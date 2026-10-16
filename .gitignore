@@ -24,3 +24,10 @@ Thumbs.db
 .zeroone/hook-debug/
 .zeroone/hook-state/
 reports
+
+# Android 本地构建与 IDE 状态
+apps/codex-elves-android/.gradle/
+apps/codex-elves-android/.idea/
+apps/codex-elves-android/local.properties
+apps/codex-elves-android/app/build/
+dist/android/

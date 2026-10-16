@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 33) return;
+  if (window.__codexElvesRemoteAccess?.version === 34) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -389,12 +389,12 @@
     if (typeof value !== "string" || value.length > 4096) throw failure(400, `${label}无效`);
     return value;
   }
-  async function nativeItemsPage(threadId, turnId, cursor) {
+  async function nativeItemsPage(threadId, turnId, cursor, sortDirection = "desc") {
     let limit = HISTORY_ITEM_PAGE_LIMIT, page;
     for (;;) {
       try {
         page = await manager.requestClient.sendRequest("thread/items/list", {
-          threadId, turnId, cursor, limit, sortDirection: "desc"
+          threadId, turnId, cursor, limit, sortDirection
         });
         break;
       } catch (error) {
@@ -417,7 +417,8 @@
         if (Number.isFinite(entry?.startedAtMs)) itemStartedAtMsById[item.id] = entry.startedAtMs;
       }
       return item;
-    }).reverse();
+    });
+    if (sortDirection === "desc") items.reverse();
     return {
       items, nextCursor, itemStartedAtMsById,
       pageLimit: limit, newestSnapshotItemId: items.at(-1)?.id ?? null
@@ -530,6 +531,17 @@
     for (const turn of page.data) {
       const pageTurnId = requiredId(turn?.id);
       const itemPage = await nativeItemsPage(threadId, pageTurnId, null);
+      if (itemPage.nextCursor != null) {
+        const firstPage = await nativeItemsPage(threadId, pageTurnId, null, "asc");
+        const firstUser = firstPage.items.findIndex(item => item.type === "userMessage");
+        if (firstUser >= 0) {
+          const loadedIds = new Set(itemPage.items.map(item => item.id));
+          const prefix = firstPage.items.slice(0, firstUser + 1)
+            .filter(item => !loadedIds.has(item.id)).map(item => ({ ...item, remoteHistoryContext: true }));
+          itemPage.items.unshift(...prefix);
+          itemPage.itemStartedAtMsById = { ...firstPage.itemStartedAtMsById, ...itemPage.itemStartedAtMsById };
+        }
+      }
       data.push(enrichHistoryTurn(threadId, turn, itemPage));
       itemsPaginationByTurnId[pageTurnId] = {
         nextCursor: itemPage.nextCursor,
@@ -2655,7 +2667,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 33, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
+    version: 34, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
     dispose() {
       for (const dispose of unsubscribe) { try { dispose?.(); } catch {} }
       unsubscribe = [];

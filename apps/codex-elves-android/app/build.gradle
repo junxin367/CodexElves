@@ -1,0 +1,180 @@
+import groovy.json.JsonOutput
+import java.security.MessageDigest
+
+plugins {
+    id "com.android.application"
+}
+
+def repositoryRoot = rootProject.projectDir.toPath().resolve("../..").normalize().toFile()
+def cargoToml = new File(repositoryRoot, "Cargo.toml")
+def cargoText = cargoToml.getText("UTF-8")
+def workspacePackageMatcher = cargoText =~ /(?ms)^\[workspace\.package\]\s*$([\s\S]*?)(?=^\[|\z)/
+if (!workspacePackageMatcher.find()) {
+    throw new GradleException("根 Cargo.toml 缺少 [workspace.package]")
+}
+def versionMatcher = workspacePackageMatcher.group(1) =~ /(?m)^\s*version\s*=\s*"([^"]+)"\s*$/
+if (!versionMatcher.find()) {
+    throw new GradleException("无法从根 Cargo.toml 读取 workspace.package.version")
+}
+def productVersion = versionMatcher.group(1)
+
+def signingNames = [
+    storeFile: "CODEX_ELVES_ANDROID_KEYSTORE",
+    storePassword: "CODEX_ELVES_ANDROID_STORE_PASSWORD",
+    keyAlias: "CODEX_ELVES_ANDROID_KEY_ALIAS",
+    keyPassword: "CODEX_ELVES_ANDROID_KEY_PASSWORD"
+]
+def signingValues = signingNames.collectEntries { key, envName -> [(key): System.getenv(envName)] }
+def hasReleaseSigning = signingValues.values().every { it != null && !it.isBlank() }
+
+android {
+    namespace "com.junxin367.codexelves"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.junxin367.codexelves"
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName productVersion
+
+        buildConfigField "int", "SHELL_VERSION", "1"
+    }
+
+    if (hasReleaseSigning) {
+        signingConfigs {
+            release {
+                storeFile file(signingValues.storeFile)
+                storePassword signingValues.storePassword
+                keyAlias signingValues.keyAlias
+                keyPassword signingValues.keyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+        }
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    packaging {
+        resources {
+            excludes += ["META-INF/DEPENDENCIES", "META-INF/LICENSE*", "META-INF/NOTICE*"]
+        }
+    }
+
+}
+
+def generatedWebAssets = layout.buildDirectory.dir("generated/webAssets")
+def remoteAssets = new File(repositoryRoot, "assets/remote-access")
+
+def bundledWebResources = [
+    [source: "index.html", path: "/", contentType: "text/html; charset=utf-8"],
+    [source: "app.js", path: "/app.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "attachments.js", path: "/attachments.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "events-client.js", path: "/events-client.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "events-worker.js", path: "/events-worker.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "markdown.js", path: "/markdown.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "vendor/marked.esm.js", path: "/vendor/marked.esm.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "vendor/dompurify.esm.js", path: "/vendor/dompurify.esm.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "vendor/mermaid.esm.js", path: "/vendor/mermaid.esm.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "message-actions.js", path: "/message-actions.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "platform.js", path: "/platform.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "pwa.js", path: "/pwa.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "sw.js", path: "/sw.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "style.css", path: "/style.css", contentType: "text/css; charset=utf-8"],
+    [source: "manifest.webmanifest", path: "/manifest.webmanifest", contentType: "application/manifest+json; charset=utf-8"],
+    [source: "icons/icon-192.png", path: "/icons/icon-192.png", contentType: "image/png"],
+    [source: "icons/icon-512.png", path: "/icons/icon-512.png", contentType: "image/png"],
+    [source: "icons/apple-touch-icon.png", path: "/icons/apple-touch-icon.png", contentType: "image/png"]
+]
+
+def unsignedLongBigEndian = { long value ->
+    byte[] result = new byte[8]
+    for (int index = 7; index >= 0; index--) {
+        result[index] = (byte) (value & 0xff)
+        value >>>= 8
+    }
+    result
+}
+
+def updateVersionField = { MessageDigest digest, byte[] value ->
+    digest.update(unsignedLongBigEndian(value.length))
+    digest.update(value)
+}
+
+tasks.register("prepareBundledWebAssets") {
+    inputs.dir(remoteAssets)
+    outputs.dir(generatedWebAssets)
+
+    doLast {
+        def outputRoot = generatedWebAssets.get().asFile
+        delete(outputRoot)
+        def filesRoot = new File(outputRoot, "web/files")
+        filesRoot.mkdirs()
+
+        def entries = bundledWebResources.collect { resource ->
+            def source = new File(remoteAssets, resource.source)
+            if (!source.isFile()) {
+                throw new GradleException("缺少 Android 内置网页资源：${resource.source}")
+            }
+            def target = new File(filesRoot, resource.source)
+            target.parentFile.mkdirs()
+            target.bytes = source.bytes
+
+            def digest = MessageDigest.getInstance("SHA-256").digest(source.bytes).encodeHex().toString()
+            [
+                path: resource.path,
+                contentType: resource.contentType,
+                size: source.length(),
+                sha256: digest
+            ]
+        }
+        entries.sort { a, b -> a.path <=> b.path }
+
+        def versionDigest = MessageDigest.getInstance("SHA-256")
+        entries.each { entry ->
+            updateVersionField(versionDigest, entry.path.getBytes("UTF-8"))
+            updateVersionField(versionDigest, entry.contentType.getBytes("UTF-8"))
+            versionDigest.update(unsignedLongBigEndian(entry.size))
+            updateVersionField(versionDigest, entry.sha256.getBytes("UTF-8"))
+        }
+        def manifest = [
+            schemaVersion: 1,
+            minShellVersion: 1,
+            version: versionDigest.digest().encodeHex().toString(),
+            files: entries
+        ]
+        def manifestFile = new File(outputRoot, "web/app-resources.json")
+        manifestFile.parentFile.mkdirs()
+        manifestFile.setText(JsonOutput.toJson(manifest), "UTF-8")
+    }
+}
+
+android.sourceSets.main.assets.srcDir(generatedWebAssets)
+tasks.named("preBuild").configure {
+    dependsOn("prepareBundledWebAssets")
+}
+
+dependencies {
+    implementation "androidx.webkit:webkit:1.17.1"
+}

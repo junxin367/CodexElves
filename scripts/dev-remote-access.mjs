@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { STATUS_CODES, createServer, request } from "node:http";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -50,10 +51,17 @@ const files = new Map([
   ["/events-worker.js", ["events-worker.js", "application/javascript; charset=utf-8"]],
   ["/markdown.js", ["markdown.js", "application/javascript; charset=utf-8"]],
   ["/message-actions.js", ["message-actions.js", "application/javascript; charset=utf-8"]],
+  ["/platform.js", ["platform.js", "application/javascript; charset=utf-8"]],
+  ["/pwa.js", ["pwa.js", "application/javascript; charset=utf-8"]],
+  ["/sw.js", ["sw.js", "application/javascript; charset=utf-8"]],
   ["/vendor/marked.esm.js", ["vendor/marked.esm.js", "application/javascript; charset=utf-8"]],
   ["/vendor/dompurify.esm.js", ["vendor/dompurify.esm.js", "application/javascript; charset=utf-8"]],
   ["/vendor/mermaid.esm.js", ["vendor/mermaid.esm.js", "application/javascript; charset=utf-8"]],
-  ["/style.css", ["style.css", "text/css; charset=utf-8"]]
+  ["/style.css", ["style.css", "text/css; charset=utf-8"]],
+  ["/manifest.webmanifest", ["manifest.webmanifest", "application/manifest+json; charset=utf-8"]],
+  ["/icons/icon-192.png", ["icons/icon-192.png", "image/png"]],
+  ["/icons/icon-512.png", ["icons/icon-512.png", "image/png"]],
+  ["/icons/apple-touch-icon.png", ["icons/apple-touch-icon.png", "image/png"]]
 ]);
 const requestHeaders = [
   "accept", "accept-encoding", "accept-language", "content-type", "content-length",
@@ -76,6 +84,51 @@ const securityHeaders = {
   "x-frame-options": "DENY",
   "content-security-policy": "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 };
+function sha256(body) {
+  return createHash("sha256").update(body).digest("hex");
+}
+function updateVersionField(hash, value) {
+  const bytes = Buffer.from(value);
+  const length = Buffer.alloc(8);
+  length.writeBigUInt64BE(BigInt(bytes.length));
+  hash.update(length);
+  hash.update(bytes);
+}
+async function staticBody(path, file) {
+  let body = eventsTransport === "sse" && path === "/events-client.js"
+    ? Buffer.from(sseEventsClient)
+    : await readFile(resolve(assets, file[0]));
+  if (path === "/") body = Buffer.from(body.toString("utf8")
+    .replace("<title>CodexElves · 远程会话</title>", "<title>CodexElves · 本机调试</title>"));
+  return body;
+}
+async function appResourcesBody() {
+  const resourceFiles = [];
+  for (const [path, file] of [...files].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) {
+    const body = await staticBody(path, file);
+    resourceFiles.push({
+      path,
+      contentType: file[1],
+      size: body.length,
+      sha256: sha256(body)
+    });
+  }
+  const version = createHash("sha256");
+  for (const file of resourceFiles) {
+    updateVersionField(version, file.path);
+    updateVersionField(version, file.contentType);
+    const size = Buffer.alloc(8);
+    size.writeBigUInt64BE(BigInt(file.size));
+    version.update(size);
+    updateVersionField(version, file.sha256);
+  }
+  return Buffer.from(JSON.stringify({
+    schemaVersion: 1,
+    minShellVersion: 1,
+    version: version.digest("hex"),
+    files: resourceFiles
+  }));
+}
 function fail(res, status, message) {
   if (res.destroyed) return;
   if (res.headersSent) { res.destroy(); return; }
@@ -225,15 +278,17 @@ const server = createServer(async (req, res) => {
   if (url.pathname === "/favicon.ico" && ["GET", "HEAD"].includes(req.method)) {
     res.writeHead(204, securityHeaders); res.end(); return;
   }
+  if (!["GET", "HEAD"].includes(req.method)) { fail(res, 404, "调试入口不存在"); return; }
   const file = files.get(url.pathname);
-  if (!file || !["GET", "HEAD"].includes(req.method)) { fail(res, 404, "调试入口不存在"); return; }
+  if (!file && url.pathname !== "/app-resources.json") { fail(res, 404, "调试入口不存在"); return; }
   try {
-    let body = eventsTransport === "sse" && url.pathname === "/events-client.js"
-      ? Buffer.from(sseEventsClient)
-      : await readFile(resolve(assets, file[0]));
-    if (url.pathname === "/") body = Buffer.from(body.toString("utf8")
-      .replace("<title>CodexElves · 远程会话</title>", "<title>CodexElves · 本机调试</title>"));
-    res.writeHead(200, { ...securityHeaders, "content-type": file[1], "content-length": body.length });
+    const body = url.pathname === "/app-resources.json"
+      ? await appResourcesBody()
+      : await staticBody(url.pathname, file);
+    const contentType = url.pathname === "/app-resources.json"
+      ? "application/json; charset=utf-8"
+      : file[1];
+    res.writeHead(200, { ...securityHeaders, "content-type": contentType, "content-length": body.length });
     res.end(req.method === "HEAD" ? undefined : body);
   } catch {
     fail(res, 500, "无法读取网页源码，请确认在完整的 CodexElves 工作区中运行");

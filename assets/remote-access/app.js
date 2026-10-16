@@ -1,6 +1,8 @@
 import { markdown, renderMermaidBlocks } from "./markdown.js";
 import { createRemoteEventStream, sharedEventsAvailable } from "./events-client.js";
 import { renderMessageActions } from "./message-actions.js";
+import { isAndroidContainer, postPlatformMessage } from "./platform.js";
+import "./pwa.js";
 import {
   attachmentsFromQueuedMessage,
   attachmentsFromRemoteImages,
@@ -31,6 +33,7 @@ let historyInitialized = false;
 let historyError = "", historyController = null, selectionController = null, historyLoadingTurnId = null;
 let historyLoadFrame = null, historyAutoFailed = false, historyScrollTop = 0, historyLoadVisibleItems = false;
 let sidebarVersion = 0, approvalSignature = null, pendingTimer = null, streamRetry = null, streamBackoff = 1000;
+let approvalResizeObserver = null;
 let sessionRequest = null, connectionPollVersion = 0, connectionPollPending = null;
 let nativeConnectionVersion = 0;
 let connectionCycleVersion = 0, connectionRtt = null;
@@ -1589,7 +1592,8 @@ async function api(path, body, id, signal) {
       return { message: `HTTP ${response.status}` };
     });
     if (!response.ok) {
-      if (response.status === 401 && !path.endsWith("/connect") && session && deviceId === session.device.id) { disconnect(); showLogin(); }
+      if (response.status === 401 && !path.endsWith("/connect") && session && deviceId === session.device.id)
+        requireAuthentication();
       throw Object.assign(new Error(result.message || "请求失败"), { code: response.status });
     }
     return result;
@@ -1753,23 +1757,35 @@ function enrichTurnTranscriptEvents(turn) {
   const items = [...(turn.items || [])];
   const pending = [];
   let initialCompaction = null;
-  for (const entry of transcriptEvents.values()) {
-    if (entry.turnId !== turn.id) continue;
+  const events = [...transcriptEvents.values()].filter(entry => entry.turnId === turn.id);
+  const eventIds = new Set(events.map(entry => entry.item.id));
+  for (const item of items) {
+    if (item.type === "modelChanged" && !eventIds.has(item.id))
+      events.push({ item, beforeItemId: null });
+  }
+  const beforeInput = () => {
+    let index = items.findIndex(item => item.type === "userMessage");
+    if (index < 0) index = items.findIndex(item => !["modelChanged", "modelRerouted"].includes(item.type));
+    return index < 0 ? items.length : index;
+  };
+  for (const entry of events) {
     if (!initialCompaction && entry.item.type === "contextCompaction" && entry.item.source !== "manual")
       initialCompaction = entry;
     const existing = items.findIndex(item => item.id === entry.item.id);
     if (existing >= 0) {
-      items[existing] = { ...items[existing], ...entry.item,
+      const item = { ...items[existing], ...entry.item,
         ...(items[existing].type === "contextCompaction" && items[existing].completed === true ? { completed: true } : {}) };
-      continue;
-    }
-    pending.push(entry);
+      if (item.type !== "modelChanged") { items[existing] = item; continue; }
+      items.splice(existing, 1);
+      pending.push({ ...entry, item });
+    } else pending.push(entry);
   }
   while (pending.length) {
     let inserted = false;
     for (let index = 0; index < pending.length;) {
       const entry = pending[index];
-      const insertion = entry.beforeItemId ? items.findIndex(item => item.id === entry.beforeItemId) : items.length;
+      const insertion = entry.beforeItemId ? items.findIndex(item => item.id === entry.beforeItemId)
+        : entry.item.type === "modelChanged" ? beforeInput() : items.length;
       if (insertion < 0) { index++; continue; }
       items.splice(insertion, 0, entry.item);
       pending.splice(index, 1);
@@ -1777,9 +1793,7 @@ function enrichTurnTranscriptEvents(turn) {
     }
     if (inserted) continue;
     for (const entry of pending.splice(0)) {
-      let insertion = ["modelChanged", "modelRerouted"].includes(entry.item.type)
-        ? items.findIndex(item => item.type === "userMessage") : -1;
-      if (insertion < 0) insertion = items.length;
+      const insertion = ["modelChanged", "modelRerouted"].includes(entry.item.type) ? beforeInput() : items.length;
       items.splice(insertion, 0, entry.item);
     }
   }
@@ -2149,6 +2163,63 @@ function showLogin() {
   panel.append(heading, form, help, footer); page.append(panel); app.append(page); updateForm();
   if (matchMedia("(min-width: 761px) and (hover: hover) and (pointer: fine)").matches) key.focus({ preventScroll: true });
 }
+function requireAuthentication() {
+  disconnect();
+  postPlatformMessage("auth-required");
+  showLogin();
+}
+function connectionErrorMessage(error) {
+  return error instanceof TypeError
+    ? "无法连接服务，请检查网络和远程访问地址后重试。"
+    : error?.message || "连接失败，请检查网络后重试。";
+}
+function showConnectionRecovery(error) {
+  showLogin();
+  const page = element("div", "pair-page");
+  const panel = element("main", "pair-panel");
+  const heading = element("header", "pair-heading");
+  const mark = element("div", "brand-mark", "✦"); mark.setAttribute("aria-hidden", "true");
+  heading.append(mark, element("h1", "", "CodexElves"),
+    element("p", "pair-description muted", "当前无法连接远程服务。"));
+  const message = element("p", "pair-status error-text", connectionErrorMessage(error));
+  message.setAttribute("role", "alert");
+  const retry = element("button", "primary pair-submit", "重新连接");
+  retry.type = "button";
+  const status = element("p", "pair-status muted", "设备授权仍保留，恢复连接后会继续打开会话。");
+  retry.onclick = async () => {
+    retry.disabled = true;
+    retry.textContent = "正在重试…";
+    status.textContent = "正在连接远程服务…";
+    try {
+      await connect();
+    } catch (retryError) {
+      if (retryError.code === 401) {
+        requireAuthentication();
+        return;
+      }
+      if (!panel.isConnected) return;
+      message.textContent = connectionErrorMessage(retryError);
+      status.textContent = "设备授权仍保留，恢复连接后会继续打开会话。";
+      retry.disabled = false;
+      retry.textContent = "重新连接";
+    }
+  };
+  panel.append(heading, message, retry, status);
+  page.append(panel);
+  app.replaceChildren(page);
+}
+function handleInitialConnectionError(error) {
+  if (error.code === 401) {
+    requireAuthentication();
+    return;
+  }
+  if (isAndroidContainer()) {
+    showConnectionRecovery(error);
+    return;
+  }
+  showLogin();
+  notice(error.message, true);
+}
 function shell() {
   approvalSignature = null;
   search = "";
@@ -2331,7 +2402,12 @@ function shell() {
     const deviceId = session.device.id;
     if (!await confirmAction("退出", "将撤销当前浏览器的访问授权；再次进入需要重新输入访问密钥。", "退出", true) || session?.device.id !== deviceId) return;
     $("#logout").disabled = true;
-    try { await api("/api/logout", {}); disconnect(); savePending(null); showLogin(); }
+    try {
+      await api("/api/logout", {});
+      disconnect(); savePending(null);
+      postPlatformMessage("logged-out");
+      showLogin();
+    }
     catch (error) { notice(error.message, true); if ($("#logout")) $("#logout").disabled = false; }
   };
   $("#refresh").onclick = () => void Promise.all([refreshAll(), loadModels(true)]).catch(error => notice(error.message, true));
@@ -2690,13 +2766,20 @@ function renderSidebar() {
       (timestamp >= todayAt ? todayThreads : timestamp >= yesterdayAt ? yesterdayThreads : historyThreads).push(item);
     }
     for (const [label, items] of [["今天", todayThreads], ["昨天", yesterdayThreads], ["历史", historyThreads]]) {
-      if (!items.length) continue;
+      const children = items.map(item => row(item, "recent", true));
+      if (label === "历史") {
+        if (visible.length < dated.length)
+          children.push(button("显示更多会话", "显示更多会话", () => { recentLimit += 40; renderSidebar(); }, "load-more"));
+        else if (sidebar.nextCursor)
+          children.push(button("加载更多会话", "加载更多会话", () => {
+            void loadSidebar(sidebar.nextCursor).catch(error => notice(error.message, true));
+          }, "load-more"));
+      }
       appendSection(`list:${label === "今天" ? "today" : label === "昨天" ? "yesterday" : "history"}`,
-        label, items.map(item => row(item, "recent", true)));
+        label, children);
     }
-    if (visible.length < dated.length) root.append(button("显示更多会话", "显示更多会话", () => { recentLimit += 40; renderSidebar(); }, "load-more"));
   }
-  if (sidebar.nextCursor) root.append(button("加载更多会话", "加载更多会话", () => {
+  if (preferences.mode === "project" && sidebar.nextCursor) root.append(button("加载更多会话", "加载更多会话", () => {
     void loadSidebar(sidebar.nextCursor).catch(error => notice(error.message, true));
   }, "load-more"));
   if (search && !root.querySelector(".thread-row, .project-group")) root.append(element("p", "empty-project", "没有匹配的会话或项目"));
@@ -5067,10 +5150,6 @@ function historyPlaceholder() {
   }
   return node;
 }
-function loadEarlierHistory() {
-  const first = turns.values().next().value;
-  return first?.itemsNextCursor ? loadHistory(true, selectionVersion, first.id) : loadHistory(true);
-}
 function scheduleHistoryLoad(visibleItems = false) {
   historyLoadVisibleItems ||= visibleItems;
   if (historyLoadFrame != null) return;
@@ -5117,6 +5196,14 @@ function visibleMessageAnchor(root) {
   }
   return null;
 }
+function historyGapIndex(turn) {
+  const items = turn.items || [];
+  let index = items.findIndex(item => item.id === turn.itemsCursorAnchor);
+  if (index < 0) index = items.findIndex(item => !["userMessage", "modelChanged", "modelRerouted"].includes(item.type));
+  if (index < 0) index = items.length;
+  while (index > 0 && transcriptEventTypes.has(items[index - 1].type) && !items[index - 1].remoteHistoryContext) index--;
+  return index;
+}
 function renderMessages(keepScroll = true) {
   cancelAnimationFrame(messageFrame); messageFrame = null;
   const root = $("#messages");
@@ -5129,21 +5216,21 @@ function renderMessages(keepScroll = true) {
   const sorted = [...turns.values()];
   if (historyError && sorted.length)
     children.push(historyLoadButton("最新记录加载失败，重试", () => void loadHistory()));
-  if (historyCursor || sorted[0]?.itemsNextCursor) {
+  if (historyCursor) {
     const load = root.querySelector(":scope > .history-load")
-      || historyLoadButton("加载更早的消息", () => void loadEarlierHistory());
-    load.dataset.turnId = sorted[0]?.itemsNextCursor ? sorted[0].id : "";
+      || historyLoadButton("加载更早的消息", () => void loadHistory(true));
+    load.dataset.turnId = "";
     load.dataset.historyPage = "older";
     children.push(load);
   }
   for (const turn of sorted) {
     const group = renderedTurns.get(turn.id) || element("section", "turn"), items = [];
     group.dataset.turnId = turn.id; renderedTurns.set(turn.id, group); turnKeys.add(turn.id);
-    if (turn !== sorted[0] && turn.itemsNextCursor) {
-      const load = group.querySelector(":scope > .history-load")
+    let historyLoad = null;
+    if (turn.itemsNextCursor) {
+      historyLoad = group.querySelector(":scope > .history-load")
         || historyLoadButton("加载本轮较早的消息", () => void loadHistory(true, selectionVersion, turn.id), turn.id);
-      load.dataset.historyPage = "older";
-      items.push(load);
+      historyLoad.dataset.historyPage = "older";
     }
     const turnItems = turn.items || [], finalIndex = finalMessageIndex(turn),
       turnRunning = turn === sorted.at(-1) && turn.status === "inProgress" && (thread == null || isActiveThread());
@@ -5178,25 +5265,30 @@ function renderMessages(keepScroll = true) {
     };
     let work = [];
     const content = [];
-    const flushActivity = (beforeUser = false) => {
+    const historyGap = historyGapIndex(turn);
+    const flushActivity = () => {
       if (!work.length) return;
-      const collapsible = beforeUser || finalIndex >= 0 && turn.status !== "interrupted" && turnItems[finalIndex].phase !== "commentary"
+      const collapsible = finalIndex >= 0 && turn.status !== "interrupted" && turnItems[finalIndex].phase !== "commentary"
         && (turn.status !== "inProgress" || turnItems[finalIndex].phase === "final_answer");
       content.push({ work, collapsible });
       work = [];
     };
     for (let index = 0; index < turnItems.length; index++) {
+      if (historyLoad && index === historyGap) {
+        flushActivity(); content.push({ historyLoad });
+      }
       const item = turnItems[index];
       if (index === finalIndex) continue;
       if (isSubagentItem(item) && ["wait", "wait_agent"].includes(subagentTool(item))) continue;
       if (item.type === "reasoning" && !reasoningPreviewText(item) && !(turnRunning && item === turnItems.at(-1))) continue;
       if (["agentMessage", "plan"].includes(item.type) && !textContent(item).trim()) continue;
       if (item.type === "userMessage" || transcriptEventTypes.has(item.type)) {
-        flushActivity(true); content.push({ item });
+        flushActivity(); content.push({ item });
       }
       else work.push(item);
     }
     flushActivity();
+    if (historyLoad && historyGap === turnItems.length) content.push({ historyLoad });
     const activeFlags = thread?.status?.status?.activeFlags || thread?.status?.activeFlags || [];
     if (turnRunning && finalIndex < 0 && !content.at(-1)?.work
         && !compactionLocked() && !thread?.requests?.length
@@ -5206,6 +5298,7 @@ function renderMessages(keepScroll = true) {
     const live = activityPresentation(turn, turnRunning).live;
     const header = live ? activities[0] : activities.at(-1);
     for (const part of content) {
+      if (part.historyLoad) { items.push(part.historyLoad); continue; }
       if (part.item) { items.push(renderMessage(part.item)); continue; }
       const activity = renderActivity(turn, part.work, live, part.collapsible, renderMessage, part === header);
       activityKeys.add(activity.dataset.activityKey); items.push(activity);
@@ -5416,9 +5509,14 @@ function mergeLiveText(snapshot, live, partial = false) {
 }
 function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = null } = {}) {
   const current = turns.get(snapshot.id);
-  // 压缩输入可以跨页补投影，不能充当当前页的定位点。
-  const snapshotAnchor = snapshot.items?.find(item => !item.remoteCompactionInput)?.id || null;
-  if (!current) return enrichTurnTranscriptEvents({ ...snapshot, itemsCursorAnchor: snapshotAnchor });
+  const contextItems = (snapshot.items || []).filter(item => item.remoteHistoryContext);
+  if (contextItems.length)
+    snapshot = { ...snapshot, items: snapshot.items.filter(item => !item.remoteHistoryContext) };
+  // 跨页补投影的轮次开头和压缩输入不能充当当前页的定位点。
+  const snapshotAnchor = snapshot.items?.find(item => !item.remoteCompactionInput && !item.remoteHistoryContext)?.id || null;
+  if (!current) return enrichTurnTranscriptEvents({
+    ...snapshot, items: [...contextItems, ...(snapshot.items || [])], itemsCursorAnchor: snapshotAnchor
+  });
   const streaming = snapshot.status === "inProgress" && current.status === "inProgress";
   const previous = new Map((current.items || []).map(item => [item.id, item]));
   let items = (snapshot.items || []).map(item => {
@@ -5454,7 +5552,7 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
   const pagination = { itemsCursorAnchor: snapshotAnchor || current.itemsCursorAnchor || null };
   if (snapshot.itemsPageComplete === true && (older || snapshot.itemsComplete !== true)) {
     const pageIds = new Set(items.map(item => item.id)), currentItems = current.items || [];
-    const pageAnchors = new Set(items.filter(item => !item.remoteCompactionInput).map(item => item.id));
+    const pageAnchors = new Set(items.filter(item => !item.remoteCompactionInput && !item.remoteHistoryContext).map(item => item.id));
     const overlap = currentItems.findIndex(item => pageAnchors.has(item.id));
     const remaining = currentItems.filter(item => !pageIds.has(item.id));
     let insertion = beforeId ? remaining.findIndex(item => item.id === beforeId) : -1;
@@ -5489,6 +5587,11 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
   const timing = Object.fromEntries(["startedAt", "completedAt", "durationMs", "turnStartedAtMs", "turnCompletedAtMs"]
     .filter(field => Number.isFinite(current[field]) && (newer || !Number.isFinite(snapshot[field])))
     .map(field => [field, current[field]]));
+  if (contextItems.length) {
+    const contextIds = new Set(contextItems.map(item => item.id));
+    const loaded = new Map(items.map(item => [item.id, item]));
+    items = [...contextItems.map(item => loaded.get(item.id) || item), ...items.filter(item => !contextIds.has(item.id))];
+  }
   return enrichTurnTranscriptEvents({
     ...current, ...snapshot, ...pagination, ...timing, items,
     ...(newer ? { status: current.status, error: current.error } : {})
@@ -6125,22 +6228,79 @@ function renderAsyncQuestion(card, request, requestThreadId) {
   };
   update(); form.append(status, actions); card.append(form);
 }
+function commandApprovalPresentation(params = {}) {
+  const network = params.networkApprovalContext;
+  if (network) {
+    const host = String(network.host || "");
+    const authority = `${host}${network.port != null ? `:${network.port}` : ""}`;
+    const destination = ["http", "https"].includes(network.protocol) ? `${network.protocol}://${authority}` : authority;
+    return {
+      label: "互联网访问", icon: "globe",
+      title: `允许 ChatGPT 与 ${destination} 建立连接？`,
+      description: `${host} 不在当前网络允许列表中`, command: ""
+    };
+  }
+  const commands = (Array.isArray(params.commandActions) ? params.commandActions : [])
+    .map(action => action?.command).filter(command => typeof command === "string" && command.trim());
+  const command = commands.length ? commands.join(" ")
+    : typeof params.command === "string" && params.command.trim() ? params.command
+    : Array.isArray(params.proposedExecpolicyAmendment) ? params.proposedExecpolicyAmendment.join(" ") : "";
+  return {
+    label: "终端", icon: "terminal",
+    title: typeof params.reason === "string" && params.reason.trim() || "允许 ChatGPT 运行此命令？",
+    description: "", command
+  };
+}
+function renderCommandApproval(card, params) {
+  const view = commandApprovalPresentation(params);
+  card.classList.add("command-approval-card");
+  const identity = element("div", "approval-identity");
+  identity.append(icon(view.icon), element("span", "", view.label));
+  card.append(identity, element("strong", "approval-title", view.title));
+  if (view.description) card.append(element("p", "approval-reason muted", view.description));
+  if (!view.command) return;
+  const preview = element("div", "approval-command-preview collapsed");
+  const code = element("pre", "approval-command-code", view.command);
+  const toggle = button("展开", "展开完整命令", () => {
+    const collapsed = preview.classList.toggle("collapsed");
+    toggle.textContent = collapsed ? "展开" : "收起";
+    toggle.setAttribute("aria-label", collapsed ? "展开完整命令" : "收起完整命令");
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    toggle.title = collapsed ? "展开完整命令" : "收起完整命令";
+  }, "text-button approval-command-toggle");
+  toggle.hidden = true; toggle.setAttribute("aria-expanded", "false");
+  preview.append(code, toggle); card.append(preview);
+}
+function observeApprovalCommands(root) {
+  const previews = root.querySelectorAll(".approval-command-preview");
+  if (!previews.length) return;
+  approvalResizeObserver = new ResizeObserver(entries => {
+    for (const { target: code } of entries) {
+      const preview = code.parentElement;
+      if (preview.classList.contains("collapsed"))
+        preview.querySelector(".approval-command-toggle").hidden = code.scrollHeight <= code.clientHeight + 1;
+    }
+  });
+  for (const preview of previews) approvalResizeObserver.observe(preview.querySelector(".approval-command-code"));
+}
 function renderApprovals() {
   const root = $("#approval-area"); if (!root) return;
   const signature = JSON.stringify([thread?.id, thread?.requests || [], session?.readOnly, session?.allowApprovals, connected]);
   if (signature === approvalSignature) return;
   approvalSignature = signature;
+  approvalResizeObserver?.disconnect(); approvalResizeObserver = null;
   root.replaceChildren();
   for (const request of thread?.requests || []) {
     const requestThreadId = thread.id;
     const asyncQuestion = request.method === "remote/requestUserInputAsync";
     const card = element("section", `approval-card${asyncQuestion ? " question-card" : ""}`);
     if (asyncQuestion) { renderAsyncQuestion(card, request, requestThreadId); root.append(card); continue; }
-    card.append(element("strong", "", request.method === "item/tool/requestUserInput" ? "Codex 需要你回答" : "等待你的授权"));
-    const network = request.params?.networkApprovalContext;
-    const command = network ? `网络访问：${network.protocol || ""}://${network.host || ""}${network.port != null ? `:${network.port}` : ""}\n${request.params?.reason || ""}`
-      : request.params?.command || request.params?.reason || request.params?.message || request.method;
-    card.append(element("pre", "approval-description", typeof command === "string" ? command : JSON.stringify(command, null, 2)));
+    if (request.method === "item/commandExecution/requestApproval") renderCommandApproval(card, request.params);
+    else {
+      card.append(element("strong", "", request.method === "item/tool/requestUserInput" ? "Codex 需要你回答" : "等待你的授权"));
+      const description = request.params?.command || request.params?.reason || request.params?.message || request.method;
+      card.append(element("pre", "approval-description", typeof description === "string" ? description : JSON.stringify(description, null, 2)));
+    }
     if (session.readOnly || !session.allowApprovals) { card.append(element("small", "muted", "请在 Codex 桌面处理，此设备没有审批权限。")); root.append(card); continue; }
     const reply = async (action, value) => {
       for (const control of card.querySelectorAll("button,input,select,textarea")) control.disabled = true;
@@ -6190,6 +6350,7 @@ function renderApprovals() {
     } else card.append(element("small", "muted", "此类请求请在 Codex 桌面处理。"));
     card.append(actions); root.append(card);
   }
+  observeApprovalCommands(root);
 }
 function isActiveThread() {
   const status = thread?.status?.status || thread?.status;
@@ -6580,7 +6741,7 @@ function receiveCompactionLifecycle(event, params) {
   }
 }
 function receive(event) {
-  if (event.method === "remote/unauthorized") { disconnect(); showLogin(); return; }
+  if (event.method === "remote/unauthorized") { requireAuthentication(); return; }
   if (["remote/disconnected", "remote/reconnected"].includes(event.method)) {
     const available = event.method === "remote/reconnected";
     ++nativeConnectionVersion;
@@ -6735,6 +6896,7 @@ function receive(event) {
   }
 }
 function disconnect() {
+  approvalResizeObserver?.disconnect(); approvalResizeObserver = null;
   stream?.close(); stream = null; stopConnectionPoll();
   cancelConnectionProbe();
   clearTimeout(refreshTimer); clearTimeout(sidebarTimer); clearTimeout(pendingTimer);
@@ -6842,6 +7004,7 @@ function resumePage() {
 }
 async function connect(signal) {
   session = await readConnectionSession(signal);
+  postPlatformMessage("authenticated");
   pageLeaving = false;
   connected = false; shell();
   openStream();
@@ -6882,4 +7045,5 @@ window.addEventListener("popstate", () => {
   if (id && id !== selectedId) void selectThread(id, { closeSidebar: false }).catch(error => notice(error.message, true));
   else if (!id && selectedId) showWelcome();
 });
-connect().catch(error => { showLogin(); if (error.code !== 401) notice(error.message, true); });
+postPlatformMessage("ready");
+connect().catch(handleInitialConnectionError);

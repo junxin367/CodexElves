@@ -1,0 +1,173 @@
+name: Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: APK 类型
+        required: true
+        type: choice
+        options:
+          - Debug
+          - Release
+        default: Debug
+      tag:
+        description: 可选 Git tag；Release 必须填写已有 GitHub Release 对应的 tag
+        required: false
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  debug:
+    name: Build Android debug APK
+    if: ${{ inputs.configuration == 'Debug' }}
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
+
+      - name: Build debug APK
+        shell: pwsh
+        run: .\scripts\build-android.ps1 -Configuration Debug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: CodexElves-android-debug
+          path: dist/android/CodexElves-*-android-debug.apk
+          if-no-files-found: error
+
+  release:
+    name: Build and publish Android release APK
+    if: ${{ inputs.configuration == 'Release' }}
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Validate release and signing secrets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          CODEX_ELVES_ANDROID_KEYSTORE_BASE64: ${{ secrets.CODEX_ELVES_ANDROID_KEYSTORE_BASE64 }}
+          CODEX_ELVES_ANDROID_STORE_PASSWORD: ${{ secrets.CODEX_ELVES_ANDROID_STORE_PASSWORD }}
+          CODEX_ELVES_ANDROID_KEY_ALIAS: ${{ secrets.CODEX_ELVES_ANDROID_KEY_ALIAS }}
+          CODEX_ELVES_ANDROID_KEY_PASSWORD: ${{ secrets.CODEX_ELVES_ANDROID_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:RELEASE_TAG)) {
+            throw "Release 构建必须填写已有 GitHub Release 的 tag。"
+          }
+          if ($env:RELEASE_TAG.StartsWith("-")) {
+            throw "Release tag 不能以连字符开头。"
+          }
+
+          $missingSecrets = @()
+          if ([string]::IsNullOrWhiteSpace($env:CODEX_ELVES_ANDROID_KEYSTORE_BASE64)) {
+            $missingSecrets += "CODEX_ELVES_ANDROID_KEYSTORE_BASE64"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:CODEX_ELVES_ANDROID_STORE_PASSWORD)) {
+            $missingSecrets += "CODEX_ELVES_ANDROID_STORE_PASSWORD"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:CODEX_ELVES_ANDROID_KEY_ALIAS)) {
+            $missingSecrets += "CODEX_ELVES_ANDROID_KEY_ALIAS"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:CODEX_ELVES_ANDROID_KEY_PASSWORD)) {
+            $missingSecrets += "CODEX_ELVES_ANDROID_KEY_PASSWORD"
+          }
+          if ($missingSecrets.Count -gt 0) {
+            throw "Release 构建缺少必需的 Actions secrets：$($missingSecrets -join ', ')"
+          }
+
+          $releaseTag = & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json tagName --jq .tagName
+          if ($LASTEXITCODE -ne 0 -or $releaseTag -ne $env:RELEASE_TAG) {
+            throw "找不到 tag $env:RELEASE_TAG 对应的 GitHub Release；此工作流不会创建 Release。"
+          }
+
+      - name: Prepare temporary signing keystore
+        shell: pwsh
+        env:
+          CODEX_ELVES_ANDROID_KEYSTORE_BASE64: ${{ secrets.CODEX_ELVES_ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          try {
+            $keystoreBytes = [Convert]::FromBase64String($env:CODEX_ELVES_ANDROID_KEYSTORE_BASE64)
+          } catch {
+            throw "CODEX_ELVES_ANDROID_KEYSTORE_BASE64 不是有效的 Base64 内容。"
+          }
+          if ($keystoreBytes.Length -eq 0) {
+            throw "签名 keystore 内容为空。"
+          }
+
+          $keystorePath = Join-Path $env:RUNNER_TEMP "codex-elves-android-signing-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT).jks"
+          [System.IO.File]::WriteAllBytes($keystorePath, $keystoreBytes)
+          "CODEX_ELVES_ANDROID_KEYSTORE=$keystorePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Checkout release tag
+        uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
+
+      - name: Build signed release APK
+        shell: pwsh
+        env:
+          CODEX_ELVES_ANDROID_STORE_PASSWORD: ${{ secrets.CODEX_ELVES_ANDROID_STORE_PASSWORD }}
+          CODEX_ELVES_ANDROID_KEY_ALIAS: ${{ secrets.CODEX_ELVES_ANDROID_KEY_ALIAS }}
+          CODEX_ELVES_ANDROID_KEY_PASSWORD: ${{ secrets.CODEX_ELVES_ANDROID_KEY_PASSWORD }}
+        run: .\scripts\build-android.ps1 -Configuration Release
+
+      - name: Upload APK to existing GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $apks = @(Get-ChildItem -LiteralPath "dist/android" -Filter "CodexElves-*-android.apk" -File)
+          if ($apks.Count -ne 1) {
+            throw "预期在 dist/android 中找到一个正式 APK，实际找到 $($apks.Count) 个。"
+          }
+
+          & gh release upload $env:RELEASE_TAG $apks[0].FullName --clobber --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) {
+            throw "向 GitHub Release 上传 Android APK 失败，退出码：$LASTEXITCODE"
+          }
+
+      - name: Remove temporary signing keystore
+        if: always()
+        shell: pwsh
+        run: |
+          $keystorePath = Join-Path $env:RUNNER_TEMP "codex-elves-android-signing-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT).jks"
+          if (Test-Path -LiteralPath $keystorePath -PathType Leaf) {
+            Remove-Item -LiteralPath $keystorePath -Force
+          }

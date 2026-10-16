@@ -55,6 +55,15 @@ const WEB_VENDOR_DOMPURIFY_JS: &str =
     include_str!("../../../assets/remote-access/vendor/dompurify.esm.js");
 const WEB_VENDOR_MERMAID_JS: &str =
     include_str!("../../../assets/remote-access/vendor/mermaid.esm.js");
+const WEB_PLATFORM_JS: &str = include_str!("../../../assets/remote-access/platform.js");
+const WEB_PWA_JS: &str = include_str!("../../../assets/remote-access/pwa.js");
+const WEB_SERVICE_WORKER_JS: &str = include_str!("../../../assets/remote-access/sw.js");
+const WEB_MANIFEST_WEBMANIFEST: &str =
+    include_str!("../../../assets/remote-access/manifest.webmanifest");
+const WEB_ICON_192_PNG: &[u8] = include_bytes!("../../../assets/remote-access/icons/icon-192.png");
+const WEB_ICON_512_PNG: &[u8] = include_bytes!("../../../assets/remote-access/icons/icon-512.png");
+const WEB_APPLE_TOUCH_ICON_PNG: &[u8] =
+    include_bytes!("../../../assets/remote-access/icons/apple-touch-icon.png");
 const COOKIE_NAME: &str = "codex_elves_device";
 const MAX_DEVICES: usize = 32;
 const MAX_RECEIPTS: usize = 20_000;
@@ -1066,10 +1075,119 @@ fn web_assets() -> &'static HashMap<&'static str, StaticWebAsset> {
                 ),
             ),
             (
+                "/platform.js",
+                StaticWebAsset::new(
+                    "application/javascript; charset=utf-8",
+                    WEB_PLATFORM_JS.as_bytes(),
+                ),
+            ),
+            (
+                "/pwa.js",
+                StaticWebAsset::new(
+                    "application/javascript; charset=utf-8",
+                    WEB_PWA_JS.as_bytes(),
+                ),
+            ),
+            (
+                "/sw.js",
+                StaticWebAsset::new(
+                    "application/javascript; charset=utf-8",
+                    WEB_SERVICE_WORKER_JS.as_bytes(),
+                ),
+            ),
+            (
                 "/style.css",
                 StaticWebAsset::new("text/css; charset=utf-8", WEB_CSS.as_bytes()),
             ),
+            (
+                "/manifest.webmanifest",
+                StaticWebAsset::new(
+                    "application/manifest+json; charset=utf-8",
+                    WEB_MANIFEST_WEBMANIFEST.as_bytes(),
+                ),
+            ),
+            (
+                "/icons/icon-192.png",
+                StaticWebAsset::new("image/png", WEB_ICON_192_PNG),
+            ),
+            (
+                "/icons/icon-512.png",
+                StaticWebAsset::new("image/png", WEB_ICON_512_PNG),
+            ),
+            (
+                "/icons/apple-touch-icon.png",
+                StaticWebAsset::new("image/png", WEB_APPLE_TOUCH_ICON_PNG),
+            ),
         ])
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppResourcesManifest {
+    schema_version: u32,
+    min_shell_version: u32,
+    version: String,
+    files: Vec<AppResourceFile>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppResourceFile {
+    path: String,
+    content_type: String,
+    size: u64,
+    sha256: String,
+}
+
+fn build_app_resources_manifest(
+    assets: &HashMap<&'static str, StaticWebAsset>,
+) -> AppResourcesManifest {
+    let mut files: Vec<_> = assets
+        .iter()
+        .map(|(path, asset)| AppResourceFile {
+            path: (*path).to_string(),
+            content_type: asset.content_type.to_string(),
+            size: asset.identity.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(asset.identity)),
+        })
+        .collect();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+
+    let mut version = Sha256::new();
+    for file in &files {
+        update_manifest_version_field(&mut version, file.path.as_bytes());
+        update_manifest_version_field(&mut version, file.content_type.as_bytes());
+        version.update(file.size.to_be_bytes());
+        update_manifest_version_field(&mut version, file.sha256.as_bytes());
+    }
+
+    AppResourcesManifest {
+        schema_version: 1,
+        min_shell_version: 1,
+        version: format!("{:x}", version.finalize()),
+        files,
+    }
+}
+
+fn update_manifest_version_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn app_resources_json() -> &'static [u8] {
+    static JSON: OnceLock<Box<[u8]>> = OnceLock::new();
+    JSON.get_or_init(|| {
+        serde_json::to_vec(&build_app_resources_manifest(web_assets()))
+            .expect("app resource manifest should serialize")
+            .into_boxed_slice()
+    })
+}
+
+fn app_resources_asset() -> &'static StaticWebAsset {
+    static ASSET: OnceLock<StaticWebAsset> = OnceLock::new();
+    ASSET.get_or_init(|| {
+        StaticWebAsset::new("application/json; charset=utf-8", app_resources_json())
     })
 }
 
@@ -1081,7 +1199,8 @@ fn strong_etag(bytes: &[u8]) -> HeaderValue {
 fn is_static_web_asset_path(path: &str) -> bool {
     matches!(
         path,
-        "/" | "/app.js"
+        "/" | "/app-resources.json"
+            | "/app.js"
             | "/attachments.js"
             | "/events-client.js"
             | "/events-worker.js"
@@ -1090,7 +1209,14 @@ fn is_static_web_asset_path(path: &str) -> bool {
             | "/vendor/dompurify.esm.js"
             | "/vendor/mermaid.esm.js"
             | "/message-actions.js"
+            | "/platform.js"
+            | "/pwa.js"
+            | "/sw.js"
             | "/style.css"
+            | "/manifest.webmanifest"
+            | "/icons/icon-192.png"
+            | "/icons/icon-512.png"
+            | "/icons/apple-touch-icon.png"
     )
 }
 
@@ -1171,7 +1297,11 @@ fn apply_static_asset_headers(response: &mut Response, asset: &StaticWebAsset, g
 }
 
 async fn static_web_asset(uri: Uri, headers: HeaderMap) -> Response {
-    let Some(asset) = web_assets().get(uri.path()) else {
+    let asset = if uri.path() == "/app-resources.json" {
+        app_resources_asset()
+    } else if let Some(asset) = web_assets().get(uri.path()) {
+        asset
+    } else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let gzip = accepts_gzip(&headers);
@@ -1210,6 +1340,7 @@ pub fn web_router(
     };
     Router::new()
         .route("/", get(static_web_asset))
+        .route("/app-resources.json", get(static_web_asset))
         .route("/app.js", get(static_web_asset))
         .route("/attachments.js", get(static_web_asset))
         .route("/events-client.js", get(static_web_asset))
@@ -1219,7 +1350,14 @@ pub fn web_router(
         .route("/vendor/dompurify.esm.js", get(static_web_asset))
         .route("/vendor/mermaid.esm.js", get(static_web_asset))
         .route("/message-actions.js", get(static_web_asset))
+        .route("/platform.js", get(static_web_asset))
+        .route("/pwa.js", get(static_web_asset))
+        .route("/sw.js", get(static_web_asset))
         .route("/style.css", get(static_web_asset))
+        .route("/manifest.webmanifest", get(static_web_asset))
+        .route("/icons/icon-192.png", get(static_web_asset))
+        .route("/icons/icon-512.png", get(static_web_asset))
+        .route("/icons/apple-touch-icon.png", get(static_web_asset))
         .route("/api/connect", post(connect))
         .route("/api/session", get(session))
         .route("/api/logout", post(logout))
@@ -3102,6 +3240,240 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(new_login.status(), reqwest::StatusCode::OK);
+        controller.reconcile(RemoteAccessSettings::default()).await;
+    }
+
+    #[test]
+    fn app_resource_version_is_stable_and_changes_with_resource_content() {
+        let first_assets = HashMap::from([
+            (
+                "/b.js",
+                StaticWebAsset::new("application/javascript; charset=utf-8", b"second"),
+            ),
+            (
+                "/a.js",
+                StaticWebAsset::new("application/javascript; charset=utf-8", b"first"),
+            ),
+        ]);
+        let reordered_assets = HashMap::from([
+            (
+                "/a.js",
+                StaticWebAsset::new("application/javascript; charset=utf-8", b"first"),
+            ),
+            (
+                "/b.js",
+                StaticWebAsset::new("application/javascript; charset=utf-8", b"second"),
+            ),
+        ]);
+        let changed_assets = HashMap::from([
+            (
+                "/a.js",
+                StaticWebAsset::new("application/javascript; charset=utf-8", b"changed"),
+            ),
+            (
+                "/b.js",
+                StaticWebAsset::new("application/javascript; charset=utf-8", b"second"),
+            ),
+        ]);
+
+        let first = build_app_resources_manifest(&first_assets);
+        let reordered = build_app_resources_manifest(&reordered_assets);
+        let changed = build_app_resources_manifest(&changed_assets);
+
+        assert_eq!(first.version, reordered.version);
+        assert_ne!(first.version, changed.version);
+        assert_eq!(first.files[0].path, "/a.js");
+        assert_eq!(first.files[1].path, "/b.js");
+        assert_eq!(first.schema_version, 1);
+        assert_eq!(first.min_shell_version, 1);
+        assert_eq!(first.version.len(), 64);
+        assert!(
+            first
+                .version
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+    }
+
+    #[tokio::test]
+    async fn app_resource_manifest_matches_public_routes_and_preserves_api_boundary() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let controller = RemoteAccessController::new(
+            Arc::new(OfflineNativeBridge),
+            state_dir.path().to_path_buf(),
+        )
+        .unwrap();
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let settings = RemoteAccessSettings {
+            enabled: true,
+            port,
+            ..RemoteAccessSettings::default()
+        };
+        controller.reconcile(settings).await;
+
+        let base_url = format!("http://127.0.0.1:{port}");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let manifest_response = client
+            .get(format!("{base_url}/app-resources.json"))
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(manifest_response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            manifest_response
+                .headers()
+                .get(reqwest::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-cache")
+        );
+        let manifest_etag = manifest_response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let manifest: Value = manifest_response.json().await.unwrap();
+        let manifest_version = manifest["version"].as_str().unwrap();
+        assert_eq!(manifest["schemaVersion"], 1);
+        assert_eq!(manifest["minShellVersion"], 1);
+        assert_eq!(manifest_version.len(), 64);
+        assert!(
+            manifest_version
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+
+        let files = manifest["files"].as_array().unwrap();
+        let paths: Vec<_> = files
+            .iter()
+            .map(|file| file["path"].as_str().unwrap())
+            .collect();
+        let mut sorted_paths = paths.clone();
+        sorted_paths.sort_unstable();
+        assert_eq!(paths, sorted_paths);
+        assert!(!paths.contains(&"/app-resources.json"));
+        assert!(!paths.contains(&"/native.js"));
+        assert!(paths.iter().all(|path| !path.starts_with("/api/")));
+
+        for file in files {
+            let path = file["path"].as_str().unwrap();
+            let response = client
+                .get(format!("{base_url}{path}"))
+                .header(reqwest::header::ACCEPT_ENCODING, "identity")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok()),
+                file["contentType"].as_str(),
+                "{path}"
+            );
+            let bytes = response.bytes().await.unwrap();
+            assert_eq!(bytes.len() as u64, file["size"].as_u64().unwrap(), "{path}");
+            assert_eq!(
+                format!("{:x}", Sha256::digest(&bytes)),
+                file["sha256"].as_str().unwrap(),
+                "{path}"
+            );
+        }
+
+        let repeated_manifest: Value = client
+            .get(format!("{base_url}/app-resources.json"))
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(repeated_manifest["version"], manifest["version"]);
+        let revalidated_manifest = client
+            .get(format!("{base_url}/app-resources.json"))
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .header(reqwest::header::IF_NONE_MATCH, manifest_etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            revalidated_manifest.status(),
+            reqwest::StatusCode::NOT_MODIFIED
+        );
+
+        let compressed_asset = client
+            .get(format!("{base_url}/app.js"))
+            .header(reqwest::header::ACCEPT_ENCODING, "gzip")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(compressed_asset.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            compressed_asset
+                .headers()
+                .get(reqwest::header::CONTENT_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+            Some("gzip")
+        );
+        let compressed_etag = compressed_asset
+            .headers()
+            .get(reqwest::header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let cached_compressed_asset = client
+            .get(format!("{base_url}/app.js"))
+            .header(reqwest::header::ACCEPT_ENCODING, "gzip")
+            .header(reqwest::header::IF_NONE_MATCH, compressed_etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            cached_compressed_asset.status(),
+            reqwest::StatusCode::NOT_MODIFIED
+        );
+
+        let unauthenticated_api = client
+            .get(format!("{base_url}/api/session"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            unauthenticated_api.status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            unauthenticated_api
+                .headers()
+                .get(reqwest::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+
+        let bad_host = client
+            .get(format!("{base_url}/app-resources.json"))
+            .header(reqwest::header::HOST, "untrusted.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_host.status(), reqwest::StatusCode::FORBIDDEN);
+        let bad_origin = client
+            .get(format!("{base_url}/app-resources.json"))
+            .header(reqwest::header::ORIGIN, "https://untrusted.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_origin.status(), reqwest::StatusCode::FORBIDDEN);
+
         controller.reconcile(RemoteAccessSettings::default()).await;
     }
 }

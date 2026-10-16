@@ -138,7 +138,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .sidebar-view-toggle,.sidebar-search-toggle{display:flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;line-height:1;color:var(--muted);border-radius:var(--radius-control)}
 .sidebar-view-toggle:hover,.sidebar-search-toggle:hover{color:var(--text)}
 .sidebar-search-toggle[aria-pressed=true]{color:#3076df}
-.sidebar-action{display:flex;flex-shrink:0;margin-bottom:12px}
+.sidebar-action{display:flex;flex-shrink:0;margin-bottom:0}
 .sidebar-action>.new-chat{width:100%;margin-bottom:0}
 .sidebar-action>.search{height:40px}
 .new-chat{min-height:40px;padding:8px}
@@ -424,6 +424,14 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .command-shell>.command-output{padding:6px 8px 10px;max-height:min(180px,32vh);font-size:.92857rem;line-height:1.5}
 .command-prompt{font-weight:600}
 .command-shell>.text-button{margin:0 4px 6px;font-size:.85714rem}
+.approval-card.command-approval-card{border-color:var(--line);padding:14px}
+.approval-identity{display:flex;align-items:center;gap:7px;margin-bottom:8px;color:var(--muted);font-size:.78571rem;line-height:20px}
+.approval-title{display:block;margin-bottom:10px;font-size:.92857rem;font-weight:600;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}
+.approval-reason{margin:0 0 12px;font-size:.85714rem;line-height:1.6;overflow-wrap:anywhere}
+.approval-command-preview{min-width:0;margin:0 0 12px;border-radius:8px;background:var(--code);overflow:hidden}
+.approval-command-code{max-height:min(240px,32dvh);margin:0;padding:8px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:.78571rem/1.6 Consolas,monospace;scrollbar-width:thin}
+.approval-command-preview.collapsed .approval-command-code{display:-webkit-box;max-height:calc(4.8em + 16px);-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.approval-command-toggle{display:block;margin:0 4px 4px auto;padding:4px 8px;font-size:.78571rem;color:var(--muted)}
 @media(prefers-reduced-motion:reduce){.command-item>summary>.command-chevron{transition:none}}
 .message-image-link{display:block;width:fit-content;max-width:min(100%,150px);margin:16px 0;text-decoration:none!important}
 .message-image{display:block;max-width:min(100%,150px);max-height:150px;width:auto;height:auto;object-fit:contain;border:1px solid var(--line);border-radius:8px}
@@ -431,10 +439,11 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .user-bubble .message-image-link:last-child{margin-bottom:0}
 .user-message{flex-direction:column;align-items:flex-end;gap:8px}
 .user-bubble.markdown{white-space:normal;line-height:1.625}
-.user-attachments{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;max-width:100%}
-.user-attachments .message-image-link{margin:0}
+.user-attachments,.image-view-body{--thumbnail-size:80px;min-width:0;overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;scrollbar-width:thin}
+.user-attachments{display:flex;justify-content:flex-start;flex-wrap:nowrap;gap:8px;max-width:100%}
+.user-attachments .message-image-link{flex:0 0 var(--thumbnail-size);width:var(--thumbnail-size);height:var(--thumbnail-size);margin:0}
 .user-attachments button.message-image-link{padding:0;border:0;background:transparent;border-radius:8px}
-.user-attachments .message-image{width:80px;height:80px;max-width:80px;max-height:80px;object-fit:cover}
+.user-attachments .message-image{width:var(--thumbnail-size);height:var(--thumbnail-size);max-width:var(--thumbnail-size);max-height:var(--thumbnail-size);object-fit:cover}
 .image-preview-dialog{width:min(960px,calc(100vw - 32px));max-width:none;max-height:calc(100dvh - 32px);margin:auto;padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--text);overflow:hidden}
 .image-preview-dialog::backdrop{background:#000b}
 .image-preview-panel{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:0;min-height:180px;max-height:calc(100dvh - 34px);margin:0;padding:44px 16px 14px;overflow:auto}
@@ -451,11 +460,12 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .image-view-summary>.ui-icon{width:12px;height:12px;opacity:.7;transform:rotate(-90deg);transition:transform var(--duration-control)}
 .image-view-item[open]>.image-view-summary>.ui-icon{transform:rotate(0deg)}
 .activity-body>.image-view-item[open]>.image-view-summary{padding-left:0;padding-right:0}
-.image-view-body{display:flex;max-width:100%;flex-wrap:wrap;gap:8px;padding:4px 0}
-.image-view-entry{display:block;flex:0 0 80px;width:80px;height:80px;min-width:0}
-.image-view-entry .message-image-link{width:80px;height:80px;margin:0}
-.image-view-entry .message-image{width:80px;height:80px;max-width:80px;max-height:80px;object-fit:cover;cursor:zoom-in}
-.image-view-placeholder,.image-view-entry .attachment-placeholder{display:grid;width:80px;height:80px;margin:0;padding:6px;place-items:center;border:1px dashed var(--line);border-radius:8px;color:var(--muted);font-size:.71429rem;line-height:1.35;text-align:center}
+.image-view-body{display:flex;max-width:100%;flex-wrap:nowrap;gap:8px;padding:4px 0}
+.image-view-entry{display:block;flex:0 0 var(--thumbnail-size);width:var(--thumbnail-size);height:var(--thumbnail-size);min-width:0}
+.image-view-entry .message-image-link{width:var(--thumbnail-size);height:var(--thumbnail-size);margin:0}
+.image-view-entry .message-image{width:var(--thumbnail-size);height:var(--thumbnail-size);max-width:var(--thumbnail-size);max-height:var(--thumbnail-size);object-fit:cover;cursor:zoom-in}
+.image-view-placeholder,.image-view-entry .attachment-placeholder{display:grid;width:var(--thumbnail-size);height:var(--thumbnail-size);margin:0;padding:6px;place-items:center;border:1px dashed var(--line);border-radius:8px;color:var(--muted);font-size:.71429rem;line-height:1.35;text-align:center}
+@media(max-width:760px){.user-attachments,.image-view-body{--thumbnail-size:50px}}
 @media(prefers-reduced-motion:reduce){.image-view-summary>.ui-icon{transition:none}}
 @media(max-width:760px){.image-preview-dialog{width:calc(100vw - 16px);max-height:calc(100dvh - 16px)}.image-preview-panel{max-height:calc(100dvh - 18px);padding:44px 8px 10px}.image-preview-image{max-height:calc(100dvh - 104px)}}
 .agent-message{line-height:1.625}
