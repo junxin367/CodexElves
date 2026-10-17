@@ -91,6 +91,16 @@ static WEB_ASSETS: OnceLock<HashMap<&'static str, StaticWebAsset>> = OnceLock::n
 #[async_trait]
 pub trait NativeRemoteBridge: Send + Sync {
     async fn call(&self, action: &str, payload: Value) -> anyhow::Result<Value>;
+
+    async fn call_authorized(
+        &self,
+        action: &str,
+        payload: Value,
+        authorization: &RemoteAuthorization,
+    ) -> anyhow::Result<Value> {
+        authorization.check().await?;
+        self.call(action, payload).await
+    }
 }
 
 pub struct NativeCdpBridge;
@@ -105,6 +115,21 @@ impl NativeRemoteBridge for NativeCdpBridge {
         )
         .await
     }
+
+    async fn call_authorized(
+        &self,
+        action: &str,
+        payload: Value,
+        authorization: &RemoteAuthorization,
+    ) -> anyhow::Result<Value> {
+        Self::call_guarded_with_status(
+            crate::status::StatusStore::default().load_latest()?,
+            action,
+            payload,
+            Some(authorization),
+        )
+        .await
+    }
 }
 
 impl NativeCdpBridge {
@@ -112,6 +137,15 @@ impl NativeCdpBridge {
         status: Option<crate::status::LaunchStatus>,
         action: &str,
         payload: Value,
+    ) -> anyhow::Result<Value> {
+        Self::call_guarded_with_status(status, action, payload, None).await
+    }
+
+    async fn call_guarded_with_status(
+        status: Option<crate::status::LaunchStatus>,
+        action: &str,
+        payload: Value,
+        authorization: Option<&RemoteAuthorization>,
     ) -> anyhow::Result<Value> {
         let status = status
             .filter(|status| matches!(status.status.as_str(), "running" | "running_degraded"))
@@ -127,12 +161,22 @@ impl NativeCdpBridge {
             serde_json::to_string(action)?,
             serde_json::to_string(&payload)?
         );
-        let response = crate::bridge::evaluate_script_value_with_timeout(
-            &websocket,
-            &expression,
-            Duration::from_secs(45),
-        )
-        .await?;
+        let response = if let Some(authorization) = authorization {
+            crate::bridge::evaluate_script_value_with_authorization(
+                &websocket,
+                &expression,
+                Duration::from_secs(45),
+                || authorization.prepare_dispatch(),
+            )
+            .await?
+        } else {
+            crate::bridge::evaluate_script_value_with_timeout(
+                &websocket,
+                &expression,
+                Duration::from_secs(45),
+            )
+            .await?
+        };
         if response.pointer("/result/exceptionDetails").is_some() {
             anyhow::bail!("Codex 原生会话桥接执行失败");
         }
@@ -186,6 +230,98 @@ struct AuthState {
     login_locked: bool,
     login_storage_failed_for: Option<String>,
     receipts: HashMap<String, Receipt>,
+}
+
+#[derive(Clone, Copy)]
+struct AccessPolicy {
+    enabled: bool,
+    read_only: bool,
+    allow_approvals: bool,
+}
+
+impl Default for AccessPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            read_only: true,
+            allow_approvals: false,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct RemoteAuthorization {
+    controller: Arc<RemoteAccessController>,
+    device: Device,
+    write_action: Option<String>,
+}
+
+impl RemoteAuthorization {
+    pub async fn check(&self) -> anyhow::Result<()> {
+        use crate::bridge::CdpDispatchPermit;
+        self.prepare_dispatch().await?.commit(|| Ok(()))
+    }
+
+    async fn prepare_dispatch(&self) -> anyhow::Result<RemoteDispatchPermit> {
+        let mut auth = self.controller.auth.clone().lock_owned().await;
+        let (store, key, locked) = self
+            .controller
+            .access_key_snapshot()
+            .await
+            .map_err(|_| ApiError::new(401, "设备授权无法确认，请重新连接"))?;
+        self.controller.sync_access_key(&mut auth, key, locked);
+        let current_key = auth.access_key.as_ref().map(|key| key.id.as_str());
+        let current = auth
+            .devices
+            .iter()
+            .find(|device| {
+                device.id == self.device.id
+                    && device.key_id == self.device.key_id
+                    && current_key == Some(device.key_id.as_str())
+                    && constant_time_eq(&device.token_hash, &self.device.token_hash)
+                    && device.expires_at_ms > now_ms()
+            })
+            .ok_or_else(|| ApiError::new(401, "设备授权已撤销或过期"))?;
+        let expires_at_ms = current.expires_at_ms;
+        Ok(RemoteDispatchPermit {
+            authorization: self.clone(),
+            expires_at_ms,
+            _auth: auth,
+            _key_store: store,
+        })
+    }
+}
+
+struct RemoteDispatchPermit {
+    authorization: RemoteAuthorization,
+    expires_at_ms: u64,
+    _auth: tokio::sync::OwnedMutexGuard<AuthState>,
+    _key_store: AccessKeyStore,
+}
+
+impl crate::bridge::CdpDispatchPermit for RemoteDispatchPermit {
+    fn commit<T>(self, send: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+        let controller = &self.authorization.controller;
+        let policy = controller
+            .access_policy
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        if !policy.enabled || !controller.running.load(Ordering::SeqCst) {
+            return Err(ApiError::new(503, "远程访问服务已停止").into());
+        }
+        if self.expires_at_ms <= now_ms() {
+            return Err(ApiError::new(401, "设备授权已撤销或过期").into());
+        }
+        if let Some(action) = &self.authorization.write_action {
+            if policy.read_only {
+                return Err(ApiError::new(403, "当前为只读访问").into());
+            }
+            if matches!(action.as_str(), "approve" | "answer") && !policy.allow_approvals {
+                return Err(ApiError::new(403, "远程审批与询问回答已关闭，请在桌面处理").into());
+            }
+        }
+        send()
+    }
 }
 
 #[derive(Clone)]
@@ -309,7 +445,8 @@ struct LiveService {
 pub struct RemoteAccessController {
     native: Arc<dyn NativeRemoteBridge>,
     state_dir: PathBuf,
-    auth: Mutex<AuthState>,
+    auth: Arc<Mutex<AuthState>>,
+    access_policy: RwLock<AccessPolicy>,
     live: Mutex<LiveService>,
     running: AtomicBool,
     native_connected: AtomicBool,
@@ -356,13 +493,14 @@ impl RemoteAccessController {
         Ok(Arc::new(Self {
             native,
             state_dir,
-            auth: Mutex::new(AuthState {
+            auth: Arc::new(Mutex::new(AuthState {
                 devices,
                 access_key,
                 login_locked,
                 receipts,
                 ..AuthState::default()
-            }),
+            })),
+            access_policy: RwLock::new(AccessPolicy::default()),
             live: Mutex::new(LiveService {
                 settings: None,
                 handle: None,
@@ -533,6 +671,38 @@ impl RemoteAccessController {
         Ok(auth.access_key.is_some())
     }
 
+    fn publish_access_policy(&self, settings: &RemoteAccessSettings) {
+        *self
+            .access_policy
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = AccessPolicy {
+            enabled: settings.enabled,
+            read_only: settings.read_only,
+            allow_approvals: settings.allow_approvals,
+        };
+    }
+
+    fn accepting_requests(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+            && self
+                .access_policy
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .enabled
+    }
+
+    fn authorization(
+        self: &Arc<Self>,
+        device: Device,
+        write_action: Option<&str>,
+    ) -> RemoteAuthorization {
+        RemoteAuthorization {
+            controller: self.clone(),
+            device,
+            write_action: write_action.map(str::to_owned),
+        }
+    }
+
     async fn access_key_snapshot(
         &self,
     ) -> anyhow::Result<(AccessKeyStore, Option<AccessKey>, bool)> {
@@ -599,6 +769,8 @@ impl RemoteAccessController {
     }
 
     pub async fn reconcile(self: &Arc<Self>, settings: RemoteAccessSettings) {
+        // Publish restrictions before any file lock, native call, or tunnel await.
+        self.publish_access_policy(&settings);
         let zrok_target = zrok_target(&settings);
         let key_error = self
             .reload_access_key()
@@ -815,7 +987,13 @@ impl RemoteAccessController {
     }
 
     async fn authorize(&self, headers: &HeaderMap) -> Option<Device> {
-        if !self.running.load(Ordering::SeqCst) || !self.reload_access_key().await.ok()? {
+        if !self.running.load(Ordering::SeqCst)
+            || !self
+                .access_policy
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .enabled
+        {
             return None;
         }
         let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
@@ -823,7 +1001,22 @@ impl RemoteAccessController {
             let (name, value) = cookie.trim().split_once('=')?;
             (name == COOKIE_NAME).then_some(value)
         })?;
+        if token.is_empty() || token.len() > 256 {
+            return None;
+        }
         let digest = hash(token);
+        // Anonymous and random-cookie requests must not reach key-file/KDF work.
+        {
+            let auth = self.auth.lock().await;
+            if !auth.devices.iter().any(|device| {
+                device.expires_at_ms > now_ms() && constant_time_eq(&device.token_hash, &digest)
+            }) {
+                return None;
+            }
+        }
+        if !self.reload_access_key().await.ok()? {
+            return None;
+        }
         let mut auth = self.auth.lock().await;
         let key_id = auth.access_key.as_ref()?.id.clone();
         let device = auth.devices.iter_mut().find(|device| {
@@ -842,6 +1035,8 @@ impl RemoteAccessController {
         action: String,
         payload: Value,
     ) -> Result<Value, ApiError> {
+        let authorization = self.authorization(device.clone(), Some(&action));
+        authorization.check().await.map_err(authorization_error)?;
         if request_id.is_empty()
             || request_id.len() > 100
             || !request_id
@@ -874,7 +1069,13 @@ impl RemoteAccessController {
                 if receipt.payload_hash != digest {
                     return Err(ApiError::new(409, "请求 ID 已用于不同操作"));
                 }
-                return Ok(receipt_value(receipt));
+                let value = receipt_value(receipt);
+                drop(auth);
+                self.authorization(device, None)
+                    .check()
+                    .await
+                    .map_err(|error| authorization_error(error).after_admission())?;
+                return Ok(value);
             }
             if auth.receipts.len() >= MAX_RECEIPTS {
                 return Err(ApiError::new(429, "消息回执已达上限"));
@@ -882,7 +1083,7 @@ impl RemoteAccessController {
             auth.receipts.insert(
                 key.clone(),
                 Receipt {
-                    device_id: device.id,
+                    device_id: device.id.clone(),
                     request_id: request_id.clone(),
                     payload_hash: digest,
                     created_at_ms: now_ms(),
@@ -896,10 +1097,14 @@ impl RemoteAccessController {
             }
         }
         let controller = self.clone();
+        let dispatch_authorization = authorization.clone();
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let operation_id = request_id.clone();
         tokio::spawn(async move {
-            let result = controller.native.call(&action, payload).await;
+            let result = controller
+                .native
+                .call_authorized(&action, payload, &dispatch_authorization)
+                .await;
             let mut auth = controller.auth.lock().await;
             let receipt = auth.receipts.get_mut(&key).unwrap();
             match result {
@@ -915,6 +1120,13 @@ impl RemoteAccessController {
                     .into();
                     receipt.result = Some(value);
                 }
+                Err(error) if error.downcast_ref::<ApiError>().is_some() => {
+                    let error = error.downcast_ref::<ApiError>().unwrap();
+                    receipt.state = "failed".into();
+                    receipt.result = Some(
+                        json!({"ok":false,"notSent":true,"code":error.code,"message":error.message}),
+                    );
+                }
                 Err(_) => {
                     // The native client may have accepted the operation before the CDP response was lost.
                     receipt.state = "unknown".into();
@@ -929,10 +1141,15 @@ impl RemoteAccessController {
                 let _ = sender.send(response);
             }
         });
-        match tokio::time::timeout(Duration::from_secs(40), receiver).await {
-            Ok(Ok(value)) => Ok(value),
-            _ => Ok(json!({"requestId":request_id,"state":"pending"})),
-        }
+        let value = match tokio::time::timeout(Duration::from_secs(40), receiver).await {
+            Ok(Ok(value)) => value,
+            _ => json!({"requestId":request_id,"state":"pending"}),
+        };
+        self.authorization(device, None)
+            .check()
+            .await
+            .map_err(|error| authorization_error(error).after_admission())?;
+        Ok(value)
     }
 }
 
@@ -1514,10 +1731,26 @@ pub fn web_router(
         .with_state(state)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ApiError {
     code: u16,
     message: String,
+    outcome_unknown: bool,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+fn authorization_error(error: anyhow::Error) -> ApiError {
+    error
+        .downcast_ref::<ApiError>()
+        .cloned()
+        .unwrap_or_else(|| ApiError::new(503, "无法确认当前访问权限，请重新连接"))
 }
 
 impl ApiError {
@@ -1525,15 +1758,27 @@ impl ApiError {
         Self {
             code,
             message: message.into(),
+            outcome_unknown: false,
         }
+    }
+
+    fn after_admission(mut self) -> Self {
+        self.outcome_unknown = true;
+        self.message =
+            "访问授权已失效，无法确认原操作结果。请勿重复发送，重新连接后请查看会话确认。".into();
+        self
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let mut payload = json!({"ok":false,"message":self.message});
+        if self.outcome_unknown {
+            payload["outcomeUnknown"] = json!(true);
+        }
         (
             StatusCode::from_u16(self.code).unwrap_or(StatusCode::BAD_REQUEST),
-            Json(json!({"ok":false,"message":self.message})),
+            Json(payload),
         )
             .into_response()
     }
@@ -1603,7 +1848,18 @@ async fn access_boundary(
     request
         .extensions_mut()
         .insert(RequestTrustContext { external_https });
-    let mut response = next.run(request).await;
+    let path = request.uri().path();
+    let private_api = (path == "/api" || path.starts_with("/api/"))
+        && !matches!(path, "/api/connect" | "/api/login-status");
+    // Reject unauthorized uploads before JSON/body extraction and before routing.
+    let mut response = if private_api {
+        match authorized(&state, request.headers()).await {
+            Ok(_) => next.run(request).await,
+            Err(error) => error.into_response(),
+        }
+    } else {
+        next.run(request).await
+    };
     let headers = response.headers_mut();
     headers.insert(
         header::CACHE_CONTROL,
@@ -1632,7 +1888,7 @@ async fn access_boundary(
 }
 
 async fn authorized(state: &WebState, headers: &HeaderMap) -> Result<Device, ApiError> {
-    if !state.controller.running.load(Ordering::SeqCst) {
+    if !state.controller.accepting_requests() {
         return Err(ApiError::new(503, "远程访问服务已停止"));
     }
     state
@@ -1649,7 +1905,7 @@ async fn connect(
     headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Result<Response, ApiError> {
-    if !state.controller.running.load(Ordering::SeqCst) {
+    if !state.controller.accepting_requests() {
         return Err(ApiError::new(503, "服务已关闭"));
     }
     let key_value = payload["key"].as_str().unwrap_or("").trim();
@@ -1749,7 +2005,7 @@ async fn complete_login(
         .clone()
         .filter(|key| key.id == verified_key.id)
         .ok_or_else(|| ApiError::new(401, "访问密钥刚被更换，请使用新密钥"))?;
-    if !state.controller.running.load(Ordering::SeqCst) {
+    if !state.controller.accepting_requests() {
         return Err(ApiError::new(503, "服务已关闭"));
     }
     if auth.login_locked {
@@ -1839,9 +2095,14 @@ async fn session(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let device = authorized(&state, &headers).await?;
+    let policy = *state
+        .controller
+        .access_policy
+        .read()
+        .unwrap_or_else(|error| error.into_inner());
     Ok(Json(
         json!({"ok":true,"device":device.public(),"nativeConnected":state.controller.native_connected.load(Ordering::SeqCst),
-        "readOnly":state.settings.read_only,"allowApprovals":state.settings.allow_approvals,
+        "readOnly":policy.read_only,"allowApprovals":policy.allow_approvals,
         "capabilities":{"imageInput":true,"queuedImageRemoval":true,"queuedImageEditing":true,"queueEditRecovery":true,"queueSendRecovery":true,"projectlessCreation":true,"promptOptimization":true,"messageEditModelSettings":true,"goalComposer":true}}),
     ))
 }
@@ -1897,12 +2158,16 @@ async fn read(
     if action == "promptOptimization" {
         payload = json!({"requestId": prompt_optimization_request_id(&device.id, payload["requestId"].as_str().unwrap_or(""))?});
     }
+    let authorization = state.controller.authorization(device, None);
     let value = state
         .controller
         .native
-        .call(&action, payload)
+        .call_authorized(&action, payload, &authorization)
         .await
         .map_err(|error| {
+            if let Some(error) = error.downcast_ref::<ApiError>() {
+                return error.clone();
+            }
             let _ = crate::diagnostic_log::append_diagnostic_log(
                 "remote_access.native_read_failed",
                 json!({
@@ -1923,9 +2188,11 @@ async fn read(
         state.controller.attach_queue_images(&mut value);
     }
     let gzip = accepts_gzip(&headers);
-    tokio::task::spawn_blocking(move || read_json_response(value, gzip))
+    let response = tokio::task::spawn_blocking(move || read_json_response(value, gzip))
         .await
-        .map_err(|_| ApiError::new(503, "会话数据处理暂时失败，请重试读取"))?
+        .map_err(|_| ApiError::new(503, "会话数据处理暂时失败，请重试读取"))??;
+    authorization.check().await.map_err(authorization_error)?;
+    Ok(response)
 }
 
 fn read_json_response(value: Value, accept_gzip: bool) -> Result<Response, ApiError> {
@@ -2572,7 +2839,15 @@ async fn receipt(
         .receipts
         .get(&format!("{}:{id}", device.id))
         .ok_or_else(|| ApiError::new(404, "未找到此请求回执"))?;
-    Ok(Json(receipt_value(receipt)))
+    let value = receipt_value(receipt);
+    drop(auth);
+    state
+        .controller
+        .authorization(device, None)
+        .check()
+        .await
+        .map_err(authorization_error)?;
+    Ok(Json(value))
 }
 
 async fn image(
@@ -2580,7 +2855,7 @@ async fn image(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    authorized(&state, &headers).await?;
+    let device = authorized(&state, &headers).await?;
     if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(ApiError::new(404, "图片不存在或已过期"));
     }
@@ -2591,6 +2866,12 @@ async fn image(
     let image = tokio::task::spawn_blocking(move || read_registered_image(&image))
         .await
         .map_err(|_| ApiError::new(503, "无法读取本机图片"))??;
+    state
+        .controller
+        .authorization(device, None)
+        .check()
+        .await
+        .map_err(authorization_error)?;
     let content_length = HeaderValue::from_str(&image.bytes.len().to_string())
         .map_err(|_| ApiError::new(500, "无法生成图片响应"))?;
     Ok((
@@ -2634,7 +2915,7 @@ async fn events(
                     (receiver, controller, id, true),
                 ));
             }
-            if !controller.running.load(Ordering::SeqCst) {
+            if !controller.accepting_requests() {
                 return Some((
                     Ok(Event::default().data(r#"{"method":"remote/disconnected"}"#)),
                     (receiver, controller, id, true),
@@ -2650,7 +2931,7 @@ async fn events(
                     Err(_) => json!({"method":"remote/heartbeat"}),
                 };
             let authorized = controller.device_active(&id).await;
-            let done = !authorized || !controller.running.load(Ordering::SeqCst);
+            let done = !authorized || !controller.accepting_requests();
             if !authorized {
                 event = json!({"method":"remote/unauthorized"});
             } else if done {
@@ -2687,7 +2968,7 @@ async fn stream_websocket_events(
     loop {
         let mut event = if !controller.device_active(&id).await {
             json!({"method":"remote/unauthorized"})
-        } else if !controller.running.load(Ordering::SeqCst) {
+        } else if !controller.accepting_requests() {
             json!({"method":"remote/disconnected"})
         } else {
             match tokio::time::timeout(Duration::from_secs(15), receiver.recv()).await {
@@ -2700,7 +2981,7 @@ async fn stream_websocket_events(
             }
         };
         let authorized = controller.device_active(&id).await;
-        let done = !authorized || !controller.running.load(Ordering::SeqCst);
+        let done = !authorized || !controller.accepting_requests();
         if !authorized {
             event = json!({"method":"remote/unauthorized"});
         } else if done {
@@ -3468,6 +3749,10 @@ mod tests {
         });
         let controller =
             RemoteAccessController::new(native.clone(), state_dir.path().to_path_buf()).unwrap();
+        controller.publish_access_policy(&RemoteAccessSettings {
+            enabled: true,
+            ..RemoteAccessSettings::default()
+        });
         controller.running.store(true, Ordering::SeqCst);
         {
             let mut auth = controller.auth.lock().await;
@@ -3594,6 +3879,10 @@ mod tests {
         });
         let controller =
             RemoteAccessController::new(native.clone(), state_dir.path().to_path_buf()).unwrap();
+        controller.publish_access_policy(&RemoteAccessSettings {
+            enabled: true,
+            ..RemoteAccessSettings::default()
+        });
         controller.running.store(true, Ordering::SeqCst);
         {
             let mut auth = controller.auth.lock().await;
@@ -3818,6 +4107,10 @@ mod tests {
         });
         let controller =
             RemoteAccessController::new(native.clone(), directory.path().to_path_buf()).unwrap();
+        controller.publish_access_policy(&RemoteAccessSettings {
+            enabled: true,
+            ..RemoteAccessSettings::default()
+        });
         controller.running.store(true, Ordering::SeqCst);
         {
             let mut auth = controller.auth.lock().await;
@@ -3968,6 +4261,10 @@ mod tests {
         let controller =
             RemoteAccessController::new(Arc::new(OfflineNativeBridge), directory.to_path_buf())
                 .unwrap();
+        controller.publish_access_policy(&RemoteAccessSettings {
+            enabled: true,
+            ..RemoteAccessSettings::default()
+        });
         controller.running.store(true, Ordering::SeqCst);
         WebState {
             controller,
@@ -4158,6 +4455,13 @@ mod tests {
         settings.remote_access.read_only = true;
         settings_store.save(&settings).unwrap();
         restarted.controller.reconcile(settings.remote_access).await;
+        restarted
+            .controller
+            .publish_access_policy(&RemoteAccessSettings {
+                enabled: true,
+                read_only: true,
+                ..RemoteAccessSettings::default()
+            });
         restarted.controller.running.store(true, Ordering::SeqCst);
         let _unsaved_candidate = random_token();
         configure_access_key(directory.path(), LOGIN_TEST_KEY).unwrap();

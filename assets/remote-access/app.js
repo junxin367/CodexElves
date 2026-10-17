@@ -315,8 +315,8 @@ function openAppearance() {
   const dialog = element("dialog", "appearance-dialog");
   dialog.id = "appearance-dialog";
   dialog.setAttribute("aria-labelledby", "appearance-title");
-  dialog.innerHTML = `<div class="appearance-heading"><h2 id="appearance-title">设置</h2><button type="button" class="icon-button" aria-label="关闭设置">×</button></div>
-    <div class="appearance-body"><p class="muted">设置仅保存在当前浏览器。</p>
+  dialog.innerHTML = `<div class="appearance-heading"><h2 id="appearance-title">设置</h2><button type="button" class="icon-button" title="关闭设置" aria-label="关闭设置"></button></div>
+    <div class="appearance-body">
     <div class="appearance-field"><span id="appearance-theme-label">主题</span><div id="appearance-theme-slot" class="appearance-theme-options" role="group" aria-labelledby="appearance-theme-label"></div></div>
     <div class="appearance-field appearance-thread-limit-field"><span>每个项目显示会话数</span><div id="appearance-project-thread-limit-slot"></div></div>
     <div id="appearance-colors"></div>
@@ -324,6 +324,7 @@ function openAppearance() {
     <label class="appearance-field">字体大小<span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="字体大小"><output id="appearance-font-value"></output></span></label></div>
     <div class="appearance-actions"><button type="button" id="appearance-reset">恢复默认</button><button type="button" class="primary" id="appearance-close">完成</button></div>`;
   document.body.append(dialog);
+  $(".appearance-heading button", dialog).append(icon("close"));
   renderPwaCacheState();
   const themeButtons = [["light", "浅色主题", "sun"], ["dark", "深色主题", "moon"]].map(([theme, label, iconName]) => {
     const control = button("", label, () => {
@@ -1188,9 +1189,12 @@ function closeSkillMenu() {
   $("#prompt")?.setAttribute("aria-expanded", "false");
   $("#prompt")?.removeAttribute("aria-activedescendant");
 }
-function closeComposerMenus({ keepContextUsage = false } = {}) {
+function closeModelMenu() {
   const menu = $("#model-settings"); if (menu) menu.hidden = true;
   $("#model-button")?.setAttribute("aria-expanded", "false");
+}
+function closeComposerMenus({ keepContextUsage = false } = {}) {
+  closeModelMenu();
   closeSkillMenu();
   if (!keepContextUsage) closeContextUsageTip();
 }
@@ -1713,16 +1717,35 @@ document.addEventListener("pointerdown", event => {
 document.addEventListener("focusin", event => {
   if (activePopup && !activePopup.node.contains(event.target) && !activePopup.trigger.contains(event.target)) closePopup();
   if (contextUsageTip && !event.target.closest("#context-info,#context-usage-tooltip")) closeContextUsageTip();
+  if (!event.target.closest("#model-button,#model-settings")) closeModelMenu();
 });
+function checkModelMenuFocus() {
+  queueMicrotask(() => {
+    const menu = $("#model-settings");
+    if (!menu || menu.hidden) return;
+    if (document.hasFocus() && document.activeElement?.closest("#model-button,#model-settings")) return;
+    closeModelMenu();
+  });
+}
+document.addEventListener("focusout", event => {
+  if (event.target.closest("#model-button,#model-settings")) checkModelMenuFocus();
+});
+window.addEventListener("blur", checkModelMenuFocus);
 document.addEventListener("keydown", event => {
+  if (event.isComposing) return;
   if (event.key === "Tab") document.documentElement.dataset.inputModality = "keyboard";
   if (event.key === "Escape") {
     if (queueDrag) { event.preventDefault(); finishQueueDrag(); return; }
     if (contextUsageTip) { event.preventDefault(); closeContextUsageTip(); return; }
     if (activePopup) { event.preventDefault(); event.stopPropagation(); closePopup(true); return; }
     const modelOpen = $("#model-settings") && !$("#model-settings").hidden;
+    const skillOpen = $("#skill-menu") && !$("#skill-menu").hidden;
     closeComposerMenus();
-    if (modelOpen) $("#model-button").focus();
+    if (modelOpen) { event.preventDefault(); $("#model-button").focus(); return; }
+    if (skillOpen) { event.preventDefault(); return; }
+    if (!document.querySelector("dialog[open]") && $(".workspace")?.classList.contains("sidebar-open")) {
+      event.preventDefault(); closeMobileSidebar();
+    }
   }
 });
 const element = (tag, className, text) => {
@@ -1745,6 +1768,7 @@ function icon(name) {
     search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
     chat: '<path d="M20 11.5a8.5 8.5 0 0 1-8.5 8.5 9 9 0 0 1-4-.9L3 21l1.9-4.5A9 9 0 0 1 4 12.5 8.5 8.5 0 0 1 12.5 4h.5a8.5 8.5 0 0 1 7 7.5Z"/>',
     more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+    menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
     folderClosed: '<path d="M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2Z"/><path d="M2 10h20"/>',
     pin: '<path d="m16 3 5 5-4 1-3 5-4-4 5-3Z"/><path d="m10 14-7 7"/>',
     plus: '<path d="M12 5v14M5 12h14"/>', check: '<path d="m5 12 4 4L19 6"/>',
@@ -1853,14 +1877,20 @@ function openPopup(trigger, { query = "", edge = null, focus = true, position = 
   renderPopup();
   if (activePopup?.node !== node) return;
   if (node.hasAttribute("popover")) node.showPopover();
-  if (edge) activePopup.index = edge === "first" ? 0 : activePopup.choices.length - 1;
-  if (focus) (input && !edge ? input : list.querySelectorAll("button")[activePopup.index])?.focus();
+  const buttons = [...list.querySelectorAll("button")];
+  const enabled = buttons.filter(option => !option.disabled);
+  const selected = buttons[activePopup.index];
+  const target = edge === "last" ? enabled.at(-1) : edge === "first" ? enabled[0]
+    : selected && !selected.disabled ? selected : enabled[0];
+  activePopup.index = Math.max(0, buttons.indexOf(target));
+  if (focus) (input && !edge ? input : target)?.focus();
   fitPopup();
   node.onkeydown = event => {
     if (event.isComposing || !activePopup) return;
     const options = [...list.querySelectorAll("button:not(:disabled)")];
     if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) && !(event.target === input && ["Home", "End"].includes(event.key))) {
       event.preventDefault();
+      if (!options.length) return;
       const index = options.indexOf(document.activeElement);
       const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1
         : index < 0 ? event.key === "ArrowDown" ? 0 : options.length - 1
@@ -1868,7 +1898,9 @@ function openPopup(trigger, { query = "", edge = null, focus = true, position = 
       activePopup.index = next;
       options[next]?.focus(); options[next]?.scrollIntoView({ block: "nearest" });
     } else if (event.target === input && event.key === "Enter") {
-      event.preventDefault(); options[Math.min(activePopup.index, options.length - 1)]?.click();
+      event.preventDefault();
+      const selected = list.querySelectorAll("button")[activePopup.index];
+      (selected && !selected.disabled ? selected : options[0])?.click();
     } else if (event.key === "Tab") closePopup(true);
     else if (event.target !== input && event.key.length === 1 && !event.ctrlKey && !event.metaKey && event.key !== " ") {
       const start = options.indexOf(document.activeElement) + 1;
@@ -2285,7 +2317,9 @@ async function api(path, body, id, signal, { resourcePriority = "foreground" } =
       }
       if (response.status === 401 && !path.endsWith("/connect") && session && deviceId === session.device.id)
         requireAuthentication();
-      throw Object.assign(new Error(result.message || "请求失败"), { code: response.status });
+      throw Object.assign(new Error(result.message || "请求失败"), {
+        code: response.status, ...(result.outcomeUnknown === true ? { outcomeUnknown: true } : {})
+      });
     }
     return result;
   } catch (error) {
@@ -2790,7 +2824,8 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
   try { result = await api(`/api/action/${action}`, payload, id); }
   catch (error) {
     if (goalAction && ownsPending()) {
-      const rejected = Number.isInteger(error.code) && error.code >= 400 && error.code < 500 && error.code !== 408;
+      const rejected = error.outcomeUnknown !== true && Number.isInteger(error.code)
+        && error.code >= 400 && error.code < 500 && error.code !== 408;
       const receipt = { state: rejected ? "failed" : "unknown",
         result: { ok: false, message: error.message, code: error.code, outcomeUnknown: !rejected } };
       Object.assign(error, { goalReceipt: receipt, receiptId: id, result: receipt.result, outcomeUnknown: !rejected });
@@ -2798,18 +2833,20 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
       throw error;
     }
     if (action === "deleteThread") {
-      const rejected = Number.isInteger(error.code) && error.code >= 400 && error.code < 500 && error.code !== 408;
+      const rejected = error.outcomeUnknown !== true && Number.isInteger(error.code)
+        && error.code >= 400 && error.code < 500 && error.code !== 408;
       Object.assign(error, { receiptId: id, operationState: rejected ? "failed" : "unknown", outcomeUnknown: !rejected });
     }
     if (reliable) {
       // A network failure does not prove the native client rejected the message.
-      const rejected = Number.isInteger(error.code) && error.code >= 400 && error.code < 500
+      const rejected = error.outcomeUnknown !== true && Number.isInteger(error.code) && error.code >= 400 && error.code < 500
         && ![408, 409].includes(error.code);
       if (rejected && ownsPending()) {
         await recoverFailedInput(pending);
         if (ownsPending()) savePending(null);
       } else {
-        notice("未收到回执，正在确认送达状态。请勿重复发送。", true);
+        notice(error.code === 401 && error.outcomeUnknown
+          ? error.message : "未收到回执，正在确认送达状态。请勿重复发送。", true);
         if (ownsPending()) void resolvePending();
         if (action === "send") error.deliveryPending = true;
       }
@@ -3363,14 +3400,14 @@ function shell() {
       <div class="sidebar-footer"><div class="footer-actions"><button id="appearance-button" class="footer-button" type="button" aria-label="设置"></button><button id="logout" class="footer-button" type="button"></button></div></div>
     </aside>
     <main class="conversation">
-      <header class="conversation-header"><button id="open-sidebar" class="icon-button" aria-label="打开侧边栏" aria-controls="session-sidebar">☰</button><div class="thread-heading"><strong id="thread-title">远程会话</strong><span id="thread-path" class="muted"></span></div><span id="connection-state" class="connection-state pending" role="status" title="${connectionRttDescription}" aria-label="连接中…。${connectionRttDescription}">连接中…</span><button id="refresh" class="icon-button" aria-label="刷新会话"></button></header>
+      <header class="conversation-header"><button id="open-sidebar" class="icon-button" type="button" aria-label="打开侧边栏" aria-controls="session-sidebar"></button><div class="thread-heading"><strong id="thread-title">远程会话</strong><span id="thread-path" class="muted"></span></div><span id="connection-state" class="connection-state pending" role="status" title="${connectionRttDescription}" aria-label="连接中…。${connectionRttDescription}">连接中…</span><button id="refresh" class="icon-button" type="button" title="刷新会话" aria-label="刷新会话"></button></header>
       <div id="desktop-connection-guidance" class="desktop-connection-guidance" role="status" aria-live="polite" hidden>Codex 桌面尚未连接或正在重启。请在电脑端 CodexElves 管理器右上角点击「重启 Codex」；若已点击，请等待 Codex 主界面完全打开、能够正常查看会话后，再刷新远程网页。</div>
       <div class="messages-shell"><div id="messages" class="messages" role="log" aria-label="会话消息"></div><button id="scroll-to-bottom" class="scroll-to-bottom" type="button" aria-label="跳转到最新消息" hidden></button></div>
       <div class="composer-area"><div class="composer-context"><div id="queued-area" hidden></div><div id="goal-area" hidden></div></div><div id="pending-area"></div><div id="project-select-slot" hidden></div><div class="composer-anchor"><div id="approval-area" class="approval-area" aria-live="polite"></div><form id="composer" class="composer">
         <div class="composer-input"><div class="composer-input-content"><div id="edit-message-area" hidden></div>
         <div id="prompt" class="prompt-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="给 Codex 发送消息，输入 / 选择命令或 Skill…" aria-label="消息输入" aria-autocomplete="list" aria-controls="skill-menu" aria-expanded="false" spellcheck="true"></div>
         </div></div>
-        <div class="composer-toolbar"><div class="composer-controls"><button id="composer-add" class="icon-button composer-add-button" type="button" aria-label="添加图片、压缩上下文或设置目标" aria-haspopup="menu" aria-expanded="false"></button><button id="prompt-optimize" class="icon-button prompt-optimize-button" type="button" aria-label="优化提示词" aria-busy="false" disabled>✨</button><button id="context-info" class="context-info muted" type="button" aria-label="查看上下文用量" aria-controls="context-usage-tooltip" aria-expanded="false"></button><button id="model-button" class="text-button model-button" type="button" aria-label="选择模型与思考深度" aria-haspopup="menu" aria-expanded="false">正在读取模型…</button><button id="composer-goal" class="text-button composer-goal-mode" type="button" aria-label="清除目标模式" title="清除目标模式，保留正文、Skill 和图片" hidden></button></div><div class="composer-send"><span id="send-status" class="composer-send-status" role="status" aria-live="polite"></span><button id="send" class="send-button" type="submit" aria-label="发送消息"></button></div></div>
+        <div class="composer-toolbar"><div class="composer-controls"><button id="composer-add" class="icon-button composer-add-button" type="button" aria-label="添加图片、压缩上下文或设置目标" aria-haspopup="menu" aria-expanded="false"></button><button id="prompt-optimize" class="icon-button prompt-optimize-button" type="button" aria-label="优化提示词" aria-busy="false" disabled>✨</button><button id="context-info" class="context-info muted" type="button" aria-label="查看上下文用量" aria-controls="context-usage-tooltip" aria-expanded="false"></button><button id="model-button" class="text-button model-button" type="button" aria-label="选择模型与思考深度" aria-haspopup="menu" aria-controls="model-settings" aria-expanded="false">正在读取模型…</button><button id="composer-goal" class="text-button composer-goal-mode" type="button" aria-label="清除目标模式" title="清除目标模式，保留正文、Skill 和图片" hidden></button></div><div class="composer-send"><span id="send-status" class="composer-send-status" role="status" aria-live="polite"></span><button id="send" class="send-button" type="submit" aria-label="发送消息"></button></div></div>
         <div id="model-settings" class="composer-popover" role="menu" aria-label="模型与思考深度" hidden></div>
         <div id="skill-menu" class="composer-popover skill-menu" role="listbox" aria-label="命令与 Skill" hidden></div>
       </form></div></div>
@@ -3383,6 +3420,7 @@ function shell() {
   goalClearIcon.classList.add("goal-mode-clear");
   goalModeButton.append(goalComposerIcon(), goalClearIcon, element("span", "", "目标"));
   goalModeButton.onclick = clearGoalComposerMode;
+  $("#open-sidebar").append(icon("menu"));
   $("#refresh").append(icon("refresh"));
   $("#prompt-optimize").onclick = () => void activatePromptOptimization();
   $("#prompt-optimize").oncontextmenu = event => event.preventDefault();
@@ -4282,7 +4320,8 @@ function openImagePreview(link, image) {
   dialog.id = "image-preview-dialog";
   dialog.setAttribute("aria-label", image.alt || "图片预览");
   const panel = element("figure", "image-preview-panel");
-  const close = button("×", "关闭图片预览", () => dialog.close(), "image-preview-close");
+  const close = button("", "关闭图片预览", () => dialog.close(), "image-preview-close");
+  close.append(icon("close"));
   const preview = element("img", "image-preview-image");
   const caption = element("figcaption", "image-preview-caption", image.alt || "图片");
   preview.alt = image.alt || "图片预览"; preview.src = source;
@@ -7364,7 +7403,8 @@ function renderGoalEditor(goal, pendingRecord) {
   const heading = element("div", "goal-edit-heading");
   const title = element("h2", "", "编辑目标");
   title.id = "goal-edit-title";
-  const close = button("×", "关闭目标编辑并取消草稿", cancelGoalEdit, "icon-button goal-edit-close");
+  const close = button("", "关闭目标编辑并取消草稿", cancelGoalEdit, "icon-button goal-edit-close");
+  close.append(icon("close"));
   heading.append(title, close);
   const scroll = element("div", "goal-edit-scroll");
   const field = element("div", "goal-edit-field");

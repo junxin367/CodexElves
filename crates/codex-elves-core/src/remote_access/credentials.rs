@@ -2,6 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::ensure;
 use base64::Engine;
@@ -34,6 +35,41 @@ pub(super) struct AccessKey {
         skip_serializing_if = "Option::is_none"
     )]
     login_state_version: Option<Value>,
+}
+
+struct VerifiedKeyMaterial {
+    id: String,
+    salt: String,
+    hash: String,
+    value: String,
+}
+
+fn verify_stored_key_material(key: &AccessKey) -> bool {
+    // Cache only the successful KDF result for one exact set of key material.
+    // The file and login state must still be read and checked on every request.
+    static VERIFIED: OnceLock<Mutex<Option<VerifiedKeyMaterial>>> = OnceLock::new();
+    let mut verified = VERIFIED
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if verified.as_ref().is_some_and(|cached| {
+        cached.id == key.id
+            && cached.salt == key.salt
+            && cached.hash == key.hash
+            && cached.value == key.value
+    }) {
+        return true;
+    }
+    if !key.verify(&key.value) {
+        return false;
+    }
+    *verified = Some(VerifiedKeyMaterial {
+        id: key.id.clone(),
+        salt: key.salt.clone(),
+        hash: key.hash.clone(),
+        value: key.value.clone(),
+    });
+    true
 }
 
 fn deserialize_present_login_state<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
@@ -148,7 +184,7 @@ fn load_access_key_unlocked(state_dir: &Path) -> anyhow::Result<Option<AccessKey
                 && (key.value.is_empty()
                     || ((8..=256).contains(&key.value.len())
                         && key.value.bytes().all(|byte| byte.is_ascii_graphic())
-                        && key.verify(&key.value))),
+                        && verify_stored_key_material(key))),
             "访问密钥文件损坏，已拒绝授权"
         );
     }

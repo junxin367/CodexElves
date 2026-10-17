@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use futures_util::stream::FuturesUnordered;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
@@ -161,6 +161,55 @@ pub async fn evaluate_script_value_with_timeout(
     session
         .send_command_with_timeout(1, "Runtime.evaluate", params, command_timeout)
         .await
+}
+
+pub(crate) trait CdpDispatchPermit {
+    fn commit<T>(self, send: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T>;
+}
+
+pub(crate) async fn evaluate_script_value_with_authorization<F, Fut, P>(
+    websocket_url: &str,
+    script: &str,
+    command_timeout: Duration,
+    authorize: F,
+) -> anyhow::Result<Value>
+where
+    F: FnOnce() -> Fut + Send,
+    Fut: Future<Output = anyhow::Result<P>> + Send,
+    P: CdpDispatchPermit + Send,
+{
+    let mut params = runtime_evaluate_params_with_await_promise(script, true);
+    params["returnByValue"] = json!(true);
+    // Serialize large attachments and finish the handshake before the final check.
+    let frame = Message::Text(
+        json!({"id":1,"method":"Runtime.evaluate","params":params})
+            .to_string()
+            .into(),
+    );
+    let socket = connect_cdp_websocket(websocket_url).await?;
+    let mut session = CdpSession::new(socket);
+    futures_util::future::poll_fn(|cx| Pin::new(&mut session.socket).poll_ready(cx))
+        .await
+        .context("failed to prepare authorized CDP command")?;
+    let permit = authorize().await?;
+    // The permit holds revocation/key-rotation locks through synchronous enqueue,
+    // but never through flush or the potentially long native response.
+    permit.commit(|| {
+        Pin::new(&mut session.socket)
+            .start_send(frame)
+            .context("failed to enqueue authorized CDP command")
+    })?;
+    session
+        .socket
+        .flush()
+        .await
+        .context("failed to flush authorized CDP command")?;
+    tokio::time::timeout(
+        command_timeout,
+        session.wait_for_id(1, "Runtime.evaluate".into()),
+    )
+    .await
+    .context("timed out waiting for authorized CDP response")?
 }
 
 pub async fn add_script_to_new_documents(

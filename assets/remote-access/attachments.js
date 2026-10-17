@@ -174,7 +174,7 @@ function renderComposerAttachments() {
       remove.className = "composer-attachment-remove";
       remove.setAttribute("aria-label", `移除图片 ${entry.name}`);
       remove.title = "移除图片";
-      remove.textContent = "×";
+      remove.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg>';
       remove.disabled = disabled || readingFiles;
       remove.onclick = () => {
         if (disabled || readingFiles || locked && !(remoteRemovalAllowed && entry.kind === "remote")) return;
