@@ -8,6 +8,7 @@ import { remoteAccessValidation, type RemoteAccessCredentials, type RemoteAccess
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const FIXED_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$/;
+const DESKTOP_START_GUIDANCE = "请先点击管理器右上角「重启 Codex」，等待 Codex 主界面完全打开、能够正常查看会话后，再点击「启动公网」。";
 
 export function RemoteAccessScreen({
   settings,
@@ -28,6 +29,7 @@ export function RemoteAccessScreen({
 }) {
   const [status, setStatus] = useState<RemoteAccessStatus | null>(null);
   const [credentials, setCredentials] = useState<RemoteAccessCredentials | null>(null);
+  const [loginLocked, setLoginLocked] = useState(false);
   const [zrokValue, setZrokValue] = useState(settings.zrokSetupValue);
   const [fixedNameValue, setFixedNameValue] = useState("");
   const [keyValue, setKeyValue] = useState("");
@@ -39,6 +41,7 @@ export function RemoteAccessScreen({
   const refreshing = useRef(false);
   const loadedZrokSetupValue = useRef(settings.zrokSetupValue);
   const loadedKeyValue = useRef<string | null>(null);
+  const loginLockRevision = useRef(0);
   const keyDirtyRef = useRef(false);
   const latestSettings = useRef(settings);
   latestSettings.current = settings;
@@ -46,11 +49,14 @@ export function RemoteAccessScreen({
   const refresh = async () => {
     if (refreshing.current) return;
     refreshing.current = true;
+    const loginLockReadRevision = loginLockRevision.current;
     try {
       const saved = await command<RemoteAccessCredentials>("credentials");
-      if (!mounted.current) return;
+      if (!mounted.current || loginLockReadRevision !== loginLockRevision.current) return;
       if (saved.status === "ok") {
         setCredentials(saved);
+        if (loginLockReadRevision === loginLockRevision.current && typeof saved.loginLocked === "boolean")
+          setLoginLocked(saved.loginLocked);
         const savedKey = saved.key || "";
         if (!keyDirtyRef.current && loadedKeyValue.current !== savedKey) {
           loadedKeyValue.current = savedKey;
@@ -62,9 +68,11 @@ export function RemoteAccessScreen({
       const result = await command<RemoteAccessStatus>("status");
       if (!mounted.current) return;
       setStatus(result);
+      if (loginLockReadRevision === loginLockRevision.current && result.status === "ok" && typeof result.loginLocked === "boolean")
+        setLoginLocked(result.loginLocked);
       if (result.status !== "ok") setMessage(result.message || "本机服务未连接");
     } catch (error) {
-      if (mounted.current) setMessage(String(error));
+      if (mounted.current) { setStatus(null); setMessage(String(error)); }
     } finally { refreshing.current = false; }
   };
   useEffect(() => {
@@ -96,6 +104,12 @@ export function RemoteAccessScreen({
     catch { setMessage("复制失败，请手动选择文本复制"); }
   };
   const zrok = status?.zrok;
+  const desktopReady = status?.status === "ok" && status.nativeConnected === true;
+  const desktopGuidance = !settings.enabled
+    ? "请先启用上方「远程会话网页」，再重启 Codex 并等待主界面就绪，最后启动公网。"
+    : desktopReady
+      ? "Codex 桌面已连接，可以启动公网。后续重启 Codex 时，请等待主界面恢复后再刷新远程网页。"
+      : DESKTOP_START_GUIDANCE;
   const publicUrl = zrok?.publicUrl || "";
   const zrokInput = zrokValue.trim();
   const zrokEmail = EMAIL_PATTERN.test(zrokInput);
@@ -117,6 +131,7 @@ export function RemoteAccessScreen({
   const zrokActionDisabled = busy
     || !zrok
     || zrokTransitioning
+    || (zrok.installed && !zrokEmail && !desktopReady)
     || (zrok.installed && zrokToken && (!settings.enabled || !fixedNameValid))
     || (zrok.installed && !zrokInput && (!settings.enabled || !zrok.bound || !zrok.fixedName || zrok.running));
   const runApply = (operation: () => Promise<void>) => run(async () => {
@@ -141,7 +156,9 @@ export function RemoteAccessScreen({
   const renderZrokBadge = () => {
     switch (zrok?.state) {
       case "ready":
-        return <span className="zrok-status-badge connected"><span className="zrok-status-dot" />可访问</span>;
+        return desktopReady
+          ? <span className="zrok-status-badge connected"><span className="zrok-status-dot" />可访问</span>
+          : <span className="zrok-status-badge connecting" title="公网已连通，等待 Codex 桌面连接后才能读取会话。"><span className="zrok-status-dot" />等待 Codex 就绪</span>;
       case "checking":
         return <span className="zrok-status-badge connecting"><span className="zrok-status-dot" />正在检查</span>;
       case "downloading":
@@ -166,6 +183,14 @@ export function RemoteAccessScreen({
   };
   const handleZrokAction = () => runApply(async () => {
     if (!zrok) return;
+    if (zrok.installed && !zrokEmail) {
+      const latest = await command<RemoteAccessStatus>("status");
+      if (!mounted.current) return;
+      setStatus(latest);
+      if (latest.status !== "ok") throw new Error(latest.message || "无法确认桌面连接，请稍后重试。");
+      if (!latest.enabled || !latest.running) throw new Error("请先启用上方「远程会话网页」。");
+      if (!latest.nativeConnected) throw new Error(DESKTOP_START_GUIDANCE);
+    }
     if (zrokInput) await saveZrokSetupValue(zrokInput);
     if (!zrok.installed) {
       const result = await command<RemoteAccessStatus>("downloadZrok");
@@ -371,11 +396,14 @@ export function RemoteAccessScreen({
                   variant="secondary"
                   className="h-9"
                   disabled={zrokActionDisabled}
+                  aria-describedby="remote-desktop-guidance"
+                  title={zrok?.installed && !zrokEmail && !desktopReady ? desktopGuidance : undefined}
                   onClick={() => void handleZrokAction()}
                 >
                   {busy ? "处理中…" : zrokActionLabel}
                 </Button>
               </div>
+              <p id="remote-desktop-guidance" className="remote-access-hint" role="status" aria-live="polite">{desktopGuidance}</p>
               {zrokToken && fixedNameValue && !fixedNameValid ? <small className="remote-access-inline-error">固定公网名称需为 3–63 位小写字母、数字或连字符，且首尾必须是字母或数字。</small> : null}
               <small>输入邮箱时发送注册邮件；输入 token 时同时填写固定公网名称。点击右侧按钮后，当前邮箱或 token 会保存到本机 CodexElves 设置并在下次打开时回显。</small>
             </div>
@@ -408,6 +436,7 @@ export function RemoteAccessScreen({
           </div>
         </CardHeader>
         <CardContent>
+          {loginLocked ? <p className="remote-access-error" role="alert">访问密钥连续输错超过3次，新设备登录已锁定。请点击「生成」，再点击右侧「保存」；只有不同的新密钥保存成功后才会解锁。已登录设备当前不受影响。</p> : null}
           <div className="remote-access-fields remote-access-fields-top">
             <div className="remote-access-wide"><Label htmlFor="remote-access-key">设置访问密钥</Label><div className="remote-access-input-row remote-access-key-row"><div className="remote-access-key-input">
               <Input
@@ -438,13 +467,16 @@ export function RemoteAccessScreen({
               keyDirtyRef.current = true;
               setKeyDirty(true);
               setKeyValue(result.key); setShowKey(false);
-              setMessage("随机密钥已生成，尚未保存。点击右侧「保存」后生效，当前设备授权不受影响。");
+              setMessage(loginLocked
+                ? "随机密钥已生成，尚未保存。请点击右侧「保存」；只有不同的新密钥保存成功后才会解除登录锁定，并使原有设备重新登录。"
+                : "随机密钥已生成，尚未保存。点击右侧「保存」后生效，当前设备授权不受影响。");
             })}>生成</Button><Button disabled={busy || !keyDirty || !keyValue.trim()} onClick={() => void runApply(async () => {
               const nextKey = keyValue.trim();
               if (!/^[\x21-\x7e]{8,64}$/.test(nextKey)) throw new Error("密钥需为 8–64 个非空格 ASCII 字符。");
               if (!confirmKeyChange()) return;
               const result = await command<RemoteAccessCredentials>("setKey", { key: nextKey });
               if (result.status !== "ok") throw new Error(result.message || "访问密钥保存失败");
+              ++loginLockRevision.current;
               const savedKey = result.key || nextKey;
               loadedKeyValue.current = savedKey;
               keyDirtyRef.current = false;
@@ -452,7 +484,10 @@ export function RemoteAccessScreen({
               setKeyValue(savedKey);
               setShowKey(false);
               setCredentials({ ...result, key: savedKey });
-              onSuccess("访问密钥已明文保存到本机并生效，默认以圆点遮挡，可点击小眼睛查看。原有设备需重新输入新密钥连接。");
+              if (typeof result.loginLocked === "boolean") setLoginLocked(result.loginLocked);
+              onSuccess(result.loginLocked === true
+                ? "访问密钥已保存，登录仍处于锁定状态。请生成不同的新密钥并保存。"
+                : "访问密钥已保存并生效；更换密钥后，原有设备需使用新密钥重新登录。");
             })}>保存</Button></div><small>支持 8–64 个非空格 ASCII 字符；点击「保存」后以明文保存在本机，输入框默认使用圆点遮挡，可点击小眼睛查看。</small></div>
           </div>
           <div className="remote-access-devices">

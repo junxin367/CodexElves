@@ -36,7 +36,7 @@ const inlineContent = (renderer, token) => token.tokens
   ? renderer.parser.parseInline(token.tokens)
   : escapeHtml(token.text);
 
-const createRenderer = remoteImages => {
+const createRenderer = (remoteImages, { userMessage = false, skills = [], skillLink } = {}) => {
   const registeredImages = new Map();
   if (Array.isArray(remoteImages)) {
     for (const image of remoteImages) {
@@ -47,6 +47,23 @@ const createRenderer = remoteImages => {
   }
 
   const renderer = new Renderer();
+  const skillNames = new Map();
+  for (const skill of skills) {
+    if (typeof skill?.name === "string" && /^[\p{L}_][\p{L}\p{N}_.:/-]*$/u.test(skill.name))
+      skillNames.set(skill.name, skill);
+  }
+  const skillPattern = userMessage && skillNames.size
+    ? new RegExp(`(^|[^\\p{L}\\p{N}_$])\\$(${[...skillNames.keys()].sort((left, right) => right.length - left.length)
+      .map(name => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\p{L}\\p{N}_:./-])`, "gu")
+    : null;
+  const skillPlaceholder = skill => `<span class="message-skill-reference" title="${escapeHtml(skill.path)}">${escapeHtml(skill.displayName || skill.name)}</span>`;
+  let linkDepth = 0;
+  const renderText = renderer.text;
+  renderer.text = function (token) {
+    const html = renderText.call(this, token);
+    if (!skillPattern || linkDepth || token.type !== "text" || token.tokens) return html;
+    return html.replace(skillPattern, (_match, prefix, name) => `${prefix}${skillPlaceholder(skillNames.get(name))}`);
+  };
 
   renderer.code = ({ text, lang, raw }) => {
     const language = String(lang ?? "").trim().split(/\s+/u, 1)[0] || "代码";
@@ -59,7 +76,15 @@ const createRenderer = remoteImages => {
   renderer.html = ({ text }) => escapeHtml(text);
 
   renderer.link = function (token) {
-    const label = inlineContent(this, token);
+    let label;
+    linkDepth++;
+    try { label = inlineContent(this, token); }
+    finally { linkDepth--; }
+    if (userMessage && isLocalReference(token.href)) {
+      const text = token.tokens ? this.parser.parseInline(token.tokens, this.parser.textRenderer) : token.text;
+      const skill = skillLink?.(token.href, text);
+      if (skill) return skillPlaceholder(skill);
+    }
     const href = safeHref(token.href);
     if (href?.startsWith("#")) return `<a href="${escapeHtml(href)}">${label}</a>`;
     if (href) {
@@ -123,14 +148,14 @@ purifier.addHook("uponSanitizeAttribute", (_node, data) => {
   }
 });
 
-export function markdown(text, remoteImages = [], { userMessage = false } = {}) {
+export function markdown(text, remoteImages = [], { userMessage = false, skills = [], skillLink } = {}) {
   const source = String(text ?? "");
   const html = marked.parse(userMessage ? source : source.replace(/\uE200[^\uE201]*\uE201/g, ""), {
     async: false,
     breaks: userMessage,
     gfm: true,
     pedantic: false,
-    renderer: createRenderer(remoteImages)
+    renderer: createRenderer(remoteImages, { userMessage, skills, skillLink })
   });
   return purifier.sanitize(html, sanitizeOptions);
 }

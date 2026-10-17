@@ -12,6 +12,7 @@ let attachmentInput = null;
 let composerPrompt = null;
 let changeListener = () => {};
 let showNotice = () => {};
+let previewImage = () => {};
 let disabled = false;
 let locked = false;
 let remoteRemovalAllowed = false;
@@ -155,9 +156,17 @@ function renderComposerAttachments() {
     image.alt = entry.name;
     image.title = entry.name;
     image.decoding = "async";
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.className = "composer-attachment-preview";
+    preview.setAttribute("aria-label", `查看图片 ${entry.name}`);
+    preview.setAttribute("aria-haspopup", "dialog");
+    preview.title = `查看图片 ${entry.name}`;
+    preview.onclick = () => previewImage(preview, image);
+    preview.append(image);
     const caption = document.createElement("figcaption");
     caption.textContent = entry.name;
-    item.append(image, caption);
+    item.append(preview, caption);
     const canRemove = !locked || remoteRemovalAllowed && entry.kind === "remote";
     if (canRemove) {
       const remove = document.createElement("button");
@@ -227,12 +236,13 @@ async function addFiles(files) {
   return true;
 }
 
-export function mountComposerAttachments({ form, prompt, onChange, notice } = {}) {
+export function mountComposerAttachments({ form, prompt, onChange, notice, onPreview } = {}) {
   if (!(form instanceof HTMLElement) || !(prompt instanceof HTMLElement))
     throw new Error("图片附件组件缺少编辑框");
   composerPrompt = prompt;
   changeListener = typeof onChange === "function" ? onChange : () => {};
   showNotice = typeof notice === "function" ? notice : () => {};
+  previewImage = typeof onPreview === "function" ? onPreview : () => {};
   attachmentRoot = document.createElement("div");
   attachmentRoot.id = "composer-attachments";
   attachmentRoot.className = "composer-attachments";

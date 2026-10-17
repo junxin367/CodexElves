@@ -148,6 +148,39 @@ struct CommandOutput {
     stderr: String,
 }
 
+#[async_trait::async_trait]
+trait EnvironmentCommands: Sync {
+    fn verify_program(&self, program: &Path) -> anyhow::Result<()> {
+        verify_program_sha256(program)
+    }
+
+    async fn run(
+        &self,
+        program: &Path,
+        args: &[&str],
+        timeout: Duration,
+    ) -> anyhow::Result<CommandOutput>;
+}
+
+struct SystemEnvironmentCommands;
+
+#[async_trait::async_trait]
+impl EnvironmentCommands for SystemEnvironmentCommands {
+    async fn run(
+        &self,
+        program: &Path,
+        args: &[&str],
+        timeout: Duration,
+    ) -> anyhow::Result<CommandOutput> {
+        run_command(program, args, timeout).await
+    }
+}
+
+enum EnableOutcome {
+    Enabled,
+    AlreadyEnabled,
+}
+
 pub(super) struct ZrokTunnelService {
     state_dir: PathBuf,
     origin: Arc<RwLock<Option<String>>>,
@@ -219,7 +252,12 @@ impl ZrokTunnelService {
         self.refresh_environment().await;
         self.refresh_process().await;
 
-        if self.installed && !self.environment_checked && self.environment_check.is_none() {
+        if self.installed
+            && !self.environment_checked
+            && self.environment_check.is_none()
+            && self.child.is_none()
+            && self.state != ZrokState::Error
+        {
             self.begin_environment_check();
         }
         if !web_running {
@@ -231,6 +269,13 @@ impl ZrokTunnelService {
             self.stop(true).await;
             self.error = Some(format!("{error:#}"));
             self.state = ZrokState::Error;
+            return;
+        }
+        if self.child.is_some()
+            && !self.environment_checked
+            && !target_requires_restart(self.target.as_deref(), target)
+        {
+            self.refresh_public_access().await;
             return;
         }
         if target_requires_restart(self.target.as_deref(), target) {
@@ -305,7 +350,42 @@ impl ZrokTunnelService {
         web_running: bool,
         target: &str,
     ) -> anyhow::Result<()> {
+        self.start_public_with_commands(
+            token,
+            fixed_name,
+            web_running,
+            target,
+            &SystemEnvironmentCommands,
+        )
+        .await
+    }
+
+    async fn start_public_with_commands(
+        &mut self,
+        token: Option<&str>,
+        fixed_name: &str,
+        web_running: bool,
+        target: &str,
+        commands: &impl EnvironmentCommands,
+    ) -> anyhow::Result<()> {
         self.refresh_download().await;
+        let result = self
+            .prepare_and_start_public(token, fixed_name, web_running, target, commands)
+            .await;
+        if let Err(error) = &result {
+            self.record_start_error(error);
+        }
+        result
+    }
+
+    async fn prepare_and_start_public(
+        &mut self,
+        token: Option<&str>,
+        fixed_name: &str,
+        web_running: bool,
+        target: &str,
+        commands: &impl EnvironmentCommands,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(self.installed, "请先下载 zrok 程序");
         anyhow::ensure!(web_running, "请先启用远程会话网页");
         validate_target(target)?;
@@ -315,19 +395,9 @@ impl ZrokTunnelService {
             .clone()
             .context("未找到已校验的 zrok 程序")?;
 
-        self.stop(false).await;
-        self.error = None;
-        self.retry_at_ms = 0;
-        self.state = ZrokState::Starting;
-        if !self.bound {
-            let token = token
-                .map(str::trim)
-                .filter(|token| !token.is_empty())
-                .context("请输入 zrok token")?;
-            enable_environment(&program, token).await?;
-            self.bound = true;
-            self.environment_checked = true;
-        }
+        commands.verify_program(&program)?;
+        self.ensure_environment_bound(&program, token, commands)
+            .await?;
         ensure_reserved_name(&program, &fixed_name).await?;
         save_config(
             &self.state_dir,
@@ -335,9 +405,61 @@ impl ZrokTunnelService {
                 fixed_name: fixed_name.clone(),
             },
         )?;
+        self.stop(false).await;
+        self.error = None;
+        self.retry_at_ms = 0;
+        self.state = ZrokState::Starting;
         self.fixed_name = fixed_name.clone();
         self.target = Some(target.to_owned());
         self.start(&program, target, &fixed_name).await
+    }
+
+    async fn ensure_environment_bound(
+        &mut self,
+        program: &Path,
+        token: Option<&str>,
+        commands: &impl EnvironmentCommands,
+    ) -> anyhow::Result<()> {
+        // 启动必须使用本次读取的结果，旧探测即使已完成也不能覆盖新的绑定。
+        if let Some(task) = self.environment_check.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.environment_checked = false;
+        let bound = read_environment_bound(program, commands).await?;
+        self.bound = bound;
+        self.environment_checked = true;
+        if bound {
+            return Ok(());
+        }
+        let token = token
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .context("请输入 zrok token")?;
+        match enable_environment(program, token, commands).await? {
+            EnableOutcome::Enabled => self.bound = true,
+            EnableOutcome::AlreadyEnabled => {
+                self.environment_checked = false;
+                let bound = read_environment_bound(program, commands)
+                    .await
+                    .context("zrok 环境已被启用，但无法确认当前绑定状态")?;
+                self.bound = bound;
+                self.environment_checked = true;
+                anyhow::ensure!(
+                    bound,
+                    "zrok 提示环境已启用，但当前状态仍未绑定，请重新点击“启动公网”"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn record_start_error(&mut self, error: &anyhow::Error) {
+        self.error = Some(format!("{error:#}"));
+        self.retry_at_ms = 0;
+        if self.child.is_none() {
+            self.state = ZrokState::Error;
+        }
     }
 
     pub(super) async fn check(&mut self) -> anyhow::Result<Value> {
@@ -431,15 +553,17 @@ impl ZrokTunnelService {
             .as_ref()
             .is_some_and(|task| !task.is_finished())
         {
-            self.state = ZrokState::Checking;
+            if self.child.is_none() && self.state != ZrokState::Error {
+                self.state = ZrokState::Checking;
+            }
             return;
         }
         let Some(task) = self.environment_check.take() else {
             return;
         };
-        self.environment_checked = true;
         match task.await {
             Ok(Ok(status)) => {
+                self.environment_checked = true;
                 self.bound = status.bound;
                 if self.fixed_name.is_empty()
                     && let Some(name) = status.detected_name
@@ -454,19 +578,19 @@ impl ZrokTunnelService {
                         self.error = Some(format!("{error:#}"));
                     }
                 }
-                if self.error.is_none() {
+                if self.error.is_none() && self.child.is_none() {
                     self.state = self.passive_state();
                 }
             }
             Ok(Err(error)) => {
-                self.bound = false;
-                self.error = Some(format!("{error:#}"));
-                self.state = ZrokState::Error;
+                self.environment_checked = false;
+                self.record_start_error(&error);
             }
             Err(error) => {
-                self.bound = false;
-                self.error = Some(format!("无法确认 zrok 绑定状态：{error}"));
-                self.state = ZrokState::Error;
+                self.environment_checked = false;
+                self.record_start_error(
+                    &anyhow::Error::new(error).context("无法确认 zrok 绑定状态"),
+                );
             }
         }
     }
@@ -689,7 +813,7 @@ impl ZrokTunnelService {
     }
 
     fn passive_state(&self) -> ZrokState {
-        if self.state == ZrokState::Error && self.error.is_some() {
+        if self.error.is_some() && (self.state == ZrokState::Error || !self.environment_checked) {
             ZrokState::Error
         } else if self
             .download
@@ -1011,10 +1135,7 @@ fn read_limited_file(path: &Path, limit: u64) -> anyhow::Result<Vec<u8>> {
 }
 
 async fn inspect_environment(program: &Path) -> anyhow::Result<EnvironmentStatus> {
-    let status = run_command(program, &["status"], Duration::from_secs(10)).await?;
-    anyhow::ensure!(status.success, "无法读取 zrok 本机环境状态");
-    let combined = format!("{}\n{}", status.stdout, status.stderr);
-    let bound = status_output_is_bound(&combined);
+    let bound = read_environment_bound(program, &SystemEnvironmentCommands).await?;
     let detected_name = if bound {
         detect_reserved_name(program).await.ok().flatten()
     } else {
@@ -1026,8 +1147,54 @@ async fn inspect_environment(program: &Path) -> anyhow::Result<EnvironmentStatus
     })
 }
 
-fn status_output_is_bound(output: &str) -> bool {
-    output.contains("Account Token") && output.contains("<<SET>>")
+async fn read_environment_bound(
+    program: &Path,
+    commands: &impl EnvironmentCommands,
+) -> anyhow::Result<bool> {
+    let status = commands
+        .run(program, &["status"], Duration::from_secs(10))
+        .await?;
+    anyhow::ensure!(
+        status.success,
+        "无法读取 zrok 本机环境状态：{}",
+        command_diagnostic(&status)
+    );
+    status_output_is_bound(&format!("{}\n{}", status.stdout, status.stderr))
+}
+
+fn status_output_is_bound(output: &str) -> anyhow::Result<bool> {
+    let output = status_without_ansi_styles(output);
+    if output
+        .lines()
+        .any(|line| line.contains("Account Token") && line.contains("<<SET>>"))
+    {
+        return Ok(true);
+    }
+    if output.contains("To create a local environment use the zrok2 enable command.") {
+        return Ok(false);
+    }
+    anyhow::bail!("无法确认 zrok 本机环境是否已启用，请重新点击“启动公网”")
+}
+
+fn status_without_ansi_styles(output: &str) -> String {
+    let mut parts = output.split("\x1b[");
+    let mut plain = parts.next().unwrap_or_default().to_owned();
+    for part in parts {
+        match part.split_once('m') {
+            Some((style, text))
+                if style
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b';') =>
+            {
+                plain.push_str(text);
+            }
+            _ => {
+                plain.push_str("\x1b[");
+                plain.push_str(part);
+            }
+        }
+    }
+    plain
 }
 
 async fn detect_reserved_name(program: &Path) -> anyhow::Result<Option<String>> {
@@ -1054,23 +1221,33 @@ fn select_reserved_name(names: &[ZrokName]) -> Option<String> {
         .map(|name| name.name.clone())
 }
 
-async fn enable_environment(program: &Path, token: &str) -> anyhow::Result<()> {
+async fn enable_environment(
+    program: &Path,
+    token: &str,
+    commands: &impl EnvironmentCommands,
+) -> anyhow::Result<EnableOutcome> {
     anyhow::ensure!(
         !token.chars().any(char::is_whitespace) && (6..=512).contains(&token.len()),
         "zrok token 格式无效"
     );
-    let output = run_command(
-        program,
-        &["enable", token, "--headless", "--description", "CodexElves"],
-        COMMAND_TIMEOUT,
-    )
-    .await?;
-    anyhow::ensure!(
-        output.success,
-        "zrok token 绑定失败：{}",
-        command_diagnostic(&output)
-    );
-    Ok(())
+    let output = commands
+        .run(
+            program,
+            &["enable", token, "--headless", "--description", "CodexElves"],
+            COMMAND_TIMEOUT,
+        )
+        .await?;
+    if output.success {
+        return Ok(EnableOutcome::Enabled);
+    }
+    if [&output.stdout, &output.stderr].iter().any(|text| {
+        status_without_ansi_styles(text).contains(
+            "you already have an enabled environment, zrok2 disable first before you zrok2 enable",
+        )
+    }) {
+        return Ok(EnableOutcome::AlreadyEnabled);
+    }
+    anyhow::bail!("zrok token 绑定失败：{}", command_diagnostic(&output))
 }
 
 async fn ensure_reserved_name(program: &Path, fixed_name: &str) -> anyhow::Result<()> {
@@ -1507,6 +1684,97 @@ impl Drop for TemporaryDownload {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    const BOUND_STATUS: &str = "Environment:\nAccount Token <<SET>>\nEnvZId <<SET>>";
+    const UNBOUND_STATUS: &str = "To create a local environment use the zrok2 enable command.";
+    const ALREADY_ENABLED: &str = "[ERROR] you already have an enabled environment, zrok2 disable first before you zrok2 enable";
+
+    struct ScriptedCommands {
+        replies: Mutex<VecDeque<(&'static str, anyhow::Result<CommandOutput>)>>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl ScriptedCommands {
+        fn new(
+            replies: impl IntoIterator<Item = (&'static str, anyhow::Result<CommandOutput>)>,
+        ) -> Self {
+            Self {
+                replies: Mutex::new(replies.into_iter().collect()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn assert_calls(&self, expected: &[&str]) {
+            assert_eq!(*self.calls.lock().unwrap(), expected);
+            assert!(self.replies.lock().unwrap().is_empty());
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EnvironmentCommands for ScriptedCommands {
+        fn verify_program(&self, _program: &Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn run(
+            &self,
+            _program: &Path,
+            args: &[&str],
+            _timeout: Duration,
+        ) -> anyhow::Result<CommandOutput> {
+            let (expected, result) = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected environment command");
+            assert_eq!(args[0], expected);
+            self.calls.lock().unwrap().push(args[0].to_owned());
+            result
+        }
+    }
+
+    fn command_success(stdout: &str) -> anyhow::Result<CommandOutput> {
+        Ok(CommandOutput {
+            success: true,
+            code: Some(0),
+            stdout: stdout.into(),
+            stderr: String::new(),
+        })
+    }
+
+    fn command_failure(stderr: &str) -> anyhow::Result<CommandOutput> {
+        Ok(CommandOutput {
+            success: false,
+            code: Some(1),
+            stdout: String::new(),
+            stderr: stderr.into(),
+        })
+    }
+
+    fn test_service() -> ZrokTunnelService {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../temp/zrok-binding-fix-20261017")
+            .join(uuid::Uuid::new_v4().simple().to_string());
+        let mut service = ZrokTunnelService::new(&directory, Arc::new(RwLock::new(None)));
+        service.installed = true;
+        service.program_path = Some(directory.join("nonexistent-zrok-test.exe"));
+        service.state = ZrokState::Checking;
+        service
+    }
+
+    async fn confirm_environment(
+        service: &mut ZrokTunnelService,
+        token: Option<&str>,
+        commands: &ScriptedCommands,
+    ) -> anyhow::Result<()> {
+        let program = service.program_path.clone().unwrap();
+        service
+            .ensure_environment_bound(&program, token, commands)
+            .await
+    }
 
     #[test]
     fn validates_fixed_public_names_and_origins() {
@@ -1542,12 +1810,495 @@ mod tests {
 
     #[test]
     fn detects_bound_status_without_reading_secrets() {
-        assert!(status_output_is_bound(
-            "Environment:\nAccount Token <<SET>>\nEnvZId <<SET>>"
-        ));
-        assert!(!status_output_is_bound(
-            "To create a local environment use the zrok2 enable command."
-        ));
+        assert!(
+            status_output_is_bound("Environment:\nAccount Token <<SET>>\nEnvZId <<SET>>").unwrap()
+        );
+        assert!(
+            !status_output_is_bound("To create a local environment use the zrok2 enable command.")
+                .unwrap()
+        );
+        assert!(status_output_is_bound("").is_err());
+        assert!(status_output_is_bound("Account Token <<UNSET>>\nEnvZId <<SET>>").is_err());
+        assert!(
+            !status_output_is_bound(
+                "To create a local environment use the \x1b[33;1mzrok2 enable\x1b[0m command."
+            )
+            .unwrap()
+        );
+        assert!(
+            status_output_is_bound(
+                "Environment:\n\x1b[1mAccount Token\x1b[0m <<SET>>\nEnvZId <<SET>>"
+            )
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_rechecks_stale_unbound_cache_and_reuses_enabled_environment() {
+        let mut service = test_service();
+        service.bound = false;
+        service.environment_checked = true;
+        let commands = ScriptedCommands::new([("status", command_success(BOUND_STATUS))]);
+
+        confirm_environment(&mut service, Some("unused invalid token"), &commands)
+            .await
+            .unwrap();
+
+        assert!(service.bound && service.environment_checked);
+        commands.assert_calls(&["status"]);
+    }
+
+    #[tokio::test]
+    async fn startup_discards_late_environment_probe_before_binding() {
+        let mut service = test_service();
+        let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
+        service.environment_check = Some(tokio::spawn(async move {
+            receiver.await?;
+            Ok(EnvironmentStatus {
+                bound: false,
+                detected_name: None,
+            })
+        }));
+        let commands = ScriptedCommands::new([
+            ("status", command_success(UNBOUND_STATUS)),
+            ("enable", command_success("environment enabled")),
+        ]);
+
+        confirm_environment(&mut service, Some("test-token"), &commands)
+            .await
+            .unwrap();
+        assert!(sender.send(()).is_err(), "old probe must be cancelled");
+        service.refresh_environment().await;
+
+        assert!(service.bound && service.environment_checked);
+        assert!(service.environment_check.is_none());
+        commands.assert_calls(&["status", "enable"]);
+    }
+
+    #[tokio::test]
+    async fn startup_discards_completed_environment_probe_before_fresh_status() {
+        let mut service = test_service();
+        service.environment_check = Some(tokio::spawn(async {
+            Ok(EnvironmentStatus {
+                bound: false,
+                detected_name: None,
+            })
+        }));
+        tokio::task::yield_now().await;
+        assert!(service.environment_check.as_ref().unwrap().is_finished());
+        let commands = ScriptedCommands::new([("status", command_success(BOUND_STATUS))]);
+
+        confirm_environment(&mut service, None, &commands)
+            .await
+            .unwrap();
+        service.refresh_environment().await;
+
+        assert!(service.bound && service.environment_checked);
+        commands.assert_calls(&["status"]);
+    }
+
+    #[tokio::test]
+    async fn startup_enables_once_only_after_confirming_environment_is_unbound() {
+        let mut service = test_service();
+        service.bound = true;
+        service.environment_checked = true;
+        let commands = ScriptedCommands::new([
+            ("status", command_success(UNBOUND_STATUS)),
+            ("enable", command_success("environment enabled")),
+        ]);
+
+        confirm_environment(&mut service, Some("test-token"), &commands)
+            .await
+            .unwrap();
+
+        assert!(service.bound && service.environment_checked);
+        commands.assert_calls(&["status", "enable"]);
+    }
+
+    #[tokio::test]
+    async fn startup_recovers_already_enabled_race_only_after_confirming_bound_status() {
+        for message in [
+            ALREADY_ENABLED,
+            "[ERROR] you already have an enabled environment, \x1b[33;1mzrok2 disable\x1b[0m first before you \x1b[33;1mzrok2 enable\x1b[0m",
+        ] {
+            let mut service = test_service();
+            let commands = ScriptedCommands::new([
+                ("status", command_success(UNBOUND_STATUS)),
+                ("enable", command_failure(message)),
+                ("status", command_success(BOUND_STATUS)),
+            ]);
+
+            confirm_environment(&mut service, Some("test-token"), &commands)
+                .await
+                .unwrap();
+
+            assert!(service.bound && service.environment_checked);
+            commands.assert_calls(&["status", "enable", "status"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_already_enabled_race_if_recheck_is_still_unbound() {
+        let mut service = test_service();
+        let commands = ScriptedCommands::new([
+            ("status", command_success(UNBOUND_STATUS)),
+            ("enable", command_failure(ALREADY_ENABLED)),
+            ("status", command_success(UNBOUND_STATUS)),
+        ]);
+
+        let error = service
+            .start_public_with_commands(
+                Some("test-token"),
+                "codex-elves-test",
+                true,
+                "http://127.0.0.1:45222",
+                &commands,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("当前状态仍未绑定"));
+        assert!(!service.bound);
+        assert_eq!(service.state.as_str(), "error");
+        assert_eq!(service.retry_at_ms, 0);
+        commands.assert_calls(&["status", "enable", "status"]);
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_unknown_status_without_enabling_or_discarding_bound_cache() {
+        let mut service = test_service();
+        service.bound = true;
+        service.environment_checked = true;
+        let commands = ScriptedCommands::new([("status", command_success("unexpected output"))]);
+
+        let error = service
+            .start_public_with_commands(
+                Some("test-token"),
+                "codex-elves-test",
+                true,
+                "http://127.0.0.1:45222",
+                &commands,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("无法确认"));
+        assert!(service.bound);
+        assert!(!service.environment_checked);
+        assert_eq!(service.state.as_str(), "error");
+        service.reconcile(true, "http://127.0.0.1:45222").await;
+        assert_eq!(service.state.as_str(), "error");
+        assert!(service.environment_check.is_none());
+        commands.assert_calls(&["status"]);
+    }
+
+    #[tokio::test]
+    async fn startup_does_not_retry_ordinary_enable_errors() {
+        for message in [
+            "invalid token",
+            "network timeout",
+            "permission denied",
+            "already enabled",
+        ] {
+            let mut service = test_service();
+            let commands = ScriptedCommands::new([
+                ("status", command_success(UNBOUND_STATUS)),
+                ("enable", command_failure(message)),
+            ]);
+
+            let error = service
+                .start_public_with_commands(
+                    Some("test-token"),
+                    "codex-elves-test",
+                    true,
+                    "http://127.0.0.1:45222",
+                    &commands,
+                )
+                .await
+                .unwrap_err();
+
+            assert!(error.to_string().contains(message));
+            assert!(!service.bound);
+            assert_eq!(service.state.as_str(), "error");
+            assert_eq!(service.retry_at_ms, 0);
+            commands.assert_calls(&["status", "enable"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_does_not_accept_already_enabled_when_recheck_fails() {
+        let mut service = test_service();
+        let commands = ScriptedCommands::new([
+            ("status", command_success(UNBOUND_STATUS)),
+            ("enable", command_failure(ALREADY_ENABLED)),
+            ("status", Err(anyhow::anyhow!("simulated status timeout"))),
+        ]);
+
+        let error = service
+            .start_public_with_commands(
+                Some("test-token"),
+                "codex-elves-test",
+                true,
+                "http://127.0.0.1:45222",
+                &commands,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("simulated status timeout"));
+        assert!(!service.bound && !service.environment_checked);
+        assert_eq!(service.state.as_str(), "error");
+        commands.assert_calls(&["status", "enable", "status"]);
+    }
+
+    #[tokio::test]
+    async fn failed_start_can_be_clicked_again_and_read_environment_again() {
+        let mut service = test_service();
+        let first = ScriptedCommands::new([(
+            "status",
+            Err(anyhow::anyhow!("simulated first status failure")),
+        )]);
+        assert!(
+            service
+                .start_public_with_commands(
+                    Some("test-token"),
+                    "codex-elves-test",
+                    true,
+                    "http://127.0.0.1:45222",
+                    &first,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(service.state.as_str(), "error");
+        first.assert_calls(&["status"]);
+        let second = ScriptedCommands::new([
+            ("status", command_success(UNBOUND_STATUS)),
+            ("enable", command_success("environment enabled")),
+        ]);
+
+        // 使用不存在的测试程序，使第二次启动在名称检查处结束，绝不运行真实 zrok。
+        let error = service
+            .start_public_with_commands(
+                Some("test-token"),
+                "codex-elves-test",
+                true,
+                "http://127.0.0.1:45222",
+                &second,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("无法执行 zrok 命令"));
+        assert!(service.bound && service.environment_checked);
+        assert_eq!(service.state.as_str(), "error");
+        second.assert_calls(&["status", "enable"]);
+    }
+
+    #[tokio::test]
+    async fn background_probe_failure_keeps_last_confirmed_binding_and_exits_checking() {
+        let mut service = test_service();
+        service.bound = true;
+        service.environment_checked = true;
+        service.environment_check = Some(tokio::spawn(async {
+            Err(anyhow::anyhow!("simulated background status failure"))
+        }));
+        tokio::task::yield_now().await;
+
+        service.refresh_environment().await;
+        service.reconcile(true, "http://127.0.0.1:45222").await;
+
+        assert!(service.bound);
+        assert!(!service.environment_checked);
+        assert_eq!(service.state.as_str(), "error");
+        assert!(service.environment_check.is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_token_validation_failure_exits_checking_without_enabling() {
+        for token in [None, Some("invalid token")] {
+            let mut service = test_service();
+            let commands = ScriptedCommands::new([("status", command_success(UNBOUND_STATUS))]);
+
+            assert!(
+                service
+                    .start_public_with_commands(
+                        token,
+                        "codex-elves-test",
+                        true,
+                        "http://127.0.0.1:45222",
+                        &commands,
+                    )
+                    .await
+                    .is_err()
+            );
+
+            assert_eq!(service.state.as_str(), "error");
+            assert_eq!(service.retry_at_ms, 0);
+            commands.assert_calls(&["status"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_probe_does_not_restore_checking_after_start_validation_error() {
+        let mut service = test_service();
+        let (_sender, receiver) = tokio::sync::oneshot::channel::<()>();
+        service.environment_check = Some(tokio::spawn(async move {
+            receiver.await?;
+            Ok(EnvironmentStatus {
+                bound: false,
+                detected_name: None,
+            })
+        }));
+        assert!(
+            service
+                .start_public(
+                    Some("test-token"),
+                    "invalid name",
+                    true,
+                    "http://127.0.0.1:45222",
+                )
+                .await
+                .is_err()
+        );
+
+        service.refresh_environment().await;
+
+        assert_eq!(service.state.as_str(), "error");
+        let task = service.environment_check.take().unwrap();
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[cfg(windows)]
+    async fn test_child() -> Child {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "remote_access::zrok_tunnel::tests::job_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CODEX_ELVES_ZROK_JOB_CHILD", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .creation_flags(crate::windows_integration::CREATE_NO_WINDOW);
+        let mut child = command.spawn().unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(line) = lines.next_line().await.unwrap() {
+                if line == "job-child-ready" {
+                    return;
+                }
+            }
+            panic!("test child exited before becoming ready");
+        })
+        .await
+        .unwrap();
+        child
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn failed_start_preflight_keeps_current_process_and_origin() {
+        let mut service = test_service();
+        service.bound = true;
+        service.environment_checked = true;
+        service.fixed_name = "codex-elves-test".into();
+        service.target = Some("http://127.0.0.1:45222".into());
+        service.child = Some(test_child().await);
+        service.state = ZrokState::Ready;
+        service.next_public_check_at_ms = u64::MAX;
+        let origin = origin_for_name(&service.fixed_name);
+        *service.origin.write().unwrap() = Some(origin.clone());
+        let process_id = service.child.as_ref().unwrap().id();
+
+        for fixed_name in ["invalid name", "codex-elves-test"] {
+            assert!(
+                service
+                    .start_public(None, fixed_name, true, "http://127.0.0.1:45222")
+                    .await
+                    .is_err()
+            );
+            assert_eq!(service.child.as_ref().unwrap().id(), process_id);
+            assert_eq!(service.current_origin(), Some(origin.clone()));
+            assert_eq!(service.state.as_str(), "ready");
+        }
+        let commands =
+            ScriptedCommands::new([("status", Err(anyhow::anyhow!("simulated status failure")))]);
+        assert!(
+            service
+                .start_public_with_commands(
+                    None,
+                    "codex-elves-test",
+                    true,
+                    "http://127.0.0.1:45222",
+                    &commands,
+                )
+                .await
+                .is_err()
+        );
+        service.reconcile(true, "http://127.0.0.1:45222").await;
+
+        assert_eq!(service.child.as_ref().unwrap().id(), process_id);
+        assert_eq!(service.current_origin(), Some(origin.clone()));
+        assert_eq!(service.state.as_str(), "ready");
+        assert!(service.environment_check.is_none());
+        commands.assert_calls(&["status"]);
+        let commands = ScriptedCommands::new([("status", command_success(BOUND_STATUS))]);
+        let error = service
+            .start_public_with_commands(
+                None,
+                "codex-elves-test",
+                true,
+                "http://127.0.0.1:45222",
+                &commands,
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("无法执行 zrok 命令"));
+        assert_eq!(service.child.as_ref().unwrap().id(), process_id);
+        assert_eq!(service.current_origin(), Some(origin));
+        assert_eq!(service.state.as_str(), "ready");
+        commands.assert_calls(&["status"]);
+        service.stop(true).await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn changed_target_still_stops_previous_process_after_failed_environment_check() {
+        let mut service = test_service();
+        service.bound = true;
+        service.environment_checked = false;
+        service.fixed_name = "codex-elves-test".into();
+        service.target = Some("http://127.0.0.1:45222".into());
+        service.child = Some(test_child().await);
+        service.state = ZrokState::Ready;
+        let commands =
+            ScriptedCommands::new([("status", Err(anyhow::anyhow!("simulated status failure")))]);
+        assert!(
+            service
+                .start_public_with_commands(
+                    None,
+                    "codex-elves-test",
+                    true,
+                    "http://127.0.0.1:45222",
+                    &commands,
+                )
+                .await
+                .is_err()
+        );
+
+        service.reconcile(true, "http://127.0.0.1:45223").await;
+
+        assert!(service.child.is_none());
+        assert!(service.current_origin().is_none());
+        assert_eq!(service.target.as_deref(), Some("http://127.0.0.1:45223"));
+        assert_eq!(service.state.as_str(), "error");
+        commands.assert_calls(&["status"]);
     }
 
     #[test]

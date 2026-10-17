@@ -50,6 +50,7 @@ export type RemoteAccessStatus = {
   devices: RemoteAccessDevice[];
   settings?: RemoteAccessSettings;
   accessKeyConfigured?: boolean;
+  loginLocked?: boolean;
   zrok?: {
     state: ZrokState;
     running: boolean;
@@ -71,6 +72,7 @@ export type RemoteAccessCredentials = {
   status: string;
   message?: string;
   accessKeyConfigured: boolean;
+  loginLocked?: boolean;
   key?: string;
 };
 

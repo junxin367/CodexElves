@@ -896,6 +896,14 @@ impl LaunchHooks for DefaultLaunchHooks {
                             helper_port,
                             move || retry_injection_with_runtime(debug_port, helper_port, runtime.clone()),
                         ).await;
+                        if let Err(error) = sync_launch_status_after_bridge_check(
+                            &StatusStore::default(), debug_port, helper_port, outcome,
+                        ) {
+                            let _ = crate::diagnostic_log::append_diagnostic_log(
+                                "bridge.status_sync_failed",
+                                serde_json::json!({"debug_port":debug_port,"helper_port":helper_port,"message":format!("{error:#}")}),
+                            );
+                        }
                         delay = bridge_watchdog_delay(outcome);
                     }
                 }
@@ -5003,6 +5011,34 @@ pub fn bridge_watchdog_delay(outcome: BridgeWatchdogStatus) -> Duration {
     }
 }
 
+fn sync_launch_status_after_bridge_check(
+    store: &StatusStore,
+    debug_port: u16,
+    helper_port: u16,
+    outcome: BridgeWatchdogStatus,
+) -> anyhow::Result<()> {
+    if outcome == BridgeWatchdogStatus::Unhealthy {
+        return Ok(());
+    }
+    let Some(mut status) = store.load_latest()? else {
+        return Ok(());
+    };
+    if status.status != "running_degraded"
+        || status.debug_port != Some(debug_port)
+        || status.helper_port != Some(helper_port)
+    {
+        return Ok(());
+    }
+    status.status = "running".to_owned();
+    status.message = "CodexElves launcher ready".to_owned();
+    store.save_latest(&status)?;
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "bridge.launch_status_recovered",
+        serde_json::json!({"debug_port":debug_port,"helper_port":helper_port}),
+    );
+    Ok(())
+}
+
 async fn bridge_health_ok(debug_port: u16) -> anyhow::Result<bool> {
     if let Some(websocket_url) = cached_bridge_websocket_url(debug_port) {
         match bridge_health_ok_for_websocket(&websocket_url).await {
@@ -5965,6 +6001,63 @@ mod tests {
             ..BackendSettings::default()
         };
         assert!(!should_refresh_codex_builtin_model_catalog(&aggregate));
+    }
+
+    #[test]
+    fn bridge_recovery_updates_only_its_own_degraded_launch_status() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = StatusStore::new(directory.path().join("latest-status.json"));
+        let original = LaunchStatus {
+            status: "running_degraded".to_owned(),
+            message: "Waiting for the page bridge".to_owned(),
+            started_at_ms: 123,
+            debug_port: Some(9229),
+            helper_port: Some(45221),
+            lan_proxy_listening: true,
+            codex_app: Some("Codex.app".to_owned()),
+        };
+        for outcome in [
+            BridgeWatchdogStatus::Healthy,
+            BridgeWatchdogStatus::Reinjected,
+        ] {
+            store.save_latest(&original).unwrap();
+            sync_launch_status_after_bridge_check(&store, 9229, 45221, outcome).unwrap();
+            let recovered = store.load_latest().unwrap().unwrap();
+            assert_eq!(recovered.status, "running");
+            assert_eq!(recovered.started_at_ms, original.started_at_ms);
+            assert_eq!(recovered.codex_app, original.codex_app);
+            assert_eq!(recovered.lan_proxy_listening, original.lan_proxy_listening);
+        }
+        for (status, debug_port, helper_port, outcome) in [
+            (
+                "running_degraded",
+                9229,
+                45221,
+                BridgeWatchdogStatus::Unhealthy,
+            ),
+            (
+                "running_degraded",
+                9230,
+                45221,
+                BridgeWatchdogStatus::Healthy,
+            ),
+            (
+                "running_degraded",
+                9229,
+                45223,
+                BridgeWatchdogStatus::Healthy,
+            ),
+            ("failed", 9229, 45221, BridgeWatchdogStatus::Healthy),
+        ] {
+            let unchanged = LaunchStatus {
+                status: status.to_owned(),
+                ..original.clone()
+            };
+            store.save_latest(&unchanged).unwrap();
+            sync_launch_status_after_bridge_check(&store, debug_port, helper_port, outcome)
+                .unwrap();
+            assert_eq!(store.load_latest().unwrap().unwrap(), unchanged);
+        }
     }
 
     #[test]

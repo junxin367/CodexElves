@@ -1,16 +1,25 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 34) return;
+  if (window.__codexElvesRemoteAccess?.version === 40) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
   let unsubscribe = [];
   let eventSequence = 0;
   let queueSequence = 0;
+  let requestsSequence = 0;
   const epoch = crypto.randomUUID();
   const notifications = [];
   const queuedReorders = new Set();
   const asyncQuestionSignatures = new Map();
+  const blockingRequestSnapshots = new Map();
+  const observedRequestThreads = new Set();
+  const asyncQuestionStateModules = new WeakMap();
+  const asyncQuestionRecoveries = new Map();
   const sidebarSignatures = new Map();
+  const deletedThreadIds = new Set();
+  let goalMaterializer = null;
+  const goalSubmissions = new Map();
+  const isDeletedThread = id => typeof id === "string" && deletedThreadIds.has(id.toLowerCase());
   const questionReplyStore = (() => {
     const existing = window.__codexElvesRemoteQuestionReplies;
     if (existing instanceof Map) return existing;
@@ -37,6 +46,8 @@
   const isManager = value => value?.hostId === "local" && typeof value.sendFollowUpMessage === "function"
     && typeof value.listThreadTurns === "function" && value.storage?.readGlobalState;
   const pushNotification = event => {
+    if (event.method === "thread/deleted") forgetDeletedThread(event.params?.threadId);
+    else if (event.method !== "remote/sidebarChanged" && isDeletedThread(event.params?.threadId)) return;
     if (["thread/archived", "thread/deleted"].includes(event.method)) {
       nativeCatalog.delete(event.params?.threadId);
       catalogLoaded = false;
@@ -68,6 +79,8 @@
     if (notifications.length > 2048) notifications.splice(0, notifications.length - 2048);
   };
   const emit = event => {
+    if (event.method === "serverRequest/resolved")
+      event = { ...event, params: { ...event.params, requestsEpoch: epoch } };
     if (event.method === "thread/queue/changed") {
       void queueSnapshot(event.params?.threadId).then(snapshot => {
         pushNotification({
@@ -138,13 +151,14 @@
     if (!manager) throw failure(503, "未发现本机原生会话管理器，请检查 CodexElves 注入连接");
     if (!unsubscribe.length) {
       unsubscribe.push(manager.addNotificationCallback(methods, emit));
-      unsubscribe.push(manager.addApprovalRequestListener(() => emit({ method: "remote/requestsChanged" })));
-      unsubscribe.push(manager.addApprovalResolvedListener(() => emit({ method: "remote/requestsChanged" })));
-      unsubscribe.push(manager.addUserInputRequestListener(() => emit({ method: "remote/requestsChanged" })));
+      unsubscribe.push(manager.addApprovalRequestListener(syncRequestNotification));
+      unsubscribe.push(manager.addApprovalResolvedListener(syncRequestNotification));
+      unsubscribe.push(manager.addUserInputRequestListener(syncRequestNotification));
       if (typeof manager.addConversationStateCallback === "function")
         unsubscribe.push(manager.addConversationStateCallback((id, conversation) => {
+          if (observedRequestThreads.has(id)) syncBlockingRequests(id, conversation);
           if (asyncQuestionSignatures.has(id)) syncAsyncQuestions(id, conversation);
-          if (conversation && nativeCatalog.has(id)) {
+          if (conversation && !isDeletedThread(id) && nativeCatalog.has(id)) {
             const previous = sidebarSignatures.get(id);
             const item = summary(conversation);
             nativeCatalog.set(id, item);
@@ -153,6 +167,44 @@
         }));
     }
     return manager;
+  }
+  function blockingRequestsSnapshot(id, conversation = manager.getConversation(id)) {
+    observedRequestThreads.add(id);
+    if (!conversation || !Array.isArray(conversation.requests)) return null;
+    const signature = JSON.stringify(conversation.requests
+      .filter(request => request.method !== "remote/requestUserInputAsync")
+      .map(request => ({ id: request.id, method: request.method, params: request.params })));
+    let snapshot = blockingRequestSnapshots.get(id);
+    if (!snapshot || snapshot.signature !== signature) {
+      snapshot = { signature, threadId: id, requests: JSON.parse(signature),
+        requestsEpoch: epoch, requestsRevision: ++requestsSequence };
+      blockingRequestSnapshots.set(id, snapshot);
+    }
+    const { signature: _, ...fields } = snapshot;
+    return fields;
+  }
+  function syncBlockingRequests(id, conversation, identity = null) {
+    const previous = blockingRequestSnapshots.get(id);
+    const snapshot = blockingRequestsSnapshot(id, conversation);
+    if (snapshot && (previous !== blockingRequestSnapshots.get(id) || identity))
+      emit({ method: "remote/requestsChanged", params: { ...identity, ...snapshot } });
+    return snapshot;
+  }
+  function syncRequestNotification(payload) {
+    const threadId = payload?.threadId ?? payload?.conversationId;
+    const requestId = payload?.requestId;
+    const sourceManager = manager;
+    // Owner callbacks precede removeConversationRequest; inspect the settled native state.
+    queueMicrotask(() => {
+      if (manager !== sourceManager || sourceManager.disposed) return;
+      if (typeof threadId !== "string" || !threadId) {
+        emit({ method: "remote/requestsChanged" }); return;
+      }
+      const identity = { threadId,
+        ...(["string", "number"].includes(typeof requestId) ? { requestId } : {}) };
+      if (!syncBlockingRequests(threadId, sourceManager.getConversation(threadId), identity))
+        emit({ method: "remote/requestsChanged", params: identity });
+    });
   }
   function failure(code, message) { return Object.assign(new Error(message), { code, remoteValidationFailure: true }); }
   function requiredId(value) {
@@ -308,6 +360,7 @@
     const observeThreads = threads => {
       for (const thread of array(threads)) {
         const id = thread.conversationId || thread.id;
+        if (isDeletedThread(id)) continue;
         if (thread.threadSource === "subagent" || thread.source?.subAgent || thread.source?.subagent) {
           nativeCatalog.delete(id);
           continue;
@@ -379,10 +432,58 @@
       preferences: { mode: preferences.mode === "list" ? "list" : "project", chats: chatSort, projects: projectSort, pinned: pinnedSort } };
   }
   async function readThread(id) {
+    if (isDeletedThread(id)) throw failure(404, "会话已永久删除");
     const response = await manager.readThread(requiredId(id), { includeTurns: false });
     const thread = response.thread || response;
     if (!thread?.id) throw failure(404, "会话不存在或已删除");
     return thread;
+  }
+  function forgetDeletedThread(id) {
+    if (typeof id !== "string" || !id) return;
+    const canonicalId = id.toLowerCase();
+    deletedThreadIds.add(canonicalId);
+    const matches = value => typeof value === "string" && value.toLowerCase() === canonicalId;
+    for (const cache of [nativeCatalog, sidebarSignatures, asyncQuestionSignatures,
+      blockingRequestSnapshots, asyncQuestionRecoveries, observedRequestThreads, queuedReorders]) {
+      for (const key of cache.keys()) if (matches(key)) cache.delete(key);
+    }
+    for (const key of questionReplyStore.keys()) {
+      try { if (matches(JSON.parse(key)?.[0])) questionReplyStore.delete(key); } catch {}
+    }
+    for (const [editId, entry] of queuedEditStore.sessions)
+      if (matches(entry?.threadId)) queuedEditStore.sessions.delete(editId);
+  }
+  async function deleteThread(payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)
+        || Object.keys(payload).length !== 1 || !Object.hasOwn(payload, "threadId")
+        || typeof payload.threadId !== "string"
+        || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(payload.threadId))
+      throw failure(400, "永久删除需要已创建完成的本机会话 ID");
+    const id = payload.threadId;
+    if (isDeletedThread(id)) return { ok: true, threadId: id, deleted: true, status: "local_deleted" };
+    const remove = window.__codexElvesNativeDeleteThread;
+    if (typeof remove !== "function" || manager?.hostId !== "local"
+        || typeof manager.requestClient?.sendRequest !== "function")
+      throw failure(503, "当前 Codex 版本的原生永久删除服务不可用，请在桌面检查增强功能");
+    let result;
+    try {
+      result = await remove({ session_id: `local:${id}` });
+    } catch (error) {
+      if (error?.delivery?.stage === "not-sent")
+        throw failure(503, error.message || "永久删除请求未发送");
+      return { ok: false, threadId: id, outcomeUnknown: true, code: 503,
+        message: "永久删除结果未确认，请在桌面检查会话，不要重复删除" };
+    }
+    if (!["local_deleted", "partial"].includes(result?.status)
+        || typeof result.session_id !== "string" || result.session_id.toLowerCase() !== id.toLowerCase())
+      return { ok: false, threadId: id, outcomeUnknown: true, code: 503,
+        message: "原生永久删除回执无法确认，请在桌面检查会话，不要重复删除" };
+    emit({ method: "thread/deleted", params: { threadId: id } });
+    emit({ method: "remote/sidebarChanged", params: { threadId: id } });
+    return { ok: true, threadId: id, deleted: true, status: result.status,
+      ...(result.status === "partial" ? {
+        message: typeof result.message === "string" ? result.message : "会话已永久删除，但最近列表更新失败"
+      } : {}) };
   }
   function optionalCursor(value, label) {
     if (value == null || value === "") return null;
@@ -416,7 +517,7 @@
       if (typeof item.id === "string") {
         if (Number.isFinite(entry?.startedAtMs)) itemStartedAtMsById[item.id] = entry.startedAtMs;
       }
-      return item;
+      return Number.isFinite(entry?.completedAtMs) ? { ...item, completedAtMs: entry.completedAtMs } : item;
     });
     if (sortDirection === "desc") items.reverse();
     return {
@@ -624,6 +725,160 @@
         || updated.objective !== objective || updated.status !== current.status)
       throw new Error("原生目标更新结果无效");
     return { ok: true, threadId: id, goal: updated };
+  }
+  function validateGoalComposerPayload(action, payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload))
+      throw failure(400, "目标提交参数无效");
+    if (Object.prototype.hasOwnProperty.call(payload, "goalMode") && typeof payload.goalMode !== "boolean")
+      throw failure(400, "目标模式参数无效");
+    if (action === "send" && payload.goalMode === true)
+      throw failure(400, "目标必须通过目标提交入口发送");
+    if (action !== "setGoal" && !(action === "create" && payload.goalMode === true)) return;
+    if (payload.goalMode !== true) throw failure(400, "目标提交需要启用目标模式");
+    const fields = ["prompt", "goalMode", "skills", "images", "model", "reasoningEffort",
+      action === "setGoal" ? "threadId" : "projectId"];
+    if (Object.keys(payload).some(key => !fields.includes(key)))
+      throw failure(400, "目标提交包含不支持的字段");
+    if (typeof payload.prompt !== "string"
+        || new TextEncoder().encode(payload.prompt).byteLength > 128 * 1024)
+      throw failure(400, "目标内容不能超过 128 KiB");
+    for (const key of ["model", "reasoningEffort"]) {
+      if (Object.prototype.hasOwnProperty.call(payload, key)
+          && (typeof payload[key] !== "string" || !payload[key].trim()
+          || payload[key].length > (key === "model" ? 256 : 32)))
+        throw failure(400, "目标模型或思考深度无效");
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "skills")
+        && (!Array.isArray(payload.skills) || payload.skills.length > 16
+        || payload.skills.some(skill => !skill || typeof skill !== "object" || Array.isArray(skill)
+          || Object.keys(skill).some(key => !["name", "path"].includes(key))
+          || typeof skill.name !== "string" || !skill.name || skill.name.length > 256
+          || typeof skill.path !== "string" || !skill.path || skill.path.length > 4096)))
+      throw failure(400, "Skill 选择无效，最多选择 16 项");
+    if (Object.prototype.hasOwnProperty.call(payload, "images") && (!Array.isArray(payload.images)
+        || payload.images.some(image => !image || typeof image !== "object" || Array.isArray(image)
+          || Object.keys(image).some(key => !["name", "mime", "dataUrl", "size"].includes(key)))))
+      throw failure(400, "目标图片包含不支持的字段");
+  }
+  async function nativeGoalMaterializer() {
+    if (!appScope) discover();
+    if (!appScope || typeof manager.setThreadGoal !== "function"
+        || ["createThreadGoalAttachmentDirectory", "writeThreadGoalAttachment",
+          "removeThreadGoalAttachmentDirectory"].some(key => typeof manager[key] !== "function"))
+      throw failure(503, "当前 Codex 版本不支持完整目标提交，请更新桌面端");
+    if (goalMaterializer) return goalMaterializer;
+    const module = await nativeCreationModule();
+    const candidates = Object.values(module).filter(value => {
+      if (typeof value !== "function") return false;
+      const source = Function.prototype.toString.call(value);
+      return source.includes("Goal objective must not be empty")
+        && source.includes(".createThreadGoalAttachmentDirectory()")
+        && source.includes("attachmentDirectory");
+    });
+    if (candidates.length !== 1)
+      throw failure(503, "当前 Codex 版本的原生目标附件服务不可用，请更新桌面端");
+    goalMaterializer = candidates[0];
+    return goalMaterializer;
+  }
+  async function goalThreadSettings(payload, loaded = null) {
+    if (payload.model == null && payload.reasoningEffort == null) return undefined;
+    const conversation = loaded ? manager.getConversation(loaded.id) : null;
+    const currentModel = conversation?.latestCollaborationMode?.settings?.model
+      || conversation?.latestModel || loaded?.model;
+    const model = payload.model ?? currentModel ?? (await defaultModelSettings()).defaultModel;
+    if (typeof model !== "string" || !model.trim())
+      throw failure(409, "无法确定目标使用的模型，请先选择模型");
+    const entry = (await nativeModelCatalog()).find(entry => entry.model === model);
+    if (!entry) throw failure(409, "当前模型不在原生模型目录中，请重新选择");
+    const effort = payload.reasoningEffort === undefined
+      ? payload.model != null && payload.model !== currentModel ? null
+        : conversation?.latestReasoningEffort ?? loaded?.reasoningEffort ?? null
+      : payload.reasoningEffort;
+    if (effort != null
+        && !array(entry.supportedReasoningEfforts).some(item => item.reasoningEffort === effort))
+      throw failure(400, "思考深度超出此模型支持的范围");
+    return { model, effort };
+  }
+  function goalSubmission(action, threadId = null) {
+    return { action, phase: "preparing", threadId, firstTurnAccepted: false, goalSet: "not-attempted" };
+  }
+  function goalSubmissionFailure(submission, error, unknown = false) {
+    return {
+      ok: false, ...(submission.threadId ? { threadId: submission.threadId } : {}),
+      ...(unknown ? { outcomeUnknown: true } : {}),
+      code: unknown ? 503 : error?.code > 0 ? error.code : 503,
+      message: unknown ? submission.firstTurnAccepted
+        ? "首条消息已送达，但目标保存结果未知，请打开已创建会话确认，不要重新新建或发送"
+        : "原生目标提交结果未知，请查看会话确认，不要重复提交"
+        : error?.message || "目标提交失败",
+      goalSubmission: { ...submission }
+    };
+  }
+  function definiteGoalRejection(error) {
+    const code = error?.jsonRpcCode;
+    return ([-32700, -32600, -32601, -32602].includes(code)
+      && error?.name === `AppServerRequestError(${code})`)
+      || (error?.name === "AppServerRequestDeliveryError" && error?.delivery?.stage === "not-sent");
+  }
+  async function ensureGoalAbsent(id, sourceManager) {
+    const response = await sourceManager.requestClient.sendRequest("thread/goal/get", { threadId: id });
+    if (!response || !Object.prototype.hasOwnProperty.call(response, "goal"))
+      throw failure(503, "无法确认当前目标，请重新读取会话");
+    if (response.goal != null && response.goal.status !== "complete")
+      throw failure(409, "此会话已有未完成目标，请使用现有目标编辑入口");
+  }
+  async function cleanupUnsubmittedGoal(sourceManager, materialized) {
+    if (materialized?.attachmentDirectory != null)
+      await sourceManager.removeThreadGoalAttachmentDirectory(materialized.attachmentDirectory).catch(() => {});
+  }
+  async function setComposerGoal(payload) {
+    const submission = goalSubmission("setGoal");
+    let materialized = null, sourceManager = manager, submitted = false, locked = false;
+    try {
+      validateGoalComposerPayload("setGoal", payload);
+      const id = requiredId(payload.threadId);
+      submission.threadId = id;
+      const previous = goalSubmissions.get(id);
+      if (previous) return goalSubmissionFailure(submission,
+        failure(409, "此会话的目标提交正在处理，请等待原请求回执"));
+      goalSubmissions.set(id, submission); locked = true;
+      const thread = await readThread(id);
+      sourceManager = manager;
+      await ensureGoalAbsent(id, sourceManager);
+      const materialize = await nativeGoalMaterializer();
+      const imageAttachments = remoteImageAttachments(payload);
+      const objective = payload.prompt.trim();
+      if (!objective && !imageAttachments.length) throw failure(400, "目标不能为空");
+      await skillInputs(payload, thread.cwd);
+      const threadSettings = await goalThreadSettings(payload, thread);
+      const assertRequestCurrent = () => {
+        if (manager !== sourceManager || sourceManager.disposed)
+          throw failure(409, "原生会话连接已变化，请重新读取后提交目标");
+      };
+      materialized = await materialize({
+        scope: appScope, hostId: "local", assertRequestCurrent,
+        draft: { objective, imageAttachments, pastedTextAttachments: [] }
+      });
+      assertRequestCurrent();
+      await ensureGoalAbsent(id, sourceManager);
+      assertRequestCurrent();
+      submission.phase = "goalSet"; submitted = true;
+      const goal = runtimeGoal(await sourceManager.setThreadGoal(id, {
+        objective: materialized.objective, ...(threadSettings ? { threadSettings } : {})
+      }));
+      if (!goal || goal.objective !== materialized.objective || goal.status !== "active")
+        throw new Error("原生目标创建结果未确认");
+      submission.goalSet = "succeeded"; submission.phase = "complete";
+      return { ok: true, threadId: id, goal, goalSubmission: { ...submission } };
+    } catch (error) {
+      if (!submitted) await cleanupUnsubmittedGoal(sourceManager, materialized);
+      const unknown = submitted && !definiteGoalRejection(error);
+      if (submitted) submission.goalSet = unknown ? "unknown" : "failed";
+      return goalSubmissionFailure(submission, error, unknown);
+    } finally {
+      // 已终结的未知结果由 HTTP 原回执和远程 pending 保护；此处只锁真正的在途调用。
+      if (locked) goalSubmissions.delete(submission.threadId);
+    }
   }
   function runtimeCompaction(id, conversation = manager.getConversation(id)) {
     const turns = conversation?.turnHistory?.kind === "canonical"
@@ -898,13 +1153,18 @@
     emit({ method: "remote/threadReverted", params: { threadId: id } });
     return { ok: true, threadId: id, ...state.metadata };
   }
-  function asyncQuestionRequests(id, conversation = manager.getConversation(id)) {
-    const turn = nativeConversationTurns(conversation).findLast(turn => nativeTurnStatus(turn) === "inProgress");
-    const turnId = nativeTurnId(turn);
-    if (!turnId) return [];
-    const answered = new Set();
-    for (const item of array(turn.items)) {
-      if (item.type !== "userMessage" && (item.type !== "steeringUserMessage" || item.status !== "accepted")) continue;
+  function acceptedAsyncQuestionReplies(turn) {
+    const originals = new Map();
+    for (const item of array(turn?.items)) {
+      if (item?.type !== "agentMessage" || typeof item.id !== "string" || !item.id) continue;
+      array(item.questions).forEach((question, index) => {
+        if (typeof question?.title === "string")
+          originals.set(JSON.stringify(["request_user_input_async", item.id, index]), question.title);
+      });
+    }
+    const answered = new Map();
+    for (const item of array(turn?.items)) {
+      if (item?.type !== "userMessage" && (item?.type !== "steeringUserMessage" || item.status !== "accepted")) continue;
       const input = item.type === "userMessage" ? item.content : item.input;
       if (!Array.isArray(input) || input.length !== 1 || input[0]?.type !== "text") continue;
       const text = String(input[0].text || "").trim();
@@ -912,11 +1172,22 @@
       if (!text.startsWith(open) || !text.endsWith(close)) continue;
       try {
         const parsed = JSON.parse(text.slice(open.length, -close.length));
-        for (const reply of Array.isArray(parsed) ? parsed : [parsed])
-          if (typeof reply?.questionItemId === "string" && typeof reply.question === "string"
-              && typeof reply.answer === "string") answered.add(reply.questionItemId);
+        const replies = Array.isArray(parsed) ? parsed : [parsed];
+        if (!replies.length || new Set(replies.map(reply => reply?.questionItemId)).size !== replies.length
+            || !replies.every(reply => typeof reply?.questionItemId === "string"
+              && typeof reply.question === "string"
+              && typeof reply.answer === "string" && reply.answer.trim())) continue;
+        for (const reply of replies)
+          if (originals.get(reply.questionItemId) === reply.question) answered.set(reply.questionItemId, reply);
       } catch {}
     }
+    return answered;
+  }
+  function asyncQuestionRequests(id, conversation = manager.getConversation(id)) {
+    const turn = nativeConversationTurns(conversation).findLast(turn => nativeTurnStatus(turn) === "inProgress");
+    const turnId = nativeTurnId(turn);
+    if (!turnId) return [];
+    const answered = acceptedAsyncQuestionReplies(turn);
     return array(turn.items).flatMap(item => {
       if (item.type !== "agentMessage") return [];
       const questions = array(item.questions).flatMap((question, index) => {
@@ -933,7 +1204,215 @@
           submissionState: questionReplyStore.get(JSON.stringify([id, requestId]))?.state ?? null } }];
     });
   }
+  function nativeAsyncQuestionState(module) {
+    const cached = asyncQuestionStateModules.get(module);
+    if (cached) return cached;
+    const functions = Object.values(module).filter(value => typeof value === "function")
+      .map(value => ({ value, source: Function.prototype.toString.call(value) }));
+    const unique = predicate => {
+      const matches = functions.filter(predicate);
+      if (matches.length !== 1) throw failure(503, "当前 Codex 版本的原生问答状态接口无法唯一识别");
+      return matches[0].value;
+    };
+    const draftSetter = unique(({ source }) => source.length < 500
+      && source.includes(".draft!==") && source.includes("draft:"));
+    const selectQuestion = unique(({ source }) => source.length < 700
+      && [".selectedQuestionKey.entityKey", ".questionIds.includes(", "selectedQuestionKey:"]
+        .every(marker => source.includes(marker)));
+    const setPanel = unique(({ value, source }) => value.length === 3 && source.length < 600
+      && [".hostId", ".threadId", "new Map(", ".delete(", ".get(", ".set("]
+        .every(marker => source.includes(marker)));
+    const key = { hostId: "__remote_question_probe__", threadId: "__remote_question_probe__",
+      entityKey: "__remote_question_probe__", itemId: "__remote_question_probe__" };
+    const draftReads = [], panelReads = [];
+    let writes = 0;
+    const probe = reads => ({
+      get(family, key) { reads.push({ family, key }); return null; },
+      set() { writes++; throw new Error("原生问答隔离探针禁止写入"); }
+    });
+    try {
+      draftSetter(probe(draftReads), key, "");
+      selectQuestion(probe(panelReads), key);
+    } catch {
+      throw failure(503, "当前 Codex 版本的原生问答状态接口验证失败");
+    }
+    if (writes || draftReads.length !== 1 || panelReads.length !== 2
+        || !draftReads[0].family || !panelReads[0].family
+        || !["object", "function"].includes(typeof draftReads[0].family)
+        || !["object", "function"].includes(typeof panelReads[0].family)
+        || panelReads[0].family === draftReads[0].family
+        || panelReads[1].family !== draftReads[0].family
+        || draftReads[0].key !== key || panelReads[1].key !== key
+        || panelReads[0].key?.hostId !== key.hostId || panelReads[0].key?.threadId !== key.threadId)
+      throw failure(503, "当前 Codex 版本的原生问答状态接口验证失败");
+    const resolved = { questionFamily: draftReads[0].family, panelFamily: panelReads[0].family, setPanel };
+    asyncQuestionStateModules.set(module, resolved);
+    return resolved;
+  }
+  function asyncQuestionDesktopBaseline(native, scope, id, replies) {
+    const panel = scope.get(native.panelFamily, { hostId: "local", threadId: id });
+    const selected = panel?.selectedQuestionKey;
+    if (selected?.hostId !== "local" || selected.threadId !== id) return null;
+    return {
+      entityKey: selected.entityKey,
+      questions: new Map(replies.flatMap(reply => {
+        if (!array(panel.questionIds).includes(reply.questionItemId)) return [];
+        const state = scope.get(native.questionFamily, { ...selected, itemId: reply.questionItemId });
+        return state ? [[reply.questionItemId, {
+          turnId: state.turnId, lastSubmission: state.lastSubmission, draftBaseline: state.draftBaseline
+        }]] : [];
+      }))
+    };
+  }
+  function syncAsyncQuestionDesktop(native, scope, sourceManager, id, turnId, replies, submission = null) {
+    const current = () => manager === sourceManager && appScope === scope && !sourceManager.disposed;
+    const processed = new Set(), ids = replies.map(reply => reply.questionItemId);
+    const result = () => ({
+      processed: current() ? [...processed] : [],
+      pending: ids.filter(id => !current() || !processed.has(id))
+    });
+    if (!current()) return result();
+    const panelKey = { hostId: "local", threadId: id };
+    const panel = scope.get(native.panelFamily, panelKey);
+    if (panel == null) {
+      for (const itemId of ids) processed.add(itemId);
+      return result();
+    }
+    const selected = panel.selectedQuestionKey;
+    if (selected?.hostId !== "local" || selected.threadId !== id
+        || typeof selected.entityKey !== "string" || !selected.entityKey
+        || !Array.isArray(panel.questionIds) || !panel.questionIds.includes(selected.itemId)
+        || panel.questionIds.some(value => typeof value !== "string")
+        || new Set(panel.questionIds).size !== panel.questionIds.length) return result();
+    const matching = new Map();
+    for (const reply of replies) {
+      if (!current() || scope.get(native.panelFamily, panelKey) !== panel) return result();
+      if (!panel.questionIds.includes(reply.questionItemId)) {
+        processed.add(reply.questionItemId);
+        continue;
+      }
+      const key = { ...selected, itemId: reply.questionItemId };
+      const state = scope.get(native.questionFamily, key);
+      // 远程路径不接管桌面另一笔正在提交的状态。
+      if (!state || state.turnId !== turnId || state.title !== reply.question
+          || typeof state.draft !== "string" || typeof state.draftBaseline !== "string"
+          || state.isSubmitting !== false) continue;
+      if (!submission && (typeof state.lastSubmission === "string" && state.lastSubmission.length > 0
+            && state.lastSubmission !== reply.answer
+          || state.draftBaseline.length > 0 && state.draftBaseline !== reply.answer)) {
+        processed.add(reply.questionItemId);
+        continue;
+      }
+      if (submission) {
+        const baseline = submission.baseline?.questions.get(reply.questionItemId);
+        if (submission.baseline?.entityKey !== selected.entityKey || baseline?.turnId !== turnId
+            || submission.accepted?.has(reply.questionItemId)
+              && submission.accepted.get(reply.questionItemId).answer !== reply.answer) {
+          processed.add(reply.questionItemId);
+          continue;
+        }
+        if ((state.lastSubmission !== baseline.lastSubmission || state.draftBaseline !== baseline.draftBaseline)
+            && (state.lastSubmission !== reply.answer || state.draftBaseline !== reply.answer)) {
+          processed.add(reply.questionItemId);
+          continue;
+        }
+      }
+      const draft = state.draft === state.draftBaseline ? reply.answer : state.draft;
+      const next = { ...state, lastSubmission: reply.answer, draftBaseline: reply.answer, draft, isSubmitting: false };
+      if (!current() || scope.get(native.panelFamily, panelKey) !== panel) return result();
+      if (state.lastSubmission !== next.lastSubmission || state.draftBaseline !== next.draftBaseline
+          || state.draft !== next.draft) scope.set(native.questionFamily, key, next);
+      processed.add(reply.questionItemId);
+      matching.set(reply.questionItemId, reply);
+    }
+    if (!matching.size || !current() || scope.get(native.panelFamily, panelKey) !== panel) return result();
+    const questionIds = panel.questionIds.filter(itemId => {
+      const reply = matching.get(itemId);
+      if (!reply) return true;
+      const state = scope.get(native.questionFamily, { ...selected, itemId });
+      return state?.turnId !== turnId || state.title !== reply.question || state.isSubmitting !== false
+        || state.lastSubmission !== reply.answer || state.draftBaseline !== reply.answer
+        || typeof state.draft !== "string" || state.draft.trim() !== reply.answer;
+    });
+    if (questionIds.length === panel.questionIds.length || !current()
+        || scope.get(native.panelFamily, panelKey) !== panel) return result();
+    if (!questionIds.length) native.setPanel(scope, panelKey, null);
+    else native.setPanel(scope, panelKey, {
+      ...panel, questionIds,
+      selectedQuestionKey: questionIds.includes(selected.itemId) ? selected : { ...selected, itemId: questionIds[0] }
+    });
+    return result();
+  }
+  function syncAsyncQuestionDesktopRecord(key, questionIds, replies, perform) {
+    const record = questionReplyStore.get(key);
+    const previous = new Set(array(record?.desktopSynchronizedQuestionIds));
+    const snapshot = processed => ({
+      ...record, questionIds,
+      desktopSynchronizedQuestionIds: [...processed],
+      desktopSynchronized: questionIds.length > 0 && questionIds.every(id => processed.has(id))
+    });
+    // 先暂记本次有证据的逐题范围，原生 watcher 重入时不能再处理这些题。
+    const provisional = snapshot(new Set([...previous, ...replies.map(reply => reply.questionItemId)]));
+    questionReplyStore.set(key, provisional);
+    let outcome, failed = false;
+    try { outcome = perform(); }
+    catch { outcome = { processed: [] }; failed = true; }
+    const completed = new Set([...previous, ...array(outcome?.processed)]);
+    const final = snapshot(completed);
+    if (questionReplyStore.get(key) === provisional) questionReplyStore.set(key, final);
+    return { processed: [...completed], pending: questionIds.filter(id => !completed.has(id)), failed };
+  }
+  function asyncQuestionRecoveryCandidates(id, conversation) {
+    const candidates = [];
+    for (const [key, record] of questionReplyStore) {
+      if (!["submitted", "unknown"].includes(record?.state) || record.desktopSynchronized) continue;
+      try {
+        const [threadId, requestId] = JSON.parse(key);
+        const [kind, turnId, itemId] = JSON.parse(requestId);
+        if (threadId !== id || kind !== "async-question") continue;
+        const turn = nativeConversationTurns(conversation).find(turn => nativeTurnId(turn) === turnId);
+        if (!turn) continue;
+        const source = array(turn.items).find(item => item.type === "agentMessage" && item.id === itemId);
+        if (!array(source?.questions).length) continue;
+        const sourceIds = source.questions.flatMap((question, index) => typeof question?.title === "string"
+          ? [JSON.stringify(["request_user_input_async", itemId, index])] : []);
+        const questionIds = Array.isArray(record.questionIds)
+          ? record.questionIds.filter(id => sourceIds.includes(id)) : sourceIds;
+        const processed = new Set(array(record.desktopSynchronizedQuestionIds));
+        const accepted = acceptedAsyncQuestionReplies(turn);
+        const replies = array(source.questions).flatMap((question, index) => {
+          const questionId = JSON.stringify(["request_user_input_async", itemId, index]);
+          if (!questionIds.includes(questionId) || processed.has(questionId)) return [];
+          const reply = accepted.get(questionId);
+          return reply ? [reply] : [];
+        });
+        if (replies.length) candidates.push({ key, record, turnId, replies, questionIds });
+      } catch {}
+    }
+    return candidates;
+  }
+  function recoverAsyncQuestionDesktop(id, conversation) {
+    if (!appScope || !asyncQuestionRecoveryCandidates(id, conversation).length) return;
+    const sourceManager = manager, scope = appScope;
+    const active = asyncQuestionRecoveries.get(id);
+    if (active?.manager === sourceManager && active.scope === scope) return;
+    const ticket = { manager: sourceManager, scope };
+    asyncQuestionRecoveries.set(id, ticket);
+    void nativeCreationModule().then(module => {
+      if (manager !== sourceManager || appScope !== scope || sourceManager.disposed) return;
+      const native = nativeAsyncQuestionState(module);
+      for (const candidate of asyncQuestionRecoveryCandidates(id, sourceManager.getConversation(id))) {
+        if (manager !== sourceManager || appScope !== scope || sourceManager.disposed) return;
+        if (questionReplyStore.get(candidate.key) !== candidate.record) continue;
+        syncAsyncQuestionDesktopRecord(candidate.key, candidate.questionIds, candidate.replies, () =>
+          syncAsyncQuestionDesktop(native, scope, sourceManager, id, candidate.turnId, candidate.replies));
+      }
+    }).catch(() => {}).finally(() => {
+      if (asyncQuestionRecoveries.get(id) === ticket) asyncQuestionRecoveries.delete(id);
+    });
+  }
   function syncAsyncQuestions(id, conversation) {
+    recoverAsyncQuestionDesktop(id, conversation);
     const requests = asyncQuestionRequests(id, conversation);
     const signature = JSON.stringify(requests);
     if (signature === asyncQuestionSignatures.get(id)) return;
@@ -961,14 +1440,21 @@
     if (runtimeCompaction(id).state !== "idle") throw failure(409, "上下文压缩完成前不能提交回答");
     if (!appScope) discover();
     if (!appScope) throw failure(503, "Codex 界面上下文尚未就绪，请稍后重试提交回答");
+    const sourceManager = manager, scope = appScope;
+    if (typeof scope.set !== "function") throw failure(503, "Codex 原生问答状态上下文尚未就绪");
     const module = await nativeCreationModule();
-    const submit = Object.values(module).find(value => typeof value === "function"
+    if (manager !== sourceManager || appScope !== scope || sourceManager.disposed)
+      throw failure(409, "Codex 界面上下文已变化，请重新读取问题");
+    const native = nativeAsyncQuestionState(module);
+    const submits = Object.values(module).filter(value => typeof value === "function"
       && ["isSubmissionCurrent", "getTurnCoordinator", ".sendMessage("]
         .every(marker => Function.prototype.toString.call(value).includes(marker)));
-    if (!submit) throw failure(503, "当前 Codex 版本的原生异步问答提交服务不可用");
+    if (submits.length !== 1) throw failure(503, "当前 Codex 版本的原生异步问答提交服务不可用");
+    const submit = submits[0];
     const key = JSON.stringify([id, request.id]);
     if (questionReplyStore.has(key)) throw failure(409, "此回答已提交或结果待确认，请先核对回答状态");
     const isCurrent = () => {
+      if (manager !== sourceManager || appScope !== scope || sourceManager.disposed) return false;
       const current = asyncQuestionRequests(id).find(value => value.id === request.id);
       return current?.params.turnId === request.params.turnId
         && questions.every(question => current.params.questions.some(value => value.id === question.id))
@@ -979,11 +1465,14 @@
     const cwd = manager.getConversationCwd(id) || "/";
     const context = { ...remoteAttachmentContext(prompt, cwd, []), turnTrigger: "send_user_message_async_question" };
     const message = { id: crypto.randomUUID(), text: prompt, context, cwd, createdAt: Date.now() };
-    questionReplyStore.set(key, { state: "submitting" });
+    const submission = { questionIds: replies.map(reply => reply.questionItemId) };
+    const desktopBaseline = asyncQuestionDesktopBaseline(native, scope, id, replies);
+    questionReplyStore.set(key, { ...submission, state: "submitting" });
     syncAsyncQuestions(id, conversation);
+    let sent = false;
     try {
       const result = await submit({
-        scope: appScope, turnTrigger: "send_user_message_async_question",
+        scope, turnTrigger: "send_user_message_async_question",
         managerHostId: "local", hostId: "local", targetConversationId: id,
         context, cwd, agentMode: "auto", permissionProfileId: null,
         serviceTier: conversation?.latestServiceTier ?? undefined,
@@ -991,22 +1480,44 @@
         restoreMessage: message, isSubmissionCurrent: isCurrent
       }, { queueModeOverride: "send-now" });
       if (result?.status !== "sent") {
-        questionReplyStore.set(key, { state: "unknown" });
+        questionReplyStore.set(key, { ...submission, state: "unknown" });
         return { ok: false, outcomeUnknown: true, threadId: id, message: "回答送达状态待确认，请核对会话，不要重复提交" };
       }
-      questionReplyStore.set(key, { state: "submitted" });
-      return { ok: true, threadId: id, requestId: request.id };
+      sent = true;
+      questionReplyStore.set(key, { ...submission, state: "submitted", desktopSynchronized: false });
+      let desktopSyncPending = false;
+      try {
+        const turn = nativeConversationTurns(sourceManager.getConversation(id))
+          .find(turn => nativeTurnId(turn) === request.params.turnId);
+        const accepted = acceptedAsyncQuestionReplies(turn);
+        const outcome = syncAsyncQuestionDesktopRecord(key, submission.questionIds, replies, () =>
+          syncAsyncQuestionDesktop(native, scope, sourceManager, id, request.params.turnId, replies,
+            { baseline: desktopBaseline, accepted }));
+        desktopSyncPending = outcome.failed || outcome.pending.length > 0;
+      } catch {
+        desktopSyncPending = true;
+        questionReplyStore.set(key, { ...submission, state: "submitted", desktopSynchronized: false });
+      }
+      return { ok: true, threadId: id, requestId: request.id, ...(desktopSyncPending ? { desktopSyncPending: true } : {}) };
     } catch (error) {
+      if (sent) {
+        questionReplyStore.set(key, { ...submission, state: "submitted", desktopSynchronized: false });
+        return { ok: true, threadId: id, requestId: request.id, desktopSyncPending: true };
+      }
       if (error.remoteValidationFailure || error.delivery?.stage === "not-sent") {
         questionReplyStore.delete(key);
         throw error;
       }
-      questionReplyStore.set(key, { state: "unknown" });
+      questionReplyStore.set(key, { ...submission, state: "unknown" });
       return { ok: false, outcomeUnknown: true, threadId: id, message: "回答送达状态待确认，请核对会话，不要重复提交" };
-    } finally { syncAsyncQuestions(id, manager.getConversation(id)); }
+    } finally {
+      try { syncAsyncQuestions(id, manager.getConversation(id)); } catch {}
+    }
   }
   function runtimeThread(id, nativeThread = null) {
     const conversation = manager.getConversation(id);
+    const requestsSnapshot = blockingRequestsSnapshot(id, conversation);
+    recoverAsyncQuestionDesktop(id, conversation);
     const queued = manager.getTurnCoordinator?.()?.readMessages?.(id)
       ?? manager.storage.readQueuedFollowUps?.()?.value?.[id];
     const collaborationSettings = conversation?.latestCollaborationMode?.settings
@@ -1022,13 +1533,14 @@
         ?? conversation?.latestReasoningEffort ?? null,
       serviceTier: conversation?.latestServiceTier ?? null,
       tokenUsage: conversation?.latestTokenUsageInfo ?? null,
-      goal: runtimeGoal(conversation?.threadGoal ?? conversation?.completedThreadGoal),
+      goal: runtimeGoal(conversation?.threadGoal),
       compaction: runtimeCompaction(id, conversation),
       transcriptEvents: nativeTranscriptEvents(conversation),
       editableMessage: editableMessageState(id).metadata,
       status: manager.getThreadRuntimeStatusEvidence(id) || { type: "idle" },
-      requests: [...array(conversation?.requests).map(request => ({ id: request.id, method: request.method, params: request.params })),
-        ...asyncQuestions],
+      requestsKnown: !!requestsSnapshot,
+      ...(requestsSnapshot ? { ...requestsSnapshot, requests: [...requestsSnapshot.requests, ...asyncQuestions] }
+        : asyncQuestions.length ? { requests: asyncQuestions } : {}),
       ...queueSnapshotFields(id, queued)
     };
   }
@@ -2396,6 +2908,7 @@
   async function call(action, payload = {}) {
     try {
       if (action === "dispose") { window.__codexElvesRemoteAccess.dispose(); return { ok: true }; }
+      if (["send", "create", "setGoal"].includes(action)) validateGoalComposerPayload(action, payload);
       if (manager?.disposed) {
         for (const dispose of unsubscribe) { try { dispose?.(); } catch {} }
         unsubscribe = [];
@@ -2431,6 +2944,7 @@
         case "queue": return await queueSnapshot(payload.threadId);
         case "queueEdit": return await queueEditState(payload);
         case "markRead": return await markThreadRead(payload.threadId);
+        case "deleteThread": return await deleteThread(payload);
         case "removeQueued": return await removeQueued(payload);
         case "reorderQueued": return await reorderQueued(payload);
         case "beginQueuedEdit": return await beginQueuedEdit(payload);
@@ -2440,6 +2954,7 @@
         case "steerQueued": return await steerQueued(payload);
         case "editMessage": return await editLastMessage(payload);
         case "updateGoal": return await updateThreadGoal(payload);
+        case "setGoal": return await setComposerGoal(payload);
         case "history": return await historyPage(payload);
         case "thread": {
           const thread = await readThread(payload.threadId);
@@ -2503,9 +3018,14 @@
         }
         case "create": {
           let startConversationSubmitted = false;
+          let materialized = null, sourceManager = manager;
+          const goalMode = payload.goalMode === true;
+          const submission = goalMode ? goalSubmission("create") : null;
           try {
             const projectId = requestedProjectId(payload.projectId);
-            await validateReasoningEffort(payload.model, payload.reasoningEffort);
+            const materialize = goalMode ? await nativeGoalMaterializer() : null;
+            const goalSettings = goalMode ? await goalThreadSettings(payload) : null;
+            if (!goalMode) await validateReasoningEffort(payload.model, payload.reasoningEffort);
             const imageAttachments = remoteImageAttachments(payload);
             const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
             if (!prompt && !imageAttachments.length) throw failure(400, "消息不能为空");
@@ -2519,10 +3039,22 @@
               workspace = await localProjectWorkspace(projectId);
             }
             const skills = await skillInputs(payload, workspace.cwd);
+            if (goalMode) {
+              materialized = await materialize({
+                scope: appScope, hostId: "local",
+                assertRequestCurrent: () => {
+                  if (manager !== sourceManager || sourceManager.disposed)
+                    throw failure(409, "原生会话连接已变化，请重新提交目标");
+                },
+                draft: { objective: prompt, imageAttachments, pastedTextAttachments: [] }
+              });
+              submission.phase = "firstTurn";
+            }
+            const submittedPrompt = goalMode ? `/goal ${materialized.objective}` : prompt;
             startConversationSubmitted = true;
             const result = await manager.startConversation({
               input: [
-                ...(prompt ? [{ type: "text", text: prompt, text_elements: [] }] : []),
+                ...(submittedPrompt ? [{ type: "text", text: submittedPrompt, text_elements: [] }] : []),
                 ...remoteImageInputs(imageAttachments),
                 ...skills
               ],
@@ -2534,13 +3066,48 @@
                 projectAssignment: workspace.projectAssignment
               }),
               useAppServerPermissionDefault: true, mode: "default", threadStartKind: "default",
-              ...(payload.model ? {
+              ...(goalSettings || payload.model ? {
                 collaborationMode: {
                   mode: "default",
-                  settings: { model: String(payload.model), reasoning_effort: payload.reasoningEffort || null, developer_instructions: null }
+                  settings: { model: goalSettings?.model ?? String(payload.model),
+                    reasoning_effort: goalSettings ? goalSettings.effort : payload.reasoningEffort || null,
+                    developer_instructions: null }
                 }
               } : {})
             }, { readThreadCreationInputs: (params, mode) => provider.readCreationInputs(params, mode) });
+            if (goalMode) {
+              submission.threadId = typeof result.conversationId === "string" ? result.conversationId : null;
+              submission.firstTurnAccepted = result.status === "created" && result.firstTurn?.status === "accepted";
+              if (!submission.firstTurnAccepted) {
+                const unknown = result.status === "outcome-unknown" || result.firstTurn?.status === "outcome-unknown";
+                return {
+                  ...result, ok: false, threadId: submission.threadId, outcomeUnknown: unknown,
+                  code: 409,
+                  message: result.firstTurn?.message || "首条目标消息尚未确认送达，请查看已创建会话，不要重复新建",
+                  goalSubmission: { ...submission }
+                };
+              }
+              const id = requiredId(submission.threadId);
+              submission.phase = "goalSet";
+              if (goalSubmissions.has(id)) return goalSubmissionFailure(submission,
+                failure(409, "已创建会话的另一个目标提交正在处理，请查看原请求回执"));
+              goalSubmissions.set(id, submission);
+              try {
+                const goal = runtimeGoal(await sourceManager.setThreadGoal(id, {
+                  objective: materialized.objective, appendTranscriptItem: false
+                }));
+                if (!goal || goal.objective !== materialized.objective || goal.status !== "active")
+                  throw new Error("原生目标创建结果未确认");
+                submission.goalSet = "succeeded"; submission.phase = "complete";
+                return { ...result, ok: true, threadId: id, goal, goalSubmission: { ...submission } };
+              } catch (error) {
+                const unknown = !definiteGoalRejection(error);
+                submission.goalSet = unknown ? "unknown" : "failed";
+                return { ...result, ...goalSubmissionFailure(submission, error, unknown) };
+              } finally {
+                goalSubmissions.delete(id);
+              }
+            }
             const accepted = result.status === "created" && ["accepted", "not-requested"].includes(result.firstTurn?.status);
             return {
               ...result, ok: accepted, threadId: result.conversationId,
@@ -2548,6 +3115,10 @@
               ...(!accepted ? { code: 409, message: result.firstTurn?.message || `会话 ${result.conversationId || ""} 的首条消息未确认，请先查看会话，不要重复新建` } : {})
             };
           } catch (error) {
+            if (goalMode) {
+              if (!startConversationSubmitted) await cleanupUnsubmittedGoal(sourceManager, materialized);
+              return goalSubmissionFailure(submission, error, startConversationSubmitted);
+            }
             if (!startConversationSubmitted && !error?.remoteValidationFailure)
               throw failure(error?.code || 503, error?.message || "原生创建输入准备失败");
             throw error;
@@ -2653,11 +3224,15 @@
               await manager.replyWithMcpServerElicitationResponse(id, request.id, payload.response);
             } else throw failure(400, "此类询问请在 Codex 桌面处理");
           }
-          return { ok: true };
+          return { ok: true, ...blockingRequestsSnapshot(id) };
         }
         default: throw failure(404, "不支持的原生会话操作");
       }
     } catch (error) {
+      if (action === "setGoal" || action === "create" && payload?.goalMode === true) {
+        return goalSubmissionFailure(goalSubmission(action,
+          typeof payload?.threadId === "string" ? payload.threadId : null), error);
+      }
       if (["send", "create", "editMessage", "updateGoal"].includes(action) && !error.remoteValidationFailure) {
         return { ok: false, outcomeUnknown: true, code: 503, message: action === "updateGoal"
           ? "原生目标更新未确认完成，请检查会话，不要重复保存"
@@ -2667,7 +3242,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 34, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
+    version: 40, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
     dispose() {
       for (const dispose of unsubscribe) { try { dispose?.(); } catch {} }
       unsubscribe = [];

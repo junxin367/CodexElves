@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::io::{Cursor, Read, Write};
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::{Component, Path as FsPath, PathBuf, Prefix};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -34,7 +34,7 @@ use crate::settings::{RemoteAccessSettings, SettingsStore};
 mod credentials;
 mod service;
 mod zrok_tunnel;
-use credentials::{AccessKey, load_access_key};
+use credentials::{AccessKey, AccessKeyStore, lock_access_key_store};
 pub use credentials::{access_credentials_status, configure_access_key};
 pub use service::{ensure_running as ensure_service_running, run as run_service};
 use zrok_tunnel::ZrokTunnelService;
@@ -65,6 +65,8 @@ const WEB_ICON_512_PNG: &[u8] = include_bytes!("../../../assets/remote-access/ic
 const WEB_APPLE_TOUCH_ICON_PNG: &[u8] =
     include_bytes!("../../../assets/remote-access/icons/apple-touch-icon.png");
 const COOKIE_NAME: &str = "codex_elves_device";
+const DESKTOP_START_GUIDANCE: &str = "Codex 桌面尚未就绪。请在电脑端 CodexElves 管理器右上角点击「重启 Codex」，等待 Codex 主界面完全打开、能够正常查看会话后，再点击「启动公网」。";
+const DESKTOP_READ_GUIDANCE: &str = "暂时无法读取 Codex 桌面数据。若刚启动或重启 Codex，请等待主界面完全打开、能够正常查看会话后，再刷新远程网页；尚未启动时，请在电脑端 CodexElves 管理器右上角点击「重启 Codex」。";
 const MAX_DEVICES: usize = 32;
 const MAX_RECEIPTS: usize = 20_000;
 const MAX_REMOTE_IMAGES: usize = 1_024;
@@ -90,9 +92,23 @@ pub struct NativeCdpBridge;
 #[async_trait]
 impl NativeRemoteBridge for NativeCdpBridge {
     async fn call(&self, action: &str, payload: Value) -> anyhow::Result<Value> {
-        let status = crate::status::StatusStore::default()
-            .load_latest()?
-            .filter(|status| status.status == "running")
+        Self::call_with_status(
+            crate::status::StatusStore::default().load_latest()?,
+            action,
+            payload,
+        )
+        .await
+    }
+}
+
+impl NativeCdpBridge {
+    async fn call_with_status(
+        status: Option<crate::status::LaunchStatus>,
+        action: &str,
+        payload: Value,
+    ) -> anyhow::Result<Value> {
+        let status = status
+            .filter(|status| matches!(status.status.as_str(), "running" | "running_degraded"))
             .context("请先通过 CodexElves 启动 Codex 桌面应用")?;
         let port = status.debug_port.context("Codex 桌面连接不可用")?;
         let targets = crate::cdp::list_targets(port).await?;
@@ -161,7 +177,8 @@ struct Receipt {
 struct AuthState {
     devices: Vec<Device>,
     access_key: Option<AccessKey>,
-    login_attempts: HashMap<IpAddr, (u64, u8)>,
+    login_locked: bool,
+    login_storage_failed_for: Option<String>,
     receipts: HashMap<String, Receipt>,
 }
 
@@ -302,7 +319,12 @@ impl RemoteAccessController {
         state_dir: PathBuf,
     ) -> anyhow::Result<Arc<Self>> {
         let devices = read_json_or_default(&state_dir.join("remote-access-devices.json"))?;
-        let access_key = load_access_key(&state_dir)?;
+        let (access_key, login_locked) = {
+            let mut store = lock_access_key_store(&state_dir)?;
+            let key = store.load()?;
+            let locked = store.login_locked(key.as_ref())?;
+            (key, locked)
+        };
         let mut receipts: HashMap<String, Receipt> =
             read_json_or_default(&state_dir.join("remote-access-receipts.json"))?;
         let mut recovered = false;
@@ -331,6 +353,7 @@ impl RemoteAccessController {
             auth: Mutex::new(AuthState {
                 devices,
                 access_key,
+                login_locked,
                 receipts,
                 ..AuthState::default()
             }),
@@ -482,10 +505,12 @@ impl RemoteAccessController {
     }
 
     async fn save_devices(&self, state: &AuthState) -> anyhow::Result<()> {
-        crate::settings::atomic_write(
-            &self.state_dir.join("remote-access-devices.json"),
-            &serde_json::to_vec(&state.devices)?,
-        )
+        let path = self.state_dir.join("remote-access-devices.json");
+        let devices = state.devices.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::settings::atomic_write(&path, &serde_json::to_vec(&devices)?)
+        })
+        .await?
     }
 
     async fn save_receipts(&self, state: &AuthState) -> anyhow::Result<()> {
@@ -496,17 +521,41 @@ impl RemoteAccessController {
     }
 
     async fn reload_access_key(&self) -> anyhow::Result<bool> {
-        let key = load_access_key(&self.state_dir)?;
         let mut auth = self.auth.lock().await;
-        if auth.access_key != key {
+        let (_store, key, locked) = self.access_key_snapshot().await?;
+        self.sync_access_key(&mut auth, key, locked);
+        Ok(auth.access_key.is_some())
+    }
+
+    async fn access_key_snapshot(
+        &self,
+    ) -> anyhow::Result<(AccessKeyStore, Option<AccessKey>, bool)> {
+        let state_dir = self.state_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut store = lock_access_key_store(&state_dir)?;
+            let key = store.load()?;
+            let locked = store.login_locked(key.as_ref())?;
+            Ok((store, key, locked))
+        })
+        .await?
+    }
+
+    fn sync_access_key(&self, auth: &mut AuthState, key: Option<AccessKey>, locked: bool) {
+        let changed =
+            auth.access_key.as_ref().map(|key| &key.id) != key.as_ref().map(|key| &key.id);
+        if changed {
             auth.devices
                 .retain(|device| key.as_ref().is_some_and(|key| device.key_id == key.id));
-            auth.access_key = key;
+            auth.login_storage_failed_for = None;
             let _ = self
                 .events
                 .send(json!({"method":"remote/authorizationChanged"}));
         }
-        Ok(auth.access_key.is_some())
+        auth.login_locked = locked
+            || key
+                .as_ref()
+                .is_some_and(|key| auth.login_storage_failed_for.as_ref() == Some(&key.id));
+        auth.access_key = key;
     }
 
     async fn device_active(&self, id: &str) -> bool {
@@ -695,7 +744,8 @@ impl RemoteAccessController {
                 .filter(|device|auth.access_key.as_ref().is_some_and(|key|device.key_id==key.id))
                 .map(Device::public).collect::<Vec<_>>(),
             "settings":settings, "zrok":zrok,
-            "accessKeyConfigured":auth.access_key.is_some()
+            "accessKeyConfigured":auth.access_key.is_some(),
+            "loginLocked":auth.login_locked
         })
     }
 
@@ -724,6 +774,10 @@ impl RemoteAccessController {
                 anyhow::ensure!(
                     settings.enabled && self.running.load(Ordering::SeqCst),
                     "请先启用远程会话网页"
+                );
+                anyhow::ensure!(
+                    self.native_connected.load(Ordering::SeqCst),
+                    DESKTOP_START_GUIDANCE
                 );
                 let token = payload["token"].as_str();
                 let fixed_name = payload["fixedName"].as_str().context("缺少固定公网名称")?;
@@ -977,7 +1031,6 @@ struct WebState {
 #[derive(Clone, Copy, Default)]
 struct RequestTrustContext {
     external_https: bool,
-    effective_ip: Option<IpAddr>,
 }
 
 struct StaticWebAsset {
@@ -1358,6 +1411,7 @@ pub fn web_router(
         .route("/icons/icon-192.png", get(static_web_asset))
         .route("/icons/icon-512.png", get(static_web_asset))
         .route("/icons/apple-touch-icon.png", get(static_web_asset))
+        .route("/api/login-status", get(login_status))
         .route("/api/connect", post(connect))
         .route("/api/session", get(session))
         .route("/api/logout", post(logout))
@@ -1464,21 +1518,9 @@ async fn access_boundary(
     if origin.is_some_and(|origin| origin != request_origin) {
         return ApiError::new(403, "请求来源与访问地址不一致").into_response();
     }
-    let peer = request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(peer)| *peer);
-    let effective_ip = if external_https && peer.is_some_and(|peer| peer.ip().is_loopback()) {
-        forwarded_header_ip(request.headers(), "x-forwarded-for")
-            .or_else(|| single_header_ip(request.headers(), "x-real-ip"))
-            .or_else(|| single_header_ip(request.headers(), "cf-connecting-ip"))
-    } else {
-        None
-    };
-    request.extensions_mut().insert(RequestTrustContext {
-        external_https,
-        effective_ip,
-    });
+    request
+        .extensions_mut()
+        .insert(RequestTrustContext { external_https });
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(
@@ -1520,7 +1562,7 @@ async fn authorized(state: &WebState, headers: &HeaderMap) -> Result<Device, Api
 
 async fn connect(
     State(state): State<WebState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     Extension(trust): Extension<RequestTrustContext>,
     headers: HeaderMap,
     Json(payload): Json<Value>,
@@ -1537,25 +1579,17 @@ async fn connect(
             "请填写 8–256 个非空格 ASCII 字符的访问密钥",
         ));
     }
-    state
-        .controller
-        .reload_access_key()
-        .await
-        .map_err(|_| ApiError::new(503, "访问密钥无法读取，请在本机管理器检查"))?;
-    let ip = trust.effective_ip.unwrap_or_else(|| peer.ip());
     let key = {
         let mut auth = state.controller.auth.lock().await;
-        let now = now_ms();
-        auth.login_attempts
-            .retain(|_, (start, _)| now.saturating_sub(*start) < 60_000);
-        if auth.login_attempts.len() >= 1024 && !auth.login_attempts.contains_key(&ip) {
-            return Err(ApiError::new(429, "连接尝试过多，请稍后再试"));
+        let (_store, key, locked) = state
+            .controller
+            .access_key_snapshot()
+            .await
+            .map_err(|_| ApiError::new(503, "访问密钥无法读取，请在本机管理器检查"))?;
+        state.controller.sync_access_key(&mut auth, key, locked);
+        if auth.login_locked {
+            return Err(login_locked_error());
         }
-        let attempt = auth.login_attempts.entry(ip).or_insert((now, 0));
-        if attempt.1 >= 8 {
-            return Err(ApiError::new(429, "密钥尝试过多，请一分钟后再试"));
-        }
-        attempt.1 += 1;
         auth.access_key
             .clone()
             .ok_or_else(|| ApiError::new(503, "本机尚未设置访问密钥"))?
@@ -1568,24 +1602,95 @@ async fn connect(
         .clone()
         .try_acquire_owned()
         .map_err(|_| ApiError::new(429, "连接验证繁忙，请稍后再试"))?;
-    let valid = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        checked_key.verify(&candidate)
+    // Dropping an HTTP request must not discard an already running verification.
+    tokio::spawn(async move {
+        let valid = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            checked_key.verify(&candidate)
+        })
+        .await
+        .map_err(|_| ApiError::new(503, "无法验证访问密钥，请稍后再试"))?;
+        complete_login(state, key, valid, headers, trust).await
     })
     .await
-    .map_err(|_| ApiError::new(503, "无法验证访问密钥，请稍后再试"))?;
-    if !valid {
-        return Err(ApiError::new(401, "访问密钥不正确"));
-    }
-    if !state.controller.running.load(Ordering::SeqCst)
-        || load_access_key(&state.controller.state_dir)
-            .ok()
-            .flatten()
-            .is_none_or(|current| current != key)
-    {
-        return Err(ApiError::new(401, "访问密钥刚被更换，请使用新密钥"));
-    }
+    .map_err(|_| ApiError::new(503, "无法完成访问密钥验证，请稍后再试"))?
+}
+
+fn login_locked_error() -> ApiError {
+    ApiError::new(
+        423,
+        "访问密钥连续输错超过 3 次，登录已锁定，请在本机管理器重新生成并保存新密钥",
+    )
+}
+
+async fn login_status(State(state): State<WebState>) -> Result<Json<Value>, ApiError> {
     let mut auth = state.controller.auth.lock().await;
+    let (_store, key, locked) = state
+        .controller
+        .access_key_snapshot()
+        .await
+        .map_err(|_| ApiError::new(503, "登录状态无法读取，请在本机管理器检查"))?;
+    state.controller.sync_access_key(&mut auth, key, locked);
+    Ok(Json(json!({"ok":true,"loginLocked":auth.login_locked})))
+}
+
+async fn persist_login_result(
+    mut store: AccessKeyStore,
+    mut key: AccessKey,
+    valid: bool,
+) -> anyhow::Result<(AccessKeyStore, AccessKey)> {
+    tokio::task::spawn_blocking(move || {
+        store.record_login_result(&mut key, valid)?;
+        Ok((store, key))
+    })
+    .await?
+}
+
+async fn complete_login(
+    state: WebState,
+    verified_key: AccessKey,
+    valid: bool,
+    headers: HeaderMap,
+    trust: RequestTrustContext,
+) -> Result<Response, ApiError> {
+    // Every controller path takes auth before the file lock. Keep both until the
+    // outcome and any device authorization are committed, including key rotation.
+    let mut auth = state.controller.auth.lock().await;
+    let (store, key, locked) = state
+        .controller
+        .access_key_snapshot()
+        .await
+        .map_err(|_| ApiError::new(503, "访问密钥无法读取，请在本机管理器检查"))?;
+    state.controller.sync_access_key(&mut auth, key, locked);
+    let key = auth
+        .access_key
+        .clone()
+        .filter(|key| key.id == verified_key.id)
+        .ok_or_else(|| ApiError::new(401, "访问密钥刚被更换，请使用新密钥"))?;
+    if !state.controller.running.load(Ordering::SeqCst) {
+        return Err(ApiError::new(503, "服务已关闭"));
+    }
+    if auth.login_locked {
+        return Err(login_locked_error());
+    }
+    if !valid {
+        let key_id = key.id.clone();
+        let (_store, key) = persist_login_result(store, key, false).await.map_err(|_| {
+            auth.login_locked = true;
+            auth.login_storage_failed_for = Some(key_id);
+            ApiError::new(
+                503,
+                "登录状态保存失败，已拒绝新登录，请在本机管理器重新生成密钥",
+            )
+        })?;
+        auth.login_locked = key.login_locked();
+        auth.access_key = Some(key);
+        return Err(if auth.login_locked {
+            login_locked_error()
+        } else {
+            ApiError::new(401, "访问密钥不正确")
+        });
+    }
     auth.devices
         .retain(|device| device.expires_at_ms > now_ms() && device.key_id == key.id);
     if auth.devices.len() >= MAX_DEVICES {
@@ -1607,7 +1712,7 @@ async fn connect(
         created_at_ms: now_ms(),
         expires_at_ms,
         last_seen_at_ms: now_ms(),
-        key_id: key.id,
+        key_id: key.id.clone(),
         public_origin: if trust.external_https {
             state.controller.public_origin()
         } else {
@@ -1619,6 +1724,22 @@ async fn connect(
         auth.devices.pop();
         return Err(ApiError::new(503, "设备授权保存失败"));
     }
+    let key_id = key.id.clone();
+    let (_store, key) = match persist_login_result(store, key, true).await {
+        Ok(result) => result,
+        Err(_) => {
+            auth.devices.pop();
+            let _ = state.controller.save_devices(&auth).await;
+            auth.login_locked = true;
+            auth.login_storage_failed_for = Some(key_id);
+            return Err(ApiError::new(
+                503,
+                "登录状态保存失败，已拒绝新登录，请在本机管理器重新生成密钥",
+            ));
+        }
+    };
+    auth.access_key = Some(key);
+    auth.login_locked = false;
     let secure = trust.external_https;
     let cookie = format!(
         "{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age_seconds}{}",
@@ -1639,7 +1760,7 @@ async fn session(
     Ok(Json(
         json!({"ok":true,"device":device.public(),"nativeConnected":state.controller.native_connected.load(Ordering::SeqCst),
         "readOnly":state.settings.read_only,"allowApprovals":state.settings.allow_approvals,
-        "capabilities":{"imageInput":true,"queuedImageRemoval":true,"queuedImageEditing":true,"queueEditRecovery":true,"queueSendRecovery":true,"projectlessCreation":true,"promptOptimization":true,"messageEditModelSettings":true}}),
+        "capabilities":{"imageInput":true,"queuedImageRemoval":true,"queuedImageEditing":true,"queueEditRecovery":true,"queueSendRecovery":true,"projectlessCreation":true,"promptOptimization":true,"messageEditModelSettings":true,"goalComposer":true}}),
     ))
 }
 
@@ -1707,7 +1828,7 @@ async fn read(
                     "error": format!("{error:#}")
                 }),
             );
-            ApiError::new(503, "Codex 桌面读取失败，请稍后重试或在本机检查")
+            ApiError::new(503, DESKTOP_READ_GUIDANCE)
         })?;
     let mut value = native_result(value)?;
     if action == "history" {
@@ -1772,6 +1893,114 @@ fn validate_prompt_optimization_payload(payload: &Value) -> Result<(), ApiError>
     Ok(())
 }
 
+fn validate_goal_composer_payload(action: &str, payload: &Value) -> Result<(), ApiError> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| ApiError::new(400, "目标提交参数无效"))?;
+    if object
+        .get("goalMode")
+        .is_some_and(|mode| !mode.is_boolean())
+    {
+        return Err(ApiError::new(400, "目标模式参数无效"));
+    }
+    let goal_mode = object.get("goalMode") == Some(&Value::Bool(true));
+    if action == "send" && goal_mode {
+        return Err(ApiError::new(400, "目标必须通过目标提交入口发送"));
+    }
+    if action != "setGoal" && !(action == "create" && goal_mode) {
+        return Ok(());
+    }
+    if !goal_mode {
+        return Err(ApiError::new(400, "目标提交需要启用目标模式"));
+    }
+    let target_field = if action == "setGoal" {
+        "threadId"
+    } else {
+        "projectId"
+    };
+    if object.keys().any(|key| {
+        ![
+            target_field,
+            "prompt",
+            "goalMode",
+            "skills",
+            "images",
+            "model",
+            "reasoningEffort",
+        ]
+        .contains(&key.as_str())
+    }) {
+        return Err(ApiError::new(400, "目标提交包含不支持的字段"));
+    }
+    let valid_id = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 120
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    };
+    if action == "setGoal" {
+        if object
+            .get("threadId")
+            .and_then(Value::as_str)
+            .is_none_or(|id| !valid_id(id))
+        {
+            return Err(ApiError::new(400, "会话 ID 无效"));
+        }
+    } else if object.get("projectId").is_some_and(|value| {
+        !value.is_null()
+            && value
+                .as_str()
+                .is_none_or(|id| !id.is_empty() && !valid_id(id))
+    }) {
+        return Err(ApiError::new(400, "项目 ID 无效"));
+    }
+    validate_input_images(payload)?;
+    let has_images = object
+        .get("images")
+        .and_then(Value::as_array)
+        .is_some_and(|images| !images.is_empty());
+    if object
+        .get("prompt")
+        .and_then(Value::as_str)
+        .is_none_or(|prompt| prompt.len() > 128 * 1024 || prompt.trim().is_empty() && !has_images)
+    {
+        return Err(ApiError::new(400, "目标不能为空或超过 128 KiB"));
+    }
+    if object.get("skills").is_some_and(|skills| {
+        skills.as_array().is_none_or(|skills| {
+            skills.len() > 16
+                || skills.iter().any(|skill| {
+                    skill.as_object().is_none_or(|object| {
+                        object
+                            .keys()
+                            .any(|key| !["name", "path"].contains(&key.as_str()))
+                            || object
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .is_none_or(|name| name.is_empty() || name.len() > 256)
+                            || object
+                                .get("path")
+                                .and_then(Value::as_str)
+                                .is_none_or(|path| path.is_empty() || path.len() > 4096)
+                    })
+                })
+        })
+    }) {
+        return Err(ApiError::new(400, "Skill 选择无效，最多选择 16 项"));
+    }
+    for (field, limit) in [("model", 256), ("reasoningEffort", 32)] {
+        if object.get(field).is_some_and(|value| {
+            value
+                .as_str()
+                .is_none_or(|text| text.trim().is_empty() || text.len() > limit)
+        }) {
+            return Err(ApiError::new(400, "目标模型或思考深度无效"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_goal_update_payload(payload: &Value) -> Result<(), ApiError> {
     let object = payload
         .as_object()
@@ -1827,6 +2056,21 @@ fn validate_goal_update_payload(payload: &Value) -> Result<(), ApiError> {
         Some("active" | "paused" | "blocked" | "budgetLimited" | "usageLimited")
     ) {
         return Err(ApiError::new(400, "目标编辑基线无效"));
+    }
+    Ok(())
+}
+
+fn validate_delete_thread_payload(payload: &Value) -> Result<(), ApiError> {
+    let object = payload
+        .as_object()
+        .filter(|object| object.len() == 1 && object.contains_key("threadId"))
+        .ok_or_else(|| ApiError::new(400, "永久删除参数只允许包含 threadId"))?;
+    let thread_id = object
+        .get("threadId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::new(400, "永久删除需要已创建完成的本机会话 ID"))?;
+    if thread_id.len() != 36 || uuid::Uuid::parse_str(thread_id).is_err() {
+        return Err(ApiError::new(400, "永久删除需要已创建完成的本机会话 ID"));
     }
     Ok(())
 }
@@ -2112,9 +2356,11 @@ async fn action(
             | "steerQueued"
             | "editMessage"
             | "updateGoal"
+            | "setGoal"
             | "create"
             | "pinProject"
             | "pinThread"
+            | "deleteThread"
             | "sort"
             | "rename"
             | "approve"
@@ -2125,8 +2371,14 @@ async fn action(
     if matches!(action.as_str(), "approve" | "answer") && !state.settings.allow_approvals {
         return Err(ApiError::new(403, "远程审批与询问回答已关闭，请在桌面处理"));
     }
+    if matches!(action.as_str(), "send" | "create" | "setGoal") {
+        validate_goal_composer_payload(&action, &payload)?;
+    }
     if action == "updateGoal" {
         validate_goal_update_payload(&payload)?;
+    }
+    if action == "deleteThread" {
+        validate_delete_thread_payload(&payload)?;
     }
     if matches!(
         action.as_str(),
@@ -2151,6 +2403,7 @@ async fn action(
         return Err(ApiError::new(400, "消息不能为空或超过 128 KiB"));
     }
     if matches!(action.as_str(), "send" | "create")
+        && payload["goalMode"] != true
         && payload.get("skills").is_some_and(|skills| {
             skills.as_array().is_none_or(|skills| {
                 skills.len() > 16
@@ -2167,7 +2420,7 @@ async fn action(
     {
         return Err(ApiError::new(400, "Skill 选择无效，最多选择 16 项"));
     }
-    if matches!(action.as_str(), "send" | "create") {
+    if matches!(action.as_str(), "send" | "create") && payload["goalMode"] != true {
         validate_input_images(&payload)?;
     }
     let id = headers
@@ -2939,31 +3192,6 @@ fn origin_matches_host(origin: &str, host: &str) -> bool {
     authority.eq_ignore_ascii_case(host)
 }
 
-fn single_header_ip(headers: &HeaderMap, name: &'static str) -> Option<IpAddr> {
-    let mut values = headers.get_all(name).iter();
-    let value = values.next()?;
-    if values.next().is_some() {
-        return None;
-    }
-    value.to_str().ok()?.parse().ok()
-}
-
-fn forwarded_header_ip(headers: &HeaderMap, name: &'static str) -> Option<IpAddr> {
-    let mut values = headers.get_all(name).iter();
-    let value = values.next()?;
-    if values.next().is_some() {
-        return None;
-    }
-    value
-        .to_str()
-        .ok()?
-        .split(',')
-        .next_back()?
-        .trim()
-        .parse()
-        .ok()
-}
-
 fn read_json_or_default<T: serde::de::DeserializeOwned + Default>(
     path: &std::path::Path,
 ) -> anyhow::Result<T> {
@@ -3000,6 +3228,469 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn recovered_desktop_remains_readable_with_degraded_launch_status() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new()
+            .route(
+                "/json",
+                get(move || async move {
+                    Json(json!([{
+                        "id":"desktop", "type":"page", "url":"app://-/index.html",
+                        "webSocketDebuggerUrl":format!("ws://127.0.0.1:{port}/desktop")
+                    }]))
+                }),
+            )
+            .route(
+                "/desktop",
+                get(|upgrade: WebSocketUpgrade| async move {
+                    upgrade.on_upgrade(|mut socket| async move {
+                        let request = socket.recv().await.unwrap().unwrap();
+                        let request: Value = serde_json::from_str(request.to_text().unwrap()).unwrap();
+                        assert_eq!(request["method"], "Runtime.evaluate");
+                        assert!(request["params"]["expression"].as_str().unwrap().contains(
+                            "window.__codexElvesRemoteAccess.call(\"models\", {})"
+                        ));
+                        socket.send(WebSocketMessage::Text(json!({
+                            "id":request["id"],
+                            "result":{"result":{"value":{"ok":true,"data":[{"id":"recovered-model"}]}}}
+                        }).to_string().into())).await.unwrap();
+                    })
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let status = crate::status::LaunchStatus {
+            status: "running_degraded".to_owned(),
+            message: "Waiting for injection".to_owned(),
+            started_at_ms: 123,
+            debug_port: Some(port),
+            helper_port: Some(45221),
+            lan_proxy_listening: false,
+            codex_app: None,
+        };
+        let response = NativeCdpBridge::call_with_status(Some(status.clone()), "models", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(response["data"][0]["id"], "recovered-model");
+        let failed = crate::status::LaunchStatus {
+            status: "failed".to_owned(),
+            ..status
+        };
+        assert!(
+            NativeCdpBridge::call_with_status(Some(failed), "models", json!({}))
+                .await
+                .is_err()
+        );
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[test]
+    fn delete_thread_payload_requires_a_single_real_thread_uuid() {
+        assert!(
+            validate_delete_thread_payload(
+                &json!({"threadId":"01234567-89ab-4cde-8123-456789abcdef"})
+            )
+            .is_ok()
+        );
+        for payload in [
+            Value::Null,
+            json!([]),
+            json!({}),
+            json!({"threadId":42}),
+            json!({"threadId":"client-new-thread-1"}),
+            json!({"threadId":"local:01234567-89ab-4cde-8123-456789abcdef"}),
+            json!({"threadId":"cloud:01234567-89ab-4cde-8123-456789abcdef"}),
+            json!({"threadId":"0123456789ab4cde8123456789abcdef"}),
+            json!({"threadId":"01234567-89ab-4cde-8123-456789abcdef","hostId":"local"}),
+            json!({"threadId":"01234567-89ab-4cde-8123-456789abcdef","force":true}),
+        ] {
+            assert_eq!(
+                validate_delete_thread_payload(&payload).unwrap_err().code,
+                400
+            );
+        }
+    }
+
+    struct RecordingActionBridge {
+        calls: Mutex<Vec<(String, Value)>>,
+        result: Mutex<Value>,
+    }
+
+    #[async_trait::async_trait]
+    impl NativeRemoteBridge for RecordingActionBridge {
+        async fn call(&self, action: &str, payload: Value) -> anyhow::Result<Value> {
+            self.calls.lock().await.push((action.to_string(), payload));
+            Ok(self.result.lock().await.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_thread_action_preserves_auth_read_only_and_idempotency() {
+        let temp_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp");
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let state_dir = tempfile::Builder::new()
+            .prefix("delete-route-")
+            .tempdir_in(temp_root)
+            .unwrap();
+        configure_access_key(state_dir.path(), "delete-test-key").unwrap();
+        let thread_id = "01234567-89ab-4cde-8123-456789abcdef";
+        let native = Arc::new(RecordingActionBridge {
+            calls: Mutex::new(Vec::new()),
+            result: Mutex::new(
+                json!({"ok":true,"threadId":thread_id,"deleted":true,"status":"local_deleted"}),
+            ),
+        });
+        let controller =
+            RemoteAccessController::new(native.clone(), state_dir.path().to_path_buf()).unwrap();
+        controller.running.store(true, Ordering::SeqCst);
+        {
+            let mut auth = controller.auth.lock().await;
+            let key_id = auth.access_key.as_ref().unwrap().id.clone();
+            auth.devices.push(Device {
+                id: "test-device".into(),
+                name: "隔离删除测试".into(),
+                token_hash: hash("test-cookie"),
+                created_at_ms: now_ms(),
+                expires_at_ms: now_ms() + 60_000,
+                last_seen_at_ms: now_ms(),
+                key_id,
+                public_origin: None,
+            });
+        }
+        let state = WebState {
+            controller: controller.clone(),
+            settings: RemoteAccessSettings::default(),
+        };
+        let payload = json!({"threadId":thread_id});
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("codex_elves_device=test-cookie"),
+        );
+        headers.insert("idempotency-key", HeaderValue::from_static("delete-1"));
+        let invoke = |state, headers, payload| {
+            action(
+                State(state),
+                Path("deleteThread".to_string()),
+                headers,
+                Json(payload),
+            )
+        };
+        assert_eq!(
+            invoke(state.clone(), HeaderMap::new(), payload.clone())
+                .await
+                .unwrap_err()
+                .code,
+            401
+        );
+        let mut read_only = state.clone();
+        read_only.settings.read_only = true;
+        assert_eq!(
+            invoke(read_only, headers.clone(), payload.clone())
+                .await
+                .unwrap_err()
+                .code,
+            403
+        );
+        assert_eq!(
+            invoke(
+                state.clone(),
+                headers.clone(),
+                json!({"threadId":"client-new-thread-1"})
+            )
+            .await
+            .unwrap_err()
+            .code,
+            400
+        );
+        let mut no_id = headers.clone();
+        no_id.remove("idempotency-key");
+        assert_eq!(
+            invoke(state.clone(), no_id, payload.clone())
+                .await
+                .unwrap_err()
+                .code,
+            400
+        );
+        assert!(native.calls.lock().await.is_empty());
+        let first = invoke(state.clone(), headers.clone(), payload.clone())
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(first["state"], "completed");
+        assert_eq!(first["result"]["deleted"], true);
+        assert_eq!(
+            invoke(state.clone(), headers.clone(), payload.clone())
+                .await
+                .unwrap()
+                .0,
+            first
+        );
+        assert_eq!(
+            invoke(
+                state.clone(),
+                headers.clone(),
+                json!({"threadId":"fedcba98-7654-4321-8abc-0123456789ab"})
+            )
+            .await
+            .unwrap_err()
+            .code,
+            409
+        );
+        assert_eq!(
+            *native.calls.lock().await,
+            vec![("deleteThread".to_string(), payload.clone())]
+        );
+        *native.result.lock().await =
+            json!({"ok":false,"threadId":thread_id,"outcomeUnknown":true});
+        headers.insert("idempotency-key", HeaderValue::from_static("delete-2"));
+        let unknown = invoke(state.clone(), headers.clone(), payload.clone())
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(unknown["state"], "unknown");
+        assert_eq!(
+            invoke(state.clone(), headers.clone(), payload.clone())
+                .await
+                .unwrap()
+                .0,
+            unknown
+        );
+        assert_eq!(native.calls.lock().await.len(), 2);
+        *native.result.lock().await = json!({"ok":true,"threadId":thread_id,"deleted":true,"status":"partial","message":"mock 最近列表更新失败"});
+        headers.insert("idempotency-key", HeaderValue::from_static("delete-3"));
+        let partial = invoke(state.clone(), headers.clone(), payload.clone())
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(partial["state"], "completed");
+        assert_eq!(partial["result"]["status"], "partial");
+        controller.auth.lock().await.devices.clear();
+        assert_eq!(invoke(state, headers, payload).await.unwrap_err().code, 401);
+        assert_eq!(native.calls.lock().await.len(), 3);
+    }
+
+    #[test]
+    fn goal_composer_payload_requires_explicit_mode_and_validated_inputs() {
+        let payload = json!({
+            "threadId":"existing-thread","prompt":"前文 [$example](C:/skills/example/SKILL.md) 后文",
+            "goalMode":true,"model":"test-model","reasoningEffort":"xhigh",
+            "skills":[{"name":"example","path":"C:/skills/example/SKILL.md"}]
+        });
+        assert!(validate_goal_composer_payload("setGoal", &payload).is_ok());
+        assert!(
+            validate_goal_composer_payload(
+                "create",
+                &json!({"projectId":null,"prompt":"新目标","goalMode":true})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_goal_composer_payload(
+                "create",
+                &json!({"prompt":"普通消息","goalMode":false})
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate_goal_composer_payload("send", &payload)
+                .unwrap_err()
+                .code,
+            400
+        );
+        for (field, value) in [
+            ("goalMode", json!("true")),
+            ("goalMode", Value::Null),
+            ("goalMode", json!(false)),
+            ("threadId", json!("local:other-thread")),
+            ("prompt", json!(" ")),
+            ("status", json!("active")),
+            ("tokenBudget", json!(600_000)),
+            ("directoryPath", json!("C:/private")),
+            ("model", json!(12)),
+            ("reasoningEffort", json!("")),
+            (
+                "skills",
+                json!([{"name":"example","path":"C:/skill.md","content":"unsafe"}]),
+            ),
+            (
+                "images",
+                json!([{"name":"sample.png","localPath":"C:/private.png"}]),
+            ),
+        ] {
+            let mut invalid = payload.clone();
+            invalid[field] = value;
+            assert_eq!(
+                validate_goal_composer_payload("setGoal", &invalid)
+                    .unwrap_err()
+                    .code,
+                400,
+                "field: {field}"
+            );
+        }
+        let mut image_bytes = Cursor::new(Vec::new());
+        image::RgbaImage::new(1, 1)
+            .write_to(&mut image_bytes, ImageFormat::Png)
+            .unwrap();
+        let bytes = image_bytes.into_inner();
+        let image = json!({"name":"sample.png","mime":"image/png","size":bytes.len(),
+            "dataUrl":format!("data:image/png;base64,{}",STANDARD.encode(bytes))});
+        let mut images_only =
+            json!({"threadId":"existing-thread","goalMode":true,"prompt":"","images":[image]});
+        assert!(validate_goal_composer_payload("setGoal", &images_only).is_ok());
+        images_only["images"][0]["size"] = json!(1);
+        assert_eq!(
+            validate_goal_composer_payload("setGoal", &images_only)
+                .unwrap_err()
+                .code,
+            400
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_composer_actions_preserve_auth_read_only_and_idempotent_phase_receipts() {
+        let temp_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp");
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("goal-composer-route-")
+            .tempdir_in(temp_root)
+            .unwrap();
+        configure_access_key(directory.path(), "isolated-goal-key").unwrap();
+        let native = Arc::new(RecordingActionBridge {
+            calls: Mutex::new(Vec::new()),
+            result: Mutex::new(json!({
+                "ok":true,"threadId":"existing-thread",
+                "goalSubmission":{"action":"setGoal","phase":"complete","threadId":"existing-thread",
+                    "firstTurnAccepted":false,"goalSet":"succeeded"}
+            })),
+        });
+        let controller =
+            RemoteAccessController::new(native.clone(), directory.path().to_path_buf()).unwrap();
+        controller.running.store(true, Ordering::SeqCst);
+        {
+            let mut auth = controller.auth.lock().await;
+            let key_id = auth.access_key.as_ref().unwrap().id.clone();
+            auth.devices.push(Device {
+                id: "goal-test-device".into(),
+                name: "隔离目标测试".into(),
+                token_hash: hash("goal-test-cookie"),
+                created_at_ms: now_ms(),
+                expires_at_ms: now_ms() + 60_000,
+                last_seen_at_ms: now_ms(),
+                key_id,
+                public_origin: None,
+            });
+        }
+        let state = WebState {
+            controller: controller.clone(),
+            settings: RemoteAccessSettings::default(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("codex_elves_device=goal-test-cookie"),
+        );
+        headers.insert("idempotency-key", HeaderValue::from_static("goal-1"));
+        let payload = json!({"threadId":"existing-thread","prompt":"完成目标","goalMode":true});
+        let invoke = |state, action_name: &str, headers, payload| {
+            action(
+                State(state),
+                Path(action_name.to_string()),
+                headers,
+                Json(payload),
+            )
+        };
+        assert_eq!(
+            invoke(state.clone(), "setGoal", HeaderMap::new(), payload.clone())
+                .await
+                .unwrap_err()
+                .code,
+            401
+        );
+        let mut read_only = state.clone();
+        read_only.settings.read_only = true;
+        assert_eq!(
+            invoke(read_only, "setGoal", headers.clone(), payload.clone())
+                .await
+                .unwrap_err()
+                .code,
+            403
+        );
+        assert_eq!(
+            invoke(state.clone(), "send", headers.clone(), payload.clone())
+                .await
+                .unwrap_err()
+                .code,
+            400
+        );
+        let mut no_id = headers.clone();
+        no_id.remove("idempotency-key");
+        assert_eq!(
+            invoke(state.clone(), "setGoal", no_id, payload.clone())
+                .await
+                .unwrap_err()
+                .code,
+            400
+        );
+        assert!(native.calls.lock().await.is_empty());
+        let capabilities = session(State(state.clone()), headers.clone())
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(capabilities["capabilities"]["goalComposer"], true);
+        let completed = invoke(state.clone(), "setGoal", headers.clone(), payload.clone())
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(completed["state"], "completed");
+        assert_eq!(
+            invoke(state.clone(), "setGoal", headers.clone(), payload.clone())
+                .await
+                .unwrap()
+                .0,
+            completed
+        );
+        let mut changed = payload.clone();
+        changed["prompt"] = json!("另一个目标");
+        assert_eq!(
+            invoke(state.clone(), "setGoal", headers.clone(), changed)
+                .await
+                .unwrap_err()
+                .code,
+            409
+        );
+        assert_eq!(native.calls.lock().await.len(), 1);
+        let unknown = json!({
+            "ok":false,"outcomeUnknown":true,"threadId":"new-thread",
+            "goalSubmission":{"action":"create","phase":"goalSet","threadId":"new-thread",
+                "firstTurnAccepted":true,"goalSet":"unknown"}
+        });
+        *native.result.lock().await = unknown.clone();
+        headers.insert("idempotency-key", HeaderValue::from_static("goal-2"));
+        let creating = json!({"projectId":"project1","prompt":"新目标","goalMode":true});
+        let first = invoke(state.clone(), "create", headers.clone(), creating.clone())
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(first["state"], "unknown");
+        assert_eq!(first["result"], unknown);
+        assert_eq!(
+            invoke(state.clone(), "create", headers.clone(), creating)
+                .await
+                .unwrap()
+                .0,
+            first
+        );
+        let reread = receipt(State(state), Path("goal-2".to_owned()), headers)
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(reread, first);
+        assert_eq!(native.calls.lock().await.len(), 2);
+    }
+
     struct OfflineNativeBridge;
 
     #[async_trait::async_trait]
@@ -3007,6 +3698,566 @@ mod tests {
         async fn call(&self, _action: &str, _payload: Value) -> anyhow::Result<Value> {
             anyhow::bail!("native bridge unavailable during test")
         }
+    }
+
+    const LOGIN_TEST_KEY: &str = "isolated-login-key";
+
+    fn login_lock_test_state() -> (tempfile::TempDir, WebState) {
+        let temp_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp");
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("remote-login-lock-")
+            .tempdir_in(temp_root)
+            .unwrap();
+        configure_access_key(directory.path(), LOGIN_TEST_KEY).unwrap();
+        let state = reopened_login_lock_state(directory.path());
+        (directory, state)
+    }
+
+    fn reopened_login_lock_state(directory: &std::path::Path) -> WebState {
+        let controller =
+            RemoteAccessController::new(Arc::new(OfflineNativeBridge), directory.to_path_buf())
+                .unwrap();
+        controller.running.store(true, Ordering::SeqCst);
+        WebState {
+            controller,
+            settings: RemoteAccessSettings::default(),
+        }
+    }
+
+    async fn login_lock_attempt(
+        state: &WebState,
+        candidate: &str,
+        peer: &str,
+    ) -> Result<Response, ApiError> {
+        connect(
+            State(state.clone()),
+            ConnectInfo(peer.parse().unwrap()),
+            Extension(RequestTrustContext::default()),
+            HeaderMap::new(),
+            Json(json!({"key":candidate})),
+        )
+        .await
+    }
+
+    fn login_failure_count(directory: &std::path::Path) -> u64 {
+        let record: Value = serde_json::from_slice(
+            &std::fs::read(directory.join("remote-access-key.json")).unwrap(),
+        )
+        .unwrap();
+        record["login_failures"].as_u64().unwrap()
+    }
+
+    fn login_cookie(response: &Response) -> String {
+        response.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn login_lock_is_global_at_four_failures_and_skips_non_key_errors() {
+        let (directory, state) = login_lock_test_state();
+        assert_eq!(
+            login_lock_attempt(&state, "short", "192.0.2.1:1000")
+                .await
+                .unwrap_err()
+                .code,
+            400
+        );
+        state.controller.running.store(false, Ordering::SeqCst);
+        assert_eq!(
+            login_lock_attempt(&state, LOGIN_TEST_KEY, "192.0.2.1:1000")
+                .await
+                .unwrap_err()
+                .code,
+            503
+        );
+        state.controller.running.store(true, Ordering::SeqCst);
+        let busy = state
+            .controller
+            .key_checks
+            .clone()
+            .acquire_many_owned(4)
+            .await
+            .unwrap();
+        assert_eq!(
+            login_lock_attempt(&state, "wrong-login-key", "192.0.2.1:1000")
+                .await
+                .unwrap_err()
+                .code,
+            429
+        );
+        drop(busy);
+        assert_eq!(login_failure_count(directory.path()), 0);
+        for (index, peer) in [
+            "192.0.2.1:1000",
+            "192.0.2.2:2000",
+            "[2001:db8::1]:3000",
+            "198.51.100.1:4000",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let error = login_lock_attempt(&state, "wrong-login-key", peer)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, if index == 3 { 423 } else { 401 });
+            assert!(
+                error
+                    .into_response()
+                    .headers()
+                    .get(header::SET_COOKIE)
+                    .is_none()
+            );
+            assert_eq!(login_failure_count(directory.path()), index as u64 + 1);
+            assert_eq!(
+                login_status(State(state.clone())).await.unwrap().0["loginLocked"],
+                index == 3
+            );
+        }
+        assert_eq!(
+            login_lock_attempt(&state, LOGIN_TEST_KEY, "203.0.113.5:5000")
+                .await
+                .unwrap_err()
+                .code,
+            423
+        );
+        assert_eq!(login_failure_count(directory.path()), 4);
+        assert!(state.controller.auth.lock().await.devices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn login_lock_success_resets_counter_and_preserves_existing_device() {
+        let (directory, state) = login_lock_test_state();
+        let mut authorization_events = state.controller.events.subscribe();
+        for _ in 0..3 {
+            assert_eq!(
+                login_lock_attempt(&state, "wrong-login-key", "192.0.2.1:1000")
+                    .await
+                    .unwrap_err()
+                    .code,
+                401
+            );
+        }
+        let response = login_lock_attempt(&state, LOGIN_TEST_KEY, "192.0.2.1:1000")
+            .await
+            .unwrap();
+        let cookie = login_cookie(&response);
+        assert_eq!(login_failure_count(directory.path()), 0);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
+        for index in 0..4 {
+            let error = login_lock_attempt(&state, "wrong-login-key", "192.0.2.2:2000")
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, if index == 3 { 423 } else { 401 });
+            assert!(state.controller.authorize(&headers).await.is_some());
+        }
+        assert!(authorization_events.try_recv().is_err());
+        let status = state.controller.admin_status(&state.settings).await;
+        assert_eq!(status["loginLocked"], true);
+        assert_eq!(status["devices"].as_array().unwrap().len(), 1);
+
+        configure_access_key(directory.path(), "rotated-login-key").unwrap();
+        assert!(state.controller.authorize(&headers).await.is_none());
+        assert_eq!(
+            login_lock_attempt(&state, LOGIN_TEST_KEY, "192.0.2.1:1000")
+                .await
+                .unwrap_err()
+                .code,
+            401
+        );
+        assert!(
+            login_lock_attempt(&state, "rotated-login-key", "192.0.2.1:1000")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn login_lock_survives_restart_settings_reads_and_saving_same_key() {
+        let (directory, state) = login_lock_test_state();
+        for _ in 0..3 {
+            let _ = login_lock_attempt(&state, "wrong-login-key", "192.0.2.1:1000").await;
+        }
+        let restarted = reopened_login_lock_state(directory.path());
+        assert_eq!(login_failure_count(directory.path()), 3);
+        assert_eq!(
+            login_lock_attempt(&restarted, "wrong-login-key", "192.0.2.2:2000")
+                .await
+                .unwrap_err()
+                .code,
+            423
+        );
+        let key_id = restarted
+            .controller
+            .auth
+            .lock()
+            .await
+            .access_key
+            .as_ref()
+            .unwrap()
+            .id
+            .clone();
+        let settings_store = SettingsStore::new(directory.path().join("settings.json"));
+        let mut settings = settings_store.load().unwrap();
+        settings.remote_access.read_only = true;
+        settings_store.save(&settings).unwrap();
+        restarted.controller.reconcile(settings.remote_access).await;
+        restarted.controller.running.store(true, Ordering::SeqCst);
+        let _unsaved_candidate = random_token();
+        configure_access_key(directory.path(), LOGIN_TEST_KEY).unwrap();
+        for _ in 0..2 {
+            let status = access_credentials_status(directory.path()).unwrap();
+            assert_eq!(status["loginLocked"], true);
+            assert_eq!(
+                login_status(State(restarted.clone())).await.unwrap().0["loginLocked"],
+                true
+            );
+        }
+        let restarted_again = reopened_login_lock_state(directory.path());
+        assert_eq!(
+            restarted_again
+                .controller
+                .auth
+                .lock()
+                .await
+                .access_key
+                .as_ref()
+                .unwrap()
+                .id,
+            key_id
+        );
+        assert_eq!(login_failure_count(directory.path()), 4);
+        assert_eq!(
+            login_lock_attempt(&restarted_again, LOGIN_TEST_KEY, "203.0.113.1:3000")
+                .await
+                .unwrap_err()
+                .code,
+            423
+        );
+        configure_access_key(directory.path(), "new-isolated-key").unwrap();
+        assert_eq!(
+            login_status(State(restarted_again.clone()))
+                .await
+                .unwrap()
+                .0["loginLocked"],
+            false
+        );
+        assert_ne!(
+            restarted_again
+                .controller
+                .auth
+                .lock()
+                .await
+                .access_key
+                .as_ref()
+                .unwrap()
+                .id,
+            key_id
+        );
+        assert!(
+            login_lock_attempt(&restarted_again, "new-isolated-key", "192.0.2.1:1000")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn login_lock_write_failure_is_durable_and_does_not_revoke_devices() {
+        let (directory, state) = login_lock_test_state();
+        let response = login_lock_attempt(&state, LOGIN_TEST_KEY, "192.0.2.1:1000")
+            .await
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&login_cookie(&response)).unwrap(),
+        );
+        for _ in 0..3 {
+            let _ = login_lock_attempt(&state, "wrong-login-key", "192.0.2.1:1000").await;
+        }
+        let blocked_temp = directory.path().join("remote-access-key.json.tmp");
+        std::fs::create_dir(&blocked_temp).unwrap();
+        let error = login_lock_attempt(&state, "wrong-login-key", "192.0.2.1:1000")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, 503);
+        assert!(
+            error
+                .into_response()
+                .headers()
+                .get(header::SET_COOKIE)
+                .is_none()
+        );
+        assert_eq!(login_failure_count(directory.path()), 3);
+        assert!(state.controller.authorize(&headers).await.is_some());
+        let restarted = reopened_login_lock_state(directory.path());
+        assert_eq!(
+            login_lock_attempt(&restarted, LOGIN_TEST_KEY, "192.0.2.2:2000")
+                .await
+                .unwrap_err()
+                .code,
+            423
+        );
+        assert!(restarted.controller.authorize(&headers).await.is_some());
+        assert!(configure_access_key(directory.path(), "new-isolated-key").is_err());
+        assert_eq!(
+            access_credentials_status(directory.path()).unwrap()["loginLocked"],
+            true
+        );
+        std::fs::remove_dir(blocked_temp).unwrap();
+        configure_access_key(directory.path(), LOGIN_TEST_KEY).unwrap();
+        assert_eq!(
+            access_credentials_status(directory.path()).unwrap()["loginLocked"],
+            true
+        );
+        configure_access_key(directory.path(), "new-isolated-key").unwrap();
+        assert_eq!(
+            login_status(State(restarted.clone())).await.unwrap().0["loginLocked"],
+            false
+        );
+    }
+
+    #[tokio::test]
+    async fn login_lock_corrupt_counter_refuses_new_authorization_until_key_rotation() {
+        let (directory, state) = login_lock_test_state();
+        let response = login_lock_attempt(&state, LOGIN_TEST_KEY, "192.0.2.1:1000")
+            .await
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&login_cookie(&response)).unwrap(),
+        );
+        let path = directory.path().join("remote-access-key.json");
+        let mut stored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        stored["login_failures"] = json!(5);
+        crate::settings::atomic_write(&path, &serde_json::to_vec(&stored).unwrap()).unwrap();
+        assert_eq!(
+            login_lock_attempt(&state, LOGIN_TEST_KEY, "192.0.2.1:1000")
+                .await
+                .unwrap_err()
+                .code,
+            423
+        );
+        assert_eq!(
+            login_status(State(state.clone())).await.unwrap().0["loginLocked"],
+            true
+        );
+        let restarted = reopened_login_lock_state(directory.path());
+        assert!(restarted.controller.authorize(&headers).await.is_some());
+        configure_access_key(directory.path(), LOGIN_TEST_KEY).unwrap();
+        assert_eq!(
+            login_status(State(restarted)).await.unwrap().0["loginLocked"],
+            true
+        );
+        configure_access_key(directory.path(), "new-isolated-key").unwrap();
+        assert!(
+            login_lock_attempt(&state, "new-isolated-key", "192.0.2.1:1000")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn login_lock_concurrent_failures_block_late_success_and_stale_rotation_results() {
+        let (directory, state) = login_lock_test_state();
+        let snapshot = state
+            .controller
+            .auth
+            .lock()
+            .await
+            .access_key
+            .clone()
+            .unwrap();
+        let verified = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let late_success = {
+            let state = state.clone();
+            let key = snapshot.clone();
+            let verified = verified.clone();
+            let release = release.clone();
+            tokio::spawn(async move {
+                let checked_key = key.clone();
+                let valid = tokio::task::spawn_blocking(move || checked_key.verify(LOGIN_TEST_KEY))
+                    .await
+                    .unwrap();
+                verified.notify_one();
+                release.notified().await;
+                complete_login(
+                    state,
+                    key,
+                    valid,
+                    HeaderMap::new(),
+                    RequestTrustContext::default(),
+                )
+                .await
+            })
+        };
+        verified.notified().await;
+        let mut failures = tokio::task::JoinSet::new();
+        for _ in 0..4 {
+            let state = state.clone();
+            failures.spawn(async move {
+                login_lock_attempt(&state, "wrong-login-key", "192.0.2.1:1000")
+                    .await
+                    .unwrap_err()
+                    .code
+            });
+        }
+        let mut codes = Vec::new();
+        while let Some(result) = failures.join_next().await {
+            codes.push(result.unwrap());
+        }
+        codes.sort_unstable();
+        assert_eq!(codes, vec![401, 401, 401, 423]);
+        release.notify_one();
+        assert_eq!(late_success.await.unwrap().unwrap_err().code, 423);
+        assert!(state.controller.auth.lock().await.devices.is_empty());
+        configure_access_key(directory.path(), "new-isolated-key").unwrap();
+        for valid in [false, true] {
+            assert_eq!(
+                complete_login(
+                    state.clone(),
+                    snapshot.clone(),
+                    valid,
+                    HeaderMap::new(),
+                    RequestTrustContext::default()
+                )
+                .await
+                .unwrap_err()
+                .code,
+                401
+            );
+            assert_eq!(login_failure_count(directory.path()), 0);
+        }
+        assert!(
+            login_lock_attempt(&state, "new-isolated-key", "192.0.2.1:1000")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn login_lock_cancelled_request_still_records_completed_key_verification() {
+        let (directory, state) = login_lock_test_state();
+        let request = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                login_lock_attempt(&state, "wrong-login-key", "192.0.2.1:1000").await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.controller.key_checks.available_permits() == 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        let _ = request.await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while login_failure_count(directory.path()) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(login_failure_count(directory.path()), 1);
+    }
+
+    #[tokio::test]
+    async fn login_lock_public_routes_report_lock_without_secrets_or_new_cookie() {
+        let (_directory, mut state) = login_lock_test_state();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        state.settings.port = listener.local_addr().unwrap().port();
+        let base_url = format!("http://127.0.0.1:{}", state.settings.port);
+        let router = web_router(state.controller.clone(), state.settings);
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .get(format!("{base_url}/api/login-status"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.headers()[reqwest::header::CACHE_CONTROL],
+            "no-store"
+        );
+        assert_eq!(
+            response.json::<Value>().await.unwrap(),
+            json!({"ok":true,"loginLocked":false})
+        );
+        let authorized_response = client
+            .post(format!("{base_url}/api/connect"))
+            .header(reqwest::header::ORIGIN, &base_url)
+            .json(&json!({"key":LOGIN_TEST_KEY}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(authorized_response.status(), reqwest::StatusCode::OK);
+        let existing_cookie = authorized_response.headers()[reqwest::header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        for index in 0..5 {
+            let response = client
+                .post(format!("{base_url}/api/connect"))
+                .header(reqwest::header::ORIGIN, &base_url)
+                .json(&json!({"key":if index == 4 { LOGIN_TEST_KEY } else { "wrong-login-key" }}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status().as_u16(),
+                if index >= 3 { 423 } else { 401 }
+            );
+            assert!(
+                response
+                    .headers()
+                    .get(reqwest::header::SET_COOKIE)
+                    .is_none()
+            );
+        }
+        let status: Value = client
+            .get(format!("{base_url}/api/login-status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status, json!({"ok":true,"loginLocked":true}));
+        assert_eq!(
+            client
+                .get(format!("{base_url}/api/session"))
+                .header(reqwest::header::COOKIE, existing_cookie)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        server.abort();
+        let _ = server.await;
     }
 
     struct RestartingNativeBridge {

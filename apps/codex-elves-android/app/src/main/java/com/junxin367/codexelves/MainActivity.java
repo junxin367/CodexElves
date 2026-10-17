@@ -3,14 +3,18 @@ package com.junxin367.codexelves;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ext.SdkExtensions;
+import android.provider.MediaStore;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -87,6 +91,7 @@ public final class MainActivity extends Activity {
     private Runnable readyTimeout;
     private boolean pageReady;
     private ValueCallback<Uri[]> fileChooserCallback;
+    private boolean orderedImagePickerPending;
     private long lastUpdateCheckAt;
 
     @Override
@@ -972,9 +977,54 @@ public final class MainActivity extends Activity {
         if (requestCode != FILE_CHOOSER_REQUEST || fileChooserCallback == null) {
             return;
         }
-        Uri[] result = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+        Uri[] result = orderedImagePickerPending
+            ? parseOrderedImagePickerResult(resultCode, data)
+            : WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+        orderedImagePickerPending = false;
         fileChooserCallback.onReceiveValue(result);
         fileChooserCallback = null;
+    }
+
+    private static Uri[] parseOrderedImagePickerResult(int resultCode, Intent data) {
+        if (resultCode != RESULT_OK || data == null) {
+            return null;
+        }
+        ClipData selected = data.getClipData();
+        if (selected != null && selected.getItemCount() > 0) {
+            Uri[] result = new Uri[selected.getItemCount()];
+            for (int index = 0; index < selected.getItemCount(); index++) {
+                result[index] = selected.getItemAt(index).getUri();
+            }
+            return result;
+        }
+        Uri selectedImage = data.getData();
+        return selectedImage == null ? null : new Uri[] { selectedImage };
+    }
+
+    private static Intent orderedImagePickerIntent(WebChromeClient.FileChooserParams params) {
+        String[] acceptTypes = params.getAcceptTypes();
+        if (params.getMode() != WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
+            || params.isCaptureEnabled()
+            || acceptTypes == null
+            || acceptTypes.length != 1
+            || !"image/*".equals(acceptTypes[0])) {
+            return null;
+        }
+        boolean supported = Build.VERSION.SDK_INT >= 35
+            || Build.VERSION.SDK_INT >= 30
+                && SdkExtensions.getExtensionVersion(Build.VERSION_CODES.R) >= 12;
+        if (!supported) {
+            return null;
+        }
+        int maximumImages = Math.min(4, MediaStore.getPickImagesMaxLimit());
+        if (maximumImages < 2) {
+            return null;
+        }
+        Intent intent = new Intent(MediaStore.ACTION_PICK_IMAGES);
+        intent.setType("image/*");
+        intent.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, maximumImages);
+        intent.putExtra(MediaStore.EXTRA_PICK_IMAGES_IN_ORDER, true);
+        return intent;
     }
 
     private final class ShellChromeClient extends WebChromeClient {
@@ -988,6 +1038,17 @@ public final class MainActivity extends Activity {
                 fileChooserCallback.onReceiveValue(null);
             }
             fileChooserCallback = callback;
+            orderedImagePickerPending = false;
+            Intent orderedPicker = orderedImagePickerIntent(params);
+            if (orderedPicker != null) {
+                try {
+                    startActivityForResult(orderedPicker, FILE_CHOOSER_REQUEST);
+                    orderedImagePickerPending = true;
+                    return true;
+                } catch (ActivityNotFoundException error) {
+                    // Keep the existing document picker available when the photo picker is absent.
+                }
+            }
             Intent intent;
             try {
                 intent = params.createIntent();
