@@ -47,9 +47,11 @@ const files = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "application/javascript; charset=utf-8"]],
   ["/attachments.js", ["attachments.js", "application/javascript; charset=utf-8"]],
+  ["/recovery-store.js", ["recovery-store.js", "application/javascript; charset=utf-8"]],
   ["/events-client.js", ["events-client.js", "application/javascript; charset=utf-8"]],
   ["/events-worker.js", ["events-worker.js", "application/javascript; charset=utf-8"]],
   ["/markdown.js", ["markdown.js", "application/javascript; charset=utf-8"]],
+  ["/markdown-renderer.js", ["markdown-renderer.js", "application/javascript; charset=utf-8"]],
   ["/message-actions.js", ["message-actions.js", "application/javascript; charset=utf-8"]],
   ["/platform.js", ["platform.js", "application/javascript; charset=utf-8"]],
   ["/pwa.js", ["pwa.js", "application/javascript; charset=utf-8"]],
@@ -62,6 +64,10 @@ const files = new Map([
   ["/icons/icon-192.png", ["icons/icon-192.png", "image/png"]],
   ["/icons/icon-512.png", ["icons/icon-512.png", "image/png"]],
   ["/icons/apple-touch-icon.png", ["icons/apple-touch-icon.png", "image/png"]]
+]);
+const recoveryFiles = new Map([
+  ["/cache-recovery.html", ["cache-recovery.html", "text/html; charset=utf-8"]],
+  ["/cache-recovery.js", ["cache-recovery.js", "application/javascript; charset=utf-8"]]
 ]);
 const requestHeaders = [
   "accept", "accept-encoding", "accept-language", "content-type", "content-length",
@@ -279,7 +285,7 @@ const server = createServer(async (req, res) => {
     res.writeHead(204, securityHeaders); res.end(); return;
   }
   if (!["GET", "HEAD"].includes(req.method)) { fail(res, 404, "调试入口不存在"); return; }
-  const file = files.get(url.pathname);
+  const file = files.get(url.pathname) || recoveryFiles.get(url.pathname);
   if (!file && url.pathname !== "/app-resources.json") { fail(res, 404, "调试入口不存在"); return; }
   try {
     const body = url.pathname === "/app-resources.json"

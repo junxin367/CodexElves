@@ -79,6 +79,7 @@ public final class MainActivity extends Activity {
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService background = Executors.newSingleThreadExecutor();
+    private final ExecutorService resources = Executors.newSingleThreadExecutor();
     private final AtomicLong connectionGeneration = new AtomicLong();
     private final AtomicLong updateCheckGeneration = new AtomicLong(-1L);
 
@@ -87,7 +88,9 @@ public final class MainActivity extends Activity {
     private FrameLayout root;
     private WebView webView;
     private ResourceStore.Snapshot snapshot;
-    private String currentOrigin;
+    private volatile String currentOrigin;
+    private ResourceStore.Cancellation resourceCancellation;
+    private TextView resourceStatus;
     private Runnable readyTimeout;
     private boolean pageReady;
     private ValueCallback<Uri[]> fileChooserCallback;
@@ -127,12 +130,14 @@ public final class MainActivity extends Activity {
     }
 
     private void showLogin(String message) {
+        cancelResourceWork();
         connectionGeneration.incrementAndGet();
         pageReady = false;
         cancelReadyTimeout();
         destroyWebView();
         currentOrigin = null;
         snapshot = null;
+        resourceStatus = null;
         root.removeAllViews();
         root.addView(buildLoginView(message), matchParent());
     }
@@ -360,9 +365,15 @@ public final class MainActivity extends Activity {
     }
 
     private void openSession(String origin) {
+        cancelResourceWork();
         long generation = connectionGeneration.incrementAndGet();
         currentOrigin = origin;
+        resourceCancellation = new ResourceStore.Cancellation(
+            () -> generation == connectionGeneration.get() && origin.equals(currentOrigin)
+        );
         pageReady = false;
+        snapshot = null;
+        resourceStatus = null;
         cancelReadyTimeout();
         destroyWebView();
         root.removeAllViews();
@@ -379,14 +390,38 @@ public final class MainActivity extends Activity {
     }
 
     private void startSessionPage(String origin, long generation) {
-        try {
-            snapshot = resourceStore.selectForPage(origin);
-        } catch (IOException error) {
-            showSessionLaunchError(origin, "本地页面资源不可用，请重新安装应用");
-            return;
-        }
-        ResourceStore.Snapshot pageSnapshot = snapshot;
+        TextView loading = text("正在校验本地页面资源…", 15, 0xFF6B7280);
+        loading.setGravity(Gravity.CENTER);
+        root.addView(loading, matchParent());
+        ResourceStore.Cancellation cancellation = resourceCancellation;
+        resources.execute(() -> {
+            try {
+                ResourceStore.Snapshot selected = resourceStore.selectForPage(origin, cancellation);
+                runOnUiThread(() -> {
+                    if (generation != connectionGeneration.get() || cancellation.isCancelled()
+                        || isFinishing()) {
+                        return;
+                    }
+                    snapshot = selected;
+                    root.removeAllViews();
+                    displaySessionPage(origin, generation, selected);
+                });
+            } catch (IOException error) {
+                runOnUiThread(() -> {
+                    if (generation == connectionGeneration.get() && !cancellation.isCancelled()
+                        && !isFinishing()) {
+                        showSessionLaunchError(origin, "本地页面资源不可用，请重新安装应用");
+                    }
+                });
+            }
+        });
+    }
 
+    private void displaySessionPage(
+        String origin,
+        long generation,
+        ResourceStore.Snapshot pageSnapshot
+    ) {
         WebView view = new WebView(this);
         webView = view;
         configureWebView(view, origin, generation, pageSnapshot);
@@ -649,8 +684,13 @@ public final class MainActivity extends Activity {
             case "ready":
                 pageReady = true;
                 cancelReadyTimeout();
-                resourceStore.markReady(origin, pageSnapshot.version);
-                checkForResourceUpdate(origin, pageSnapshot.version, generation, true);
+                ResourceStore.Cancellation cancellation = resourceCancellation;
+                resources.execute(() -> {
+                    if (!cancellation.isCancelled()) {
+                        resourceStore.markReady(origin, pageSnapshot.version);
+                    }
+                });
+                checkForResourceUpdate(origin, pageSnapshot, generation, true);
                 break;
             case "authenticated":
                 sessionStore.saveAuthorizedConnection(origin);
@@ -712,7 +752,7 @@ public final class MainActivity extends Activity {
 
     private void checkForResourceUpdate(
         String origin,
-        String version,
+        ResourceStore.Snapshot pageSnapshot,
         long generation,
         boolean force
     ) {
@@ -725,27 +765,85 @@ public final class MainActivity extends Activity {
             return;
         }
         lastUpdateCheckAt = now;
-        background.execute(() -> {
+        ResourceStore.Cancellation cancellation = resourceCancellation;
+        if (resourceStatus != null) {
+            resourceStatus.setVisibility(View.GONE);
+        }
+        resources.execute(() -> {
             try {
                 ResourceStore.UpdateResult result = resourceStore.checkForUpdate(
                     origin,
-                    version,
-                    () -> generation == connectionGeneration.get()
-                        && origin.equals(currentOrigin)
-                        && sessionStore.isAuthorized()
+                    pageSnapshot,
+                    cancellation
                 );
-                if (result.kind == ResourceStore.UpdateResult.Kind.DOWNLOADED
-                    && generation == connectionGeneration.get()) {
-                    runOnUiThread(() -> Toast.makeText(
-                        MainActivity.this,
-                        "页面资源已更新，将在下次启动页面时启用",
-                        Toast.LENGTH_SHORT
-                    ).show());
-                }
+                runOnUiThread(() -> {
+                    if (generation != connectionGeneration.get() || cancellation.isCancelled()
+                        || isFinishing()) {
+                        return;
+                    }
+                    switch (result.kind) {
+                        case DOWNLOADED:
+                            Toast.makeText(
+                                MainActivity.this,
+                                "页面资源已更新，将在下次启动页面时启用",
+                                Toast.LENGTH_SHORT
+                            ).show();
+                            break;
+                        case FAILED:
+                            showResourceUpdateStatus(
+                                "资源更新失败，点击重试", true, origin, pageSnapshot, generation
+                            );
+                            break;
+                        case UNSUPPORTED:
+                            showResourceUpdateStatus(
+                                "新版页面需要更新应用", false, origin, pageSnapshot, generation
+                            );
+                            break;
+                        default:
+                            break;
+                    }
+                });
             } finally {
                 updateCheckGeneration.compareAndSet(generation, -1L);
             }
         });
+    }
+
+    private void showResourceUpdateStatus(
+        String message,
+        boolean retry,
+        String origin,
+        ResourceStore.Snapshot pageSnapshot,
+        long generation
+    ) {
+        if (resourceStatus == null) {
+            resourceStatus = text(message, 12, 0xFFB42318);
+            resourceStatus.setPadding(dp(12), dp(8), dp(12), dp(8));
+            resourceStatus.setBackground(rounded(0xFFFFF4ED, 10, 0xFFFED7AA));
+            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.END
+            );
+            params.setMargins(dp(12), dp(12), dp(12), 0);
+            root.addView(resourceStatus, params);
+        }
+        resourceStatus.setText(message);
+        resourceStatus.setVisibility(View.VISIBLE);
+        resourceStatus.setClickable(retry);
+        resourceStatus.setOnClickListener(retry ? ignored -> {
+            if (generation == connectionGeneration.get() && pageReady
+                && sessionStore.isAuthorized()) {
+                checkForResourceUpdate(origin, pageSnapshot, generation, true);
+            }
+        } : null);
+    }
+
+    private void cancelResourceWork() {
+        if (resourceCancellation != null) {
+            resourceCancellation.cancel();
+            resourceCancellation = null;
+        }
     }
 
     @Override
@@ -759,7 +857,7 @@ public final class MainActivity extends Activity {
         if (pageReady && currentOrigin != null && snapshot != null && sessionStore.isAuthorized()) {
             checkForResourceUpdate(
                 currentOrigin,
-                snapshot.version,
+                snapshot,
                 connectionGeneration.get(),
                 false
             );
@@ -775,16 +873,30 @@ public final class MainActivity extends Activity {
         if (generation != connectionGeneration.get()) {
             return;
         }
-        if (resourceStore.rollbackTrial(origin, version)) {
-            Toast.makeText(this, "新版页面启动失败，已回退", Toast.LENGTH_LONG).show();
-            openSession(origin);
-            return;
-        }
         cancelReadyTimeout();
-        Toast.makeText(this, reason + "，请检查网络后重试", Toast.LENGTH_LONG).show();
+        ResourceStore.Cancellation cancellation = resourceCancellation;
+        resources.execute(() -> {
+            if (cancellation.isCancelled()) {
+                return;
+            }
+            boolean rolledBack = resourceStore.rollbackTrial(origin, version);
+            runOnUiThread(() -> {
+                if (generation != connectionGeneration.get() || cancellation.isCancelled()
+                    || isFinishing()) {
+                    return;
+                }
+                if (rolledBack) {
+                    Toast.makeText(this, "新版页面启动失败，已回退", Toast.LENGTH_LONG).show();
+                    openSession(origin);
+                } else {
+                    Toast.makeText(this, reason + "，请检查网络后重试", Toast.LENGTH_LONG).show();
+                }
+            });
+        });
     }
 
     private void clearAuthorization(String origin) {
+        cancelResourceWork();
         connectionGeneration.incrementAndGet();
         sessionStore.setAuthorized(false);
         CookieManager cookies = CookieManager.getInstance();
@@ -960,10 +1072,12 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        cancelResourceWork();
         connectionGeneration.incrementAndGet();
         cancelReadyTimeout();
         destroyWebView();
         background.shutdownNow();
+        resources.shutdownNow();
         if (fileChooserCallback != null) {
             fileChooserCallback.onReceiveValue(null);
             fileChooserCallback = null;

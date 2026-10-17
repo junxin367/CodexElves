@@ -6,13 +6,32 @@
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#171717">
   <title>CodexElves · 远程会话</title>
-  <link rel="manifest" href="/manifest.webmanifest">
+  <link id="app-manifest" rel="manifest" crossorigin="use-credentials">
   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
   <link rel="stylesheet" href="/style.css">
+  <link rel="modulepreload" href="/app.js">
+  <link rel="modulepreload" href="/events-client.js">
+  <link rel="modulepreload" href="/platform.js">
+  <link rel="modulepreload" href="/recovery-store.js">
+  <link rel="modulepreload" href="/attachments.js">
+  <link rel="modulepreload" href="/message-actions.js">
+  <link rel="modulepreload" href="/markdown.js">
+  <script type="module" src="/pwa.js"></script>
   <script type="module" src="/app.js"></script>
 </head>
 <body>
-  <div id="app"></div>
+  <div id="app">
+    <main class="initial-loading" role="status" aria-live="polite">
+      <p id="initial-loading-status">正在加载远程会话…</p>
+      <details id="initial-loading-recovery">
+        <summary>加载一直未完成？查看恢复说明</summary>
+        <p>请先确认网络可用，再检查并准备完整的网页更新。</p>
+        <button id="initial-cache-retry" type="button" hidden>检查并准备更新</button>
+        <p>新版准备完成后，请关闭此网站的所有页面，再从原地址重新打开；普通刷新可能仍使用原有页面缓存。</p>
+        <p>如果检查按钮未出现或重试仍失败，请<a href="/cache-recovery.html">打开独立恢复页</a>。恢复页保留本浏览器的授权和草稿，不会强制刷新其他页面。</p>
+      </details>
+    </main>
+  </div>
   <div id="notice" role="status" aria-live="polite"></div>
 </body>
 </html>

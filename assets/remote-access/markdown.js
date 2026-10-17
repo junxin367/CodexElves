@@ -1,282 +1,257 @@
-import { marked, Renderer } from "./vendor/marked.esm.js";
-import createDOMPurify from "./vendor/dompurify.esm.js";
-
-const purifier = createDOMPurify(globalThis.window);
+// 格式增强不属于登录和会话请求的启动依赖；未就绪时只显示安全的纯文本。
+const stateEvent = "codex-elves-markdown-state";
+const maximumRetries = 2;
+let renderer = null;
+let loading = null;
+let status = "deferred";
+let attempt = 0;
+const modules = new Map();
 
 const escapeHtml = value => String(value ?? "")
-  .replaceAll("&", "&amp;")
-  .replaceAll("<", "&lt;")
-  .replaceAll(">", "&gt;")
-  .replaceAll('"', "&quot;")
-  .replaceAll("'", "&#39;");
+  .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 
-const safeHref = href => {
-  const value = String(href ?? "").trim();
-  if (!value || /[\u0000-\u001f\u007f\s<>"'`]/u.test(value)) return null;
-  if (value.startsWith("#")) return value;
-  if (!/^https?:\/\//iu.test(value)) return null;
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
-  } catch {
+function updateFallbackStatus() {
+  for (const node of document.querySelectorAll(".markdown-deferred-status")) {
+    node.textContent = status === "failed"
+      ? "格式加载失败，正文仍可阅读" : "正在加载正文格式…";
+  }
+  for (const button of document.querySelectorAll(".markdown-load-retry")) {
+    button.hidden = status !== "failed";
+    button.disabled = status === "loading";
+    button.textContent = attempt >= maximumRetries ? "刷新后重试格式加载" : "重试格式加载";
+  }
+  window.dispatchEvent(new CustomEvent(stateEvent, { detail: { status } }));
+}
+
+function loadModule(path) {
+  if (!modules.has(path)) {
+    const suffix = attempt ? `?retry=${attempt}` : "";
+    const request = import(`./${path}${suffix}`);
+    modules.set(path, request);
+    void request.catch(() => {
+      if (modules.get(path) === request) modules.delete(path);
+    });
+  }
+  return modules.get(path);
+}
+
+function loadRenderer({ retry = false } = {}) {
+  if (renderer) return Promise.resolve(renderer);
+  if (loading) return loading;
+  if (status === "failed" && !retry) return Promise.resolve(null);
+  if (retry && attempt >= maximumRetries) return Promise.resolve(null);
+  if (retry) attempt++;
+  status = "loading";
+  updateFallbackStatus();
+  // 失败模块可能被当前文档记住；手动重试使用有限次数的新 URL。
+  // 依赖分别导入，避免重试入口仍引用同一失败的静态依赖图。
+  loading = Promise.all([
+    loadModule("markdown-renderer.js"),
+    loadModule("vendor/marked.esm.js"),
+    loadModule("vendor/dompurify.esm.js")
+  ]).then(([module, marked, purify]) => {
+    renderer = module.createMarkdownRenderer({
+      marked: marked.marked,
+      Renderer: marked.Renderer,
+      createDOMPurify: purify.default
+    });
+    status = "ready";
+    updateFallbackStatus();
+    window.dispatchEvent(new Event("codex-elves-markdown-ready"));
+    return renderer;
+  }).catch(() => {
+    status = "failed";
+    updateFallbackStatus();
     return null;
-  }
-};
+  }).finally(() => { loading = null; });
+  return loading;
+}
 
-const imagePathPattern = /^\/api\/images\/[A-Za-z0-9_-]{20,128}$/u;
-const safeImagePath = url => typeof url === "string" && imagePathPattern.test(url) ? url : null;
-
-const isLocalReference = href => {
-  const value = String(href ?? "").trim();
-  if (/^file:/iu.test(value) || /^[a-z]:[\\/]/iu.test(value) || /^\\\\/u.test(value)) return true;
-  return !/^[a-z][a-z\d+.-]*:/iu.test(value) && !value.startsWith("//") && !value.startsWith("#");
-};
-
-const inlineContent = (renderer, token) => token.tokens
-  ? renderer.parser.parseInline(token.tokens)
-  : escapeHtml(token.text);
-
-const createRenderer = (remoteImages, { userMessage = false, skills = [], skillLink } = {}) => {
-  const registeredImages = new Map();
-  if (Array.isArray(remoteImages)) {
-    for (const image of remoteImages) {
-      if (typeof image?.source !== "string" || registeredImages.has(image.source)) continue;
-      const url = safeImagePath(image.url);
-      if (url) registeredImages.set(image.source, url);
-    }
-  }
-
-  const renderer = new Renderer();
-  const skillNames = new Map();
-  for (const skill of skills) {
-    if (typeof skill?.name === "string" && /^[\p{L}_][\p{L}\p{N}_.:/-]*$/u.test(skill.name))
-      skillNames.set(skill.name, skill);
-  }
-  const skillPattern = userMessage && skillNames.size
-    ? new RegExp(`(^|[^\\p{L}\\p{N}_$])\\$(${[...skillNames.keys()].sort((left, right) => right.length - left.length)
-      .map(name => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\p{L}\\p{N}_:./-])`, "gu")
-    : null;
-  const skillPlaceholder = skill => `<span class="message-skill-reference" title="${escapeHtml(skill.path)}">${escapeHtml(skill.displayName || skill.name)}</span>`;
-  let linkDepth = 0;
-  const renderText = renderer.text;
-  renderer.text = function (token) {
-    const html = renderText.call(this, token);
-    if (!skillPattern || linkDepth || token.type !== "text" || token.tokens) return html;
-    return html.replace(skillPattern, (_match, prefix, name) => `${prefix}${skillPlaceholder(skillNames.get(name))}`);
-  };
-
-  renderer.code = ({ text, lang, raw }) => {
-    const language = String(lang ?? "").trim().split(/\s+/u, 1)[0] || "代码";
-    const fence = raw?.match(/^ {0,3}(`{3,}|~{3,})/u)?.[1];
-    const closed = fence && new RegExp(`\\n {0,3}${fence[0]}{${fence.length},}[ \\t]*(?:\\n)?$`, "u").test(raw);
-    const diagram = language.toLowerCase() === "mermaid" && closed;
-    return `<div class="code-block${diagram ? " mermaid-block" : ""}"><div class="code-header"><span>${escapeHtml(language)}</span><button class="copy-code" type="button">复制</button></div><pre><code>${escapeHtml(text)}</code></pre></div>\n`;
-  };
-
-  renderer.html = ({ text }) => escapeHtml(text);
-
-  renderer.link = function (token) {
-    let label;
-    linkDepth++;
-    try { label = inlineContent(this, token); }
-    finally { linkDepth--; }
-    if (userMessage && isLocalReference(token.href)) {
-      const text = token.tokens ? this.parser.parseInline(token.tokens, this.parser.textRenderer) : token.text;
-      const skill = skillLink?.(token.href, text);
-      if (skill) return skillPlaceholder(skill);
-    }
-    const href = safeHref(token.href);
-    if (href?.startsWith("#")) return `<a href="${escapeHtml(href)}">${label}</a>`;
-    if (href) {
-      const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
-      return `<a href="${escapeHtml(href)}"${title} target="_blank" rel="noopener noreferrer">${label}</a>`;
-    }
-    if (isLocalReference(token.href)) {
-      return `<span class="local-file-reference" title="${escapeHtml(token.href)}">${label}</span>`;
-    }
-    return label;
-  };
-
-  renderer.image = token => {
-    const alt = String(token.text ?? "");
-    const source = String(token.href ?? "");
-    const url = registeredImages.get(source);
-    if (url) {
-      const safeUrl = escapeHtml(url);
-      return `<a class="message-image-link" href="${safeUrl}" target="_blank" rel="noopener noreferrer"><img class="message-image" src="${safeUrl}" alt="${escapeHtml(alt)}" loading="lazy" decoding="async"></a>`;
-    }
-    const label = alt.trim() || "图片";
-    const title = source ? ` title="${escapeHtml(source)}"` : "";
-    return `<span class="attachment-placeholder"${title}>[附件：${escapeHtml(label)}]</span>`;
-  };
-
-  const renderTable = renderer.table;
-  renderer.table = function (token) {
-    return `<div class="table-scroll">${renderTable.call(this, token)}</div>\n`;
-  };
-
-  return renderer;
-};
-
-const sanitizeOptions = {
-  ALLOWED_TAGS: [
-    "a", "blockquote", "br", "button", "code", "del", "div", "em", "h1", "h2", "h3",
-    "h4", "h5", "h6", "hr", "img", "input", "li", "ol", "p", "pre", "span", "strong", "table",
-    "tbody", "td", "th", "thead", "tr", "ul"
-  ],
-  ALLOWED_ATTR: [
-    "align", "alt", "checked", "class", "decoding", "disabled", "href", "loading", "rel", "src",
-    "start", "target", "title", "type"
-  ],
-  ALLOW_ARIA_ATTR: false,
-  ALLOW_DATA_ATTR: false,
-  ALLOW_UNKNOWN_PROTOCOLS: false,
-  FORBID_ATTR: ["style"],
-  FORBID_TAGS: [
-    "audio", "embed", "form", "iframe", "math", "object", "script", "source", "style", "svg", "video"
-  ],
-  RETURN_TRUSTED_TYPE: false
-};
-
-purifier.addHook("uponSanitizeAttribute", (_node, data) => {
-  if (data.attrName === "href" && safeHref(data.attrValue) === null && safeImagePath(data.attrValue) === null) {
-    data.keepAttr = false;
-  }
-  if (data.attrName === "src" && safeImagePath(data.attrValue) === null) data.keepAttr = false;
-  if (data.attrName === "srcset" || data.attrName === "xlink:href") {
-    data.keepAttr = false;
-  }
-});
-
-export function markdown(text, remoteImages = [], { userMessage = false, skills = [], skillLink } = {}) {
+export function markdown(text, remoteImages = [], options = {}) {
+  if (renderer) return renderer.markdown(text, remoteImages, options);
   const source = String(text ?? "");
-  const html = marked.parse(userMessage ? source : source.replace(/\uE200[^\uE201]*\uE201/g, ""), {
-    async: false,
-    breaks: userMessage,
-    gfm: true,
-    pedantic: false,
-    renderer: createRenderer(remoteImages, { userMessage, skills, skillLink })
-  });
-  return purifier.sanitize(html, sanitizeOptions);
+  if (!source) return "";
+  void loadRenderer();
+  const plain = options.userMessage ? source : source.replace(/\uE200[^\uE201]*\uE201/g, "");
+  const message = status === "failed" ? "格式加载失败，正文仍可阅读" : "正在加载正文格式…";
+  const retryLabel = attempt >= maximumRetries ? "刷新后重试格式加载" : "重试格式加载";
+  return `<div class="markdown-plain-text">${escapeHtml(plain)}</div>`
+    + `<div class="markdown-deferred"><span class="markdown-deferred-status">${message}</span>`
+    + `<button class="markdown-load-retry text-button" type="button"${status === "failed" ? "" : " hidden"}>${retryLabel}</button></div>`;
 }
 
-const diagramPurifier = createDOMPurify(globalThis.window);
-const diagrams = new Map();
-let mermaidModule, diagramSequence = 0, diagramQueue = Promise.resolve();
-
-async function renderDiagram(source, theme) {
-  mermaidModule ||= import("./vendor/mermaid.esm.js").catch(error => {
-    mermaidModule = null;
-    throw error;
-  });
-  const { default: mermaid } = await mermaidModule;
-  mermaid.initialize({
-    startOnLoad: false,
-    securityLevel: "strict",
-    suppressErrorRendering: true,
-    logLevel: 5,
-    theme: theme === "dark" ? "dark" : "default",
-    fontFamily: 'Inter, "Segoe UI", "Microsoft YaHei", sans-serif',
-    htmlLabels: false,
-    flowchart: { htmlLabels: false },
-    secure: [...Object.keys(mermaid.mermaidAPI.defaultConfig), "htmlLabels"]
-  });
-  const stage = document.createElement("div");
-  stage.className = "mermaid-render-stage";
-  stage.setAttribute("aria-hidden", "true");
-  document.body.append(stage);
-  try {
-    const { svg } = await mermaid.mermaidAPI.render(`remote-mermaid-${++diagramSequence}`, source, stage);
-    const clean = diagramPurifier.sanitize(svg, {
-      USE_PROFILES: { svg: true, svgFilters: true },
-      ADD_TAGS: ["style"],
-      FORBID_TAGS: ["a", "foreignObject", "image", "script"],
-      FORBID_ATTR: ["href", "xlink:href", "src"],
-      ALLOW_DATA_ATTR: false
-    });
-    const document = new DOMParser().parseFromString(clean, "image/svg+xml");
-    const image = document.documentElement;
-    if (image.localName !== "svg") throw new Error("图表格式无效");
-    const [, , width, height] = (image.getAttribute("viewBox") || "").split(/[\s,]+/u).map(Number);
-    if (!(width > 0 && height > 0)) throw new Error("图表尺寸无效");
-    image.setAttribute("width", String(width));
-    image.setAttribute("height", String(height));
-    image.removeAttribute("style");
-    return { src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(image))}`, width, height };
-  } finally { stage.remove(); }
+export function renderMermaidBlocks(node, onRender, withLayout) {
+  renderer?.renderMermaidBlocks(node, onRender, withLayout);
 }
 
-export function renderMermaidBlocks(node, onRender) {
-  const theme = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  for (const block of node.querySelectorAll(".mermaid-block")) {
-    const source = block.querySelector("pre code")?.textContent || "";
-    const key = JSON.stringify([theme, source]);
-    if (block.mermaidKey === key) continue;
-    block.mermaidKey = key;
-    const pre = block.querySelector("pre"), header = block.querySelector(".code-header");
-    let image = block.querySelector(".mermaid-diagram");
-    if (!image) {
-      image = document.createElement("img");
-      image.className = "mermaid-diagram";
-      image.alt = "Mermaid 图表";
-      image.hidden = true;
-      const toggle = document.createElement("button");
-      toggle.className = "mermaid-source-toggle";
-      toggle.type = "button";
-      toggle.textContent = "源码";
-      toggle.setAttribute("aria-label", "查看 Mermaid 源码");
-      toggle.hidden = true;
-      toggle.onclick = () => {
-        const showSource = pre.hidden;
-        pre.hidden = !showSource;
-        image.hidden = showSource;
-        toggle.textContent = showSource ? "图表" : "源码";
-        toggle.setAttribute("aria-label", showSource ? "查看 Mermaid 图表" : "查看 Mermaid 源码");
-      };
-      header.insertBefore(toggle, header.querySelector(".copy-code"));
-      block.insertBefore(image, pre);
+const anchorIgnored = "[hidden],button,textarea,input,.code-header,.markdown-deferred,.transcript-checking-notice";
+const anchorCharacters = value => [...String(value).matchAll(/[\p{L}\p{N}]/gu)];
+const anchorText = value => String(value).replace(/[^\p{L}\p{N}]/gu, "");
+
+function characterRect(node, offset) {
+  if (!node?.isConnected || !node.length) return null;
+  const range = document.createRange();
+  range.setStart(node, Math.min(offset, node.length - 1));
+  range.setEnd(node, Math.min(offset + 1, node.length));
+  const rect = range.getBoundingClientRect();
+  return rect.width && rect.height ? rect : null;
+}
+
+function anchorContext(node, offset, scope) {
+  const contextStart = Math.max(0, offset - 128);
+  const characters = anchorCharacters(node.textContent.slice(contextStart, offset + 192));
+  const index = characters.findIndex(character => character.index >= offset - contextStart);
+  const position = index < 0 ? characters.length : index;
+  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+  let source = "", sourceOffset = 0;
+  for (let current; (current = walker.nextNode());) {
+    if (current.parentElement?.closest(anchorIgnored)) continue;
+    if (current === node) sourceOffset = source.length + anchorText(current.textContent.slice(0, offset)).length;
+    source += anchorText(current.textContent);
+  }
+  return {
+    before: characters.slice(Math.max(0, position - 32), position).map(character => character[0]).join(""),
+    after: characters.slice(position, position + 48).map(character => character[0]).join(""),
+    source, sourceOffset
+  };
+}
+
+function readingAnchor(root) {
+  const box = root.getBoundingClientRect();
+  const notice = root.querySelector(":scope > .transcript-checking-notice")?.getBoundingClientRect();
+  const top = Math.max(box.top, notice?.bottom || box.top), bottom = box.bottom;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  // 常见浏览器先命中视口首行，避免每次图片完成都遍历整段已读历史。
+  let pointNode = null;
+  for (const x of [box.left + 24, box.left + box.width / 2]) {
+    const y = Math.min(bottom - 1, top + 2);
+    const point = document.caretPositionFromPoint?.(x, y);
+    const range = point ? null : document.caretRangeFromPoint?.(x, y);
+    const candidate = point?.offsetNode || range?.startContainer;
+    const offset = point?.offset ?? range?.startOffset ?? 0;
+    if (candidate?.nodeType !== Node.TEXT_NODE || !root.contains(candidate)
+        || candidate.parentElement?.closest(anchorIgnored)) continue;
+    const rect = characterRect(candidate, Math.min(offset, candidate.length - 1));
+    if (rect && rect.bottom > top && rect.top < bottom) { pointNode = candidate; break; }
+  }
+  if (pointNode) walker.currentNode = pointNode;
+  for (let node = pointNode || walker.nextNode(); node; node = walker.nextNode()) {
+    if (!node.textContent?.trim() || node.parentElement?.closest(anchorIgnored)) continue;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    if (![...range.getClientRects()].some(rect => rect.height && rect.bottom > top && rect.top < bottom)) continue;
+    // 找到视口内第一行的字符；长消息不能只保存整条消息的顶部。
+    let left = 0, right = node.length - 1;
+    while (left < right) {
+      const middle = Math.floor((left + right) / 2), rect = characterRect(node, middle);
+      if (rect && rect.bottom > top) right = middle;
+      else left = middle + 1;
     }
-    let status = block.querySelector(".mermaid-status");
-    if (!status) {
-      status = document.createElement("span");
-      status.className = "mermaid-status";
-      status.setAttribute("role", "status");
-      header.firstElementChild.after(status);
+    let offset = left, rect = characterRect(node, offset);
+    // 换行符自身没有矩形，最多跨过当前空白段。
+    while (!rect && offset < Math.min(node.length - 1, left + 128)) rect = characterRect(node, ++offset);
+    if (!rect || rect.top >= bottom || rect.bottom <= top) continue;
+    const scope = node.parentElement.closest(".markdown") || node.parentElement.closest("[data-key],.turn") || node.parentElement;
+    return {
+      node, offset, scope, top: rect.top - box.top,
+      ...anchorContext(node, offset, scope),
+      scopeTop: scope.getBoundingClientRect().top - box.top
+    };
+  }
+  const node = [...root.querySelectorAll("[data-key],.turn")].find(candidate => {
+    const rect = candidate.getBoundingClientRect();
+    return rect.height && rect.bottom > top && rect.top < bottom;
+  });
+  return node ? { scope: node, scopeTop: node.getBoundingClientRect().top - box.top } : null;
+}
+
+function replacementCharacter(anchor) {
+  const scope = anchor.scope;
+  if (!scope?.isConnected) return null;
+  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT), segments = [];
+  let text = "";
+  for (let node; (node = walker.nextNode());) {
+    if (node.parentElement?.closest(anchorIgnored)) continue;
+    const characters = anchorCharacters(node.textContent);
+    if (!characters.length) continue;
+    const positions = [];
+    let normalized = "";
+    for (const character of characters) { positions.push(normalized.length); normalized += character[0]; }
+    segments.push({ node, start: text.length, characters, positions });
+    text += normalized;
+  }
+  // 原始文本中的 Markdown 标点在格式化后消失；匹配正文字符及上下文。
+  const candidates = [
+    [anchor.before + anchor.after, anchor.before.length],
+    [anchor.after, 0], [anchor.before, anchor.before.length],
+    [anchor.after.slice(0, 20), 0], [anchor.before.slice(-20), Math.min(20, anchor.before.length)]
+  ];
+  for (const [query, delta] of candidates) {
+    if (query.length < 6) continue;
+    const previous = [], matches = [];
+    for (let index = anchor.source?.indexOf(query); index >= 0; index = anchor.source.indexOf(query, index + 1))
+      previous.push(index);
+    for (let index = text.indexOf(query); index >= 0; index = text.indexOf(query, index + 1)) {
+      matches.push(index);
     }
-    status.textContent = "正在生成图表…";
-    block.classList.add("mermaid-loading");
-    if (!block.classList.contains("mermaid-ready")) pre.hidden = true;
-    if (!diagrams.has(key)) {
-      const result = source.length > 50_000 ? Promise.reject(new Error("图表内容过长"))
-        : diagramQueue.then(() => renderDiagram(source, theme));
-      diagramQueue = result.catch(() => {});
-      diagrams.set(key, result);
-      if (diagrams.size > 32) diagrams.delete(diagrams.keys().next().value);
+    // 链接目的地址等会从正文消失，不能用原始字符比例选择重复段落。
+    // 同一上下文的数量一致时，按原出现序号恢复；数量变化则换上下文或退回容器。
+    const ordinal = previous.indexOf(anchor.sourceOffset - delta);
+    if (ordinal < 0 || matches.length !== previous.length) continue;
+    const found = matches[ordinal] + delta;
+    const segment = segments.findLast(value => value.start <= found);
+    if (segment) {
+      const index = segment.positions.findLastIndex(position => position <= found - segment.start);
+      const character = segment.characters[Math.max(0, index)];
+      return { node: segment.node, offset: character.index };
     }
-    diagrams.get(key).then(async result => {
-      if (block.mermaidKey !== key) return;
-      image.width = Math.ceil(result.width);
-      image.height = Math.ceil(result.height);
-      image.src = result.src;
-      await image.decode();
-      if (block.mermaidKey !== key) return;
-      const toggle = block.querySelector(".mermaid-source-toggle");
-      toggle.hidden = false;
-      pre.hidden = toggle.textContent !== "图表";
-      image.hidden = !pre.hidden;
-      block.classList.add("mermaid-ready");
-      block.classList.remove("mermaid-loading");
-      status.remove();
-      onRender?.();
-    }).catch(() => {
-      if (block.mermaidKey !== key) return;
-      diagrams.delete(key);
-      status.textContent = "图表暂时无法渲染，可查看或复制源码";
-      pre.hidden = false;
-      image.hidden = true;
-      block.querySelector(".mermaid-source-toggle").hidden = true;
-      block.classList.remove("mermaid-ready");
-      block.classList.remove("mermaid-loading");
-    });
+  }
+  return null;
+}
+
+export function withStableMessageLayout(root, change, { follow = false } = {}) {
+  if (!root?.isConnected) return change();
+  const anchor = follow ? null : readingAnchor(root);
+  try { return change(); }
+  finally {
+    if (root.isConnected) {
+      if (follow) root.scrollTop = root.scrollHeight;
+      else if (anchor?.scope?.isConnected && root.contains(anchor.scope)) {
+        const character = !anchor.node ? null : anchor.node.isConnected && root.contains(anchor.node)
+          ? anchor : replacementCharacter(anchor);
+        const rect = character ? characterRect(character.node, character.offset) : null;
+        root.scrollTop += (rect ? rect.top : anchor.scope.getBoundingClientRect().top)
+          - root.getBoundingClientRect().top - (rect ? anchor.top : anchor.scopeTop);
+      }
+    }
   }
 }
+
+export function prepareMessageImage(image) {
+  if (image.closest(".user-attachments,.image-view-entry")) return;
+  if (image.complete && image.naturalWidth) { settleMessageImage(image); return; }
+  // 保留一个非零、同位置的 img 供浏览器触发 lazy 下载，解码前不让未知比例改动正文。
+  image.classList.add("message-image-pending");
+  image.closest(".message-image-link")?.classList.add("message-image-loading");
+}
+
+export function settleMessageImage(image) {
+  if (image.naturalWidth && image.naturalHeight) {
+    image.width = image.naturalWidth;
+    image.height = image.naturalHeight;
+  }
+  image.classList.remove("message-image-pending");
+  image.closest(".message-image-link")?.classList.remove("message-image-loading");
+}
+
+document.addEventListener("click", event => {
+  const target = event.target instanceof Element ? event.target.closest(".markdown-load-retry") : null;
+  if (!target || !target.closest(".markdown-deferred")) return;
+  if (attempt >= maximumRetries) {
+    // 不自行刷新页面，避免丢失尚未存好的输入或干扰待回执操作。
+    target.textContent = "请先保留输入，再刷新页面";
+    return;
+  }
+  void loadRenderer({ retry: true });
+});

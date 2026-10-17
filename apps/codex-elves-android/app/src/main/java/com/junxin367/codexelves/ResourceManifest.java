@@ -168,5 +168,10 @@ final class ResourceManifest {
         String relativeFilePath() {
             return "/".equals(path) ? "index.html" : path.substring(1);
         }
+
+        boolean sameContent(Entry other) {
+            return other != null && path.equals(other.path) && size == other.size
+                && contentType.equals(other.contentType) && sha256.equals(other.sha256);
+        }
     }
 }

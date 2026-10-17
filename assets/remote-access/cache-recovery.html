@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CodexElves · 网页缓存恢复</title>
+  <script src="/cache-recovery.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>网页缓存恢复</h1>
+    <p>此页面只检查和修复公开网页资源，保留本浏览器的授权、草稿和待处理操作。</p>
+    <p id="recovery-status" role="status" aria-live="polite">正在检查网页资源…</p>
+    <p id="recovery-next-step">现有会话页面不会自动刷新。请先保留正在输入的内容。</p>
+    <button id="recovery-retry" type="button">重新检查</button>
+    <p><a id="recovery-return" href="/" hidden>重新打开远程会话</a></p>
+    <p>原访问地址：<code id="recovery-address"></code></p>
+    <noscript>此恢复页需要 JavaScript。请允许本网站运行脚本后重新打开恢复页。</noscript>
+  </main>
+</body>
+</html>

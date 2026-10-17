@@ -1,8 +1,9 @@
-import { markdown, renderMermaidBlocks } from "./markdown.js";
+import { markdown, prepareMessageImage, renderMermaidBlocks, settleMessageImage, withStableMessageLayout } from "./markdown.js";
 import { createRemoteEventStream, sharedEventsAvailable } from "./events-client.js";
 import { renderMessageActions } from "./message-actions.js";
 import { isAndroidContainer, postPlatformMessage } from "./platform.js";
-import "./pwa.js";
+import { createRecoveryStore, createTranscriptCache, recoveryStorageMessage } from "./recovery-store.js";
+import { beginPwaForegroundWork, getPwaCacheState, retryPwaCache } from "./pwa.js";
 import {
   attachmentsFromQueuedMessage,
   attachmentsFromRemoteImages,
@@ -37,6 +38,7 @@ let approvalResizeObserver = null;
 const blockingRequestStates = new Map();
 const approvalReplies = new Map();
 let sessionRequest = null, connectionPollVersion = 0, connectionPollPending = null;
+const sessionRecoveryReads = new WeakMap();
 let nativeConnectionVersion = 0;
 let connectionCycleVersion = 0, connectionRtt = null;
 const connectionRttDescription = "网页到当前接入服务的 /api/session HTTP 往返时长；不代表模型响应耗时，也不代表端到端原生执行延迟。";
@@ -47,6 +49,26 @@ const drafts = new Map();
 const skillDrafts = new Map();
 const attachmentDrafts = new Map();
 const goalDrafts = new Map();
+const recoveryStore = createRecoveryStore();
+const transcriptCache = createTranscriptCache();
+const draftWrites = new Map(), failedInputRecoveries = new Map();
+let recoveryScope = null, recoveryGeneration = 0, draftStorageError = "", connecting = null;
+let initialAuthenticationRequired = false, appReadySent = false, transcriptChecking = false;
+function announceAppReady() {
+  if (appReadySent) return;
+  appReadySent = true;
+  window.dispatchEvent(new Event("codex-elves-app-ready"));
+}
+function renderPwaCacheState() {
+  const root = $("#appearance-cache-state");
+  if (!root) return;
+  const state = getPwaCacheState();
+  root.replaceChildren(element("span", "muted", state.message));
+  if (state.retryable) root.append(button("重试", "重新检查离线页面缓存", async () => {
+    try { await retryPwaCache(); } catch (error) { notice(error.message || "缓存检查失败，请稍后重试。", true); }
+  }, "text-button"));
+}
+window.addEventListener("codex-elves-pwa-state", () => renderPwaCacheState());
 const submittedDrafts = new WeakMap();
 const promptOptimizations = new Map();
 let selectedSkills = [], selectedModel = "", selectedEffort = "", selectedGoal = null;
@@ -100,9 +122,12 @@ let queueVersion = 0, notifiedQueue = null, notifiedQueueEdits = null, queueRequ
 let queueSnapshotVersion = null;
 const retiredQueueEpochs = new Set();
 let queueDrag = null, queueReorder = null;
-let sidebarRequest = null, refreshRequest = null, threadRequest = null, historyRefreshPending = false;
+let sidebarRequest = null, refreshRequest = null, threadRequest = null, historyRequest = null;
 let desktopSidebarOpen = true, sidebarLayoutCleanup = null, closeMobileSidebar = () => {};
 const itemVersions = new Map(), turnVersions = new Map(), renderedItems = new Map(), renderedTurns = new Map();
+const turnFieldVersions = new Map();
+let markdownRenderVersion = 0;
+let mermaidScanPending = false;
 const renderedActivities = new Map();
 const partialItems = new Set();
 const compactions = new Map();
@@ -133,6 +158,11 @@ function goalSubmissionState(value, action) {
     && ["not-attempted", "succeeded", "failed", "unknown"].includes(value.goalSet) ? value : null;
 }
 function goalComposerStorageRecord(record) {
+  if (record?.recoveryRef) {
+    const { draft, ...metadata } = record;
+    const { images, ...payload } = record.payload || {};
+    return { ...metadata, payload };
+  }
   if (!goalComposerAction(record?.action, record?.payload) || !validGoalComposerDraft(record.draft)) return record;
   let imageIndex = 0;
   return { ...record, draft: { ...record.draft, attachments: record.draft.attachments.map(entry => {
@@ -170,7 +200,8 @@ try {
       : ["send", "create", "editMessage", "setGoal"].includes(stored.action)
         && typeof stored.payload?.prompt === "string" && validSkillSelection(stored.payload.skills)
         && (stored.action !== "setGoal" || stored.payload.goalMode === true && typeof stored.payload.threadId === "string")
-        && (stored.payload.goalMode !== true || goalComposerAction(stored.action, stored.payload) && validGoalComposerDraft(stored.draft)))
+        && (stored.payload.goalMode !== true || goalComposerAction(stored.action, stored.payload)
+          && (validGoalComposerDraft(stored.draft) || typeof stored.recoveryRef === "string")))
     ? stored : { invalid: true };
 } catch { pending = { invalid: true }; }
 const goalComposerRecoveries = new Map();
@@ -181,7 +212,7 @@ try {
     const state = goalSubmissionState(record?.goalSubmission, record?.action);
     if (record?.invalid || typeof record?.deviceId !== "string" || typeof record.id !== "string"
         || !/^[a-zA-Z0-9-]{1,100}$/.test(record.id) || !state?.threadId
-        || record.action !== "create" || !validGoalComposerDraft(record.draft)
+        || record.action !== "create" || !validGoalComposerDraft(record.draft) && typeof record.recoveryRef !== "string"
         || !["failed", "unknown"].includes(record.recoveryState)
         || !state.firstTurnAccepted && record.manuallyVerified !== true && record.confirmedCreated !== true) continue;
     goalComposerRecoveries.set(state.threadId, record);
@@ -274,7 +305,7 @@ function applyAppearance(save = false) {
   }
   resizeComposerInput();
   refitComposerMenus();
-  if ($("#messages")) renderMermaidBlocks($("#messages"));
+  if ($("#messages")) scheduleMermaidBlocks();
 }
 applyAppearance();
 function openAppearance() {
@@ -289,9 +320,11 @@ function openAppearance() {
     <div class="appearance-field"><span id="appearance-theme-label">主题</span><div id="appearance-theme-slot" class="appearance-theme-options" role="group" aria-labelledby="appearance-theme-label"></div></div>
     <div class="appearance-field appearance-thread-limit-field"><span>每个项目显示会话数</span><div id="appearance-project-thread-limit-slot"></div></div>
     <div id="appearance-colors"></div>
+    <div id="appearance-cache-state" class="appearance-field" role="status"></div>
     <label class="appearance-field">字体大小<span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="字体大小"><output id="appearance-font-value"></output></span></label></div>
     <div class="appearance-actions"><button type="button" id="appearance-reset">恢复默认</button><button type="button" class="primary" id="appearance-close">完成</button></div>`;
   document.body.append(dialog);
+  renderPwaCacheState();
   const themeButtons = [["light", "浅色主题", "sun"], ["dark", "深色主题", "moon"]].map(([theme, label, iconName]) => {
     const control = button("", label, () => {
       if (appearance.theme === theme) return;
@@ -763,9 +796,163 @@ function storeDraft(key, draft) {
   attachmentDrafts.set(key, draft.attachments || []);
   if (draft.goalMode) goalDrafts.set(key, draft.goalMode);
   else goalDrafts.delete(key);
+  void persistInputDraft(key).catch(() => {});
 }
 function deleteDraft(key) {
   drafts.delete(key); skillDrafts.delete(key); attachmentDrafts.delete(key); goalDrafts.delete(key);
+  void persistInputDraft(key, true).catch(() => {});
+}
+function inputDraftEmpty(draft) {
+  return !draft?.text && !draft?.skills?.length && !draft?.attachments?.length && !draft?.goalMode;
+}
+function persistInputDraft(key, remove = false) {
+  if (!recoveryScope || !session) return Promise.resolve();
+  const scope = recoveryScope, generation = recoveryGeneration;
+  let job = draftWrites.get(key);
+  if (job?.scope === scope) { job.again = true; job.remove = remove; return job.promise; }
+  job = { scope, again: false, remove, promise: null };
+  job.promise = (async () => {
+    do {
+      job.again = false;
+      if (generation !== recoveryGeneration || scope !== recoveryScope) return;
+      const draft = storedDraft(key);
+      if (job.remove || inputDraftEmpty(draft)) await recoveryStore.remove(scope, "draft", key);
+      else await recoveryStore.put(scope, [{ kind: "draft", id: key, value: draft }]);
+      draftStorageError = "";
+    } while (job.again);
+  })().catch(error => {
+    if (generation === recoveryGeneration && draftStorageError !== error.name) {
+      draftStorageError = error.name || "Error";
+      if ($("#notice")) notice(recoveryStorageMessage(error), true);
+    }
+    throw error;
+  }).finally(() => { if (draftWrites.get(key) === job) draftWrites.delete(key); });
+  draftWrites.set(key, job);
+  return job.promise;
+}
+function privateInputScope(value) {
+  return typeof value?.device?.id === "string"
+    ? JSON.stringify([value.device.id, value.device.createdAtMs ?? null]) : null;
+}
+function clearPrivateInputs({ persisted = true } = {}) {
+  let previousScope = recoveryScope || privateInputScope(session);
+  if (!previousScope) try { previousScope = sessionStorage.getItem("codex-elves-input-owner"); } catch {}
+  ++recoveryGeneration; recoveryScope = null;
+  drafts.clear(); skillDrafts.clear(); attachmentDrafts.clear(); goalDrafts.clear();
+  draftWrites.clear(); failedInputRecoveries.clear(); goalComposerRecoveries.clear();
+  queuedEdits.clear(); questionDrafts.clear(); questionReplyReceipts.clear(); compactions.clear();
+  blockingRequestStates.clear(); approvalReplies.clear(); threadDeletions.clear();
+  pending = null; pendingSendRequest = null; editingQueuedMessage = null; editingMessage = null;
+  goalEditPending = null;
+  selectedSkills = []; selectedGoal = null; transcriptCache.clear();
+  clearTimeout(pendingTimer);
+  for (const key of ["codex-elves-pending", "codex-elves-input-owner", "codex-elves-goal-composer-recoveries",
+    "codex-elves-queue-edits", "codex-elves-question-receipts", "codex-elves-compact-pending",
+    "codex-elves-goal-edit-pending", "codex-elves-failed-inputs", threadDeletionStorageKey]) {
+    try { sessionStorage.removeItem(key); } catch {}
+  }
+  return persisted ? recoveryStore.clear(previousScope) : Promise.resolve();
+}
+async function restorePrivateInputs(value, { expected = null, requestGeneration = recoveryGeneration } = {}) {
+  const scope = privateInputScope(value);
+  if (requestGeneration !== recoveryGeneration)
+    throw Object.assign(new Error("会话读取已取消，当前授权状态已改变。"), { name: "RecoveryAuthorizationError" });
+  // 先在同一 IDB 事务核对读取开始时的 owner/代次，再允许清理旧授权数据。
+  await recoveryStore.activate(scope, { replace: !!expected, expected });
+  if (requestGeneration !== recoveryGeneration || privateInputScope(session) !== scope) return;
+  let previousScope;
+  try { previousScope = sessionStorage.getItem("codex-elves-input-owner"); } catch {}
+  if (recoveryScope && recoveryScope !== scope || previousScope && previousScope !== scope
+      || pending?.deviceId && pending.deviceId !== value.device.id) {
+    await clearPrivateInputs({ persisted: false });
+  }
+  const currentGeneration = recoveryGeneration;
+  recoveryScope = scope;
+  try { sessionStorage.setItem("codex-elves-input-owner", scope); } catch {}
+  const [savedDrafts, savedPending, savedFailures, activeReceipts] = await Promise.all([
+    recoveryStore.list(scope, "draft"), recoveryStore.list(scope, "pending"), recoveryStore.list(scope, "failed"),
+    recoveryStore.list(scope, "active")
+  ]);
+  if (currentGeneration !== recoveryGeneration || privateInputScope(session) !== scope) return;
+  const hydrate = record => {
+    if (!record?.recoveryRef) return record;
+    const full = savedPending.find(entry => entry.id === record.recoveryRef)?.value;
+    return full && full.deviceId === value.device.id && full.recoveryScope === scope
+      ? { ...full, ...record, payload: { ...full.payload, ...record.payload }, draft: full.draft,
+        ...(record.recoveryUnavailable ? { invalid: false, recoveryUnavailable: false } : {}) }
+      : { ...record, invalid: true };
+  };
+  pending = hydrate(pending);
+  for (const [id, record] of goalComposerRecoveries) goalComposerRecoveries.set(id, hydrate(record));
+  // IndexedDB 本身保存完整回执，sessionStorage 被限制时仍可找回原请求标识。
+  if (!pending) {
+    const candidates = savedPending.map(entry => entry.value)
+      .filter(record => record.deviceId === value.device.id && record.recoveryScope === scope
+        && activeReceipts.some(active => active.id === record.id)
+        && ![...goalComposerRecoveries.values()].some(recovery => recovery.id === record.id));
+    const latest = candidates.sort((left, right) => right.time - left.time)[0];
+    if (latest) pending = { ...latest, recoveryRef: latest.id };
+  }
+  if (pending?.draft) submittedDrafts.set(pending.payload, pending.draft);
+  for (const { id, value: draft } of savedDrafts) {
+    if (typeof draft?.text !== "string" || !validSkillSelection(draft.skills) || !Array.isArray(draft.attachments)
+        || drafts.has(id)) continue;
+    drafts.set(id, draft.text); skillDrafts.set(id, draft.skills || []);
+    attachmentDrafts.set(id, draft.attachments);
+    if (draft.goalMode) goalDrafts.set(id, draft.goalMode);
+  }
+  for (const { id, value: record } of savedFailures)
+    if (record.deviceId === value.device.id && record.recoveryScope === scope) failedInputRecoveries.set(id, record);
+}
+function restoreSmallInputRecoveries() {
+  try {
+    const records = JSON.parse(sessionStorage.getItem("codex-elves-failed-inputs") || "[]");
+    if (Array.isArray(records)) for (const record of records)
+      if (record?.deviceId === session?.device.id && record.recoveryScope === privateInputScope(session)
+          && typeof record.draft?.text === "string" && validSkillSelection(record.draft.skills))
+        failedInputRecoveries.set(record.id, record);
+  } catch {}
+}
+function smallInputStorageRecord(record) {
+  const serialized = JSON.stringify(record);
+  return serialized.length <= 128 * 1024 ? serialized : null;
+}
+function persistSmallInputRecoveries() {
+  const serialized = JSON.stringify([...failedInputRecoveries.values()].filter(record => record.sessionRecovery));
+  if (serialized.length > 256 * 1024) throw Object.assign(new Error("小文字恢复记录已达到会话存储上限。"), { name: "QuotaExceededError" });
+  sessionStorage.setItem("codex-elves-failed-inputs", serialized);
+}
+function ordinaryInputRecord(record) {
+  return record && ["send", "create"].includes(record.action) && !goalComposerAction(record.action, record.payload);
+}
+async function recoverFailedInput(record) {
+  if (!ordinaryInputRecord(record) || record.deviceId !== session?.device.id
+      || record.recoveryScope && record.recoveryScope !== privateInputScope(session)) return;
+  if (record.recoveryRef && !record.draft) throw new Error("本地草稿暂时无法读取，原回执已保留。请恢复存储后再核对，勿重新发送。");
+  const scope = recoveryScope || privateInputScope(session), generation = recoveryGeneration;
+  const key = record.payload.threadId || `$new:${record.payload.projectId || ""}`;
+  const draft = record.draft || { text: record.payload.prompt || "", skills: record.payload.skills || [],
+    attachments: (record.payload.images || []).map(image => ({ ...image, kind: "inline" })), goalMode: null };
+  const recovery = { ...record, draft, recoveryScope: scope };
+  try { await recoveryStore.put(scope, [{ kind: "failed", id: record.id, value: recovery }]); }
+  catch (error) {
+    if (!smallInputStorageRecord(recovery)) throw new Error(recoveryStorageMessage(error));
+    recovery.sessionRecovery = true;
+    failedInputRecoveries.set(record.id, recovery);
+    try { persistSmallInputRecoveries(); }
+    catch (storageError) { throw new Error(recoveryStorageMessage(storageError)); }
+  }
+  if (generation !== recoveryGeneration || record.deviceId !== session?.device.id) return;
+  failedInputRecoveries.set(record.id, recovery);
+  const isCurrent = draftKey() === key && !editingQueuedMessage && !editingMessage;
+  const existing = isCurrent ? snapshotDraft() : storedDraft(key);
+  if (!inputDraftEmpty(existing) && !matchingDraft(existing, record.payload)) return;
+  storeDraft(key, draft);
+  if (isCurrent) { restoreDraft(key); resizeComposerInput(); }
+  if (recovery.sessionRecovery) return;
+  await persistInputDraft(key);
+  await recoveryStore.remove(scope, "failed", record.id);
+  if (scope === recoveryScope) failedInputRecoveries.delete(record.id);
 }
 function rememberDraft() {
   if (editingQueuedMessage?.threadId === selectedId) { rememberQueuedMessageEdit(); return; }
@@ -831,6 +1018,13 @@ function matchingDraft(draft, payload) {
 }
 function clearSubmittedDraft(payload, current = true) {
   const key = payload.threadId || `$new:${payload.projectId || ""}`;
+  for (const [id, record] of failedInputRecoveries) {
+    const recoveryKey = record.payload.threadId || `$new:${record.payload.projectId || ""}`;
+    if (recoveryKey !== key || !matchingDraft(record.draft, payload)) continue;
+    failedInputRecoveries.delete(id);
+    if (!record.sessionRecovery && recoveryScope) void recoveryStore.remove(recoveryScope, "failed", id).catch(() => {});
+  }
+  try { persistSmallInputRecoveries(); } catch {}
   if (matchingDraft(storedDraft(key), payload)) deleteDraft(key);
   if (current && matchingDraft(snapshotDraft(), payload)) {
     $("#prompt").value = ""; selectedSkills = []; selectedGoal = null; clearComposerAttachments(); renderSelectedSkills();
@@ -1865,6 +2059,7 @@ function filterDeletedSidebar(value, deviceId = session?.device.id) {
   for (const project of value.projects) project.threads = project.threads.filter(keep);
 }
 function applyThreadDeletion(id, deviceId = session?.device.id) {
+  transcriptCache.remove(deviceId, id);
   const key = threadDeletionKey(id, deviceId), previous = threadDeletions.get(key);
   setThreadDeletion(key, { ...previous, deviceId, threadId: id, state: "deleted" });
   if (session?.device.id !== deviceId) return;
@@ -1873,7 +2068,10 @@ function applyThreadDeletion(id, deviceId = session?.device.id) {
   }
   // showWelcome 会先保存当前草稿；永久删除后再清理，避免把草稿重新留在内存。
   deleteDraft(id);
-  goalComposerRecoveries.delete(id); persistGoalComposerRecoveries();
+  const removedGoalRecovery = goalComposerRecoveries.get(id);
+  goalComposerRecoveries.delete(id);
+  if (persistGoalComposerRecoveries() && removedGoalRecovery?.recoveryRef && recoveryScope)
+    void recoveryStore.remove(recoveryScope, "pending", removedGoalRecovery.recoveryRef).catch(() => {});
   for (const [scope, record] of promptOptimizations)
     if (JSON.parse(scope)[0] === id) { cancelPromptOptimization(record); promptOptimizations.delete(scope); }
   readMarkRequests.delete(id);
@@ -2050,36 +2248,50 @@ function notice(message, error = false) {
     if (node.hasAttribute("popover") && node.matches(":popover-open")) node.hidePopover();
   }, 6500);
 }
-async function api(path, body, id, signal) {
+async function api(path, body, id, signal, { resourcePriority = "foreground" } = {}) {
   if (path.startsWith("/api/action/") && path !== "/api/action/deleteThread" && body?.threadId
       && (threadDeletionLocked(body.threadId) || threadDeleted(body.threadId)))
     throw Object.assign(new Error("此会话正在删除或已删除，请先核对删除结果。"), { code: 409 });
   const deviceId = session?.device.id;
+  const encodedBody = body === undefined ? undefined : JSON.stringify(body);
+  // 16 KiB/s 包含 base64 上传；12 MiB 图片可等待约 18 分钟，仍有有限上限。
+  const actionTimeout = path.startsWith("/api/action/")
+    ? Math.min(20 * 60000, 90000 + Math.ceil(new TextEncoder().encode(encodedBody || "").length / 16384) * 1000) : 0;
   const timeout = path.startsWith("/api/read/") ? 60000
-    : path === "/api/session" || path.startsWith("/api/receipts/") ? 15000 : 0;
+    : path === "/api/session" || path.startsWith("/api/receipts/") ? 15000 : actionTimeout;
   const controller = timeout ? new AbortController() : null;
   const abort = () => controller?.abort();
   let timedOut = false;
   if (signal?.aborted) abort();
   else if (controller) signal?.addEventListener("abort", abort, { once: true });
   const timer = timeout ? setTimeout(() => { timedOut = true; controller.abort(); }, timeout) : null;
+  let releaseForeground = null;
   try {
+    if (!["/api/read/models", "/api/read/skills"].includes(path))
+      releaseForeground = beginPwaForegroundWork({ priority: resourcePriority });
     const response = await fetch(path, {
       method: body === undefined ? "GET" : "POST", credentials: "same-origin",
       headers: { ...(body !== undefined ? { "Content-Type": "application/json" } : {}), ...(id ? { "Idempotency-Key": id } : {}) },
-      body: body === undefined ? undefined : JSON.stringify(body), signal: controller?.signal || signal
+      body: encodedBody, signal: controller?.signal || signal
     });
     const result = await response.json().catch(error => {
       if (controller?.signal.aborted || signal?.aborted) throw error;
       return { message: `HTTP ${response.status}` };
     });
     if (!response.ok) {
+      if (session?.device.id === deviceId) {
+        connectionRtt = null;
+        setConnection(response.status >= 500 || path === "/api/session" ? false : connected);
+      }
       if (response.status === 401 && !path.endsWith("/connect") && session && deviceId === session.device.id)
         requireAuthentication();
       throw Object.assign(new Error(result.message || "请求失败"), { code: response.status });
     }
     return result;
   } catch (error) {
+    if ((timedOut || error instanceof TypeError) && session?.device.id === deviceId) setConnection(false);
+    if (timedOut && actionTimeout) throw Object.assign(
+      new Error("等待上传或回包已超时，正在核对原请求回执；不会自动重发。"), { outcomeUnknown: true, actionTimedOut: true });
     if (timedOut) throw new Error(path.startsWith("/api/read/")
       ? "桌面数据读取超时。若刚启动或重启 Codex，请等待主界面完全打开、能够正常查看会话后，再刷新远程网页。"
       : "读取超时，请检查网络后重试");
@@ -2087,22 +2299,40 @@ async function api(path, body, id, signal) {
   } finally {
     clearTimeout(timer);
     if (controller) signal?.removeEventListener("abort", abort);
+    releaseForeground?.();
   }
 }
-function readConnectionSession(signal) {
+function promoteReadPriority(request, resourcePriority) {
+  if (resourcePriority === "background" || request.resourcePriority !== "background") return;
+  request.resourcePriority = "foreground";
+  if (request.apiStarted) request.releasePriority = beginPwaForegroundWork();
+}
+function readConnectionSession(signal, recoveryObservation = undefined, { resourcePriority = "foreground" } = {}) {
   const deviceId = session?.device.id;
   const nativeVersion = nativeConnectionVersion;
   const connectionVersion = connectionCycleVersion;
   if (sessionRequest && sessionRequest.deviceId === deviceId && sessionRequest.nativeVersion === nativeVersion
-      && sessionRequest.connectionVersion === connectionVersion) return sessionRequest.promise;
+      && sessionRequest.connectionVersion === connectionVersion) {
+    promoteReadPriority(sessionRequest, resourcePriority);
+    return sessionRequest.promise;
+  }
   const controller = new AbortController();
   const abort = () => controller.abort();
   if (signal?.aborted) abort();
   else signal?.addEventListener("abort", abort, { once: true });
-  const startedAt = performance.now();
-  const request = { deviceId, nativeVersion, connectionVersion, controller, promise: null };
-  request.promise = api("/api/session", undefined, undefined, controller.signal)
-    .then(latest => {
+  const request = { deviceId, nativeVersion, connectionVersion, controller,
+    recoveryGeneration, resourcePriority, apiStarted: false, releasePriority: null, promise: null };
+  request.promise = (async () => {
+      let expected = recoveryObservation;
+      if (expected === undefined) {
+        try { expected = await recoveryStore.observe(); }
+        catch { expected = null; }
+      }
+      if (controller.signal.aborted) throw new Error("连接已取消，请重试。");
+      const startedAt = performance.now();
+      request.apiStarted = true;
+      const latest = await api("/api/session", undefined, undefined, controller.signal,
+        { resourcePriority: request.resourcePriority });
       const elapsed = performance.now() - startedAt;
       const sameDevice = deviceId === undefined ? !session : session?.device.id === deviceId;
       if (sessionRequest === request && !controller.signal.aborted && sameDevice
@@ -2111,11 +2341,14 @@ function readConnectionSession(signal) {
           && Number.isFinite(elapsed) && elapsed >= 0) {
         connectionRtt = { deviceId: latest.device.id, nativeVersion, connectionVersion, milliseconds: elapsed };
       }
-      return session && session.device.id === deviceId && nativeVersion !== nativeConnectionVersion
+      const result = session && session.device.id === deviceId && nativeVersion !== nativeConnectionVersion
         ? { ...latest, nativeConnected: session.nativeConnected } : latest;
-    })
+      sessionRecoveryReads.set(result, { expected, requestGeneration: request.recoveryGeneration });
+      return result;
+    })()
     .finally(() => {
       signal?.removeEventListener("abort", abort);
+      request.releasePriority?.();
       if (sessionRequest === request) sessionRequest = null;
     });
   sessionRequest = request;
@@ -2130,6 +2363,10 @@ async function syncConnectionState(source = stream) {
   const deviceId = session?.device.id;
   const latest = await readConnectionSession();
   if (pageLeaving || stream !== source || session?.device.id !== deviceId) return false;
+  if (privateInputScope(latest) !== privateInputScope(session)) {
+    await reconnectChangedAuthorization();
+    return false;
+  }
   session = latest;
   setConnection(latest.nativeConnected && source?.readyState === EventSource.OPEN);
   renderApprovals();
@@ -2138,10 +2375,19 @@ async function syncConnectionState(source = stream) {
 function savePending(value) {
   if (value) {
     try { sessionStorage.setItem("codex-elves-pending", JSON.stringify(goalComposerStorageRecord(value))); }
-    catch { throw new Error("无法保存发送回执，消息未提交。请允许此网页使用浏览器会话存储。"); }
+    catch (error) {
+      if (!value.recoveryRef) throw new Error(recoveryStorageMessage(error, true));
+      // 完整记录已先写入 IndexedDB，刷新时也可以通过原 ID 找回。
+    }
   } else {
     try { sessionStorage.removeItem("codex-elves-pending"); }
     catch { notice("无法清理浏览器回执记录，重新打开页面后可能仍需人工核对。", true); }
+    const previous = pending;
+    if (previous?.recoveryRef && recoveryScope)
+      void recoveryStore.remove(recoveryScope, "active", previous.recoveryRef).catch(() => {});
+    if (previous?.recoveryRef && recoveryScope
+        && ![...goalComposerRecoveries.values()].some(record => record.id === previous.id))
+      void recoveryStore.remove(recoveryScope, "pending", previous.recoveryRef).catch(() => {});
   }
   clearTimeout(pendingTimer);
   pending = value;
@@ -2161,9 +2407,11 @@ function persistGoalComposerRecoveries(required = false) {
         .filter(record => record.recoveryState !== "unknown" || pending?.id !== record.id)
         .map(goalComposerStorageRecord)));
     else sessionStorage.removeItem("codex-elves-goal-composer-recoveries");
+    return true;
   } catch {
     if (required) throw new Error("无法保存已创建会话的目标草稿，请保留页面并核对回执。");
     notice("无法保存目标恢复草稿，请保留页面并完成核对。", true);
+    return false;
   }
 }
 function goalRecordThreadId(record) {
@@ -2230,8 +2478,8 @@ async function applyGoalComposerReceipt(record, receipt, { allowSelection = fals
     || goalSubmissionState(record.goalSubmission, record.action);
   const deletedThreadId = state?.threadId || record.payload.threadId;
   if (deletedThreadId && threadDeleted(deletedThreadId, record.deviceId)) {
-    if (pending?.id === record.id) savePending(null);
     goalComposerRecoveries.delete(deletedThreadId); persistGoalComposerRecoveries();
+    if (pending?.id === record.id) savePending(null);
     return "failed";
   }
   const outcome = manuallyVerified ? "failed" : goalReceiptOutcome(receipt, record.action);
@@ -2240,6 +2488,15 @@ async function applyGoalComposerReceipt(record, receipt, { allowSelection = fals
   const updated = { ...record, result, receiptState: receipt?.state || "unknown",
     ...(confirmedCreated ? { confirmedCreated: true } : {}),
     ...(state ? { goalSubmission: state } : {}), ...(manuallyVerified ? { manuallyVerified: true } : {}) };
+  if (record.recoveryRef && recoveryScope) {
+    try { await recoveryStore.put(recoveryScope, [{ kind: "pending", id: record.recoveryRef, value: updated }]); }
+    catch (error) {
+      updateGoalComposerPending(updated);
+      notice(`目标结果已收到，但恢复记录未能更新：${recoveryStorageMessage(error)}`, true);
+      return;
+    }
+    if (record.deviceId !== session?.device.id) return;
+  }
   const sourceKey = record.payload.threadId || `$new:${record.payload.projectId || ""}`;
   const ownsSelection = record.selectionToken === selectionToken && draftKey() === sourceKey;
   const unchangedCurrent = !ownsSelection || matchingDraft(snapshotDraft(), record.payload);
@@ -2485,15 +2742,43 @@ function refreshTranscriptEvents() {
 }
 async function mutate(action, payload, { reliable = false, receiptId = null } = {}) {
   const version = selectionVersion;
+  const deviceId = session?.device.id, generation = recoveryGeneration;
   const id = receiptId || (reliable && pending ? pending.id : randomId());
   const goalAction = goalComposerAction(action, payload);
   if (reliable && !pending) {
     try {
-      savePending({
+      const record = {
         id, action, payload, deviceId: session.device.id, selectionToken, time: Date.now(),
-        ...(goalAction ? { draft: submittedDrafts.get(payload) || snapshotDraft(), goalReadVersion: goalVersion } : {})
-      });
+        ...(["send", "create", "setGoal"].includes(action) ? {
+          draft: submittedDrafts.get(payload) || snapshotDraft(),
+          ...(goalAction ? { goalReadVersion: goalVersion } : {})
+        } : {})
+      };
+      if (record.draft) {
+        const currentScope = privateInputScope(session);
+        try {
+          await recoveryStore.activate(currentScope, { replace: false });
+          if (generation !== recoveryGeneration || deviceId !== session?.device.id)
+            throw new Error("设备授权已更换，操作未提交。");
+          recoveryScope = currentScope;
+          record.recoveryScope = currentScope;
+          await recoveryStore.put(currentScope, [{ kind: "pending", id, value: record },
+            { kind: "active", id, value: { id } }]);
+          record.recoveryRef = id;
+        } catch (error) {
+          if (generation !== recoveryGeneration || deviceId !== session?.device.id || error.name === "RecoveryAuthorizationError") throw error;
+          record.recoveryScope = currentScope;
+          if (!smallInputStorageRecord(record)) throw error;
+          // 大小受控的记录仍可使用会话存储回执；大图片必须先可靠存入 IndexedDB。
+          notice("浏览器本地草稿存储不可用；本次回执将保存在会话存储，未发送草稿仅保留在本页。", true);
+        }
+        if (generation !== recoveryGeneration || deviceId !== session?.device.id)
+          throw new Error("设备授权已更换，操作未提交。");
+      }
+      savePending(record);
     } catch (error) {
+      error.message = recoveryStorageMessage(error, true);
+      error.notSubmitted = true;
       if (goalAction) Object.assign(error, { notSubmitted: true, goalReceipt: {
         state: "failed", result: { ok: false, message: error.message, code: "receipt-storage-unavailable" }
       } });
@@ -2518,8 +2803,16 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
     }
     if (reliable) {
       // A network failure does not prove the native client rejected the message.
-      if (error.code && error.code !== 503 && ownsPending()) savePending(null);
-      else notice("未收到回执，正在确认送达状态。请勿重复发送。", true);
+      const rejected = Number.isInteger(error.code) && error.code >= 400 && error.code < 500
+        && ![408, 409].includes(error.code);
+      if (rejected && ownsPending()) {
+        await recoverFailedInput(pending);
+        if (ownsPending()) savePending(null);
+      } else {
+        notice("未收到回执，正在确认送达状态。请勿重复发送。", true);
+        if (ownsPending()) void resolvePending();
+        if (action === "send") error.deliveryPending = true;
+      }
     }
     throw error;
   }
@@ -2562,6 +2855,7 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
       });
     }
   }
+  if (ownsPending() && result.state === "failed") await recoverFailedInput(pending);
   if (ownsPending()) savePending(null);
   if (result.state === "failed") {
     if (action === "create" && result.result?.threadId && creating && selectionVersion === version) {
@@ -2620,6 +2914,12 @@ async function confirmPendingSend(current, result = {}) {
 }
 async function resolvePending() {
   if (!pending || !session) return;
+  if (pending.recoveryUnavailable) {
+    try { await restorePrivateInputs(session); }
+    catch (error) { notice(recoveryStorageMessage(error), true); return; }
+    if (pending?.recoveryUnavailable) { notice("本地恢复记录仍不可读取，原请求标识已保留，请先核对本机会话。", true); return; }
+    return resolvePending();
+  }
   const current = pending;
   const deviceId = session.device.id;
   const version = selectionVersion;
@@ -2664,6 +2964,14 @@ async function resolvePending() {
       } else notice("上一条消息送达状态未知。请查看会话，确认后再解除发送锁定。", true);
       updateComposer(); return;
     }
+    if (receipt.state === "failed") {
+      try { await recoverFailedInput(current); }
+      catch (error) {
+        notice(error.message || "输入恢复失败，原请求回执已保留，请勿重新发送。", true);
+        retry(5000); updateComposer(); return;
+      }
+    }
+    if (!stillCurrent()) return;
     savePending(null);
     if (current.action === "reorderQueued") {
       if (receipt.state === "completed") {
@@ -2706,7 +3014,7 @@ async function resolvePending() {
         && current.selectionToken === selectionToken && version === selectionVersion) await selectCreatedThread(receipt.result.threadId);
     else if (selectedId === current.payload.threadId) {
       if (current.action === "editMessage" && receipt.state === "completed")
-        await selectThread(selectedId, { closeSidebar: false });
+        await selectThread(selectedId, { closeSidebar: false, force: true });
       else if (!queued) await reloadThread();
     }
     updateComposer();
@@ -2980,9 +3288,13 @@ function showLogin() {
   else void readLoginStatus();
   updateForm();
   if (matchMedia("(min-width: 761px) and (hover: hover) and (pointer: fine)").matches) key.focus({ preventScroll: true });
+  announceAppReady();
 }
 function requireAuthentication() {
   disconnect();
+  initialAuthenticationRequired = true;
+  void clearPrivateInputs().catch(() => {});
+  session = null; selectedId = null; thread = null; sidebar = null;
   postPlatformMessage("auth-required");
   showLogin();
 }
@@ -3026,18 +3338,14 @@ function showConnectionRecovery(error) {
   panel.append(heading, message, retry, status);
   page.append(panel);
   app.replaceChildren(page);
+  announceAppReady();
 }
 function handleInitialConnectionError(error) {
   if (error.code === 401) {
     requireAuthentication();
     return;
   }
-  if (isAndroidContainer()) {
-    showConnectionRecovery(error);
-    return;
-  }
-  showLogin();
-  notice(error.message, true);
+  showConnectionRecovery(error);
 }
 function shell() {
   loginPageCleanup?.();
@@ -3089,6 +3397,7 @@ function shell() {
     onPreview: openImagePreview
   });
   composerScroll = mountComposerScroll();
+  announceAppReady();
   const add = $("#composer-add");
   add.append(icon("plus"));
   add.popupDirection = "up";
@@ -3237,12 +3546,14 @@ function shell() {
     try {
       await api("/api/logout", {});
       disconnect(); savePending(null);
+      await clearPrivateInputs().catch(() => {});
+      initialAuthenticationRequired = true;
       postPlatformMessage("logged-out");
       showLogin();
     }
     catch (error) { notice(error.message, true); if ($("#logout")) $("#logout").disabled = false; }
   };
-  $("#refresh").onclick = () => void Promise.all([refreshAll(), loadModels(true)]).catch(error => notice(error.message, true));
+  $("#refresh").onclick = () => void Promise.all([refreshAll({ fresh: true }), loadModels(true)]).catch(error => notice(error.message, true));
   $("#appearance-button").onclick = openAppearance;
   $("#sidebar-view-toggle").onclick = () => void changeSidebar({
     target: "grouping", mode: "updated_at",
@@ -3373,7 +3684,7 @@ async function startNewChat(projectId) {
         || session.readOnly || !connected) return;
   }
   const project = projectId === undefined ? selectedThreadProjectId() : projectId;
-  closePopup(); rememberDraft(); resetMessages();
+  closePopup(); rememberDraft(); rememberTranscript(); resetMessages();
   editingQueuedMessage = null;
   setSelectValue($("#project-select"), project);
   ++selectionVersion; creating = true; selectedId = null; thread = null; historyCursor = null; historyInitialized = false; turns.clear(); transcriptEvents.clear(); renderMessages();
@@ -3385,8 +3696,15 @@ async function startNewChat(projectId) {
   renderSidebar(); updateComposer(); closeMobileSidebar({ focus: false });
   $("#prompt").focus();
 }
-async function loadSidebar(cursor = null) {
-  if (sidebarRequest?.deviceId === session?.device.id) return sidebarRequest.promise;
+async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "foreground" } = {}) {
+  if (sidebarRequest?.deviceId === session?.device.id) {
+    promoteReadPriority(sidebarRequest, resourcePriority);
+    if (fresh || cursor !== sidebarRequest.cursor) {
+      sidebarRequest.again = true;
+      sidebarRequest.nextCursor = fresh ? null : cursor;
+    }
+    return sidebarRequest.promise;
+  }
   const version = ++sidebarVersion, deviceId = session?.device.id;
   if (sidebarFilterDeviceId !== deviceId) {
     sidebarFilterDeviceId = deviceId;
@@ -3394,24 +3712,38 @@ async function loadSidebar(cursor = null) {
     recentPriorityIds = null;
     expandedProjects.clear(); collapsedSidebarSections.clear();
   }
+  const request = { deviceId, cursor, nextCursor: cursor, again: false, resourcePriority,
+    apiStarted: false, releasePriority: null, promise: null };
   const promise = (async () => {
-    const result = await api("/api/read/sidebar", { cursor });
-    if (version !== sidebarVersion || !session || deviceId !== session.device.id) return;
-    const isMainThread = item => item.threadSource !== "subagent" && !item.source?.subAgent && !item.source?.subagent;
-    result.recent = result.recent.filter(isMainThread);
-    result.pinnedThreads = result.pinnedThreads.filter(isMainThread);
-    for (const project of result.projects) project.threads = project.threads.filter(isMainThread);
-    filterDeletedSidebar(result, deviceId);
-    if (JSON.stringify(sidebar) === JSON.stringify(result)) return;
-    sidebar = result;
-    renderSidebar();
-    const selected = [...sidebar.recent, ...sidebar.pinnedThreads].find(item => item.id === selectedId);
-    if (selected?.hasUnreadTurn && !isActiveThread())
-      void markVisibleThreadRead().catch(error => notice(error.message, true));
+    do {
+      request.again = false; request.cursor = request.nextCursor;
+      let result;
+      try {
+        request.apiStarted = true;
+        result = await api("/api/read/sidebar", { cursor: request.cursor }, undefined, undefined,
+          { resourcePriority: request.resourcePriority });
+      }
+      catch (error) { if (request.again && deviceId === session?.device.id) continue; throw error; }
+      if (version !== sidebarVersion || !session || deviceId !== session.device.id) return;
+      const isMainThread = item => item.threadSource !== "subagent" && !item.source?.subAgent && !item.source?.subagent;
+      result.recent = result.recent.filter(isMainThread);
+      result.pinnedThreads = result.pinnedThreads.filter(isMainThread);
+      for (const project of result.projects) project.threads = project.threads.filter(isMainThread);
+      filterDeletedSidebar(result, deviceId);
+      if (JSON.stringify(sidebar) === JSON.stringify(result)) continue;
+      sidebar = result;
+      renderSidebar();
+      const selected = [...sidebar.recent, ...sidebar.pinnedThreads].find(item => item.id === selectedId);
+      if (selected?.hasUnreadTurn && !isActiveThread())
+        void markVisibleThreadRead().catch(error => notice(error.message, true));
+    } while (request.again && deviceId === session?.device.id && version === sidebarVersion);
   })();
-  sidebarRequest = { deviceId, promise };
+  request.promise = promise; sidebarRequest = request;
   try { await promise; }
-  finally { if (sidebarRequest?.promise === promise) sidebarRequest = null; }
+  finally {
+    request.releasePriority?.();
+    if (sidebarRequest?.promise === promise) sidebarRequest = null;
+  }
 }
 function sidebarAttentionState(item) {
   if (["waiting", "unread", "active", "idle"].includes(item.priority?.attentionState))
@@ -3933,7 +4265,7 @@ async function submitMessageEdit() {
     }, { reliable: true });
     if (editingMessage === edit) cancelMessageEdit({ focus: false });
     if (version === selectionVersion && selectedId === edit.threadId)
-      await selectThread(edit.threadId, { closeSidebar: false });
+      await selectThread(edit.threadId, { closeSidebar: false, force: true });
     await loadSidebar();
   } catch (error) {
     if (editingMessage === edit) edit.error = error.message;
@@ -3981,14 +4313,22 @@ function openImagePreview(link, image) {
 function bindMessageImages(node) {
   for (const image of node.querySelectorAll(".message-image")) {
     const link = image.closest(".message-image-link");
-    image.onload = () => { if (followMessages && image.isConnected) $("#messages").scrollTop = $("#messages").scrollHeight; };
-    image.onerror = () => {
+    prepareMessageImage(image);
+    const updateLayout = change => {
+      const root = $("#messages");
+      if (root?.isConnected && image.isConnected && root.contains(image))
+        withStableMessageLayout(root, change, { follow: followMessages && !composerScroll?.collapsed });
+      else change();
+    };
+    image.onload = () => updateLayout(() => settleMessageImage(image));
+    image.onerror = () => updateLayout(() => {
+      settleMessageImage(image);
       const placeholder = element("span", "attachment-placeholder", `图片不可用：${image.alt || "附件"}`);
       placeholder.messageImageSource = image.getAttribute("src");
       placeholder.messageImageLabel = image.alt;
       placeholder.messageImageKey = JSON.stringify([image.getAttribute("src"), image.alt, link?.getAttribute("href") || ""]);
       image.closest(".message-image-link")?.replaceWith(placeholder);
-    };
+    });
     if (link && (/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(link.getAttribute("href") || "")
         || safeInlineImageSource(image.getAttribute("src")))) {
       link.title = image.alt ? `预览图片：${image.alt}` : "预览图片";
@@ -4015,6 +4355,8 @@ function messageImage(asset, label, inlineSource, previous) {
   link.append(image); bindMessageImages(link); return link;
 }
 function setMarkdown(node, text, remoteImages = [], options) {
+  node.markdownSource = { text, remoteImages, options };
+  scheduleMermaidBlocks();
   const html = markdown(text, remoteImages, options).trim();
   if (node.markdownHtml === html) return;
   if (node.querySelector(".message-image,.attachment-placeholder,.mermaid-block")) {
@@ -4062,10 +4404,44 @@ function setMarkdown(node, text, remoteImages = [], options) {
   node.markdownHtml = html;
   for (const copy of node.querySelectorAll(".copy-code")) copy.onclick = () => copyText(copy.closest(".code-block").querySelector("code").textContent);
   bindMessageImages(node);
-  renderMermaidBlocks(node, () => {
-    if (followMessages && node.isConnected) $("#messages").scrollTop = $("#messages").scrollHeight;
+}
+function scheduleMermaidBlocks() {
+  if (mermaidScanPending) return;
+  mermaidScanPending = true;
+  queueMicrotask(() => {
+    mermaidScanPending = false;
+    const root = $("#messages"), version = selectionVersion;
+    if (!root?.isConnected) return;
+    renderMermaidBlocks(root, () => {
+      if (version === selectionVersion && root === $("#messages") && root.isConnected
+          && followMessages && !composerScroll?.collapsed) root.scrollTop = root.scrollHeight;
+    }, change => {
+      if (version === selectionVersion && root === $("#messages") && root.isConnected)
+        withStableMessageLayout(root, change, { follow: followMessages && !composerScroll?.collapsed });
+    });
   });
 }
+function refreshMarkdown() {
+  ++markdownRenderVersion;
+  const root = $("#messages");
+  const refresh = () => {
+    for (const node of document.querySelectorAll(".markdown")) {
+      const source = node.markdownSource;
+      if (source) setMarkdown(node, source.text, source.remoteImages, source.options);
+    }
+    for (const cached of renderedItems.values())
+      if (cached.node.isConnected) cached.markdownVersion = markdownRenderVersion;
+  };
+  if (root?.isConnected)
+    withStableMessageLayout(root, refresh, { follow: followMessages && !composerScroll?.collapsed });
+  else refresh();
+  if (root) {
+    historyScrollTop = root.scrollTop;
+    updateScrollControl(); scheduleHistoryLoad();
+    scheduleMermaidBlocks();
+  }
+}
+window.addEventListener("codex-elves-markdown-ready", refreshMarkdown);
 function renderImageViewGroup(records, previous) {
   const groupRecords = Array.isArray(records) ? records : [records];
   const occurrences = new Map();
@@ -4679,16 +5055,18 @@ function resetMessages() {
   stopActivityTimer();
   finishQueueDrag({ render: false });
   historyController?.abort(); historyController = null;
+  historyRequest = null;
   selectionController?.abort(); selectionController = null;
   historyLoading = false; historyLoadingVersion = -1; historyLoadingTurnId = null; historyError = "";
   cancelAnimationFrame(historyLoadFrame); historyLoadFrame = null; historyAutoFailed = false;
   historyScrollTop = 0; historyLoadVisibleItems = false;
   cancelAnimationFrame(messageFrame); messageFrame = null;
   for (const entry of renderedItems.values()) entry.node.messageActionBinding?.dispose();
-  renderedItems.clear(); renderedTurns.clear(); renderedActivities.clear(); itemVersions.clear(); turnVersions.clear();
+  renderedItems.clear(); renderedTurns.clear(); renderedActivities.clear(); itemVersions.clear(); turnVersions.clear(); turnFieldVersions.clear();
   partialItems.clear();
   followMessages = true;
-  historyRefreshPending = false; notifiedStatus = null;
+  transcriptChecking = false;
+  notifiedStatus = null;
   notifiedQueue = null; notifiedQueueEdits = null; queueSnapshotVersion = null; retiredQueueEpochs.clear(); ++queueVersion;
 }
 function scheduleMessages() {
@@ -5549,14 +5927,14 @@ function queueSnapshotIsVersioned(snapshot) {
   return typeof snapshot?.queueEpoch === "string" && snapshot.queueEpoch.length > 0
     && Number.isSafeInteger(snapshot.queueRevision) && snapshot.queueRevision >= 0;
 }
-function applyQueueSnapshot(id, messages, edits, snapshot = null, { authoritative = false } = {}) {
+function applyQueueSnapshot(id, messages, edits, snapshot = null, { authoritative = false, readVersion = null } = {}) {
   if (id !== selectedId || !Array.isArray(messages)) return false;
   if (queueSnapshotIsVersioned(snapshot)) {
     if (retiredQueueEpochs.has(snapshot.queueEpoch)) return true;
     if (queueSnapshotVersion?.queueEpoch === snapshot.queueEpoch
         && snapshot.queueRevision <= queueSnapshotVersion.queueRevision) return true;
     if (queueSnapshotVersion && queueSnapshotVersion.queueEpoch !== snapshot.queueEpoch) {
-      if (!authoritative) return false;
+      if (!authoritative || readVersion !== null && readVersion !== queueVersion) return false;
       retiredQueueEpochs.add(queueSnapshotVersion.queueEpoch);
     }
     queueSnapshotVersion = { queueEpoch: snapshot.queueEpoch, queueRevision: snapshot.queueRevision };
@@ -5573,6 +5951,15 @@ function applyQueueSnapshot(id, messages, edits, snapshot = null, { authoritativ
   }
   return true;
 }
+function applyQueueRead(id, snapshot, readVersion) {
+  if (!Array.isArray(snapshot?.queuedMessages)) return true;
+  if (readVersion !== queueVersion && !queueSnapshotIsVersioned(snapshot)) return true;
+  const applied = applyQueueSnapshot(id, snapshot.queuedMessages, snapshot.queuedEdits, snapshot,
+    { authoritative: true, readVersion });
+  if (!applied && id === selectedId)
+    void reloadQueue().catch(error => notice(`队列正在重新核对：${error.message}`, true));
+  return applied;
+}
 async function reloadQueue() {
   if (!selectedId) return;
   if (queueRequest?.version === selectionVersion) {
@@ -5587,8 +5974,9 @@ async function reloadQueue() {
       const readVersion = queueVersion;
       const result = await api("/api/read/queue", { threadId: id });
       if (version !== selectionVersion || selectedId !== id) return;
-      if (readVersion === queueVersion || queueSnapshotIsVersioned(result))
-        applyQueueSnapshot(id, result.queuedMessages, result.queuedEdits, result, { authoritative: true });
+      if ((readVersion === queueVersion || queueSnapshotIsVersioned(result))
+          && !applyQueueSnapshot(id, result.queuedMessages, result.queuedEdits, result, { authoritative: true, readVersion }))
+        request.again = true;
     } while (request.again && version === selectionVersion && selectedId === id);
   })();
   queueRequest = request;
@@ -5740,7 +6128,7 @@ async function checkQueuedMessageEdit(threadId, editId) {
   if (!connected || session?.capabilities?.queueEditRecovery !== true) return null;
   const existing = queuedEditChecks.get(editId), deviceId = session.device.id;
   if (existing?.deviceId === deviceId && existing.promise) return existing.promise;
-  const request = { deviceId, loading: true, result: null, error: "", promise: null };
+  const request = { deviceId, loading: true, result: null, error: "", promise: null, queueReadVersion: queueVersion };
   queuedEditChecks.set(editId, request); ++queuedEditCheckVersion; updateComposer();
   request.promise = (async () => {
     try {
@@ -5748,8 +6136,7 @@ async function checkQueuedMessageEdit(threadId, editId) {
       if (session?.device.id !== deviceId || queuedEditChecks.get(editId) !== request) return null;
       if (result.threadId !== threadId || result.editId !== editId) throw new Error("队列编辑状态归属不一致，请重新读取");
       request.result = result;
-      if (selectedId === threadId)
-        applyQueueSnapshot(threadId, result.queuedMessages, result.queuedEdits, result, { authoritative: true });
+      if (selectedId === threadId) applyQueueRead(threadId, result, request.queueReadVersion);
       const current = pending;
       if (queuedEditActions.has(current?.action) && current.deviceId === deviceId
           && current.payload.threadId === threadId && current.payload.editId === editId && !result.operationPending) {
@@ -6146,16 +6533,19 @@ function renderMessages(keepScroll = true) {
   cancelAnimationFrame(messageFrame); messageFrame = null;
   const root = $("#messages");
   if (!root) return;
+  scheduleMermaidBlocks();
   const bottom = followMessages && !composerScroll?.collapsed;
   const oldHeight = root.scrollHeight, oldTop = root.scrollTop;
   const anchor = !keepScroll || !bottom ? visibleMessageAnchor(root) : null;
   const children = [], itemKeys = new Set(), turnKeys = new Set(), activityKeys = new Set();
+  if (transcriptChecking) children.push(element("p", "muted transcript-checking-notice",
+    historyError ? "已显示上次记录；最新内容核对失败，可点击刷新重试。" : "已显示上次记录，正在核对最新内容…"));
   const sorted = [...turns.values()];
   loadMessageSkillChoices(sorted.flatMap(turn => turn.items || []));
   if (historyError && sorted.length)
     children.push(historyLoadButton("最新记录加载失败，重试", () => void loadHistory()));
   if (historyCursor) {
-    const load = root.querySelector(":scope > .history-load")
+    const load = root.querySelector(":scope > .history-load[data-history-page='older']")
       || historyLoadButton("加载更早的消息", () => void loadHistory(true));
     load.dataset.turnId = "";
     load.dataset.historyPage = "older";
@@ -6180,10 +6570,10 @@ function renderMessages(keepScroll = true) {
       const skillKey = userMessageHasSkills(item)
         ? JSON.stringify([skillRenderVersion, (item.content || []).filter(part => part.type === "skill")]) : "";
       const node = cached?.item === item && cached.inActivity === inActivity && cached.running === running
-        && cached.editing === editing && cached.skillKey === skillKey
+        && cached.editing === editing && cached.skillKey === skillKey && cached.markdownVersion === markdownRenderVersion
         ? cached.node : renderItem(item, cached?.item.type === item.type ? cached.node : null, inActivity, running);
       node.dataset.key = key;
-      renderedItems.set(key, { item, node, inActivity, running, editing, skillKey });
+      renderedItems.set(key, { item, node, inActivity, running, editing, skillKey, markdownVersion: markdownRenderVersion });
       if (editing) node.messageActionBinding?.dispose();
       else if (item.type === "userMessage" || item.type === "agentMessage") {
         const threadId = selectedId;
@@ -6257,7 +6647,7 @@ function renderMessages(keepScroll = true) {
     }
     reconcileChildren(group, items); children.push(group);
   }
-  if (!sorted.length) children.push(selectedId && !historyInitialized ? historyPlaceholder()
+  if (!sorted.length) children.push(selectedId && (!historyInitialized || historyError) ? historyPlaceholder()
     : element("div", "empty-conversation", creating ? "发送第一条消息，开始新会话。" : "此会话暂无消息。"));
   reconcileChildren(root, children);
   for (const key of renderedItems.keys()) if (!itemKeys.has(key)) {
@@ -6278,15 +6668,44 @@ function renderMessages(keepScroll = true) {
   updateScrollControl();
   scheduleHistoryLoad();
 }
-async function selectThread(id, { closeSidebar = true } = {}) {
+function rememberTranscript() {
+  if (!session || !selectedId || !historyInitialized || threadDeleted(selectedId)) return;
+  const root = $("#messages");
+  transcriptCache.put(session.device.id, selectedId, {
+    turns: [...turns.values()], transcriptEvents: [...transcriptEvents.values()], historyCursor,
+    scrollTop: root?.scrollTop || 0, followMessages,
+    title: thread?.title || $("#thread-title")?.textContent || "",
+    cwd: thread?.cwd || $("#thread-path")?.textContent || ""
+  });
+}
+function restoreTranscript(id) {
+  const cached = transcriptCache.get(session?.device.id, id);
+  if (!cached) return null;
+  turns = new Map(cached.turns.map(turn => [turn.id, turn]));
+  replaceTranscriptEvents(cached.transcriptEvents);
+  historyCursor = cached.historyCursor; historyInitialized = true;
+  followMessages = cached.followMessages; transcriptChecking = true;
+  renderMessages();
+  const root = $("#messages");
+  if (root) { root.scrollTop = cached.scrollTop; historyScrollTop = root.scrollTop; }
+  return cached;
+}
+async function selectThread(id, { closeSidebar = true, force = false } = {}) {
   if (threadDeleted(id)) {
     if (!selectedId || selectedId === id) applyThreadDeletion(id);
+    return;
+  }
+  if (!force && selectedId === id && !creating
+      && (thread?.id === id || historyInitialized || selectionController || historyLoading)) {
+    if (closeSidebar) { closePopup(); closeMobileSidebar(); }
     return;
   }
   stopGoalLiveTimer();
   cancelMessageEdit({ focus: false });
   if (closeSidebar) closePopup();
-  rememberDraft(); resetMessages();
+  rememberDraft();
+  if (!force) rememberTranscript();
+  resetMessages();
   editingQueuedMessage = null;
   const version = ++selectionVersion;
   selectionToken = randomId();
@@ -6300,11 +6719,13 @@ async function selectThread(id, { closeSidebar = true } = {}) {
     goalReadVersion = goalVersion, compactionReadVersion = compactionVersion, queueReadVersion = queueVersion;
   renderApprovals();
   $("#project-select-slot").hidden = true;
-  $("#messages").replaceChildren(historyPlaceholder());
+  $("#messages").replaceChildren();
+  const cached = force ? null : restoreTranscript(id);
+  if (!cached) $("#messages").replaceChildren(historyPlaceholder());
   const summary = [...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
     ...(sidebar?.projects || []).flatMap(project => project.threads || [])].find(item => item.id === id);
-  $("#thread-title").textContent = summary?.title || "正在打开会话";
-  $("#thread-path").textContent = summary?.cwd || "正在读取会话设置…";
+  $("#thread-title").textContent = summary?.title || cached?.title || "正在打开会话";
+  $("#thread-path").textContent = summary?.cwd || cached?.cwd || "正在读取会话设置…";
   if (closeSidebar) closeMobileSidebar();
   renderSidebar(); updateComposer();
   syncThreadHash(id);
@@ -6324,8 +6745,7 @@ async function selectThread(id, { closeSidebar = true } = {}) {
     if (usageVersion !== tokenUsageVersion) thread.tokenUsage = notifiedTokenUsage;
     if (runtimeVersion !== statusVersion && notifiedStatus) thread.status = notifiedStatus;
     if (goalReadVersion !== goalVersion) thread.goal = notifiedGoal;
-    if (queueReadVersion === queueVersion || queueSnapshotIsVersioned(thread))
-      applyQueueSnapshot(id, thread.queuedMessages, thread.queuedEdits, thread, { authoritative: true });
+    applyQueueRead(id, thread, queueReadVersion);
     if (notifiedQueue) {
       thread.queuedMessages = notifiedQueue;
       if (notifiedQueueEdits) thread.queuedEdits = notifiedQueueEdits;
@@ -6356,7 +6776,7 @@ function welcomeNode() {
 }
 function showWelcome() {
   cancelMessageEdit({ focus: false });
-  rememberDraft(); resetMessages();
+  rememberDraft(); rememberTranscript(); resetMessages();
   editingQueuedMessage = null;
   ++selectionVersion; ++threadReadVersion; selectionToken = randomId();
   selectedId = null; thread = null; creating = false; historyCursor = null; historyInitialized = false; turns.clear(); transcriptEvents.clear(); notifiedTokenUsage = null;
@@ -6367,18 +6787,34 @@ function showWelcome() {
   renderSelectedSkills(); renderApprovals(); renderSidebar(); updateComposer();
 }
 async function loadHistory(older = false, version = selectionVersion, itemsTurnId = null) {
-  if (!selectedId || threadDeleted(selectedId)) return;
-  if (historyLoading && historyLoadingVersion === version) {
-    if (!older) historyRefreshPending = true;
-    return;
+  if (version !== selectionVersion || !selectedId || threadDeleted(selectedId)) return;
+  if (historyRequest?.version === version) {
+    if (!older) historyRequest.latestPending = true;
+    return historyRequest.promise;
   }
+  const id = selectedId, request = { version, latestPending: false, promise: null };
+  request.promise = Promise.resolve().then(async () => {
+    do {
+      request.latestPending = false;
+      await readHistoryPage(older, version, itemsTurnId);
+      older = false; itemsTurnId = null;
+    } while (request.latestPending && version === selectionVersion && selectedId === id);
+  });
+  historyRequest = request;
+  try { await request.promise; }
+  finally { if (historyRequest === request) historyRequest = null; }
+}
+async function readHistoryPage(older, version, itemsTurnId) {
+  if (version !== selectionVersion || !selectedId || threadDeleted(selectedId)) return;
   const itemTurn = itemsTurnId ? turns.get(itemsTurnId) : null;
   if ((itemsTurnId && !itemTurn?.itemsNextCursor) || (older && !itemsTurnId && !historyCursor)) return;
   historyLoading = true; historyLoadingVersion = version;
-  historyLoadingTurnId = itemsTurnId; historyError = ""; historyAutoFailed = false;
+  const latestPage = !older && !itemsTurnId;
+  historyLoadingTurnId = itemsTurnId; historyAutoFailed = false;
+  if (latestPage) historyError = "";
   syncHistoryButtons();
   if (!historyInitialized) renderMessages();
-  const id = selectedId, readVersion = messageVersion;
+  const id = selectedId, readVersion = messageVersion, checkingCached = transcriptChecking && latestPage;
   const initialIds = new Set(turns.keys());
   const controller = new AbortController();
   historyController = controller;
@@ -6391,6 +6827,7 @@ async function loadHistory(older = false, version = selectionVersion, itemsTurnI
     const result = await api("/api/read/history", payload, undefined, controller.signal);
     if (version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
     if (!Array.isArray(result.data)) throw new Error("会话历史返回格式无效");
+    if (checkingCached && !pruneCachedHistory(result.data, readVersion)) historyCursor = result.nextCursor;
     mergeTranscriptEvents(result.transcriptEvents);
     if (itemsTurnId) {
       if (result.scope !== "items" || result.turnId !== itemsTurnId) throw new Error("会话消息分页归属无效");
@@ -6401,7 +6838,7 @@ async function loadHistory(older = false, version = selectionVersion, itemsTurnI
       }, readVersion, { older: true, beforeId: cursorAnchor });
       turns.set(itemsTurnId, merged);
     } else {
-      const chronological = [...result.data].reverse().map(turn => mergeHistoryTurn(turn, readVersion));
+      const chronological = [...result.data].reverse().map(turn => mergeHistoryTurn(turn, readVersion, { cached: checkingCached }));
       if (older) {
         const ids = new Set(chronological.map(turn => turn.id));
         turns = new Map([...chronological.map(turn => [turn.id, turn]), ...[...turns].filter(([key]) => !ids.has(key))]);
@@ -6417,6 +6854,7 @@ async function loadHistory(older = false, version = selectionVersion, itemsTurnI
       if (older || !historyInitialized) historyCursor = result.nextCursor;
     }
     historyInitialized = true;
+    if (latestPage) transcriptChecking = false;
     syncEditableMessageMetadata();
     renderMessages(!older);
   } catch (error) {
@@ -6425,17 +6863,45 @@ async function loadHistory(older = false, version = selectionVersion, itemsTurnI
     if (!historyInitialized) {
       historyError = `最新消息加载失败：${error.message}`;
       renderMessages();
-    } else notice(error.message, true);
+    } else {
+      if (latestPage) {
+        historyError = `最新消息加载失败：${error.message}`;
+        renderMessages();
+      }
+      notice(error.message, true);
+    }
   }
   finally {
     if (historyController === controller) {
       historyController = null; historyLoading = false; historyLoadingTurnId = null;
       syncHistoryButtons();
-      if (historyRefreshPending && version === selectionVersion) {
-        historyRefreshPending = false; scheduleReload();
-      }
     }
   }
+}
+function pruneCachedHistory(snapshots, readVersion) {
+  const ids = new Set(snapshots.map(turn => turn.id)), known = [...turns.values()];
+  const firstShared = known.findIndex(turn => ids.has(turn.id));
+  const earlier = firstShared < 0 ? [] : known.slice(0, firstShared);
+  const earlierIds = new Set(earlier.map(turn => turn.id));
+  const live = turn => (turnVersions.get(turn.id) || 0) > readVersion
+    || ["plan", "diff"].some(field => (turnFieldVersions.get(`${turn.id}:${field}`) || 0) > readVersion)
+    || (turn.items || []).some(item => (itemVersions.get(`${turn.id}:${item.id}`) || 0) > readVersion);
+  for (const turn of known) if (!ids.has(turn.id) && !earlierIds.has(turn.id) && !live(turn)) {
+    turns.delete(turn.id);
+    for (const [key, event] of transcriptEvents) if (event.turnId === turn.id) transcriptEvents.delete(key);
+  }
+  for (const snapshot of snapshots) {
+    const current = turns.get(snapshot.id);
+    if (!current || snapshot.itemsPageComplete !== true || snapshot.itemsComplete === true) continue;
+    const itemIds = new Set((snapshot.items || []).map(item => item.id));
+    const anchors = new Set((snapshot.items || []).filter(item =>
+      !item.remoteHistoryContext && !item.remoteCompactionInput).map(item => item.id));
+    const first = (current.items || []).findIndex(item => anchors.has(item.id));
+    const items = (current.items || []).filter((item, index) => itemIds.has(item.id)
+      || first >= 0 && index < first || (itemVersions.get(`${current.id}:${item.id}`) || 0) > readVersion);
+    turns.set(current.id, { ...current, items });
+  }
+  return earlier.length > 0;
 }
 function mergeLiveText(snapshot, live, partial = false, newer = true) {
   snapshot = String(snapshot || ""); live = String(live || "");
@@ -6470,7 +6936,7 @@ function mergeItemProjection(previous, item) {
     if (!Object.hasOwn(item, field) && Object.hasOwn(previous || {}, field)) projection[field] = previous[field];
   return { ...projection, ...item };
 }
-function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = null } = {}) {
+function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = null, cached = false } = {}) {
   const current = turns.get(snapshot.id);
   const contextItems = (snapshot.items || []).filter(item => item.remoteHistoryContext);
   if (contextItems.length)
@@ -6492,6 +6958,7 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
     previous.delete(item.id);
     if (!live) return item;
     const newer = (itemVersions.get(key) || 0) > readVersion;
+    if (cached && !newer) return mergeItemProjection(live, item);
     const liveComplete = completedItem(live), snapshotComplete = completedItem(item);
     if (liveComplete || snapshotComplete) {
       let keepLive = liveComplete && !snapshotComplete;
@@ -6556,6 +7023,9 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
     }
   }
   const newer = (turnVersions.get(snapshot.id) || 0) > readVersion;
+  const liveFields = Object.fromEntries(["plan", "diff"]
+    .filter(field => (turnFieldVersions.get(`${snapshot.id}:${field}`) || 0) > readVersion)
+    .map(field => [field, current[field]]));
   const timing = Object.fromEntries(["startedAt", "completedAt", "durationMs", "turnStartedAtMs", "turnCompletedAtMs"]
     .filter(field => Number.isFinite(current[field]) && (newer || !Number.isFinite(snapshot[field])))
     .map(field => [field, current[field]]));
@@ -6565,55 +7035,54 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
     items = [...contextItems.map(item => loaded.get(item.id) || item), ...items.filter(item => !contextIds.has(item.id))];
   }
   return enrichTurnTranscriptEvents({
-    ...current, ...snapshot, ...pagination, ...timing, items,
+    ...current, ...snapshot, ...pagination, ...timing, ...liveFields, items,
     ...(newer ? { status: current.status, error: current.error } : {})
   });
 }
 async function reloadThread() {
   if (!selectedId || threadDeleted(selectedId)) return;
   if (threadRequest?.version === selectionVersion) { threadRequest.again = true; return threadRequest.promise; }
-  const id = selectedId, version = selectionVersion, read = ++threadReadVersion, usageVersion = tokenUsageVersion,
-    questionReadVersion = questionVersion,
-    requestsReadVersion = blockingRequestState(id).generation,
-    runtimeVersion = statusVersion, goalReadVersion = goalVersion, compactionReadVersion = compactionVersion,
-    queueReadVersion = queueVersion;
+  const id = selectedId, version = selectionVersion;
   const request = { version, again: false, promise: null };
-  let loaded = false;
   request.promise = (async () => {
-    const { thread: latest } = await api("/api/read/thread", { threadId: id });
-    if (version !== selectionVersion || read !== threadReadVersion || selectedId !== id || threadDeleted(id)) return;
-    if (usageVersion !== tokenUsageVersion) latest.tokenUsage = notifiedTokenUsage;
-    if (runtimeVersion !== statusVersion && notifiedStatus) latest.status = notifiedStatus;
-    if (goalReadVersion !== goalVersion) latest.goal = notifiedGoal;
-    if (queueReadVersion === queueVersion || queueSnapshotIsVersioned(latest))
-      applyQueueSnapshot(id, latest.queuedMessages, latest.queuedEdits, latest, { authoritative: true });
-    if (notifiedQueue) {
-      latest.queuedMessages = notifiedQueue;
-      if (notifiedQueueEdits) latest.queuedEdits = notifiedQueueEdits;
-    }
-    thread = latest;
-    mergeBlockingRequestsRead(id, thread, requestsReadVersion);
-    if (questionReadVersion !== questionVersion && notifiedQuestions)
-      replaceAsyncQuestions(thread, notifiedQuestions);
-    replaceTranscriptEvents(thread.transcriptEvents);
-    refreshTranscriptEvents();
-    syncEditableMessageMetadata();
-    if (!$("#model-settings").hidden) renderModelMenu();
-    if (compactionReadVersion === compactionVersion) reconcileCompaction(id, thread.compaction);
-    else thread.compaction = normalizeCompaction(currentCompaction(id));
-    $("#thread-title").textContent = thread.title;
-    $("#thread-path").textContent = thread.cwd || ""; syncThreadHash(id);
-    updateComposer(); renderApprovals(); loaded = true;
+    do {
+      request.again = false;
+      const read = ++threadReadVersion, usageVersion = tokenUsageVersion,
+        questionReadVersion = questionVersion, requestsReadVersion = blockingRequestState(id).generation,
+        runtimeVersion = statusVersion, goalReadVersion = goalVersion, compactionReadVersion = compactionVersion,
+        queueReadVersion = queueVersion;
+      const historyRead = loadHistory(false, version);
+      let latest;
+      try { ({ thread: latest } = await api("/api/read/thread", { threadId: id })); }
+      catch (error) { if (request.again && version === selectionVersion) continue; throw error; }
+      if (version !== selectionVersion || read !== threadReadVersion || selectedId !== id || threadDeleted(id)) return;
+      if (usageVersion !== tokenUsageVersion) latest.tokenUsage = notifiedTokenUsage;
+      if (runtimeVersion !== statusVersion && notifiedStatus) latest.status = notifiedStatus;
+      if (goalReadVersion !== goalVersion) latest.goal = notifiedGoal;
+      applyQueueRead(id, latest, queueReadVersion);
+      if (notifiedQueue) {
+        latest.queuedMessages = notifiedQueue;
+        if (notifiedQueueEdits) latest.queuedEdits = notifiedQueueEdits;
+      }
+      thread = latest;
+      mergeBlockingRequestsRead(id, thread, requestsReadVersion);
+      if (questionReadVersion !== questionVersion && notifiedQuestions)
+        replaceAsyncQuestions(thread, notifiedQuestions);
+      replaceTranscriptEvents(thread.transcriptEvents);
+      refreshTranscriptEvents();
+      syncEditableMessageMetadata();
+      if (!$("#model-settings").hidden) renderModelMenu();
+      if (compactionReadVersion === compactionVersion) reconcileCompaction(id, thread.compaction);
+      else thread.compaction = normalizeCompaction(currentCompaction(id));
+      $("#thread-title").textContent = thread.title;
+      $("#thread-path").textContent = thread.cwd || ""; syncThreadHash(id);
+      updateComposer(); renderApprovals();
+      await historyRead;
+    } while (request.again && version === selectionVersion && selectedId === id);
   })();
   threadRequest = request;
   try { await request.promise; }
-  finally {
-    if (threadRequest === request) {
-      threadRequest = null;
-      if (request.again && version === selectionVersion && selectedId === id) scheduleReload();
-    }
-  }
-  if (loaded && version === selectionVersion && selectedId === id) await loadHistory(false, version);
+  finally { if (threadRequest === request) threadRequest = null; }
 }
 const goalStatusLabels = {
   active: "运行中",
@@ -7563,7 +8032,8 @@ function dismissGoalComposerRecovery(record) {
   if (!id || record?.deviceId !== session?.device.id || record.recoveryState !== "failed"
       || goalComposerRecoveries.get(id) !== record || pending?.id === record.id) return false;
   goalComposerRecoveries.delete(id);
-  persistGoalComposerRecoveries();
+  if (persistGoalComposerRecoveries() && record.recoveryRef && recoveryScope)
+    void recoveryStore.remove(recoveryScope, "pending", record.recoveryRef).catch(() => {});
   updateComposer();
   return true;
 }
@@ -7764,10 +8234,36 @@ function updateComposer() {
     }, "text-button"));
     $("#pending-area").append(box);
   }
+  renderFailedInputRecovery($("#pending-area"));
   renderGoalComposerRecovery($("#pending-area"));
   renderCompactionBanner($("#pending-area"), selectedId, compaction);
   if (historyInitialized && selectedId) scheduleMessages();
   updateMessageEditor();
+}
+function renderFailedInputRecovery(root) {
+  const key = draftKey(), scope = privateInputScope(session);
+  const record = [...failedInputRecoveries.values()].find(record => record.deviceId === session?.device.id
+    && record.recoveryScope === scope && (record.payload.threadId || `$new:${record.payload.projectId || ""}`) === key);
+  if (!record) return;
+  const empty = !editingQueuedMessage && !editingMessage && inputDraftEmpty(snapshotDraft());
+  const box = element("div", "pending-banner", empty
+    ? "上次发送失败，原文字、Skill 和图片已保留，可恢复到输入框。"
+    : "上次发送失败，原输入已保留；清空当前输入后可恢复，当前内容不会被覆盖。");
+  const restore = button("恢复输入", "恢复上次失败的输入，不会自动发送", async () => {
+    if (draftKey() !== key || privateInputScope(session) !== scope || editingQueuedMessage || editingMessage
+        || !inputDraftEmpty(snapshotDraft())) return;
+    storeDraft(key, record.draft); restoreDraft(key); resizeComposerInput();
+    if (!record.sessionRecovery) {
+      try {
+        await persistInputDraft(key);
+        await recoveryStore.remove(scope, "failed", record.id);
+        if (privateInputScope(session) === scope) failedInputRecoveries.delete(record.id);
+      } catch (error) { notice(recoveryStorageMessage(error), true); }
+    }
+    updateComposer();
+  }, "text-button");
+  restore.disabled = !empty || busy || stopping || !!pending;
+  box.append(restore); root.append(box);
 }
 async function sendMessage() {
   if (threadDeletionLocked() || threadDeleted(selectedId)) return;
@@ -8045,12 +8541,12 @@ function receive(event) {
     setConnection(available && stream?.readyState === EventSource.OPEN);
     if (available) {
       void syncConnectionState().catch(() => {});
-      void refreshAll().catch(error => notice(error.message, true));
+      void refreshAll({ fresh: true }).catch(error => notice(error.message, true));
     }
     return;
   }
   if (event.method === "remote/resync") {
-    void Promise.all([syncConnectionState(), refreshAll()]).catch(error => notice(error.message, true));
+    void Promise.all([syncConnectionState(), refreshAll({ fresh: true })]).catch(error => notice(error.message, true));
     return;
   }
   const params = { ...event.params || {} };
@@ -8113,8 +8609,10 @@ function receive(event) {
       void resolvePending();
     return;
   }
-  if (event.method === "remote/threadReverted" && params.threadId === selectedId) {
-    void selectThread(selectedId, { closeSidebar: false }).catch(error => notice(error.message, true));
+  if (event.method === "remote/threadReverted" && typeof eventThreadId === "string") {
+    transcriptCache.remove(session?.device.id, eventThreadId);
+    if (eventThreadId === selectedId)
+      void selectThread(selectedId, { closeSidebar: false, force: true }).catch(error => notice(error.message, true));
     return;
   }
   receiveCompactionLifecycle(event, params);
@@ -8184,8 +8682,12 @@ function receive(event) {
           itemVersions.set(`${turnId}:${item.id}`, version); partialItems.delete(`${turnId}:${item.id}`);
         }
       }
-      if (event.method === "turn/plan/updated") turn.plan = params.plan;
-      if (event.method === "turn/diff/updated") turn.diff = params.diff;
+      if (event.method === "turn/plan/updated") {
+        turn.plan = params.plan; turnFieldVersions.set(`${turnId}:plan`, version);
+      }
+      if (event.method === "turn/diff/updated") {
+        turn.diff = params.diff; turnFieldVersions.set(`${turnId}:diff`, version);
+      }
       if (params.itemId && (params.delta != null || event.method === "item/reasoning/summaryPartAdded" || event.method === "item/fileChange/patchUpdated")) {
         let index = turn.items.findIndex(item => item.id === params.itemId);
         let item = index < 0 ? null : turn.items[index];
@@ -8239,16 +8741,35 @@ function disconnect() {
   ++selectionVersion; ++sidebarVersion; connected = false;
   resetMessages();
 }
-async function refreshAll() {
-  if (refreshRequest?.deviceId === session?.device.id) return refreshRequest.promise;
+async function reconnectChangedAuthorization() {
+  disconnect();
+  session = null; selectedId = null; sidebar = null; thread = null;
+  turns.clear(); transcriptEvents.clear();
+  await connect();
+}
+async function refreshAll({ fresh = false } = {}) {
+  if (!session) return;
+  if (refreshRequest?.deviceId === session.device.id) {
+    if (fresh) refreshRequest.again = true;
+    return refreshRequest.promise;
+  }
   const deviceId = session?.device.id;
+  const request = { deviceId, again: false, promise: null };
   const promise = (async () => {
-    const sidebarRead = loadSidebar();
-    const id = selectedId || (!creating ? new URLSearchParams(location.hash.slice(1)).get("thread") : null);
-    await Promise.all([sidebarRead, id ? selectedId
-      ? reloadThread() : selectThread(id, { closeSidebar: false }) : Promise.resolve()]);
+    do {
+      request.again = false;
+      const sidebarRead = loadSidebar(null, { fresh });
+      const id = selectedId || (!creating ? new URLSearchParams(location.hash.slice(1)).get("thread") : null);
+      try {
+        await Promise.all([sidebarRead, id ? selectedId
+          ? reloadThread() : selectThread(id, { closeSidebar: false }) : Promise.resolve()]);
+      } catch (error) {
+        if (!request.again || deviceId !== session?.device.id) throw error;
+      }
+      fresh = true;
+    } while (request.again && deviceId === session?.device.id);
   })();
-  refreshRequest = { deviceId, promise };
+  request.promise = promise; refreshRequest = request;
   try { await promise; }
   finally { if (refreshRequest?.promise === promise) refreshRequest = null; }
 }
@@ -8269,7 +8790,7 @@ function openStream() {
     try {
       await Promise.all([
         syncConnectionState(current).then(applied => { if (applied) void resolvePending(); }),
-        refreshAll()
+        refreshAll({ fresh: true })
       ]);
     } catch (error) { if (isCurrent()) notice(error.message, true); }
   };
@@ -8310,11 +8831,14 @@ function startConnectionPoll(deviceId) {
     connectionPollPending = request;
     ensureStream();
     try {
-      const current = await readConnectionSession();
+      const current = await readConnectionSession(undefined, undefined, { resourcePriority: "background" });
       if (pageLeaving || version !== connectionPollVersion || session?.device.id !== deviceId) return;
+      if (privateInputScope(current) !== privateInputScope(session)) { await reconnectChangedAuthorization(); return; }
       session = current; setConnection(current.nativeConnected && stream?.readyState === EventSource.OPEN); renderApprovals();
-      await loadSidebar();
-    } catch {}
+      await loadSidebar(null, { resourcePriority: "background" });
+    } catch {
+      if (!pageLeaving && version === connectionPollVersion && session?.device.id === deviceId) setConnection(false);
+    }
     finally { if (connectionPollPending === request) connectionPollPending = null; }
   }, 15000);
 }
@@ -8323,6 +8847,7 @@ function suspendPage() {
   stopActivityTimer();
   stopGoalLiveTimer();
   finishQueueDrag();
+  if (session && $("#prompt")) rememberDraft();
   closeContextUsageTip();
   pageLeaving = true;
   stream?.close(); stream = null;
@@ -8331,19 +8856,60 @@ function suspendPage() {
   clearTimeout(streamRetry); streamRetry = null;
 }
 function resumePage() {
-  if (!pageLeaving) return;
+  const wasLeaving = pageLeaving;
   pageLeaving = false;
-  if (!session) return;
+  if (!session) { retryConnectionRecovery(); return; }
+  if (!wasLeaving) return;
   syncGoalLiveTimer();
   startConnectionPoll(session.device.id);
   ensureStream();
-  void refreshAll().catch(() => {});
+  void Promise.all([syncConnectionState(), refreshAll({ fresh: true })]).catch(() => {});
 }
 async function connect(signal) {
-  session = await readConnectionSession(signal);
+  if (connecting) return connecting;
+  const promise = connectPage(signal);
+  connecting = promise;
+  try { return await promise; }
+  finally { if (connecting === promise) connecting = null; }
+}
+async function connectPage(signal) {
+  const previousSession = session;
+  let latest, storageError = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const requestGeneration = recoveryGeneration;
+    let expected = null;
+    try { expected = await recoveryStore.observe(); } catch {}
+    if (requestGeneration !== recoveryGeneration) throw new Error("会话读取已取消，当前授权状态已改变。");
+    latest = await readConnectionSession(signal, expected);
+    const observation = sessionRecoveryReads.get(latest) || { expected, requestGeneration };
+    if (observation.requestGeneration !== recoveryGeneration)
+      throw new Error("会话读取已取消，当前授权状态已改变。");
+    session = latest;
+    try {
+      await restorePrivateInputs(latest, observation);
+      break;
+    } catch (error) {
+      if (error.name === "RecoveryAuthorizationError") {
+        if (session === latest) session = previousSession;
+        if (attempt === 0 && !signal?.aborted) {
+          cancelConnectionProbe();
+          continue;
+        }
+        throw new Error("设备授权仍在其他页面变更，请稍后重新连接；已保存的新授权草稿未被清理。");
+      }
+      storageError = error;
+      if (pending?.recoveryRef && !pending.draft) Object.assign(pending, { invalid: true, recoveryUnavailable: true });
+      break;
+    }
+  }
+  if (session !== latest) return;
+  if (signal?.aborted) throw new Error("连接已取消，请重试。");
+  initialAuthenticationRequired = false;
+  restoreSmallInputRecoveries();
   postPlatformMessage("authenticated");
   pageLeaving = false;
   connected = false; shell(); restoreGoalComposerDrafts();
+  if (storageError) notice(recoveryStorageMessage(storageError), true);
   setConnection(false);
   openStream();
   const deviceId = session.device.id;
@@ -8352,12 +8918,22 @@ async function connect(signal) {
   catch (error) { if (session?.device.id === deviceId) notice(error.message, true); }
   updateComposer(); void resolvePending();
 }
+function retryConnectionRecovery() {
+  if (pageLeaving || document.hidden || navigator.onLine === false || initialAuthenticationRequired || connecting) return;
+  if (!session) { void connect().catch(handleInitialConnectionError); return; }
+  ensureStream();
+  void Promise.all([syncConnectionState(), refreshAll({ fresh: true })]).catch(() => {});
+}
 async function copyText(text) {
   try { await navigator.clipboard.writeText(text); notice("已复制"); }
   catch { notice("无法访问剪贴板，请手动选择代码复制", true); }
 }
 window.addEventListener("online", () => {
-  if (!pageLeaving && !document.hidden && session) { ensureStream(); void refreshAll().catch(() => {}); }
+  retryConnectionRecovery();
+});
+window.addEventListener("offline", () => {
+  if (session) setConnection(false);
+  else if (!initialAuthenticationRequired) showConnectionRecovery(new TypeError("网络已离线"));
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
@@ -8374,7 +8950,7 @@ document.addEventListener("visibilitychange", () => {
   }
   syncActivityTimer();
   syncGoalLiveTimer();
-  if (!pageLeaving && session) { ensureStream(); void refreshAll().catch(() => {}); }
+  retryConnectionRecovery();
 });
 window.addEventListener("pagehide", suspendPage);
 window.addEventListener("blur", () => finishQueueDrag());

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use async_trait::async_trait;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message as WebSocketMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
@@ -43,10 +43,13 @@ const NATIVE_SCRIPT: &str = include_str!("../../../assets/remote-access/native.j
 const WEB_HTML: &str = include_str!("../../../assets/remote-access/index.html");
 const WEB_JS: &str = include_str!("../../../assets/remote-access/app.js");
 const WEB_ATTACHMENTS_JS: &str = include_str!("../../../assets/remote-access/attachments.js");
+const WEB_RECOVERY_STORE_JS: &str = include_str!("../../../assets/remote-access/recovery-store.js");
 const WEB_EVENTS_CLIENT_JS: &str = include_str!("../../../assets/remote-access/events-client.js");
 const WEB_EVENTS_WORKER_JS: &str = include_str!("../../../assets/remote-access/events-worker.js");
 const WEB_CSS: &str = include_str!("../../../assets/remote-access/style.css");
 const WEB_MARKDOWN_JS: &str = include_str!("../../../assets/remote-access/markdown.js");
+const WEB_MARKDOWN_RENDERER_JS: &str =
+    include_str!("../../../assets/remote-access/markdown-renderer.js");
 const WEB_MESSAGE_ACTIONS_JS: &str =
     include_str!("../../../assets/remote-access/message-actions.js");
 const WEB_VENDOR_MARKED_JS: &str =
@@ -58,6 +61,9 @@ const WEB_VENDOR_MERMAID_JS: &str =
 const WEB_PLATFORM_JS: &str = include_str!("../../../assets/remote-access/platform.js");
 const WEB_PWA_JS: &str = include_str!("../../../assets/remote-access/pwa.js");
 const WEB_SERVICE_WORKER_JS: &str = include_str!("../../../assets/remote-access/sw.js");
+const WEB_CACHE_RECOVERY_HTML: &str =
+    include_str!("../../../assets/remote-access/cache-recovery.html");
+const WEB_CACHE_RECOVERY_JS: &str = include_str!("../../../assets/remote-access/cache-recovery.js");
 const WEB_MANIFEST_WEBMANIFEST: &str =
     include_str!("../../../assets/remote-access/manifest.webmanifest");
 const WEB_ICON_192_PNG: &[u8] = include_bytes!("../../../assets/remote-access/icons/icon-192.png");
@@ -1036,27 +1042,44 @@ struct RequestTrustContext {
 struct StaticWebAsset {
     content_type: &'static str,
     identity: &'static [u8],
-    gzip: Vec<u8>,
-    identity_etag: HeaderValue,
-    gzip_etag: HeaderValue,
+    identity_etag: OnceLock<HeaderValue>,
+    gzip: OnceLock<CompressedWebAsset>,
+}
+
+struct CompressedWebAsset {
+    bytes: Bytes,
+    etag: HeaderValue,
 }
 
 impl StaticWebAsset {
     fn new(content_type: &'static str, identity: &'static [u8]) -> Self {
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder
-            .write_all(identity)
-            .expect("in-memory gzip compression should not fail");
-        let gzip = encoder
-            .finish()
-            .expect("in-memory gzip compression should not fail");
         Self {
             content_type,
             identity,
-            identity_etag: strong_etag(identity),
-            gzip_etag: strong_etag(&gzip),
-            gzip,
+            identity_etag: OnceLock::new(),
+            gzip: OnceLock::new(),
         }
+    }
+
+    fn identity_etag(&self) -> &HeaderValue {
+        self.identity_etag
+            .get_or_init(|| strong_etag(self.identity))
+    }
+
+    fn compressed(&self) -> &CompressedWebAsset {
+        self.gzip.get_or_init(|| {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder
+                .write_all(self.identity)
+                .expect("in-memory gzip compression should not fail");
+            let bytes = encoder
+                .finish()
+                .expect("in-memory gzip compression should not fail");
+            CompressedWebAsset {
+                etag: strong_etag(&bytes),
+                bytes: Bytes::from(bytes),
+            }
+        })
     }
 }
 
@@ -1079,6 +1102,13 @@ fn web_assets() -> &'static HashMap<&'static str, StaticWebAsset> {
                 ),
             ),
             (
+                "/recovery-store.js",
+                StaticWebAsset::new(
+                    "application/javascript; charset=utf-8",
+                    WEB_RECOVERY_STORE_JS.as_bytes(),
+                ),
+            ),
+            (
                 "/events-client.js",
                 StaticWebAsset::new(
                     "application/javascript; charset=utf-8",
@@ -1097,6 +1127,13 @@ fn web_assets() -> &'static HashMap<&'static str, StaticWebAsset> {
                 StaticWebAsset::new(
                     "application/javascript; charset=utf-8",
                     WEB_MARKDOWN_JS.as_bytes(),
+                ),
+            ),
+            (
+                "/markdown-renderer.js",
+                StaticWebAsset::new(
+                    "application/javascript; charset=utf-8",
+                    WEB_MARKDOWN_RENDERER_JS.as_bytes(),
                 ),
             ),
             (
@@ -1255,9 +1292,11 @@ fn is_static_web_asset_path(path: &str) -> bool {
         "/" | "/app-resources.json"
             | "/app.js"
             | "/attachments.js"
+            | "/recovery-store.js"
             | "/events-client.js"
             | "/events-worker.js"
             | "/markdown.js"
+            | "/markdown-renderer.js"
             | "/vendor/marked.esm.js"
             | "/vendor/dompurify.esm.js"
             | "/vendor/mermaid.esm.js"
@@ -1338,9 +1377,9 @@ fn apply_static_asset_headers(response: &mut Response, asset: &StaticWebAsset, g
     headers.insert(
         header::ETAG,
         if gzip {
-            asset.gzip_etag.clone()
+            asset.compressed().etag.clone()
         } else {
-            asset.identity_etag.clone()
+            asset.identity_etag().clone()
         },
     );
     headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
@@ -1350,31 +1389,70 @@ fn apply_static_asset_headers(response: &mut Response, asset: &StaticWebAsset, g
 }
 
 async fn static_web_asset(uri: Uri, headers: HeaderMap) -> Response {
-    let asset = if uri.path() == "/app-resources.json" {
-        app_resources_asset()
-    } else if let Some(asset) = web_assets().get(uri.path()) {
-        asset
-    } else {
-        return StatusCode::NOT_FOUND.into_response();
+    // 摘要和压缩按资源首次访问生成，不让 Mermaid 等非首屏资源阻塞入口。
+    // 首次计算或同资源并发等待均在阻塞线程池中完成，避免占住事件/API 工作线程。
+    tokio::task::spawn_blocking(move || {
+        let asset = if uri.path() == "/app-resources.json" {
+            app_resources_asset()
+        } else if let Some(asset) = web_assets().get(uri.path()) {
+            asset
+        } else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        web_asset_response(asset, &headers, true)
+    })
+    .await
+    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+async fn cache_recovery_asset(uri: Uri, headers: HeaderMap) -> Response {
+    static HTML: OnceLock<StaticWebAsset> = OnceLock::new();
+    static SCRIPT: OnceLock<StaticWebAsset> = OnceLock::new();
+    let asset = match uri.path() {
+        "/cache-recovery.html" => HTML.get_or_init(|| {
+            StaticWebAsset::new(
+                "text/html; charset=utf-8",
+                WEB_CACHE_RECOVERY_HTML.as_bytes(),
+            )
+        }),
+        "/cache-recovery.js" => SCRIPT.get_or_init(|| {
+            StaticWebAsset::new(
+                "application/javascript; charset=utf-8",
+                WEB_CACHE_RECOVERY_JS.as_bytes(),
+            )
+        }),
+        _ => return StatusCode::NOT_FOUND.into_response(),
     };
-    let gzip = accepts_gzip(&headers);
+    // 恢复入口不属于任一版本壳，损坏的缓存也不能挡住它。
+    web_asset_response(asset, &headers, false)
+}
+
+fn web_asset_response(asset: &StaticWebAsset, headers: &HeaderMap, conditional: bool) -> Response {
+    let gzip = accepts_gzip(headers);
     let etag = if gzip {
-        &asset.gzip_etag
+        &asset.compressed().etag
     } else {
-        &asset.identity_etag
+        asset.identity_etag()
     };
-    if if_none_match_matches(&headers, etag) {
+    if conditional && if_none_match_matches(headers, etag) {
         let mut response = StatusCode::NOT_MODIFIED.into_response();
         apply_static_asset_headers(&mut response, asset, gzip);
         return response;
     }
     let (body, length) = if gzip {
-        (Body::from(asset.gzip.clone()), asset.gzip.len())
+        let compressed = asset.compressed();
+        (Body::from(compressed.bytes.clone()), compressed.bytes.len())
     } else {
         (Body::from(asset.identity), asset.identity.len())
     };
     let mut response = Response::new(body);
     apply_static_asset_headers(&mut response, asset, gzip);
+    if !conditional {
+        response.headers_mut().remove(header::ETAG);
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     response.headers_mut().insert(
         header::CONTENT_LENGTH,
         HeaderValue::from_str(&length.to_string())
@@ -1396,9 +1474,11 @@ pub fn web_router(
         .route("/app-resources.json", get(static_web_asset))
         .route("/app.js", get(static_web_asset))
         .route("/attachments.js", get(static_web_asset))
+        .route("/recovery-store.js", get(static_web_asset))
         .route("/events-client.js", get(static_web_asset))
         .route("/events-worker.js", get(static_web_asset))
         .route("/markdown.js", get(static_web_asset))
+        .route("/markdown-renderer.js", get(static_web_asset))
         .route("/vendor/marked.esm.js", get(static_web_asset))
         .route("/vendor/dompurify.esm.js", get(static_web_asset))
         .route("/vendor/mermaid.esm.js", get(static_web_asset))
@@ -1406,6 +1486,8 @@ pub fn web_router(
         .route("/platform.js", get(static_web_asset))
         .route("/pwa.js", get(static_web_asset))
         .route("/sw.js", get(static_web_asset))
+        .route("/cache-recovery.html", get(cache_recovery_asset))
+        .route("/cache-recovery.js", get(cache_recovery_asset))
         .route("/style.css", get(static_web_asset))
         .route("/manifest.webmanifest", get(static_web_asset))
         .route("/icons/icon-192.png", get(static_web_asset))
@@ -1793,7 +1875,7 @@ async fn read(
     Path(action): Path<String>,
     headers: HeaderMap,
     Json(mut payload): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let device = authorized(&state, &headers).await?;
     if !matches!(
         action.as_str(),
@@ -1840,7 +1922,45 @@ async fn read(
     ) {
         state.controller.attach_queue_images(&mut value);
     }
-    Ok(Json(value))
+    let gzip = accepts_gzip(&headers);
+    tokio::task::spawn_blocking(move || read_json_response(value, gzip))
+        .await
+        .map_err(|_| ApiError::new(503, "会话数据处理暂时失败，请重试读取"))?
+}
+
+fn read_json_response(value: Value, accept_gzip: bool) -> Result<Response, ApiError> {
+    let mut bytes =
+        serde_json::to_vec(&value).map_err(|_| ApiError::new(500, "无法编码会话数据"))?;
+    let mut compressed = false;
+    if accept_gzip && bytes.len() >= 1024 {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        if encoder.write_all(&bytes).is_ok() {
+            if let Ok(encoded) = encoder.finish() {
+                if encoded.len() < bytes.len() {
+                    bytes = encoded;
+                    compressed = true;
+                }
+            }
+        }
+    }
+    let length = bytes.len();
+    let mut response = Body::from(bytes).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&length.to_string())
+            .expect("serialized JSON length should be a valid header value"),
+    );
+    if compressed {
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    }
+    Ok(response)
 }
 
 fn prompt_optimization_request_id(device_id: &str, request_id: &str) -> Result<String, ApiError> {
@@ -3327,6 +3447,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_response_compression_preserves_auth_and_private_payloads() {
+        let state_dir = tempfile::tempdir().unwrap();
+        configure_access_key(state_dir.path(), "compression-test-key").unwrap();
+        let expected = json!({
+            "ok": true,
+            "data": [{
+                "id": "isolated-turn",
+                "items": [{
+                    "id": "isolated-message",
+                    "type": "agentMessage",
+                    "text": "这是用于弱网传输验证的合成会话内容，不涉及真实会话。".repeat(1000)
+                }]
+            }]
+        });
+        let original_bytes = serde_json::to_vec(&expected).unwrap();
+        let native = Arc::new(RecordingActionBridge {
+            calls: Mutex::new(Vec::new()),
+            result: Mutex::new(expected.clone()),
+        });
+        let controller =
+            RemoteAccessController::new(native.clone(), state_dir.path().to_path_buf()).unwrap();
+        controller.running.store(true, Ordering::SeqCst);
+        {
+            let mut auth = controller.auth.lock().await;
+            let key_id = auth.access_key.as_ref().unwrap().id.clone();
+            auth.devices.push(Device {
+                id: "compression-device".into(),
+                name: "隔离传输验证".into(),
+                token_hash: hash("compression-cookie"),
+                created_at_ms: now_ms(),
+                expires_at_ms: now_ms() + 120_000,
+                last_seen_at_ms: now_ms(),
+                key_id,
+                public_origin: None,
+            });
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = web_router(
+            controller,
+            RemoteAccessSettings {
+                enabled: true,
+                port,
+                ..RemoteAccessSettings::default()
+            },
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let base_url = format!("http://127.0.0.1:{port}");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let request = |encoding: &str| {
+            client
+                .post(format!("{base_url}/api/read/history"))
+                .header(reqwest::header::ORIGIN, &base_url)
+                .header(reqwest::header::ACCEPT_ENCODING, encoding)
+                .header(reqwest::header::IF_NONE_MATCH, "*")
+                .json(&json!({"threadId":"isolated-thread"}))
+        };
+        let denied = request("gzip").send().await.unwrap();
+        assert_eq!(denied.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert!(native.calls.lock().await.is_empty());
+        for (encoding, compressed) in [
+            ("gzip", true),
+            ("identity", false),
+            ("gzip;q=0, *;q=1", false),
+        ] {
+            let response = request(encoding)
+                .header(
+                    reqwest::header::COOKIE,
+                    "codex_elves_device=compression-cookie",
+                )
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(
+                response.headers()[reqwest::header::CACHE_CONTROL],
+                "no-store"
+            );
+            assert_eq!(response.headers()[reqwest::header::VARY], "Accept-Encoding");
+            assert!(!response.headers().contains_key(reqwest::header::ETAG));
+            assert_eq!(
+                response.headers().get(reqwest::header::CONTENT_ENCODING),
+                compressed.then_some(&HeaderValue::from_static("gzip"))
+            );
+            let body = response.bytes().await.unwrap();
+            let decoded = if compressed {
+                assert!(body.len() < original_bytes.len() / 4);
+                println!(
+                    "合成历史正文：identity={} bytes，gzip={} bytes",
+                    original_bytes.len(),
+                    body.len()
+                );
+                let mut decoded = Vec::new();
+                flate2::read::GzDecoder::new(&body[..])
+                    .read_to_end(&mut decoded)
+                    .unwrap();
+                decoded
+            } else {
+                body.to_vec()
+            };
+            assert!(
+                serde_json::from_slice::<Value>(&decoded).unwrap() == expected,
+                "压缩与未压缩响应必须保留完整相同的 JSON 正文"
+            );
+        }
+        *native.result.lock().await = json!({"ok":true,"data":[]});
+        let small = request("gzip")
+            .header(
+                reqwest::header::COOKIE,
+                "codex_elves_device=compression-cookie",
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(small.status(), reqwest::StatusCode::OK);
+        assert!(
+            !small
+                .headers()
+                .contains_key(reqwest::header::CONTENT_ENCODING)
+        );
+        assert_eq!(
+            small.json::<Value>().await.unwrap(),
+            json!({"ok":true,"data":[]})
+        );
+        assert_eq!(native.calls.lock().await.len(), 4);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
     async fn delete_thread_action_preserves_auth_read_only_and_idempotency() {
         let temp_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp");
         std::fs::create_dir_all(&temp_root).unwrap();
@@ -4610,7 +4860,36 @@ mod tests {
         assert_eq!(paths, sorted_paths);
         assert!(!paths.contains(&"/app-resources.json"));
         assert!(!paths.contains(&"/native.js"));
+        assert!(!paths.contains(&"/cache-recovery.html"));
+        assert!(!paths.contains(&"/cache-recovery.js"));
         assert!(paths.iter().all(|path| !path.starts_with("/api/")));
+
+        for (path, content_type) in [
+            ("/cache-recovery.html", "text/html; charset=utf-8"),
+            (
+                "/cache-recovery.js",
+                "application/javascript; charset=utf-8",
+            ),
+        ] {
+            let response = client
+                .get(format!("{base_url}{path}"))
+                .header(reqwest::header::IF_NONE_MATCH, "*")
+                .header(reqwest::header::ACCEPT_ENCODING, "identity")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(
+                response.headers()[reqwest::header::CONTENT_TYPE],
+                content_type
+            );
+            assert_eq!(
+                response.headers()[reqwest::header::CACHE_CONTROL],
+                "no-store"
+            );
+            assert!(!response.headers().contains_key(reqwest::header::ETAG));
+            assert!(!response.bytes().await.unwrap().is_empty());
+        }
 
         for file in files {
             let path = file["path"].as_str().unwrap();
