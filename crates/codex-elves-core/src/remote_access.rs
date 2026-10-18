@@ -32,6 +32,7 @@ use tokio::sync::{Mutex, broadcast};
 use crate::settings::{RemoteAccessSettings, SettingsStore};
 
 mod credentials;
+mod image_preview;
 mod service;
 mod zrok_tunnel;
 use credentials::{AccessKey, AccessKeyStore, lock_access_key_store};
@@ -338,6 +339,7 @@ enum RegisteredImageSource {
     },
 }
 
+#[derive(Clone)]
 struct LoadedImage {
     bytes: Vec<u8>,
     mime: &'static str,
@@ -454,6 +456,8 @@ pub struct RemoteAccessController {
     key_checks: Arc<tokio::sync::Semaphore>,
     public_origin: Arc<RwLock<Option<String>>>,
     images: RwLock<ImageRegistry>,
+    image_previews: std::sync::Mutex<image_preview::PreviewCache>,
+    image_preview_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl RemoteAccessController {
@@ -515,6 +519,8 @@ impl RemoteAccessController {
             key_checks: Arc::new(tokio::sync::Semaphore::new(4)),
             public_origin,
             images: RwLock::new(ImageRegistry::default()),
+            image_previews: std::sync::Mutex::new(image_preview::PreviewCache::default()),
+            image_preview_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         }))
     }
 
@@ -1721,6 +1727,7 @@ pub fn web_router(
         )
         .route("/api/receipts/{id}", get(receipt))
         .route("/api/images/{id}", get(image))
+        .route("/api/images/{id}/thumbnail", get(image_thumbnail))
         .route("/api/events", get(events))
         .route("/api/events/ws", get(events_ws))
         .layer(DefaultBodyLimit::max(256 * 1024))
@@ -1851,6 +1858,7 @@ async fn access_boundary(
     let path = request.uri().path();
     let private_api = (path == "/api" || path.starts_with("/api/"))
         && !matches!(path, "/api/connect" | "/api/login-status");
+    let private_image = path.starts_with("/api/images/");
     // Reject unauthorized uploads before JSON/body extraction and before routing.
     let mut response = if private_api {
         match authorized(&state, request.headers()).await {
@@ -1860,10 +1868,15 @@ async fn access_boundary(
     } else {
         next.run(request).await
     };
+    let revalidated_image = private_image
+        && matches!(response.status(), StatusCode::OK | StatusCode::NOT_MODIFIED)
+        && response.headers().contains_key(header::ETAG);
     let headers = response.headers_mut();
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(if static_web_asset {
+        HeaderValue::from_static(if revalidated_image {
+            "private, no-cache"
+        } else if static_web_asset {
             "no-cache"
         } else {
             "no-store"
@@ -3025,6 +3038,23 @@ async fn image(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    image_response(state, id, headers, false).await
+}
+
+async fn image_thumbnail(
+    State(state): State<WebState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    image_response(state, id, headers, true).await
+}
+
+async fn image_response(
+    state: WebState,
+    id: String,
+    headers: HeaderMap,
+    thumbnail: bool,
+) -> Result<Response, ApiError> {
     let device = authorized(&state, &headers).await?;
     if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(ApiError::new(404, "图片不存在或已过期"));
@@ -3033,21 +3063,69 @@ async fn image(
         .controller
         .registered_image(&id)
         .ok_or_else(|| ApiError::new(404, "图片不存在或已过期"))?;
-    let image = tokio::task::spawn_blocking(move || read_registered_image(&image))
-        .await
-        .map_err(|_| ApiError::new(503, "无法读取本机图片"))??;
+    let permit = if thumbnail {
+        Some(
+            state
+                .controller
+                .image_preview_slots
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| ApiError::new(503, "图片预览暂不可用"))?,
+        )
+    } else {
+        None
+    };
+    let controller = state.controller.clone();
+    let image = tokio::task::spawn_blocking(move || {
+        // 请求被取消后，阻塞解码仍可能运行；许可必须由实际工作持有到结束。
+        let _permit = permit;
+        let source = read_registered_image(&image)?;
+        if !thumbnail {
+            return Ok(source);
+        }
+        let key: [u8; 32] = Sha256::digest(&source.bytes).into();
+        let cached = controller
+            .image_previews
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&key);
+        if let Some(cached) = cached {
+            return Ok(cached.unwrap_or(source));
+        }
+        let preview = image_preview::thumbnail(&source);
+        controller
+            .image_previews
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(key, preview.clone());
+        Ok::<_, ApiError>(preview.unwrap_or(source))
+    })
+    .await
+    .map_err(|_| ApiError::new(503, "无法读取本机图片"))??;
     state
         .controller
         .authorization(device, None)
         .check()
         .await
         .map_err(authorization_error)?;
+    let etag = strong_etag(&image.bytes);
+    if if_none_match_matches(&headers, &etag) {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        response.headers_mut().insert(header::ETAG, etag);
+        response
+            .headers_mut()
+            .insert(header::VARY, HeaderValue::from_static("Cookie"));
+        return Ok(response);
+    }
     let content_length = HeaderValue::from_str(&image.bytes.len().to_string())
         .map_err(|_| ApiError::new(500, "无法生成图片响应"))?;
     Ok((
         [
             (header::CONTENT_TYPE, HeaderValue::from_static(image.mime)),
             (header::CONTENT_LENGTH, content_length),
+            (header::ETAG, etag),
+            (header::VARY, HeaderValue::from_static("Cookie")),
             (
                 header::CONTENT_DISPOSITION,
                 HeaderValue::from_static("inline"),
@@ -3981,6 +4059,195 @@ mod tests {
             self.calls.lock().await.push((action.to_string(), payload));
             Ok(self.result.lock().await.clone())
         }
+    }
+
+    #[test]
+    fn image_preview_preserves_alpha_and_bounded_cache() {
+        use image::GenericImageView;
+        let original = image::RgbaImage::from_fn(1200, 800, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, (x * y % 256) as u8, 96])
+        });
+        let mut encoded = Cursor::new(Vec::new());
+        original.write_to(&mut encoded, ImageFormat::Png).unwrap();
+        let source = LoadedImage {
+            bytes: encoded.into_inner(),
+            mime: "image/png",
+        };
+        let preview = image_preview::thumbnail(&source).unwrap();
+        assert!(preview.bytes.len() < source.bytes.len());
+        assert_eq!(preview.mime, "image/webp");
+        let decoded = image::load_from_memory(&preview.bytes).unwrap();
+        assert_eq!(decoded.dimensions(), (256, 171));
+        assert_eq!(decoded.to_rgba8().get_pixel(100, 80)[3], 96);
+        let mut small = Cursor::new(Vec::new());
+        image::RgbaImage::new(50, 50)
+            .write_to(&mut small, ImageFormat::Png)
+            .unwrap();
+        assert!(
+            image_preview::thumbnail(&LoadedImage {
+                bytes: small.into_inner(),
+                mime: "image/png",
+            })
+            .is_none()
+        );
+        let mut cache = image_preview::PreviewCache::default();
+        cache.insert([1; 32], Some(preview));
+        cache.insert([2; 32], None);
+        assert!(cache.get(&[1; 32]).unwrap().is_some());
+        assert!(cache.get(&[2; 32]).unwrap().is_none());
+        for value in 3..=131 {
+            cache.insert([value; 32], None);
+        }
+        assert!(cache.get(&[1; 32]).is_none());
+        assert!(cache.get(&[131; 32]).is_some());
+    }
+
+    #[tokio::test]
+    async fn image_http_cache_revalidates_content_and_authorization() {
+        let directory = tempfile::tempdir().unwrap();
+        configure_access_key(directory.path(), "image-cache-test-key").unwrap();
+        let controller = RemoteAccessController::new(
+            Arc::new(OfflineNativeBridge),
+            directory.path().to_path_buf(),
+        )
+        .unwrap();
+        controller.publish_access_policy(&RemoteAccessSettings {
+            enabled: true,
+            ..RemoteAccessSettings::default()
+        });
+        controller.running.store(true, Ordering::SeqCst);
+        {
+            let mut auth = controller.auth.lock().await;
+            let key_id = auth.access_key.as_ref().unwrap().id.clone();
+            auth.devices.push(Device {
+                id: "image-cache-device".into(),
+                name: "图片缓存回归".into(),
+                token_hash: hash("image-cache-cookie"),
+                created_at_ms: now_ms(),
+                expires_at_ms: now_ms() + 120_000,
+                last_seen_at_ms: now_ms(),
+                key_id,
+                public_origin: None,
+            });
+        }
+        let source_path = directory.path().join("image.png");
+        let write_source = |seed: u32| {
+            image::RgbaImage::from_fn(1200, 800, |x, y| {
+                image::Rgba([
+                    ((x + seed) % 256) as u8,
+                    (y % 256) as u8,
+                    (x * y % 256) as u8,
+                    255,
+                ])
+            })
+            .save(&source_path)
+            .unwrap();
+        };
+        write_source(0);
+        let image_id = controller
+            .images
+            .write()
+            .unwrap()
+            .register(source_path.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = web_router(
+            controller.clone(),
+            RemoteAccessSettings {
+                enabled: true,
+                port,
+                ..RemoteAccessSettings::default()
+            },
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let base = format!("http://127.0.0.1:{port}/api/images/{image_id}");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let request = |url: String| {
+            client.get(url).header(
+                reqwest::header::COOKIE,
+                "codex_elves_device=image-cache-cookie",
+            )
+        };
+        let unauthorized = client.get(&base).send().await.unwrap();
+        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            unauthorized.headers()[reqwest::header::CACHE_CONTROL],
+            "no-store"
+        );
+        let mut etags = Vec::new();
+        for (url, expected_mime) in [
+            (base.clone(), "image/png"),
+            (format!("{base}/thumbnail"), "image/webp"),
+        ] {
+            let response = request(url.clone()).send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(
+                response.headers()[reqwest::header::CONTENT_TYPE],
+                expected_mime
+            );
+            assert_eq!(
+                response.headers()[reqwest::header::CACHE_CONTROL],
+                "private, no-cache"
+            );
+            assert_eq!(response.headers()[reqwest::header::VARY], "Cookie");
+            let etag = response.headers()[reqwest::header::ETAG].clone();
+            let bytes = response.bytes().await.unwrap();
+            if expected_mime == "image/png" {
+                assert_eq!(bytes.as_ref(), std::fs::read(&source_path).unwrap());
+            }
+            let unchanged = request(url)
+                .header(reqwest::header::IF_NONE_MATCH, &etag)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(unchanged.status(), reqwest::StatusCode::NOT_MODIFIED);
+            assert_eq!(unchanged.headers()[reqwest::header::VARY], "Cookie");
+            assert!(unchanged.bytes().await.unwrap().is_empty());
+            etags.push(etag);
+        }
+        write_source(40);
+        for (index, url) in [base.clone(), format!("{base}/thumbnail")]
+            .into_iter()
+            .enumerate()
+        {
+            let changed = request(url)
+                .header(reqwest::header::IF_NONE_MATCH, &etags[index])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(changed.status(), reqwest::StatusCode::OK);
+            assert_ne!(changed.headers()[reqwest::header::ETAG], etags[index]);
+        }
+        std::fs::remove_file(&source_path).unwrap();
+        let missing = request(base.clone()).send().await.unwrap();
+        assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+        assert_eq!(
+            missing.headers()[reqwest::header::CACHE_CONTROL],
+            "no-store"
+        );
+        controller.auth.lock().await.devices.clear();
+        for (index, url) in [
+            base,
+            format!("http://127.0.0.1:{port}/api/images/{image_id}/thumbnail"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let revoked = request(url)
+                .header(reqwest::header::IF_NONE_MATCH, &etags[index])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(revoked.status(), reqwest::StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                revoked.headers()[reqwest::header::CACHE_CONTROL],
+                "no-store"
+            );
+            assert!(!revoked.headers().contains_key(reqwest::header::ETAG));
+        }
+        assert_eq!(controller.image_preview_slots.available_permits(), 2);
+        server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]

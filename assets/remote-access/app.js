@@ -13,7 +13,7 @@ import {
   setAndroidNotificationSettings,
   subscribeAndroidNotificationSettings
 } from "./platform.js";
-import { createRecoveryStore, createTranscriptCache, recoveryStorageMessage } from "./recovery-store.js";
+import { createReadCache, createRecoveryStore, createTranscriptCache, recoveryStorageMessage } from "./recovery-store.js";
 import { beginPwaForegroundWork, getPwaCacheState, retryPwaCache } from "./pwa.js";
 import {
   attachmentsFromQueuedMessage,
@@ -27,8 +27,10 @@ import {
   composerHasAttachments,
   composerRemoteAttachmentSources,
   handleComposerImagePaste,
+  loadAttachmentThumbnail,
   mountComposerAttachments,
   renderQueuedMessageAttachments,
+  retryOriginalImage,
   safeInlineImageSource,
   setComposerAttachments,
   setComposerAttachmentsDisabled
@@ -66,6 +68,17 @@ const attachmentDrafts = new Map();
 const goalDrafts = new Map();
 const recoveryStore = createRecoveryStore();
 const transcriptCache = createTranscriptCache();
+const readCache = createReadCache();
+const catalogCacheMs = 60 * 60 * 1000;
+const catalogRefreshAheadMs = 5 * 60 * 1000, catalogRetryMs = 60 * 1000;
+const catalogFallbackMs = 7 * 24 * 60 * 60 * 1000;
+const skillCatalogs = new Map(), skillScopeAliases = new Map(), skillCatalogRequests = new Map();
+const skillCatalogRetryAt = new Map();
+let globalSkillChoices = [], globalSkillsLoadedAt = 0;
+let skillCatalogRevision = 0, globalSkillEpoch = "", globalSkillsInvalidated = false;
+let appliedSkillCatalog = null, appliedGlobalSkills = null;
+let catalogRefreshTimer = null, modelsRetryAt = 0;
+let readScope = null, readGeneration = 0, readingPositionTimer = null, recentHistoryPage = null;
 const draftWrites = new Map(), failedInputRecoveries = new Map();
 let recoveryScope = null, recoveryGeneration = 0, draftStorageError = "", connecting = null;
 let initialAuthenticationRequired = false, appReadySent = false, transcriptChecking = false;
@@ -94,6 +107,7 @@ const promptOptimizations = new Map();
 let selectedSkills = [], selectedModel = "", selectedEffort = "", selectedGoal = null;
 let models = [], modelsPromise = null, modelsLoadedAt = 0, modelQuery = "", skillChoices = [], skillIndex = 0, skillLoadVersion = 0, skillScope = "";
 let modelDefaults = { model: "", reasoningEffort: "" };
+const newChatModels = new Map();
 let skillLoading = null, creationProject = "", threadReadVersion = 0, tokenUsageVersion = 0, notifiedTokenUsage = null;
 let skillRenderVersion = 0, messageSkillLoadScope = "";
 let recentLimit = 40;
@@ -345,7 +359,7 @@ function openAppearance() {
     <div id="appearance-colors"></div>
     <div id="appearance-cache-state" class="appearance-field" role="status"></div>
     <label class="appearance-field">字体大小<span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="字体大小"><output id="appearance-font-value"></output></span></label>
-    <div id="appearance-notifications-field" class="appearance-field" hidden><span>通知事件</span><button type="button" id="appearance-notifications-entry" class="icon-button appearance-notifications-entry" title="打开通知事件设置" aria-label="打开通知事件设置" aria-controls="appearance-notifications-page"></button></div></div>
+    <div id="appearance-notifications-field" class="appearance-field" hidden><button type="button" id="appearance-notifications-entry" class="appearance-notifications-entry" title="打开通知事件设置" aria-label="打开通知事件设置" aria-controls="appearance-notifications-page"><span>通知事件</span></button></div></div>
     <div class="appearance-actions"><button type="button" class="appearance-version" id="appearance-app-version" hidden disabled></button><div class="appearance-action-buttons"><button type="button" id="appearance-reset">恢复默认</button><button type="button" class="primary" id="appearance-close">完成</button></div></div>`;
   document.body.append(dialog);
   const title = $("#appearance-title", dialog);
@@ -467,6 +481,7 @@ function openAppearance() {
         finishPageOperation();
       }
     }, "appearance-notification-action");
+    systemSettingsButton.hidden = true;
     page.append(status, rows);
     $("#appearance-close", dialog).before(systemSettingsButton);
     dialog.insertBefore(page, $(".appearance-actions", dialog));
@@ -480,7 +495,9 @@ function openAppearance() {
     dialog.classList.add("appearance-notifications-open");
     let state = null;
     const setBusy = busy => {
-      for (const control of controls.values()) control.disabled = busy || !state;
+      for (const [key, control] of controls)
+        control.disabled = busy || !state || key !== "enabled" && !state.settings.enabled;
+      categories.setAttribute("aria-disabled", String(!state?.settings.enabled));
       systemSettingsButton.disabled = busy || !state;
     };
     const pageApi = { setBusy, systemSettingsButton };
@@ -502,8 +519,8 @@ function openAppearance() {
       rows.removeAttribute("aria-busy");
       for (const [key, control] of controls) {
         control.checked = value.settings[key];
-        control.disabled = notificationOperations > 0;
       }
+      setBusy(notificationOperations > 0);
       const permissionText = {
         prompt: "系统通知尚未授权",
         granted: "系统通知权限已允许",
@@ -1223,6 +1240,117 @@ function privateInputScope(value) {
   return typeof value?.device?.id === "string"
     ? JSON.stringify([value.device.id, value.device.createdAtMs ?? null]) : null;
 }
+function cacheDisplayData(kind, id, value, options) {
+  if (!readScope || readScope !== privateInputScope(session)) return;
+  void readCache.put(readScope, kind, id, value, options).catch(() => {});
+}
+async function optionalCachedRead(task, timeout = 250) {
+  let timer;
+  try {
+    return await Promise.race([task.catch(() => null),
+      new Promise(resolve => { timer = setTimeout(() => resolve(null), timeout); })]);
+  } finally { clearTimeout(timer); }
+}
+function readingPosition() {
+  const root = $("#messages"), anchor = root && visibleMessageAnchor(root);
+  return { threadId: selectedId, scrollTop: root?.scrollTop || 0, followMessages,
+    anchor: anchor?.key ? { key: anchor.key, offset: anchor.offset } : null };
+}
+function rememberReadingPosition() {
+  clearTimeout(readingPositionTimer); readingPositionTimer = null;
+  cacheDisplayData("view", "last", readingPosition());
+}
+function scheduleReadingPosition() {
+  clearTimeout(readingPositionTimer);
+  readingPositionTimer = setTimeout(rememberReadingPosition, 500);
+}
+function cachedReadingPosition(snapshot, position) {
+  const anchor = position?.anchor;
+  const containsAnchor = anchor && snapshot.turns.some(turn =>
+    Array.isArray(turn?.items) && turn.items.some(item => `${turn.id}:${item?.id}` === anchor.key));
+  if (!position || position.followMessages || anchor && !containsAnchor
+      || snapshot.cacheWindowOnly && !containsAnchor)
+    return { followMessages: true, scrollTop: 0, anchor: null };
+  return { followMessages: false, scrollTop: position.scrollTop || 0, anchor: containsAnchor ? anchor : null };
+}
+function sidebarSnapshot(value) {
+  const displayThread = item => {
+    const { status, priority, hasUnreadTurn, requests, queuedMessages, queuedEdits, ...display } = item;
+    return display;
+  };
+  return { ...value,
+    recent: value.recent.map(displayThread),
+    pinnedThreads: value.pinnedThreads.map(displayThread),
+    projects: value.projects.map(project => ({ ...project, threads: project.threads.map(displayThread) })) };
+}
+function clearReadViews() {
+  const previousScope = readScope;
+  readScope = null; readGeneration++;
+  clearTimeout(readingPositionTimer); readingPositionTimer = null;
+  skillCatalogs.clear(); skillScopeAliases.clear();
+  skillCatalogRequests.clear(); skillCatalogRevision++;
+  skillCatalogRetryAt.clear(); stopCatalogRefresh();
+  globalSkillChoices = []; globalSkillsLoadedAt = 0;
+  globalSkillEpoch = ""; globalSkillsInvalidated = false;
+  appliedSkillCatalog = appliedGlobalSkills = null;
+  modelsRetryAt = 0;
+  models = []; modelsPromise = null; modelsLoadedAt = 0;
+  modelDefaults = { model: "", reasoningEffort: "" };
+  return readCache.clear(previousScope).catch(() => {});
+}
+async function restoreReadViews(value) {
+  const scope = privateInputScope(value);
+  if (readScope === scope && sidebar) return;
+  readScope = scope;
+  const revision = ++readGeneration;
+  const load = (async () => {
+    await readCache.activate(scope);
+    const [savedSidebar, view, modelCatalog, globalSkills] = await Promise.all([
+      readCache.get(scope, "sidebar", "main"), readCache.get(scope, "view", "last"),
+      readCache.get(scope, "models", "global"), readCache.get(scope, "skills", "global")
+    ]);
+    const requested = new URLSearchParams(location.hash.slice(1)).get("thread");
+    const id = requested || view?.threadId;
+    const snapshot = typeof id === "string" && /^[A-Za-z0-9_-]{1,120}$/.test(id)
+      ? await readCache.get(scope, "transcript", id) : null;
+    return { savedSidebar, view, modelCatalog, globalSkills, id, snapshot, requested };
+  })().catch(() => null);
+  // 缓存损坏、空间不足或旧标签页锁住数据库时，首屏直接走网络，不等待缓存修复。
+  const saved = await optionalCachedRead(load);
+  if (!saved || revision !== readGeneration || scope !== readScope || scope !== privateInputScope(session)) return;
+  const validSummary = item => item && typeof item.id === "string";
+  if (saved.savedSidebar?.preferences && Array.isArray(saved.savedSidebar.recent)
+      && Array.isArray(saved.savedSidebar.pinnedThreads) && Array.isArray(saved.savedSidebar.projects)
+      && saved.savedSidebar.recent.every(validSummary) && saved.savedSidebar.pinnedThreads.every(validSummary)
+      && saved.savedSidebar.projects.every(project => validSummary(project) && Array.isArray(project.threads)
+        && project.threads.every(validSummary)))
+    sidebar = saved.savedSidebar;
+  if (saved.modelCatalog && Array.isArray(saved.modelCatalog.models)
+      && saved.modelCatalog.models.every(model => model && typeof model.model === "string"
+        && (model.supportedReasoningEfforts == null || Array.isArray(model.supportedReasoningEfforts)))
+      && catalogUsable(saved.modelCatalog)) {
+    models = saved.modelCatalog.models;
+    modelDefaults = { model: saved.modelCatalog.defaults?.model || "",
+      reasoningEffort: saved.modelCatalog.defaults?.reasoningEffort || "" };
+    modelsLoadedAt = saved.modelCatalog.loadedAt;
+  }
+  if (saved.globalSkills && Array.isArray(saved.globalSkills.data)
+      && saved.globalSkills.data.every(validCachedSkill)
+      && catalogUsable(saved.globalSkills)) {
+    globalSkillChoices = saved.globalSkills.data; globalSkillsLoadedAt = saved.globalSkills.loadedAt;
+    globalSkillEpoch = typeof saved.globalSkills.epoch === "string" ? saved.globalSkills.epoch : "";
+    globalSkillsInvalidated = saved.globalSkills.invalidated === true;
+  }
+  if (typeof saved.id === "string" && /^[A-Za-z0-9_-]{1,120}$/.test(saved.id) && !threadDeleted(saved.id)) {
+    if (Array.isArray(saved.snapshot?.turns) && saved.snapshot.turns.length) {
+      const position = saved.view?.threadId === saved.id ? saved.view : saved.snapshot;
+      transcriptCache.put(value.device.id, saved.id,
+        { ...saved.snapshot, ...cachedReadingPosition(saved.snapshot, position) });
+    }
+    if (!saved.requested)
+      history.replaceState(null, "", `${location.pathname}${location.search}#thread=${encodeURIComponent(saved.id)}`);
+  }
+}
 function clearPrivateInputs({ persisted = true } = {}) {
   let previousScope = recoveryScope || privateInputScope(session);
   if (!previousScope) try { previousScope = sessionStorage.getItem("codex-elves-input-owner"); } catch {}
@@ -1234,6 +1362,7 @@ function clearPrivateInputs({ persisted = true } = {}) {
   pending = null; pendingSendRequest = null; editingQueuedMessage = null; editingMessage = null;
   goalEditPending = null;
   selectedSkills = []; selectedGoal = null; transcriptCache.clear();
+  void clearReadViews();
   clearTimeout(pendingTimer);
   for (const key of ["codex-elves-pending", "codex-elves-input-owner", "codex-elves-goal-composer-recoveries",
     "codex-elves-queue-edits", "codex-elves-question-receipts", "codex-elves-compact-pending",
@@ -1424,9 +1553,11 @@ function clearSubmittedDraft(payload, current = true) {
 function resetComposerOptions() {
   selectedModel = selectedEffort = "";
   modelQuery = "";
-  skillChoices = []; skillScope = ""; skillLoading = null; ++skillLoadVersion;
+  skillChoices = [...globalSkillChoices]; skillScope = ""; skillLoading = null; ++skillLoadVersion;
   messageSkillLoadScope = ""; ++skillRenderVersion;
+  appliedSkillCatalog = appliedGlobalSkills = null;
   closeComposerMenus();
+  scheduleCatalogRefresh();
 }
 function promptOptimizationScope() {
   return JSON.stringify([draftKey(), editingQueuedMessage?.editId || null]);
@@ -1708,48 +1839,91 @@ function compactUsageDescription(usage) {
   return usage ? `（已使用${usage.percent}%/${tokenCount(usage.total)}）` : "";
 }
 async function loadModels(force = false) {
-  if (!force && modelsLoadedAt && Date.now() - modelsLoadedAt < 60_000) return models;
+  if (!force && catalogUsable({ loadedAt: modelsLoadedAt })) {
+    if (catalogNeedsRefresh({ loadedAt: modelsLoadedAt }) && Date.now() >= modelsRetryAt)
+      void loadModels(true).catch(() => {});
+    scheduleCatalogRefresh();
+    return models;
+  }
   if (modelsPromise) return modelsPromise;
-  const deviceId = session?.device.id;
+  const scope = privateInputScope(session);
+  const previousModels = models;
   const request = (async () => {
     const result = await api("/api/read/models", {});
-    if (!session || session.device.id !== deviceId) return [];
-    models = (Array.isArray(result.data) ? result.data : []).map(model => ({
+    if (!scope || privateInputScope(session) !== scope) return [];
+    if (!Array.isArray(result.data) || !result.data.every(model => model && typeof model.model === "string"
+        && (model.supportedReasoningEfforts == null || Array.isArray(model.supportedReasoningEfforts))))
+      throw new Error("模型列表返回格式无效");
+    const nextModels = result.data.map(model => ({
       ...model,
       supportedReasoningEfforts: (model.supportedReasoningEfforts || [])
         .filter(effort => effort.reasoningEffort !== "ultra" || result.ultraReasoningEnabled === true)
     }));
+    models = nextModels;
     modelDefaults = { model: result.defaultModel || "", reasoningEffort: result.defaultReasoningEffort || "" };
-    modelsLoadedAt = Date.now();
+    modelsLoadedAt = Date.now(); modelsRetryAt = 0;
+    cacheDisplayData("models", "global", { models, defaults: modelDefaults, loadedAt: modelsLoadedAt },
+      { maxAge: catalogFallbackMs });
     return models;
   })();
   modelsPromise = request;
   try { return await request; }
+  catch (error) {
+    if (privateInputScope(session) === scope) modelsRetryAt = Date.now() + catalogRetryMs;
+    throw error;
+  }
   finally {
     if (modelsPromise === request) {
       modelsPromise = null; updateComposer();
-      if (modelsLoadedAt && $("#model-settings") && !$("#model-settings").hidden) renderModelMenu();
+      if (models !== previousModels && $("#model-settings") && !$("#model-settings").hidden) renderModelMenu();
+      scheduleCatalogRefresh();
     }
   }
 }
-function currentModelId() { return selectedModel || (selectedId ? thread?.model : modelDefaults.model) || ""; }
+function rememberedNewChatModel() {
+  const scope = privateInputScope(session);
+  if (!scope) return null;
+  if (!newChatModels.has(scope)) {
+    let model = "";
+    try { model = localStorage.getItem(`codex-elves-new-chat-model:${scope}`) || ""; } catch {}
+    newChatModels.set(scope, model);
+  }
+  return models.find(model => model.model === newChatModels.get(scope)) || null;
+}
+function rememberNewChatModel(model) {
+  const scope = privateInputScope(session);
+  if (!scope) return;
+  newChatModels.set(scope, model);
+  try { localStorage.setItem(`codex-elves-new-chat-model:${scope}`, model); } catch {}
+}
+function defaultModelEffort(model) {
+  const efforts = (model?.supportedReasoningEfforts || []).filter(effort => effort.reasoningEffort !== "minimal");
+  return efforts.find(value => value.reasoningEffort === model?.defaultReasoningEffort)?.reasoningEffort
+    || efforts.find(value => value.reasoningEffort === "medium")?.reasoningEffort || efforts[0]?.reasoningEffort || "";
+}
+function currentModelId() {
+  return selectedModel || (selectedId ? thread?.model
+    : creating && rememberedNewChatModel()?.model || modelDefaults.model) || "";
+}
 function currentModel() { return models.find(model => model.model === currentModelId()); }
 function currentEffort() {
   if (selectedEffort) return selectedEffort;
   const model = currentModelId();
   if (selectedId) return model === thread?.model ? thread.reasoningEffort || "" : "";
-  return model === modelDefaults.model ? modelDefaults.reasoningEffort : "";
+  return model === modelDefaults.model ? modelDefaults.reasoningEffort
+    : creating && !selectedModel ? defaultModelEffort(currentModel()) : "";
 }
 function renderModelMenu() {
   const menu = $("#model-settings");
   if (!menu) return;
   const focusIndex = [...menu.querySelectorAll("button")].indexOf(document.activeElement);
+  const focusKey = menu.contains(document.activeElement) ? document.activeElement.dataset.choiceKey : null;
   const modelScroll = $(".model-options", menu)?.scrollTop || 0;
   const effortScroll = $(".effort-options", menu)?.scrollTop || 0;
   const searchFocused = document.activeElement === $("#model-search");
   const searchSelection = searchFocused ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
   menu.replaceChildren();
-  if (models.length > 8) {
+  if (models.length > 8 || modelQuery || searchFocused) {
     const input = element("input", "model-search");
     input.id = "model-search"; input.type = "search"; input.value = modelQuery;
     input.placeholder = "搜索模型"; input.setAttribute("aria-label", "搜索模型"); input.autocomplete = "off";
@@ -1757,8 +1931,9 @@ function renderModelMenu() {
     input.oncompositionend = () => { modelQuery = input.value; renderModelMenu(); };
     menu.append(input);
   }
-  const choice = (text, checked, action, description) => {
+  const choice = (text, checked, action, description, key = text) => {
     const node = button("", text, action, "model-option");
+    node.dataset.choiceKey = key;
     node.title = text;
     node.setAttribute("role", "menuitemradio"); node.setAttribute("aria-checked", String(checked));
     const labels = element("span", "model-option-label");
@@ -1779,14 +1954,13 @@ function renderModelMenu() {
   for (const model of visibleModels) group.append(choice(model.displayName || model.model, modelId === model.model, () => {
     if (currentModelId() !== model.model) {
       selectedModel = model.model;
-      const efforts = (model.supportedReasoningEfforts || []).filter(effort => effort.reasoningEffort !== "minimal");
-      selectedEffort = efforts.find(value => value.reasoningEffort === model.defaultReasoningEffort)?.reasoningEffort
-        || efforts.find(value => value.reasoningEffort === "medium")?.reasoningEffort || efforts[0]?.reasoningEffort || "";
+      selectedEffort = defaultModelEffort(model);
     }
+    if (creating) rememberNewChatModel(model.model);
     applyModelMenuChoice();
-  }));
+  }, null, `model:${model.model}`));
   if (modelId && !models.some(model => model.model === modelId) && modelId.toLowerCase().includes(modelQuery.trim().toLowerCase())) {
-    const current = choice(modelId, true, () => {}, "当前会话模型，原生模型列表暂未提供");
+    const current = choice(modelId, true, () => {}, "当前会话模型，原生模型列表暂未提供", `model:${modelId}`);
     current.disabled = true; group.prepend(current);
   }
   if (!group.children.length) group.append(element("p", "popover-empty muted", models.length ? "没有匹配的模型，请修改搜索条件" : "暂无可选模型，请稍后重试"));
@@ -1796,7 +1970,7 @@ function renderModelMenu() {
   for (const effort of supportedEfforts) {
     efforts.append(choice(effortLabels[effort.reasoningEffort] || effort.reasoningEffort,
       selectedReasoning === effort.reasoningEffort,
-      () => { selectedEffort = effort.reasoningEffort; applyModelMenuChoice(); }));
+      () => { selectedEffort = effort.reasoningEffort; applyModelMenuChoice(); }, null, `effort:${effort.reasoningEffort}`));
   }
   if (!efforts.children.length) efforts.append(element("p", "popover-empty muted", "此模型暂无可选思考深度"));
   menu.append(efforts);
@@ -1805,7 +1979,10 @@ function renderModelMenu() {
   if (searchFocused && $("#model-search")) {
     $("#model-search").focus({ preventScroll: true });
     $("#model-search").setSelectionRange(...searchSelection);
-  } else if (focusIndex >= 0) menu.querySelectorAll("button")[focusIndex]?.focus();
+  } else if (focusIndex >= 0) {
+    const buttons = [...menu.querySelectorAll("button")];
+    (buttons.find(node => node.dataset.choiceKey === focusKey) || buttons[focusIndex])?.focus({ preventScroll: true });
+  }
 }
 function fitComposerMenu(menu) {
   if (menu.id === "model-settings") {
@@ -2030,21 +2207,214 @@ function renderSkillMenu(message) {
       $(`#skill-option-${active}`)?.scrollIntoView({ block: "nearest" });
   } else $("#prompt").removeAttribute("aria-activedescendant");
 }
-async function loadSkillChoices(scope, payload) {
-  if (skillScope === scope) return;
-  if (skillLoading?.scope === scope) return skillLoading.promise;
-  const version = ++skillLoadVersion, selection = selectionVersion, deviceId = session.device.id;
+function catalogFresh(value) {
+  const age = Date.now() - value?.loadedAt;
+  return Number.isFinite(age) && age >= 0 && age < catalogCacheMs;
+}
+function catalogUsable(value) {
+  const age = Date.now() - value?.loadedAt;
+  return Number.isFinite(value?.loadedAt) && value.loadedAt > 0 && age >= 0 && age < catalogFallbackMs;
+}
+function catalogNeedsRefresh(value) {
+  return !catalogFresh(value) || Date.now() - value.loadedAt >= catalogCacheMs - catalogRefreshAheadMs;
+}
+function activeSkillCatalogContext() {
+  const projectId = creating ? $("#project-select")?.value : "";
+  const scope = selectedId ? `thread:${selectedId}` : projectId ? `project:${projectId}`
+    : creating && session?.capabilities?.projectlessCreation === true ? "projectless" : "";
+  return scope ? { scope, payload: selectedId ? { threadId: selectedId } : { projectId } } : null;
+}
+function stopCatalogRefresh() {
+  clearTimeout(catalogRefreshTimer); catalogRefreshTimer = null;
+}
+function scheduleCatalogRefresh() {
+  stopCatalogRefresh();
+  if (!session || pageLeaving || document.hidden || navigator.onLine === false) return;
+  const deadlines = [], time = Date.now();
+  const due = loadedAt => loadedAt + catalogCacheMs - catalogRefreshAheadMs;
+  if (modelsLoadedAt && !modelsPromise)
+    deadlines.push(Math.max(catalogFresh({ loadedAt: modelsLoadedAt }) ? due(modelsLoadedAt) : time, modelsRetryAt));
+  const context = activeSkillCatalogContext(), key = context && skillScopeKey(context.scope);
+  const record = key && skillCatalogs.get(key);
+  if (context && (record || globalSkillsLoadedAt) && !skillCatalogRequests.has(key) && skillLoading?.scope !== context.scope) {
+    const stale = globalSkillsInvalidated || !catalogFresh({ loadedAt: globalSkillsLoadedAt })
+      || record && ((record.epoch || "") !== globalSkillEpoch || !catalogFresh(record));
+    deadlines.push(Math.max(stale ? time : Math.min(record ? due(record.loadedAt) : Infinity, due(globalSkillsLoadedAt)),
+      skillCatalogRetryAt.get(key) || 0));
+  }
+  if (deadlines.length) catalogRefreshTimer = setTimeout(refreshCachedCatalogs, Math.max(0, Math.min(...deadlines) - time));
+}
+function refreshCachedCatalogs() {
+  stopCatalogRefresh();
+  if (!session || pageLeaving || document.hidden || navigator.onLine === false) return;
+  if (modelsLoadedAt) void loadModels().catch(() => {});
+  const context = activeSkillCatalogContext();
+  if (context && (globalSkillsLoadedAt || skillCatalogs.has(skillScopeKey(context.scope))))
+    void loadSkillChoices(context.scope, context.payload).catch(() => {});
+  scheduleCatalogRefresh();
+}
+function validCachedSkill(skill) {
+  return typeof skill?.name === "string" && typeof skill?.path === "string";
+}
+function skillCwdKey(cwd) {
+  if (typeof cwd !== "string" || !cwd) return null;
+  const path = cwd.replaceAll("\\", "/").replace(/\/+$/, "") || "/";
+  return `cwd:${/^[a-z]:\//i.test(path) || path.startsWith("//") ? path.toLowerCase() : path}`;
+}
+function skillScopeKey(scope) {
+  if (skillScopeAliases.has(scope)) return skillScopeAliases.get(scope);
+  let cwd;
+  if (scope.startsWith("thread:")) {
+    const id = scope.slice(7);
+    cwd = thread?.id === id ? thread.cwd
+      : [...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
+        ...(sidebar?.projects || []).flatMap(project => project.threads || [])].find(item => item.id === id)?.cwd;
+  } else if (scope.startsWith("project:"))
+    cwd = sidebar?.projects?.find(project => project.id === scope.slice(8))?.roots?.[0];
+  return skillCwdKey(cwd) || `context:${scope}`;
+}
+function skillCatalogFresh(scope) {
+  const record = skillCatalogs.get(skillScopeKey(scope));
+  return !globalSkillsInvalidated && (record?.epoch || "") === globalSkillEpoch
+    && catalogFresh(record) && catalogFresh({ loadedAt: globalSkillsLoadedAt });
+}
+function skillCatalogUsable(scope) {
+  return catalogUsable(skillCatalogs.get(skillScopeKey(scope))) && catalogUsable({ loadedAt: globalSkillsLoadedAt });
+}
+function skillCatalogNeedsRefresh(scope) {
+  return !skillCatalogFresh(scope) || catalogNeedsRefresh(skillCatalogs.get(skillScopeKey(scope)))
+    || catalogNeedsRefresh({ loadedAt: globalSkillsLoadedAt });
+}
+function applySkillCatalog(record, scope) {
+  if (skillScope === scope && appliedSkillCatalog === record && appliedGlobalSkills === globalSkillChoices) return;
+  const previous = skillScope === scope ? slashMenuEntries()[skillIndex] : null;
+  const allowedGlobals = new Set(record.globalPaths);
+  skillChoices = [...globalSkillChoices.filter(skill => allowedGlobals.has(skill.path)), ...record.data];
+  skillScope = scope; skillIndex = 0;
+  if (previous) {
+    const index = slashMenuEntries().findIndex(entry => entry.type === previous.type
+      && (entry.type !== "skill" || skillIdentity(entry.skill) === skillIdentity(previous.skill)));
+    if (index >= 0) skillIndex = index;
+  }
+  appliedSkillCatalog = record; appliedGlobalSkills = globalSkillChoices;
+  ++skillRenderVersion; scheduleMessages();
+}
+async function readSkillCatalog(scope, payload, force) {
+  const key = skillScopeKey(scope), owner = privateInputScope(session), revision = skillCatalogRevision;
+  const current = () => privateInputScope(session) === owner && revision === skillCatalogRevision;
+  if (!force && !skillCatalogUsable(scope) && readScope === owner) {
+    if (!catalogUsable({ loadedAt: globalSkillsLoadedAt })) {
+      const global = await optionalCachedRead(readCache.get(owner, "skills", "global"), 50);
+      if (current() && catalogUsable(global) && Array.isArray(global.data) && global.data.every(validCachedSkill)) {
+        globalSkillChoices = global.data; globalSkillsLoadedAt = global.loadedAt;
+        globalSkillEpoch = typeof global.epoch === "string" ? global.epoch : "";
+        globalSkillsInvalidated = global.invalidated === true;
+      }
+    }
+    const cached = await optionalCachedRead(readCache.get(owner, "skills", key), 50);
+    if (current() && catalogUsable(cached) && Array.isArray(cached.data) && Array.isArray(cached.globalPaths)
+        && cached.data.every(validCachedSkill) && cached.globalPaths.every(path => typeof path === "string")
+        && catalogUsable({ loadedAt: globalSkillsLoadedAt })) {
+      skillCatalogs.set(key, cached);
+    }
+  }
+  if (!current()) return null;
+  if (!force && skillCatalogUsable(scope)) {
+    if (skillCatalogNeedsRefresh(scope) && Date.now() >= (skillCatalogRetryAt.get(key) || 0))
+      void refreshSkillCatalogRecord(scope, payload, true).catch(() => {});
+    scheduleCatalogRefresh();
+    return skillCatalogs.get(key);
+  }
+  return refreshSkillCatalogRecord(scope, payload, force
+    || !!globalSkillsLoadedAt && catalogNeedsRefresh({ loadedAt: globalSkillsLoadedAt }));
+}
+async function refreshSkillCatalogRecord(scope, payload, force) {
+  const key = skillScopeKey(scope), owner = privateInputScope(session), revision = skillCatalogRevision;
+  if (skillCatalogRequests.has(key)) return skillCatalogRequests.get(key);
+  const current = () => privateInputScope(session) === owner && revision === skillCatalogRevision;
+  const request = (async () => {
+    const result = await api("/api/read/skills", { ...payload, forceReload: force });
+    if (!current()) return null;
+    if (!Array.isArray(result.data) || !result.data.every(validCachedSkill))
+      throw new Error("Skill 列表返回格式无效");
+    const data = result.data;
+    const globals = data.filter(skill => ["user", "system", "admin"].includes(skill.scope));
+    const mergedGlobals = new Map((catalogUsable({ loadedAt: globalSkillsLoadedAt })
+      ? globalSkillChoices : []).map(skill => [skill.path, skill]));
+    for (const skill of globals) mergedGlobals.set(skill.path, skill);
+    const nextGlobals = [...mergedGlobals.values()].sort((left, right) => left.name.localeCompare(right.name));
+    const loadedAt = Date.now();
+    const record = { cwd: result.cwd, loadedAt, epoch: globalSkillEpoch,
+      globalPaths: globals.map(skill => skill.path),
+      data: data.filter(skill => !["user", "system", "admin"].includes(skill.scope)) };
+    const resolvedKey = skillCwdKey(result.cwd) || key;
+    // 完整新目录生成后再替换；刷新过程中保留原列表和已选项。
+    globalSkillChoices = nextGlobals; globalSkillsLoadedAt = loadedAt; globalSkillsInvalidated = false;
+    skillScopeAliases.set(scope, resolvedKey);
+    skillCatalogs.delete(resolvedKey); skillCatalogs.set(resolvedKey, record);
+    skillCatalogRetryAt.delete(key); skillCatalogRetryAt.delete(resolvedKey);
+    while (skillCatalogs.size > 64) {
+      const oldest = skillCatalogs.keys().next().value;
+      skillCatalogs.delete(oldest); skillCatalogRetryAt.delete(oldest);
+    }
+    cacheDisplayData("skills", "global", { data: globalSkillChoices, loadedAt, epoch: globalSkillEpoch },
+      { maxAge: catalogFallbackMs });
+    cacheDisplayData("skills", resolvedKey, record, { maxAge: catalogFallbackMs });
+    const active = activeSkillCatalogContext();
+    if (active && skillScopeKey(active.scope) === resolvedKey) {
+      applySkillCatalog(record, active.scope);
+      if ($("#skill-menu") && !$("#skill-menu").hidden && document.activeElement === $("#prompt"))
+        renderSkillMenu();
+    }
+    return record;
+  })();
+  skillCatalogRequests.set(key, request);
+  try { return await request; }
+  catch (error) {
+    if (current()) skillCatalogRetryAt.set(key, Date.now() + catalogRetryMs);
+    throw error;
+  }
+  finally {
+    if (skillCatalogRequests.get(key) === request) {
+      skillCatalogRequests.delete(key);
+      scheduleCatalogRefresh();
+    }
+  }
+}
+async function loadSkillChoices(scope, payload, { force = false } = {}) {
+  if (!force && skillLoading?.scope === scope) return skillLoading.promise;
+  const version = ++skillLoadVersion, selection = selectionVersion, owner = privateInputScope(session);
   const loading = skillLoading = { scope };
-  skillChoices = []; skillScope = ""; ++skillRenderVersion;
+  if (skillScope !== scope) {
+    skillChoices = [...globalSkillChoices]; skillScope = ""; ++skillRenderVersion;
+    appliedSkillCatalog = appliedGlobalSkills = null;
+  }
   loading.promise = (async () => {
     try {
-      const result = await api("/api/read/skills", payload);
-      if (version !== skillLoadVersion || selection !== selectionVersion || session?.device.id !== deviceId) return;
-      skillChoices = Array.isArray(result.data) ? result.data : []; skillScope = scope; skillIndex = 0;
-      ++skillRenderVersion; scheduleMessages();
-    } finally { if (skillLoading === loading) skillLoading = null; }
+      const record = await readSkillCatalog(scope, payload, force);
+      if (record && version === skillLoadVersion && selection === selectionVersion
+          && privateInputScope(session) === owner) {
+        applySkillCatalog(skillCatalogs.get(skillScopeKey(scope)) || record, scope);
+      }
+    } finally {
+      if (skillLoading === loading) { skillLoading = null; scheduleCatalogRefresh(); }
+    }
   })();
   return loading.promise;
+}
+function invalidateSkillCatalogs() {
+  skillCatalogRevision++; skillCatalogRequests.clear(); skillCatalogRetryAt.clear();
+  globalSkillEpoch = randomId(); globalSkillsInvalidated = true;
+  skillLoading = null; ++skillLoadVersion; messageSkillLoadScope = "";
+  if (globalSkillsLoadedAt) cacheDisplayData("skills", "global", {
+    data: globalSkillChoices, loadedAt: globalSkillsLoadedAt, epoch: globalSkillEpoch, invalidated: true
+  }, { maxAge: catalogFallbackMs });
+  scheduleCatalogRefresh();
+}
+async function refreshSkillCatalog() {
+  invalidateSkillCatalogs();
+  const context = activeSkillCatalogContext();
+  if (context) await loadSkillChoices(context.scope, context.payload, { force: true });
 }
 async function updateSkillMenu() {
   if (editingMessage || editingQueuedMessage) { closeSkillMenu(); return; }
@@ -2054,9 +2424,16 @@ async function updateSkillMenu() {
   const scope = selectedId ? `thread:${selectedId}` : projectId ? `project:${projectId}`
     : creating && session.capabilities?.projectlessCreation === true ? "projectless" : "";
   if (!scope) { renderSkillMenu("请先选择会话，或为新会话选择项目"); return; }
-  if (skillScope === scope) { renderSkillMenu(); return; }
+  if (skillScope === scope && skillCatalogUsable(scope)) {
+    renderSkillMenu();
+    void loadSkillChoices(scope, selectedId ? { threadId: selectedId } : { projectId }).catch(() => {});
+    return;
+  }
   const selection = selectionVersion;
-  renderSkillMenu("正在读取本机可用 Skill…");
+  if (skillCatalogUsable(scope)) {
+    applySkillCatalog(skillCatalogs.get(skillScopeKey(scope)), scope);
+    renderSkillMenu();
+  } else renderSkillMenu("正在读取本机可用 Skill…");
   const request = loadSkillChoices(scope, selectedId ? { threadId: selectedId } : { projectId });
   const version = skillLoadVersion, deviceId = session.device.id;
   try {
@@ -2287,7 +2664,7 @@ function openPopup(trigger, { query = "", edge = null, focus = true, position = 
   const target = edge === "last" ? enabled.at(-1) : edge === "first" ? enabled[0]
     : selected && !selected.disabled ? selected : enabled[0];
   activePopup.index = Math.max(0, buttons.indexOf(target));
-  if (focus) (input && !edge ? input : target)?.focus();
+  if (focus) target?.focus();
   fitPopup();
   node.onkeydown = event => {
     if (event.isComposing || !activePopup) return;
@@ -2496,6 +2873,8 @@ function filterDeletedSidebar(value, deviceId = session?.device.id) {
 }
 function applyThreadDeletion(id, deviceId = session?.device.id) {
   transcriptCache.remove(deviceId, id);
+  if (readScope && session?.device.id === deviceId)
+    void readCache.remove(readScope, "transcript", id).catch(() => {});
   const key = threadDeletionKey(id, deviceId), previous = threadDeletions.get(key);
   setThreadDeletion(key, { ...previous, deviceId, threadId: id, state: "deleted" });
   if (session?.device.id !== deviceId) return;
@@ -2535,6 +2914,7 @@ function applyThreadDeletion(id, deviceId = session?.device.id) {
       || goalComposerAction(pending.action, pending.payload) && goalRecordThreadId(pending) === id)) savePending(null);
   recentPriorityIds?.delete(id); recentPriorityKnownIds.delete(id);
   filterDeletedSidebar(sidebar);
+  if (sidebar) cacheDisplayData("sidebar", "main", sidebarSnapshot(sidebar));
   const hash = new URLSearchParams(location.hash.slice(1));
   if (hash.get("thread") === id) {
     hash.delete("thread");
@@ -3897,6 +4277,7 @@ function shell() {
     followMessages = !composerScroll?.collapsed && messages.scrollHeight - messages.scrollTop - messages.clientHeight < 100;
     updateScrollControl();
     scheduleHistoryLoad(scrollingUp);
+    scheduleReadingPosition();
     if (!wasFollowing && followMessages && !isActiveThread())
       void markVisibleThreadRead().catch(error => notice(error.message, true));
   };
@@ -3906,6 +4287,8 @@ function shell() {
     $(".composer-input").getAnimations().forEach(animation => animation.finish());
     followMessages = true; messages.scrollTop = messages.scrollHeight;
     updateScrollControl();
+    if (!isActiveThread())
+      void markVisibleThreadRead().catch(error => notice(error.message, true));
   };
   messagesResizeObserver?.disconnect();
   messagesResizeObserver = new ResizeObserver(() => {
@@ -4029,7 +4412,9 @@ function shell() {
     }
     catch (error) { notice(error.message, true); if ($("#logout")) $("#logout").disabled = false; }
   };
-  $("#connection-state").onclick = () => void Promise.all([refreshAll({ fresh: true }), loadModels(true)]).catch(error => notice(error.message, true));
+  $("#connection-state").onclick = () => void Promise.all([
+    refreshAll({ fresh: true }), loadModels(true), refreshSkillCatalog()
+  ]).catch(error => notice(error.message, true));
   $("#appearance-button").onclick = openAppearance;
   $("#sidebar-view-toggle").onclick = () => void changeSidebar({
     target: "grouping", mode: "updated_at",
@@ -4154,9 +4539,9 @@ function selectedThreadProjectId() {
     : projects.find(project => project.threads?.some(item => item.id === selectedId))?.id;
   return projects.some(project => project.id === projectId) ? projectId : "";
 }
-async function startNewChat(projectId) {
+async function startNewChat(projectId, { focus = true } = {}) {
   cancelMessageEdit({ focus: false });
-  if (!session || session.readOnly || !connected) return;
+  if (!session || session.readOnly) return;
   if (projectId === undefined && selectedId && !sidebar) {
     const version = selectionVersion, id = selectedId, deviceId = session.device.id;
     try { await loadSidebar(); } catch {}
@@ -4164,7 +4549,9 @@ async function startNewChat(projectId) {
         || session.readOnly || !connected) return;
   }
   const project = projectId === undefined ? selectedThreadProjectId() : projectId;
-  closePopup(); rememberDraft(); rememberTranscript(); resetMessages();
+  closePopup();
+  if (selectedId || creating) { rememberDraft(); rememberTranscript(); }
+  resetMessages();
   editingQueuedMessage = null;
   setSelectValue($("#project-select"), project);
   ++selectionVersion; creating = true; selectedId = null; thread = null; historyCursor = null; historyInitialized = false; turns.clear(); transcriptEvents.clear(); renderMessages();
@@ -4174,7 +4561,8 @@ async function startNewChat(projectId) {
   $("#thread-title").textContent = "新建会话"; $("#thread-path").textContent = "在本机创建会话";
   $("#project-select-slot").hidden = false;
   renderSidebar(); updateComposer(); closeMobileSidebar({ focus: false });
-  $("#prompt").focus();
+  rememberReadingPosition();
+  if (focus) $("#prompt").focus();
 }
 async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "foreground" } = {}) {
   if (sidebarRequest?.deviceId === session?.device.id) {
@@ -4210,9 +4598,12 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
       result.pinnedThreads = result.pinnedThreads.filter(isMainThread);
       for (const project of result.projects) project.threads = project.threads.filter(isMainThread);
       filterDeletedSidebar(result, deviceId);
-      if (JSON.stringify(sidebar) === JSON.stringify(result)) continue;
-      sidebar = result;
-      renderSidebar();
+      if (JSON.stringify(sidebar) !== JSON.stringify(result)) {
+        sidebar = result;
+        cacheDisplayData("sidebar", "main", sidebarSnapshot(result));
+        renderSidebar();
+      }
+      // 侧栏没有变化时，会话也可能刚完成加载或恢复连接。
       const selected = [...sidebar.recent, ...sidebar.pinnedThreads].find(item => item.id === selectedId);
       if (selected?.hasUnreadTurn && !isActiveThread())
         void markVisibleThreadRead().catch(error => notice(error.message, true));
@@ -4617,6 +5008,7 @@ function loadMessageSkillChoices(items) {
 }
 async function markVisibleThreadRead(id = selectedId) {
   if (!id || id !== selectedId || thread?.id !== id || session?.readOnly || !connected
+      || !historyInitialized || historyError || transcriptChecking
       || threadDeletionLocked(id) || threadDeleted(id) || document.hidden || !followMessages) return;
   if (readMarkRequests.has(id)) return readMarkRequests.get(id);
   const deviceId = session.device.id;
@@ -4802,7 +5194,7 @@ function enableImagePreviewZoom(viewport, image) {
   return () => { resizeObserver.disconnect(); pointers.clear(); };
 }
 function openImagePreview(link, image) {
-  const source = link.getAttribute("href") || image.getAttribute("src") || "";
+  const source = link.getAttribute("href") || image.originalImageSource || image.getAttribute("src") || "";
   if (!/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(source) && !safeInlineImageSource(source)) return;
   $("#image-preview-dialog")?.close();
   const trigger = link;
@@ -4857,14 +5249,17 @@ function bindMessageImages(node) {
       else change();
     };
     image.onload = () => updateLayout(() => settleMessageImage(image));
-    image.onerror = () => updateLayout(() => {
-      settleMessageImage(image);
-      const placeholder = element("span", "attachment-placeholder", `图片不可用：${image.alt || "附件"}`);
-      placeholder.messageImageSource = image.getAttribute("src");
-      placeholder.messageImageLabel = image.alt;
-      placeholder.messageImageKey = JSON.stringify([image.getAttribute("src"), image.alt, link?.getAttribute("href") || ""]);
-      image.closest(".message-image-link")?.replaceWith(placeholder);
-    });
+    image.onerror = () => {
+      if (retryOriginalImage(image)) return;
+      updateLayout(() => {
+        settleMessageImage(image);
+        const placeholder = element("span", "attachment-placeholder", `图片不可用：${image.alt || "附件"}`);
+        placeholder.messageImageSource = image.getAttribute("src");
+        placeholder.messageImageLabel = image.alt;
+        placeholder.messageImageKey = JSON.stringify([image.getAttribute("src"), image.alt, link?.getAttribute("href") || ""]);
+        image.closest(".message-image-link")?.replaceWith(placeholder);
+      });
+    };
     if (link && (/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(link.getAttribute("href") || "")
         || safeInlineImageSource(image.getAttribute("src")))) {
       link.title = image.alt ? `预览图片：${image.alt}` : "预览图片";
@@ -4887,7 +5282,8 @@ function messageImage(asset, label, inlineSource, previous) {
   if (remoteUrl) {
     link.href = remoteUrl; link.target = "_blank"; link.rel = "noopener noreferrer";
   } else link.type = "button";
-  image.alt = caption; image.loading = "lazy"; image.decoding = "async"; image.src = source;
+  image.alt = caption; image.loading = "lazy"; image.decoding = "async";
+  loadAttachmentThumbnail(image, source);
   link.append(image); bindMessageImages(link); return link;
 }
 function setMarkdown(node, text, remoteImages = [], options) {
@@ -5603,6 +5999,7 @@ function resetMessages() {
   partialItems.clear();
   followMessages = true;
   transcriptChecking = false;
+  recentHistoryPage = null;
   notifiedStatus = null;
   notifiedQueue = null; notifiedQueueEdits = null; queueSnapshotVersion = null; retiredQueueEpochs.clear(); ++queueVersion;
 }
@@ -7070,7 +7467,7 @@ function scheduleHistoryLoad(visibleItems = false) {
     const includeVisibleItems = historyLoadVisibleItems;
     historyLoadVisibleItems = false;
     const root = $("#messages");
-    if (!root || !selectedId || !historyInitialized || historyLoading || historyAutoFailed || pageLeaving) return;
+    if (!root || !selectedId || !historyInitialized || transcriptChecking || historyLoading || historyAutoFailed || pageLeaving) return;
     const box = root.getBoundingClientRect();
     for (const node of root.querySelectorAll(".history-load[data-history-page]")) {
       if (node.dataset.turnId && node.closest("details:not([open])")) continue;
@@ -7208,7 +7605,9 @@ function renderMessages(keepScroll = true) {
     flushActivity();
     if (historyLoad && historyGap === turnItems.length) content.push({ historyLoad });
     const activeFlags = thread?.status?.status?.activeFlags || thread?.status?.activeFlags || [];
+    // 轮次开始事件可能先于用户消息；空活动占位须等本轮用户消息可见后再出现。
     if (turnRunning && finalIndex < 0 && !content.at(-1)?.work
+        && turnItems.some(item => item.type === "userMessage")
         && !compactionLocked() && !thread?.requests?.length
         && !activeFlags.some(flag => ["waitingOnApproval", "waitingOnUserInput"].includes(flag)))
       content.push({ work: [], collapsible: false });
@@ -7241,10 +7640,12 @@ function renderMessages(keepScroll = true) {
       for (const step of turn.plan) plan.append(element("li", step.status, `${step.status === "completed" ? "✓" : step.status === "inProgress" ? "◌" : "○"} ${step.step}`));
       items.push(plan);
     }
-    reconcileChildren(group, items); children.push(group);
+    reconcileChildren(group, items);
+    if (items.length) children.push(group);
   }
-  if (!sorted.length) children.push(selectedId && (!historyInitialized || historyError) ? historyPlaceholder()
-    : element("div", "empty-conversation", creating ? "发送第一条消息，开始新会话。" : "此会话暂无消息。"));
+  if (!sorted.length) children.push(creating ? welcomeNode()
+    : selectedId && (!historyInitialized || historyError) ? historyPlaceholder()
+    : element("div", "empty-conversation", "此会话暂无消息。"));
   reconcileChildren(root, children);
   for (const key of renderedItems.keys()) if (!itemKeys.has(key)) {
     renderedItems.get(key).node.messageActionBinding?.dispose(); renderedItems.delete(key);
@@ -7266,13 +7667,32 @@ function renderMessages(keepScroll = true) {
 }
 function rememberTranscript() {
   if (!session || !selectedId || !historyInitialized || threadDeleted(selectedId)) return;
-  const root = $("#messages");
-  transcriptCache.put(session.device.id, selectedId, {
-    turns: [...turns.values()], transcriptEvents: [...transcriptEvents.values()], historyCursor,
-    scrollTop: root?.scrollTop || 0, followMessages,
-    title: thread?.title || $("#thread-title")?.textContent || "",
-    cwd: thread?.cwd || $("#thread-path")?.textContent || ""
-  });
+  const summary = [...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
+    ...(sidebar?.projects || []).flatMap(project => project.threads || [])].find(item => item.id === selectedId);
+  const currentTurns = [...turns.values()], events = [...transcriptEvents.values()];
+  const recentStart = currentTurns.findIndex(turn => turn.id === recentHistoryPage?.turns?.[0]?.id);
+  // 最近页起点和游标来自服务器；合并该页之后收到的新轮次，避免回退窗口遗漏刚完成的回复。
+  const recentTurns = recentStart >= 0 ? currentTurns.slice(recentStart) : null;
+  const recentIds = new Set(recentTurns?.map(turn => turn.id));
+  const recentWindow = recentTurns ? { ...recentHistoryPage, turns: recentTurns,
+    transcriptEvents: events.filter(event => recentIds.has(event.turnId)) } : recentHistoryPage;
+  const snapshot = {
+    turns: currentTurns, transcriptEvents: events, historyCursor,
+    ...readingPosition(), recentWindow, recentPage: recentHistoryPage,
+    title: thread?.title || summary?.title || "",
+    cwd: thread?.cwd || summary?.cwd || ""
+  };
+  const retained = transcriptCache.put(session.device.id, selectedId, snapshot);
+  if (retained) {
+    const completed = retained.turns.filter(turn => ["completed", "failed", "interrupted"].includes(turn.status));
+    const completedIds = new Set(completed.map(turn => turn.id));
+    if (completed.length) cacheDisplayData("transcript", selectedId, {
+      ...retained, turns: completed,
+      transcriptEvents: (retained.transcriptEvents || []).filter(event => completedIds.has(event.turnId)),
+      ...(completed.length === retained.turns.length ? {} : { followMessages: true, scrollTop: 0, anchor: null })
+    });
+  }
+  rememberReadingPosition();
 }
 function restoreTranscript(id) {
   const cached = transcriptCache.get(session?.device.id, id);
@@ -7280,10 +7700,17 @@ function restoreTranscript(id) {
   turns = new Map(cached.turns.map(turn => [turn.id, turn]));
   replaceTranscriptEvents(cached.transcriptEvents);
   historyCursor = cached.historyCursor; historyInitialized = true;
+  recentHistoryPage = cached;
   followMessages = cached.followMessages; transcriptChecking = true;
   renderMessages();
   const root = $("#messages");
-  if (root) { root.scrollTop = cached.scrollTop; historyScrollTop = root.scrollTop; }
+  if (root) {
+    root.scrollTop = cached.followMessages ? root.scrollHeight : cached.scrollTop || 0;
+    const anchor = cached.anchor && renderedItems.get(cached.anchor.key)?.node;
+    if (!cached.followMessages && anchor?.isConnected)
+      root.scrollTop += anchor.getBoundingClientRect().top - root.getBoundingClientRect().top - cached.anchor.offset;
+    historyScrollTop = root.scrollTop;
+  }
   return cached;
 }
 async function selectThread(id, { closeSidebar = true, force = false } = {}) {
@@ -7316,8 +7743,18 @@ async function selectThread(id, { closeSidebar = true, force = false } = {}) {
   renderApprovals();
   $("#project-select-slot").hidden = true;
   $("#messages").replaceChildren();
-  const cached = force ? null : restoreTranscript(id);
+  let cached = force ? null : restoreTranscript(id);
   if (!cached) $("#messages").replaceChildren(historyPlaceholder());
+  if (!force && !cached && readScope) {
+    const owner = readScope;
+    const snapshot = await optionalCachedRead(readCache.get(owner, "transcript", id), 50);
+    if (version !== selectionVersion || selectedId !== id || owner !== readScope || threadDeleted(id)) return;
+    if (snapshot?.turns?.length) {
+      transcriptCache.put(session.device.id, id, snapshot);
+      cached = restoreTranscript(id);
+    }
+  }
+  rememberReadingPosition();
   const summary = [...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
     ...(sidebar?.projects || []).flatMap(project => project.threads || [])].find(item => item.id === id);
   $("#thread-title").textContent = summary?.title || cached?.title || "正在打开会话";
@@ -7360,6 +7797,8 @@ async function selectThread(id, { closeSidebar = true, force = false } = {}) {
     if (selectionController === controller) selectionController = null;
   }
   await latest;
+  if (version === selectionVersion && !isActiveThread())
+    void markVisibleThreadRead(id).catch(error => notice(error.message, true));
 }
 function syncThreadHash(id) {
   const hash = `#thread=${encodeURIComponent(id)}`;
@@ -7367,10 +7806,14 @@ function syncThreadHash(id) {
 }
 function welcomeNode() {
   const node = element("div", "welcome");
-  node.append(element("h1", "", "继续本机的工作"), element("p", "", "选择左侧会话，或新建会话。"), element("small", "", "消息、审批和执行状态与 Codex 桌面共享。"));
+  node.append(element("h1", "", "继续本机的工作"), element("p", "", "选择左侧会话，发送会话。"), element("small", "", "消息、审批和执行状态与 Codex 桌面共享。"));
   return node;
 }
 function showWelcome() {
+  if (session && !session.readOnly) {
+    void startNewChat("", { focus: false });
+    return;
+  }
   cancelMessageEdit({ focus: false });
   rememberDraft(); rememberTranscript(); resetMessages();
   editingQueuedMessage = null;
@@ -7381,9 +7824,11 @@ function showWelcome() {
   $("#project-select-slot").hidden = true;
   $("#messages").replaceChildren(welcomeNode());
   renderSelectedSkills(); renderApprovals(); renderSidebar(); updateComposer();
+  rememberReadingPosition();
 }
 async function loadHistory(older = false, version = selectionVersion, itemsTurnId = null) {
   if (version !== selectionVersion || !selectedId || threadDeleted(selectedId)) return;
+  if ((older || itemsTurnId) && transcriptChecking) return;
   if (historyRequest?.version === version) {
     if (!older) historyRequest.latestPending = true;
     return historyRequest.promise;
@@ -7434,6 +7879,10 @@ async function readHistoryPage(older, version, itemsTurnId) {
     if (controller.signal.aborted || pageLeaving || version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
     if (!Array.isArray(result?.data)) throw new Error("会话历史返回格式无效");
     if (itemsTurnId && (result.scope !== "items" || result.turnId !== itemsTurnId)) throw new Error("会话消息分页归属无效");
+    if (latestPage) recentHistoryPage = {
+      turns: [...result.data].reverse(), transcriptEvents: result.transcriptEvents || [],
+      historyCursor: result.nextCursor, followMessages: true, scrollTop: 0
+    };
     if (checkingCached && !pruneCachedHistory(result.data, readVersion)) historyCursor = result.nextCursor;
     mergeTranscriptEvents(result.transcriptEvents);
     if (itemsTurnId) {
@@ -7463,6 +7912,7 @@ async function readHistoryPage(older, version, itemsTurnId) {
     if (latestPage) transcriptChecking = false;
     syncEditableMessageMetadata();
     renderMessages(!older);
+    rememberTranscript();
   } catch (error) {
     if (controller.signal.aborted || pageLeaving || version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
     historyAutoFailed = true;
@@ -9019,7 +9469,9 @@ async function sendMessage() {
   const version = selectionVersion;
   const wasCreating = creating;
   const queueReadVersion = queueVersion;
-  const model = selectedModel || (selectedEffort ? currentModelId() : ""), reasoningEffort = selectedEffort;
+  const rememberedModel = creating && !selectedModel ? rememberedNewChatModel() : null;
+  const model = selectedModel || rememberedModel?.model || (selectedEffort ? currentModelId() : ""),
+    reasoningEffort = selectedEffort || (rememberedModel ? currentEffort() : "");
   const payload = {
     prompt, ...(creating ? { projectId: $("#project-select").value } : {
       threadId: id,
@@ -9339,6 +9791,7 @@ function receive(event) {
   }
   if (event.method === "remote/threadReverted" && typeof eventThreadId === "string") {
     transcriptCache.remove(session?.device.id, eventThreadId);
+    if (readScope) void readCache.remove(readScope, "transcript", eventThreadId).catch(() => {});
     if (eventThreadId === selectedId)
       void selectThread(selectedId, { closeSidebar: false, force: true }).catch(error => notice(error.message, true));
     return;
@@ -9444,13 +9897,12 @@ function receive(event) {
       }
       turns.set(turnId, enrichTurnTranscriptEvents(turn));
       scheduleMessages();
+      if (event.method === "turn/completed") rememberTranscript();
     }
     if (["turn/started", "thread/settings/updated"].includes(event.method)) scheduleReload();
   }
   if (event.method === "skills/changed") {
-    skillScope = ""; skillChoices = []; skillLoading = null; ++skillLoadVersion;
-    messageSkillLoadScope = ""; ++skillRenderVersion; scheduleMessages();
-    if ($("#skill-menu") && !$("#skill-menu").hidden) void updateSkillMenu();
+    void refreshSkillCatalog().catch(() => {});
   }
   if (["thread/started", "turn/completed", "remote/sidebarChanged", "thread/name/updated", "thread/status/changed",
     "remote/requestsChanged", "serverRequest/resolved"].includes(event.method)) {
@@ -9458,6 +9910,7 @@ function receive(event) {
   }
 }
 function disconnect() {
+  stopCatalogRefresh();
   stopGoalLiveTimer();
   closeContextUsageTip();
   approvalResizeObserver?.disconnect(); approvalResizeObserver = null;
@@ -9584,9 +10037,10 @@ function suspendPage() {
   stopActivityTimer();
   stopGoalLiveTimer();
   finishQueueDrag();
-  if (session && $("#prompt")) rememberDraft();
+  if (session && $("#prompt")) { rememberDraft(); rememberTranscript(); rememberReadingPosition(); }
   closeContextUsageTip();
   pageLeaving = true;
+  stopCatalogRefresh();
   stream?.close(); stream = null;
   stopConnectionPoll();
   cancelConnectionProbe();
@@ -9597,6 +10051,7 @@ function resumePage() {
   pageLeaving = false;
   if (!session) { retryConnectionRecovery(); return; }
   if (!wasLeaving) return;
+  refreshCachedCatalogs();
   syncGoalLiveTimer();
   startConnectionPoll(session.device.id);
   ensureStream();
@@ -9642,11 +10097,14 @@ async function connectPage(signal) {
   }
   if (session !== latest) return;
   if (signal?.aborted) throw new Error("连接已取消，请重试。");
+  await restoreReadViews(session);
+  if (signal?.aborted) throw new Error("连接已取消，请重试。");
   initialAuthenticationRequired = false;
   restoreSmallInputRecoveries();
   postPlatformMessage("authenticated");
   pageLeaving = false;
   connected = false; shell(); restoreGoalComposerDrafts();
+  if (sidebar) renderSidebar();
   if (storageError) notice(recoveryStorageMessage(storageError), true);
   setConnection(false);
   openStream();
@@ -9654,11 +10112,14 @@ async function connectPage(signal) {
   startConnectionPoll(deviceId);
   try { await refreshAll(); }
   catch (error) { if (session?.device.id === deviceId) notice(error.message, true); }
+  if (session?.device.id === deviceId && !selectedId && !creating
+      && !new URLSearchParams(location.hash.slice(1)).get("thread")) showWelcome();
   updateComposer(); void resolvePending(); drainPendingNotificationOpen();
 }
 function retryConnectionRecovery() {
   if (pageLeaving || document.hidden || navigator.onLine === false || initialAuthenticationRequired || connecting) return;
   if (!session) { void connect().catch(handleInitialConnectionError); return; }
+  refreshCachedCatalogs();
   ensureStream();
   void Promise.all([syncConnectionState(), refreshAll({ fresh: true })]).catch(() => {});
 }
@@ -9701,11 +10162,14 @@ window.addEventListener("online", () => {
   retryConnectionRecovery();
 });
 window.addEventListener("offline", () => {
+  stopCatalogRefresh();
   if (session) setConnection(false);
   else if (!initialAuthenticationRequired) showConnectionRecovery(new TypeError("网络已离线"));
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
+    stopCatalogRefresh();
+    if (session) { rememberTranscript(); rememberReadingPosition(); }
     stopActivityTimer();
     stopGoalLiveTimer();
     finishQueueDrag();

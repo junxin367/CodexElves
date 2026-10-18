@@ -216,18 +216,37 @@ export function createTranscriptCache({ maxEntries = 5, maxBytes = 6 * 1024 * 10
   return {
     put(deviceId, threadId, value) {
       if (!deviceId || !threadId) return;
-      const id = key(deviceId, threadId), previous = entries.get(id);
+      const id = key(deviceId, threadId);
+      let serialized, bytes, retained;
+      // 长会话超限时保留服务端最近一页；游标仍来自服务端，不自行截断消息或制造分页缺口。
+      const recentWindows = [value?.recentWindow, value?.recentPage].filter(Boolean).map(page => ({
+        ...page, title: value.title, cwd: value.cwd,
+        followMessages: true, scrollTop: 0, anchor: null, cacheWindowOnly: true
+      }));
+      for (const candidate of [value, ...recentWindows]) {
+        if (!Array.isArray(candidate?.turns) || !candidate.turns.length || candidate.turns.length > maxTurns
+            || candidate.transcriptEvents != null && !Array.isArray(candidate.transcriptEvents)
+            || !candidate.turns.every(turn => turn && typeof turn.id === "string"
+              && (turn.items == null || Array.isArray(turn.items)
+                && turn.items.every(item => item && typeof item.id === "string")))
+            || candidate.turns.reduce((sum, turn) => sum + (turn.items?.length || 0), 0) > maxItems) continue;
+        const { recentPage: _recentPage, recentWindow: _recentWindow, ...snapshot } = candidate;
+        let text;
+        try { text = JSON.stringify(snapshot); } catch { continue; }
+        const size = new TextEncoder().encode(text).length;
+        if (size > maxBytes) continue;
+        serialized = text; bytes = size; retained = snapshot;
+        break;
+      }
+      if (serialized === undefined) return;
+      const previous = entries.get(id);
       if (previous) { totalBytes -= previous.bytes; entries.delete(id); }
-      if (!value?.turns?.length) return;
-      const itemCount = value.turns.reduce((sum, turn) => sum + (turn.items?.length || 0), 0);
-      if (value.turns.length > maxTurns || itemCount > maxItems) return;
-      const serialized = JSON.stringify(value), bytes = new TextEncoder().encode(serialized).length;
-      if (bytes > maxBytes) return;
       entries.set(id, { serialized, bytes }); totalBytes += bytes;
       while (entries.size > maxEntries || totalBytes > maxBytes) {
         const oldest = entries.keys().next().value;
         totalBytes -= entries.get(oldest).bytes; entries.delete(oldest);
       }
+      return retained;
     },
     get(deviceId, threadId) {
       const id = key(deviceId, threadId), entry = entries.get(id);
@@ -240,5 +259,173 @@ export function createTranscriptCache({ maxEntries = 5, maxBytes = 6 * 1024 * 10
       if (entry) { totalBytes -= entry.bytes; entries.delete(id); }
     },
     clear() { entries.clear(); totalBytes = 0; }
+  };
+}
+
+const readCacheKinds = new Set(["sidebar", "view", "transcript", "models", "skills"]);
+const readCacheDay = 24 * 60 * 60 * 1000;
+
+// 与输入恢复库独立：这里只保存已授权用户的只读展示数据，不保存 Cookie、审批或可执行队列。
+export function createReadCache({ indexedDB = globalThis.indexedDB,
+  databaseName = "codex-elves-read-cache-v1", maxBytes = 32 * 1024 * 1024,
+  maxRecordBytes = 6 * 1024 * 1024, maxEntries = 64, now = () => Date.now() } = {}) {
+  let database = null, opening = null, owner = null, generation = 0, serial = Promise.resolve();
+  const enqueue = work => {
+    const next = serial.then(work);
+    serial = next.catch(() => {});
+    return next;
+  };
+  function open() {
+    if (database) return Promise.resolve(database);
+    if (opening) return opening;
+    opening = new Promise((resolve, reject) => {
+      if (!indexedDB) { reject(new Error("当前浏览器不支持只读快照缓存")); return; }
+      const request = indexedDB.open(databaseName, 1);
+      let expired = false;
+      const timer = setTimeout(() => { expired = true; reject(new Error("只读快照缓存打开超时")); }, 1000);
+      request.onupgradeneeded = () => {
+        for (const name of ["records", "meta"])
+          if (!request.result.objectStoreNames.contains(name)) request.result.createObjectStore(name);
+      };
+      request.onerror = () => { clearTimeout(timer); reject(request.error); };
+      request.onsuccess = () => {
+        clearTimeout(timer);
+        if (expired) { request.result.close(); return; }
+        database = request.result;
+        database.onversionchange = () => { database.close(); database = null; opening = null; };
+        resolve(database);
+      };
+    }).catch(error => { opening = null; throw error; });
+    return opening;
+  }
+  async function transaction(work) {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(["records", "meta"], "readwrite");
+      let result, failure;
+      tx.oncomplete = () => resolve(result);
+      tx.onerror = () => reject(failure || tx.error || new Error("只读快照缓存不可用"));
+      tx.onabort = () => reject(failure || tx.error || new Error("只读快照缓存已取消"));
+      try { work(tx, value => { result = value; }, error => { failure = error; tx.abort(); }); }
+      catch (error) { failure = error; tx.abort(); }
+    });
+  }
+  function owned(scope, revision, work) {
+    return transaction((tx, done, fail) => {
+      const meta = tx.objectStore("meta"), readOwner = meta.get("owner"), readIndex = meta.get("index");
+      readIndex.onsuccess = () => {
+        try {
+          if (!scope || owner !== scope || revision !== generation || readOwner.result !== scope)
+            throw new Error("只读快照所属授权已变化");
+          work(tx, Array.isArray(readIndex.result) ? readIndex.result : [], done);
+        } catch (error) { fail(error); }
+      };
+    });
+  }
+  function recordKey(kind, id) {
+    if (!readCacheKinds.has(kind) || typeof id !== "string" || id.length > 4096)
+      throw new Error("只读快照缓存键无效");
+    return JSON.stringify([kind, id]);
+  }
+  return {
+    activate(scope) {
+      if (typeof scope !== "string" || !scope) return Promise.reject(new Error("只读快照缺少授权身份"));
+      if (owner !== scope) { owner = scope; generation++; }
+      const revision = generation;
+      return enqueue(() => transaction((tx, done, fail) => {
+        const meta = tx.objectStore("meta"), read = meta.get("owner");
+        read.onsuccess = () => {
+          if (owner !== scope || generation !== revision) { fail(new Error("授权已变化")); return; }
+          if (read.result !== scope) {
+            tx.objectStore("records").clear();
+            meta.put([], "index");
+            meta.put(scope, "owner");
+          }
+          done();
+        };
+      }));
+    },
+    get(scope, kind, id) {
+      const key = recordKey(kind, id), revision = generation;
+      return enqueue(() => owned(scope, revision, (tx, index, done) => {
+        const record = index.find(entry => entry.key === key), time = now();
+        if (!record || record.expiresAt <= time) {
+          if (record) {
+            tx.objectStore("records").delete(key);
+            tx.objectStore("meta").put(index.filter(entry => entry.key !== key), "index");
+          }
+          done(null); return;
+        }
+        const read = tx.objectStore("records").get(key);
+        read.onsuccess = () => {
+          let value;
+          try { value = typeof read.result === "string" ? JSON.parse(read.result) : null; }
+          catch {
+            tx.objectStore("records").delete(key);
+            tx.objectStore("meta").put(index.filter(entry => entry.key !== key), "index");
+            done(null); return;
+          }
+          record.accessedAt = time;
+          tx.objectStore("meta").put(index, "index");
+          done(value);
+        };
+      }));
+    },
+    put(scope, kind, id, value, { maxAge = 7 * readCacheDay } = {}) {
+      const key = recordKey(kind, id), revision = generation;
+      let serialized;
+      try { serialized = JSON.stringify(value); } catch { return Promise.resolve(false); }
+      if (serialized === undefined) return Promise.resolve(false);
+      const bytes = new TextEncoder().encode(serialized).length;
+      if (bytes > maxRecordBytes || bytes > maxBytes || !Number.isFinite(maxAge) || maxAge <= 0)
+        return Promise.resolve(false);
+      return enqueue(() => owned(scope, revision, (tx, index, done) => {
+        const time = now(), store = tx.objectStore("records");
+        const next = index.filter(entry => {
+          const keep = entry.key !== key && entry.expiresAt > time;
+          if (!keep) store.delete(entry.key);
+          return keep;
+        }).sort((left, right) => left.accessedAt - right.accessedAt);
+        let total = next.reduce((sum, entry) => sum + entry.bytes, 0);
+        while (next.length >= maxEntries || total + bytes > maxBytes) {
+          const expired = next.shift();
+          if (!expired) break;
+          total -= expired.bytes; store.delete(expired.key);
+        }
+        store.put(serialized, key);
+        next.push({ key, kind, bytes, accessedAt: time, expiresAt: time + maxAge });
+        tx.objectStore("meta").put(next, "index");
+        done(true);
+      }));
+    },
+    remove(scope, kind, id) {
+      const key = recordKey(kind, id), revision = generation;
+      return enqueue(() => owned(scope, revision, (tx, index, done) => {
+        tx.objectStore("records").delete(key);
+        tx.objectStore("meta").put(index.filter(entry => entry.key !== key), "index");
+        done();
+      }));
+    },
+    invalidate(scope, kind) {
+      if (!readCacheKinds.has(kind)) return Promise.reject(new Error("缓存类型无效"));
+      const revision = generation;
+      return enqueue(() => owned(scope, revision, (tx, index, done) => {
+        for (const entry of index) if (entry.kind === kind) tx.objectStore("records").delete(entry.key);
+        tx.objectStore("meta").put(index.filter(entry => entry.kind !== kind), "index");
+        done();
+      }));
+    },
+    clear(scope = owner) {
+      owner = null; generation++;
+      return enqueue(() => transaction((tx, done) => {
+        const meta = tx.objectStore("meta"), read = meta.get("owner");
+        read.onsuccess = () => {
+          if (scope && read.result === scope) {
+            tx.objectStore("records").clear(); meta.clear();
+          }
+          done();
+        };
+      }));
+    }
   };
 }

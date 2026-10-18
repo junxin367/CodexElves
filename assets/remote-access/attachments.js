@@ -6,6 +6,20 @@ const MAX_IMAGE_PIXELS = 100_000_000;
 const remoteImagePattern = /^\/api\/images\/[A-Za-z0-9_-]{20,128}$/u;
 const supportedMimes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
+export function retryOriginalImage(image) {
+  const source = image.originalImageSource;
+  if (!source || image.getAttribute("src") === source) return false;
+  image.src = source;
+  return true;
+}
+
+export function loadAttachmentThumbnail(image, source, mime = "") {
+  image.originalImageSource = source;
+  image.src = remoteImagePattern.test(source) && mime !== "image/gif" ? `${source}/thumbnail` : source;
+  // 兼容尚未提供缩略图接口的旧服务；失败后只回退一次原图。
+  image.onerror = () => { retryOriginalImage(image); };
+}
+
 let attachments = [];
 let attachmentRoot = null;
 let attachmentInput = null;
@@ -152,7 +166,7 @@ function renderComposerAttachments() {
     item.className = "composer-attachment";
     const image = document.createElement("img");
     image.className = "composer-attachment-image";
-    image.src = entry.kind === "inline" ? entry.dataUrl : entry.url;
+    loadAttachmentThumbnail(image, entry.kind === "inline" ? entry.dataUrl : entry.url, entry.mime);
     image.alt = entry.name;
     image.title = entry.name;
     image.decoding = "async";
@@ -397,7 +411,7 @@ export function renderQueuedMessageAttachments(message) {
   const image = images[0];
   const thumbnail = document.createElement("img");
   thumbnail.className = "queued-message-attachment";
-  thumbnail.src = image.url;
+  loadAttachmentThumbnail(thumbnail, image.url, image.mime);
   thumbnail.alt = image.name;
   thumbnail.title = image.name;
   thumbnail.loading = "lazy";

@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 46) return;
+  if (window.__codexElvesRemoteAccess?.version === 47) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -2779,7 +2779,7 @@
         message: error.message || "引导结果未确认，请查看原生队列，不要重复操作" };
     }
   }
-  async function skillCatalog(payload, trustedCwd = null) {
+  async function skillCatalog(payload, trustedCwd = null, { forceReload = false } = {}) {
     let cwd = trustedCwd;
     if (!cwd) {
       if (payload.threadId) cwd = (await readThread(payload.threadId)).cwd;
@@ -2790,7 +2790,7 @@
       }
     }
     if (!cwd) throw failure(400, "未能确定 Skill 所属的本机工作目录");
-    const result = await manager.requestClient.sendRequest("skills/list", { cwds: [cwd], forceReload: true });
+    const result = await manager.requestClient.sendRequest("skills/list", { cwds: [cwd], forceReload });
     const skills = new Map();
     for (const entry of array(result.data)) {
       if (normalizePath(entry.cwd) !== normalizePath(cwd)) continue;
@@ -2798,11 +2798,12 @@
         if (!skill.enabled || typeof skill.name !== "string" || typeof skill.path !== "string") continue;
         skills.set(skill.path, {
           name: skill.name, path: skill.path, displayName: skill.interface?.displayName || skill.name,
-          description: skill.interface?.shortDescription || skill.shortDescription || skill.description || ""
+          description: skill.interface?.shortDescription || skill.shortDescription || skill.description || "",
+          scope: ["user", "system", "admin"].includes(skill.scope) ? skill.scope : "repo"
         });
       }
     }
-    return { ok: true, data: [...skills.values()] };
+    return { ok: true, cwd, data: [...skills.values()] };
   }
   async function skillInputs(payload, cwd = null) {
     if (payload.skills == null) return [];
@@ -2810,7 +2811,8 @@
         || payload.skills.some(skill => !skill || typeof skill.name !== "string" || typeof skill.path !== "string"))
       throw failure(400, "Skill 选择无效，最多选择 16 项");
     if (!payload.skills.length) return [];
-    const available = (await skillCatalog(payload, cwd)).data;
+    // 菜单可长时间复用目录；真正提交前仍重新核验项目适用范围和启用状态。
+    const available = (await skillCatalog(payload, cwd, { forceReload: true })).data;
     const selected = new Map();
     for (const skill of payload.skills) {
       const entry = available.find(item => item.name === skill.name && item.path === skill.path);
@@ -3277,7 +3279,7 @@
             ultraReasoningEnabled: models.some(model => model.supportedReasoningEfforts.some(effort => effort.reasoningEffort === "ultra")),
             ...await defaultModelSettings() };
         }
-        case "skills": return await skillCatalog(payload);
+        case "skills": return await skillCatalog(payload, null, { forceReload: payload.forceReload === true });
         case "sendState": return await queueSendState(payload);
         case "send": {
           const id = requiredId(payload.threadId);
@@ -3523,7 +3525,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 46, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
+    version: 47, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
     dispose() {
       for (const dispose of unsubscribe) { try { dispose?.(); } catch {} }
       unsubscribe = [];
