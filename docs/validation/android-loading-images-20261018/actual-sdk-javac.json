@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-10-18T00:15:27.5134533Z",
+  "kind": "JDK 17 direct javac with real Android 35 SDK, existing generated R and BuildConfig, and androidx.webkit 1.17.1 classes.jar",
+  "sourceCount": 9,
+  "exitCode": 0,
+  "noGradleBuild": true,
+  "noDeviceRuntime": true,
+  "warnings": "Six missing androidx.annotation.RestrictTo enum metadata warnings in the focused classpath; no compile errors. Deprecation notes for pre-existing APIs.",
+  "sourceSha256AtCompile": "4095680157a216238c169f0d6d6c2daadd9f49719480471c1b1573878644cbe8",
+  "scope": "Earlier callback/lifecycle fix before the final unified ClipData parser; final Android Gradle build is owned by the root agent."
+}

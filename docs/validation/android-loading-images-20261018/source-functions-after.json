@@ -1,0 +1,342 @@
+{
+  "mode": "after",
+  "capturedAt": "2026-10-18T00:23:05.973Z",
+  "sourceHashes": {
+    "native": "804fe683530fca3142904aa88363e7afe6371f865044cc6b25ad00fbef5f5265",
+    "app": "f655014618dfdbe2e90a8dddce590a2fdf905fa5fbff54cab806b57091dd67e4"
+  },
+  "adapterVersion": "41",
+  "passed": 13,
+  "total": 13,
+  "results": [
+    {
+      "name": "跨轮读取保留原生倒序、逐轮正序、缺页游标及用户输入投影",
+      "passed": true,
+      "detail": {
+        "elapsedMs": 128,
+        "maxConcurrentNativeItemReads": 2,
+        "calls": [
+          {
+            "method": "thread/turns/list",
+            "threadId": "fixture-thread",
+            "cursor": null,
+            "limit": 3,
+            "itemsView": "notLoaded",
+            "sortDirection": "desc"
+          },
+          {
+            "method": "thread/items/list",
+            "threadId": "fixture-thread",
+            "turnId": "newest",
+            "cursor": null,
+            "limit": 40,
+            "sortDirection": "desc"
+          },
+          {
+            "method": "thread/items/list",
+            "threadId": "fixture-thread",
+            "turnId": "middle",
+            "cursor": null,
+            "limit": 40,
+            "sortDirection": "desc"
+          },
+          {
+            "method": "thread/items/list",
+            "threadId": "fixture-thread",
+            "turnId": "newest",
+            "cursor": null,
+            "limit": 40,
+            "sortDirection": "asc"
+          },
+          {
+            "method": "thread/items/list",
+            "threadId": "fixture-thread",
+            "turnId": "middle",
+            "cursor": null,
+            "limit": 40,
+            "sortDirection": "asc"
+          },
+          {
+            "method": "thread/items/list",
+            "threadId": "fixture-thread",
+            "turnId": "oldest",
+            "cursor": null,
+            "limit": 40,
+            "sortDirection": "desc"
+          },
+          {
+            "method": "thread/items/list",
+            "threadId": "fixture-thread",
+            "turnId": "oldest",
+            "cursor": null,
+            "limit": 40,
+            "sortDirection": "asc"
+          }
+        ]
+      }
+    },
+    {
+      "name": "历史轮次读取有界并发为 2",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "一轮读取失败时整页失败且不继续调度未启动轮次",
+      "passed": true,
+      "detail": {
+        "maxConcurrentNativeItemReads": 2
+      }
+    },
+    {
+      "name": "空轮次页不启动消息读取",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "单轮旧页保持 scope、游标、归属和时间",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "超大原生消息仍按 40、20、10 缩小页长",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "跨轮游标未前进仍然报错",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "原生适配版本首尾一致",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "首次流连接保留补读以覆盖 HTTP 快照与订阅间隙",
+      "passed": true,
+      "detail": {
+        "sidebar": 2,
+        "thread": 2,
+        "session": 1
+      }
+    },
+    {
+      "name": "首次流连接晚于初始化结束时仍补读以覆盖连接间隙",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "后续重连仍排队重读进行中的旧快照",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "HTTP 快照生成后且 WebSocket 尚未订阅的变更不会丢失",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "并发优化前后历史返回完整深度一致",
+      "passed": true,
+      "detail": null
+    }
+  ],
+  "historyFixtureResult": {
+    "ok": true,
+    "scope": "turns",
+    "threadId": "fixture-thread",
+    "data": [
+      {
+        "id": "newest",
+        "status": "inProgress",
+        "startedAt": 1000,
+        "completedAt": null,
+        "items": [
+          {
+            "id": "newest-model",
+            "type": "modelChanged",
+            "toModel": "fixture-model",
+            "remoteHistoryContext": true
+          },
+          {
+            "id": "newest-user",
+            "type": "userMessage",
+            "content": [
+              {
+                "type": "text",
+                "text": "合成输入"
+              }
+            ],
+            "remoteHistoryContext": true
+          },
+          {
+            "id": "newest-reasoning",
+            "type": "reasoning",
+            "summary": [
+              "合成活动"
+            ]
+          },
+          {
+            "id": "newest-final",
+            "type": "agentMessage",
+            "text": "合成最终正文",
+            "completedAtMs": 1200
+          }
+        ],
+        "itemsView": "summary",
+        "itemsPageComplete": true,
+        "itemsComplete": false,
+        "itemsNextCursor": "older:newest",
+        "newestSnapshotItemId": "newest-final"
+      },
+      {
+        "id": "middle",
+        "status": "completed",
+        "startedAt": 1001,
+        "completedAt": 1501,
+        "items": [
+          {
+            "id": "middle-model",
+            "type": "modelChanged",
+            "toModel": "fixture-model",
+            "remoteHistoryContext": true
+          },
+          {
+            "id": "middle-user",
+            "type": "userMessage",
+            "content": [
+              {
+                "type": "text",
+                "text": "合成输入"
+              }
+            ],
+            "remoteHistoryContext": true
+          },
+          {
+            "id": "middle-reasoning",
+            "type": "reasoning",
+            "summary": [
+              "合成活动"
+            ]
+          },
+          {
+            "id": "middle-final",
+            "type": "agentMessage",
+            "text": "合成最终正文",
+            "completedAtMs": 1200
+          }
+        ],
+        "itemsView": "summary",
+        "itemsPageComplete": true,
+        "itemsComplete": false,
+        "itemsNextCursor": "older:middle",
+        "newestSnapshotItemId": "middle-final"
+      },
+      {
+        "id": "oldest",
+        "status": "completed",
+        "startedAt": 1002,
+        "completedAt": 1502,
+        "items": [
+          {
+            "id": "oldest-model",
+            "type": "modelChanged",
+            "toModel": "fixture-model",
+            "remoteHistoryContext": true
+          },
+          {
+            "id": "oldest-user",
+            "type": "userMessage",
+            "content": [
+              {
+                "type": "text",
+                "text": "合成输入"
+              }
+            ],
+            "remoteHistoryContext": true
+          },
+          {
+            "id": "oldest-reasoning",
+            "type": "reasoning",
+            "summary": [
+              "合成活动"
+            ]
+          },
+          {
+            "id": "oldest-final",
+            "type": "agentMessage",
+            "text": "合成最终正文",
+            "completedAtMs": 1200
+          }
+        ],
+        "itemsView": "summary",
+        "itemsPageComplete": true,
+        "itemsComplete": false,
+        "itemsNextCursor": "older:oldest",
+        "newestSnapshotItemId": "oldest-final"
+      }
+    ],
+    "nextCursor": "older-turns",
+    "backwardsCursor": "newer-turns",
+    "turnOrder": "desc",
+    "itemOrder": "asc",
+    "turnsPageComplete": true,
+    "turnsComplete": false,
+    "itemsPaginationByTurnId": {
+      "newest": {
+        "nextCursor": "older:newest",
+        "hasMore": true,
+        "complete": false,
+        "pageComplete": true,
+        "direction": "older",
+        "order": "asc",
+        "newestSnapshotItemId": "newest-final",
+        "pageLimit": 40
+      },
+      "middle": {
+        "nextCursor": "older:middle",
+        "hasMore": true,
+        "complete": false,
+        "pageComplete": true,
+        "direction": "older",
+        "order": "asc",
+        "newestSnapshotItemId": "middle-final",
+        "pageLimit": 40
+      },
+      "oldest": {
+        "nextCursor": "older:oldest",
+        "hasMore": true,
+        "complete": false,
+        "pageComplete": true,
+        "direction": "older",
+        "order": "asc",
+        "newestSnapshotItemId": "oldest-final",
+        "pageLimit": 40
+      }
+    },
+    "transcriptEvents": [
+      {
+        "turnId": "newest",
+        "item": {
+          "id": "newest-model",
+          "type": "modelChanged"
+        }
+      },
+      {
+        "turnId": "middle",
+        "item": {
+          "id": "middle-model",
+          "type": "modelChanged"
+        }
+      },
+      {
+        "turnId": "oldest",
+        "item": {
+          "id": "oldest-model",
+          "type": "modelChanged"
+        }
+      }
+    ]
+  }
+}

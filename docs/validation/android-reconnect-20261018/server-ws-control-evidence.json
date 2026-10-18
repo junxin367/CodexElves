@@ -1,0 +1,99 @@
+{
+  "capturedAtUtc": "2026-10-18T01:20:33.8649440+00:00",
+  "compileExitCode": 0,
+  "runExitCode": 0,
+  "versions": {
+    "axum": "0.8.9",
+    "serverTokioTungstenite": "0.29.0",
+    "serverTungstenite": "0.29.0",
+    "directWorkspaceTokioTungstenite": "0.26.2",
+    "tokio": "1.52.3",
+    "rustc": "1.95.0 (59807616e 2026-04-14)"
+  },
+  "harness": {
+    "path": "temp/android-reconnect-native-20261018/ws-control-probe.rs",
+    "sha256": "4a5626c312a2df05e7070dbae109aa17df82e815823fd140737fec9a4a8c6721",
+    "tungsteniteArtifact": "target/debug/deps/libtungstenite-1751036c0c5c120b.rlib",
+    "tokioArtifact": "target/debug/deps/libtokio-8bb48dce042ad178.rlib",
+    "network": "127.0.0.1:OS-assigned-port",
+    "protocol": "real RFC6455 masked client control frames over local TCP; tungstenite 0.29.0",
+    "textIntervalMs": 100,
+    "observationWindowMs": 500,
+    "boundNote": "Harness socket timeouts and deadline only bound the controlled experiment; production has a 15-second receive timeout and no added write timeout.",
+    "originalFunctionExecuted": false,
+    "productionCodeModified": false,
+    "subscriptions": "Real tokio broadcast receiver_count; production receiver lifetime inferred from exact source function."
+  },
+  "sourceHashes": {
+    "remoteAccessRs": "9003ea8279f04b4ecaac46ca96ebac8be24daf953b4ee508cb021e313ac76259",
+    "cargoLock": "4b62dda898aa8b9657c54d403050ff3f47b3b4ce10b655b5cdc409415e8a84af",
+    "axumWsRs": "1d2145ee8500333c511bbb43ba470f05e0dc65d6be411c0d42bb3bf507d0fdc5",
+    "tokioTungsteniteLibRs": "33ad167c6de78cc76f010bffe33f4f8bd254ce843136763be959384031cfb33f",
+    "tungsteniteProtocolRs": "a531ed6cda998b0db2ede7a0878453d49599f45d585d6278450e282d2b64dfb0"
+  },
+  "cases": [
+    {
+      "mode": "send_only",
+      "case": "ping",
+      "observed_ms": 525,
+      "text_frames": 6,
+      "pong_frames": 0,
+      "matched_pong_payload": false,
+      "close_frames": 0,
+      "first_control_ms": null,
+      "subscriptions_before_peer_tcp_drop": 1,
+      "server_loop_running_before_peer_tcp_drop": true,
+      "subscriptions_after_test_stop": 0,
+      "server_end_reason": "test_stop"
+    },
+    {
+      "mode": "read_and_send",
+      "case": "ping",
+      "observed_ms": 546,
+      "text_frames": 5,
+      "pong_frames": 1,
+      "matched_pong_payload": true,
+      "close_frames": 0,
+      "first_control_ms": 0,
+      "subscriptions_before_peer_tcp_drop": 1,
+      "server_loop_running_before_peer_tcp_drop": true,
+      "subscriptions_after_test_stop": 0,
+      "server_end_reason": "read_error"
+    },
+    {
+      "mode": "send_only",
+      "case": "close",
+      "observed_ms": 527,
+      "text_frames": 6,
+      "pong_frames": 0,
+      "matched_pong_payload": false,
+      "close_frames": 0,
+      "first_control_ms": null,
+      "subscriptions_before_peer_tcp_drop": 1,
+      "server_loop_running_before_peer_tcp_drop": true,
+      "subscriptions_after_test_stop": 0,
+      "server_end_reason": "test_stop"
+    },
+    {
+      "mode": "read_and_send",
+      "case": "close",
+      "observed_ms": 20,
+      "text_frames": 0,
+      "pong_frames": 0,
+      "matched_pong_payload": false,
+      "close_frames": 1,
+      "first_control_ms": 0,
+      "subscriptions_before_peer_tcp_drop": 0,
+      "server_loop_running_before_peer_tcp_drop": false,
+      "subscriptions_after_test_stop": 0,
+      "server_end_reason": "received_close"
+    }
+  ],
+  "limitations": [
+    "No phone or public tunnel evidence.",
+    "Original production stream function was not executed by this minimal probe.",
+    "No full crate build, permanent tests, Java/Rust source changes, installs or service restarts.",
+    "Pending Close with TCP held open is distinct from completed TCP closure; permanent subscription leakage is not claimed.",
+    "Context7 was unavailable due to monthly quota; fixed-version docs.rs, RFC6455 and exact local dependency source were used."
+  ]
+}

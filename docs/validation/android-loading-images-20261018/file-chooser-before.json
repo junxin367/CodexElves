@@ -1,0 +1,68 @@
+{
+  "timestamp": "2026-10-18T00:16:11.558Z",
+  "sourceFile": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/MainActivity.java",
+  "sourceSha256": "a90e948bd8d5021b1cb72e27c6ed0d377997340d6ddfaa038a7466c7da64ba75",
+  "method": "Extract actual chooser and destroyWebView Java methods; run in JDK 17 against explicit Android API test doubles. No WebView/device runtime is simulated.",
+  "compileExitCode": 0,
+  "javaExitCode": 0,
+  "verificationExitCode": 1,
+  "passed": 6,
+  "total": 12,
+  "tests": [
+    {
+      "name": "single content URI is delivered",
+      "passed": true
+    },
+    {
+      "name": "ordered ClipData is preserved",
+      "passed": true
+    },
+    {
+      "name": "picker cancellation completes once",
+      "passed": true
+    },
+    {
+      "name": "no chooser completes once and claims handling",
+      "passed": false,
+      "error": "java.lang.AssertionError: callback invoked but returned false"
+    },
+    {
+      "name": "destroying page cancels the chooser",
+      "passed": false,
+      "error": "java.lang.AssertionError: destroy left callback pending"
+    },
+    {
+      "name": "old chooser result cannot complete replacement request",
+      "passed": false,
+      "error": "java.lang.AssertionError: old result completed new callback"
+    },
+    {
+      "name": "result callback reentry preserves the next chooser",
+      "passed": false,
+      "error": "java.lang.IllegalStateException: Duplicate showFileChooser result"
+    },
+    {
+      "name": "document fallback preserves image filter and multiple selection",
+      "passed": false,
+      "error": "java.lang.AssertionError: document fallback not launched"
+    },
+    {
+      "name": "picker SecurityException uses document fallback",
+      "passed": false,
+      "error": "java.lang.SecurityException: picker denied launch"
+    },
+    {
+      "name": "photo picker failure uses the document provider path",
+      "passed": true
+    },
+    {
+      "name": "ordered picker availability matches SDK extension contract",
+      "passed": true
+    },
+    {
+      "name": "image picker only handles requested multiple image selection",
+      "passed": true
+    }
+  ],
+  "limitationCorrection": "Initial 12-case harness platform parseResult test double incorrectly supported ClipData. These results cover only the callback control flow actually exercised and are not platform URI parsing evidence. Corrected coverage is in file-chooser-clipdata-before.json and file-chooser-clipdata-after.json."
+}

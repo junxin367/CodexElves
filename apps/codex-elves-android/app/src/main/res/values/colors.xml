@@ -1,3 +1,10 @@
 <resources>
-    <color name="launcher_background">#171717</color>
+    <color name="launcher_background">#F6F3FA</color>
+    <color name="login_background">#FFFFFF</color>
+    <color name="login_text">#1F1F1F</color>
+    <color name="login_muted">#7D7D7D</color>
+    <color name="login_line">#E0E0E0</color>
+    <color name="login_accent">#171717</color>
+    <color name="login_on_accent">#FFFFFF</color>
+    <color name="login_error">#B42318</color>
 </resources>

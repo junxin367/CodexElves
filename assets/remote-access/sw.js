@@ -25,7 +25,6 @@ const deferredResourcePaths = new Set([
   "/vendor/mermaid.esm.js", "/manifest.webmanifest",
   "/icons/icon-192.png", "/icons/icon-512.png", "/icons/apple-touch-icon.png"
 ]);
-const demandOnlyResourcePaths = new Set(["/vendor/mermaid.esm.js"]);
 const criticalResourceOrder = [
   "/", "/style.css", "/platform.js", "/pwa.js", "/markdown.js", "/app.js",
   "/events-client.js", "/recovery-store.js", "/attachments.js", "/message-actions.js",
@@ -516,7 +515,7 @@ self.addEventListener("activate", event => {
       if (ready && await ready.text() === name.slice(cachePrefix.length) && !workerUsesCache(name))
         await caches.delete(name);
     }
-    await notifyClients("ready", "基础页面已缓存，完整内容首次查看可能仍需联网");
+    await notifyClients("ready", "");
   })());
 });
 
@@ -620,9 +619,10 @@ async function warmupRequiredResources() {
 
 async function prepareOptionalResources() {
   const manifest = await storedManifest();
-  for (const file of manifest.files) {
-    if (!deferredResourcePaths.has(file.path) || demandOnlyResourcePaths.has(file.path)
-        || preparedOptionalPaths.has(file.path) || Date.now() < (optionalRetryAt.get(file.path) || 0))
+  const files = manifest.files.filter(file => deferredResourcePaths.has(file.path))
+    .sort((first, second) => first.size - second.size);
+  for (const file of files) {
+    if (preparedOptionalPaths.has(file.path) || Date.now() < (optionalRetryAt.get(file.path) || 0))
       continue;
     try {
       await cachedManifestResource(file, "optional");

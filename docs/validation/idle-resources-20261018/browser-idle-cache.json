@@ -1,0 +1,60 @@
+{
+  "capturedAt": "2026-10-18T02:07:54.101Z",
+  "scope": "Chrome real Service Worker on isolated localhost, no login or actual chat, first controlled navigation after initial installation",
+  "initial": {
+    "started": false,
+    "imported": false,
+    "registrations": 0,
+    "cacheNames": [],
+    "graphCached": false,
+    "graphBytes": 0,
+    "graphNetworkRequests": 0,
+    "controller": false,
+    "version": "d5ed8d9881586e081b8b6ec69ab4c1bb772d48d5a6e88b0a7190f0c5d51f0b64"
+  },
+  "warmedBeforeImport": {
+    "started": true,
+    "imported": false,
+    "registrations": 1,
+    "cacheNames": [
+      "codex-elves-pwa-v1-d5ed8d9881586e081b8b6ec69ab4c1bb772d48d5a6e88b0a7190f0c5d51f0b64"
+    ],
+    "graphCached": true,
+    "graphBytes": 5254649,
+    "graphNetworkRequests": 1,
+    "controller": false,
+    "version": "d5ed8d9881586e081b8b6ec69ab4c1bb772d48d5a6e88b0a7190f0c5d51f0b64"
+  },
+  "importResult": {
+    "moduleReady": true,
+    "newNetworkRequests": 0,
+    "before": {
+      "started": false,
+      "imported": false,
+      "registrations": 1,
+      "cacheNames": [
+        "codex-elves-pwa-v1-d5ed8d9881586e081b8b6ec69ab4c1bb772d48d5a6e88b0a7190f0c5d51f0b64"
+      ],
+      "graphCached": true,
+      "graphBytes": 5254649,
+      "graphNetworkRequests": 1,
+      "controller": true,
+      "version": "d5ed8d9881586e081b8b6ec69ab4c1bb772d48d5a6e88b0a7190f0c5d51f0b64"
+    },
+    "after": {
+      "started": false,
+      "imported": true,
+      "registrations": 1,
+      "cacheNames": [
+        "codex-elves-pwa-v1-d5ed8d9881586e081b8b6ec69ab4c1bb772d48d5a6e88b0a7190f0c5d51f0b64"
+      ],
+      "graphCached": true,
+      "graphBytes": 5254649,
+      "graphNetworkRequests": 1,
+      "controller": true,
+      "version": "d5ed8d9881586e081b8b6ec69ab4c1bb772d48d5a6e88b0a7190f0c5d51f0b64"
+    }
+  },
+  "settingsHidden": true,
+  "settingsEmpty": true
+}

@@ -179,7 +179,7 @@ function showRegistrationState() {
     setCacheState("installing", "正在后台准备离线网页资源",
       { version: workerVersion(registration.installing) });
   } else if (registration?.active) {
-    setCacheState("ready", "基础页面已缓存，完整内容首次查看可能仍需联网",
+    setCacheState("ready", "",
       { version: workerVersion(registration.active) });
   }
   broadcastResourceActivity();

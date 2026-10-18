@@ -1,0 +1,124 @@
+{
+  "checkedAt": "2026-10-18T02:01:33.678Z",
+  "verification": "Node VM executes the actual Service Worker source with in-memory Cache Storage and controlled fetch/clock; no browser, live service, or real session is touched.",
+  "sourceSha256": "0187f4488faafa19490135950260b51a3bd0321f54c4243755490175e2949da5",
+  "fixtureVersion": "3880f1b8586532489deec116bf4fbcc698f5ce441d83f6ec20e3865184cb52f9",
+  "fixtureResources": [
+    {
+      "path": "/",
+      "contentType": "text/html; charset=utf-8",
+      "size": 1874,
+      "sha256": "a451f08e85d2f6ed371ec521c4b1553d2ee6b5859c57d9989a0cf518cac94008"
+    },
+    {
+      "path": "/icons/apple-touch-icon.png",
+      "contentType": "image/png",
+      "size": 45461,
+      "sha256": "ff430804f5de431b01338efe348163f099c339f15523ce98c8bce259d866a410"
+    },
+    {
+      "path": "/icons/icon-192.png",
+      "contentType": "image/png",
+      "size": 52387,
+      "sha256": "b377f107a2f2dd07224aa5d8bfdbd30db8637da3f9c1cb896e0b92311db27ad4"
+    },
+    {
+      "path": "/icons/icon-512.png",
+      "contentType": "image/png",
+      "size": 208081,
+      "sha256": "047bbae573cb16dac21c8ec09ac54846387526c0e32565aacd232561220a5dab"
+    },
+    {
+      "path": "/manifest.webmanifest",
+      "contentType": "application/manifest+json; charset=utf-8",
+      "size": 556,
+      "sha256": "1c315454fb5b62001b317eb19813aa84cd575bb2ddb48d6048b4d12aa2e32434"
+    },
+    {
+      "path": "/markdown-renderer.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "size": 15124,
+      "sha256": "4453fbec06165673a793cff3e65ee2d80f6f11cc808024bb9e036ae664f0a882"
+    },
+    {
+      "path": "/vendor/dompurify.esm.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "size": 85820,
+      "sha256": "60c5d5ccbb466de3de3ba863461a92bf134f8c156cef7992da43e0f659bc5cbd"
+    },
+    {
+      "path": "/vendor/marked.esm.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "size": 47076,
+      "sha256": "930457e5d55439f90465015cc507d3323366e80df5f7a701b61189d4e1046bda"
+    },
+    {
+      "path": "/vendor/mermaid.esm.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "size": 5254649,
+      "sha256": "b80a03a6965adce02160ac3bde4ea044788f9d00c00dfab2c75215131500f8c9"
+    }
+  ],
+  "passed": 2,
+  "failed": 7,
+  "results": [
+    {
+      "name": "未触发图表时空闲预下载全部可选资源，Mermaid 排在较小文件之后",
+      "status": "failed",
+      "durationMs": 32,
+      "error": "AssertionError [ERR_ASSERTION]: 未触发图表时也必须在空闲队列下载 Mermaid\n    at E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:193:5\n    at async check (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:177:21)\n    at async main (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:186:3)"
+    },
+    {
+      "name": "空闲准备完成后首次 Mermaid 需求及有限重试 query 从缓存返回",
+      "status": "failed",
+      "durationMs": 38,
+      "error": "AssertionError [ERR_ASSERTION]: 已预备的首次图表需求不应重新联网\n\n8 !== 7\n\n    at E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:215:12\n    at async check (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:177:21)\n    at async main (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:203:3)"
+    },
+    {
+      "name": "忙状态、应用未就绪、页面不可见或错误版本均不启动预下载",
+      "status": "passed",
+      "durationMs": 4,
+      "details": {
+        "statesChecked": 4
+      }
+    },
+    {
+      "name": "已授权的空闲队列在前台忙期间等待，空闲后恢复",
+      "status": "failed",
+      "durationMs": 12,
+      "error": "AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:\n\n  assert(h.requests.some(request => request.path === mermaidPath))\n\n    at E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:241:5\n    at async check (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:177:21)\n    at async main (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:231:3)"
+    },
+    {
+      "name": "同一路径由按需请求接管预下载，不重复下载或中止该资源",
+      "status": "failed",
+      "durationMs": 2010,
+      "error": "AssertionError [ERR_ASSERTION]: Mermaid 应先由空闲任务开始下载\n    at waitFor (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:59:5)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:256:5\n    at async check (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:177:21)\n    at async main (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:245:3)"
+    },
+    {
+      "name": "可选任务被主动操作两次中断后退避，继续后续资源，按需可绕过退避",
+      "status": "failed",
+      "durationMs": 9,
+      "error": "AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:\n\n  assert(h.requests.some(request => request.path === mermaidPath))\n\n    at E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:290:5\n    at async check (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:177:21)\n    at async main (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:270:3)"
+    },
+    {
+      "name": "摘要失败不写缓存或恢复页；两种缓存模式重试及五分钟空闲退避保留",
+      "status": "failed",
+      "durationMs": 8,
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:\n+ actual - expected\n\n+ []\n- [\n-   'force-cache',\n-   'no-store'\n- ]\n\n    at E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:319:12\n    at async check (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:177:21)\n    at async main (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:306:3)"
+    },
+    {
+      "name": "损坏缓存重新校验修复，当前 worker 版本错误时拒绝后台准备",
+      "status": "failed",
+      "durationMs": 11,
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n0 !== 1\n\n    at E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:340:12\n    at async check (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:177:21)\n    at async main (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\idle-resources-20261018\\verify-idle-resources.cjs:334:3)"
+    },
+    {
+      "name": "前台资源下载并发仍最多两个",
+      "status": "passed",
+      "durationMs": 36,
+      "details": {
+        "foregroundPeak": 2
+      }
+    }
+  ]
+}

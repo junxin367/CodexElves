@@ -1,0 +1,98 @@
+{
+  "purpose": "基于本机原生合同构造的验证数据，不是实际授权请求。",
+  "toolApproval": {
+    "id": "fixture-tool-approval-a",
+    "method": "mcpServer/elicitation/request",
+    "params": {
+      "mode": "form",
+      "serverName": "browser-use",
+      "message": "Allow Browser use to use full Chrome Developer Tools access on http://127.0.0.1:1462",
+      "requestedSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "_meta": {
+        "codex_approval_kind": "mcp_tool_call",
+        "connector_id": "browser-use",
+        "tool_name": "access_browser_origin_with_raw_cdp",
+        "tool_params": {
+          "origin": "http://127.0.0.1:1462"
+        },
+        "tool_params_display": [],
+        "full_cdp_access": true,
+        "origin": "http://127.0.0.1:1462",
+        "persist": "always",
+        "riskLevel": "high"
+      }
+    }
+  },
+  "genericBrowserApproval": {
+    "id": "fixture-generic-browser",
+    "method": "mcpServer/elicitation/request",
+    "params": {
+      "mode": "form",
+      "serverName": "browser",
+      "message": "请允许访问此网站",
+      "requestedSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "_meta": {
+        "persist": "always",
+        "origin": "https://example.test",
+        "riskLevel": "high"
+      }
+    }
+  },
+  "blockingQuestion": {
+    "id": "fixture-blocking-questions",
+    "method": "item/tool/requestUserInput",
+    "params": {
+      "questions": [
+        {
+          "id": "fixture-blocking-first",
+          "header": "范围",
+          "question": "选择本次处理范围",
+          "options": [
+            { "label": "当前会话", "description": "仅处理当前会话" },
+            { "label": "所有会话", "description": "处理全部会话" }
+          ]
+        },
+        {
+          "id": "fixture-blocking-second",
+          "header": "补充",
+          "question": "填写补充说明",
+          "options": []
+        }
+      ]
+    }
+  },
+  "asyncQuestion": {
+    "id": "fixture-async-questions",
+    "method": "remote/requestUserInputAsync",
+    "params": {
+      "questions": [
+        {
+          "id": "fixture-async-first",
+          "header": "选择",
+          "question": "选择处理方式",
+          "options": [
+            { "label": "方式一", "description": "第一个可选方式" },
+            { "label": "方式二", "description": "第二个可选方式" }
+          ]
+        },
+        {
+          "id": "fixture-async-second",
+          "header": "备注",
+          "question": "填写备注",
+          "options": []
+        }
+      ]
+    }
+  },
+  "expectedResponses": {
+    "once": { "action": "accept", "content": {}, "_meta": null },
+    "always": { "action": "accept", "content": {}, "_meta": { "persist": "always" } },
+    "decline": { "action": "decline", "content": null, "_meta": null }
+  }
+}

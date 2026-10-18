@@ -1,0 +1,11 @@
+N: android=http://schemas.android.com/apk/res/android (line=3)
+  E: ripple (line=3)
+    A: http://schemas.android.com/apk/res/android:color(0x010101a5)=#1f7d7d7d
+      E: item (line=4)
+        A: http://schemas.android.com/apk/res/android:id(0x010100d0)=@0x0102002e
+          E: shape (line=5)
+            A: http://schemas.android.com/apk/res/android:shape(0x0101019a)=0
+              E: solid (line=6)
+                A: http://schemas.android.com/apk/res/android:color(0x010101a5)=@0x0106000b
+              E: corners (line=7)
+                A: http://schemas.android.com/apk/res/android:radius(0x010101a8)=6.000000dp

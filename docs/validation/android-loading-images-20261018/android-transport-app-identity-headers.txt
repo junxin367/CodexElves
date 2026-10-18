@@ -1,0 +1,11 @@
+HTTP/1.1 200 OK
+content-type: application/javascript; charset=utf-8
+etag: "4b7a1c2c9be12c380d5021c4ea9e92e79b561f366e909c2233763705dbc25cab"
+vary: Accept-Encoding
+content-length: 494465
+cache-control: no-cache
+x-content-type-options: nosniff
+referrer-policy: no-referrer
+x-frame-options: DENY
+content-security-policy: default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'
+date: Sun, 18 Oct 2026 00:11:33 GMT

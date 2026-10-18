@@ -2965,19 +2965,44 @@ async fn stream_websocket_events(
     id: String,
 ) {
     let mut receiver = controller.events.subscribe();
+    let heartbeat = tokio::time::sleep(Duration::from_secs(15));
+    tokio::pin!(heartbeat);
     loop {
         let mut event = if !controller.device_active(&id).await {
             json!({"method":"remote/unauthorized"})
         } else if !controller.accepting_requests() {
             json!({"method":"remote/disconnected"})
         } else {
-            match tokio::time::timeout(Duration::from_secs(15), receiver.recv()).await {
-                Ok(Ok(event)) => event,
-                Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
-                    json!({"method":"remote/resync"})
+            tokio::select! {
+                incoming = socket.recv() => {
+                    match incoming {
+                        Some(Ok(WebSocketMessage::Close(_))) => {
+                            let _ = socket.close().await;
+                            break;
+                        }
+                        Some(Ok(WebSocketMessage::Ping(_))) => {
+                            if socket.flush().await.is_err() {
+                                break;
+                            }
+                        }
+                        Some(Ok(_)) => {}
+                        Some(Err(_)) | None => break,
+                    }
+                    continue;
                 }
-                Ok(Err(_)) => break,
-                Err(_) => json!({"method":"remote/heartbeat"}),
+                received = receiver.recv() => match received {
+                    Ok(event) => event,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        json!({"method":"remote/resync"})
+                    }
+                    Err(_) => break,
+                },
+                _ = &mut heartbeat => {
+                    heartbeat.as_mut().reset(
+                        tokio::time::Instant::now() + Duration::from_secs(15)
+                    );
+                    json!({"method":"remote/heartbeat"})
+                }
             }
         };
         let authorized = controller.device_active(&id).await;

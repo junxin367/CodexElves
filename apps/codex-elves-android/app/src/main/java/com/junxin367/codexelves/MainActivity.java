@@ -5,8 +5,6 @@ import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Intent;
-import android.graphics.Color;
-import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -15,7 +13,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.ext.SdkExtensions;
 import android.provider.MediaStore;
-import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -35,9 +32,7 @@ import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -94,7 +89,8 @@ public final class MainActivity extends Activity {
     private Runnable readyTimeout;
     private boolean pageReady;
     private ValueCallback<Uri[]> fileChooserCallback;
-    private boolean orderedImagePickerPending;
+    private int fileChooserRequestCode = -1;
+    private int nextFileChooserRequestCode = FILE_CHOOSER_REQUEST;
     private long lastUpdateCheckAt;
 
     @Override
@@ -104,7 +100,7 @@ public final class MainActivity extends Activity {
         sessionStore = new SessionStore(this);
         resourceStore = new ResourceStore(this);
         root = new FrameLayout(this);
-        root.setBackgroundColor(Color.rgb(250, 250, 250));
+        root.setBackgroundColor(getColor(R.color.login_background));
         root.setFitsSystemWindows(true);
         setContentView(root);
 
@@ -122,8 +118,8 @@ public final class MainActivity extends Activity {
 
     private void configureWindow() {
         Window window = getWindow();
-        window.setStatusBarColor(Color.rgb(250, 250, 250));
-        window.setNavigationBarColor(Color.rgb(250, 250, 250));
+        window.setStatusBarColor(getColor(R.color.login_background));
+        window.setNavigationBarColor(getColor(R.color.login_background));
         window.getDecorView().setSystemUiVisibility(
             View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         );
@@ -143,108 +139,19 @@ public final class MainActivity extends Activity {
     }
 
     private View buildLoginView(String message) {
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
-        scroll.setClipToPadding(false);
-        int horizontal = dp(28);
-        scroll.setPadding(horizontal, dp(28), horizontal, dp(28));
-
-        LinearLayout outer = new LinearLayout(this);
-        outer.setOrientation(LinearLayout.VERTICAL);
-        outer.setGravity(Gravity.CENTER);
-        scroll.addView(outer, matchParent());
-
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(24), dp(28), dp(24), dp(26));
-        card.setBackground(rounded(Color.WHITE, 18, 0xFFE5E7EB));
-        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        );
-        cardParams.gravity = Gravity.CENTER;
-        outer.addView(card, cardParams);
-
-        ImageView logo = new ImageView(this);
-        logo.setImageResource(R.drawable.codex_elves_icon);
-        logo.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(68), dp(68));
-        logoParams.gravity = Gravity.CENTER_HORIZONTAL;
-        logoParams.bottomMargin = dp(18);
-        card.addView(logo, logoParams);
-
-        TextView title = text("连接 CodexElves", 24, 0xFF171717);
-        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        title.setGravity(Gravity.CENTER);
-        card.addView(title, fullWidthWrap());
-
-        TextView subtitle = text("输入远程服务域名和访问密钥。设备仅保存域名与授权状态。", 14, 0xFF6B7280);
-        subtitle.setGravity(Gravity.CENTER);
-        subtitle.setPadding(0, dp(8), 0, dp(22));
-        card.addView(subtitle, fullWidthWrap());
-
-        EditText originInput = input("服务域名，例如 example.com");
-        originInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        originInput.setSingleLine(true);
-        originInput.setText(sessionStore.getOrigin());
-        card.addView(originInput, fieldParams());
-
-        EditText keyInput = input("访问密钥");
-        keyInput.setInputType(
-            InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD
-        );
-        keyInput.setSingleLine(true);
-        LinearLayout.LayoutParams keyParams = fieldParams();
-        keyParams.topMargin = dp(12);
-        card.addView(keyInput, keyParams);
-
-        TextView status = text(message == null ? "" : message, 13, 0xFFB42318);
-        status.setPadding(0, dp(12), 0, 0);
-        status.setVisibility(message == null ? View.GONE : View.VISIBLE);
-        card.addView(status, fullWidthWrap());
-
-        Button connect = new Button(this);
-        connect.setText("连接");
-        connect.setTextSize(16);
-        connect.setTextColor(Color.WHITE);
-        connect.setAllCaps(false);
-        connect.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        connect.setBackground(rounded(0xFF2563EB, 12, 0xFF2563EB));
-        LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(52)
-        );
-        buttonParams.topMargin = dp(18);
-        card.addView(connect, buttonParams);
-
-        TextView security = text("仅支持 HTTPS 根地址；证书错误不会被忽略。", 12, 0xFF9CA3AF);
-        security.setGravity(Gravity.CENTER);
-        security.setPadding(0, dp(16), 0, 0);
-        card.addView(security, fullWidthWrap());
-
-        View.OnClickListener submit = ignored -> authenticate(
-            originInput,
-            keyInput,
-            connect,
-            status
-        );
-        connect.setOnClickListener(submit);
-        keyInput.setOnEditorActionListener((view, actionId, event) -> {
-            submit.onClick(view);
-            return true;
-        });
-        return scroll;
+        LoginView login = new LoginView(this);
+        login.setInitialValues(sessionStore.getOrigin(), message);
+        login.setOnSubmit(() -> authenticate(login));
+        return login;
     }
 
-    private void authenticate(
-        EditText originInput,
-        EditText keyInput,
-        Button connect,
-        TextView status
-    ) {
-        if (!connect.isEnabled()) {
+    private void authenticate(LoginView login) {
+        if (login.isBusy()) {
             return;
         }
+        EditText originInput = login.originInput;
+        EditText keyInput = login.keyInput;
+        TextView status = login.status;
         final String origin;
         try {
             origin = ServiceOrigin.normalize(originInput.getText().toString());
@@ -259,9 +166,7 @@ public final class MainActivity extends Activity {
         }
 
         sessionStore.saveOrigin(origin);
-        connect.setEnabled(false);
-        originInput.setEnabled(false);
-        keyInput.setEnabled(false);
+        login.setBusy(true);
         status.setTextColor(0xFF6B7280);
         showStatus(status, "正在连接…");
         long generation = connectionGeneration.incrementAndGet();
@@ -272,9 +177,7 @@ public final class MainActivity extends Activity {
                 if (generation != connectionGeneration.get() || isFinishing()) {
                     return;
                 }
-                connect.setEnabled(true);
-                originInput.setEnabled(true);
-                keyInput.setEnabled(true);
+                login.setBusy(false);
                 status.setTextColor(0xFFB42318);
                 if (!result.success) {
                     showStatus(status, result.message);
@@ -1051,6 +954,7 @@ public final class MainActivity extends Activity {
     }
 
     private void destroyWebView() {
+        cancelFileChooser();
         if (webView == null) {
             return;
         }
@@ -1078,28 +982,63 @@ public final class MainActivity extends Activity {
         destroyWebView();
         background.shutdownNow();
         resources.shutdownNow();
-        if (fileChooserCallback != null) {
-            fileChooserCallback.onReceiveValue(null);
-            fileChooserCallback = null;
-        }
         super.onDestroy();
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != FILE_CHOOSER_REQUEST || fileChooserCallback == null) {
+        if (requestCode != fileChooserRequestCode || fileChooserCallback == null) {
             return;
         }
-        Uri[] result = orderedImagePickerPending
-            ? parseOrderedImagePickerResult(resultCode, data)
-            : WebChromeClient.FileChooserParams.parseResult(resultCode, data);
-        orderedImagePickerPending = false;
-        fileChooserCallback.onReceiveValue(result);
-        fileChooserCallback = null;
+        completeFileChooser(parseFileChooserResult(resultCode, data));
     }
 
-    private static Uri[] parseOrderedImagePickerResult(int resultCode, Intent data) {
+    private void completeFileChooser(Uri[] result) {
+        ValueCallback<Uri[]> callback = fileChooserCallback;
+        fileChooserCallback = null;
+        fileChooserRequestCode = -1;
+        if (callback != null) {
+            callback.onReceiveValue(result);
+        }
+    }
+
+    private void cancelFileChooser() {
+        int requestCode = fileChooserRequestCode;
+        completeFileChooser(null);
+        if (requestCode >= 0) {
+            finishActivity(requestCode);
+        }
+    }
+
+    private boolean launchFileChooser(Intent intent, int requestCode) {
+        try {
+            startActivityForResult(intent, requestCode);
+            return true;
+        } catch (ActivityNotFoundException | SecurityException error) {
+            return false;
+        }
+    }
+
+    private static Intent documentPickerIntent(WebChromeClient.FileChooserParams params) {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        String[] acceptTypes = params.getAcceptTypes();
+        String type = acceptTypes != null && acceptTypes.length == 1
+            && acceptTypes[0] != null && !acceptTypes[0].trim().isEmpty()
+            ? acceptTypes[0] : "*/*";
+        intent.setType(type);
+        if (acceptTypes != null && acceptTypes.length > 1) {
+            intent.putExtra(Intent.EXTRA_MIME_TYPES, acceptTypes);
+        }
+        intent.putExtra(
+            Intent.EXTRA_ALLOW_MULTIPLE,
+            params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
+        );
+        return intent;
+    }
+
+    private static Uri[] parseFileChooserResult(int resultCode, Intent data) {
         if (resultCode != RESULT_OK || data == null) {
             return null;
         }
@@ -1148,42 +1087,39 @@ public final class MainActivity extends Activity {
             ValueCallback<Uri[]> callback,
             FileChooserParams params
         ) {
-            if (fileChooserCallback != null) {
-                fileChooserCallback.onReceiveValue(null);
-            }
+            cancelFileChooser();
             fileChooserCallback = callback;
-            orderedImagePickerPending = false;
+            int requestCode = nextFileChooserRequestCode;
+            nextFileChooserRequestCode = requestCode >= 0xFFFF
+                ? FILE_CHOOSER_REQUEST : requestCode + 1;
+            fileChooserRequestCode = requestCode;
             Intent orderedPicker = orderedImagePickerIntent(params);
             if (orderedPicker != null) {
-                try {
-                    startActivityForResult(orderedPicker, FILE_CHOOSER_REQUEST);
-                    orderedImagePickerPending = true;
+                if (launchFileChooser(orderedPicker, requestCode)) {
                     return true;
-                } catch (ActivityNotFoundException error) {
-                    // Keep the existing document picker available when the photo picker is absent.
                 }
             }
-            Intent intent;
+            Intent intent = null;
             try {
                 intent = params.createIntent();
             } catch (Exception error) {
-                intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-                intent.addCategory(Intent.CATEGORY_OPENABLE);
-                intent.setType("*/*");
+                // Use the document provider when WebView cannot create its picker intent.
             }
-            intent.putExtra(
-                Intent.EXTRA_ALLOW_MULTIPLE,
-                params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE
-            );
-            try {
-                startActivityForResult(intent, FILE_CHOOSER_REQUEST);
+            if (intent != null) {
+                intent.putExtra(
+                    Intent.EXTRA_ALLOW_MULTIPLE,
+                    params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE
+                );
+                if (launchFileChooser(intent, requestCode)) {
+                    return true;
+                }
+            }
+            if (launchFileChooser(documentPickerIntent(params), requestCode)) {
                 return true;
-            } catch (ActivityNotFoundException error) {
-                fileChooserCallback.onReceiveValue(null);
-                fileChooserCallback = null;
-                Toast.makeText(MainActivity.this, "没有可用的文件选择器", Toast.LENGTH_SHORT).show();
-                return false;
             }
+            completeFileChooser(null);
+            Toast.makeText(MainActivity.this, "没有可用的文件选择器", Toast.LENGTH_SHORT).show();
+            return true;
         }
     }
 
@@ -1223,17 +1159,6 @@ public final class MainActivity extends Activity {
         status.setVisibility(View.VISIBLE);
     }
 
-    private EditText input(String hint) {
-        EditText input = new EditText(this);
-        input.setHint(hint);
-        input.setTextSize(16);
-        input.setTextColor(0xFF171717);
-        input.setHintTextColor(0xFF9CA3AF);
-        input.setPadding(dp(14), 0, dp(14), 0);
-        input.setBackground(rounded(0xFFF9FAFB, 10, 0xFFD1D5DB));
-        return input;
-    }
-
     private TextView text(String value, int size, int color) {
         TextView text = new TextView(this);
         text.setText(value);
@@ -1253,10 +1178,6 @@ public final class MainActivity extends Activity {
         drawable.setCornerRadius(dp(radiusDp));
         drawable.setStroke(dp(1), stroke);
         return drawable;
-    }
-
-    private LinearLayout.LayoutParams fieldParams() {
-        return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54));
     }
 
     private static ViewGroup.LayoutParams matchParent() {

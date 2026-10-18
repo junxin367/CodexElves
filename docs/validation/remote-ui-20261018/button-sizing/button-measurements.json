@@ -1,0 +1,446 @@
+{
+  "changedTypes": 11,
+  "failures": [],
+  "measurements": [
+    {
+      "id": "image-close",
+      "title": "图片查看弹窗 · 关闭调整前",
+      "version": "before",
+      "background": "color(srgb 0.0901961 0.0901961 0.0901961 / 0.88)",
+      "button": {
+        "height": 40,
+        "width": 40
+      },
+      "icon": {
+        "height": 16,
+        "width": 16
+      },
+      "space": {
+        "bottom": 12,
+        "left": 12,
+        "right": 12,
+        "top": 12
+      }
+    },
+    {
+      "id": "image-close",
+      "title": "图片查看弹窗 · 关闭调整后",
+      "version": "after",
+      "background": "color(srgb 0.0901961 0.0901961 0.0901961 / 0.88)",
+      "button": {
+        "height": 32,
+        "width": 32
+      },
+      "icon": {
+        "height": 16,
+        "width": 16
+      },
+      "space": {
+        "bottom": 8,
+        "left": 8,
+        "right": 8,
+        "top": 8
+      }
+    },
+    {
+      "id": "settings-close",
+      "title": "设置弹窗 · 关闭调整前",
+      "version": "before",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 40,
+        "width": 40
+      },
+      "icon": {
+        "height": 16,
+        "width": 16
+      },
+      "space": {
+        "bottom": 12,
+        "left": 12,
+        "right": 12,
+        "top": 12
+      }
+    },
+    {
+      "id": "settings-close",
+      "title": "设置弹窗 · 关闭调整后",
+      "version": "after",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 32,
+        "width": 32
+      },
+      "icon": {
+        "height": 16,
+        "width": 16
+      },
+      "space": {
+        "bottom": 8,
+        "left": 8,
+        "right": 8,
+        "top": 8
+      }
+    },
+    {
+      "id": "sidebar-view",
+      "title": "侧栏 · 切换会话视图调整前",
+      "version": "before",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 40,
+        "width": 40
+      },
+      "icon": {
+        "height": 16,
+        "width": 16
+      },
+      "space": {
+        "bottom": 12,
+        "left": 12,
+        "right": 12,
+        "top": 12
+      }
+    },
+    {
+      "id": "sidebar-view",
+      "title": "侧栏 · 切换会话视图调整后",
+      "version": "after",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 32,
+        "width": 32
+      },
+      "icon": {
+        "height": 16,
+        "width": 16
+      },
+      "space": {
+        "bottom": 8,
+        "left": 8,
+        "right": 8,
+        "top": 8
+      }
+    },
+    {
+      "id": "sidebar-search",
+      "title": "侧栏 · 搜索会话与项目调整前",
+      "version": "before",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 40,
+        "width": 40
+      },
+      "icon": {
+        "height": 16,
+        "width": 16
+      },
+      "space": {
+        "bottom": 12,
+        "left": 12,
+        "right": 12,
+        "top": 12
+      }
+    },
+    {
+      "id": "sidebar-search",
+      "title": "侧栏 · 搜索会话与项目调整后",
+      "version": "after",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 32,
+        "width": 32
+      },
+      "icon": {
+        "height": 16,
+        "width": 16
+      },
+      "space": {
+        "bottom": 8,
+        "left": 8,
+        "right": 8,
+        "top": 8
+      }
+    },
+    {
+      "id": "row-more",
+      "title": "项目 / 会话 · 更多操作调整前",
+      "version": "before",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 40,
+        "width": 40
+      },
+      "icon": {
+        "height": 16,
+        "width": 16
+      },
+      "space": {
+        "bottom": 12,
+        "left": 12,
+        "right": 12,
+        "top": 12
+      }
+    },
+    {
+      "id": "row-more",
+      "title": "项目 / 会话 · 更多操作调整后",
+      "version": "after",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 32,
+        "width": 32
+      },
+      "icon": {
+        "height": 16,
+        "width": 16
+      },
+      "space": {
+        "bottom": 8,
+        "left": 8,
+        "right": 8,
+        "top": 8
+      }
+    },
+    {
+      "id": "jump-latest",
+      "title": "会话区 · 跳转到最新消息调整前",
+      "version": "before",
+      "background": "rgb(23, 23, 23)",
+      "button": {
+        "height": 40,
+        "width": 40
+      },
+      "icon": {
+        "height": 16,
+        "width": 16
+      },
+      "space": {
+        "bottom": 12,
+        "left": 12,
+        "right": 12,
+        "top": 12
+      }
+    },
+    {
+      "id": "jump-latest",
+      "title": "会话区 · 跳转到最新消息调整后",
+      "version": "after",
+      "background": "rgb(23, 23, 23)",
+      "button": {
+        "height": 32,
+        "width": 32
+      },
+      "icon": {
+        "height": 16,
+        "width": 16
+      },
+      "space": {
+        "bottom": 8,
+        "left": 8,
+        "right": 8,
+        "top": 8
+      }
+    },
+    {
+      "id": "goal-close",
+      "title": "目标编辑弹窗 · 关闭调整前",
+      "version": "before",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 40,
+        "width": 40
+      },
+      "icon": {
+        "height": 16,
+        "width": 16
+      },
+      "space": {
+        "bottom": 12,
+        "left": 12,
+        "right": 12,
+        "top": 12
+      }
+    },
+    {
+      "id": "goal-close",
+      "title": "目标编辑弹窗 · 关闭调整后",
+      "version": "after",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 32,
+        "width": 32
+      },
+      "icon": {
+        "height": 16,
+        "width": 16
+      },
+      "space": {
+        "bottom": 8,
+        "left": 8,
+        "right": 8,
+        "top": 8
+      }
+    },
+    {
+      "id": "sidebar-open",
+      "title": "会话顶部 · 打开 / 收起侧栏调整前",
+      "version": "before",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 40,
+        "width": 40
+      },
+      "icon": {
+        "height": 18,
+        "width": 18
+      },
+      "space": {
+        "bottom": 11,
+        "left": 11,
+        "right": 11,
+        "top": 11
+      }
+    },
+    {
+      "id": "sidebar-open",
+      "title": "会话顶部 · 打开 / 收起侧栏调整后",
+      "version": "after",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 36,
+        "width": 36
+      },
+      "icon": {
+        "height": 18,
+        "width": 18
+      },
+      "space": {
+        "bottom": 9,
+        "left": 9,
+        "right": 9,
+        "top": 9
+      }
+    },
+    {
+      "id": "refresh-session",
+      "title": "会话顶部 · 刷新调整前",
+      "version": "before",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 40,
+        "width": 40
+      },
+      "icon": {
+        "height": 18,
+        "width": 18
+      },
+      "space": {
+        "bottom": 11,
+        "left": 11,
+        "right": 11,
+        "top": 11
+      }
+    },
+    {
+      "id": "refresh-session",
+      "title": "会话顶部 · 刷新调整后",
+      "version": "after",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 36,
+        "width": 36
+      },
+      "icon": {
+        "height": 18,
+        "width": 18
+      },
+      "space": {
+        "bottom": 9,
+        "left": 9,
+        "right": 9,
+        "top": 9
+      }
+    },
+    {
+      "id": "web-key",
+      "title": "网页登录 · 显示 / 隐藏密钥调整前",
+      "version": "before",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 44,
+        "width": 44
+      },
+      "icon": {
+        "height": 18,
+        "width": 18
+      },
+      "space": {
+        "bottom": 13,
+        "left": 13,
+        "right": 13,
+        "top": 13
+      }
+    },
+    {
+      "id": "web-key",
+      "title": "网页登录 · 显示 / 隐藏密钥调整后",
+      "version": "after",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 36,
+        "width": 36
+      },
+      "icon": {
+        "height": 18,
+        "width": 18
+      },
+      "space": {
+        "bottom": 9,
+        "left": 9,
+        "right": 9,
+        "top": 9
+      }
+    },
+    {
+      "id": "queue-drag",
+      "title": "队列 · 拖动调整顺序调整前",
+      "version": "before",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 36,
+        "width": 36
+      },
+      "icon": {
+        "height": 14,
+        "width": 14
+      },
+      "space": {
+        "bottom": 11,
+        "left": 11,
+        "right": 11,
+        "top": 11
+      }
+    },
+    {
+      "id": "queue-drag",
+      "title": "队列 · 拖动调整顺序调整后",
+      "version": "after",
+      "background": "rgba(0, 0, 0, 0)",
+      "button": {
+        "height": 28,
+        "width": 28
+      },
+      "icon": {
+        "height": 14,
+        "width": 14
+      },
+      "space": {
+        "bottom": 7,
+        "left": 7,
+        "right": 7,
+        "top": 7
+      }
+    }
+  ]
+}

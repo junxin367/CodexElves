@@ -1,0 +1,21 @@
+{
+  "status": "passed",
+  "source": "current assets/remote-access/app.js",
+  "wsKeptOpenAcrossModes": true,
+  "readonlyActionRejection": true,
+  "uiVerification": "pending parent Chrome validation",
+  "state": {
+    "mode": "healthy",
+    "wsAccepted": 1,
+    "wsClosed": 0,
+    "counts": {
+      "/api/session": 4,
+      "/app.js": 1,
+      "/__qa/control": 3,
+      "/api/read/sidebar": 1,
+      "/api/read/history": 1,
+      "/api/action/send": 1
+    },
+    "rejectedActions": 1
+  }
+}

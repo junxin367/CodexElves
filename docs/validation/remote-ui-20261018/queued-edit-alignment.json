@@ -1,0 +1,62 @@
+[
+  {
+    "align": "center",
+    "buttonCenter": 156.796875,
+    "delta": 0,
+    "font": "14px",
+    "overlap": false,
+    "pageOverflow": false,
+    "titleCenter": 156.796875,
+    "viewport": 320
+  },
+  {
+    "align": "center",
+    "buttonCenter": 164.3125,
+    "delta": 0,
+    "font": "18px",
+    "overlap": false,
+    "pageOverflow": false,
+    "titleCenter": 164.3125,
+    "viewport": 320
+  },
+  {
+    "align": "center",
+    "buttonCenter": 204.0859375,
+    "delta": 0,
+    "font": "24px",
+    "overlap": false,
+    "pageOverflow": false,
+    "titleCenter": 204.0859375,
+    "viewport": 320
+  },
+  {
+    "align": "center",
+    "buttonCenter": 156.796875,
+    "delta": 0,
+    "font": "14px",
+    "overlap": false,
+    "pageOverflow": false,
+    "titleCenter": 156.796875,
+    "viewport": 390
+  },
+  {
+    "align": "center",
+    "buttonCenter": 164.3125,
+    "delta": 0,
+    "font": "18px",
+    "overlap": false,
+    "pageOverflow": false,
+    "titleCenter": 164.3125,
+    "viewport": 390
+  },
+  {
+    "align": "center",
+    "buttonCenter": 155.5,
+    "delta": 0,
+    "font": "14px",
+    "overlap": false,
+    "pageOverflow": false,
+    "titleCenter": 155.5,
+    "viewport": 1280
+  }
+]

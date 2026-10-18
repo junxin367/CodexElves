@@ -1,0 +1,31 @@
+{
+  "mode": "read-failure",
+  "wsAccepted": 1,
+  "wsClosed": 1,
+  "counts": {
+    "/control": 1,
+    "/": 1,
+    "/__qa/state": 813,
+    "/style.css": 1,
+    "/app.js": 1,
+    "/events-client.js": 1,
+    "/platform.js": 1,
+    "/recovery-store.js": 1,
+    "/attachments.js": 1,
+    "/message-actions.js": 1,
+    "/markdown.js": 1,
+    "/pwa.js": 1,
+    "/api/session": 32,
+    "/favicon.ico": 1,
+    "/api/read/models": 1,
+    "/api/read/sidebar": 29,
+    "/api/read/thread": 6,
+    "/api/read/history": 6,
+    "/markdown-renderer.js": 1,
+    "/vendor/marked.esm.js": 1,
+    "/vendor/dompurify.esm.js": 1,
+    "/__qa/control": 4
+  },
+  "rejectedActions": 0,
+  "wsActive": 0
+}

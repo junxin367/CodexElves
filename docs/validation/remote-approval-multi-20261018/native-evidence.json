@@ -1,0 +1,234 @@
+{
+  "collectedAt": "2026-10-17T22:25:30.730Z",
+  "versions": {
+    "appx": "26.1007.9446.0",
+    "package": "26.1007.71326",
+    "cli": "0.162.0-alpha.17.2"
+  },
+  "asarPath": "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.9446.0_x64__2p2nqsd0c76g0/app/resources/app.asar",
+  "installedFiles": [
+    {
+      "file": "package.json",
+      "bytes": 5756,
+      "sha256": "03285612942752337ebf828039e408dd1f1dc79697c043a4088aca6d59a54e26",
+      "previousExtractionSha256": "03285612942752337ebf828039e408dd1f1dc79697c043a4088aca6d59a54e26",
+      "matchesPreviousExtraction": true
+    },
+    {
+      "file": "webview/assets/app-initial-102e45562729.js",
+      "bytes": 11441755,
+      "sha256": "c59b2a0be6c13496b30ebda167925cdccab26799cae350c62d2b37afe3589b57",
+      "previousExtractionSha256": "c59b2a0be6c13496b30ebda167925cdccab26799cae350c62d2b37afe3589b57",
+      "matchesPreviousExtraction": true
+    },
+    {
+      "file": "webview/assets/app-primary-cd52df2361eb.js",
+      "bytes": 2385396,
+      "sha256": "9602eea8c6dd07ddfbbc2772eac271e8ec7f765e1f275fe47ef681b996ac056a",
+      "previousExtractionSha256": "9602eea8c6dd07ddfbbc2772eac271e8ec7f765e1f275fe47ef681b996ac056a",
+      "matchesPreviousExtraction": true
+    },
+    {
+      "file": "webview/assets/app-shared-30671c57ec82.js",
+      "bytes": 8175574,
+      "sha256": "392b023063a3569a2efc47a019accb2d1e72295b1bfec2cbb81fc37e1515580a",
+      "previousExtractionSha256": "392b023063a3569a2efc47a019accb2d1e72295b1bfec2cbb81fc37e1515580a",
+      "matchesPreviousExtraction": true
+    },
+    {
+      "file": "webview/assets/ecosystem-mcp-elicitation-16f1ff3ff81d.js",
+      "bytes": 1994,
+      "sha256": "7432343f51ef6dd212594442c988db2e62b8d5d4d469f09e424a4125947b33db",
+      "previousExtractionSha256": null,
+      "matchesPreviousExtraction": null
+    },
+    {
+      "file": "webview/assets/mcp-request-card-5fd479d0d010.js",
+      "bytes": 20304,
+      "sha256": "381c7e82ca0f13039166b6e960d4dc2806d8e8f1e5fbb4df07b8572b6f0180ec",
+      "previousExtractionSha256": null,
+      "matchesPreviousExtraction": null
+    },
+    {
+      "file": "webview/assets/mcp-server-elicitation-request-panel-73248dfcf7fa.js",
+      "bytes": 14878,
+      "sha256": "d50bb406cd06eb73c872eae7ae4da9fa973147124b94f3d46cf509e4788b6326",
+      "previousExtractionSha256": null,
+      "matchesPreviousExtraction": null
+    },
+    {
+      "file": "webview/assets/mcp-tool-call-approval-a312e5089b30.js",
+      "bytes": 2650,
+      "sha256": "d447007daaf5ea118b37502240526c4eeba070ea1cce8a6f238d450a4515fad9",
+      "previousExtractionSha256": null,
+      "matchesPreviousExtraction": null
+    },
+    {
+      "file": "webview/assets/pending-mcp-server-elicitation-signals-8676b995a2e2.js",
+      "bytes": 924,
+      "sha256": "248c8d6ac7a95c9825dff72f47b85860d1a923eceeb5f4261ecc69e03a34c3db",
+      "previousExtractionSha256": null,
+      "matchesPreviousExtraction": null
+    },
+    {
+      "file": "webview/assets/pending-request-item-panel-a592e84fd27e.js",
+      "bytes": 86157,
+      "sha256": "7aa66ac7402bb75ed5215d03090b6b107125226a9252b4bf05a555909f85707e",
+      "previousExtractionSha256": null,
+      "matchesPreviousExtraction": null
+    }
+  ],
+  "chromeProducer": {
+    "sourcePath": "C:/Users/junes/.codex/plugins/cache/openai-bundled/chrome/26.1007.71326/scripts/browser-service.mjs",
+    "sha256": "81387988dcb4a1efb15d5665ba8483ba7d650500651beb009bf7c04f34afb9bc",
+    "excerpts": [
+      {
+        "sourcePath": "C:/Users/junes/.codex/plugins/cache/openai-bundled/chrome/26.1007.71326/scripts/browser-service.mjs",
+        "offset": 600161,
+        "line": 1105,
+        "source": "async function JR(t,e,r,n={},o=\"full-cdp\"){let i=He(n),s=ze(e),a={origin:s??void 0};s==null&&Oe({audit:a,check:o,options:n,reason:\"browser_context_unavailable\"},\"Raw CDP requires an HTTP(S) page. Navigate to the tab first then use the CDP capability.\");let l=await r.getFullCdpPermission(s);if(l?.decision===\"approve\"){jt(o,n,l.source,a);return}l?.decision===\"deny\"&&qt(o,l.source,`use raw CDP on ${s}`,n,a);let c=Wt(t,{audit:a,check:o,options:n,errorMessage:`${i} could not complete the permission request to use raw CDP on ${s}. Please try another approach.`}),d=await r.isPersistentApprovalAllowed(s),m=await c({message:`Allow ${i} to use full Chrome Developer Tools access on ${s}`,meta:{codex_approval_kind:\"mcp_tool_call\",connector_id:\"browser-use\",connector_name:i,persist:d?\"always\":void 0,riskLevel:\"high\",tool_name:\"access_browser_origin_with_raw_cdp\",tool_title:\"Use raw CDP on browser origin\",tool_params:{origin:s},tool_params_display:[],full_cdp_access:!0,origin:s}});await r.handleFullCdpPromptResult(s,m),sr(o,m,`use raw CDP on ${s}`,n,a)}u();"
+      },
+      {
+        "sourcePath": "C:/Users/junes/.codex/plugins/cache/openai-bundled/chrome/26.1007.71326/scripts/browser-service.mjs",
+        "offset": 1223363,
+        "line": 4469,
+        "source": "async handleFullCdpPromptResult(e,r){await D0({preferenceSessionId:qu(this.runtime),resource:{kind:\"fullCdp\",origin:e},turn:Wu(this.runtime)},r,this.config)}"
+      }
+    ]
+  },
+  "nativeExcerpts": [
+    {
+      "sourcePath": "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.9446.0_x64__2p2nqsd0c76g0/app/resources/app.asar::webview/assets/app-shared-30671c57ec82.js",
+      "offset": 2649659,
+      "line": 433,
+      "source": "function QB(e,t,n){if(e.mode===`openai/userVerification`){let t=H({_meta:hd().optional()}).safeParse(e);return{kind:`userVerification`,serverName:e.serverName,title:e.title,description:e.description,challenge:e.challenge,metadata:t.success?t.data._meta:void 0}}let r=E5t.safeParse(e._meta),i=r.success?r.data:{},a=H({\"openai/confirmation\":hd()}).safeParse(e._meta).data?.[`openai/confirmation`];if(H({codex_approval_kind:W(`browser_auth`)}).safeParse(e._meta).success){let t=h5t.safeParse(e._meta);if(e.mode!==`form`||!t.success)return null;let{browser_auth_challenge_id:n,...r}=t.data;return{kind:`browserAuth`,challengeId:n,targetTabId:m5t.safeParse(e._meta).data?.screenshot.tabId,message:e.message,serverName:e.serverName,browserAuth:r}}if(e.mode===`url`){let t=c5t(e.url,n);if(t==null)return null;let r=_5t.safeParse(e._meta);if(e.serverName===`codex_apps`){if(!r.success||!l5t(t.hostname))return null;let a=r.data._codex_apps.connector_auth_failure,o=c5t(a.install_url,n);return{...i,kind:`connectorAuth`,message:e.message,url:t.href,connector:{...a,install_url:o!=null&&l5t(o.hostname)?o.href:t.href}}}return{...i,kind:`urlAction`,message:e.message,serverName:e.serverName,url:t.href}}if(e.mode===`openai/form`||e.mode===`openaiForm`)return t?{...i,kind:e.mode===`openaiForm`?`openaiForm`:`legacyOpenAIForm`,message:e.message,serverName:e.serverName,schema:e.requestedSchema,confirmation:a}:{kind:`unsupportedOpenAIForm`,serverName:e.serverName};if(e.mode!==`form`)return null;if(H({codex_approval_kind:W(`browser_email_otp`)}).safeParse(e._meta).success){let t=H({connector_id:W(`browser-use`),origin:z(),frame_origin:z(),browser_auth_challenge_id:z().regex(/^[A-Za-z0-9_-]{32,128}$/),otp_handle:z().regex(/^[A-Za-z0-9_-]{21}[AQgw]$/)}).safeParse(e._meta);if(!t.success||![`node_repl`,`cua_repl`].includes(e.serverName))return null;let r=n(t.data.origin);return r?.protocol!==`https:`||r.username!==``||r.password!==``||r.href!==`${t.data.origin}/`||t.data.frame_origin!==t.data.origin||Object.keys(e.requestedSchema.properties).length!==1||e.requestedSchema.properties.approved?.type!==`boolean`||e.requestedSchema.required?.length!==1||e.requestedSchema.required[0]!==`approved`?null:{kind:`generic`,message:e.message,serverName:e.serverName,metadata:null,browserEmailOtp:{origin:t.data.origin},requestedSchema:e.requestedSchema,toolParams:null}}let o=z8t(e),s=w5t.safeParse(e._meta);if(!s.success&&o!=null)return{...i,approveDisabled:!0,executionBound:o.executionBound,kind:`mcpToolCall`,message:e.message,approval:{codex_approval_kind:`mcp_tool_call`,connector_id:o.connectorId,tool_name:o.toolName,tool_params:{}}};if(s.success)switch(s.data.codex_approval_kind){case`tool_suggestion`:return{...i,kind:`toolSuggestion`,suggestion:s.data};case`mcp_tool_call`:return{...i,approveDisabled:o?.approveDisabled,executionBound:o?.executionBound,kind:`mcpToolCall`,message:e.message,approval:o?.executionBound?{...s.data,persist:void 0}:s.data,toolParamsDisplay:a5t(e._meta)??void 0}}if(r5t(e.serverName,e.requestedSchema,e._meta)){let t=a5t(e._meta);return{...i,kind:`generic`,message:e.message,serverName:e.serverName,metadata:o5t(e._meta),persist:s5t(e._meta),requestedSchema:e.requestedSchema,toolParams:i5t(e._meta),toolParamsDisplay:t??void 0}}if(H({\"openai/elicitation\":hd()}).safeParse(e._meta).success){let n=t5t(e._meta);return!t||n===void 0?{kind:`unsupportedOpenAIForm`,serverName:e.serverName}:{...i,kind:`openaiForm`,message:e.message,serverName:e.serverName,schema:n,confirmation:a}}return{...i,kind:`formElicitation`,message:e.message,serverName:e.serverName,schema:e.requestedSchema,confirmation:a}}"
+    },
+    {
+      "sourcePath": "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.9446.0_x64__2p2nqsd0c76g0/app/resources/app.asar::webview/assets/app-shared-30671c57ec82.js",
+      "offset": 2511858,
+      "line": 430,
+      "source": "function Hz(e,t=null,n={}){switch(e){case`accept`:return{action:e,content:n,_meta:t};case`decline`:case`cancel`:return{action:e,content:null,_meta:t}}}"
+    },
+    {
+      "sourcePath": "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.9446.0_x64__2p2nqsd0c76g0/app/resources/app.asar::webview/assets/app-shared-30671c57ec82.js",
+      "offset": 2662282,
+      "line": 433,
+      "source": "function Q5t(e){let t=mz(e,wz);for(let e=t.length-1;e>=0;--e){let n=t[e];if(n?.status===`inProgress`)return n}return null}"
+    },
+    {
+      "sourcePath": "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.9446.0_x64__2p2nqsd0c76g0/app/resources/app.asar::webview/assets/app-shared-30671c57ec82.js",
+      "offset": 3259320,
+      "line": 490,
+      "source": "function qH(e){return e?.type===`agentMessage`&&(e.questions?.length??0)>0}function Bmn(e){return(e.questions??[]).map((t,n)=>({id:F5t(e.id,n),sourceItemId:e.id,questionIndex:n,title:t.title,options:t.options??[]}))}function Vmn(e){return e.flatMap(e=>qH(e)?Bmn(e):[])}"
+    },
+    {
+      "sourcePath": "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.9446.0_x64__2p2nqsd0c76g0/app/resources/app.asar::webview/assets/mcp-request-card-5fd479d0d010.js",
+      "offset": 1720,
+      "line": 1,
+      "source": "function ye(e){let t=(0,J.c)(39),{ApprovalCard:n,collapseToolParams:r,conversationId:i,hostId:a,requestId:o,headerContent:l,title:u,reason:d,toolParams:f,toolParamsDisplay:p,persist:m,subtitle:h,riskLevel:g,approveDisabled:_,approveLabel:v,acceptContent:y,onReply:b}=e,x=s(c),S=O(m),E=g===`high`,D;t[0]!==f||t[1]!==p?(D=Ce(f,p),t[0]=f,t[1]=p,t[2]=D):D=t[2];let A=D,j=(0,X.useRef)(!1),M;t[3]!==y||t[4]!==i||t[5]!==a||t[6]!==b||t[7]!==o||t[8]!==x?(M=(e,t)=>{let n=t===void 0?null:t;if(j.current)return!1;j.current=b==null;let r=T(e,e===`accept`&&n!=null?{persist:n}:null,y);return(b==null?N(x,a).replyWithMcpServerElicitationResponse(i,o,r):b(r)).catch(()=>{j.current=!1}),!0},t[3]=y,t[4]=i,t[5]=a,t[6]=b,t[7]=o,t[8]=x,t[9]=M):M=t[9];let P=M,F;t[10]!==_||t[11]!==b||t[12]!==P?(F=e=>{_||P(`accept`,e===void 0?null:e)&&b==null&&I()},t[10]=_,t[11]=b,t[12]=P,t[13]=F):F=t[13];let L=F,R;t[14]!==l||t[15]!==E?(R=E?(0,Z.jsxs)(Z.Fragment,{children:[(0,Z.jsx)(w,{className:`shrink-0 text-warning`,\"aria-hidden\":!1,asset:C}),(0,Z.jsx)(`span`,{className:`font-medium text-warning`,children:(0,Z.jsx)(k,{id:`composer.mcpToolCallApproval.elevatedRiskLabel`,defaultMessage:`Elevated Risk`,description:`Header label for elevated-risk MCP approval requests`})})]}):l,t[14]=l,t[15]=E,t[16]=R):R=t[16];let z=R,B;t[17]!==r||t[18]!==A?(B=A.length>0?(0,Z.jsx)(we,{collapsible:r,toolParamEntries:A}):null,t[17]=r,t[18]=A,t[19]=B):B=t[19];let V=!_&&S.includes(`session`)?{onClick:()=>L(`session`)}:void 0,H=!_&&S.includes(`always`)?{onClick:()=>L(`always`)}:void 0,U;t[20]===L?U=t[21]:(U=()=>L(),t[20]=L,t[21]=U);let W;t[22]===P?W=t[23]:(W=()=>{P(`decline`)},t[22]=P,t[23]=W);let G;t[24]!==_||t[25]!==v||t[26]!==V||t[27]!==H||t[28]!==U||t[29]!==W?(G={scopedApproveAction:V,leadingAction:H,approveDisabled:_,approveLabel:v,onApprove:U,onDeny:W},t[24]=_,t[25]=v,t[26]=V,t[27]=H,t[28]=U,t[29]=W,t[30]=G):G=t[30];let K;return t[31]!==n||t[32]!==d||t[33]!==z||t[34]!==h||t[35]!==G||t[36]!==B||t[37]!==u?(K=(0,Z.jsx)(n,{headerContent:z,title:u,subtitle:h,reason:d,details:B,actions:G}),t[31]=n,t[32]=d,t[33]=z,t[34]=h,t[35]=G,t[36]=B,t[37]=u,t[38]=K):K=t[38],K}"
+    }
+  ],
+  "externalRequestsScan": {
+    "filesScanned": 14805,
+    "matchedFiles": [
+      {
+        "file": ".vite/build/src-DCNiwad_.js",
+        "matches": [
+          {
+            "marker": "externalRequests",
+            "offset": 352814,
+            "source": "&&this.streamRevisionWaiters.delete(e)}}rejectStreamRevisionWaiters(e,t,n){let r=this.streamRevisionWaiters.get(e);if(r!=null){for(let e of r)(t==null||e.ownerClientId===t)&&(r.delete(e),e.reject(Error(n)));r.size===0&&this.streamRevisionWaiters.delete(e)}}deleteStreamRevisionWaiter(e,t){let n=this.streamRevisionWaiters.get(e);n!=null&&(n.delete(t),n.size===0&&this.streamRevisionWaiters.delete(e))}notifyStreamRoleChanged(e){let t=this.getStreamRole(e);this.params.threadStore.getConversation(e)?.externalRequests?.some(e=>e.completedAtMs==null)&&this.params.threadStore.updateConversationState(e,e=>{e.externalRequests=e.externalRequests?.filter(e=>e.completedAtMs!=null),e.externalRequests?.length===0&&delete e.externalRequests}),this.params.events.emitStreamRole(e,t),this.params.isLocalHost(this.params.hostId)&&this.params.transport?.setThreadOwnership(e,this.params.hostId,t?.role===`owner`)?.catch(t=>{this.params.logger.warning(`Failed to update local thread ownership`,{safe:{conversationId:e},sensitive:{error:t}})})}},sh=e.t(((e,t)=>{t.exports=function(){}})),ch=e.t(((e,t)=>{var n=sh()();t.exports=function(e){return e!==n&&e!==null}})),lh=e.t(((e,t)=>{var n=ch(),r=Array.prototype.forEach,i=Object.create,a=function(e,t){for(var n in e)t[n]=e[n]};t.exports=function(e){var t=i(null);return r.call(arguments,function(e){n(e)&&a(Object(e),t)}),t}})),uh=e.t(((e,t)=>{t.exports=function(){var e=Math.sign;return typeof e==`function`&&e(10)===1&&e(-20)===-1}})),dh=e.t(((e,t)=>{t.exports=function(e){return e=Number(e),isNaN(e)||e===0?e:e>0?1:-1}})),fh=e.t(((e,t)=>{t.exports=uh()()?Math.sign:dh()})),ph=e.t(((e,t)=>{var n=fh(),r=Math.abs,i=Math.floor;t.exports=function(e){return isNaN(e)?0:(e=Number(e),e===0||!isFinite(e)?e:n(e)*i(r(e)))}})),mh=e.t(((e,t)=>{var n=ph(),r=Math.max;t.exports=function(e){return r(0,n(e))}})),hh=e.t(((e,t)=>{var n=mh();t.exports=function(e,t,r){var i;return isNaN(e)?(i=t,i>=0?r&&i?i-1:i:1):e!==!1&&n(e)}})),gh=e.t(((e,t)=>{t.exports=function(e){if(typeo"
+          },
+          {
+            "marker": "externalRequests",
+            "offset": 352920,
+            "source": "s.get(e);if(r!=null){for(let e of r)(t==null||e.ownerClientId===t)&&(r.delete(e),e.reject(Error(n)));r.size===0&&this.streamRevisionWaiters.delete(e)}}deleteStreamRevisionWaiter(e,t){let n=this.streamRevisionWaiters.get(e);n!=null&&(n.delete(t),n.size===0&&this.streamRevisionWaiters.delete(e))}notifyStreamRoleChanged(e){let t=this.getStreamRole(e);this.params.threadStore.getConversation(e)?.externalRequests?.some(e=>e.completedAtMs==null)&&this.params.threadStore.updateConversationState(e,e=>{e.externalRequests=e.externalRequests?.filter(e=>e.completedAtMs!=null),e.externalRequests?.length===0&&delete e.externalRequests}),this.params.events.emitStreamRole(e,t),this.params.isLocalHost(this.params.hostId)&&this.params.transport?.setThreadOwnership(e,this.params.hostId,t?.role===`owner`)?.catch(t=>{this.params.logger.warning(`Failed to update local thread ownership`,{safe:{conversationId:e},sensitive:{error:t}})})}},sh=e.t(((e,t)=>{t.exports=function(){}})),ch=e.t(((e,t)=>{var n=sh()();t.exports=function(e){return e!==n&&e!==null}})),lh=e.t(((e,t)=>{var n=ch(),r=Array.prototype.forEach,i=Object.create,a=function(e,t){for(var n in e)t[n]=e[n]};t.exports=function(e){var t=i(null);return r.call(arguments,function(e){n(e)&&a(Object(e),t)}),t}})),uh=e.t(((e,t)=>{t.exports=function(){var e=Math.sign;return typeof e==`function`&&e(10)===1&&e(-20)===-1}})),dh=e.t(((e,t)=>{t.exports=function(e){return e=Number(e),isNaN(e)||e===0?e:e>0?1:-1}})),fh=e.t(((e,t)=>{t.exports=uh()()?Math.sign:dh()})),ph=e.t(((e,t)=>{var n=fh(),r=Math.abs,i=Math.floor;t.exports=function(e){return isNaN(e)?0:(e=Number(e),e===0||!isFinite(e)?e:n(e)*i(r(e)))}})),mh=e.t(((e,t)=>{var n=ph(),r=Math.max;t.exports=function(e){return r(0,n(e))}})),hh=e.t(((e,t)=>{var n=mh();t.exports=function(e,t,r){var i;return isNaN(e)?(i=t,i>=0?r&&i?i-1:i:1):e!==!1&&n(e)}})),gh=e.t(((e,t)=>{t.exports=function(e){if(typeof e!=`function`)throw TypeError(e+` is not a function`);return e}})),_h=e.t(((e,t)=>{var n=ch();t.exports="
+          },
+          {
+            "marker": "externalRequests",
+            "offset": 352939,
+            "source": "){for(let e of r)(t==null||e.ownerClientId===t)&&(r.delete(e),e.reject(Error(n)));r.size===0&&this.streamRevisionWaiters.delete(e)}}deleteStreamRevisionWaiter(e,t){let n=this.streamRevisionWaiters.get(e);n!=null&&(n.delete(t),n.size===0&&this.streamRevisionWaiters.delete(e))}notifyStreamRoleChanged(e){let t=this.getStreamRole(e);this.params.threadStore.getConversation(e)?.externalRequests?.some(e=>e.completedAtMs==null)&&this.params.threadStore.updateConversationState(e,e=>{e.externalRequests=e.externalRequests?.filter(e=>e.completedAtMs!=null),e.externalRequests?.length===0&&delete e.externalRequests}),this.params.events.emitStreamRole(e,t),this.params.isLocalHost(this.params.hostId)&&this.params.transport?.setThreadOwnership(e,this.params.hostId,t?.role===`owner`)?.catch(t=>{this.params.logger.warning(`Failed to update local thread ownership`,{safe:{conversationId:e},sensitive:{error:t}})})}},sh=e.t(((e,t)=>{t.exports=function(){}})),ch=e.t(((e,t)=>{var n=sh()();t.exports=function(e){return e!==n&&e!==null}})),lh=e.t(((e,t)=>{var n=ch(),r=Array.prototype.forEach,i=Object.create,a=function(e,t){for(var n in e)t[n]=e[n]};t.exports=function(e){var t=i(null);return r.call(arguments,function(e){n(e)&&a(Object(e),t)}),t}})),uh=e.t(((e,t)=>{t.exports=function(){var e=Math.sign;return typeof e==`function`&&e(10)===1&&e(-20)===-1}})),dh=e.t(((e,t)=>{t.exports=function(e){return e=Number(e),isNaN(e)||e===0?e:e>0?1:-1}})),fh=e.t(((e,t)=>{t.exports=uh()()?Math.sign:dh()})),ph=e.t(((e,t)=>{var n=fh(),r=Math.abs,i=Math.floor;t.exports=function(e){return isNaN(e)?0:(e=Number(e),e===0||!isFinite(e)?e:n(e)*i(r(e)))}})),mh=e.t(((e,t)=>{var n=ph(),r=Math.max;t.exports=function(e){return r(0,n(e))}})),hh=e.t(((e,t)=>{var n=mh();t.exports=function(e,t,r){var i;return isNaN(e)?(i=t,i>=0?r&&i?i-1:i:1):e!==!1&&n(e)}})),gh=e.t(((e,t)=>{t.exports=function(e){if(typeof e!=`function`)throw TypeError(e+` is not a function`);return e}})),_h=e.t(((e,t)=>{var n=ch();t.exports=function(e){if(!n(e"
+          },
+          {
+            "marker": "externalRequests",
+            "offset": 352992,
+            "source": "elete(e),e.reject(Error(n)));r.size===0&&this.streamRevisionWaiters.delete(e)}}deleteStreamRevisionWaiter(e,t){let n=this.streamRevisionWaiters.get(e);n!=null&&(n.delete(t),n.size===0&&this.streamRevisionWaiters.delete(e))}notifyStreamRoleChanged(e){let t=this.getStreamRole(e);this.params.threadStore.getConversation(e)?.externalRequests?.some(e=>e.completedAtMs==null)&&this.params.threadStore.updateConversationState(e,e=>{e.externalRequests=e.externalRequests?.filter(e=>e.completedAtMs!=null),e.externalRequests?.length===0&&delete e.externalRequests}),this.params.events.emitStreamRole(e,t),this.params.isLocalHost(this.params.hostId)&&this.params.transport?.setThreadOwnership(e,this.params.hostId,t?.role===`owner`)?.catch(t=>{this.params.logger.warning(`Failed to update local thread ownership`,{safe:{conversationId:e},sensitive:{error:t}})})}},sh=e.t(((e,t)=>{t.exports=function(){}})),ch=e.t(((e,t)=>{var n=sh()();t.exports=function(e){return e!==n&&e!==null}})),lh=e.t(((e,t)=>{var n=ch(),r=Array.prototype.forEach,i=Object.create,a=function(e,t){for(var n in e)t[n]=e[n]};t.exports=function(e){var t=i(null);return r.call(arguments,function(e){n(e)&&a(Object(e),t)}),t}})),uh=e.t(((e,t)=>{t.exports=function(){var e=Math.sign;return typeof e==`function`&&e(10)===1&&e(-20)===-1}})),dh=e.t(((e,t)=>{t.exports=function(e){return e=Number(e),isNaN(e)||e===0?e:e>0?1:-1}})),fh=e.t(((e,t)=>{t.exports=uh()()?Math.sign:dh()})),ph=e.t(((e,t)=>{var n=fh(),r=Math.abs,i=Math.floor;t.exports=function(e){return isNaN(e)?0:(e=Number(e),e===0||!isFinite(e)?e:n(e)*i(r(e)))}})),mh=e.t(((e,t)=>{var n=ph(),r=Math.max;t.exports=function(e){return r(0,n(e))}})),hh=e.t(((e,t)=>{var n=mh();t.exports=function(e,t,r){var i;return isNaN(e)?(i=t,i>=0?r&&i?i-1:i:1):e!==!1&&n(e)}})),gh=e.t(((e,t)=>{t.exports=function(e){if(typeof e!=`function`)throw TypeError(e+` is not a function`);return e}})),_h=e.t(((e,t)=>{var n=ch();t.exports=function(e){if(!n(e))throw TypeError(`Cannot use null or undefined`);ret"
+          },
+          {
+            "marker": "externalRequests",
+            "offset": 353031,
+            "source": "&&this.streamRevisionWaiters.delete(e)}}deleteStreamRevisionWaiter(e,t){let n=this.streamRevisionWaiters.get(e);n!=null&&(n.delete(t),n.size===0&&this.streamRevisionWaiters.delete(e))}notifyStreamRoleChanged(e){let t=this.getStreamRole(e);this.params.threadStore.getConversation(e)?.externalRequests?.some(e=>e.completedAtMs==null)&&this.params.threadStore.updateConversationState(e,e=>{e.externalRequests=e.externalRequests?.filter(e=>e.completedAtMs!=null),e.externalRequests?.length===0&&delete e.externalRequests}),this.params.events.emitStreamRole(e,t),this.params.isLocalHost(this.params.hostId)&&this.params.transport?.setThreadOwnership(e,this.params.hostId,t?.role===`owner`)?.catch(t=>{this.params.logger.warning(`Failed to update local thread ownership`,{safe:{conversationId:e},sensitive:{error:t}})})}},sh=e.t(((e,t)=>{t.exports=function(){}})),ch=e.t(((e,t)=>{var n=sh()();t.exports=function(e){return e!==n&&e!==null}})),lh=e.t(((e,t)=>{var n=ch(),r=Array.prototype.forEach,i=Object.create,a=function(e,t){for(var n in e)t[n]=e[n]};t.exports=function(e){var t=i(null);return r.call(arguments,function(e){n(e)&&a(Object(e),t)}),t}})),uh=e.t(((e,t)=>{t.exports=function(){var e=Math.sign;return typeof e==`function`&&e(10)===1&&e(-20)===-1}})),dh=e.t(((e,t)=>{t.exports=function(e){return e=Number(e),isNaN(e)||e===0?e:e>0?1:-1}})),fh=e.t(((e,t)=>{t.exports=uh()()?Math.sign:dh()})),ph=e.t(((e,t)=>{var n=fh(),r=Math.abs,i=Math.floor;t.exports=function(e){return isNaN(e)?0:(e=Number(e),e===0||!isFinite(e)?e:n(e)*i(r(e)))}})),mh=e.t(((e,t)=>{var n=ph(),r=Math.max;t.exports=function(e){return r(0,n(e))}})),hh=e.t(((e,t)=>{var n=mh();t.exports=function(e,t,r){var i;return isNaN(e)?(i=t,i>=0?r&&i?i-1:i:1):e!==!1&&n(e)}})),gh=e.t(((e,t)=>{t.exports=function(e){if(typeof e!=`function`)throw TypeError(e+` is not a function`);return e}})),_h=e.t(((e,t)=>{var n=ch();t.exports=function(e){if(!n(e))throw TypeError(`Cannot use null or undefined`);return e}})),vh=e.t(((e,t)=>{var n=gh(),r="
+          },
+          {
+            "marker": "externalRequests",
+            "offset": 393867,
+            "source": "p;timelineByIslands=new WeakMap;legacyTurnIdentitiesByTurns=new WeakMap;turnEntityKeysByConversationId=new Map;turnFieldReaders={error:e=>e?.error??null,hasOlderItems:e=>e?.itemsPagination?.hasLoadedOldest===!1,hasSubagentActivity:(e,t,n)=>(this.access.readItemActivity(t)?.[n]?.length??0)>0,interruptedCommandExecutionItemIds:e=>e?.interruptedCommandExecutionItemIds??null,itemIds:e=>e?.items.map(e=>e?.id)??null,status:e=>e?.status??null,turnId:e=>e?.turnId??null};threadFieldReaders={goalState:Kg,externalRequests:e=>e?.externalRequests??null,mcpServerElicitationRequests:e=>e?.requests.filter(e=>e.method===`mcpServer/elicitation/request`&&!(`completed`in e&&e.completed===!0))??null,environments:e=>e?.environments,connectedEnvironmentIds:e=>e?.connectedEnvironmentIds,historyComplete:e=>e==null?null:Ao(e),historyGeneration:e=>e?.turnHistory?.kind===`canonical`?e.turnHistory.history.generation:null,resumeState:e=>e?.resumeState??null,sessionId:e=>e?.sessionId??null,projectlessOutputDirectory:e=>e?.projectlessOutputDirectory??null,streamRole:(e,t)=>t==null?null:this.access.readStreamRole(t)??null,boundedCloudHistoryReady:e=>e?.boundedCloudHistory===!0&&e.turnHistory?.kind===`canonical`&&(e.turnHistory.history.isComplete||e.turnsPagination?.olderCursor!=null),listState:e=>this.getListState(e),queuedMessages:(e,t)=>t==null?void 0:this.access.readQueuedMessages(t),automaticApprovalReviewItems:e=>e==null?null:J(e,zo).flatMap(e=>e.items.filter(e=>e.type===`automaticApprovalReview`)),guardianWarnings:e=>e==null?null:e.guardianWarnings??[],createdThreadCalls:e=>this.access.readCreatedThreadCalls(e),subagentActivity:e=>this.access.readItemActivity(e),subagentProgress:e=>this.access.readItemProgress(e),childThreadIds:(e,t)=>t==null?[]:this.access.getChildThreadIds(t),metadata:e=>e==null?null:this.access.getMetaSnapshot(e.id)??Vg(e),runtimeStatus:e=>e==null?void 0:e.threadRuntimeStatus??null,collaborationMode:e=>e?.latestCollaborationMode??null,tokenUsageInfo:e=>e?.resumeState===`re"
+          },
+          {
+            "marker": "externalRequests",
+            "offset": 393890,
+            "source": " WeakMap;legacyTurnIdentitiesByTurns=new WeakMap;turnEntityKeysByConversationId=new Map;turnFieldReaders={error:e=>e?.error??null,hasOlderItems:e=>e?.itemsPagination?.hasLoadedOldest===!1,hasSubagentActivity:(e,t,n)=>(this.access.readItemActivity(t)?.[n]?.length??0)>0,interruptedCommandExecutionItemIds:e=>e?.interruptedCommandExecutionItemIds??null,itemIds:e=>e?.items.map(e=>e?.id)??null,status:e=>e?.status??null,turnId:e=>e?.turnId??null};threadFieldReaders={goalState:Kg,externalRequests:e=>e?.externalRequests??null,mcpServerElicitationRequests:e=>e?.requests.filter(e=>e.method===`mcpServer/elicitation/request`&&!(`completed`in e&&e.completed===!0))??null,environments:e=>e?.environments,connectedEnvironmentIds:e=>e?.connectedEnvironmentIds,historyComplete:e=>e==null?null:Ao(e),historyGeneration:e=>e?.turnHistory?.kind===`canonical`?e.turnHistory.history.generation:null,resumeState:e=>e?.resumeState??null,sessionId:e=>e?.sessionId??null,projectlessOutputDirectory:e=>e?.projectlessOutputDirectory??null,streamRole:(e,t)=>t==null?null:this.access.readStreamRole(t)??null,boundedCloudHistoryReady:e=>e?.boundedCloudHistory===!0&&e.turnHistory?.kind===`canonical`&&(e.turnHistory.history.isComplete||e.turnsPagination?.olderCursor!=null),listState:e=>this.getListState(e),queuedMessages:(e,t)=>t==null?void 0:this.access.readQueuedMessages(t),automaticApprovalReviewItems:e=>e==null?null:J(e,zo).flatMap(e=>e.items.filter(e=>e.type===`automaticApprovalReview`)),guardianWarnings:e=>e==null?null:e.guardianWarnings??[],createdThreadCalls:e=>this.access.readCreatedThreadCalls(e),subagentActivity:e=>this.access.readItemActivity(e),subagentProgress:e=>this.access.readItemProgress(e),childThreadIds:(e,t)=>t==null?[]:this.access.getChildThreadIds(t),metadata:e=>e==null?null:this.access.getMetaSnapshot(e.id)??Vg(e),runtimeStatus:e=>e==null?void 0:e.threadRuntimeStatus??null,collaborationMode:e=>e?.latestCollaborationMode??null,tokenUsageInfo:e=>e?.resumeState===`resumed`?e.latestTokenUsa"
+          }
+        ]
+      },
+      {
+        "file": "webview/assets/app-shared-30671c57ec82.js",
+        "matches": [
+          {
+            "marker": "externalRequests",
+            "offset": 2590068,
+            "source": "&&this.streamRevisionWaiters.delete(e)}}rejectStreamRevisionWaiters(e,t,n){let r=this.streamRevisionWaiters.get(e);if(r!=null){for(let e of r)(t==null||e.ownerClientId===t)&&(r.delete(e),e.reject(Error(n)));r.size===0&&this.streamRevisionWaiters.delete(e)}}deleteStreamRevisionWaiter(e,t){let n=this.streamRevisionWaiters.get(e);n!=null&&(n.delete(t),n.size===0&&this.streamRevisionWaiters.delete(e))}notifyStreamRoleChanged(e){let t=this.getStreamRole(e);this.params.threadStore.getConversation(e)?.externalRequests?.some(e=>e.completedAtMs==null)&&this.params.threadStore.updateConversationState(e,e=>{e.externalRequests=e.externalRequests?.filter(e=>e.completedAtMs!=null),e.externalRequests?.length===0&&delete e.externalRequests}),this.params.events.emitStreamRole(e,t),this.params.isLocalHost(this.params.hostId)&&this.params.transport?.setThreadOwnership(e,this.params.hostId,t?.role===`owner`)?.catch(t=>{this.params.logger.warning(`Failed to update local thread ownership`,{safe:{conversationId:e},sensitive:{error:t}})})}}})))()}var x3t=i(((e,t)=>{t.exports=function(){}})),gB=i(((e,t)=>{var n=x3t()();t.exports=function(e){return e!==n&&e!==null}})),S3t=i(((e,t)=>{var n=gB(),r=Array.prototype.forEach,i=Object.create,a=function(e,t){for(var n in e)t[n]=e[n]};t.exports=function(e){var t=i(null);return r.call(arguments,function(e){n(e)&&a(Object(e),t)}),t}})),C3t=i(((e,t)=>{t.exports=function(){var e=Math.sign;return typeof e==`function`&&e(10)===1&&e(-20)===-1}})),w3t=i(((e,t)=>{t.exports=function(e){return e=Number(e),isNaN(e)||e===0?e:e>0?1:-1}})),T3t=i(((e,t)=>{t.exports=C3t()()?Math.sign:w3t()})),E3t=i(((e,t)=>{var n=T3t(),r=Math.abs,i=Math.floor;t.exports=function(e){return isNaN(e)?0:(e=Number(e),e===0||!isFinite(e)?e:n(e)*i(r(e)))}})),_B=i(((e,t)=>{var n=E3t(),r=Math.max;t.exports=function(e){return r(0,n(e))}})),D3t=i(((e,t)=>{var n=_B();t.exports=function(e,t,r){var i;return isNaN(e)?(i=t,i>=0?r&&i?i-1:i:1):e!==!1&&n(e)}})),vB=i(((e,t)=>{t.exports=function(e){if(typ"
+          },
+          {
+            "marker": "externalRequests",
+            "offset": 2590174,
+            "source": "s.get(e);if(r!=null){for(let e of r)(t==null||e.ownerClientId===t)&&(r.delete(e),e.reject(Error(n)));r.size===0&&this.streamRevisionWaiters.delete(e)}}deleteStreamRevisionWaiter(e,t){let n=this.streamRevisionWaiters.get(e);n!=null&&(n.delete(t),n.size===0&&this.streamRevisionWaiters.delete(e))}notifyStreamRoleChanged(e){let t=this.getStreamRole(e);this.params.threadStore.getConversation(e)?.externalRequests?.some(e=>e.completedAtMs==null)&&this.params.threadStore.updateConversationState(e,e=>{e.externalRequests=e.externalRequests?.filter(e=>e.completedAtMs!=null),e.externalRequests?.length===0&&delete e.externalRequests}),this.params.events.emitStreamRole(e,t),this.params.isLocalHost(this.params.hostId)&&this.params.transport?.setThreadOwnership(e,this.params.hostId,t?.role===`owner`)?.catch(t=>{this.params.logger.warning(`Failed to update local thread ownership`,{safe:{conversationId:e},sensitive:{error:t}})})}}})))()}var x3t=i(((e,t)=>{t.exports=function(){}})),gB=i(((e,t)=>{var n=x3t()();t.exports=function(e){return e!==n&&e!==null}})),S3t=i(((e,t)=>{var n=gB(),r=Array.prototype.forEach,i=Object.create,a=function(e,t){for(var n in e)t[n]=e[n]};t.exports=function(e){var t=i(null);return r.call(arguments,function(e){n(e)&&a(Object(e),t)}),t}})),C3t=i(((e,t)=>{t.exports=function(){var e=Math.sign;return typeof e==`function`&&e(10)===1&&e(-20)===-1}})),w3t=i(((e,t)=>{t.exports=function(e){return e=Number(e),isNaN(e)||e===0?e:e>0?1:-1}})),T3t=i(((e,t)=>{t.exports=C3t()()?Math.sign:w3t()})),E3t=i(((e,t)=>{var n=T3t(),r=Math.abs,i=Math.floor;t.exports=function(e){return isNaN(e)?0:(e=Number(e),e===0||!isFinite(e)?e:n(e)*i(r(e)))}})),_B=i(((e,t)=>{var n=E3t(),r=Math.max;t.exports=function(e){return r(0,n(e))}})),D3t=i(((e,t)=>{var n=_B();t.exports=function(e,t,r){var i;return isNaN(e)?(i=t,i>=0?r&&i?i-1:i:1):e!==!1&&n(e)}})),vB=i(((e,t)=>{t.exports=function(e){if(typeof e!=`function`)throw TypeError(e+` is not a function`);return e}})),yB=i(((e,t)=>{var n=gB();t.exports="
+          },
+          {
+            "marker": "externalRequests",
+            "offset": 2590193,
+            "source": "){for(let e of r)(t==null||e.ownerClientId===t)&&(r.delete(e),e.reject(Error(n)));r.size===0&&this.streamRevisionWaiters.delete(e)}}deleteStreamRevisionWaiter(e,t){let n=this.streamRevisionWaiters.get(e);n!=null&&(n.delete(t),n.size===0&&this.streamRevisionWaiters.delete(e))}notifyStreamRoleChanged(e){let t=this.getStreamRole(e);this.params.threadStore.getConversation(e)?.externalRequests?.some(e=>e.completedAtMs==null)&&this.params.threadStore.updateConversationState(e,e=>{e.externalRequests=e.externalRequests?.filter(e=>e.completedAtMs!=null),e.externalRequests?.length===0&&delete e.externalRequests}),this.params.events.emitStreamRole(e,t),this.params.isLocalHost(this.params.hostId)&&this.params.transport?.setThreadOwnership(e,this.params.hostId,t?.role===`owner`)?.catch(t=>{this.params.logger.warning(`Failed to update local thread ownership`,{safe:{conversationId:e},sensitive:{error:t}})})}}})))()}var x3t=i(((e,t)=>{t.exports=function(){}})),gB=i(((e,t)=>{var n=x3t()();t.exports=function(e){return e!==n&&e!==null}})),S3t=i(((e,t)=>{var n=gB(),r=Array.prototype.forEach,i=Object.create,a=function(e,t){for(var n in e)t[n]=e[n]};t.exports=function(e){var t=i(null);return r.call(arguments,function(e){n(e)&&a(Object(e),t)}),t}})),C3t=i(((e,t)=>{t.exports=function(){var e=Math.sign;return typeof e==`function`&&e(10)===1&&e(-20)===-1}})),w3t=i(((e,t)=>{t.exports=function(e){return e=Number(e),isNaN(e)||e===0?e:e>0?1:-1}})),T3t=i(((e,t)=>{t.exports=C3t()()?Math.sign:w3t()})),E3t=i(((e,t)=>{var n=T3t(),r=Math.abs,i=Math.floor;t.exports=function(e){return isNaN(e)?0:(e=Number(e),e===0||!isFinite(e)?e:n(e)*i(r(e)))}})),_B=i(((e,t)=>{var n=E3t(),r=Math.max;t.exports=function(e){return r(0,n(e))}})),D3t=i(((e,t)=>{var n=_B();t.exports=function(e,t,r){var i;return isNaN(e)?(i=t,i>=0?r&&i?i-1:i:1):e!==!1&&n(e)}})),vB=i(((e,t)=>{t.exports=function(e){if(typeof e!=`function`)throw TypeError(e+` is not a function`);return e}})),yB=i(((e,t)=>{var n=gB();t.exports=function(e){if(!n(e"
+          },
+          {
+            "marker": "externalRequests",
+            "offset": 2590246,
+            "source": "elete(e),e.reject(Error(n)));r.size===0&&this.streamRevisionWaiters.delete(e)}}deleteStreamRevisionWaiter(e,t){let n=this.streamRevisionWaiters.get(e);n!=null&&(n.delete(t),n.size===0&&this.streamRevisionWaiters.delete(e))}notifyStreamRoleChanged(e){let t=this.getStreamRole(e);this.params.threadStore.getConversation(e)?.externalRequests?.some(e=>e.completedAtMs==null)&&this.params.threadStore.updateConversationState(e,e=>{e.externalRequests=e.externalRequests?.filter(e=>e.completedAtMs!=null),e.externalRequests?.length===0&&delete e.externalRequests}),this.params.events.emitStreamRole(e,t),this.params.isLocalHost(this.params.hostId)&&this.params.transport?.setThreadOwnership(e,this.params.hostId,t?.role===`owner`)?.catch(t=>{this.params.logger.warning(`Failed to update local thread ownership`,{safe:{conversationId:e},sensitive:{error:t}})})}}})))()}var x3t=i(((e,t)=>{t.exports=function(){}})),gB=i(((e,t)=>{var n=x3t()();t.exports=function(e){return e!==n&&e!==null}})),S3t=i(((e,t)=>{var n=gB(),r=Array.prototype.forEach,i=Object.create,a=function(e,t){for(var n in e)t[n]=e[n]};t.exports=function(e){var t=i(null);return r.call(arguments,function(e){n(e)&&a(Object(e),t)}),t}})),C3t=i(((e,t)=>{t.exports=function(){var e=Math.sign;return typeof e==`function`&&e(10)===1&&e(-20)===-1}})),w3t=i(((e,t)=>{t.exports=function(e){return e=Number(e),isNaN(e)||e===0?e:e>0?1:-1}})),T3t=i(((e,t)=>{t.exports=C3t()()?Math.sign:w3t()})),E3t=i(((e,t)=>{var n=T3t(),r=Math.abs,i=Math.floor;t.exports=function(e){return isNaN(e)?0:(e=Number(e),e===0||!isFinite(e)?e:n(e)*i(r(e)))}})),_B=i(((e,t)=>{var n=E3t(),r=Math.max;t.exports=function(e){return r(0,n(e))}})),D3t=i(((e,t)=>{var n=_B();t.exports=function(e,t,r){var i;return isNaN(e)?(i=t,i>=0?r&&i?i-1:i:1):e!==!1&&n(e)}})),vB=i(((e,t)=>{t.exports=function(e){if(typeof e!=`function`)throw TypeError(e+` is not a function`);return e}})),yB=i(((e,t)=>{var n=gB();t.exports=function(e){if(!n(e))throw TypeError(`Cannot use null or undefined`);ret"
+          },
+          {
+            "marker": "externalRequests",
+            "offset": 2590285,
+            "source": "&&this.streamRevisionWaiters.delete(e)}}deleteStreamRevisionWaiter(e,t){let n=this.streamRevisionWaiters.get(e);n!=null&&(n.delete(t),n.size===0&&this.streamRevisionWaiters.delete(e))}notifyStreamRoleChanged(e){let t=this.getStreamRole(e);this.params.threadStore.getConversation(e)?.externalRequests?.some(e=>e.completedAtMs==null)&&this.params.threadStore.updateConversationState(e,e=>{e.externalRequests=e.externalRequests?.filter(e=>e.completedAtMs!=null),e.externalRequests?.length===0&&delete e.externalRequests}),this.params.events.emitStreamRole(e,t),this.params.isLocalHost(this.params.hostId)&&this.params.transport?.setThreadOwnership(e,this.params.hostId,t?.role===`owner`)?.catch(t=>{this.params.logger.warning(`Failed to update local thread ownership`,{safe:{conversationId:e},sensitive:{error:t}})})}}})))()}var x3t=i(((e,t)=>{t.exports=function(){}})),gB=i(((e,t)=>{var n=x3t()();t.exports=function(e){return e!==n&&e!==null}})),S3t=i(((e,t)=>{var n=gB(),r=Array.prototype.forEach,i=Object.create,a=function(e,t){for(var n in e)t[n]=e[n]};t.exports=function(e){var t=i(null);return r.call(arguments,function(e){n(e)&&a(Object(e),t)}),t}})),C3t=i(((e,t)=>{t.exports=function(){var e=Math.sign;return typeof e==`function`&&e(10)===1&&e(-20)===-1}})),w3t=i(((e,t)=>{t.exports=function(e){return e=Number(e),isNaN(e)||e===0?e:e>0?1:-1}})),T3t=i(((e,t)=>{t.exports=C3t()()?Math.sign:w3t()})),E3t=i(((e,t)=>{var n=T3t(),r=Math.abs,i=Math.floor;t.exports=function(e){return isNaN(e)?0:(e=Number(e),e===0||!isFinite(e)?e:n(e)*i(r(e)))}})),_B=i(((e,t)=>{var n=E3t(),r=Math.max;t.exports=function(e){return r(0,n(e))}})),D3t=i(((e,t)=>{var n=_B();t.exports=function(e,t,r){var i;return isNaN(e)?(i=t,i>=0?r&&i?i-1:i:1):e!==!1&&n(e)}})),vB=i(((e,t)=>{t.exports=function(e){if(typeof e!=`function`)throw TypeError(e+` is not a function`);return e}})),yB=i(((e,t)=>{var n=gB();t.exports=function(e){if(!n(e))throw TypeError(`Cannot use null or undefined`);return e}})),O3t=i(((e,t)=>{var n=vB(),r=y"
+          },
+          {
+            "marker": "externalRequests",
+            "offset": 2631563,
+            "source": ";timelineByIslands=new WeakMap;legacyTurnIdentitiesByTurns=new WeakMap;turnEntityKeysByConversationId=new Map;turnFieldReaders={error:e=>e?.error??null,hasOlderItems:e=>e?.itemsPagination?.hasLoadedOldest===!1,hasSubagentActivity:(e,t,n)=>(this.access.readItemActivity(t)?.[n]?.length??0)>0,interruptedCommandExecutionItemIds:e=>e?.interruptedCommandExecutionItemIds??null,itemIds:e=>e?.items.map(e=>e?.id)??null,status:e=>e?.status??null,turnId:e=>e?.turnId??null};threadFieldReaders={goalState:Z6t,externalRequests:e=>e?.externalRequests??null,mcpServerElicitationRequests:e=>e?.requests.filter(e=>e.method===`mcpServer/elicitation/request`&&!(`completed`in e&&e.completed===!0))??null,environments:e=>e?.environments,connectedEnvironmentIds:e=>e?.connectedEnvironmentIds,historyComplete:e=>e==null?null:bz(e),historyGeneration:e=>e?.turnHistory?.kind===`canonical`?e.turnHistory.history.generation:null,resumeState:e=>e?.resumeState??null,sessionId:e=>e?.sessionId??null,projectlessOutputDirectory:e=>e?.projectlessOutputDirectory??null,streamRole:(e,t)=>t==null?null:this.access.readStreamRole(t)??null,boundedCloudHistoryReady:e=>e?.boundedCloudHistory===!0&&e.turnHistory?.kind===`canonical`&&(e.turnHistory.history.isComplete||e.turnsPagination?.olderCursor!=null),listState:e=>this.getListState(e),queuedMessages:(e,t)=>t==null?void 0:this.access.readQueuedMessages(t),automaticApprovalReviewItems:e=>e==null?null:mz(e,wz).flatMap(e=>e.items.filter(e=>e.type===`automaticApprovalReview`)),guardianWarnings:e=>e==null?null:e.guardianWarnings??[],createdThreadCalls:e=>this.access.readCreatedThreadCalls(e),subagentActivity:e=>this.access.readItemActivity(e),subagentProgress:e=>this.access.readItemProgress(e),childThreadIds:(e,t)=>t==null?[]:this.access.getChildThreadIds(t),metadata:e=>e==null?null:this.access.getMetaSnapshot(e.id)??q6t(e),runtimeStatus:e=>e==null?void 0:e.threadRuntimeStatus??null,collaborationMode:e=>e?.latestCollaborationMode??null,tokenUsageInfo:e=>e?.resumeState===`"
+          },
+          {
+            "marker": "externalRequests",
+            "offset": 2631586,
+            "source": "WeakMap;legacyTurnIdentitiesByTurns=new WeakMap;turnEntityKeysByConversationId=new Map;turnFieldReaders={error:e=>e?.error??null,hasOlderItems:e=>e?.itemsPagination?.hasLoadedOldest===!1,hasSubagentActivity:(e,t,n)=>(this.access.readItemActivity(t)?.[n]?.length??0)>0,interruptedCommandExecutionItemIds:e=>e?.interruptedCommandExecutionItemIds??null,itemIds:e=>e?.items.map(e=>e?.id)??null,status:e=>e?.status??null,turnId:e=>e?.turnId??null};threadFieldReaders={goalState:Z6t,externalRequests:e=>e?.externalRequests??null,mcpServerElicitationRequests:e=>e?.requests.filter(e=>e.method===`mcpServer/elicitation/request`&&!(`completed`in e&&e.completed===!0))??null,environments:e=>e?.environments,connectedEnvironmentIds:e=>e?.connectedEnvironmentIds,historyComplete:e=>e==null?null:bz(e),historyGeneration:e=>e?.turnHistory?.kind===`canonical`?e.turnHistory.history.generation:null,resumeState:e=>e?.resumeState??null,sessionId:e=>e?.sessionId??null,projectlessOutputDirectory:e=>e?.projectlessOutputDirectory??null,streamRole:(e,t)=>t==null?null:this.access.readStreamRole(t)??null,boundedCloudHistoryReady:e=>e?.boundedCloudHistory===!0&&e.turnHistory?.kind===`canonical`&&(e.turnHistory.history.isComplete||e.turnsPagination?.olderCursor!=null),listState:e=>this.getListState(e),queuedMessages:(e,t)=>t==null?void 0:this.access.readQueuedMessages(t),automaticApprovalReviewItems:e=>e==null?null:mz(e,wz).flatMap(e=>e.items.filter(e=>e.type===`automaticApprovalReview`)),guardianWarnings:e=>e==null?null:e.guardianWarnings??[],createdThreadCalls:e=>this.access.readCreatedThreadCalls(e),subagentActivity:e=>this.access.readItemActivity(e),subagentProgress:e=>this.access.readItemProgress(e),childThreadIds:(e,t)=>t==null?[]:this.access.getChildThreadIds(t),metadata:e=>e==null?null:this.access.getMetaSnapshot(e.id)??q6t(e),runtimeStatus:e=>e==null?void 0:e.threadRuntimeStatus??null,collaborationMode:e=>e?.latestCollaborationMode??null,tokenUsageInfo:e=>e?.resumeState===`resumed`?e.latestTokenU"
+          }
+        ]
+      }
+    ]
+  },
+  "runtimeSummary": {
+    "collectedAt": "2026-10-17T22:24:12.595Z",
+    "value": {
+      "href": "app://-/index.html",
+      "adapterVersion": 40,
+      "cachedConversations": 23,
+      "pendingRequests": 0,
+      "pendingExternalRequests": 0,
+      "activeQuestionCounts": [],
+      "replyFunctionSource": "replyWithMcpServerElicitationResponse(e,t,n){L7t(this.getApprovalActionContext(),e,t,n)}",
+      "moduleScripts": [
+        "app://-/assets/app-shared-30671c57ec82.js",
+        "app://-/assets/app-initial-102e45562729.js",
+        "app://-/assets/app-primary-cd52df2361eb.js"
+      ]
+    }
+  },
+  "scope": "只读安装包与当前原生运行态；契约验证使用Node VM内存替身；未作任何真实授权决定"
+}

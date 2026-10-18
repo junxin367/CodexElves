@@ -1,0 +1,11 @@
+HTTP/1.1 200 OK
+content-type: application/json; charset=utf-8
+etag: "e97642eb40bd037b95bece6f8c2a062389cab792f80dc96947664f7fbf2e8fa5"
+vary: Accept-Encoding
+content-length: 3430
+cache-control: no-cache
+x-content-type-options: nosniff
+referrer-policy: no-referrer
+x-frame-options: DENY
+content-security-policy: default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'
+date: Sun, 18 Oct 2026 00:11:33 GMT

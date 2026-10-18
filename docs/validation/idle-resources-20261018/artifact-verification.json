@@ -1,0 +1,180 @@
+{
+  "capturedAt": "2026-10-18T02:13:01.479832+00:00",
+  "android": {
+    "path": "E:\\code\\junes\\github\\CodexPlusPlus\\dist\\android\\CodexElves-0.5.0-android-debug.apk",
+    "bytes": 4719483,
+    "sha256": "603cc795e6de75f80cc9ae80121da2e5d7f91deeb6a6bc316f5b858600b94d17",
+    "resourceVersion": "d5ed8d9881586e081b8b6ec69ab4c1bb772d48d5a6e88b0a7190f0c5d51f0b64",
+    "resources": [
+      {
+        "path": "/",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/app.js",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/attachments.js",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/events-client.js",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/events-worker.js",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/icons/apple-touch-icon.png",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/icons/icon-192.png",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/icons/icon-512.png",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/manifest.webmanifest",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/markdown-renderer.js",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/markdown.js",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/message-actions.js",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/platform.js",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/pwa.js",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/recovery-store.js",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/style.css",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/sw.js",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/vendor/dompurify.esm.js",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/vendor/marked.esm.js",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      },
+      {
+        "path": "/vendor/mermaid.esm.js",
+        "sizeMatches": true,
+        "hashMatches": true,
+        "matchesSource": true
+      }
+    ]
+  },
+  "windows": [
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\target\\release\\codex-elves.exe",
+      "bytes": 24328192,
+      "sha256": "b36478611d4dfd86572e131f47826d2dee1219a99a68ae3ed8192cd4c4eda8cc"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\target\\release\\codex-elves-manager.exe",
+      "bytes": 57402368,
+      "sha256": "79c88369aab3d12e96b110609045dbee591489ee8a4b9faa566d7df99ff4ddaf"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\dist\\windows\\app\\codex-elves.exe",
+      "bytes": 24328192,
+      "sha256": "b36478611d4dfd86572e131f47826d2dee1219a99a68ae3ed8192cd4c4eda8cc"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\dist\\windows\\app\\codex-elves-manager.exe",
+      "bytes": 57402368,
+      "sha256": "79c88369aab3d12e96b110609045dbee591489ee8a4b9faa566d7df99ff4ddaf"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\dist\\windows\\CodexElves-0.5.0-windows-x64-setup.exe",
+      "bytes": 42450356,
+      "sha256": "1deb1641c4601b66de7f09a5080818927115503c1c2450c87d2fd8fd2875e613"
+    }
+  ],
+  "embedded": {
+    "app.js": {
+      "sha256": "aef2cac877935c70ccb11f59be6d815e41151ce8b51a008f05e2dd2d64b35050",
+      "exactBytesInManager": true
+    },
+    "pwa.js": {
+      "sha256": "535f5d39e25d60b6223040d337642aa2fc459f2b97617871987ee82414ad5c73",
+      "exactBytesInManager": true
+    },
+    "sw.js": {
+      "sha256": "d0706e10bb9d4dfda3bc81a038ab3f3e5f781740d37a3a1c4576a73b4f932584",
+      "exactBytesInManager": true
+    }
+  },
+  "checks": {
+    "all20ResourcesMatch": true,
+    "managerEmbedsCurrentSource": true,
+    "launcherCopyMatches": true,
+    "managerCopyMatches": true,
+    "packageMatchesBrowserVersion": true
+  },
+  "scope": "Local packages and isolated Chrome only; no install or production restart"
+}

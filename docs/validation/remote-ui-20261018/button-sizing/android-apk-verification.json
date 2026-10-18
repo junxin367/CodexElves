@@ -1,0 +1,37 @@
+{
+  "date": "2026-10-18",
+  "apk": "E:\\code\\junes\\github\\CodexPlusPlus\\dist\\android\\CodexElves-0.5.0-android-debug.apk",
+  "bytes": 4719483,
+  "sha256": "9c011608dac507c8ad2462caf9228cf54b767a372b3a64dac0b780ebb5a03f83",
+  "build": "BUILD SUCCESSFUL",
+  "tasks": [
+    "assembleDebug",
+    "lintDebug"
+  ],
+  "native_device_or_emulator_run": false,
+  "bundled_web_resources": {
+    "app.js": {
+      "packaged_sha256": "31c2f4b8844951ba3573db5a946b4bcaca25532e1be4f7c95135191cda291473",
+      "current_source_sha256": "31c2f4b8844951ba3573db5a946b4bcaca25532e1be4f7c95135191cda291473",
+      "matches_current_source": true
+    },
+    "style.css": {
+      "packaged_sha256": "51e5d2995fc55b64afc7cd8b63ca440dbdd9cc668707ac6d9c4c8699dd4450a2",
+      "current_source_sha256": "51e5d2995fc55b64afc7cd8b63ca440dbdd9cc668707ac6d9c4c8699dd4450a2",
+      "matches_current_source": true
+    }
+  },
+  "packaged_native_button": {
+    "width_dp": 36,
+    "height_dp": 36,
+    "padding_dp": 9,
+    "icon_dp": 18,
+    "field_margin_dp": 7,
+    "bounded_ripple_mask": true
+  },
+  "lint": {
+    "errors": 0,
+    "warnings": 1,
+    "warning": "Existing mipmap-anydpi-v26 ObsoleteSdkInt"
+  }
+}

@@ -1,0 +1,271 @@
+{
+  "capturedAtUtc": "2026-10-18T01:10:23.8655473+00:00",
+  "scope": "Android native read-only reconnect audit; no source edits, build, device run, install or service restart",
+  "apk": {
+    "path": "E:\\code\\junes\\github\\CodexPlusPlus\\dist\\android\\CodexElves-0.5.0-android-debug.apk",
+    "sha256": "cdeab7c56c3f4ce971a09fc7c2704b8bd3feb641ccba8916a8aea1158720faca",
+    "bytes": 4719483,
+    "webResourceVersion": "1a236d8e4a164a33cba2e88f1b820cbac3051bcaaaa12e40a5315a33a1a161c2",
+    "resources": [
+      {
+        "path": "/",
+        "manifestSha256": "a451f08e85d2f6ed371ec521c4b1553d2ee6b5859c57d9989a0cf518cac94008",
+        "apkSha256": "a451f08e85d2f6ed371ec521c4b1553d2ee6b5859c57d9989a0cf518cac94008",
+        "sourceSha256": "a451f08e85d2f6ed371ec521c4b1553d2ee6b5859c57d9989a0cf518cac94008",
+        "manifestSize": 1874,
+        "apkSize": 1874,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/app.js",
+        "manifestSha256": "4ea5415b9b017601945a2449956623dcb9b4363b16aa0a49d0781e3744db9d77",
+        "apkSha256": "4ea5415b9b017601945a2449956623dcb9b4363b16aa0a49d0781e3744db9d77",
+        "sourceSha256": "4ea5415b9b017601945a2449956623dcb9b4363b16aa0a49d0781e3744db9d77",
+        "manifestSize": 504104,
+        "apkSize": 504104,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/attachments.js",
+        "manifestSha256": "be9936a2451e82d65a3ca4a0b802cfabb6010780b74de037433fad551753ac81",
+        "apkSha256": "be9936a2451e82d65a3ca4a0b802cfabb6010780b74de037433fad551753ac81",
+        "sourceSha256": "be9936a2451e82d65a3ca4a0b802cfabb6010780b74de037433fad551753ac81",
+        "manifestSize": 16054,
+        "apkSize": 16054,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/events-client.js",
+        "manifestSha256": "e6889da6fc5a80c271924b959dac62f7a3875fad396bfa97a0eaf76a52162dcb",
+        "apkSha256": "e6889da6fc5a80c271924b959dac62f7a3875fad396bfa97a0eaf76a52162dcb",
+        "sourceSha256": "e6889da6fc5a80c271924b959dac62f7a3875fad396bfa97a0eaf76a52162dcb",
+        "manifestSize": 10446,
+        "apkSize": 10446,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/events-worker.js",
+        "manifestSha256": "8baf0cf284ef7a3e3ead8a0c62acdd6f3a3889e2ed37ed467e1e32ecdfebd5d3",
+        "apkSha256": "8baf0cf284ef7a3e3ead8a0c62acdd6f3a3889e2ed37ed467e1e32ecdfebd5d3",
+        "sourceSha256": "8baf0cf284ef7a3e3ead8a0c62acdd6f3a3889e2ed37ed467e1e32ecdfebd5d3",
+        "manifestSize": 5294,
+        "apkSize": 5294,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/icons/apple-touch-icon.png",
+        "manifestSha256": "ff430804f5de431b01338efe348163f099c339f15523ce98c8bce259d866a410",
+        "apkSha256": "ff430804f5de431b01338efe348163f099c339f15523ce98c8bce259d866a410",
+        "sourceSha256": "ff430804f5de431b01338efe348163f099c339f15523ce98c8bce259d866a410",
+        "manifestSize": 45461,
+        "apkSize": 45461,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/icons/icon-192.png",
+        "manifestSha256": "b377f107a2f2dd07224aa5d8bfdbd30db8637da3f9c1cb896e0b92311db27ad4",
+        "apkSha256": "b377f107a2f2dd07224aa5d8bfdbd30db8637da3f9c1cb896e0b92311db27ad4",
+        "sourceSha256": "b377f107a2f2dd07224aa5d8bfdbd30db8637da3f9c1cb896e0b92311db27ad4",
+        "manifestSize": 52387,
+        "apkSize": 52387,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/icons/icon-512.png",
+        "manifestSha256": "047bbae573cb16dac21c8ec09ac54846387526c0e32565aacd232561220a5dab",
+        "apkSha256": "047bbae573cb16dac21c8ec09ac54846387526c0e32565aacd232561220a5dab",
+        "sourceSha256": "047bbae573cb16dac21c8ec09ac54846387526c0e32565aacd232561220a5dab",
+        "manifestSize": 208081,
+        "apkSize": 208081,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/manifest.webmanifest",
+        "manifestSha256": "1c315454fb5b62001b317eb19813aa84cd575bb2ddb48d6048b4d12aa2e32434",
+        "apkSha256": "1c315454fb5b62001b317eb19813aa84cd575bb2ddb48d6048b4d12aa2e32434",
+        "sourceSha256": "1c315454fb5b62001b317eb19813aa84cd575bb2ddb48d6048b4d12aa2e32434",
+        "manifestSize": 556,
+        "apkSize": 556,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/markdown-renderer.js",
+        "manifestSha256": "4453fbec06165673a793cff3e65ee2d80f6f11cc808024bb9e036ae664f0a882",
+        "apkSha256": "4453fbec06165673a793cff3e65ee2d80f6f11cc808024bb9e036ae664f0a882",
+        "sourceSha256": "4453fbec06165673a793cff3e65ee2d80f6f11cc808024bb9e036ae664f0a882",
+        "manifestSize": 15124,
+        "apkSize": 15124,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/markdown.js",
+        "manifestSha256": "ad402364da53bdb87d7d27dce379fe97a6360151ac56f388cd59174a193b1d80",
+        "apkSha256": "ad402364da53bdb87d7d27dce379fe97a6360151ac56f388cd59174a193b1d80",
+        "sourceSha256": "ad402364da53bdb87d7d27dce379fe97a6360151ac56f388cd59174a193b1d80",
+        "manifestSize": 12122,
+        "apkSize": 12122,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/message-actions.js",
+        "manifestSha256": "da5731a067ca3b103cb8f54abd8f9eab8e3751acc96ba477508ca09fc90a9f69",
+        "apkSha256": "da5731a067ca3b103cb8f54abd8f9eab8e3751acc96ba477508ca09fc90a9f69",
+        "sourceSha256": "da5731a067ca3b103cb8f54abd8f9eab8e3751acc96ba477508ca09fc90a9f69",
+        "manifestSize": 3594,
+        "apkSize": 3594,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/platform.js",
+        "manifestSha256": "ffd7c3c8bef31e374ea1b7957bb257714fd9e8494995bd9866e2764c2c0424ba",
+        "apkSha256": "ffd7c3c8bef31e374ea1b7957bb257714fd9e8494995bd9866e2764c2c0424ba",
+        "sourceSha256": "ffd7c3c8bef31e374ea1b7957bb257714fd9e8494995bd9866e2764c2c0424ba",
+        "manifestSize": 453,
+        "apkSize": 453,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/pwa.js",
+        "manifestSha256": "adccbdb576b457020d05fedccbe86181fd023f8ef5a97dbe48369c49ee149dce",
+        "apkSha256": "adccbdb576b457020d05fedccbe86181fd023f8ef5a97dbe48369c49ee149dce",
+        "sourceSha256": "adccbdb576b457020d05fedccbe86181fd023f8ef5a97dbe48369c49ee149dce",
+        "manifestSize": 15159,
+        "apkSize": 15159,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/recovery-store.js",
+        "manifestSha256": "4814176a87ab45b4f4847451628b0b5c989759d6395686747e261c082582b27e",
+        "apkSha256": "4814176a87ab45b4f4847451628b0b5c989759d6395686747e261c082582b27e",
+        "sourceSha256": "4814176a87ab45b4f4847451628b0b5c989759d6395686747e261c082582b27e",
+        "manifestSize": 12021,
+        "apkSize": 12021,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/style.css",
+        "manifestSha256": "117d3bbe50e54c6cce1ae66b6101cec591e4bd717740070cd9dadab2928ae350",
+        "apkSha256": "117d3bbe50e54c6cce1ae66b6101cec591e4bd717740070cd9dadab2928ae350",
+        "sourceSha256": "117d3bbe50e54c6cce1ae66b6101cec591e4bd717740070cd9dadab2928ae350",
+        "manifestSize": 83725,
+        "apkSize": 83725,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/sw.js",
+        "manifestSha256": "8edaf63d9181e1c8b7fdc552ce2c197029b4fcb33bf376743a22ade14e24db22",
+        "apkSha256": "8edaf63d9181e1c8b7fdc552ce2c197029b4fcb33bf376743a22ade14e24db22",
+        "sourceSha256": "8edaf63d9181e1c8b7fdc552ce2c197029b4fcb33bf376743a22ade14e24db22",
+        "manifestSize": 27848,
+        "apkSize": 27848,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/vendor/dompurify.esm.js",
+        "manifestSha256": "60c5d5ccbb466de3de3ba863461a92bf134f8c156cef7992da43e0f659bc5cbd",
+        "apkSha256": "60c5d5ccbb466de3de3ba863461a92bf134f8c156cef7992da43e0f659bc5cbd",
+        "sourceSha256": "60c5d5ccbb466de3de3ba863461a92bf134f8c156cef7992da43e0f659bc5cbd",
+        "manifestSize": 85820,
+        "apkSize": 85820,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/vendor/marked.esm.js",
+        "manifestSha256": "930457e5d55439f90465015cc507d3323366e80df5f7a701b61189d4e1046bda",
+        "apkSha256": "930457e5d55439f90465015cc507d3323366e80df5f7a701b61189d4e1046bda",
+        "sourceSha256": "930457e5d55439f90465015cc507d3323366e80df5f7a701b61189d4e1046bda",
+        "manifestSize": 47076,
+        "apkSize": 47076,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      },
+      {
+        "path": "/vendor/mermaid.esm.js",
+        "manifestSha256": "b80a03a6965adce02160ac3bde4ea044788f9d00c00dfab2c75215131500f8c9",
+        "apkSha256": "b80a03a6965adce02160ac3bde4ea044788f9d00c00dfab2c75215131500f8c9",
+        "sourceSha256": "b80a03a6965adce02160ac3bde4ea044788f9d00c00dfab2c75215131500f8c9",
+        "manifestSize": 5254649,
+        "apkSize": 5254649,
+        "hashMatchesManifest": true,
+        "sizeMatchesManifest": true,
+        "matchesCurrentSource": true
+      }
+    ]
+  },
+  "nativeSources": [
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\MainActivity.java",
+      "sha256": "a909b22736487b4434f83db8b287e85a63d045163047e80c21799553386f2f83"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\SessionStore.java",
+      "sha256": "4059466757003140cf072a4a4921a5b8df1cffa8ddcfc7ff37bbb19cee0df500"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\ZrokCookiePolicy.java",
+      "sha256": "0b261855b6bbe30bfb07374903223232b436063bec93894bc6bc5042d07d466d"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\ResourceStore.java",
+      "sha256": "38ed612f33f9a115e3a97aaa077ba563610d29ab058c8fcc00cb375e0df0e9f2"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\ResourceStatePolicy.java",
+      "sha256": "e6e9276d78d7d230d7cb82daf814ea19600c1767f5caf691e54d8b3b54e1eeed"
+    }
+  ],
+  "priorBuildEvidence": "docs/validation/android-loading-images-20261018/artifact-verification.json",
+  "nativeMainActivityMatchesPriorFinalHash": true,
+  "checks": {
+    "allApkResourcesMatchManifest": true,
+    "allApkResourcesMatchCurrentSource": true
+  },
+  "deviceEvidence": {
+    "connectedDevice": false,
+    "installedApkIdentity": null,
+    "androidVersion": null,
+    "webViewVersion": null,
+    "activeResourceSnapshot": null,
+    "wsCloseCode": null,
+    "lifecycleTrace": null,
+    "rendererExitTrace": null,
+    "networkSwitchTrace": null
+  }
+}

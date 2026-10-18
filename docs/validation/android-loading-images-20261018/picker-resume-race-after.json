@@ -1,0 +1,141 @@
+{
+  "mode": "after",
+  "capturedAt": "2026-10-18T00:32:01.875Z",
+  "sourceHashes": {
+    "app": "4ea5415b9b017601945a2449956623dcb9b4363b16aa0a49d0781e3744db9d77",
+    "attachments": "be9936a2451e82d65a3ca4a0b802cfabb6010780b74de037433fad551753ac81"
+  },
+  "conclusion": "进行中选图不再被旧失败回执覆盖，旧失败输入仍可恢复；截图前提未知，未声称这是现场唯一原因。",
+  "passed": 8,
+  "total": 8,
+  "tests": [
+    {
+      "name": "连接状态导致的附件禁用/恢复不会递增版本或丢弃正在读取的图片",
+      "passed": true,
+      "detail": {
+        "before": {
+          "attachmentVersion": 0,
+          "count": 0,
+          "readingFiles": true
+        },
+        "after": {
+          "attachmentVersion": 0,
+          "count": 1,
+          "readingFiles": false
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "显式草稿重置会使正在读取的图片静默取消",
+      "passed": true,
+      "detail": {
+        "before": {
+          "attachmentVersion": 0,
+          "count": 0,
+          "readingFiles": true
+        },
+        "after": {
+          "attachmentVersion": 1,
+          "count": 0,
+          "readingFiles": false
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "待确认失败回执不会覆盖进行中选图且失败恢复记录仍保留",
+      "passed": true,
+      "detail": {
+        "before": {
+          "attachmentVersion": 0,
+          "count": 0,
+          "readingFiles": true
+        },
+        "after": {
+          "attachmentVersion": 0,
+          "count": 1,
+          "readingFiles": false
+        },
+        "retainedFailedRecoveries": 1,
+        "notices": []
+      }
+    },
+    {
+      "name": "有当前新文字时失败回执不覆盖草稿且选图保留",
+      "passed": true,
+      "detail": {
+        "before": {
+          "attachmentVersion": 0,
+          "count": 0,
+          "readingFiles": true
+        },
+        "after": {
+          "attachmentVersion": 0,
+          "count": 1,
+          "readingFiles": false
+        },
+        "newDraftKept": true
+      }
+    },
+    {
+      "name": "没有进行中选图时正常自动恢复旧失败输入",
+      "passed": true,
+      "detail": {
+        "after": {
+          "attachmentVersion": 1,
+          "count": 0,
+          "readingFiles": false
+        },
+        "normallyRecovered": true
+      }
+    },
+    {
+      "name": "已有当前图片时旧失败输入不会覆盖",
+      "passed": true,
+      "detail": {
+        "before": {
+          "attachmentVersion": 1,
+          "count": 1,
+          "readingFiles": false
+        },
+        "after": {
+          "attachmentVersion": 1,
+          "count": 1,
+          "readingFiles": false
+        },
+        "retainedFailedRecoveries": 1
+      }
+    },
+    {
+      "name": "读取失败后仍可通过原恢复按钮取回失败输入",
+      "passed": true,
+      "detail": {
+        "after": {
+          "attachmentVersion": 1,
+          "count": 0,
+          "readingFiles": false
+        },
+        "manuallyRecovered": true,
+        "readFailureNotice": [
+          [
+            "已添加 0 张图片；selected.png：合成图片读取失败",
+            true
+          ]
+        ]
+      }
+    },
+    {
+      "name": "真实聊天切换仍立即重置附件并取消旧聊天读取",
+      "passed": true,
+      "detail": {
+        "after": {
+          "attachmentVersion": 1,
+          "count": 0,
+          "readingFiles": false
+        },
+        "switchedThread": true
+      }
+    }
+  ]
+}

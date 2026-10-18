@@ -1,0 +1,139 @@
+{
+  "generatedAt": "2026-10-17T16:18:55.286Z",
+  "source": "assets/remote-access/app.js",
+  "sourceSha256": "31c2f4b8844951ba3573db5a946b4bcaca25532e1be4f7c95135191cda291473",
+  "mode": "源函数 VM 最小复现；DOM 几何使用闭合 details 的可见性模型",
+  "results": [
+    {
+      "name": "最新页刷新不会让已完成轮次的补页入口假装正在加载",
+      "status": "passed"
+    },
+    {
+      "name": "更早轮次请求只更新跨轮分页入口，不更新各轮活动入口",
+      "status": "passed"
+    },
+    {
+      "name": "已完成轮次的补页入口属于折叠活动明细，最终正文保持可见",
+      "status": "passed"
+    },
+    {
+      "name": "展开活动后自动调度可见缺页；实际补页保留加载状态，结束后入口移除",
+      "status": "passed"
+    },
+    {
+      "name": "单轮补页失败后保留手动入口且解除加载状态",
+      "status": "passed"
+    },
+    {
+      "name": "活动轮次的缺页和正在思考提示继续显示",
+      "status": "passed"
+    },
+    {
+      "name": "完整轮次与空已完成轮次不产生分页或思考占位",
+      "status": "passed"
+    },
+    {
+      "name": "仅加载到用户输入与最终答复时仍有可展开的历史活动入口",
+      "status": "passed"
+    },
+    {
+      "name": "中断或仍为 commentary 的轮次不会折叠必要分页入口",
+      "status": "passed"
+    },
+    {
+      "name": "真实历史调度器跳过折叠明细，展开后自动补页且不并发重复请求",
+      "status": "passed"
+    },
+    {
+      "name": "切换会话后旧分页响应不合入新会话，也不清除新请求状态",
+      "status": "passed"
+    }
+  ],
+  "functions": {
+    "reconcileChildren": {
+      "path": "assets/remote-access/app.js",
+      "line": 5084,
+      "sha256": "746160daa8ae3608ce08c3db11c6db6160f5c8ec1a07437fcc1358655df3b303"
+    },
+    "activityTimestamp": {
+      "path": "assets/remote-access/app.js",
+      "line": 5563,
+      "sha256": "ce94a7fe3ff9b3438be18cdd17c1f2df0648367d43733b7479fb305ab372321b"
+    },
+    "activityPresentation": {
+      "path": "assets/remote-access/app.js",
+      "line": 5567,
+      "sha256": "1ea196966ac0687d11a11baf740028dec71e245bc26dc2915a3ca862de031ae3"
+    },
+    "updateActivitySummary": {
+      "path": "assets/remote-access/app.js",
+      "line": 5589,
+      "sha256": "e345cf2e4a80a28d5649f328d0375bfa1fc79244c1df435fb2b779be3a5f4b08"
+    },
+    "renderActivity": {
+      "path": "assets/remote-access/app.js",
+      "line": 5737,
+      "sha256": "6588e437e74f7d7f965f8ba3ffedaa5ff4f64b316e1590df78f071cd9404a8a6"
+    },
+    "finalMessageIndex": {
+      "path": "assets/remote-access/app.js",
+      "line": 5544,
+      "sha256": "38240ce0d6d7a1bf163adc9124a3222ae5873524b7f1e87c735d57957b77d9fe"
+    },
+    "historyLoadButton": {
+      "path": "assets/remote-access/app.js",
+      "line": 6557,
+      "sha256": "f48a27e9317e72b7fa72adcfc468f9b5bc2139df09fd8aeb4734d8241707dbf0"
+    },
+    "historyGapIndex": {
+      "path": "assets/remote-access/app.js",
+      "line": 6572,
+      "sha256": "7c46214e59e58a62f98ceb838e0beb64367d36f2c29710efa1a6bdde012a3ff7"
+    },
+    "syncHistoryButtons": {
+      "path": "assets/remote-access/app.js",
+      "line": 6547,
+      "sha256": "5b809c430a16d9219f5ee9ba2e03d9e19b8e5adda980b153d8ae309db9687bc6"
+    },
+    "renderMessages": {
+      "path": "assets/remote-access/app.js",
+      "line": 6580,
+      "sha256": "5c3162e1120767f6b1e06848dc98b07460fcbdc0840dfeac4e40868a9eaf2b66"
+    },
+    "completedItem": {
+      "path": "assets/remote-access/app.js",
+      "line": 6984,
+      "sha256": "01fd653402b1044cc93373ed562948552436778a23857317d19ee568fc5b7226"
+    },
+    "mergeItemProjection": {
+      "path": "assets/remote-access/app.js",
+      "line": 6990,
+      "sha256": "c6c704c35dafbcecbebfbc3236d353486b1339476cdb6c059f03080a7bbfaff7"
+    },
+    "mergeLiveText": {
+      "path": "assets/remote-access/app.js",
+      "line": 6964,
+      "sha256": "01b7b077bb4be4be80f6d19d40a0f0aaf7d9fa623c6676dafeec483836e0c5dd"
+    },
+    "mergeHistoryTurn": {
+      "path": "assets/remote-access/app.js",
+      "line": 6997,
+      "sha256": "bf11525e38469dd8a1802a173bef74756cc3aa5784b3268b721f4014a060ea58"
+    },
+    "readHistoryPage": {
+      "path": "assets/remote-access/app.js",
+      "line": 6865,
+      "sha256": "3fe328685a967dc63cb23889c7f4ac1ea8be3ad03d08d1ff4a2c431d7e40eb05"
+    },
+    "loadHistory": {
+      "path": "assets/remote-access/app.js",
+      "line": 6847,
+      "sha256": "52c38d00490dd02f0de6f032659d109fb7cca1b5eb586c97fb15a74cea052bbf"
+    },
+    "scheduleHistoryLoad": {
+      "path": "assets/remote-access/app.js",
+      "line": 6524,
+      "sha256": "d56fd10f667c658045cee3953e8469cdb27f083f1b2581141d9926e181fd3ffc"
+    }
+  }
+}

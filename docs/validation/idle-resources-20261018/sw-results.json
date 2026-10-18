@@ -1,0 +1,166 @@
+{
+  "checkedAt": "2026-10-18T02:00:54.940Z",
+  "verification": "Node VM executes the actual Service Worker source with in-memory Cache Storage and controlled fetch/clock; no browser, live service, or real session is touched.",
+  "sourceSha256": "d0706e10bb9d4dfda3bc81a038ab3f3e5f781740d37a3a1c4576a73b4f932584",
+  "fixtureVersion": "3880f1b8586532489deec116bf4fbcc698f5ce441d83f6ec20e3865184cb52f9",
+  "fixtureResources": [
+    {
+      "path": "/",
+      "contentType": "text/html; charset=utf-8",
+      "size": 1874,
+      "sha256": "a451f08e85d2f6ed371ec521c4b1553d2ee6b5859c57d9989a0cf518cac94008"
+    },
+    {
+      "path": "/icons/apple-touch-icon.png",
+      "contentType": "image/png",
+      "size": 45461,
+      "sha256": "ff430804f5de431b01338efe348163f099c339f15523ce98c8bce259d866a410"
+    },
+    {
+      "path": "/icons/icon-192.png",
+      "contentType": "image/png",
+      "size": 52387,
+      "sha256": "b377f107a2f2dd07224aa5d8bfdbd30db8637da3f9c1cb896e0b92311db27ad4"
+    },
+    {
+      "path": "/icons/icon-512.png",
+      "contentType": "image/png",
+      "size": 208081,
+      "sha256": "047bbae573cb16dac21c8ec09ac54846387526c0e32565aacd232561220a5dab"
+    },
+    {
+      "path": "/manifest.webmanifest",
+      "contentType": "application/manifest+json; charset=utf-8",
+      "size": 556,
+      "sha256": "1c315454fb5b62001b317eb19813aa84cd575bb2ddb48d6048b4d12aa2e32434"
+    },
+    {
+      "path": "/markdown-renderer.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "size": 15124,
+      "sha256": "4453fbec06165673a793cff3e65ee2d80f6f11cc808024bb9e036ae664f0a882"
+    },
+    {
+      "path": "/vendor/dompurify.esm.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "size": 85820,
+      "sha256": "60c5d5ccbb466de3de3ba863461a92bf134f8c156cef7992da43e0f659bc5cbd"
+    },
+    {
+      "path": "/vendor/marked.esm.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "size": 47076,
+      "sha256": "930457e5d55439f90465015cc507d3323366e80df5f7a701b61189d4e1046bda"
+    },
+    {
+      "path": "/vendor/mermaid.esm.js",
+      "contentType": "application/javascript; charset=utf-8",
+      "size": 5254649,
+      "sha256": "b80a03a6965adce02160ac3bde4ea044788f9d00c00dfab2c75215131500f8c9"
+    }
+  ],
+  "passed": 9,
+  "failed": 0,
+  "results": [
+    {
+      "name": "未触发图表时空闲预下载全部可选资源，Mermaid 排在较小文件之后",
+      "status": "passed",
+      "durationMs": 51,
+      "details": {
+        "downloaded": [
+          "/manifest.webmanifest",
+          "/markdown-renderer.js",
+          "/icons/apple-touch-icon.png",
+          "/vendor/marked.esm.js",
+          "/icons/icon-192.png",
+          "/vendor/dompurify.esm.js",
+          "/icons/icon-512.png",
+          "/vendor/mermaid.esm.js"
+        ],
+        "sizes": [
+          556,
+          15124,
+          45461,
+          47076,
+          52387,
+          85820,
+          208081,
+          5254649
+        ],
+        "backgroundPeak": 1
+      }
+    },
+    {
+      "name": "空闲准备完成后首次 Mermaid 需求及有限重试 query 从缓存返回",
+      "status": "passed",
+      "durationMs": 55,
+      "details": {
+        "additionalNetworkRequests": 0
+      }
+    },
+    {
+      "name": "忙状态、应用未就绪、页面不可见或错误版本均不启动预下载",
+      "status": "passed",
+      "durationMs": 4,
+      "details": {
+        "statesChecked": 4
+      }
+    },
+    {
+      "name": "已授权的空闲队列在前台忙期间等待，空闲后恢复",
+      "status": "passed",
+      "durationMs": 31,
+      "details": {
+        "downloadsWhileBusy": 0,
+        "resumedDownloads": 8
+      }
+    },
+    {
+      "name": "同一路径由按需请求接管预下载，不重复下载或中止该资源",
+      "status": "passed",
+      "durationMs": 38,
+      "details": {
+        "mermaidRequests": 1,
+        "promotedPriority": "foreground"
+      }
+    },
+    {
+      "name": "可选任务被主动操作两次中断后退避，继续后续资源，按需可绕过退避",
+      "status": "passed",
+      "durationMs": 33,
+      "details": {
+        "interruptedPath": "/manifest.webmanifest",
+        "interruptedAttempts": 2,
+        "laterMermaidDownloaded": true,
+        "demandBypassedBackoff": true
+      }
+    },
+    {
+      "name": "摘要失败不写缓存或恢复页；两种缓存模式重试及五分钟空闲退避保留",
+      "status": "passed",
+      "durationMs": 46,
+      "details": {
+        "rejectedAttempts": 2,
+        "retrySucceeded": true,
+        "recoveryNotices": 0
+      }
+    },
+    {
+      "name": "损坏缓存重新校验修复，当前 worker 版本错误时拒绝后台准备",
+      "status": "passed",
+      "durationMs": 40,
+      "details": {
+        "corruptedEntryRepaired": true,
+        "wrongVersionRequests": 0
+      }
+    },
+    {
+      "name": "前台资源下载并发仍最多两个",
+      "status": "passed",
+      "durationMs": 26,
+      "details": {
+        "foregroundPeak": 2
+      }
+    }
+  ]
+}

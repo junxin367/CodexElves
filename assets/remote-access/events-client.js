@@ -178,12 +178,23 @@ function fallbackStream() {
   const restore = () => {
     if (closed) return;
     online = navigator.onLine !== false;
-    if (online && !hidden) connect();
+    if (!online || hidden) return;
+    if (!socket) {
+      connect();
+      return;
+    }
+    const now = Date.now();
+    lastWatchAt = now;
+    graceUntil = Math.max(graceUntil, now + RESUME_GRACE);
+    if (watchTimer === null) watchTimer = setTimeout(watch, WATCH_INTERVAL);
   };
   const visibility = () => {
     hidden = document.hidden;
-    if (hidden) pause();
-    else restore();
+    if (hidden) {
+      clearTimeout(retryTimer);
+      clearTimeout(watchTimer);
+      retryTimer = watchTimer = null;
+    } else restore();
   };
   window.addEventListener("offline", offline);
   window.addEventListener("online", restore);

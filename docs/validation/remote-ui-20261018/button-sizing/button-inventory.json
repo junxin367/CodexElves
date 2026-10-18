@@ -1,0 +1,206 @@
+{
+  "changed": [
+    {
+      "id": "image-close",
+      "name": "图片查看弹窗 · 关闭",
+      "cls": "image-preview-close",
+      "icon": "close",
+      "old": 40,
+      "next": 32,
+      "iconSize": 16,
+      "context": "image-preview-panel",
+      "floating": true
+    },
+    {
+      "id": "settings-close",
+      "name": "设置弹窗 · 关闭",
+      "cls": "icon-button",
+      "icon": "close",
+      "old": 40,
+      "next": 32,
+      "iconSize": 16,
+      "context": "appearance-heading"
+    },
+    {
+      "id": "sidebar-view",
+      "name": "侧栏 · 切换会话视图",
+      "cls": "icon-button sidebar-view-toggle",
+      "icon": "folder",
+      "old": 40,
+      "next": 32,
+      "iconSize": 16
+    },
+    {
+      "id": "sidebar-search",
+      "name": "侧栏 · 搜索会话与项目",
+      "cls": "icon-button sidebar-search-toggle",
+      "icon": "search",
+      "old": 40,
+      "next": 32,
+      "iconSize": 16
+    },
+    {
+      "id": "row-more",
+      "name": "项目 / 会话 · 更多操作",
+      "cls": "row-menu-button",
+      "icon": "more",
+      "old": 40,
+      "next": 32,
+      "iconSize": 16
+    },
+    {
+      "id": "jump-latest",
+      "name": "会话区 · 跳转到最新消息",
+      "cls": "scroll-to-bottom",
+      "icon": "arrowUp",
+      "old": 40,
+      "next": 32,
+      "iconSize": 16,
+      "floating": true
+    },
+    {
+      "id": "goal-close",
+      "name": "目标编辑弹窗 · 关闭",
+      "cls": "icon-button goal-edit-close",
+      "icon": "close",
+      "old": 40,
+      "next": 32,
+      "iconSize": 16
+    },
+    {
+      "id": "sidebar-open",
+      "name": "会话顶部 · 打开 / 收起侧栏",
+      "cls": "icon-button",
+      "elementId": "open-sidebar",
+      "icon": "menu",
+      "old": 40,
+      "next": 36,
+      "iconSize": 18,
+      "context": "conversation-header"
+    },
+    {
+      "id": "refresh-session",
+      "name": "会话顶部 · 刷新",
+      "cls": "icon-button",
+      "elementId": "refresh",
+      "icon": "refresh",
+      "old": 40,
+      "next": 36,
+      "iconSize": 18,
+      "context": "conversation-header"
+    },
+    {
+      "id": "web-key",
+      "name": "网页登录 · 显示 / 隐藏密钥",
+      "cls": "pair-key-toggle",
+      "icon": "eye",
+      "old": 44,
+      "next": 36,
+      "iconSize": 18,
+      "floating": true
+    },
+    {
+      "id": "queue-drag",
+      "name": "队列 · 拖动调整顺序",
+      "cls": "queued-message-icon queued-drag-handle",
+      "icon": "queue",
+      "old": 36,
+      "next": 28,
+      "iconSize": 16
+    }
+  ],
+  "unchanged": [
+    {
+      "id": "theme",
+      "name": "设置 · 当前主题 / 切换主题",
+      "cls": "appearance-theme-button",
+      "icon": "moon",
+      "old": 32,
+      "next": 32,
+      "iconSize": 20
+    },
+    {
+      "id": "attachment",
+      "name": "编辑器附件 · 移除图片",
+      "cls": "composer-attachment-remove",
+      "rawIcon": true,
+      "icon": "close",
+      "old": 18,
+      "next": 18,
+      "iconSize": 12,
+      "floating": true
+    },
+    {
+      "id": "add",
+      "name": "编辑器 · 添加功能",
+      "cls": "icon-button composer-add-button",
+      "icon": "plus",
+      "old": 30,
+      "next": 30,
+      "iconSize": 16
+    },
+    {
+      "id": "send",
+      "name": "编辑器 · 发送 / 停止",
+      "cls": "send-button",
+      "icon": "arrowUp",
+      "old": 36,
+      "next": 36,
+      "iconSize": 18
+    },
+    {
+      "id": "message-copy",
+      "name": "消息 · 复制 / 编辑",
+      "cls": "message-action-button",
+      "icon": "copy",
+      "old": 32,
+      "next": 32,
+      "iconSize": 16
+    },
+    {
+      "id": "command-copy",
+      "name": "命令输出 · 复制",
+      "cls": "command-shell-copy",
+      "icon": "copy",
+      "old": 32,
+      "next": 32,
+      "iconSize": 16
+    },
+    {
+      "id": "event-info",
+      "name": "会话事件 · 说明",
+      "cls": "transcript-event-info",
+      "icon": "info",
+      "old": 32,
+      "next": 32,
+      "iconSize": 16
+    },
+    {
+      "id": "goal-edit",
+      "name": "目标 · 编辑 / 核对回执",
+      "cls": "goal-edit-button",
+      "icon": "edit",
+      "old": 32,
+      "next": 32,
+      "iconSize": 16
+    },
+    {
+      "id": "queue-more",
+      "name": "队列 · 更多操作",
+      "cls": "queued-menu-button",
+      "icon": "more",
+      "old": 32,
+      "next": 32,
+      "iconSize": 16
+    },
+    {
+      "id": "clear-read",
+      "name": "侧栏 · 清除已读",
+      "cls": "priority-clear-button",
+      "icon": "eraser",
+      "old": 32,
+      "next": 32,
+      "iconSize": 16
+    }
+  ]
+}

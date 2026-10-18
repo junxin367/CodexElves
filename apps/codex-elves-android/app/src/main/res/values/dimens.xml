@@ -1,0 +1,4 @@
+<resources>
+    <dimen name="login_horizontal_padding">18dp</dimen>
+    <dimen name="login_max_width">420dp</dimen>
+</resources>

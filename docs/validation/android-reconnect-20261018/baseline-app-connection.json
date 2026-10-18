@@ -1,0 +1,161 @@
+{
+  "time": "2026-10-18T01:23:17.985Z",
+  "source": "assets/remote-access/app.js",
+  "sourceSha256": "4ea5415b9b017601945a2449956623dcb9b4363b16aa0a49d0781e3744db9d77",
+  "extraction": "TypeScript AST extracts current source functions and top-level lifecycle handlers into isolated Node vm",
+  "total": 33,
+  "passed": 15,
+  "failed": 18,
+  "results": [
+    {
+      "name": "普通侧边栏 503 保留健康连接并抛出原错误",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nfalse !== true\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:95:10)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "历史读取网络异常保留健康连接",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nfalse !== true\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:101:10)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "普通读取超时保留健康连接及超时错误",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nfalse !== true\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:109:10)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "动作超时保留幂等未知结果及当前连接",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nfalse !== true\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:121:10)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "401 保留原授权门禁",
+      "status": "passed"
+    },
+    {
+      "name": "connect 的 401 保留登录处理豁免",
+      "status": "passed"
+    },
+    {
+      "name": "普通 HTTP 成功不会恢复离线状态或授权",
+      "status": "passed"
+    },
+    {
+      "name": "当前 session 探针网络失败仍标离线并抛出错误",
+      "status": "passed"
+    },
+    {
+      "name": "当前 session 探针 503 仍标离线",
+      "status": "passed"
+    },
+    {
+      "name": "当前 session 探针超时仍标离线",
+      "status": "passed"
+    },
+    {
+      "name": "当前 session 探针成功恢复连接",
+      "status": "passed"
+    },
+    {
+      "name": "当前 session 探针原生不可用仍标离线",
+      "status": "passed"
+    },
+    {
+      "name": "当前探针的授权范围变化仍触发重新授权读取",
+      "status": "passed"
+    },
+    {
+      "name": "旧探针 success 不覆盖新 stream 状态",
+      "status": "passed"
+    },
+    {
+      "name": "旧探针 failure 不覆盖新 stream 状态",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nfalse !== true\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:193:14)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "旧探针 success 不覆盖新 cycle 状态",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\ntrue !== false\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:192:19)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "旧探针 failure 不覆盖新 cycle 状态",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nfalse !== true\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:193:14)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "旧探针 success 不覆盖新 native 状态",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\ntrue !== false\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:192:19)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "旧探针 failure 不覆盖新 native 状态",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nfalse !== true\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:193:14)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "旧探针 success 不覆盖新 poll 状态",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\ntrue !== false\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:192:19)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "旧探针 failure 不覆盖新 poll 状态",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nfalse !== true\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:193:14)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "旧探针 success 不覆盖新 device 状态",
+      "status": "passed"
+    },
+    {
+      "name": "旧探针 failure 不覆盖新 device 状态",
+      "status": "passed"
+    },
+    {
+      "name": "新 stream 不共用旧 stream 的在途 session 请求",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n1 !== 2\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:211:10)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "新轮询代次不共用取消前的在途请求",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n1 !== 2\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:227:10)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "侧边栏轮询失败不推翻 session 探针成功",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nfalse !== true\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:233:10)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "当前轮询 session 网络失败仍标离线",
+      "status": "passed"
+    },
+    {
+      "name": "旧轮询失败不覆盖重连后的同一 stream 包装对象",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nfalse !== true\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:251:10)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "旧轮询成功不覆盖原生重新连接事件",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n'old' !== 'new'\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:263:10)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "hidden 暂停轮询并取消探针，保留 socket 和连接状态",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n1 !== 0\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:274:10)\n    at E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:22"
+    },
+    {
+      "name": "visible 恢复轮询及新探针，忽略 hidden 取消的旧失败",
+      "status": "failed",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nfalse !== true\n\n    at Object.run (E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:298:10)\n    at async E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-reconnect-app-20261018\\app-connection-regression.cjs:326:11"
+    },
+    {
+      "name": "pagehide 真正离开仍关闭 stream 并取消探针",
+      "status": "passed"
+    },
+    {
+      "name": "首次 WS 打开后仍 fresh 补读并核对 pending",
+      "status": "passed"
+    }
+  ]
+}

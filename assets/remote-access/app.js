@@ -32,11 +32,13 @@ let sending = null;
 let turns = new Map(), collapsed = new Set(), search = "", sidebarTimer = null, refreshTimer = null;
 let historyInitialized = false;
 let historyError = "", historyController = null, selectionController = null, historyLoadingTurnId = null;
+let historyLoadingOlder = false;
 let historyLoadFrame = null, historyAutoFailed = false, historyScrollTop = 0, historyLoadVisibleItems = false;
 let sidebarVersion = 0, approvalSignature = null, pendingTimer = null, streamRetry = null, streamBackoff = 1000;
 let approvalResizeObserver = null;
 const blockingRequestStates = new Map();
 const approvalReplies = new Map();
+const approvalDrafts = new Map();
 let sessionRequest = null, connectionPollVersion = 0, connectionPollPending = null;
 const sessionRecoveryReads = new WeakMap();
 let nativeConnectionVersion = 0;
@@ -63,6 +65,11 @@ function renderPwaCacheState() {
   const root = $("#appearance-cache-state");
   if (!root) return;
   const state = getPwaCacheState();
+  root.hidden = state.status === "ready";
+  if (root.hidden) {
+    root.replaceChildren();
+    return;
+  }
   root.replaceChildren(element("span", "muted", state.message));
   if (state.retryable) root.append(button("重试", "重新检查离线页面缓存", async () => {
     try { await retryPwaCache(); } catch (error) { notice(error.message || "缓存检查失败，请稍后重试。", true); }
@@ -326,19 +333,12 @@ function openAppearance() {
   document.body.append(dialog);
   $(".appearance-heading button", dialog).append(icon("close"));
   renderPwaCacheState();
-  const themeButtons = [["light", "浅色主题", "sun"], ["dark", "深色主题", "moon"]].map(([theme, label, iconName]) => {
-    const control = button("", label, () => {
-      if (appearance.theme === theme) return;
-      appearance.theme = theme;
-      applyAppearance(true);
-      sync();
-    }, "appearance-theme-button");
-    control.dataset.theme = theme;
-    control.setAttribute("aria-pressed", "false");
-    control.append(icon(iconName));
-    $("#appearance-theme-slot").append(control);
-    return control;
-  });
+  const themeButton = button("", "切换主题", () => {
+    appearance.theme = appearance.theme === "light" ? "dark" : "light";
+    applyAppearance(true);
+    sync();
+  }, "appearance-theme-button");
+  $("#appearance-theme-slot").append(themeButton);
   $("#appearance-project-thread-limit-slot").append(selectControl("appearance-project-thread-limit", "每个项目显示会话数",
     projectThreadLimits.map(value => ({ value: String(value), label: `${value}个` })), String(appearance.projectThreadLimit)));
   const colorFields = [["accent", "强调色"], ["background", "背景色"], ["foreground", "前景色"]];
@@ -377,7 +377,13 @@ function openAppearance() {
     $("#appearance-colors").append(field);
   }
   const sync = () => {
-    for (const control of themeButtons) control.setAttribute("aria-pressed", String(control.dataset.theme === appearance.theme));
+    const isLightTheme = appearance.theme === "light";
+    const themeLabel = isLightTheme
+      ? "当前为浅色主题，切换到深色主题"
+      : "当前为深色主题，切换到浅色主题";
+    themeButton.title = themeLabel;
+    themeButton.setAttribute("aria-label", themeLabel);
+    themeButton.replaceChildren(icon(isLightTheme ? "sun" : "moon"));
     setSelectValue($("#appearance-project-thread-limit"), String(appearance.projectThreadLimit));
     for (const [name] of colorFields) {
       const color = appearance.colors[appearance.theme][name];
@@ -842,7 +848,7 @@ function clearPrivateInputs({ persisted = true } = {}) {
   drafts.clear(); skillDrafts.clear(); attachmentDrafts.clear(); goalDrafts.clear();
   draftWrites.clear(); failedInputRecoveries.clear(); goalComposerRecoveries.clear();
   queuedEdits.clear(); questionDrafts.clear(); questionReplyReceipts.clear(); compactions.clear();
-  blockingRequestStates.clear(); approvalReplies.clear(); threadDeletions.clear();
+  blockingRequestStates.clear(); approvalReplies.clear(); approvalDrafts.clear(); threadDeletions.clear();
   pending = null; pendingSendRequest = null; editingQueuedMessage = null; editingMessage = null;
   goalEditPending = null;
   selectedSkills = []; selectedGoal = null; transcriptCache.clear();
@@ -946,6 +952,7 @@ async function recoverFailedInput(record) {
   if (generation !== recoveryGeneration || record.deviceId !== session?.device.id) return;
   failedInputRecoveries.set(record.id, recovery);
   const isCurrent = draftKey() === key && !editingQueuedMessage && !editingMessage;
+  if (isCurrent && composerAttachmentsLoading()) return;
   const existing = isCurrent ? snapshotDraft() : storedDraft(key);
   if (!inputDraftEmpty(existing) && !matchingDraft(existing, record.payload)) return;
   storeDraft(key, draft);
@@ -1261,7 +1268,6 @@ function updateContextUsage() {
   if (contextUsageTip?.trigger === trigger) {
     const { node } = contextUsageTip;
     if (node.firstElementChild.textContent !== text.value) node.firstElementChild.textContent = text.value;
-    if (node.lastElementChild.textContent !== text.description) node.lastElementChild.textContent = text.description;
     fitContextUsageTip();
   }
 }
@@ -1276,7 +1282,7 @@ function showContextUsageTip(pinned = false) {
   closePopup(); closeComposerMenus();
   const node = element("div", "ui-popup context-usage-tooltip");
   node.id = "context-usage-tooltip"; node.setAttribute("role", "tooltip");
-  node.append(element("div", "context-usage-value"), element("div", "muted"));
+  node.append(element("div", "context-usage-value muted"));
   contextUsageTip = { node, trigger, pinned, closeTimer: null };
   trigger.setAttribute("aria-expanded", "true");
   trigger.setAttribute("aria-describedby", node.id);
@@ -2114,6 +2120,8 @@ function applyThreadDeletion(id, deviceId = session?.device.id) {
   blockingRequestStates.delete(key);
   for (const [entryKey, reply] of approvalReplies)
     if (reply.deviceId === deviceId && reply.threadId === id) approvalReplies.delete(entryKey);
+  for (const [entryKey, draft] of approvalDrafts)
+    if (draft.deviceId === deviceId && draft.threadId === id) approvalDrafts.delete(entryKey);
   for (const [entryKey, reply] of questionReplyReceipts)
     if (reply.deviceId === deviceId && reply.threadId === id) {
       questionReplyReceipts.delete(entryKey); questionDrafts.delete(entryKey);
@@ -2311,10 +2319,6 @@ async function api(path, body, id, signal, { resourcePriority = "foreground" } =
       return { message: `HTTP ${response.status}` };
     });
     if (!response.ok) {
-      if (session?.device.id === deviceId) {
-        connectionRtt = null;
-        setConnection(response.status >= 500 || path === "/api/session" ? false : connected);
-      }
       if (response.status === 401 && !path.endsWith("/connect") && session && deviceId === session.device.id)
         requireAuthentication();
       throw Object.assign(new Error(result.message || "请求失败"), {
@@ -2323,7 +2327,6 @@ async function api(path, body, id, signal, { resourcePriority = "foreground" } =
     }
     return result;
   } catch (error) {
-    if ((timedOut || error instanceof TypeError) && session?.device.id === deviceId) setConnection(false);
     if (timedOut && actionTimeout) throw Object.assign(
       new Error("等待上传或回包已超时，正在核对原请求回执；不会自动重发。"), { outcomeUnknown: true, actionTimedOut: true });
     if (timedOut) throw new Error(path.startsWith("/api/read/")
@@ -2343,10 +2346,13 @@ function promoteReadPriority(request, resourcePriority) {
 }
 function readConnectionSession(signal, recoveryObservation = undefined, { resourcePriority = "foreground" } = {}) {
   const deviceId = session?.device.id;
+  const source = stream;
   const nativeVersion = nativeConnectionVersion;
   const connectionVersion = connectionCycleVersion;
+  const pollVersion = connectionPollVersion;
   if (sessionRequest && sessionRequest.deviceId === deviceId && sessionRequest.nativeVersion === nativeVersion
-      && sessionRequest.connectionVersion === connectionVersion) {
+      && sessionRequest.connectionVersion === connectionVersion && sessionRequest.source === source
+      && sessionRequest.pollVersion === pollVersion) {
     promoteReadPriority(sessionRequest, resourcePriority);
     return sessionRequest.promise;
   }
@@ -2354,7 +2360,7 @@ function readConnectionSession(signal, recoveryObservation = undefined, { resour
   const abort = () => controller.abort();
   if (signal?.aborted) abort();
   else signal?.addEventListener("abort", abort, { once: true });
-  const request = { deviceId, nativeVersion, connectionVersion, controller,
+  const request = { deviceId, source, nativeVersion, connectionVersion, pollVersion, controller,
     recoveryGeneration, resourcePriority, apiStarted: false, releasePriority: null, promise: null };
   request.promise = (async () => {
       let expected = recoveryObservation;
@@ -2370,6 +2376,7 @@ function readConnectionSession(signal, recoveryObservation = undefined, { resour
       const elapsed = performance.now() - startedAt;
       const sameDevice = deviceId === undefined ? !session : session?.device.id === deviceId;
       if (sessionRequest === request && !controller.signal.aborted && sameDevice
+          && stream === source && pollVersion === connectionPollVersion
           && nativeVersion === nativeConnectionVersion && connectionVersion === connectionCycleVersion
           && typeof latest.device?.id === "string"
           && Number.isFinite(elapsed) && elapsed >= 0) {
@@ -2395,8 +2402,19 @@ function cancelConnectionProbe() {
 }
 async function syncConnectionState(source = stream) {
   const deviceId = session?.device.id;
-  const latest = await readConnectionSession();
-  if (pageLeaving || stream !== source || session?.device.id !== deviceId) return false;
+  const nativeVersion = nativeConnectionVersion, connectionVersion = connectionCycleVersion;
+  const pollVersion = connectionPollVersion;
+  const isCurrent = () => !pageLeaving && stream === source && session?.device.id === deviceId
+    && nativeVersion === nativeConnectionVersion && connectionVersion === connectionCycleVersion
+    && pollVersion === connectionPollVersion;
+  let latest;
+  try {
+    latest = await readConnectionSession();
+  } catch (error) {
+    if (isCurrent()) setConnection(false);
+    throw error;
+  }
+  if (!isCurrent()) return false;
   if (privateInputScope(latest) !== privateInputScope(session)) {
     await reconnectChangedAuthorization();
     return false;
@@ -5096,7 +5114,7 @@ function resetMessages() {
   historyController?.abort(); historyController = null;
   historyRequest = null;
   selectionController?.abort(); selectionController = null;
-  historyLoading = false; historyLoadingVersion = -1; historyLoadingTurnId = null; historyError = "";
+  historyLoading = false; historyLoadingVersion = -1; historyLoadingTurnId = null; historyLoadingOlder = false; historyError = "";
   cancelAnimationFrame(historyLoadFrame); historyLoadFrame = null; historyAutoFailed = false;
   historyScrollTop = 0; historyLoadVisibleItems = false;
   cancelAnimationFrame(messageFrame); messageFrame = null;
@@ -5734,7 +5752,7 @@ function renderCommandGroup(items, previous, renderMessage, running = false) {
   else state.clearBody();
   return group;
 }
-function renderActivity(turn, work, running, collapsible, renderMessage, showSummary = true) {
+function renderActivity(turn, work, running, collapsible, renderMessage, showSummary = true, historyLoad = null) {
   const key = `${turn.id}:${work[0]?.id || "pending-thinking"}`;
   let activity = renderedActivities.get(key);
   if (!activity && work.length) {
@@ -5754,10 +5772,17 @@ function renderActivity(turn, work, running, collapsible, renderMessage, showSum
       if (!activity.collapsible) { event.preventDefault(); return; }
       activity.manualOpen = !node.open;
     };
-    node.ontoggle = () => { if (node.isConnected) scheduleMessages(); };
+    node.ontoggle = () => {
+      if (!node.isConnected) return;
+      scheduleMessages();
+      if (node.open && activity.historyLoad) scheduleHistoryLoad(true);
+    };
   }
   renderedActivities.set(key, activity);
   const { node, summary, state, label, body } = activity;
+  if (activity.historyLoad !== historyLoad) activity.historyLoad?.remove();
+  activity.historyLoad = historyLoad;
+  if (historyLoad && body.firstChild !== historyLoad) body.prepend(historyLoad);
   node.dataset.activityKey = key;
   activity.turn = turn; activity.running = running; activity.workCount = work.length; activity.showSummary = showSummary;
   collapsible &&= showSummary;
@@ -5773,7 +5798,7 @@ function renderActivity(turn, work, running, collapsible, renderMessage, showSum
   label.className = "";
   updateActivitySummary(activity);
   if (node.open || !running && [...activity.commandGroups.values()].some(group => group.classList.contains("running"))) {
-    const children = [], commandKeys = new Set(), imageKeys = new Set();
+    const children = historyLoad ? [historyLoad] : [], commandKeys = new Set(), imageKeys = new Set();
     const activeFlags = thread?.status?.status?.activeFlags || thread?.status?.activeFlags || [];
     const working = running && !compactionLocked() && !thread?.requests?.length
       && !activeFlags.some(flag => ["waitingOnApproval", "waitingOnUserInput"].includes(flag));
@@ -6037,12 +6062,14 @@ function applyQueuedSendResult(id, result, readVersion) {
 function queueMessageText(message) {
   return message?.text ?? message?.context?.prompt ?? message?.prompt ?? message?.message?.prompt ?? "";
 }
-function renderQueuedMessages(messages) {
+function renderQueuedMessages(messages, previous = null) {
   messages = queueDisplayMessages(messages);
   if (editingQueuedMessage?.threadId === selectedId && editingQueuedMessage.state === "editing")
     messages = messages?.filter(message => message?.id !== editingQueuedMessage.message.id);
   if (!Array.isArray(messages) || !messages.length) return null;
   const threadId = selectedId;
+  const previousAttachments = new Map([...previous?.querySelectorAll(".queued-message") || []]
+    .map(row => [row.dataset.messageId, $(".queued-message-attachments", row)]));
   const queue = element("section", "queued-messages");
   queue.setAttribute("aria-label", `原生消息队列，${messages.length} 条待执行`);
   queue.setAttribute("role", "list");
@@ -6072,8 +6099,14 @@ function renderQueuedMessages(messages) {
       void reorderQueuedMessages(threadId, ids,
         moveQueueItem(ids, messageId, ids.indexOf(messageId) + (event.key === "ArrowUp" ? -1 : 1)), messageId);
     };
-    const attachments = typeof renderQueuedMessageAttachments === "function"
-      ? renderQueuedMessageAttachments(message) : null;
+    const attachmentSignature = JSON.stringify([message.remoteImages, message.context?.imageAttachments]);
+    const previousAttachment = previousAttachments.get(messageId);
+    const thumbnail = previousAttachment?.querySelector("img");
+    const attachments = previousAttachment?.remoteAttachmentSignature === attachmentSignature
+        && thumbnail && (!thumbnail.complete || thumbnail.naturalWidth > 0)
+      ? previousAttachment : typeof renderQueuedMessageAttachments === "function"
+        ? renderQueuedMessageAttachments(message) : null;
+    if (attachments) attachments.remoteAttachmentSignature = attachmentSignature;
     row.append(queueIcon, ...(attachments ? [attachments] : []),
       element("p", "queued-message-text", queueMessageText(message) || "待执行消息"));
     const unavailable = !threadId || !messageId || session?.readOnly || !connected
@@ -6127,7 +6160,9 @@ function renderQueueArea() {
     compactionLocked(), [...queuedActionBusy], editingQueuedMessage?.message.id, editingQueuedMessage?.state,
     !!editingMessage, busy, stopping, pending?.id, queueReorder, queuedEditCheckVersion]);
   if (root.dataset.queueSignature === signature) return;
-  const scrollTop = root.dataset.queueThread === selectedId ? root.querySelector(".queued-messages")?.scrollTop || 0 : 0;
+  const previous = root.dataset.queueThread === selectedId && root.dataset.queueDevice === session?.device.id
+    ? root.querySelector(".queued-messages") : null;
+  const scrollTop = previous?.scrollTop || 0;
   if (queueDrag) {
     const changed = queueDrag.threadId === selectedId
       && !sameQueueOrder(queueDrag.ids, (thread?.queuedMessages || []).map(message => message.id));
@@ -6136,7 +6171,8 @@ function renderQueueArea() {
   }
   root.dataset.queueSignature = signature;
   root.dataset.queueThread = selectedId || "";
-  const queue = renderQueuedMessages(thread?.queuedMessages);
+  root.dataset.queueDevice = session?.device.id || "";
+  const queue = renderQueuedMessages(thread?.queuedMessages, previous);
   const recovery = !editingQueuedMessage && thread?.queuedEdits?.find(edit => typeof edit.editId === "string"
     && !(queuedEditActions.has(pending?.action) && pending.payload?.editId === edit.editId));
   const children = queue ? [queue] : [];
@@ -6541,7 +6577,9 @@ function syncHistoryButtons() {
   const loading = historyLoading && historyLoadingVersion === selectionVersion;
   for (const node of document.querySelectorAll("#messages .history-load")) {
     node.disabled = loading;
-    node.textContent = loading && (!historyLoadingTurnId || node.dataset.turnId === historyLoadingTurnId)
+    const requested = historyLoadingTurnId ? node.dataset.turnId === historyLoadingTurnId
+      : historyLoadingOlder ? node.dataset.historyPage === "older" && !node.dataset.turnId : !node.dataset.historyPage;
+    node.textContent = loading && requested
       ? "加载中…" : node.dataset.label;
   }
 }
@@ -6580,6 +6618,11 @@ function renderMessages(keepScroll = true) {
   if (transcriptChecking) children.push(element("p", "muted transcript-checking-notice",
     historyError ? "已显示上次记录；最新内容核对失败，可点击刷新重试。" : "已显示上次记录，正在核对最新内容…"));
   const sorted = [...turns.values()];
+  if (selectedId && sorted.length && !historyInitialized && !historyError) {
+    const loading = element("p", "muted transcript-checking-notice", "正在加载会话记录，已先显示实时活动…");
+    loading.setAttribute("role", "status");
+    children.push(loading);
+  }
   loadMessageSkillChoices(sorted.flatMap(turn => turn.items || []));
   if (historyError && sorted.length)
     children.push(historyLoadButton("最新记录加载失败，重试", () => void loadHistory()));
@@ -6595,7 +6638,7 @@ function renderMessages(keepScroll = true) {
     group.dataset.turnId = turn.id; renderedTurns.set(turn.id, group); turnKeys.add(turn.id);
     let historyLoad = null;
     if (turn.itemsNextCursor) {
-      historyLoad = group.querySelector(":scope > .history-load")
+      historyLoad = group.querySelector(".history-load")
         || historyLoadButton("加载本轮较早的消息", () => void loadHistory(true, selectionVersion, turn.id), turn.id);
       historyLoad.dataset.historyPage = "older";
     }
@@ -6665,11 +6708,21 @@ function renderMessages(keepScroll = true) {
       content.push({ work: [], collapsible: false });
     const activities = content.filter(part => part.work);
     const live = activityPresentation(turn, turnRunning).live;
-    const header = live ? activities[0] : activities.at(-1);
+    let header = live ? activities[0] : activities.at(-1);
+    if (historyLoad && !live && finalIndex >= 0 && turn.status !== "interrupted"
+        && (turn.status !== "inProgress" || turnItems[finalIndex].phase === "final_answer")) {
+      // 已完成答复前的历史活动缺页属于活动明细，不能看起来像正文仍未加载。
+      const index = content.findIndex(part => part.historyLoad);
+      if (!header) {
+        header = { work: [], collapsible: true };
+        content.splice(index, 1, header);
+      } else content.splice(index, 1);
+      header.historyLoad = historyLoad;
+    }
     for (const part of content) {
-      if (part.historyLoad) { items.push(part.historyLoad); continue; }
+      if (part.historyLoad && !part.work) { items.push(part.historyLoad); continue; }
       if (part.item) { items.push(renderMessage(part.item)); continue; }
-      const activity = renderActivity(turn, part.work, live, part.collapsible, renderMessage, part === header);
+      const activity = renderActivity(turn, part.work, live, part.collapsible, renderMessage, part === header, part.historyLoad);
       activityKeys.add(activity.dataset.activityKey); items.push(activity);
     }
     if (finalIndex >= 0) items.push(renderMessage(turnItems[finalIndex]));
@@ -6849,7 +6902,7 @@ async function readHistoryPage(older, version, itemsTurnId) {
   if ((itemsTurnId && !itemTurn?.itemsNextCursor) || (older && !itemsTurnId && !historyCursor)) return;
   historyLoading = true; historyLoadingVersion = version;
   const latestPage = !older && !itemsTurnId;
-  historyLoadingTurnId = itemsTurnId; historyAutoFailed = false;
+  historyLoadingTurnId = itemsTurnId; historyLoadingOlder = older; historyAutoFailed = false;
   if (latestPage) historyError = "";
   syncHistoryButtons();
   if (!historyInitialized) renderMessages();
@@ -6912,7 +6965,7 @@ async function readHistoryPage(older, version, itemsTurnId) {
   }
   finally {
     if (historyController === controller) {
-      historyController = null; historyLoading = false; historyLoadingTurnId = null;
+      historyController = null; historyLoading = false; historyLoadingTurnId = null; historyLoadingOlder = false;
       syncHistoryButtons();
     }
   }
@@ -7656,6 +7709,15 @@ function approvalReplyKey(id, request, deviceId = session?.device.id) {
 function blockingApprovalIdentity(id, request) {
   return JSON.stringify([approvalReplyKey(id, request), request.params]);
 }
+function blockingApprovalDraft(id, request) {
+  const key = blockingApprovalIdentity(id, request);
+  let record = approvalDrafts.get(key);
+  if (!record) {
+    record = { deviceId: session?.device.id, threadId: id, values: new Map() };
+    approvalDrafts.set(key, record);
+  }
+  return record.values;
+}
 function applyBlockingRequestsSnapshot(id, requests, snapshot = null, { readVersion = null, render = true } = {}) {
   if (typeof id !== "string" || !Array.isArray(requests) || snapshot?.requestsKnown === false) return false;
   const state = blockingRequestState(id);
@@ -7859,14 +7921,15 @@ function renderAsyncQuestion(card, request, requestThreadId) {
     status.textContent = submissionState === "unknown"
       ? "回答送达状态待确认，不会自动重发。请核对回答状态。"
       : "回答已提交，正在确认结果…";
-    actions.append(button(receipt ? "核对回答状态" : "刷新问题状态", "核对回答状态", async event => {
+    const check = button(receipt ? "核对回答状态" : "刷新问题状态", "核对回答状态", async event => {
       const control = event.currentTarget; control.disabled = true;
       try {
         if (receipt) await applyQuestionReceipt(key, await api(`/api/receipts/${receipt.id}`));
         if (selectedId === requestThreadId) await reloadThread();
       } catch (error) { notice(error.message, true); }
       finally { if (control.isConnected) control.disabled = false; approvalSignature = null; renderApprovals(); }
-    }));
+    });
+    check.disabled = !connected; actions.append(check);
   } else if (!allowed) status.textContent = session.readOnly || !session.allowApprovals
     ? "此设备没有问答回复权限，请在 Codex 桌面处理。" : "连接恢复后可以提交回答。";
   form.onsubmit = event => {
@@ -7932,6 +7995,64 @@ function observeApprovalCommands(root) {
   });
   for (const preview of previews) approvalResizeObserver.observe(preview.querySelector(".approval-command-code"));
 }
+function mcpToolApprovalPresentation(params = {}) {
+  const record = value => value && typeof value === "object" && !Array.isArray(value);
+  const metadata = params._meta;
+  if (params.mode !== "form" || !record(metadata)) return null;
+  const toolCall = metadata.codex_approval_kind === "mcp_tool_call";
+  if (["browser_auth", "browser_email_otp", "tool_suggestion"].includes(metadata.codex_approval_kind)) return null;
+  const persist = metadata.persist === undefined ? [] : Array.isArray(metadata.persist) ? metadata.persist : [metadata.persist];
+  const validPersist = (metadata.persist === undefined || !Array.isArray(metadata.persist)
+    || metadata.persist.length >= 1 && metadata.persist.length <= 2)
+    && persist.every(value => ["session", "always"].includes(value));
+  const validToolCall = toolCall && typeof metadata.connector_id === "string" && record(metadata.tool_params)
+    && ["connector_name", "tool_name", "tool_title"].every(key => metadata[key] === undefined || typeof metadata[key] === "string")
+    && (metadata.codex_request_type === undefined || metadata.codex_request_type === "approval_request") && validPersist;
+  const browser = ["browser", "browser-use"].includes(params.serverName)
+    && record(params.requestedSchema?.properties) && Object.keys(params.requestedSchema.properties).length === 0
+    && metadata.persist !== undefined && validPersist && typeof metadata.origin === "string" && metadata.origin.trim();
+  if (!toolCall && !browser) return null;
+  const executionBound = params.serverName === "codex_apps"
+    && metadata.connector_id === "connector_20205bf7d4e99a89d7154bb849718324";
+  let parameterEntries = [];
+  if (Object.prototype.hasOwnProperty.call(metadata, "tool_params_display")) {
+    const display = metadata.tool_params_display;
+    if (Array.isArray(display) && display.every(entry => record(entry)
+      && typeof entry.name === "string" && entry.name.trim()
+      && Object.prototype.hasOwnProperty.call(entry, "value")
+      && (entry.display_name === undefined || typeof entry.display_name === "string" && entry.display_name.trim()))) {
+      parameterEntries = display.map(entry => ({
+        name: entry.name.trim(), value: entry.value, displayName: entry.display_name?.trim() || entry.name.trim()
+      }));
+    }
+  } else if (record(metadata.tool_params)) {
+    parameterEntries = Object.entries(metadata.tool_params).map(([name, value]) => ({ name, value, displayName: name }));
+  }
+  return {
+    unsupported: toolCall && !validToolCall || executionBound,
+    title: typeof params.message === "string" && params.message.trim() || "允许此工具执行所列操作？",
+    parameterEntries,
+    persist, elevatedRisk: metadata.riskLevel === "high",
+    subtitle: typeof metadata.subtitle === "string" ? metadata.subtitle : ""
+  };
+}
+function renderMcpToolApproval(card, view) {
+  card.classList.add("tool-approval-card");
+  if (view.elevatedRisk) card.append(element("div", "approval-identity approval-risk-label", "较高风险"));
+  card.append(element("strong", "approval-title", view.title));
+  if (view.subtitle) card.append(element("p", "approval-reason muted", view.subtitle));
+  if (view.parameterEntries.length) {
+    const details = element("details", "approval-tool-details");
+    details.append(element("summary", "", "查看工具参数"));
+    for (const entry of view.parameterEntries) {
+      const field = element("div", "approval-tool-parameter");
+      field.append(element("strong", "", entry.displayName),
+        element("pre", "approval-description", typeof entry.value === "string" ? entry.value : JSON.stringify(entry.value, null, 2)));
+      details.append(field);
+    }
+    card.append(details);
+  }
+}
 function updateBlockingApprovalControls(card, key) {
   card.remoteReplyStatus?.remove(); card.remoteReplyStatus = null;
   const replyState = approvalReplies.get(key)?.state;
@@ -7946,42 +8067,65 @@ function updateBlockingApprovalControls(card, key) {
   const status = element("div", "remote-approval-reply-status");
   status.append(element("small", "muted", replyState === "submitting" ? "正在提交，请勿重复操作。"
     : replyState === "pending" ? "已提交，等待原生待处理状态更新。" : "提交结果待确认，请核对状态，勿重复操作。"));
-  if (replyState !== "submitting") status.append(button("核对状态", "重新读取原生待处理状态",
-    () => void reloadThread().catch(error => notice(error.message, true)), "text-button"));
+  if (replyState !== "submitting") {
+    const check = button("核对状态", "重新读取原生待处理状态",
+      () => void reloadThread().catch(error => notice(error.message, true)), "text-button");
+    check.disabled = !connected; status.append(check);
+  }
   card.remoteReplyStatus = status; card.append(status);
 }
 function renderApprovals() {
   const root = $("#approval-area"); if (!root) return;
-  const signature = JSON.stringify([thread?.id, thread?.requests || [], session?.readOnly, session?.allowApprovals, connected,
+  const requests = thread?.requests || [];
+  const signature = JSON.stringify([session?.device.id, thread?.id, requests, session?.readOnly, session?.allowApprovals, connected,
     thread?.id ? [blockingRequestState(thread.id).epoch, blockingRequestState(thread.id).sourceVersion] : null,
     [...approvalReplies].filter(([, reply]) => reply.deviceId === session?.device.id && reply.threadId === thread?.id)
+      .map(([key, reply]) => [key, reply.state]),
+    [...questionReplyReceipts].filter(([, reply]) => reply.deviceId === session?.device.id && reply.threadId === thread?.id)
       .map(([key, reply]) => [key, reply.state])]);
   if (signature === approvalSignature) return;
   approvalSignature = signature;
   approvalResizeObserver?.disconnect(); approvalResizeObserver = null;
   const previousCards = new Map([...root.children].filter(card => card.remoteRequestSignature)
     .map(card => [card.remoteRequestSignature, card]));
-  root.replaceChildren();
-  for (const request of thread?.requests || []) {
+  const cards = [], identities = new Set(requests.map(request => blockingApprovalIdentity(thread.id, request)));
+  for (const [key, record] of approvalDrafts) {
+    if (record.deviceId === session?.device.id && record.threadId === thread?.id && !identities.has(key))
+      approvalDrafts.delete(key);
+  }
+  root.classList.toggle("multiple-requests", requests.length > 1);
+  if (requests.length > 1) {
+    const summary = root.querySelector(".approval-queue-summary") || element("div", "approval-queue-summary muted");
+    summary.textContent = `${requests.length} 项待处理，请逐项处理`;
+    cards.push(summary);
+  }
+  for (const [index, request] of requests.entries()) {
     const requestThreadId = thread.id;
     const asyncQuestion = request.method === "remote/requestUserInputAsync";
-    const requestSignature = asyncQuestion ? null : JSON.stringify([
-      blockingApprovalIdentity(requestThreadId, request), session?.readOnly, session?.allowApprovals]);
+    const questionKey = asyncQuestion ? JSON.stringify([session.device.id, requestThreadId, request.id]) : null;
+    const requestSignature = JSON.stringify([blockingApprovalIdentity(requestThreadId, request),
+      session?.readOnly, session?.allowApprovals, connected,
+      asyncQuestion ? questionReplyReceipts.get(questionKey)?.state : null]);
     const previous = previousCards.get(requestSignature);
     if (previous) {
-      updateBlockingApprovalControls(previous, approvalReplyKey(requestThreadId, request));
-      root.append(previous); continue;
+      if (!asyncQuestion) updateBlockingApprovalControls(previous, approvalReplyKey(requestThreadId, request));
+      previous.setAttribute("aria-label", `第 ${index + 1} 项待处理请求，共 ${requests.length} 项`);
+      cards.push(previous); continue;
     }
-    const card = element("section", `approval-card${asyncQuestion ? " question-card" : ""}`);
+    const questionCard = asyncQuestion || request.method === "item/tool/requestUserInput";
+    const card = element("section", `approval-card${questionCard ? " question-card" : ""}`);
     card.remoteRequestSignature = requestSignature;
-    if (asyncQuestion) { renderAsyncQuestion(card, request, requestThreadId); root.append(card); continue; }
-    if (request.method === "item/commandExecution/requestApproval") renderCommandApproval(card, request.params);
+    card.setAttribute("aria-label", `第 ${index + 1} 项待处理请求，共 ${requests.length} 项`);
+    if (asyncQuestion) { renderAsyncQuestion(card, request, requestThreadId); cards.push(card); continue; }
+    const toolApproval = request.method === "mcpServer/elicitation/request" ? mcpToolApprovalPresentation(request.params) : null;
+    if (toolApproval) renderMcpToolApproval(card, toolApproval);
+    else if (request.method === "item/commandExecution/requestApproval") renderCommandApproval(card, request.params);
     else {
       card.append(element("strong", "", request.method === "item/tool/requestUserInput" ? "Codex 需要你回答" : "等待你的授权"));
       const description = request.params?.command || request.params?.reason || request.params?.message || request.method;
       card.append(element("pre", "approval-description", typeof description === "string" ? description : JSON.stringify(description, null, 2)));
     }
-    if (session.readOnly || !session.allowApprovals) { card.append(element("small", "muted", "请在 Codex 桌面处理，此设备没有审批权限。")); root.append(card); continue; }
+    if (session.readOnly || !session.allowApprovals) { card.append(element("small", "muted", "请在 Codex 桌面处理，此设备没有审批权限。")); cards.push(card); continue; }
     const requestIdentity = blockingApprovalIdentity(requestThreadId, request);
     const reply = (action, value) => submitBlockingRequest(requestThreadId, request, action, value, requestIdentity);
     const actions = element("div", "approval-actions");
@@ -7998,13 +8142,17 @@ function renderApprovals() {
       }
       if (!actions.children.length) card.append(element("small", "muted", "此请求的审批方式请在 Codex 桌面处理。"));
     } else if (request.method === "item/tool/requestUserInput") {
-      const fields = [];
+      const fields = [], draft = blockingApprovalDraft(requestThreadId, request);
       for (const question of request.params?.questions || []) {
         const label = element("label", "question-label", question.question || question.header);
         const input = element("input"); input.setAttribute("aria-label", question.question || question.header);
         if (question.isSecret) input.type = "password";
+        input.value = draft.get(question.id) || "";
+        input.oninput = () => draft.set(question.id, input.value);
         const choices = element("div", "question-options");
-        for (const option of question.options || []) choices.append(button(option.label, option.description || option.label, () => { input.value = option.label; }));
+        for (const option of question.options || []) choices.append(button(option.label, option.description || option.label, () => {
+          input.value = option.label; draft.set(question.id, input.value);
+        }));
         fields.push([question.id, input]); label.append(choices, input); card.append(label);
       }
       actions.append(button("提交回答", "提交所有问题的回答", () => reply("answer", {
@@ -8014,8 +8162,23 @@ function renderApprovals() {
       card.append(element("pre", "approval-description", JSON.stringify(request.params?.permissions, null, 2)));
       actions.append(button("仅本轮授予", "仅本轮授予所列权限", () => reply("answer", { response: { grant: true, scope: "turn" } }), "primary"),
         button("拒绝", "不授予权限", () => reply("answer", { response: { grant: false, scope: "turn" } })));
+    } else if (toolApproval) {
+      if (toolApproval.unsupported) card.append(element("small", "muted", "此工具授权需要在 Codex 桌面核对并处理。"));
+      else {
+        for (const [scope, label] of [["session", "本会话允许"], ["always", "始终允许"]]) {
+          if (toolApproval.persist.includes(scope)) actions.append(button(label, `按本次请求指定范围${label}`,
+            () => reply("answer", { response: { action: "accept", content: {}, _meta: { persist: scope } } })));
+        }
+        actions.append(button("拒绝", "拒绝此工具操作",
+          () => reply("answer", { response: { action: "decline", content: null, _meta: null } })),
+        button("允许一次", "仅允许本次工具操作",
+          () => reply("answer", { response: { action: "accept", content: {}, _meta: null } }), "primary"));
+      }
     } else if (request.method === "mcpServer/elicitation/request" && ["form", "openai/form"].includes(request.params?.mode)) {
+      const draft = blockingApprovalDraft(requestThreadId, request);
       const input = element("textarea"); input.placeholder = "按请求的 JSON 格式填写回答"; input.setAttribute("aria-label", "工具询问回答");
+      input.value = draft.get("content") || "";
+      input.oninput = () => draft.set("content", input.value);
       card.append(input);
       actions.append(button("提交", "提交工具询问", () => {
         try { void reply("answer", { response: { action: "accept", content: JSON.parse(input.value) } }); }
@@ -8023,9 +8186,16 @@ function renderApprovals() {
       }, "primary"), button("拒绝", "拒绝工具询问", () => reply("answer", { response: { action: "decline" } })));
     } else card.append(element("small", "muted", "此类请求请在 Codex 桌面处理。"));
     card.append(actions);
+    if (!connected) {
+      for (const control of card.querySelectorAll("button,input,select,textarea")) control.disabled = true;
+      card.append(element("small", "muted", "连接恢复后可以处理此请求。"));
+    }
     updateBlockingApprovalControls(card, approvalReplyKey(requestThreadId, request));
-    root.append(card);
+    cards.push(card);
   }
+  const scrollTop = root.scrollTop;
+  reconcileChildren(root, cards);
+  root.scrollTop = scrollTop;
   observeApprovalCommands(root);
   fitApprovalArea();
 }
@@ -8867,17 +9037,25 @@ function startConnectionPoll(deviceId) {
   const version = connectionPollVersion;
   connect.poll = setInterval(async () => {
     if (pageLeaving || document.hidden || session?.device.id !== deviceId || connectionPollPending) return;
+    const source = stream, nativeVersion = nativeConnectionVersion, connectionVersion = connectionCycleVersion;
+    const isCurrent = () => !pageLeaving && version === connectionPollVersion && stream === source
+      && session?.device.id === deviceId && nativeVersion === nativeConnectionVersion
+      && connectionVersion === connectionCycleVersion;
     const request = { version };
     connectionPollPending = request;
     ensureStream();
     try {
-      const current = await readConnectionSession(undefined, undefined, { resourcePriority: "background" });
-      if (pageLeaving || version !== connectionPollVersion || session?.device.id !== deviceId) return;
+      let current;
+      try {
+        current = await readConnectionSession(undefined, undefined, { resourcePriority: "background" });
+      } catch {
+        if (isCurrent()) setConnection(false);
+        return;
+      }
+      if (!isCurrent()) return;
       if (privateInputScope(current) !== privateInputScope(session)) { await reconnectChangedAuthorization(); return; }
       session = current; setConnection(current.nativeConnected && stream?.readyState === EventSource.OPEN); renderApprovals();
-      await loadSidebar(null, { resourcePriority: "background" });
-    } catch {
-      if (!pageLeaving && version === connectionPollVersion && session?.device.id === deviceId) setConnection(false);
+      await loadSidebar(null, { resourcePriority: "background" }).catch(() => {});
     }
     finally { if (connectionPollPending === request) connectionPollPending = null; }
   }, 15000);
@@ -8981,15 +9159,14 @@ document.addEventListener("visibilitychange", () => {
     stopGoalLiveTimer();
     finishQueueDrag();
     closeContextUsageTip();
-    if (stream?.transport === "fallback" || !sharedEventsAvailable()) {
-      stream?.close(); stream = null;
-      clearTimeout(streamRetry); streamRetry = null;
-      setConnection(false);
-    }
+    stopConnectionPoll();
+    cancelConnectionProbe();
+    clearTimeout(streamRetry); streamRetry = null;
     return;
   }
   syncActivityTimer();
   syncGoalLiveTimer();
+  if (session) startConnectionPoll(session.device.id);
   retryConnectionRecovery();
 });
 window.addEventListener("pagehide", suspendPage);

@@ -1,0 +1,13 @@
+{
+  "remaining": 5,
+  "payload": {
+    "threadId": "qa-a",
+    "requestId": "browser-persistent",
+    "method": "mcpServer/elicitation/request",
+    "response": {
+      "action": "decline",
+      "content": null,
+      "_meta": null
+    }
+  }
+}

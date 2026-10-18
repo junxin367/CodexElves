@@ -1,0 +1,74 @@
+[
+  {
+    "path": "/app-resources.json",
+    "acceptEncoding": "identity",
+    "httpCode": 200,
+    "wireBodyBytes": 3430,
+    "seconds": 0.003659,
+    "contentType": "application/json; charset=utf-8",
+    "headersFile": "docs/validation/android-loading-images-20261018/android-transport-manifest-identity-headers.txt",
+    "decodedBytes": 3430,
+    "decodedSha256": "e97642eb40bd037b95bece6f8c2a062389cab792f80dc96947664f7fbf2e8fa5",
+    "matchesServiceManifest": true
+  },
+  {
+    "path": "/app-resources.json",
+    "acceptEncoding": "gzip",
+    "httpCode": 200,
+    "wireBodyBytes": 1308,
+    "seconds": 0.00187,
+    "contentType": "application/json; charset=utf-8",
+    "headersFile": "docs/validation/android-loading-images-20261018/android-transport-manifest-gzip-headers.txt",
+    "decodedBytes": 3430,
+    "decodedSha256": "e97642eb40bd037b95bece6f8c2a062389cab792f80dc96947664f7fbf2e8fa5",
+    "matchesServiceManifest": true
+  },
+  {
+    "path": "/app.js",
+    "acceptEncoding": "identity",
+    "httpCode": 200,
+    "wireBodyBytes": 494465,
+    "seconds": 0.003026,
+    "contentType": "application/javascript; charset=utf-8",
+    "headersFile": "docs/validation/android-loading-images-20261018/android-transport-app-identity-headers.txt",
+    "decodedBytes": 494465,
+    "decodedSha256": "4b7a1c2c9be12c380d5021c4ea9e92e79b561f366e909c2233763705dbc25cab",
+    "matchesServiceManifest": true
+  },
+  {
+    "path": "/app.js",
+    "acceptEncoding": "gzip",
+    "httpCode": 200,
+    "wireBodyBytes": 122806,
+    "seconds": 0.002094,
+    "contentType": "application/javascript; charset=utf-8",
+    "headersFile": "docs/validation/android-loading-images-20261018/android-transport-app-gzip-headers.txt",
+    "decodedBytes": 494465,
+    "decodedSha256": "4b7a1c2c9be12c380d5021c4ea9e92e79b561f366e909c2233763705dbc25cab",
+    "matchesServiceManifest": true
+  },
+  {
+    "path": "/style.css",
+    "acceptEncoding": "identity",
+    "httpCode": 200,
+    "wireBodyBytes": 83378,
+    "seconds": 0.026602,
+    "contentType": "text/css; charset=utf-8",
+    "headersFile": "docs/validation/android-loading-images-20261018/android-transport-style-identity-headers.txt",
+    "decodedBytes": 83378,
+    "decodedSha256": "60eafc58605e612ada82612c84c874a811b675cf1f8156127d84681fd47fb778",
+    "matchesServiceManifest": true
+  },
+  {
+    "path": "/style.css",
+    "acceptEncoding": "gzip",
+    "httpCode": 200,
+    "wireBodyBytes": 16022,
+    "seconds": 0.002572,
+    "contentType": "text/css; charset=utf-8",
+    "headersFile": "docs/validation/android-loading-images-20261018/android-transport-style-gzip-headers.txt",
+    "decodedBytes": 83378,
+    "decodedSha256": "60eafc58605e612ada82612c84c874a811b675cf1f8156127d84681fd47fb778",
+    "matchesServiceManifest": true
+  }
+]

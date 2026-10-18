@@ -1,0 +1,151 @@
+{
+  "time": "2026-10-18T01:27:14.534Z",
+  "source": "assets/remote-access/app.js",
+  "sourceSha256": "310b7eaf04438c57149f8e80fee0bc987e6d27165f11f46f8b7c93cc446354d9",
+  "extraction": "TypeScript AST extracts current source functions and top-level lifecycle handlers into isolated Node vm",
+  "total": 35,
+  "passed": 35,
+  "failed": 0,
+  "results": [
+    {
+      "name": "普通侧边栏 503 保留健康连接并抛出原错误",
+      "status": "passed"
+    },
+    {
+      "name": "历史读取网络异常保留健康连接",
+      "status": "passed"
+    },
+    {
+      "name": "普通读取超时保留健康连接及超时错误",
+      "status": "passed"
+    },
+    {
+      "name": "动作超时保留幂等未知结果及当前连接",
+      "status": "passed"
+    },
+    {
+      "name": "401 保留原授权门禁",
+      "status": "passed"
+    },
+    {
+      "name": "connect 的 401 保留登录处理豁免",
+      "status": "passed"
+    },
+    {
+      "name": "普通 HTTP 成功不会恢复离线状态或授权",
+      "status": "passed"
+    },
+    {
+      "name": "当前 session 探针网络失败仍标离线并抛出错误",
+      "status": "passed"
+    },
+    {
+      "name": "当前 session 探针 503 仍标离线",
+      "status": "passed"
+    },
+    {
+      "name": "当前 session 探针超时仍标离线",
+      "status": "passed"
+    },
+    {
+      "name": "当前 session 探针成功恢复连接",
+      "status": "passed"
+    },
+    {
+      "name": "当前 session 探针成功但渲染失败不会标离线",
+      "status": "passed"
+    },
+    {
+      "name": "当前 session 探针原生不可用仍标离线",
+      "status": "passed"
+    },
+    {
+      "name": "当前探针的授权范围变化仍触发重新授权读取",
+      "status": "passed"
+    },
+    {
+      "name": "旧探针 success 不覆盖新 stream 状态",
+      "status": "passed"
+    },
+    {
+      "name": "旧探针 failure 不覆盖新 stream 状态",
+      "status": "passed"
+    },
+    {
+      "name": "旧探针 success 不覆盖新 cycle 状态",
+      "status": "passed"
+    },
+    {
+      "name": "旧探针 failure 不覆盖新 cycle 状态",
+      "status": "passed"
+    },
+    {
+      "name": "旧探针 success 不覆盖新 native 状态",
+      "status": "passed"
+    },
+    {
+      "name": "旧探针 failure 不覆盖新 native 状态",
+      "status": "passed"
+    },
+    {
+      "name": "旧探针 success 不覆盖新 poll 状态",
+      "status": "passed"
+    },
+    {
+      "name": "旧探针 failure 不覆盖新 poll 状态",
+      "status": "passed"
+    },
+    {
+      "name": "旧探针 success 不覆盖新 device 状态",
+      "status": "passed"
+    },
+    {
+      "name": "旧探针 failure 不覆盖新 device 状态",
+      "status": "passed"
+    },
+    {
+      "name": "新 stream 不共用旧 stream 的在途 session 请求",
+      "status": "passed"
+    },
+    {
+      "name": "新轮询代次不共用取消前的在途请求",
+      "status": "passed"
+    },
+    {
+      "name": "侧边栏轮询失败不推翻 session 探针成功",
+      "status": "passed"
+    },
+    {
+      "name": "当前轮询 session 网络失败仍标离线",
+      "status": "passed"
+    },
+    {
+      "name": "当前轮询探针成功但渲染失败不会标离线且释放轮询",
+      "status": "passed"
+    },
+    {
+      "name": "旧轮询失败不覆盖重连后的同一 stream 包装对象",
+      "status": "passed"
+    },
+    {
+      "name": "旧轮询成功不覆盖原生重新连接事件",
+      "status": "passed"
+    },
+    {
+      "name": "hidden 暂停轮询并取消探针，保留 socket 和连接状态",
+      "status": "passed"
+    },
+    {
+      "name": "visible 恢复轮询及新探针，忽略 hidden 取消的旧失败",
+      "status": "passed"
+    },
+    {
+      "name": "pagehide 真正离开仍关闭 stream 并取消探针",
+      "status": "passed"
+    },
+    {
+      "name": "首次 WS 打开后仍 fresh 补读并核对 pending",
+      "status": "passed"
+    }
+  ]
+}

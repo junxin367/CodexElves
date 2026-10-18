@@ -1,0 +1,62 @@
+{
+  "timestamp": "2026-10-18T00:16:12.618Z",
+  "sourceFile": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/MainActivity.java",
+  "sourceSha256": "4095680157a216238c169f0d6d6c2daadd9f49719480471c1b1573878644cbe8",
+  "method": "Extract actual chooser and destroyWebView Java methods; run in JDK 17 against explicit Android API test doubles. No WebView/device runtime is simulated.",
+  "compileExitCode": 0,
+  "javaExitCode": 0,
+  "verificationExitCode": 0,
+  "passed": 12,
+  "total": 12,
+  "tests": [
+    {
+      "name": "single content URI is delivered",
+      "passed": true
+    },
+    {
+      "name": "ordered ClipData is preserved",
+      "passed": true
+    },
+    {
+      "name": "picker cancellation completes once",
+      "passed": true
+    },
+    {
+      "name": "no chooser completes once and claims handling",
+      "passed": true
+    },
+    {
+      "name": "destroying page cancels the chooser",
+      "passed": true
+    },
+    {
+      "name": "old chooser result cannot complete replacement request",
+      "passed": true
+    },
+    {
+      "name": "result callback reentry preserves the next chooser",
+      "passed": true
+    },
+    {
+      "name": "document fallback preserves image filter and multiple selection",
+      "passed": true
+    },
+    {
+      "name": "picker SecurityException uses document fallback",
+      "passed": true
+    },
+    {
+      "name": "photo picker failure uses the document provider path",
+      "passed": true
+    },
+    {
+      "name": "ordered picker availability matches SDK extension contract",
+      "passed": true
+    },
+    {
+      "name": "image picker only handles requested multiple image selection",
+      "passed": true
+    }
+  ],
+  "limitationCorrection": "Initial 12-case harness platform parseResult test double incorrectly supported ClipData. These results cover only the callback control flow actually exercised and are not platform URI parsing evidence. Corrected coverage is in file-chooser-clipdata-before.json and file-chooser-clipdata-after.json."
+}

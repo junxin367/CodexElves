@@ -1,3 +1,19 @@
 <resources>
     <string name="app_name">CodexElves</string>
+    <string name="login_brand_mark" translatable="false">✦</string>
+    <string name="login_description">输入访问密钥，继续使用你的 Codex 会话。</string>
+    <string name="login_origin_label">服务链接</string>
+    <string name="login_origin_hint">https://example.com</string>
+    <string name="login_key_label">访问密钥</string>
+    <string name="login_key_hint">粘贴或输入访问密钥</string>
+    <string name="login_key_hint_detail">支持 8–256 个非空格 ASCII 字符。</string>
+    <string name="login_show_key">显示密钥</string>
+    <string name="login_hide_key">隐藏密钥</string>
+    <string name="login_connect">连接</string>
+    <string name="login_connecting">连接中…</string>
+    <string name="login_help_title">在哪里获取访问密钥？</string>
+    <string name="login_help_expand">在哪里获取访问密钥？展开说明</string>
+    <string name="login_help_collapse">在哪里获取访问密钥？收起说明</string>
+    <string name="login_help_body">访问密钥由本机 CodexElves 管理器的「远程会话」页面设置，请使用设置时保存的密钥。它不是 OpenAI API Key。</string>
+    <string name="login_footer">密钥勿外传</string>
 </resources>

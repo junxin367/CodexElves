@@ -1,0 +1,79 @@
+[
+  {
+    "id": "image-close",
+    "height": 32,
+    "icon": 16,
+    "pass": true,
+    "width": 32
+  },
+  {
+    "id": "settings-close",
+    "height": 32,
+    "icon": 16,
+    "pass": true,
+    "width": 32
+  },
+  {
+    "id": "sidebar-view",
+    "height": 32,
+    "icon": 16,
+    "pass": true,
+    "width": 32
+  },
+  {
+    "id": "sidebar-search",
+    "height": 32,
+    "icon": 16,
+    "pass": true,
+    "width": 32
+  },
+  {
+    "id": "row-more",
+    "height": 32,
+    "icon": 16,
+    "pass": true,
+    "width": 32
+  },
+  {
+    "id": "jump-latest",
+    "height": 32,
+    "icon": 16,
+    "pass": true,
+    "width": 32
+  },
+  {
+    "id": "goal-close",
+    "height": 32,
+    "icon": 16,
+    "pass": true,
+    "width": 32
+  },
+  {
+    "id": "sidebar-open",
+    "height": 36,
+    "icon": 18,
+    "pass": true,
+    "width": 36
+  },
+  {
+    "id": "refresh-session",
+    "height": 36,
+    "icon": 18,
+    "pass": true,
+    "width": 36
+  },
+  {
+    "id": "web-key",
+    "height": 36,
+    "icon": 18,
+    "pass": true,
+    "width": 36
+  },
+  {
+    "id": "queue-drag",
+    "height": 28,
+    "icon": 14,
+    "pass": true,
+    "width": 28
+  }
+]

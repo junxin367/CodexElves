@@ -1,0 +1,178 @@
+{
+  "mode": "fixed",
+  "total": 19,
+  "passed": 19,
+  "failed": 0,
+  "results": [
+    {
+      "name": "fallback-foreground-10m",
+      "passed": true,
+      "details": {
+        "durationMs": 600000,
+        "sockets": 1,
+        "errors": 0
+      }
+    },
+    {
+      "name": "fallback-hidden-keeps-open-socket",
+      "passed": true,
+      "details": {
+        "sockets": 1,
+        "closeCalls": 0,
+        "opens": 1
+      }
+    },
+    {
+      "name": "fallback-hidden-keeps-handshake",
+      "passed": true,
+      "details": {
+        "sockets": 1,
+        "opens": 1
+      }
+    },
+    {
+      "name": "fallback-hidden-genuine-close-recovers-on-visible",
+      "passed": true,
+      "details": {
+        "hiddenRetries": 0,
+        "visibleSockets": 2
+      }
+    },
+    {
+      "name": "fallback-hidden-stale-socket-expires-after-resume-grace",
+      "passed": true,
+      "details": {
+        "resumeGraceMs": 20000,
+        "errors": [
+          "activity-timeout"
+        ],
+        "sockets": 2
+      }
+    },
+    {
+      "name": "fallback-scheduler-suspension-heartbeat-recovers",
+      "passed": true,
+      "details": {
+        "suspendedMs": 120000,
+        "sockets": 1,
+        "errors": 0
+      }
+    },
+    {
+      "name": "fallback-scheduler-suspension-genuine-timeout-recovers",
+      "passed": true,
+      "details": {
+        "errors": [
+          "activity-timeout"
+        ],
+        "sockets": 2
+      }
+    },
+    {
+      "name": "fallback-genuine-handshake-timeout",
+      "passed": true,
+      "details": {
+        "handshakeTimeoutMs": 45000,
+        "sockets": 2
+      }
+    },
+    {
+      "name": "fallback-error-close-deduplicate-and-ignore-old-generation",
+      "passed": true,
+      "details": {
+        "sockets": 2,
+        "errors": 1,
+        "opens": 2,
+        "staleMessages": 0
+      }
+    },
+    {
+      "name": "fallback-offline-online-repeat-no-duplicate",
+      "passed": true,
+      "details": {
+        "sockets": 2,
+        "offlineErrors": 1
+      }
+    },
+    {
+      "name": "fallback-pagehide-remains-terminal",
+      "passed": true,
+      "details": {
+        "sockets": 1,
+        "readyState": 2
+      }
+    },
+    {
+      "name": "shared-foreground-10m",
+      "passed": true,
+      "details": {
+        "durationMs": 600000,
+        "sockets": 1,
+        "errors": 0
+      }
+    },
+    {
+      "name": "shared-hidden-keeps-open-socket",
+      "passed": true,
+      "details": {
+        "hiddenMs": 120000,
+        "sockets": 1,
+        "opens": 1
+      }
+    },
+    {
+      "name": "shared-scheduler-suspension-heartbeat-recovers",
+      "passed": true,
+      "details": {
+        "suspendedMs": 120000,
+        "sockets": 1,
+        "errors": 0
+      }
+    },
+    {
+      "name": "shared-genuine-handshake-timeout",
+      "passed": true,
+      "details": {
+        "handshakeTimeoutMs": 45000,
+        "sockets": 2
+      }
+    },
+    {
+      "name": "shared-genuine-activity-timeout-despite-port-pong",
+      "passed": true,
+      "details": {
+        "activityTimeoutMs": 75000,
+        "sockets": 2
+      }
+    },
+    {
+      "name": "shared-error-close-deduplicate-and-ignore-old-generation",
+      "passed": true,
+      "details": {
+        "sockets": 2,
+        "errors": 1,
+        "opens": 2,
+        "staleMessages": 0
+      }
+    },
+    {
+      "name": "shared-worker-start-failure-uses-fallback",
+      "passed": true,
+      "details": {
+        "transport": "fallback",
+        "errors": [
+          "worker-timeout"
+        ],
+        "sockets": 1
+      }
+    },
+    {
+      "name": "shared-one-subscriber-offline-keeps-other-subscriber",
+      "passed": true,
+      "details": {
+        "sockets": 2,
+        "unaffectedSubscriberErrors": 0
+      }
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "timestamp": "2026-10-18T00:47:26.571Z",
+  "sourceFile": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/MainActivity.java",
+  "sourceSha256": "a909b22736487b4434f83db8b287e85a63d045163047e80c21799553386f2f83",
+  "method": "Extract actual chooser and destroyWebView Java methods; run in JDK 17 against explicit Android API test doubles. No WebView/device runtime is simulated.",
+  "parserCorrection": "The initial 12-case harness incorrectly modeled the platform parseResult as supporting ClipData. This harness extracts the official AwContentsClient.parseFileChooserResult implementation at pinned Chromium revision 586f39ce10f91f06192b790e0c7f8c019ce3306f, which reads only Intent.getData(). Earlier cases only establish the callback control flow they actually exercise.",
+  "chromiumParserSourceSha256": "034b5aba6a1d0cccc8205149bca63a6887a526b2f0404952611c1deca5bb846e",
+  "compileExitCode": 0,
+  "javaExitCode": 0,
+  "verificationExitCode": 0,
+  "passed": 17,
+  "total": 17,
+  "tests": [
+    {
+      "name": "single content URI is delivered",
+      "passed": true
+    },
+    {
+      "name": "ordered ClipData is preserved",
+      "passed": true
+    },
+    {
+      "name": "default picker ClipData-only single image is delivered",
+      "passed": true
+    },
+    {
+      "name": "default picker ClipData-only multiple images are delivered in order",
+      "passed": true
+    },
+    {
+      "name": "ClipData takes precedence when result also has a data URI",
+      "passed": true
+    },
+    {
+      "name": "successful result with no URI completes as empty cancellation",
+      "passed": true
+    },
+    {
+      "name": "unrelated result leaves the active chooser pending",
+      "passed": true
+    },
+    {
+      "name": "picker cancellation completes once",
+      "passed": true
+    },
+    {
+      "name": "no chooser completes once and claims handling",
+      "passed": true
+    },
+    {
+      "name": "destroying page cancels the chooser",
+      "passed": true
+    },
+    {
+      "name": "old chooser result cannot complete replacement request",
+      "passed": true
+    },
+    {
+      "name": "result callback reentry preserves the next chooser",
+      "passed": true
+    },
+    {
+      "name": "document fallback preserves image filter and multiple selection",
+      "passed": true
+    },
+    {
+      "name": "picker SecurityException uses document fallback",
+      "passed": true
+    },
+    {
+      "name": "photo picker failure uses the document provider path",
+      "passed": true
+    },
+    {
+      "name": "ordered picker availability matches SDK extension contract",
+      "passed": true
+    },
+    {
+      "name": "image picker only handles requested multiple image selection",
+      "passed": true
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "cards": 6,
+  "tools": [
+    {
+      "details": 0,
+      "disabled": false,
+      "jsonInputs": 0,
+      "text": "较高风险\nAllow Browser use to use full Chrome Developer Tools access on http://127.0.0.1:1462\n始终允许\n拒绝\n允许一次"
+    },
+    {
+      "details": 0,
+      "disabled": false,
+      "jsonInputs": 0,
+      "text": "较高风险\nAllow Browser use to use full Chrome Developer Tools access on http://127.0.0.1:1474\n拒绝\n允许一次"
+    }
+  ]
+}

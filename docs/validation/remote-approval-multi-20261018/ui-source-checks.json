@@ -1,0 +1,124 @@
+{
+  "date": "2026-10-18",
+  "method": "当前源码函数在 Node VM 和最小 DOM 模型中验证；不替代真实浏览器",
+  "baseline": [
+    {
+      "name": "四项独立卡片及单请求多个问题全部渲染",
+      "passed": true
+    },
+    {
+      "name": "其他请求提交时保持未提交卡片和滚动",
+      "passed": false,
+      "error": "未提交异步卡片应保持原节点"
+    },
+    {
+      "name": "仅锁定对应请求，其他卡片仍可填写",
+      "passed": true
+    },
+    {
+      "name": "移除一项已完成请求不会删除其余三项或草稿",
+      "passed": true
+    },
+    {
+      "name": "断线时阻塞与异步输入均不可提交",
+      "passed": false,
+      "error": "The expression evaluated to a falsy value:\n\n  assert(cards(root).every(card => card.querySelectorAll(\"button,input,textarea\").every(control => control.disabled)))\n"
+    },
+    {
+      "name": "连接恢复后各请求草稿仍保留",
+      "passed": true
+    },
+    {
+      "name": "权限变化重建卡片后保留各请求草稿",
+      "passed": false,
+      "error": "Expected values to be strictly equal:\n\n'' !== '阻塞问题草稿'\n"
+    },
+    {
+      "name": "原生较高风险工具批准卡无需 JSON",
+      "passed": false,
+      "error": "原生工具批准应显示按钮而不是 JSON 文本框"
+    }
+  ],
+  "actual": [
+    {
+      "name": "四项独立卡片及单请求多个问题全部渲染",
+      "passed": true
+    },
+    {
+      "name": "其他请求提交时保持未提交卡片和滚动",
+      "passed": true
+    },
+    {
+      "name": "仅锁定对应请求，其他卡片仍可填写",
+      "passed": true
+    },
+    {
+      "name": "移除一项已完成请求不会删除其余三项或草稿",
+      "passed": true
+    },
+    {
+      "name": "断线时阻塞与异步输入均不可提交",
+      "passed": true
+    },
+    {
+      "name": "连接恢复后各请求草稿仍保留",
+      "passed": true
+    },
+    {
+      "name": "权限变化重建卡片后保留各请求草稿",
+      "passed": true
+    },
+    {
+      "name": "重复提交门禁仅按当前请求锁定",
+      "passed": true
+    },
+    {
+      "name": "异步一项多问题提交仅含该请求完整答案且不清除其他项",
+      "passed": true
+    },
+    {
+      "name": "只读和审批权限门禁",
+      "passed": true
+    },
+    {
+      "name": "其他 MCP JSON 表单保留且重建后草稿不丢失",
+      "passed": true
+    },
+    {
+      "name": "原生较高风险工具批准卡显示三按钮且无需 JSON",
+      "passed": true
+    },
+    {
+      "name": "允许一次使用原生响应合同且仅提交一次",
+      "passed": true
+    },
+    {
+      "name": "始终允许使用原生响应合同且仅提交一次",
+      "passed": true
+    },
+    {
+      "name": "拒绝使用原生响应合同且仅提交一次",
+      "passed": true
+    },
+    {
+      "name": "持久授权仅展示请求声明的范围",
+      "passed": true
+    },
+    {
+      "name": "generic browser 识别条件完整且不会吞掉真实表单",
+      "passed": true
+    },
+    {
+      "name": "数据库绑定授权及不完整工具批准只提示桌面处理",
+      "passed": true
+    },
+    {
+      "name": "两个工具批准与两项多问题问答并行独立处理",
+      "passed": true
+    },
+    {
+      "name": "阻塞问答一次提交本请求所有问题的回答",
+      "passed": true
+    }
+  ]
+}

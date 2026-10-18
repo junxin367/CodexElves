@@ -1,0 +1,90 @@
+[
+  {
+    "artifact": "dist/android/CodexElves-0.5.0-android-debug.apk",
+    "lastWriteTimeUtc": "2026-10-17T16:52:11.9763350Z",
+    "apkSha256": "9c011608dac507c8ad2462caf9228cf54b767a372b3a64dac0b780ebb5a03f83",
+    "manifestVersion": "64767e9760199c8d8ca58119a30d2db74939e14de82c421c3d496e59e088a81f",
+    "resources": [
+      {
+        "path": "/app.js",
+        "bytes": 495605,
+        "compressedBytes": 155051,
+        "sha256": "31c2f4b8844951ba3573db5a946b4bcaca25532e1be4f7c95135191cda291473",
+        "hasHistoryLoadingOlder": true,
+        "hasIndependentApprovalDrafts": false,
+        "has80vwSidebar": false
+      },
+      {
+        "path": "/style.css",
+        "bytes": 83199,
+        "compressedBytes": 21839,
+        "sha256": "51e5d2995fc55b64afc7cd8b63ca440dbdd9cc668707ac6d9c4c8699dd4450a2",
+        "hasHistoryLoadingOlder": false,
+        "hasIndependentApprovalDrafts": false,
+        "has80vwSidebar": true
+      },
+      {
+        "path": "/attachments.js",
+        "bytes": 16054,
+        "compressedBytes": 5551,
+        "sha256": "be9936a2451e82d65a3ca4a0b802cfabb6010780b74de037433fad551753ac81",
+        "hasHistoryLoadingOlder": false,
+        "hasIndependentApprovalDrafts": false,
+        "has80vwSidebar": false
+      },
+      {
+        "path": "/events-client.js",
+        "bytes": 10446,
+        "compressedBytes": 2880,
+        "sha256": "e6889da6fc5a80c271924b959dac62f7a3875fad396bfa97a0eaf76a52162dcb",
+        "hasHistoryLoadingOlder": false,
+        "hasIndependentApprovalDrafts": false,
+        "has80vwSidebar": false
+      }
+    ]
+  },
+  {
+    "artifact": "dist/android/CodexElves-0.5.0-android.apk",
+    "lastWriteTimeUtc": "2026-10-17T15:27:26.2022323Z",
+    "apkSha256": "498ff0e866329e9e1d4e773047801ecd3f755185924e905a89d4734512b2a1f9",
+    "manifestVersion": "9878532f04978dfaaecd9f63a90783a9f52f1e2f969221512869df926bb6e43d",
+    "resources": [
+      {
+        "path": "/app.js",
+        "bytes": 494465,
+        "compressedBytes": 123121,
+        "sha256": "4b7a1c2c9be12c380d5021c4ea9e92e79b561f366e909c2233763705dbc25cab",
+        "hasHistoryLoadingOlder": false,
+        "hasIndependentApprovalDrafts": false,
+        "has80vwSidebar": false
+      },
+      {
+        "path": "/style.css",
+        "bytes": 83378,
+        "compressedBytes": 16040,
+        "sha256": "60eafc58605e612ada82612c84c874a811b675cf1f8156127d84681fd47fb778",
+        "hasHistoryLoadingOlder": false,
+        "hasIndependentApprovalDrafts": false,
+        "has80vwSidebar": false
+      },
+      {
+        "path": "/attachments.js",
+        "bytes": 16054,
+        "compressedBytes": 4830,
+        "sha256": "be9936a2451e82d65a3ca4a0b802cfabb6010780b74de037433fad551753ac81",
+        "hasHistoryLoadingOlder": false,
+        "hasIndependentApprovalDrafts": false,
+        "has80vwSidebar": false
+      },
+      {
+        "path": "/events-client.js",
+        "bytes": 10446,
+        "compressedBytes": 2320,
+        "sha256": "e6889da6fc5a80c271924b959dac62f7a3875fad396bfa97a0eaf76a52162dcb",
+        "hasHistoryLoadingOlder": false,
+        "hasIndependentApprovalDrafts": false,
+        "has80vwSidebar": false
+      }
+    ]
+  }
+]

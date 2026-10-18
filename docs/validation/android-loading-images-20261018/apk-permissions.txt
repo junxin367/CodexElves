@@ -1,0 +1,3 @@
+package: com.junxin367.codexelves.debug
+uses-permission: name='android.permission.INTERNET'
+uses-permission: name='android.permission.ACCESS_NETWORK_STATE'

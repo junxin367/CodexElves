@@ -1,0 +1,66 @@
+{
+  "capturedAt": "2026-10-18T08:11:34.1064540+08:00",
+  "serviceOrigin": "http://127.0.0.1:45222",
+  "serviceVersion": "9878532f04978dfaaecd9f63a90783a9f52f1e2f969221512869df926bb6e43d",
+  "serviceDecodedBytes": 6391862.0,
+  "apkResults": [
+    {
+      "apk": "E:\\code\\junes\\github\\CodexPlusPlus\\dist\\android\\CodexElves-0.5.0-android-debug.apk",
+      "apkBytes": 4719483,
+      "apkSha256": "9c011608dac507c8ad2462caf9228cf54b767a372b3a64dac0b780ebb5a03f83",
+      "resourceVersion": "64767e9760199c8d8ca58119a30d2db74939e14de82c421c3d496e59e088a81f",
+      "resourceFiles": 20,
+      "resourceDecodedBytes": 6392823.0,
+      "resourceIntegrityFailures": [],
+      "serviceFiles": 20,
+      "shortCircuitsUnchangedByVersion": false,
+      "downloadedFromServiceIfBuiltinSelected": [
+        {
+          "path": "/app.js",
+          "contentType": "application/javascript; charset=utf-8",
+          "size": 494465,
+          "sha256": "4b7a1c2c9be12c380d5021c4ea9e92e79b561f366e909c2233763705dbc25cab"
+        },
+        {
+          "path": "/style.css",
+          "contentType": "text/css; charset=utf-8",
+          "size": 83378,
+          "sha256": "60eafc58605e612ada82612c84c874a811b675cf1f8156127d84681fd47fb778"
+        }
+      ],
+      "downloadDecodedBytes": 577843,
+      "reusedFromBuiltinFiles": 18
+    },
+    {
+      "apk": "E:\\code\\junes\\github\\CodexPlusPlus\\dist\\android\\CodexElves-0.5.0-android.apk",
+      "apkBytes": 2193707,
+      "apkSha256": "498ff0e866329e9e1d4e773047801ecd3f755185924e905a89d4734512b2a1f9",
+      "resourceVersion": "9878532f04978dfaaecd9f63a90783a9f52f1e2f969221512869df926bb6e43d",
+      "resourceFiles": 20,
+      "resourceDecodedBytes": 6391862.0,
+      "resourceIntegrityFailures": [],
+      "serviceFiles": 20,
+      "shortCircuitsUnchangedByVersion": true,
+      "downloadedFromServiceIfBuiltinSelected": [],
+      "downloadDecodedBytes": 0,
+      "reusedFromBuiltinFiles": 20
+    }
+  ],
+  "sourceDifferences": [
+    {
+      "path": "/app.js",
+      "serviceBytes": 494465,
+      "sourceBytes": 502923,
+      "serviceSha256": "4b7a1c2c9be12c380d5021c4ea9e92e79b561f366e909c2233763705dbc25cab",
+      "sourceSha256": "b42b0a7320278ce373252ba0aaa56fde2c1a574bc0479dfff5f1e80b3fec1aea"
+    },
+    {
+      "path": "/style.css",
+      "serviceBytes": 83378,
+      "sourceBytes": 83725,
+      "serviceSha256": "60eafc58605e612ada82612c84c874a811b675cf1f8156127d84681fd47fb778",
+      "sourceSha256": "117d3bbe50e54c6cce1ae66b6101cec591e4bd717740070cd9dadab2928ae350"
+    }
+  ],
+  "deviceInstalledVersion": "未取得真机证据"
+}

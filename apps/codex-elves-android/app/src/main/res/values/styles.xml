@@ -1,10 +1,32 @@
 <resources>
     <style name="Theme.CodexElves" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
-        <item name="android:colorAccent">#2563EB</item>
-        <item name="android:navigationBarColor">#FAFAFA</item>
-        <item name="android:statusBarColor">#FAFAFA</item>
+        <item name="android:colorAccent">#171717</item>
+        <item name="android:navigationBarColor">@color/login_background</item>
+        <item name="android:statusBarColor">@color/login_background</item>
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowActionModeOverlay">true</item>
+    </style>
+    <style name="Login.Label" parent="">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginBottom">8dp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:textColor">@color/login_text</item>
+    </style>
+    <style name="Login.Input" parent="">
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">50dp</item>
+        <item name="android:background">@drawable/login_input_background</item>
+        <item name="android:backgroundTint">@null</item>
+        <item name="android:paddingStart">13dp</item>
+        <item name="android:paddingEnd">13dp</item>
+        <item name="android:paddingTop">0dp</item>
+        <item name="android:paddingBottom">0dp</item>
+        <item name="android:textSize">16sp</item>
+        <item name="android:textColor">@color/login_text</item>
+        <item name="android:textColorHint">@color/login_muted</item>
     </style>
 </resources>

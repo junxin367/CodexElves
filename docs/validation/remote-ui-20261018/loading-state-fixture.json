@@ -1,0 +1,89 @@
+{
+  "description": "合成数据：已完成答复与尚未补齐的本轮活动，时间与截图的25分56秒一致，不含真实会话正文。",
+  "threadId": "qa-loading-completed",
+  "latestResponse": {
+    "ok": true,
+    "scope": "turns",
+    "threadId": "qa-loading-completed",
+    "data": [
+      {
+        "id": "completed-turn",
+        "status": "completed",
+        "startedAt": 1792203474.014,
+        "completedAt": 1792205030.54,
+        "itemsPageComplete": true,
+        "itemsComplete": false,
+        "itemsNextCursor": "older:completed-turn",
+        "items": [
+          {
+            "id": "user-completed",
+            "type": "userMessage",
+            "remoteHistoryContext": true,
+            "content": [
+              {
+                "type": "text",
+                "text": "请检查远程会话的加载状态。"
+              }
+            ]
+          },
+          {
+            "id": "work-tail",
+            "type": "commandExecution",
+            "status": "completed",
+            "command": "node --check assets/remote-access/app.js",
+            "aggregatedOutput": "",
+            "exitCode": 0
+          },
+          {
+            "id": "final-completed",
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "已经完成的助手正文。\n\n- 正文应持续可见\n- 历史活动可以展开补齐"
+          }
+        ]
+      }
+    ],
+    "nextCursor": null
+  },
+  "olderItemsResponse": {
+    "ok": true,
+    "scope": "items",
+    "threadId": "qa-loading-completed",
+    "turnId": "completed-turn",
+    "itemsPageComplete": true,
+    "itemsComplete": true,
+    "itemsNextCursor": null,
+    "data": [
+      {
+        "id": "work-early",
+        "type": "commandExecution",
+        "status": "completed",
+        "command": "git status --short",
+        "aggregatedOutput": "",
+        "exitCode": 0
+      },
+      {
+        "id": "commentary-early",
+        "type": "agentMessage",
+        "phase": "commentary",
+        "text": "正在核对历史活动记录。"
+      }
+    ]
+  },
+  "emptyCompletedTurn": {
+    "id": "empty-completed-turn",
+    "status": "completed",
+    "itemsPageComplete": true,
+    "itemsComplete": true,
+    "itemsNextCursor": null,
+    "items": []
+  },
+  "emptyActiveTurn": {
+    "id": "empty-active-turn",
+    "status": "inProgress",
+    "itemsPageComplete": true,
+    "itemsComplete": true,
+    "itemsNextCursor": null,
+    "items": []
+  }
+}

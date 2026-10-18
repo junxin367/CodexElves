@@ -1,0 +1,81 @@
+{
+  "capturedAt": "2026-10-18T00:29:27.220Z",
+  "sourceHashes": {
+    "app": "f655014618dfdbe2e90a8dddce590a2fdf905fa5fbff54cab806b57091dd67e4",
+    "attachments": "be9936a2451e82d65a3ca4a0b802cfabb6010780b74de037433fad551753ac81"
+  },
+  "conclusion": "普通恢复路径无附件版本重置；有失败未决回执且当前图片仍在读取时，自动草稿恢复能够造成静默丢弃。截图前提未知。",
+  "passed": 4,
+  "total": 4,
+  "tests": [
+    {
+      "name": "连接状态导致的附件禁用/恢复不会递增版本或丢弃正在读取的图片",
+      "passed": true,
+      "detail": {
+        "before": {
+          "attachmentVersion": 0,
+          "count": 0,
+          "readingFiles": true
+        },
+        "after": {
+          "attachmentVersion": 0,
+          "count": 1,
+          "readingFiles": false
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "显式草稿重置会使正在读取的图片静默取消",
+      "passed": true,
+      "detail": {
+        "before": {
+          "attachmentVersion": 0,
+          "count": 0,
+          "readingFiles": true
+        },
+        "after": {
+          "attachmentVersion": 1,
+          "count": 0,
+          "readingFiles": false
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "待确认失败回执在图片读取中恢复旧空附件草稿会复现静默丢弃",
+      "passed": true,
+      "detail": {
+        "before": {
+          "attachmentVersion": 0,
+          "count": 0,
+          "readingFiles": true
+        },
+        "after": {
+          "attachmentVersion": 1,
+          "count": 0,
+          "readingFiles": false
+        },
+        "recoveredOldText": true,
+        "notices": []
+      }
+    },
+    {
+      "name": "有当前新文字时失败回执不覆盖草稿且选图保留",
+      "passed": true,
+      "detail": {
+        "before": {
+          "attachmentVersion": 0,
+          "count": 0,
+          "readingFiles": true
+        },
+        "after": {
+          "attachmentVersion": 0,
+          "count": 1,
+          "readingFiles": false
+        },
+        "newDraftKept": true
+      }
+    }
+  ]
+}

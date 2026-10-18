@@ -1,0 +1,54 @@
+{
+  "collectedAt": "2026-10-17T22:23:15.769Z",
+  "sourcePath": "E:\\code\\junes\\github\\CodexPlusPlus\\assets\\remote-access\\native.js",
+  "sourceSha256": "0d36bb4d62cebbfb16865a1170308b3cbbf47ef73b79a9e85a025345183841c7",
+  "execution": "Node VM隔离原生桥接源码；manager为内存替身，没有CDP写入或真实授权",
+  "passed": 11,
+  "failed": 0,
+  "results": [
+    {
+      "name": "同一会话同时保留三个阻塞请求",
+      "passed": true
+    },
+    {
+      "name": "原始高风险元数据在桥接快照中完整保留",
+      "passed": true
+    },
+    {
+      "name": "同一轮两条异步消息的三个问题全部保留且身份不同",
+      "passed": true
+    },
+    {
+      "name": "已接受的一条异步回复仅移除对应问题",
+      "passed": true
+    },
+    {
+      "name": "canonical与legacy历史使用相同的多问题枚举",
+      "passed": true
+    },
+    {
+      "name": "已结束轮次和其他会话不混入当前问题",
+      "passed": true
+    },
+    {
+      "name": "同一批通知观察原生settled集合并保留新增请求",
+      "passed": true
+    },
+    {
+      "name": "请求通知中完整集合不被逐项回调截断且保留数字零ID",
+      "passed": true
+    },
+    {
+      "name": "允许一次响应逐字段透传并仅消除所选请求",
+      "passed": true
+    },
+    {
+      "name": "始终允许响应逐字段透传并仅消除所选请求",
+      "passed": true
+    },
+    {
+      "name": "拒绝响应逐字段透传并仅消除所选请求",
+      "passed": true
+    }
+  ]
+}

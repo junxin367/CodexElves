@@ -1,0 +1,198 @@
+{
+  "capturedAt": "2026-10-18T00:10:31.452Z",
+  "origin": "http://127.0.0.1:45222",
+  "resources": [
+    {
+      "path": "/app.js",
+      "sourceBytes": 502923,
+      "sourceSha256": "b42b0a7320278ce373252ba0aaa56fde2c1a574bc0479dfff5f1e80b3fec1aea",
+      "manifest": {
+        "path": "/app.js",
+        "contentType": "application/javascript; charset=utf-8",
+        "size": 494465,
+        "sha256": "4b7a1c2c9be12c380d5021c4ea9e92e79b561f366e909c2233763705dbc25cab"
+      },
+      "liveGzip": {
+        "status": 200,
+        "durationMs": 36,
+        "encoding": "gzip",
+        "contentType": "application/javascript; charset=utf-8",
+        "contentLength": 122806,
+        "decodedBytes": 494465,
+        "sha256": "4b7a1c2c9be12c380d5021c4ea9e92e79b561f366e909c2233763705dbc25cab",
+        "cacheControl": "no-cache",
+        "etag": "\"65a0ae6f1df4656de4b8ea6a9b255b49929a8e349790ff5a57fb24194554d4b1\"",
+        "vary": "Accept-Encoding"
+      },
+      "liveIdentity": {
+        "status": 200,
+        "durationMs": 13,
+        "encoding": null,
+        "contentType": "application/javascript; charset=utf-8",
+        "contentLength": 494465,
+        "decodedBytes": 494465,
+        "sha256": "4b7a1c2c9be12c380d5021c4ea9e92e79b561f366e909c2233763705dbc25cab",
+        "cacheControl": "no-cache",
+        "etag": "\"4b7a1c2c9be12c380d5021c4ea9e92e79b561f366e909c2233763705dbc25cab\"",
+        "vary": "Accept-Encoding"
+      },
+      "liveMatchesSource": false
+    },
+    {
+      "path": "/native.js",
+      "sourceBytes": 177584,
+      "sourceSha256": "0d36bb4d62cebbfb16865a1170308b3cbbf47ef73b79a9e85a025345183841c7",
+      "manifest": null,
+      "liveGzip": {
+        "status": 404,
+        "durationMs": 1,
+        "encoding": null,
+        "contentType": null,
+        "contentLength": null,
+        "decodedBytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "cacheControl": "no-store",
+        "etag": null,
+        "vary": null
+      },
+      "liveIdentity": {
+        "status": 404,
+        "durationMs": 2,
+        "encoding": null,
+        "contentType": null,
+        "contentLength": null,
+        "decodedBytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "cacheControl": "no-store",
+        "etag": null,
+        "vary": null
+      },
+      "liveMatchesSource": false
+    },
+    {
+      "path": "/style.css",
+      "sourceBytes": 83725,
+      "sourceSha256": "117d3bbe50e54c6cce1ae66b6101cec591e4bd717740070cd9dadab2928ae350",
+      "manifest": {
+        "path": "/style.css",
+        "contentType": "text/css; charset=utf-8",
+        "size": 83378,
+        "sha256": "60eafc58605e612ada82612c84c874a811b675cf1f8156127d84681fd47fb778"
+      },
+      "liveGzip": {
+        "status": 200,
+        "durationMs": 4,
+        "encoding": "gzip",
+        "contentType": "text/css; charset=utf-8",
+        "contentLength": 16022,
+        "decodedBytes": 83378,
+        "sha256": "60eafc58605e612ada82612c84c874a811b675cf1f8156127d84681fd47fb778",
+        "cacheControl": "no-cache",
+        "etag": "\"c2f8243e5cd82b477f3cc4b11bc905f149e8f565a8093a241c504c584006c543\"",
+        "vary": "Accept-Encoding"
+      },
+      "liveIdentity": {
+        "status": 200,
+        "durationMs": 1,
+        "encoding": null,
+        "contentType": "text/css; charset=utf-8",
+        "contentLength": 83378,
+        "decodedBytes": 83378,
+        "sha256": "60eafc58605e612ada82612c84c874a811b675cf1f8156127d84681fd47fb778",
+        "cacheControl": "no-cache",
+        "etag": "\"60eafc58605e612ada82612c84c874a811b675cf1f8156127d84681fd47fb778\"",
+        "vary": "Accept-Encoding"
+      },
+      "liveMatchesSource": false
+    },
+    {
+      "path": "/attachments.js",
+      "sourceBytes": 16054,
+      "sourceSha256": "be9936a2451e82d65a3ca4a0b802cfabb6010780b74de037433fad551753ac81",
+      "manifest": {
+        "path": "/attachments.js",
+        "contentType": "application/javascript; charset=utf-8",
+        "size": 16054,
+        "sha256": "be9936a2451e82d65a3ca4a0b802cfabb6010780b74de037433fad551753ac81"
+      },
+      "liveGzip": {
+        "status": 200,
+        "durationMs": 1,
+        "encoding": "gzip",
+        "contentType": "application/javascript; charset=utf-8",
+        "contentLength": 4854,
+        "decodedBytes": 16054,
+        "sha256": "be9936a2451e82d65a3ca4a0b802cfabb6010780b74de037433fad551753ac81",
+        "cacheControl": "no-cache",
+        "etag": "\"dde4d484c4cf63d37157bc1981d57828a72ba7831b29edd539eac057dc906530\"",
+        "vary": "Accept-Encoding"
+      },
+      "liveIdentity": {
+        "status": 200,
+        "durationMs": 1,
+        "encoding": null,
+        "contentType": "application/javascript; charset=utf-8",
+        "contentLength": 16054,
+        "decodedBytes": 16054,
+        "sha256": "be9936a2451e82d65a3ca4a0b802cfabb6010780b74de037433fad551753ac81",
+        "cacheControl": "no-cache",
+        "etag": "\"be9936a2451e82d65a3ca4a0b802cfabb6010780b74de037433fad551753ac81\"",
+        "vary": "Accept-Encoding"
+      },
+      "liveMatchesSource": true
+    },
+    {
+      "path": "/events-client.js",
+      "sourceBytes": 10446,
+      "sourceSha256": "e6889da6fc5a80c271924b959dac62f7a3875fad396bfa97a0eaf76a52162dcb",
+      "manifest": {
+        "path": "/events-client.js",
+        "contentType": "application/javascript; charset=utf-8",
+        "size": 10446,
+        "sha256": "e6889da6fc5a80c271924b959dac62f7a3875fad396bfa97a0eaf76a52162dcb"
+      },
+      "liveGzip": {
+        "status": 200,
+        "durationMs": 1,
+        "encoding": "gzip",
+        "contentType": "application/javascript; charset=utf-8",
+        "contentLength": 2342,
+        "decodedBytes": 10446,
+        "sha256": "e6889da6fc5a80c271924b959dac62f7a3875fad396bfa97a0eaf76a52162dcb",
+        "cacheControl": "no-cache",
+        "etag": "\"8e1bad16353233866364aa6a98e28c787a175893e4024ec182b835933e8f7c15\"",
+        "vary": "Accept-Encoding"
+      },
+      "liveIdentity": {
+        "status": 200,
+        "durationMs": 1,
+        "encoding": null,
+        "contentType": "application/javascript; charset=utf-8",
+        "contentLength": 10446,
+        "decodedBytes": 10446,
+        "sha256": "e6889da6fc5a80c271924b959dac62f7a3875fad396bfa97a0eaf76a52162dcb",
+        "cacheControl": "no-cache",
+        "etag": "\"e6889da6fc5a80c271924b959dac62f7a3875fad396bfa97a0eaf76a52162dcb\"",
+        "vary": "Accept-Encoding"
+      },
+      "liveMatchesSource": true
+    }
+  ],
+  "manifestResponse": {
+    "status": 200,
+    "durationMs": 35,
+    "encoding": "gzip",
+    "contentType": "application/json; charset=utf-8",
+    "contentLength": 1308,
+    "decodedBytes": 3430,
+    "sha256": "e97642eb40bd037b95bece6f8c2a062389cab792f80dc96947664f7fbf2e8fa5",
+    "cacheControl": "no-cache",
+    "etag": "\"1a6aaefd226878eb7c2636223c86a366d5e2a895b10d1c9360adb4a2615aaa07\"",
+    "vary": "Accept-Encoding"
+  },
+  "manifest": {
+    "version": "9878532f04978dfaaecd9f63a90783a9f52f1e2f969221512869df926bb6e43d",
+    "files": 20,
+    "totalIdentityBytes": 6391862
+  }
+}

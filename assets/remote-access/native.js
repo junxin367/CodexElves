@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 40) return;
+  if (window.__codexElvesRemoteAccess?.version === 42) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -215,6 +215,7 @@
   const array = value => Array.isArray(value) ? value : [];
   const HISTORY_TURN_PAGE_LIMIT = 3;
   const HISTORY_ITEM_PAGE_LIMIT = 40;
+  const HISTORY_TURN_READ_CONCURRENCY = 2;
   const transcriptEventTypes = new Set(["modelChanged", "modelRerouted", "contextCompaction"]);
   const normalizePath = path => String(path || "").replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
   async function nativeUltraReasoningEnabled() {
@@ -628,23 +629,36 @@
     const nextCursor = optionalCursor(page.nextCursor, "原生会话分页游标");
     if (nextCursor != null && nextCursor === cursor)
       throw failure(503, "原生会话历史分页游标未前进");
-    const data = [], itemsPaginationByTurnId = {};
-    for (const turn of page.data) {
-      const pageTurnId = requiredId(turn?.id);
-      const itemPage = await nativeItemsPage(threadId, pageTurnId, null);
-      if (itemPage.nextCursor != null) {
-        const firstPage = await nativeItemsPage(threadId, pageTurnId, null, "asc");
-        const firstUser = firstPage.items.findIndex(item => item.type === "userMessage");
-        if (firstUser >= 0) {
-          const loadedIds = new Set(itemPage.items.map(item => item.id));
-          const prefix = firstPage.items.slice(0, firstUser + 1)
-            .filter(item => !loadedIds.has(item.id)).map(item => ({ ...item, remoteHistoryContext: true }));
-          itemPage.items.unshift(...prefix);
-          itemPage.itemStartedAtMsById = { ...firstPage.itemStartedAtMsById, ...itemPage.itemStartedAtMsById };
+    const pages = new Array(page.data.length);
+    let nextTurn = 0, failed = false;
+    // 不同轮次独立读取；按原页索引归并，避免首屏等待逐轮叠加，也限制桌面请求并发。
+    await Promise.all(Array.from({ length: Math.min(HISTORY_TURN_READ_CONCURRENCY, page.data.length) }, async () => {
+      while (!failed && nextTurn < page.data.length) {
+        const index = nextTurn++, turn = page.data[index];
+        try {
+          const pageTurnId = requiredId(turn?.id);
+          const itemPage = await nativeItemsPage(threadId, pageTurnId, null);
+          if (failed) return;
+          if (itemPage.nextCursor != null) {
+            const firstPage = await nativeItemsPage(threadId, pageTurnId, null, "asc");
+            const firstUser = firstPage.items.findIndex(item => item.type === "userMessage");
+            if (firstUser >= 0) {
+              const loadedIds = new Set(itemPage.items.map(item => item.id));
+              const prefix = firstPage.items.slice(0, firstUser + 1)
+                .filter(item => !loadedIds.has(item.id)).map(item => ({ ...item, remoteHistoryContext: true }));
+              itemPage.items.unshift(...prefix);
+              itemPage.itemStartedAtMsById = { ...firstPage.itemStartedAtMsById, ...itemPage.itemStartedAtMsById };
+            }
+          }
+          pages[index] = { turn: enrichHistoryTurn(threadId, turn, itemPage), itemPage };
+        } catch (error) {
+          failed = true;
+          throw error;
         }
       }
-      data.push(enrichHistoryTurn(threadId, turn, itemPage));
-      itemsPaginationByTurnId[pageTurnId] = {
+    }));
+    const data = pages.map(page => page.turn);
+    const itemsPaginationByTurnId = Object.fromEntries(pages.map(({ turn, itemPage }) => [turn.id, {
         nextCursor: itemPage.nextCursor,
         hasMore: itemPage.nextCursor != null,
         complete: itemPage.nextCursor == null,
@@ -653,8 +667,7 @@
         order: "asc",
         newestSnapshotItemId: itemPage.newestSnapshotItemId,
         pageLimit: itemPage.pageLimit
-      };
-    }
+    }]));
     return {
       ok: true,
       scope: "turns",
@@ -2859,8 +2872,24 @@
     if (typeof provider?.readCreationInputs !== "function") throw failure(503, "原生创建输入不可用");
     return provider;
   }
-  async function nativeCreationInputs() {
-    return nativeCreationProvider(await nativeCreationModule());
+  async function nativeCreationPermissions(module, workspace, workspaceKind, model) {
+    const resolvers = Object.values(module).filter(value => typeof value === "function"
+      && ["allowPermissionSelection", "sourcePermissionSelection",
+        "permissionsConfig", "useAppServerPermissionDefault"]
+        .every(marker => Function.prototype.toString.call(value).includes(marker)));
+    if (resolvers.length !== 1)
+      throw failure(503, "当前 Codex 版本不支持继承桌面权限设置，请在桌面新建会话");
+    // 使用桌面的权限解析流程，保留预设、自定义配置及项目和模型的权限限制。
+    const permissions = await resolvers[0]({
+      scope: appScope, allowPermissionSelection: true, hostId: "local",
+      cwd: workspace.cwd, workspaceRoots: workspace.workspaceRoots,
+      workspaceKind, model: model ? String(model) : null,
+      permissionProfileId: null, sourcePermissionSelection: null, isDelegated: false
+    });
+    if (!permissions || (!permissions.permissionSelection && !permissions.permissionsConfig
+        && permissions.useAppServerPermissionDefault !== true))
+      throw failure(503, "未能读取桌面权限设置，请稍后重试");
+    return permissions;
   }
   function requestedProjectId(value) {
     if (value == null || value === "") return null;
@@ -3029,15 +3058,13 @@
             const imageAttachments = remoteImageAttachments(payload);
             const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
             if (!prompt && !imageAttachments.length) throw failure(400, "消息不能为空");
-            let provider, workspace;
-            if (projectId == null) {
-              const module = await nativeCreationModule();
-              provider = nativeCreationProvider(module);
-              workspace = await nativeProjectlessWorkspace(prompt, module);
-            } else {
-              provider = await nativeCreationInputs();
-              workspace = await localProjectWorkspace(projectId);
-            }
+            const module = await nativeCreationModule();
+            const provider = nativeCreationProvider(module);
+            const workspace = projectId == null
+              ? await nativeProjectlessWorkspace(prompt, module)
+              : await localProjectWorkspace(projectId);
+            const permissions = await nativeCreationPermissions(module, workspace,
+              projectId == null ? "projectless" : "project", goalSettings?.model ?? payload.model);
             const skills = await skillInputs(payload, workspace.cwd);
             if (goalMode) {
               materialized = await materialize({
@@ -3065,7 +3092,7 @@
               } : {
                 projectAssignment: workspace.projectAssignment
               }),
-              useAppServerPermissionDefault: true, mode: "default", threadStartKind: "default",
+              ...permissions, mode: "default", threadStartKind: "default",
               ...(goalSettings || payload.model ? {
                 collaborationMode: {
                   mode: "default",
@@ -3242,7 +3269,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 40, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
+    version: 42, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
     dispose() {
       for (const dispose of unsubscribe) { try { dispose?.(); } catch {} }
       unsubscribe = [];

@@ -1,0 +1,41 @@
+{
+  "apk": "E:\\code\\junes\\github\\CodexPlusPlus\\dist\\android\\CodexElves-0.5.0-android-debug.apk",
+  "bytes": 4719392,
+  "sha256": "c673ae3d5caf7000e5d8552168229e617b1da1198d9109abde89aed4b52ded95",
+  "native_runtime_evidence": false,
+  "preview_type": "Composition of extracted APK adaptive-icon layers, not a device screenshot",
+  "icons": {
+    "codex_elves_icon": {
+      "packaged_path": "res/drawable-nodpi-v4/codex_elves_icon.png",
+      "size": [
+        432,
+        432
+      ],
+      "source_pixels_equal": true
+    },
+    "ic_launcher_monochrome": {
+      "packaged_path": "res/drawable-nodpi-v4/ic_launcher_monochrome.png",
+      "size": [
+        432,
+        432
+      ],
+      "source_pixels_equal": true
+    }
+  },
+  "bundled_web_resources": {
+    "app.js": {
+      "packaged_sha256": "31c2f4b8844951ba3573db5a946b4bcaca25532e1be4f7c95135191cda291473",
+      "current_source_sha256": "31c2f4b8844951ba3573db5a946b4bcaca25532e1be4f7c95135191cda291473",
+      "matches_current_source": true
+    },
+    "style.css": {
+      "packaged_sha256": "c8feb7dc13b9265b5952a4c1a890a0695487ecabc74a0ef48b80780da0f58819",
+      "current_source_sha256": "c8feb7dc13b9265b5952a4c1a890a0695487ecabc74a0ef48b80780da0f58819",
+      "matches_current_source": true
+    }
+  },
+  "foreground_max_radius_dp": 30.63,
+  "safe_circle_radius_dp": 33,
+  "foreground_within_safe_circle": true,
+  "packaged_background": "#F6F3FA"
+}

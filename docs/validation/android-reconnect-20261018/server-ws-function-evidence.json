@@ -1,0 +1,87 @@
+{
+  "capturedAtUtc": "2026-10-18T01:29:32.0740391+00:00",
+  "source": {
+    "path": "crates/codex-elves-core/src/remote_access.rs",
+    "function": "stream_websocket_events",
+    "finalFileSha256": "ef335a3630f17a00203675f68f2df56147571d9afbf1db8f2361125556e60734",
+    "finalFunctionUtf8Sha256": "10d38e549048757c4e0f83adf772751b39a68569ecb6a7e3e58a7418b3b1d225",
+    "onlyPermanentRustChange": "stream_websocket_events",
+    "temporaryIncludeRemoved": true,
+    "javaModifiedByThisTask": false
+  },
+  "dependencies": {
+    "axum": "0.8.9",
+    "serverTokioTungstenite": "0.29.0",
+    "serverTungstenite": "0.29.0",
+    "probeClientTokioTungstenite": "0.26.2",
+    "tokio": "1.52.3"
+  },
+  "validation": {
+    "command": "cargo test -p codex-elves-core --lib ws_control_function_probe -- --test-threads=1 --nocapture",
+    "finalExitCode": 0,
+    "finalPassed": 5,
+    "finalFailed": 0,
+    "filteredOut": 638,
+    "reportedTestDurationSeconds": 33.37,
+    "finalCompileDurationSeconds": 10.38,
+    "actualProductionFunctionExecuted": true,
+    "actualAxumUpgradeAndTokioTungsteniteClient": true,
+    "realRemoteAccessControllerAndAdminRevoke": true,
+    "deviceOrPublicTunnelUsed": false,
+    "testCodePath": "temp/android-reconnect-native-20261018/ws-control-function-tests.rs",
+    "testCodeSha256": "f3cffb1b39d611fd092614caba7432439dbc708c3ee0dda14b24e721619a39a1",
+    "firstRun": {
+      "exitCode": 101,
+      "passed": 4,
+      "failed": 1,
+      "failedCase": "continuous_control_frames_do_not_starve_business_or_heartbeat",
+      "explanation": "Test expected Close to be the next frame, but a previously in-flight Pong arrived first. Production heartbeat/business assertions had already passed. Only temporary test close draining was corrected before the final 5/5 run."
+    },
+    "fmtCommand": "cargo fmt -p codex-elves-core -- --check",
+    "fmtExitCode": 0,
+    "diffCheckExitCode": 0
+  },
+  "cases": [
+    {
+      "case": "continuous_control_frames",
+      "pingsSent": 376,
+      "pongsReceived": 375,
+      "businessReceived": true,
+      "heartbeatMs": 15014,
+      "receiverCountAfterClose": 0
+    },
+    {
+      "case": "peer_tcp_drop",
+      "releaseWaitMs": 3,
+      "receiverCount": 0
+    },
+    {
+      "case": "ping_close_and_ignored_client_data",
+      "pongPayloadMatches": true,
+      "closeReceived": true,
+      "receiverCount": 0,
+      "releaseWaitMs": 0,
+      "nativeActionCalls": 0
+    },
+    {
+      "case": "authorization_revoked",
+      "terminalMethod": "remote/unauthorized",
+      "closeReceived": true,
+      "receiverCount": 0
+    },
+    {
+      "case": "service_stopped",
+      "terminalMethod": "remote/disconnected",
+      "closeReceived": true,
+      "receiverCount": 0
+    }
+  ],
+  "minimalBeforeFixEvidence": "server-ws-control-evidence.json",
+  "limits": [
+    "No phone or public tunnel control-frame trace. This is a repaired protocol handling defect, not a confirmed unique cause of the user reconnect incident.",
+    "Close frame received while peer holds TCP open is distinct from completed TCP closure; no permanent subscription leak is claimed.",
+    "Temporary focused test inclusion was removed after validation. Temporary files are retained for parent cleanup; no deletion was performed.",
+    "No new write timeout, global network/permission/Java settings, source commit, package build, installation or service restart was performed.",
+    "Tests cover local non-congested connections, not public proxy backpressure or Android background behavior."
+  ]
+}

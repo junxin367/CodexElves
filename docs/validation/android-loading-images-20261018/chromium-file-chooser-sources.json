@@ -1,0 +1,99 @@
+{
+  "retrievedAt": "2026-10-18T00:17:15.9507696Z",
+  "source": "Official chromium/chromium repository mirror",
+  "revision": "586f39ce10f91f06192b790e0c7f8c019ce3306f",
+  "deviceVersionMatched": false,
+  "limitation": "These source findings do not replace a runtime test against the user device WebView version.",
+  "sources": [
+    {
+      "path": "android_webview/glue/java/src/com/android/webview/chromium/WebViewContentsClientAdapter.java",
+      "url": "https://raw.githubusercontent.com/chromium/chromium/586f39ce10f91f06192b790e0c7f8c019ce3306f/android_webview/glue/java/src/com/android/webview/chromium/WebViewContentsClientAdapter.java",
+      "revision": "586f39ce10f91f06192b790e0c7f8c019ce3306f",
+      "sha256": "df0c79403c9144bf732627561b2bb9b74c0d3e8bbfcc5782437257e7bb6df9e7",
+      "symbol": "showFileChooser",
+      "lineStart": 905,
+      "lineEnd": 949,
+      "finding": "onShowFileChooser 返回 false 后，WebView 直接向 uploadFileCallback 再次发送取消。应用回调在调用用户处理前先置 mCompleted，重复调用会抛异常。"
+    },
+    {
+      "path": "android_webview/browser/aw_web_contents_delegate.cc",
+      "url": "https://raw.githubusercontent.com/chromium/chromium/586f39ce10f91f06192b790e0c7f8c019ce3306f/android_webview/browser/aw_web_contents_delegate.cc",
+      "revision": "586f39ce10f91f06192b790e0c7f8c019ce3306f",
+      "sha256": "09cf7eab1be50a01a1c1b4415f8b6b77507a6eaa9463692aedb69b32088b98a0",
+      "symbol": "JNI_AwWebContentsDelegate_FilesSelectedInChooser",
+      "lineStart": 404,
+      "lineEnd": 461,
+      "finding": "选择结果 URI 作为 NativeFileInfo 的 file_path 传入 FileSelected，没有经过 URLLoader。"
+    },
+    {
+      "path": "content/browser/web_contents/file_chooser_impl.cc",
+      "url": "https://raw.githubusercontent.com/chromium/chromium/586f39ce10f91f06192b790e0c7f8c019ce3306f/content/browser/web_contents/file_chooser_impl.cc",
+      "revision": "586f39ce10f91f06192b790e0c7f8c019ce3306f",
+      "sha256": "be5eefb546fd9c7cc1182598594fe206412c665d8d4871c4c565f2bccaf1f15e",
+      "symbol": "FileChooserImpl::FileSelected",
+      "lineStart": 246,
+      "lineEnd": 281,
+      "finding": "选择结果针对指定文件授予渲染进程 GrantReadFile 访问权。"
+    },
+    {
+      "path": "storage/browser/blob/blob_reader.cc",
+      "url": "https://raw.githubusercontent.com/chromium/chromium/586f39ce10f91f06192b790e0c7f8c019ce3306f/storage/browser/blob/blob_reader.cc",
+      "revision": "586f39ce10f91f06192b790e0c7f8c019ce3306f",
+      "sha256": "acaea1ab48cdf921e74138140389a3fda799c4f5c0ed26f4aadd98080ed7b2ec",
+      "symbol": "BlobReader::CreateFileStreamReader",
+      "lineStart": 718,
+      "lineEnd": 735,
+      "finding": "文件 Blob 通过 FileStreamReader::CreateForLocalFile 读取。"
+    },
+    {
+      "path": "base/files/file_posix.cc",
+      "url": "https://raw.githubusercontent.com/chromium/chromium/586f39ce10f91f06192b790e0c7f8c019ce3306f/base/files/file_posix.cc",
+      "revision": "586f39ce10f91f06192b790e0c7f8c019ce3306f",
+      "sha256": "90458cf81796905754515d5e6e80dd70212836aedb4139f54ba146c7ccfb5acf",
+      "symbol": "File::DoInitialize",
+      "lineStart": 625,
+      "lineEnd": 642,
+      "finding": "Android content URI 走 OpenAndroidFile 文件描述符读取分支。"
+    },
+    {
+      "path": "android_webview/browser/network_service/net_helpers.cc",
+      "url": "https://raw.githubusercontent.com/chromium/chromium/586f39ce10f91f06192b790e0c7f8c019ce3306f/android_webview/browser/network_service/net_helpers.cc",
+      "revision": "586f39ce10f91f06192b790e0c7f8c019ce3306f",
+      "sha256": "f036a575b0ac70348d0db8917a6397fba2bf61643ea11e98e27aad9f235f2ca5",
+      "symbol": "ShouldBlockURL",
+      "lineStart": 103,
+      "lineEnd": 110,
+      "finding": "allowContentAccess 对 content scheme 的 URL 请求执行阻断。"
+    },
+    {
+      "path": "android_webview/glue/java/src/com/android/webview/chromium/WebViewChromiumFactoryProvider.java",
+      "url": "https://raw.githubusercontent.com/chromium/chromium/586f39ce10f91f06192b790e0c7f8c019ce3306f/android_webview/glue/java/src/com/android/webview/chromium/WebViewChromiumFactoryProvider.java",
+      "revision": "586f39ce10f91f06192b790e0c7f8c019ce3306f",
+      "sha256": "1ac91273f49c02dce2ab121937d84decf1349ea51afa15f4dd828ba2dbf87d46",
+      "symbol": "StaticsAdapter.parseFileChooserResult",
+      "lineStart": 241,
+      "lineEnd": 244,
+      "finding": "WebView framework Statics adapter forwards parseFileChooserResult to SharedStatics."
+    },
+    {
+      "path": "android_webview/glue/java/src/com/android/webview/chromium/SharedStatics.java",
+      "url": "https://raw.githubusercontent.com/chromium/chromium/586f39ce10f91f06192b790e0c7f8c019ce3306f/android_webview/glue/java/src/com/android/webview/chromium/SharedStatics.java",
+      "revision": "586f39ce10f91f06192b790e0c7f8c019ce3306f",
+      "sha256": "01c32ad3e68064347e6d7da88ee631a054ab9842ba6d692fbb7d06d6081ee29c",
+      "symbol": "SharedStatics.parseFileChooserResult",
+      "lineStart": 238,
+      "lineEnd": 245,
+      "finding": "SharedStatics forwards the result parser to AwContentsClient."
+    },
+    {
+      "path": "android_webview/java/src/org/chromium/android_webview/AwContentsClient.java",
+      "url": "https://raw.githubusercontent.com/chromium/chromium/586f39ce10f91f06192b790e0c7f8c019ce3306f/android_webview/java/src/org/chromium/android_webview/AwContentsClient.java",
+      "revision": "586f39ce10f91f06192b790e0c7f8c019ce3306f",
+      "sha256": "034b5aba6a1d0cccc8205149bca63a6887a526b2f0404952611c1deca5bb846e",
+      "symbol": "AwContentsClient.parseFileChooserResult",
+      "lineStart": 288,
+      "lineEnd": 300,
+      "finding": "The platform parser reads Intent.getData() only; a successful ClipData-only result becomes null, and multiple ClipData URIs are ignored."
+    }
+  ]
+}

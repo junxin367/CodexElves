@@ -1,0 +1,111 @@
+{
+  "mode": "before",
+  "capturedAt": "2026-10-18T00:32:17.264Z",
+  "sourceHashes": {
+    "app": "f655014618dfdbe2e90a8dddce590a2fdf905fa5fbff54cab806b57091dd67e4",
+    "attachments": "be9936a2451e82d65a3ca4a0b802cfabb6010780b74de037433fad551753ac81"
+  },
+  "conclusion": "普通恢复路径无附件版本重置；有失败未决回执且当前图片仍在读取时，自动草稿恢复能够造成静默丢弃。截图前提未知。",
+  "passed": 6,
+  "total": 6,
+  "tests": [
+    {
+      "name": "连接状态导致的附件禁用/恢复不会递增版本或丢弃正在读取的图片",
+      "passed": true,
+      "detail": {
+        "before": {
+          "attachmentVersion": 0,
+          "count": 0,
+          "readingFiles": true
+        },
+        "after": {
+          "attachmentVersion": 0,
+          "count": 1,
+          "readingFiles": false
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "显式草稿重置会使正在读取的图片静默取消",
+      "passed": true,
+      "detail": {
+        "before": {
+          "attachmentVersion": 0,
+          "count": 0,
+          "readingFiles": true
+        },
+        "after": {
+          "attachmentVersion": 1,
+          "count": 0,
+          "readingFiles": false
+        },
+        "notices": []
+      }
+    },
+    {
+      "name": "修改前复现旧失败回执覆盖进行中选图且静默丢弃",
+      "passed": true,
+      "detail": {
+        "before": {
+          "attachmentVersion": 0,
+          "count": 0,
+          "readingFiles": true
+        },
+        "after": {
+          "attachmentVersion": 1,
+          "count": 0,
+          "readingFiles": false
+        },
+        "retainedFailedRecoveries": 0,
+        "notices": []
+      }
+    },
+    {
+      "name": "有当前新文字时失败回执不覆盖草稿且选图保留",
+      "passed": true,
+      "detail": {
+        "before": {
+          "attachmentVersion": 0,
+          "count": 0,
+          "readingFiles": true
+        },
+        "after": {
+          "attachmentVersion": 0,
+          "count": 1,
+          "readingFiles": false
+        },
+        "newDraftKept": true
+      }
+    },
+    {
+      "name": "没有进行中选图时正常自动恢复旧失败输入",
+      "passed": true,
+      "detail": {
+        "after": {
+          "attachmentVersion": 1,
+          "count": 0,
+          "readingFiles": false
+        },
+        "normallyRecovered": true
+      }
+    },
+    {
+      "name": "已有当前图片时旧失败输入不会覆盖",
+      "passed": true,
+      "detail": {
+        "before": {
+          "attachmentVersion": 1,
+          "count": 1,
+          "readingFiles": false
+        },
+        "after": {
+          "attachmentVersion": 1,
+          "count": 1,
+          "readingFiles": false
+        },
+        "retainedFailedRecoveries": 1
+      }
+    }
+  ]
+}
