@@ -1,0 +1,30 @@
+验证日期：2026-10-18
+方式：临时 cfg(test) 模块引用 temp/android-notifications-backend-20261018/backend-tests.rs，直接调用生产 read/events/notification_stream_event；使用隔离授权目录及合成 NativeRemoteBridge。WebSocket 验证只连接测试自身的 127.0.0.1 随机端口。
+
+命令：
+cargo test -p codex-elves-core --lib android_notification_validation -- --test-threads=1 --nocapture
+
+结果：
+Finished test profile in 24.19s
+running 6 tests
+notifications_contract_rejects_unknown_fields_and_private_payloads ... ok
+notifications_legacy_websocket_auth_and_body_events_remain_unchanged ... ok
+notifications_read_requires_auth_and_remains_read_only ... ok
+notifications_sse_auth_filter_and_legacy_events_are_preserved ... ok
+notifications_sse_heartbeat_deadline_survives_continuous_body_events ... ok
+  连续正文期间通知心跳耗时 15.01s
+notifications_stream_whitelist_only_exposes_metadata ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 638 filtered out; finished in 31.09s
+退出码：0
+
+覆盖：
+- 无设备 Cookie / 已撤权读取拒绝；非法请求不触发 native 调用。
+- 当前 read_only=true、allow_approvals=false 下通知读取可用，调用动作只有 notifications。
+- 请求字段、epoch、非负安全整数 cursor 校验；响应 schema、epoch/cursor、notify/dismiss 身份、类型、标题、顺序、pending 唯一性校验。
+- 多余正文、命令、Cookie、访问密钥等字段使快照响应拒绝。
+- 通知 SSE 仅转发允许元数据；普通正文和问答正文被过滤；状态事件与删除事件重新构造允许字段。
+- 持续每 20ms 注入合成正文事件时，通知 SSE 仍按固定 15 秒 deadline 发送 heartbeat。
+- 原 SSE 仍传递完整正文；原 WebSocket 保留鉴权、完整正文和撤权断开行为。
+- 普通 models 读取保持原响应字段。
+
+临时模块和测试源在验证后删除；未向真实服务发送消息、授权、目标或队列写操作。

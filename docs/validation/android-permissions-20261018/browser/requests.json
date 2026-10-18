@@ -1,0 +1,236 @@
+[
+  {
+    "case": "cancel",
+    "type": "ready"
+  },
+  {
+    "case": "cancel",
+    "type": "authenticated"
+  },
+  {
+    "case": "cancel",
+    "type": "haptic-click"
+  },
+  {
+    "case": "cancel",
+    "type": "haptic-click"
+  },
+  {
+    "case": "cancel",
+    "type": "app-info"
+  },
+  {
+    "case": "cancel",
+    "type": "haptic-click"
+  },
+  {
+    "case": "cancel",
+    "type": "notification-settings-get",
+    "requestId": "notification-mvdnmn69-1"
+  },
+  {
+    "case": "cancel",
+    "type": "haptic-click"
+  },
+  {
+    "case": "cancel",
+    "type": "notification-settings-set",
+    "requestId": "notification-mvdnn27w-2",
+    "settings": {
+      "enabled": true,
+      "approval": true,
+      "question": true,
+      "completed": true,
+      "failed": true
+    }
+  },
+  {
+    "case": "cancel",
+    "type": "notification-settings-get",
+    "requestId": "notification-mvdnn288-3"
+  },
+  {
+    "case": "cancel",
+    "type": "notification-permission-request",
+    "requestId": "notification-mvdnn28g-4"
+  },
+  {
+    "case": "save-failure",
+    "type": "ready"
+  },
+  {
+    "case": "save-failure",
+    "type": "authenticated"
+  },
+  {
+    "case": "save-failure",
+    "type": "haptic-click"
+  },
+  {
+    "case": "save-failure",
+    "type": "haptic-click"
+  },
+  {
+    "case": "save-failure",
+    "type": "app-info"
+  },
+  {
+    "case": "save-failure",
+    "type": "haptic-click"
+  },
+  {
+    "case": "save-failure",
+    "type": "notification-settings-get",
+    "requestId": "notification-mvdnno2q-1"
+  },
+  {
+    "case": "save-failure",
+    "type": "haptic-click"
+  },
+  {
+    "case": "save-failure",
+    "type": "notification-settings-set",
+    "requestId": "notification-mvdnnu40-2",
+    "settings": {
+      "enabled": true,
+      "approval": true,
+      "question": true,
+      "completed": true,
+      "failed": true
+    }
+  },
+  {
+    "case": "channel",
+    "type": "ready"
+  },
+  {
+    "case": "channel",
+    "type": "authenticated"
+  },
+  {
+    "case": "channel",
+    "type": "haptic-click"
+  },
+  {
+    "case": "channel",
+    "type": "haptic-click"
+  },
+  {
+    "case": "channel",
+    "type": "app-info"
+  },
+  {
+    "case": "channel",
+    "type": "haptic-click"
+  },
+  {
+    "case": "channel",
+    "type": "notification-settings-get",
+    "requestId": "notification-mvdnp50k-1"
+  },
+  {
+    "case": "channel",
+    "type": "haptic-click"
+  },
+  {
+    "case": "channel",
+    "type": "notification-open-system-settings",
+    "requestId": "notification-mvdnpdg7-2"
+  },
+  {
+    "case": "channel",
+    "type": "haptic-click"
+  },
+  {
+    "case": "channel",
+    "type": "haptic-click"
+  },
+  {
+    "case": "channel",
+    "type": "notification-settings-get",
+    "requestId": "notification-mvdnptyt-3"
+  },
+  {
+    "case": "channel",
+    "type": "haptic-click"
+  },
+  {
+    "case": "channel",
+    "type": "notification-open-system-settings",
+    "requestId": "notification-mvdnq764-4"
+  },
+  {
+    "case": "save-failure",
+    "type": "ready"
+  },
+  {
+    "case": "save-failure",
+    "type": "authenticated"
+  },
+  {
+    "case": "save-failure",
+    "type": "haptic-click"
+  },
+  {
+    "case": "save-failure",
+    "type": "haptic-click"
+  },
+  {
+    "case": "save-failure",
+    "type": "app-info"
+  },
+  {
+    "case": "save-failure",
+    "type": "haptic-click"
+  },
+  {
+    "case": "save-failure",
+    "type": "notification-settings-get",
+    "requestId": "notification-mvdnwmfk-1"
+  },
+  {
+    "case": "save-failure",
+    "type": "haptic-click"
+  },
+  {
+    "case": "save-failure",
+    "type": "notification-settings-set",
+    "requestId": "notification-mvdnwuht-2",
+    "settings": {
+      "enabled": true,
+      "approval": true,
+      "question": true,
+      "completed": true,
+      "failed": true
+    }
+  },
+  {
+    "case": "channel",
+    "type": "ready"
+  },
+  {
+    "case": "channel",
+    "type": "authenticated"
+  },
+  {
+    "case": "channel",
+    "type": "haptic-click"
+  },
+  {
+    "case": "channel",
+    "type": "haptic-click"
+  },
+  {
+    "case": "channel",
+    "type": "app-info"
+  },
+  {
+    "case": "channel",
+    "type": "haptic-click"
+  },
+  {
+    "case": "channel",
+    "type": "notification-settings-get",
+    "requestId": "notification-mvdnxrc2-1"
+  }
+]

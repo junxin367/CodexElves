@@ -1,0 +1,91 @@
+{
+  "status": "PASS",
+  "date": "2026-10-18",
+  "scope": [
+    "assets/remote-access/platform.js",
+    "assets/remote-access/app.js"
+  ],
+  "contract": {
+    "method": "CodexElvesAndroid.postMessage(JSON.stringify({type}))",
+    "types": [
+      "haptic-click",
+      "haptic-drag-start",
+      "haptic-drag-tick",
+      "haptic-drag-end"
+    ],
+    "navigatorVibrate": false,
+    "responseListenerOrTimeout": false
+  },
+  "verification": [
+    {
+      "command": "node --check assets/remote-access/platform.js",
+      "result": "PASS",
+      "exitCode": 0
+    },
+    {
+      "command": "node --check assets/remote-access/app.js",
+      "result": "PASS",
+      "exitCode": 0
+    },
+    {
+      "command": "node --check temp/android-haptics-20261018/web/haptics-vm-fixture.mjs",
+      "result": "PASS",
+      "exitCode": 0
+    },
+    {
+      "command": "node temp/android-haptics-20261018/web/haptics-vm-fixture.mjs",
+      "result": "PASS",
+      "exitCode": 0,
+      "cases": {
+        "exactHapticTypes": 4,
+        "globalMinimumIntervalMs": 50,
+        "dragTickMinimumIntervalMs": 80,
+        "hiddenPageSuppressed": true,
+        "ordinaryBrowserFeedbackAndBridgeRequests": 0,
+        "trustedPrimaryKeyboardAndAccessibilityClicks": true,
+        "syntheticAndNonPrimaryClicksSuppressed": true,
+        "disabledAriaDisabledAndInertSuppressed": true,
+        "textRangeAndQueueHandleSuppressed": true,
+        "labelForwardedCheckboxSingleFeedback": true,
+        "queueDragStartTickEndGates": true,
+        "keyboardQueueMoveAndBoundaryGates": true,
+        "originalDragThresholdsPreserved": true
+      }
+    },
+    {
+      "command": "git diff --check -- assets/remote-access/platform.js assets/remote-access/app.js",
+      "result": "PASS",
+      "exitCode": 0
+    }
+  ],
+  "cleanup": {
+    "temporaryFixtureFileDeleted": true,
+    "preexistingTemporaryValidationFilesPreserved": true
+  },
+  "browserValidation": {
+    "result": "PASS",
+    "performedBy": "主代理",
+    "mode": "Android 容器及普通手机网页隔离夹具",
+    "results": {
+      "modelOpenAndSelectEachOnce": true,
+      "disabledControlsTextAndEditorSuppressed": true,
+      "queueKeyboardBoundarySuppressed": true,
+      "validKeyboardMoveOneTick": true,
+      "touchDragStartMoveAndCommitEachOnce": true,
+      "samePositionMoveSuppressed": true,
+      "touchCancelNoCommitOrEnd": true,
+      "checkboxLabelSingleClick": true,
+      "spaceActivationWorks": true,
+      "ordinaryMobileWebHapticRequests": 0,
+      "isolatedQueueReorderRequests": {
+        "android": 2,
+        "ordinaryWeb": 1,
+        "realSessionWrites": 0
+      }
+    },
+    "evidence": [
+      "../browser/samples.json",
+      "../browser/records.json"
+    ]
+  }
+}

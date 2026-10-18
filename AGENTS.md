@@ -66,7 +66,7 @@
 
 合并后必须保持以下本地行为：
 
-- 版本号以根 `Cargo.toml` 的 `workspace.package.version` 为准，不得因合并上游而被上游版本覆盖；除非用户明确要求，否则不主动改版本。
+- 桌面端及管理器版本号以根 `Cargo.toml` 的 `workspace.package.version` 为准，不得因合并上游而被上游版本覆盖。Android 版本独立维护于 `apps/codex-elves-android/version.properties`，不随管理器版本同步；除非用户明确要求，否则不主动改显示版本。Android 每次正式发布必须递增 `versionCode`，并保持现有正式签名证书。
 - 默认本地代理端口保持当前项目端口，不恢复旧端口 `57321`。
 - 管理器关闭按钮默认最小化到托盘；再次打开 manager 时如果在托盘中，必须显示主窗口。
 - manager 打开时保持上一次窗口位置，不能跨显示器跳回旧位置。
@@ -116,6 +116,16 @@
 - `dist/windows/CodexElves-<version>-windows-x64-setup.exe`（`<version>` 取自根 `Cargo.toml` 的 `workspace.package.version`）
 
 不要改回手工 NSIS 命令作为默认流程。需要修改构建流程时，优先更新 `build.ps1` 和 `scripts/build-windows-installer.ps1`。
+
+### Android 同步编译
+
+- 用户要求“编译”或“编译安装包”时，必须判断 Android 是否较上次成功正式构建发生变化；不能只看未提交的 Git 差异。
+- 检查范围包括 `apps/codex-elves-android/` 下的源码、资源、独立版本和构建配置，`scripts/` 中的 Android 构建脚本，以及 APK 内置的 `assets/remote-access/` 网页资源；排除构建产物、工具链、缓存和本机私有配置。
+- 相关内容有变化、没有成功构建基线，或上次 APK 缺失、摘要不符时，同步执行 Android **Release** 构建及 lint，生成 `dist/android/CodexElves-<androidVersion>-android.apk`。`<androidVersion>` 取自 Android 独立版本配置。
+- 相关内容没有变化且 APK 校验有效时跳过 Android 构建，并说明跳过原因。用户明确只编译 Android 时直接执行 Android 构建。
+- 复用既有正式签名材料；缺少签名配置时明确报告 Android 构建失败，不得创建替代证书或以 Debug APK 交付。Debug 仅用于明确的开发验证或不持有发布密钥的 PR 检查。
+- 只有正式 APK 构建及校验成功后才能更新本机 Android 构建基线；失败不得记录为已构建。
+- Android 发布使用独立 `android-v<androidVersion>` 标签和更新清单，不覆盖桌面版 `latest.json` 或 GitHub Latest 标记。
 
 ## 合并后的强制检查
 

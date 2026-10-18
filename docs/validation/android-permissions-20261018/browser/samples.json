@@ -1,0 +1,49 @@
+[
+  {
+    "case": "dismissed-permission",
+    "controlsEnabled": true,
+    "enabled": true,
+    "systemSettingsVisible": true,
+    "text": "系统通知尚未获准或已关闭，当前不会接收通知。\n\n接收通知\n需要授权\n需要回答\n执行完成\n执行失败\n打开系统通知设置"
+  },
+  {
+    "case": "save-failure-keeps-old-state",
+    "controlsEnabled": true,
+    "enabled": false,
+    "systemSettingsVisible": true,
+    "text": "保存失败，页面保留上次读取的设置。请稍后重试。\n\n接收通知\n需要授权\n需要回答\n执行完成\n执行失败\n打开系统通知设置"
+  },
+  {
+    "case": "granted-with-channel-block",
+    "enabled": true,
+    "systemSettingsVisible": true,
+    "text": "通知已开启；系统通知权限已允许；连接已建立。 系统已关闭“需要授权”通知类别，请在系统通知设置中开启。\n\n接收通知\n需要授权\n需要回答\n执行完成\n执行失败\n打开系统通知设置"
+  },
+  {
+    "case": "small-screen-font20",
+    "dialogHeight": 344,
+    "horizontalOverflow": false,
+    "pageHeight": 213,
+    "pageScrollHeight": 370,
+    "systemSettingsVisible": true,
+    "viewport": {
+      "height": 360,
+      "width": 320
+    }
+  },
+  {
+    "case": "ordinary-mobile-web",
+    "entryDisplay": "none",
+    "entryHidden": true
+  },
+  {
+    "case": "baseline-save-failure-wrongly-enabled",
+    "enabled": true,
+    "text": "通知已开启；系统权限已允许；连接已建立。\n\n接收通知\n需要授权\n需要回答\n执行完成\n执行失败"
+  },
+  {
+    "case": "final-native-channel-message",
+    "systemSettingsVisible": true,
+    "text": "通知已开启；系统通知权限已允许；连接已建立。 以下通知类别已在系统中关闭：需要授权。请打开系统通知设置重新开启\n\n接收通知\n需要授权\n需要回答\n执行完成\n执行失败\n打开系统通知设置"
+  }
+]

@@ -1,0 +1,314 @@
+{
+  "mode": "fixed",
+  "node": "v22.22.2",
+  "sourceSha256": "43aed2e6258bab39e15d3e531c9d5b2b76fdc6406520e896d9476685defec137",
+  "tests": [
+    {
+      "name": "empty-history-is-a-valid-success",
+      "status": "PASS"
+    },
+    {
+      "name": "nonempty-history-is-rendered",
+      "status": "PASS"
+    },
+    {
+      "name": "complete-json-missing-data-fails-without-retry",
+      "status": "PASS"
+    },
+    {
+      "name": "complete-json-null-data-fails-without-retry",
+      "status": "PASS"
+    },
+    {
+      "name": "complete-json-object-data-fails-without-retry",
+      "status": "PASS"
+    },
+    {
+      "name": "complete-json-null-fails-without-retry",
+      "status": "PASS"
+    },
+    {
+      "name": "complete-json-string-fails-without-retry",
+      "status": "PASS"
+    },
+    {
+      "name": "complete-json-number-fails-without-retry",
+      "status": "PASS"
+    },
+    {
+      "name": "complete-json-boolean-fails-without-retry",
+      "status": "PASS"
+    },
+    {
+      "name": "complete-json-array-fails-without-retry",
+      "status": "PASS"
+    },
+    {
+      "name": "truncated-json-recovers-once-with-identical-history-payload-and-controller",
+      "status": "PASS",
+      "evidence": {
+        "requests": 2,
+        "samePayload": true,
+        "sameHistoryController": true,
+        "delayMilliseconds": 0
+      }
+    },
+    {
+      "name": "truncated-json-exhaustion-stops-at-two-and-preserves-history",
+      "status": "PASS",
+      "evidence": {
+        "requests": 2,
+        "historyPreserved": true,
+        "connected": true
+      }
+    },
+    {
+      "name": "non-json-success-exhaustion-stops-at-two-and-preserves-history",
+      "status": "PASS",
+      "evidence": {
+        "requests": 2,
+        "historyPreserved": true,
+        "connected": true
+      }
+    },
+    {
+      "name": "body-transport-error-exhaustion-stops-at-two-and-preserves-history",
+      "status": "PASS",
+      "evidence": {
+        "requests": 2,
+        "historyPreserved": true,
+        "connected": true
+      }
+    },
+    {
+      "name": "body-decode-error-exhaustion-stops-at-two-and-preserves-history",
+      "status": "PASS",
+      "evidence": {
+        "requests": 2,
+        "historyPreserved": true,
+        "connected": true
+      }
+    },
+    {
+      "name": "body-read-error-can-recover-on-the-second-read",
+      "status": "PASS"
+    },
+    {
+      "name": "failed-initial-history-stays-uninitialized-and-shows-retry-error",
+      "status": "PASS"
+    },
+    {
+      "name": "failed-cache-refresh-keeps-cached-history-events-and-pagination",
+      "status": "PASS"
+    },
+    {
+      "name": "http-401-html-retains-status-and-auth-semantics-without-retry",
+      "status": "PASS",
+      "evidence": {
+        "code": 401,
+        "message": "HTTP 401",
+        "authRequired": true
+      }
+    },
+    {
+      "name": "http-401-json-null-retains-status-and-auth-semantics-without-retry",
+      "status": "PASS",
+      "evidence": {
+        "code": 401,
+        "message": "HTTP 401",
+        "authRequired": true
+      }
+    },
+    {
+      "name": "http-401-json-primitive-retains-status-and-auth-semantics-without-retry",
+      "status": "PASS",
+      "evidence": {
+        "code": 401,
+        "message": "HTTP 401",
+        "authRequired": true
+      }
+    },
+    {
+      "name": "http-401-json-object-message-retains-status-and-auth-semantics-without-retry",
+      "status": "PASS",
+      "evidence": {
+        "code": 401,
+        "message": "HTTP 401",
+        "authRequired": true
+      }
+    },
+    {
+      "name": "http-403-html-retains-status-and-auth-semantics-without-retry",
+      "status": "PASS",
+      "evidence": {
+        "code": 403,
+        "message": "HTTP 403",
+        "authRequired": false
+      }
+    },
+    {
+      "name": "http-403-json-null-retains-status-and-auth-semantics-without-retry",
+      "status": "PASS",
+      "evidence": {
+        "code": 403,
+        "message": "HTTP 403",
+        "authRequired": false
+      }
+    },
+    {
+      "name": "http-403-json-primitive-retains-status-and-auth-semantics-without-retry",
+      "status": "PASS",
+      "evidence": {
+        "code": 403,
+        "message": "HTTP 403",
+        "authRequired": false
+      }
+    },
+    {
+      "name": "http-403-json-object-message-retains-status-and-auth-semantics-without-retry",
+      "status": "PASS",
+      "evidence": {
+        "code": 403,
+        "message": "HTTP 403",
+        "authRequired": false
+      }
+    },
+    {
+      "name": "http-502-html-retains-status-and-auth-semantics-without-retry",
+      "status": "PASS",
+      "evidence": {
+        "code": 502,
+        "message": "HTTP 502",
+        "authRequired": false
+      }
+    },
+    {
+      "name": "http-502-json-null-retains-status-and-auth-semantics-without-retry",
+      "status": "PASS",
+      "evidence": {
+        "code": 502,
+        "message": "HTTP 502",
+        "authRequired": false
+      }
+    },
+    {
+      "name": "http-502-json-primitive-retains-status-and-auth-semantics-without-retry",
+      "status": "PASS",
+      "evidence": {
+        "code": 502,
+        "message": "HTTP 502",
+        "authRequired": false
+      }
+    },
+    {
+      "name": "http-502-json-object-message-retains-status-and-auth-semantics-without-retry",
+      "status": "PASS",
+      "evidence": {
+        "code": 502,
+        "message": "HTTP 502",
+        "authRequired": false
+      }
+    },
+    {
+      "name": "http-502-history-is-not-retried-and-keeps-existing-turns",
+      "status": "PASS"
+    },
+    {
+      "name": "server-json-error-and-outcome-unknown-are-preserved",
+      "status": "PASS"
+    },
+    {
+      "name": "plain-fetch-network-failure-does-not-enter-response-retry",
+      "status": "PASS"
+    },
+    {
+      "name": "history-timeout-remains-a-single-bounded-read",
+      "status": "PASS"
+    },
+    {
+      "name": "action-timeout-remains-outcome-unknown-without-replay",
+      "status": "PASS"
+    },
+    {
+      "name": "cancelled-history-does-not-retry-or-notify",
+      "status": "PASS"
+    },
+    {
+      "name": "switch-during-first-read-blocks-retry",
+      "status": "PASS"
+    },
+    {
+      "name": "cancel-during-retry-blocks-ignored-abort-success-from-merging",
+      "status": "PASS"
+    },
+    {
+      "name": "switch-during-retry-does-not-overwrite-new-thread-or-controller",
+      "status": "PASS"
+    },
+    {
+      "name": "late-first-success-from-old-selection-is-discarded",
+      "status": "PASS"
+    },
+    {
+      "name": "page-leaving-before-read-blocks-the-request",
+      "status": "PASS"
+    },
+    {
+      "name": "page-leaving-during-failed-read-blocks-retry-and-notice",
+      "status": "PASS"
+    },
+    {
+      "name": "deletion-during-failed-read-blocks-retry-and-notice",
+      "status": "PASS"
+    },
+    {
+      "name": "manual-retry-after-exhaustion-can-complete",
+      "status": "PASS"
+    },
+    {
+      "name": "cross-turn-pagination-recovers-same-cursor-and-deduplicates",
+      "status": "PASS"
+    },
+    {
+      "name": "same-turn-pagination-recovers-same-item-cursor-without-duplicates",
+      "status": "PASS"
+    },
+    {
+      "name": "wrong-item-pagination-owner-fails-before-writing-transcript-events",
+      "status": "PASS"
+    },
+    {
+      "name": "live-items-arriving-during-retry-are-kept",
+      "status": "PASS"
+    },
+    {
+      "name": "read-coalescing-keeps-one-history-read-chain",
+      "status": "PASS"
+    },
+    {
+      "name": "action-unreadable-success-is-outcome-unknown-without-replay",
+      "status": "PASS"
+    },
+    {
+      "name": "mutate-unknown-send-retains-original-receipt-and-only-reads-its-status",
+      "status": "PASS",
+      "evidence": {
+        "actionRequests": 1,
+        "originalReceiptRetained": true,
+        "draftRetained": true,
+        "receiptReads": 1
+      }
+    },
+    {
+      "name": "sendMessage-unreadable-reply-preserves-draft-images-and-pending-until-receipt-confirms",
+      "status": "PASS",
+      "evidence": {
+        "actionRequests": 1,
+        "draftKeptWhileUnknown": true,
+        "attachmentsKeptWhileUnknown": true,
+        "clearedOnlyAfterOriginalReceiptCompleted": true
+      }
+    }
+  ],
+  "status": "PASS"
+}

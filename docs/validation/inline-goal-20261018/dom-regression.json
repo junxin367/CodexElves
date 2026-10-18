@@ -1,0 +1,148 @@
+{
+  "scope": "extracted-production-functions-jsdom",
+  "runtime": {
+    "node": "22.22.2",
+    "jsdom": "26.1.0"
+  },
+  "sourceSha256": {
+    "app.js": "34E9A6025721054983AF1E7A8030A88C42C995AF4802E8F0438276A9FDE5920F",
+    "style.css": "7AE3CC901C030DE23C7C09CFC8F9A3C9A893E7B88CDFBF719D0D79D625084BC0"
+  },
+  "date": "2026-10-18",
+  "passed": 33,
+  "failed": 0,
+  "tests": [
+    {
+      "name": "目标是固定前缀及零正文长度节点",
+      "status": "PASS"
+    },
+    {
+      "name": "正文位置和 token 边界可区分标签两侧",
+      "status": "PASS"
+    },
+    {
+      "name": "目标与两个 Skill 共存且位置和提交正文保持合同",
+      "status": "PASS"
+    },
+    {
+      "name": "重复添加目标只保留一个标签和同一 nonce",
+      "status": "PASS"
+    },
+    {
+      "name": "加号菜单空稿入口聚焦后可立即 Backspace",
+      "status": "PASS"
+    },
+    {
+      "name": "添加目标保留有效正文选区及同一位置 Skill 的左右边界",
+      "status": "PASS"
+    },
+    {
+      "name": "原生输入轮换 nonce 而不改变标签身份",
+      "status": "PASS"
+    },
+    {
+      "name": "光标在标签前原生输入后仍规范为正文前缀",
+      "status": "PASS"
+    },
+    {
+      "name": "Enter 和 beforeinput 换行保持目标与 Skill",
+      "status": "PASS"
+    },
+    {
+      "name": "Backspace 逐个删除 Skill 和目标且保留正文",
+      "status": "PASS"
+    },
+    {
+      "name": "Delete 从目标前删除目标，正文和 Skill 保留",
+      "status": "PASS"
+    },
+    {
+      "name": "移动端 beforeinput 删除目标和 Skill",
+      "status": "PASS"
+    },
+    {
+      "name": "嵌套原生文本节点旁删除仍识别零长度标签",
+      "status": "PASS"
+    },
+    {
+      "name": "只替换正文选区保留目标",
+      "status": "PASS"
+    },
+    {
+      "name": "只有标签的零正文长度选区可单独删除",
+      "status": "PASS"
+    },
+    {
+      "name": "全选粘贴会删除目标与 Skill，继续编辑不复活",
+      "status": "PASS"
+    },
+    {
+      "name": "全选删除包含标签与末尾换行",
+      "status": "PASS"
+    },
+    {
+      "name": "原生 input 全选替换同步取消目标",
+      "status": "PASS"
+    },
+    {
+      "name": "IME 在标签后组词不重绘，结束后保留目标并轮换 nonce",
+      "status": "PASS"
+    },
+    {
+      "name": "IME 覆盖整个选区后不自动恢复已删除目标",
+      "status": "PASS"
+    },
+    {
+      "name": "会话草稿切换及旧 goalMode nonce 恢复",
+      "status": "PASS"
+    },
+    {
+      "name": "直接 value 赋值清除目标节点和模式，普通渲染不补回",
+      "status": "PASS"
+    },
+    {
+      "name": "显式取消目标仅影响本地模式，正文 Skill 图片不丢",
+      "status": "PASS"
+    },
+    {
+      "name": "队列编辑进入不带目标，取消后恢复原目标草稿",
+      "status": "PASS"
+    },
+    {
+      "name": "队列 starting 恢复显示备份目标而不丢 nonce",
+      "status": "PASS"
+    },
+    {
+      "name": "成功回执清除未改变的目标草稿和标签",
+      "status": "PASS"
+    },
+    {
+      "name": "编辑后改回相同正文，旧回执不能清除新目标草稿",
+      "status": "PASS"
+    },
+    {
+      "name": "取消再添加同正文目标，旧回执不能清除",
+      "status": "PASS"
+    },
+    {
+      "name": "提示词优化及恢复原文保持当前目标前缀和 Skill",
+      "status": "PASS"
+    },
+    {
+      "name": "优化后删除目标，再恢复原文也不复活目标",
+      "status": "PASS"
+    },
+    {
+      "name": "只读、旧服务和已有目标门禁保持",
+      "status": "PASS"
+    },
+    {
+      "name": "普通 Skill 编辑保持零长度、换行、删除及发送结构",
+      "status": "PASS"
+    },
+    {
+      "name": "目标标签无易变 nonce、无多目标或额外持久化字段",
+      "status": "PASS"
+    }
+  ]
+}

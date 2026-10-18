@@ -1,0 +1,45 @@
+{
+  "status": "PASS",
+  "sourcePath": "assets/remote-access/app.js",
+  "sourceBeforeSha256": "292282b6e7731bf736f9f06fd8cfd0cdd0c45d2d7a88ffb5b2a34ec135e4922c",
+  "sourceAfterSha256": "43aed2e6258bab39e15d3e531c9d5b2b76fdc6406520e896d9476685defec137",
+  "allowedChangedFunctions": [
+    {
+      "name": "api",
+      "beforeLine": 2363,
+      "afterLine": 2363,
+      "beforeSha256": "7e254f149bf649fd2dc88038d4d8ad9756026d86124023219835f78ae93323a5",
+      "afterSha256": "c0b482422d8144ef2dc8a139ae7b1f452fe9373c088d84b2563ff1465cd09975"
+    },
+    {
+      "name": "readHistoryPage",
+      "beforeLine": 6972,
+      "afterLine": 6977,
+      "beforeSha256": "3fe328685a967dc63cb23889c7f4ac1ea8be3ad03d08d1ff4a2c431d7e40eb05",
+      "afterSha256": "770f3e02f970cc616d286641c9cc49d8fc907e0b8481b556a02ecd9ba52f6351"
+    }
+  ],
+  "outsideAllowedFunctionsByteIdentical": true,
+  "outsideAllowedFunctionsSha256": "c0728c22c3acce0170500d5d164e387dd044dedaa30de4a0b8343b296f072824",
+  "regressionReportMatchesCurrentSource": true,
+  "regressionCount": 52,
+  "historicalReadRetryPolicy": {
+    "maxAttempts": 2,
+    "delayMilliseconds": 0,
+    "predicate": "2xx body read or JSON parse failure only",
+    "samePayload": true,
+    "sameHistoryController": true,
+    "noRetryFor": [
+      "complete JSON shape error",
+      "non-2xx",
+      "timeout",
+      "abort",
+      "selection change",
+      "page leaving",
+      "deleted thread"
+    ]
+  },
+  "actionReplayAllowed": false,
+  "localUnitOnly": true,
+  "actualAndroidResponseCaptured": false
+}

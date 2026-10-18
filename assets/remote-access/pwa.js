@@ -246,7 +246,7 @@ async function readResourceManifest(manual = false) {
 
 async function registerServiceWorker(manual = false) {
   if (isAndroidContainer() || !globalThis.isSecureContext || !("serviceWorker" in navigator)) {
-    setCacheState("unsupported", "当前环境不使用浏览器离线网页缓存");
+    setCacheState("unsupported", "");
     return null;
   }
   if (registrationPromise) return registrationPromise;
@@ -337,7 +337,7 @@ function scheduleBackgroundCheck() {
 prepareManifestLink();
 renderLoadingRecovery();
 if (isAndroidContainer() || !globalThis.isSecureContext || !("serviceWorker" in navigator)) {
-  setCacheState("unsupported", "当前环境不使用浏览器离线网页缓存");
+  setCacheState("unsupported", "");
 } else {
   window.addEventListener("codex-elves-app-ready", () => {
     appReady = true;

@@ -1,0 +1,39 @@
+{
+  "boundary": "生产 attachments.js；受控 Blob 读取与解码替身。切换通过实际 setComposerAttachments 入口，无真实会话操作",
+  "passed": 7,
+  "total": 7,
+  "checks": [
+    {
+      "name": "旧会话进入读取状态",
+      "pass": true
+    },
+    {
+      "name": "切换后立即解除旧读取状态",
+      "pass": true
+    },
+    {
+      "name": "新会话可以开始独立读取",
+      "pass": true
+    },
+    {
+      "name": "旧任务结束不解除新读取锁",
+      "pass": true
+    },
+    {
+      "name": "旧任务失败不污染新会话提示",
+      "pass": true,
+      "value": []
+    },
+    {
+      "name": "只接收新会话图片",
+      "pass": true,
+      "value": [
+        "当前会话.png"
+      ]
+    },
+    {
+      "name": "当前读取完成后解锁",
+      "pass": true
+    }
+  ]
+}

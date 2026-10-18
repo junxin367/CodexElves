@@ -1,0 +1,25 @@
+{
+  "status": "PASS",
+  "checks": [
+    "首次基线只返回当前 pending，包含数字0、同会话多请求与未打开聊天全部异步请求",
+    "元数据仅含九个允许字段，标题去控制符并限长，无任何正文",
+    "重复快照维持身份且无重复 notify",
+    "重复调用removeQueued不改变通知epoch、游标或pending身份",
+    "数值0解决产生独立dismiss，保留字符串0",
+    "已解决请求复用同ID生成新notificationId",
+    "同ID跨turn更换身份，撤下旧提醒并产生新提醒",
+    "未打开聊天state callback发现新增异步问答",
+    "历史状态读取只撤下异步请求，不触发完成通知",
+    "仅实时completed/failed提醒；重复完成去重，取消未知及子代理静默",
+    "重连按相同epoch游标补读",
+    "epoch变化仅pending基线，无历史完成回放",
+    "事件窗口有界256且超窗truncated同时带完整pending",
+    "删除聊天撤下该聊天全部pending",
+    "全部已加载活动回合的异步请求均能被通知提取",
+    "MCP工具及浏览器持久授权分类为approval；auth/OTP/有字段表单保持question",
+    "非法游标拒绝",
+    "manager代次变化重建epoch并清理旧pending/完成去重状态",
+    "所有验证未触发任何发送、授权、目标或网络读取"
+  ],
+  "checkCount": 19
+}

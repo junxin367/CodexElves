@@ -1,0 +1,61 @@
+diff --git a/temp/android-permissions-20261018/app.before.js b/assets/remote-access/app.js
+index 593c0c53..1cb4cbc5 100644
+--- a/temp/android-permissions-20261018/app.before.js
++++ b/assets/remote-access/app.js
+@@ -376,7 +376,7 @@ function openAppearance() {
+   const notificationErrorMessage = error => {
+     if (["unsupported", "timeout"].includes(error?.code))
+       return "当前 Android App 版本不支持或未响应通知设置，请更新 App 后重试。";
+-    if (error?.code === "permission-denied") return "系统拒绝了通知权限，可前往系统通知设置重新允许。";
++    if (error?.code === "permission-denied") return "尚未获得系统通知权限，可前往系统通知设置开启。";
+     return "请稍后重试。";
+   };
+   const beginNotificationOperation = () => {
+@@ -500,9 +500,9 @@ function openAppearance() {
+         control.disabled = notificationOperations > 0;
+       }
+       const permissionText = {
+-        prompt: "系统权限尚未确认",
+-        granted: "系统权限已允许",
+-        denied: "系统权限已拒绝"
++        prompt: "系统通知尚未授权",
++        granted: "系统通知权限已允许",
++        denied: "系统通知未开启"
+       }[value.permission];
+       const deliveryText = {
+         disabled: value.settings.enabled ? "等待启动" : "已关闭",
+@@ -515,10 +515,10 @@ function openAppearance() {
+       }[value.delivery];
+       let summary = `通知${value.settings.enabled ? "已开启" : "已关闭"}；${permissionText}；${deliveryText}。`;
+       if (value.permission === "denied")
+-        summary = `系统通知权限已拒绝，当前不会接收通知。`;
++        summary = `系统通知尚未获准或已关闭，当前不会接收通知。`;
+       if (value.message) summary += ` ${value.message}`;
+       status.textContent = summary;
+-      systemSettingsButton.hidden = value.permission !== "denied" && value.delivery !== "permission-required";
++      systemSettingsButton.hidden = false;
+     };
+     const renderError = (error, action) => {
+       if (!notificationPageIsCurrent(page, revision)) return;
+@@ -529,8 +529,7 @@ function openAppearance() {
+         : action === "permission"
+           ? `通知设置已保存；系统权限请求未完成。${message}`
+           : `保存失败，页面保留上次读取的设置。${message}`;
+-      systemSettingsButton.hidden = error?.code !== "permission-denied"
+-        && state?.permission !== "denied" && state?.delivery !== "permission-required";
++      systemSettingsButton.hidden = !state?.supported;
+     };
+     const isCurrent = () => notificationPageIsCurrent(page, revision);
+     const finishPageOperation = () => {
+@@ -587,7 +586,10 @@ function openAppearance() {
+       } catch (error) {
+         if (saveCompleted) {
+           if (isCurrent()) status.textContent = `通知设置已保存，但无法确认当前状态；页面保留上次读取的设置。${notificationErrorMessage(error)}`;
+-        } else renderError(error, "save");
++        } else {
++          queuedChangedStatus = null;
++          renderError(error, "save");
++        }
+       } finally {
+         finishPageOperation();
+       }

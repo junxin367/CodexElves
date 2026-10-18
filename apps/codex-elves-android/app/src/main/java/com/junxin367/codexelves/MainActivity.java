@@ -77,9 +77,12 @@ public final class MainActivity extends Activity {
     private final ExecutorService resources = Executors.newSingleThreadExecutor();
     private final AtomicLong connectionGeneration = new AtomicLong();
     private final AtomicLong updateCheckGeneration = new AtomicLong(-1L);
+    private final HapticFeedbackController haptics = new HapticFeedbackController();
 
     private SessionStore sessionStore;
     private ResourceStore resourceStore;
+    private AppUpdateController appUpdates;
+    private NotificationController notifications;
     private FrameLayout root;
     private WebView webView;
     private ResourceStore.Snapshot snapshot;
@@ -88,6 +91,13 @@ public final class MainActivity extends Activity {
     private TextView resourceStatus;
     private Runnable readyTimeout;
     private boolean pageReady;
+    private boolean pageAuthenticated;
+    private NotificationPublisher.OpenTarget pendingNotificationOpen;
+    private NotificationPublisher.OpenTarget navigatingNotification;
+    private long notificationNavigationAttempt;
+    private long backAttempt;
+    private boolean backPending;
+    private android.window.OnBackInvokedCallback nativeBackCallback;
     private ValueCallback<Uri[]> fileChooserCallback;
     private int fileChooserRequestCode = -1;
     private int nextFileChooserRequestCode = FILE_CHOOSER_REQUEST;
@@ -103,6 +113,15 @@ public final class MainActivity extends Activity {
         root.setBackgroundColor(getColor(R.color.login_background));
         root.setFitsSystemWindows(true);
         setContentView(root);
+        appUpdates = new AppUpdateController(this);
+        notifications = new NotificationController(this, this::handleNotificationAuthorizationLost);
+        if (Build.VERSION.SDK_INT >= 33) {
+            nativeBackCallback = this::onBackPressed;
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, nativeBackCallback
+            );
+        }
+        handleNotificationIntent(getIntent());
 
         String savedOrigin = sessionStore.getOrigin();
         if (sessionStore.isAuthorized() && !savedOrigin.isEmpty()) {
@@ -126,9 +145,16 @@ public final class MainActivity extends Activity {
     }
 
     private void showLogin(String message) {
+        notifications.onPageChanged();
         cancelResourceWork();
         connectionGeneration.incrementAndGet();
         pageReady = false;
+        pageAuthenticated = false;
+        pendingNotificationOpen = null;
+        notificationNavigationAttempt++;
+        navigatingNotification = null;
+        backAttempt++;
+        backPending = false;
         cancelReadyTimeout();
         destroyWebView();
         currentOrigin = null;
@@ -139,7 +165,7 @@ public final class MainActivity extends Activity {
     }
 
     private View buildLoginView(String message) {
-        LoginView login = new LoginView(this);
+        LoginView login = new LoginView(this, haptics);
         login.setInitialValues(sessionStore.getOrigin(), message);
         login.setOnSubmit(() -> authenticate(login));
         return login;
@@ -165,6 +191,9 @@ public final class MainActivity extends Activity {
             return;
         }
 
+        notifications.onPageChanged();
+        NotificationService.stop(this, "auth-required", true);
+        sessionStore.setAuthorized(false);
         sessionStore.saveOrigin(origin);
         login.setBusy(true);
         status.setTextColor(0xFF6B7280);
@@ -268,6 +297,10 @@ public final class MainActivity extends Activity {
     }
 
     private void openSession(String origin) {
+        notifications.onPageChanged();
+        if (currentOrigin != null && !origin.equals(currentOrigin)) {
+            NotificationService.stop(this, "auth-required", true);
+        }
         cancelResourceWork();
         long generation = connectionGeneration.incrementAndGet();
         currentOrigin = origin;
@@ -275,6 +308,11 @@ public final class MainActivity extends Activity {
             () -> generation == connectionGeneration.get() && origin.equals(currentOrigin)
         );
         pageReady = false;
+        pageAuthenticated = false;
+        notificationNavigationAttempt++;
+        navigatingNotification = null;
+        backAttempt++;
+        backPending = false;
         snapshot = null;
         resourceStatus = null;
         cancelReadyTimeout();
@@ -513,14 +551,7 @@ public final class MainActivity extends Activity {
                 WebView requestView,
                 RenderProcessGoneDetail detail
             ) {
-                if (generation == connectionGeneration.get()) {
-                    handlePageStartupFailure(
-                        "页面进程已退出",
-                        origin,
-                        pageSnapshot.version,
-                        generation
-                    );
-                }
+                handleRendererExit(requestView, origin, generation);
                 return true;
             }
         });
@@ -547,28 +578,69 @@ public final class MainActivity extends Activity {
                 if (generation != connectionGeneration.get()
                     || sourceView != webView
                     || !isMainFrame
-                    || !ServiceOrigin.matches(origin, sourceOrigin)
-                    || sourceView.getUrl() == null
-                    || !ServiceOrigin.matches(origin, Uri.parse(sourceView.getUrl()))) {
+                    || !ServiceOrigin.matches(origin, sourceOrigin)) {
+                    return;
+                }
+                String sourcePageUrl = sourceView.getUrl();
+                if (sourcePageUrl == null
+                    || !ServiceOrigin.matches(origin, Uri.parse(sourcePageUrl))) {
                     return;
                 }
                 String data = message.getData();
-                if (data == null) {
+                if (data == null || data.length() > 4096) {
                     return;
                 }
                 final String type;
+                final JSONObject payload;
                 try {
-                    JSONObject payload = new JSONObject(data);
-                    if (payload.length() != 1) {
+                    payload = new JSONObject(data);
+                    Object rawType = payload.opt("type");
+                    if (!(rawType instanceof String)) {
                         return;
                     }
-                    type = payload.getString("type");
+                    type = (String) rawType;
+                    if (!NotificationSettings.isRequestType(type) && payload.length() != 1) {
+                        return;
+                    }
                 } catch (JSONException error) {
                     return;
                 }
-                runOnUiThread(() ->
-                    handleBridgeMessage(type, origin, generation, pageSnapshot)
-                );
+                runOnUiThread(() -> {
+                    if (generation != connectionGeneration.get() || sourceView != webView
+                        || !origin.equals(currentOrigin) || isFinishing() || isDestroyed()) {
+                        return;
+                    }
+                    if (HapticFeedbackController.isRequestType(type)) {
+                        String activePageUrl = sourceView.getUrl();
+                        if (activePageUrl == null || !sourcePageUrl.equals(activePageUrl)
+                            || !ServiceOrigin.matches(origin, Uri.parse(activePageUrl))) {
+                            return;
+                        }
+                        haptics.perform(sourceView, type);
+                    } else if (NotificationSettings.isRequestType(type)) {
+                        notifications.handle(
+                            payload,
+                            () -> generation == connectionGeneration.get() && sourceView == webView
+                                && origin.equals(currentOrigin) && !isFinishing() && !isDestroyed(),
+                            replyProxy::postMessage
+                        );
+                    } else if ("app-info".equals(type)) {
+                        try {
+                            replyProxy.postMessage(new JSONObject()
+                                .put("type", "app-info")
+                                .put("versionName", BuildConfig.VERSION_NAME)
+                                .put("versionCode", BuildConfig.VERSION_CODE)
+                                .put("updateSupported", !BuildConfig.DEBUG)
+                                .toString());
+                        } catch (JSONException ignored) {
+                            // These BuildConfig values are always valid JSON primitives.
+                        }
+                    } else if ("check-app-update".equals(type)) {
+                        appUpdates.checkManually();
+                    } else {
+                        handleBridgeMessage(type, origin, generation, pageSnapshot);
+                    }
+                });
             }
         );
         return true;
@@ -594,9 +666,13 @@ public final class MainActivity extends Activity {
                     }
                 });
                 checkForResourceUpdate(origin, pageSnapshot, generation, true);
+                openPendingNotification();
                 break;
             case "authenticated":
                 sessionStore.saveAuthorizedConnection(origin);
+                pageAuthenticated = true;
+                notifications.onAuthenticated();
+                openPendingNotification();
                 break;
             case "auth-required":
             case "logged-out":
@@ -752,6 +828,10 @@ public final class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        haptics.setForeground(true);
+        appUpdates.onResume();
+        notifications.onResume();
+        openPendingNotification();
         if ((pageReady || webView != null)
             && currentOrigin != null
             && sessionStore.isAuthorized()) {
@@ -764,6 +844,42 @@ public final class MainActivity extends Activity {
                 connectionGeneration.get(),
                 false
             );
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        haptics.setForeground(false);
+        appUpdates.onPause();
+        notifications.onPause();
+        super.onPause();
+    }
+
+    private void handleRendererExit(WebView failedView, String origin, long generation) {
+        if (failedView != webView || generation != connectionGeneration.get()) {
+            root.removeView(failedView);
+            failedView.destroy();
+            return;
+        }
+        notifications.onPageChanged();
+        cancelResourceWork();
+        connectionGeneration.incrementAndGet();
+        pageReady = false;
+        pageAuthenticated = false;
+        notificationNavigationAttempt++;
+        navigatingNotification = null;
+        backAttempt++;
+        backPending = false;
+        cancelReadyTimeout();
+        webView = null;
+        cancelFileChooser();
+        root.removeView(failedView);
+        failedView.destroy();
+        resourceStatus = null;
+        if (!isFinishing() && !isDestroyed()) {
+            showSessionLaunchError(origin, "页面进程已退出，请点击重试恢复会话");
+        } else {
+            snapshot = null;
         }
     }
 
@@ -799,6 +915,10 @@ public final class MainActivity extends Activity {
     }
 
     private void clearAuthorization(String origin) {
+        notifications.onPageChanged();
+        NotificationService.stop(this, "auth-required", true);
+        pendingNotificationOpen = null;
+        pageAuthenticated = false;
         cancelResourceWork();
         connectionGeneration.incrementAndGet();
         sessionStore.setAuthorized(false);
@@ -961,12 +1081,46 @@ public final class MainActivity extends Activity {
         webView.stopLoading();
         webView.setWebChromeClient(null);
         webView.setWebViewClient(null);
+        root.removeView(webView);
         webView.destroy();
         webView = null;
     }
 
     @Override
     public void onBackPressed() {
+        WebView view = webView;
+        if (view == null || !pageReady || currentOrigin == null) {
+            performDefaultBack();
+            return;
+        }
+        if (backPending) {
+            return;
+        }
+        long generation = connectionGeneration.get();
+        long attempt = ++backAttempt;
+        backPending = true;
+        try {
+            view.evaluateJavascript(
+                "(()=>{const e=new Event('codex-elves-native-back',{cancelable:true});"
+                    + "window.dispatchEvent(e);return e.defaultPrevented;})()",
+                result -> {
+                    if (attempt != backAttempt || generation != connectionGeneration.get()
+                        || view != webView || isFinishing() || isDestroyed()) {
+                        return;
+                    }
+                    backPending = false;
+                    if (!"true".equals(result)) {
+                        performDefaultBack();
+                    }
+                }
+            );
+        } catch (RuntimeException error) {
+            backPending = false;
+            performDefaultBack();
+        }
+    }
+
+    private void performDefaultBack() {
         if (webView != null && webView.canGoBack()) {
             webView.goBack();
         } else {
@@ -975,7 +1129,93 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleNotificationIntent(intent);
+    }
+
+    private void handleNotificationIntent(Intent intent) {
+        NotificationPublisher.OpenTarget target = NotificationPublisher.openTarget(intent);
+        NotificationIdentity identity = NotificationService.currentIdentity(this);
+        if (target == null || identity == null || !target.identity.equals(identity.digest)
+            || !NotificationSettings.read(this).enabled) {
+            return;
+        }
+        NotificationPublisher.recordUserOpen(this, target);
+        pendingNotificationOpen = target;
+        openPendingNotification();
+    }
+
+    private void openPendingNotification() {
+        NotificationPublisher.OpenTarget target = pendingNotificationOpen;
+        WebView view = webView;
+        if (target == null || view == null || !pageReady || !pageAuthenticated
+            || currentOrigin == null || isFinishing() || isDestroyed()) {
+            return;
+        }
+        NotificationIdentity identity = NotificationService.currentIdentity(this);
+        if (identity == null || !identity.origin.equals(currentOrigin)
+            || !target.identity.equals(identity.digest)) {
+            pendingNotificationOpen = null;
+            return;
+        }
+        long generation = connectionGeneration.get();
+        if (navigatingNotification == target) {
+            return;
+        }
+        navigatingNotification = target;
+        long attempt = ++notificationNavigationAttempt;
+        String script = "(()=>{const e=new CustomEvent('codex-elves-notification-open',"
+            + "{detail:{threadId:" + JSONObject.quote(target.threadId) + "},cancelable:true});"
+            + "window.dispatchEvent(e);return e.defaultPrevented;})()";
+        try {
+            view.evaluateJavascript(script, result -> {
+                if (attempt == notificationNavigationAttempt
+                    && generation == connectionGeneration.get() && view == webView) {
+                    navigatingNotification = null;
+                    NotificationIdentity active = NotificationService.currentIdentity(this);
+                    if (pendingNotificationOpen == target && "true".equals(result)
+                        && active != null && target.identity.equals(active.digest)
+                        && !isFinishing() && !isDestroyed()) {
+                        pendingNotificationOpen = null;
+                    }
+                }
+            });
+        } catch (RuntimeException ignored) {
+            navigatingNotification = null;
+            // Keep the target until a current, authenticated document can handle it.
+        }
+    }
+
+    private void handleNotificationAuthorizationLost(String identityDigest) {
+        if (currentOrigin == null || isFinishing() || isDestroyed()) {
+            return;
+        }
+        NotificationIdentity identity = NotificationService.identityAtOrigin(this, currentOrigin);
+        if (identity == null || !identity.digest.equals(identityDigest)) {
+            return;
+        }
+        clearAuthorization(currentOrigin);
+        showLogin("设备授权已失效");
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+        int requestCode, String[] permissions, int[] grantResults
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        notifications.onRequestPermissionsResult(requestCode);
+    }
+
+    @Override
     protected void onDestroy() {
+        haptics.setForeground(false);
+        appUpdates.onDestroy();
+        notifications.onDestroy();
+        if (Build.VERSION.SDK_INT >= 33 && nativeBackCallback != null) {
+            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(nativeBackCallback);
+        }
         cancelResourceWork();
         connectionGeneration.incrementAndGet();
         cancelReadyTimeout();
@@ -988,6 +1228,9 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (appUpdates.onActivityResult(requestCode)) {
+            return;
+        }
         if (requestCode != fileChooserRequestCode || fileChooserCallback == null) {
             return;
         }

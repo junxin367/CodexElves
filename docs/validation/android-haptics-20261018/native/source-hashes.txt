@@ -1,0 +1,6 @@
+
+Algorithm Hash                                                             Path
+--------- ----                                                             ----
+SHA256    9929589BF24729F058405414B3B1AD0CC6F667A35BF33B47FACF0AEB52E76E4A E:\code\junes\github\CodexPlusPlus\apps\codex-elves-android\app\src\main\java\com\junxin367\codexelves\HapticFeedbackController.java
+SHA256    800F52D11DAF9CB24228FFCB513ED4B8B35C675AA253056448385629CE564005 E:\code\junes\github\CodexPlusPlus\apps\codex-elves-android\app\src\main\java\com\junxin367\codexelves\LoginView.java
+SHA256    22C03456F45FB877F0BD9BF9417D09695F1296284BED3DA0B69EE27048B49A0E E:\code\junes\github\CodexPlusPlus\apps\codex-elves-android\app\src\main\java\com\junxin367\codexelves\MainActivity.java

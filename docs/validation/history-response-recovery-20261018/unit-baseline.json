@@ -1,0 +1,46 @@
+{
+  "mode": "baseline",
+  "node": "v22.22.2",
+  "sourceSha256": "292282b6e7731bf736f9f06fd8cfd0cdd0c45d2d7a88ffb5b2a34ec135e4922c",
+  "tests": [
+    {
+      "name": "truncated-success-is-misreported-as-history-shape",
+      "status": "PASS",
+      "evidence": {
+        "requests": 1,
+        "toast": "会话历史返回格式无效",
+        "existingHistoryPreserved": true
+      }
+    },
+    {
+      "name": "body-read-error-is-misreported-as-history-shape",
+      "status": "PASS",
+      "evidence": {
+        "requests": 1,
+        "toast": "会话历史返回格式无效"
+      }
+    },
+    {
+      "name": "action-truncated-success-is-treated-as-a-success-object",
+      "status": "PASS",
+      "evidence": {
+        "requests": 1,
+        "result": {
+          "message": "HTTP 200"
+        },
+        "receiptId": "original-receipt"
+      }
+    },
+    {
+      "name": "sendMessage-truncated-success-clears-pending-and-draft-before-confirmation",
+      "status": "PASS",
+      "evidence": {
+        "actionRequests": 1,
+        "receiptReads": 0,
+        "pendingCleared": true,
+        "draftCleared": true
+      }
+    }
+  ],
+  "status": "PASS"
+}

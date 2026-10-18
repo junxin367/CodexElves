@@ -1,0 +1,292 @@
+{
+  "scope": "实际网页源码与隔离原生消息桥；不是Android真机或安装器验收。",
+  "cases": [
+    {
+      "mode": "android",
+      "theme": "light",
+      "font": 14,
+      "result": {
+        "cacheRowHidden": true,
+        "close": {
+          "bg": "rgb(22, 160, 90)",
+          "color": "rgb(255, 255, 255)",
+          "fontSize": "14px",
+          "height": 40,
+          "text": "完成",
+          "visible": true,
+          "width": 54,
+          "x": 304,
+          "y": 460.5
+        },
+        "footerWidth": 326,
+        "muted": "#7d7d7d",
+        "noOverlap": true,
+        "overflow": false,
+        "reset": {
+          "bg": "rgba(0, 0, 0, 0)",
+          "color": "rgb(31, 31, 31)",
+          "fontSize": "14px",
+          "height": 40,
+          "text": "恢复默认",
+          "visible": true,
+          "width": 82,
+          "x": 210,
+          "y": 460.5
+        },
+        "sameRow": true,
+        "version": {
+          "bg": "rgba(0, 0, 0, 0)",
+          "color": "rgb(125, 125, 125)",
+          "fontSize": "10.5px",
+          "height": 14.6875,
+          "text": "v0.0.1",
+          "visible": true,
+          "width": 26.578125,
+          "x": 32,
+          "y": 473.15625
+        },
+        "width": 390
+      }
+    },
+    {
+      "width": 320,
+      "font": 20,
+      "theme": "light",
+      "mode": "android",
+      "result": {
+        "cacheRowHidden": true,
+        "close": {
+          "bg": "rgb(22, 160, 90)",
+          "color": "rgb(255, 255, 255)",
+          "fontSize": "20px",
+          "height": 46,
+          "text": "完成",
+          "visible": true,
+          "width": 66,
+          "x": 216,
+          "y": 464.6875
+        },
+        "footerWidth": 244,
+        "muted": "#7d7d7d",
+        "noOverlap": true,
+        "overflow": false,
+        "reset": {
+          "bg": "rgba(0, 0, 0, 0)",
+          "color": "rgb(31, 31, 31)",
+          "fontSize": "20px",
+          "height": 46,
+          "text": "恢复默认",
+          "visible": true,
+          "width": 106,
+          "x": 98,
+          "y": 464.6875
+        },
+        "sameRow": true,
+        "version": {
+          "bg": "rgba(0, 0, 0, 0)",
+          "color": "rgb(125, 125, 125)",
+          "fontSize": "15px",
+          "height": 21,
+          "text": "v0.0.1",
+          "visible": true,
+          "width": 37.953125,
+          "x": 38,
+          "y": 477.1875
+        },
+        "width": 320
+      }
+    },
+    {
+      "width": 390,
+      "font": 20,
+      "theme": "dark",
+      "mode": "android",
+      "result": {
+        "cacheRowHidden": true,
+        "close": {
+          "bg": "rgb(119, 199, 160)",
+          "color": "rgb(23, 23, 23)",
+          "fontSize": "20px",
+          "height": 46,
+          "text": "完成",
+          "visible": true,
+          "width": 66,
+          "x": 286,
+          "y": 460.5
+        },
+        "footerWidth": 314,
+        "muted": "#939393",
+        "noOverlap": true,
+        "overflow": false,
+        "reset": {
+          "bg": "rgba(0, 0, 0, 0)",
+          "color": "rgb(237, 237, 237)",
+          "fontSize": "20px",
+          "height": 46,
+          "text": "恢复默认",
+          "visible": true,
+          "width": 106,
+          "x": 168,
+          "y": 460.5
+        },
+        "sameRow": true,
+        "version": {
+          "bg": "rgba(0, 0, 0, 0)",
+          "color": "rgb(147, 147, 147)",
+          "fontSize": "15px",
+          "height": 21,
+          "text": "v0.0.1",
+          "visible": true,
+          "width": 37.953125,
+          "x": 38,
+          "y": 473
+        },
+        "width": 390
+      }
+    },
+    {
+      "width": 768,
+      "font": 10,
+      "theme": "light",
+      "mode": "android",
+      "result": {
+        "cacheRowHidden": true,
+        "close": {
+          "bg": "rgb(22, 160, 90)",
+          "color": "rgb(255, 255, 255)",
+          "fontSize": "10px",
+          "height": 40,
+          "text": "完成",
+          "visible": true,
+          "width": 46,
+          "x": 537,
+          "y": 457.5
+        },
+        "footerWidth": 398,
+        "muted": "#7d7d7d",
+        "noOverlap": true,
+        "overflow": false,
+        "reset": {
+          "bg": "rgba(0, 0, 0, 0)",
+          "color": "rgb(31, 31, 31)",
+          "fontSize": "10px",
+          "height": 40,
+          "text": "恢复默认",
+          "visible": true,
+          "width": 66,
+          "x": 459,
+          "y": 457.5
+        },
+        "sameRow": true,
+        "version": {
+          "bg": "rgba(0, 0, 0, 0)",
+          "color": "rgb(125, 125, 125)",
+          "fontSize": "7.5px",
+          "height": 10.5,
+          "text": "v0.0.1",
+          "visible": true,
+          "width": 18.984375,
+          "x": 185,
+          "y": 472.25
+        },
+        "width": 768
+      }
+    },
+    {
+      "width": 390,
+      "font": 14,
+      "theme": "light",
+      "mode": "web",
+      "result": {
+        "cacheRowHidden": false,
+        "close": {
+          "bg": "rgb(22, 160, 90)",
+          "color": "rgb(255, 255, 255)",
+          "fontSize": "14px",
+          "height": 40,
+          "text": "完成",
+          "visible": true,
+          "width": 54,
+          "x": 304,
+          "y": 475
+        },
+        "footerWidth": 326,
+        "muted": "#7d7d7d",
+        "noOverlap": true,
+        "overflow": false,
+        "reset": {
+          "bg": "rgba(0, 0, 0, 0)",
+          "color": "rgb(31, 31, 31)",
+          "fontSize": "14px",
+          "height": 40,
+          "text": "恢复默认",
+          "visible": true,
+          "width": 82,
+          "x": 210,
+          "y": 475
+        },
+        "sameRow": false,
+        "version": {
+          "bg": "rgba(0, 0, 0, 0)",
+          "color": "rgb(125, 125, 125)",
+          "fontSize": "10.5px",
+          "height": 0,
+          "text": "",
+          "visible": false,
+          "width": 0,
+          "x": 0,
+          "y": 0
+        },
+        "width": 390
+      }
+    },
+    {
+      "width": 390,
+      "font": 14,
+      "theme": "light",
+      "mode": "old",
+      "result": {
+        "cacheRowHidden": true,
+        "close": {
+          "bg": "rgb(22, 160, 90)",
+          "color": "rgb(255, 255, 255)",
+          "fontSize": "14px",
+          "height": 40,
+          "text": "完成",
+          "visible": true,
+          "width": 54,
+          "x": 304,
+          "y": 460.5
+        },
+        "footerWidth": 326,
+        "muted": "#7d7d7d",
+        "noOverlap": true,
+        "overflow": false,
+        "reset": {
+          "bg": "rgba(0, 0, 0, 0)",
+          "color": "rgb(31, 31, 31)",
+          "fontSize": "14px",
+          "height": 40,
+          "text": "恢复默认",
+          "visible": true,
+          "width": 82,
+          "x": 210,
+          "y": 460.5
+        },
+        "sameRow": false,
+        "version": {
+          "bg": "rgba(0, 0, 0, 0)",
+          "color": "rgb(125, 125, 125)",
+          "fontSize": "10.5px",
+          "height": 0,
+          "text": "",
+          "visible": false,
+          "width": 0,
+          "x": 0,
+          "y": 0
+        },
+        "width": 390
+      }
+    }
+  ]
+}

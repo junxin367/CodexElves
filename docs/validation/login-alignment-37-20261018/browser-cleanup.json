@@ -1,0 +1,9 @@
+{
+  "browserFixtureRemoved": true,
+  "browserTabClosed": true,
+  "viewportRestored": true,
+  "localBrowserStorageCleared": true,
+  "previewServerStopped": true,
+  "productionServiceChanged": false,
+  "packageBuilt": false
+}

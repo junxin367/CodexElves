@@ -1,0 +1,16 @@
+{
+  "time": "2026-10-18T06:04:47.594Z",
+  "action": "setGoal",
+  "id": "fee6aa9c-cf6f-4d53-a942-726dd835c2cc",
+  "payload": {
+    "prompt": "完善登录页面并验证手机显示效果。 [$demo-skill](/preview/demo/SKILL.md)\n保留目标模式继续编辑。",
+    "threadId": "inline-goal-a",
+    "goalMode": true,
+    "skills": [
+      {
+        "name": "demo-skill",
+        "path": "/preview/demo/SKILL.md"
+      }
+    ]
+  }
+}

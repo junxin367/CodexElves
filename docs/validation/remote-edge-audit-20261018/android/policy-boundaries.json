@@ -1,0 +1,1 @@
+{"status":"PASS","assertions":16,"scope":"production AppUpdatePolicy.copy, AppUpdateCancellation, ResourceStatePolicy; Java I/O and connection fixture; no Android device"}

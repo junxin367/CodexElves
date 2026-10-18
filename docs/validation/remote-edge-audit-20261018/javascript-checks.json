@@ -1,0 +1,14 @@
+[
+  {
+    "file": "assets/remote-access/app.js",
+    "exitCode": 0
+  },
+  {
+    "file": "assets/remote-access/attachments.js",
+    "exitCode": 0
+  },
+  {
+    "file": "assets/remote-access/native.js",
+    "exitCode": 0
+  }
+]

@@ -1,0 +1,7 @@
+{
+  "status": "PASS",
+  "submittedRequests": 6,
+  "uniqueIds": 6,
+  "loginConnectRequests": 0,
+  "source": "生产前端实际HTTP载荷，接收方为隔离模拟服务"
+}

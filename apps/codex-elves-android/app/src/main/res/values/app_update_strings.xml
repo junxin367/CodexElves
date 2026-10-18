@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_update_title">应用更新</string>
+    <string name="app_update_available">发现 Android 新版本</string>
+    <string name="app_update_offer">当前版本 v%1$s，新版本 v%2$s。下载并校验后，将打开系统安装确认。</string>
+    <string name="app_update_download">下载并更新</string>
+    <string name="app_update_later">稍后</string>
+    <string name="app_update_retry">重试</string>
+    <string name="app_update_checking">正在检查 Android 更新…</string>
+    <string name="app_update_downloading">正在下载更新… %1$d%%</string>
+    <string name="app_update_verifying">正在校验并准备安装…</string>
+    <string name="app_update_no_update">暂未发现可用的 Android 新版本。</string>
+    <string name="app_update_check_failed">检查更新失败，请检查网络后重试。</string>
+    <string name="app_update_download_failed">下载或安装包校验失败，请稍后重试。</string>
+    <string name="app_update_debug_unsupported">当前为开发版本，可查看版本号；请安装正式版本后使用应用更新。</string>
+    <string name="app_update_install_permission_title">允许安装应用更新</string>
+    <string name="app_update_install_permission">安装更新需要允许 CodexElves 安装此来源的应用。请在系统设置中授权，返回后继续由系统确认安装。</string>
+    <string name="app_update_install_permission_denied">尚未允许安装此来源的应用。更新安装包已保留，可再次打开系统设置授权，或稍后重试。</string>
+    <string name="app_update_open_settings">打开系统设置</string>
+    <string name="app_update_settings_unavailable">无法打开安装来源设置，请在系统设置中允许 CodexElves 安装应用后重试。</string>
+    <string name="app_update_installer_unavailable">无法打开系统安装器，请稍后重试。</string>
+</resources>

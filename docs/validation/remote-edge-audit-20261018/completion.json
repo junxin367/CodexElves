@@ -1,0 +1,35 @@
+{
+  "featureStatus": "PASS",
+  "sourceHashesMatch": true,
+  "gradleSourceHashesMatch": true,
+  "nativeAdapterVersion": 46,
+  "browserStatus": "PASS",
+  "cleanupStatus": "PARTIAL",
+  "cleanupReason": "blocked by policy",
+  "remainingTemporaryFiles": 91,
+  "temporaryAreas": [
+    {
+      "area": "ui",
+      "fileCount": 0
+    },
+    {
+      "area": "ui-browser",
+      "fileCount": 0
+    },
+    {
+      "area": "android",
+      "fileCount": 62
+    },
+    {
+      "area": "notifications",
+      "fileCount": 27
+    },
+    {
+      "area": "queue",
+      "fileCount": 2
+    }
+  ],
+  "packageBuilt": false,
+  "deployed": false,
+  "deviceRuntimeVerified": false
+}

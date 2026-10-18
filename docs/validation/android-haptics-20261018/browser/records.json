@@ -1,0 +1,177 @@
+{
+  "bridge": [
+    {
+      "time": 1792314994132,
+      "type": "ready"
+    },
+    {
+      "time": 1792314994914,
+      "type": "authenticated"
+    },
+    {
+      "time": 1792315404480,
+      "type": "ready"
+    },
+    {
+      "time": 1792315405085,
+      "type": "authenticated"
+    },
+    {
+      "time": 1792315440447,
+      "type": "haptic-click"
+    },
+    {
+      "time": 1792315469630,
+      "type": "ready"
+    },
+    {
+      "time": 1792315469892,
+      "type": "authenticated"
+    },
+    {
+      "time": 1792315499966,
+      "type": "haptic-click"
+    },
+    {
+      "time": 1792315506472,
+      "type": "haptic-click"
+    },
+    {
+      "time": 1792315561981,
+      "type": "haptic-drag-tick"
+    },
+    {
+      "time": 1792315589637,
+      "type": "haptic-drag-start"
+    },
+    {
+      "time": 1792315608551,
+      "type": "haptic-drag-tick"
+    },
+    {
+      "time": 1792315637964,
+      "type": "haptic-drag-end"
+    },
+    {
+      "time": 1792315660826,
+      "type": "haptic-drag-start"
+    },
+    {
+      "time": 1792315688552,
+      "type": "haptic-drag-start"
+    },
+    {
+      "time": 1792315702712,
+      "type": "haptic-drag-tick"
+    },
+    {
+      "time": 1792315729589,
+      "type": "haptic-click"
+    },
+    {
+      "time": 1792315735811,
+      "type": "haptic-click"
+    },
+    {
+      "time": 1792315735818,
+      "type": "app-info"
+    },
+    {
+      "time": 1792315743217,
+      "type": "haptic-click"
+    },
+    {
+      "time": 1792315743223,
+      "type": "notification-settings-get",
+      "requestId": "notification-mvdmimeq-1"
+    },
+    {
+      "time": 1792315759505,
+      "type": "haptic-click"
+    },
+    {
+      "time": 1792315759525,
+      "type": "notification-settings-set",
+      "requestId": "notification-mvdmiyzl-2",
+      "settings": {
+        "enabled": false,
+        "approval": false,
+        "question": true,
+        "completed": true,
+        "failed": true
+      }
+    },
+    {
+      "time": 1792315759537,
+      "type": "notification-settings-get",
+      "requestId": "notification-mvdmiyzy-3"
+    },
+    {
+      "time": 1792315781640,
+      "type": "haptic-click"
+    },
+    {
+      "time": 1792315801169,
+      "type": "haptic-click"
+    },
+    {
+      "time": 1792315828136,
+      "type": "haptic-click"
+    }
+  ],
+  "actions": [
+    {
+      "path": "/api/action/reorderQueued",
+      "payload": {
+        "threadId": "haptics-demo",
+        "messageIds": [
+          "qb",
+          "qa",
+          "qc"
+        ],
+        "expectedMessageIds": [
+          "qa",
+          "qb",
+          "qc"
+        ]
+      }
+    },
+    {
+      "path": "/api/action/reorderQueued",
+      "payload": {
+        "threadId": "haptics-demo",
+        "messageIds": [
+          "qa",
+          "qc",
+          "qb"
+        ],
+        "expectedMessageIds": [
+          "qb",
+          "qa",
+          "qc"
+        ]
+      }
+    },
+    {
+      "path": "/api/action/reorderQueued",
+      "payload": {
+        "threadId": "haptics-demo",
+        "messageIds": [
+          "qc",
+          "qa",
+          "qb"
+        ],
+        "expectedMessageIds": [
+          "qa",
+          "qc",
+          "qb"
+        ]
+      }
+    }
+  ],
+  "queue": [
+    "qc",
+    "qa",
+    "qb"
+  ]
+}

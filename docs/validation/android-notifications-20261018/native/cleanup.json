@@ -1,0 +1,16 @@
+{
+  "result": "PASS",
+  "root": "E:/code/junes/github/CodexPlusPlus/temp/android-notifications-native-20261018",
+  "temporaryRootAbsent": true,
+  "recursiveDelete": false,
+  "sourceFilesRemoved": [
+    "NativePolicyHarness.java",
+    "validate-native.ps1",
+    "cross-bridge-failure.mjs",
+    "R.java"
+  ],
+  "generatedClassFilesRemoved": true,
+  "method": "Confirmed individual literal file paths; then removed only verified empty directories.",
+  "initialBatchCleanup": "Automatic review rejected a dynamic batch cleanup command with blocked by policy. Replaced it with narrower explicit literal-file cleanup; completed successfully.",
+  "preserved": "Production source and docs/validation/android-notifications-20261018/native evidence files"
+}

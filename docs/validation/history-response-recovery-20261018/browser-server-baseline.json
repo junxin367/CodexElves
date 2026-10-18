@@ -1,0 +1,726 @@
+{
+  "plans": [
+    {
+      "label": "before-broken-body",
+      "fault": "broken-body",
+      "historyHits": 1,
+      "actionHits": 0,
+      "receiptHits": 0,
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/read/history",
+          "mode": "before",
+          "time": 1792307899035,
+          "payload": {
+            "threadId": "history-main",
+            "cursor": null
+          },
+          "response": "200 + incomplete Content-Length body",
+          "connectionClosed": true,
+          "finished": false
+        }
+      ]
+    },
+    {
+      "label": "before-visible-error",
+      "fault": "broken-body",
+      "historyHits": 1,
+      "actionHits": 0,
+      "receiptHits": 0,
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/read/history",
+          "mode": "before",
+          "time": 1792307943689,
+          "payload": {
+            "threadId": "history-main",
+            "cursor": null
+          },
+          "response": "200 + incomplete Content-Length body",
+          "connectionClosed": true,
+          "finished": false
+        }
+      ]
+    },
+    {
+      "label": "after-initial",
+      "fault": "none",
+      "historyHits": 2,
+      "actionHits": 0,
+      "receiptHits": 0,
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/read/history",
+          "mode": "after",
+          "time": 1792307980953,
+          "payload": {
+            "threadId": "history-main",
+            "cursor": null
+          },
+          "response": "200 + valid history"
+        },
+        {
+          "method": "POST",
+          "path": "/api/read/history",
+          "mode": "after",
+          "time": 1792307981021,
+          "payload": {
+            "threadId": "history-main",
+            "cursor": null
+          },
+          "response": "200 + valid history"
+        }
+      ]
+    }
+  ],
+  "allRequests": [
+    {
+      "method": "GET",
+      "path": "/",
+      "mode": null,
+      "time": 1792307862775
+    },
+    {
+      "method": "GET",
+      "path": "/fixture.js",
+      "mode": "before",
+      "time": 1792307862856
+    },
+    {
+      "method": "GET",
+      "path": "/style.css",
+      "mode": "before",
+      "time": 1792307862857
+    },
+    {
+      "method": "GET",
+      "path": "/app.js",
+      "mode": "before",
+      "time": 1792307862860
+    },
+    {
+      "method": "GET",
+      "path": "/events-client.js",
+      "mode": "before",
+      "time": 1792307862860
+    },
+    {
+      "method": "GET",
+      "path": "/platform.js",
+      "mode": "before",
+      "time": 1792307862865
+    },
+    {
+      "method": "GET",
+      "path": "/recovery-store.js",
+      "mode": "before",
+      "time": 1792307862865
+    },
+    {
+      "method": "GET",
+      "path": "/attachments.js",
+      "mode": "before",
+      "time": 1792307862866
+    },
+    {
+      "method": "GET",
+      "path": "/message-actions.js",
+      "mode": "before",
+      "time": 1792307862867
+    },
+    {
+      "method": "GET",
+      "path": "/markdown.js",
+      "mode": "before",
+      "time": 1792307862872
+    },
+    {
+      "method": "GET",
+      "path": "/pwa.js",
+      "mode": "before",
+      "time": 1792307862874
+    },
+    {
+      "method": "GET",
+      "path": "/manifest.webmanifest",
+      "mode": "before",
+      "time": 1792307863263
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "before",
+      "time": 1792307863826
+    },
+    {
+      "method": "GET",
+      "path": "/favicon.ico",
+      "mode": "before",
+      "time": 1792307863900
+    },
+    {
+      "method": "GET",
+      "path": "/icons/icon-192.png",
+      "mode": "before",
+      "time": 1792307863901
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "mode": "before",
+      "time": 1792307864047,
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "before",
+      "time": 1792307864171,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "before",
+      "time": 1792307864171,
+      "payload": {
+        "threadId": "history-main"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "before",
+      "time": 1792307864172,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/events-worker.js",
+      "mode": "before",
+      "time": 1792307864173
+    },
+    {
+      "method": "GET",
+      "path": "/markdown-renderer.js",
+      "mode": null,
+      "time": 1792307864257
+    },
+    {
+      "method": "GET",
+      "path": "/vendor/marked.esm.js",
+      "mode": null,
+      "time": 1792307864258
+    },
+    {
+      "method": "GET",
+      "path": "/vendor/dompurify.esm.js",
+      "mode": null,
+      "time": 1792307864258
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "before",
+      "time": 1792307864300,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "before",
+      "time": 1792307864301,
+      "payload": {
+        "threadId": "history-main"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "before",
+      "time": 1792307864302,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "before",
+      "time": 1792307864365
+    },
+    {
+      "method": "GET",
+      "path": "/app-resources.json",
+      "mode": "before",
+      "time": 1792307866391
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "before",
+      "time": 1792307879152
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "before",
+      "time": 1792307879164,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/__arm",
+      "mode": null,
+      "time": 1792307881910
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "before",
+      "time": 1792307894163
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "before",
+      "time": 1792307894177,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "before",
+      "time": 1792307899028,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "before",
+      "time": 1792307899031,
+      "payload": {
+        "threadId": "history-main"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "mode": "before",
+      "time": 1792307899035,
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "before",
+      "time": 1792307899035,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      },
+      "response": "200 + incomplete Content-Length body",
+      "connectionClosed": true,
+      "finished": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "before",
+      "time": 1792307909155
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "before",
+      "time": 1792307909159,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "before",
+      "time": 1792307924153
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "before",
+      "time": 1792307924159,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/__arm",
+      "mode": null,
+      "time": 1792307933636
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "before",
+      "time": 1792307939150
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "before",
+      "time": 1792307939167,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "before",
+      "time": 1792307943685,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "before",
+      "time": 1792307943687,
+      "payload": {
+        "threadId": "history-main"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "mode": "before",
+      "time": 1792307943687,
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "before",
+      "time": 1792307943689,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      },
+      "response": "200 + incomplete Content-Length body",
+      "connectionClosed": true,
+      "finished": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "before",
+      "time": 1792307954153
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "before",
+      "time": 1792307954170,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/__arm",
+      "mode": null,
+      "time": 1792307956706
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "before",
+      "time": 1792307969153
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "before",
+      "time": 1792307969158,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/",
+      "mode": null,
+      "time": 1792307980471
+    },
+    {
+      "method": "GET",
+      "path": "/fixture.js",
+      "mode": "after",
+      "time": 1792307980583
+    },
+    {
+      "method": "GET",
+      "path": "/style.css",
+      "mode": "after",
+      "time": 1792307980587
+    },
+    {
+      "method": "GET",
+      "path": "/app.js",
+      "mode": "after",
+      "time": 1792307980596
+    },
+    {
+      "method": "GET",
+      "path": "/events-client.js",
+      "mode": "after",
+      "time": 1792307980597
+    },
+    {
+      "method": "GET",
+      "path": "/platform.js",
+      "mode": "after",
+      "time": 1792307980597
+    },
+    {
+      "method": "GET",
+      "path": "/recovery-store.js",
+      "mode": "after",
+      "time": 1792307980598
+    },
+    {
+      "method": "GET",
+      "path": "/attachments.js",
+      "mode": "after",
+      "time": 1792307980601
+    },
+    {
+      "method": "GET",
+      "path": "/message-actions.js",
+      "mode": "after",
+      "time": 1792307980601
+    },
+    {
+      "method": "GET",
+      "path": "/markdown.js",
+      "mode": "after",
+      "time": 1792307980605
+    },
+    {
+      "method": "GET",
+      "path": "/pwa.js",
+      "mode": "after",
+      "time": 1792307980609
+    },
+    {
+      "method": "GET",
+      "path": "/manifest.webmanifest",
+      "mode": "after",
+      "time": 1792307980704
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792307980727
+    },
+    {
+      "method": "GET",
+      "path": "/favicon.ico",
+      "mode": "after",
+      "time": 1792307980836
+    },
+    {
+      "method": "GET",
+      "path": "/icons/icon-192.png",
+      "mode": "after",
+      "time": 1792307980846
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "mode": "after",
+      "time": 1792307980910,
+      "payload": {}
+    },
+    {
+      "method": "GET",
+      "path": "/events-worker.js",
+      "mode": "after",
+      "time": 1792307980926
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792307980926,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "after",
+      "time": 1792307980942,
+      "payload": {
+        "threadId": "history-main"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "after",
+      "time": 1792307980953,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      },
+      "response": "200 + valid history"
+    },
+    {
+      "method": "GET",
+      "path": "/markdown-renderer.js",
+      "mode": null,
+      "time": 1792307981000
+    },
+    {
+      "method": "GET",
+      "path": "/vendor/marked.esm.js",
+      "mode": null,
+      "time": 1792307981000
+    },
+    {
+      "method": "GET",
+      "path": "/vendor/dompurify.esm.js",
+      "mode": null,
+      "time": 1792307981001
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792307981020,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "after",
+      "time": 1792307981021,
+      "payload": {
+        "threadId": "history-main"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "after",
+      "time": 1792307981021,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      },
+      "response": "200 + valid history"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792307981129
+    },
+    {
+      "method": "GET",
+      "path": "/app-resources.json",
+      "mode": "after",
+      "time": 1792307983162
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792307995924
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792307995929,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308010931
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308010948,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308025948
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308025959,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308040947
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308040965,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/__results",
+      "mode": null,
+      "time": 1792308047725
+    }
+  ]
+}

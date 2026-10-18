@@ -1,0 +1,134 @@
+{
+  "status": "PASS",
+  "source": "assets/remote-access/app.js",
+  "generatedAt": "2026-10-18T10:31:07.873Z",
+  "validation": "定向 Node VM + 最小 DOM，使用源文件函数；不访问真实会话，不代表完整浏览器或原生运行验证。",
+  "total": 31,
+  "passed": 31,
+  "cases": [
+    {
+      "name": "running：普通草稿编辑和发送门禁",
+      "status": "PASS"
+    },
+    {
+      "name": "acknowledged-pending：普通草稿编辑和发送门禁",
+      "status": "PASS"
+    },
+    {
+      "name": "unknown：普通草稿编辑和发送门禁",
+      "status": "PASS"
+    },
+    {
+      "name": "unacknowledged-pending：普通草稿编辑和发送门禁",
+      "status": "PASS"
+    },
+    {
+      "name": "old-identity：普通草稿编辑和发送门禁",
+      "status": "PASS"
+    },
+    {
+      "name": "missing-capability：普通草稿编辑和发送门禁",
+      "status": "PASS"
+    },
+    {
+      "name": "native-confirmed-pending：普通草稿编辑和发送门禁",
+      "status": "PASS"
+    },
+    {
+      "name": "压缩时空编辑器保持发送动作且不能停止",
+      "status": "PASS"
+    },
+    {
+      "name": "未压缩且运行中的空编辑器保留停止",
+      "status": "PASS"
+    },
+    {
+      "name": "原生 pending 读取确认压缩生命周期但不修改回执确认",
+      "status": "PASS"
+    },
+    {
+      "name": "网页压缩请求需要超出提交基线的原生证据",
+      "status": "PASS"
+    },
+    {
+      "name": "读取原生生命周期后旧身份仍被拒绝",
+      "status": "PASS"
+    },
+    {
+      "name": "read-only：保留原有提交门禁",
+      "status": "PASS"
+    },
+    {
+      "name": "disconnected：保留原有提交门禁",
+      "status": "PASS"
+    },
+    {
+      "name": "busy：保留原有提交门禁",
+      "status": "PASS"
+    },
+    {
+      "name": "stopping：保留原有提交门禁",
+      "status": "PASS"
+    },
+    {
+      "name": "pending-delivery：保留原有提交门禁",
+      "status": "PASS"
+    },
+    {
+      "name": "deleting：保留原有提交门禁",
+      "status": "PASS"
+    },
+    {
+      "name": "existing-message-edit：保留原有提交门禁",
+      "status": "PASS"
+    },
+    {
+      "name": "queue-edit：保留原有提交门禁",
+      "status": "PASS"
+    },
+    {
+      "name": "selected-goal：目标不能静默转换为普通排队消息",
+      "status": "PASS"
+    },
+    {
+      "name": "typed-goal：目标不能静默转换为普通排队消息",
+      "status": "PASS"
+    },
+    {
+      "name": "压缩状态未知时仍能选择和插入 Skill",
+      "status": "PASS"
+    },
+    {
+      "name": "排队提交保留 Skill、图片、模型和推理深度",
+      "status": "PASS"
+    },
+    {
+      "name": "缺少图片能力时禁止发送且仍能编辑附件",
+      "status": "PASS"
+    },
+    {
+      "name": "图片读取期间禁止提交",
+      "status": "PASS"
+    },
+    {
+      "name": "普通发送和创建会话不携带 queueOnly",
+      "status": "PASS"
+    },
+    {
+      "name": "设置目标和带目标创建会话不携带 queueOnly",
+      "status": "PASS"
+    },
+    {
+      "name": "failed：发送保留草稿、图片和 Skill，且不自动重发",
+      "status": "PASS"
+    },
+    {
+      "name": "unknown：发送保留草稿、图片和 Skill，且不自动重发",
+      "status": "PASS"
+    },
+    {
+      "name": "确认发送后仅清除提交草稿并保留后来输入",
+      "status": "PASS"
+    }
+  ]
+}

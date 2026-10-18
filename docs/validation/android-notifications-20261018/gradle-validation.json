@@ -1,0 +1,11 @@
+{
+  "startedAt": "2026-10-18T16:23:24.7903650+08:00",
+  "endedAt": "2026-10-18T16:23:54.2831087+08:00",
+  "exitCode": 0,
+  "tasks": [
+    ":app:compileReleaseJavaWithJavac",
+    ":app:lintRelease"
+  ],
+  "packageBuilt": false,
+  "installed": false
+}

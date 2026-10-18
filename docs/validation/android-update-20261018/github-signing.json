@@ -1,0 +1,16 @@
+{
+  "repository": "junxin367/CodexElves",
+  "configuredAtUtc": "2026-10-18T04:04:16Z",
+  "releaseCertificateSha256": "7b15895625b40e03792fc250a1fc489df11fe03a25f7e8f1e177d2442fe9dc2d",
+  "secretNamesVerified": [
+    "CODEX_ELVES_ANDROID_KEYSTORE_BASE64",
+    "CODEX_ELVES_ANDROID_KEY_ALIAS",
+    "CODEX_ELVES_ANDROID_KEY_PASSWORD",
+    "CODEX_ELVES_ANDROID_STORE_PASSWORD"
+  ],
+  "configurationExitCodes": [0, 0, 0, 0],
+  "secretValuesRecorded": false,
+  "codePushed": false,
+  "workflowDispatched": false,
+  "releasePublished": false
+}

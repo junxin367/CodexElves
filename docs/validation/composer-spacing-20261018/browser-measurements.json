@@ -1,0 +1,1954 @@
+{
+  "scope": "真实 Chrome 隔离编辑器样式；DOM 与图标取自实际 app.js，CSS 对比 HEAD 与工作区；不连接真实会话，不是真机截图。",
+  "cases": [
+    {
+      "width": 320,
+      "font": 14,
+      "goal": false,
+      "before": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.08px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 92,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 115,
+            "x": 129,
+            "y": 147
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 63,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 256,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "5px",
+        "overflow": false,
+        "rowGap": "5px",
+        "toolbarGap": "12px",
+        "width": 320
+      },
+      "after": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.08px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 98,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 106,
+            "x": 138,
+            "y": 147
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 66,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 256,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "8px",
+        "overflow": false,
+        "rowGap": "8px",
+        "toolbarGap": "12px",
+        "width": 320
+      },
+      "checks": {
+        "gap8": true,
+        "sendUnchanged": true,
+        "toolbarGapUnchanged": true,
+        "noOverflow": true,
+        "noOverlap": true,
+        "goalWrapPreserved": true
+      }
+    },
+    {
+      "width": 360,
+      "font": 14,
+      "goal": false,
+      "before": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.08px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 92,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 134.84375,
+            "x": 129,
+            "y": 147
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 63,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 296,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "5px",
+        "overflow": false,
+        "rowGap": "5px",
+        "toolbarGap": "12px",
+        "width": 360
+      },
+      "after": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.08px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 98,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 134.84375,
+            "x": 138,
+            "y": 147
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 66,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 296,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "8px",
+        "overflow": false,
+        "rowGap": "8px",
+        "toolbarGap": "12px",
+        "width": 360
+      },
+      "checks": {
+        "gap8": true,
+        "sendUnchanged": true,
+        "toolbarGapUnchanged": true,
+        "noOverflow": true,
+        "noOverlap": true,
+        "goalWrapPreserved": true
+      }
+    },
+    {
+      "width": 390,
+      "font": 14,
+      "goal": false,
+      "before": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.08px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 92,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 134.84375,
+            "x": 129,
+            "y": 147
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 63,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 326,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "5px",
+        "overflow": false,
+        "rowGap": "5px",
+        "toolbarGap": "12px",
+        "width": 390
+      },
+      "after": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.08px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 98,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 134.84375,
+            "x": 138,
+            "y": 147
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 66,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 326,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "8px",
+        "overflow": false,
+        "rowGap": "8px",
+        "toolbarGap": "12px",
+        "width": 390
+      },
+      "checks": {
+        "gap8": true,
+        "sendUnchanged": true,
+        "toolbarGapUnchanged": true,
+        "noOverflow": true,
+        "noOverlap": true,
+        "goalWrapPreserved": true
+      }
+    },
+    {
+      "width": 414,
+      "font": 14,
+      "goal": false,
+      "before": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.08px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 92,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 134.84375,
+            "x": 129,
+            "y": 147
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 63,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 350,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "5px",
+        "overflow": false,
+        "rowGap": "5px",
+        "toolbarGap": "12px",
+        "width": 414
+      },
+      "after": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.08px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 98,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 134.84375,
+            "x": 138,
+            "y": 147
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 66,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 350,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "8px",
+        "overflow": false,
+        "rowGap": "8px",
+        "toolbarGap": "12px",
+        "width": 414
+      },
+      "checks": {
+        "gap8": true,
+        "sendUnchanged": true,
+        "toolbarGapUnchanged": true,
+        "noOverflow": true,
+        "noOverlap": true,
+        "goalWrapPreserved": true
+      }
+    },
+    {
+      "width": 768,
+      "font": 14,
+      "goal": false,
+      "before": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 40,
+            "y": 172
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 5px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.92px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 28,
+            "x": 114,
+            "y": 173
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 26,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 134.84375,
+            "x": 152,
+            "y": 174
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 80,
+            "y": 173
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 32,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 32,
+            "x": 696,
+            "y": 171
+          }
+        },
+        "coarse": false,
+        "gap": "10px",
+        "overflow": false,
+        "rowGap": "10px",
+        "toolbarGap": "12px",
+        "width": 768
+      },
+      "after": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 40,
+            "y": 172
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 5px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.92px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 28,
+            "x": 110,
+            "y": 173
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 26,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 134.84375,
+            "x": 146,
+            "y": 174
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 78,
+            "y": 173
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 32,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 32,
+            "x": 696,
+            "y": 171
+          }
+        },
+        "coarse": false,
+        "gap": "8px",
+        "overflow": false,
+        "rowGap": "8px",
+        "toolbarGap": "12px",
+        "width": 768
+      },
+      "checks": {
+        "gap8": true,
+        "sendUnchanged": true,
+        "toolbarGapUnchanged": true,
+        "noOverflow": true,
+        "noOverlap": true,
+        "goalWrapPreserved": true
+      }
+    },
+    {
+      "width": 1280,
+      "font": 14,
+      "goal": false,
+      "before": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 260,
+            "y": 172
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 5px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.92px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 28,
+            "x": 334,
+            "y": 173
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 26,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 134.84375,
+            "x": 372,
+            "y": 174
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 300,
+            "y": 173
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 32,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 32,
+            "x": 988,
+            "y": 171
+          }
+        },
+        "coarse": false,
+        "gap": "10px",
+        "overflow": false,
+        "rowGap": "10px",
+        "toolbarGap": "12px",
+        "width": 1280
+      },
+      "after": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 260,
+            "y": 172
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 5px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.92px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 28,
+            "x": 330,
+            "y": 173
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 26,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 134.84375,
+            "x": 366,
+            "y": 174
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 298,
+            "y": 173
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 32,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 32,
+            "x": 988,
+            "y": 171
+          }
+        },
+        "coarse": false,
+        "gap": "8px",
+        "overflow": false,
+        "rowGap": "8px",
+        "toolbarGap": "12px",
+        "width": 1280
+      },
+      "checks": {
+        "gap8": true,
+        "sendUnchanged": true,
+        "toolbarGapUnchanged": true,
+        "noOverflow": true,
+        "noOverlap": true,
+        "goalWrapPreserved": true
+      }
+    },
+    {
+      "width": 320,
+      "font": 18,
+      "goal": false,
+      "before": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "12.8572px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "12.96px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 92,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "15.3px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 115,
+            "x": 129,
+            "y": 147
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 63,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 256,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "5px",
+        "overflow": false,
+        "rowGap": "5px",
+        "toolbarGap": "12px",
+        "width": 320
+      },
+      "after": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "12.8572px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "12.96px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 98,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "15.3px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 106,
+            "x": 138,
+            "y": 147
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 66,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 256,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "8px",
+        "overflow": false,
+        "rowGap": "8px",
+        "toolbarGap": "12px",
+        "width": 320
+      },
+      "checks": {
+        "gap8": true,
+        "sendUnchanged": true,
+        "toolbarGapUnchanged": true,
+        "noOverflow": true,
+        "noOverlap": true,
+        "goalWrapPreserved": true
+      }
+    },
+    {
+      "width": 320,
+      "font": 18,
+      "goal": true,
+      "before": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "12.8572px",
+            "height": 36,
+            "hidden": false,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 50.703125,
+            "x": 127,
+            "y": 147
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "12.96px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 90,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "15.3px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 216,
+            "x": 28,
+            "y": 185
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 22,
+            "x": 63,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 256,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "5px",
+        "overflow": false,
+        "rowGap": "2px",
+        "toolbarGap": "12px",
+        "width": 320
+      },
+      "after": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "12.8572px",
+            "height": 36,
+            "hidden": false,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 50.703125,
+            "x": 136,
+            "y": 147
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "12.96px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 96,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "15.3px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 216,
+            "x": 28,
+            "y": 185
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 22,
+            "x": 66,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 256,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "8px",
+        "overflow": false,
+        "rowGap": "2px",
+        "toolbarGap": "12px",
+        "width": 320
+      },
+      "checks": {
+        "gap8": true,
+        "sendUnchanged": true,
+        "toolbarGapUnchanged": true,
+        "noOverflow": true,
+        "noOverlap": true,
+        "goalWrapPreserved": true
+      }
+    },
+    {
+      "width": 390,
+      "font": 14,
+      "goal": true,
+      "before": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 36,
+            "hidden": false,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 45,
+            "x": 127,
+            "y": 147
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.08px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 90,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 286,
+            "x": 28,
+            "y": 185
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 22,
+            "x": 63,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 326,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "5px",
+        "overflow": false,
+        "rowGap": "2px",
+        "toolbarGap": "12px",
+        "width": 390
+      },
+      "after": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 36,
+            "hidden": false,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 45,
+            "x": 136,
+            "y": 147
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.08px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 96,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 286,
+            "x": 28,
+            "y": 185
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 22,
+            "x": 66,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 326,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "8px",
+        "overflow": false,
+        "rowGap": "2px",
+        "toolbarGap": "12px",
+        "width": 390
+      },
+      "checks": {
+        "gap8": true,
+        "sendUnchanged": true,
+        "toolbarGapUnchanged": true,
+        "noOverflow": true,
+        "noOverlap": true,
+        "goalWrapPreserved": true
+      }
+    },
+    {
+      "width": 414,
+      "font": 14,
+      "goal": true,
+      "before": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 36,
+            "hidden": false,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 45,
+            "x": 293,
+            "y": 147
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.08px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 90,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 161,
+            "x": 127,
+            "y": 147
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 22,
+            "x": 63,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 350,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "5px",
+        "overflow": false,
+        "rowGap": "5px",
+        "toolbarGap": "12px",
+        "width": 414
+      },
+      "after": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.0001px",
+            "height": 36,
+            "hidden": false,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 45,
+            "x": 293,
+            "y": 147
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "10.08px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 96,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(31, 31, 31)",
+            "fontSize": "11.9px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 149,
+            "x": 136,
+            "y": 147
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(125, 125, 125)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 22,
+            "x": 66,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 350,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "8px",
+        "overflow": false,
+        "rowGap": "8px",
+        "toolbarGap": "12px",
+        "width": 414
+      },
+      "checks": {
+        "gap8": true,
+        "sendUnchanged": true,
+        "toolbarGapUnchanged": true,
+        "noOverflow": true,
+        "noOverlap": true,
+        "goalWrapPreserved": true
+      }
+    },
+    {
+      "width": 390,
+      "font": 14,
+      "goal": false,
+      "state": "stop",
+      "theme": "dark",
+      "before": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(147, 147, 147)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(147, 147, 147)",
+            "fontSize": "10.0001px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(147, 147, 147)",
+            "fontSize": "10.08px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 92,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(237, 237, 237)",
+            "fontSize": "11.9px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 134.84375,
+            "x": 129,
+            "y": 147
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(147, 147, 147)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 63,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 326,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "5px",
+        "overflow": false,
+        "rowGap": "5px",
+        "toolbarGap": "12px",
+        "width": 390
+      },
+      "after": {
+        "boxes": {
+          "composer-add": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(147, 147, 147)",
+            "fontSize": "20px",
+            "height": 30,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 30,
+            "x": 28,
+            "y": 150
+          },
+          "composer-goal": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(147, 147, 147)",
+            "fontSize": "10.0001px",
+            "height": 0,
+            "hidden": true,
+            "padding": "4px 3px",
+            "radius": "8px",
+            "width": 0,
+            "x": 0,
+            "y": 0
+          },
+          "context-info": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(147, 147, 147)",
+            "fontSize": "10.08px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 32,
+            "x": 98,
+            "y": 147
+          },
+          "model-button": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(237, 237, 237)",
+            "fontSize": "11.9px",
+            "height": 36,
+            "hidden": false,
+            "padding": "5px 7px",
+            "radius": "8px",
+            "width": 134.84375,
+            "x": 138,
+            "y": 147
+          },
+          "prompt-optimize": {
+            "bg": "rgba(0, 0, 0, 0)",
+            "color": "rgb(147, 147, 147)",
+            "fontSize": "16px",
+            "height": 28,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "6px",
+            "width": 24,
+            "x": 66,
+            "y": 151
+          },
+          "send": {
+            "bg": "rgb(22, 160, 90)",
+            "color": "rgb(255, 255, 255)",
+            "fontSize": "22px",
+            "height": 36,
+            "hidden": false,
+            "padding": "0px",
+            "radius": "50%",
+            "width": 36,
+            "x": 326,
+            "y": 147
+          }
+        },
+        "coarse": true,
+        "gap": "8px",
+        "overflow": false,
+        "rowGap": "8px",
+        "toolbarGap": "12px",
+        "width": 390
+      },
+      "checks": {
+        "gap8": true,
+        "sendUnchanged": true,
+        "toolbarGapUnchanged": true,
+        "noOverflow": true,
+        "noOverlap": true,
+        "goalWrapPreserved": true
+      }
+    }
+  ]
+}

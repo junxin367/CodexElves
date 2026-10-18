@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="notification_approval">需要授权</string>
+    <string name="notification_question">需要回答</string>
+    <string name="notification_completed">执行完成</string>
+    <string name="notification_failed">执行失败</string>
+    <string name="notification_untitled_thread">未命名会话</string>
+    <string name="notification_public_summary">有新的会话事件</string>
+    <string name="notification_connection_channel">通知连接状态</string>
+    <string name="notification_connection_title">CodexElves 通知连接</string>
+    <string name="notification_connection_connecting">正在连接会话通知服务</string>
+    <string name="notification_connection_connected">正在接收会话事件</string>
+    <string name="notification_connection_disconnected">连接已断开，等待网络恢复</string>
+</resources>

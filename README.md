@@ -44,7 +44,7 @@ Windows 安装包会创建桌面和开始菜单快捷方式。macOS DMG 会安�
 
 ## Android 与 PWA
 
-Android APK 内置首版网页资源，登录后从填写的 HTTPS 服务域名后台检查和下载资源更新。网页与 PWA 只需输入访问密钥；Android 首次登录输入域名和密钥，之后恢复已保存的设备授权。构建和发布说明见 [Android 与 PWA 发布说明](docs/android-release.md)。电脑端需要更新到包含 PWA 和资源清单接口的版本。
+Android APK 内置首版网页资源，登录后从填写的 HTTPS 服务域名后台检查和下载资源更新。网页与 PWA 只需输入访问密钥；Android 首次登录输入域名和密钥，之后恢复已保存的设备授权。Android 使用独立版本，设置弹窗左下显示当前应用版本并支持手动检查更新，也会自动从本仓库的 Android GitHub Release 检查新版，校验 APK 后交给系统确认安装。构建和发布说明见 [Android 与 PWA 发布说明](docs/android-release.md)。电脑端需要更新到包含 PWA 和资源清单接口的版本。
 
 ## 主要功能
 

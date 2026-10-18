@@ -1,0 +1,42 @@
+[
+  {
+    "file": "assets/remote-access/app.js",
+    "sha256": "cfc2b2c269d10930163a125fd95f7ec6807634b90afece8bfbeaf04eb67d8a81"
+  },
+  {
+    "file": "assets/remote-access/attachments.js",
+    "sha256": "b596bc977c7cb4377adfcd25a11102352edcc65bbb3830592505343ed6fedb99"
+  },
+  {
+    "file": "assets/remote-access/native.js",
+    "sha256": "364de2280295e42d2815c0c5c8c0b9121ee024330128e399e23b82c3e764c387"
+  },
+  {
+    "file": "assets/remote-access/platform.js",
+    "sha256": "628145e908f163db877ffdc1a4bcf8fb44ae1036dd8cde6d1707be62fc8ad55f"
+  },
+  {
+    "file": "assets/remote-access/style.css",
+    "sha256": "4e2bd9882aa74317b3b8b92219084097fb6dd4efb1842e19073671bc52b0cf40"
+  },
+  {
+    "file": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/MainActivity.java",
+    "sha256": "84a3e5ebc1a303d4fd4e5541d3f29ffaf497fbb06cfddf3e207444c065b13a52"
+  },
+  {
+    "file": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/LoginView.java",
+    "sha256": "f29b2e29f32462ee719439ecaffddcf23a39b81f469dc7b3297e9772b2e61439"
+  },
+  {
+    "file": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/NotificationController.java",
+    "sha256": "7d78d96a5e1a74937fbc517001841b4ee3ce07f43990f93a5e6bf1ed2fe5ed16"
+  },
+  {
+    "file": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/NotificationSettings.java",
+    "sha256": "90101edd4368d4bd56ac4a3f4be959ef215483a09774ee696a8ab35b5a3b99e3"
+  },
+  {
+    "file": "crates/codex-elves-core/src/remote_access.rs",
+    "sha256": "e48954d1de05e480b416efa4e9f8772950487f2b39947febbe6171821d997b9e"
+  }
+]

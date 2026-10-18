@@ -1,0 +1,10 @@
+{
+  "status": "PASS",
+  "settingsWrites": 6,
+  "permissionRequests": 2,
+  "systemSettingsRequests": 1,
+  "nativeBackHandled": 2,
+  "notificationOpenHandled": 1,
+  "finalBridgeListenerCount": 0,
+  "realChatWrites": 0
+}

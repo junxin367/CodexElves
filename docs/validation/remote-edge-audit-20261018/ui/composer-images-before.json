@@ -1,0 +1,63 @@
+{
+  "boundary": "实际生产附件与发送/回执函数，Blob 读取延迟受控；图片解码和网络为替身，无真实会话写入",
+  "shortcutDirectCall": true,
+  "passed": 1,
+  "total": 6,
+  "results": [
+    {
+      "name": "普通会话图片读取时快捷发送",
+      "pass": false,
+      "whileReading": {
+        "sends": 1,
+        "text": "",
+        "reading": true
+      },
+      "imagesAfterRead": 0,
+      "notices": []
+    },
+    {
+      "name": "压缩排队图片读取时快捷发送",
+      "pass": false,
+      "whileReading": {
+        "sends": 1,
+        "text": "",
+        "reading": true
+      },
+      "imagesAfterRead": 0,
+      "notices": []
+    },
+    {
+      "name": "创建会话图片读取时快捷发送",
+      "pass": false,
+      "whileReading": {
+        "sends": 1,
+        "text": "",
+        "reading": true
+      },
+      "imagesAfterRead": 0,
+      "notices": []
+    },
+    {
+      "name": "目标图片读取时快捷发送",
+      "pass": false,
+      "whileReading": {
+        "sends": 1,
+        "text": "保留这段文字",
+        "reading": true
+      },
+      "imagesAfterRead": 1,
+      "notices": []
+    },
+    {
+      "name": "原发送回执到达时保留新在读图片及当前草稿",
+      "pass": false,
+      "retainedText": "",
+      "images": 0
+    },
+    {
+      "name": "没有新编辑时确认回执仍清理原草稿",
+      "pass": true,
+      "text": ""
+    }
+  ]
+}

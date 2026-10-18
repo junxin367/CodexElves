@@ -1,0 +1,18 @@
+[
+  {
+    "Path": "temp\\android-update-ui-20261018",
+    "Exists": false
+  },
+  {
+    "Path": "temp\\android-build-rules-20261018",
+    "Exists": false
+  },
+  {
+    "Path": "temp\\android-publish-idempotence-20261018",
+    "Exists": false
+  },
+  {
+    "Path": "temp\\android-app-update-20261018",
+    "Exists": false
+  }
+]

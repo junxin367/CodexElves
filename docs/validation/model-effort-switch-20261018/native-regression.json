@@ -1,0 +1,4429 @@
+{
+  "collectedAt": "2026-10-18T07:04:38.864Z",
+  "baseline": {
+    "source": {
+      "path": "assets/remote-access/native.js",
+      "sha256": "232322ac0670f0d7100adf2905bf8f7846499069e330543cc76f9df0bbcb82ba"
+    },
+    "passed": 14,
+    "failed": 9,
+    "failures": [
+      {
+        "name": "普通发送：切换无推理模型清空旧等级",
+        "result": "FAIL",
+        "error": "Expected values to be strictly equal:\n\n'high' !== null\n",
+        "response": {
+          "ok": true,
+          "threadId": "fixture-thread",
+          "result": "sent-turn"
+        },
+        "records": [
+          {
+            "kind": "send-follow-up",
+            "conversationId": "fixture-thread",
+            "options": {
+              "prompt": "继续",
+              "inputItems": [],
+              "model": "no-reasoning"
+            }
+          },
+          {
+            "kind": "resume",
+            "params": {
+              "conversationId": "fixture-thread",
+              "model": "no-reasoning",
+              "reasoningEffort": null,
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "model-a",
+                  "reasoning_effort": "high",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            }
+          },
+          {
+            "kind": "update-next-turn",
+            "threadId": "fixture-thread",
+            "settings": {
+              "model": "no-reasoning",
+              "effort": "high"
+            }
+          },
+          {
+            "kind": "request",
+            "method": "thread/settings/update",
+            "params": {
+              "threadId": "fixture-thread",
+              "model": "no-reasoning",
+              "effort": "high"
+            }
+          },
+          {
+            "kind": "send-prepared",
+            "submission": {
+              "conversationId": "fixture-thread",
+              "executionHostId": "local",
+              "resume": {
+                "conversationId": "fixture-thread",
+                "model": "no-reasoning",
+                "reasoningEffort": null,
+                "workspaceRoots": [
+                  "E:/fixture"
+                ],
+                "collaborationMode": {
+                  "mode": "default",
+                  "settings": {
+                    "model": "no-reasoning",
+                    "reasoning_effort": "high",
+                    "developer_instructions": "保留既有指令"
+                  }
+                }
+              },
+              "steer": {
+                "input": [
+                  {
+                    "type": "text",
+                    "text": "继续",
+                    "text_elements": []
+                  }
+                ],
+                "restoreMessage": {
+                  "id": "96bf3385-ffed-43f5-8ea2-bfad0a0c576d",
+                  "text": "继续",
+                  "context": {
+                    "prompt": "继续",
+                    "addedFiles": [],
+                    "fileAttachments": [],
+                    "ideContext": null,
+                    "imageAttachments": [],
+                    "workspaceRoots": [
+                      "E:/fixture"
+                    ]
+                  },
+                  "cwd": "E:/fixture",
+                  "createdAt": 1792306751240
+                },
+                "attachments": [],
+                "clientUserMessageId": "96bf3385-ffed-43f5-8ea2-bfad0a0c576d"
+              },
+              "start": {
+                "request": {
+                  "threadId": "fixture-thread",
+                  "input": [
+                    {
+                      "type": "text",
+                      "text": "继续",
+                      "text_elements": []
+                    }
+                  ],
+                  "clientUserMessageId": "96bf3385-ffed-43f5-8ea2-bfad0a0c576d"
+                },
+                "context": {
+                  "restoreMessage": {
+                    "id": "96bf3385-ffed-43f5-8ea2-bfad0a0c576d",
+                    "text": "继续",
+                    "context": {
+                      "prompt": "继续",
+                      "addedFiles": [],
+                      "fileAttachments": [],
+                      "ideContext": null,
+                      "imageAttachments": [],
+                      "workspaceRoots": [
+                        "E:/fixture"
+                      ]
+                    },
+                    "cwd": "E:/fixture",
+                    "createdAt": 1792306751240
+                  },
+                  "usePermissionSelection": false
+                }
+              }
+            },
+            "settings": {
+              "model": "no-reasoning",
+              "effort": "high",
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "no-reasoning",
+                  "reasoning_effort": "high",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            },
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "no-reasoning",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "普通发送：设置 false 阻止发送",
+        "result": "FAIL",
+        "error": "Expected values to be strictly equal:\n\ntrue !== false\n",
+        "response": {
+          "ok": true,
+          "threadId": "fixture-thread",
+          "result": "sent-turn"
+        },
+        "records": [
+          {
+            "kind": "request",
+            "method": "model/list",
+            "params": {
+              "limit": 100,
+              "cursor": null
+            }
+          },
+          {
+            "kind": "send-follow-up",
+            "conversationId": "fixture-thread",
+            "options": {
+              "prompt": "继续",
+              "inputItems": [],
+              "model": "model-b",
+              "reasoningEffort": "low"
+            }
+          },
+          {
+            "kind": "resume",
+            "params": {
+              "conversationId": "fixture-thread",
+              "model": "model-b",
+              "reasoningEffort": "low",
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "model-a",
+                  "reasoning_effort": "high",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            }
+          },
+          {
+            "kind": "update-next-turn",
+            "threadId": "fixture-thread",
+            "settings": {
+              "model": "model-b",
+              "effort": "low"
+            }
+          },
+          {
+            "kind": "send-prepared",
+            "submission": {
+              "conversationId": "fixture-thread",
+              "executionHostId": "local",
+              "resume": {
+                "conversationId": "fixture-thread",
+                "model": "model-b",
+                "reasoningEffort": "low",
+                "workspaceRoots": [
+                  "E:/fixture"
+                ],
+                "collaborationMode": {
+                  "mode": "default",
+                  "settings": {
+                    "model": "model-a",
+                    "reasoning_effort": "high",
+                    "developer_instructions": "保留既有指令"
+                  }
+                }
+              },
+              "steer": {
+                "input": [
+                  {
+                    "type": "text",
+                    "text": "继续",
+                    "text_elements": []
+                  }
+                ],
+                "restoreMessage": {
+                  "id": "bde0b5b4-3906-4c8e-baee-7963258629c9",
+                  "text": "继续",
+                  "context": {
+                    "prompt": "继续",
+                    "addedFiles": [],
+                    "fileAttachments": [],
+                    "ideContext": null,
+                    "imageAttachments": [],
+                    "workspaceRoots": [
+                      "E:/fixture"
+                    ]
+                  },
+                  "cwd": "E:/fixture",
+                  "createdAt": 1792306751249
+                },
+                "attachments": [],
+                "clientUserMessageId": "bde0b5b4-3906-4c8e-baee-7963258629c9"
+              },
+              "start": {
+                "request": {
+                  "threadId": "fixture-thread",
+                  "input": [
+                    {
+                      "type": "text",
+                      "text": "继续",
+                      "text_elements": []
+                    }
+                  ],
+                  "clientUserMessageId": "bde0b5b4-3906-4c8e-baee-7963258629c9"
+                },
+                "context": {
+                  "restoreMessage": {
+                    "id": "bde0b5b4-3906-4c8e-baee-7963258629c9",
+                    "text": "继续",
+                    "context": {
+                      "prompt": "继续",
+                      "addedFiles": [],
+                      "fileAttachments": [],
+                      "ideContext": null,
+                      "imageAttachments": [],
+                      "workspaceRoots": [
+                        "E:/fixture"
+                      ]
+                    },
+                    "cwd": "E:/fixture",
+                    "createdAt": 1792306751249
+                  },
+                  "usePermissionSelection": false
+                }
+              }
+            },
+            "settings": {
+              "model": "model-a",
+              "effort": "high"
+            },
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "普通发送：设置 error 阻止发送",
+        "result": "FAIL",
+        "error": "Expected \"actual\" to be strictly unequal to: true",
+        "response": {
+          "ok": false,
+          "outcomeUnknown": true,
+          "code": 503,
+          "message": "原生操作未确认完成，请检查会话，不要重复发送或新建"
+        },
+        "records": [
+          {
+            "kind": "request",
+            "method": "model/list",
+            "params": {
+              "limit": 100,
+              "cursor": null
+            }
+          },
+          {
+            "kind": "send-follow-up",
+            "conversationId": "fixture-thread",
+            "options": {
+              "prompt": "继续",
+              "inputItems": [],
+              "model": "model-b",
+              "reasoningEffort": "low"
+            }
+          },
+          {
+            "kind": "resume",
+            "params": {
+              "conversationId": "fixture-thread",
+              "model": "model-b",
+              "reasoningEffort": "low",
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "model-a",
+                  "reasoning_effort": "high",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            }
+          },
+          {
+            "kind": "update-next-turn",
+            "threadId": "fixture-thread",
+            "settings": {
+              "model": "model-b",
+              "effort": "low"
+            }
+          },
+          {
+            "kind": "request",
+            "method": "thread/settings/update",
+            "params": {
+              "threadId": "fixture-thread",
+              "model": "model-b",
+              "effort": "low"
+            }
+          }
+        ]
+      },
+      {
+        "name": "排队 server：切换无推理模型清空旧等级",
+        "result": "FAIL",
+        "error": "Expected values to be strictly equal:\n\n'high' !== null\n",
+        "response": {
+          "ok": true,
+          "threadId": "fixture-thread",
+          "messageId": "queue-1",
+          "clientUserMessageId": "8639adc7-c94a-41a8-a207-6d0ba5fab26d",
+          "queueEpoch": "bd1a14cb-5599-4077-a511-67247638dc19",
+          "queueRevision": 1,
+          "queuedMessages": [
+            {
+              "id": "queue-1",
+              "text": "队列消息",
+              "clientUserMessageId": "8639adc7-c94a-41a8-a207-6d0ba5fab26d"
+            }
+          ],
+          "queuedEdits": []
+        },
+        "records": [
+          {
+            "kind": "resume",
+            "params": {
+              "conversationId": "fixture-thread",
+              "model": "no-reasoning",
+              "reasoningEffort": null,
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "model-a",
+                  "reasoning_effort": "high",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            }
+          },
+          {
+            "kind": "update-next-turn",
+            "threadId": "fixture-thread",
+            "settings": {
+              "model": "no-reasoning",
+              "effort": "high"
+            }
+          },
+          {
+            "kind": "request",
+            "method": "thread/settings/update",
+            "params": {
+              "threadId": "fixture-thread",
+              "model": "no-reasoning",
+              "effort": "high"
+            }
+          },
+          {
+            "kind": "prepare",
+            "threadId": "fixture-thread",
+            "phase": "start",
+            "settings": {
+              "model": "no-reasoning",
+              "effort": "high",
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "no-reasoning",
+                  "reasoning_effort": "high",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            }
+          },
+          {
+            "kind": "request",
+            "method": "thread/queue/add",
+            "params": {
+              "threadId": "fixture-thread",
+              "input": [
+                {
+                  "type": "text",
+                  "text": "队列",
+                  "text_elements": []
+                }
+              ],
+              "clientUserMessageId": "8639adc7-c94a-41a8-a207-6d0ba5fab26d"
+            }
+          }
+        ]
+      },
+      {
+        "name": "排队 server：设置 false 阻止准备",
+        "result": "FAIL",
+        "error": "Expected values to be strictly equal:\n\ntrue !== false\n",
+        "response": {
+          "ok": true,
+          "threadId": "fixture-thread",
+          "messageId": "queue-1",
+          "clientUserMessageId": "7d93ba98-cc0e-41f2-8df1-ca3710a21357",
+          "queueEpoch": "a8496ac7-1c9e-4584-9985-be9056cd141b",
+          "queueRevision": 1,
+          "queuedMessages": [
+            {
+              "id": "queue-1",
+              "text": "队列消息",
+              "clientUserMessageId": "7d93ba98-cc0e-41f2-8df1-ca3710a21357"
+            }
+          ],
+          "queuedEdits": []
+        },
+        "records": [
+          {
+            "kind": "request",
+            "method": "model/list",
+            "params": {
+              "limit": 100,
+              "cursor": null
+            }
+          },
+          {
+            "kind": "resume",
+            "params": {
+              "conversationId": "fixture-thread",
+              "model": "model-b",
+              "reasoningEffort": "low",
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "model-a",
+                  "reasoning_effort": "high",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            }
+          },
+          {
+            "kind": "update-next-turn",
+            "threadId": "fixture-thread",
+            "settings": {
+              "model": "model-b",
+              "effort": "low"
+            }
+          },
+          {
+            "kind": "prepare",
+            "threadId": "fixture-thread",
+            "phase": "start",
+            "settings": {
+              "model": "model-a",
+              "effort": "high"
+            }
+          },
+          {
+            "kind": "request",
+            "method": "thread/queue/add",
+            "params": {
+              "threadId": "fixture-thread",
+              "input": [
+                {
+                  "type": "text",
+                  "text": "队列",
+                  "text_elements": []
+                }
+              ],
+              "clientUserMessageId": "7d93ba98-cc0e-41f2-8df1-ca3710a21357"
+            }
+          }
+        ]
+      },
+      {
+        "name": "排队 local：切换无推理模型清空旧等级",
+        "result": "FAIL",
+        "error": "Expected values to be strictly equal:\n\n'high' !== null\n",
+        "response": {
+          "ok": true,
+          "threadId": "fixture-thread",
+          "messageId": "6f54b607-6c8e-460c-9d80-cf67125a4521",
+          "clientUserMessageId": "6f54b607-6c8e-460c-9d80-cf67125a4521",
+          "queueEpoch": "4053239a-9124-4e52-8faf-1a295320f731",
+          "queueRevision": 1,
+          "queuedMessages": [
+            {
+              "id": "6f54b607-6c8e-460c-9d80-cf67125a4521",
+              "text": "队列",
+              "context": {
+                "prompt": "队列",
+                "addedFiles": [],
+                "fileAttachments": [],
+                "pastedTextAttachments": [],
+                "uploadedFileAttachments": [],
+                "ideContext": null,
+                "imageAttachments": [],
+                "workspaceRoots": [
+                  "E:/fixture"
+                ],
+                "commentAttachments": [],
+                "mcpAppModelContextAttachments": [],
+                "appshotContexts": []
+              },
+              "cwd": "E:/fixture",
+              "createdAt": 1792306751272,
+              "clientUserMessageId": "6f54b607-6c8e-460c-9d80-cf67125a4521"
+            }
+          ],
+          "queuedEdits": []
+        },
+        "records": [
+          {
+            "kind": "resume",
+            "params": {
+              "conversationId": "fixture-thread",
+              "model": "no-reasoning",
+              "reasoningEffort": null,
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "model-a",
+                  "reasoning_effort": "high",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            }
+          },
+          {
+            "kind": "update-next-turn",
+            "threadId": "fixture-thread",
+            "settings": {
+              "model": "no-reasoning",
+              "effort": "high"
+            }
+          },
+          {
+            "kind": "request",
+            "method": "thread/settings/update",
+            "params": {
+              "threadId": "fixture-thread",
+              "model": "no-reasoning",
+              "effort": "high"
+            }
+          },
+          {
+            "kind": "prepare",
+            "threadId": "fixture-thread",
+            "phase": "start",
+            "settings": {
+              "model": "no-reasoning",
+              "effort": "high",
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "no-reasoning",
+                  "reasoning_effort": "high",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            }
+          },
+          {
+            "kind": "local-queue-send",
+            "request": {
+              "conversationId": "fixture-thread",
+              "message": {
+                "id": "6f54b607-6c8e-460c-9d80-cf67125a4521",
+                "text": "队列",
+                "context": {
+                  "prompt": "队列",
+                  "addedFiles": [],
+                  "fileAttachments": [],
+                  "pastedTextAttachments": [],
+                  "uploadedFileAttachments": [],
+                  "ideContext": null,
+                  "imageAttachments": [],
+                  "workspaceRoots": [
+                    "E:/fixture"
+                  ],
+                  "commentAttachments": [],
+                  "mcpAppModelContextAttachments": [],
+                  "appshotContexts": []
+                },
+                "cwd": "E:/fixture",
+                "createdAt": 1792306751272,
+                "clientUserMessageId": "6f54b607-6c8e-460c-9d80-cf67125a4521"
+              },
+              "queueModeOverride": "queue",
+              "acceptLocally": true,
+              "editPosition": {
+                "serverSubmission": {
+                  "id": "6f54b607-6c8e-460c-9d80-cf67125a4521",
+                  "clientUserMessageId": "6f54b607-6c8e-460c-9d80-cf67125a4521",
+                  "input": [
+                    {
+                      "type": "text",
+                      "text": "队列",
+                      "text_elements": []
+                    }
+                  ]
+                },
+                "preserveSerializedContext": false
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "排队 local：设置 false 阻止准备",
+        "result": "FAIL",
+        "error": "Expected values to be strictly equal:\n\ntrue !== false\n",
+        "response": {
+          "ok": true,
+          "threadId": "fixture-thread",
+          "messageId": "ec3e356b-2c43-4049-a8be-ee756dd328c7",
+          "clientUserMessageId": "ec3e356b-2c43-4049-a8be-ee756dd328c7",
+          "queueEpoch": "cb000978-7256-4164-b062-f4c9255a6295",
+          "queueRevision": 1,
+          "queuedMessages": [
+            {
+              "id": "ec3e356b-2c43-4049-a8be-ee756dd328c7",
+              "text": "队列",
+              "context": {
+                "prompt": "队列",
+                "addedFiles": [],
+                "fileAttachments": [],
+                "pastedTextAttachments": [],
+                "uploadedFileAttachments": [],
+                "ideContext": null,
+                "imageAttachments": [],
+                "workspaceRoots": [
+                  "E:/fixture"
+                ],
+                "commentAttachments": [],
+                "mcpAppModelContextAttachments": [],
+                "appshotContexts": []
+              },
+              "cwd": "E:/fixture",
+              "createdAt": 1792306751276,
+              "clientUserMessageId": "ec3e356b-2c43-4049-a8be-ee756dd328c7"
+            }
+          ],
+          "queuedEdits": []
+        },
+        "records": [
+          {
+            "kind": "request",
+            "method": "model/list",
+            "params": {
+              "limit": 100,
+              "cursor": null
+            }
+          },
+          {
+            "kind": "resume",
+            "params": {
+              "conversationId": "fixture-thread",
+              "model": "model-b",
+              "reasoningEffort": "low",
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "model-a",
+                  "reasoning_effort": "high",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            }
+          },
+          {
+            "kind": "update-next-turn",
+            "threadId": "fixture-thread",
+            "settings": {
+              "model": "model-b",
+              "effort": "low"
+            }
+          },
+          {
+            "kind": "prepare",
+            "threadId": "fixture-thread",
+            "phase": "start",
+            "settings": {
+              "model": "model-a",
+              "effort": "high"
+            }
+          },
+          {
+            "kind": "local-queue-send",
+            "request": {
+              "conversationId": "fixture-thread",
+              "message": {
+                "id": "ec3e356b-2c43-4049-a8be-ee756dd328c7",
+                "text": "队列",
+                "context": {
+                  "prompt": "队列",
+                  "addedFiles": [],
+                  "fileAttachments": [],
+                  "pastedTextAttachments": [],
+                  "uploadedFileAttachments": [],
+                  "ideContext": null,
+                  "imageAttachments": [],
+                  "workspaceRoots": [
+                    "E:/fixture"
+                  ],
+                  "commentAttachments": [],
+                  "mcpAppModelContextAttachments": [],
+                  "appshotContexts": []
+                },
+                "cwd": "E:/fixture",
+                "createdAt": 1792306751276,
+                "clientUserMessageId": "ec3e356b-2c43-4049-a8be-ee756dd328c7"
+              },
+              "queueModeOverride": "queue",
+              "acceptLocally": true,
+              "editPosition": {
+                "serverSubmission": {
+                  "id": "ec3e356b-2c43-4049-a8be-ee756dd328c7",
+                  "clientUserMessageId": "ec3e356b-2c43-4049-a8be-ee756dd328c7",
+                  "input": [
+                    {
+                      "type": "text",
+                      "text": "队列",
+                      "text_elements": []
+                    }
+                  ]
+                },
+                "preserveSerializedContext": false
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "会话读取：thread/read 的 null 等级优先于旧缓存",
+        "result": "FAIL",
+        "error": "Expected values to be strictly equal:\n\n'high' !== null\n",
+        "response": {
+          "ok": true,
+          "thread": {
+            "id": "fixture-thread",
+            "title": "新会话",
+            "cwd": "E:/fixture",
+            "createdAt": 0,
+            "updatedAt": 0,
+            "recencyAt": 0,
+            "hasUnreadTurn": false,
+            "status": {
+              "type": "idle"
+            },
+            "priority": {
+              "attentionState": "idle",
+              "active": false,
+              "eligible": true
+            },
+            "projectId": null,
+            "pinned": false,
+            "model": "no-reasoning",
+            "reasoningEffort": "high",
+            "serviceTier": "priority",
+            "tokenUsage": null,
+            "goal": null,
+            "compaction": {
+              "state": "idle",
+              "turnId": null,
+              "itemId": null
+            },
+            "transcriptEvents": [],
+            "editableMessage": {
+              "turnId": "last-turn",
+              "messageId": "message-1",
+              "editable": true
+            },
+            "requestsKnown": true,
+            "threadId": "fixture-thread",
+            "requests": [],
+            "requestsEpoch": "f56a0f21-f1ff-4f66-9da2-47f44c0b447a",
+            "requestsRevision": 1,
+            "queueEpoch": "f56a0f21-f1ff-4f66-9da2-47f44c0b447a",
+            "queueRevision": 1,
+            "queuedMessages": [],
+            "queuedEdits": []
+          }
+        },
+        "records": []
+      },
+      {
+        "name": "目标：设置 false 阻止创建目标",
+        "result": "FAIL",
+        "error": "Expected values to be strictly equal:\n\ntrue !== false\n",
+        "response": {
+          "ok": true,
+          "threadId": "fixture-thread",
+          "goal": {
+            "objective": "完成目标",
+            "status": "active",
+            "tokenBudget": null,
+            "tokensUsed": null,
+            "timeUsedSeconds": null,
+            "createdAt": 1,
+            "updatedAt": null
+          },
+          "goalSubmission": {
+            "action": "setGoal",
+            "phase": "complete",
+            "threadId": "fixture-thread",
+            "firstTurnAccepted": false,
+            "goalSet": "succeeded"
+          }
+        },
+        "records": [
+          {
+            "kind": "request",
+            "method": "thread/goal/get",
+            "params": {
+              "threadId": "fixture-thread"
+            }
+          },
+          {
+            "kind": "request",
+            "method": "model/list",
+            "params": {
+              "limit": 100,
+              "cursor": null
+            }
+          },
+          {
+            "kind": "request",
+            "method": "thread/goal/get",
+            "params": {
+              "threadId": "fixture-thread"
+            }
+          },
+          {
+            "kind": "set-goal",
+            "conversationId": "fixture-thread",
+            "options": {
+              "objective": "完成目标",
+              "threadSettings": {
+                "model": "model-b",
+                "effort": "low"
+              }
+            }
+          },
+          {
+            "kind": "resume",
+            "params": {
+              "conversationId": "fixture-thread",
+              "model": null,
+              "serviceTier": null,
+              "reasoningEffort": null,
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "model-a",
+                  "reasoning_effort": "high",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            }
+          },
+          {
+            "kind": "update-next-turn",
+            "threadId": "fixture-thread",
+            "settings": {
+              "model": "model-b",
+              "effort": "low"
+            }
+          },
+          {
+            "kind": "request",
+            "method": "thread/goal/set",
+            "params": {
+              "threadId": "fixture-thread",
+              "objective": "完成目标",
+              "status": "active"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "installed": {
+    "collectedAt": "2026-10-18T06:53:50.394Z",
+    "asarPath": "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.9446.0_x64__2p2nqsd0c76g0/app/resources/app.asar",
+    "appxVersion": "26.1007.9446.0",
+    "packageVersion": "26.1007.71326",
+    "manifest": [
+      {
+        "file": "package.json",
+        "bytes": 5756,
+        "sha256": "03285612942752337ebf828039e408dd1f1dc79697c043a4088aca6d59a54e26",
+        "previousHash": "03285612942752337ebf828039e408dd1f1dc79697c043a4088aca6d59a54e26",
+        "matchesPrevious": true
+      },
+      {
+        "file": "webview/assets/app-initial-102e45562729.js",
+        "bytes": 11441755,
+        "sha256": "c59b2a0be6c13496b30ebda167925cdccab26799cae350c62d2b37afe3589b57",
+        "previousHash": "c59b2a0be6c13496b30ebda167925cdccab26799cae350c62d2b37afe3589b57",
+        "matchesPrevious": true
+      },
+      {
+        "file": "webview/assets/app-primary-cd52df2361eb.js",
+        "bytes": 2385396,
+        "sha256": "9602eea8c6dd07ddfbbc2772eac271e8ec7f765e1f275fe47ef681b996ac056a",
+        "previousHash": "9602eea8c6dd07ddfbbc2772eac271e8ec7f765e1f275fe47ef681b996ac056a",
+        "matchesPrevious": true
+      },
+      {
+        "file": "webview/assets/app-shared-30671c57ec82.js",
+        "bytes": 8175574,
+        "sha256": "392b023063a3569a2efc47a019accb2d1e72295b1bfec2cbb81fc37e1515580a",
+        "previousHash": "392b023063a3569a2efc47a019accb2d1e72295b1bfec2cbb81fc37e1515580a",
+        "matchesPrevious": true
+      }
+    ]
+  },
+  "source": {
+    "path": "assets/remote-access/native.js",
+    "sha256": "90043785361a9496a2e51a32c84977a9eca3e9e2abdcbde73b642fd67d799717"
+  },
+  "nativeFunctions": [
+    {
+      "start": "async function Pln(",
+      "end": "function Fln(",
+      "offset": 3015491,
+      "sha256": "bd0c2da8d1e37461ceb10b7606a0025306e922b1f9906ed8d27e0fcc79b4351b",
+      "source": "async function Pln({conversationId:e,createId:t,manager:n,options:{additionalContext:r,attachmentContext:i,inputItems:a,toolOutput:o,writingBlockContextPrepared:s,messageMetadata:c,messageThreadId:l,model:u,prompt:d,turnTrigger:f,reasoningEffort:p,serviceTier:m,usePermissionSelection:h,useUserMessageAdmission:g}}){let _=d.trim();if(_.length===0)throw Error(`Cannot send an empty follow-up message.`);let v=await n.resumeConversation({conversationId:e,model:u??null,serviceTier:m,reasoningEffort:p??null,workspaceRoots:[n.getConversationCwd(e)??`/`],collaborationMode:n.getConversation(e)?.latestCollaborationMode??null,useAppServerPermissionDefault:h});if(v.status===`not-ready`)throw new DB(v);if(u!=null||p!==void 0){let t=n.getConversation(e),r=u??t?.latestModel;if(r==null||r.trim().length===0)throw Error(`Cannot set reasoning without a thread model.`);await n.updateThreadSettingsForNextTurn(e,{model:r,effort:p===void 0?t?.latestReasoningEffort??null:p})}let y=i==null?null:Eln({context:i,isRemoteHost:n.getHostId()!==`local`,callId:t()}),b=o==null?[...y?.input??[{type:`text`,text:_,text_elements:[]}],...a??[]]:[],x=c==null?void 0:{message_metadata:JSON.stringify(c)},S=n.getConversationCwd(e)??`/`,C={id:t(),text:_,context:i==null?{prompt:_,messageThreadId:l,turnTrigger:f,addedFiles:[],fileAttachments:[],ideContext:null,imageAttachments:[],workspaceRoots:[S]}:{...i,messageThreadId:l,turnTrigger:f},cwd:S,createdAt:Date.now(),responsesapiClientMetadata:x},w={request:{threadId:e,turnTrigger:f,additionalContext:r,input:b,toolOutput:o,clientUserMessageId:C.id,responsesapiClientMetadata:x,serviceTier:m},context:{messageThreadId:C.context.messageThreadId,restoreMessage:C,writingBlockContextPrepared:s,useUserMessageAdmission:g,attachments:y?.attachments,localTurnMetadata:y?.localTurnMetadata,responseItems:y?.responseItems,usePermissionSelection:h===!0&&n.canUsePermissionSelection(e)}},T=n.getConversation(e),E=T!=null&&Mln(n.getHostId(),T,w.request,w.context?.useUserMessageAdmission);return n.turnCoordinator.sendPreparedMessage({conversationId:e,executionHostId:n.getHostId(),resume:{conversationId:e,model:u??null,reasoningEffort:p??null,serviceTier:m,workspaceRoots:[S],collaborationMode:n.getConversation(e)?.latestCollaborationMode??null,useAppServerPermissionDefault:h},steer:{...E?{userMessageAdmissionStart:w}:{},input:b,toolOutput:o,restoreMessage:C,serviceTier:m,attachments:y?.attachments??[],clientUserMessageId:C.id,additionalContext:r},start:w},{serialize:E&&fyt(T?.threadStartKind,T?.threadSource)})}"
+    },
+    {
+      "start": "function xV(e,t)",
+      "end": "function enn(",
+      "offset": 2829276,
+      "sha256": "25e9a158f2fae2784871c24cb5bd265876af2f3a5595d37e7ef74bf3d38e18ac",
+      "source": "function xV(e,t){let n=rnn(e.latestCollaborationMode,t),r=e.latestCollaborationMode.settings.model;e.latestThreadSettings={...e.latestThreadSettings,...t,disabledPluginIds:t.disabledPluginIds??e.latestThreadSettings?.disabledPluginIds,...nnn(t),...t.sandboxPolicy!==void 0&&t.permissions===void 0?{permissions:null}:{},model:t.model??t.collaborationMode?.settings.model??e.latestThreadSettings?.model??e.latestModel,effort:inn(e.latestThreadSettings?.effort===void 0?e.latestReasoningEffort:e.latestThreadSettings.effort,t),collaborationMode:n},e.latestModel=e.latestThreadSettings.model??e.latestModel,e.latestReasoningEffort=e.latestThreadSettings.effort===void 0?e.latestReasoningEffort:e.latestThreadSettings.effort,e.latestCollaborationMode=n,e.cwd=t.cwd??e.cwd,ann(e,r,n.settings.model)}"
+    },
+    {
+      "start": "function nnn(e)",
+      "end": "var onn;",
+      "offset": 2830662,
+      "sha256": "539bb60c737ec34c75963ff62b4cbaac51558d12dc02b6f0458c956268d998b5",
+      "source": "function nnn(e){return e.activePermissionProfile===void 0?e.sandboxPolicy===void 0?e.permissions===void 0?{}:{activePermissionProfile:e.permissions==null?null:{id:e.permissions,extends:null}}:{activePermissionProfile:null}:{activePermissionProfile:e.activePermissionProfile}}function rnn(e,t){return t.collaborationMode==null?t.model==null&&t.effort===void 0?e:{...e,settings:{...e.settings,model:t.model??e.settings.model,reasoning_effort:t.effort===void 0?e.settings.reasoning_effort:t.effort}}:t.collaborationMode}function inn(e,t){return t.effort===void 0?t.collaborationMode==null?e:t.collaborationMode.settings.reasoning_effort:t.effort}function ann(e,t,n){if(ih(e)!=null&&t.length!==0&&n!==t){if(e.previousTurnModel==null){e.previousTurnModel=t;return}n===e.previousTurnModel&&(e.previousTurnModel=null)}}"
+    },
+    {
+      "start": "async function _V(",
+      "end": "function vV(",
+      "offset": 2752082,
+      "sha256": "6a63cbbef0faf9a2291bba246c7736bd60230a53ea3e0692af79ee47dc6e4ebb",
+      "source": "async function _V({conversationId:e,getStreamRole:t,markConversationNeedsResumeForUnavailableOwner:n,resumeConversationForUnavailableOwner:r,workspaceRoots:i,collaborationMode:a,reasoningEffort:o,serviceTier:s,useAppServerPermissionDefault:c,sendRequest:l}){let u=t(e);try{return await l(u)}catch(t){if(u?.role!==`follower`||!IN(t).includes(`no-client-found`))throw t;n(e,u.ownerClientId);let l=await r({conversationId:e,model:null,...s===void 0?{}:{serviceTier:s},reasoningEffort:o,workspaceRoots:i,useAppServerPermissionDefault:c,collaborationMode:a});if(l.status===`not-ready`)throw new DB(l);return null}}"
+    },
+    {
+      "start": "async applyThreadSettings(",
+      "end": "async runThreadSettingsUpdate(",
+      "offset": 3082712,
+      "sha256": "41d019b6e9406e68389931d3273d13c3521985ef20a0fd6efbd0d2614aa5a9d8",
+      "source": "async applyThreadSettings(e,t,n,r){let i=this.access.getConversation(e),a=i?.latestThreadSettings,o=await _V({conversationId:e,getStreamRole:e=>this.access.getStreamRole(e),markConversationNeedsResumeForUnavailableOwner:(e,t)=>{this.access.markConversationNeedsResumeForUnavailableOwner(e,t)},resumeConversationForUnavailableOwner:e=>this.access.resumeConversationForUnavailableOwner(e),workspaceRoots:[this.access.getConversationCwd(e)??`/`],collaborationMode:i?.latestCollaborationMode??null,reasoningEffort:i?.latestReasoningEffort??null,serviceTier:t.serviceTier,sendRequest:i=>this.access.sendThreadFollowerRequest(i,`thread-follower-update-thread-settings`,{conversationId:e,threadSettings:t,activeTurnId:n,condition:r})});if(o!=null)return o.applied&&this.access.getConversation(e)?.latestThreadSettings===a&&this.access.updateConversationState(e,e=>{xV(e,t)}),o.applied;let s=this.access.getConversation(e),c=s?.latestThreadSettings;if(r!=null&&(s?.latestReasoningEffort!==r.ifEffortEquals||r.ifModelEquals!=null&&s?.latestModel!==r.ifModelEquals))return!1;if(this.threadSettingsUpdateSupport!==`unsupported`)try{await this.access.sendRequest(`thread/settings/update`,{threadId:e,...t}),this.threadSettingsUpdateSupport=`supported`}catch(e){if(!OEt(e,`thread/settings/update`))throw e;this.threadSettingsUpdateSupport=`unsupported`}return(this.threadSettingsUpdateSupport===`unsupported`||this.access.getConversation(e)?.latestThreadSettings===c)&&this.access.updateConversationState(e,e=>{xV(e,t)}),n!=null&&t.approvalsReviewer!=null&&jM(this.access.getAppServerVersion(),`turnApprovalsReviewer`)&&await this.access.sendRequest(`turn/settings/update`,{threadId:e,turnId:n,approvalsReviewer:t.approvalsReviewer}),!0}"
+    },
+    {
+      "start": "async function Q6t(",
+      "end": "async function $6t(",
+      "offset": 2623348,
+      "sha256": "d3e806ea44ce5abf37154b56d49e0a7e33f243ed391f40d00613067464bcbd6f",
+      "source": "async function Q6t(e,t,{appendTranscriptItem:n,objective:r,threadSettings:i},a){let o=await e.resumeConversationForUnavailableOwner({conversationId:t,model:null,serviceTier:null,reasoningEffort:null,workspaceRoots:[e.getConversationCwd(t)??`/`],collaborationMode:e.getConversation(t)?.latestCollaborationMode??null});if(o.status===`not-ready`)throw new DB(o);e.assertThreadFollowerOwner(t),i==null?await e.waitForPendingThreadSettingsUpdate(t):await e.updateThreadSettingsForNextTurn(t,i);let{goal:s}=await e.sendRequest(`thread/goal/set`,{threadId:t,objective:r,status:`active`});return n===!1?e.updateConversationState(t,e=>{e.threadGoal=s}):t8t(e,t,s,a.createSearchIslandId),s}"
+    }
+  ],
+  "boundary": "生产 native.js 在隔离 VM 中运行；安装包真实 Pln、xV、rnn、inn、_V、applyThreadSettings、Q6t 参与执行；manager 存储、传输、队列、创建与附件物化为内存夹具；无真实会话写入或模型请求。",
+  "passed": 41,
+  "failed": 0,
+  "cases": [
+    {
+      "name": "普通发送：无显式设置完全继承",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "result": "sent-turn"
+      },
+      "records": [
+        {
+          "kind": "send-follow-up",
+          "conversationId": "fixture-thread",
+          "options": {
+            "prompt": "继续",
+            "inputItems": []
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": null,
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "send-prepared",
+          "submission": {
+            "conversationId": "fixture-thread",
+            "executionHostId": "local",
+            "resume": {
+              "conversationId": "fixture-thread",
+              "model": null,
+              "reasoningEffort": null,
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "model-a",
+                  "reasoning_effort": "high",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            },
+            "steer": {
+              "input": [
+                {
+                  "type": "text",
+                  "text": "继续",
+                  "text_elements": []
+                }
+              ],
+              "restoreMessage": {
+                "id": "20535bf0-d2d4-4e71-85ab-c87c9b1378d6",
+                "text": "继续",
+                "context": {
+                  "prompt": "继续",
+                  "addedFiles": [],
+                  "fileAttachments": [],
+                  "ideContext": null,
+                  "imageAttachments": [],
+                  "workspaceRoots": [
+                    "E:/fixture"
+                  ]
+                },
+                "cwd": "E:/fixture",
+                "createdAt": 1792307078685
+              },
+              "attachments": [],
+              "clientUserMessageId": "20535bf0-d2d4-4e71-85ab-c87c9b1378d6"
+            },
+            "start": {
+              "request": {
+                "threadId": "fixture-thread",
+                "input": [
+                  {
+                    "type": "text",
+                    "text": "继续",
+                    "text_elements": []
+                  }
+                ],
+                "clientUserMessageId": "20535bf0-d2d4-4e71-85ab-c87c9b1378d6"
+              },
+              "context": {
+                "restoreMessage": {
+                  "id": "20535bf0-d2d4-4e71-85ab-c87c9b1378d6",
+                  "text": "继续",
+                  "context": {
+                    "prompt": "继续",
+                    "addedFiles": [],
+                    "fileAttachments": [],
+                    "ideContext": null,
+                    "imageAttachments": [],
+                    "workspaceRoots": [
+                      "E:/fixture"
+                    ]
+                  },
+                  "cwd": "E:/fixture",
+                  "createdAt": 1792307078685
+                },
+                "usePermissionSelection": false
+              }
+            }
+          },
+          "settings": {
+            "model": "model-a",
+            "effort": "high"
+          },
+          "collaborationMode": {
+            "mode": "default",
+            "settings": {
+              "model": "model-a",
+              "reasoning_effort": "high",
+              "developer_instructions": "保留既有指令"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "普通发送：切换模型并设置等级同步 collaborationMode",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "result": "sent-turn"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "model-b",
+            "reasoningEffort": "low",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-b",
+            "effort": "low"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "model-b",
+            "effort": "low"
+          }
+        },
+        {
+          "kind": "send-follow-up",
+          "conversationId": "fixture-thread",
+          "options": {
+            "prompt": "继续",
+            "inputItems": []
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": null,
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-b",
+                "reasoning_effort": "low",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "send-prepared",
+          "submission": {
+            "conversationId": "fixture-thread",
+            "executionHostId": "local",
+            "resume": {
+              "conversationId": "fixture-thread",
+              "model": null,
+              "reasoningEffort": null,
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "model-b",
+                  "reasoning_effort": "low",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            },
+            "steer": {
+              "input": [
+                {
+                  "type": "text",
+                  "text": "继续",
+                  "text_elements": []
+                }
+              ],
+              "restoreMessage": {
+                "id": "c02a775c-3db3-409f-b18d-178987a3f73c",
+                "text": "继续",
+                "context": {
+                  "prompt": "继续",
+                  "addedFiles": [],
+                  "fileAttachments": [],
+                  "ideContext": null,
+                  "imageAttachments": [],
+                  "workspaceRoots": [
+                    "E:/fixture"
+                  ]
+                },
+                "cwd": "E:/fixture",
+                "createdAt": 1792307078691
+              },
+              "attachments": [],
+              "clientUserMessageId": "c02a775c-3db3-409f-b18d-178987a3f73c"
+            },
+            "start": {
+              "request": {
+                "threadId": "fixture-thread",
+                "input": [
+                  {
+                    "type": "text",
+                    "text": "继续",
+                    "text_elements": []
+                  }
+                ],
+                "clientUserMessageId": "c02a775c-3db3-409f-b18d-178987a3f73c"
+              },
+              "context": {
+                "restoreMessage": {
+                  "id": "c02a775c-3db3-409f-b18d-178987a3f73c",
+                  "text": "继续",
+                  "context": {
+                    "prompt": "继续",
+                    "addedFiles": [],
+                    "fileAttachments": [],
+                    "ideContext": null,
+                    "imageAttachments": [],
+                    "workspaceRoots": [
+                      "E:/fixture"
+                    ]
+                  },
+                  "cwd": "E:/fixture",
+                  "createdAt": 1792307078691
+                },
+                "usePermissionSelection": false
+              }
+            }
+          },
+          "settings": {
+            "model": "model-b",
+            "effort": "low",
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-b",
+                "reasoning_effort": "low",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          },
+          "collaborationMode": {
+            "mode": "default",
+            "settings": {
+              "model": "model-b",
+              "reasoning_effort": "low",
+              "developer_instructions": "保留既有指令"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "普通发送：切换无推理模型清空旧等级",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "result": "sent-turn"
+      },
+      "records": [
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "no-reasoning",
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "no-reasoning",
+            "effort": null
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "no-reasoning",
+            "effort": null
+          }
+        },
+        {
+          "kind": "send-follow-up",
+          "conversationId": "fixture-thread",
+          "options": {
+            "prompt": "继续",
+            "inputItems": []
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": null,
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "no-reasoning",
+                "reasoning_effort": null,
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "send-prepared",
+          "submission": {
+            "conversationId": "fixture-thread",
+            "executionHostId": "local",
+            "resume": {
+              "conversationId": "fixture-thread",
+              "model": null,
+              "reasoningEffort": null,
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "no-reasoning",
+                  "reasoning_effort": null,
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            },
+            "steer": {
+              "input": [
+                {
+                  "type": "text",
+                  "text": "继续",
+                  "text_elements": []
+                }
+              ],
+              "restoreMessage": {
+                "id": "1d7c0bb8-1be1-422b-a931-5b833f64c7b8",
+                "text": "继续",
+                "context": {
+                  "prompt": "继续",
+                  "addedFiles": [],
+                  "fileAttachments": [],
+                  "ideContext": null,
+                  "imageAttachments": [],
+                  "workspaceRoots": [
+                    "E:/fixture"
+                  ]
+                },
+                "cwd": "E:/fixture",
+                "createdAt": 1792307078696
+              },
+              "attachments": [],
+              "clientUserMessageId": "1d7c0bb8-1be1-422b-a931-5b833f64c7b8"
+            },
+            "start": {
+              "request": {
+                "threadId": "fixture-thread",
+                "input": [
+                  {
+                    "type": "text",
+                    "text": "继续",
+                    "text_elements": []
+                  }
+                ],
+                "clientUserMessageId": "1d7c0bb8-1be1-422b-a931-5b833f64c7b8"
+              },
+              "context": {
+                "restoreMessage": {
+                  "id": "1d7c0bb8-1be1-422b-a931-5b833f64c7b8",
+                  "text": "继续",
+                  "context": {
+                    "prompt": "继续",
+                    "addedFiles": [],
+                    "fileAttachments": [],
+                    "ideContext": null,
+                    "imageAttachments": [],
+                    "workspaceRoots": [
+                      "E:/fixture"
+                    ]
+                  },
+                  "cwd": "E:/fixture",
+                  "createdAt": 1792307078696
+                },
+                "usePermissionSelection": false
+              }
+            }
+          },
+          "settings": {
+            "model": "no-reasoning",
+            "effort": null,
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "no-reasoning",
+                "reasoning_effort": null,
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          },
+          "collaborationMode": {
+            "mode": "default",
+            "settings": {
+              "model": "no-reasoning",
+              "reasoning_effort": null,
+              "developer_instructions": "保留既有指令"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "普通发送：仅调整等级保留当前模型",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "result": "sent-turn"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "model-a",
+            "reasoningEffort": "max",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-a",
+            "effort": "max"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "model-a",
+            "effort": "max"
+          }
+        },
+        {
+          "kind": "send-follow-up",
+          "conversationId": "fixture-thread",
+          "options": {
+            "prompt": "继续",
+            "inputItems": []
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": null,
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "max",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "send-prepared",
+          "submission": {
+            "conversationId": "fixture-thread",
+            "executionHostId": "local",
+            "resume": {
+              "conversationId": "fixture-thread",
+              "model": null,
+              "reasoningEffort": null,
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "model-a",
+                  "reasoning_effort": "max",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            },
+            "steer": {
+              "input": [
+                {
+                  "type": "text",
+                  "text": "继续",
+                  "text_elements": []
+                }
+              ],
+              "restoreMessage": {
+                "id": "d9e6a7a0-afaf-42fd-9df0-47ac64566a25",
+                "text": "继续",
+                "context": {
+                  "prompt": "继续",
+                  "addedFiles": [],
+                  "fileAttachments": [],
+                  "ideContext": null,
+                  "imageAttachments": [],
+                  "workspaceRoots": [
+                    "E:/fixture"
+                  ]
+                },
+                "cwd": "E:/fixture",
+                "createdAt": 1792307078700
+              },
+              "attachments": [],
+              "clientUserMessageId": "d9e6a7a0-afaf-42fd-9df0-47ac64566a25"
+            },
+            "start": {
+              "request": {
+                "threadId": "fixture-thread",
+                "input": [
+                  {
+                    "type": "text",
+                    "text": "继续",
+                    "text_elements": []
+                  }
+                ],
+                "clientUserMessageId": "d9e6a7a0-afaf-42fd-9df0-47ac64566a25"
+              },
+              "context": {
+                "restoreMessage": {
+                  "id": "d9e6a7a0-afaf-42fd-9df0-47ac64566a25",
+                  "text": "继续",
+                  "context": {
+                    "prompt": "继续",
+                    "addedFiles": [],
+                    "fileAttachments": [],
+                    "ideContext": null,
+                    "imageAttachments": [],
+                    "workspaceRoots": [
+                      "E:/fixture"
+                    ]
+                  },
+                  "cwd": "E:/fixture",
+                  "createdAt": 1792307078700
+                },
+                "usePermissionSelection": false
+              }
+            }
+          },
+          "settings": {
+            "model": "model-a",
+            "effort": "max",
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "max",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          },
+          "collaborationMode": {
+            "mode": "default",
+            "settings": {
+              "model": "model-a",
+              "reasoning_effort": "max",
+              "developer_instructions": "保留既有指令"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "普通发送：同模型不重置等级且只写入一次",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "result": "sent-turn"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "model-a",
+            "reasoningEffort": "high",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-a",
+            "effort": "high"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "model-a",
+            "effort": "high"
+          }
+        },
+        {
+          "kind": "send-follow-up",
+          "conversationId": "fixture-thread",
+          "options": {
+            "prompt": "继续",
+            "inputItems": []
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": null,
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "send-prepared",
+          "submission": {
+            "conversationId": "fixture-thread",
+            "executionHostId": "local",
+            "resume": {
+              "conversationId": "fixture-thread",
+              "model": null,
+              "reasoningEffort": null,
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "model-a",
+                  "reasoning_effort": "high",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            },
+            "steer": {
+              "input": [
+                {
+                  "type": "text",
+                  "text": "继续",
+                  "text_elements": []
+                }
+              ],
+              "restoreMessage": {
+                "id": "6193a4f5-90cd-4bd1-be7b-1ed1dfe6833f",
+                "text": "继续",
+                "context": {
+                  "prompt": "继续",
+                  "addedFiles": [],
+                  "fileAttachments": [],
+                  "ideContext": null,
+                  "imageAttachments": [],
+                  "workspaceRoots": [
+                    "E:/fixture"
+                  ]
+                },
+                "cwd": "E:/fixture",
+                "createdAt": 1792307078704
+              },
+              "attachments": [],
+              "clientUserMessageId": "6193a4f5-90cd-4bd1-be7b-1ed1dfe6833f"
+            },
+            "start": {
+              "request": {
+                "threadId": "fixture-thread",
+                "input": [
+                  {
+                    "type": "text",
+                    "text": "继续",
+                    "text_elements": []
+                  }
+                ],
+                "clientUserMessageId": "6193a4f5-90cd-4bd1-be7b-1ed1dfe6833f"
+              },
+              "context": {
+                "restoreMessage": {
+                  "id": "6193a4f5-90cd-4bd1-be7b-1ed1dfe6833f",
+                  "text": "继续",
+                  "context": {
+                    "prompt": "继续",
+                    "addedFiles": [],
+                    "fileAttachments": [],
+                    "ideContext": null,
+                    "imageAttachments": [],
+                    "workspaceRoots": [
+                      "E:/fixture"
+                    ]
+                  },
+                  "cwd": "E:/fixture",
+                  "createdAt": 1792307078704
+                },
+                "usePermissionSelection": false
+              }
+            }
+          },
+          "settings": {
+            "model": "model-a",
+            "effort": "high",
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          },
+          "collaborationMode": {
+            "mode": "default",
+            "settings": {
+              "model": "model-a",
+              "reasoning_effort": "high",
+              "developer_instructions": "保留既有指令"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "普通发送：开启 ultra 门禁时尊重原生声明",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "result": "sent-turn"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "model-a",
+            "reasoningEffort": "ultra",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-a",
+            "effort": "ultra"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "model-a",
+            "effort": "ultra"
+          }
+        },
+        {
+          "kind": "send-follow-up",
+          "conversationId": "fixture-thread",
+          "options": {
+            "prompt": "继续",
+            "inputItems": []
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": null,
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "ultra",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "send-prepared",
+          "submission": {
+            "conversationId": "fixture-thread",
+            "executionHostId": "local",
+            "resume": {
+              "conversationId": "fixture-thread",
+              "model": null,
+              "reasoningEffort": null,
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "model-a",
+                  "reasoning_effort": "ultra",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            },
+            "steer": {
+              "input": [
+                {
+                  "type": "text",
+                  "text": "继续",
+                  "text_elements": []
+                }
+              ],
+              "restoreMessage": {
+                "id": "5e93d7a2-3a6a-42a1-9d1e-cf88357be946",
+                "text": "继续",
+                "context": {
+                  "prompt": "继续",
+                  "addedFiles": [],
+                  "fileAttachments": [],
+                  "ideContext": null,
+                  "imageAttachments": [],
+                  "workspaceRoots": [
+                    "E:/fixture"
+                  ]
+                },
+                "cwd": "E:/fixture",
+                "createdAt": 1792307078709
+              },
+              "attachments": [],
+              "clientUserMessageId": "5e93d7a2-3a6a-42a1-9d1e-cf88357be946"
+            },
+            "start": {
+              "request": {
+                "threadId": "fixture-thread",
+                "input": [
+                  {
+                    "type": "text",
+                    "text": "继续",
+                    "text_elements": []
+                  }
+                ],
+                "clientUserMessageId": "5e93d7a2-3a6a-42a1-9d1e-cf88357be946"
+              },
+              "context": {
+                "restoreMessage": {
+                  "id": "5e93d7a2-3a6a-42a1-9d1e-cf88357be946",
+                  "text": "继续",
+                  "context": {
+                    "prompt": "继续",
+                    "addedFiles": [],
+                    "fileAttachments": [],
+                    "ideContext": null,
+                    "imageAttachments": [],
+                    "workspaceRoots": [
+                      "E:/fixture"
+                    ]
+                  },
+                  "cwd": "E:/fixture",
+                  "createdAt": 1792307078709
+                },
+                "usePermissionSelection": false
+              }
+            }
+          },
+          "settings": {
+            "model": "model-a",
+            "effort": "ultra",
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "ultra",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          },
+          "collaborationMode": {
+            "mode": "default",
+            "settings": {
+              "model": "model-a",
+              "reasoning_effort": "ultra",
+              "developer_instructions": "保留既有指令"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "普通发送：仅等级优先使用 thread/read 模型",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "result": "sent-turn"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "model-b",
+            "reasoningEffort": "high",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-b",
+            "effort": "high"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "model-b",
+            "effort": "high"
+          }
+        },
+        {
+          "kind": "send-follow-up",
+          "conversationId": "fixture-thread",
+          "options": {
+            "prompt": "继续",
+            "inputItems": []
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": null,
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-b",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "send-prepared",
+          "submission": {
+            "conversationId": "fixture-thread",
+            "executionHostId": "local",
+            "resume": {
+              "conversationId": "fixture-thread",
+              "model": null,
+              "reasoningEffort": null,
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "model-b",
+                  "reasoning_effort": "high",
+                  "developer_instructions": "保留既有指令"
+                }
+              }
+            },
+            "steer": {
+              "input": [
+                {
+                  "type": "text",
+                  "text": "继续",
+                  "text_elements": []
+                }
+              ],
+              "restoreMessage": {
+                "id": "cb70d45c-ed92-42f3-b1f3-796b7a850bbd",
+                "text": "继续",
+                "context": {
+                  "prompt": "继续",
+                  "addedFiles": [],
+                  "fileAttachments": [],
+                  "ideContext": null,
+                  "imageAttachments": [],
+                  "workspaceRoots": [
+                    "E:/fixture"
+                  ]
+                },
+                "cwd": "E:/fixture",
+                "createdAt": 1792307078714
+              },
+              "attachments": [],
+              "clientUserMessageId": "cb70d45c-ed92-42f3-b1f3-796b7a850bbd"
+            },
+            "start": {
+              "request": {
+                "threadId": "fixture-thread",
+                "input": [
+                  {
+                    "type": "text",
+                    "text": "继续",
+                    "text_elements": []
+                  }
+                ],
+                "clientUserMessageId": "cb70d45c-ed92-42f3-b1f3-796b7a850bbd"
+              },
+              "context": {
+                "restoreMessage": {
+                  "id": "cb70d45c-ed92-42f3-b1f3-796b7a850bbd",
+                  "text": "继续",
+                  "context": {
+                    "prompt": "继续",
+                    "addedFiles": [],
+                    "fileAttachments": [],
+                    "ideContext": null,
+                    "imageAttachments": [],
+                    "workspaceRoots": [
+                      "E:/fixture"
+                    ]
+                  },
+                  "cwd": "E:/fixture",
+                  "createdAt": 1792307078714
+                },
+                "usePermissionSelection": false
+              }
+            }
+          },
+          "settings": {
+            "model": "model-b",
+            "effort": "high",
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-b",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          },
+          "collaborationMode": {
+            "mode": "default",
+            "settings": {
+              "model": "model-b",
+              "reasoning_effort": "high",
+              "developer_instructions": "保留既有指令"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "普通发送：前置条件失败阻止提交 noSettingsApi",
+      "result": "PASS",
+      "response": {
+        "ok": false,
+        "code": 503,
+        "message": "当前 Codex 版本不支持设置下一轮模型"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "model-b",
+            "reasoningEffort": "low",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "普通发送：前置条件失败阻止提交 resumeNotReady",
+      "result": "PASS",
+      "response": {
+        "ok": false,
+        "code": 409,
+        "message": "会话暂不可用，请稍后重试"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "model-b",
+            "reasoningEffort": "low",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "普通发送：设置 false 阻止发送",
+      "result": "PASS",
+      "response": {
+        "ok": false,
+        "code": 409,
+        "message": "模型或思考深度未能应用，请重新核对后发送"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "model-b",
+            "reasoningEffort": "low",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-b",
+            "effort": "low"
+          }
+        }
+      ]
+    },
+    {
+      "name": "普通发送：设置 error 阻止发送",
+      "result": "PASS",
+      "response": {
+        "ok": false,
+        "code": 503,
+        "message": "fixture update failure"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "model-b",
+            "reasoningEffort": "low",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-b",
+            "effort": "low"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "model-b",
+            "effort": "low"
+          }
+        }
+      ]
+    },
+    {
+      "name": "排队 server：无显式设置完全继承",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "messageId": "queue-1",
+        "clientUserMessageId": "482599ac-1453-4b0c-a89d-052a05eb6a1b",
+        "queueEpoch": "a37be499-d4a5-45ee-ab58-67fcb67a8cae",
+        "queueRevision": 1,
+        "queuedMessages": [
+          {
+            "id": "queue-1",
+            "text": "队列消息",
+            "clientUserMessageId": "482599ac-1453-4b0c-a89d-052a05eb6a1b"
+          }
+        ],
+        "queuedEdits": []
+      },
+      "records": [
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": null,
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "prepare",
+          "threadId": "fixture-thread",
+          "phase": "start",
+          "settings": {
+            "model": "model-a",
+            "effort": "high"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/queue/add",
+          "params": {
+            "threadId": "fixture-thread",
+            "input": [
+              {
+                "type": "text",
+                "text": "队列",
+                "text_elements": []
+              }
+            ],
+            "clientUserMessageId": "482599ac-1453-4b0c-a89d-052a05eb6a1b"
+          }
+        }
+      ]
+    },
+    {
+      "name": "排队 server：仅等级更新且保留模型",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "messageId": "queue-1",
+        "clientUserMessageId": "991be864-81ed-4180-b8bd-5fe257652d00",
+        "queueEpoch": "633b36a1-e5c4-4d30-91bd-6347aa1c19aa",
+        "queueRevision": 1,
+        "queuedMessages": [
+          {
+            "id": "queue-1",
+            "text": "队列消息",
+            "clientUserMessageId": "991be864-81ed-4180-b8bd-5fe257652d00"
+          }
+        ],
+        "queuedEdits": []
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "model-a",
+            "reasoningEffort": "max",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-a",
+            "effort": "max"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "model-a",
+            "effort": "max"
+          }
+        },
+        {
+          "kind": "prepare",
+          "threadId": "fixture-thread",
+          "phase": "start",
+          "settings": {
+            "model": "model-a",
+            "effort": "max",
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "max",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/queue/add",
+          "params": {
+            "threadId": "fixture-thread",
+            "input": [
+              {
+                "type": "text",
+                "text": "队列",
+                "text_elements": []
+              }
+            ],
+            "clientUserMessageId": "991be864-81ed-4180-b8bd-5fe257652d00"
+          }
+        }
+      ]
+    },
+    {
+      "name": "排队 server：切换无推理模型清空旧等级",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "messageId": "queue-1",
+        "clientUserMessageId": "a06940ce-f32b-42ab-bb01-fe25821428d4",
+        "queueEpoch": "e862ddd5-4031-4a1d-8897-1b007168cc21",
+        "queueRevision": 1,
+        "queuedMessages": [
+          {
+            "id": "queue-1",
+            "text": "队列消息",
+            "clientUserMessageId": "a06940ce-f32b-42ab-bb01-fe25821428d4"
+          }
+        ],
+        "queuedEdits": []
+      },
+      "records": [
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "no-reasoning",
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "no-reasoning",
+            "effort": null
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "no-reasoning",
+            "effort": null
+          }
+        },
+        {
+          "kind": "prepare",
+          "threadId": "fixture-thread",
+          "phase": "start",
+          "settings": {
+            "model": "no-reasoning",
+            "effort": null,
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "no-reasoning",
+                "reasoning_effort": null,
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/queue/add",
+          "params": {
+            "threadId": "fixture-thread",
+            "input": [
+              {
+                "type": "text",
+                "text": "队列",
+                "text_elements": []
+              }
+            ],
+            "clientUserMessageId": "a06940ce-f32b-42ab-bb01-fe25821428d4"
+          }
+        }
+      ]
+    },
+    {
+      "name": "排队 server：设置 false 阻止准备",
+      "result": "PASS",
+      "response": {
+        "ok": false,
+        "code": 409,
+        "message": "模型或思考深度未能应用，请重新核对后发送"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "model-b",
+            "reasoningEffort": "low",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-b",
+            "effort": "low"
+          }
+        }
+      ]
+    },
+    {
+      "name": "排队 server：设置 error 阻止准备",
+      "result": "PASS",
+      "response": {
+        "ok": false,
+        "code": 503,
+        "message": "fixture update failure"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "model-b",
+            "reasoningEffort": "low",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-b",
+            "effort": "low"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "model-b",
+            "effort": "low"
+          }
+        }
+      ]
+    },
+    {
+      "name": "排队 local：无显式设置完全继承",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "messageId": "b689c3d4-3ac4-4c3c-95c3-11005cad5393",
+        "clientUserMessageId": "b689c3d4-3ac4-4c3c-95c3-11005cad5393",
+        "queueEpoch": "033a09be-0391-44bd-8df6-8541cdd61ad6",
+        "queueRevision": 1,
+        "queuedMessages": [
+          {
+            "id": "b689c3d4-3ac4-4c3c-95c3-11005cad5393",
+            "text": "队列",
+            "context": {
+              "prompt": "队列",
+              "addedFiles": [],
+              "fileAttachments": [],
+              "pastedTextAttachments": [],
+              "uploadedFileAttachments": [],
+              "ideContext": null,
+              "imageAttachments": [],
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "commentAttachments": [],
+              "mcpAppModelContextAttachments": [],
+              "appshotContexts": []
+            },
+            "cwd": "E:/fixture",
+            "createdAt": 1792307078759,
+            "clientUserMessageId": "b689c3d4-3ac4-4c3c-95c3-11005cad5393"
+          }
+        ],
+        "queuedEdits": []
+      },
+      "records": [
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": null,
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "prepare",
+          "threadId": "fixture-thread",
+          "phase": "start",
+          "settings": {
+            "model": "model-a",
+            "effort": "high"
+          }
+        },
+        {
+          "kind": "local-queue-send",
+          "request": {
+            "conversationId": "fixture-thread",
+            "message": {
+              "id": "b689c3d4-3ac4-4c3c-95c3-11005cad5393",
+              "text": "队列",
+              "context": {
+                "prompt": "队列",
+                "addedFiles": [],
+                "fileAttachments": [],
+                "pastedTextAttachments": [],
+                "uploadedFileAttachments": [],
+                "ideContext": null,
+                "imageAttachments": [],
+                "workspaceRoots": [
+                  "E:/fixture"
+                ],
+                "commentAttachments": [],
+                "mcpAppModelContextAttachments": [],
+                "appshotContexts": []
+              },
+              "cwd": "E:/fixture",
+              "createdAt": 1792307078759,
+              "clientUserMessageId": "b689c3d4-3ac4-4c3c-95c3-11005cad5393"
+            },
+            "queueModeOverride": "queue",
+            "acceptLocally": true,
+            "editPosition": {
+              "serverSubmission": {
+                "id": "b689c3d4-3ac4-4c3c-95c3-11005cad5393",
+                "clientUserMessageId": "b689c3d4-3ac4-4c3c-95c3-11005cad5393",
+                "input": [
+                  {
+                    "type": "text",
+                    "text": "队列",
+                    "text_elements": []
+                  }
+                ]
+              },
+              "preserveSerializedContext": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "排队 local：仅等级更新且保留模型",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "messageId": "d6b7bbb8-8248-4cc2-988c-36947d64f5a6",
+        "clientUserMessageId": "d6b7bbb8-8248-4cc2-988c-36947d64f5a6",
+        "queueEpoch": "c803ade9-4887-4629-87e2-f3ca21d2980a",
+        "queueRevision": 1,
+        "queuedMessages": [
+          {
+            "id": "d6b7bbb8-8248-4cc2-988c-36947d64f5a6",
+            "text": "队列",
+            "context": {
+              "prompt": "队列",
+              "addedFiles": [],
+              "fileAttachments": [],
+              "pastedTextAttachments": [],
+              "uploadedFileAttachments": [],
+              "ideContext": null,
+              "imageAttachments": [],
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "commentAttachments": [],
+              "mcpAppModelContextAttachments": [],
+              "appshotContexts": []
+            },
+            "cwd": "E:/fixture",
+            "createdAt": 1792307078763,
+            "clientUserMessageId": "d6b7bbb8-8248-4cc2-988c-36947d64f5a6"
+          }
+        ],
+        "queuedEdits": []
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "model-a",
+            "reasoningEffort": "max",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-a",
+            "effort": "max"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "model-a",
+            "effort": "max"
+          }
+        },
+        {
+          "kind": "prepare",
+          "threadId": "fixture-thread",
+          "phase": "start",
+          "settings": {
+            "model": "model-a",
+            "effort": "max",
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "max",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "local-queue-send",
+          "request": {
+            "conversationId": "fixture-thread",
+            "message": {
+              "id": "d6b7bbb8-8248-4cc2-988c-36947d64f5a6",
+              "text": "队列",
+              "context": {
+                "prompt": "队列",
+                "addedFiles": [],
+                "fileAttachments": [],
+                "pastedTextAttachments": [],
+                "uploadedFileAttachments": [],
+                "ideContext": null,
+                "imageAttachments": [],
+                "workspaceRoots": [
+                  "E:/fixture"
+                ],
+                "commentAttachments": [],
+                "mcpAppModelContextAttachments": [],
+                "appshotContexts": []
+              },
+              "cwd": "E:/fixture",
+              "createdAt": 1792307078763,
+              "clientUserMessageId": "d6b7bbb8-8248-4cc2-988c-36947d64f5a6"
+            },
+            "queueModeOverride": "queue",
+            "acceptLocally": true,
+            "editPosition": {
+              "serverSubmission": {
+                "id": "d6b7bbb8-8248-4cc2-988c-36947d64f5a6",
+                "clientUserMessageId": "d6b7bbb8-8248-4cc2-988c-36947d64f5a6",
+                "input": [
+                  {
+                    "type": "text",
+                    "text": "队列",
+                    "text_elements": []
+                  }
+                ]
+              },
+              "preserveSerializedContext": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "排队 local：切换无推理模型清空旧等级",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "messageId": "713f814c-8984-4898-a3f9-525e9943d253",
+        "clientUserMessageId": "713f814c-8984-4898-a3f9-525e9943d253",
+        "queueEpoch": "b43ee1d5-4bec-4e7c-9b55-7876c59193db",
+        "queueRevision": 1,
+        "queuedMessages": [
+          {
+            "id": "713f814c-8984-4898-a3f9-525e9943d253",
+            "text": "队列",
+            "context": {
+              "prompt": "队列",
+              "addedFiles": [],
+              "fileAttachments": [],
+              "pastedTextAttachments": [],
+              "uploadedFileAttachments": [],
+              "ideContext": null,
+              "imageAttachments": [],
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "commentAttachments": [],
+              "mcpAppModelContextAttachments": [],
+              "appshotContexts": []
+            },
+            "cwd": "E:/fixture",
+            "createdAt": 1792307078767,
+            "clientUserMessageId": "713f814c-8984-4898-a3f9-525e9943d253"
+          }
+        ],
+        "queuedEdits": []
+      },
+      "records": [
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "no-reasoning",
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "no-reasoning",
+            "effort": null
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "no-reasoning",
+            "effort": null
+          }
+        },
+        {
+          "kind": "prepare",
+          "threadId": "fixture-thread",
+          "phase": "start",
+          "settings": {
+            "model": "no-reasoning",
+            "effort": null,
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "no-reasoning",
+                "reasoning_effort": null,
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "local-queue-send",
+          "request": {
+            "conversationId": "fixture-thread",
+            "message": {
+              "id": "713f814c-8984-4898-a3f9-525e9943d253",
+              "text": "队列",
+              "context": {
+                "prompt": "队列",
+                "addedFiles": [],
+                "fileAttachments": [],
+                "pastedTextAttachments": [],
+                "uploadedFileAttachments": [],
+                "ideContext": null,
+                "imageAttachments": [],
+                "workspaceRoots": [
+                  "E:/fixture"
+                ],
+                "commentAttachments": [],
+                "mcpAppModelContextAttachments": [],
+                "appshotContexts": []
+              },
+              "cwd": "E:/fixture",
+              "createdAt": 1792307078767,
+              "clientUserMessageId": "713f814c-8984-4898-a3f9-525e9943d253"
+            },
+            "queueModeOverride": "queue",
+            "acceptLocally": true,
+            "editPosition": {
+              "serverSubmission": {
+                "id": "713f814c-8984-4898-a3f9-525e9943d253",
+                "clientUserMessageId": "713f814c-8984-4898-a3f9-525e9943d253",
+                "input": [
+                  {
+                    "type": "text",
+                    "text": "队列",
+                    "text_elements": []
+                  }
+                ]
+              },
+              "preserveSerializedContext": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "排队 local：设置 false 阻止准备",
+      "result": "PASS",
+      "response": {
+        "ok": false,
+        "code": 409,
+        "message": "模型或思考深度未能应用，请重新核对后发送"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "model-b",
+            "reasoningEffort": "low",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-b",
+            "effort": "low"
+          }
+        }
+      ]
+    },
+    {
+      "name": "排队 local：设置 error 阻止准备",
+      "result": "PASS",
+      "response": {
+        "ok": false,
+        "code": 503,
+        "message": "fixture update failure"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": "model-b",
+            "reasoningEffort": "low",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-b",
+            "effort": "low"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "model-b",
+            "effort": "low"
+          }
+        }
+      ]
+    },
+    {
+      "name": "编辑消息：切换无推理模型清空旧等级",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "turnId": "last-turn",
+        "messageId": "message-1",
+        "editable": true
+      },
+      "records": [
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "no-reasoning",
+            "effort": null
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "no-reasoning",
+            "effort": null
+          }
+        },
+        {
+          "kind": "edit-last",
+          "conversationId": "fixture-thread",
+          "options": {
+            "turnId": "last-turn",
+            "message": "修改",
+            "agentMode": "default",
+            "shouldSendPermissionOverrides": false,
+            "serviceTier": "priority"
+          },
+          "settings": {
+            "model": "no-reasoning",
+            "effort": null,
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "no-reasoning",
+                "reasoning_effort": null,
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "编辑消息：无显式设置完全继承",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "turnId": "last-turn",
+        "messageId": "message-1",
+        "editable": true
+      },
+      "records": [
+        {
+          "kind": "edit-last",
+          "conversationId": "fixture-thread",
+          "options": {
+            "turnId": "last-turn",
+            "message": "修改",
+            "agentMode": "default",
+            "shouldSendPermissionOverrides": false,
+            "serviceTier": "priority"
+          },
+          "settings": {
+            "model": "model-a",
+            "effort": "high"
+          }
+        }
+      ]
+    },
+    {
+      "name": "编辑消息：仅等级保留当前模型",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "turnId": "last-turn",
+        "messageId": "message-1",
+        "editable": true
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-a",
+            "effort": "max"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "model-a",
+            "effort": "max"
+          }
+        },
+        {
+          "kind": "edit-last",
+          "conversationId": "fixture-thread",
+          "options": {
+            "turnId": "last-turn",
+            "message": "修改",
+            "agentMode": "default",
+            "shouldSendPermissionOverrides": false,
+            "serviceTier": "priority"
+          },
+          "settings": {
+            "model": "model-a",
+            "effort": "max",
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "max",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "编辑消息：设置 false 阻止编辑",
+      "result": "PASS",
+      "response": {
+        "ok": false,
+        "code": 409,
+        "message": "模型或思考深度未能应用，请重新核对后发送"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-b",
+            "effort": "low"
+          }
+        }
+      ]
+    },
+    {
+      "name": "编辑消息：设置 error 阻止编辑",
+      "result": "PASS",
+      "response": {
+        "ok": false,
+        "code": 503,
+        "message": "fixture update failure"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-b",
+            "effort": "low"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "model-b",
+            "effort": "low"
+          }
+        }
+      ]
+    },
+    {
+      "name": "原生目录校验：拒绝 model-b/max",
+      "result": "PASS",
+      "response": {
+        "ok": false,
+        "code": 400,
+        "message": "思考深度超出此模型支持的范围"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "原生目录校验：拒绝 model-a/ultra",
+      "result": "PASS",
+      "response": {
+        "ok": false,
+        "code": 400,
+        "message": "思考深度超出此模型支持的范围"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "原生目录校验：拒绝 no-reasoning/high",
+      "result": "PASS",
+      "response": {
+        "ok": false,
+        "code": 400,
+        "message": "思考深度超出此模型支持的范围"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "会话读取：thread/read 的 null 等级优先于旧缓存",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "thread": {
+          "id": "fixture-thread",
+          "title": "新会话",
+          "cwd": "E:/fixture",
+          "createdAt": 0,
+          "updatedAt": 0,
+          "recencyAt": 0,
+          "hasUnreadTurn": false,
+          "status": {
+            "type": "idle"
+          },
+          "priority": {
+            "attentionState": "idle",
+            "active": false,
+            "eligible": true
+          },
+          "projectId": null,
+          "pinned": false,
+          "model": "no-reasoning",
+          "reasoningEffort": null,
+          "serviceTier": "priority",
+          "tokenUsage": null,
+          "goal": null,
+          "compaction": {
+            "state": "idle",
+            "turnId": null,
+            "itemId": null
+          },
+          "transcriptEvents": [],
+          "editableMessage": {
+            "turnId": "last-turn",
+            "messageId": "message-1",
+            "editable": true
+          },
+          "requestsKnown": true,
+          "threadId": "fixture-thread",
+          "requests": [],
+          "requestsEpoch": "e501cf7d-d1fc-46d0-be83-e42418341aa9",
+          "requestsRevision": 1,
+          "queueEpoch": "e501cf7d-d1fc-46d0-be83-e42418341aa9",
+          "queueRevision": 1,
+          "queuedMessages": [],
+          "queuedEdits": []
+        }
+      },
+      "records": []
+    },
+    {
+      "name": "会话读取：缺少原生等级字段时使用协作配置",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "thread": {
+          "id": "fixture-thread",
+          "title": "新会话",
+          "cwd": "E:/fixture",
+          "createdAt": 0,
+          "updatedAt": 0,
+          "recencyAt": 0,
+          "hasUnreadTurn": false,
+          "status": {
+            "type": "idle"
+          },
+          "priority": {
+            "attentionState": "idle",
+            "active": false,
+            "eligible": true
+          },
+          "projectId": null,
+          "pinned": false,
+          "model": "model-a",
+          "reasoningEffort": "high",
+          "serviceTier": "priority",
+          "tokenUsage": null,
+          "goal": null,
+          "compaction": {
+            "state": "idle",
+            "turnId": null,
+            "itemId": null
+          },
+          "transcriptEvents": [],
+          "editableMessage": {
+            "turnId": "last-turn",
+            "messageId": "message-1",
+            "editable": true
+          },
+          "requestsKnown": true,
+          "threadId": "fixture-thread",
+          "requests": [],
+          "requestsEpoch": "9d4b05d7-1ab0-45f3-8e1b-6c4bdb341667",
+          "requestsRevision": 1,
+          "queueEpoch": "9d4b05d7-1ab0-45f3-8e1b-6c4bdb341667",
+          "queueRevision": 1,
+          "queuedMessages": [],
+          "queuedEdits": []
+        }
+      },
+      "records": []
+    },
+    {
+      "name": "目录：默认模型等级和 ultra 关闭状态原样保留",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "data": [
+          {
+            "id": "model-a",
+            "model": "model-a",
+            "displayName": "模型 A",
+            "supportedReasoningEfforts": [
+              {
+                "reasoningEffort": "low"
+              },
+              {
+                "reasoningEffort": "medium"
+              },
+              {
+                "reasoningEffort": "high"
+              },
+              {
+                "reasoningEffort": "max"
+              }
+            ],
+            "defaultReasoningEffort": "medium"
+          },
+          {
+            "id": "model-b",
+            "model": "model-b",
+            "displayName": "模型 B",
+            "supportedReasoningEfforts": [
+              {
+                "reasoningEffort": "low"
+              },
+              {
+                "reasoningEffort": "high"
+              }
+            ],
+            "defaultReasoningEffort": "low"
+          },
+          {
+            "id": "no-reasoning",
+            "model": "no-reasoning",
+            "displayName": "普通模型",
+            "supportedReasoningEfforts": [],
+            "defaultReasoningEffort": null
+          }
+        ],
+        "ultraReasoningEnabled": false,
+        "defaultModel": "model-a",
+        "defaultReasoningEffort": "medium"
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "request",
+          "method": "config/read",
+          "params": {
+            "cwd": null,
+            "includeLayers": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "新建：显式模型与等级传入原生 collaborationMode",
+      "result": "PASS",
+      "response": {
+        "status": "created",
+        "conversationId": "created-thread",
+        "firstTurn": {
+          "status": "accepted"
+        },
+        "ok": true,
+        "threadId": "created-thread",
+        "outcomeUnknown": false
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "start-conversation",
+          "params": {
+            "input": [
+              {
+                "type": "text",
+                "text": "新建",
+                "text_elements": []
+              }
+            ],
+            "cwd": "E:/fixture",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "projectAssignment": {
+              "projectKind": "local",
+              "projectId": "project1"
+            },
+            "permissionsConfig": {
+              "allowPermissionSelection": true,
+              "sourcePermissionSelection": null
+            },
+            "useAppServerPermissionDefault": true,
+            "mode": "default",
+            "threadStartKind": "default",
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-b",
+                "reasoning_effort": "low",
+                "developer_instructions": null
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "新建：无显式设置交由原生继承",
+      "result": "PASS",
+      "response": {
+        "status": "created",
+        "conversationId": "created-thread",
+        "firstTurn": {
+          "status": "accepted"
+        },
+        "ok": true,
+        "threadId": "created-thread",
+        "outcomeUnknown": false
+      },
+      "records": [
+        {
+          "kind": "start-conversation",
+          "params": {
+            "input": [
+              {
+                "type": "text",
+                "text": "新建",
+                "text_elements": []
+              }
+            ],
+            "cwd": "E:/fixture",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "projectAssignment": {
+              "projectKind": "local",
+              "projectId": "project1"
+            },
+            "permissionsConfig": {
+              "allowPermissionSelection": true,
+              "sourcePermissionSelection": null
+            },
+            "useAppServerPermissionDefault": true,
+            "mode": "default",
+            "threadStartKind": "default"
+          }
+        }
+      ]
+    },
+    {
+      "name": "新建：无推理模型传入明确 null 等级",
+      "result": "PASS",
+      "response": {
+        "status": "created",
+        "conversationId": "created-thread",
+        "firstTurn": {
+          "status": "accepted"
+        },
+        "ok": true,
+        "threadId": "created-thread",
+        "outcomeUnknown": false
+      },
+      "records": [
+        {
+          "kind": "start-conversation",
+          "params": {
+            "input": [
+              {
+                "type": "text",
+                "text": "新建",
+                "text_elements": []
+              }
+            ],
+            "cwd": "E:/fixture",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "projectAssignment": {
+              "projectKind": "local",
+              "projectId": "project1"
+            },
+            "permissionsConfig": {
+              "allowPermissionSelection": true,
+              "sourcePermissionSelection": null
+            },
+            "useAppServerPermissionDefault": true,
+            "mode": "default",
+            "threadStartKind": "default",
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "no-reasoning",
+                "reasoning_effort": null,
+                "developer_instructions": null
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "新建目标：模型等级传入首条消息",
+      "result": "PASS",
+      "response": {
+        "status": "created",
+        "conversationId": "created-thread",
+        "firstTurn": {
+          "status": "accepted"
+        },
+        "ok": true,
+        "threadId": "created-thread",
+        "goal": {
+          "objective": "新目标",
+          "status": "active",
+          "tokenBudget": null,
+          "tokensUsed": null,
+          "timeUsedSeconds": null,
+          "createdAt": 1,
+          "updatedAt": null
+        },
+        "goalSubmission": {
+          "action": "create",
+          "phase": "complete",
+          "threadId": "created-thread",
+          "firstTurnAccepted": true,
+          "goalSet": "succeeded"
+        }
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "start-conversation",
+          "params": {
+            "input": [
+              {
+                "type": "text",
+                "text": "/goal 新目标",
+                "text_elements": []
+              }
+            ],
+            "cwd": "E:/fixture",
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "projectAssignment": {
+              "projectKind": "local",
+              "projectId": "project1"
+            },
+            "permissionsConfig": {
+              "allowPermissionSelection": true,
+              "sourcePermissionSelection": null
+            },
+            "useAppServerPermissionDefault": true,
+            "mode": "default",
+            "threadStartKind": "default",
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-b",
+                "reasoning_effort": "low",
+                "developer_instructions": null
+              }
+            }
+          }
+        },
+        {
+          "kind": "set-goal",
+          "conversationId": "created-thread",
+          "options": {
+            "objective": "新目标",
+            "appendTranscriptItem": false
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "created-thread",
+            "model": null,
+            "serviceTier": null,
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/goal/set",
+          "params": {
+            "threadId": "created-thread",
+            "objective": "新目标",
+            "status": "active"
+          }
+        }
+      ]
+    },
+    {
+      "name": "目标：切换无推理模型清空旧等级",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "goal": {
+          "objective": "完成目标",
+          "status": "active",
+          "tokenBudget": null,
+          "tokensUsed": null,
+          "timeUsedSeconds": null,
+          "createdAt": 1,
+          "updatedAt": null
+        },
+        "goalSubmission": {
+          "action": "setGoal",
+          "phase": "complete",
+          "threadId": "fixture-thread",
+          "firstTurnAccepted": false,
+          "goalSet": "succeeded"
+        }
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "thread/goal/get",
+          "params": {
+            "threadId": "fixture-thread"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/goal/get",
+          "params": {
+            "threadId": "fixture-thread"
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "no-reasoning",
+            "effort": null
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "no-reasoning",
+            "effort": null
+          }
+        },
+        {
+          "kind": "set-goal",
+          "conversationId": "fixture-thread",
+          "options": {
+            "objective": "完成目标"
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": null,
+            "serviceTier": null,
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "no-reasoning",
+                "reasoning_effort": null,
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/goal/set",
+          "params": {
+            "threadId": "fixture-thread",
+            "objective": "完成目标",
+            "status": "active"
+          }
+        }
+      ]
+    },
+    {
+      "name": "目标：无显式设置完全继承",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "goal": {
+          "objective": "完成目标",
+          "status": "active",
+          "tokenBudget": null,
+          "tokensUsed": null,
+          "timeUsedSeconds": null,
+          "createdAt": 1,
+          "updatedAt": null
+        },
+        "goalSubmission": {
+          "action": "setGoal",
+          "phase": "complete",
+          "threadId": "fixture-thread",
+          "firstTurnAccepted": false,
+          "goalSet": "succeeded"
+        }
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "thread/goal/get",
+          "params": {
+            "threadId": "fixture-thread"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/goal/get",
+          "params": {
+            "threadId": "fixture-thread"
+          }
+        },
+        {
+          "kind": "set-goal",
+          "conversationId": "fixture-thread",
+          "options": {
+            "objective": "完成目标"
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": null,
+            "serviceTier": null,
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-a",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/goal/set",
+          "params": {
+            "threadId": "fixture-thread",
+            "objective": "完成目标",
+            "status": "active"
+          }
+        }
+      ]
+    },
+    {
+      "name": "目标：仅等级保留 thread/read 模型",
+      "result": "PASS",
+      "response": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "goal": {
+          "objective": "完成目标",
+          "status": "active",
+          "tokenBudget": null,
+          "tokensUsed": null,
+          "timeUsedSeconds": null,
+          "createdAt": 1,
+          "updatedAt": null
+        },
+        "goalSubmission": {
+          "action": "setGoal",
+          "phase": "complete",
+          "threadId": "fixture-thread",
+          "firstTurnAccepted": false,
+          "goalSet": "succeeded"
+        }
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "thread/goal/get",
+          "params": {
+            "threadId": "fixture-thread"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/goal/get",
+          "params": {
+            "threadId": "fixture-thread"
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-b",
+            "effort": "high"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "model-b",
+            "effort": "high"
+          }
+        },
+        {
+          "kind": "set-goal",
+          "conversationId": "fixture-thread",
+          "options": {
+            "objective": "完成目标"
+          }
+        },
+        {
+          "kind": "resume",
+          "params": {
+            "conversationId": "fixture-thread",
+            "model": null,
+            "serviceTier": null,
+            "reasoningEffort": null,
+            "workspaceRoots": [
+              "E:/fixture"
+            ],
+            "collaborationMode": {
+              "mode": "default",
+              "settings": {
+                "model": "model-b",
+                "reasoning_effort": "high",
+                "developer_instructions": "保留既有指令"
+              }
+            }
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/goal/set",
+          "params": {
+            "threadId": "fixture-thread",
+            "objective": "完成目标",
+            "status": "active"
+          }
+        }
+      ]
+    },
+    {
+      "name": "目标：设置 false 阻止创建目标",
+      "result": "PASS",
+      "response": {
+        "ok": false,
+        "threadId": "fixture-thread",
+        "code": 409,
+        "message": "模型或思考深度未能应用，请重新核对后发送",
+        "goalSubmission": {
+          "action": "setGoal",
+          "phase": "preparing",
+          "threadId": "fixture-thread",
+          "firstTurnAccepted": false,
+          "goalSet": "not-attempted"
+        }
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "thread/goal/get",
+          "params": {
+            "threadId": "fixture-thread"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/goal/get",
+          "params": {
+            "threadId": "fixture-thread"
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-b",
+            "effort": "low"
+          }
+        }
+      ]
+    },
+    {
+      "name": "目标：设置 error 阻止创建目标",
+      "result": "PASS",
+      "response": {
+        "ok": false,
+        "threadId": "fixture-thread",
+        "code": 503,
+        "message": "fixture update failure",
+        "goalSubmission": {
+          "action": "setGoal",
+          "phase": "preparing",
+          "threadId": "fixture-thread",
+          "firstTurnAccepted": false,
+          "goalSet": "not-attempted"
+        }
+      },
+      "records": [
+        {
+          "kind": "request",
+          "method": "thread/goal/get",
+          "params": {
+            "threadId": "fixture-thread"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "model/list",
+          "params": {
+            "limit": 100,
+            "cursor": null
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/goal/get",
+          "params": {
+            "threadId": "fixture-thread"
+          }
+        },
+        {
+          "kind": "update-next-turn",
+          "threadId": "fixture-thread",
+          "settings": {
+            "model": "model-b",
+            "effort": "low"
+          }
+        },
+        {
+          "kind": "request",
+          "method": "thread/settings/update",
+          "params": {
+            "threadId": "fixture-thread",
+            "model": "model-b",
+            "effort": "low"
+          }
+        }
+      ]
+    }
+  ],
+  "checks": {
+    "diff": "PASS",
+    "adapterVersion": 43,
+    "syntax": "PASS"
+  },
+  "cleanup": {
+    "servicesStarted": 0,
+    "paidInferenceRequests": 0,
+    "temporaryDirectory": "temp/model-effort-native-20261018",
+    "realConversationWrites": 0,
+    "directoryRemoved": true,
+    "status": "PASS",
+    "removedFiles": [
+      "find-native.cjs",
+      "baseline-results.json",
+      "inspect-current.cjs",
+      "installed-evidence.json",
+      "package.json",
+      "regression-results.json",
+      "regression.cjs",
+      "webview__assets__app-initial-102e45562729.js",
+      "webview__assets__app-primary-cd52df2361eb.js",
+      "webview__assets__app-shared-30671c57ec82.js"
+    ]
+  }
+}

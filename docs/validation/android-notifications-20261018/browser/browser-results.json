@@ -1,0 +1,536 @@
+{
+  "status": "PASS",
+  "scope": "Chrome扩展加载完整生产网页，Android原生桥与系统权限状态由本机隔离服务模拟；未更改真实用户设置、未申请真实系统权限、未发送真实通知或会话消息。",
+  "checks": {
+    "normalWebEntryHidden": true,
+    "normalWebNotificationBridgeRequestsZero": true,
+    "entryBelowFont": true,
+    "secondaryTitleAndBack": true,
+    "fourEventSwitches": true,
+    "permissionGrantAndDenial": true,
+    "systemSettingsReturnReadback": true,
+    "saveFailureKeepsOldValueAndUnlocks": true,
+    "headerBackPreservesSettings": true,
+    "escapeReturnsRoot": true,
+    "nativeBackReturnsRootThenCloses": true,
+    "rootScrollRestored": true,
+    "lateReadDoesNotReopenPage": true,
+    "notificationOpensTargetAndClosesDialogs": true,
+    "draftRestored": true,
+    "legacyAppShowsUpdateMessage": true,
+    "largeFontNoHorizontalOverflow": true
+  },
+  "samples": [
+    {
+      "entryDisplay": "none",
+      "entryHidden": true,
+      "label": "normal-web-settings",
+      "title": "设置",
+      "versionHidden": true
+    },
+    {
+      "entryHidden": false,
+      "entryTop": 529.5,
+      "fontBottom": 517.5,
+      "label": "android-entry-below-font",
+      "version": "v0.0.1"
+    },
+    {
+      "controls": [
+        {
+          "checked": false,
+          "disabled": false,
+          "name": "接收通知"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "需要授权"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "需要回答"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行完成"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行失败"
+        }
+      ],
+      "dialogOpen": true,
+      "headerLabel": "返回设置",
+      "label": "android-default-page",
+      "overflowX": false,
+      "resetVisible": false,
+      "status": "接收偏好已关闭；系统权限尚未确认；已关闭。",
+      "title": "通知事件",
+      "versionVisible": false
+    },
+    {
+      "controls": [
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "接收通知"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "需要授权"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "需要回答"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行完成"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行失败"
+        }
+      ],
+      "dialogOpen": true,
+      "headerLabel": "返回设置",
+      "label": "enabled-and-permission-granted",
+      "overflowX": false,
+      "resetVisible": false,
+      "status": "接收偏好已开启；系统权限已允许；连接已建立。",
+      "title": "通知事件",
+      "versionVisible": false
+    },
+    {
+      "controls": [
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "接收通知"
+        },
+        {
+          "checked": false,
+          "disabled": false,
+          "name": "需要授权"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "需要回答"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行完成"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行失败"
+        }
+      ],
+      "dialogOpen": true,
+      "headerLabel": "返回设置",
+      "label": "approval-disabled",
+      "overflowX": false,
+      "resetVisible": false,
+      "status": "接收偏好已开启；系统权限已允许；连接已建立。",
+      "title": "通知事件",
+      "versionVisible": false
+    },
+    {
+      "controls": [
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "接收通知"
+        },
+        {
+          "checked": false,
+          "disabled": false,
+          "name": "需要授权"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "需要回答"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行完成"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行失败"
+        }
+      ],
+      "dialogOpen": true,
+      "headerLabel": "返回设置",
+      "label": "save-failure-keeps-old-value",
+      "overflowX": false,
+      "resetVisible": false,
+      "status": "保存失败，页面保留上次读取的设置。请稍后重试。",
+      "title": "通知事件",
+      "versionVisible": false
+    },
+    {
+      "controls": [
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "接收通知"
+        },
+        {
+          "checked": false,
+          "disabled": false,
+          "name": "需要授权"
+        },
+        {
+          "checked": false,
+          "disabled": false,
+          "name": "需要回答"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行完成"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行失败"
+        }
+      ],
+      "dialogOpen": true,
+      "headerLabel": "返回设置",
+      "label": "save-retry-succeeds",
+      "overflowX": false,
+      "resetVisible": false,
+      "status": "接收偏好已开启；系统权限已允许；连接已建立。",
+      "title": "通知事件",
+      "versionVisible": false
+    },
+    {
+      "controls": [
+        {
+          "checked": false,
+          "disabled": false,
+          "name": "接收通知"
+        },
+        {
+          "checked": false,
+          "disabled": false,
+          "name": "需要授权"
+        },
+        {
+          "checked": false,
+          "disabled": false,
+          "name": "需要回答"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行完成"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行失败"
+        }
+      ],
+      "dialogOpen": true,
+      "headerLabel": "返回设置",
+      "label": "master-disabled",
+      "overflowX": false,
+      "resetVisible": false,
+      "status": "接收偏好已关闭；系统权限已允许；已关闭。",
+      "title": "通知事件",
+      "versionVisible": false
+    },
+    {
+      "controls": [
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "接收通知"
+        },
+        {
+          "checked": false,
+          "disabled": false,
+          "name": "需要授权"
+        },
+        {
+          "checked": false,
+          "disabled": false,
+          "name": "需要回答"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行完成"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行失败"
+        }
+      ],
+      "dialogOpen": true,
+      "headerLabel": "返回设置",
+      "label": "permission-denied",
+      "overflowX": false,
+      "resetVisible": false,
+      "status": "系统通知权限已拒绝，当前不会接收通知。",
+      "title": "通知事件",
+      "versionVisible": false
+    },
+    {
+      "controls": [
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "接收通知"
+        },
+        {
+          "checked": false,
+          "disabled": false,
+          "name": "需要授权"
+        },
+        {
+          "checked": false,
+          "disabled": false,
+          "name": "需要回答"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行完成"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行失败"
+        }
+      ],
+      "dialogOpen": true,
+      "headerLabel": "返回设置",
+      "label": "system-settings-return-granted",
+      "overflowX": false,
+      "resetVisible": false,
+      "status": "接收偏好已开启；系统权限已允许；连接已建立。",
+      "title": "通知事件",
+      "versionVisible": false
+    },
+    {
+      "controls": [],
+      "dialogOpen": true,
+      "headerLabel": "关闭设置",
+      "label": "header-back-restores-root",
+      "overflowX": false,
+      "resetVisible": true,
+      "title": "设置",
+      "versionVisible": true
+    },
+    {
+      "backButton": {
+        "height": 32,
+        "width": 32
+      },
+      "backIcon": {
+        "height": 16,
+        "width": 16
+      },
+      "dialog": {
+        "bottom": 523.671875,
+        "height": 407.34375,
+        "top": 116.328125,
+        "width": 274
+      },
+      "font": "20px",
+      "label": "320-font20-notification-page",
+      "overflowX": false
+    },
+    {
+      "controls": [],
+      "dialogOpen": true,
+      "headerLabel": "关闭设置",
+      "label": "escape-returns-root",
+      "overflowX": false,
+      "resetVisible": true,
+      "title": "设置",
+      "versionVisible": true
+    },
+    {
+      "after": 127,
+      "before": 127,
+      "font": "20px",
+      "label": "root-scroll-restored"
+    },
+    {
+      "controls": [],
+      "dialogOpen": true,
+      "headerLabel": "关闭设置",
+      "label": "native-back-to-root",
+      "overflowX": false,
+      "resetVisible": true,
+      "title": "设置",
+      "versionVisible": true
+    },
+    {
+      "entryDisabled": false,
+      "font": "20px",
+      "label": "late-read-after-back",
+      "secondaryCount": 0,
+      "title": "设置"
+    },
+    {
+      "dialogOpen": false,
+      "label": "native-back-closes-root"
+    },
+    {
+      "controls": [
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "接收通知"
+        },
+        {
+          "checked": false,
+          "disabled": false,
+          "name": "需要授权"
+        },
+        {
+          "checked": false,
+          "disabled": false,
+          "name": "需要回答"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行完成"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行失败"
+        }
+      ],
+      "dialogOpen": true,
+      "headerLabel": "返回设置",
+      "label": "before-notification-open",
+      "overflowX": false,
+      "resetVisible": false,
+      "status": "接收偏好已开启；系统权限已允许；连接已建立。",
+      "title": "通知事件",
+      "versionVisible": false
+    },
+    {
+      "dialogOpen": false,
+      "draft": "",
+      "hash": "#thread=notification-target",
+      "label": "notification-opens-target",
+      "title": "收到通知的会话"
+    },
+    {
+      "draft": "通知跳转前的草稿",
+      "label": "source-draft-restored",
+      "title": "原有会话"
+    },
+    {
+      "controls": [
+        {
+          "checked": false,
+          "disabled": true,
+          "name": "接收通知"
+        },
+        {
+          "checked": false,
+          "disabled": true,
+          "name": "需要授权"
+        },
+        {
+          "checked": false,
+          "disabled": true,
+          "name": "需要回答"
+        },
+        {
+          "checked": false,
+          "disabled": true,
+          "name": "执行完成"
+        },
+        {
+          "checked": false,
+          "disabled": true,
+          "name": "执行失败"
+        }
+      ],
+      "dialogOpen": true,
+      "headerLabel": "返回设置",
+      "label": "legacy-app-timeout",
+      "overflowX": false,
+      "resetVisible": false,
+      "status": "无法读取通知设置：当前 Android App 版本不支持或未响应通知设置，请更新 App 后重试。",
+      "title": "通知事件",
+      "versionVisible": false
+    },
+    {
+      "entryHidden": false,
+      "font": "13px",
+      "label": "final-root-font13",
+      "title": "设置"
+    },
+    {
+      "controls": [
+        {
+          "checked": false,
+          "disabled": false,
+          "name": "接收通知"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "需要授权"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "需要回答"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行完成"
+        },
+        {
+          "checked": true,
+          "disabled": false,
+          "name": "执行失败"
+        }
+      ],
+      "dialogOpen": true,
+      "headerLabel": "返回设置",
+      "label": "final-notification-page-font13",
+      "overflowX": false,
+      "resetVisible": false,
+      "status": "通知已关闭；系统权限尚未确认；已关闭。",
+      "title": "通知事件",
+      "versionVisible": false
+    }
+  ],
+  "testingNotes": [
+    "异步受控开关在失败时正确回滚，Playwright setChecked因预期即时状态改变报错；改用真实click并观察状态完成验证，未修改产品逻辑。",
+    "旧App读取超时为5秒，首次定位等待边界稍早返回；随后DOM状态确认更新提示与请求释放正常。",
+    "切换视口后主区域收起按钮被侧栏覆盖，改用侧栏中的当前会话项完成正常导航，未按测试定位问题修改产品。",
+    "最后仅精简新增通知中文文案，协议/条件/布局不变；重新加载最终页面并验证旧App提示和默认页。"
+  ]
+}

@@ -24,6 +24,7 @@ env:
 jobs:
   ensure-release:
     name: Ensure GitHub Release
+    if: ${{ !startsWith(github.event.release.tag_name || inputs.tag || github.ref_name, 'android-v') }}
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.release-tag.outputs.tag }}

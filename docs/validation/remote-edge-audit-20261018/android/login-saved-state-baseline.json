@@ -1,0 +1,25 @@
+{
+  "widget/EditText.java": {
+    "url": "https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android15-release/core/java/android/widget/EditText.java",
+    "sha256": "0a72d81a56888b1908d1436654d478b9bebc0dfe0a13177f4557f3c1f33b16f2",
+    "method": "public boolean getFreezesText()",
+    "excerpt": "public boolean getFreezesText() {\n        return true;\n    }"
+  },
+  "widget/TextView.java": {
+    "url": "https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android15-release/core/java/android/widget/TextView.java",
+    "sha256": "28df78f28a87faafd48906c2f36de0ec4bfaafe0c1fe8451d86daa432ea1759a",
+    "method": "public Parcelable onSaveInstanceState()",
+    "excerpt": "public Parcelable onSaveInstanceState() {\n        Parcelable superState = super.onSaveInstanceState();\n\n        // Save state if we are forced to\n        final boolean freezesText = getFreezesText();\n        boolean hasSelection = false;\n        int start = -1;\n        int end = -1;\n\n        if (mText != null) {\n            start = getSelectionStart();\n            end = getSelectionEnd();\n            if (start >= 0 || end >= 0) {\n                // Or save state if there is a selection\n                hasSelection = true;\n            }\n        }\n\n        if (freezesText || hasSelection) {\n            SavedState ss = new SavedState(superState);\n\n            if (freezesText) {\n                if (mText instanceof Spanned) {\n                    final Spannable sp = new SpannableStringBuilder(mText);\n\n                    if (mEditor != null) {\n                        removeMisspelledSpans(sp);\n                        sp.removeSpan(mEditor.mSuggestionRangeSpan);\n                    }\n\n                    ss.text = sp;\n                } else {\n                    ss.text = mText.toString();\n                }\n            }\n\n            if (hasSelection) {\n                // XXX Should also save the current scroll position!\n                ss.selStart = start;\n                ss.selEnd = end;\n            }\n\n            if (isFocused() && start >= 0 && end >= 0) {\n                ss.frozenWithFocus = true;\n            }\n\n            ss.error = getError();\n\n            if (mEditor != null) {\n                ss.editorState = mEditor.saveInstanceState();\n            }\n            return ss;\n        }\n\n        return superState;\n    }"
+  },
+  "view/View.java": {
+    "url": "https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android15-release/core/java/android/view/View.java",
+    "sha256": "1efd6232dac7babfeebd211829d25a551dae2d52c5d82369194ad63b582b5677",
+    "method": "protected void dispatchSaveInstanceState(",
+    "excerpt": "protected void dispatchSaveInstanceState(SparseArray<Parcelable> container) {\n        if (mID != NO_ID && (mViewFlags & SAVE_DISABLED_MASK) == 0) {\n            mPrivateFlags &= ~PFLAG_SAVE_STATE_CALLED;\n            Parcelable state = onSaveInstanceState();\n            if ((mPrivateFlags & PFLAG_SAVE_STATE_CALLED) == 0) {\n                throw new IllegalStateException(\n                        \"Derived class did not call super.onSaveInstanceState()\");\n            }\n            if (state != null) {\n                // Log.i(\"View\", \"Freezing #\" + Integer.toHexString(mID)\n                // + \": \" + state);\n                container.put(mID, state);\n            }\n        }\n    }"
+  },
+  "production": {
+    "keyHasId": true,
+    "javaDisablesSavedState": false,
+    "layoutDisablesSavedState": false
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "status": "PASS",
+  "baselineErrorReproductions": 2,
+  "readCaseRequestCounts": {
+    "after-broken-body": 2,
+    "after-retry-exhausted": 2,
+    "after-valid-json-wrong-shape": 1,
+    "after-manual-retry": 1,
+    "after-switch-cancels-old-read": 1
+  },
+  "samePayloadOnRetry": true,
+  "actionRequests": 1,
+  "originalReceiptReads": 1
+}

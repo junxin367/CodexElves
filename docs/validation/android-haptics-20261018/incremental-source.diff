@@ -1,0 +1,319 @@
+diff --git a/temp/android-haptics-20261018/app.before.js b/assets/remote-access/app.js
+index ff242e50..593c0c53 100644
+--- a/temp/android-haptics-20261018/app.before.js
++++ b/assets/remote-access/app.js
+@@ -4,8 +4,10 @@ import { renderMessageActions } from "./message-actions.js";
+ import {
+   getAndroidAppInfo,
+   getAndroidNotificationSettings,
++  installAndroidClickHapticFeedback,
+   isAndroidContainer,
+   openAndroidNotificationSystemSettings,
++  performAndroidHapticFeedback,
+   postPlatformMessage,
+   requestAndroidNotificationPermission,
+   setAndroidNotificationSettings,
+@@ -34,6 +36,7 @@ import {
+ 
+ const $ = (selector, root = document) => root.querySelector(selector);
+ const app = $("#app");
++installAndroidClickHapticFeedback();
+ document.documentElement.dataset.inputModality = "pointer";
+ let session = null, sidebar = null, selectedId = null, thread = null, historyCursor = null, historyLoading = false;
+ let pendingNotificationOpen = null;
+@@ -6286,7 +6289,7 @@ async function reorderQueuedMessages(threadId, expectedMessageIds, messageIds, f
+     }
+   }
+ }
+-function finishQueueDrag({ commit = false, render = true } = {}) {
++function finishQueueDrag({ commit = false, render = true, hapticEnd = false } = {}) {
+   const drag = queueDrag;
+   if (!drag) return;
+   queueDrag = null;
+@@ -6303,18 +6306,24 @@ function finishQueueDrag({ commit = false, render = true } = {}) {
+   if (root) delete root.dataset.queueSignature;
+   if (commit && drag.active && selectedId === drag.threadId
+       && !sameQueueOrder(drag.ids, drag.order) && queueReorderAvailable()) {
++    const hapticEndAllowed = sameQueueOrder((thread?.queuedMessages || []).map(message => message.id), drag.ids);
+     void reorderQueuedMessages(drag.threadId, drag.ids, drag.order);
++    if (hapticEnd && drag.userInitiated && hapticEndAllowed) performAndroidHapticFeedback("drag-end");
+   } else if (render) renderQueueArea();
+ }
+ function moveQueueDrag(drag) {
+   if (queueDrag !== drag || !drag.active) return;
++  const previousOrder = [...drag.queue.children].map(row => row.dataset.messageId);
+   const rows = [...drag.queue.children].filter(row => row !== drag.row);
+   const before = rows.find(row => {
+     const rect = row.getBoundingClientRect();
+     return drag.y < rect.top + rect.height / 2;
+   });
+   if (drag.row.nextElementSibling !== (before || null)) drag.queue.insertBefore(drag.row, before || null);
+-  drag.order = [...drag.queue.children].map(row => row.dataset.messageId);
++  const order = [...drag.queue.children].map(row => row.dataset.messageId);
++  drag.order = order;
++  if (drag.userInitiated && !sameQueueOrder(previousOrder, order))
++    performAndroidHapticFeedback("drag-tick");
+ }
+ function scrollQueueDrag(drag) {
+   if (queueDrag !== drag || !drag.active || drag.frame != null) return;
+@@ -6339,14 +6348,16 @@ function beginQueueDrag(event, handle, row, queue, messageId) {
+     threadId: selectedId, ids: thread.queuedMessages.map(message => message.id),
+     messageId, handle, row, queue, pointerId: event.pointerId,
+     x: event.clientX, y: event.clientY, startY: event.clientY,
+-    active: false, order: [], timer: null, frame: null
++    userInitiated: event.isTrusted === true, active: false, order: [], timer: null, frame: null
+   };
+   queueDrag = drag;
+   const activate = () => {
+     if (queueDrag !== drag || !handle.isConnected || !queueReorderAvailable()) { finishQueueDrag(); return; }
++    if (drag.active) return;
+     drag.active = true; drag.order = [...drag.ids];
+     row.classList.add("queued-dragging"); row.setAttribute("aria-grabbed", "true");
+     queue.classList.add("queue-reordering");
++    if (drag.userInitiated) performAndroidHapticFeedback("drag-start");
+   };
+   const touch = event.pointerType !== "mouse";
+   if (touch) drag.timer = setTimeout(activate, 240);
+@@ -6361,7 +6372,10 @@ function beginQueueDrag(event, handle, row, queue, messageId) {
+     move.preventDefault(); drag.y = move.clientY;
+     moveQueueDrag(drag); scrollQueueDrag(drag);
+   };
+-  drag.up = up => { if (up.pointerId === drag.pointerId) finishQueueDrag({ commit: true }); };
++  drag.up = up => {
++    if (up.pointerId === drag.pointerId)
++      finishQueueDrag({ commit: true, hapticEnd: up.isTrusted === true });
++  };
+   drag.cancel = cancel => {
+     if (cancel.pointerId !== drag.pointerId || cancel.type === "lostpointercapture" && cancel.target !== queue) return;
+     finishQueueDrag({ commit: cancel.type === "lostpointercapture" && cancel.buttons === 0 });
+@@ -6481,8 +6495,11 @@ function renderQueuedMessages(messages, previous = null) {
+       if (!["ArrowUp", "ArrowDown"].includes(event.key) || queueDrag || !queueReorderAvailable()) return;
+       event.preventDefault();
+       const ids = thread.queuedMessages.map(message => message.id);
+-      void reorderQueuedMessages(threadId, ids,
+-        moveQueueItem(ids, messageId, ids.indexOf(messageId) + (event.key === "ArrowUp" ? -1 : 1)), messageId);
++      const next = moveQueueItem(ids, messageId,
++        ids.indexOf(messageId) + (event.key === "ArrowUp" ? -1 : 1));
++      if (event.isTrusted === true && !sameQueueOrder(ids, next))
++        performAndroidHapticFeedback("drag-tick");
++      void reorderQueuedMessages(threadId, ids, next, messageId);
+     };
+     const attachmentSignature = JSON.stringify([message.remoteImages, message.context?.imageAttachments]);
+     const previousAttachment = previousAttachments.get(messageId);
+diff --git a/temp/android-haptics-20261018/platform.before.js b/assets/remote-access/platform.js
+index 8c3f85c2..c7fa70b1 100644
+--- a/temp/android-haptics-20261018/platform.before.js
++++ b/assets/remote-access/platform.js
+@@ -24,6 +24,40 @@ const notificationSettingsListeners = new Set();
+ let notificationBridge = null;
+ let notificationBridgeListenerInstalled = false;
+ let notificationRequestSequence = 0;
++const androidHapticTypes = Object.freeze({
++  click: "haptic-click",
++  "drag-start": "haptic-drag-start",
++  "drag-tick": "haptic-drag-tick",
++  "drag-end": "haptic-drag-end"
++});
++const androidClickableSelector = [
++  "button",
++  "a[href]",
++  "area[href]",
++  "input[type='button']",
++  "input[type='submit']",
++  "input[type='reset']",
++  "input[type='image']",
++  "input[type='file']",
++  "input[type='checkbox']",
++  "input[type='radio']",
++  "select",
++  "summary",
++  "[role~='button']",
++  "[role~='link']",
++  "[role~='checkbox']",
++  "[role~='radio']",
++  "[role~='switch']",
++  "[role~='menuitem']",
++  "[role~='menuitemcheckbox']",
++  "[role~='menuitemradio']",
++  "[role~='tab']",
++  "[role~='option']",
++  "[role~='treeitem']"
++].join(",");
++let lastAndroidHapticAt = -Infinity;
++let lastAndroidDragTickAt = -Infinity;
++let androidClickHapticFeedbackInstalled = false;
+ 
+ function isPlainObject(value) {
+   return value !== null && typeof value === "object" && !Array.isArray(value)
+@@ -180,6 +214,54 @@ export function isAndroidContainer() {
+   return typeof globalThis.CodexElvesAndroid?.postMessage === "function";
+ }
+ 
++export function performAndroidHapticFeedback(kind) {
++  if (typeof kind !== "string" || !Object.hasOwn(androidHapticTypes, kind)) return false;
++  const type = androidHapticTypes[kind];
++  try {
++    const bridge = globalThis.CodexElvesAndroid;
++    if (typeof bridge?.postMessage !== "function" || typeof document === "undefined"
++        || document.visibilityState !== "visible") return false;
++    const now = globalThis.performance.now();
++    if (!Number.isFinite(now) || now - lastAndroidHapticAt < 50
++        || kind === "drag-tick" && now - lastAndroidDragTickAt < 80) return false;
++    bridge.postMessage(JSON.stringify({ type }));
++    lastAndroidHapticAt = now;
++    if (kind === "drag-tick") lastAndroidDragTickAt = now;
++    return true;
++  } catch {
++    return false;
++  }
++}
++
++function onAndroidClickableClick(event) {
++  try {
++    if (event.isTrusted !== true || event.button !== 0 && event.detail !== 0) return;
++    const target = event.target?.nodeType === 1 ? event.target : event.target?.parentElement;
++    if (!target || typeof target.closest !== "function" || target.closest(".queued-drag-handle")) return;
++    const control = target.closest(androidClickableSelector);
++    if (!control || control.disabled === true || control.hasAttribute("disabled")
++        || control.matches(":disabled")) return;
++    for (let ancestor = control; ancestor; ancestor = ancestor.parentElement) {
++      if (ancestor.getAttribute("aria-disabled") === "true"
++          || ancestor.inert === true || ancestor.hasAttribute("inert")) return;
++    }
++    performAndroidHapticFeedback("click");
++  } catch {}
++}
++
++export function installAndroidClickHapticFeedback() {
++  if (androidClickHapticFeedbackInstalled || typeof document === "undefined"
++      || typeof document.addEventListener !== "function") return false;
++  try {
++    if (!isAndroidContainer()) return false;
++    document.addEventListener("click", onAndroidClickableClick, true);
++    androidClickHapticFeedbackInstalled = true;
++    return true;
++  } catch {
++    return false;
++  }
++}
++
+ export function postPlatformMessage(type) {
+   if (!messageTypes.has(type) || !isAndroidContainer()) return false;
+   try {
+diff --git a/temp/android-haptics-20261018/MainActivity.before.java b/apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/MainActivity.java
+index 5bf8e279..860067cf 100644
+--- a/temp/android-haptics-20261018/MainActivity.before.java
++++ b/apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/MainActivity.java
+@@ -77,6 +77,7 @@ public final class MainActivity extends Activity {
+     private final ExecutorService resources = Executors.newSingleThreadExecutor();
+     private final AtomicLong connectionGeneration = new AtomicLong();
+     private final AtomicLong updateCheckGeneration = new AtomicLong(-1L);
++    private final HapticFeedbackController haptics = new HapticFeedbackController();
+ 
+     private SessionStore sessionStore;
+     private ResourceStore resourceStore;
+@@ -164,7 +165,7 @@ public final class MainActivity extends Activity {
+     }
+ 
+     private View buildLoginView(String message) {
+-        LoginView login = new LoginView(this);
++        LoginView login = new LoginView(this, haptics);
+         login.setInitialValues(sessionStore.getOrigin(), message);
+         login.setOnSubmit(() -> authenticate(login));
+         return login;
+@@ -584,9 +585,12 @@ public final class MainActivity extends Activity {
+                 if (generation != connectionGeneration.get()
+                     || sourceView != webView
+                     || !isMainFrame
+-                    || !ServiceOrigin.matches(origin, sourceOrigin)
+-                    || sourceView.getUrl() == null
+-                    || !ServiceOrigin.matches(origin, Uri.parse(sourceView.getUrl()))) {
++                    || !ServiceOrigin.matches(origin, sourceOrigin)) {
++                    return;
++                }
++                String sourcePageUrl = sourceView.getUrl();
++                if (sourcePageUrl == null
++                    || !ServiceOrigin.matches(origin, Uri.parse(sourcePageUrl))) {
+                     return;
+                 }
+                 String data = message.getData();
+@@ -613,7 +617,14 @@ public final class MainActivity extends Activity {
+                         || !origin.equals(currentOrigin) || isFinishing() || isDestroyed()) {
+                         return;
+                     }
+-                    if (NotificationSettings.isRequestType(type)) {
++                    if (HapticFeedbackController.isRequestType(type)) {
++                        String activePageUrl = sourceView.getUrl();
++                        if (activePageUrl == null || !sourcePageUrl.equals(activePageUrl)
++                            || !ServiceOrigin.matches(origin, Uri.parse(activePageUrl))) {
++                            return;
++                        }
++                        haptics.perform(sourceView, type);
++                    } else if (NotificationSettings.isRequestType(type)) {
+                         notifications.handle(
+                             payload,
+                             () -> generation == connectionGeneration.get() && sourceView == webView
+@@ -824,6 +835,7 @@ public final class MainActivity extends Activity {
+     @Override
+     protected void onResume() {
+         super.onResume();
++        haptics.setForeground(true);
+         appUpdates.onResume();
+         notifications.onResume();
+         openPendingNotification();
+@@ -844,6 +856,7 @@ public final class MainActivity extends Activity {
+ 
+     @Override
+     protected void onPause() {
++        haptics.setForeground(false);
+         appUpdates.onPause();
+         notifications.onPause();
+         super.onPause();
+@@ -1174,6 +1187,7 @@ public final class MainActivity extends Activity {
+ 
+     @Override
+     protected void onDestroy() {
++        haptics.setForeground(false);
+         appUpdates.onDestroy();
+         notifications.onDestroy();
+         if (Build.VERSION.SDK_INT >= 33 && nativeBackCallback != null) {
+diff --git a/temp/android-haptics-20261018/LoginView.before.java b/apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/LoginView.java
+index 572ca1cd..c1f13d6e 100644
+--- a/temp/android-haptics-20261018/LoginView.before.java
++++ b/apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/LoginView.java
+@@ -26,7 +26,7 @@ final class LoginView extends ScrollView {
+     private boolean keyVisible;
+     private Runnable submit;
+ 
+-    public LoginView(Context context) {
++    public LoginView(Context context, HapticFeedbackController haptics) {
+         super(context);
+         setFillViewport(true);
+         setClipToPadding(false);
+@@ -57,8 +57,14 @@ final class LoginView extends ScrollView {
+         };
+         originInput.addTextChangedListener(inputChanges);
+         keyInput.addTextChangedListener(inputChanges);
+-        keyVisibility.setOnClickListener(ignored -> setKeyVisible(!keyVisible));
+-        connect.setOnClickListener(ignored -> submit());
++        keyVisibility.setOnClickListener(view -> {
++            haptics.perform(view, "haptic-click");
++            setKeyVisible(!keyVisible);
++        });
++        connect.setOnClickListener(view -> {
++            haptics.perform(view, "haptic-click");
++            submit();
++        });
+         keyInput.setOnEditorActionListener((view, actionId, event) -> {
+             boolean enterPressed = event != null
+                 && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+@@ -75,7 +81,8 @@ final class LoginView extends ScrollView {
+         View helpToggle = findViewById(R.id.login_help_toggle);
+         TextView helpBody = findViewById(R.id.login_help_body);
+         ImageView helpChevron = findViewById(R.id.login_help_chevron);
+-        helpToggle.setOnClickListener(ignored -> {
++        helpToggle.setOnClickListener(view -> {
++            haptics.perform(view, "haptic-click");
+             boolean expanded = helpBody.getVisibility() != View.VISIBLE;
+             helpBody.setVisibility(expanded ? View.VISIBLE : View.GONE);
+             helpChevron.setRotation(expanded ? 180 : 0);

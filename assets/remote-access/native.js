@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 42) return;
+  if (window.__codexElvesRemoteAccess?.version === 46) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -9,7 +9,14 @@
   let requestsSequence = 0;
   const epoch = crypto.randomUUID();
   const notifications = [];
+  let notificationEpoch = epoch;
+  let notificationManager = null;
+  let notificationSequence = 0;
+  const notificationEvents = [];
+  const pendingNotifications = new Map();
+  const completedNotificationTurns = new Set();
   const queuedReorders = new Set();
+  const queuedSendSubmissions = new Map();
   const asyncQuestionSignatures = new Map();
   const blockingRequestSnapshots = new Map();
   const observedRequestThreads = new Set();
@@ -79,6 +86,7 @@
     if (notifications.length > 2048) notifications.splice(0, notifications.length - 2048);
   };
   const emit = event => {
+    observeNotificationEvent(event);
     if (event.method === "serverRequest/resolved")
       event = { ...event, params: { ...event.params, requestsEpoch: epoch } };
     if (event.method === "thread/queue/changed") {
@@ -149,6 +157,16 @@
       }
     }
     if (!manager) throw failure(503, "未发现本机原生会话管理器，请检查 CodexElves 注入连接");
+    if (notificationManager !== manager) {
+      if (notificationManager) {
+        notificationEpoch = crypto.randomUUID();
+        notificationSequence = 0;
+        notificationEvents.length = 0;
+        pendingNotifications.clear();
+        completedNotificationTurns.clear();
+      }
+      notificationManager = manager;
+    }
     if (!unsubscribe.length) {
       unsubscribe.push(manager.addNotificationCallback(methods, emit));
       unsubscribe.push(manager.addApprovalRequestListener(syncRequestNotification));
@@ -156,6 +174,7 @@
       unsubscribe.push(manager.addUserInputRequestListener(syncRequestNotification));
       if (typeof manager.addConversationStateCallback === "function")
         unsubscribe.push(manager.addConversationStateCallback((id, conversation) => {
+          syncPendingNotifications(id, conversation);
           if (observedRequestThreads.has(id)) syncBlockingRequests(id, conversation);
           if (asyncQuestionSignatures.has(id)) syncAsyncQuestions(id, conversation);
           if (conversation && !isDeletedThread(id) && nativeCatalog.has(id)) {
@@ -165,6 +184,7 @@
             if (previous !== sidebarSignatures.get(id)) emit({ method: "remote/sidebarChanged" });
           }
         }));
+      refreshPendingNotifications();
     }
     return manager;
   }
@@ -202,6 +222,7 @@
       }
       const identity = { threadId,
         ...(["string", "number"].includes(typeof requestId) ? { requestId } : {}) };
+      syncPendingNotifications(threadId, sourceManager.getConversation(threadId));
       if (!syncBlockingRequests(threadId, sourceManager.getConversation(threadId), identity))
         emit({ method: "remote/requestsChanged", params: identity });
     });
@@ -213,6 +234,128 @@
   }
   const state = async key => await manager.storage.readGlobalState(key);
   const array = value => Array.isArray(value) ? value : [];
+  function notificationThread(id, conversation = manager.getConversation(id)) {
+    if (typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,120}$/.test(id) || isDeletedThread(id)) return null;
+    const current = manager.getThreadListSummary?.(id);
+    const sources = [conversation, current, nativeCatalog.get(id)].filter(Boolean);
+    if (!sources.length || sources.some(thread => thread.threadSource === "subagent"
+        || thread.source === "subagent" || thread.source?.subAgent || thread.source?.subagent)) return null;
+    const title = Array.from(String(current?.title || conversation?.title || conversation?.name || "新会话")
+      .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")).slice(0, 160).join("") || "新会话";
+    return { threadId: id, title };
+  }
+  function appendNotification(action, kind, thread, notificationId = null) {
+    const sequence = ++notificationSequence;
+    const id = `${notificationEpoch}:${sequence}`;
+    const event = { epoch: notificationEpoch, sequence, id, action,
+      notificationId: notificationId ?? id, kind, ...thread, createdAtMs: Date.now() };
+    notificationEvents.push(event);
+    if (notificationEvents.length > 256) notificationEvents.shift();
+    pushNotification({ method: "remote/notification", params: event });
+    return event;
+  }
+  function notificationMcpApproval(params = {}) {
+    const record = value => value && typeof value === "object" && !Array.isArray(value);
+    const metadata = params._meta;
+    if (params.mode !== "form" || !record(metadata)
+        || ["browser_auth", "browser_email_otp", "tool_suggestion"].includes(metadata.codex_approval_kind)) return false;
+    if (metadata.codex_approval_kind === "mcp_tool_call") return true;
+    const persist = metadata.persist === undefined ? []
+      : Array.isArray(metadata.persist) ? metadata.persist : [metadata.persist];
+    const validPersist = (metadata.persist === undefined || !Array.isArray(metadata.persist)
+      || metadata.persist.length >= 1 && metadata.persist.length <= 2)
+      && persist.every(value => ["session", "always"].includes(value));
+    return ["browser", "browser-use"].includes(params.serverName)
+      && record(params.requestedSchema?.properties) && Object.keys(params.requestedSchema.properties).length === 0
+      && metadata.persist !== undefined && validPersist
+      && typeof metadata.origin === "string" && !!metadata.origin.trim();
+  }
+  function notificationRequestKind(request) {
+    const method = request?.method;
+    if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval",
+      "item/permissions/requestApproval", "execCommandApproval", "applyPatchApproval"].includes(method)) return "approval";
+    if (method === "mcpServer/elicitation/request") return notificationMcpApproval(request.params) ? "approval" : "question";
+    if (["item/tool/requestUserInput", "remote/requestUserInputAsync"].includes(method)) return "question";
+    return null;
+  }
+  function syncPendingNotifications(id, conversation = manager.getConversation(id)) {
+    const thread = notificationThread(id, conversation);
+    const desired = new Map();
+    if (thread && conversation) {
+      const asyncRequests = nativeConversationTurns(conversation).flatMap(turn => {
+        const turnId = nativeTurnId(turn);
+        if (!turnId || nativeTurnStatus(turn) !== "inProgress") return [];
+        const answered = acceptedAsyncQuestionReplies(turn);
+        return array(turn.items).flatMap(item => item?.type === "agentMessage"
+          && array(item.questions).some((question, index) => typeof question?.title === "string"
+            && !answered.has(JSON.stringify(["request_user_input_async", item.id, index])))
+          ? [{ id: JSON.stringify(["async-question", turnId, item.id]),
+            method: "remote/requestUserInputAsync", params: { turnId } }] : []);
+      });
+      const requests = [...array(conversation.requests), ...asyncRequests];
+      for (const request of requests) {
+        const kind = notificationRequestKind(request);
+        if (!kind || !(typeof request.id === "string"
+            || typeof request.id === "number" && Number.isSafeInteger(request.id))) continue;
+        const key = JSON.stringify([id, typeof request.id, request.id, request.method,
+          request.params?.turnId ?? null, request.params?.itemId ?? null]);
+        desired.set(key, kind);
+      }
+    }
+    for (const [key, previous] of pendingNotifications) {
+      if (previous.threadId !== id || desired.has(key)) continue;
+      pendingNotifications.delete(key);
+      appendNotification("dismiss", previous.kind,
+        { threadId: previous.threadId, title: previous.title }, previous.notificationId);
+    }
+    for (const [key, kind] of desired)
+      if (!pendingNotifications.has(key)) pendingNotifications.set(key, appendNotification("notify", kind, thread));
+  }
+  function refreshPendingNotifications() {
+    if (typeof manager.getCachedConversations !== "function") return;
+    const loaded = new Set();
+    for (const entry of manager.getCachedConversations() || []) {
+      const conversation = Array.isArray(entry) && entry.length === 2 ? entry[1] : entry;
+      const id = conversation?.conversationId ?? conversation?.id;
+      if (typeof id !== "string") continue;
+      loaded.add(id);
+      syncPendingNotifications(id, conversation);
+    }
+    for (const id of new Set([...pendingNotifications.values()].map(event => event.threadId)))
+      if (!loaded.has(id)) syncPendingNotifications(id, null);
+  }
+  function observeNotificationEvent(event) {
+    if (event.method === "thread/deleted") {
+      syncPendingNotifications(event.params?.threadId, null);
+      return;
+    }
+    if (event.method !== "turn/completed") return;
+    const { threadId, turn, turnId = turn?.id ?? turn?.turnId } = event.params || {};
+    const status = typeof turn?.status === "string" ? turn.status : turn?.status?.type;
+    const kind = status === "completed" ? "completed" : status === "failed" ? "failed" : null;
+    const thread = notificationThread(threadId);
+    if (!kind || !thread || typeof turnId !== "string" || !turnId) return;
+    const key = JSON.stringify([threadId, turnId]);
+    if (completedNotificationTurns.has(key)) return;
+    completedNotificationTurns.add(key);
+    if (completedNotificationTurns.size > 256)
+      completedNotificationTurns.delete(completedNotificationTurns.values().next().value);
+    appendNotification("notify", kind, thread);
+  }
+  function notificationSnapshot(payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)
+        || Object.keys(payload).some(key => !["epoch", "cursor"].includes(key))
+        || Object.keys(payload).length !== 0 && (typeof payload.epoch !== "string"
+          || !/^[a-zA-Z0-9_-]{1,120}$/.test(payload.epoch)
+          || !Number.isSafeInteger(payload.cursor) || payload.cursor < 0))
+      throw failure(400, "通知游标无效");
+    refreshPendingNotifications();
+    const reset = payload.epoch !== notificationEpoch || payload.cursor > notificationSequence;
+    const truncated = !reset && payload.cursor < (notificationEvents[0]?.sequence ?? 1) - 1;
+    return { ok: true, schemaVersion: 1, notificationEpoch, notificationCursor: notificationSequence,
+      reset, truncated, pending: [...pendingNotifications.values()],
+      events: reset ? [] : notificationEvents.filter(event => event.sequence > payload.cursor) };
+  }
   const HISTORY_TURN_PAGE_LIMIT = 3;
   const HISTORY_ITEM_PAGE_LIMIT = 40;
   const HISTORY_TURN_READ_CONCURRENCY = 2;
@@ -276,6 +419,42 @@
       };
     } catch {
       return { defaultModel: null, defaultReasoningEffort: null };
+    }
+  }
+  function threadModelSettings(conversation, nativeThread = null) {
+    const collaboration = conversation?.latestCollaborationMode?.settings
+      ?? conversation?.latestThreadSettings?.collaborationMode?.settings;
+    const effort = Object.hasOwn(nativeThread ?? {}, "reasoningEffort") ? nativeThread.reasoningEffort
+      : Object.hasOwn(nativeThread ?? {}, "reasoning_effort") ? nativeThread.reasoning_effort
+      : Object.hasOwn(collaboration ?? {}, "reasoning_effort") ? collaboration.reasoning_effort
+      : Object.hasOwn(conversation?.latestThreadSettings ?? {}, "effort") ? conversation.latestThreadSettings.effort
+      : conversation?.latestReasoningEffort;
+    return {
+      model: nativeThread?.model ?? collaboration?.model
+        ?? conversation?.latestThreadSettings?.model ?? conversation?.latestModel ?? null,
+      effort: effort ?? null
+    };
+  }
+  async function requestedThreadModelSettings(payload, nativeThread, conversation) {
+    if (payload.model == null && payload.reasoningEffort == null) return undefined;
+    const current = threadModelSettings(conversation, nativeThread);
+    const model = payload.model == null ? current.model : String(payload.model);
+    if (typeof model !== "string" || !model.trim()) throw failure(400, "请求模型不能为空");
+    const effort = payload.reasoningEffort == null
+      ? payload.model != null && model !== current.model ? null : current.effort
+      : String(payload.reasoningEffort);
+    await validateReasoningEffort(model, effort);
+    return { model, effort };
+  }
+  async function applyThreadModelSettings(id, settings) {
+    if (!settings) return;
+    if (typeof manager.updateThreadSettingsForNextTurn !== "function")
+      throw failure(503, "当前 Codex 版本不支持设置下一轮模型");
+    try {
+      const applied = await manager.updateThreadSettingsForNextTurn(id, settings);
+      if (applied === false) throw failure(409, "模型或思考深度未能应用，请重新核对后发送");
+    } catch (error) {
+      throw failure(error.code || 503, error.message || "模型或思考深度切换失败，请稍后重试");
     }
   }
   const timestamp = value => typeof value === "number" ? (value < 100_000_000_000 ? value * 1000 : value) : 0;
@@ -796,8 +975,8 @@
   async function goalThreadSettings(payload, loaded = null) {
     if (payload.model == null && payload.reasoningEffort == null) return undefined;
     const conversation = loaded ? manager.getConversation(loaded.id) : null;
-    const currentModel = conversation?.latestCollaborationMode?.settings?.model
-      || conversation?.latestModel || loaded?.model;
+    const current = threadModelSettings(conversation, loaded);
+    const currentModel = current.model;
     const model = payload.model ?? currentModel ?? (await defaultModelSettings()).defaultModel;
     if (typeof model !== "string" || !model.trim())
       throw failure(409, "无法确定目标使用的模型，请先选择模型");
@@ -805,7 +984,7 @@
     if (!entry) throw failure(409, "当前模型不在原生模型目录中，请重新选择");
     const effort = payload.reasoningEffort === undefined
       ? payload.model != null && payload.model !== currentModel ? null
-        : conversation?.latestReasoningEffort ?? loaded?.reasoningEffort ?? null
+        : current.effort
       : payload.reasoningEffort;
     if (effort != null
         && !array(entry.supportedReasoningEfforts).some(item => item.reasoningEffort === effort))
@@ -875,9 +1054,11 @@
       assertRequestCurrent();
       await ensureGoalAbsent(id, sourceManager);
       assertRequestCurrent();
+      await applyThreadModelSettings(id, threadSettings);
+      assertRequestCurrent();
       submission.phase = "goalSet"; submitted = true;
       const goal = runtimeGoal(await sourceManager.setThreadGoal(id, {
-        objective: materialized.objective, ...(threadSettings ? { threadSettings } : {})
+        objective: materialized.objective
       }));
       if (!goal || goal.objective !== materialized.objective || goal.status !== "active")
         throw new Error("原生目标创建结果未确认");
@@ -1125,29 +1306,13 @@
     if (typeof payload.prompt !== "string" || !payload.prompt.trim())
       throw failure(400, "消息不能为空");
     const conversation = manager.getConversation(id);
-    const model = payload.model == null ? undefined : String(payload.model);
-    const reasoningEffort = payload.reasoningEffort == null ? undefined : String(payload.reasoningEffort);
-    if (model !== undefined || reasoningEffort !== undefined) {
-      const currentModel = conversation?.latestCollaborationMode?.settings?.model
-        || conversation?.latestModel || loaded.model;
-      const selectedModel = model ?? currentModel;
-      if (typeof selectedModel !== "string" || !selectedModel.trim())
-        throw failure(400, "请求模型不能为空");
+    const threadSettings = await requestedThreadModelSettings(payload, loaded, conversation);
+    if (threadSettings) {
       try {
-        await validateReasoningEffort(selectedModel, reasoningEffort);
-        if (typeof manager.updateThreadSettingsForNextTurn !== "function")
-          throw failure(503, "当前 Codex 版本不支持编辑消息时切换模型");
         const current = editableMessageState(id);
         if (!current.metadata || current.metadata.turnId !== payload.turnId || current.metadata.messageId !== payload.messageId)
           throw failure(409, current.reason || "消息已变化，请刷新会话后重试");
-        const applied = await manager.updateThreadSettingsForNextTurn(id, {
-          model: selectedModel,
-          effort: reasoningEffort === undefined
-            ? model !== undefined && model !== currentModel ? null
-              : conversation?.latestReasoningEffort ?? loaded.reasoningEffort ?? null
-            : reasoningEffort
-        });
-        if (applied === false) throw failure(409, "模型或思考深度未能应用，请重新核对后发送");
+        await applyThreadModelSettings(id, threadSettings);
         const updated = editableMessageState(id);
         if (!updated.metadata || updated.metadata.turnId !== payload.turnId || updated.metadata.messageId !== payload.messageId)
           throw failure(409, updated.reason || "消息已变化，请刷新会话后重试");
@@ -1533,17 +1698,13 @@
     recoverAsyncQuestionDesktop(id, conversation);
     const queued = manager.getTurnCoordinator?.()?.readMessages?.(id)
       ?? manager.storage.readQueuedFollowUps?.()?.value?.[id];
-    const collaborationSettings = conversation?.latestCollaborationMode?.settings
-      ?? conversation?.latestThreadSettings?.collaborationMode?.settings;
+    const modelSettings = threadModelSettings(conversation, nativeThread);
     const asyncQuestions = asyncQuestionRequests(id, conversation);
     asyncQuestionSignatures.set(id, JSON.stringify(asyncQuestions));
     return {
       id,
-      model: nativeThread?.model ?? collaborationSettings?.model
-        ?? conversation?.latestThreadSettings?.model ?? conversation?.latestModel ?? null,
-      reasoningEffort: nativeThread?.reasoningEffort ?? nativeThread?.reasoning_effort
-        ?? collaborationSettings?.reasoning_effort ?? conversation?.latestThreadSettings?.effort
-        ?? conversation?.latestReasoningEffort ?? null,
+      model: modelSettings.model,
+      reasoningEffort: modelSettings.effort,
       serviceTier: conversation?.latestServiceTier ?? null,
       tokenUsage: conversation?.latestTokenUsageInfo ?? null,
       goal: runtimeGoal(conversation?.threadGoal),
@@ -1606,6 +1767,14 @@
     return null;
   }
   async function queueSendState(payload) {
+    const result = await readQueuedSendState(payload);
+    if (result.confirmed) {
+      const key = JSON.stringify([result.threadId, result.clientUserMessageId]);
+      if (queuedSendSubmissions.get(key)?.unconfirmed === true) queuedSendSubmissions.delete(key);
+    }
+    return result;
+  }
+  async function readQueuedSendState(payload) {
     const threadId = requiredId(payload.threadId), clientUserMessageId = requiredId(payload.clientUserMessageId);
     const accepted = acceptedQueuedSend(threadId, clientUserMessageId);
     if (accepted) return accepted;
@@ -1613,7 +1782,8 @@
     const queued = coordinator?.readMessages?.(threadId);
     const message = array(queued?.messages || queued).find(message =>
       (message.clientUserMessageId ?? message.submissionOptions?.clientUserMessageId
-        ?? (!message.serverQueuedMessageId ? message.id : null)) === clientUserMessageId);
+        ?? (!message.serverQueuedMessageId ? message.id : null)) === clientUserMessageId
+      && !["pending", "sending", "outcome-unknown"].includes(message.submission?.status));
     if (message) return {
       ok: true, confirmed: true, deliveryState: "queued", threadId, clientUserMessageId,
       messageId: message.id, ...queueSnapshotFields(threadId, queued)
@@ -2690,21 +2860,82 @@
     };
   }
   const remoteImageInputs = images => images.map(image => ({ type: "image", url: image.src }));
-  async function queueMessage(payload = {}) {
+  function hasNativeLocalQueuedMessages(coordinator, serverQueue, threadId) {
+    const serverIds = new Set(array(serverQueue?.read?.(threadId)).map(message => message.id));
+    return array(coordinator.readMessages(threadId)).some(message => !serverIds.has(message.id));
+  }
+  function validateCompactionQueueSendPayload(action, payload) {
+    if (!Object.prototype.hasOwnProperty.call(payload, "queueOnly")) return;
+    if (typeof payload.queueOnly !== "boolean")
+      throw failure(400, "排队发送参数无效");
+    if (action !== "send" || payload.goalMode === true)
+      throw failure(400, "排队发送参数仅适用于普通消息");
+  }
+  async function queueMessage(payload = {}, allowImmediate = false) {
+    try {
+      validateCompactionQueueSendPayload("send", payload);
+      if (payload.clientUserMessageId == null) return await submitQueuedMessage(payload, allowImmediate);
+      const key = JSON.stringify([requiredId(payload.threadId), requiredId(payload.clientUserMessageId)]);
+      const identity = JSON.parse(JSON.stringify({
+        prompt: typeof payload.prompt === "string" ? payload.prompt.trim() : "",
+        images: payload.images ?? [], skills: payload.skills ?? [],
+        model: payload.model == null ? null : String(payload.model),
+        reasoningEffort: payload.reasoningEffort == null ? null : String(payload.reasoningEffort)
+      }));
+      const current = queuedSendSubmissions.get(key);
+      if (current) {
+        if (!sameJsonValue(current.identity, identity))
+          throw failure(409, "同一消息 ID 的排队内容或设置已变化，请检查原请求");
+        if (current.unconfirmed) {
+          try {
+            messageActionManager();
+            const recovered = await queueSendState({
+              threadId: payload.threadId, clientUserMessageId: payload.clientUserMessageId
+            });
+            if (recovered.confirmed) {
+              if (queuedSendSubmissions.get(key) === current) queuedSendSubmissions.delete(key);
+              return recovered;
+            }
+          } catch {}
+        }
+        return await current.promise;
+      }
+      const entry = { identity, promise: null, unconfirmed: false };
+      queuedSendSubmissions.set(key, entry);
+      entry.promise = Promise.resolve().then(() => submitQueuedMessage({
+        ...payload, images: identity.images, skills: identity.skills
+      }, allowImmediate));
+      try {
+        const result = await entry.promise;
+        // 未知回执只允许查询原生结果；即使暂时读不到消息，也不能重放 add。
+        entry.unconfirmed = result?.outcomeUnknown === true;
+        return result;
+      } finally {
+        if (!entry.unconfirmed && queuedSendSubmissions.get(key) === entry) queuedSendSubmissions.delete(key);
+      }
+    } catch (error) {
+      return { ok: false, code: error.code || 503, message: error.message || "加入原生队列失败" };
+    }
+  }
+  async function submitQueuedMessage(payload = {}, allowImmediate = false) {
     let threadId = null;
     let clientUserMessageId = null;
     let queueAddStarted = false;
     let localQueueStarted = false;
     let queuedSubmission = null;
     try {
-      messageActionManager();
+      validateCompactionQueueSendPayload("send", payload);
+      const sourceManager = messageActionManager();
       threadId = requiredId(payload.threadId);
+      const assertCurrent = () => {
+        if (manager !== sourceManager || sourceManager.disposed || isDeletedThread(threadId))
+          throw failure(409, "会话连接已变化或会话已删除，请重新核对后发送");
+      };
       const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
       const imageAttachments = remoteImageAttachments(payload);
       if (!prompt && !imageAttachments.length) throw failure(400, "消息不能为空");
       const thread = await readThread(threadId);
-      if (runtimeCompaction(threadId).state !== "idle")
-        throw failure(409, "上下文压缩完成前不能加入队列");
+      assertCurrent();
       if (typeof manager.getTurnCoordinator !== "function"
           || typeof manager.requestClient?.sendRequest !== "function")
         throw failure(503, "当前 Codex 版本的原生队列服务不可用");
@@ -2713,6 +2944,8 @@
       if (typeof coordinator?.execution?.prepare !== "function"
           || typeof coordinator?.readMessages !== "function")
         throw failure(503, "当前 Codex 版本不支持原生队列发送");
+      await loadNativeQueue(coordinator, threadId);
+      assertCurrent();
       const cwd = manager.getConversationCwd(threadId) || thread.cwd || "/";
       const message = {
         id: payload.clientUserMessageId == null ? crypto.randomUUID() : requiredId(payload.clientUserMessageId),
@@ -2723,42 +2956,42 @@
       };
       clientUserMessageId = message.id;
       message.clientUserMessageId = clientUserMessageId;
-      const useServerQueue = typeof serverQueue?.isEnabled === "function"
+      if (payload.clientUserMessageId != null) {
+        const previous = await queueSendState({ threadId, clientUserMessageId });
+        assertCurrent();
+        if (previous.confirmed) return previous;
+        const unresolved = array(coordinator.readMessages(threadId)).some(queued =>
+          (queued.clientUserMessageId ?? queued.id) === clientUserMessageId
+          && ["pending", "sending", "outcome-unknown"].includes(queued.submission?.status));
+        if (unresolved) return {
+          ok: false, outcomeUnknown: true, code: 503, threadId, clientUserMessageId,
+          message: "原生队列加入结果未确认，请检查会话，不要重复操作"
+        };
+      }
+      let useServerQueue = !allowImmediate && typeof serverQueue?.isEnabled === "function"
         && await serverQueue.isEnabled(threadId)
+        && typeof serverQueue.read === "function"
+        && !hasNativeLocalQueuedMessages(coordinator, serverQueue, threadId)
         && typeof serverQueue.canEnqueue === "function" && await serverQueue.canEnqueue(threadId, message);
       if (!useServerQueue && (typeof coordinator.sendMessage !== "function" || typeof coordinator.loadMessages !== "function"))
         throw failure(503, "当前 Codex 版本不支持原生本地消息队列");
       const inputItems = await skillInputs({ ...payload, threadId });
-      const conversation = manager.getConversation(threadId);
-      const model = payload.model == null ? undefined : String(payload.model);
-      const reasoningEffort = payload.reasoningEffort == null ? undefined : String(payload.reasoningEffort);
-      const selectedModel = model === undefined
-        ? thread.model ?? conversation?.latestCollaborationMode?.settings?.model ?? conversation?.latestModel
-        : model;
-      if (model !== undefined && !model.trim())
-        throw failure(400, "请求模型不能为空");
-      await validateReasoningEffort(selectedModel, reasoningEffort);
-      const resumed = await manager.resumeConversation({
+      const conversation = sourceManager.getConversation(threadId);
+      const threadSettings = await requestedThreadModelSettings(payload, thread, conversation);
+      assertCurrent();
+      const resumed = await sourceManager.resumeConversation({
         conversationId: threadId,
-        model: model ?? null,
-        reasoningEffort: reasoningEffort ?? null,
+        model: threadSettings?.model ?? null,
+        reasoningEffort: threadSettings?.effort ?? null,
         workspaceRoots: [cwd],
         collaborationMode: conversation?.latestCollaborationMode ?? null
       });
+      assertCurrent();
       if (resumed?.status === "not-ready") throw failure(409, "会话暂不可用，请稍后重试");
-      if (model !== undefined || reasoningEffort !== undefined) {
-        const current = manager.getConversation(threadId);
-        const selected = model ?? current?.latestModel;
-        if (typeof selected !== "string" || !selected.trim())
-          throw failure(409, "无法为此会话设置思考深度");
-        if (typeof manager.updateThreadSettingsForNextTurn !== "function")
-          throw failure(503, "当前 Codex 版本不支持设置下一轮模型");
-        await manager.updateThreadSettingsForNextTurn(threadId, {
-          model: selected,
-          effort: reasoningEffort === undefined ? current?.latestReasoningEffort ?? null : reasoningEffort
-        });
-      }
+      await applyThreadModelSettings(threadId, threadSettings);
+      assertCurrent();
       const prepared = await coordinator.execution.prepare(threadId, message, "start");
+      assertCurrent();
       if (prepared?.status === "paused")
         throw failure(409, prepared.reason || "原生队列消息暂时不可用");
       const start = prepared?.submission?.start;
@@ -2770,7 +3003,11 @@
           || !Array.isArray(preparedInput))
         throw failure(503, "原生队列消息准备失败");
       const input = [...preparedInput, ...inputItems];
+      // server queue 展示和执行均先于 local queue；已有本地消息时交给原生 coordinator 保序。
+      useServerQueue &&= !hasNativeLocalQueuedMessages(coordinator, serverQueue, threadId);
       if (!useServerQueue) {
+        if (typeof coordinator.sendMessage !== "function" || typeof coordinator.loadMessages !== "function")
+          throw failure(503, "当前 Codex 版本不支持原生本地消息队列");
         const request = {
           conversationId: threadId, message, queueModeOverride: "queue", acceptLocally: true,
           // 本地队列重载会重新准备消息，额外输入必须随原生重放上下文保存。
@@ -2779,36 +3016,63 @@
             preserveSerializedContext: false
           }
         };
-        if (typeof coordinator.submission?.getQueueMode === "function"
-            && await coordinator.submission.getQueueMode(request) === "send-only")
-          throw failure(409, "此类会话不支持排队发送，请等待当前回复完成后重试");
+        const sendOnly = typeof coordinator.submission?.getQueueMode === "function"
+          && await coordinator.submission.getQueueMode(request) === "send-only";
+        assertCurrent();
+        const assertAdmission = () => {
+          assertCurrent();
+          const conversation = sourceManager.getConversation(threadId);
+          if (!conversation)
+            throw failure(409, "会话状态已变化，暂不能提交排队消息");
+          if (sendOnly) {
+            const status = sourceManager.getThreadRuntimeStatusEvidence?.(threadId)
+              || conversation.threadRuntimeStatus || thread.status;
+            const runtime = status?.status ?? status;
+            const statusType = typeof runtime === "string" ? runtime : runtime?.type;
+            const queued = coordinator.readMessages(threadId);
+            if (runtimeCompaction(threadId, conversation).state !== "idle"
+                || ["active", "inProgress", "running", "pending"].includes(statusType)
+                || nativeConversationTurns(conversation).some(turn => nativeTurnStatus(turn) === "inProgress")
+                || array(queued?.messages || queued).length)
+              throw failure(409, "此类会话只支持空闲时直接发送，请等待当前回复或压缩完成后重试");
+          }
+        };
+        if (sendOnly) {
+          if (!allowImmediate)
+            throw failure(409, "此类会话不支持排队发送，请等待当前回复完成后重试");
+          assertAdmission();
+          request.acceptLocally = false;
+        }
         queueAddStarted = true;
-        localQueueStarted = true;
+        localQueueStarted = request.acceptLocally;
+        // send-only 不经过本地接受阶段，使用原生提交前的请求校验位置保护压缩交界。
         const result = await coordinator.sendMessage(request, async (request, phase) => {
+          assertCurrent();
           if (request.conversationId !== threadId || request.message?.id !== clientUserMessageId)
             throw failure(409, "原生队列消息身份已变化，请刷新会话");
           const current = await coordinator.execution.prepare(threadId, request.message, phase);
+          assertCurrent();
           if (current?.status === "paused") throw failure(409, current.reason || "原生队列消息暂时不可用");
           if (current?.status !== "ready" || current.submission?.conversationId !== threadId)
             throw failure(503, "原生队列消息准备失败");
           return current.submission;
-        }, undefined, undefined, () => {
-          if (manager.disposed || !manager.getConversation(threadId)
-              || runtimeCompaction(threadId).state !== "idle")
-            throw failure(409, "会话状态已变化，暂不能提交排队消息");
-        });
+        }, undefined, sendOnly ? assertAdmission : undefined, assertAdmission);
         if (!["queued", "sent"].includes(result?.status)
             || typeof result.messageId !== "string"
             || result.messageId !== clientUserMessageId && result.serverAccepted !== true)
           throw new Error("原生本地队列未确认消息身份");
-        if (result.status === "sent") return { ok: true, threadId, result };
-        queuedSubmission = { id: result.messageId, clientUserMessageId };
+        if (result.status === "sent") return {
+          ok: true, threadId, messageId: result.messageId, clientUserMessageId, result
+        };
+        if (result.serverAccepted === true)
+          queuedSubmission = { id: result.messageId, clientUserMessageId };
         await loadNativeQueue(coordinator, threadId);
-        return { ok: true, threadId, messageId: result.messageId, clientUserMessageId,
-          ...queueSnapshotFields(threadId, coordinator.readMessages(threadId)) };
+        const confirmed = await queueSendState({ threadId, clientUserMessageId });
+        if (confirmed.confirmed) return confirmed;
+        throw new Error("原生本地队列尚未确认消息已排队或接受");
       }
       queueAddStarted = true;
-      const result = await manager.requestClient.sendRequest("thread/queue/add", {
+      const result = await sourceManager.requestClient.sendRequest("thread/queue/add", {
         threadId,
         input,
         clientUserMessageId
@@ -2936,6 +3200,7 @@
   }
   async function call(action, payload = {}) {
     try {
+      validateCompactionQueueSendPayload(action, payload);
       if (action === "dispose") { window.__codexElvesRemoteAccess.dispose(); return { ok: true }; }
       if (["send", "create", "setGoal"].includes(action)) validateGoalComposerPayload(action, payload);
       if (manager?.disposed) {
@@ -2957,6 +3222,7 @@
           return await runtime[method](payload);
         }
         case "events": {
+          refreshPendingNotifications();
           const reset = payload.epoch !== epoch || payload.cursor < (notifications[0]?.sequence || 1) - 1;
           return { ok: true, epoch, cursor: eventSequence, reset,
             events: notifications.filter(event => event.sequence > (payload.cursor || 0)).flatMap(({ event }) => {
@@ -2969,6 +3235,7 @@
               return [{ method: "item/started", params: { threadId, turnId, item } }, event];
             }) };
         }
+        case "notifications": return notificationSnapshot(payload);
         case "sidebar": return await sidebar(payload);
         case "queue": return await queueSnapshot(payload.threadId);
         case "queueEdit": return await queueEditState(payload);
@@ -3024,26 +3291,13 @@
           const runtime = status?.status ?? status;
           const statusType = typeof runtime === "string" ? runtime : runtime?.type;
           const queued = manager.getTurnCoordinator?.()?.readMessages?.(id);
-          if (["active", "inProgress", "running", "pending"].includes(statusType)
+          if (payload.queueOnly === true || runtimeCompaction(id, conversation).state !== "idle"
+              || ["active", "inProgress", "running", "pending"].includes(statusType)
               || nativeConversationTurns(conversation).some(turn => nativeTurnStatus(turn) === "inProgress")
               || array(queued?.messages || queued).length)
             return await queueMessage({ ...payload, threadId: id });
-          const cwd = manager.getConversationCwd(id) || loaded.cwd || "/";
-          const options = {
-            prompt,
-            inputItems: await skillInputs(payload),
-            ...(imageAttachments.length
-              ? { attachmentContext: remoteAttachmentContext(payload.prompt, cwd, imageAttachments) }
-              : {})
-          };
-          const selectedModel = payload.model || loaded.model
-            || conversation?.latestCollaborationMode?.settings?.model || conversation?.latestModel;
-          await validateReasoningEffort(selectedModel, payload.reasoningEffort);
-          if (payload.model != null) options.model = String(payload.model);
-          if (payload.reasoningEffort != null) options.reasoningEffort = String(payload.reasoningEffort);
-          const result = await manager.sendFollowUpMessage(id, options);
-          if (result?.status === "outcome-unknown") return { ok: false, outcomeUnknown: true, threadId: id, message: "原生客户端未确认送达，请查看会话，不要重复发送" };
-          return { ok: true, threadId: id, result: result ?? null };
+          // 普通空闲发送也经过同一准备和身份保护；由原生在异步准备后决定立即发送或入队。
+          return await queueMessage({ ...payload, threadId: id }, true);
         }
         case "create": {
           let startConversationSubmitted = false;
@@ -3269,7 +3523,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 42, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
+    version: 46, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
     dispose() {
       for (const dispose of unsubscribe) { try { dispose?.(); } catch {} }
       unsubscribe = [];

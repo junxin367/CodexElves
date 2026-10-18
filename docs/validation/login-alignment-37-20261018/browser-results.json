@@ -1,0 +1,255 @@
+{
+  "status": "PASS",
+  "scope": "Chrome扩展加载完整生产网页，身份与连接接口使用本机替身；字体13及20px，未进行真实登录或原生Android软键盘验收",
+  "layoutContract": "保留最小边距和安全区后，将整块表单上下可用空白按3:7分配；空间不足时加权空白归零并允许自然滚动",
+  "checks": {
+    "brandLeftAligned": true,
+    "availableWhitespaceRatio30To70": true,
+    "contentMovesUpOnMobile": true,
+    "fullTitleVisible": true,
+    "largeFontNoHorizontalOverflow": true,
+    "shortViewportFooterReachable": true,
+    "recoveryPageConsistent": true
+  },
+  "samples": [
+    {
+      "blankAbove": 191.859375,
+      "blankBelow": 191.84375,
+      "brandLeftDelta": 97.03125,
+      "documentHeight": 844,
+      "font": "13px",
+      "headerHeight": 26.84375,
+      "label": "before-390-font13",
+      "overflowX": false,
+      "page": {
+        "bottomPadding": 24,
+        "height": 844,
+        "topPadding": 24
+      },
+      "panel": {
+        "bottom": 628.15625,
+        "height": 412.296875,
+        "width": 354,
+        "x": 18,
+        "y": 215.859375
+      },
+      "scrollY": 0,
+      "title": "CodexElves",
+      "upperFraction": 0.5000203607932565,
+      "viewport": {
+        "height": 844,
+        "width": 390
+      }
+    },
+    {
+      "blankAbove": 115.109375,
+      "blankBelow": 268.59375,
+      "brandLeftDelta": 0,
+      "documentHeight": 844,
+      "font": "13px",
+      "headerHeight": 26.84375,
+      "label": "after-390-font13",
+      "overflowX": false,
+      "page": {
+        "bottomPadding": 24,
+        "height": 844,
+        "topPadding": 24
+      },
+      "panel": {
+        "bottom": 551.40625,
+        "height": 412.296875,
+        "width": 354,
+        "x": 18,
+        "y": 139.109375
+      },
+      "scrollY": 0,
+      "title": "CodexElves",
+      "upperFraction": 0.2999959278413487,
+      "viewport": {
+        "height": 844,
+        "width": 390
+      }
+    },
+    {
+      "blankAbove": 25.59375,
+      "blankBelow": 59.703125,
+      "brandLeftDelta": 0,
+      "documentHeight": 640,
+      "font": "20px",
+      "headerHeight": 41.296875,
+      "label": "after-320-font20",
+      "overflowX": false,
+      "page": {
+        "bottomPadding": 24,
+        "height": 640,
+        "topPadding": 24
+      },
+      "panel": {
+        "bottom": 556.296875,
+        "height": 506.703125,
+        "width": 284,
+        "x": 18,
+        "y": 49.59375
+      },
+      "scrollY": 0,
+      "title": "CodexElves",
+      "upperFraction": 0.30005495511998537,
+      "viewport": {
+        "height": 640,
+        "width": 320
+      }
+    },
+    {
+      "blankAbove": 0,
+      "blankBelow": 0,
+      "brandLeftDelta": 0,
+      "documentHeight": 676,
+      "font": "20px",
+      "headerHeight": 41.296875,
+      "label": "after-320-font20-help-open",
+      "overflowX": false,
+      "page": {
+        "bottomPadding": 24,
+        "height": 675.578125,
+        "topPadding": 24
+      },
+      "panel": {
+        "bottom": 651.578125,
+        "height": 627.578125,
+        "width": 269,
+        "x": 18,
+        "y": 24
+      },
+      "scrollY": 0,
+      "title": "CodexElves",
+      "upperFraction": null,
+      "viewport": {
+        "height": 640,
+        "width": 320
+      }
+    },
+    {
+      "blankAbove": 0,
+      "blankBelow": 0,
+      "brandLeftDelta": 0,
+      "documentHeight": 676,
+      "font": "20px",
+      "headerHeight": 41.296875,
+      "label": "after-320x360-font20-help-open",
+      "overflowX": false,
+      "page": {
+        "bottomPadding": 24,
+        "height": 675.578125,
+        "topPadding": 24
+      },
+      "panel": {
+        "bottom": 651.578125,
+        "height": 627.578125,
+        "width": 269,
+        "x": 18,
+        "y": 24
+      },
+      "scrollY": 0,
+      "title": "CodexElves",
+      "upperFraction": null,
+      "viewport": {
+        "height": 360,
+        "width": 320
+      }
+    },
+    {
+      "blankAbove": 0,
+      "blankBelow": 0,
+      "brandLeftDelta": 0,
+      "documentHeight": 676,
+      "font": "20px",
+      "headerHeight": 41.296875,
+      "label": "after-short-scroll-to-footer",
+      "overflowX": false,
+      "page": {
+        "bottomPadding": 24,
+        "height": 675.578125,
+        "topPadding": 24
+      },
+      "panel": {
+        "bottom": 359.578125,
+        "height": 627.578125,
+        "width": 269,
+        "x": 18,
+        "y": -268
+      },
+      "scrollY": 292,
+      "title": "CodexElves",
+      "upperFraction": null,
+      "viewport": {
+        "height": 360,
+        "width": 320
+      }
+    },
+    {
+      "blankAbove": 89.3125,
+      "blankBelow": 208.390625,
+      "brandLeftDelta": 0,
+      "documentHeight": 800,
+      "font": "13px",
+      "headerHeight": 30.671875,
+      "label": "after-desktop-1280-font13",
+      "overflowX": false,
+      "page": {
+        "bottomPadding": 32,
+        "height": 800,
+        "topPadding": 48
+      },
+      "panel": {
+        "bottom": 559.609375,
+        "height": 422.296875,
+        "width": 420,
+        "x": 430,
+        "y": 137.3125
+      },
+      "scrollY": 0,
+      "title": "CodexElves",
+      "upperFraction": 0.3000052485172939,
+      "viewport": {
+        "height": 800,
+        "width": 1280
+      }
+    },
+    {
+      "blankAbove": 179.21875,
+      "blankBelow": 418.171875,
+      "brandLeftDelta": 0,
+      "documentHeight": 844,
+      "font": "13px",
+      "headerHeight": 26.84375,
+      "label": "after-recovery-390-font13",
+      "overflowX": false,
+      "page": {
+        "bottomPadding": 24,
+        "height": 844,
+        "topPadding": 24
+      },
+      "panel": {
+        "bottom": 401.828125,
+        "height": 198.609375,
+        "width": 354,
+        "x": 18,
+        "y": 203.21875
+      },
+      "scrollY": 0,
+      "title": "CodexElves",
+      "upperFraction": 0.3000026155415479,
+      "viewport": {
+        "height": 844,
+        "width": 390
+      }
+    }
+  ],
+  "shortViewportFooter": {
+    "focus": "设置",
+    "scrollY": 292,
+    "top": 315.578125,
+    "bottom": 359.578125,
+    "viewportHeight": 360
+  }
+}

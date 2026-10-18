@@ -1,0 +1,41 @@
+{
+  "installedVersion": "26.1007.9446.0",
+  "matches": [
+    {
+      "file": "webview/assets/app-shared-30671c57ec82.js",
+      "excerpt": "untimeStatus?.type===`active`&&t.push({kind:`active-runtime`,conversationId:n.conversationId});for(let n of e.getCachedConversations()){let r=n.id;n.unconfirmedTurnSubmissions?.some(e=>e.terminal!==!0)&&t.push({kind:`unconfirmed-submission`,conversationId:r});let i=yz(n);i?.status===`inProgress`&&i.turnId==null&&t.push({kind:`pending-send"
+    },
+    {
+      "file": "webview/assets/app-shared-30671c57ec82.js",
+      "excerpt": ")return(hz(n,t,wz)??_z(n))?.params.sandboxPolicy}getCachedThreadIds(){let e=this.#e();return[...new Set([...e.getCachedConversations().map(e=>e.id),...e.getThreadSummaries().map(e=>e.conversationId)])]}getCachedThreadSearchSnapshot(){let e=this.#e(),t=262144;return{conversations:e.getCachedConversations().map(n=>{let r=n.title?.trim()||n."
+    },
+    {
+      "file": "webview/assets/app-shared-30671c57ec82.js",
+      "excerpt": ").map(e=>e.conversationId)])]}getCachedThreadSearchSnapshot(){let e=this.#e(),t=262144;return{conversations:e.getCachedConversations().map(n=>{let r=n.title?.trim()||n.fallbackSearchTitle!==void 0||t===0?null:L2t(Nz(gz(n)??(n.resumeState===`needs_resume`&&n.turnHistory?.kind!==`canonical`?n.turns:null)),t);return r!=null&&(t-=JSON.stringi"
+    },
+    {
+      "file": "webview/assets/app-shared-30671c57ec82.js",
+      "excerpt": "hreads:()=>this.getRecentConversations().map(e=>this.stateReaders.getListState(e)),getThreadStatuses:()=>this.getCachedConversations().map(e=>({conversationId:e.id,lastTurnStatus:_z(e)?.status??null,resumeState:e.resumeState,threadRuntimeStatus:e.threadRuntimeStatus??null,title:e.title,updatedAt:e.updatedAt})).sort((e,t)=>t.updatedAt-e.up"
+    },
+    {
+      "file": "webview/assets/app-shared-30671c57ec82.js",
+      "excerpt": "etTranscript(e){return this.stateReaders.getTranscript(e)}subscribe(e){return this.subscriptions.subscribe(e)}getCachedConversations(){return Array.from(this.conversations.values())}getThreadSummaries(){return this.threadSummaries}getKnownSubagentDescendantThreads(e){let t=new Map(this.threadSummaries.map(e=>[e.conversationId,e]));for(let"
+    },
+    {
+      "file": "webview/assets/app-shared-30671c57ec82.js",
+      "excerpt": "ault)(n.threadRuntimeStatus,t)&&this.updateConversationState(e,e=>{e.threadRuntimeStatus=t})}let d=A8t(u,this.getCachedConversations()),f=u.flatMap(t=>{if(o.has(t.conversationId)||!M8t(t,e,a))return[];let n=this.runtimeThreadStatusEvidenceByThreadId.get(t.conversationId)??j8t(t,this.conversations.get(t.conversationId));if(n?.type!==`activ"
+    },
+    {
+      "file": "webview/assets/app-shared-30671c57ec82.js",
+      "excerpt": "c.status,c.status!==`interrupted`&&y,o.turnMergePolicy)||A8t(o.threadStore.getThreadSummaries(),o.threadStore.getCachedConversations()).has(l),x;a.updateConversationState(l,e=>{o.unread.completeTurn(l,c.id,g===`DONT_NOTIFY`,e),v&&(e.hasUnreadTurn=!0);let t=ah(e,e=>e.turnId===c.id);t!=null&&(t.automationNotificationDecision=g,x=t.localMeta"
+    },
+    {
+      "file": "webview/assets/app-shared-30671c57ec82.js",
+      "excerpt": "Store.hasFetchedRecentConversations}getRecentConversations(){return this.threadStore.getRecentConversations()}getCachedConversations(){return this.threadStore.getCachedConversations()}getSuppressedArchivedConversationIds(){return this.threadStore.getSuppressedArchivedConversationIds()}getHasInProgressLocalConversation({exceptConversationI"
+    },
+    {
+      "file": "webview/assets/app-shared-30671c57ec82.js",
+      "excerpt": "ersations(){return this.threadStore.getRecentConversations()}getCachedConversations(){return this.threadStore.getCachedConversations()}getSuppressedArchivedConversationIds(){return this.threadStore.getSuppressedArchivedConversationIds()}getHasInProgressLocalConversation({exceptConversationId:e}={}){for(let t of this.threadStore.getRecentC"
+    }
+  ]
+}

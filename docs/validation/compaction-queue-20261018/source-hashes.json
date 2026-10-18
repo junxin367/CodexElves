@@ -1,0 +1,18 @@
+[
+  {
+    "path": "assets/remote-access/app.js",
+    "sha256": "073FAA7B16D915D08272EFC8167EAA8E7A6C4782A78B010CD8CD7E6B2643EC20"
+  },
+  {
+    "path": "assets/remote-access/native.js",
+    "sha256": "7B7AC84D5657A5B2B877772A36A38BB502D3AC1B8CB835C5E495799634799F81"
+  },
+  {
+    "path": "crates/codex-elves-core/src/remote_access.rs",
+    "sha256": "E48954D1DE05E480B416EFA4E9F8772950487F2B39947FEBBE6171821D997B9E"
+  },
+  {
+    "path": "docs/remote-access.md",
+    "sha256": "DEF63349ED08402624C385C0CBCA23B0857A1C2DA11E344356FC23DA9CEBADA0"
+  }
+]

@@ -1,0 +1,233 @@
+{
+  "result": "PASS",
+  "scope": "真实Chrome运行提取的生产浮层函数及完整CSS，模拟用量，不连接真实会话",
+  "hoverOpenAndLeaveClose": true,
+  "pinnedClickOpenAndClose": true,
+  "contextValueCount": 1,
+  "settledSampleCount": 9,
+  "samples": [
+    {
+      "label": "before-390-regular",
+      "font": "11.2px",
+      "height": 39.921875,
+      "horizontalOverflow": false,
+      "inlineWidth": "300px",
+      "maxWidth": "374px",
+      "minWidth": "0px",
+      "muted": "#717171",
+      "pageOverflow": false,
+      "text": "168.9k / 30%，570k",
+      "textColor": "rgb(113, 113, 113)",
+      "viewport": {
+        "height": 844,
+        "width": 390
+      },
+      "width": 300,
+      "x": 82,
+      "y": 745.078125
+    },
+    {
+      "label": "after-390-hover-regular",
+      "font": "11.2px",
+      "height": 39.921875,
+      "horizontalOverflow": false,
+      "inlineWidth": "max-content",
+      "maxWidth": "300px",
+      "minWidth": "140px",
+      "muted": "#717171",
+      "pageOverflow": false,
+      "text": "168.9k / 30%，570k",
+      "textColor": "rgb(113, 113, 113)",
+      "viewport": {
+        "height": 844,
+        "width": 390
+      },
+      "width": 140,
+      "x": 98,
+      "y": 745.078125
+    },
+    {
+      "label": "after-390-short-minimum",
+      "font": "11.2px",
+      "height": 39.921875,
+      "horizontalOverflow": false,
+      "inlineWidth": "max-content",
+      "maxWidth": "300px",
+      "minWidth": "140px",
+      "muted": "#717171",
+      "pageOverflow": false,
+      "text": "0 / 0%，1",
+      "textColor": "rgb(113, 113, 113)",
+      "viewport": {
+        "height": 844,
+        "width": 390
+      },
+      "width": 140,
+      "x": 98,
+      "y": 745.078125
+    },
+    {
+      "label": "after-390-long-grows",
+      "font": "11.2px",
+      "height": 39.921875,
+      "horizontalOverflow": false,
+      "inlineWidth": "max-content",
+      "maxWidth": "300px",
+      "minWidth": "140px",
+      "muted": "#717171",
+      "pageOverflow": false,
+      "text": "4503599627370.5k / 50%，9007199254741k",
+      "textColor": "rgb(113, 113, 113)",
+      "viewport": {
+        "height": 844,
+        "width": 390
+      },
+      "width": 251.34375,
+      "x": 98,
+      "y": 745.078125
+    },
+    {
+      "label": "after-390-regular-shrinks",
+      "font": "11.2px",
+      "height": 39.921875,
+      "horizontalOverflow": false,
+      "inlineWidth": "max-content",
+      "maxWidth": "300px",
+      "minWidth": "140px",
+      "muted": "#717171",
+      "pageOverflow": false,
+      "text": "168.9k / 30%，570k",
+      "textColor": "rgb(113, 113, 113)",
+      "viewport": {
+        "height": 844,
+        "width": 390
+      },
+      "width": 140,
+      "x": 98,
+      "y": 745.078125
+    },
+    {
+      "label": "after-320-font20-max300-wrap",
+      "font": "16px",
+      "height": 73.1875,
+      "horizontalOverflow": false,
+      "inlineWidth": "max-content",
+      "maxWidth": "300px",
+      "minWidth": "140px",
+      "muted": "#717171",
+      "pageOverflow": false,
+      "text": "4503599627370.5k / 50%，9007199254741k",
+      "textColor": "rgb(113, 113, 113)",
+      "viewport": {
+        "height": 640,
+        "width": 320
+      },
+      "width": 300,
+      "x": 12,
+      "y": 507.8125
+    },
+    {
+      "label": "resize-immediate-before-layout-settled",
+      "font": "16px",
+      "height": 73.1875,
+      "horizontalOverflow": false,
+      "inlineWidth": "max-content",
+      "maxWidth": "300px",
+      "minWidth": "140px",
+      "muted": "#717171",
+      "pageOverflow": false,
+      "text": "4503599627370.5k / 50%，9007199254741k",
+      "textColor": "rgb(113, 113, 113)",
+      "viewport": {
+        "height": 640,
+        "width": 280
+      },
+      "width": 300,
+      "x": 12,
+      "y": 507.8125,
+      "transient": true
+    },
+    {
+      "label": "after-280-font20-no-data",
+      "font": "16px",
+      "height": 47.59375,
+      "horizontalOverflow": false,
+      "inlineWidth": "max-content",
+      "maxWidth": "264px",
+      "minWidth": "140px",
+      "muted": "#717171",
+      "pageOverflow": false,
+      "text": "上下文信息尚未提供",
+      "textColor": "rgb(113, 113, 113)",
+      "viewport": {
+        "height": 640,
+        "width": 280
+      },
+      "width": 170,
+      "x": 98,
+      "y": 533.40625
+    },
+    {
+      "label": "after-280-font20-long264",
+      "font": "16px",
+      "height": 73.1875,
+      "horizontalOverflow": false,
+      "inlineWidth": "max-content",
+      "maxWidth": "264px",
+      "minWidth": "140px",
+      "muted": "#717171",
+      "pageOverflow": false,
+      "text": "4503599627370.5k / 50%，9007199254741k",
+      "textColor": "rgb(113, 113, 113)",
+      "viewport": {
+        "height": 640,
+        "width": 280
+      },
+      "width": 264,
+      "x": 8,
+      "y": 507.8125
+    },
+    {
+      "label": "resize-only-320-font20-long300",
+      "font": "16px",
+      "height": 73.1875,
+      "horizontalOverflow": false,
+      "inlineWidth": "max-content",
+      "maxWidth": "300px",
+      "minWidth": "140px",
+      "muted": "#717171",
+      "pageOverflow": false,
+      "text": "4503599627370.5k / 50%，9007199254741k",
+      "textColor": "rgb(113, 113, 113)",
+      "viewport": {
+        "height": 640,
+        "width": 320
+      },
+      "width": 300,
+      "x": 12,
+      "y": 507.8125
+    },
+    {
+      "label": "resize-only-280-font20-long264",
+      "font": "16px",
+      "height": 73.1875,
+      "horizontalOverflow": false,
+      "inlineWidth": "max-content",
+      "maxWidth": "264px",
+      "minWidth": "140px",
+      "muted": "#717171",
+      "pageOverflow": false,
+      "text": "4503599627370.5k / 50%，9007199254741k",
+      "textColor": "rgb(113, 113, 113)",
+      "viewport": {
+        "height": 640,
+        "width": 280
+      },
+      "width": 264,
+      "x": 8,
+      "y": 507.8125
+    }
+  ],
+  "resizeObservation": "初次在浏览器resize事件完成前读取到旧宽度；等待实际max-width样式变化后，纯视口缩放两方向均符合边界",
+  "measurementNote": "子节点数量使用浏览器locator计数；只读DOM包装未提供childElementCount属性"
+}

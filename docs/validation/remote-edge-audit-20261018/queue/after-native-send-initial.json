@@ -1,0 +1,442 @@
+{
+  "source": {
+    "nativePath": "E:\\code\\junes\\github\\CodexPlusPlus\\assets\\remote-access\\native.js",
+    "sha256": "2fd2d69341b9204226d884d4d235ccaba7b3ad1b06306d81588e22ce264a10e7"
+  },
+  "installed": {
+    "asarPath": "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.9446.0_x64__2p2nqsd0c76g0/app/resources/app.asar",
+    "functions": {
+      "Pln": "bd0c2da8d1e37461ceb10b7606a0025306e922b1f9906ed8d27e0fcc79b4351b",
+      "ifn": "99a3a09857617648ea671f2c3722b3e319e0b165770e715dd596ddcb777b035c",
+      "ufn": "da4ccbff7bddf04752abadb9ba3bbca1bd34b11403e777082e6a3ce8a3d2588b",
+      "pN": "86d110b66d3f87ed8c52b6030c84eaf03c1560b365faa9ca1c82d38b9bbc8fc3",
+      "Dln": "e007d016c604b372faf0418374608d6ceb02c1dee55c915cc6c068fbe3ddcbe4",
+      "TurnCoordinator": "286504a92994b2a3b53c15b604f0e978e315cba102d0f13d9802a732785a25c8"
+    }
+  },
+  "boundary": "生产 native.js；当前安装包实际 Pln / ifn / TurnCoordinator；manager、存储及传输为内存夹具，无 app-server 或模型流量。",
+  "results": [
+    {
+      "name": "普通发送内部恢复时开始压缩",
+      "expected": "只入队，不 steer；保留 stable-client",
+      "result": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "messageId": "stable-client",
+        "clientUserMessageId": "stable-client",
+        "queueEpoch": "aee983b9-e2d0-4b67-8c3e-589eb8a33432",
+        "queueRevision": 1,
+        "queuedMessages": [
+          {
+            "id": "stable-client",
+            "text": "压缩交界消息",
+            "context": {
+              "prompt": "压缩交界消息",
+              "addedFiles": [],
+              "fileAttachments": [],
+              "pastedTextAttachments": [],
+              "uploadedFileAttachments": [],
+              "ideContext": null,
+              "imageAttachments": [],
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "commentAttachments": [],
+              "mcpAppModelContextAttachments": [],
+              "appshotContexts": []
+            },
+            "cwd": "E:/fixture",
+            "createdAt": 1792326500890,
+            "clientUserMessageId": "stable-client",
+            "submissionIntent": "queue",
+            "submission": {
+              "hostId": "local",
+              "status": "queued",
+              "queueModeOverride": "queue",
+              "editPosition": {
+                "serverSubmission": {
+                  "id": "stable-client",
+                  "clientUserMessageId": "stable-client",
+                  "input": [
+                    {
+                      "type": "text",
+                      "text": "压缩交界消息",
+                      "text_elements": []
+                    }
+                  ]
+                },
+                "preserveSerializedContext": false
+              }
+            }
+          }
+        ],
+        "queuedEdits": []
+      },
+      "records": [
+        {
+          "kind": "resume",
+          "conversationId": "fixture-thread",
+          "model": null,
+          "reasoningEffort": null,
+          "workspaceRoots": [
+            "E:/fixture"
+          ],
+          "collaborationMode": null
+        },
+        {
+          "kind": "prepare",
+          "id": "fixture-thread",
+          "phase": "start",
+          "count": 1,
+          "model": "model-a",
+          "effort": "high"
+        },
+        {
+          "kind": "queue-write",
+          "value": {
+            "fixture-thread": [
+              {
+                "id": "stable-client",
+                "text": "压缩交界消息",
+                "context": {
+                  "prompt": "压缩交界消息",
+                  "addedFiles": [],
+                  "fileAttachments": [],
+                  "pastedTextAttachments": [],
+                  "uploadedFileAttachments": [],
+                  "ideContext": null,
+                  "imageAttachments": [],
+                  "workspaceRoots": [
+                    "E:/fixture"
+                  ],
+                  "commentAttachments": [],
+                  "mcpAppModelContextAttachments": [],
+                  "appshotContexts": []
+                },
+                "cwd": "E:/fixture",
+                "createdAt": 1792326500890,
+                "clientUserMessageId": "stable-client",
+                "submissionIntent": "queue",
+                "submission": {
+                  "hostId": "local",
+                  "status": "pending",
+                  "queueModeOverride": "queue",
+                  "editPosition": {
+                    "serverSubmission": {
+                      "id": "stable-client",
+                      "clientUserMessageId": "stable-client",
+                      "input": [
+                        {
+                          "type": "text",
+                          "text": "压缩交界消息",
+                          "text_elements": []
+                        }
+                      ]
+                    },
+                    "preserveSerializedContext": false
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "kind": "queue-write",
+          "value": {
+            "fixture-thread": [
+              {
+                "id": "stable-client",
+                "text": "压缩交界消息",
+                "context": {
+                  "prompt": "压缩交界消息",
+                  "addedFiles": [],
+                  "fileAttachments": [],
+                  "pastedTextAttachments": [],
+                  "uploadedFileAttachments": [],
+                  "ideContext": null,
+                  "imageAttachments": [],
+                  "workspaceRoots": [
+                    "E:/fixture"
+                  ],
+                  "commentAttachments": [],
+                  "mcpAppModelContextAttachments": [],
+                  "appshotContexts": []
+                },
+                "cwd": "E:/fixture",
+                "createdAt": 1792326500890,
+                "clientUserMessageId": "stable-client",
+                "submissionIntent": "queue",
+                "submission": {
+                  "hostId": "local",
+                  "status": "queued",
+                  "queueModeOverride": "queue",
+                  "editPosition": {
+                    "serverSubmission": {
+                      "id": "stable-client",
+                      "clientUserMessageId": "stable-client",
+                      "input": [
+                        {
+                          "type": "text",
+                          "text": "压缩交界消息",
+                          "text_elements": []
+                        }
+                      ]
+                    },
+                    "preserveSerializedContext": false
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "普通发送完成后按网页客户端 ID 核对",
+      "expected": "confirmed:true accepted；原生使用 stable-client",
+      "result": {
+        "ok": true,
+        "confirmed": true,
+        "deliveryState": "queued",
+        "threadId": "fixture-thread",
+        "clientUserMessageId": "stable-client",
+        "messageId": "stable-client",
+        "queueEpoch": "54270e20-daa2-40c5-b309-b4da1c869473",
+        "queueRevision": 1,
+        "queuedMessages": [
+          {
+            "id": "stable-client",
+            "text": "回执未知消息",
+            "context": {
+              "prompt": "回执未知消息",
+              "addedFiles": [],
+              "fileAttachments": [],
+              "pastedTextAttachments": [],
+              "uploadedFileAttachments": [],
+              "ideContext": null,
+              "imageAttachments": [],
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "commentAttachments": [],
+              "mcpAppModelContextAttachments": [],
+              "appshotContexts": []
+            },
+            "cwd": "E:/fixture",
+            "createdAt": 1792326500894,
+            "clientUserMessageId": "stable-client",
+            "submissionIntent": "start",
+            "submission": {
+              "hostId": "local",
+              "status": "queued",
+              "queueModeOverride": "queue",
+              "editPosition": {
+                "serverSubmission": {
+                  "id": "stable-client",
+                  "clientUserMessageId": "stable-client",
+                  "input": [
+                    {
+                      "type": "text",
+                      "text": "回执未知消息",
+                      "text_elements": []
+                    }
+                  ]
+                },
+                "preserveSerializedContext": false
+              }
+            },
+            "pausedReason": "Cannot read properties of undefined (reading 'map')"
+          }
+        ],
+        "queuedEdits": []
+      },
+      "state": {
+        "ok": true,
+        "confirmed": true,
+        "deliveryState": "queued",
+        "threadId": "fixture-thread",
+        "clientUserMessageId": "stable-client",
+        "messageId": "stable-client",
+        "queueEpoch": "54270e20-daa2-40c5-b309-b4da1c869473",
+        "queueRevision": 2,
+        "queuedMessages": [
+          {
+            "id": "stable-client",
+            "text": "回执未知消息",
+            "context": {
+              "prompt": "回执未知消息",
+              "addedFiles": [],
+              "fileAttachments": [],
+              "pastedTextAttachments": [],
+              "uploadedFileAttachments": [],
+              "ideContext": null,
+              "imageAttachments": [],
+              "workspaceRoots": [
+                "E:/fixture"
+              ],
+              "commentAttachments": [],
+              "mcpAppModelContextAttachments": [],
+              "appshotContexts": []
+            },
+            "cwd": "E:/fixture",
+            "createdAt": 1792326500894,
+            "clientUserMessageId": "stable-client",
+            "submissionIntent": "start",
+            "submission": {
+              "hostId": "local",
+              "status": "queued",
+              "queueModeOverride": "queue",
+              "editPosition": {
+                "serverSubmission": {
+                  "id": "stable-client",
+                  "clientUserMessageId": "stable-client",
+                  "input": [
+                    {
+                      "type": "text",
+                      "text": "回执未知消息",
+                      "text_elements": []
+                    }
+                  ]
+                },
+                "preserveSerializedContext": false
+              }
+            },
+            "pausedReason": "Cannot read properties of undefined (reading 'map')"
+          }
+        ],
+        "queuedEdits": []
+      },
+      "records": [
+        {
+          "kind": "resume",
+          "conversationId": "fixture-thread",
+          "model": null,
+          "reasoningEffort": null,
+          "workspaceRoots": [
+            "E:/fixture"
+          ],
+          "collaborationMode": null
+        },
+        {
+          "kind": "prepare",
+          "id": "fixture-thread",
+          "phase": "start",
+          "count": 1,
+          "model": "model-a",
+          "effort": "high"
+        },
+        {
+          "kind": "queue-write",
+          "value": {
+            "fixture-thread": [
+              {
+                "id": "stable-client",
+                "text": "回执未知消息",
+                "context": {
+                  "prompt": "回执未知消息",
+                  "addedFiles": [],
+                  "fileAttachments": [],
+                  "pastedTextAttachments": [],
+                  "uploadedFileAttachments": [],
+                  "ideContext": null,
+                  "imageAttachments": [],
+                  "workspaceRoots": [
+                    "E:/fixture"
+                  ],
+                  "commentAttachments": [],
+                  "mcpAppModelContextAttachments": [],
+                  "appshotContexts": []
+                },
+                "cwd": "E:/fixture",
+                "createdAt": 1792326500894,
+                "clientUserMessageId": "stable-client",
+                "submissionIntent": "start",
+                "submission": {
+                  "hostId": "local",
+                  "status": "pending",
+                  "queueModeOverride": "queue",
+                  "editPosition": {
+                    "serverSubmission": {
+                      "id": "stable-client",
+                      "clientUserMessageId": "stable-client",
+                      "input": [
+                        {
+                          "type": "text",
+                          "text": "回执未知消息",
+                          "text_elements": []
+                        }
+                      ]
+                    },
+                    "preserveSerializedContext": false
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "kind": "prepare",
+          "id": "fixture-thread",
+          "phase": "steer",
+          "count": 2,
+          "model": "model-a",
+          "effort": "high"
+        },
+        {
+          "kind": "queue-write",
+          "value": {
+            "fixture-thread": [
+              {
+                "id": "stable-client",
+                "text": "回执未知消息",
+                "context": {
+                  "prompt": "回执未知消息",
+                  "addedFiles": [],
+                  "fileAttachments": [],
+                  "pastedTextAttachments": [],
+                  "uploadedFileAttachments": [],
+                  "ideContext": null,
+                  "imageAttachments": [],
+                  "workspaceRoots": [
+                    "E:/fixture"
+                  ],
+                  "commentAttachments": [],
+                  "mcpAppModelContextAttachments": [],
+                  "appshotContexts": []
+                },
+                "cwd": "E:/fixture",
+                "createdAt": 1792326500894,
+                "clientUserMessageId": "stable-client",
+                "submissionIntent": "start",
+                "submission": {
+                  "hostId": "local",
+                  "status": "queued",
+                  "queueModeOverride": "queue",
+                  "editPosition": {
+                    "serverSubmission": {
+                      "id": "stable-client",
+                      "clientUserMessageId": "stable-client",
+                      "input": [
+                        {
+                          "type": "text",
+                          "text": "回执未知消息",
+                          "text_elements": []
+                        }
+                      ]
+                    },
+                    "preserveSerializedContext": false
+                  }
+                },
+                "pausedReason": "Cannot read properties of undefined (reading 'map')"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "fixture-error",
+          "message": "Cannot read properties of undefined (reading 'map')"
+        }
+      ]
+    }
+  ]
+}

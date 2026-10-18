@@ -1,0 +1,221 @@
+{
+  "status": "PASS",
+  "capturedAt": "2026-10-18T04:27:29.617253+00:00",
+  "checks": {
+    "releaseManifestMatchesApk": true,
+    "releaseIdentity": true,
+    "originalReleaseSignature": true,
+    "installerPermissionAndProvider": true,
+    "all20BundledResourcesMatch": true,
+    "resourceVersionMatches": true,
+    "windowsCopiesMatch": true,
+    "windowsEmbedsCurrentWebSource": true,
+    "integratedBuildPassed": true,
+    "lintPassed": true,
+    "nativeVerifiedSourceUnchanged": true
+  },
+  "android": {
+    "path": "E:\\code\\junes\\github\\CodexPlusPlus\\dist\\android\\CodexElves-0.0.1-android.apk",
+    "bytes": 2226239,
+    "sha256": "c7dc0327a24b6e19184020eaaf8401923b952f3c484fbc251622f35011a7d501"
+  },
+  "updateManifest": {
+    "schemaVersion": 1,
+    "applicationId": "com.junxin367.codexelves",
+    "versionName": "0.0.1",
+    "versionCode": 2,
+    "minSdk": 26,
+    "apk": {
+      "name": "CodexElves-0.0.1-android.apk",
+      "size": 2226239,
+      "sha256": "c7dc0327a24b6e19184020eaaf8401923b952f3c484fbc251622f35011a7d501"
+    }
+  },
+  "resourceVersion": "d2aeab9568065682558d568f94278a66c757f73c332e22def4f2912322744fbc",
+  "resources": [
+    {
+      "path": "/",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/app.js",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/attachments.js",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/events-client.js",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/events-worker.js",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/icons/apple-touch-icon.png",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/icons/icon-192.png",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/icons/icon-512.png",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/manifest.webmanifest",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/markdown-renderer.js",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/markdown.js",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/message-actions.js",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/platform.js",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/pwa.js",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/recovery-store.js",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/style.css",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/sw.js",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/vendor/dompurify.esm.js",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/vendor/marked.esm.js",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    },
+    {
+      "path": "/vendor/mermaid.esm.js",
+      "sizeMatches": true,
+      "hashMatches": true,
+      "matchesSource": true
+    }
+  ],
+  "windowsInstaller": {
+    "path": "E:\\code\\junes\\github\\CodexPlusPlus\\dist\\windows\\CodexElves-0.5.0-windows-x64-setup.exe",
+    "bytes": 42450390,
+    "sha256": "162b2932ea1d2661b47ad2de4f6ec6f050f8c5b8f8ee76998bc99dbca1207978"
+  },
+  "windows": [
+    {
+      "name": "codex-elves.exe",
+      "built": {
+        "path": "E:\\code\\junes\\github\\CodexPlusPlus\\target\\release\\codex-elves.exe",
+        "bytes": 24328192,
+        "sha256": "56085ad0608e6c6f2a26cd42b127916ece950111ddb41e83bbfa0041f9cfe04f"
+      },
+      "packaged": {
+        "path": "E:\\code\\junes\\github\\CodexPlusPlus\\dist\\windows\\app\\codex-elves.exe",
+        "bytes": 24328192,
+        "sha256": "56085ad0608e6c6f2a26cd42b127916ece950111ddb41e83bbfa0041f9cfe04f"
+      },
+      "matches": true
+    },
+    {
+      "name": "codex-elves-manager.exe",
+      "built": {
+        "path": "E:\\code\\junes\\github\\CodexPlusPlus\\target\\release\\codex-elves-manager.exe",
+        "bytes": 57406464,
+        "sha256": "3b47caf02883004fd5d1451509c55df385aaca50c8c004afed90f318c03b9ef9"
+      },
+      "packaged": {
+        "path": "E:\\code\\junes\\github\\CodexPlusPlus\\dist\\windows\\app\\codex-elves-manager.exe",
+        "bytes": 57406464,
+        "sha256": "3b47caf02883004fd5d1451509c55df385aaca50c8c004afed90f318c03b9ef9"
+      },
+      "matches": true
+    },
+    {
+      "name": "codex-elves-task-board.exe",
+      "built": {
+        "path": "E:\\code\\junes\\github\\CodexPlusPlus\\target\\release\\codex-elves-task-board.exe",
+        "bytes": 27457024,
+        "sha256": "b066cd584e713ee4491f560162aba7c28d805eb897e046b186535fd8aeda8dd1"
+      },
+      "packaged": {
+        "path": "E:\\code\\junes\\github\\CodexPlusPlus\\dist\\windows\\app\\codex-elves-task-board.exe",
+        "bytes": 27457024,
+        "sha256": "b066cd584e713ee4491f560162aba7c28d805eb897e046b186535fd8aeda8dd1"
+      },
+      "matches": true
+    }
+  ],
+  "embedded": {
+    "app.js": true,
+    "platform.js": true,
+    "pwa.js": true,
+    "style.css": true
+  },
+  "build": {
+    "StartedAt": "2026-10-18T04:12:48.1324930Z",
+    "FinishedAt": "2026-10-18T04:25:24.8864267Z",
+    "ExitCode": 0,
+    "Commit": "2f4949008ad8fc9357ae48f792155ce4a098fca5"
+  },
+  "lint": "0 errors, 1 existing ObsoleteSdkInt warning",
+  "installed": false,
+  "published": false
+}

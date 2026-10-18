@@ -1,0 +1,38 @@
+[
+  {
+    "name": "MainActivity",
+    "exists": true
+  },
+  {
+    "name": "NotificationController",
+    "exists": true
+  },
+  {
+    "name": "NotificationDismissReceiver",
+    "exists": true
+  },
+  {
+    "name": "NotificationEventState",
+    "exists": true
+  },
+  {
+    "name": "NotificationIdentity",
+    "exists": true
+  },
+  {
+    "name": "NotificationPublisher",
+    "exists": true
+  },
+  {
+    "name": "NotificationService",
+    "exists": true
+  },
+  {
+    "name": "NotificationSettings",
+    "exists": true
+  },
+  {
+    "name": "NotificationStreamClient",
+    "exists": true
+  }
+]

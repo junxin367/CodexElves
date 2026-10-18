@@ -1,0 +1,8 @@
+{
+  "browserFixtureRemoved": true,
+  "serverTestFixtureRemoved": true,
+  "browserTabClosed": true,
+  "viewportRestored": true,
+  "localBrowserStorageCleared": true,
+  "previewServerStopped": true
+}

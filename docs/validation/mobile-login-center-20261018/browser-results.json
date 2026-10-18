@@ -1,0 +1,257 @@
+{
+  "result": "PASS",
+  "scope": "真实Chrome加载完整生产网页，登录状态接口为本机替身；未登录、未触发真实Android软键盘，短视口用于验证空间不足时的布局和滚动",
+  "samples": [
+    {
+      "label": "before-mobile-390-font14",
+      "centerOffset": -189.1875,
+      "documentHeight": 844,
+      "fitsViewport": true,
+      "font": "14px",
+      "input": {
+        "bottom": 195.4375,
+        "top": 145.4375
+      },
+      "overflowX": false,
+      "page": {
+        "display": "block",
+        "height": 844,
+        "paddingBottom": 24,
+        "paddingTop": 24,
+        "top": 0
+      },
+      "panel": {
+        "bottom": 441.625,
+        "height": 417.625,
+        "top": 24,
+        "width": 354
+      },
+      "scrollY": 0,
+      "submit": {
+        "bottom": 284.03125,
+        "top": 238.03125
+      },
+      "viewport": {
+        "height": 844,
+        "width": 390
+      }
+    },
+    {
+      "label": "after-mobile-390-font14",
+      "centerOffset": 0,
+      "documentHeight": 844,
+      "fitsViewport": true,
+      "font": "14px",
+      "input": {
+        "bottom": 384.625,
+        "top": 334.625
+      },
+      "overflowX": false,
+      "page": {
+        "display": "flex",
+        "height": 844,
+        "paddingBottom": 24,
+        "paddingTop": 24,
+        "top": 0
+      },
+      "panel": {
+        "bottom": 630.8125,
+        "height": 417.625,
+        "top": 213.1875,
+        "width": 354
+      },
+      "scrollY": 0,
+      "submit": {
+        "bottom": 473.21875,
+        "top": 427.21875
+      },
+      "viewport": {
+        "height": 844,
+        "width": 390
+      }
+    },
+    {
+      "label": "mobile-320-font20",
+      "centerOffset": 0.0078125,
+      "documentHeight": 640,
+      "fitsViewport": true,
+      "font": "20px",
+      "input": {
+        "bottom": 286.9375,
+        "top": 236.9375
+      },
+      "overflowX": false,
+      "page": {
+        "display": "flex",
+        "height": 640,
+        "paddingBottom": 24,
+        "paddingTop": 24,
+        "top": 0
+      },
+      "panel": {
+        "bottom": 573.359375,
+        "height": 506.703125,
+        "top": 66.65625,
+        "width": 284
+      },
+      "scrollY": 0,
+      "submit": {
+        "bottom": 408.21875,
+        "top": 362.21875
+      },
+      "viewport": {
+        "height": 640,
+        "width": 320
+      }
+    },
+    {
+      "label": "mobile-320-font20-help-open",
+      "centerOffset": 17.7890625,
+      "documentHeight": 676,
+      "fitsViewport": false,
+      "font": "20px",
+      "input": {
+        "bottom": 244.28125,
+        "top": 194.28125
+      },
+      "overflowX": false,
+      "page": {
+        "display": "flex",
+        "height": 675.578125,
+        "paddingBottom": 24,
+        "paddingTop": 24,
+        "top": 0
+      },
+      "panel": {
+        "bottom": 651.578125,
+        "height": 627.578125,
+        "top": 24,
+        "width": 269
+      },
+      "scrollY": 0,
+      "submit": {
+        "bottom": 365.5625,
+        "top": 319.5625
+      },
+      "viewport": {
+        "height": 640,
+        "width": 320
+      }
+    },
+    {
+      "label": "mobile-short-height-input-and-submit",
+      "centerOffset": 118.7890625,
+      "documentHeight": 676,
+      "fitsViewport": false,
+      "font": "20px",
+      "input": {
+        "bottom": 205.28125,
+        "top": 155.28125
+      },
+      "overflowX": false,
+      "page": {
+        "display": "flex",
+        "height": 675.578125,
+        "paddingBottom": 24,
+        "paddingTop": 24,
+        "top": 0
+      },
+      "panel": {
+        "bottom": 651.578125,
+        "height": 627.578125,
+        "top": 24,
+        "width": 269
+      },
+      "scrollY": 39,
+      "submit": {
+        "bottom": 326.5625,
+        "top": 280.5625
+      },
+      "viewport": {
+        "height": 360,
+        "width": 320
+      }
+    },
+    {
+      "label": "before-desktop-1280-font20",
+      "centerOffset": -94.59375,
+      "documentHeight": 800,
+      "fitsViewport": true,
+      "font": "20px",
+      "input": {
+        "bottom": 279.53125,
+        "top": 229.53125
+      },
+      "overflowX": false,
+      "page": {
+        "display": "block",
+        "height": 800,
+        "paddingBottom": 32,
+        "paddingTop": 48,
+        "top": 0
+      },
+      "panel": {
+        "bottom": 546.8125,
+        "height": 466.8125,
+        "top": 80,
+        "width": 420
+      },
+      "scrollY": 0,
+      "submit": {
+        "bottom": 375.671875,
+        "top": 329.671875
+      },
+      "viewport": {
+        "height": 800,
+        "width": 1280
+      }
+    },
+    {
+      "label": "after-desktop-1280-font20",
+      "centerOffset": -94.59375,
+      "documentHeight": 800,
+      "fitsViewport": true,
+      "font": "20px",
+      "input": {
+        "bottom": 279.53125,
+        "top": 229.53125
+      },
+      "overflowX": false,
+      "page": {
+        "display": "block",
+        "height": 800,
+        "paddingBottom": 32,
+        "paddingTop": 48,
+        "top": 0
+      },
+      "panel": {
+        "bottom": 546.8125,
+        "height": 466.8125,
+        "top": 80,
+        "width": 420
+      },
+      "scrollY": 0,
+      "submit": {
+        "bottom": 375.671875,
+        "top": 329.671875
+      },
+      "viewport": {
+        "height": 800,
+        "width": 1280
+      }
+    }
+  ],
+  "submitReachable": {
+    "bottom": 326.5625,
+    "enabled": true,
+    "focus": "pair-submit",
+    "height": 360,
+    "top": 280.5625
+  },
+  "footerReachable": {
+    "bottom": 335.578125,
+    "height": 360,
+    "scrollY": 316,
+    "top": 291.578125
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "status": "REPRODUCED",
+  "assertions": 10,
+  "stable": {
+    "deadViewRetained": true,
+    "pageReadyRetained": true,
+    "chooserPending": true,
+    "bindingsCurrent": true,
+    "recreated": false
+  },
+  "trial": {
+    "delegatesOpenSession": true,
+    "waitsForResourceQueue": true
+  },
+  "sourceSha256": "9ab9f4225bb1869772d60b9314fa175dbde5522965e41bc396d26b3db7ce0eef",
+  "methodSha256": {
+    "onRenderProcessGone": "40bb7266c91571f48892702eb6702e1c47c3bc39ef7d4000b409bcb9c1b0c4ff",
+    "handlePageStartupFailure": "34bfcf5c058fb7cfda307417843d7488fdbcb3ef32789aec9ff73bebf6a278ef"
+  },
+  "scope": "Exact production method bodies; deterministic resource/UI queues and state sentinels; no Android device runtime."
+}

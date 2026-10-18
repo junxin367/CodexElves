@@ -1,0 +1,12 @@
+{
+  "sendRequests": 6,
+  "queuedSendRequests": 5,
+  "ordinarySendRequests": 1,
+  "uniqueReceiptIds": 6,
+  "uniqueClientIds": 6,
+  "skillMessages": 1,
+  "imageMessages": 1,
+  "simulatedCompactionRequests": 1,
+  "realSessionWrites": 0,
+  "samples": 11
+}

@@ -1,0 +1,15 @@
+{
+  "status": "PASS",
+  "checks": [
+    {
+      "name": "api",
+      "unchanged": true,
+      "expected": "c0b482422d8144ef2dc8a139ae7b1f452fe9373c088d84b2563ff1465cd09975"
+    },
+    {
+      "name": "readHistoryPage",
+      "unchanged": true,
+      "expected": "770f3e02f970cc616d286641c9cc49d8fc907e0b8481b556a02ecd9ba52f6351"
+    }
+  ]
+}

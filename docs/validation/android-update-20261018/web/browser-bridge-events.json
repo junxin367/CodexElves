@@ -1,0 +1,78 @@
+[
+  {
+    "mode": "android",
+    "type": "ready"
+  },
+  {
+    "mode": "android",
+    "type": "auth-required"
+  },
+  {
+    "mode": "android",
+    "type": "app-info"
+  },
+  {
+    "mode": "android",
+    "type": "check-app-update"
+  },
+  {
+    "mode": "android",
+    "type": "ready"
+  },
+  {
+    "mode": "android",
+    "type": "auth-required"
+  },
+  {
+    "mode": "android",
+    "type": "app-info"
+  },
+  {
+    "mode": "android",
+    "type": "ready"
+  },
+  {
+    "mode": "android",
+    "type": "auth-required"
+  },
+  {
+    "mode": "android",
+    "type": "app-info"
+  },
+  {
+    "mode": "android",
+    "type": "ready"
+  },
+  {
+    "mode": "android",
+    "type": "auth-required"
+  },
+  {
+    "mode": "android",
+    "type": "app-info"
+  },
+  {
+    "mode": "old",
+    "type": "ready"
+  },
+  {
+    "mode": "old",
+    "type": "auth-required"
+  },
+  {
+    "mode": "old",
+    "type": "app-info"
+  },
+  {
+    "mode": "android",
+    "type": "ready"
+  },
+  {
+    "mode": "android",
+    "type": "auth-required"
+  },
+  {
+    "mode": "android",
+    "type": "app-info"
+  }
+]

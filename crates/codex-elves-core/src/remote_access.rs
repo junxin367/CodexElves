@@ -2103,7 +2103,7 @@ async fn session(
     Ok(Json(
         json!({"ok":true,"device":device.public(),"nativeConnected":state.controller.native_connected.load(Ordering::SeqCst),
         "readOnly":policy.read_only,"allowApprovals":policy.allow_approvals,
-        "capabilities":{"imageInput":true,"queuedImageRemoval":true,"queuedImageEditing":true,"queueEditRecovery":true,"queueSendRecovery":true,"projectlessCreation":true,"promptOptimization":true,"messageEditModelSettings":true,"goalComposer":true}}),
+        "capabilities":{"imageInput":true,"queuedImageRemoval":true,"queuedImageEditing":true,"queueEditRecovery":true,"queueSendRecovery":true,"projectlessCreation":true,"promptOptimization":true,"messageEditModelSettings":true,"goalComposer":true,"compactionQueueSend":true}}),
     ))
 }
 
@@ -2149,11 +2149,15 @@ async fn read(
             | "queueEdit"
             | "sendState"
             | "promptOptimization"
+            | "notifications"
     ) {
         return Err(ApiError::new(404, "不支持的读取操作"));
     }
     if matches!(action.as_str(), "queue" | "queueEdit" | "sendState") {
         validate_queued_action_payload(&action, &payload)?;
+    }
+    if action == "notifications" {
+        validate_notifications_payload(&payload)?;
     }
     if action == "promptOptimization" {
         payload = json!({"requestId": prompt_optimization_request_id(&device.id, payload["requestId"].as_str().unwrap_or(""))?});
@@ -2162,7 +2166,7 @@ async fn read(
     let value = state
         .controller
         .native
-        .call_authorized(&action, payload, &authorization)
+        .call_authorized(&action, payload.clone(), &authorization)
         .await
         .map_err(|error| {
             if let Some(error) = error.downcast_ref::<ApiError>() {
@@ -2172,12 +2176,25 @@ async fn read(
                 "remote_access.native_read_failed",
                 json!({
                     "action": action,
-                    "error": format!("{error:#}")
+                    "error": if action == "notifications" {
+                        "通知元数据读取失败".to_owned()
+                    } else {
+                        format!("{error:#}")
+                    }
                 }),
             );
             ApiError::new(503, DESKTOP_READ_GUIDANCE)
         })?;
-    let mut value = native_result(value)?;
+    let mut value = native_result(value).map_err(|error| {
+        if action == "notifications" {
+            ApiError::new(503, "通知元数据暂时不可用，请重试连接")
+        } else {
+            error
+        }
+    })?;
+    if action == "notifications" {
+        validate_notifications_response(&value, &payload)?;
+    }
     if action == "history" {
         state.controller.attach_history_images(&mut value);
     }
@@ -2193,6 +2210,145 @@ async fn read(
         .map_err(|_| ApiError::new(503, "会话数据处理暂时失败，请重试读取"))??;
     authorization.check().await.map_err(authorization_error)?;
     Ok(response)
+}
+
+const MAX_NOTIFICATION_SEQUENCE: u64 = 9_007_199_254_740_991;
+
+fn notification_epoch(value: &Value) -> Option<&str> {
+    value.as_str().filter(|epoch| {
+        !epoch.is_empty()
+            && epoch.len() <= 120
+            && epoch
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    })
+}
+
+fn notification_sequence(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .filter(|sequence| *sequence <= MAX_NOTIFICATION_SEQUENCE)
+}
+
+fn notification_thread_id(value: &Value) -> Option<&str> {
+    value.as_str().filter(|id| {
+        !id.is_empty()
+            && id.len() <= 120
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    })
+}
+
+fn validate_notifications_payload(payload: &Value) -> Result<(), ApiError> {
+    let valid = payload.as_object().is_some_and(|object| {
+        object.is_empty()
+            || object.len() == 2
+                && notification_epoch(&payload["epoch"]).is_some()
+                && notification_sequence(&payload["cursor"]).is_some()
+    });
+    if !valid {
+        return Err(ApiError::new(400, "通知游标无效"));
+    }
+    Ok(())
+}
+
+fn valid_notification_event(event: &Value, epoch: Option<&str>, cursor: u64) -> bool {
+    let Some(object) = event.as_object() else {
+        return false;
+    };
+    let Some(event_epoch) = notification_epoch(&event["epoch"]) else {
+        return false;
+    };
+    let Some(sequence) = notification_sequence(&event["sequence"])
+        .filter(|sequence| *sequence > 0 && *sequence <= cursor)
+    else {
+        return false;
+    };
+    let identity = format!("{event_epoch}:{sequence}");
+    if object.len() != 9
+        || epoch.is_some_and(|epoch| epoch != event_epoch)
+        || event["id"].as_str() != Some(identity.as_str())
+        || notification_thread_id(&event["threadId"]).is_none()
+        || !matches!(
+            event["kind"].as_str(),
+            Some("approval" | "question" | "completed" | "failed")
+        )
+        || !event["title"].as_str().is_some_and(|title| {
+            !title.is_empty()
+                && title.chars().count() <= 160
+                && !title.chars().any(char::is_control)
+        })
+        || notification_sequence(&event["createdAtMs"]).is_none()
+    {
+        return false;
+    }
+    match event["action"].as_str() {
+        Some("notify") => event["notificationId"].as_str() == Some(identity.as_str()),
+        Some("dismiss") => {
+            matches!(event["kind"].as_str(), Some("approval" | "question"))
+                && event["notificationId"].as_str().is_some_and(|id| {
+                    id.strip_prefix(&format!("{event_epoch}:"))
+                        .and_then(|number| number.parse::<u64>().ok())
+                        .is_some_and(|number| {
+                            number > 0
+                                && number < sequence
+                                && id == format!("{event_epoch}:{number}")
+                        })
+                })
+        }
+        _ => false,
+    }
+}
+
+fn validate_notifications_response(value: &Value, request: &Value) -> Result<(), ApiError> {
+    let invalid = || ApiError::new(503, "通知元数据暂时不可用，请重试连接");
+    let object = value.as_object().ok_or_else(invalid)?;
+    let epoch = notification_epoch(&value["notificationEpoch"]).ok_or_else(invalid)?;
+    let cursor = notification_sequence(&value["notificationCursor"]).ok_or_else(invalid)?;
+    let reset = value["reset"].as_bool().ok_or_else(invalid)?;
+    let truncated = value["truncated"].as_bool().ok_or_else(invalid)?;
+    let pending = value["pending"].as_array().ok_or_else(invalid)?;
+    let events = value["events"].as_array().ok_or_else(invalid)?;
+    if object.len() != 8
+        || value["ok"] != true
+        || value["schemaVersion"] != 1
+        || events.len() > 256
+        || reset && (!events.is_empty() || truncated)
+        || request["epoch"].as_str() != Some(epoch) && !reset
+        || !reset
+            && request["cursor"]
+                .as_u64()
+                .is_some_and(|previous| previous > cursor)
+    {
+        return Err(invalid());
+    }
+    let mut pending_ids = HashSet::new();
+    for event in pending {
+        if !valid_notification_event(event, Some(epoch), cursor)
+            || event["action"] != "notify"
+            || !matches!(event["kind"].as_str(), Some("approval" | "question"))
+            || !pending_ids.insert(event["notificationId"].as_str().unwrap_or(""))
+        {
+            return Err(invalid());
+        }
+    }
+    let mut previous = if reset {
+        0
+    } else {
+        request["cursor"].as_u64().unwrap_or(0)
+    };
+    for event in events {
+        if !valid_notification_event(event, Some(epoch), cursor)
+            || event["sequence"]
+                .as_u64()
+                .is_none_or(|sequence| sequence <= previous)
+        {
+            return Err(invalid());
+        }
+        previous = event["sequence"].as_u64().unwrap();
+    }
+    Ok(())
 }
 
 fn read_json_response(value: Value, accept_gzip: bool) -> Result<Response, ApiError> {
@@ -2276,6 +2432,19 @@ fn validate_prompt_optimization_payload(payload: &Value) -> Result<(), ApiError>
         {
             return Err(ApiError::new(400, "最近一轮上下文无效"));
         }
+    }
+    Ok(())
+}
+
+fn validate_compaction_queue_send_payload(action: &str, payload: &Value) -> Result<(), ApiError> {
+    let Some(queue_only) = payload.get("queueOnly") else {
+        return Ok(());
+    };
+    if !queue_only.is_boolean() {
+        return Err(ApiError::new(400, "排队发送参数无效"));
+    }
+    if action != "send" || payload["goalMode"] == true {
+        return Err(ApiError::new(400, "排队发送参数仅适用于普通消息"));
     }
     Ok(())
 }
@@ -2758,6 +2927,7 @@ async fn action(
     if matches!(action.as_str(), "approve" | "answer") && !state.settings.allow_approvals {
         return Err(ApiError::new(403, "远程审批与询问回答已关闭，请在桌面处理"));
     }
+    validate_compaction_queue_send_payload(&action, &payload)?;
     if matches!(action.as_str(), "send" | "create" | "setGoal") {
         validate_goal_composer_payload(&action, &payload)?;
     }
@@ -2895,14 +3065,26 @@ async fn image(
 async fn events(
     State(state): State<WebState>,
     headers: HeaderMap,
+    uri: Uri,
 ) -> Result<impl IntoResponse, ApiError> {
     let device = authorized(&state, &headers).await?;
+    let notifications_only = uri.query().is_some_and(|query| {
+        query
+            .split('&')
+            .any(|parameter| parameter == "notifications=true")
+    });
     let receiver = state.controller.events.subscribe();
     let controller = state.controller.clone();
     let id = device.id.clone();
     let stream = stream::unfold(
-        (receiver, controller, id, false),
-        |(mut receiver, controller, id, done)| async move {
+        (
+            receiver,
+            controller,
+            id,
+            false,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+        ),
+        move |(mut receiver, controller, id, done, mut heartbeat)| async move {
             if done {
                 return None;
             }
@@ -2912,24 +3094,46 @@ async fn events(
                     Ok::<_, Infallible>(
                         Event::default().data(r#"{"method":"remote/unauthorized"}"#),
                     ),
-                    (receiver, controller, id, true),
+                    (receiver, controller, id, true, heartbeat),
                 ));
             }
             if !controller.accepting_requests() {
                 return Some((
                     Ok(Event::default().data(r#"{"method":"remote/disconnected"}"#)),
-                    (receiver, controller, id, true),
+                    (receiver, controller, id, true, heartbeat),
                 ));
             }
-            let mut event =
-                match tokio::time::timeout(Duration::from_secs(15), receiver.recv()).await {
-                    Ok(Ok(event)) => event,
-                    Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
+            if !notifications_only {
+                heartbeat = tokio::time::Instant::now() + Duration::from_secs(15);
+            }
+            let mut event = loop {
+                let received = if tokio::time::Instant::now() >= heartbeat {
+                    None
+                } else {
+                    tokio::time::timeout_at(heartbeat, receiver.recv())
+                        .await
+                        .ok()
+                };
+                let event = match received {
+                    Some(Ok(event)) => event,
+                    Some(Err(broadcast::error::RecvError::Lagged(_))) => {
                         json!({"method":"remote/resync"})
                     }
-                    Ok(Err(_)) => return None,
-                    Err(_) => json!({"method":"remote/heartbeat"}),
+                    Some(Err(_)) => return None,
+                    None => {
+                        heartbeat = tokio::time::Instant::now() + Duration::from_secs(15);
+                        json!({"method":"remote/heartbeat"})
+                    }
                 };
+                if notifications_only {
+                    let Some(event) = notification_stream_event(&event) else {
+                        continue;
+                    };
+                    break event;
+                }
+                heartbeat = tokio::time::Instant::now() + Duration::from_secs(15);
+                break event;
+            };
             let authorized = controller.device_active(&id).await;
             let done = !authorized || !controller.accepting_requests();
             if !authorized {
@@ -2939,11 +3143,33 @@ async fn events(
             }
             Some((
                 Ok(Event::default().data(serde_json::to_string(&event).unwrap())),
-                (receiver, controller, id, done),
+                (receiver, controller, id, done, heartbeat),
             ))
         },
     );
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+fn notification_stream_event(event: &Value) -> Option<Value> {
+    let method = event["method"].as_str()?;
+    match method {
+        "remote/notification" => {
+            if valid_notification_event(&event["params"], None, MAX_NOTIFICATION_SEQUENCE) {
+                Some(json!({"method":method,"params":event["params"]}))
+            } else {
+                Some(json!({"method":"remote/resync"}))
+            }
+        }
+        "remote/heartbeat"
+        | "remote/resync"
+        | "remote/reconnected"
+        | "remote/disconnected"
+        | "remote/authorizationChanged"
+        | "remote/unauthorized" => Some(json!({"method":method})),
+        "thread/deleted" => notification_thread_id(&event["params"]["threadId"])
+            .map(|id| json!({"method":method,"params":{"threadId":id}})),
+        _ => None,
+    }
 }
 
 async fn events_ws(
@@ -3385,6 +3611,11 @@ fn eligible_image_path(source: &str) -> Option<(PathBuf, &'static str)> {
     {
         return None;
     }
+    #[cfg(windows)]
+    let source = match source.as_bytes() {
+        [b'/', drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic() => &source[1..],
+        _ => source,
+    };
     let path = PathBuf::from(source);
     if !path.is_absolute() || !input_path_has_local_prefix(&path) {
         return None;

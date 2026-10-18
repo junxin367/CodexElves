@@ -4,14 +4,20 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
-    android:gravity="center"
+    android:gravity="center_horizontal"
     android:focusableInTouchMode="true"
     android:paddingStart="@dimen/login_horizontal_padding"
     android:paddingEnd="@dimen/login_horizontal_padding"
     android:paddingTop="24dp"
     android:paddingBottom="24dp">
 
-    <!-- 外层负责视口内居中，内层单独限制平板上的表单宽度。 -->
+    <!-- 最小边距之外的剩余高度按上三下七分配；内容过长时留白归零。 -->
+    <Space
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_weight="3" />
+
+    <!-- 内层单独限制平板上的表单宽度。 -->
     <LinearLayout
         android:id="@+id/login_panel"
         tools:ignore="UselessParent"
@@ -21,28 +27,30 @@
         android:orientation="vertical">
 
         <LinearLayout
-            android:layout_width="match_parent"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_gravity="start"
+            android:baselineAligned="false"
             android:gravity="center_vertical"
             android:orientation="horizontal">
 
-            <TextView
+            <ImageView
                 android:layout_width="40dp"
                 android:layout_height="40dp"
-                android:gravity="center"
-                android:includeFontPadding="false"
+                android:contentDescription="@null"
                 android:importantForAccessibility="no"
-                android:text="@string/login_brand_mark"
-                android:textColor="@color/login_text"
-                android:textSize="40sp" />
+                android:src="@drawable/ic_login_brand" />
 
+            <!-- 宽度不足时保留完整标题换行，不限制行数或省略文字。 -->
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="12dp"
+                android:breakStrategy="simple"
                 android:fontFamily="sans-serif-medium"
+                android:gravity="start|center_vertical"
+                android:hyphenationFrequency="none"
                 android:includeFontPadding="false"
-                android:maxLines="1"
                 android:text="@string/app_name"
                 android:textColor="@color/login_text"
                 android:textSize="28sp" />
@@ -110,15 +118,6 @@
                 android:src="@drawable/ic_visibility"
                 android:tint="@color/login_muted" />
         </FrameLayout>
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="7dp"
-            android:lineSpacingMultiplier="1.2"
-            android:text="@string/login_key_hint_detail"
-            android:textColor="@color/login_muted"
-            android:textSize="11sp" />
 
         <Button
             android:id="@+id/login_connect"
@@ -220,4 +219,9 @@
             android:textColor="@color/login_muted"
             android:textSize="11sp" />
     </LinearLayout>
+
+    <Space
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_weight="7" />
 </LinearLayout>

@@ -1,0 +1,277 @@
+[
+  {
+    "label": "final-page-baseline",
+    "haptics": 1,
+    "newHaptics": [],
+    "actions": 0,
+    "queue": [
+      "qa",
+      "qb",
+      "qc"
+    ]
+  },
+  {
+    "label": "model-open-select",
+    "haptics": 3,
+    "newHaptics": [
+      {
+        "time": 1792315499966,
+        "type": "haptic-click"
+      },
+      {
+        "time": 1792315506472,
+        "type": "haptic-click"
+      }
+    ],
+    "actions": 0,
+    "queue": [
+      "qa",
+      "qb",
+      "qc"
+    ]
+  },
+  {
+    "label": "disabled-text-editor",
+    "haptics": 3,
+    "newHaptics": [],
+    "actions": 0,
+    "queue": [
+      "qa",
+      "qb",
+      "qc"
+    ]
+  },
+  {
+    "label": "queue-keyboard-boundary",
+    "haptics": 3,
+    "newHaptics": [],
+    "actions": 0,
+    "queue": [
+      "qa",
+      "qb",
+      "qc"
+    ]
+  },
+  {
+    "label": "queue-keyboard-move",
+    "haptics": 4,
+    "newHaptics": [
+      {
+        "time": 1792315561981,
+        "type": "haptic-drag-tick"
+      }
+    ],
+    "actions": 1,
+    "queue": [
+      "qb",
+      "qa",
+      "qc"
+    ]
+  },
+  {
+    "label": "touch-drag-activated",
+    "haptics": 5,
+    "newHaptics": [
+      {
+        "time": 1792315589637,
+        "type": "haptic-drag-start"
+      }
+    ],
+    "actions": 1,
+    "queue": [
+      "qb",
+      "qa",
+      "qc"
+    ]
+  },
+  {
+    "label": "touch-drag-position-change",
+    "haptics": 6,
+    "newHaptics": [
+      {
+        "time": 1792315608551,
+        "type": "haptic-drag-tick"
+      }
+    ],
+    "actions": 1,
+    "queue": [
+      "qb",
+      "qa",
+      "qc"
+    ]
+  },
+  {
+    "label": "touch-drag-same-position",
+    "haptics": 6,
+    "newHaptics": [],
+    "actions": 1,
+    "queue": [
+      "qb",
+      "qa",
+      "qc"
+    ]
+  },
+  {
+    "label": "touch-drag-committed",
+    "haptics": 7,
+    "newHaptics": [
+      {
+        "time": 1792315637964,
+        "type": "haptic-drag-end"
+      }
+    ],
+    "actions": 2,
+    "queue": [
+      "qa",
+      "qc",
+      "qb"
+    ]
+  },
+  {
+    "label": "touch-hold-without-reorder",
+    "haptics": 8,
+    "newHaptics": [
+      {
+        "time": 1792315660826,
+        "type": "haptic-drag-start"
+      }
+    ],
+    "actions": 2,
+    "queue": [
+      "qa",
+      "qc",
+      "qb"
+    ],
+    "note": "CDP 各调用存在延迟，实际已超过240ms并触发开始反馈；本样本证明长按但不换位时没有结束反馈或排序提交，不作为240ms前滚动取消证据。"
+  },
+  {
+    "label": "touch-cancel-start",
+    "haptics": 9,
+    "newHaptics": [
+      {
+        "time": 1792315688552,
+        "type": "haptic-drag-start"
+      }
+    ],
+    "actions": 2,
+    "queue": [
+      "qa",
+      "qc",
+      "qb"
+    ]
+  },
+  {
+    "label": "touch-cancel-preview",
+    "haptics": 10,
+    "newHaptics": [
+      {
+        "time": 1792315702712,
+        "type": "haptic-drag-tick"
+      }
+    ],
+    "actions": 2,
+    "queue": [
+      "qa",
+      "qc",
+      "qb"
+    ]
+  },
+  {
+    "label": "touch-cancel-no-commit",
+    "haptics": 10,
+    "newHaptics": [],
+    "actions": 2,
+    "queue": [
+      "qa",
+      "qc",
+      "qb"
+    ]
+  },
+  {
+    "label": "sidebar-settings-notification-buttons",
+    "haptics": 13,
+    "newHaptics": [
+      {
+        "time": 1792315729589,
+        "type": "haptic-click"
+      },
+      {
+        "time": 1792315735811,
+        "type": "haptic-click"
+      },
+      {
+        "time": 1792315743217,
+        "type": "haptic-click"
+      }
+    ],
+    "actions": 2,
+    "queue": [
+      "qa",
+      "qc",
+      "qb"
+    ]
+  },
+  {
+    "label": "checkbox-label-once",
+    "haptics": 14,
+    "newHaptics": [
+      {
+        "time": 1792315759505,
+        "type": "haptic-click"
+      }
+    ],
+    "actions": 2,
+    "queue": [
+      "qa",
+      "qc",
+      "qb"
+    ]
+  },
+  {
+    "label": "back-button-range-keyboard-complete",
+    "haptics": 16,
+    "newHaptics": [
+      {
+        "time": 1792315781640,
+        "type": "haptic-click"
+      },
+      {
+        "time": 1792315801169,
+        "type": "haptic-click"
+      }
+    ],
+    "actions": 2,
+    "queue": [
+      "qa",
+      "qc",
+      "qb"
+    ]
+  },
+  {
+    "label": "android-checks-finished-web-baseline",
+    "haptics": 17,
+    "newHaptics": [
+      {
+        "time": 1792315828136,
+        "type": "haptic-click"
+      }
+    ],
+    "actions": 2,
+    "queue": [
+      "qa",
+      "qc",
+      "qb"
+    ]
+  },
+  {
+    "label": "normal-mobile-web-no-feedback",
+    "haptics": 17,
+    "newHaptics": [],
+    "actions": 3,
+    "queue": [
+      "qc",
+      "qa",
+      "qb"
+    ]
+  }
+]

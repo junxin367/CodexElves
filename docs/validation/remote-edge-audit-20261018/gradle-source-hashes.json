@@ -1,0 +1,18 @@
+[
+  {
+    "file": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/MainActivity.java",
+    "sha256": "84a3e5ebc1a303d4fd4e5541d3f29ffaf497fbb06cfddf3e207444c065b13a52"
+  },
+  {
+    "file": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/LoginView.java",
+    "sha256": "f29b2e29f32462ee719439ecaffddcf23a39b81f469dc7b3297e9772b2e61439"
+  },
+  {
+    "file": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/NotificationController.java",
+    "sha256": "7d78d96a5e1a74937fbc517001841b4ee3ce07f43990f93a5e6bf1ed2fe5ed16"
+  },
+  {
+    "file": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/NotificationSettings.java",
+    "sha256": "90101edd4368d4bd56ac4a3f4be959ef215483a09774ee696a8ab35b5a3b99e3"
+  }
+]

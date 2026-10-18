@@ -1,0 +1,17 @@
+{
+  "status": "PASS",
+  "compiledReleaseClassCount": 9,
+  "nativeChangedDuringBuild": false,
+  "nativeTempRemoved": true,
+  "backendTempRemoved": true,
+  "browserTempRemoved": true,
+  "browserListenersAfterClose": 0,
+  "temporaryServerStopped": true,
+  "browserStorageCleared": true,
+  "browserViewportRestored": true,
+  "browserTabClosed": true,
+  "apkBuilt": false,
+  "installed": false,
+  "realNotificationSent": false,
+  "productionServiceRestarted": false
+}

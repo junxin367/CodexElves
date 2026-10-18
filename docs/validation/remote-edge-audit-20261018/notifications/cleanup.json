@@ -1,0 +1,9 @@
+{
+  "status": "partial",
+  "temporarySourcesRemoved": 17,
+  "remainingSources": 0,
+  "remainingClassFiles": 27,
+  "cleanupMethod": "apply_patch deleted each explicit source file",
+  "shellDeletion": "recursive and single-file Remove-Item were both rejected by automatic approval policy",
+  "remainingPath": "temp/remote-edge-audit-20261018/notifications/classes"
+}

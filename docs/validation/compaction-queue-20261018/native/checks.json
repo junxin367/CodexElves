@@ -1,0 +1,102 @@
+{
+  "collectedAt": "2026-10-18T11:05:55.644Z",
+  "result": "PASS",
+  "sources": [
+    {
+      "path": "assets/remote-access/native.js",
+      "sha256": "7b7ac84d5657a5b2b877772a36a38bb502d3ac1b8cb835c5e495799634799f81"
+    },
+    {
+      "path": "crates/codex-elves-core/src/remote_access.rs",
+      "sha256": "e48954d1de05e480b416efa4e9f8772950487f2b39947febbe6171821d997b9e"
+    }
+  ],
+  "javascriptTests": {
+    "passed": 63,
+    "failed": 0,
+    "baseline": {
+      "file": "native-regression.json",
+      "sourceSha256": "9b7a42c3b1d21b141d4c3b6ecdfa19688cae8e3c4bd5d3817fa30ced565cc6e1",
+      "passed": 61
+    },
+    "supplemental": {
+      "file": "send-state-release.json",
+      "sourceSha256": "7b7ac84d5657a5b2b877772a36a38bb502d3ac1b8cb835c5e495799634799f81",
+      "passed": 2
+    },
+    "reuse": "最终增量仅在 queueSendState 确认后释放已终态 unknown 身份；原读取实现仅改名，调度、prepare、add、身份合并及其他分支未变。按主代理要求只补受影响两项验证。"
+  },
+  "appServer": {
+    "result": "PASS",
+    "mode": "manual-and-automatic-server-queue",
+    "sourceSha256": "9b7a42c3b1d21b141d4c3b6ecdfa19688cae8e3c4bd5d3817fa30ced565cc6e1",
+    "currentSourceMatches": false,
+    "evidenceReusedForUnchangedScheduling": true,
+    "processStopped": true,
+    "reuse": "实际 app-server 的压缩调度、顺序、并发 admission、回包与历史恢复代码未变；最终仅补已确认 unknown 内存身份释放。"
+  },
+  "rustTests": {
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "codex-elves-core",
+      "--lib",
+      "compaction_queue_send_tests",
+      "--",
+      "--test-threads=1"
+    ],
+    "exitCode": 0,
+    "passed": 2,
+    "failed": 0,
+    "temporaryModuleRemoved": true,
+    "log": "rust-tests.log"
+  },
+  "cargoCheck": {
+    "command": [
+      "cargo",
+      "check",
+      "-p",
+      "codex-elves-core",
+      "--lib"
+    ],
+    "exitCode": 0,
+    "log": "cargo-check.log"
+  },
+  "commands": [
+    {
+      "command": [
+        "rustfmt",
+        "--check",
+        "--edition",
+        "2024",
+        "crates/codex-elves-core/src/remote_access.rs"
+      ],
+      "exitCode": 0,
+      "reusedEvidence": "本轮此前相同 Rust 源码状态的命令工具退出码 0，无输出；此后 Rust 源码未修改。"
+    },
+    {
+      "command": [
+        "C:\\nvm4w\\nodejs\\node.exe",
+        "--check",
+        "assets/remote-access/native.js"
+      ],
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check",
+        "--",
+        "assets/remote-access/native.js",
+        "crates/codex-elves-core/src/remote_access.rs"
+      ],
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": "warning: in the working copy of 'crates/codex-elves-core/src/remote_access.rs', LF will be replaced by CRLF the next time Git touches it\n"
+    }
+  ]
+}

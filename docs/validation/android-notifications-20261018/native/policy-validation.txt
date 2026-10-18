@@ -1,0 +1,6 @@
+PASS: origin, cookie, thread and intent identity policy
+PASS: settings defaults, exact booleans and request envelope
+PASS: snapshots, pending requests, dismissal, epochs, cursor and Unicode
+PASS: bounded SSE comments, CRLF and multiline parsing
+PASS: fake HTTPS handshake gap, SSE, redirect, HTTP401 and old server
+PASS: native isolated policy assertions=100

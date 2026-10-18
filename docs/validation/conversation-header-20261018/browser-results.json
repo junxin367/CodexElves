@@ -1,0 +1,254 @@
+{
+  "result": "PASS",
+  "scope": "Chrome加载生产标题栏结构及完整CSS，内容为本机预览，不连接真实会话；不是Android真机截图",
+  "samples": [
+    {
+      "label": "before-mobile-390-font14",
+      "aboveText": 13,
+      "belowText": 14,
+      "contentsWithinHeader": true,
+      "heading": {
+        "height": 33,
+        "width": 244.546875,
+        "x": 48
+      },
+      "height": 60,
+      "open": {
+        "height": 36,
+        "width": 36,
+        "x": 4
+      },
+      "overflow": false,
+      "padding": "10px 12px 10px 4px",
+      "pathFont": "9.00004px",
+      "refresh": {
+        "height": 36,
+        "width": 36,
+        "x": 342
+      },
+      "titleFont": "12px",
+      "titleGap": 5,
+      "viewport": {
+        "height": 180,
+        "width": 390
+      }
+    },
+    {
+      "label": "after-mobile-390-font14",
+      "aboveText": 7,
+      "belowText": 8,
+      "contentsWithinHeader": true,
+      "heading": {
+        "height": 33,
+        "width": 244.546875,
+        "x": 48
+      },
+      "height": 48,
+      "open": {
+        "height": 36,
+        "width": 36,
+        "x": 4
+      },
+      "overflow": false,
+      "padding": "3px 12px 3px 4px",
+      "pathFont": "9.00004px",
+      "refresh": {
+        "height": 36,
+        "width": 36,
+        "x": 342
+      },
+      "titleFont": "12px",
+      "titleGap": 5,
+      "viewport": {
+        "height": 180,
+        "width": 390
+      }
+    },
+    {
+      "label": "before-mobile-320-font20",
+      "aboveText": 7.5,
+      "belowText": 8.5,
+      "contentsWithinHeader": true,
+      "heading": {
+        "height": 44,
+        "width": 160.25,
+        "x": 48
+      },
+      "height": 60,
+      "open": {
+        "height": 36,
+        "width": 36,
+        "x": 4
+      },
+      "overflow": false,
+      "padding": "10px 12px 10px 4px",
+      "pathFont": "12.8572px",
+      "refresh": {
+        "height": 36,
+        "width": 36,
+        "x": 272
+      },
+      "titleFont": "17.1428px",
+      "titleGap": 5,
+      "viewport": {
+        "height": 240,
+        "width": 320
+      }
+    },
+    {
+      "label": "after-mobile-320-font20",
+      "aboveText": 3,
+      "belowText": 4,
+      "contentsWithinHeader": true,
+      "heading": {
+        "height": 44,
+        "width": 160.25,
+        "x": 48
+      },
+      "height": 51,
+      "open": {
+        "height": 36,
+        "width": 36,
+        "x": 4
+      },
+      "overflow": false,
+      "padding": "3px 12px 3px 4px",
+      "pathFont": "12.8572px",
+      "refresh": {
+        "height": 36,
+        "width": 36,
+        "x": 272
+      },
+      "titleFont": "17.1428px",
+      "titleGap": 5,
+      "viewport": {
+        "height": 240,
+        "width": 320
+      }
+    },
+    {
+      "label": "before-desktop-1280-font14",
+      "aboveText": 12.5,
+      "belowText": 13.5,
+      "contentsWithinHeader": true,
+      "heading": {
+        "height": 38,
+        "width": 830.828125,
+        "x": 332
+      },
+      "height": 64,
+      "open": {
+        "height": 32,
+        "width": 32,
+        "x": 288
+      },
+      "overflow": false,
+      "padding": "12px 24px 12px 8px",
+      "pathFont": "10.0001px",
+      "refresh": {
+        "height": 32,
+        "width": 32,
+        "x": 1224
+      },
+      "titleFont": "14px",
+      "titleGap": 5,
+      "viewport": {
+        "height": 240,
+        "width": 1280
+      }
+    },
+    {
+      "label": "after-desktop-1280-font14",
+      "aboveText": 6.5,
+      "belowText": 7.5,
+      "contentsWithinHeader": true,
+      "heading": {
+        "height": 38,
+        "width": 830.828125,
+        "x": 332
+      },
+      "height": 52,
+      "open": {
+        "height": 32,
+        "width": 32,
+        "x": 288
+      },
+      "overflow": false,
+      "padding": "6px 24px 6px 8px",
+      "pathFont": "10.0001px",
+      "refresh": {
+        "height": 32,
+        "width": 32,
+        "x": 1224
+      },
+      "titleFont": "14px",
+      "titleGap": 5,
+      "viewport": {
+        "height": 240,
+        "width": 1280
+      }
+    },
+    {
+      "label": "before-desktop-1280-font20",
+      "aboveText": 6,
+      "belowText": 7,
+      "contentsWithinHeader": true,
+      "heading": {
+        "height": 51,
+        "width": 814.9375,
+        "x": 332
+      },
+      "height": 64,
+      "open": {
+        "height": 32,
+        "width": 32,
+        "x": 288
+      },
+      "overflow": false,
+      "padding": "12px 24px 12px 8px",
+      "pathFont": "14.2858px",
+      "refresh": {
+        "height": 32,
+        "width": 32,
+        "x": 1224
+      },
+      "titleFont": "20px",
+      "titleGap": 5,
+      "viewport": {
+        "height": 240,
+        "width": 1280
+      }
+    },
+    {
+      "label": "after-desktop-1280-font20",
+      "aboveText": 6,
+      "belowText": 7,
+      "contentsWithinHeader": true,
+      "heading": {
+        "height": 51,
+        "width": 814.9375,
+        "x": 332
+      },
+      "height": 64,
+      "open": {
+        "height": 32,
+        "width": 32,
+        "x": 288
+      },
+      "overflow": false,
+      "padding": "6px 24px 6px 8px",
+      "pathFont": "14.2858px",
+      "refresh": {
+        "height": 32,
+        "width": 32,
+        "x": 1224
+      },
+      "titleFont": "20px",
+      "titleGap": 5,
+      "viewport": {
+        "height": 240,
+        "width": 1280
+      }
+    }
+  ]
+}

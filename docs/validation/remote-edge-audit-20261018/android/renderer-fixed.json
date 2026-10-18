@@ -1,0 +1,32 @@
+{
+  "status": "PASS",
+  "assertions": 30,
+  "noDeviceRuntime": true,
+  "coverage": [
+    "current/stale renderer",
+    "finishing/destroyed",
+    "chooser cancellation",
+    "notification target",
+    "ready queued/completed",
+    "trial/pending retention",
+    "manual retry",
+    "destroy ordering"
+  ],
+  "sourceSha256": {
+    "MainActivity.java": "84a3e5ebc1a303d4fd4e5541d3f29ffaf497fbb06cfddf3e207444c065b13a52",
+    "ResourceStore.java": "38ed612f33f9a115e3a97aaa077ba563610d29ab058c8fcc00cb375e0df0e9f2",
+    "ResourceStatePolicy.java": "e6e9276d78d7d230d7cb82daf814ea19600c1767f5caf691e54d8b3b54e1eeed"
+  },
+  "extractedMethods": {
+    "public boolean onRenderProcessGone(": "50c9ec44c46d5b09ed0248f026068cbf55bc969a33f451fb77a874bcc184f42d",
+    "private void handleRendererExit(": "5ea08bc2eda7aa5252e27a2d95eb9f2518a34527fa230fbf2c5539021db6b1aa",
+    "private void cancelResourceWork()": "f776b5b0ce5423f5f36d693f6564bf8fb147dfccebb4750293f07db2a2658e98",
+    "private void destroyWebView()": "12c5473f89e61caadca600dd03fd7f6d3358ac27c784eba3ca976d6a3270cb32",
+    "private void completeFileChooser(": "fc01b49cb7f10b8866f4314aecd59357c4fe744cb20f157ca699e409da84a2d5",
+    "private void cancelFileChooser()": "d00d2e31a402b16a7d6a5cc91fee46261426aeee9e255c8bac5fb1c2025d2edd",
+    "synchronized Snapshot selectForPage(": "e948385f827984a43e707a56ce8fd6b398053555da445f135c8c93cd446109fc",
+    "synchronized void markReady(": "4a5c150b1e0f4c06558e205672103312d7dbd633d955df44cf3cb61ff6222918",
+    "synchronized boolean rollbackTrial(": "1be34b52ceea0fe54b0d1b88547306e56cbd8fda3c7cf906fac0463b01f34242"
+  },
+  "scope": "Exact production renderer/cleanup/chooser and resource selection/markReady/rollback method bodies; deterministic View/notification/preferences/file-loading/UI stubs. Retry UI/openSession routing is a fixture; no WebView or device runtime."
+}

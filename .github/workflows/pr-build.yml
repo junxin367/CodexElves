@@ -11,6 +11,73 @@ permissions:
   contents: read
 
 jobs:
+  android-changes:
+    name: Detect Android changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      changed: ${{ steps.changes.outputs.changed }}
+    steps:
+      - name: Detect Android build inputs
+        id: changes
+        uses: actions/github-script@v8
+        with:
+          script: |
+            if (context.eventName === "workflow_dispatch") {
+              core.setOutput("changed", "true");
+              return;
+            }
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              per_page: 100
+            });
+            const relevant = (path) =>
+              (path.startsWith("apps/codex-elves-android/") &&
+                !/(?:^|\/)(?:build|\.gradle|\.idea)\//.test(path) &&
+                !path.endsWith("/local.properties")) ||
+              path.startsWith("assets/remote-access/") ||
+              /^scripts\/[^/]*android[^/]*\.ps1$/.test(path) ||
+              path === "build.ps1" ||
+              path === ".github/workflows/android-apk.yml" ||
+              path === ".github/workflows/pr-build.yml";
+            core.setOutput("changed", String(files.some(file =>
+              relevant(file.filename) || (file.previous_filename && relevant(file.previous_filename)))));
+
+  android-debug:
+    name: Android debug APK and lint
+    needs: android-changes
+    if: ${{ needs.android-changes.outputs.changed == 'true' }}
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
+      - name: Build debug APK and lint without signing secrets
+        shell: pwsh
+        run: .\scripts\build-android.ps1 -Configuration Debug
+      - name: Upload Android debug APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: codex-elves-android-pr-debug
+          path: dist/android/CodexElves-*-android-debug.apk
+          if-no-files-found: error
+
   windows-artifacts:
     name: Windows artifacts
     runs-on: windows-latest

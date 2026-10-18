@@ -1,0 +1,10 @@
+[
+  {
+    "file": "temp/android-permissions-20261018/native-fixes/MemoryNativeCheck.java",
+    "sha256": "DA88D8F66EF4473E627460C5DBE2E5C265D99A2FD30DC4F202B70562C8754D05"
+  },
+  {
+    "file": "temp/android-permissions-20261018/native-fixes/NativeFixesCheck.java",
+    "sha256": "D8C647E9EC0166D60B3A1445FFC319E7549DFFEE07F9E57FD26C741328F2A248"
+  }
+]

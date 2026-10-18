@@ -1,0 +1,295 @@
+{
+  "status": "PASS",
+  "scope": "Chrome扩展加载完整生产前端，模型目录和HTTP/WS为本机模拟；通过真实页面交互捕获6次隔离发送载荷。未写真实聊天，未调用付费模型，模拟后端状态不等于原生实际应用结果。",
+  "checks": {
+    "currentValuesShown": true,
+    "sameModelKeepsEffort": true,
+    "selectionClosesMenu": true,
+    "repeatButtonClosesMenu": true,
+    "newModelDefaultSelected": true,
+    "unsupportedEffortHidden": true,
+    "minimalHidden": true,
+    "ultraHiddenWithoutFlag": true,
+    "effortOnlyIncludesModel": true,
+    "noReasoningModelOmitsEffort": true,
+    "newChatEffortIncludesModel": true,
+    "threadSwitchResetsLocalOverrides": true,
+    "unchangedSelectionInherits": true
+  },
+  "samples": [
+    {
+      "checked": [
+        "模型 A",
+        "高"
+      ],
+      "efforts": [
+        "轻度",
+        "中",
+        "高",
+        "极高"
+      ],
+      "expanded": "true",
+      "input": "",
+      "label": "initial-menu",
+      "menuHidden": false,
+      "model": "模型 A 高",
+      "overflowX": false
+    },
+    {
+      "checked": [
+        "模型 A",
+        "高"
+      ],
+      "efforts": [
+        "轻度",
+        "中",
+        "高",
+        "极高"
+      ],
+      "expanded": "false",
+      "input": "",
+      "label": "same-model-keeps-high-and-closes",
+      "menuHidden": true,
+      "model": "模型 A 高",
+      "overflowX": false
+    },
+    {
+      "checked": [
+        "模型 A",
+        "高"
+      ],
+      "efforts": [
+        "轻度",
+        "中",
+        "高",
+        "极高"
+      ],
+      "expanded": "false",
+      "input": "",
+      "label": "button-toggles-closed",
+      "menuHidden": true,
+      "model": "模型 A 高",
+      "overflowX": false
+    },
+    {
+      "checked": [
+        "模型 A",
+        "极高"
+      ],
+      "efforts": [
+        "轻度",
+        "中",
+        "高",
+        "极高"
+      ],
+      "expanded": "false",
+      "input": "",
+      "label": "effort-only-xhigh",
+      "menuHidden": true,
+      "model": "模型 A 极高",
+      "overflowX": false
+    },
+    {
+      "checked": [
+        "模型 B",
+        "Max"
+      ],
+      "efforts": [
+        "轻度",
+        "中",
+        "高",
+        "Max"
+      ],
+      "expanded": "false",
+      "input": "",
+      "label": "switch-model-default-max",
+      "menuHidden": true,
+      "model": "模型 B Max",
+      "overflowX": false
+    },
+    {
+      "checked": [
+        "模型 B",
+        "Max"
+      ],
+      "efforts": [
+        "轻度",
+        "中",
+        "高",
+        "Max"
+      ],
+      "expanded": "true",
+      "input": "",
+      "label": "b-menu-ultra-hidden",
+      "menuHidden": false,
+      "model": "模型 B Max",
+      "overflowX": false
+    },
+    {
+      "checked": [
+        "模型 B",
+        "轻度"
+      ],
+      "efforts": [
+        "轻度",
+        "中",
+        "高",
+        "Max"
+      ],
+      "expanded": "false",
+      "input": "",
+      "label": "switch-b-effort-low",
+      "menuHidden": true,
+      "model": "模型 B 轻度",
+      "overflowX": false
+    },
+    {
+      "checked": [
+        "模型 B",
+        "轻度"
+      ],
+      "efforts": [
+        "轻度",
+        "中",
+        "高",
+        "Max"
+      ],
+      "expanded": "false",
+      "input": "",
+      "label": "same-model-keeps-explicit-low",
+      "menuHidden": true,
+      "model": "模型 B 轻度",
+      "overflowX": false
+    },
+    {
+      "checked": [
+        "无推理模型"
+      ],
+      "efforts": [],
+      "expanded": "false",
+      "input": "",
+      "label": "switch-no-reasoning",
+      "menuHidden": true,
+      "model": "无推理模型",
+      "overflowX": false
+    },
+    {
+      "checked": [
+        "无推理模型"
+      ],
+      "efforts": [],
+      "expanded": "true",
+      "input": "",
+      "label": "no-reasoning-menu",
+      "menuHidden": false,
+      "model": "无推理模型",
+      "overflowX": false
+    },
+    {
+      "checked": [
+        "无推理模型"
+      ],
+      "efforts": [],
+      "expanded": "false",
+      "input": "",
+      "label": "new-chat-defaults",
+      "menuHidden": true,
+      "model": "模型 A 高",
+      "overflowX": false
+    },
+    {
+      "checked": [
+        "模型 A",
+        "中"
+      ],
+      "efforts": [
+        "轻度",
+        "中",
+        "高",
+        "极高"
+      ],
+      "expanded": "false",
+      "input": "",
+      "label": "new-chat-effort-only",
+      "menuHidden": true,
+      "model": "模型 A 中",
+      "overflowX": false
+    },
+    {
+      "checked": [
+        "模型 B",
+        "Max"
+      ],
+      "efforts": [
+        "轻度",
+        "中",
+        "高",
+        "Max"
+      ],
+      "expanded": "false",
+      "input": "",
+      "label": "model-default-max-before-send",
+      "menuHidden": true,
+      "model": "模型 B Max",
+      "overflowX": false
+    },
+    {
+      "checked": [
+        "模型 A",
+        "高"
+      ],
+      "efforts": [
+        "轻度",
+        "中",
+        "高",
+        "极高"
+      ],
+      "expanded": "false",
+      "input": "",
+      "label": "other-thread-restores-own-settings",
+      "menuHidden": true,
+      "model": "模型 B Max",
+      "overflowX": false
+    },
+    {
+      "checked": [
+        "模型 A",
+        "高"
+      ],
+      "efforts": [
+        "轻度",
+        "中",
+        "高",
+        "极高"
+      ],
+      "expanded": "false",
+      "input": "",
+      "label": "after-inherited-send",
+      "menuHidden": true,
+      "model": "模型 B Max",
+      "overflowX": false
+    }
+  ],
+  "loginHintChecks": [
+    {
+      "buttonTop": 332.734375,
+      "description": "pair-key-hint",
+      "display": "none",
+      "hidden": true,
+      "inputBottom": 314.734375,
+      "state": "initial",
+      "text": ""
+    },
+    {
+      "hidden": false,
+      "invalid": "true",
+      "state": "invalid",
+      "text": "访问密钥需为 8–256 个非空格 ASCII 字符。"
+    },
+    {
+      "hidden": true,
+      "state": "cleared",
+      "text": ""
+    }
+  ]
+}

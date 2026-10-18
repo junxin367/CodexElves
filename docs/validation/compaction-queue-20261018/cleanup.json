@@ -1,0 +1,13 @@
+{
+  "status": "PARTIAL",
+  "testSourcesRemoved": true,
+  "temporaryRustModuleRemoved": true,
+  "remainingFiles": 162,
+  "reparsePoints": 0,
+  "remainingRoot": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture",
+  "rootRemovedFixtureConfig": true,
+  "reason": "自动审批拒绝批量删除隔离测试数据库与缓存，仅返回 blocked by policy",
+  "isolatedProcessesStopped": true,
+  "browserCleanup": "browser/cleanup.json",
+  "priorHapticsFilesTouched": false
+}

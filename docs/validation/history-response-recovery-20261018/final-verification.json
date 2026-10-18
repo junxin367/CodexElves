@@ -1,0 +1,13 @@
+{
+  "status": "PASS",
+  "appSha256": "43aed2e6258bab39e15d3e531c9d5b2b76fdc6406520e896d9476685defec137",
+  "browserFixtureRemoved": true,
+  "unitFixtureRemoved": true,
+  "browserTabClosed": true,
+  "browserStorageCleared": true,
+  "viewportRestored": true,
+  "temporaryServersStopped": true,
+  "productionRestarted": false,
+  "packageBuilt": false,
+  "phoneResponseCaptured": false
+}

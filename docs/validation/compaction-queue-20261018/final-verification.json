@@ -1,0 +1,15 @@
+{
+  "implementation": "PASS",
+  "nativeJsCases": 63,
+  "rustTests": 2,
+  "uiVmCases": 31,
+  "browserSamples": 11,
+  "appServerManualAndAutoCompaction": "PASS",
+  "finalNativeAndRustHashesMatch": true,
+  "temporaryCleanup": "PARTIAL",
+  "remainingTemporaryFiles": 162,
+  "packageBuilt": false,
+  "deployed": false,
+  "realUpstreamCalls": false,
+  "realUserChatWrites": false
+}

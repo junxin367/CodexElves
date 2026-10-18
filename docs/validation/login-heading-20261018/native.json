@@ -1,0 +1,66 @@
+{
+  "sourceAndResourceValidation": "PASS",
+  "date": "2026-10-18",
+  "changes": [
+    "apps/codex-elves-android/app/src/main/res/layout/view_login.xml",
+    "apps/codex-elves-android/app/src/main/res/drawable/ic_login_brand.xml"
+  ],
+  "checks": {
+    "heading_wraps_content": true,
+    "heading_centered_as_group": true,
+    "heading_vertically_centers_children": true,
+    "icon_fixed_40dp": true,
+    "icon_vector_reference": true,
+    "icon_decorative": true,
+    "title_keeps_28sp": true,
+    "title_wraps_height_and_width": true,
+    "title_no_truncation_or_line_limit": true,
+    "title_preserves_resource_name": true,
+    "title_no_added_hyphens": true,
+    "everything_outside_heading_unchanged": true,
+    "vector_has_40_unit_viewport": true,
+    "vector_uses_existing_dark_color": true,
+    "login_java_dimensions_and_styles_unchanged": true
+  },
+  "resourceTool": "Android SDK 35.0.0 AAPT2 2.19-11948202",
+  "resourceCompileExit": 0,
+  "resourceLinkExit": 0,
+  "compiledLayoutDumpExit": 0,
+  "resourceLinkDetails": "最终圆弧四角星版本已重新通过 SDK35 AAPT2 compile/link。仅在任务临时目录内给 Manifest 添加 package，并将 provider 的 applicationId 占位符解析为现有 applicationId；使用原始资源目录、SDK35 android.jar、minSdk26、targetSdk35 完成资源编译及链接。未运行 Gradle 或 APK 构建。",
+  "narrowScreenConstraints": {
+    "screenWidthDp": 320,
+    "horizontalPaddingDpEach": 18,
+    "panelAndHeadingMaxWidthDp": 284,
+    "iconWidthDp": 40,
+    "gapDp": 12,
+    "titleAvailableWidthDp": 232,
+    "behavior": "标题使用平台 TextView 的受限宽度及不限行 wrap_content 高度；宽度足够时单行，不足时换行，不启用省略或强制单行。",
+    "fontScale200RuntimeRendering": "NOT_RUN"
+  },
+  "preserved": [
+    "外层 ScrollView fillViewport 与既有垂直居中",
+    "420dp 表单最大宽度",
+    "标题以下全部 XML",
+    "LoginView.java 与登录交互",
+    "字体缩放设置与全局样式"
+  ],
+  "coverageLimit": "没有设备、ADB 或模拟器。未验证 OEM 字体、200% 字体下实际绘制、TalkBack 或真实设备截图；本证据仅确认源码约束和资源可链接性。",
+  "references": [
+    "https://developer.android.com/reference/android/widget/LinearLayout.LayoutParams",
+    "https://developer.android.com/reference/android/widget/TextView",
+    "https://developer.android.com/develop/ui/views/graphics/vector-drawable-resources",
+    "https://developer.android.com/develop/ui/views/text-and-emoji/autosizing-textview",
+    "https://support.google.com/accessibility/android/answer/7158690?hl=en",
+    "https://android.googlesource.com/platform/frameworks/base/+/refs/heads/master/core/java/android/widget/LinearLayout.java"
+  ],
+  "implementationChoice": "采用平台自然换行，以保留用户字体缩放；官方文档不建议 wrap_content TextView 同时启用 autosizing，因此没有添加自动缩字或自定义测量逻辑。",
+  "finalIcon": {
+    "outline": "四条三次贝塞尔曲线保留原 ✦ 圆弧过渡轮廓。",
+    "pathData": "M20,1 C23.2,11.4 28.6,16.8 39,20 C28.6,23.2 23.2,28.6 20,39 C16.8,28.6 11.4,23.2 1,20 C11.4,16.8 16.8,11.4 20,1 Z",
+    "viewport": "40×40",
+    "safeInsetUnits": 1,
+    "sha256": "8157364B1964DE9F4712483B70AC21B0F2E03FA5BAC0892D9669F53B2FE5DBB8",
+    "aapt2FinalResourceCompile": "PASS",
+    "aapt2FinalResourceLink": "PASS"
+  }
+}

@@ -1,0 +1,1116 @@
+{
+  "plans": [
+    {
+      "label": "after-broken-body",
+      "fault": "broken-body",
+      "historyHits": 2,
+      "actionHits": 0,
+      "receiptHits": 0,
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/read/history",
+          "mode": "after",
+          "time": 1792308127399,
+          "payload": {
+            "threadId": "history-main",
+            "cursor": null
+          },
+          "response": "200 + incomplete Content-Length body",
+          "connectionClosed": true,
+          "finished": false
+        },
+        {
+          "method": "POST",
+          "path": "/api/read/history",
+          "mode": "after",
+          "time": 1792308127499,
+          "payload": {
+            "threadId": "history-main",
+            "cursor": null
+          },
+          "response": "200 + valid history"
+        }
+      ]
+    },
+    {
+      "label": "after-retry-exhausted",
+      "fault": "always-broken",
+      "historyHits": 2,
+      "actionHits": 0,
+      "receiptHits": 0,
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/read/history",
+          "mode": "after",
+          "time": 1792308151444,
+          "payload": {
+            "threadId": "history-main",
+            "cursor": null
+          },
+          "response": "200 + incomplete Content-Length body",
+          "connectionClosed": true,
+          "finished": false
+        },
+        {
+          "method": "POST",
+          "path": "/api/read/history",
+          "mode": "after",
+          "time": 1792308151545,
+          "payload": {
+            "threadId": "history-main",
+            "cursor": null
+          },
+          "response": "200 + incomplete Content-Length body",
+          "connectionClosed": true,
+          "finished": false
+        }
+      ]
+    },
+    {
+      "label": "after-manual-retry",
+      "fault": "none",
+      "historyHits": 1,
+      "actionHits": 0,
+      "receiptHits": 0,
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/read/history",
+          "mode": "after",
+          "time": 1792308180303,
+          "payload": {
+            "threadId": "history-main",
+            "cursor": null
+          },
+          "response": "200 + valid history"
+        }
+      ]
+    },
+    {
+      "label": "after-valid-json-wrong-shape",
+      "fault": "wrong-shape",
+      "historyHits": 1,
+      "actionHits": 0,
+      "receiptHits": 0,
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/read/history",
+          "mode": "after",
+          "time": 1792308209628,
+          "payload": {
+            "threadId": "history-main",
+            "cursor": null
+          },
+          "response": "200 + valid JSON + data object"
+        }
+      ]
+    },
+    {
+      "label": "after-switch-cancels-old-read",
+      "fault": "delayed-broken",
+      "historyHits": 1,
+      "actionHits": 0,
+      "receiptHits": 0,
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/read/history",
+          "mode": "after",
+          "time": 1792308263770,
+          "payload": {
+            "threadId": "history-main",
+            "cursor": null
+          },
+          "response": "200 + incomplete Content-Length body",
+          "connectionClosed": true,
+          "finished": false
+        }
+      ]
+    },
+    {
+      "label": "after-send-receipt-body-failure",
+      "fault": "send-broken",
+      "historyHits": 0,
+      "actionHits": 1,
+      "receiptHits": 1,
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/action/send",
+          "mode": "after",
+          "time": 1792308299863,
+          "payload": {
+            "prompt": "回执中断验证：只发送一次，确认后才清空",
+            "threadId": "history-other"
+          },
+          "response": "200 + incomplete Content-Length body",
+          "connectionClosed": true,
+          "finished": false
+        },
+        {
+          "method": "GET",
+          "path": "/api/receipts/89e8fc17-8480-4fc2-b9f0-347cd1f23db0",
+          "mode": "after",
+          "time": 1792308299977
+        }
+      ]
+    },
+    {
+      "label": "after-final-healthy",
+      "fault": "none",
+      "historyHits": 1,
+      "actionHits": 0,
+      "receiptHits": 0,
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/read/history",
+          "mode": "after",
+          "time": 1792308405836,
+          "payload": {
+            "threadId": "history-main",
+            "cursor": null
+          },
+          "response": "200 + valid history"
+        }
+      ]
+    }
+  ],
+  "allRequests": [
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308070947
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308070965,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308071533,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "after",
+      "time": 1792308071534,
+      "payload": {
+        "threadId": "history-main"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "after",
+      "time": 1792308071534,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308071540
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308085933
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308085942,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/",
+      "mode": null,
+      "time": 1792308098513
+    },
+    {
+      "method": "GET",
+      "path": "/fixture.js",
+      "mode": "after",
+      "time": 1792308098646
+    },
+    {
+      "method": "GET",
+      "path": "/style.css",
+      "mode": "after",
+      "time": 1792308098650
+    },
+    {
+      "method": "GET",
+      "path": "/app.js",
+      "mode": "after",
+      "time": 1792308098658
+    },
+    {
+      "method": "GET",
+      "path": "/events-client.js",
+      "mode": "after",
+      "time": 1792308098664
+    },
+    {
+      "method": "GET",
+      "path": "/platform.js",
+      "mode": "after",
+      "time": 1792308098665
+    },
+    {
+      "method": "GET",
+      "path": "/recovery-store.js",
+      "mode": "after",
+      "time": 1792308098665
+    },
+    {
+      "method": "GET",
+      "path": "/attachments.js",
+      "mode": "after",
+      "time": 1792308098669
+    },
+    {
+      "method": "GET",
+      "path": "/message-actions.js",
+      "mode": "after",
+      "time": 1792308098669
+    },
+    {
+      "method": "GET",
+      "path": "/markdown.js",
+      "mode": "after",
+      "time": 1792308098673
+    },
+    {
+      "method": "GET",
+      "path": "/pwa.js",
+      "mode": "after",
+      "time": 1792308098675
+    },
+    {
+      "method": "GET",
+      "path": "/manifest.webmanifest",
+      "mode": "after",
+      "time": 1792308098811
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308098822
+    },
+    {
+      "method": "GET",
+      "path": "/favicon.ico",
+      "mode": "after",
+      "time": 1792308098971
+    },
+    {
+      "method": "GET",
+      "path": "/icons/icon-192.png",
+      "mode": "after",
+      "time": 1792308098972
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "mode": "after",
+      "time": 1792308099004,
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308099013,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/events-worker.js",
+      "mode": "after",
+      "time": 1792308099015
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "after",
+      "time": 1792308099025,
+      "payload": {
+        "threadId": "history-main"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "after",
+      "time": 1792308099036,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308099066
+    },
+    {
+      "method": "GET",
+      "path": "/markdown-renderer.js",
+      "mode": null,
+      "time": 1792308099076
+    },
+    {
+      "method": "GET",
+      "path": "/vendor/marked.esm.js",
+      "mode": null,
+      "time": 1792308099076
+    },
+    {
+      "method": "GET",
+      "path": "/vendor/dompurify.esm.js",
+      "mode": null,
+      "time": 1792308099076
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308099092,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "after",
+      "time": 1792308099093,
+      "payload": {
+        "threadId": "history-main"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "after",
+      "time": 1792308099093,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/app-resources.json",
+      "mode": "after",
+      "time": 1792308101227
+    },
+    {
+      "method": "GET",
+      "path": "/__arm",
+      "mode": null,
+      "time": 1792308112355
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308114024
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308114029,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308127393,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "after",
+      "time": 1792308127398,
+      "payload": {
+        "threadId": "history-main"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "mode": "after",
+      "time": 1792308127399,
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "after",
+      "time": 1792308127399,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      },
+      "response": "200 + incomplete Content-Length body",
+      "connectionClosed": true,
+      "finished": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "after",
+      "time": 1792308127499,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      },
+      "response": "200 + valid history"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308129028
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308129038,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/__results",
+      "mode": null,
+      "time": 1792308138654
+    },
+    {
+      "method": "GET",
+      "path": "/__arm",
+      "mode": null,
+      "time": 1792308138725
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308144023
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308144029,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308151442,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "after",
+      "time": 1792308151443,
+      "payload": {
+        "threadId": "history-main"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "mode": "after",
+      "time": 1792308151444,
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "after",
+      "time": 1792308151444,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      },
+      "response": "200 + incomplete Content-Length body",
+      "connectionClosed": true,
+      "finished": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "after",
+      "time": 1792308151545,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      },
+      "response": "200 + incomplete Content-Length body",
+      "connectionClosed": true,
+      "finished": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308159042
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308159054,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/__results",
+      "mode": null,
+      "time": 1792308170223
+    },
+    {
+      "method": "GET",
+      "path": "/__arm",
+      "mode": null,
+      "time": 1792308170283
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308174045
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308174060,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "after",
+      "time": 1792308180303,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      },
+      "response": "200 + valid history"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308189031
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308189043,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/__arm",
+      "mode": null,
+      "time": 1792308199073
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308204029
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308204048,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308209618,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "after",
+      "time": 1792308209620,
+      "payload": {
+        "threadId": "history-main"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "mode": "after",
+      "time": 1792308209627,
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "after",
+      "time": 1792308209628,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      },
+      "response": "200 + valid JSON + data object"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308219016
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308219021,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308234019
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308234024,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/__results",
+      "mode": null,
+      "time": 1792308247022
+    },
+    {
+      "method": "GET",
+      "path": "/__arm",
+      "mode": null,
+      "time": 1792308247078
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308249017
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308249033,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308263769,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "after",
+      "time": 1792308263770,
+      "payload": {
+        "threadId": "history-main"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "mode": "after",
+      "time": 1792308263770,
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "after",
+      "time": 1792308263770,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      },
+      "response": "200 + incomplete Content-Length body",
+      "connectionClosed": true,
+      "finished": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308264022
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308264031,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "after",
+      "time": 1792308265868,
+      "payload": {
+        "threadId": "history-other"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "after",
+      "time": 1792308265869,
+      "payload": {
+        "threadId": "history-other",
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/favicon.ico",
+      "mode": "after",
+      "time": 1792308265887
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308279032
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308279050,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/__results",
+      "mode": null,
+      "time": 1792308281998
+    },
+    {
+      "method": "GET",
+      "path": "/__arm",
+      "mode": null,
+      "time": 1792308282060
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308294019
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308294025,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/action/send",
+      "mode": "after",
+      "time": 1792308299863,
+      "payload": {
+        "prompt": "回执中断验证：只发送一次，确认后才清空",
+        "threadId": "history-other"
+      },
+      "response": "200 + incomplete Content-Length body",
+      "connectionClosed": true,
+      "finished": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/receipts/89e8fc17-8480-4fc2-b9f0-347cd1f23db0",
+      "mode": "after",
+      "time": 1792308299977
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "after",
+      "time": 1792308301596,
+      "payload": {
+        "threadId": "history-other"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "after",
+      "time": 1792308301601,
+      "payload": {
+        "threadId": "history-other",
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308309028
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308309034,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308324011
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308324015,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308339014
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308339018,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308354013
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308354017,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308369030
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308369038,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308384025
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308384037,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/__results",
+      "mode": null,
+      "time": 1792308388291
+    },
+    {
+      "method": "GET",
+      "path": "/__arm",
+      "mode": null,
+      "time": 1792308388350
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308399017
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308399032,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/app-resources.json",
+      "mode": "after",
+      "time": 1792308401232
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "after",
+      "time": 1792308405834,
+      "payload": {
+        "threadId": "history-main"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "after",
+      "time": 1792308405836,
+      "payload": {
+        "threadId": "history-main",
+        "cursor": null
+      },
+      "response": "200 + valid history"
+    },
+    {
+      "method": "GET",
+      "path": "/favicon.ico",
+      "mode": "after",
+      "time": 1792308405851
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "after",
+      "time": 1792308414033
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "after",
+      "time": 1792308414048,
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/__cleanup",
+      "mode": null,
+      "time": 1792308420181
+    },
+    {
+      "method": "GET",
+      "path": "/__results",
+      "mode": null,
+      "time": 1792308484161
+    }
+  ]
+}

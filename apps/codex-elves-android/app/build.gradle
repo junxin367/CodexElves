@@ -6,17 +6,27 @@ plugins {
 }
 
 def repositoryRoot = rootProject.projectDir.toPath().resolve("../..").normalize().toFile()
-def cargoToml = new File(repositoryRoot, "Cargo.toml")
-def cargoText = cargoToml.getText("UTF-8")
-def workspacePackageMatcher = cargoText =~ /(?ms)^\[workspace\.package\]\s*$([\s\S]*?)(?=^\[|\z)/
-if (!workspacePackageMatcher.find()) {
-    throw new GradleException("根 Cargo.toml 缺少 [workspace.package]")
+def versionFile = rootProject.file("version.properties")
+def versionProperties = new Properties()
+if (!versionFile.isFile()) {
+    throw new GradleException("缺少 Android 独立版本文件：version.properties")
 }
-def versionMatcher = workspacePackageMatcher.group(1) =~ /(?m)^\s*version\s*=\s*"([^"]+)"\s*$/
-if (!versionMatcher.find()) {
-    throw new GradleException("无法从根 Cargo.toml 读取 workspace.package.version")
+versionFile.withReader("UTF-8") { versionProperties.load(it) }
+def productVersion = versionProperties.getProperty("versionName", "").trim()
+def versionCodeText = versionProperties.getProperty("versionCode", "").trim()
+if (!(productVersion ==~ /(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)/) ||
+    !(versionCodeText ==~ /[1-9][0-9]*/)) {
+    throw new GradleException("version.properties 必须包含有效的 versionName 和 versionCode")
 }
-def productVersion = versionMatcher.group(1)
+def androidVersionCode
+try {
+    androidVersionCode = Integer.parseInt(versionCodeText)
+} catch (NumberFormatException ignored) {
+    throw new GradleException("Android versionCode 超出整数范围")
+}
+if (androidVersionCode < 2 || androidVersionCode > 2100000000) {
+    throw new GradleException("Android versionCode 必须在 2 到 2100000000 之间，并在每次正式发布时递增")
+}
 
 def signingNames = [
     storeFile: "CODEX_ELVES_ANDROID_KEYSTORE",
@@ -35,7 +45,7 @@ android {
         applicationId "com.junxin367.codexelves"
         minSdk 26
         targetSdk 35
-        versionCode 1
+        versionCode androidVersionCode
         versionName productVersion
 
         buildConfigField "int", "SHELL_VERSION", "1"

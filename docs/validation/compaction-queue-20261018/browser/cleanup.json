@@ -1,0 +1,10 @@
+{
+  "serverPort": 1509,
+  "serverStopped": true,
+  "browserTabClosed": true,
+  "viewportReset": true,
+  "localStorageEmpty": true,
+  "sessionStorageEmpty": true,
+  "cachesEmpty": true,
+  "indexedDbEmpty": true
+}

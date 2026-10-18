@@ -1,0 +1,2530 @@
+[
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\_fn.js",
+    "Length": 4204
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-initial-102e45562729.js",
+    "Length": 11441755
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-primary-cd52df2361eb.js",
+    "Length": 2385396
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server.cjs",
+    "Length": 23325
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-shared-30671c57ec82.js",
+    "Length": 8175574
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\Dln.js",
+    "Length": 1132
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\extract.cjs",
+    "Length": 1849
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\finalize.cjs",
+    "Length": 2590
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\fnn.js",
+    "Length": 269
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\ifn.js",
+    "Length": 3105
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\installed.json",
+    "Length": 1063
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\lWn.js",
+    "Length": 8436
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\ManualContextCompactions.js",
+    "Length": 1030
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\native-sources.json",
+    "Length": 49198
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\package.json",
+    "Length": 5756
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\regression.cjs",
+    "Length": 32605
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\rust_tests.rs",
+    "Length": 7565
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\sources.cjs",
+    "Length": 1797
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\T9t.js",
+    "Length": 945
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\TurnCoordinator.js",
+    "Length": 26652
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\ufn.js",
+    "Length": 318
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\yfn.js",
+    "Length": 1005
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.sandbox_migration",
+    "Length": 3
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\config.toml",
+    "Length": 454
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\goals_1.sqlite",
+    "Length": 4096
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\goals_1.sqlite-shm",
+    "Length": 32768
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\goals_1.sqlite-wal",
+    "Length": 74192
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\installation_id",
+    "Length": 36
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\logs_2.sqlite",
+    "Length": 49152
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\logs_2.sqlite-shm",
+    "Length": 32768
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\logs_2.sqlite-wal",
+    "Length": 115392
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\memories_1.sqlite",
+    "Length": 4096
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\memories_1.sqlite-shm",
+    "Length": 32768
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\memories_1.sqlite-wal",
+    "Length": 86552
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\queue_1.sqlite",
+    "Length": 4096
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\queue_1.sqlite-shm",
+    "Length": 32768
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\queue_1.sqlite-wal",
+    "Length": 1293712
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\state_5.sqlite",
+    "Length": 274432
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\state_5.sqlite-shm",
+    "Length": 32768
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\state_5.sqlite-wal",
+    "Length": 4268352
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\thread_history_1.sqlite",
+    "Length": 143360
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\thread_history_1.sqlite-shm",
+    "Length": 32768
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\thread_history_1.sqlite-wal",
+    "Length": 4120032
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins.sync.lock",
+    "Length": 0
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\git-gbfSM6\\HEAD",
+    "Length": 21
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\git-tA7gsu\\HEAD",
+    "Length": 21
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\git-yNsSmx\\HEAD",
+    "Length": 21
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\config",
+    "Length": 130
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\description",
+    "Length": 73
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\FETCH_HEAD",
+    "Length": 122
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\HEAD",
+    "Length": 23
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\shallow",
+    "Length": 41
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\applypatch-msg.sample",
+    "Length": 478
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\commit-msg.sample",
+    "Length": 896
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\fsmonitor-watchman.sample",
+    "Length": 4726
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\post-update.sample",
+    "Length": 189
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\pre-applypatch.sample",
+    "Length": 424
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\pre-commit.sample",
+    "Length": 1649
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\pre-merge-commit.sample",
+    "Length": 416
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\pre-push.sample",
+    "Length": 1374
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\pre-rebase.sample",
+    "Length": 4898
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\pre-receive.sample",
+    "Length": 544
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\prepare-commit-msg.sample",
+    "Length": 1492
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\push-to-checkout.sample",
+    "Length": 2783
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\sendemail-validate.sample",
+    "Length": 2308
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\update.sample",
+    "Length": 3650
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\info\\exclude",
+    "Length": 240
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\objects\\pack\\pack-f811a37b58b15bd30e1edad7816103ab8e2af16e.idx",
+    "Length": 205612
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\objects\\pack\\pack-f811a37b58b15bd30e1edad7816103ab8e2af16e.pack",
+    "Length": 25495172
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\objects\\pack\\pack-f811a37b58b15bd30e1edad7816103ab8e2af16e.rev",
+    "Length": 29272
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\refs\\codex\\curated-sync",
+    "Length": 41
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\config",
+    "Length": 130
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\description",
+    "Length": 73
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\FETCH_HEAD",
+    "Length": 122
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\HEAD",
+    "Length": 23
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\shallow",
+    "Length": 41
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\applypatch-msg.sample",
+    "Length": 478
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\commit-msg.sample",
+    "Length": 896
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\fsmonitor-watchman.sample",
+    "Length": 4726
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\post-update.sample",
+    "Length": 189
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\pre-applypatch.sample",
+    "Length": 424
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\pre-commit.sample",
+    "Length": 1649
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\pre-merge-commit.sample",
+    "Length": 416
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\pre-push.sample",
+    "Length": 1374
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\pre-rebase.sample",
+    "Length": 4898
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\pre-receive.sample",
+    "Length": 544
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\prepare-commit-msg.sample",
+    "Length": 1492
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\push-to-checkout.sample",
+    "Length": 2783
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\sendemail-validate.sample",
+    "Length": 2308
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\update.sample",
+    "Length": 3650
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\info\\exclude",
+    "Length": 240
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\objects\\pack\\pack-f811a37b58b15bd30e1edad7816103ab8e2af16e.idx",
+    "Length": 205612
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\objects\\pack\\pack-f811a37b58b15bd30e1edad7816103ab8e2af16e.pack",
+    "Length": 25495172
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\objects\\pack\\pack-f811a37b58b15bd30e1edad7816103ab8e2af16e.rev",
+    "Length": 29272
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\refs\\codex\\curated-sync",
+    "Length": 41
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\config",
+    "Length": 130
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\description",
+    "Length": 73
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\FETCH_HEAD",
+    "Length": 122
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\HEAD",
+    "Length": 23
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\shallow",
+    "Length": 41
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\applypatch-msg.sample",
+    "Length": 478
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\commit-msg.sample",
+    "Length": 896
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\fsmonitor-watchman.sample",
+    "Length": 4726
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\post-update.sample",
+    "Length": 189
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\pre-applypatch.sample",
+    "Length": 424
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\pre-commit.sample",
+    "Length": 1649
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\pre-merge-commit.sample",
+    "Length": 416
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\pre-push.sample",
+    "Length": 1374
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\pre-rebase.sample",
+    "Length": 4898
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\pre-receive.sample",
+    "Length": 544
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\prepare-commit-msg.sample",
+    "Length": 1492
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\push-to-checkout.sample",
+    "Length": 2783
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\sendemail-validate.sample",
+    "Length": 2308
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\update.sample",
+    "Length": 3650
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\info\\exclude",
+    "Length": 240
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\objects\\pack\\pack-ad2a192ec8453f9d3b2605ec5a09ccf388bd5994.idx",
+    "Length": 205612
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\objects\\pack\\pack-ad2a192ec8453f9d3b2605ec5a09ccf388bd5994.pack",
+    "Length": 25496135
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\objects\\pack\\pack-ad2a192ec8453f9d3b2605ec5a09ccf388bd5994.rev",
+    "Length": 29272
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\refs\\codex\\curated-sync",
+    "Length": 41
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-38-59-01a14e97-e190-7502-9a33-673bdc8065cc.jsonl",
+    "Length": 49533
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-39-16-01a14e98-23d8-7fb2-8d11-8bf313dcbedc.jsonl",
+    "Length": 49832
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-41-58-01a14e9a-9e35-7702-9cfc-1d4fc97f38eb.jsonl",
+    "Length": 113233
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-43-17-01a14e9b-d15e-7950-86e6-55a8bf043933.jsonl",
+    "Length": 113238
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-43-17-01a14e9b-d432-7653-bad6-c8d7cdd46ab5.jsonl",
+    "Length": 117226
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-44-35-01a14e9d-02e8-79a2-b539-1dd6f17295f9.jsonl",
+    "Length": 113237
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-44-36-01a14e9d-05a1-7fc3-97f0-587fa1e4f3d1.jsonl",
+    "Length": 117225
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-50-35-01a14ea2-7fb5-7f42-82e1-b04bc6bb35d3.jsonl",
+    "Length": 113238
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-50-35-01a14ea2-82c5-7972-8563-3cb274e18fd9.jsonl",
+    "Length": 117228
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-53-39-01a14ea5-513b-7a71-82be-0fe8491fb2ec.jsonl",
+    "Length": 113238
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-53-40-01a14ea5-5469-7c61-815a-5b3649d9ab13.jsonl",
+    "Length": 117226
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\.codex-system-skills.marker",
+    "Length": 16
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\LICENSE.txt",
+    "Length": 10977
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\SKILL.md",
+    "Length": 19516
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\agents\\openai.yaml",
+    "Length": 281
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\assets\\imagegen-small.svg",
+    "Length": 2894
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\assets\\imagegen.png",
+    "Length": 1711
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\references\\cli.md",
+    "Length": 9897
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\references\\codex-network.md",
+    "Length": 1812
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\references\\image-api.md",
+    "Length": 6162
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\references\\prompting.md",
+    "Length": 8394
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\references\\sample-prompts.md",
+    "Length": 18039
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\scripts\\image_gen.py",
+    "Length": 35697
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\scripts\\remove_chroma_key.py",
+    "Length": 14354
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\LICENSE.txt",
+    "Length": 10977
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\SKILL.md",
+    "Length": 5475
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\agents\\openai.yaml",
+    "Length": 376
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\assets\\openai-small.svg",
+    "Length": 1094
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\assets\\openai.png",
+    "Length": 1429
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\codex-self-knowledge.md",
+    "Length": 7488
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\latest-model.md",
+    "Length": 2172
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\mcp-diagnostics.md",
+    "Length": 2345
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\model-migration.md",
+    "Length": 5139
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\model-selection.md",
+    "Length": 1356
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\official-docs.md",
+    "Length": 3362
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\prompting-guide.md",
+    "Length": 10281
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\upgrade-guide.md",
+    "Length": 1049
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\upgrading-to-gpt-6-astra.md",
+    "Length": 19214
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\scripts\\fetch-codex-manual.mjs",
+    "Length": 16683
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\scripts\\resolve-latest-model-info",
+    "Length": 1077
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\scripts\\resolve-latest-model-info.cjs",
+    "Length": 4102
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\review-agent\\SKILL.md",
+    "Length": 2718
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\review-agent\\agents\\openai.yaml",
+    "Length": 258
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\license.txt",
+    "Length": 11560
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\SKILL.md",
+    "Length": 15540
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\agents\\openai.yaml",
+    "Length": 188
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\assets\\skill-creator-small.svg",
+    "Length": 1322
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\assets\\skill-creator.png",
+    "Length": 1563
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\references\\openai_yaml.md",
+    "Length": 2405
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\scripts\\generate_openai_yaml.py",
+    "Length": 6900
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\scripts\\init_skill.py",
+    "Length": 10622
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+    "Length": 4376
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\LICENSE.txt",
+    "Length": 11560
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\SKILL.md",
+    "Length": 3425
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\agents\\openai.yaml",
+    "Length": 226
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\assets\\skill-installer-small.svg",
+    "Length": 926
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\assets\\skill-installer.png",
+    "Length": 1086
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\scripts\\github_utils.py",
+    "Length": 680
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\scripts\\install-skill-from-github.py",
+    "Length": 12272
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\scripts\\list-skills.py",
+    "Length": 3054
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\thread-writer-locks\\.coordination.lock",
+    "Length": 0
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\thread-writer-locks\\01a14ea5-513b-7a71-82be-0fe8491fb2ec.lock",
+    "Length": 0
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\thread-writer-locks\\01a14ea5-5469-7c61-815a-5b3649d9ab13.lock",
+    "Length": 0
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\tmp\\arg0\\codex-arg00ForNp\\.lock",
+    "Length": 0
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\tmp\\arg0\\codex-arg00ForNp\\apply_patch.bat",
+    "Length": 142
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\tmp\\arg0\\codex-arg00ForNp\\applypatch.bat",
+    "Length": 142
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\ApplyPatchApprovalParams.json",
+    "Length": 2657
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\ApplyPatchApprovalResponse.json",
+    "Length": 4278
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\AttestationGenerateParams.json",
+    "Length": 118
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\AttestationGenerateResponse.json",
+    "Length": 277
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\ChatgptAuthTokensRefreshParams.json",
+    "Length": 971
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\ChatgptAuthTokensRefreshResponse.json",
+    "Length": 406
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\ClientNotification.json",
+    "Length": 431
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\ClientRequest.json",
+    "Length": 300474
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\codex_app_server_protocol.schemas.json",
+    "Length": 878244
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\codex_app_server_protocol.v2.schemas.json",
+    "Length": 765474
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\CommandExecutionRequestApprovalParams.json",
+    "Length": 16106
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\CommandExecutionRequestApprovalResponse.json",
+    "Length": 3202
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\CurrentTimeReadParams.json",
+    "Length": 220
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\CurrentTimeReadResponse.json",
+    "Length": 318
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\DynamicToolCallParams.json",
+    "Length": 519
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\DynamicToolCallResponse.json",
+    "Length": 2010
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\ExecCommandApprovalParams.json",
+    "Length": 3768
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\ExecCommandApprovalResponse.json",
+    "Length": 4279
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\FileChangeRequestApprovalParams.json",
+    "Length": 968
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\FileChangeRequestApprovalResponse.json",
+    "Length": 1158
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\FuzzyFileSearchParams.json",
+    "Length": 413
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\FuzzyFileSearchResponse.json",
+    "Length": 1332
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\FuzzyFileSearchSessionCompletedNotification.json",
+    "Length": 244
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\FuzzyFileSearchSessionStartParams.json",
+    "Length": 342
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\FuzzyFileSearchSessionStartResponse.json",
+    "Length": 128
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\FuzzyFileSearchSessionStopParams.json",
+    "Length": 233
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\FuzzyFileSearchSessionStopResponse.json",
+    "Length": 127
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\FuzzyFileSearchSessionUpdatedNotification.json",
+    "Length": 1474
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\FuzzyFileSearchSessionUpdateParams.json",
+    "Length": 293
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\FuzzyFileSearchSessionUpdateResponse.json",
+    "Length": 129
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\JSONRPCError.json",
+    "Length": 893
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\JSONRPCErrorError.json",
+    "Length": 314
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\JSONRPCMessage.json",
+    "Length": 2888
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\JSONRPCNotification.json",
+    "Length": 303
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\JSONRPCRequest.json",
+    "Length": 1093
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\JSONRPCResponse.json",
+    "Length": 520
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\McpServerElicitationRequestParams.json",
+    "Length": 14246
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\McpServerElicitationRequestResponse.json",
+    "Length": 741
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\PermissionsRequestApprovalParams.json",
+    "Length": 7286
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\PermissionsRequestApprovalResponse.json",
+    "Length": 7068
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\RequestId.json",
+    "Length": 197
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\ServerNotification.json",
+    "Length": 211202
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\ServerRequest.json",
+    "Length": 52047
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\ToolRequestUserInputParams.json",
+    "Length": 2143
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\ToolRequestUserInputResponse.json",
+    "Length": 793
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v1\\InitializeParams.json",
+    "Length": 2401
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v1\\InitializeResponse.json",
+    "Length": 1286
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\AccountLoginCompletedNotification.json",
+    "Length": 720
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\AccountRateLimitsUpdatedNotification.json",
+    "Length": 4772
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\AccountUpdatedNotification.json",
+    "Length": 2763
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\AgentMessageDeltaNotification.json",
+    "Length": 406
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\AppListUpdatedNotification.json",
+    "Length": 5703
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\AppsInstalledParams.json",
+    "Length": 570
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\AppsInstalledResponse.json",
+    "Length": 1343
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\AppsListParams.json",
+    "Length": 904
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\AppsListResponse.json",
+    "Length": 5888
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\AppsReadParams.json",
+    "Length": 823
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\AppsReadResponse.json",
+    "Length": 2443
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\AuthRecoveryNotification.json",
+    "Length": 409
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\BedrockCheckGovCloudRequirementsParams.json",
+    "Length": 131
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\BedrockCheckGovCloudRequirementsResponse.json",
+    "Length": 680
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\BedrockDiscoverParams.json",
+    "Length": 114
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\BedrockDiscoverResponse.json",
+    "Length": 1244
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\BedrockSetupParams.json",
+    "Length": 1000
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\BedrockSetupResponse.json",
+    "Length": 113
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\CancelLoginAccountParams.json",
+    "Length": 221
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\CancelLoginAccountResponse.json",
+    "Length": 404
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\CollaborationModeListParams.json",
+    "Length": 188
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\CollaborationModeListResponse.json",
+    "Length": 1682
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\CommandExecOutputDeltaNotification.json",
+    "Length": 1585
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\CommandExecParams.json",
+    "Length": 7673
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\CommandExecResizeParams.json",
+    "Length": 1216
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\CommandExecResizeResponse.json",
+    "Length": 188
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\CommandExecResponse.json",
+    "Length": 699
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\CommandExecTerminateParams.json",
+    "Length": 404
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\CommandExecTerminateResponse.json",
+    "Length": 194
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\CommandExecutionOutputDeltaNotification.json",
+    "Length": 416
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\CommandExecWriteParams.json",
+    "Length": 716
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\CommandExecWriteResponse.json",
+    "Length": 186
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ConfigBatchWriteParams.json",
+    "Length": 1369
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ConfigReadParams.json",
+    "Length": 495
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ConfigReadResponse.json",
+    "Length": 28667
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ConfigRequirementsReadResponse.json",
+    "Length": 27236
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ConfigValueWriteParams.json",
+    "Length": 763
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ConfigWarningNotification.json",
+    "Length": 1640
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ConfigWriteResponse.json",
+    "Length": 8685
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ConsumeAccountRateLimitResetCreditParams.json",
+    "Length": 594
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ConsumeAccountRateLimitResetCreditResponse.json",
+    "Length": 1177
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ContextCompactedNotification.json",
+    "Length": 362
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\DeprecationNoticeNotification.json",
+    "Length": 457
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\EnvironmentAddParams.json",
+    "Length": 1443
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\EnvironmentAddResponse.json",
+    "Length": 115
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\EnvironmentConnectionNotification.json",
+    "Length": 306
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\EnvironmentInfoParams.json",
+    "Length": 230
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\EnvironmentInfoResponse.json",
+    "Length": 1018
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\EnvironmentStatusParams.json",
+    "Length": 376
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\EnvironmentStatusResponse.json",
+    "Length": 2178
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ErrorNotification.json",
+    "Length": 7283
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ExperimentalFeatureEnablementSetParams.json",
+    "Length": 509
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ExperimentalFeatureEnablementSetResponse.json",
+    "Length": 386
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ExperimentalFeatureListParams.json",
+    "Length": 827
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ExperimentalFeatureListResponse.json",
+    "Length": 3066
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ExternalAgentConfigDetectParams.json",
+    "Length": 1414
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ExternalAgentConfigDetectResponse.json",
+    "Length": 5240
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ExternalAgentConfigImportCompletedNotification.json",
+    "Length": 3025
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ExternalAgentConfigImportHistoriesReadResponse.json",
+    "Length": 3890
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ExternalAgentConfigImportHistoryRecordParams.json",
+    "Length": 3237
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ExternalAgentConfigImportHistoryRecordResponse.json",
+    "Length": 245
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ExternalAgentConfigImportParams.json",
+    "Length": 5152
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ExternalAgentConfigImportProgressNotification.json",
+    "Length": 3024
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ExternalAgentConfigImportResponse.json",
+    "Length": 232
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FeedbackUploadParams.json",
+    "Length": 726
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FeedbackUploadResponse.json",
+    "Length": 555
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FileChangeOutputDeltaNotification.json",
+    "Length": 544
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FileChangePatchUpdatedNotification.json",
+    "Length": 2159
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsChangedNotification.json",
+    "Length": 1061
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsCopyParams.json",
+    "Length": 1198
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsCopyResponse.json",
+    "Length": 162
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsCreateDirectoryParams.json",
+    "Length": 1047
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsCreateDirectoryResponse.json",
+    "Length": 184
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsGetMetadataParams.json",
+    "Length": 851
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsGetMetadataResponse.json",
+    "Length": 1005
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsReadDirectoryParams.json",
+    "Length": 862
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsReadDirectoryResponse.json",
+    "Length": 1139
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsReadFileParams.json",
+    "Length": 844
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsReadFileResponse.json",
+    "Length": 354
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsRemoveParams.json",
+    "Length": 1199
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsRemoveResponse.json",
+    "Length": 166
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsUnwatchParams.json",
+    "Length": 368
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsUnwatchResponse.json",
+    "Length": 168
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsWatchParams.json",
+    "Length": 1042
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsWatchResponse.json",
+    "Length": 864
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsWriteFileParams.json",
+    "Length": 970
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\FsWriteFileResponse.json",
+    "Length": 172
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\GatewayOAuthCancelResponse.json",
+    "Length": 119
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\GatewayOAuthChangedNotification.json",
+    "Length": 758
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\GatewayOAuthLoginResponse.json",
+    "Length": 118
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\GatewayOAuthReadResponse.json",
+    "Length": 1088
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\GetAccountParams.json",
+    "Length": 485
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\GetAccountRateLimitsResponse.json",
+    "Length": 8204
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\GetAccountResponse.json",
+    "Length": 3267
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\GetAccountTokenUsageResponse.json",
+    "Length": 3838
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\GetWorkspaceMessagesResponse.json",
+    "Length": 1565
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\GuardianWarningNotification.json",
+    "Length": 423
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\HookCompletedNotification.json",
+    "Length": 4287
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\HooksListParams.json",
+    "Length": 311
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\HooksListResponse.json",
+    "Length": 5850
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\HookStartedNotification.json",
+    "Length": 4285
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ItemCompletedNotification.json",
+    "Length": 48258
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ItemGuardianApprovalReviewCompletedNotification.json",
+    "Length": 16915
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ItemGuardianApprovalReviewStartedNotification.json",
+    "Length": 16417
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ItemStartedNotification.json",
+    "Length": 48250
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ListMcpServerStatusParams.json",
+    "Length": 1223
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ListMcpServerStatusResponse.json",
+    "Length": 6283
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\LoginAccountParams.json",
+    "Length": 4353
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\LoginAccountResponse.json",
+    "Length": 2521
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\LogoutAccountResponse.json",
+    "Length": 114
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\MarketplaceAddParams.json",
+    "Length": 431
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\MarketplaceAddResponse.json",
+    "Length": 865
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\MarketplaceRemoveParams.json",
+    "Length": 236
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\MarketplaceRemoveResponse.json",
+    "Length": 869
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\MarketplaceUpgradeParams.json",
+    "Length": 228
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\MarketplaceUpgradeResponse.json",
+    "Length": 1348
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\McpResourceReadParams.json",
+    "Length": 1330
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\McpResourceReadResponse.json",
+    "Length": 1664
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\McpServerEventStreamNotification.json",
+    "Length": 614
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\McpServerEventStreamStartParams.json",
+    "Length": 481
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\McpServerEventStreamStartResponse.json",
+    "Length": 126
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\McpServerEventStreamStopParams.json",
+    "Length": 241
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\McpServerEventStreamStopResponse.json",
+    "Length": 125
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\McpServerOauthLoginCompletedNotification.json",
+    "Length": 630
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\McpServerOauthLoginParams.json",
+    "Length": 1003
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\McpServerOauthLoginResponse.json",
+    "Length": 514
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\McpServerRefreshResponse.json",
+    "Length": 117
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\McpServerStatusUpdatedNotification.json",
+    "Length": 973
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\McpServerToolCallParams.json",
+    "Length": 380
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\McpServerToolCallResponse.json",
+    "Length": 374
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\McpToolCallProgressNotification.json",
+    "Length": 412
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\MemoryResetResponse.json",
+    "Length": 112
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\MemoryStatusParams.json",
+    "Length": 387
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\MemoryStatusResponse.json",
+    "Length": 357
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\MockExperimentalMethodParams.json",
+    "Length": 271
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\MockExperimentalMethodResponse.json",
+    "Length": 275
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ModelListParams.json",
+    "Length": 688
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ModelListResponse.json",
+    "Length": 7169
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ModelProviderCapabilitiesReadParams.json",
+    "Length": 128
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ModelProviderCapabilitiesReadResponse.json",
+    "Length": 318
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ModelReroutedNotification.json",
+    "Length": 636
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ModelSafetyBufferingUpdatedNotification.json",
+    "Length": 746
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ModelVerificationNotification.json",
+    "Length": 574
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\NullableGetAccountRateLimitsParams.json",
+    "Length": 1002
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\NullableGetAccountTokenUsageParams.json",
+    "Length": 573
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\NullableRemoteControlDisableParams.json",
+    "Length": 410
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\NullableRemoteControlEnableParams.json",
+    "Length": 407
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PermissionProfileListParams.json",
+    "Length": 667
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PermissionProfileListResponse.json",
+    "Length": 1174
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PlanDeltaNotification.json",
+    "Length": 565
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginInstalledParams.json",
+    "Length": 1174
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginInstalledResponse.json",
+    "Length": 15679
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginInstallParams.json",
+    "Length": 1136
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginInstallResponse.json",
+    "Length": 1190
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginListParams.json",
+    "Length": 1629
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginListResponse.json",
+    "Length": 15802
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginReadParams.json",
+    "Length": 947
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginReadResponse.json",
+    "Length": 23979
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginReconcileParams.json",
+    "Length": 314
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginReconcileResponse.json",
+    "Length": 2424
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginSearchParams.json",
+    "Length": 1345
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginSearchResponse.json",
+    "Length": 14650
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginShareCheckoutParams.json",
+    "Length": 236
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginShareCheckoutResponse.json",
+    "Length": 1187
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginShareDeleteParams.json",
+    "Length": 234
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginShareDeleteResponse.json",
+    "Length": 118
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginShareListParams.json",
+    "Length": 114
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginShareListResponse.json",
+    "Length": 14477
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginShareSaveParams.json",
+    "Length": 1974
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginShareSaveResponse.json",
+    "Length": 417
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginShareUpdateTargetsParams.json",
+    "Length": 1369
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginShareUpdateTargetsResponse.json",
+    "Length": 1380
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginSkillReadParams.json",
+    "Length": 388
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginSkillReadResponse.json",
+    "Length": 220
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginUninstallParams.json",
+    "Length": 220
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\PluginUninstallResponse.json",
+    "Length": 116
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProcessExitedNotification.json",
+    "Length": 1419
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProcessKillParams.json",
+    "Length": 388
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProcessKillResponse.json",
+    "Length": 175
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProcessOutputDeltaNotification.json",
+    "Length": 1436
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProcessResizePtyParams.json",
+    "Length": 1201
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProcessResizePtyResponse.json",
+    "Length": 185
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProcessSpawnParams.json",
+    "Length": 3904
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProcessSpawnResponse.json",
+    "Length": 174
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProcessWriteStdinParams.json",
+    "Length": 710
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProcessWriteStdinResponse.json",
+    "Length": 187
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProjectChangedNotification.json",
+    "Length": 481
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProjectCreateParams.json",
+    "Length": 1225
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProjectCreateResponse.json",
+    "Length": 2038
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProjectDeleteParams.json",
+    "Length": 220
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProjectDeleteResponse.json",
+    "Length": 114
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProjectImportParams.json",
+    "Length": 1356
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProjectImportResponse.json",
+    "Length": 2038
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProjectListParams.json",
+    "Length": 1115
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProjectListResponse.json",
+    "Length": 2164
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProjectMoveParams.json",
+    "Length": 307
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProjectMoveResponse.json",
+    "Length": 112
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProjectReadParams.json",
+    "Length": 218
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProjectReadResponse.json",
+    "Length": 2036
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProjectUpdateParams.json",
+    "Length": 1258
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ProjectUpdateResponse.json",
+    "Length": 2038
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\RawResponseCompletedNotification.json",
+    "Length": 1998
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\RawResponseItemCompletedNotification.json",
+    "Length": 34557
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ReasoningSummaryPartAddedNotification.json",
+    "Length": 454
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ReasoningSummaryTextDeltaNotification.json",
+    "Length": 512
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ReasoningTextDeltaNotification.json",
+    "Length": 505
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\RemoteControlClientsListParams.json",
+    "Length": 771
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\RemoteControlClientsListResponse.json",
+    "Length": 1389
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\RemoteControlClientsRevokeParams.json",
+    "Length": 305
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\RemoteControlClientsRevokeResponse.json",
+    "Length": 127
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\RemoteControlDisableResponse.json",
+    "Length": 689
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\RemoteControlEnableResponse.json",
+    "Length": 688
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\RemoteControlPairingStartParams.json",
+    "Length": 197
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\RemoteControlPairingStartResponse.json",
+    "Length": 495
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\RemoteControlPairingStatusParams.json",
+    "Length": 323
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\RemoteControlPairingStatusResponse.json",
+    "Length": 232
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\RemoteControlStatusChangedNotification.json",
+    "Length": 800
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\RemoteControlStatusReadResponse.json",
+    "Length": 692
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ReviewStartParams.json",
+    "Length": 3341
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ReviewStartResponse.json",
+    "Length": 57992
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\RolloutCompressResponse.json",
+    "Length": 289
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\SendAddCreditsNudgeEmailParams.json",
+    "Length": 420
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\SendAddCreditsNudgeEmailResponse.json",
+    "Length": 417
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ServerDiagnosticsParams.json",
+    "Length": 116
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ServerDiagnosticsResponse.json",
+    "Length": 1338
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ServerRequestResolvedNotification.json",
+    "Length": 514
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\SkillsChangedNotification.json",
+    "Length": 341
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\SkillsConfigWriteParams.json",
+    "Length": 1011
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\SkillsConfigWriteResponse.json",
+    "Length": 241
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\SkillsExtraRootsSetParams.json",
+    "Length": 761
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\SkillsExtraRootsSetResponse.json",
+    "Length": 120
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\SkillsListParams.json",
+    "Length": 453
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\SkillsListResponse.json",
+    "Length": 5295
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\StrictReviewRequiredNotification.json",
+    "Length": 470
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\TerminalInteractionNotification.json",
+    "Length": 474
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadApproveGuardianDeniedActionParams.json",
+    "Length": 360
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadApproveGuardianDeniedActionResponse.json",
+    "Length": 134
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadArchivedNotification.json",
+    "Length": 225
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadArchiveParams.json",
+    "Length": 218
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadArchiveResponse.json",
+    "Length": 114
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadAttachmentAddParams.json",
+    "Length": 498
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadAttachmentAddResponse.json",
+    "Length": 1249
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadAttachmentListParams.json",
+    "Length": 505
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadAttachmentListResponse.json",
+    "Length": 1086
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadAttachmentOwnerListParams.json",
+    "Length": 806
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadAttachmentOwnerListResponse.json",
+    "Length": 999
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadAttachmentRemoveParams.json",
+    "Length": 468
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadAttachmentRemoveResponse.json",
+    "Length": 207
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadAttachmentUpdatedNotification.json",
+    "Length": 880
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadBackgroundTerminalsCleanParams.json",
+    "Length": 235
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadBackgroundTerminalsCleanResponse.json",
+    "Length": 131
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadBackgroundTerminalsListParams.json",
+    "Length": 564
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadBackgroundTerminalsListResponse.json",
+    "Length": 1529
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadBackgroundTerminalsTerminateParams.json",
+    "Length": 305
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadBackgroundTerminalsTerminateResponse.json",
+    "Length": 246
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadClosedNotification.json",
+    "Length": 223
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadCompactStartParams.json",
+    "Length": 223
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadCompactStartResponse.json",
+    "Length": 119
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadDecrementElicitationParams.json",
+    "Length": 390
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadDecrementElicitationResponse.json",
+    "Length": 558
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadDeletedNotification.json",
+    "Length": 224
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadDeleteParams.json",
+    "Length": 217
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadDeleteResponse.json",
+    "Length": 113
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadForkParams.json",
+    "Length": 7006
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadForkResponse.json",
+    "Length": 81064
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadGoalClearedNotification.json",
+    "Length": 228
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadGoalClearParams.json",
+    "Length": 721
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadGoalClearResponse.json",
+    "Length": 221
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadGoalGetParams.json",
+    "Length": 218
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadGoalGetResponse.json",
+    "Length": 1491
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadGoalSetParams.json",
+    "Length": 1282
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadGoalSetResponse.json",
+    "Length": 1428
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadGoalUpdatedNotification.json",
+    "Length": 1580
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadIncrementElicitationParams.json",
+    "Length": 390
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadIncrementElicitationResponse.json",
+    "Length": 553
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadInjectItemsParams.json",
+    "Length": 397
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadInjectItemsResponse.json",
+    "Length": 118
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadItemsListParams.json",
+    "Length": 2291
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadItemsListResponse.json",
+    "Length": 49298
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadListParams.json",
+    "Length": 4685
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadListResponse.json",
+    "Length": 73585
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadLoadedListParams.json",
+    "Length": 489
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadLoadedListResponse.json",
+    "Length": 565
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadMemoryModeSetParams.json",
+    "Length": 446
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadMemoryModeSetResponse.json",
+    "Length": 120
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadMetadataUpdateParams.json",
+    "Length": 1971
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadMetadataUpdateResponse.json",
+    "Length": 72931
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadNameUpdatedNotification.json",
+    "Length": 312
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadPredictionRequestParams.json",
+    "Length": 300
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadPredictionRequestResponse.json",
+    "Length": 124
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadPredictionUpdatedNotification.json",
+    "Length": 1389
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadProjectUpdatedNotification.json",
+    "Length": 331
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadQueueAddParams.json",
+    "Length": 6291
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadQueueAddResponse.json",
+    "Length": 6559
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadQueueChangedNotification.json",
+    "Length": 229
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadQueueDeleteParams.json",
+    "Length": 306
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadQueueDeleteResponse.json",
+    "Length": 223
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadQueueListParams.json",
+    "Length": 598
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadQueueListResponse.json",
+    "Length": 6765
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadQueueReorderParams.json",
+    "Length": 359
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadQueueReorderResponse.json",
+    "Length": 119
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadQueueStartParams.json",
+    "Length": 313
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadQueueStartResponse.json",
+    "Length": 57734
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadQueueUpdateParams.json",
+    "Length": 6292
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadQueueUpdateResponse.json",
+    "Length": 6562
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadReadParams.json",
+    "Length": 502
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadReadResponse.json",
+    "Length": 72921
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeAppendAudioParams.json",
+    "Length": 1239
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeAppendAudioResponse.json",
+    "Length": 206
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeAppendSpeechParams.json",
+    "Length": 364
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeAppendSpeechResponse.json",
+    "Length": 202
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeAppendTextParams.json",
+    "Length": 669
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeAppendTextResponse.json",
+    "Length": 204
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeClosedNotification.json",
+    "Length": 393
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeErrorNotification.json",
+    "Length": 377
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeItemAddedNotification.json",
+    "Length": 358
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeItemCompletedNotification.json",
+    "Length": 5063
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeItemStartedNotification.json",
+    "Length": 5063
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeItemTranscriptDeltaNotification.json",
+    "Length": 450
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeListVoicesParams.json",
+    "Length": 200
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeListVoicesResponse.json",
+    "Length": 1382
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeOutputAudioDeltaNotification.json",
+    "Length": 1261
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeSdpNotification.json",
+    "Length": 376
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeStartedNotification.json",
+    "Length": 661
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeStartParams.json",
+    "Length": 7996
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeStartResponse.json",
+    "Length": 194
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeStopParams.json",
+    "Length": 280
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeStopResponse.json",
+    "Length": 193
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeTranscriptDeltaNotification.json",
+    "Length": 533
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRealtimeTranscriptDoneNotification.json",
+    "Length": 528
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadResumeParams.json",
+    "Length": 42913
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadResumeResponse.json",
+    "Length": 83893
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRevertedNotification.json",
+    "Length": 225
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRevertParams.json",
+    "Length": 579
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadRevertResponse.json",
+    "Length": 73731
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSearchOccurrencesParams.json",
+    "Length": 902
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSearchOccurrencesResponse.json",
+    "Length": 2040
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSearchParams.json",
+    "Length": 2314
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSearchResponse.json",
+    "Length": 73883
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSectionCreateParams.json",
+    "Length": 969
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSectionCreateResponse.json",
+    "Length": 1548
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSectionDeleteParams.json",
+    "Length": 401
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSectionDeleteResponse.json",
+    "Length": 201
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSectionListParams.json",
+    "Length": 570
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSectionListResponse.json",
+    "Length": 1760
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSectionMoveParams.json",
+    "Length": 768
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSectionMoveResponse.json",
+    "Length": 118
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSectionUpdateParams.json",
+    "Length": 1211
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSectionUpdateResponse.json",
+    "Length": 1552
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSetNameParams.json",
+    "Length": 274
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSetNameResponse.json",
+    "Length": 114
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSettingsUpdatedNotification.json",
+    "Length": 11087
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSettingsUpdateParams.json",
+    "Length": 11120
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadSettingsUpdateResponse.json",
+    "Length": 121
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadShellCommandParams.json",
+    "Length": 917
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadShellCommandResponse.json",
+    "Length": 119
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadStartedNotification.json",
+    "Length": 72928
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadStartParams.json",
+    "Length": 13453
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadStartResponse.json",
+    "Length": 81065
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadStatusChangedNotification.json",
+    "Length": 2207
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadTimelineListParams.json",
+    "Length": 526
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadTimelineListResponse.json",
+    "Length": 63782
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadTokenUsageUpdatedNotification.json",
+    "Length": 1727
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadTurnsListParams.json",
+    "Length": 1889
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadTurnsListResponse.json",
+    "Length": 58357
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadUnarchivedNotification.json",
+    "Length": 227
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadUnarchiveParams.json",
+    "Length": 220
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadUnarchiveResponse.json",
+    "Length": 72926
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadUnsubscribeParams.json",
+    "Length": 222
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\ThreadUnsubscribeResponse.json",
+    "Length": 431
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\TurnCompletedNotification.json",
+    "Length": 57799
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\TurnDiffUpdatedNotification.json",
+    "Length": 494
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\TurnInterruptParams.json",
+    "Length": 278
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\TurnInterruptResponse.json",
+    "Length": 114
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\TurnModerationMetadataNotification.json",
+    "Length": 331
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\TurnPlanUpdatedNotification.json",
+    "Length": 948
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\TurnSettingsUpdateParams.json",
+    "Length": 3130
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\TurnSettingsUpdateResponse.json",
+    "Length": 816
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\TurnStartedNotification.json",
+    "Length": 57797
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\TurnStartParams.json",
+    "Length": 26060
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\TurnStartResponse.json",
+    "Length": 57727
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\TurnSteerParams.json",
+    "Length": 7786
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\TurnSteerResponse.json",
+    "Length": 212
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\UserVerificationCancelParams.json",
+    "Length": 666
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\UserVerificationCancelResponse.json",
+    "Length": 302
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\UserVerificationDeleteParams.json",
+    "Length": 154
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\UserVerificationDeleteResponse.json",
+    "Length": 123
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\UserVerificationEnrollParams.json",
+    "Length": 154
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\UserVerificationEnrollResponse.json",
+    "Length": 750
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\UserVerificationRpcError.json",
+    "Length": 3690
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\UserVerificationStatusParams.json",
+    "Length": 154
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\UserVerificationStatusResponse.json",
+    "Length": 825
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\UserVerificationVerifyParams.json",
+    "Length": 723
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\UserVerificationVerifyResponse.json",
+    "Length": 803
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\WarningNotification.json",
+    "Length": 454
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\WindowsSandboxReadinessResponse.json",
+    "Length": 435
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\WindowsSandboxSetupCompletedNotification.json",
+    "Length": 556
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\WindowsSandboxSetupStartParams.json",
+    "Length": 1002
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\WindowsSandboxSetupStartResponse.json",
+    "Length": 230
+  },
+  {
+    "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\schema\\v2\\WindowsWorldWritableWarningNotification.json",
+    "Length": 478
+  }
+]

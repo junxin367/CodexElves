@@ -1,0 +1,302 @@
+{
+  "result": "PASS",
+  "scope": "Chrome执行生产菜单函数、按钮绑定及完整全局焦点/指针/键盘事件；模型数据及周边接口为本机替身",
+  "before": {
+    "first": "菜单：打开；按钮展开：true",
+    "second": "菜单：打开；按钮展开：true",
+    "events": [
+      {
+        "type": "pointerdown",
+        "target": "model-button",
+        "related": "",
+        "hidden": true,
+        "focus": "BODY"
+      },
+      {
+        "type": "focusin",
+        "target": "model-button",
+        "related": "",
+        "hidden": true,
+        "focus": "model-button"
+      },
+      {
+        "type": "focusout",
+        "target": "model-button",
+        "related": "gpt-6-astra[600K]",
+        "hidden": false,
+        "focus": "BODY"
+      },
+      {
+        "type": "focusin",
+        "target": "gpt-6-astra[600K]",
+        "related": "model-button",
+        "hidden": false,
+        "focus": "BUTTON"
+      },
+      {
+        "type": "click",
+        "target": "model-button",
+        "related": "",
+        "hidden": false,
+        "focus": "BUTTON"
+      },
+      {
+        "type": "pointerdown",
+        "target": "model-button",
+        "related": "",
+        "hidden": false,
+        "focus": "BUTTON"
+      },
+      {
+        "type": "focusout",
+        "target": "gpt-6-astra[600K]",
+        "related": "model-button",
+        "hidden": true,
+        "focus": "BODY"
+      },
+      {
+        "type": "focusin",
+        "target": "model-button",
+        "related": "gpt-6-astra[600K]",
+        "hidden": true,
+        "focus": "model-button"
+      },
+      {
+        "type": "focusout",
+        "target": "model-button",
+        "related": "gpt-6-astra[600K]",
+        "hidden": false,
+        "focus": "BODY"
+      },
+      {
+        "type": "focusin",
+        "target": "gpt-6-astra[600K]",
+        "related": "model-button",
+        "hidden": false,
+        "focus": "BUTTON"
+      },
+      {
+        "type": "click",
+        "target": "model-button",
+        "related": "",
+        "hidden": false,
+        "focus": "BUTTON"
+      }
+    ]
+  },
+  "after": [
+    {
+      "label": "首次点击打开",
+      "expectedOpen": true,
+      "expanded": "true",
+      "focus": "gpt-6-astra[600K]",
+      "hidden": false,
+      "selection": "当前选择：gpt-6-astra[600K] / max"
+    },
+    {
+      "label": "再次点击关闭",
+      "expectedOpen": false,
+      "expanded": "false",
+      "focus": "model-button",
+      "hidden": true,
+      "selection": "当前选择：gpt-6-astra[600K] / max"
+    },
+    {
+      "label": "第三次点击重新打开",
+      "expectedOpen": true,
+      "expanded": "true",
+      "focus": "gpt-6-astra[600K]",
+      "hidden": false,
+      "selection": "当前选择：gpt-6-astra[600K] / max"
+    },
+    {
+      "label": "内部搜索不关闭",
+      "expectedOpen": true,
+      "expanded": "true",
+      "focus": "model-search",
+      "hidden": false,
+      "selection": "当前选择：gpt-6-astra[600K] / max"
+    },
+    {
+      "label": "搜索框转回按钮可关闭",
+      "expectedOpen": false,
+      "expanded": "false",
+      "focus": "model-button",
+      "hidden": true,
+      "selection": "当前选择：gpt-6-astra[600K] / max"
+    },
+    {
+      "label": "模型选项仍选中后关闭",
+      "expectedOpen": false,
+      "expanded": "false",
+      "focus": "prompt",
+      "hidden": true,
+      "selection": "当前选择：gpt-6.1-sol / medium"
+    },
+    {
+      "label": "推理选项仍选中后关闭",
+      "expectedOpen": false,
+      "expanded": "false",
+      "focus": "prompt",
+      "hidden": true,
+      "selection": "当前选择：gpt-6.1-sol / xhigh"
+    },
+    {
+      "label": "点击输入框移出焦点关闭",
+      "expectedOpen": false,
+      "expanded": "false",
+      "focus": "prompt",
+      "hidden": true,
+      "selection": "当前选择：gpt-6.1-sol / xhigh"
+    },
+    {
+      "label": "键盘回车打开",
+      "expectedOpen": true,
+      "expanded": "true",
+      "focus": "gpt-6.1-sol",
+      "hidden": false,
+      "selection": "当前选择：gpt-6.1-sol / xhigh"
+    },
+    {
+      "label": "键盘回车再次关闭",
+      "expectedOpen": false,
+      "expanded": "false",
+      "focus": "model-button",
+      "hidden": true,
+      "selection": "当前选择：gpt-6.1-sol / xhigh"
+    },
+    {
+      "label": "Escape关闭",
+      "expectedOpen": false,
+      "expanded": "false",
+      "focus": "model-button",
+      "hidden": true,
+      "selection": "当前选择：gpt-6.1-sol / xhigh"
+    },
+    {
+      "label": "点击菜单外部关闭",
+      "expectedOpen": false,
+      "expanded": "false",
+      "focus": "BODY",
+      "hidden": true,
+      "selection": "当前选择：gpt-6.1-sol / xhigh"
+    },
+    {
+      "label": "触摸第一次打开",
+      "expectedOpen": true,
+      "expanded": "true",
+      "focus": "gpt-6.1-sol",
+      "hidden": false,
+      "selection": "当前选择：gpt-6.1-sol / xhigh"
+    },
+    {
+      "label": "触摸第二次关闭",
+      "expectedOpen": false,
+      "expanded": "false",
+      "focus": "model-button",
+      "hidden": true,
+      "selection": "当前选择：gpt-6.1-sol / xhigh"
+    }
+  ],
+  "finalEvents": [
+    {
+      "type": "pointerdown",
+      "target": "model-button",
+      "related": "",
+      "hidden": true,
+      "focus": "model-button"
+    },
+    {
+      "type": "focusout",
+      "target": "model-button",
+      "related": "gpt-6.1-sol",
+      "hidden": false,
+      "focus": "BODY"
+    },
+    {
+      "type": "focusin",
+      "target": "gpt-6.1-sol",
+      "related": "model-button",
+      "hidden": false,
+      "focus": "BUTTON"
+    },
+    {
+      "type": "click",
+      "target": "model-button",
+      "related": "",
+      "hidden": false,
+      "focus": "BUTTON"
+    },
+    {
+      "type": "focusout",
+      "target": "gpt-6.1-sol",
+      "related": "",
+      "hidden": true,
+      "focus": "BODY"
+    },
+    {
+      "type": "pointerdown",
+      "target": "model-button",
+      "related": "",
+      "hidden": true,
+      "focus": "BODY"
+    },
+    {
+      "type": "focusin",
+      "target": "model-button",
+      "related": "",
+      "hidden": true,
+      "focus": "model-button"
+    },
+    {
+      "type": "focusout",
+      "target": "model-button",
+      "related": "gpt-6.1-sol",
+      "hidden": false,
+      "focus": "BODY"
+    },
+    {
+      "type": "focusin",
+      "target": "gpt-6.1-sol",
+      "related": "model-button",
+      "hidden": false,
+      "focus": "BUTTON"
+    },
+    {
+      "type": "click",
+      "target": "model-button",
+      "related": "",
+      "hidden": false,
+      "focus": "BUTTON"
+    },
+    {
+      "type": "pointerdown",
+      "target": "model-button",
+      "related": "",
+      "hidden": false,
+      "focus": "BUTTON"
+    },
+    {
+      "type": "focusout",
+      "target": "gpt-6.1-sol",
+      "related": "model-button",
+      "hidden": false,
+      "focus": "BODY"
+    },
+    {
+      "type": "focusin",
+      "target": "model-button",
+      "related": "gpt-6.1-sol",
+      "hidden": false,
+      "focus": "model-button"
+    },
+    {
+      "type": "click",
+      "target": "model-button",
+      "related": "",
+      "hidden": true,
+      "focus": "model-button"
+    }
+  ],
+  "touchInput": "通过当前Chrome标签的CDP Input.dispatchTouchEvent触发；不是Android真机验收"
+}

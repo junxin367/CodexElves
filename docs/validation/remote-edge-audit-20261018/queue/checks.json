@@ -1,0 +1,20 @@
+{
+  "status": "PARTIAL",
+  "featureStatus": "PASS",
+  "nativeSyntaxExit": 0,
+  "targetDiffExit": 0,
+  "nativeSha256": "364de2280295e42d2815c0c5c8c0b9121ee024330128e399e23b82c3e764c387",
+  "nativeSourceMatchesReport": true,
+  "nativeAdapterVersion": 46,
+  "targetedPassed": 26,
+  "targetedFailed": 0,
+  "rustChangedByThisTask": false,
+  "cleanupStatus": "PARTIAL",
+  "cleanupRejection": "blocked by policy",
+  "remainingTemporarySources": [
+    "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\remote-edge-audit-20261018\\queue\\inspect-native.cjs",
+    "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\remote-edge-audit-20261018\\queue\\queue-boundaries.cjs"
+  ],
+  "externalModelRequests": 0,
+  "appServerProcessesStarted": 0
+}

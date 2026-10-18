@@ -1,0 +1,56 @@
+{
+  "result": "PASS",
+  "scope": "真实Chrome加载完整生产网页；GET /api/session 使用本机401或503替身；未进行登录",
+  "beforeCenterOffset": -92.8828125,
+  "defaultMobile": {
+    "label": "390-font14",
+    "centerOffset": -0.0078125,
+    "font": "14px",
+    "height": 844,
+    "iconWithinHeading": true,
+    "noPageOverflow": true,
+    "textWithinHeading": true,
+    "titleOverflow": "visible",
+    "titleText": "CodexElves",
+    "width": 390
+  },
+  "checks": [
+    {
+      "label": "320-font20",
+      "centerOffset": -0.0078125,
+      "clippingAncestors": [],
+      "font": "20px",
+      "height": 640,
+      "iconWithinViewport": true,
+      "noPageOverflow": true,
+      "textWithinViewport": true,
+      "title": "CodexElves",
+      "width": 320
+    },
+    {
+      "label": "1280-font20",
+      "centerOffset": -0.0078125,
+      "clippingAncestors": [],
+      "font": "20px",
+      "height": 800,
+      "iconWithinViewport": true,
+      "noPageOverflow": true,
+      "textWithinViewport": true,
+      "title": "CodexElves",
+      "width": 1280
+    },
+    {
+      "label": "recovery-1280-font20",
+      "centerOffset": -0.0078125,
+      "clippingAncestors": [],
+      "font": "20px",
+      "height": 800,
+      "iconWithinViewport": true,
+      "noPageOverflow": true,
+      "textWithinViewport": true,
+      "title": "CodexElves",
+      "width": 1280
+    }
+  ],
+  "screenshot": "web-mobile.jpg"
+}

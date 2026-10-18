@@ -1,0 +1,185 @@
+{
+  "collectedAt": "2026-10-18T11:02:45.593Z",
+  "source": {
+    "path": "assets/remote-access/native.js",
+    "sha256": "7b7ac84d5657a5b2b877772a36a38bb502d3ac1b8cb835c5e495799634799f81"
+  },
+  "passed": 2,
+  "failed": 0,
+  "results": [
+    {
+      "name": "普通 sendState 确认后释放已终态 unknown 身份及图片引用",
+      "result": "PASS"
+    },
+    {
+      "name": "sendState 已确认时仍保留在途 promise 防止并发双 add",
+      "result": "PASS"
+    }
+  ],
+  "records": [
+    {
+      "name": "terminal-unknown-recovery",
+      "unknown": {
+        "ok": false,
+        "outcomeUnknown": true,
+        "code": 503,
+        "threadId": "fixture-thread",
+        "clientUserMessageId": "client-message",
+        "message": "原生队列加入结果未确认，请检查会话，不要重复操作"
+      },
+      "pending": {
+        "ok": true,
+        "confirmed": false,
+        "deliveryState": "unknown",
+        "threadId": "fixture-thread",
+        "clientUserMessageId": "client-message"
+      },
+      "confirmed": {
+        "ok": true,
+        "confirmed": true,
+        "deliveryState": "queued",
+        "threadId": "fixture-thread",
+        "clientUserMessageId": "client-message",
+        "messageId": "server-message",
+        "queueEpoch": "d0317558-db26-441d-a867-bda32ffc5e4c",
+        "queueRevision": 1,
+        "queuedMessages": [
+          {
+            "id": "server-message",
+            "clientUserMessageId": "client-message",
+            "text": "测试消息",
+            "context": {
+              "prompt": "测试消息"
+            }
+          }
+        ],
+        "queuedEdits": []
+      },
+      "remainingIdentityCount": 0,
+      "calls": [
+        {
+          "method": "thread/queue/list",
+          "params": {
+            "threadId": "fixture-thread",
+            "cursor": null
+          }
+        },
+        {
+          "method": "thread/queue/add",
+          "params": {
+            "threadId": "fixture-thread",
+            "input": [
+              {
+                "type": "text",
+                "text": "测试消息",
+                "text_elements": []
+              }
+            ],
+            "clientUserMessageId": "client-message"
+          }
+        },
+        {
+          "method": "thread/queue/list",
+          "params": {
+            "threadId": "fixture-thread",
+            "cursor": null
+          }
+        },
+        {
+          "method": "thread/queue/list",
+          "params": {
+            "threadId": "fixture-thread",
+            "cursor": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "inflight-query-keeps-admission",
+      "confirmed": {
+        "ok": true,
+        "confirmed": true,
+        "deliveryState": "queued",
+        "threadId": "fixture-thread",
+        "clientUserMessageId": "client-message",
+        "messageId": "server-message",
+        "queueEpoch": "66a52fe8-05e8-492f-a20c-2f101ed31274",
+        "queueRevision": 1,
+        "queuedMessages": [
+          {
+            "id": "server-message",
+            "clientUserMessageId": "client-message",
+            "text": "测试消息",
+            "context": {
+              "prompt": "测试消息"
+            }
+          }
+        ],
+        "queuedEdits": []
+      },
+      "first": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "messageId": "server-message",
+        "clientUserMessageId": "client-message",
+        "queueEpoch": "66a52fe8-05e8-492f-a20c-2f101ed31274",
+        "queueRevision": 2,
+        "queuedMessages": [
+          {
+            "id": "server-message",
+            "clientUserMessageId": "client-message",
+            "text": "测试消息",
+            "context": {
+              "prompt": "测试消息"
+            }
+          }
+        ],
+        "queuedEdits": []
+      },
+      "second": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "messageId": "server-message",
+        "clientUserMessageId": "client-message",
+        "queueEpoch": "66a52fe8-05e8-492f-a20c-2f101ed31274",
+        "queueRevision": 2,
+        "queuedMessages": [
+          {
+            "id": "server-message",
+            "clientUserMessageId": "client-message",
+            "text": "测试消息",
+            "context": {
+              "prompt": "测试消息"
+            }
+          }
+        ],
+        "queuedEdits": []
+      },
+      "remainingIdentityCount": 0,
+      "calls": [
+        {
+          "method": "thread/queue/list",
+          "params": {
+            "threadId": "fixture-thread",
+            "cursor": null
+          }
+        },
+        {
+          "method": "thread/queue/add",
+          "params": {
+            "threadId": "fixture-thread",
+            "input": [
+              {
+                "type": "text",
+                "text": "测试消息",
+                "text_elements": []
+              }
+            ],
+            "clientUserMessageId": "client-message"
+          }
+        }
+      ]
+    }
+  ],
+  "boundary": "生产 queueMessage/queueSendState/readQueuedSendState 原文执行，仅读取临时只读观察入口检查内部 Map；manager/server API 为合成内存夹具，不操作真实聊天或模型。"
+}

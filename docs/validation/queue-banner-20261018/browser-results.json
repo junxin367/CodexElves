@@ -1,0 +1,295 @@
+{
+  "result": "PASS",
+  "scope": "Chrome使用生产编辑器结构、横幅渲染函数和CSS；队列状态为本机替身，无真实队列操作",
+  "samples": [
+    {
+      "label": "before-390-font14",
+      "aboveText": 19,
+      "banner": {
+        "height": 39.59375,
+        "marginBottom": "10px",
+        "paddingBottom": "9px"
+      },
+      "belowText": 26,
+      "button": {
+        "font": "10.9999px",
+        "height": 29.59375,
+        "padding": "6px 9px"
+      },
+      "centerDelta": 0,
+      "composer": {
+        "height": 197.59375,
+        "paddingTop": "12px"
+      },
+      "hidden": false,
+      "overflow": false,
+      "promptHeight": 80,
+      "send": {
+        "height": 36,
+        "width": 36,
+        "x": 326,
+        "y": 785
+      },
+      "viewport": {
+        "height": 844,
+        "width": 390
+      }
+    },
+    {
+      "label": "after-390-font14",
+      "aboveText": 12.203125,
+      "banner": {
+        "height": 29,
+        "marginBottom": "6px",
+        "paddingBottom": "4px"
+      },
+      "belowText": 14.203125,
+      "button": {
+        "font": "10.9999px",
+        "height": 24,
+        "padding": "2px 9px"
+      },
+      "centerDelta": 0,
+      "composer": {
+        "height": 179,
+        "paddingTop": "8px"
+      },
+      "hidden": false,
+      "overflow": false,
+      "promptHeight": 80,
+      "send": {
+        "height": 36,
+        "width": 36,
+        "x": 326,
+        "y": 785
+      },
+      "viewport": {
+        "height": 844,
+        "width": 390
+      }
+    },
+    {
+      "label": "before-320-font20",
+      "aboveText": 19,
+      "banner": {
+        "height": 47.140625,
+        "marginBottom": "10px",
+        "paddingBottom": "9px"
+      },
+      "belowText": 26,
+      "button": {
+        "font": "15.7142px",
+        "height": 37.140625,
+        "padding": "6px 9px"
+      },
+      "centerDelta": 0,
+      "composer": {
+        "height": 205.140625,
+        "paddingTop": "12px"
+      },
+      "hidden": false,
+      "overflow": false,
+      "promptHeight": 80,
+      "send": {
+        "height": 36,
+        "width": 36,
+        "x": 256,
+        "y": 581
+      },
+      "viewport": {
+        "height": 640,
+        "width": 320
+      }
+    },
+    {
+      "label": "after-320-font20",
+      "aboveText": 11,
+      "banner": {
+        "height": 34.140625,
+        "marginBottom": "6px",
+        "paddingBottom": "4px"
+      },
+      "belowText": 13,
+      "button": {
+        "font": "15.7142px",
+        "height": 29.140625,
+        "padding": "2px 9px"
+      },
+      "centerDelta": 0,
+      "composer": {
+        "height": 184.140625,
+        "paddingTop": "8px"
+      },
+      "hidden": false,
+      "overflow": false,
+      "promptHeight": 80,
+      "send": {
+        "height": 36,
+        "width": 36,
+        "x": 256,
+        "y": 581
+      },
+      "viewport": {
+        "height": 640,
+        "width": 320
+      }
+    },
+    {
+      "label": "before-1280-font14",
+      "aboveText": 19,
+      "banner": {
+        "height": 37,
+        "marginBottom": "10px",
+        "paddingBottom": "9px"
+      },
+      "belowText": 26,
+      "button": {
+        "font": "10.9999px",
+        "height": 27,
+        "padding": "6px 9px"
+      },
+      "centerDelta": 0,
+      "composer": {
+        "height": 211,
+        "paddingTop": "12px"
+      },
+      "hidden": false,
+      "overflow": false,
+      "promptHeight": 100,
+      "send": {
+        "height": 32,
+        "width": 32,
+        "x": 928,
+        "y": 743
+      },
+      "viewport": {
+        "height": 800,
+        "width": 1280
+      }
+    },
+    {
+      "label": "after-1280-font14",
+      "aboveText": 13.5,
+      "banner": {
+        "height": 29,
+        "marginBottom": "6px",
+        "paddingBottom": "4px"
+      },
+      "belowText": 15.5,
+      "button": {
+        "font": "10.9999px",
+        "height": 24,
+        "padding": "2px 9px"
+      },
+      "centerDelta": 0,
+      "composer": {
+        "height": 195,
+        "paddingTop": "8px"
+      },
+      "hidden": false,
+      "overflow": false,
+      "promptHeight": 100,
+      "send": {
+        "height": 32,
+        "width": 32,
+        "x": 928,
+        "y": 743
+      },
+      "viewport": {
+        "height": 800,
+        "width": 1280
+      }
+    },
+    {
+      "label": "before-390-normal",
+      "aboveText": null,
+      "banner": {
+        "height": 0,
+        "marginBottom": "10px",
+        "paddingBottom": "9px"
+      },
+      "belowText": null,
+      "button": null,
+      "centerDelta": null,
+      "composer": {
+        "height": 148,
+        "paddingTop": "12px"
+      },
+      "hidden": true,
+      "overflow": false,
+      "promptHeight": 80,
+      "send": {
+        "height": 36,
+        "width": 36,
+        "x": 326,
+        "y": 785
+      },
+      "viewport": {
+        "height": 844,
+        "width": 390
+      }
+    },
+    {
+      "label": "after-390-normal",
+      "aboveText": null,
+      "banner": {
+        "height": 0,
+        "marginBottom": "6px",
+        "paddingBottom": "4px"
+      },
+      "belowText": null,
+      "button": null,
+      "centerDelta": null,
+      "composer": {
+        "height": 148,
+        "paddingTop": "12px"
+      },
+      "hidden": true,
+      "overflow": false,
+      "promptHeight": 80,
+      "send": {
+        "height": 36,
+        "width": 36,
+        "x": 326,
+        "y": 785
+      },
+      "viewport": {
+        "height": 844,
+        "width": 390
+      }
+    },
+    {
+      "label": "after-390-short-viewport",
+      "aboveText": 12.203125,
+      "banner": {
+        "height": 29,
+        "marginBottom": "6px",
+        "paddingBottom": "4px"
+      },
+      "belowText": 14.203125,
+      "button": {
+        "font": "10.9999px",
+        "height": 24,
+        "padding": "2px 9px"
+      },
+      "centerDelta": 0,
+      "composer": {
+        "height": 179,
+        "paddingTop": "8px"
+      },
+      "hidden": false,
+      "overflow": false,
+      "promptHeight": 80,
+      "send": {
+        "height": 36,
+        "width": 36,
+        "x": 326,
+        "y": 301
+      },
+      "viewport": {
+        "height": 360,
+        "width": 390
+      }
+    }
+  ]
+}

@@ -228,10 +228,12 @@ async function addFiles(files) {
   } catch (error) {
     showNotice(error?.message || "无法添加图片", true);
   } finally {
-    readingFiles = false;
-    if (attachmentInput) attachmentInput.value = "";
-    renderComposerAttachments();
-    changeListener();
+    if (version === attachmentVersion) {
+      readingFiles = false;
+      if (attachmentInput) attachmentInput.value = "";
+      renderComposerAttachments();
+      changeListener();
+    }
   }
   return true;
 }
@@ -320,6 +322,7 @@ export function composerRemoteAttachmentSources() {
 
 export function setComposerAttachments(value = [], { readOnly = false, removableRemote = false } = {}) {
   attachmentVersion += 1;
+  readingFiles = false;
   attachments = Array.isArray(value) ? value.flatMap(entry => {
     if (entry?.kind === "inline" && supportedMimes.has(entry.mime)
         && typeof entry.dataUrl === "string" && Number.isFinite(entry.size))

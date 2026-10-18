@@ -1,0 +1,23 @@
+{
+  "implementationComplete": true,
+  "sourceHashesUnchanged": true,
+  "javaCompilationExit": 0,
+  "lintExit": 0,
+  "lintErrors": 0,
+  "lintWarnings": 4,
+  "browserVerified": true,
+  "packaged": false,
+  "installed": false,
+  "physicalHapticsVerified": false,
+  "temporarySourceFilesRemoved": true,
+  "remainingTemporaryFiles": [
+    "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-haptics-20261018\\native\\out\\runtime\\android\\os\\Build$VERSION.class",
+    "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-haptics-20261018\\native\\out\\runtime\\android\\os\\Looper.class",
+    "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-haptics-20261018\\native\\out\\runtime\\android\\os\\SystemClock.class",
+    "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-haptics-20261018\\native\\out\\runtime\\android\\view\\View.class",
+    "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-haptics-20261018\\native\\out\\runtime\\com\\junxin367\\codexelves\\HapticFeedbackControllerCheck.class",
+    "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\android-haptics-20261018\\native\\out\\sdk\\com\\junxin367\\codexelves\\HapticFeedbackController.class"
+  ],
+  "temporaryCleanupComplete": false,
+  "temporaryCleanupBlock": "automatic approval rejected removal: blocked by policy"
+}

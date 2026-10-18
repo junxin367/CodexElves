@@ -1,0 +1,280 @@
+{
+  "status": "PASS",
+  "scope": "仅验证服务端图片路径兼容、生产图片注册读取和 HTTP 鉴权；浏览器显示由主代理独立验证",
+  "timestamp": "2026-10-18T14:33:06.2751916+08:00",
+  "platform": "Windows / PowerShell 7 / rustc 1.95.0 / cargo 1.95.0",
+  "reproduction": {
+    "platform": "windows",
+    "source": "/E:/code/junes/github/CodexPlusPlus/docs/validation/mobile-login-center-20261018/mobile-login.jpg",
+    "rawIsAbsolute": false,
+    "rawLocalPrefix": false,
+    "sourceCount": 1,
+    "registeredImageCount": 0,
+    "hasRemoteImages": false,
+    "ordinaryPathReadable": true,
+    "ordinaryPath": "E:/code/junes/github/CodexPlusPlus/docs/validation/mobile-login-center-20261018/mobile-login.jpg",
+    "imageBytes": 15680,
+    "imageSha256": "bb5f71e1dd2bec43a7af48fb5245e16872ffddc2882c78044df1db1c89bd5a40",
+    "sessionLog": "C:\\Users\\junes\\.codex\\sessions\\2026\\10\\18\\rollout-2026-10-18T00-06-17-01a14a9d-2d95-7100-9ac3-87adb37d0454.jsonl",
+    "sessionLogLine": 6908
+  },
+  "regression": {
+    "status": "PASS",
+    "platform": "windows",
+    "source": "/E:/code/junes/github/CodexPlusPlus/docs/validation/mobile-login-center-20261018/mobile-login.jpg",
+    "registeredSource": "/E:/code/junes/github/CodexPlusPlus/docs/validation/mobile-login-center-20261018/mobile-login.jpg",
+    "registeredUrl": "/api/images/714dd3b4c1274ae6a6e9b47d86114b4af0c7e287c7e7453398b3e00be5e4c3ba",
+    "imageBytes": 15680,
+    "imageMime": "image/jpeg",
+    "imageSha256": "bb5f71e1dd2bec43a7af48fb5245e16872ffddc2882c78044df1db1c89bd5a40",
+    "filesystemPath": "\\\\?\\E:\\code\\junes\\github\\CodexPlusPlus\\docs\\validation\\mobile-login-center-20261018\\mobile-login.jpg",
+    "fixedDisk": true,
+    "pathCases": [
+      {
+        "source": "/E:/code/junes/github/CodexPlusPlus/docs/validation/mobile-login-center-20261018/mobile-login.jpg",
+        "eligible": true,
+        "bytes": 15680,
+        "mime": "image/jpeg"
+      },
+      {
+        "source": "E:/code/junes/github/CodexPlusPlus/docs/validation/mobile-login-center-20261018/mobile-login.jpg",
+        "eligible": true,
+        "bytes": 15680,
+        "mime": "image/jpeg"
+      },
+      {
+        "source": "E:\\code\\junes\\github\\CodexPlusPlus\\docs\\validation\\mobile-login-center-20261018\\mobile-login.jpg",
+        "eligible": true,
+        "bytes": 15680,
+        "mime": "image/jpeg"
+      },
+      {
+        "source": "/E:\\code\\junes\\github\\CodexPlusPlus\\docs\\validation\\mobile-login-center-20261018\\mobile-login.jpg",
+        "eligible": true,
+        "bytes": 15680,
+        "mime": "image/jpeg"
+      },
+      {
+        "source": "/1:/image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "/é:/image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "/E:image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "E:image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "//E:/image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "///E:/image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "//server/share/image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "\\\\server\\share\\image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "\\\\?\\E:\\image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "\\\\.\\E:\\image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "//?/E:/image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "/image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "../image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "file:///E:/image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "file:E:/image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "FILE:/E:/image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "http://example.invalid/image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "https://example.invalid/image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "/E:/image.txt",
+        "eligible": false
+      },
+      {
+        "source": "/E:/image.svg",
+        "eligible": false
+      },
+      {
+        "source": "/E%3A/image.jpg",
+        "eligible": false
+      },
+      {
+        "source": "",
+        "eligible": false
+      },
+      {
+        "source": "/E:/bad\u0000image.jpg",
+        "eligible": false
+      }
+    ],
+    "httpCases": [
+      {
+        "case": "anonymous",
+        "status": 401
+      },
+      {
+        "case": "invalid-cookie",
+        "status": 401
+      },
+      {
+        "case": "valid-cookie",
+        "status": 200
+      },
+      {
+        "case": "unknown-id",
+        "status": 404
+      },
+      {
+        "case": "malformed-id",
+        "status": 404
+      },
+      {
+        "case": "bad-origin",
+        "status": 403
+      },
+      {
+        "case": "cross-site",
+        "status": 403
+      },
+      {
+        "case": "non-image-file",
+        "status": 415
+      },
+      {
+        "case": "oversized-file",
+        "status": 413
+      },
+      {
+        "case": "history-attaches-actual-item",
+        "status": 200
+      },
+      {
+        "case": "revoked-device",
+        "status": 401
+      }
+    ],
+    "formatValidation": 415,
+    "fileSizeValidation": 413,
+    "dimensionValidation": 415,
+    "inlineDataUrlPreserved": true,
+    "listenerStopped": true,
+    "realNativeMessagesSent": 0
+  },
+  "source": {
+    "path": "crates/codex-elves-core/src/remote_access.rs",
+    "sha256": "3515abb8324ae43e10c1bbffd7260beb8aebb641aa8709e2ca6580641b429b3a",
+    "location": "eligible_image_path:3388",
+    "addedLines": 5,
+    "behavior": "仅在 cfg(windows) 下，对单个前导 / + ASCII 字母盘符 + : + 根分隔符 / 或反斜杠剥离首个 /，仅用于构造文件系统 PathBuf",
+    "originalSourcePreserved": true,
+    "unchangedControls": [
+      "原始 URL、file:、UNC 和设备路径拒绝",
+      "固定磁盘检查",
+      "图片访问鉴权和撤销授权",
+      "图片格式、文件大小、尺寸限制",
+      "非 Windows 分支和普通 Windows 盘符路径"
+    ]
+  },
+  "commands": [
+    {
+      "command": "cargo test -p codex-elves-core --lib message_image_path_baseline_reproduces_rejection -- --exact remote_access::message_image_path_regression::message_image_path_baseline_reproduces_rejection --nocapture",
+      "exitCode": 0,
+      "result": "1 passed; 修复前实际 canonical 提取1条、图片注册0条",
+      "elapsedSeconds": 28.31
+    },
+    {
+      "command": "cargo test -p codex-elves-core --lib message_image_path_registration_read_and_http_auth -- --nocapture",
+      "phase": "before",
+      "exitCode": 1,
+      "result": "预期红灯：None != Some(1)，实际原文未注册 remoteImages",
+      "elapsedSeconds": 4.1
+    },
+    {
+      "command": "cargo test -p codex-elves-core --lib message_image_path_registration_read_and_http_auth -- --nocapture",
+      "phase": "after",
+      "exitCode": 0,
+      "result": "1 passed; 实际 JPEG、4种本机路径、24种拒绝路径、11项 HTTP/鉴权行为通过",
+      "elapsedSeconds": 21.93
+    },
+    {
+      "command": "rustfmt --edition 2024 --check --config skip_children=true temp/message-image-path-20261018/eligible-image-path.rs",
+      "exitCode": 0,
+      "result": "从最终源码提取的完整 eligible_image_path 函数格式检查通过；无全文件格式化"
+    },
+    {
+      "command": "git diff --check -- crates/codex-elves-core/src/remote_access.rs",
+      "exitCode": 0,
+      "result": "最终生产源码差异检查通过"
+    },
+    {
+      "command": "cargo check -p codex-elves-core --lib",
+      "exitCode": 0,
+      "result": "删除临时测试入口后的最终生产源码编译检查通过",
+      "elapsedSeconds": 11.16
+    }
+  ],
+  "artifacts": {
+    "baseline": "baseline-item.json",
+    "repaired": "repaired-item.json",
+    "report": "server-regression.json",
+    "summary": "server-regression.md"
+  },
+  "cleanup": {
+    "temporaryTestSha256": "9a654eac24b459c6865d9602287c12e0fafa4412e8cf48af98341e2f9beec51d",
+    "temporaryTestDirectory": "temp/message-image-path-20261018",
+    "temporaryDirectoryRemoved": true,
+    "temporarySourceModuleRemoved": true,
+    "listenerStopped": true,
+    "noPermanentNewTests": true
+  },
+  "limits": [
+    "未重新打包、安装或重启生产服务",
+    "未发送真实会话消息或使用生产访问凭证",
+    "未运行非 Windows 平台；其源码不经过新增 cfg(windows) 规范化分支",
+    "浏览器真实前端渲染和图片预览由主代理独立核验"
+  ]
+}

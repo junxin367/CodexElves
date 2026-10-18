@@ -1,0 +1,7 @@
+E:\code\junes\github\CodexPlusPlus\temp\android-haptics-20261018\native\out\runtime\android\os\Build.class
+E:\code\junes\github\CodexPlusPlus\temp\android-haptics-20261018\native\out\runtime\android\os\Build$VERSION.class
+E:\code\junes\github\CodexPlusPlus\temp\android-haptics-20261018\native\out\runtime\android\os\Looper.class
+E:\code\junes\github\CodexPlusPlus\temp\android-haptics-20261018\native\out\runtime\android\os\SystemClock.class
+E:\code\junes\github\CodexPlusPlus\temp\android-haptics-20261018\native\out\runtime\android\view\View.class
+E:\code\junes\github\CodexPlusPlus\temp\android-haptics-20261018\native\out\runtime\com\junxin367\codexelves\HapticFeedbackControllerCheck.class
+E:\code\junes\github\CodexPlusPlus\temp\android-haptics-20261018\native\out\sdk\com\junxin367\codexelves\HapticFeedbackController.class

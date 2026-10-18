@@ -1,0 +1,27 @@
+[
+  {
+    "path": "assets/remote-access/app.js",
+    "sha256": "B4F8A21D22E93714FEDAF4CEA1777675823EA054C904B60F57A43F66463ECAF3",
+    "modifiedAt": "2026-10-18T17:23:50.9426093+08:00"
+  },
+  {
+    "path": "assets/remote-access/platform.js",
+    "sha256": "628145E908F163DB877FFDC1A4BCF8FB44AE1036DD8CDE6D1707BE62FC8AD55F",
+    "modifiedAt": "2026-10-18T17:23:41.1890087+08:00"
+  },
+  {
+    "path": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/MainActivity.java",
+    "sha256": "22C03456F45FB877F0BD9BF9417D09695F1296284BED3DA0B69EE27048B49A0E",
+    "modifiedAt": "2026-10-18T17:16:08.3108793+08:00"
+  },
+  {
+    "path": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/LoginView.java",
+    "sha256": "800F52D11DAF9CB24228FFCB513ED4B8B35C675AA253056448385629CE564005",
+    "modifiedAt": "2026-10-18T17:14:54.2049373+08:00"
+  },
+  {
+    "path": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/HapticFeedbackController.java",
+    "sha256": "9929589BF24729F058405414B3B1AD0CC6F667A35BF33B47FACF0AEB52E76E4A",
+    "modifiedAt": "2026-10-18T17:14:54.2049373+08:00"
+  }
+]

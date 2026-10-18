@@ -1,0 +1,33 @@
+{
+  "phase": "before",
+  "assertionCount": 37,
+  "observations": "[notification-settings-set\/page: lifecycle returned before disk release=false, notification-settings-set\/destroy: lifecycle returned before disk release=false, notification-settings-set\/identity: lifecycle returned before disk release=false, notification-permission-request\/page: lifecycle returned before disk release=false, notification-permission-request\/destroy: lifecycle returned before disk release=false]",
+  "values": {
+    "notification-settings-set\/page\/permissionRequested": false,
+    "notification-settings-set\/identity\/permissionRequested": false,
+    "notification-permission-request\/page\/permissionDialogs": 0,
+    "notification-settings-set\/identity\/replyCount": 0,
+    "notification-permission-request\/destroy\/permissionRequested": true,
+    "notification-permission-request\/destroy\/nonblocking": false,
+    "notification-permission-request\/destroy\/confirmedEnabled": true,
+    "notification-settings-set\/destroy\/permissionDialogs": 0,
+    "notification-settings-set\/destroy\/nonblocking": false,
+    "notification-settings-set\/page\/replyCount": 0,
+    "notification-permission-request\/page\/confirmedEnabled": true,
+    "notification-permission-request\/page\/replyCount": 0,
+    "notification-settings-set\/identity\/nonblocking": false,
+    "notification-settings-set\/destroy\/confirmedEnabled": false,
+    "notification-permission-request\/destroy\/permissionDialogs": 0,
+    "notification-settings-set\/destroy\/permissionRequested": false,
+    "notification-settings-set\/page\/nonblocking": false,
+    "notification-permission-request\/page\/nonblocking": false,
+    "notification-permission-request\/page\/permissionRequested": true,
+    "notification-settings-set\/identity\/permissionDialogs": 0,
+    "notification-permission-request\/destroy\/replyCount": 0,
+    "notification-settings-set\/page\/permissionDialogs": 0,
+    "notification-settings-set\/page\/confirmedEnabled": false,
+    "notification-settings-set\/destroy\/replyCount": 0,
+    "notification-settings-set\/identity\/confirmedEnabled": false
+  },
+  "passed": "[notification-settings-set reaches production commit, notification-settings-set keeps confirmed value during commit, notification-settings-set\/page lifecycle eventually returns, notification-settings-set\/page lifecycle no exception, notification-settings-set\/page reproduces lock held through disk commit, notification-settings-set\/page stale callback never opens permission dialog, notification-settings-set\/page stale document never receives completion, notification-settings-set reaches production commit, notification-settings-set keeps confirmed value during commit, notification-settings-set\/destroy lifecycle eventually returns, notification-settings-set\/destroy lifecycle no exception, notification-settings-set\/destroy writer terminates, notification-settings-set\/destroy reproduces lock held through disk commit, notification-settings-set\/destroy stale callback never opens permission dialog, notification-settings-set\/destroy stale document never receives completion, notification-settings-set reaches production commit, notification-settings-set keeps confirmed value during commit, notification-settings-set\/identity lifecycle eventually returns, notification-settings-set\/identity lifecycle no exception, notification-settings-set\/identity reproduces lock held through disk commit, notification-settings-set\/identity stale callback never opens permission dialog, notification-settings-set\/identity stale document never receives completion, notification-permission-request reaches production commit, notification-permission-request keeps confirmed value during commit, notification-permission-request\/page lifecycle eventually returns, notification-permission-request\/page lifecycle no exception, notification-permission-request\/page reproduces lock held through disk commit, notification-permission-request\/page stale callback never opens permission dialog, notification-permission-request\/page stale document never receives completion, notification-permission-request reaches production commit, notification-permission-request keeps confirmed value during commit, notification-permission-request\/destroy lifecycle eventually returns, notification-permission-request\/destroy lifecycle no exception, notification-permission-request\/destroy writer terminates, notification-permission-request\/destroy reproduces lock held through disk commit, notification-permission-request\/destroy stale callback never opens permission dialog, notification-permission-request\/destroy stale document never receives completion]"
+}

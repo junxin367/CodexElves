@@ -6,7 +6,6 @@
     <string name="login_origin_hint">https://example.com</string>
     <string name="login_key_label">访问密钥</string>
     <string name="login_key_hint">粘贴或输入访问密钥</string>
-    <string name="login_key_hint_detail">支持 8–256 个非空格 ASCII 字符。</string>
     <string name="login_show_key">显示密钥</string>
     <string name="login_hide_key">隐藏密钥</string>
     <string name="login_connect">连接</string>

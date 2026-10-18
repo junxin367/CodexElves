@@ -1,0 +1,524 @@
+{
+  "layout": [
+    {
+      "label": "before-mobile-390-font14",
+      "font": "14px",
+      "menu": {
+        "height": 560,
+        "width": 310.640625,
+        "x": 71.359375,
+        "y": 221
+      },
+      "overflow": false,
+      "rows": [
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 44,
+          "padding": "8px 10px",
+          "text": "claude-opus-5-5"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 44,
+          "padding": "8px 10px",
+          "text": "devin/claude-sonnet-5-5"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 44,
+          "padding": "8px 10px",
+          "text": "claude-haiku-5-5"
+        },
+        {
+          "checked": "true",
+          "font": "12.6px",
+          "height": 44,
+          "padding": "8px 10px",
+          "text": "gpt-6-astra[600K]"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 44,
+          "padding": "8px 10px",
+          "text": "gpt-6.1-sol"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 44,
+          "padding": "8px 10px",
+          "text": "deepseek-v4.1-flash"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 44,
+          "padding": "8px 10px",
+          "text": "kimi-k3"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 44,
+          "padding": "8px 10px",
+          "text": "测试长名称模型-compact-layout-long-name"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 44,
+          "padding": "8px 10px",
+          "text": "无推理模型"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 44,
+          "padding": "8px 10px",
+          "text": "轻度"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 44,
+          "padding": "8px 10px",
+          "text": "中"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 44,
+          "padding": "8px 10px",
+          "text": "高"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 44,
+          "padding": "8px 10px",
+          "text": "极高"
+        },
+        {
+          "checked": "true",
+          "font": "12.6px",
+          "height": 44,
+          "padding": "8px 10px",
+          "text": "Max"
+        }
+      ],
+      "viewport": {
+        "height": 844,
+        "width": 390
+      }
+    },
+    {
+      "label": "after-mobile-390-font14",
+      "font": "14px",
+      "menu": {
+        "height": 513,
+        "width": 300.640625,
+        "x": 81.359375,
+        "y": 268
+      },
+      "overflow": false,
+      "rows": [
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "claude-opus-5-5"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "devin/claude-sonnet-5-5"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "claude-haiku-5-5"
+        },
+        {
+          "checked": "true",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "gpt-6-astra[600K]"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "gpt-6.1-sol"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "deepseek-v4.1-flash"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "kimi-k3"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "测试长名称模型-compact-layout-long-name"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "无推理模型"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "轻度"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "中"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "高"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "极高"
+        },
+        {
+          "checked": "true",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "Max"
+        }
+      ],
+      "viewport": {
+        "height": 844,
+        "width": 390
+      }
+    },
+    {
+      "label": "after-mobile-320-font20",
+      "font": "20px",
+      "menu": {
+        "height": 560,
+        "width": 304,
+        "x": 8,
+        "y": 17
+      },
+      "overflow": false,
+      "rows": [
+        {
+          "checked": "false",
+          "font": "18px",
+          "height": 35.1875,
+          "padding": "5px 10px",
+          "text": "claude-opus-5-5"
+        },
+        {
+          "checked": "false",
+          "font": "18px",
+          "height": 35.1875,
+          "padding": "5px 10px",
+          "text": "devin/claude-sonnet-5-5"
+        },
+        {
+          "checked": "false",
+          "font": "18px",
+          "height": 35.1875,
+          "padding": "5px 10px",
+          "text": "claude-haiku-5-5"
+        },
+        {
+          "checked": "true",
+          "font": "18px",
+          "height": 35.1875,
+          "padding": "5px 10px",
+          "text": "gpt-6-astra[600K]"
+        },
+        {
+          "checked": "false",
+          "font": "18px",
+          "height": 35.1875,
+          "padding": "5px 10px",
+          "text": "gpt-6.1-sol"
+        },
+        {
+          "checked": "false",
+          "font": "18px",
+          "height": 35.1875,
+          "padding": "5px 10px",
+          "text": "deepseek-v4.1-flash"
+        },
+        {
+          "checked": "false",
+          "font": "18px",
+          "height": 35.1875,
+          "padding": "5px 10px",
+          "text": "kimi-k3"
+        },
+        {
+          "checked": "false",
+          "font": "18px",
+          "height": 35.1875,
+          "padding": "5px 10px",
+          "text": "测试长名称模型-compact-layout-long-name"
+        },
+        {
+          "checked": "false",
+          "font": "18px",
+          "height": 35.1875,
+          "padding": "5px 10px",
+          "text": "无推理模型"
+        },
+        {
+          "checked": "false",
+          "font": "18px",
+          "height": 35.1875,
+          "padding": "5px 10px",
+          "text": "轻度"
+        },
+        {
+          "checked": "false",
+          "font": "18px",
+          "height": 35.1875,
+          "padding": "5px 10px",
+          "text": "中"
+        },
+        {
+          "checked": "false",
+          "font": "18px",
+          "height": 35.1875,
+          "padding": "5px 10px",
+          "text": "高"
+        },
+        {
+          "checked": "false",
+          "font": "18px",
+          "height": 35.1875,
+          "padding": "5px 10px",
+          "text": "极高"
+        },
+        {
+          "checked": "true",
+          "font": "18px",
+          "height": 35.1875,
+          "padding": "5px 10px",
+          "text": "Max"
+        }
+      ],
+      "viewport": {
+        "height": 640,
+        "width": 320
+      }
+    },
+    {
+      "label": "after-desktop-1280-font14",
+      "font": "14px",
+      "menu": {
+        "height": 513,
+        "width": 300.640625,
+        "x": 426,
+        "y": 229
+      },
+      "overflow": false,
+      "rows": [
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "claude-opus-5-5"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "devin/claude-sonnet-5-5"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "claude-haiku-5-5"
+        },
+        {
+          "checked": "true",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "gpt-6-astra[600K]"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "gpt-6.1-sol"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "deepseek-v4.1-flash"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "kimi-k3"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "测试长名称模型-compact-layout-long-name"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "无推理模型"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "轻度"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "中"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "高"
+        },
+        {
+          "checked": "false",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "极高"
+        },
+        {
+          "checked": "true",
+          "font": "12.6px",
+          "height": 32,
+          "padding": "5px 10px",
+          "text": "Max"
+        }
+      ],
+      "viewport": {
+        "height": 800,
+        "width": 1280
+      }
+    }
+  ],
+  "actions": [
+    {
+      "label": "点击当前模型保留Max并关闭",
+      "button": "gpt-6-astra[600K] Max",
+      "expanded": "false",
+      "focus": "prompt",
+      "menuHidden": true,
+      "selection": "当前选择：gpt-6-astra[600K] / max"
+    },
+    {
+      "label": "切换模型采用默认高并关闭",
+      "button": "claude-opus-5-5 高",
+      "expanded": "false",
+      "focus": "prompt",
+      "menuHidden": true,
+      "selection": "当前选择：claude-opus-5-5 / high"
+    },
+    {
+      "label": "点击推理极高应用并关闭",
+      "button": "claude-opus-5-5 极高",
+      "expanded": "false",
+      "focus": "prompt",
+      "menuHidden": true,
+      "selection": "当前选择：claude-opus-5-5 / xhigh"
+    },
+    {
+      "label": "点击当前推理极高也关闭",
+      "button": "claude-opus-5-5 极高",
+      "expanded": "false",
+      "focus": "prompt",
+      "menuHidden": true,
+      "selection": "当前选择：claude-opus-5-5 / xhigh"
+    },
+    {
+      "label": "筛选后选择模型并关闭",
+      "button": "gpt-6.1-sol 中",
+      "expanded": "false",
+      "focus": "prompt",
+      "menuHidden": true,
+      "selection": "当前选择：gpt-6.1-sol / medium"
+    },
+    {
+      "label": "无推理模型仍可选中关闭",
+      "button": "无推理模型",
+      "expanded": "false",
+      "focus": "prompt",
+      "menuHidden": true,
+      "selection": "当前选择：无推理模型 / "
+    },
+    {
+      "label": "桌面键盘回车选择推理并关闭",
+      "button": "gpt-6-astra[600K] 轻度",
+      "expanded": "false",
+      "focus": "prompt",
+      "menuHidden": true,
+      "selection": "当前选择：gpt-6-astra[600K] / low"
+    }
+  ],
+  "result": "PASS",
+  "scope": "真实Chrome使用生产菜单函数及CSS；模型数据和周边接口为隔离替身，非Android真机"
+}

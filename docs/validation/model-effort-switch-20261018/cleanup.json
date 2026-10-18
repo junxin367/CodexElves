@@ -1,0 +1,10 @@
+{
+  "browserFixtureRemoved": true,
+  "nativeFixtureRemoved": true,
+  "browserTabClosed": true,
+  "viewportRestored": true,
+  "localBrowserStorageCleared": true,
+  "previewServerStopped": true,
+  "noRealChatWrites": true,
+  "noPackageOrDeploy": true
+}

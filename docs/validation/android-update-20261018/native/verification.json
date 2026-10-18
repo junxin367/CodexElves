@@ -1,0 +1,59 @@
+{
+  "result": "PASS",
+  "date": "2026-10-18",
+  "policyAssertions": 276,
+  "transportAssertions": 26,
+  "liveApi": {
+    "status": 200,
+    "bytes": 544406,
+    "androidCandidates": 0
+  },
+  "compile": {
+    "jdk": "17.0.20.1",
+    "sdk": 35,
+    "aapt2CompileExit": 0,
+    "aapt2LinkExit": 0,
+    "javacExit": 0,
+    "buildConfigScope": "Existing generated release BuildConfig; final version generation belongs to integrated Gradle build"
+  },
+  "deviceInstallVerified": false,
+  "signedBuildByThisAgent": false,
+  "inputHashes": [
+    {
+      "path": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/AppUpdateCancellation.java",
+      "sha256": "e26ecd49b5634df14b73ec9f6f1be406c0e6453f8df4219ea28a36fa45621136"
+    },
+    {
+      "path": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/AppUpdatePolicy.java",
+      "sha256": "c8f0c9db403ebf9e6824c9801f91a81bbfa936447fd464d313e6811e64e79877"
+    },
+    {
+      "path": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/AppUpdateClient.java",
+      "sha256": "625efbc730f46767eae340c9def4ac80b28afd811ecc966720b132e296067a4f"
+    },
+    {
+      "path": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/AppUpdateController.java",
+      "sha256": "fff0c9e8a6af88d0e0d4adff28046d60855fe1b4afda41ed626bde9d872a22f5"
+    },
+    {
+      "path": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/AppUpdateFileProvider.java",
+      "sha256": "c661bc2e5d5e726c27f26dbe34fdc83e3076cdf14c091a5cb8dde82284847c30"
+    },
+    {
+      "path": "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/MainActivity.java",
+      "sha256": "747245d256d0c2386c62bf2b6790d10a5a2bed18cd37a74c3e8416a9e1e26939"
+    },
+    {
+      "path": "apps/codex-elves-android/app/src/main/AndroidManifest.xml",
+      "sha256": "a9597c55752d7a70f34b54f2ecbbbb16fad149ce47d234f198926419b6daead3"
+    },
+    {
+      "path": "apps/codex-elves-android/app/src/main/res/xml/app_update_paths.xml",
+      "sha256": "43067a3c7ab4e5097265f4e9781125ec7b6ec35805613c5f9c245f884126ca7c"
+    },
+    {
+      "path": "apps/codex-elves-android/app/src/main/res/values/app_update_strings.xml",
+      "sha256": "66b9dcee49ce750b8569647ae62fd7efa037fba2918c983f566610356007e6ed"
+    }
+  ]
+}

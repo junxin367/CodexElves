@@ -1,0 +1,452 @@
+[
+  {
+    "path": "/",
+    "method": "GET",
+    "mode": null
+  },
+  {
+    "path": "/fixture.js",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/style.css",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/app.js",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/events-client.js",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/platform.js",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/recovery-store.js",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/attachments.js",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/message-actions.js",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/markdown.js",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/pwa.js",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/manifest.webmanifest",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/api/session",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/api/login-status",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/favicon.ico",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/icons/icon-192.png",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/app-resources.json",
+    "method": "GET",
+    "mode": "before"
+  },
+  {
+    "path": "/",
+    "method": "GET",
+    "mode": null
+  },
+  {
+    "path": "/fixture.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/style.css",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/app.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/events-client.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/platform.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/recovery-store.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/attachments.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/message-actions.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/markdown.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/pwa.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/manifest.webmanifest",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/api/session",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/api/login-status",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/favicon.ico",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/icons/icon-192.png",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/app-resources.json",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/",
+    "method": "GET",
+    "mode": null
+  },
+  {
+    "path": "/fixture.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/style.css",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/app.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/events-client.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/platform.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/recovery-store.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/attachments.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/message-actions.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/markdown.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/pwa.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/manifest.webmanifest",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/api/session",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/api/login-status",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/favicon.ico",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/icons/icon-192.png",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/app-resources.json",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/",
+    "method": "GET",
+    "mode": null
+  },
+  {
+    "path": "/fixture.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/style.css",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/app.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/events-client.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/platform.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/recovery-store.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/attachments.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/message-actions.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/markdown.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/pwa.js",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/manifest.webmanifest",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/api/session",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/api/login-status",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/favicon.ico",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/icons/icon-192.png",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/app-resources.json",
+    "method": "GET",
+    "mode": "after"
+  },
+  {
+    "path": "/",
+    "method": "GET",
+    "mode": null
+  },
+  {
+    "path": "/fixture.js",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/style.css",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/app.js",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/events-client.js",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/platform.js",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/recovery-store.js",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/attachments.js",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/message-actions.js",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/markdown.js",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/pwa.js",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/manifest.webmanifest",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/api/session",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/api/login-status",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/api/session",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/favicon.ico",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/icons/icon-192.png",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/api/login-status",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/app-resources.json",
+    "method": "GET",
+    "mode": "recovery"
+  },
+  {
+    "path": "/__cleanup",
+    "method": "GET",
+    "mode": null
+  },
+  {
+    "path": "/favicon.ico",
+    "method": "GET",
+    "mode": null
+  },
+  {
+    "path": "/__requests",
+    "method": "GET",
+    "mode": null
+  }
+]

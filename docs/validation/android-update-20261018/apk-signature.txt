@@ -1,0 +1,17 @@
+Verifies
+Verified using v1 scheme (JAR signing): false
+Verified using v2 scheme (APK Signature Scheme v2): true
+Verified using v3 scheme (APK Signature Scheme v3): false
+Verified using v3.1 scheme (APK Signature Scheme v3.1): false
+Verified using v4 scheme (APK Signature Scheme v4): false
+Verified for SourceStamp: false
+Number of signers: 1
+Signer #1 certificate DN: CN=CodexElves Android Release, OU=Android, O=CodexElves
+Signer #1 certificate SHA-256 digest: 7b15895625b40e03792fc250a1fc489df11fe03a25f7e8f1e177d2442fe9dc2d
+Signer #1 certificate SHA-1 digest: e9c94d48f5a3872cafdae9a52f6bf819a5890294
+Signer #1 certificate MD5 digest: f9d61e3ffc97e5032674fb2a8900178e
+Signer #1 key algorithm: RSA
+Signer #1 key size (bits): 4096
+Signer #1 public key SHA-256 digest: 10b6a6d18cf439c4c65ee399e4c378e7423737a79234e27a311612240d807940
+Signer #1 public key SHA-1 digest: dd99743a8f1a2bc7a6ae2ec110e89c014a0a53fb
+Signer #1 public key MD5 digest: aa4fdd7ea526542754008b3916359782

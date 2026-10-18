@@ -1,0 +1,12 @@
+{
+  "serverPort": 1508,
+  "processId": 44940,
+  "serverStopped": true,
+  "browserTabClosed": true,
+  "viewportReset": true,
+  "localStorageEmpty": true,
+  "cachesEmpty": true,
+  "indexedDbEmpty": true,
+  "sessionStorageEntriesBeforeTabClose": 1,
+  "sessionStorageLifetimeEndedWithTab": true
+}

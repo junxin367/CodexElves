@@ -26,7 +26,7 @@ final class LoginView extends ScrollView {
     private boolean keyVisible;
     private Runnable submit;
 
-    public LoginView(Context context) {
+    public LoginView(Context context, HapticFeedbackController haptics) {
         super(context);
         setFillViewport(true);
         setClipToPadding(false);
@@ -35,6 +35,8 @@ final class LoginView extends ScrollView {
         panel = findViewById(R.id.login_panel);
         originInput = findViewById(R.id.login_origin);
         keyInput = findViewById(R.id.login_key);
+        // 访问密钥不进入 Activity 的页面恢复状态。
+        keyInput.setSaveEnabled(false);
         keyVisibility = findViewById(R.id.login_key_visibility);
         connect = findViewById(R.id.login_connect);
         status = findViewById(R.id.login_status);
@@ -57,8 +59,14 @@ final class LoginView extends ScrollView {
         };
         originInput.addTextChangedListener(inputChanges);
         keyInput.addTextChangedListener(inputChanges);
-        keyVisibility.setOnClickListener(ignored -> setKeyVisible(!keyVisible));
-        connect.setOnClickListener(ignored -> submit());
+        keyVisibility.setOnClickListener(view -> {
+            haptics.perform(view, "haptic-click");
+            setKeyVisible(!keyVisible);
+        });
+        connect.setOnClickListener(view -> {
+            haptics.perform(view, "haptic-click");
+            submit();
+        });
         keyInput.setOnEditorActionListener((view, actionId, event) -> {
             boolean enterPressed = event != null
                 && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
@@ -75,7 +83,8 @@ final class LoginView extends ScrollView {
         View helpToggle = findViewById(R.id.login_help_toggle);
         TextView helpBody = findViewById(R.id.login_help_body);
         ImageView helpChevron = findViewById(R.id.login_help_chevron);
-        helpToggle.setOnClickListener(ignored -> {
+        helpToggle.setOnClickListener(view -> {
+            haptics.perform(view, "haptic-click");
             boolean expanded = helpBody.getVisibility() != View.VISIBLE;
             helpBody.setVisibility(expanded ? View.VISIBLE : View.GONE);
             helpChevron.setRotation(expanded ? 180 : 0);

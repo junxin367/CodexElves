@@ -1,0 +1,91 @@
+[
+  {
+    "case": "running-editable-skill",
+    "ariaBusy": "false",
+    "editable": "true",
+    "extraCompactionBanner": "",
+    "queue": [
+      "原有的排队消息"
+    ],
+    "sendDisabled": false,
+    "sendLabel": "发送到原生消息队列",
+    "text": "压缩期间补充 示例 Skill"
+  },
+  {
+    "case": "text-skill-enqueued",
+    "queue": [
+      "原有的排队消息",
+      "压缩期间补充 $demo"
+    ],
+    "sendDisabled": true,
+    "text": ""
+  },
+  {
+    "case": "image-editable-during-compaction",
+    "ariaBusy": "false",
+    "imageCount": 1,
+    "sendDisabled": false,
+    "text": ""
+  },
+  {
+    "case": "edit-during-pending-receipt",
+    "editable": "true",
+    "queueCount": 3,
+    "sendDisabled": true,
+    "text": "排队提交后继续写的草稿"
+  },
+  {
+    "case": "receipt-preserves-new-draft",
+    "queue": [
+      "原有的排队消息",
+      "压缩期间补充 $demo",
+      "待执行消息",
+      "压缩期间的另一条消息"
+    ],
+    "queuedImages": 1,
+    "sendDisabled": false,
+    "text": "排队提交后继续写的草稿"
+  },
+  {
+    "case": "failed-enqueue-keeps-draft",
+    "queueCount": 4,
+    "sendDisabled": false,
+    "text": "排队提交后继续写的草稿"
+  },
+  {
+    "case": "native-confirmed-pending-enqueues",
+    "queue": [
+      "等待原生压缩时加入队列"
+    ],
+    "text": ""
+  },
+  {
+    "case": "unknown-compaction-keeps-draft-but-blocks-send",
+    "editable": "true",
+    "reason": "压缩结果仍待确认，可继续编辑草稿；不会自动重发压缩请求，请查回执、重新读取或在本机核对后再发送。",
+    "sendDisabled": true,
+    "text": "压缩结果未确认时也能先写草稿"
+  },
+  {
+    "case": "old-service-keeps-editing-without-unsupported-send",
+    "editable": "true",
+    "reason": "当前服务尚不支持压缩期间发送排队消息，可继续编辑草稿；请更新远程服务或等待压缩完成。",
+    "sendDisabled": true,
+    "text": "旧服务也能继续保存这份草稿"
+  },
+  {
+    "case": "compaction-finished-restores-normal-controls",
+    "compactionBanner": "",
+    "modelDisabled": false,
+    "queueCount": 4,
+    "sendDisabled": false,
+    "sendLabel": "发送消息",
+    "text": "旧服务也能继续保存这份草稿"
+  },
+  {
+    "case": "ordinary-send-still-works",
+    "queueCount": 0,
+    "sendLabel": "发送消息",
+    "text": ""
+  }
+]

@@ -1,7 +1,18 @@
 import { markdown, prepareMessageImage, renderMermaidBlocks, settleMessageImage, withStableMessageLayout } from "./markdown.js";
 import { createRemoteEventStream, sharedEventsAvailable } from "./events-client.js";
 import { renderMessageActions } from "./message-actions.js";
-import { isAndroidContainer, postPlatformMessage } from "./platform.js";
+import {
+  getAndroidAppInfo,
+  getAndroidNotificationSettings,
+  installAndroidClickHapticFeedback,
+  isAndroidContainer,
+  openAndroidNotificationSystemSettings,
+  performAndroidHapticFeedback,
+  postPlatformMessage,
+  requestAndroidNotificationPermission,
+  setAndroidNotificationSettings,
+  subscribeAndroidNotificationSettings
+} from "./platform.js";
 import { createRecoveryStore, createTranscriptCache, recoveryStorageMessage } from "./recovery-store.js";
 import { beginPwaForegroundWork, getPwaCacheState, retryPwaCache } from "./pwa.js";
 import {
@@ -25,8 +36,10 @@ import {
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const app = $("#app");
+installAndroidClickHapticFeedback();
 document.documentElement.dataset.inputModality = "pointer";
 let session = null, sidebar = null, selectedId = null, thread = null, historyCursor = null, historyLoading = false;
+let pendingNotificationOpen = null;
 let stream = null, connected = false, selectionVersion = 0, busy = false, creating = false, historyLoadingVersion = -1;
 let sending = null;
 let turns = new Map(), collapsed = new Set(), search = "", sidebarTimer = null, refreshTimer = null;
@@ -65,7 +78,7 @@ function renderPwaCacheState() {
   const root = $("#appearance-cache-state");
   if (!root) return;
   const state = getPwaCacheState();
-  root.hidden = state.status === "ready";
+  root.hidden = state.status === "ready" || state.status === "unsupported";
   if (root.hidden) {
     root.replaceChildren();
     return;
@@ -268,7 +281,7 @@ const appearancePresets = {
 };
 const projectThreadLimits = [5, 10, 20, 50];
 function defaultAppearance(theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") {
-  return { theme, fontSize: 14, projectThreadLimit: 5, colors: { light: { ...appearancePresets.light }, dark: { ...appearancePresets.dark } } };
+  return { theme, fontSize: 13, projectThreadLimit: 5, colors: { light: { ...appearancePresets.light }, dark: { ...appearancePresets.dark } } };
 }
 function readAppearance() {
   const value = defaultAppearance();
@@ -318,7 +331,10 @@ applyAppearance();
 function openAppearance() {
   closeComposerMenus(); closePopup();
   const trigger = document.activeElement;
-  $("#appearance-dialog")?.remove();
+  const androidContainer = isAndroidContainer();
+  const previousDialog = $("#appearance-dialog");
+  if (previousDialog?.open) previousDialog.close();
+  previousDialog?.remove();
   const dialog = element("dialog", "appearance-dialog");
   dialog.id = "appearance-dialog";
   dialog.setAttribute("aria-labelledby", "appearance-title");
@@ -328,11 +344,302 @@ function openAppearance() {
     <div class="appearance-field appearance-thread-limit-field"><span>每个项目显示会话数</span><div id="appearance-project-thread-limit-slot"></div></div>
     <div id="appearance-colors"></div>
     <div id="appearance-cache-state" class="appearance-field" role="status"></div>
-    <label class="appearance-field">字体大小<span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="字体大小"><output id="appearance-font-value"></output></span></label></div>
-    <div class="appearance-actions"><button type="button" id="appearance-reset">恢复默认</button><button type="button" class="primary" id="appearance-close">完成</button></div>`;
+    <label class="appearance-field">字体大小<span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="字体大小"><output id="appearance-font-value"></output></span></label>
+    <button type="button" id="appearance-notifications-entry" class="appearance-notifications-entry" hidden><span>通知事件</span></button></div>
+    <div class="appearance-actions"><button type="button" class="appearance-version" id="appearance-app-version" hidden disabled></button><div class="appearance-action-buttons"><button type="button" id="appearance-reset">恢复默认</button><button type="button" class="primary" id="appearance-close">完成</button></div></div>`;
   document.body.append(dialog);
-  $(".appearance-heading button", dialog).append(icon("close"));
+  const title = $("#appearance-title", dialog);
+  const headingButton = $(".appearance-heading button", dialog);
+  const primaryBody = $(".appearance-body", dialog);
+  const entryButton = $("#appearance-notifications-entry", dialog);
+  const resetButton = $("#appearance-reset", dialog);
+  const notificationVersionButton = $("#appearance-app-version", dialog);
+  if (androidContainer) {
+    entryButton.hidden = false;
+    entryButton.append(icon("chevron"));
+  }
+  headingButton.append(icon("close"));
   renderPwaCacheState();
+  const versionButton = notificationVersionButton;
+  let notificationPage = null;
+  let notificationPageRevision = 0;
+  let notificationPageVisible = false;
+  let notificationPageUnsubscribe = null;
+  let activeNotificationPage = null;
+  let notificationOperations = 0;
+  let androidVersionLoaded = false;
+  const notificationEntry = entryButton;
+  const updateNotificationOperationState = () => {
+    notificationEntry.disabled = notificationOperations > 0;
+    activeNotificationPage?.setBusy(notificationOperations > 0);
+  };
+  const notificationErrorMessage = error => {
+    if (["unsupported", "timeout"].includes(error?.code))
+      return "当前 Android App 版本不支持或未响应通知设置，请更新 App 后重试。";
+    if (error?.code === "permission-denied") return "尚未获得系统通知权限，可前往系统通知设置开启。";
+    return "请稍后重试。";
+  };
+  const beginNotificationOperation = () => {
+    notificationOperations++;
+    updateNotificationOperationState();
+  };
+  const endNotificationOperation = () => {
+    notificationOperations = Math.max(0, notificationOperations - 1);
+    updateNotificationOperationState();
+  };
+  const notificationPageIsCurrent = (page, revision) => androidContainer && notificationPageVisible
+    && notificationPage === page && notificationPageRevision === revision && page.isConnected
+    && dialog.isConnected && dialog.open;
+  const restoreAppearanceRoot = () => {
+    if (!notificationPageVisible) return;
+    notificationPageVisible = false;
+    notificationPageRevision++;
+    notificationPageUnsubscribe?.();
+    notificationPageUnsubscribe = null;
+    activeNotificationPage = null;
+    notificationPage?.remove();
+    notificationPage = null;
+    dialog.classList.remove("appearance-notifications-open");
+    primaryBody.hidden = false;
+    title.textContent = "设置";
+    headingButton.title = "关闭设置";
+    headingButton.setAttribute("aria-label", "关闭设置");
+    headingButton.replaceChildren(icon("close"));
+    resetButton.hidden = false;
+    versionButton.hidden = !androidVersionLoaded;
+    updateNotificationOperationState();
+    notificationEntry.focus({ preventScroll: true });
+  };
+  if (androidContainer) entryButton.onclick = () => {
+    if (!dialog.isConnected || !dialog.open || notificationPageVisible) return;
+    notificationPageVisible = true;
+    const revision = ++notificationPageRevision;
+    const page = element("div", "appearance-body appearance-notifications-page");
+    page.id = "appearance-notifications-page";
+    notificationPage = page;
+    const status = element("p", "appearance-notification-status", "正在读取通知设置…");
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    const rows = element("div", "appearance-notification-rows");
+    rows.hidden = true;
+    const controls = new Map();
+    const addSwitch = (key, label, destination) => {
+      const row = element("label", "appearance-notification-row");
+      const text = element("span", "", label);
+      const control = document.createElement("input");
+      control.type = "checkbox";
+      control.className = "appearance-notification-switch";
+      control.setAttribute("role", "switch");
+      control.setAttribute("aria-label", label);
+      control.dataset.notificationSetting = key;
+      control.disabled = true;
+      row.append(text, control);
+      destination.append(row);
+      controls.set(key, control);
+    };
+    addSwitch("enabled", "接收通知", rows);
+    const categories = element("div", "appearance-notification-categories");
+    for (const [key, label] of [
+      ["approval", "需要授权"],
+      ["question", "需要回答"],
+      ["completed", "执行完成"],
+      ["failed", "执行失败"]
+    ]) addSwitch(key, label, categories);
+    rows.append(categories);
+    const systemSettingsButton = button("打开系统通知设置", "打开系统通知设置", async () => {
+      if (!notificationPageIsCurrent(page, revision) || notificationOperations) return;
+      beginNotificationOperation();
+      try {
+        const result = await openAndroidNotificationSystemSettings();
+        if (!notificationPageIsCurrent(page, revision)) return;
+        if (result?.supported) {
+          queuedChangedStatus = null;
+          renderStatus(result);
+        }
+        else status.textContent = "当前 Android App 版本暂不支持通知设置，请更新 App。";
+      } catch (error) {
+        if (notificationPageIsCurrent(page, revision))
+          status.textContent = `打开系统通知设置失败：${notificationErrorMessage(error)}`;
+      } finally {
+        finishPageOperation();
+      }
+    }, "appearance-notification-action");
+    systemSettingsButton.hidden = true;
+    page.append(status, rows, systemSettingsButton);
+    dialog.insertBefore(page, $(".appearance-actions", dialog));
+    primaryBody.hidden = true;
+    title.textContent = "通知事件";
+    headingButton.title = "返回设置";
+    headingButton.setAttribute("aria-label", "返回设置");
+    headingButton.replaceChildren(icon("back"));
+    resetButton.hidden = true;
+    versionButton.hidden = true;
+    dialog.classList.add("appearance-notifications-open");
+    let state = null;
+    const setBusy = busy => {
+      for (const control of controls.values()) control.disabled = busy || !state;
+      systemSettingsButton.disabled = busy;
+    };
+    const pageApi = { setBusy };
+    activeNotificationPage = pageApi;
+    let changedVersion = 0;
+    let queuedChangedStatus = null;
+    const renderStatus = value => {
+      if (!notificationPageIsCurrent(page, revision)) return;
+      if (!value?.supported) {
+        state = null;
+        rows.hidden = true;
+        systemSettingsButton.hidden = true;
+        status.textContent = "当前 Android App 版本暂不支持通知设置，请更新 App。";
+        return;
+      }
+      state = value;
+      rows.hidden = false;
+      for (const [key, control] of controls) {
+        control.checked = value.settings[key];
+        control.disabled = notificationOperations > 0;
+      }
+      const permissionText = {
+        prompt: "系统通知尚未授权",
+        granted: "系统通知权限已允许",
+        denied: "系统通知未开启"
+      }[value.permission];
+      const deliveryText = {
+        disabled: value.settings.enabled ? "等待启动" : "已关闭",
+        "permission-required": "需要系统通知权限",
+        connecting: "正在连接",
+        connected: "连接已建立",
+        disconnected: "连接中断",
+        unsupported: "当前版本不支持",
+        "auth-required": "需要重新授权"
+      }[value.delivery];
+      let summary = `通知${value.settings.enabled ? "已开启" : "已关闭"}；${permissionText}；${deliveryText}。`;
+      if (value.permission === "denied")
+        summary = `系统通知尚未获准或已关闭，当前不会接收通知。`;
+      if (value.message) summary += ` ${value.message}`;
+      status.textContent = summary;
+      systemSettingsButton.hidden = false;
+    };
+    const renderError = (error, action) => {
+      if (!notificationPageIsCurrent(page, revision)) return;
+      if (!state) rows.hidden = true;
+      const message = notificationErrorMessage(error);
+      status.textContent = action === "read"
+        ? `无法读取通知设置：${message}`
+        : action === "permission"
+          ? `通知设置已保存；系统权限请求未完成。${message}`
+          : `保存失败，页面保留上次读取的设置。${message}`;
+      systemSettingsButton.hidden = !state?.supported;
+    };
+    const isCurrent = () => notificationPageIsCurrent(page, revision);
+    const finishPageOperation = () => {
+      endNotificationOperation();
+      if (!notificationOperations && queuedChangedStatus) {
+        const latest = queuedChangedStatus;
+        queuedChangedStatus = null;
+        if (isCurrent()) renderStatus(latest);
+      }
+    };
+    const readSettings = async () => {
+      const previousChangedVersion = changedVersion;
+      beginNotificationOperation();
+      try {
+        const value = await getAndroidNotificationSettings();
+        if (!isCurrent() || changedVersion !== previousChangedVersion) return;
+        queuedChangedStatus = null;
+        renderStatus(value);
+      } catch (error) {
+        renderError(error, "read");
+      } finally {
+        finishPageOperation();
+      }
+    };
+    const saveSetting = async (key, enabled) => {
+      if (!isCurrent() || !state || notificationOperations) return;
+      const oldValue = state.settings[key];
+      controls.get(key).checked = oldValue;
+      const nextSettings = { ...state.settings, [key]: enabled };
+      beginNotificationOperation();
+      let saveCompleted = false;
+      try {
+        await setAndroidNotificationSettings(nextSettings);
+        saveCompleted = true;
+        const saved = await getAndroidNotificationSettings();
+        if (!isCurrent()) return;
+        if (!saved?.supported) throw Object.assign(new Error("当前 Android App 版本暂不支持通知设置，请更新 App。"), { code: "unsupported" });
+        queuedChangedStatus = null;
+        renderStatus(saved);
+        if (key === "enabled" && enabled) {
+          try {
+            const permission = await requestAndroidNotificationPermission();
+            if (!isCurrent()) return;
+            if (permission?.supported) {
+              queuedChangedStatus = null;
+              renderStatus(permission);
+            }
+            else status.textContent = "通知已开启，但当前 Android App 版本无法申请系统权限，请更新 App。";
+          } catch (error) {
+            if (!isCurrent()) return;
+            renderError(error, "permission");
+          }
+        }
+      } catch (error) {
+        if (saveCompleted) {
+          if (isCurrent()) status.textContent = `通知设置已保存，但无法确认当前状态；页面保留上次读取的设置。${notificationErrorMessage(error)}`;
+        } else {
+          queuedChangedStatus = null;
+          renderError(error, "save");
+        }
+      } finally {
+        finishPageOperation();
+      }
+    };
+    for (const [key, control] of controls) {
+      control.addEventListener("change", () => {
+        if (state) void saveSetting(key, control.checked);
+      });
+    }
+    notificationPageUnsubscribe = subscribeAndroidNotificationSettings(value => {
+      if (!isCurrent()) return;
+      changedVersion++;
+      if (notificationOperations) queuedChangedStatus = value;
+      else renderStatus(value);
+    });
+    void readSettings();
+    updateNotificationOperationState();
+  };
+  const onNativeBack = event => {
+    if (!dialog.open || !dialog.isConnected || document.querySelector("dialog[open]") !== dialog) return;
+    event.preventDefault();
+    if (notificationPageVisible) restoreAppearanceRoot();
+    else dialog.close();
+  };
+  const onNotificationEscape = event => {
+    if (event.key !== "Escape" || event.isComposing || !dialog.open || !notificationPageVisible) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    restoreAppearanceRoot();
+  };
+  if (androidContainer) {
+    window.addEventListener("codex-elves-native-back", onNativeBack);
+    window.addEventListener("keydown", onNotificationEscape, true);
+  }
+  if (androidContainer) {
+    void getAndroidAppInfo().then(info => {
+      if (!info || !dialog.isConnected || !dialog.open || !versionButton.isConnected) return;
+      androidVersionLoaded = true;
+      versionButton.textContent = `v${info.versionName}`;
+      versionButton.disabled = !info.updateSupported;
+      versionButton.title = info.updateSupported ? "点击检查更新" : "当前应用暂不支持在线更新";
+      versionButton.setAttribute("aria-label", info.updateSupported
+        ? `当前应用版本 v${info.versionName}，点击检查更新`
+        : `当前应用版本 v${info.versionName}，暂不支持在线更新`);
+      versionButton.hidden = notificationPageVisible;
+    }).catch(() => {});
+  }
+  versionButton.onclick = () => {
+    if (dialog.isConnected && dialog.open && !versionButton.disabled) postPlatformMessage("check-app-update");
+  };
   const themeButton = button("", "切换主题", () => {
     appearance.theme = appearance.theme === "light" ? "dark" : "light";
     applyAppearance(true);
@@ -406,13 +713,18 @@ function openAppearance() {
   };
   $("#appearance-font").oninput = event => { appearance.fontSize = Number(event.target.value); applyAppearance(true); sync(); };
   $("#appearance-reset").onclick = () => {
+    if (notificationPageVisible) return;
     appearance = defaultAppearance(appearance.theme);
     applyAppearance(true);
     expandedProjects.clear();
     renderSidebar();
     sync();
   };
-  $("#appearance-close").onclick = $(".appearance-heading button", dialog).onclick = () => dialog.close();
+  $("#appearance-close").onclick = () => dialog.close();
+  headingButton.onclick = () => {
+    if (notificationPageVisible) restoreAppearanceRoot();
+    else dialog.close();
+  };
   let backdropPressed = false;
   const onBackdrop = event => {
     const box = dialog.getBoundingClientRect();
@@ -422,8 +734,21 @@ function openAppearance() {
   dialog.onpointermove = event => { if (!onBackdrop(event)) backdropPressed = false; };
   dialog.onpointercancel = () => { backdropPressed = false; };
   dialog.onpointerup = event => { if (backdropPressed && onBackdrop(event)) dialog.close(); backdropPressed = false; };
-  dialog.oncancel = event => { event.preventDefault(); dialog.close(); };
+  dialog.oncancel = event => {
+    event.preventDefault();
+    if (notificationPageVisible) restoreAppearanceRoot();
+    else dialog.close();
+  };
   dialog.onclose = () => {
+    notificationPageRevision++;
+    notificationPageVisible = false;
+    notificationPageUnsubscribe?.();
+    notificationPageUnsubscribe = null;
+    activeNotificationPage = null;
+    notificationPage?.remove();
+    notificationPage = null;
+    window.removeEventListener("codex-elves-native-back", onNativeBack);
+    window.removeEventListener("keydown", onNotificationEscape, true);
     if (activePopup?.trigger.closest("dialog") === dialog) closePopup();
     document.body.classList.toggle("modal-open", !!document.querySelector("dialog[open]"));
     if (trigger?.isConnected && document.activeElement === document.body) trigger.focus();
@@ -442,15 +767,21 @@ function skillVisibleName(skill) {
   return name.split(":").map(part => part.split("-").filter(Boolean)
     .map(word => word[0].toLocaleUpperCase() + word.slice(1)).join(" ")).join(": ");
 }
+const goalPromptTokenKey = "composer-goal";
+function promptTokenKey(node) {
+  if (node.nodeType !== Node.ELEMENT_NODE) return null;
+  if (node.classList.contains("inline-goal")) return goalPromptTokenKey;
+  return node.classList.contains("inline-skill") ? node.dataset.skillKey : null;
+}
 function promptNodeLength(node) {
   if (node.nodeType === Node.TEXT_NODE) return node.data.length;
-  if (node.nodeType !== Node.ELEMENT_NODE || node.classList.contains("inline-skill") || node.hasAttribute("data-prompt-tail")) return 0;
+  if (node.nodeType !== Node.ELEMENT_NODE || promptTokenKey(node) || node.hasAttribute("data-prompt-tail")) return 0;
   if (node.tagName === "BR") return 1;
   return [...node.childNodes].reduce((total, child) => total + promptNodeLength(child), 0);
 }
 function promptNodeText(node) {
   if (node.nodeType === Node.TEXT_NODE) return node.data;
-  if (node.nodeType !== Node.ELEMENT_NODE || node.classList.contains("inline-skill") || node.hasAttribute("data-prompt-tail")) return "";
+  if (node.nodeType !== Node.ELEMENT_NODE || promptTokenKey(node) || node.hasAttribute("data-prompt-tail")) return "";
   if (node.tagName === "BR") return "\n";
   return [...node.childNodes].map(promptNodeText).join("");
 }
@@ -460,11 +791,14 @@ function promptPlainText(prompt = $("#prompt")) {
 function syncPromptTrailingBreak(prompt) {
   if (prompt.childNodes.length === 1 && prompt.firstChild.nodeName === "BR") prompt.replaceChildren();
   const tail = prompt.querySelector("br[data-prompt-tail]");
-  if (!promptPlainText(prompt).endsWith("\n")) { tail?.remove(); return; }
-  if (tail === prompt.lastChild) return;
-  const next = tail || document.createElement("br");
-  next.dataset.promptTail = "";
-  prompt.append(next);
+  if (!promptPlainText(prompt).endsWith("\n")) tail?.remove();
+  else if (tail !== prompt.lastChild) {
+    const next = tail || document.createElement("br");
+    next.dataset.promptTail = "";
+    prompt.append(next);
+  }
+  prompt.classList.toggle("goal-only", !!prompt.querySelector(".inline-goal")
+    && !promptPlainText(prompt) && !prompt.querySelector(".inline-skill"));
 }
 function promptBoundaryOffset(prompt, container, boundary) {
   let total = 0, found = false;
@@ -478,7 +812,7 @@ function promptBoundaryOffset(prompt, container, boundary) {
       return;
     }
     if (node.nodeType === Node.TEXT_NODE || node.nodeType !== Node.ELEMENT_NODE
-        || node.classList.contains("inline-skill") || node.tagName === "BR") {
+        || promptTokenKey(node) || node.tagName === "BR") {
       total += promptNodeLength(node);
       return;
     }
@@ -495,7 +829,9 @@ function promptSelection(prompt = $("#prompt")) {
     return { start: length, end: length };
   return {
     start: promptBoundaryOffset(prompt, range.startContainer, range.startOffset),
-    end: promptBoundaryOffset(prompt, range.endContainer, range.endOffset)
+    end: promptBoundaryOffset(prompt, range.endContainer, range.endOffset),
+    startTokens: promptTokensBeforeBoundary(prompt, range.startContainer, range.startOffset),
+    endTokens: promptTokensBeforeBoundary(prompt, range.endContainer, range.endOffset)
   };
 }
 function promptPoint(prompt, target, afterSkills) {
@@ -503,8 +839,11 @@ function promptPoint(prompt, target, afterSkills) {
   const find = parent => {
     for (let index = 0; index < parent.childNodes.length; index++) {
       const child = parent.childNodes[index];
+      // 目标始终位于正文之前，数值正文位置 0 也落在目标之后。
+      if (child.nodeType === Node.ELEMENT_NODE && child.classList.contains("inline-goal")) continue;
       if (child.nodeType === Node.ELEMENT_NODE && child.classList.contains("inline-skill")) {
-        if (!afterSkills && remaining === 0) return { node: parent, offset: index };
+        if (remaining === 0 && (afterSkills instanceof Set ? !afterSkills.has(child.dataset.skillKey) : !afterSkills))
+          return { node: parent, offset: index };
         continue;
       }
       const length = promptNodeLength(child);
@@ -526,8 +865,9 @@ function promptTokensBeforeBoundary(prompt, container, boundary) {
   const keys = new Set();
   let found = false;
   const collect = node => {
-    if (node.nodeType === Node.ELEMENT_NODE && node.classList.contains("inline-skill")) {
-      keys.add(node.dataset.skillKey);
+    const key = promptTokenKey(node);
+    if (key) {
+      keys.add(key);
       return;
     }
     if (node.nodeType === Node.ELEMENT_NODE) for (const child of node.childNodes) collect(child);
@@ -541,8 +881,9 @@ function promptTokensBeforeBoundary(prompt, container, boundary) {
       found = true;
       return;
     }
-    if (node.nodeType === Node.ELEMENT_NODE && node.classList.contains("inline-skill")) {
-      keys.add(node.dataset.skillKey);
+    const key = promptTokenKey(node);
+    if (key) {
+      keys.add(key);
       return;
     }
     if (node.nodeType === Node.ELEMENT_NODE) for (const child of node.childNodes) visit(child);
@@ -553,7 +894,8 @@ function promptTokensBeforeBoundary(prompt, container, boundary) {
 function setPromptSelection(prompt, start, end = start, afterSkills = true) {
   if (!prompt?.isConnected) return;
   const selection = window.getSelection(), range = document.createRange();
-  const first = promptPoint(prompt, start, afterSkills), last = promptPoint(prompt, end, afterSkills);
+  const first = promptPoint(prompt, start, afterSkills?.startTokens ?? afterSkills);
+  const last = promptPoint(prompt, end, afterSkills?.endTokens ?? afterSkills);
   range.setStart(first.node, first.offset); range.setEnd(last.node, last.offset);
   selection.removeAllRanges(); selection.addRange(range);
 }
@@ -573,12 +915,22 @@ function skillToken(skill) {
   node.append(skillTokenIcon(), element("span", "inline-skill-name", label));
   return node;
 }
-function promptSkillPlacements(prompt = $("#prompt")) {
+function goalToken() {
+  const node = element("span", "inline-goal"), glyph = goalComposerIcon();
+  node.contentEditable = "false";
+  node.setAttribute("aria-label", "目标模式");
+  node.title = "目标模式：删除此标签可取消，保留正文、Skill 和图片";
+  glyph.className = "inline-skill-icon";
+  node.append(glyph, element("span", "inline-skill-name", "目标"));
+  return node;
+}
+function promptTokenPlacements(prompt = $("#prompt")) {
   const placements = [];
   let offset = 0;
   const visit = node => {
-    if (node.nodeType === Node.ELEMENT_NODE && node.classList.contains("inline-skill")) {
-      placements.push({ key: node.dataset.skillKey, node, offset });
+    const key = promptTokenKey(node);
+    if (key) {
+      placements.push({ key, node, offset });
       return;
     }
     if (node.nodeType === Node.TEXT_NODE || node.nodeType !== Node.ELEMENT_NODE || node.tagName === "BR") {
@@ -590,11 +942,14 @@ function promptSkillPlacements(prompt = $("#prompt")) {
   if (prompt) for (const child of prompt.childNodes) visit(child);
   return placements;
 }
-function writePromptContent(prompt, text, skills = selectedSkills) {
+function promptSkillPlacements(prompt = $("#prompt")) {
+  return promptTokenPlacements(prompt).filter(placement => placement.key !== goalPromptTokenKey);
+}
+function writePromptContent(prompt, text, skills = selectedSkills, goalMode = !!selectedGoal) {
   const ordered = skills.map((skill, index) => ({
     skill, index, offset: Math.min(text.length, Math.max(0, Number.isFinite(skill._offset) ? skill._offset : 0))
   })).sort((left, right) => left.offset - right.offset || left.index - right.index);
-  const nodes = [];
+  const nodes = goalMode ? [goalToken()] : [];
   let cursor = 0;
   for (const entry of ordered) {
     if (entry.offset > cursor) nodes.push(document.createTextNode(text.slice(cursor, entry.offset)));
@@ -608,6 +963,12 @@ function writePromptContent(prompt, text, skills = selectedSkills) {
 }
 function syncSelectedSkillsFromPrompt(prompt = $("#prompt")) {
   if (!prompt) return;
+  // 原生删除、选区替换和输入法结束后，以实际节点为准；不要重绘已被删除的目标。
+  const goals = [...prompt.querySelectorAll(".inline-goal")];
+  if (!goals.length) selectedGoal = null;
+  const goal = selectedGoal ? goals.shift() : null;
+  for (const duplicate of goals) duplicate.remove();
+  if (goal && goal !== prompt.firstChild) prompt.prepend(goal);
   const available = new Map(selectedSkills.map(skill => [skillNodeKey(skill), skill]));
   const next = [];
   for (const placement of promptSkillPlacements(prompt)) {
@@ -628,6 +989,8 @@ function replacePromptRange(prompt, replacement, start, end, selectionMode = "pr
     && prompt.contains(range.startContainer) && prompt.contains(range.endContainer);
   const beforeStart = exactSelection ? promptTokensBeforeBoundary(prompt, range.startContainer, range.startOffset) : null;
   const beforeEnd = exactSelection ? promptTokensBeforeBoundary(prompt, range.endContainer, range.endOffset) : null;
+  if (exactSelection && !beforeStart.has(goalPromptTokenKey) && beforeEnd.has(goalPromptTokenKey))
+    selectedGoal = null;
   selectedSkills = selectedSkills.filter(skill => {
     const key = skillNodeKey(skill);
     return !exactSelection || beforeStart.has(key) || !beforeEnd.has(key);
@@ -653,7 +1016,10 @@ function configurePromptEditor(prompt) {
     value: {
       configurable: true,
       get: () => promptPlainText(prompt),
-      set: value => writePromptContent(prompt, String(value ?? ""), [])
+      set: value => {
+        selectedGoal = null;
+        writePromptContent(prompt, String(value ?? ""), [], false);
+      }
     },
     selectionStart: { configurable: true, get: () => promptSelection(prompt).start },
     selectionEnd: { configurable: true, get: () => promptSelection(prompt).end },
@@ -1033,6 +1399,7 @@ function clearSubmittedDraft(payload, current = true) {
     if (!record.sessionRecovery && recoveryScope) void recoveryStore.remove(recoveryScope, "failed", id).catch(() => {});
   }
   try { persistSmallInputRecoveries(); } catch {}
+  if (current && composerAttachmentsLoading()) return;
   if (matchingDraft(storedDraft(key), payload)) deleteDraft(key);
   if (current && matchingDraft(snapshotDraft(), payload)) {
     $("#prompt").value = ""; selectedSkills = []; selectedGoal = null; clearComposerAttachments(); renderSelectedSkills();
@@ -1064,7 +1431,7 @@ function updatePromptOptimization() {
   for (const record of promptOptimizations.values()) {
     if (record.state === "pending" && (record.scope !== scope || record.version !== selectionVersion
         || record.deviceId !== session?.device.id || record.signature !== signature
-        || $("#prompt").disabled || busy || stopping || pending))
+        || $("#prompt").disabled || compactionLocked() || busy || stopping || pending))
       cancelPromptOptimization(record);
   }
   let record = promptOptimizations.get(scope);
@@ -1075,7 +1442,7 @@ function updatePromptOptimization() {
   control.dataset.state = loading ? "loading" : optimized ? "optimized" : "idle";
   control.setAttribute("aria-busy", String(loading));
   control.disabled = session?.capabilities?.promptOptimization !== true || !connected || session.readOnly
-    || $("#prompt").disabled || busy || stopping || !!pending;
+    || $("#prompt").disabled || compactionLocked() || busy || stopping || !!pending;
   const label = loading ? "取消提示词优化" : optimized ? "恢复原提示词" : "优化提示词";
   control.setAttribute("aria-label", label);
   control.title = session?.capabilities?.promptOptimization !== true
@@ -1243,7 +1610,10 @@ function fitContextUsageTip() {
   }
   const above = Math.max(0, box.top - top - gap - padding);
   const below = Math.max(0, top + height - box.bottom - gap - padding);
-  node.style.width = `${Math.max(0, Math.min(300, width - padding * 2))}px`;
+  const availableWidth = Math.max(0, width - padding * 2), maxWidth = Math.min(300, availableWidth);
+  node.style.width = "max-content";
+  node.style.minWidth = `${Math.min(140, maxWidth)}px`;
+  node.style.maxWidth = `${maxWidth}px`;
   node.style.maxHeight = `${Math.max(above, below)}px`;
   const upwards = below < node.getBoundingClientRect().height && above > below;
   node.style.maxHeight = `${upwards ? above : below}px`;
@@ -1381,6 +1751,12 @@ function renderModelMenu() {
     node.append(labels, element("span", "choice-check", checked ? "✓" : ""));
     return node;
   };
+  const applyModelMenuChoice = () => {
+    renderModelMenu();
+    updateComposer();
+    closeComposerMenus();
+    $("#prompt").focus();
+  };
   const group = element("div", "model-options"); group.setAttribute("role", "group"); group.setAttribute("aria-label", "模型");
   const modelId = currentModelId(), selectedReasoning = currentEffort();
   const visibleModels = models.filter(model => `${model.displayName || ""} ${model.model}`.toLowerCase().includes(modelQuery.trim().toLowerCase()));
@@ -1391,7 +1767,7 @@ function renderModelMenu() {
       selectedEffort = efforts.find(value => value.reasoningEffort === model.defaultReasoningEffort)?.reasoningEffort
         || efforts.find(value => value.reasoningEffort === "medium")?.reasoningEffort || efforts[0]?.reasoningEffort || "";
     }
-    renderModelMenu(); updateComposer();
+    applyModelMenuChoice();
   }));
   if (modelId && !models.some(model => model.model === modelId) && modelId.toLowerCase().includes(modelQuery.trim().toLowerCase())) {
     const current = choice(modelId, true, () => {}, "当前会话模型，原生模型列表暂未提供");
@@ -1404,7 +1780,7 @@ function renderModelMenu() {
   for (const effort of supportedEfforts) {
     efforts.append(choice(effortLabels[effort.reasoningEffort] || effort.reasoningEffort,
       selectedReasoning === effort.reasoningEffort,
-      () => { selectedEffort = effort.reasoningEffort; renderModelMenu(); updateComposer(); closeComposerMenus(); $("#prompt").focus(); }));
+      () => { selectedEffort = effort.reasoningEffort; applyModelMenuChoice(); }));
   }
   if (!efforts.children.length) efforts.append(element("p", "popover-empty muted", "此模型暂无可选思考深度"));
   menu.append(efforts);
@@ -1478,7 +1854,7 @@ function renderSelectedSkills() {
   const selection = promptSelection(prompt), offsets = new Map(promptSkillPlacements(prompt).map(item => [item.key, item.offset]));
   for (const skill of selectedSkills) if (offsets.has(skillNodeKey(skill))) skill._offset = offsets.get(skillNodeKey(skill));
   writePromptContent(prompt, prompt.value);
-  if (document.activeElement === prompt) setPromptSelection(prompt, selection.start, selection.end);
+  if (document.activeElement === prompt) setPromptSelection(prompt, selection.start, selection.end, selection);
   updateComposer();
 }
 function slashQuery() {
@@ -1527,16 +1903,22 @@ function selectGoalCommand(range = slashQuery()) {
   if (reason) { notice(reason, true); return false; }
   const prompt = $("#prompt");
   if (range) prompt.setRangeText("", range.start, range.end, "end");
+  const selection = promptSelection(prompt);
   selectedGoal ||= randomId();
+  renderSelectedSkills();
   rememberDraft();
   closeComposerMenus(); updateComposer();
   composerScroll?.expand(); prompt.focus({ preventScroll: true });
+  setPromptSelection(prompt, selection.start, selection.end, selection);
   return true;
 }
 function clearGoalComposerMode() {
   if (!selectedGoal) return;
   selectedGoal = null;
-  rememberDraft(); updateComposer(); $("#prompt")?.focus({ preventScroll: true });
+  const prompt = $("#prompt");
+  for (const node of prompt?.querySelectorAll(".inline-goal") || []) node.remove();
+  if (prompt) syncPromptTrailingBreak(prompt);
+  rememberDraft(); updateComposer(); prompt?.focus({ preventScroll: true });
 }
 function slashMenuEntries(query = slashQuery()) {
   if (!query) return [];
@@ -1554,7 +1936,7 @@ function compactCommandIcon() {
   return node;
 }
 function goalComposerIcon() {
-  const node = element("span", "ui-icon slash-command-icon goal-mode-target");
+  const node = element("span", "ui-icon slash-command-icon");
   node.setAttribute("aria-hidden", "true");
   node.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.15"><circle cx="8" cy="8" r="6.25"/><circle cx="8" cy="8" r="3.25"/><circle cx="8" cy="8" r=".7" fill="currentColor" stroke="none"/></svg>';
   return node;
@@ -1686,30 +2068,29 @@ function selectCompactCommand() {
   closeComposerMenus(); updateComposer(); prompt.focus();
   void compactContext();
 }
-function removeAdjacentSkill(prompt, direction) {
+function removeAdjacentPromptToken(prompt, direction) {
   const selection = window.getSelection();
   if (!selection?.rangeCount || !selection.isCollapsed) return false;
   const range = selection.getRangeAt(0);
   if (!prompt.contains(range.startContainer)) return false;
-  const container = range.startContainer, offset = range.startOffset;
-  let node = null;
-  if (container === prompt) node = prompt.childNodes[offset + (direction < 0 ? -1 : 0)];
-  else if (container.nodeType === Node.TEXT_NODE
-      && (direction < 0 ? offset === 0 : offset === container.data.length))
-    node = direction < 0 ? container.previousSibling : container.nextSibling;
-  while (node?.nodeType === Node.TEXT_NODE && !node.data)
-    node = direction < 0 ? node.previousSibling : node.nextSibling;
-  if (node?.nodeType !== Node.ELEMENT_NODE || !node.classList.contains("inline-skill")) return false;
   const caret = promptBoundaryOffset(prompt, range.startContainer, range.startOffset);
-  node.remove(); syncSelectedSkillsFromPrompt(prompt); setPromptSelection(prompt, caret);
+  const before = promptTokensBeforeBoundary(prompt, range.startContainer, range.startOffset);
+  const adjacent = promptTokenPlacements(prompt).filter(placement => placement.offset === caret
+    && before.has(placement.key) === (direction < 0));
+  const token = direction < 0 ? adjacent.at(-1) : adjacent[0];
+  if (!token) return false;
+  const nextRange = range.cloneRange();
+  token.node.remove();
+  syncSelectedSkillsFromPrompt(prompt); syncPromptTrailingBreak(prompt);
+  selection.removeAllRanges(); selection.addRange(nextRange);
   rememberDraft(); updateComposer(); closeSkillMenu();
   return true;
 }
 function handlePromptInput(event) {
-  if (!event?.isComposing) syncPromptTrailingBreak($("#prompt"));
   rememberQueuedMessageEdit();
   if (event?.isComposing) { updateComposer(); closeSkillMenu(); return; }
   syncSelectedSkillsFromPrompt();
+  syncPromptTrailingBreak($("#prompt"));
   rememberDraft();
   updateComposer();
   skillIndex = 0; void updateSkillMenu();
@@ -1734,7 +2115,8 @@ function checkModelMenuFocus() {
   });
 }
 document.addEventListener("focusout", event => {
-  if (event.target.closest("#model-button,#model-settings")) checkModelMenuFocus();
+  if (event.target.closest("#model-button,#model-settings")
+      && !event.relatedTarget?.closest?.("#model-button,#model-settings")) checkModelMenuFocus();
 });
 window.addEventListener("blur", checkModelMenuFocus);
 document.addEventListener("keydown", event => {
@@ -1780,6 +2162,7 @@ function icon(name) {
     plus: '<path d="M12 5v14M5 12h14"/>', check: '<path d="m5 12 4 4L19 6"/>',
     image: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-6-6L3 21"/>',
     close: '<path d="m6 6 12 12M18 6 6 18"/>',
+    back: '<path d="m15 18-6-6 6-6"/><path d="M20 12H9"/>',
     closeCircle: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
     queue: '<path d="M8 6h12M8 12h12M8 18h8"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/>',
     target: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/>',
@@ -2316,13 +2699,18 @@ async function api(path, body, id, signal, { resourcePriority = "foreground" } =
     });
     const result = await response.json().catch(error => {
       if (controller?.signal.aborted || signal?.aborted) throw error;
+      if (response.ok) throw Object.assign(new Error(actionTimeout
+        ? "未能读取操作回执，请核对原请求结果，勿重复提交。"
+        : "响应读取失败，请检查网络后重试"), {
+        responseReadFailed: true, ...(actionTimeout ? { outcomeUnknown: true } : {})
+      });
       return { message: `HTTP ${response.status}` };
     });
     if (!response.ok) {
       if (response.status === 401 && !path.endsWith("/connect") && session && deviceId === session.device.id)
         requireAuthentication();
-      throw Object.assign(new Error(result.message || "请求失败"), {
-        code: response.status, ...(result.outcomeUnknown === true ? { outcomeUnknown: true } : {})
+      throw Object.assign(new Error(typeof result?.message === "string" && result.message || `HTTP ${response.status}`), {
+        code: response.status, ...(result?.outcomeUnknown === true ? { outcomeUnknown: true } : {})
       });
     }
     return result;
@@ -2642,6 +3030,19 @@ function currentCompaction(id = selectedId) {
 function compactionLocked(id = selectedId) {
   return ["pending", "running", "unknown"].includes(currentCompaction(id).state);
 }
+function compactionQueueSendReason(id = selectedId) {
+  const current = currentCompaction(id);
+  if (!compactionLocked(id)) return "";
+  if (current.deviceId && current.deviceId !== session?.device.id)
+    return "压缩回执属于旧设备授权，可继续编辑草稿；请重新读取或在本机核对后再发送。";
+  if (current.state === "unknown")
+    return "压缩结果仍待确认，可继续编辑草稿；不会自动重发压缩请求，请查回执、重新读取或在本机核对后再发送。";
+  if (current.state === "pending" && !current.acknowledged && !current.nativeConfirmed)
+    return "压缩请求尚未确认，可继续编辑草稿；不会自动重发压缩请求，请查回执或重新读取后再发送。";
+  if (session?.capabilities?.compactionQueueSend !== true)
+    return "当前服务尚不支持压缩期间发送排队消息，可继续编辑草稿；请更新远程服务或等待压缩完成。";
+  return "";
+}
 function persistCompactions(required = false) {
   const stored = [...compactions.values()].filter(value => compactionLocked(value.threadId)).map(value => ({
     state: value.state, threadId: value.threadId, receiptId: value.receiptId || null,
@@ -2663,6 +3064,7 @@ function setCompactionState(id, value, { required = false } = {}) {
     receiptId: typeof value?.receiptId === "string" ? value.receiptId : null,
     deviceId: typeof value?.deviceId === "string" ? value.deviceId : null,
     acknowledged: value?.acknowledged === true,
+    nativeConfirmed: value?.nativeConfirmed === true,
     baselineTurnId: typeof value?.baselineTurnId === "string" ? value.baselineTurnId : null,
     baselineItemId: typeof value?.baselineItemId === "string" ? value.baselineItemId : null
   };
@@ -2683,7 +3085,12 @@ function reconcileCompaction(id, value) {
       if (thread?.id === id) thread.compaction = normalizeCompaction(current);
       return current;
     }
-    return setCompactionState(id, { ...current, ...projection });
+    return setCompactionState(id, {
+      ...current, ...projection,
+      // 原生读取确认的 pending 与本页尚未送达的请求分开，不能改写回执确认状态。
+      nativeConfirmed: current?.nativeConfirmed === true
+        || !current?.receiptId || compactionAdvanced(current, projection)
+    });
   }
   if (!current || current.state === "idle" || !current.receiptId || current.state === "running"
       || current.acknowledged || compactionAdvanced(current, projection)) {
@@ -3128,8 +3535,9 @@ function showLogin() {
   const panel = element("main", "pair-panel");
   const heading = element("header", "pair-heading");
   const mark = element("div", "brand-mark", "✦"); mark.setAttribute("aria-hidden", "true");
-  heading.append(mark, element("h1", "", "CodexElves"),
-    element("p", "pair-description muted", "输入访问密钥，继续使用你的 Codex 会话。"));
+  const brand = element("div", "pair-brand");
+  brand.append(mark, element("h1", "", "CodexElves"));
+  heading.append(brand, element("p", "pair-description muted", "输入访问密钥，继续使用你的 Codex 会话。"));
   const form = element("form", "pair-form");
   form.noValidate = true;
   const label = element("label", "pair-label", "访问密钥"); label.htmlFor = "access-key";
@@ -3153,10 +3561,9 @@ function showLogin() {
   }
   setKeyVisible(false);
   field.append(key, reveal);
-  const defaultHint = "支持 8–256 个非空格 ASCII 字符，首尾空白会自动忽略。";
   const invalidKeyMessage = "访问密钥错误，请重试。";
   const loginLockedMessage = "访问密钥连续输错超过3次，登录已锁定。请在本机管理器重新生成并保存密钥后再登录。";
-  const hint = element("p", "pair-hint muted", defaultHint); hint.id = "pair-key-hint";
+  const hint = element("p", "pair-hint"); hint.id = "pair-key-hint"; hint.hidden = true;
   hint.setAttribute("aria-live", "polite"); hint.setAttribute("aria-atomic", "true");
   const submit = element("button", "primary pair-submit"); submit.type = "submit"; submit.id = "pair-submit";
   const spinner = element("span", "spinner"); spinner.hidden = true; spinner.setAttribute("aria-hidden", "true");
@@ -3168,7 +3575,8 @@ function showLogin() {
   let submitting = false, authenticated = false, loginLocked = false, checkingLoginStatus = true;
   let statusRequest = null, statusTimer = null, lockVersion = 0, disposed = false, pageHidden = false, loginStatusChecked = false;
   function setError(message = "", invalid = false) {
-    hint.textContent = message || defaultHint;
+    hint.textContent = message;
+    hint.hidden = !message;
     hint.classList.toggle("error-text", !!message); hint.classList.toggle("muted", !message);
     key.setAttribute("aria-invalid", String(invalid));
   }
@@ -3347,6 +3755,7 @@ function showLogin() {
 }
 function requireAuthentication() {
   disconnect();
+  pendingNotificationOpen = null;
   initialAuthenticationRequired = true;
   void clearPrivateInputs().catch(() => {});
   session = null; selectedId = null; thread = null; sidebar = null;
@@ -3365,8 +3774,9 @@ function showConnectionRecovery(error) {
   const panel = element("main", "pair-panel");
   const heading = element("header", "pair-heading");
   const mark = element("div", "brand-mark", "✦"); mark.setAttribute("aria-hidden", "true");
-  heading.append(mark, element("h1", "", "CodexElves"),
-    element("p", "pair-description muted", "当前无法连接远程服务。"));
+  const brand = element("div", "pair-brand");
+  brand.append(mark, element("h1", "", "CodexElves"));
+  heading.append(brand, element("p", "pair-description muted", "当前无法连接远程服务。"));
   const message = element("p", "pair-status error-text", connectionErrorMessage(error));
   message.setAttribute("role", "alert");
   const retry = element("button", "primary pair-submit", "重新连接");
@@ -3425,7 +3835,7 @@ function shell() {
         <div class="composer-input"><div class="composer-input-content"><div id="edit-message-area" hidden></div>
         <div id="prompt" class="prompt-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="给 Codex 发送消息，输入 / 选择命令或 Skill…" aria-label="消息输入" aria-autocomplete="list" aria-controls="skill-menu" aria-expanded="false" spellcheck="true"></div>
         </div></div>
-        <div class="composer-toolbar"><div class="composer-controls"><button id="composer-add" class="icon-button composer-add-button" type="button" aria-label="添加图片、压缩上下文或设置目标" aria-haspopup="menu" aria-expanded="false"></button><button id="prompt-optimize" class="icon-button prompt-optimize-button" type="button" aria-label="优化提示词" aria-busy="false" disabled>✨</button><button id="context-info" class="context-info muted" type="button" aria-label="查看上下文用量" aria-controls="context-usage-tooltip" aria-expanded="false"></button><button id="model-button" class="text-button model-button" type="button" aria-label="选择模型与思考深度" aria-haspopup="menu" aria-controls="model-settings" aria-expanded="false">正在读取模型…</button><button id="composer-goal" class="text-button composer-goal-mode" type="button" aria-label="清除目标模式" title="清除目标模式，保留正文、Skill 和图片" hidden></button></div><div class="composer-send"><span id="send-status" class="composer-send-status" role="status" aria-live="polite"></span><button id="send" class="send-button" type="submit" aria-label="发送消息"></button></div></div>
+        <div class="composer-toolbar"><div class="composer-controls"><button id="composer-add" class="icon-button composer-add-button" type="button" aria-label="添加图片、压缩上下文或设置目标" aria-haspopup="menu" aria-expanded="false"></button><button id="prompt-optimize" class="icon-button prompt-optimize-button" type="button" aria-label="优化提示词" aria-busy="false" disabled>✨</button><button id="context-info" class="context-info muted" type="button" aria-label="查看上下文用量" aria-controls="context-usage-tooltip" aria-expanded="false"></button><button id="model-button" class="text-button model-button" type="button" aria-label="选择模型与思考深度" aria-haspopup="menu" aria-controls="model-settings" aria-expanded="false">正在读取模型…</button></div><div class="composer-send"><span id="send-status" class="composer-send-status" role="status" aria-live="polite"></span><button id="send" class="send-button" type="submit" aria-label="发送消息"></button></div></div>
         <div id="model-settings" class="composer-popover" role="menu" aria-label="模型与思考深度" hidden></div>
         <div id="skill-menu" class="composer-popover skill-menu" role="listbox" aria-label="命令与 Skill" hidden></div>
       </form></div></div>
@@ -3433,11 +3843,6 @@ function shell() {
   </div>`;
   configurePromptEditor($("#prompt"));
   mountContextUsage();
-  const goalModeButton = $("#composer-goal");
-  const goalClearIcon = icon("close");
-  goalClearIcon.classList.add("goal-mode-clear");
-  goalModeButton.append(goalComposerIcon(), goalClearIcon, element("span", "", "目标"));
-  goalModeButton.onclick = clearGoalComposerMode;
   $("#open-sidebar").append(icon("menu"));
   $("#refresh").append(icon("refresh"));
   $("#prompt-optimize").onclick = () => void activatePromptOptimization();
@@ -3602,6 +4007,7 @@ function shell() {
     try {
       await api("/api/logout", {});
       disconnect(); savePending(null);
+      pendingNotificationOpen = null;
       await clearPrivateInputs().catch(() => {});
       initialAuthenticationRequired = true;
       postPlatformMessage("logged-out");
@@ -3643,7 +4049,7 @@ function shell() {
       }
     }
     if (["Backspace", "Delete"].includes(event.key)
-        && removeAdjacentSkill($("#prompt"), event.key === "Backspace" ? -1 : 1)) {
+        && removeAdjacentPromptToken($("#prompt"), event.key === "Backspace" ? -1 : 1)) {
       event.preventDefault(); return;
     }
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.isComposing) {
@@ -3657,6 +4063,10 @@ function shell() {
     }
   };
   $("#prompt").onbeforeinput = event => {
+    if (!event.isComposing && ["deleteContentBackward", "deleteContentForward"].includes(event.inputType)
+        && removeAdjacentPromptToken($("#prompt"), event.inputType === "deleteContentBackward" ? -1 : 1)) {
+      event.preventDefault(); return;
+    }
     if (!event.isComposing && ["insertParagraph", "insertLineBreak"].includes(event.inputType)) {
       event.preventDefault();
       $("#prompt").setRangeText("\n", $("#prompt").selectionStart, $("#prompt").selectionEnd, "end");
@@ -4964,7 +5374,8 @@ function renderTranscriptEvent(item, previous) {
       : item.completed === true && item.source === "automatic" ? "上下文已自动压缩"
       : item.completed === true ? "上下文已压缩" : "上下文压缩状态已更新";
     description = failed ? "上下文压缩未完成，请查看原生会话中的错误。"
-      : compacting ? "Codex 正在缩短较早的会话上下文，完成前暂不能继续发送消息。"
+      : compacting ? `Codex 正在缩短较早的会话上下文。${compactionQueueSendReason()
+        || "可继续编辑并发送普通消息，消息会加入原生队列，在压缩完成后执行。"}`
       : item.completed === true ? "Codex 已缩短较早的会话上下文，以便继续处理后续消息。"
       : "尚未收到明确的压缩完成状态，请以原生会话为准。";
   } else {
@@ -5901,7 +6312,7 @@ async function reorderQueuedMessages(threadId, expectedMessageIds, messageIds, f
     }
   }
 }
-function finishQueueDrag({ commit = false, render = true } = {}) {
+function finishQueueDrag({ commit = false, render = true, hapticEnd = false } = {}) {
   const drag = queueDrag;
   if (!drag) return;
   queueDrag = null;
@@ -5918,18 +6329,24 @@ function finishQueueDrag({ commit = false, render = true } = {}) {
   if (root) delete root.dataset.queueSignature;
   if (commit && drag.active && selectedId === drag.threadId
       && !sameQueueOrder(drag.ids, drag.order) && queueReorderAvailable()) {
+    const hapticEndAllowed = sameQueueOrder((thread?.queuedMessages || []).map(message => message.id), drag.ids);
     void reorderQueuedMessages(drag.threadId, drag.ids, drag.order);
+    if (hapticEnd && drag.userInitiated && hapticEndAllowed) performAndroidHapticFeedback("drag-end");
   } else if (render) renderQueueArea();
 }
 function moveQueueDrag(drag) {
   if (queueDrag !== drag || !drag.active) return;
+  const previousOrder = [...drag.queue.children].map(row => row.dataset.messageId);
   const rows = [...drag.queue.children].filter(row => row !== drag.row);
   const before = rows.find(row => {
     const rect = row.getBoundingClientRect();
     return drag.y < rect.top + rect.height / 2;
   });
   if (drag.row.nextElementSibling !== (before || null)) drag.queue.insertBefore(drag.row, before || null);
-  drag.order = [...drag.queue.children].map(row => row.dataset.messageId);
+  const order = [...drag.queue.children].map(row => row.dataset.messageId);
+  drag.order = order;
+  if (drag.userInitiated && !sameQueueOrder(previousOrder, order))
+    performAndroidHapticFeedback("drag-tick");
 }
 function scrollQueueDrag(drag) {
   if (queueDrag !== drag || !drag.active || drag.frame != null) return;
@@ -5954,14 +6371,16 @@ function beginQueueDrag(event, handle, row, queue, messageId) {
     threadId: selectedId, ids: thread.queuedMessages.map(message => message.id),
     messageId, handle, row, queue, pointerId: event.pointerId,
     x: event.clientX, y: event.clientY, startY: event.clientY,
-    active: false, order: [], timer: null, frame: null
+    userInitiated: event.isTrusted === true, active: false, order: [], timer: null, frame: null
   };
   queueDrag = drag;
   const activate = () => {
     if (queueDrag !== drag || !handle.isConnected || !queueReorderAvailable()) { finishQueueDrag(); return; }
+    if (drag.active) return;
     drag.active = true; drag.order = [...drag.ids];
     row.classList.add("queued-dragging"); row.setAttribute("aria-grabbed", "true");
     queue.classList.add("queue-reordering");
+    if (drag.userInitiated) performAndroidHapticFeedback("drag-start");
   };
   const touch = event.pointerType !== "mouse";
   if (touch) drag.timer = setTimeout(activate, 240);
@@ -5976,7 +6395,10 @@ function beginQueueDrag(event, handle, row, queue, messageId) {
     move.preventDefault(); drag.y = move.clientY;
     moveQueueDrag(drag); scrollQueueDrag(drag);
   };
-  drag.up = up => { if (up.pointerId === drag.pointerId) finishQueueDrag({ commit: true }); };
+  drag.up = up => {
+    if (up.pointerId === drag.pointerId)
+      finishQueueDrag({ commit: true, hapticEnd: up.isTrusted === true });
+  };
   drag.cancel = cancel => {
     if (cancel.pointerId !== drag.pointerId || cancel.type === "lostpointercapture" && cancel.target !== queue) return;
     finishQueueDrag({ commit: cancel.type === "lostpointercapture" && cancel.buttons === 0 });
@@ -6096,8 +6518,11 @@ function renderQueuedMessages(messages, previous = null) {
       if (!["ArrowUp", "ArrowDown"].includes(event.key) || queueDrag || !queueReorderAvailable()) return;
       event.preventDefault();
       const ids = thread.queuedMessages.map(message => message.id);
-      void reorderQueuedMessages(threadId, ids,
-        moveQueueItem(ids, messageId, ids.indexOf(messageId) + (event.key === "ArrowUp" ? -1 : 1)), messageId);
+      const next = moveQueueItem(ids, messageId,
+        ids.indexOf(messageId) + (event.key === "ArrowUp" ? -1 : 1));
+      if (event.isTrusted === true && !sameQueueOrder(ids, next))
+        performAndroidHapticFeedback("drag-tick");
+      void reorderQueuedMessages(threadId, ids, next, messageId);
     };
     const attachmentSignature = JSON.stringify([message.remoteImages, message.context?.imageAttachments]);
     const previousAttachment = previousAttachments.get(messageId);
@@ -6897,7 +7322,7 @@ async function loadHistory(older = false, version = selectionVersion, itemsTurnI
   finally { if (historyRequest === request) historyRequest = null; }
 }
 async function readHistoryPage(older, version, itemsTurnId) {
-  if (version !== selectionVersion || !selectedId || threadDeleted(selectedId)) return;
+  if (pageLeaving || version !== selectionVersion || !selectedId || threadDeleted(selectedId)) return;
   const itemTurn = itemsTurnId ? turns.get(itemsTurnId) : null;
   if ((itemsTurnId && !itemTurn?.itemsNextCursor) || (older && !itemsTurnId && !historyCursor)) return;
   historyLoading = true; historyLoadingVersion = version;
@@ -6916,13 +7341,23 @@ async function readHistoryPage(older, version, itemsTurnId) {
       threadId: id, turnId: itemsTurnId, itemCursor: itemTurn.itemsNextCursor,
       turnStatus: itemTurn.status, turnStartedAt: itemTurn.startedAt, turnCompletedAt: itemTurn.completedAt
     } : { threadId: id, cursor: older ? historyCursor : null };
-    const result = await api("/api/read/history", payload, undefined, controller.signal);
-    if (version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
-    if (!Array.isArray(result.data)) throw new Error("会话历史返回格式无效");
+    let result;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        result = await api("/api/read/history", payload, undefined, controller.signal);
+        break;
+      } catch (error) {
+        // 只重读未能取得完整正文的历史请求；业务错误和完整 JSON 的协议错误交给原有失败入口。
+        if (attempt || !error.responseReadFailed || controller.signal.aborted || pageLeaving
+            || version !== selectionVersion || selectedId !== id || threadDeleted(id)) throw error;
+      }
+    }
+    if (controller.signal.aborted || pageLeaving || version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
+    if (!Array.isArray(result?.data)) throw new Error("会话历史返回格式无效");
+    if (itemsTurnId && (result.scope !== "items" || result.turnId !== itemsTurnId)) throw new Error("会话消息分页归属无效");
     if (checkingCached && !pruneCachedHistory(result.data, readVersion)) historyCursor = result.nextCursor;
     mergeTranscriptEvents(result.transcriptEvents);
     if (itemsTurnId) {
-      if (result.scope !== "items" || result.turnId !== itemsTurnId) throw new Error("会话消息分页归属无效");
       const merged = mergeHistoryTurn({
         id: itemsTurnId, items: result.data, itemsPageComplete: result.itemsPageComplete,
         itemsComplete: result.itemsComplete, itemsNextCursor: result.itemsNextCursor,
@@ -6950,7 +7385,7 @@ async function readHistoryPage(older, version, itemsTurnId) {
     syncEditableMessageMetadata();
     renderMessages(!older);
   } catch (error) {
-    if (controller.signal.aborted || version !== selectionVersion || selectedId !== id) return;
+    if (controller.signal.aborted || pageLeaving || version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
     historyAutoFailed = true;
     if (!historyInitialized) {
       historyError = `最新消息加载失败：${error.message}`;
@@ -8206,16 +8641,15 @@ function isActiveThread() {
 function renderCompactionBanner(root, id, compaction) {
   if (!id || !compactionLocked(id)) return;
   const unavailable = compaction.deviceId && session?.device.id && compaction.deviceId !== session.device.id;
-  if (compaction.state === "running" && !unavailable) return;
+  const sendReason = compactionQueueSendReason(id);
+  if (compaction.state === "running" && !unavailable && !sendReason) return;
   const messages = {
-    pending: compaction.acknowledged
-      ? "压缩请求已提交，正在等待原生压缩生命周期；完成前不会解锁输入。"
-      : "压缩请求送达状态待确认，已锁定此会话且不会自动重发。",
-    running: "正在压缩此会话的上下文；完成前不能发送、停止或追加队列消息。",
-    unknown: "压缩请求结果未知，已锁定此会话且不会自动重发。请查回执、重新读取，或在本机核对后解除。"
+    pending: sendReason || "压缩请求已由原生确认，可继续编辑并发送普通消息；消息会加入原生队列，在压缩完成后执行。",
+    running: sendReason || "正在压缩此会话的上下文；可继续编辑并发送普通消息，消息会加入原生队列，在压缩完成后执行。",
+    unknown: sendReason
   };
   const box = element("div", "pending-banner", unavailable
-    ? "压缩回执属于旧设备授权，已保持锁定且不会自动重发。请重新读取，或在本机核对后解除。"
+    ? `${sendReason}不会自动重发压缩请求。`
     : messages[compaction.state]);
   if (!unavailable && compaction.receiptId && ["pending", "unknown"].includes(compaction.state)) {
     const check = button("查回执", "只查询压缩请求回执，不会重新提交", () => void resolveCompactionReceipt(id), "text-button");
@@ -8317,6 +8751,8 @@ function updateComposer() {
   const unsupportedProjectless = creating && !$("#project-select").value && session.capabilities?.projectlessCreation !== true;
   const compaction = currentCompaction(), compacting = compactionLocked();
   const editing = !!editingMessage || !!editingQueuedMessage;
+  const compactionSendReason = compacting && !goalMode && !editing ? compactionQueueSendReason() : "";
+  const queueOnly = compacting && !goalMode && !editing && !compactionSendReason;
   const unsupportedImages = !editing && hasAttachments && session.capabilities?.imageInput !== true
     || !!editingQueuedMessage?.imageEditing && composerAttachmentsPayload().length > 0
       && session.capabilities?.queuedImageEditing !== true;
@@ -8341,7 +8777,7 @@ function updateComposer() {
       : queueImageNote;
     attachmentNote.hidden = !unsupportedImages && !queueImageNote;
   }
-  setComposerAttachmentsDisabled(session.readOnly || deleting || compacting || busy || stopping
+  setComposerAttachmentsDisabled(session.readOnly || deleting || compacting && editing || busy || stopping
     || !!editingMessage || editing && !!pending || editingQueuedMessage?.state === "starting" || (!creating && !selectedId));
   const add = $("#composer-add");
   const usage = contextUsage(thread?.tokenUsage);
@@ -8359,7 +8795,7 @@ function updateComposer() {
   const sendingLabel = sending ? sending.phase === "syncing" ? "同步中…" : "发送中…" : "";
   if ($("#send-status").textContent !== sendingLabel) $("#send-status").textContent = sendingLabel;
   const action = sending ? "sending" : editingQueuedMessage ? "save"
-    : !goalMode && !editing && active && ((!prompt && !hasAttachments) || pending) && selectedId ? "stop" : "send";
+    : !compacting && !goalMode && !editing && active && ((!prompt && !hasAttachments) || pending) && selectedId ? "stop" : "send";
   if (send.dataset.action !== action) {
     send.dataset.action = action;
     const indicator = action === "sending" ? element("span", "spinner")
@@ -8367,16 +8803,16 @@ function updateComposer() {
     indicator.setAttribute("aria-hidden", "true");
     send.replaceChildren(indicator);
   }
-  send.setAttribute("aria-label", sendingLabel || (editingQueuedMessage ? "保存队列消息修改" : goalMode ? "创建目标" : action === "stop" ? "停止生成" : "发送消息"));
-  send.title = sendingLabel || (editingQueuedMessage ? "保存队列消息修改" : editingMessage ? "请先完成消息编辑" : goalMode ? goalReason || "创建目标" : action === "stop" ? "停止生成" : active ? "发送补充消息" : "发送消息");
+  send.setAttribute("aria-label", sendingLabel || (editingQueuedMessage ? "保存队列消息修改" : goalMode ? "创建目标" : action === "stop" ? "停止生成" : queueOnly ? "发送到原生消息队列" : "发送消息"));
+  send.title = sendingLabel || (editingQueuedMessage ? "保存队列消息修改" : editingMessage ? "请先完成消息编辑" : goalMode ? goalReason || "创建目标" : action === "stop" ? "停止生成" : queueOnly ? "加入原生消息队列，压缩完成后执行" : compactionSendReason || (active ? "发送补充消息" : "发送消息"));
   if (unsupportedImages) send.title = "当前服务版本尚不支持图片发送，请先更新程序";
   if (unsupportedProjectless) send.title = "当前服务版本尚不支持无项目会话，请先更新程序或选择已有项目";
-  send.setAttribute("aria-busy", String(busy || stopping || compacting));
-  send.disabled = deleting || busy || stopping || compacting || !connected || session.readOnly || unsupportedImages || unsupportedProjectless || !!goalReason || composerAttachmentsLoading()
+  send.setAttribute("aria-busy", String(busy || stopping));
+  send.disabled = deleting || busy || stopping || compacting && editing || !!compactionSendReason || !connected || session.readOnly || unsupportedImages || unsupportedProjectless || !!goalReason || composerAttachmentsLoading()
     || (action !== "stop" && (!!pending || !prompt && !hasAttachments))
     || (!creating && (!selectedId || thread?.id !== selectedId));
   if (editingMessage || editingQueuedMessage?.state === "starting") send.disabled = true;
-  $("#prompt").disabled = session.readOnly || deleting || compacting || !!editingMessage || editing && (busy || !!pending)
+  $("#prompt").disabled = session.readOnly || deleting || compacting && editing || !!editingMessage || editing && (busy || !!pending)
     || editingQueuedMessage?.state === "starting" || (!creating && !selectedId);
   $("#new-chat").disabled = session.readOnly || !connected;
   $("#model-button").disabled = session.readOnly || deleting || compacting || !!editingQueuedMessage
@@ -8386,14 +8822,9 @@ function updateComposer() {
   updatePromptOptimization();
   for (const control of document.querySelectorAll(".row-menu-button")) control.disabled = session.readOnly || sidebarBusy || !connected;
   fitPopup();
-  $("#prompt").placeholder = session.readOnly ? "当前设备为只读模式" : compacting ? "上下文压缩完成后可继续输入"
+  $("#prompt").placeholder = session.readOnly ? "当前设备为只读模式" : compacting && !editing && !goalMode
+    ? queueOnly ? "继续输入，发送后会排队等待压缩完成…" : "可继续编辑草稿，压缩期间暂不能发送…"
     : editingQueuedMessage ? "修改排队消息…" : goalMode ? goalComposerPlaceholder : active ? "补充要求，会使用原生消息队列…" : "给 Codex 发送消息，输入 / 选择命令或 Skill…";
-  const goalButton = $("#composer-goal");
-  if (goalButton) {
-    goalButton.hidden = !selectedGoal;
-    goalButton.disabled = session.readOnly || deleting || compacting || editing;
-  }
-  $("#composer").classList.toggle("goal-mode", !!selectedGoal);
   const model = currentModel(), effort = currentEffort();
   const name = model?.displayName || currentModelId()
     || (modelsPromise || selectedId && !thread ? "正在读取模型…" : "模型信息暂不可用");
@@ -8479,7 +8910,8 @@ async function sendMessage() {
   if (threadDeletionLocked() || threadDeleted(selectedId)) return;
   if (editingQueuedMessage) return submitQueuedMessageEdit();
   if (editingMessage) return;
-  if (busy || stopping || compactionLocked() || pending || session.readOnly || !connected) return;
+  if (busy || stopping || pending || session.readOnly || !connected) return;
+  if (composerAttachmentsLoading()) { notice("图片正在读取，请稍后发送"); return; }
   let draft = snapshotDraft();
   const prefix = goalPrefix(draft.text, draft.skills);
   if (prefix) {
@@ -8499,6 +8931,11 @@ async function sendMessage() {
   }
   if (!prompt && !images.length) { notice(goalMode ? "请描述目标或添加图片" : "请输入消息或添加图片"); return; }
   if (!creating && (!selectedId || thread?.id !== selectedId)) return;
+  const queueOnly = !creating && !goalMode && compactionLocked();
+  if (queueOnly) {
+    const reason = compactionQueueSendReason();
+    if (reason) { notice(reason, true); return; }
+  }
   const id = selectedId;
   const version = selectionVersion;
   const wasCreating = creating;
@@ -8510,6 +8947,7 @@ async function sendMessage() {
       ...(!goalMode && session.capabilities?.queueSendRecovery === true ? { clientUserMessageId: randomId() } : {})
     }),
     ...(goalMode ? { goalMode: true } : {}),
+    ...(queueOnly ? { queueOnly: true } : {}),
     ...(model ? { model } : {}),
     ...(reasoningEffort ? { reasoningEffort } : {}),
     ...(draft.skills.length ? { skills: draft.skills.map(({ name, path }) => ({ name, path })) } : {}),
@@ -8634,10 +9072,10 @@ async function recoverCompaction(id) {
   if (!connected || selectedId !== id) return;
   try {
     await reloadThread();
-    const current = currentCompaction(id);
+    const reason = compactionQueueSendReason(id);
     notice(compactionLocked(id)
-      ? current.state === "unknown" ? "原生状态仍无法证明压缩已结束，请在本机核对。" : "压缩尚未结束，已继续锁定此会话。"
-      : "已确认压缩结束，可以继续发送消息。", compactionLocked(id));
+      ? reason || "压缩尚未结束，可继续编辑并发送普通消息到原生队列，压缩完成后执行。"
+      : "已确认压缩结束，可以继续发送消息。", !!reason);
   } catch (error) { notice(`重新读取压缩状态失败：${error.message}`, true); }
   updateComposer();
 }
@@ -8725,7 +9163,7 @@ function receiveCompactionLifecycle(event, params) {
       setCompactionState(id, { state: "idle", turnId, itemId: item.id });
       current = compactions.get(id); changed = true; completed = true;
     } else if (event.method === "item/started" || item.completed === false) {
-      current = setCompactionState(id, { ...current, state: "running", turnId, itemId: item.id });
+      current = setCompactionState(id, { ...current, state: "running", nativeConfirmed: true, turnId, itemId: item.id });
       changed = true;
     }
   }
@@ -8743,6 +9181,7 @@ function receiveCompactionLifecycle(event, params) {
   }
 }
 function receive(event) {
+  if (event.method === "remote/notification") return;
   if (event.method === "remote/unauthorized") { requireAuthentication(); return; }
   if (["remote/disconnected", "remote/reconnected"].includes(event.method)) {
     const available = event.method === "remote/reconnected";
@@ -8953,6 +9392,7 @@ function disconnect() {
 }
 async function reconnectChangedAuthorization() {
   disconnect();
+  pendingNotificationOpen = null;
   session = null; selectedId = null; sidebar = null; thread = null;
   turns.clear(); transcriptEvents.clear();
   await connect();
@@ -9081,7 +9521,8 @@ function resumePage() {
   syncGoalLiveTimer();
   startConnectionPoll(session.device.id);
   ensureStream();
-  void Promise.all([syncConnectionState(), refreshAll({ fresh: true })]).catch(() => {});
+  void Promise.all([syncConnectionState(), refreshAll({ fresh: true })])
+    .catch(() => {}).finally(drainPendingNotificationOpen);
 }
 async function connect(signal) {
   if (connecting) return connecting;
@@ -9134,7 +9575,7 @@ async function connectPage(signal) {
   startConnectionPoll(deviceId);
   try { await refreshAll(); }
   catch (error) { if (session?.device.id === deviceId) notice(error.message, true); }
-  updateComposer(); void resolvePending();
+  updateComposer(); void resolvePending(); drainPendingNotificationOpen();
 }
 function retryConnectionRecovery() {
   if (pageLeaving || document.hidden || navigator.onLine === false || initialAuthenticationRequired || connecting) return;
@@ -9145,6 +9586,37 @@ function retryConnectionRecovery() {
 async function copyText(text) {
   try { await navigator.clipboard.writeText(text); notice("已复制"); }
   catch { notice("无法访问剪贴板，请手动选择代码复制", true); }
+}
+function closeDialogsForNotification() {
+  for (const dialog of [...document.querySelectorAll("dialog[open]")].reverse()) {
+    if (dialog.classList.contains("confirmation-dialog")) dialog.close("cancel");
+    else dialog.close();
+  }
+}
+function openNotificationThread(threadId) {
+  closeDialogsForNotification();
+  if (!session || initialAuthenticationRequired || pageLeaving || !$("#prompt") || !$("#messages")) {
+    pendingNotificationOpen = threadId;
+    return;
+  }
+  void selectThread(threadId).catch(error => notice(`无法打开通知关联的会话：${error.message}`, true));
+}
+function drainPendingNotificationOpen() {
+  if (!pendingNotificationOpen || !session || initialAuthenticationRequired || pageLeaving
+      || !$("#prompt") || !$("#messages")) return;
+  const threadId = pendingNotificationOpen;
+  pendingNotificationOpen = null;
+  openNotificationThread(threadId);
+}
+if (isAndroidContainer()) {
+  window.addEventListener("codex-elves-notification-open", event => {
+    const detail = event?.detail;
+    if (!event?.cancelable || !detail || typeof detail !== "object" || Array.isArray(detail)
+        || Object.keys(detail).length !== 1 || !Object.hasOwn(detail, "threadId")
+        || typeof detail.threadId !== "string" || !/^[A-Za-z0-9_-]{1,120}$/.test(detail.threadId)) return;
+    event.preventDefault();
+    openNotificationThread(detail.threadId);
+  });
 }
 window.addEventListener("online", () => {
   retryConnectionRecovery();

@@ -1,0 +1,392 @@
+[
+  {
+    "method": "GET",
+    "path": "/",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/style.css",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/app.js",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/events-client.js",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/platform.js",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/recovery-store.js",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/attachments.js",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/message-actions.js",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/markdown.js",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/pwa.js",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/manifest.webmanifest",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/api/session",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/favicon.ico",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/icons/icon-192.png",
+    "mode": "baseline"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/models",
+    "mode": "baseline"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/sidebar",
+    "mode": "baseline"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/thread",
+    "mode": "baseline"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/history",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/events-worker.js",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/markdown-renderer.js",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/vendor/marked.esm.js",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/vendor/dompurify.esm.js",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/sidebar",
+    "mode": "baseline"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/thread",
+    "mode": "baseline"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/history",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/api/session",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/app-resources.json",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/api/session",
+    "mode": "baseline"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/sidebar",
+    "mode": "baseline"
+  },
+  {
+    "method": "GET",
+    "path": "/",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/style.css",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/app.js",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/events-client.js",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/platform.js",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/recovery-store.js",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/attachments.js",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/message-actions.js",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/markdown.js",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/pwa.js",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/manifest.webmanifest",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/api/session",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/models",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/sidebar",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/events-worker.js",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/thread",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/history",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/favicon.ico",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/icons/icon-192.png",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/markdown-renderer.js",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/vendor/marked.esm.js",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/vendor/dompurify.esm.js",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/sidebar",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/thread",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/history",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/api/session",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/api/images/714dd3b4c1274ae6a6e9b47d86114b4af0c7e287c7e7453398b3e00be5e4c3ba",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/app-resources.json",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/api/session",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/sidebar",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/api/session",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/sidebar",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/api/session",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/sidebar",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/api/session",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/sidebar",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/api/session",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/sidebar",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/api/session",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/sidebar",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/api/session",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/sidebar",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/api/session",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/sidebar",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/api/session",
+    "mode": "repaired"
+  },
+  {
+    "method": "POST",
+    "path": "/api/read/sidebar",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/__cleanup",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/favicon.ico",
+    "mode": "repaired"
+  },
+  {
+    "method": "GET",
+    "path": "/__requests",
+    "mode": "repaired"
+  }
+]

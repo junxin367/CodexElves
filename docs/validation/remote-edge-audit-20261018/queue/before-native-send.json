@@ -1,0 +1,76 @@
+{
+  "source": {
+    "nativePath": "E:\\code\\junes\\github\\CodexPlusPlus\\assets\\remote-access\\native.js",
+    "sha256": "7b7ac84d5657a5b2b877772a36a38bb502d3ac1b8cb835c5e495799634799f81"
+  },
+  "installed": {
+    "asarPath": "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.9446.0_x64__2p2nqsd0c76g0/app/resources/app.asar",
+    "functions": {
+      "Pln": "bd0c2da8d1e37461ceb10b7606a0025306e922b1f9906ed8d27e0fcc79b4351b",
+      "ifn": "99a3a09857617648ea671f2c3722b3e319e0b165770e715dd596ddcb777b035c",
+      "TurnCoordinator": "286504a92994b2a3b53c15b604f0e978e315cba102d0f13d9802a732785a25c8"
+    }
+  },
+  "boundary": "生产 native.js；当前安装包实际 Pln / ifn / TurnCoordinator；manager、存储及传输为内存夹具，无 app-server 或模型流量。",
+  "results": [
+    {
+      "name": "普通发送内部恢复时开始压缩",
+      "expected": "只入队，不 steer；保留 stable-client",
+      "result": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "result": "compaction-turn"
+      },
+      "records": [
+        {
+          "kind": "resume",
+          "conversationId": "fixture-thread",
+          "model": null,
+          "reasoningEffort": null,
+          "workspaceRoots": [
+            "E:/fixture"
+          ],
+          "collaborationMode": null
+        },
+        {
+          "kind": "steer",
+          "threadId": "fixture-thread",
+          "clientId": "generated-1"
+        }
+      ]
+    },
+    {
+      "name": "普通发送完成后按网页客户端 ID 核对",
+      "expected": "confirmed:true accepted；原生使用 stable-client",
+      "result": {
+        "ok": true,
+        "threadId": "fixture-thread",
+        "result": "new-turn"
+      },
+      "state": {
+        "ok": true,
+        "confirmed": false,
+        "deliveryState": "unknown",
+        "threadId": "fixture-thread",
+        "clientUserMessageId": "stable-client"
+      },
+      "records": [
+        {
+          "kind": "resume",
+          "conversationId": "fixture-thread",
+          "model": null,
+          "reasoningEffort": null,
+          "workspaceRoots": [
+            "E:/fixture"
+          ],
+          "collaborationMode": null
+        },
+        {
+          "kind": "start",
+          "threadId": "fixture-thread",
+          "clientId": "generated-1"
+        }
+      ]
+    }
+  ]
+}

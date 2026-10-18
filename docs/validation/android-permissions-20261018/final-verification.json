@@ -1,0 +1,18 @@
+{
+  "status": "PASS",
+  "nativeAssertions": 47,
+  "sourceHashesMatch": true,
+  "javaCompileExit": 0,
+  "lintExit": 0,
+  "lintErrors": 0,
+  "lintWarnings": 4,
+  "browserVerified": true,
+  "existingApkUnchanged": true,
+  "existingApkHasNotificationPermission": false,
+  "sourceAndMergedManifestHaveNotificationPermissions": true,
+  "packageBuilt": false,
+  "installed": false,
+  "systemPermissionDialogTested": false,
+  "physicalNotificationsTested": false,
+  "realSessionActions": 0
+}

@@ -1,0 +1,130 @@
+{
+  "status": "PASS",
+  "scope": "Chrome扩展加载完整生产网页；使用真实本机HTTP连接中断和Content-Length不匹配复现，不替换fetch/Response.json；身份、历史和回执为隔离替身，无真实消息写入。",
+  "checks": {
+    "oldCodeReproducesExactToast": true,
+    "brokenBodyRetriesOnceAndRecovers": true,
+    "exhaustedRetryStopsAtTwoReads": true,
+    "historyAndDraftPreserved": true,
+    "manualRetryWorks": true,
+    "validJsonWrongShapeDoesNotRetry": true,
+    "oldSelectionAbortedWithoutRetry": true,
+    "writeRequestOnlyOnce": true,
+    "writeDraftKeptUntilReceipt": true,
+    "originalReceiptQueried": true
+  },
+  "samples": [
+    {
+      "connection": "4 ms",
+      "draft": "这份草稿需要保留",
+      "history": "最新记录加载失败，重试保留已加载的历史和未发送草稿。这是已经加载的会话历史。网络读取失败时应继续保留。",
+      "historyImages": 0,
+      "label": "before-broken-body",
+      "notice": "会话历史返回格式无效",
+      "noticeVisible": false,
+      "title": "会话历史恢复验证"
+    },
+    {
+      "connection": "17 ms",
+      "draft": "这份草稿需要保留",
+      "history": "最新记录加载失败，重试保留已加载的历史和未发送草稿。这是已经加载的会话历史。网络读取失败时应继续保留。",
+      "historyImages": 0,
+      "label": "before-visible-error",
+      "notice": "会话历史返回格式无效",
+      "noticeVisible": true,
+      "title": "会话历史恢复验证"
+    },
+    {
+      "connection": "12 ms",
+      "draft": "这份草稿需要保留",
+      "history": "保留已加载的历史和未发送草稿。历史已恢复加载，原有消息仍完整保留。",
+      "historyImages": 0,
+      "label": "after-ready",
+      "notice": "",
+      "noticeVisible": false,
+      "title": "会话历史恢复验证"
+    },
+    {
+      "connection": "5 ms",
+      "draft": "这份草稿需要保留",
+      "history": "保留已加载的历史和未发送草稿。历史已恢复加载，原有消息仍完整保留。",
+      "historyImages": 0,
+      "label": "after-broken-body",
+      "notice": "",
+      "noticeVisible": false,
+      "title": "会话历史恢复验证"
+    },
+    {
+      "connection": "6 ms",
+      "draft": "这份草稿需要保留",
+      "history": "最新记录加载失败，重试保留已加载的历史和未发送草稿。历史已恢复加载，原有消息仍完整保留。",
+      "historyImages": 0,
+      "label": "after-retry-exhausted",
+      "notice": "响应读取失败，请检查网络后重试",
+      "noticeVisible": true,
+      "title": "会话历史恢复验证"
+    },
+    {
+      "connection": "23 ms",
+      "draft": "这份草稿需要保留",
+      "history": "保留已加载的历史和未发送草稿。这是已经加载的会话历史。网络读取失败时应继续保留。",
+      "historyImages": 0,
+      "label": "after-manual-retry",
+      "notice": "响应读取失败，请检查网络后重试",
+      "noticeVisible": false,
+      "title": "会话历史恢复验证"
+    },
+    {
+      "connection": "16 ms",
+      "draft": "这份草稿需要保留",
+      "history": "最新记录加载失败，重试保留已加载的历史和未发送草稿。这是已经加载的会话历史。网络读取失败时应继续保留。",
+      "historyImages": 0,
+      "label": "after-valid-json-wrong-shape",
+      "notice": "会话历史返回格式无效",
+      "noticeVisible": true,
+      "title": "会话历史恢复验证"
+    },
+    {
+      "connection": "7 ms",
+      "draft": "",
+      "history": "保留已加载的历史和未发送草稿。这是另一会话，旧请求不得覆盖这里。",
+      "historyImages": 0,
+      "label": "after-switch-cancels-old-read",
+      "notice": "会话历史返回格式无效",
+      "noticeVisible": false,
+      "title": "另一会话"
+    },
+    {
+      "connection": "5 ms",
+      "draft": "回执中断验证：只发送一次，确认后才清空",
+      "history": "保留已加载的历史和未发送草稿。这是另一会话，旧请求不得覆盖这里。",
+      "historyImages": 0,
+      "label": "after-send-body-failure-pending",
+      "notice": "正在自动核对原生接收状态，不会重发消息。",
+      "noticeVisible": true,
+      "title": "另一会话",
+      "pendingText": "消息正在确认送达，已锁定重复发送。查回执已人工确认"
+    },
+    {
+      "connection": "5 ms",
+      "draft": "",
+      "history": "保留已加载的历史和未发送草稿。这是另一会话，旧请求不得覆盖这里。",
+      "historyImages": 0,
+      "label": "after-original-receipt-confirmed",
+      "notice": "上一条消息已确认送达",
+      "noticeVisible": true,
+      "title": "另一会话"
+    },
+    {
+      "connection": "10 ms",
+      "draft": "这份草稿需要保留",
+      "history": "保留已加载的历史和未发送草稿。这是已经加载的会话历史。网络读取失败时应继续保留。",
+      "historyImages": 0,
+      "label": "after-final-healthy-original-draft",
+      "notice": "上一条消息已确认送达",
+      "noticeVisible": false,
+      "title": "会话历史恢复验证"
+    }
+  ],
+  "screenshotScope": "after-recovered.png是在故障恢复、发送回执核对及切回原会话完成后单独采集的稳定画面；不作为断流瞬时错误证明。"
+}

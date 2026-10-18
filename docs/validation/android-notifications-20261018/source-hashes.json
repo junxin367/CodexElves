@@ -1,0 +1,70 @@
+[
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\assets\\remote-access\\app.js",
+    "Hash": "31F6CF3CE464D9C817F04BC2F941DE78C9A13B9B2F1F90654BB4AE9809DA8F0B"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\assets\\remote-access\\platform.js",
+    "Hash": "12F34245F42D50303337E285E888D198A03572B35A37362991FD0C9D9115D93E"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\assets\\remote-access\\style.css",
+    "Hash": "E98D79822DE3529296585D5DC5FFAAC4441DF11EB2B8780899C46230AC403BC1"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\assets\\remote-access\\native.js",
+    "Hash": "FFB26C0A59F41D39113CC1D8E2B99632FA878B2D71183AAF49F24BAA1505F309"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\crates\\codex-elves-core\\src\\remote_access.rs",
+    "Hash": "EDC060D8996FAE17CDAD6954909C2FA3022B260880512DD51712D6E3577286C5"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\AndroidManifest.xml",
+    "Hash": "E330C17D94F39DA584C2D8ACDA40C429B2478D5BA9D7B4A7ADC4CB4FD1722EF2"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\MainActivity.java",
+    "Hash": "2762EA4B32D6D84FDFF53853F1EB8E7CCB84222BC67055B05080880CCFEF726D"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationController.java",
+    "Hash": "9079276722C09136768336A9C13A0135D31A2E79E54A1CBF586749B52BDFBB49"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationDismissReceiver.java",
+    "Hash": "6C70CBBF12B9F67E5B2636B64890D7DFC9B5CBF02819E49840D551FB3CB3E07C"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationEventState.java",
+    "Hash": "9A0E565D12D469BCAE46521A6D03E076F19D8815B46BBEA6F42998AB372F5E4B"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationIdentity.java",
+    "Hash": "1C8144EB03F0FDF5305541ED75FC9AD08C66E7D8155B2E95CFCFE4E8EA241B07"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationPublisher.java",
+    "Hash": "EF9430B5D7B2DABE77CE113F2C36F4F6387936FE4F23795F51EC283624EAB7D3"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationService.java",
+    "Hash": "728F9B78970CD02A9B5D558A79BAF071890A2B6488669ACA215723CECC5DD336"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationSettings.java",
+    "Hash": "1D56B82EA4DC2EF1C9D78B104CF398980A4DD459AAF6462817A139AD2C73A1B2"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationStreamClient.java",
+    "Hash": "6FE942C14EEF5F3B8E043B42335727CD4891776A787CF4900270B9DE2EC2CF7C"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\res\\drawable\\ic_notification.xml",
+    "Hash": "00DD8A5A1471D8BC49C68B8A4DADA87AB94732E1E4348A840DE161567D2AE759"
+  },
+  {
+    "Path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\res\\values\\notification_strings.xml",
+    "Hash": "2BB1143150BF09EAFD52D1ADFCE7AA14BD3EFF8E4E9CCEAF7F142BBBE08FD39B"
+  }
+]

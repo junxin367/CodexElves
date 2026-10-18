@@ -1,0 +1,667 @@
+{
+  "collectedAt": "2026-10-18T11:06:55.2512840+00:00",
+  "result": "PARTIAL",
+  "root": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native",
+  "allTaskTestSourcesRemoved": true,
+  "temporaryRustModuleRemoved": true,
+  "extractedBundleCopiesRemoved": true,
+  "generatedSchemaRemoved": true,
+  "remainingFileCount": 163,
+  "remainingTestSources": [],
+  "remainingFiles": [
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.sandbox_migration",
+      "Length": 3
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\config.toml",
+      "Length": 454
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\goals_1.sqlite",
+      "Length": 4096
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\goals_1.sqlite-shm",
+      "Length": 32768
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\goals_1.sqlite-wal",
+      "Length": 74192
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\installation_id",
+      "Length": 36
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\logs_2.sqlite",
+      "Length": 49152
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\logs_2.sqlite-shm",
+      "Length": 32768
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\logs_2.sqlite-wal",
+      "Length": 115392
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\memories_1.sqlite",
+      "Length": 4096
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\memories_1.sqlite-shm",
+      "Length": 32768
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\memories_1.sqlite-wal",
+      "Length": 86552
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\queue_1.sqlite",
+      "Length": 4096
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\queue_1.sqlite-shm",
+      "Length": 32768
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\queue_1.sqlite-wal",
+      "Length": 1293712
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\state_5.sqlite",
+      "Length": 274432
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\state_5.sqlite-shm",
+      "Length": 32768
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\state_5.sqlite-wal",
+      "Length": 4268352
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\thread_history_1.sqlite",
+      "Length": 143360
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\thread_history_1.sqlite-shm",
+      "Length": 32768
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\thread_history_1.sqlite-wal",
+      "Length": 4120032
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins.sync.lock",
+      "Length": 0
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\git-gbfSM6\\HEAD",
+      "Length": 21
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\git-tA7gsu\\HEAD",
+      "Length": 21
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\git-yNsSmx\\HEAD",
+      "Length": 21
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\config",
+      "Length": 130
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\description",
+      "Length": 73
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\FETCH_HEAD",
+      "Length": 122
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\HEAD",
+      "Length": 23
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\shallow",
+      "Length": 41
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\applypatch-msg.sample",
+      "Length": 478
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\commit-msg.sample",
+      "Length": 896
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\fsmonitor-watchman.sample",
+      "Length": 4726
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\post-update.sample",
+      "Length": 189
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\pre-applypatch.sample",
+      "Length": 424
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\pre-commit.sample",
+      "Length": 1649
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\pre-merge-commit.sample",
+      "Length": 416
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\pre-push.sample",
+      "Length": 1374
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\pre-rebase.sample",
+      "Length": 4898
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\pre-receive.sample",
+      "Length": 544
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\prepare-commit-msg.sample",
+      "Length": 1492
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\push-to-checkout.sample",
+      "Length": 2783
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\sendemail-validate.sample",
+      "Length": 2308
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\hooks\\update.sample",
+      "Length": 3650
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\info\\exclude",
+      "Length": 240
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\objects\\pack\\pack-f811a37b58b15bd30e1edad7816103ab8e2af16e.idx",
+      "Length": 205612
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\objects\\pack\\pack-f811a37b58b15bd30e1edad7816103ab8e2af16e.pack",
+      "Length": 25495172
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\objects\\pack\\pack-f811a37b58b15bd30e1edad7816103ab8e2af16e.rev",
+      "Length": 29272
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-bXIs7k\\.git\\refs\\codex\\curated-sync",
+      "Length": 41
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\config",
+      "Length": 130
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\description",
+      "Length": 73
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\FETCH_HEAD",
+      "Length": 122
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\HEAD",
+      "Length": 23
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\shallow",
+      "Length": 41
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\applypatch-msg.sample",
+      "Length": 478
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\commit-msg.sample",
+      "Length": 896
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\fsmonitor-watchman.sample",
+      "Length": 4726
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\post-update.sample",
+      "Length": 189
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\pre-applypatch.sample",
+      "Length": 424
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\pre-commit.sample",
+      "Length": 1649
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\pre-merge-commit.sample",
+      "Length": 416
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\pre-push.sample",
+      "Length": 1374
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\pre-rebase.sample",
+      "Length": 4898
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\pre-receive.sample",
+      "Length": 544
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\prepare-commit-msg.sample",
+      "Length": 1492
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\push-to-checkout.sample",
+      "Length": 2783
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\sendemail-validate.sample",
+      "Length": 2308
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\hooks\\update.sample",
+      "Length": 3650
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\info\\exclude",
+      "Length": 240
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\objects\\pack\\pack-f811a37b58b15bd30e1edad7816103ab8e2af16e.idx",
+      "Length": 205612
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\objects\\pack\\pack-f811a37b58b15bd30e1edad7816103ab8e2af16e.pack",
+      "Length": 25495172
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\objects\\pack\\pack-f811a37b58b15bd30e1edad7816103ab8e2af16e.rev",
+      "Length": 29272
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-H9I8By\\.git\\refs\\codex\\curated-sync",
+      "Length": 41
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\config",
+      "Length": 130
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\description",
+      "Length": 73
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\FETCH_HEAD",
+      "Length": 122
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\HEAD",
+      "Length": 23
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\shallow",
+      "Length": 41
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\applypatch-msg.sample",
+      "Length": 478
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\commit-msg.sample",
+      "Length": 896
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\fsmonitor-watchman.sample",
+      "Length": 4726
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\post-update.sample",
+      "Length": 189
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\pre-applypatch.sample",
+      "Length": 424
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\pre-commit.sample",
+      "Length": 1649
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\pre-merge-commit.sample",
+      "Length": 416
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\pre-push.sample",
+      "Length": 1374
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\pre-rebase.sample",
+      "Length": 4898
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\pre-receive.sample",
+      "Length": 544
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\prepare-commit-msg.sample",
+      "Length": 1492
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\push-to-checkout.sample",
+      "Length": 2783
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\sendemail-validate.sample",
+      "Length": 2308
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\hooks\\update.sample",
+      "Length": 3650
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\info\\exclude",
+      "Length": 240
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\objects\\pack\\pack-ad2a192ec8453f9d3b2605ec5a09ccf388bd5994.idx",
+      "Length": 205612
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\objects\\pack\\pack-ad2a192ec8453f9d3b2605ec5a09ccf388bd5994.pack",
+      "Length": 25496135
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\objects\\pack\\pack-ad2a192ec8453f9d3b2605ec5a09ccf388bd5994.rev",
+      "Length": 29272
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\.tmp\\plugins-clone-KAWaNE\\.git\\refs\\codex\\curated-sync",
+      "Length": 41
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-38-59-01a14e97-e190-7502-9a33-673bdc8065cc.jsonl",
+      "Length": 49533
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-39-16-01a14e98-23d8-7fb2-8d11-8bf313dcbedc.jsonl",
+      "Length": 49832
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-41-58-01a14e9a-9e35-7702-9cfc-1d4fc97f38eb.jsonl",
+      "Length": 113233
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-43-17-01a14e9b-d15e-7950-86e6-55a8bf043933.jsonl",
+      "Length": 113238
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-43-17-01a14e9b-d432-7653-bad6-c8d7cdd46ab5.jsonl",
+      "Length": 117226
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-44-35-01a14e9d-02e8-79a2-b539-1dd6f17295f9.jsonl",
+      "Length": 113237
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-44-36-01a14e9d-05a1-7fc3-97f0-587fa1e4f3d1.jsonl",
+      "Length": 117225
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-50-35-01a14ea2-7fb5-7f42-82e1-b04bc6bb35d3.jsonl",
+      "Length": 113238
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-50-35-01a14ea2-82c5-7972-8563-3cb274e18fd9.jsonl",
+      "Length": 117228
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-53-39-01a14ea5-513b-7a71-82be-0fe8491fb2ec.jsonl",
+      "Length": 113238
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\sessions\\2026\\10\\18\\rollout-2026-10-18T18-53-40-01a14ea5-5469-7c61-815a-5b3649d9ab13.jsonl",
+      "Length": 117226
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\.codex-system-skills.marker",
+      "Length": 16
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\LICENSE.txt",
+      "Length": 10977
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\SKILL.md",
+      "Length": 19516
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\agents\\openai.yaml",
+      "Length": 281
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\assets\\imagegen-small.svg",
+      "Length": 2894
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\assets\\imagegen.png",
+      "Length": 1711
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\references\\cli.md",
+      "Length": 9897
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\references\\codex-network.md",
+      "Length": 1812
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\references\\image-api.md",
+      "Length": 6162
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\references\\prompting.md",
+      "Length": 8394
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\references\\sample-prompts.md",
+      "Length": 18039
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\scripts\\image_gen.py",
+      "Length": 35697
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\imagegen\\scripts\\remove_chroma_key.py",
+      "Length": 14354
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\LICENSE.txt",
+      "Length": 10977
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\SKILL.md",
+      "Length": 5475
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\agents\\openai.yaml",
+      "Length": 376
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\assets\\openai-small.svg",
+      "Length": 1094
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\assets\\openai.png",
+      "Length": 1429
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\codex-self-knowledge.md",
+      "Length": 7488
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\latest-model.md",
+      "Length": 2172
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\mcp-diagnostics.md",
+      "Length": 2345
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\model-migration.md",
+      "Length": 5139
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\model-selection.md",
+      "Length": 1356
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\official-docs.md",
+      "Length": 3362
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\prompting-guide.md",
+      "Length": 10281
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\upgrade-guide.md",
+      "Length": 1049
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\references\\upgrading-to-gpt-6-astra.md",
+      "Length": 19214
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\scripts\\fetch-codex-manual.mjs",
+      "Length": 16683
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\scripts\\resolve-latest-model-info",
+      "Length": 1077
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\openai-docs\\scripts\\resolve-latest-model-info.cjs",
+      "Length": 4102
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\review-agent\\SKILL.md",
+      "Length": 2718
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\review-agent\\agents\\openai.yaml",
+      "Length": 258
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\license.txt",
+      "Length": 11560
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\SKILL.md",
+      "Length": 15540
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\agents\\openai.yaml",
+      "Length": 188
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\assets\\skill-creator-small.svg",
+      "Length": 1322
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\assets\\skill-creator.png",
+      "Length": 1563
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\references\\openai_yaml.md",
+      "Length": 2405
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\scripts\\generate_openai_yaml.py",
+      "Length": 6900
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\scripts\\init_skill.py",
+      "Length": 10622
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+      "Length": 4376
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\LICENSE.txt",
+      "Length": 11560
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\SKILL.md",
+      "Length": 3425
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\agents\\openai.yaml",
+      "Length": 226
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\assets\\skill-installer-small.svg",
+      "Length": 926
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\assets\\skill-installer.png",
+      "Length": 1086
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\scripts\\github_utils.py",
+      "Length": 680
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\scripts\\install-skill-from-github.py",
+      "Length": 12272
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\skills\\.system\\skill-installer\\scripts\\list-skills.py",
+      "Length": 3054
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\thread-writer-locks\\.coordination.lock",
+      "Length": 0
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\thread-writer-locks\\01a14ea5-513b-7a71-82be-0fe8491fb2ec.lock",
+      "Length": 0
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\thread-writer-locks\\01a14ea5-5469-7c61-815a-5b3649d9ab13.lock",
+      "Length": 0
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\tmp\\arg0\\codex-arg00ForNp\\.lock",
+      "Length": 0
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\tmp\\arg0\\codex-arg00ForNp\\apply_patch.bat",
+      "Length": 142
+    },
+    {
+      "FullName": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\compaction-queue-20261018\\native\\app-server-fixture\\home\\tmp\\arg0\\codex-arg00ForNp\\applypatch.bat",
+      "Length": 142
+    }
+  ],
+  "blocker": "自动审批拒绝清理临时 app-server-fixture 的递归删除、逐文件管道和已知配置/合成会话文件删除；工具仅报告 rejected: blocked by policy，未提供更具体原因。没有请求提权或绕过。",
+  "isolatedProcessStopped": true
+}

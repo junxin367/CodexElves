@@ -1,0 +1,11 @@
+{
+  "phase": "before",
+  "compileExit": 0,
+  "executionExit": 0,
+  "sources": {
+    "NotificationController.java": "32469c348b3b0566e6452b5d8c96fc246e8a2fc736a38b1cb7fb27a73c5e5c78",
+    "NotificationSettings.java": "673bf5223f2e306b2d19902dfa041d1a491f41e032ea2c98517cba62cbb5d8be"
+  },
+  "harnessSha256": "b9d7ef566c7241fbc6c3e72e5a1db046dbe7514369d2443afc13773a9544a848",
+  "platform": "Android stubs and in-process blocked SharedPreferences; no device, network or service"
+}

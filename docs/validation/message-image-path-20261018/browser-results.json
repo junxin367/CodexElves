@@ -1,0 +1,96 @@
+{
+  "status": "PASS",
+  "scope": "Chrome扩展加载完整生产网页；消息映射来自实际Rust注册函数前后输出；HTTP/WS为本机隔离替身，图片为用户截图对应的真实JPEG，未发送真实消息或使用正式服务",
+  "displayFixture": "基线与修复后正文均移除模型response_item尾部的oai-mem-citation元数据，使可见正文与同一日志的AgentMessage事件及用户截图一致；图片引用和remoteImages映射原样使用",
+  "viewports": [
+    {
+      "width": 390,
+      "height": 844
+    },
+    {
+      "width": 320,
+      "height": 640
+    },
+    {
+      "width": 1280,
+      "height": 800
+    }
+  ],
+  "checks": {
+    "beforePlaceholder": true,
+    "afterImageLoaded": true,
+    "previewImageLoaded": true,
+    "closeRestoresFocus": true,
+    "enterOpensPreview": true,
+    "escapeClosesPreview": true,
+    "noHorizontalOverflow": true
+  },
+  "observations": [
+    {
+      "images": 0,
+      "overflowX": false,
+      "phase": "baseline-mobile",
+      "placeholders": [
+        "[附件：手机登录页效果]"
+      ]
+    },
+    {
+      "images": [
+        {
+          "alt": "手机登录页效果",
+          "complete": true,
+          "height": 119.96875,
+          "naturalHeight": 844,
+          "naturalWidth": 390,
+          "src": "/api/images/714dd3b4c1274ae6a6e9b47d86114b4af0c7e287c7e7453398b3e00be5e4c3ba",
+          "width": 56.5
+        }
+      ],
+      "overflowX": false,
+      "phase": "repaired-mobile",
+      "placeholders": 0
+    },
+    {
+      "complete": true,
+      "height": 740,
+      "naturalHeight": 844,
+      "naturalWidth": 390,
+      "open": true,
+      "phase": "mobile-preview",
+      "src": "/api/images/714dd3b4c1274ae6a6e9b47d86114b4af0c7e287c7e7453398b3e00be5e4c3ba",
+      "width": 341.9375
+    },
+    {
+      "dialogCount": 0,
+      "focus": "message-image-link",
+      "images": [
+        {
+          "complete": true,
+          "height": 119.96875,
+          "naturalWidth": 390,
+          "width": 56.5
+        }
+      ],
+      "innerWidth": 320,
+      "overflowX": false,
+      "phase": "repaired-narrow-mobile",
+      "placeholders": 0
+    },
+    {
+      "images": [
+        {
+          "complete": true,
+          "height": 149.96875,
+          "naturalHeight": 844,
+          "naturalWidth": 390,
+          "width": 70.359375
+        }
+      ],
+      "innerWidth": 1280,
+      "overflowX": false,
+      "phase": "repaired-desktop",
+      "placeholders": 0
+    }
+  ],
+  "consoleErrors": []
+}

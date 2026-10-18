@@ -1,0 +1,1756 @@
+{
+  "settings": {
+    "enabled": false,
+    "approval": true,
+    "question": true,
+    "completed": true,
+    "failed": true
+  },
+  "permission": "prompt",
+  "bridgeRequests": [
+    {
+      "time": 1792311489711,
+      "mode": "android",
+      "type": "ready"
+    },
+    {
+      "time": 1792311489906,
+      "mode": "android",
+      "type": "authenticated"
+    },
+    {
+      "time": 1792311508003,
+      "mode": "android",
+      "type": "app-info"
+    },
+    {
+      "time": 1792311525296,
+      "mode": "android",
+      "type": "notification-settings-get",
+      "requestId": "notification-mvdk07u4-1"
+    },
+    {
+      "time": 1792311547108,
+      "mode": "android",
+      "type": "notification-settings-set",
+      "requestId": "notification-mvdk0onz-2",
+      "settings": {
+        "enabled": true,
+        "approval": true,
+        "question": true,
+        "completed": true,
+        "failed": true
+      }
+    },
+    {
+      "time": 1792311547116,
+      "mode": "android",
+      "type": "notification-settings-get",
+      "requestId": "notification-mvdk0ooa-3"
+    },
+    {
+      "time": 1792311547122,
+      "mode": "android",
+      "type": "notification-permission-request",
+      "requestId": "notification-mvdk0oog-4"
+    },
+    {
+      "time": 1792311547489,
+      "mode": "android",
+      "type": "notification-settings-set",
+      "requestId": "notification-mvdk0oym-5",
+      "settings": {
+        "enabled": true,
+        "approval": false,
+        "question": true,
+        "completed": true,
+        "failed": true
+      }
+    },
+    {
+      "time": 1792311547497,
+      "mode": "android",
+      "type": "notification-settings-get",
+      "requestId": "notification-mvdk0oyt-6"
+    },
+    {
+      "time": 1792311620223,
+      "mode": "android",
+      "type": "notification-settings-set",
+      "requestId": "notification-mvdk292z-7",
+      "settings": {
+        "enabled": true,
+        "approval": false,
+        "question": false,
+        "completed": true,
+        "failed": true
+      }
+    },
+    {
+      "time": 1792311665180,
+      "mode": "android",
+      "type": "notification-settings-set",
+      "requestId": "notification-mvdk37rq-8",
+      "settings": {
+        "enabled": true,
+        "approval": false,
+        "question": false,
+        "completed": true,
+        "failed": true
+      }
+    },
+    {
+      "time": 1792311665231,
+      "mode": "android",
+      "type": "notification-settings-get",
+      "requestId": "notification-mvdk37t8-9"
+    },
+    {
+      "time": 1792311666173,
+      "mode": "android",
+      "type": "notification-settings-set",
+      "requestId": "notification-mvdk38jg-a",
+      "settings": {
+        "enabled": false,
+        "approval": false,
+        "question": false,
+        "completed": true,
+        "failed": true
+      }
+    },
+    {
+      "time": 1792311666241,
+      "mode": "android",
+      "type": "notification-settings-get",
+      "requestId": "notification-mvdk38lb-b"
+    },
+    {
+      "time": 1792311717987,
+      "mode": "android",
+      "type": "notification-settings-set",
+      "requestId": "notification-mvdk4cin-c",
+      "settings": {
+        "enabled": true,
+        "approval": false,
+        "question": false,
+        "completed": true,
+        "failed": true
+      }
+    },
+    {
+      "time": 1792311718052,
+      "mode": "android",
+      "type": "notification-settings-get",
+      "requestId": "notification-mvdk4ckh-d"
+    },
+    {
+      "time": 1792311718058,
+      "mode": "android",
+      "type": "notification-permission-request",
+      "requestId": "notification-mvdk4cko-e"
+    },
+    {
+      "time": 1792311718984,
+      "mode": "android",
+      "type": "notification-open-system-settings",
+      "requestId": "notification-mvdk4da9-f"
+    },
+    {
+      "time": 1792311752140,
+      "mode": "android",
+      "type": "notification-settings-get",
+      "requestId": "notification-mvdk52va-g"
+    },
+    {
+      "time": 1792311871535,
+      "mode": "android",
+      "type": "notification-settings-get",
+      "requestId": "notification-mvdk7mzu-h"
+    },
+    {
+      "time": 1792312064785,
+      "mode": "android",
+      "type": "notification-settings-get",
+      "requestId": "notification-mvdkbs3z-i"
+    },
+    {
+      "time": 1792312116178,
+      "mode": "android",
+      "type": "notification-settings-get",
+      "requestId": "notification-mvdkcvrh-j"
+    },
+    {
+      "time": 1792312261803,
+      "mode": "android",
+      "type": "notification-settings-get",
+      "requestId": "notification-mvdkg04j-k"
+    },
+    {
+      "time": 1792312488849,
+      "mode": "legacy",
+      "type": "ready"
+    },
+    {
+      "time": 1792312489503,
+      "mode": "legacy",
+      "type": "authenticated"
+    },
+    {
+      "time": 1792312510384,
+      "mode": "legacy",
+      "type": "app-info"
+    },
+    {
+      "time": 1792312511335,
+      "mode": "legacy",
+      "type": "notification-settings-get",
+      "requestId": "notification-mvdklco0-1"
+    },
+    {
+      "time": 1792312548694,
+      "mode": "android",
+      "type": "ready"
+    },
+    {
+      "time": 1792312548913,
+      "mode": "android",
+      "type": "authenticated"
+    },
+    {
+      "time": 1792312613008,
+      "mode": "android",
+      "type": "app-info"
+    },
+    {
+      "time": 1792312626887,
+      "mode": "android",
+      "type": "notification-settings-get",
+      "requestId": "notification-mvdknttv-1"
+    }
+  ],
+  "bridgeLogs": [
+    {
+      "time": 1792311508001,
+      "mode": "android",
+      "event": "listener-added",
+      "listenerCount": 1
+    },
+    {
+      "time": 1792311508075,
+      "mode": "android",
+      "event": "listener-removed",
+      "listenerCount": 0
+    },
+    {
+      "time": 1792311525293,
+      "mode": "android",
+      "event": "listener-added",
+      "listenerCount": 1
+    },
+    {
+      "time": 1792311751115,
+      "mode": "android",
+      "event": "listener-removed",
+      "listenerCount": 0
+    },
+    {
+      "time": 1792311752134,
+      "mode": "android",
+      "event": "listener-added",
+      "listenerCount": 1
+    },
+    {
+      "time": 1792311870421,
+      "mode": "android",
+      "event": "listener-removed",
+      "listenerCount": 0
+    },
+    {
+      "time": 1792311871530,
+      "mode": "android",
+      "event": "listener-added",
+      "listenerCount": 1
+    },
+    {
+      "time": 1792311872533,
+      "mode": "android",
+      "event": "listener-removed",
+      "listenerCount": 0
+    },
+    {
+      "time": 1792312064784,
+      "mode": "android",
+      "event": "listener-added",
+      "listenerCount": 1
+    },
+    {
+      "time": 1792312077484,
+      "mode": "android",
+      "event": "listener-removed",
+      "listenerCount": 0
+    },
+    {
+      "time": 1792312077487,
+      "mode": "android",
+      "event": "native-back-result",
+      "handled": true
+    },
+    {
+      "time": 1792312116178,
+      "mode": "android",
+      "event": "listener-added",
+      "listenerCount": 1
+    },
+    {
+      "time": 1792312118186,
+      "mode": "android",
+      "event": "listener-removed",
+      "listenerCount": 0
+    },
+    {
+      "time": 1792312130588,
+      "mode": "android",
+      "event": "native-back-result",
+      "handled": true
+    },
+    {
+      "time": 1792312261801,
+      "mode": "android",
+      "event": "listener-added",
+      "listenerCount": 1
+    },
+    {
+      "time": 1792312287707,
+      "mode": "android",
+      "event": "notification-open-result",
+      "handled": true,
+      "threadId": "notification-target"
+    },
+    {
+      "time": 1792312287709,
+      "mode": "android",
+      "event": "listener-removed",
+      "listenerCount": 0
+    },
+    {
+      "time": 1792312510374,
+      "mode": "legacy",
+      "event": "listener-added",
+      "listenerCount": 1
+    },
+    {
+      "time": 1792312510468,
+      "mode": "legacy",
+      "event": "listener-removed",
+      "listenerCount": 0
+    },
+    {
+      "time": 1792312511322,
+      "mode": "legacy",
+      "event": "listener-added",
+      "listenerCount": 1
+    },
+    {
+      "time": 1792312547427,
+      "mode": "legacy",
+      "event": "listener-removed",
+      "listenerCount": 0
+    },
+    {
+      "time": 1792312613007,
+      "mode": "android",
+      "event": "listener-added",
+      "listenerCount": 1
+    },
+    {
+      "time": 1792312613081,
+      "mode": "android",
+      "event": "listener-removed",
+      "listenerCount": 0
+    },
+    {
+      "time": 1792312626880,
+      "mode": "android",
+      "event": "listener-added",
+      "listenerCount": 1
+    },
+    {
+      "time": 1792312695151,
+      "mode": "android",
+      "event": "listener-removed",
+      "listenerCount": 0
+    }
+  ],
+  "apiRequests": [
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "payload": {
+        "threadId": "notification-source"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "payload": {
+        "threadId": "notification-source",
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "payload": {
+        "threadId": "notification-source"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "payload": {
+        "threadId": "notification-source",
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "payload": {
+        "threadId": "notification-source"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "payload": {
+        "threadId": "notification-source",
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "payload": {
+        "threadId": "notification-source"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "payload": {
+        "threadId": "notification-source",
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "payload": {
+        "threadId": "notification-target"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "payload": {
+        "threadId": "notification-target",
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "payload": {
+        "threadId": "notification-source"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "payload": {
+        "threadId": "notification-source",
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "payload": {
+        "threadId": "notification-source"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "payload": {
+        "threadId": "notification-source",
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "payload": {
+        "threadId": "notification-source"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "payload": {
+        "threadId": "notification-source",
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "payload": {
+        "threadId": "notification-source"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "payload": {
+        "threadId": "notification-source",
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "payload": {
+        "threadId": "notification-source"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "payload": {
+        "threadId": "notification-source",
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "payload": {}
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "payload": {
+        "cursor": null
+      }
+    }
+  ]
+}

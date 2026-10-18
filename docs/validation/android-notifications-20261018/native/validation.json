@@ -1,0 +1,66 @@
+{
+  "javacExit": 0,
+  "policyExit": 0,
+  "javaVersion": "17.0.20.1",
+  "androidApi": 35,
+  "resourceSymbols": "temporary synthetic R.java; actual Android resource validation belongs to final Gradle/lint",
+  "network": "process-local fake HTTPS URLConnection handler; no sockets or real service connections",
+  "harnessSha256": "BCB59747022EDE9B4CE97E4546B6CE401B103D25DA979440E3B58E0DAAE636FA",
+  "sources": [
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\MainActivity.java",
+      "sha256": "2762EA4B32D6D84FDFF53853F1EB8E7CCB84222BC67055B05080880CCFEF726D"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationController.java",
+      "sha256": "9079276722C09136768336A9C13A0135D31A2E79E54A1CBF586749B52BDFBB49"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationDismissReceiver.java",
+      "sha256": "6C70CBBF12B9F67E5B2636B64890D7DFC9B5CBF02819E49840D551FB3CB3E07C"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationEventState.java",
+      "sha256": "9A0E565D12D469BCAE46521A6D03E076F19D8815B46BBEA6F42998AB372F5E4B"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationIdentity.java",
+      "sha256": "1C8144EB03F0FDF5305541ED75FC9AD08C66E7D8155B2E95CFCFE4E8EA241B07"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationPublisher.java",
+      "sha256": "EF9430B5D7B2DABE77CE113F2C36F4F6387936FE4F23795F51EC283624EAB7D3"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationService.java",
+      "sha256": "728F9B78970CD02A9B5D558A79BAF071890A2B6488669ACA215723CECC5DD336"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationSettings.java",
+      "sha256": "1D56B82EA4DC2EF1C9D78B104CF398980A4DD459AAF6462817A139AD2C73A1B2"
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\java\\com\\junxin367\\codexelves\\NotificationStreamClient.java",
+      "sha256": "6FE942C14EEF5F3B8E043B42335727CD4891776A787CF4900270B9DE2EC2CF7C"
+    }
+  ],
+  "xml": [
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\AndroidManifest.xml",
+      "sha256": "E330C17D94F39DA584C2D8ACDA40C429B2478D5BA9D7B4A7ADC4CB4FD1722EF2",
+      "wellFormedXml": true
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\res\\values\\notification_strings.xml",
+      "sha256": "2BB1143150BF09EAFD52D1ADFCE7AA14BD3EFF8E4E9CCEAF7F142BBBE08FD39B",
+      "wellFormedXml": true
+    },
+    {
+      "path": "E:\\code\\junes\\github\\CodexPlusPlus\\apps\\codex-elves-android\\app\\src\\main\\res\\drawable\\ic_notification.xml",
+      "sha256": "00DD8A5A1471D8BC49C68B8A4DADA87AB94732E1E4348A840DE161567D2AE759",
+      "wellFormedXml": true
+    }
+  ],
+  "manifestService": "NotificationService exported=false foregroundServiceType=remoteMessaging",
+  "manifestReceiver": "NotificationDismissReceiver exported=false"
+}

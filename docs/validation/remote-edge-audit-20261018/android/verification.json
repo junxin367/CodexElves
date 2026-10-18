@@ -1,0 +1,81 @@
+{
+  "status": "PARTIAL",
+  "date": "2026-10-18",
+  "rendererBaselineAssertions": 10,
+  "rendererFixedAssertions": 30,
+  "updateAndResourcePolicyAssertions": 16,
+  "targetedJavac": {
+    "exitCode": 0,
+    "javaVersion": 17,
+    "androidSdk": 35,
+    "sources": [
+      "LoginView.java",
+      "HapticFeedbackController.java"
+    ],
+    "generatedResources": "existing release R.jar",
+    "apkBuilt": false
+  },
+  "diffCheckExit": 0,
+  "sourceHashes": [
+    {
+      "file": "MainActivity.java",
+      "sha256": "84a3e5ebc1a303d4fd4e5541d3f29ffaf497fbb06cfddf3e207444c065b13a52"
+    },
+    {
+      "file": "LoginView.java",
+      "sha256": "f29b2e29f32462ee719439ecaffddcf23a39b81f469dc7b3297e9772b2e61439"
+    },
+    {
+      "file": "ResourceStore.java",
+      "sha256": "38ed612f33f9a115e3a97aaa077ba563610d29ab058c8fcc00cb375e0df0e9f2"
+    },
+    {
+      "file": "ResourceStatePolicy.java",
+      "sha256": "e6e9276d78d7d230d7cb82daf814ea19600c1767f5caf691e54d8b3b54e1eeed"
+    },
+    {
+      "file": "SessionStore.java",
+      "sha256": "4059466757003140cf072a4a4921a5b8df1cffa8ddcfc7ff37bbb19cee0df500"
+    },
+    {
+      "file": "ServiceOrigin.java",
+      "sha256": "b125702a1f40be44c1ac4d9b63a409b79aaadec0e791dcc5dedc86c5433a902b"
+    },
+    {
+      "file": "ZrokCookiePolicy.java",
+      "sha256": "0b261855b6bbe30bfb07374903223232b436063bec93894bc6bc5042d07d466d"
+    },
+    {
+      "file": "AppUpdateCancellation.java",
+      "sha256": "e26ecd49b5634df14b73ec9f6f1be406c0e6453f8df4219ea28a36fa45621136"
+    },
+    {
+      "file": "AppUpdateClient.java",
+      "sha256": "625efbc730f46767eae340c9def4ac80b28afd811ecc966720b132e296067a4f"
+    },
+    {
+      "file": "AppUpdateController.java",
+      "sha256": "fff0c9e8a6af88d0e0d4adff28046d60855fe1b4afda41ed626bde9d872a22f5"
+    },
+    {
+      "file": "AppUpdatePolicy.java",
+      "sha256": "c8f0c9db403ebf9e6824c9801f91a81bbfa936447fd464d313e6811e64e79877"
+    },
+    {
+      "file": "HapticFeedbackController.java",
+      "sha256": "9929589bf24729f058405414b3b1ad0cc6f667a35bf33b47facf0aeb52e76e4a"
+    }
+  ],
+  "noDeviceRuntime": true,
+  "noInstall": true,
+  "noAccountWrites": true,
+  "noCommitOrPush": true,
+  "temporaryCleanup": {
+    "status": "BLOCKED",
+    "reason": "Automatic approval review rejected both recursive cleanup and one explicitly identified source file deletion with blocked by policy; neither command ran; no alternate tool used.",
+    "remainingFiles": 62,
+    "directory": "E:\\code\\junes\\github\\CodexPlusPlus\\temp\\remote-edge-audit-20261018\\android",
+    "exactFileList": "remaining-temp-files.txt",
+    "unrelatedTemporaryDirectoriesTouched": false
+  }
+}

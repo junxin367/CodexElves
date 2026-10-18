@@ -1,0 +1,13 @@
+{
+  "collectedAt": "2026-10-18T15:13:10.4013947+08:00",
+  "localService": "http://127.0.0.1:45222",
+  "owningProcess": 72072,
+  "processName": "codex-elves-manager.exe",
+  "processStartedAt": "2026-10-18T11:11:47.652136+08:00",
+  "appSha256": "aef2cac877935c70ccb11f59be6d815e41151ce8b51a008f05e2dd2d64b35050",
+  "workingAppBeforeSha256": "292282b6e7731bf736f9f06fd8cfd0cdd0c45d2d7a88ffb5b2a34ec135e4922c",
+  "runtimeApiJsonCatchLine": 2317,
+  "runtimeHistoryShapeCheckLine": 6921,
+  "actualAndroidResponseCaptured": false,
+  "serviceRestarted": false
+}

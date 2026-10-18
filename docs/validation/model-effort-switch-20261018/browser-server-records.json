@@ -1,0 +1,602 @@
+{
+  "actions": [
+    {
+      "action": "send",
+      "id": "4e72453e-754c-47d9-bc81-b946eb91cb9b",
+      "payload": {
+        "prompt": "验证一：仅调整推理等级",
+        "threadId": "model-preview",
+        "model": "preview-a",
+        "reasoningEffort": "xhigh"
+      },
+      "appliedInFixture": {
+        "model": "preview-a",
+        "reasoningEffort": "xhigh"
+      }
+    },
+    {
+      "action": "send",
+      "id": "11858bcd-760c-4d2f-8d4d-faff2db3e300",
+      "payload": {
+        "prompt": "验证二：更换模型并指定推理等级",
+        "threadId": "model-preview",
+        "model": "preview-b",
+        "reasoningEffort": "low"
+      },
+      "appliedInFixture": {
+        "model": "preview-b",
+        "reasoningEffort": "low"
+      }
+    },
+    {
+      "action": "send",
+      "id": "9ea5219b-a140-44ba-923d-c62b75958ec7",
+      "payload": {
+        "prompt": "验证三：切换无推理等级模型",
+        "threadId": "model-preview",
+        "model": "preview-c"
+      },
+      "appliedInFixture": {
+        "model": "preview-c",
+        "reasoningEffort": null
+      }
+    },
+    {
+      "action": "create",
+      "id": "3630abfc-4840-4eb2-b59a-446714f403f2",
+      "payload": {
+        "prompt": "验证四：新建会话仅选择推理等级",
+        "projectId": "",
+        "model": "preview-a",
+        "reasoningEffort": "medium"
+      },
+      "appliedInFixture": {
+        "model": "preview-a",
+        "reasoningEffort": "medium"
+      }
+    },
+    {
+      "action": "send",
+      "id": "5eecaf8d-e6ca-406a-8e82-70f2d5f979c9",
+      "payload": {
+        "prompt": "验证五：采用新模型默认推理等级",
+        "threadId": "created-4",
+        "model": "preview-b",
+        "reasoningEffort": "max"
+      },
+      "appliedInFixture": {
+        "model": "preview-b",
+        "reasoningEffort": "max"
+      }
+    },
+    {
+      "action": "send",
+      "id": "1859499c-f8f8-4848-9764-8b239b6cd237",
+      "payload": {
+        "prompt": "验证六：不选择时继承当前会话配置",
+        "threadId": "second-preview"
+      },
+      "appliedInFixture": {
+        "model": "preview-b",
+        "reasoningEffort": "max"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/fixture.js",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/style.css",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/app.js",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/events-client.js",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/platform.js",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/recovery-store.js",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/attachments.js",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/message-actions.js",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/markdown.js",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/pwa.js",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/manifest.webmanifest",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/api/login-status",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/favicon.ico",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/icons/icon-192.png",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/app-resources.json",
+      "mode": "login"
+    },
+    {
+      "method": "GET",
+      "path": "/",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/fixture.js",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/style.css",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/app.js",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/events-client.js",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/platform.js",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/recovery-store.js",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/attachments.js",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/message-actions.js",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/markdown.js",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/pwa.js",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/manifest.webmanifest",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/events-worker.js",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/favicon.ico",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/icons/icon-192.png",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/app-resources.json",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/action/send",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/action/send",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/action/send",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/models",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/action/create",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/favicon.ico",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/action/send",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/favicon.ico",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/action/send",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/thread",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/history",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "mode": "models"
+    },
+    {
+      "method": "POST",
+      "path": "/api/read/sidebar",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/__cleanup",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/favicon.ico",
+      "mode": "models"
+    },
+    {
+      "method": "GET",
+      "path": "/__results",
+      "mode": "models"
+    }
+  ]
+}

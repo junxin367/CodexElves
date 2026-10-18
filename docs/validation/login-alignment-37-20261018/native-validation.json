@@ -1,0 +1,74 @@
+{
+  "status": "PASS",
+  "date": "2026-10-18",
+  "scope": [
+    "assets/remote-access/style.css",
+    "apps/codex-elves-android/app/src/main/res/layout/view_login.xml"
+  ],
+  "checks": {
+    "root_wrap_content_for_scroll_view": true,
+    "root_vertical": true,
+    "root_horizontal_centering_only": true,
+    "root_minimum_top_padding_24dp": true,
+    "root_minimum_bottom_padding_24dp": true,
+    "root_three_layout_children": true,
+    "top_space_zero_height_weight_3": true,
+    "bottom_space_zero_height_weight_7": true,
+    "panel_wraps_content_without_weight": true,
+    "panel_id_preserved": true,
+    "brand_aligns_start": true,
+    "brand_child_vertical_alignment_preserved": true,
+    "icon_preserves_40dp_vector": true,
+    "title_preserves_12dp_gap_28sp_and_resource": true,
+    "title_multiline_start_aligned": true,
+    "scroll_view_fill_viewport_preserved": true,
+    "panel_width_limit_preserved": true,
+    "web_flex_column": true,
+    "web_top_weight_3_bottom_weight_7": true,
+    "web_panel_nonshrinking_and_no_vertical_auto_margin": true,
+    "web_brand_start_alignment": true,
+    "web_dynamic_viewport_and_safe_area_preserved": true,
+    "compiled_layout_contains_two_spaces": true,
+    "compiled_layout_contains_weight_3": true,
+    "compiled_layout_contains_weight_7": true,
+    "login_view_class_compiled": true,
+    "login_java_hash_unchanged": true
+  },
+  "resource_tool": "Android SDK 35.0.0 AAPT2 2.19-11948202",
+  "resource_compile_exit": 0,
+  "resource_link_exit": 0,
+  "compiled_layout_dump_exit": 0,
+  "login_javac": "Microsoft OpenJDK 17.0.20.1; generated R.java + existing LoginView.java; Android SDK 35 android.jar",
+  "login_javac_exit": 0,
+  "resource_link_notes": "仅在本任务临时目录内为 Manifest 添加现有 applicationId 对应的 package，并解析 provider applicationId 占位符。使用原始资源目录、SDK35 android.jar、minSdk26、targetSdk35 编译及链接；未改写原始 Manifest。",
+  "measurement_reasoning": "ScrollView 保留 fillViewport=true。根 LinearLayout 保留 wrap_content，高度首次按表单内容测量；表单短于视口时 fillViewport 将根按视口高度再次精确测量，前后 0dp Space 按 3:7 分配剩余高度。表单长于视口时不触发填充重测，Space 自然高度为零，表单与原有 24dp 上下 padding 形成可滚动内容。此项为布局机制推导，未在 Android 运行时测量。",
+  "source_references": [
+    "https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android15-release/core/java/android/widget/ScrollView.java",
+    "https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android15-release/core/java/android/widget/LinearLayout.java"
+  ],
+  "preserved": [
+    "图标40dp、标题28sp、图标与标题间距12dp",
+    "完整标题自然换行，不添加单行、省略或行数限制",
+    "420dp 表单最大宽度、18dp 左右边距、24dp 最小上下边距",
+    "ScrollView fillViewport、原有 adjustResize 配置、登录输入和帮助交互",
+    "网页安全区、420px最大宽度、内容超高时自然滚动"
+  ],
+  "not_run": [
+    "Gradle/APK/Windows 安装包构建",
+    "Android 设备或模拟器运行与截图",
+    "真实软键盘、系统字体缩放、OEM 字体和 TalkBack 验收"
+  ],
+  "coverage_limit": "本报告确认 XML/CSS 结构、Android 资源编译链接及 LoginView Java 编译通过；不代表 Android 真机视觉或交互验收。Chrome 生产网页验证由主代理完成，见 browser-results.json。",
+  "file_sha256": {
+    "assets/remote-access/style.css": "1779391DC79EBD3F542308248E029D4277B4D70CD6EA7CFC9724FE1667A73F87",
+    "apps/codex-elves-android/app/src/main/res/layout/view_login.xml": "2B91B6ED27119FC257BFF6B26405BBA3C69C640B938C674827DE5A5CA3E4839B",
+    "apps/codex-elves-android/app/src/main/java/com/junxin367/codexelves/LoginView.java": "69DE9D92DC8FA9418F2BED109E00FC27CBBF4AF5C6D68400AB3A68A49C1E86B7"
+  },
+  "measurement_source_verified": {
+    "platform": "AOSP android15-release",
+    "scroll_view_on_measure_lines": "473-506",
+    "linear_layout_weight_measurement_lines": "853-887, 985-1031",
+    "verification": "已读取对应平台源码，确认精确视口重测与权重分配路径；没有运行 Android 布局测量。"
+  },
+  "temporary_cleanup": "PASS：批量删除曾被自动审批拦截。主代理核对全部23个本任务文件、8个子目录及无链接后，以明确文件清单逐项删除，再清理空目录；最终临时目录不存在，未删除其他来源文件。"
+}

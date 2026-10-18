@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="40dp"
+    android:height="40dp"
+    android:viewportWidth="40"
+    android:viewportHeight="40">
+    <path
+        android:fillColor="@color/login_text"
+        android:pathData="M20,1 C23.2,11.4 28.6,16.8 39,20 C28.6,23.2 23.2,28.6 20,39 C16.8,28.6 11.4,23.2 1,20 C11.4,16.8 16.8,11.4 20,1 Z" />
+</vector>

@@ -1,0 +1,318 @@
+{
+  "result": "PASS",
+  "scope": "完整生产网页运行于Chrome，HTTP/WS及目标提交为本机模拟服务；没有创建真实目标或发送真实消息",
+  "finalAppSha256": "34e9a6025721054983af1e7a8030a88c42c995af4802e8f0438276a9fde5920f",
+  "baseline": {
+    "editorText": "完善登录页面并验证手机显示效果。 Demo Skill",
+    "inlineGoalCount": 0,
+    "inlineSkillCount": 1,
+    "sendLabel": "创建目标",
+    "toolbarGoal": "目标",
+    "toolbarGoalHidden": false
+  },
+  "checks": {
+    "immediateBackspace": true,
+    "caretPreserved": true,
+    "draftRestored": true,
+    "styleMatches": true,
+    "sentHistoryHasNoGoalTag": true,
+    "sentEditorCleared": true
+  },
+  "observations": [
+    {
+      "label": "旧版目标和Skill草稿在新版恢复",
+      "editorText": "目标完善登录页面并验证手机显示效果。 Demo Skill",
+      "firstElement": "inline-goal",
+      "goalStyle": {
+        "color": "rgb(117, 183, 239)",
+        "font": "13px",
+        "iconWidth": 14
+      },
+      "goals": 1,
+      "overflow": false,
+      "sendLabel": "创建目标",
+      "skillStyle": {
+        "color": "rgb(117, 183, 239)",
+        "font": "13px",
+        "iconWidth": 14
+      },
+      "skills": 1,
+      "toolbarGoal": false,
+      "phase": "initial-implementation"
+    },
+    {
+      "label": "换行和继续输入保留目标与Skill",
+      "editorText": "目标完善登录页面并验证手机显示效果。 Demo Skill\n保留目标模式继续编辑。",
+      "firstElement": "inline-goal",
+      "goalStyle": {
+        "color": "rgb(117, 183, 239)",
+        "font": "13px",
+        "iconWidth": 14
+      },
+      "goals": 1,
+      "overflow": false,
+      "sendLabel": "创建目标",
+      "skillStyle": {
+        "color": "rgb(117, 183, 239)",
+        "font": "13px",
+        "iconWidth": 14
+      },
+      "skills": 1,
+      "toolbarGoal": false,
+      "phase": "initial-implementation"
+    },
+    {
+      "label": "切换空会话不残留目标标签",
+      "editorText": "",
+      "goalStyle": null,
+      "goals": 0,
+      "overflow": false,
+      "sendLabel": "发送消息",
+      "skillStyle": null,
+      "skills": 0,
+      "toolbarGoal": false,
+      "phase": "initial-implementation"
+    },
+    {
+      "label": "空编辑框添加目标",
+      "editorText": "目标",
+      "firstElement": "inline-goal",
+      "goalStyle": {
+        "color": "rgb(117, 183, 239)",
+        "font": "13px",
+        "iconWidth": 14
+      },
+      "goals": 1,
+      "overflow": false,
+      "sendLabel": "创建目标",
+      "skillStyle": null,
+      "skills": 0,
+      "toolbarGoal": false,
+      "phase": "initial-implementation"
+    },
+    {
+      "label": "添加后直接退格删除目标",
+      "editorText": "目标",
+      "firstElement": "inline-goal",
+      "goalStyle": {
+        "color": "rgb(117, 183, 239)",
+        "font": "13px",
+        "iconWidth": 14
+      },
+      "goals": 1,
+      "overflow": false,
+      "sendLabel": "创建目标",
+      "skillStyle": null,
+      "skills": 0,
+      "toolbarGoal": false,
+      "phase": "initial-implementation",
+      "issue": "首次发现加号菜单光标在标签前；已修复并复测"
+    },
+    {
+      "label": "标签前Delete取消目标模式",
+      "editorText": "",
+      "goalStyle": null,
+      "goals": 0,
+      "overflow": false,
+      "sendLabel": "发送消息",
+      "skillStyle": null,
+      "skills": 0,
+      "toolbarGoal": false,
+      "phase": "initial-implementation"
+    },
+    {
+      "label": "斜杠命令添加目标并继续输入",
+      "editorText": "目标优化移动端界面。",
+      "firstElement": "inline-goal",
+      "goalStyle": {
+        "color": "rgb(117, 183, 239)",
+        "font": "13px",
+        "iconWidth": 14
+      },
+      "goals": 1,
+      "overflow": false,
+      "sendLabel": "创建目标",
+      "skillStyle": null,
+      "skills": 0,
+      "toolbarGoal": false,
+      "phase": "initial-implementation"
+    },
+    {
+      "label": "删除目标标签保留正文",
+      "editorText": "优化移动端界面。",
+      "goalStyle": null,
+      "goals": 0,
+      "overflow": false,
+      "sendLabel": "发送消息",
+      "skillStyle": null,
+      "skills": 0,
+      "toolbarGoal": false,
+      "phase": "initial-implementation"
+    },
+    {
+      "label": "全选替换清除目标模式",
+      "editorText": "替换后的普通消息。",
+      "goalStyle": null,
+      "goals": 0,
+      "overflow": false,
+      "sendLabel": "发送消息",
+      "skillStyle": null,
+      "skills": 0,
+      "toolbarGoal": false,
+      "phase": "initial-implementation"
+    },
+    {
+      "label": "输入法组合期间保留目标标签",
+      "editorText": "目标替换后的普通消息。候选",
+      "firstElement": "inline-goal",
+      "goalStyle": {
+        "color": "rgb(117, 183, 239)",
+        "font": "13px",
+        "iconWidth": 14
+      },
+      "goals": 1,
+      "overflow": false,
+      "sendLabel": "创建目标",
+      "skillStyle": null,
+      "skills": 0,
+      "toolbarGoal": false,
+      "phase": "initial-implementation"
+    },
+    {
+      "label": "输入法提交后保留目标标签",
+      "editorText": "目标替换后的普通消息。中文输入",
+      "firstElement": "inline-goal",
+      "goalStyle": {
+        "color": "rgb(117, 183, 239)",
+        "font": "13px",
+        "iconWidth": 14
+      },
+      "goals": 1,
+      "overflow": false,
+      "sendLabel": "创建目标",
+      "skillStyle": null,
+      "skills": 0,
+      "toolbarGoal": false,
+      "phase": "initial-implementation"
+    },
+    {
+      "label": "最新代码刷新恢复目标草稿",
+      "editorText": "目标替换后的普通消息。中文输入",
+      "firstElement": "inline-goal",
+      "goalStyle": {
+        "color": "rgb(117, 183, 239)",
+        "font": "13px",
+        "iconWidth": 14
+      },
+      "goals": 1,
+      "overflow": false,
+      "sendLabel": "创建目标",
+      "skillStyle": null,
+      "skills": 0,
+      "toolbarGoal": false,
+      "phase": "final-implementation"
+    },
+    {
+      "label": "全选删除回到普通空草稿",
+      "editorText": "",
+      "goalStyle": null,
+      "goals": 0,
+      "overflow": false,
+      "sendLabel": "发送消息",
+      "skillStyle": null,
+      "skills": 0,
+      "toolbarGoal": false,
+      "phase": "final-implementation"
+    },
+    {
+      "label": "修复后加号添加再退格可立即删除",
+      "editorText": "",
+      "goalStyle": null,
+      "goals": 0,
+      "overflow": false,
+      "sendLabel": "发送消息",
+      "skillStyle": null,
+      "skills": 0,
+      "toolbarGoal": false,
+      "phase": "final-implementation"
+    },
+    {
+      "label": "加入目标后保留正文中间光标",
+      "editorText": "目标前中后",
+      "firstElement": "inline-goal",
+      "goalStyle": {
+        "color": "rgb(117, 183, 239)",
+        "font": "13px",
+        "iconWidth": 14
+      },
+      "goals": 1,
+      "overflow": false,
+      "sendLabel": "创建目标",
+      "skillStyle": null,
+      "skills": 0,
+      "toolbarGoal": false,
+      "phase": "final-implementation"
+    },
+    {
+      "label": "切回原会话恢复完整目标Skill和正文",
+      "editorText": "目标完善登录页面并验证手机显示效果。 Demo Skill\n保留目标模式继续编辑。",
+      "firstElement": "inline-goal",
+      "goalStyle": {
+        "color": "rgb(117, 183, 239)",
+        "font": "13px",
+        "iconWidth": 14
+      },
+      "goals": 1,
+      "overflow": false,
+      "sendLabel": "创建目标",
+      "skillStyle": {
+        "color": "rgb(117, 183, 239)",
+        "font": "13px",
+        "iconWidth": 14
+      },
+      "skills": 1,
+      "toolbarGoal": false,
+      "phase": "final-implementation"
+    },
+    {
+      "label": "手机编辑区目标与Skill样式一致",
+      "editorText": "目标完善登录页面并验证手机显示效果。 Demo Skill\n保留目标模式继续编辑。",
+      "firstElement": "inline-goal",
+      "goalStyle": {
+        "color": "rgb(117, 183, 239)",
+        "font": "13px",
+        "iconWidth": 14
+      },
+      "goals": 1,
+      "overflow": false,
+      "sendLabel": "创建目标",
+      "skillStyle": {
+        "color": "rgb(117, 183, 239)",
+        "font": "13px",
+        "iconWidth": 14
+      },
+      "skills": 1,
+      "toolbarGoal": false,
+      "phase": "final-implementation"
+    },
+    {
+      "label": "模拟发送成功后清空编辑标签",
+      "editorText": "",
+      "goalStyle": null,
+      "goals": 0,
+      "overflow": false,
+      "sendLabel": "发送消息",
+      "skillStyle": null,
+      "skills": 0,
+      "toolbarGoal": false,
+      "phase": "final-implementation"
+    }
+  ],
+  "sentView": {
+    "editorGoalTags": 0,
+    "historyGoalTags": 0,
+    "historyText": "完善登录页面并验证手机显示效果。 Demo Skill保留目标模式继续编辑。此内容仅记录于本机模拟服务。"
+  },
+  "imeMethod": "Chrome Input.imeSetComposition 和 Input.insertText；不是实际安卓系统输入法",
+  "requestEvidence": "submitted-request.json"
+}
