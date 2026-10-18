@@ -78,6 +78,7 @@ public final class MainActivity extends Activity {
     private final AtomicLong connectionGeneration = new AtomicLong();
     private final AtomicLong updateCheckGeneration = new AtomicLong(-1L);
     private final HapticFeedbackController haptics = new HapticFeedbackController();
+    private final Object notificationVisibility = new Object();
 
     private SessionStore sessionStore;
     private ResourceStore resourceStore;
@@ -826,6 +827,12 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        NotificationService.setAppVisible(notificationVisibility, true);
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         haptics.setForeground(true);
@@ -853,6 +860,12 @@ public final class MainActivity extends Activity {
         appUpdates.onPause();
         notifications.onPause();
         super.onPause();
+    }
+
+    @Override
+    protected void onStop() {
+        NotificationService.setAppVisible(notificationVisibility, false);
+        super.onStop();
     }
 
     private void handleRendererExit(WebView failedView, String origin, long generation) {
@@ -1210,6 +1223,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        NotificationService.setAppVisible(notificationVisibility, false);
         haptics.setForeground(false);
         appUpdates.onDestroy();
         notifications.onDestroy();

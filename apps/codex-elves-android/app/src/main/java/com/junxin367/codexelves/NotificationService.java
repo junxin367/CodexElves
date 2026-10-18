@@ -17,6 +17,8 @@ import android.webkit.CookieManager;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -28,6 +30,7 @@ public final class NotificationService extends Service {
     private static final String JOURNAL = "codex_elves_notification_journal";
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final CopyOnWriteArraySet<Listener> LISTENERS = new CopyOnWriteArraySet<>();
+    private static final Set<Object> VISIBLE_ACTIVITIES = new HashSet<>();
     private static long generation;
     private static NotificationService running;
     private static String stateIdentity;
@@ -69,6 +72,22 @@ public final class NotificationService extends Service {
 
     interface Listener {
         void changed(String identityDigest, String state);
+    }
+
+    static void setAppVisible(Object owner, boolean visible) {
+        synchronized (IDENTITY_LOCK) {
+            if (visible) {
+                VISIBLE_ACTIVITIES.add(owner);
+            } else {
+                VISIBLE_ACTIVITIES.remove(owner);
+            }
+        }
+    }
+
+    static boolean isAppVisible() {
+        synchronized (IDENTITY_LOCK) {
+            return !VISIBLE_ACTIVITIES.isEmpty();
+        }
     }
 
     static void addListener(Listener listener) {
@@ -200,12 +219,12 @@ public final class NotificationService extends Service {
             try {
                 if (Build.VERSION.SDK_INT >= 34) {
                     startForeground(
-                        NotificationPublisher.CONNECTION_ID, publisher.connection("connecting"),
+                        NotificationPublisher.CONNECTION_ID, publisher.connection(),
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
                     );
                 } else {
                     startForeground(
-                        NotificationPublisher.CONNECTION_ID, publisher.connection("connecting")
+                        NotificationPublisher.CONNECTION_ID, publisher.connection()
                     );
                 }
             } catch (RuntimeException error) {
@@ -257,8 +276,8 @@ public final class NotificationService extends Service {
             public void state(String next) {
                 synchronized (IDENTITY_LOCK) {
                     if (active()) {
+                        // 只更新应用内状态，避免重新发出用户已经划掉的服务提示。
                         publish(connectionIdentity.digest, next);
-                        publisher.updateConnection(next);
                     }
                 }
             }

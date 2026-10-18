@@ -101,12 +101,14 @@ final class NotificationPublisher implements NotificationEventState.Sink {
     public boolean notify(NotificationEventState.Event event, boolean previouslySeen) {
         String tag = tag(event.notificationId);
         if (userDismissed().contains(event.notificationId)) {
-            // The legacy dismissed set includes both explicit swipes and opened pending reminders.
+            // 同一待处理提醒被划掉、打开或在前台接收后，不再重复投递。
             manager.cancel(tag, 0);
             return true;
         }
-        if (!permissionGranted(context) || !NotificationSettings.read(context).allows(event.kind)
-            || !channelEnabled(manager, event.kind)) {
+        boolean appVisible = NotificationService.isAppVisible();
+        if (!appVisible && (!permissionGranted(context)
+            || !NotificationSettings.read(context).allows(event.kind)
+            || !channelEnabled(manager, event.kind))) {
             manager.cancel(tag, 0);
             return false;
         }
@@ -119,6 +121,15 @@ final class NotificationPublisher implements NotificationEventState.Sink {
             } catch (JSONException ignored) {
                 // Event fields have already been validated.
             }
+        }
+        if (appVisible) {
+            if (event.isPending()) {
+                // 沿用持久化去重记录，避免切后台或重连后补发前台已接收的请求。
+                silencePending(context, identity.digest, event.notificationId);
+            } else {
+                manager.cancel(tag, 0);
+            }
+            return true;
         }
         if (!event.isPending() && previouslySeen && !isActive(tag)
             && !suppressed().contains(event.notificationId)) {
@@ -157,7 +168,7 @@ final class NotificationPublisher implements NotificationEventState.Sink {
             .setAutoCancel(true)
             .setOnlyAlertOnce(true)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
-            .setPublicVersion(publicVersion(channelId(event.kind)))
+            .setPublicVersion(publicVersion(channelId(event.kind), R.string.notification_public_summary))
             .addExtras(metadata)
             .build();
         manager.notify(tag, 0, notification);
@@ -168,34 +179,25 @@ final class NotificationPublisher implements NotificationEventState.Sink {
         return true;
     }
 
-    Notification connection(String state) {
+    Notification connection() {
         Intent open = new Intent(context, MainActivity.class)
             .setAction(Intent.ACTION_MAIN)
             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         PendingIntent pending = PendingIntent.getActivity(
             context, 1, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
-        int message = "connected".equals(state)
-            ? R.string.notification_connection_connected
-            : "connecting".equals(state)
-                ? R.string.notification_connection_connecting
-                : R.string.notification_connection_disconnected;
         return new Notification.Builder(context, CONNECTION_CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(context.getString(R.string.notification_connection_title))
-            .setContentText(context.getString(message))
+            .setContentText(context.getString(R.string.notification_connection_summary))
             .setContentIntent(pending)
             .setCategory(Notification.CATEGORY_SERVICE)
-            .setOngoing(true)
+            .setOngoing(false)
             .setShowWhen(false)
             .setOnlyAlertOnce(true)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
-            .setPublicVersion(publicVersion(CONNECTION_CHANNEL))
+            .setPublicVersion(publicVersion(CONNECTION_CHANNEL, R.string.notification_connection_summary))
             .build();
-    }
-
-    void updateConnection(String state) {
-        manager.notify(CONNECTION_ID, connection(state));
     }
 
     @Override
@@ -496,11 +498,11 @@ final class NotificationPublisher implements NotificationEventState.Sink {
         }
     }
 
-    private Notification publicVersion(String channel) {
+    private Notification publicVersion(String channel, int summary) {
         return new Notification.Builder(context, channel)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(context.getString(R.string.app_name))
-            .setContentText(context.getString(R.string.notification_public_summary))
+            .setContentText(context.getString(summary))
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .build();
     }

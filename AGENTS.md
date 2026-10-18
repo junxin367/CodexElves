@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-本文件适用于整个仓库。处理 `BigPizzaV3/CodexPlusPlus` 原仓库提交、冲突解决、重命名维护、协议代理、管理器 UI、安装包构建时，必须优先遵守本文件。
+本文件适用于整个仓库。处理 `BigPizzaV3/CodexPlusPlus` 原仓库提交、冲突解决、重命名维护、协议代理、管理器 UI、安装包构建、GitHub 发版及发布验收时，必须优先遵守本文件。
 
 ## 核心原则
 
@@ -126,6 +126,24 @@
 - 复用既有正式签名材料；缺少签名配置时明确报告 Android 构建失败，不得创建替代证书或以 Debug APK 交付。Debug 仅用于明确的开发验证或不持有发布密钥的 PR 检查。
 - 只有正式 APK 构建及校验成功后才能更新本机 Android 构建基线；失败不得记录为已构建。
 - Android 发布使用独立 `android-v<androidVersion>` 标签和更新清单，不覆盖桌面版 `latest.json` 或 GitHub Latest 标记。
+
+### GitHub 发版与 Android 发布验收
+
+- 用户要求“发布”“发版”或“推送发布标签”时，必须分别检查桌面和 Android 的交付状态；用户明确限定发布平台时遵守指定范围。
+- 判断 Android 是否需要发布时，以上一次**已公开且 APK、更新清单校验有效的 Android Release**为基线，比较上述 Android 同步编译范围；不能只看未提交差异、上次本机构建或 Actions 构建。相关内容有变化、尚无有效 Android Release，或远端附件缺失、校验失败时，必须将 Android 列入本次发布；内容未变化且远端附件有效时可跳过，并说明依据。
+- 按下表区分构建和发布，不得因 Actions 总体成功或桌面 Release 已发布就认定 Android 已发布：
+
+| 触发方式 | Android 实际交付 | 可报告状态 |
+| --- | --- | --- |
+| `main` 推送 Android 相关变更 | 正式签名构建、lint，上传 Actions Artifacts | 已构建未发布 |
+| 推送桌面版本标签，如 `v<desktopVersion>` | 触发桌面发布，不触发 Android 独立发布 | 单独核对 Android 状态 |
+| 手动运行 Android Release，`tag` 留空 | 仅上传 Actions Artifacts | 已构建未发布 |
+| 推送 `android-v<versionName>`，或手动运行 Release 并填写该标签 | 正式构建后执行独立 Android 发布任务 | 完成下述验收后才可报告已发布 |
+
+- 本次发布已获用户授权且 Android 需要发布时，按 Android 独立版本规则核对 `versionName`、递增的 `versionCode` 和既有正式签名，创建并推送对应的 `android-v<versionName>` 标签，或对已存在的正确标签触发 Release 工作流；不得遗漏 Android 标签，也不得移动已发布标签或覆盖不同内容的已发布 APK。具体步骤遵循 `docs/android-release.md`。
+- 等待 Android 工作流结束，单独确认 `Publish independent Android Release` 任务成功；该任务为 `skipped`、失败或仍在运行时，不得报告发布完成。
+- 发布后确认对应 Android Release 已公开，包含 `CodexElves-<versionName>-android.apk` 和 `android-update.json`；下载两项附件，核对版本、`versionCode`、APK 大小和 SHA-256 与更新清单及本次正式构建一致，并确认桌面 Latest 标记和 `latest.json` 未被 Android 发布覆盖。
+- 最终分别报告桌面和 Android 状态：`已发布`、`已构建未发布`、`进行中`、`失败/受阻` 或 `跳过（附依据）`，并提供对应运行记录、Release 或产物位置。只要求检查、诊断或本地编译时，不得擅自创建、推送发布标签或触发远程发布；发现未发布应明确列为待完成项。
 
 ## 合并后的强制检查
 

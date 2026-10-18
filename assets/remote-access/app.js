@@ -56,7 +56,7 @@ let sessionRequest = null, connectionPollVersion = 0, connectionPollPending = nu
 const sessionRecoveryReads = new WeakMap();
 let nativeConnectionVersion = 0;
 let connectionCycleVersion = 0, connectionRtt = null;
-const connectionRttDescription = "网页到当前接入服务的 /api/session HTTP 往返时长；不代表模型响应耗时，也不代表端到端原生执行延迟。";
+const connectionRttDescription = "点击刷新会话。网页到当前接入服务的 /api/session HTTP 往返时长；不代表模型响应耗时，也不代表端到端原生执行延迟。";
 let pageLeaving = false;
 const expandedProjects = new Set();
 const collapsedSidebarSections = new Set();
@@ -345,7 +345,7 @@ function openAppearance() {
     <div id="appearance-colors"></div>
     <div id="appearance-cache-state" class="appearance-field" role="status"></div>
     <label class="appearance-field">字体大小<span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="字体大小"><output id="appearance-font-value"></output></span></label>
-    <button type="button" id="appearance-notifications-entry" class="appearance-notifications-entry" hidden><span>通知事件</span></button></div>
+    <div id="appearance-notifications-field" class="appearance-field" hidden><span>通知事件</span><button type="button" id="appearance-notifications-entry" class="icon-button appearance-notifications-entry" title="打开通知事件设置" aria-label="打开通知事件设置" aria-controls="appearance-notifications-page"></button></div></div>
     <div class="appearance-actions"><button type="button" class="appearance-version" id="appearance-app-version" hidden disabled></button><div class="appearance-action-buttons"><button type="button" id="appearance-reset">恢复默认</button><button type="button" class="primary" id="appearance-close">完成</button></div></div>`;
   document.body.append(dialog);
   const title = $("#appearance-title", dialog);
@@ -355,7 +355,7 @@ function openAppearance() {
   const resetButton = $("#appearance-reset", dialog);
   const notificationVersionButton = $("#appearance-app-version", dialog);
   if (androidContainer) {
-    entryButton.hidden = false;
+    $("#appearance-notifications-field", dialog).hidden = false;
     entryButton.append(icon("chevron"));
   }
   headingButton.append(icon("close"));
@@ -396,6 +396,7 @@ function openAppearance() {
     notificationPageRevision++;
     notificationPageUnsubscribe?.();
     notificationPageUnsubscribe = null;
+    activeNotificationPage?.systemSettingsButton.remove();
     activeNotificationPage = null;
     notificationPage?.remove();
     notificationPage = null;
@@ -407,21 +408,23 @@ function openAppearance() {
     headingButton.replaceChildren(icon("close"));
     resetButton.hidden = false;
     versionButton.hidden = !androidVersionLoaded;
+    dialog.style.removeProperty("height");
     updateNotificationOperationState();
     notificationEntry.focus({ preventScroll: true });
   };
   if (androidContainer) entryButton.onclick = () => {
     if (!dialog.isConnected || !dialog.open || notificationPageVisible) return;
+    dialog.style.height = `${dialog.getBoundingClientRect().height}px`;
     notificationPageVisible = true;
     const revision = ++notificationPageRevision;
     const page = element("div", "appearance-body appearance-notifications-page");
     page.id = "appearance-notifications-page";
     notificationPage = page;
-    const status = element("p", "appearance-notification-status", "正在读取通知设置…");
+    const status = element("p", "appearance-notification-status");
     status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
     const rows = element("div", "appearance-notification-rows");
-    rows.hidden = true;
+    rows.setAttribute("aria-busy", "true");
     const controls = new Map();
     const addSwitch = (key, label, destination) => {
       const row = element("label", "appearance-notification-row");
@@ -464,8 +467,8 @@ function openAppearance() {
         finishPageOperation();
       }
     }, "appearance-notification-action");
-    systemSettingsButton.hidden = true;
-    page.append(status, rows, systemSettingsButton);
+    page.append(status, rows);
+    $("#appearance-close", dialog).before(systemSettingsButton);
     dialog.insertBefore(page, $(".appearance-actions", dialog));
     primaryBody.hidden = true;
     title.textContent = "通知事件";
@@ -478,9 +481,9 @@ function openAppearance() {
     let state = null;
     const setBusy = busy => {
       for (const control of controls.values()) control.disabled = busy || !state;
-      systemSettingsButton.disabled = busy;
+      systemSettingsButton.disabled = busy || !state;
     };
-    const pageApi = { setBusy };
+    const pageApi = { setBusy, systemSettingsButton };
     activeNotificationPage = pageApi;
     let changedVersion = 0;
     let queuedChangedStatus = null;
@@ -489,12 +492,14 @@ function openAppearance() {
       if (!value?.supported) {
         state = null;
         rows.hidden = true;
+        rows.removeAttribute("aria-busy");
         systemSettingsButton.hidden = true;
         status.textContent = "当前 Android App 版本暂不支持通知设置，请更新 App。";
         return;
       }
       state = value;
       rows.hidden = false;
+      rows.removeAttribute("aria-busy");
       for (const [key, control] of controls) {
         control.checked = value.settings[key];
         control.disabled = notificationOperations > 0;
@@ -523,6 +528,7 @@ function openAppearance() {
     const renderError = (error, action) => {
       if (!notificationPageIsCurrent(page, revision)) return;
       if (!state) rows.hidden = true;
+      rows.removeAttribute("aria-busy");
       const message = notificationErrorMessage(error);
       status.textContent = action === "read"
         ? `无法读取通知设置：${message}`
@@ -733,7 +739,15 @@ function openAppearance() {
   dialog.onpointerdown = event => { backdropPressed = onBackdrop(event); };
   dialog.onpointermove = event => { if (!onBackdrop(event)) backdropPressed = false; };
   dialog.onpointercancel = () => { backdropPressed = false; };
-  dialog.onpointerup = event => { if (backdropPressed && onBackdrop(event)) dialog.close(); backdropPressed = false; };
+  dialog.onclick = event => {
+    const close = backdropPressed && onBackdrop(event);
+    backdropPressed = false;
+    if (!close) return;
+    // 触摸在 pointerup 后仍会派发点击，等它命中遮罩后再关闭，避免落到背景元素。
+    event.preventDefault();
+    event.stopPropagation();
+    dialog.close();
+  };
   dialog.oncancel = event => {
     event.preventDefault();
     if (notificationPageVisible) restoreAppearanceRoot();
@@ -742,8 +756,10 @@ function openAppearance() {
   dialog.onclose = () => {
     notificationPageRevision++;
     notificationPageVisible = false;
+    dialog.style.removeProperty("height");
     notificationPageUnsubscribe?.();
     notificationPageUnsubscribe = null;
+    activeNotificationPage?.systemSettingsButton.remove();
     activeNotificationPage = null;
     notificationPage?.remove();
     notificationPage = null;
@@ -2176,7 +2192,6 @@ function icon(name) {
     eyeOff: '<path d="m3 3 18 18M10.6 5.1A12 12 0 0 1 12 5c6.5 0 10 7 10 7a20 20 0 0 1-3.1 4.2M6.1 6.1A22 22 0 0 0 2 12s3.5 7 10 7a12 12 0 0 0 5.9-1.9M10 10a3 3 0 0 0 4 4"/>',
     warning: '<path d="m12 3 10 18H2Z"/><path d="M12 9v5m0 3h.01"/>',
     arrowUp: '<path d="M12 19V5m-6 6 6-6 6 6"/>',
-    refresh: '<path d="M21 12a9 9 0 1 1-2.7-6.4L21 8"/><path d="M21 3v5h-5"/>',
     steer: '<path d="M4 5v5a4 4 0 0 0 4 4h12m-5-5 5 5-5 5"/>',
     terminal: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3m6 0h4"/>',
     globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z"/>',
@@ -3828,7 +3843,7 @@ function shell() {
       <div class="sidebar-footer"><div class="footer-actions"><button id="appearance-button" class="footer-button" type="button" aria-label="设置"></button><button id="logout" class="footer-button" type="button"></button></div></div>
     </aside>
     <main class="conversation">
-      <header class="conversation-header"><button id="open-sidebar" class="icon-button" type="button" aria-label="打开侧边栏" aria-controls="session-sidebar"></button><div class="thread-heading"><strong id="thread-title">远程会话</strong><span id="thread-path" class="muted"></span></div><span id="connection-state" class="connection-state pending" role="status" title="${connectionRttDescription}" aria-label="连接中…。${connectionRttDescription}">连接中…</span><button id="refresh" class="icon-button" type="button" title="刷新会话" aria-label="刷新会话"></button></header>
+      <header class="conversation-header"><button id="open-sidebar" class="icon-button" type="button" aria-label="打开侧边栏" aria-controls="session-sidebar"></button><div class="thread-heading"><strong id="thread-title">远程会话</strong><span id="thread-path" class="muted"></span></div><button id="connection-state" class="connection-state pending" type="button" aria-live="polite" title="${connectionRttDescription}" aria-label="连接中…。${connectionRttDescription}">连接中…</button></header>
       <div id="desktop-connection-guidance" class="desktop-connection-guidance" role="status" aria-live="polite" hidden>Codex 桌面尚未连接或正在重启。请在电脑端 CodexElves 管理器右上角点击「重启 Codex」；若已点击，请等待 Codex 主界面完全打开、能够正常查看会话后，再刷新远程网页。</div>
       <div class="messages-shell"><div id="messages" class="messages" role="log" aria-label="会话消息"></div><button id="scroll-to-bottom" class="scroll-to-bottom" type="button" aria-label="跳转到最新消息" hidden></button></div>
       <div class="composer-area"><div class="composer-context"><div id="queued-area" hidden></div><div id="goal-area" hidden></div></div><div id="pending-area"></div><div id="project-select-slot" hidden></div><div class="composer-anchor"><div id="approval-area" class="approval-area" aria-live="polite"></div><form id="composer" class="composer">
@@ -3844,7 +3859,6 @@ function shell() {
   configurePromptEditor($("#prompt"));
   mountContextUsage();
   $("#open-sidebar").append(icon("menu"));
-  $("#refresh").append(icon("refresh"));
   $("#prompt-optimize").onclick = () => void activatePromptOptimization();
   $("#prompt-optimize").oncontextmenu = event => event.preventDefault();
   $("#prompt-optimize").onpointerdown = event => {
@@ -4015,7 +4029,7 @@ function shell() {
     }
     catch (error) { notice(error.message, true); if ($("#logout")) $("#logout").disabled = false; }
   };
-  $("#refresh").onclick = () => void Promise.all([refreshAll({ fresh: true }), loadModels(true)]).catch(error => notice(error.message, true));
+  $("#connection-state").onclick = () => void Promise.all([refreshAll({ fresh: true }), loadModels(true)]).catch(error => notice(error.message, true));
   $("#appearance-button").onclick = openAppearance;
   $("#sidebar-view-toggle").onclick = () => void changeSidebar({
     target: "grouping", mode: "updated_at",
@@ -4739,6 +4753,54 @@ async function submitMessageEdit() {
   }
   finally { busy = false; updateComposer(); }
 }
+function enableImagePreviewZoom(viewport, image) {
+  const pointers = new Map();
+  let scale = 1, x = 0, y = 0;
+  const render = () => {
+    const limitX = Math.max(0, (image.naturalWidth * scale - viewport.clientWidth) / 2);
+    const limitY = Math.max(0, (image.naturalHeight * scale - viewport.clientHeight) / 2);
+    x = Math.max(-limitX, Math.min(limitX, x));
+    y = Math.max(-limitY, Math.min(limitY, y));
+    image.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${scale})`;
+  };
+  const gesture = () => {
+    const [first, second] = pointers.values();
+    const box = viewport.getBoundingClientRect();
+    return {
+      x: (second ? (first.x + second.x) / 2 : first.x) - box.left - box.width / 2,
+      y: (second ? (first.y + second.y) / 2 : first.y) - box.top - box.height / 2,
+      distance: second ? Math.hypot(first.x - second.x, first.y - second.y) : 0
+    };
+  };
+  viewport.onpointerdown = event => {
+    if (event.pointerType !== "touch") return;
+    event.preventDefault();
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    viewport.setPointerCapture(event.pointerId);
+  };
+  viewport.onpointermove = event => {
+    if (!pointers.has(event.pointerId)) return;
+    event.preventDefault();
+    const before = gesture();
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const after = gesture();
+    // 1:1 使用原始像素尺寸，不能以适应屏幕后的尺寸作为缩放下限。
+    const nextScale = Math.max(1, before.distance ? scale * after.distance / before.distance : scale);
+    const ratio = nextScale / scale;
+    x = after.x - (before.x - x) * ratio;
+    y = after.y - (before.y - y) * ratio;
+    scale = nextScale;
+    render();
+  };
+  const release = event => { pointers.delete(event.pointerId); };
+  viewport.onpointerup = release;
+  viewport.onpointercancel = release;
+  viewport.onlostpointercapture = release;
+  const resizeObserver = new ResizeObserver(() => { pointers.clear(); render(); });
+  resizeObserver.observe(viewport);
+  render();
+  return () => { resizeObserver.disconnect(); pointers.clear(); };
+}
 function openImagePreview(link, image) {
   const source = link.getAttribute("href") || image.getAttribute("src") || "";
   if (!/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(source) && !safeInlineImageSource(source)) return;
@@ -4751,14 +4813,20 @@ function openImagePreview(link, image) {
   const close = button("", "关闭图片预览", () => dialog.close(), "image-preview-close");
   close.append(icon("close"));
   const preview = element("img", "image-preview-image");
+  const viewport = isAndroidContainer() ? element("div", "image-preview-viewport") : null;
   const caption = element("figcaption", "image-preview-caption", image.alt || "图片");
+  let disposeZoom = null;
+  preview.draggable = false;
+  preview.onload = () => { if (viewport && dialog.open) disposeZoom = enableImagePreviewZoom(viewport, preview); };
   preview.alt = image.alt || "图片预览"; preview.src = source;
   preview.onerror = () => {
-    preview.remove();
+    disposeZoom?.();
+    (viewport || preview).remove();
     panel.classList.add("image-preview-unavailable");
     caption.textContent = `图片不可用：${image.alt || "附件"}`;
   };
-  panel.append(close, preview, caption); dialog.append(panel); document.body.append(dialog);
+  viewport?.append(preview);
+  panel.append(close, viewport || preview, caption); dialog.append(panel); document.body.append(dialog);
   let backdropPressed = false;
   const onBackdrop = event => {
     const box = dialog.getBoundingClientRect();
@@ -4770,6 +4838,7 @@ function openImagePreview(link, image) {
   dialog.onpointerup = event => { if (backdropPressed && onBackdrop(event)) dialog.close(); backdropPressed = false; };
   dialog.oncancel = event => { event.preventDefault(); dialog.close(); };
   dialog.onclose = () => {
+    disposeZoom?.();
     dialog.remove();
     document.body.classList.toggle("modal-open", !!document.querySelector("dialog[open]"));
     if (trigger.isConnected && document.activeElement === document.body) trigger.focus({ preventScroll: true });
@@ -6087,7 +6156,7 @@ function workGroupSummary(items, running = false) {
       ? "globe" : tools.length ? "tools" : changes.length ? "fileChange" : "terminal")
   };
 }
-function renderCommandGroup(items, previous, renderMessage, running = false) {
+function renderCommandGroup(items, previous, renderMessage, running = false, historyLoad = null) {
   const records = Array.isArray(items) ? items : [];
   const group = previous?.classList?.contains("command-group") ? previous : element("details", "command-group");
   let state = group.commandGroupState;
@@ -6120,6 +6189,7 @@ function renderCommandGroup(items, previous, renderMessage, running = false) {
           }
           return node;
         });
+        if (state.historyLoad) children.unshift(state.historyLoad);
         reconcileChildren(panel, children);
         panel.scrollTop = scrollTop;
       },
@@ -6136,14 +6206,22 @@ function renderCommandGroup(items, previous, renderMessage, running = false) {
     group.commandGroupState = state;
     group.ontoggle = () => {
       if (!group.isConnected) return;
-      if (group.open) state.renderBody();
+      if (group.open) {
+        state.renderBody();
+        if (state.historyLoad) scheduleHistoryLoad(true);
+      }
       else state.clearBody();
     };
   }
   state.items = records;
   state.renderMessage = renderMessage;
+  state.historyLoad = historyLoad;
   const active = running;
   const presentation = workGroupSummary(records, active);
+  if (!records.length && historyLoad) {
+    presentation.text = "较早的过程记录";
+    presentation.description = "展开后加载较早的过程记录";
+  }
   const groupClass = `command-group${active ? " running" : ""}${presentation.thinking ? " thinking-group" : ""}`;
   if (group.className !== groupClass) group.className = groupClass;
   if (group.getAttribute("aria-busy") !== String(active)) group.setAttribute("aria-busy", String(active));
@@ -6193,7 +6271,6 @@ function renderActivity(turn, work, running, collapsible, renderMessage, showSum
   const { node, summary, state, label, body } = activity;
   if (activity.historyLoad !== historyLoad) activity.historyLoad?.remove();
   activity.historyLoad = historyLoad;
-  if (historyLoad && body.firstChild !== historyLoad) body.prepend(historyLoad);
   node.dataset.activityKey = key;
   activity.turn = turn; activity.running = running; activity.workCount = work.length; activity.showSummary = showSummary;
   collapsible &&= showSummary;
@@ -6209,7 +6286,9 @@ function renderActivity(turn, work, running, collapsible, renderMessage, showSum
   label.className = "";
   updateActivitySummary(activity);
   if (node.open || !running && [...activity.commandGroups.values()].some(group => group.classList.contains("running"))) {
-    const children = historyLoad ? [historyLoad] : [], commandKeys = new Set(), imageKeys = new Set();
+    const children = [], commandKeys = new Set(), imageKeys = new Set();
+    let pendingHistoryLoad = historyLoad;
+    let previousHistoryGroup = activity.commandGroups.get("history");
     const activeFlags = thread?.status?.status?.activeFlags || thread?.status?.activeFlags || [];
     const working = running && !compactionLocked() && !thread?.requests?.length
       && !activeFlags.some(flag => ["waitingOnApproval", "waitingOnUserInput"].includes(flag));
@@ -6238,10 +6317,18 @@ function renderActivity(turn, work, running, collapsible, renderMessage, showSum
       const commandKey = records[0].id;
       const active = working && (records.some(item => ["inProgress", "running"].includes(item.status))
         || records.at(-1) === turn.items?.at(-1));
-      const previous = activity.commandGroups.get(commandKey) || records.map(item => activity.commandGroups.get(item.id)).find(Boolean);
-      const group = renderCommandGroup(records, previous, renderMessage, active);
+      const previous = activity.commandGroups.get(commandKey) || records.map(item => activity.commandGroups.get(item.id)).find(Boolean)
+        || previousHistoryGroup;
+      previousHistoryGroup = null;
+      const group = renderCommandGroup(records, previous, renderMessage, active, pendingHistoryLoad);
+      pendingHistoryLoad = null;
       activity.commandGroups.set(commandKey, group); commandKeys.add(commandKey);
       children.push(group);
+    }
+    if (pendingHistoryLoad) {
+      const group = renderCommandGroup([], activity.commandGroups.get("history"), renderMessage, false, pendingHistoryLoad);
+      activity.commandGroups.set("history", group); commandKeys.add("history");
+      children.unshift(group);
     }
     reconcileChildren(body, children);
     for (const key of activity.commandGroups.keys()) if (!commandKeys.has(key)) activity.commandGroups.delete(key);
@@ -6986,6 +7073,7 @@ function scheduleHistoryLoad(visibleItems = false) {
     if (!root || !selectedId || !historyInitialized || historyLoading || historyAutoFailed || pageLeaving) return;
     const box = root.getBoundingClientRect();
     for (const node of root.querySelectorAll(".history-load[data-history-page]")) {
+      if (node.dataset.turnId && node.closest("details:not([open])")) continue;
       const rect = node.getBoundingClientRect();
       if (!node.disabled && rect.height && rect.bottom >= box.top - 120
           && rect.top <= (includeVisibleItems && node.dataset.turnId ? box.bottom : Math.min(box.bottom, box.top + 120))) {
@@ -7040,14 +7128,7 @@ function renderMessages(keepScroll = true) {
   const oldHeight = root.scrollHeight, oldTop = root.scrollTop;
   const anchor = !keepScroll || !bottom ? visibleMessageAnchor(root) : null;
   const children = [], itemKeys = new Set(), turnKeys = new Set(), activityKeys = new Set();
-  if (transcriptChecking) children.push(element("p", "muted transcript-checking-notice",
-    historyError ? "已显示上次记录；最新内容核对失败，可点击刷新重试。" : "已显示上次记录，正在核对最新内容…"));
   const sorted = [...turns.values()];
-  if (selectedId && sorted.length && !historyInitialized && !historyError) {
-    const loading = element("p", "muted transcript-checking-notice", "正在加载会话记录，已先显示实时活动…");
-    loading.setAttribute("role", "status");
-    children.push(loading);
-  }
   loadMessageSkillChoices(sorted.flatMap(turn => turn.items || []));
   if (historyError && sorted.length)
     children.push(historyLoadButton("最新记录加载失败，重试", () => void loadHistory()));
@@ -7064,7 +7145,7 @@ function renderMessages(keepScroll = true) {
     let historyLoad = null;
     if (turn.itemsNextCursor) {
       historyLoad = group.querySelector(".history-load")
-        || historyLoadButton("加载本轮较早的消息", () => void loadHistory(true, selectionVersion, turn.id), turn.id);
+        || historyLoadButton("加载更早的过程记录", () => void loadHistory(true, selectionVersion, turn.id), turn.id);
       historyLoad.dataset.historyPage = "older";
     }
     const turnItems = turn.items || [], finalIndex = finalMessageIndex(turn),
@@ -7131,21 +7212,19 @@ function renderMessages(keepScroll = true) {
         && !compactionLocked() && !thread?.requests?.length
         && !activeFlags.some(flag => ["waitingOnApproval", "waitingOnUserInput"].includes(flag)))
       content.push({ work: [], collapsible: false });
+    if (historyLoad) {
+      const index = content.findIndex(part => part.historyLoad);
+      let activity = content.slice(index + 1).find(part => part.work);
+      if (!activity) {
+        activity = { work: [], collapsible: false };
+        content.splice(index, 1, activity);
+      } else content.splice(index, 1);
+      activity.historyLoad = historyLoad;
+    }
     const activities = content.filter(part => part.work);
     const live = activityPresentation(turn, turnRunning).live;
-    let header = live ? activities[0] : activities.at(-1);
-    if (historyLoad && !live && finalIndex >= 0 && turn.status !== "interrupted"
-        && (turn.status !== "inProgress" || turnItems[finalIndex].phase === "final_answer")) {
-      // 已完成答复前的历史活动缺页属于活动明细，不能看起来像正文仍未加载。
-      const index = content.findIndex(part => part.historyLoad);
-      if (!header) {
-        header = { work: [], collapsible: true };
-        content.splice(index, 1, header);
-      } else content.splice(index, 1);
-      header.historyLoad = historyLoad;
-    }
+    const header = live ? activities[0] : activities.at(-1);
     for (const part of content) {
-      if (part.historyLoad && !part.work) { items.push(part.historyLoad); continue; }
       if (part.item) { items.push(renderMessage(part.item)); continue; }
       const activity = renderActivity(turn, part.work, live, part.collapsible, renderMessage, part === header, part.historyLoad);
       activityKeys.add(activity.dataset.activityKey); items.push(activity);
