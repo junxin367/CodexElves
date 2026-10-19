@@ -66,7 +66,7 @@
 
 合并后必须保持以下本地行为：
 
-- 桌面端及管理器版本号以根 `Cargo.toml` 的 `workspace.package.version` 为准，不得因合并上游而被上游版本覆盖。Android 版本独立维护于 `apps/codex-elves-android/version.properties`，不随管理器版本同步；除非用户明确要求，否则不主动改显示版本。Android 每次正式发布必须递增 `versionCode`，并保持现有正式签名证书。
+- 桌面端及管理器版本号以根 `Cargo.toml` 的 `workspace.package.version` 为准，不得因合并上游而被上游版本覆盖。Android 版本独立维护于 `apps/codex-elves-android/version.properties`，不随管理器版本号同步。普通编译不调整 Android 版本；管理端发版需要同步发布 Android 时，按下方发布规则递增 Android 独立版本和 `versionCode`，并保持现有正式签名证书。
 - 默认本地代理端口保持当前项目端口，不恢复旧端口 `57321`。
 - 管理器关闭按钮默认最小化到托盘；再次打开 manager 时如果在托盘中，必须显示主窗口。
 - manager 打开时保持上一次窗口位置，不能跨显示器跳回旧位置。
@@ -101,10 +101,10 @@
 
 ## 构建约定
 
-用户说“编译”或“编译安装包”时，默认执行：
+用户仅要求“编译”或“编译安装包”时，默认只编译 Windows 管理端安装包，执行：
 
 ```powershell
-.\build.ps1
+.\scripts\build-windows-installer.ps1
 ```
 
 该脚本必须完整生成：
@@ -115,22 +115,34 @@
 - `dist/windows/app/codex-elves-manager.exe`
 - `dist/windows/CodexElves-<version>-windows-x64-setup.exe`（`<version>` 取自根 `Cargo.toml` 的 `workspace.package.version`）
 
-不要改回手工 NSIS 命令作为默认流程。需要修改构建流程时，优先更新 `build.ps1` 和 `scripts/build-windows-installer.ps1`。
+不要改回手工 NSIS 命令作为默认流程。根 `build.ps1` 当前会自动调用 Android 同步构建；普通 Windows 编译使用上述专用入口，不能默认调用根 `build.ps1` 或 `scripts/sync-android-build.ps1`，以免附带构建 Android。需要修改构建流程时，优先更新 `build.ps1` 和 `scripts/build-windows-installer.ps1`。
 
-### Android 同步编译
+### Android 显式编译
 
-- 用户要求“编译”或“编译安装包”时，必须判断 Android 是否较上次成功正式构建发生变化；不能只看未提交的 Git 差异。
-- 检查范围包括 `apps/codex-elves-android/` 下的源码、资源、独立版本和构建配置，`scripts/` 中的 Android 构建脚本，以及 APK 内置的 `assets/remote-access/` 网页资源；排除构建产物、工具链、缓存和本机私有配置。
-- 相关内容有变化、没有成功构建基线，或上次 APK 缺失、摘要不符时，同步执行 Android **Release** 构建及 lint，生成 `dist/android/CodexElves-<androidVersion>-android.apk`。`<androidVersion>` 取自 Android 独立版本配置。
-- 相关内容没有变化且 APK 校验有效时跳过 Android 构建，并说明跳过原因。用户明确只编译 Android 时直接执行 Android 构建。
+- 只有用户明确要求编译 Android，或管理端发版按下方规则判定需要同步发布 Android 时，才执行 Android 构建。
+- 普通 Windows 编译不因 Android 相关代码变化、成功构建基线缺失或旧 APK 校验失败而自动附加 Android 构建。
+- 用户明确要求编译 Android 时，执行 `.\scripts\build-android.ps1 -Configuration Release`，完成正式构建及 lint，生成 `dist/android/CodexElves-<androidVersion>-android.apk`。`<androidVersion>` 取自 Android 独立版本配置；仅编译不递增版本、不创建发布标签。
 - 复用既有正式签名材料；缺少签名配置时明确报告 Android 构建失败，不得创建替代证书或以 Debug APK 交付。Debug 仅用于明确的开发验证或不持有发布密钥的 PR 检查。
 - 只有正式 APK 构建及校验成功后才能更新本机 Android 构建基线；失败不得记录为已构建。
-- Android 发布使用独立 `android-v<androidVersion>` 标签和更新清单，不覆盖桌面版 `latest.json` 或 GitHub Latest 标记。
 
 ### GitHub 发版与 Android 发布验收
 
 - 用户要求“发布”“发版”或“推送发布标签”时，必须分别检查桌面和 Android 的交付状态；用户明确限定发布平台时遵守指定范围。
-- 判断 Android 是否需要发布时，以上一次**已公开且 APK、更新清单校验有效的 Android Release**为基线，比较上述 Android 同步编译范围；不能只看未提交差异、上次本机构建或 Actions 构建。相关内容有变化、尚无有效 Android Release，或远端附件缺失、校验失败时，必须将 Android 列入本次发布；内容未变化且远端附件有效时可跳过，并说明依据。
+- 发布管理端新版本前，以上一个**已公开的桌面正式 Release 对应标签**为起点，以本次待发布的目标提交为终点，检查期间所有会影响 Android 的改动。不得用未提交差异、上次本机构建或 Actions 构建代替此版本区间；Android 独立 Release、草稿和预发布不作为桌面比较基线。
+- Android 影响检查必须覆盖：
+  - `apps/codex-elves-android/` 下的原生源码、资源、独立版本、依赖和构建配置。
+  - APK 内置的 WebView 网页代码及资源。以 `apps/codex-elves-android/app/build.gradle` 的 `prepareBundledWebAssets` 和 `bundledWebResources` 为准，检查源目录 `assets/remote-access/`，包括 `app.js`、`recovery-store.js`、页面样式、Markdown、附件及平台适配代码；这些文件会进入 APK 的 `assets/web/files/`。即使 Android 原生目录没有变化，内置网页代码变化也必须判定为影响 Android。
+  - Android 构建、签名、资源打包和发布相关脚本及工作流；共享脚本或远程接口、资源更新协议的改动，也须核对是否改变 Android 的运行或更新行为。
+  - 排除构建产物、工具链、缓存和本机私有配置；不影响上述内容的管理器专属界面或普通文档改动，不触发 Android 发布。
+- 决定跳过 Android 前，还须以上一次**已公开且 APK、更新清单校验有效的 Android Release**为基线核对 Android 相关输入，防止遗漏此前尚未发布的 Android 改动。尚无有效 Android Release、存在未发布改动，或远端附件缺失、校验失败时，按需要同步发布处理。
+- 缺少上一个桌面发布基线时，检查全部 Android 相关输入；仍无法确认是否影响 Android 时，报告缺失证据及 `失败/受阻` 状态，不得直接宣告跳过或完成。
+
+| 管理端发版检查结果 | Android 处理 |
+| --- | --- |
+| 改动影响 Android，或存在上述未完成的 Android 交付 | 递增 Android 独立版本，正式构建及 lint 后同步发布 Android 安装包 |
+| 改动不影响 Android，且既有 Android Release 及附件校验有效 | 跳过 Android 发布，说明桌面比较基线、检查范围和跳过依据 |
+
+- 需要同步发布 Android 时，首次准备本次发布须将 `versionName` 的修订号增加 `1`，即递增 `0.0.1`，例如 `0.0.1` → `0.0.2`；不得改成管理端版本号。同时将 `versionCode` 设置为“当前值与已公开 Android 版本最大值中的较大值加 `1`”，保证可覆盖升级。失败重试时复用本次已经确定的目标版本，不重复递增。
 - 按下表区分构建和发布，不得因 Actions 总体成功或桌面 Release 已发布就认定 Android 已发布：
 
 | 触发方式 | Android 实际交付 | 可报告状态 |
@@ -140,7 +152,7 @@
 | 手动运行 Android Release，`tag` 留空 | 仅上传 Actions Artifacts | 已构建未发布 |
 | 推送 `android-v<versionName>`，或手动运行 Release 并填写该标签 | 正式构建后执行独立 Android 发布任务 | 完成下述验收后才可报告已发布 |
 
-- 本次发布已获用户授权且 Android 需要发布时，按 Android 独立版本规则核对 `versionName`、递增的 `versionCode` 和既有正式签名，创建并推送对应的 `android-v<versionName>` 标签，或对已存在的正确标签触发 Release 工作流；不得遗漏 Android 标签，也不得移动已发布标签或覆盖不同内容的已发布 APK。具体步骤遵循 `docs/android-release.md`。
+- 本次发布已获用户授权且 Android 需要发布时，必须完成 Android **Release** 构建、lint、既有正式签名及 APK 校验，并创建、推送对应的 `android-v<versionName>` 标签，或对已存在的正确标签触发 Release 工作流，同步发布 Android 安装包和更新清单。不得只生成本地 APK 或 Actions Artifacts 后报告已发布，也不得移动已发布标签或覆盖不同内容的已发布 APK。具体步骤遵循 `docs/android-release.md`。
 - 等待 Android 工作流结束，单独确认 `Publish independent Android Release` 任务成功；该任务为 `skipped`、失败或仍在运行时，不得报告发布完成。
 - 发布后确认对应 Android Release 已公开，包含 `CodexElves-<versionName>-android.apk` 和 `android-update.json`；下载两项附件，核对版本、`versionCode`、APK 大小和 SHA-256 与更新清单及本次正式构建一致，并确认桌面 Latest 标记和 `latest.json` 未被 Android 发布覆盖。
 - 最终分别报告桌面和 Android 状态：`已发布`、`已构建未发布`、`进行中`、`失败/受阻` 或 `跳过（附依据）`，并提供对应运行记录、Release 或产物位置。只要求检查、诊断或本地编译时，不得擅自创建、推送发布标签或触发远程发布；发现未发布应明确列为待完成项。
