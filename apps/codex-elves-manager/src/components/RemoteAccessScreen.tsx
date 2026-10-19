@@ -40,6 +40,7 @@ export function RemoteAccessScreen({
   const mounted = useRef(true);
   const refreshing = useRef(false);
   const loadedZrokSetupValue = useRef(settings.zrokSetupValue);
+  const fixedNameDirtyRef = useRef(false);
   const loadedKeyValue = useRef<string | null>(null);
   const loginLockRevision = useRef(0);
   const keyDirtyRef = useRef(false);
@@ -91,8 +92,8 @@ export function RemoteAccessScreen({
     setZrokValue(settings.zrokSetupValue);
   }, [settings.zrokSetupValue]);
   useEffect(() => {
-    if (!fixedNameValue && status?.zrok?.fixedName) setFixedNameValue(status.zrok.fixedName);
-  }, [fixedNameValue, status?.zrok?.fixedName]);
+    if (!fixedNameDirtyRef.current && status?.zrok?.fixedName) setFixedNameValue(status.zrok.fixedName);
+  }, [status?.zrok?.fixedName]);
   const run = async (operation: () => Promise<void>) => {
     setBusy(true);
     setMessage("");
@@ -214,6 +215,7 @@ export function RemoteAccessScreen({
     if (!mounted.current) return;
     setStatus(result);
     if (result.status !== "ok") throw new Error(result.message || "zrok 公网启动失败");
+    fixedNameDirtyRef.current = false;
     setFixedNameValue(result.zrok?.fixedName || fixedName);
     onSuccess(result.zrok?.state === "ready" ? "zrok 固定公网已启动。" : "zrok 固定公网正在启动并验证访问。");
   });
@@ -389,7 +391,10 @@ export function RemoteAccessScreen({
                     aria-label="固定公网名称"
                     placeholder="固定公网名称"
                     value={fixedNameValue}
-                    onChange={event => setFixedNameValue(event.target.value.toLowerCase())}
+                    onChange={event => {
+                      fixedNameDirtyRef.current = true;
+                      setFixedNameValue(event.target.value.toLowerCase());
+                    }}
                   />
                 ) : null}
                 <Button
@@ -405,7 +410,7 @@ export function RemoteAccessScreen({
               </div>
               <p id="remote-desktop-guidance" className="remote-access-hint" role="status" aria-live="polite">{desktopGuidance}</p>
               {zrokToken && fixedNameValue && !fixedNameValid ? <small className="remote-access-inline-error">固定公网名称需为 3–63 位小写字母、数字或连字符，且首尾必须是字母或数字。</small> : null}
-              <small>输入邮箱时发送注册邮件；输入 token 时同时填写固定公网名称。点击右侧按钮后，当前邮箱或 token 会保存到本机 CodexElves 设置并在下次打开时回显。</small>
+              {!zrokToken && !normalizedFixedName ? <small>输入邮箱时发送注册邮件；输入 token 时同时填写固定公网名称。点击右侧按钮后，当前邮箱或 token 会保存到本机 CodexElves 设置并在下次打开时回显。</small> : null}
             </div>
             <div className="remote-access-wide">
               <Label htmlFor="remote-zrok-url">固定公网地址</Label>
