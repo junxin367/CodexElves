@@ -214,10 +214,10 @@ export function createTranscriptCache({ maxEntries = 5, maxBytes = 6 * 1024 * 10
   let totalBytes = 0;
   const key = (deviceId, threadId) => JSON.stringify([deviceId, threadId]);
   return {
-    put(deviceId, threadId, value) {
+    put(deviceId, threadId, value, view = null) {
       if (!deviceId || !threadId) return;
       const id = key(deviceId, threadId);
-      let serialized, bytes, retained;
+      let serialized, bytes, retained, retainedView;
       // 长会话超限时保留服务端最近一页；游标仍来自服务端，不自行截断消息或制造分页缺口。
       const recentWindows = [value?.recentWindow, value?.recentPage].filter(Boolean).map(page => ({
         ...page, title: value.title, cwd: value.cwd,
@@ -236,12 +236,14 @@ export function createTranscriptCache({ maxEntries = 5, maxBytes = 6 * 1024 * 10
         const size = new TextEncoder().encode(text).length;
         if (size > maxBytes) continue;
         serialized = text; bytes = size; retained = snapshot;
+        retainedView = candidate === value ? view : null;
         break;
       }
       if (serialized === undefined) return;
       const previous = entries.get(id);
       if (previous) { totalBytes -= previous.bytes; entries.delete(id); }
-      entries.set(id, { serialized, bytes }); totalBytes += bytes;
+      // 渲染节点只留在内存，和对应正文一起淘汰，不进入可持久化的快照。
+      entries.set(id, { serialized, bytes, view: retainedView }); totalBytes += bytes;
       while (entries.size > maxEntries || totalBytes > maxBytes) {
         const oldest = entries.keys().next().value;
         totalBytes -= entries.get(oldest).bytes; entries.delete(oldest);
@@ -253,6 +255,12 @@ export function createTranscriptCache({ maxEntries = 5, maxBytes = 6 * 1024 * 10
       if (!entry) return null;
       entries.delete(id); entries.set(id, entry);
       return JSON.parse(entry.serialized);
+    },
+    takeView(deviceId, threadId) {
+      const entry = entries.get(key(deviceId, threadId));
+      const view = entry?.view || null;
+      if (entry) entry.view = null;
+      return view;
     },
     remove(deviceId, threadId) {
       const id = key(deviceId, threadId), entry = entries.get(id);

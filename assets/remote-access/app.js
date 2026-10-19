@@ -4550,7 +4550,7 @@ async function startNewChat(projectId, { focus = true } = {}) {
   }
   const project = projectId === undefined ? selectedThreadProjectId() : projectId;
   closePopup();
-  if (selectedId || creating) { rememberDraft(); rememberTranscript(); }
+  if (selectedId || creating) { rememberDraft(); rememberTranscript({ retainView: true }); }
   resetMessages();
   editingQueuedMessage = null;
   setSelectValue($("#project-select"), project);
@@ -5150,7 +5150,8 @@ async function submitMessageEdit() {
 }
 function enableImagePreviewZoom(viewport, image) {
   const pointers = new Map();
-  let scale = 1, x = 0, y = 0;
+  const fittedScale = () => Math.min(1, viewport.clientWidth / image.naturalWidth, viewport.clientHeight / image.naturalHeight);
+  let minScale = fittedScale(), scale = minScale, x = 0, y = 0;
   const render = () => {
     const limitX = Math.max(0, (image.naturalWidth * scale - viewport.clientWidth) / 2);
     const limitY = Math.max(0, (image.naturalHeight * scale - viewport.clientHeight) / 2);
@@ -5179,8 +5180,8 @@ function enableImagePreviewZoom(viewport, image) {
     const before = gesture();
     pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     const after = gesture();
-    // 1:1 使用原始像素尺寸，不能以适应屏幕后的尺寸作为缩放下限。
-    const nextScale = Math.max(1, before.distance ? scale * after.distance / before.distance : scale);
+    // 默认完整显示图片，双指缩小后也不能小于适应当前视口的尺寸。
+    const nextScale = Math.max(minScale, before.distance ? scale * after.distance / before.distance : scale);
     const ratio = nextScale / scale;
     x = after.x - (before.x - x) * ratio;
     y = after.y - (before.y - y) * ratio;
@@ -5191,7 +5192,16 @@ function enableImagePreviewZoom(viewport, image) {
   viewport.onpointerup = release;
   viewport.onpointercancel = release;
   viewport.onlostpointercapture = release;
-  const resizeObserver = new ResizeObserver(() => { pointers.clear(); render(); });
+  const resizeObserver = new ResizeObserver(() => {
+    pointers.clear();
+    const nextMinScale = fittedScale();
+    if (scale === minScale) {
+      scale = nextMinScale;
+      x = 0; y = 0;
+    } else scale = Math.max(nextMinScale, scale);
+    minScale = nextMinScale;
+    render();
+  });
   resizeObserver.observe(viewport);
   render();
   return () => { resizeObserver.disconnect(); pointers.clear(); };
@@ -7668,7 +7678,7 @@ function renderMessages(keepScroll = true) {
   updateScrollControl();
   scheduleHistoryLoad();
 }
-function rememberTranscript() {
+function rememberTranscript({ retainView = false } = {}) {
   if (!session || !selectedId || !historyInitialized || threadDeleted(selectedId)) return;
   const summary = [...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
     ...(sidebar?.projects || []).flatMap(project => project.threads || [])].find(item => item.id === selectedId);
@@ -7685,7 +7695,12 @@ function rememberTranscript() {
     title: thread?.title || summary?.title || "",
     cwd: thread?.cwd || summary?.cwd || ""
   };
-  const retained = transcriptCache.put(session.device.id, selectedId, snapshot);
+  // 仅离开会话时保留渲染节点，和正文共用容量限制；超限回退窗口时不复用整页视图。
+  const view = retainView ? {
+    turns: new Map(turns), items: new Map(renderedItems),
+    groups: new Map(renderedTurns), activities: new Map(renderedActivities)
+  } : null;
+  const retained = transcriptCache.put(session.device.id, selectedId, snapshot, view);
   if (retained) {
     const completed = retained.turns.filter(turn => ["completed", "failed", "interrupted"].includes(turn.status));
     const completedIds = new Set(completed.map(turn => turn.id));
@@ -7700,7 +7715,13 @@ function rememberTranscript() {
 function restoreTranscript(id) {
   const cached = transcriptCache.get(session?.device.id, id);
   if (!cached) return null;
-  turns = new Map(cached.turns.map(turn => [turn.id, turn]));
+  const view = transcriptCache.takeView(session.device.id, id);
+  turns = view?.turns || new Map(cached.turns.map(turn => [turn.id, turn]));
+  if (view) {
+    for (const [key, value] of view.items) renderedItems.set(key, value);
+    for (const [key, value] of view.groups) renderedTurns.set(key, value);
+    for (const [key, value] of view.activities) renderedActivities.set(key, value);
+  }
   replaceTranscriptEvents(cached.transcriptEvents);
   historyCursor = cached.historyCursor; historyInitialized = true;
   recentHistoryPage = cached;
@@ -7730,7 +7751,7 @@ async function selectThread(id, { closeSidebar = true, force = false } = {}) {
   cancelMessageEdit({ focus: false });
   if (closeSidebar) closePopup();
   rememberDraft();
-  if (!force) rememberTranscript();
+  if (!force) rememberTranscript({ retainView: true });
   resetMessages();
   editingQueuedMessage = null;
   const version = ++selectionVersion;
@@ -7818,7 +7839,7 @@ function showWelcome() {
     return;
   }
   cancelMessageEdit({ focus: false });
-  rememberDraft(); rememberTranscript(); resetMessages();
+  rememberDraft(); rememberTranscript({ retainView: true }); resetMessages();
   editingQueuedMessage = null;
   ++selectionVersion; ++threadReadVersion; selectionToken = randomId();
   selectedId = null; thread = null; creating = false; historyCursor = null; historyInitialized = false; turns.clear(); transcriptEvents.clear(); notifiedTokenUsage = null;
@@ -7993,7 +8014,8 @@ function mergeItemProjection(previous, item) {
   for (const field of ["messageMetadata", "sentAtMs", "startedAtMs", "completedAtMs", "completed",
     "remoteImages", "clientId", "remoteCompactionInput", "remoteHistoryContext", "remoteItemCompleted"])
     if (!Object.hasOwn(item, field) && Object.hasOwn(previous || {}, field)) projection[field] = previous[field];
-  return { ...projection, ...item };
+  const merged = { ...projection, ...item };
+  return previous && JSON.stringify(previous) === JSON.stringify(merged) ? previous : merged;
 }
 function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = null, cached = false } = {}) {
   const current = turns.get(snapshot.id);
