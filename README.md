@@ -3,7 +3,7 @@
 # CodexElves
 
 <p align="center">
-  <img src="docs/images/icon.png" alt="CodexElves 图标" width="160">
+  <img src="docs/images/icon.png" alt="CodexElves 图标" width="128">
 </p>
 
 <p align="center">
@@ -14,200 +14,165 @@
   <img alt="Release" src="https://img.shields.io/github/v/release/junxin367/CodexElves">
   <img alt="Stars" src="https://img.shields.io/github/stars/junxin367/CodexElves">
   <img alt="License" src="https://img.shields.io/github/license/junxin367/CodexElves">
-  <img alt="Rust" src="https://img.shields.io/badge/rust-1.85%2B-orange">
-  <img alt="Tauri" src="https://img.shields.io/badge/tauri-2.x-24C8DB">
 </p>
 
-CodexElves 是面向新版 ChatGPT 桌面应用中 Codex 工作区的外部增强启动器和管理工具，同时兼容旧版 Codex App。它不修改原始安装文件，而是通过外部 launcher 启动 ChatGPT/Codex，并使用 Chromium DevTools Protocol 注入增强脚本。
+CodexElves 是 Codex 桌面工作区的增强工具，提供多供应商模型配置、本地协议代理、请求日志、会话管理和手机远程会话。支持带 Codex 工作区的 ChatGPT 桌面应用及 Codex App，通过独立启动器和管理工具使用。
 
-桌面应用改名兼容：
-
-- Windows：支持新版 `ChatGPT.exe` 和旧版 `Codex.exe`；当前 Microsoft Store 包身份仍为 `OpenAI.Codex`。
-- macOS：支持新版 `ChatGPT.app`，并保留 `Codex.app`、`OpenAI Codex.app` 等旧名称。
-- Watcher 只接管带 Codex 运行时的桌面应用，不会把 ChatGPT Classic 或 `resources\codex.exe` CLI 当作桌面主进程。
-- Codex CLI、`~/.codex` 配置目录、协议字段和会话数据仍使用 Codex 名称，不做错误迁移。
-
-## 快速使用
-
-从 [GitHub Releases](https://github.com/junxin367/CodexElves/releases) 下载最新版安装包：
-
-- Windows：`CodexElves-*-windows-x64-setup.exe`
-- macOS Intel：`CodexElves-*-macos-x64.dmg`
-- macOS Apple Silicon：`CodexElves-*-macos-arm64.dmg`
-
-安装后会有两个入口：
-
-- `CodexElves`：静默启动入口，不显示管理界面，只负责启动 ChatGPT/Codex 并注入增强功能。
-- `CodexElves 管理工具`：Tauri 控制面板，用于启动、检查、修复、更新、配置中转注入、管理增强功能和用户脚本。
-
-Windows 安装包会创建桌面和开始菜单快捷方式。macOS DMG 会安装 `/Applications/CodexElves.app` 和 `/Applications/CodexElves 管理工具.app`。
-
-## Android 与 PWA
-
-Android APK 内置首版网页资源，登录后从填写的 HTTPS 服务域名后台检查和下载资源更新。网页与 PWA 只需输入访问密钥；Android 首次登录输入域名和密钥，之后恢复已保存的设备授权。Android 使用独立版本，设置弹窗左下显示当前应用版本并支持手动检查更新，也会自动从本仓库的 Android GitHub Release 检查新版，校验 APK 后交给系统确认安装。构建和发布说明见 [Android 与 PWA 发布说明](docs/android-release.md)。电脑端需要更新到包含 PWA 和资源清单接口的版本。
+**[下载安装](https://github.com/junxin367/CodexElves/releases) · [效果展示](#效果展示) · [手机远程会话](docs/remote-access-mobile.md)**
 
 ## 主要功能
 
-- Rust 后端和静默 launcher，启动时不依赖额外运行时。
-- Tauri + React 管理工具，支持深色/浅色切换。
-- 远程会话：独立设置入口与手机网页，共用桌面原生会话、项目置顶和排序；支持 zrok 固定公网地址、邮箱注册或 token 绑定、长期密钥登录和设备撤销。配置及验证边界见 [远程会话说明](docs/remote-access.md)。
-- 外部 CDP 注入，不改 `app.asar`，不向 ChatGPT/Codex 安装目录写入 DLL。
-- 中转注入模式：支持多个中转配置，写入 `CodexElves` provider，并可切回官方 ChatGPT 登录态。
-- 传统增强模式：插件入口解锁、插件市场解锁、会话删除、Markdown 导出、项目移动等。
-- 工作区 Checkpoint：每轮 AI 开始前保存外部 shadow Git 快照，可撤销上一轮文件修改、编辑历史消息时恢复对应轮次，并恢复任意历史快照；遵循 `.gitignore`，不写入项目 Git。
-- 用户脚本独立管理，可在启动时注入自定义脚本。
-- Provider 同步：启动前同步本地会话 metadata，切换供应商后旧会话仍可见。
-- Upstream worktree 创建：可从 `upstream/<base-branch>` 创建新 worktree，创建前自动 fetch 远端分支，降低从陈旧本地 HEAD 派生导致的冲突风险。
-- GitHub Release 自动更新，管理工具和静默启动器都会检测可用更新。
-- Windows 单实例、无黑框启动、管理员权限清单、系统桌面路径识别。
-- macOS x64/arm64 分架构 DMG，静默入口隐藏 Dock 图标。
+| 功能 | 可以做什么 |
+| --- | --- |
+| 供应商与模型配置 | 管理官方登录、纯 API、官方混入 API 等接入模式；为模型配置协议、别名和上下文大小 |
+| 本地协议代理 | 按模型配置连接 Responses API、Chat Completions 或 Anthropic 上游；Responses 请求直接转发，其他协议按需转换 |
+| 请求日志与用量 | 查看请求结果、首字时间、耗时、模型速率，以及完整请求、返回和上游报告的 Token 用量 |
+| 会话管理 | 浏览本地会话，批量删除、修复供应商归属；在桌面启用 Markdown 导出和项目移动等增强 |
+| 桌面增强 | 按需启用任务看板、插件入口兼容、Fast 控制、工作区快捷打开、会话 Token 统计和用户脚本 |
+| Chrome 与图片生成兼容 | 修复部分桌面版本在 API Key 模式下的 Chrome 插件调用问题，以及兼容 API 已返回图片但 Codex 未显示生成结果的问题 |
+| 工作区 Checkpoint | 在 AI 轮次开始前保存外部 Git 快照，恢复对应轮次的文件；遵循 `.gitignore`，不写入项目 Git 仓库 |
+| 手机远程会话 | 通过网页、PWA 或 Android 连接电脑上的 Codex，查看项目、继续会话、查看执行过程并处理支持的审批和询问 |
+
+模型可用性、上下文容量及工具支持取决于上游服务与桌面版本；添加模型名称不会自动获得该模型的访问权限。
+
+## 安装与开始使用
+
+先安装可正常打开 Codex 工作区的桌面应用，再从 [GitHub Releases](https://github.com/junxin367/CodexElves/releases) 下载适合的平台安装包：
+
+| 平台 | 安装包 |
+| --- | --- |
+| Windows x64 | `CodexElves-<版本>-windows-x64-setup.exe` |
+| macOS Intel | `CodexElves-<版本>-macos-x64.dmg` |
+| macOS Apple Silicon | `CodexElves-<版本>-macos-arm64.dmg` |
+
+手机远程会话的内置 zrok 自动下载目前仅支持 **Windows x64 电脑端**；macOS 安装包可用不代表支持相同的公网自动配置流程。
+
+安装后有两个入口：
+
+- **CodexElves 管理工具**：配置供应商、模型、增强功能和远程访问，查看请求日志与运行状态。
+- **CodexElves**：静默启动 Codex 桌面应用并加载增强功能，不显示管理面板。
+
+第一次使用建议按以下顺序操作：
+
+1. 打开 **CodexElves 管理工具**。在「供应商配置」选择接入方式；使用自定义 API 时填写自己的 Base URL、Key 和模型列表，并核对每个模型的协议。
+2. 需要协议转换时，在对应供应商的编辑页启用「本地代理」，保存配置并选择该供应商的「使用」。使用官方登录时，先在 Codex 桌面应用完成登录。
+3. 在「功能增强」按需选择功能并保存。修改启动相关设置后，点击右上角「重启 Codex」，等待主界面就绪。
+4. 开始使用桌面会话；通过本地代理发送的模型请求可在「本地代理」页查看日志。仅需要手机访问时，继续阅读 [远程会话移动端指南](docs/remote-access-mobile.md)。
+
+供应商配置会更新 Codex 的配置及认证文件。切换前请保留自己的配置备份；「官方混入 API」仍需有效的官方登录状态，API Key 不能替代官方账号权限。
 
 ## 效果展示
 
-## 完整功能
-![alt text](image.png)
+以下桌面图片统一为 **1200 × 810**，于 **2026-10-19** 制作。管理器图片来自当前源码预览；Codex 图片使用当前运行时控件与样式的本地演示副本，优化设置弹窗取自当前注入脚本模板。会话、供应商、路径及用量均为演示数据，API Key 保持遮挡；图片不作为真实工具执行、性能测试或端到端兼容验收的证据。可点击图片打开原图查看细节。
 
-### 本地代理
-- 本地代理优化了非gpt模型协议翻译逻辑，可以使用codex内置工具，如web_search，tool_search
-- 支持自己设置模型，和上下文大小
+### Codex 内的快捷增强
 
-![alt text](image-4.png)
+增强入口直接放在 Codex 工作界面中，减少切回管理工具的次数：
 
-### 本地代理和请求日志
-![alt text](image-1.png)
+| 入口 | 用法与作用 |
+| --- | --- |
+| Open in | 在会话顶部选择可用的编辑器、文件管理器或终端，打开当前会话的工作目录 |
+| Token 信息 | 在右上角置顶摘要附近查看当前会话的累计和最近一轮用量，包括输入、输出、缓存；统计包含关联的子代理 |
+| Fast / Standard | 在输入框权限按钮旁查看并切换服务模式，仅对模型和上游支持的能力生效 |
+| 提示词优化 ✨ | 在发送前优化输入框中的文字；右键打开模型、思考深度、风格和上下文设置 |
 
-### 批量会话删除
-![alt text](image-2.png)
+[![Codex 增强入口演示：顶部 Open in、右侧 Token 用量及输入框旁的服务模式和提示词优化按钮](docs/images/showcase/codex-workspace-controls.png)](docs/images/showcase/codex-workspace-controls.png)
 
-## 痛点与解决
+「快速打开工作区」「会话 Token 统计」「Fast 按钮」在管理工具的「功能增强」中按需启用并保存；Token 统计需展开桌面的置顶摘要面板。界面入口会随桌面版本适配，图中位置与样式来自当前运行时。
 
-API Key 登录模式下，Codex 原生插件入口会提示需要登录 ChatGPT，导致插件功能无法正常使用：
+### Open in 打开当前工作区
 
-![API Key 模式下插件入口不可用](docs/images/pain-plugin-disabled.png)
+点击顶部图标可用首选应用打开当前工作目录，旁边下拉菜单可选择其他目标。图中展示 VS Code、Visual Studio、File Explorer 和 Git Bash；实际列表由本机安装情况及 Codex 提供的目标决定。
 
-Codex 原生会话列表只有归档入口，没有真正的删除按钮：
+[![Open in 下拉菜单演示：选择编辑器、文件管理器或终端打开工作目录](docs/images/showcase/codex-open-in.png)](docs/images/showcase/codex-open-in.png)
 
-![原生会话列表缺少删除能力](docs/images/pain-no-delete-button.png)
+### 发送前优化提示词
 
-CodexElves 启动后会解锁插件入口，并在会话列表悬停时显示删除按钮：
+启用功能增强后，在输入框填写草稿，点击 **✨** 优化文字；优化后再次点击同一按钮可恢复原文，再由自己确认发送，不自动提交任务。右键点击 **✨** 可选择模型、思考深度，以及「简洁」「结构化」「编程」风格，并设置是否附带最近一轮上下文。
 
-![CodexElves 解锁插件入口并添加删除按钮](docs/images/solution-plugin-and-delete.png)
+[![提示词优化设置演示：模型、思考深度、优化风格、最近一轮上下文及系统提示词](docs/images/showcase/codex-prompt-optimize.png)](docs/images/showcase/codex-prompt-optimize.png)
 
-顶部菜单栏会出现 `CodexElves`，可以查看后端状态并打开设置面板：
+优化会调用所选上游模型，需要可用的供应商配置。图中只展示设置，不包含真实优化请求。
 
-![CodexElves 后端状态指示灯](docs/images/backend-status-indicator.png)
-![CodexElves 设置面板](docs/images/settings-panel.png)
+### Chrome 与 imagegen 兼容
 
-## 中转注入
+| 场景 | CodexElves 的处理与使用条件 |
+| --- | --- |
+| API Key 模式下无法使用 Chrome 插件 | Windows 下的「API Key 浏览器插件兼容」处理部分版本的 `unsupported Codex auth method: apikey` 及浏览器请求头身份兼容问题。保持该开关启用、保存增强设置并重启 Codex；Chrome 扩展仍需正常安装、连接并具备目标站点权限 |
+| imagegen 已返回图片，Codex 却没有显示 | 请求经过本地代理时，兼容上游的图片生成结果，将合法的 PNG/JPEG/WebP 保存到本机并转换为 Codex 可显示的消息。仍需使用支持图片生成的上游、模型和工具；不会给原本不支持的服务增加生图能力 |
 
-中转注入适合已经在 Codex/ChatGPT 中完成官方账号登录，同时希望把模型请求转到自定义兼容 API 的场景。
+Chrome 插件调用兼容与图片结果显示兼容是不同路径。这里介绍的是本项目已实现的适配，本轮文档制作未重新验收 API Key 模式下的插件调用或代理生图。
 
-这种混合模式的边界是：
+### 供应商与模型配置
 
-- 官方 ChatGPT/Codex 登录态继续负责桌面应用的账号能力和插件入口。
-- 中转配置只接管模型请求使用的 Base URL、Key 和模型名称。
-- 兼容 API 供应商不需要固定为某一家；只要上游协议和 Codex 配置匹配即可。
-- 清除 API 模式后应能回到官方登录态，继续使用官方账号和插件。
+在同一张模型表中分别设置协议、别名和上下文大小，按供应商选择是否启用本地代理。
 
-应用中转注入前建议先做一次最小检查：
+[![供应商编辑页：接入模式、Base URL、已遮挡的 Key 和模型协议表](docs/images/showcase/manager-models.png)](docs/images/showcase/manager-models.png)
 
-1. 先确认 Codex 已检测到 ChatGPT 登录状态，插件入口可用。
-2. 确认自定义 Base URL 可访问，并且支持所选上游协议（例如 Responses 兼容接口）。
-3. 用目标 Key 做一次最小认证测试，例如模型列表或很短的消息请求。
-4. 只记录 Key 是否存在和认证结果，不要把真实 Key 写入日志、截图或 issue。
-5. 确认 `~/.codex/config.toml` 已有备份，便于清除 API 模式后回滚。
+### 本地代理与请求日志
 
-在管理工具的“中转注入”页面：
+查看代理状态、按模型汇总的速率、协议转换结果及单次请求的耗时；点击「查看」打开详情。
 
-1. 确认已经检测到 ChatGPT 登录状态。
-2. 添加一个或多个中转配置，填写 Base URL 和 Key。
-3. 选择当前配置并应用中转注入。
-4. 启动 `CodexElves`。
+[![本地代理页：运行状态、模型速率和请求日志](docs/images/showcase/manager-proxy-logs.png)](docs/images/showcase/manager-proxy-logs.png)
 
-CodexElves 会在 `~/.codex/config.toml` 中写入类似配置：
+请求详情展示上游报告的输入、输出、缓存命中、缓存写入和推理 Token，并可展开请求与返回的 JSON。
 
-```toml
-model_provider = "CodexElves"
+[![请求详情：Token 用量和可展开的请求、响应 JSON](docs/images/showcase/manager-request-detail.png)](docs/images/showcase/manager-request-detail.png)
 
-[model_providers.CodexElves]
-name = "CodexElves"
-wire_api = "responses"
-requires_openai_auth = true
-base_url = "https://example.com/v1"
-experimental_bearer_token = "sk-..."
-```
+### 按需启用桌面增强
 
-如果需要回到官方登录态，在“中转注入”页面点击清除 API 模式即可移除 `OPENAI_API_KEY` 相关配置并切回官方 ChatGPT 登录模式。
+在「功能增强」集中管理任务看板、会话操作、插件兼容和桌面界面开关。
 
-## 增强功能
+[![功能增强页：基础控制、任务看板、会话删除和其他可选功能](docs/images/showcase/manager-enhancements.png)](docs/images/showcase/manager-enhancements.png)
 
-增强功能在管理工具中统一开关。默认开启增强注入；关闭后不会注入 CodexElves 菜单和脚本。
+### 手机继续电脑上的会话
 
-如果启用中转注入模式，插件入口解锁和插件市场解锁不再需要，界面会提示“中转注入模式下无需开启”。会话删除、导出、移动和用户脚本等增强仍可继续使用。
+手机端的界面演示、首次连接步骤、PWA 与 Android 的区别，以及连接问题处理，单独整理在 **[远程会话移动端指南](docs/remote-access-mobile.md)**。其中提供约 15 秒 GIF 和静态图片，便于查看操作过程。
 
-## 自动更新与安装包
+## 数据与运行方式
 
-CodexElves 通过 GitHub Release 发布安装包。Windows 会生成 NSIS 安装程序，macOS 会生成 Intel x64 和 Apple Silicon arm64 两个 DMG。
+CodexElves 通过独立 launcher 启动桌面应用并注入增强脚本。桌面界面升级可能影响注入兼容性；「API Key 浏览器插件兼容」还会备份并适配相关运行时文件，因此部分功能也会涉及运行时文件变更。
 
-管理工具的“关于”页可以检查并启动更新。静默启动器发现新版本时会拉起管理工具并进入更新提示。
+| 数据 | 默认位置 |
+| --- | --- |
+| Codex 配置 | `~/.codex/config.toml` |
+| Codex 认证信息 | `~/.codex/auth.json` |
+| Codex 会话数据库 | 优先使用 `~/.codex/sqlite/*.db`，兼容旧的 `~/.codex/state_5.sqlite` |
+| CodexElves 设置与日志 | `~/.codex-session-delete/` |
+| 供应商归属同步备份 | `~/.codex/backups_state/provider-sync` |
 
-## 数据位置
-
-- Codex 配置：`~/.codex/config.toml`
-- Codex 登录状态：`~/.codex/auth.json`
-- Codex 本地数据库：优先读取 `~/.codex/sqlite/*.db`，旧版回退到 `~/.codex/state_5.sqlite`
-- CodexElves 状态与日志：`~/.codex-session-delete/`
-- Provider 同步备份：`~/.codex/backups_state/provider-sync`
+管理工具的「设置」页可调整适用的目录配置。API Key、远程访问密钥、设备授权及请求日志可能包含敏感信息，分享日志或截图前请检查内容。删除会话会删除相应数据库记录和 rollout 文件，无法通过归档功能恢复。
 
 ## 常见问题
 
-### CodexElves 菜单没出现
+### CodexElves 菜单或增强没有出现
 
-确认是从 `CodexElves` 入口启动，而不是直接打开原版 ChatGPT/Codex 应用。也可以打开管理工具的“诊断”和“日志”页面查看注入状态。
+从 **CodexElves** 入口启动桌面应用，或在管理工具右上角点击「重启 Codex」；在「功能增强」确认相关开关已启用并保存。仍有问题时，在「安装维护」检查安装与后端状态。
 
-### 插件内显示后端连不上
+### 配置了模型，为什么请求仍然失败
 
-先在浏览器或 PowerShell 里测试：
+先在「供应商配置」核对已使用的供应商、Base URL、Key、请求模型名和协议，再到「本地代理」查看失败请求详情。官方登录、模型 API 权限和第三方工具能力是不同条件；界面显示某个模型不代表上游允许调用。
 
-```powershell
-Invoke-RestMethod -Method Post -Uri http://127.0.0.1:45221/backend/status -Body "{}" -ContentType "application/json"
-```
+### 手机上能打开网页，却看不到会话
 
-如果接口正常，但插件仍显示超时，通常是 Codex 页面里的 CDP bridge 或脚本缓存问题。重启 Codex，或在管理工具里查看日志中的 `renderer.script_loaded`、`bridge.request`、`bridge.response`。
+电脑需保持开机，负责远程访问的 CodexElves 进程和 Codex 桌面应用需保持运行。网页可打开只说明入口可达；还需保存访问密钥、完成手机授权，并等待桌面连接就绪。完整步骤见 [移动端连接与排查](docs/remote-access-mobile.md#连接问题)。
 
-### Upstream worktree 和 Codex 原生创建有什么区别
+### 更新、退出与平台说明
 
-CodexElves 的 Upstream worktree 功能等价于先更新远端分支，再执行：
+管理工具的「关于」页提供更新检查。Windows 关闭管理器窗口默认最小化到托盘，退出需使用托盘菜单。macOS 安装包按 Intel 和 Apple Silicon 区分；未签名或未公证的安装包可能被系统拦截，运行前请确认来源与安装包可信。
 
-```bash
-git worktree add -b <new-branch> <worktree-path> upstream/<base-branch>
-```
+## 更多文档
 
-这样新 worktree 从最新的远端跟踪分支开始，而不是从当前会话所在的本地 HEAD 开始。如果 CodexElves 无法安全识别当前 Codex 版本的原生 worktree 创建表单，请从 CodexElves 菜单中手动填写仓库路径、分支名、worktree 路径、remote 和 base branch。
-
-### macOS 提示无法打开或已损坏
-
-当前安装包未签名/未公证时，macOS Gatekeeper 可能拦截，出现“已损坏，无法打开”的提示：
-
-![macOS 提示 CodexElves 管理工具已损坏](docs/images/macos-damaged-warning.png)
-
-如果遇到该提示，可以在终端执行下面两条命令，解除苹果系统的安全隔离限制：
-
-```bash
-sudo xattr -rd com.apple.quarantine /Applications/CodexElves\ 管理工具.app
-sudo xattr -rd com.apple.quarantine /Applications/CodexElves.app
-```
-
-执行后重新打开 `CodexElves` 或 `CodexElves 管理工具` 即可。
-
-### macOS Intel 能用吗
-
-可以。Release 会分别提供 `macos-x64.dmg` 和 `macos-arm64.dmg`。Intel Mac 下载 x64 包，Apple Silicon 下载 arm64 包。
+- [远程会话移动端指南](docs/remote-access-mobile.md)：面向使用者的连接步骤、GIF 与手机界面说明。
+- [远程会话技术说明](docs/remote-access.md)：权限、协议、状态恢复和开发验证记录。
+- [Android 构建与运行](docs/android.md)、[Android 与 PWA 发布说明](docs/android-release.md)：移动应用构建、资源更新和发布规则。
 
 ## 开发
 
-```bash
-# 前端检查
+前端开发需要 Node.js 和 npm，Rust 构建需要相应工具链。Windows 的完整安装包通过仓库根目录的 `build.ps1` 构建。
+
+```powershell
+# 管理工具前端检查
 cd apps/codex-elves-manager
 npm install
 npm run check
@@ -216,27 +181,20 @@ npm run vite:build
 # Rust 检查
 cd ../..
 cargo fmt --check
-cargo test
-cargo build --release
+cargo check --workspace
+
+# Windows 安装包
+.\build.ps1
 ```
 
-主要结构：
+主要目录：
 
 ```text
-apps/
-  codex-elves-launcher/          静默启动入口
-  codex-elves-manager/           Tauri 管理工具
-assets/inject/
-  renderer-inject.js            注入到 Codex 渲染端的轻量 bootstrap
-  renderer-features.js          按需安装的完整增强脚本
-crates/
-  codex-elves-core/              启动、注入、配置、更新、安装、桥接等核心逻辑
-  codex-elves-data/              会话数据、导出、Provider 同步
-scripts/installer/
-  windows/CodexElves.nsi     Windows NSIS 安装包
-  macos/package-dmg.sh          macOS DMG 打包
+apps/codex-elves-launcher/    静默启动入口
+apps/codex-elves-manager/     Tauri 管理工具
+apps/codex-elves-android/     Android 应用
+assets/inject/               桌面注入脚本
+assets/remote-access/        手机网页与 PWA
+crates/codex-elves-core/     启动、代理、注入和远程访问
+crates/codex-elves-data/     会话数据、导出和供应商归属同步
 ```
-
-## 说明
-
-CodexElves 是外部增强工具，不修改 ChatGPT/Codex 桌面应用原始文件。桌面应用更新后，如果页面结构变化，可能需要更新注入脚本。

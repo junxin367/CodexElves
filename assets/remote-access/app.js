@@ -4778,10 +4778,13 @@ function renderSidebar() {
     const unassigned = sortThreads(sidebar.recent.filter(item => !item.projectId && !pinnedIds.has(item.id) && matches(item)), preferences.chats);
     appendSection("project:recent", "最近", unassigned.map(item => row(item)));
   } else {
+    appendSection("list:pinned", "置顶",
+      sortThreads(sidebar.pinnedThreads.filter(matches), preferences.pinned)
+        .map(item => row(item, "pinned", true)));
     const mergedRecent = [];
     const mergedIds = new Set();
-    for (const item of [...sidebar.recent, ...sidebar.pinnedThreads]) {
-      if (mergedIds.has(item.id)) continue;
+    for (const item of sidebar.recent) {
+      if (pinnedIds.has(item.id) || mergedIds.has(item.id)) continue;
       mergedIds.add(item.id); mergedRecent.push(item);
     }
     const eligible = item => item.priority?.eligible !== false;
