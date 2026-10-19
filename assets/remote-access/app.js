@@ -338,6 +338,7 @@ function applyAppearance(save = false) {
     catch { notice("外观已应用，但浏览器不允许保存；重新打开页面后将恢复默认。", true); }
   }
   resizeComposerInput();
+  resizeEditorInput(editingMessage?.input);
   refitComposerMenus();
   if ($("#messages")) scheduleMermaidBlocks();
 }
@@ -1097,14 +1098,18 @@ function composerPrompt(text = $("#prompt")?.value || "", skills = selectedSkill
   }
   return (result + body.slice(cursor)).trim();
 }
+function resizeEditorInput(input) {
+  if (!input?.isConnected) return;
+  input.style.height = "auto";
+  const style = getComputedStyle(input);
+  const contentHeight = Math.max(parseFloat(style.minHeight), input.scrollHeight);
+  const maxHeight = parseFloat(style.maxHeight);
+  input.style.height = `${Math.min(maxHeight, contentHeight)}px`;
+  input.style.overflowY = contentHeight > maxHeight ? "auto" : "hidden";
+  if (contentHeight <= maxHeight) input.scrollTop = 0;
+}
 function resizeComposerInput() {
-  const prompt = $("#prompt");
-  if (!prompt) return;
-  prompt.style.height = "auto";
-  const contentHeight = Math.max(matchMedia("(max-width: 760px)").matches ? 80 : 100, prompt.scrollHeight);
-  prompt.style.height = `${Math.min(180, contentHeight)}px`;
-  prompt.style.overflowY = contentHeight > 180 ? "auto" : "hidden";
-  if (contentHeight <= 180) prompt.scrollTop = 0;
+  resizeEditorInput($("#prompt"));
 }
 function mountComposerScroll() {
   const form = $("#composer"), input = $(".composer-input", form), messages = $("#messages");
@@ -4292,6 +4297,7 @@ function shell() {
   };
   messagesResizeObserver?.disconnect();
   messagesResizeObserver = new ResizeObserver(() => {
+    resizeEditorInput(editingMessage?.input);
     const messages = $("#messages");
     if (messages && followMessages) messages.scrollTop = messages.scrollHeight;
     fitApprovalArea();
@@ -5045,6 +5051,7 @@ function cancelMessageEdit({ focus = true } = {}) {
 function updateMessageEditor() {
   const edit = editingMessage;
   if (!edit?.form) return;
+  resizeEditorInput(edit.input);
   const locked = busy || !!pending;
   const target = thread?.editableMessage;
   const stale = Object.hasOwn(thread || {}, "editableMessage")
@@ -7660,6 +7667,7 @@ function renderMessages(keepScroll = true) {
     : selectedId && (!historyInitialized || historyError) ? historyPlaceholder()
     : element("div", "empty-conversation", "此会话暂无消息。"));
   reconcileChildren(root, children);
+  resizeEditorInput(editingMessage?.input);
   for (const key of renderedItems.keys()) if (!itemKeys.has(key)) {
     renderedItems.get(key).node.messageActionBinding?.dispose(); renderedItems.delete(key);
   }
