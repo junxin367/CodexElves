@@ -1306,7 +1306,15 @@ pub async fn local_settings_command(action: &str, payload: Value) -> anyhow::Res
     tokio::task::spawn_blocking(move || {
         let directory = crate::paths::default_app_state_dir();
         match action.as_str() {
-            "credentials" => access_credentials_status(&directory),
+            "credentials" => {
+                let mut credentials = access_credentials_status(&directory)?;
+                let (configured, token) = ngrok_tunnel::local_credentials(&directory);
+                credentials["ngrokTokenConfigured"] = json!(configured);
+                if let Some(token) = token {
+                    credentials["ngrokToken"] = json!(token);
+                }
+                Ok(credentials)
+            }
             "setKey" => {
                 configure_access_key(&directory, payload["key"].as_str().context("缺少访问密钥")?)?;
                 access_credentials_status(&directory)

@@ -17,6 +17,21 @@ const ARCHIVE_HASH: &str = "699bbf1932ec43a573b764bd03e6568efa2c4e45955eb3cc2089
 const PROGRAM_HASH: &str = "d339bcbd0713233337e860163f5249eea679cf26750a5700510dbc241d201748";
 const CONFIG_FILE: &str = "remote-access-ngrok.json";
 
+pub(super) fn local_credentials(directory: &Path) -> (bool, Option<String>) {
+    let path = directory.join(CONFIG_FILE);
+    let token = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|config| {
+            config["agent"]["authtoken"]
+                .as_str()
+                .filter(|token| !token.is_empty())
+                .map(str::to_owned)
+        });
+    // Unreadable ngrok configuration must not prevent access-key management.
+    (path.is_file(), token)
+}
+
 struct Running {
     child: Child,
     #[cfg(windows)]

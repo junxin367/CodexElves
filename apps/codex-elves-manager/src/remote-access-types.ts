@@ -79,6 +79,8 @@ export type RemoteAccessCredentials = {
   accessKeyConfigured: boolean;
   loginLocked?: boolean;
   key?: string;
+  ngrokTokenConfigured?: boolean;
+  ngrokToken?: string;
 };
 
 export type ZrokAccessTest = {

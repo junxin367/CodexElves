@@ -45,9 +45,11 @@ export function RemoteAccessScreen({
   const loadedZrokSetupValue = useRef(settings.zrokSetupValue);
   const fixedNameDirtyRef = useRef(false);
   const loadedKeyValue = useRef<string | null>(null);
+  const loadedNgrokToken = useRef<string | null>(null);
   const loginLockRevision = useRef(0);
   const ngrokTokenRevision = useRef(0);
   const keyDirtyRef = useRef(false);
+  const ngrokTokenDirtyRef = useRef(false);
   const latestSettings = useRef(settings);
   latestSettings.current = settings;
   const patch = (value: Partial<RemoteAccessSettings>) => onChange({ ...latestSettings.current, ...value });
@@ -68,6 +70,15 @@ export function RemoteAccessScreen({
           loadedKeyValue.current = savedKey;
           setKeyValue(savedKey);
           setShowKey(false);
+        }
+        if (ngrokTokenReadRevision === ngrokTokenRevision.current && typeof saved.ngrokTokenConfigured === "boolean") {
+          setNgrokTokenConfigured(saved.ngrokTokenConfigured);
+          const savedToken = saved.ngrokToken || "";
+          if (!ngrokTokenDirtyRef.current && loadedNgrokToken.current !== savedToken) {
+            loadedNgrokToken.current = savedToken;
+            setNgrokToken(savedToken);
+            setShowNgrokToken(false);
+          }
         }
       }
       else { setCredentials(null); setMessage(saved.message || "凭据状态读取失败"); }
@@ -236,12 +247,15 @@ export function RemoteAccessScreen({
     onSuccess(result.message || "公网访问验证通过。");
   });
   const saveNgrokToken = () => runApply(async () => {
-    const result = await command<{ status: string; message?: string }>("saveNgrok", { token: ngrokToken.trim() });
+    const nextToken = ngrokToken.trim();
+    const result = await command<{ status: string; message?: string }>("saveNgrok", { token: nextToken });
     if (!mounted.current) return;
     if (result.status !== "ok") throw new Error(result.message || "ngrok 验证失败");
     ++ngrokTokenRevision.current;
+    loadedNgrokToken.current = nextToken;
+    ngrokTokenDirtyRef.current = false;
     setNgrokTokenConfigured(true);
-    setNgrokToken("");
+    setNgrokToken(nextToken);
     setShowNgrokToken(false);
     await refresh();
     if (mounted.current) onSuccess(result.message || "ngrok Token 已保存并通过测试。");
@@ -445,34 +459,25 @@ export function RemoteAccessScreen({
             </div>
             <div className="remote-access-wide">
               <Label htmlFor="remote-ngrok-token">ngrok Token</Label>
-              <div className="remote-access-input-row remote-access-public-row">
-                <div className="remote-access-key-input">
-                  <Input
-                    id="remote-ngrok-token"
-                    type={showNgrokToken ? "text" : "password"}
-                    autoComplete="off"
-                    spellCheck={false}
-                    disabled={busy}
-                    value={ngrokToken}
-                    placeholder={ngrokTokenConfigured ? "已保存；输入新 Token 可替换" : "输入 ngrok Token"}
-                    onChange={event => {
-                      setNgrokToken(event.target.value);
-                      if (!event.target.value) setShowNgrokToken(false);
-                    }}
-                  />
-                  <div className="remote-access-key-actions">
-                    <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={busy || !ngrokToken}
-                      aria-label={showNgrokToken ? "隐藏 ngrok Token" : "显示 ngrok Token"}
-                      aria-pressed={showNgrokToken}
-                      onClick={() => setShowNgrokToken(value => !value)}>
-                      {showNgrokToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                    </Button>
-                    <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={busy || !ngrokToken}
-                      aria-label="复制 ngrok Token" onClick={() => void copy(ngrokToken)}>
-                      <Copy className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </div>
+              <div className="remote-access-input-row remote-access-key-row">
+                <SecretInput
+                  id="remote-ngrok-token"
+                  label="ngrok Token"
+                  disabled={busy}
+                  value={ngrokToken}
+                  visible={showNgrokToken}
+                  minLength={20}
+                  maxLength={512}
+                  placeholder={ngrokTokenConfigured
+                    ? loadedNgrokToken.current ? "输入新 Token 替换" : "已保存 Token 无法读取，请重新输入并保存"
+                    : "输入 ngrok Token"}
+                  onChange={value => {
+                    ngrokTokenDirtyRef.current = true;
+                    setNgrokToken(value);
+                  }}
+                  onToggleVisibility={() => setShowNgrokToken(value => !value)}
+                  onCopy={() => void copy(ngrokToken)}
+                />
                 <Button variant="secondary" size="sm" className="h-9"
                   disabled={busy || !settings.enabled || !ngrokToken.trim()}
                   onClick={() => void saveNgrokToken()}>{busy ? "处理中…" : "保存并测试"}</Button>
@@ -499,30 +504,27 @@ export function RemoteAccessScreen({
         <CardContent>
           {loginLocked ? <p className="remote-access-error" role="alert">访问密钥连续输错超过3次，新设备登录已锁定。请点击「生成」，再点击右侧「保存」；只有不同的新密钥保存成功后才会解锁。已登录设备当前不受影响。</p> : null}
           <div className="remote-access-fields remote-access-fields-top">
-            <div className="remote-access-wide"><Label htmlFor="remote-access-key">设置访问密钥</Label><div className="remote-access-input-row remote-access-key-row"><div className="remote-access-key-input">
-              <Input
+            <div className="remote-access-wide"><Label htmlFor="remote-access-key">设置访问密钥</Label><div className="remote-access-input-row remote-access-key-row">
+              <SecretInput
                 id="remote-access-key"
-                type={showKey ? "text" : "password"}
-                spellCheck={false}
+                label="访问密钥"
                 disabled={busy}
-                autoComplete="off"
+                visible={showKey}
                 minLength={8}
                 maxLength={64}
                 placeholder={credentials?.accessKeyConfigured
                   ? credentials.key ? "输入新密钥替换" : "旧密钥未保存明文，请重新输入并保存"
                   : "8–64 个非空格 ASCII 字符，建议随机生成"}
                 value={keyValue}
-                onChange={event => {
+                onChange={value => {
                   keyDirtyRef.current = true;
                   setKeyDirty(true);
-                  setKeyValue(event.target.value);
+                  setKeyValue(value);
                 }}
+                onToggleVisibility={() => setShowKey(value => !value)}
+                onCopy={() => void copy(keyValue)}
               />
-              <div className="remote-access-key-actions">
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={busy || !keyValue} aria-label={showKey ? "隐藏访问密钥" : "显示访问密钥"} onClick={() => setShowKey(value => !value)}>{showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</Button>
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={busy || !keyValue} aria-label="复制访问密钥" onClick={() => void copy(keyValue)}><Copy className="h-4 w-4" /></Button>
-              </div>
-            </div><Button variant="secondary" disabled={busy} onClick={() => void run(async () => {
+              <Button variant="secondary" disabled={busy} onClick={() => void run(async () => {
               const result = await command<{ status: string; key?: string; message?: string }>("generateKey");
               if (result.status !== "ok" || !result.key) throw new Error(result.message || "密钥生成失败");
               keyDirtyRef.current = true;
@@ -568,5 +570,50 @@ export function RemoteAccessScreen({
       </Card>
       {message ? <p className="remote-access-message" role="status" aria-live="polite">{message}</p> : null}
     </>
+  );
+}
+
+function SecretInput({
+  id, label, value, visible, disabled, placeholder, minLength, maxLength,
+  onChange, onToggleVisibility, onCopy,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  visible: boolean;
+  disabled: boolean;
+  placeholder: string;
+  minLength: number;
+  maxLength: number;
+  onChange: (value: string) => void;
+  onToggleVisibility: () => void;
+  onCopy: () => void;
+}) {
+  return (
+    <div className="remote-access-key-input">
+      <Input
+        id={id}
+        type={visible ? "text" : "password"}
+        autoComplete="off"
+        spellCheck={false}
+        disabled={disabled}
+        value={value}
+        placeholder={placeholder}
+        minLength={minLength}
+        maxLength={maxLength}
+        onChange={event => onChange(event.target.value)}
+      />
+      <div className="remote-access-key-actions">
+        <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={disabled || !value}
+          aria-label={`${visible ? "隐藏" : "显示"}${label}`} aria-pressed={visible}
+          onClick={onToggleVisibility}>
+          {visible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+        </Button>
+        <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={disabled || !value}
+          aria-label={`复制${label}`} onClick={onCopy}>
+          <Copy className="h-4 w-4" />
+        </Button>
+      </div>
+    </div>
   );
 }
