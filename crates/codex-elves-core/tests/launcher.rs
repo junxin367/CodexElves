@@ -1744,6 +1744,55 @@ async fn launch_lifecycle_reuses_existing_codex_without_reactivating_or_changing
 }
 
 #[tokio::test]
+async fn native_fast_applies_only_after_successful_explicit_launch_injection() {
+    for (enabled, enhancements, injected) in [
+        (true, true, true),
+        (false, true, true),
+        (true, false, true),
+        (true, true, false),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut hooks = FakeHooks::new(events.clone()).with_settings(BackendSettings {
+            enhancements_enabled: enhancements,
+            codex_app_native_fast_unlock: enabled,
+            computer_use_guard_enabled: false,
+            computer_use_api_key_browser_compat_enabled: false,
+            ..BackendSettings::default()
+        });
+        if !injected {
+            hooks = hooks.with_inject_error("page unavailable");
+        }
+        let handle = launch_and_inject_with_hooks(
+            LaunchOptions {
+                app_dir: Some(temp.path().join("Codex.app")),
+                debug_port: 9229,
+                helper_port: 45221,
+                status_store: StatusStore::new(temp.path().join("status.json")),
+            },
+            &hooks,
+        )
+        .await
+        .unwrap();
+        let recorded = events.lock().unwrap().clone();
+        let applied = recorded
+            .iter()
+            .position(|event| event == "native-fast:9229");
+        assert_eq!(applied.is_some(), enabled && enhancements && injected);
+        if let Some(applied) = applied {
+            assert!(
+                recorded
+                    .iter()
+                    .position(|event| event.starts_with("inject:"))
+                    .unwrap()
+                    < applied
+            );
+        }
+        handle.wait_for_codex_exit().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn launch_lifecycle_keeps_existing_codex_proxy_when_injection_is_degraded() {
     let temp = tempfile::tempdir().unwrap();
     let events = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -2796,6 +2845,11 @@ impl LaunchHooks for FakeHooks {
         if let Some(message) = &self.inject_error {
             anyhow::bail!(message.clone());
         }
+        Ok(())
+    }
+
+    async fn apply_native_fast_unlock_on_launch(&self, debug_port: u16) -> anyhow::Result<()> {
+        self.event(format!("native-fast:{debug_port}"));
         Ok(())
     }
 

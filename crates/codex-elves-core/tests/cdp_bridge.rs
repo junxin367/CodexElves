@@ -4033,7 +4033,7 @@ fn injection_script_does_not_bypass_plugin_marketplace_search_filters() {
 #[test]
 fn injection_script_expands_api_key_plugin_marketplace_requests() {
     let script = assets::injection_script(45221);
-    let cases = run_service_tier_contract_harness();
+    let cases = run_renderer_compatibility_harness();
 
     assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"19\""));
     assert!(script.contains("installPluginMarketplaceRequestPatch"));
@@ -4854,114 +4854,17 @@ fn injection_script_uses_codex_native_model_catalog_without_model_list_patching(
 }
 
 #[test]
-fn injection_script_exposes_fast_service_tier_control() {
-    let script = assets::injection_script(45221).replace("\r\n", "\n");
-
-    assert!(script.contains("default-service-tier"));
-    assert!(script.contains("setting-storage-"));
-    assert!(script.contains("vscode-api-"));
-    assert!(script.contains("app-shared-"));
-    assert!(script.contains("app-initial-"));
-    assert!(script.contains("thread-context-inputs-"));
-    assert!(script.contains("findCodexServiceTierDispatcher"));
-    assert!(script.contains("codexServiceTierDispatcherFromModule"));
-    assert!(script.contains("codexServiceTierSettingReaderFromModule"));
-    assert!(script.contains("codexServiceTierRequestClientClassFromModule"));
-    assert!(script.contains("patchCodexServiceTierRequestClientPrototype"));
-    assert!(script.contains("update-thread-settings-for-next-turn"));
-    assert!(script.contains("service_tier_native_thread_setting_synced"));
-    assert!(script.contains("service_tier_request_client_patch_installed"));
-    assert!(script.contains("installCodexServiceTierRequestClientPatch"));
-    assert!(script.contains("__codexServiceTierRequestClientPatchPromise"));
-    assert!(script.contains("__codexServiceTierRequestClientPatchNextAttemptAt"));
-    assert!(script.contains("codexServiceTierRequestClientPatchRetryMaxMs"));
-    assert!(script.contains("codexAppAssetUrl"));
-    assert!(script.contains("codexThreadServiceTierOverrides"));
-    assert!(script.contains("setCodexThreadServiceTierMode"));
-    assert!(script.contains("codexServiceTierRequestOverride"));
-    assert!(script.contains("codexServiceTierSupportedFastModels"));
-    assert!(script.contains("codexServiceTierSupportedFastModelPrefixes"));
-    assert!(script.contains("\"gpt-5.4\""));
-    assert!(script.contains("\"gpt-5.5\""));
-    assert!(script.contains("\"gpt-5.6\""));
-    assert!(script.contains("\"gpt-5.6-sol\""));
-    assert!(script.contains("\"gpt-5.6-terra\""));
-    assert!(script.contains("\"gpt-5.6-luna\""));
-    assert!(script.contains("codexServiceTierInheritedFastMinimumVersion"));
-    assert!(script.contains("codexServiceTierInheritedFastModelLines"));
-    assert!(script.contains("\"astra\""));
-    assert!(script.contains("codexServiceTierBuiltInFastSupported"));
-    assert!(script.contains("codexServiceTierFastSupportedForModel"));
-    assert!(script.contains("codexServiceTierModelForRequest"));
-    assert!(script.contains("codexServiceTierMaybeLoadModelCatalog"));
-    assert!(script.contains("fastBlocked"));
-    assert!(script.contains("data-tier=\"unsupported\""));
-    assert!(script.contains("nextParams.service_tier = override.serviceTier"));
-    assert!(script.contains("serviceTierControls: false"));
-    assert!(script.contains("data-codex-elves-setting=\"serviceTierControls\""));
-    assert!(script.contains("data-codex-service-tier-controls"));
-    assert!(script.contains("[data-codex-tooltip]::before"));
-    assert!(script.contains("[data-codex-tooltip]::after"));
-    assert!(script.contains("display: none;\n        position: absolute;"));
-    assert!(script.contains("display: block;\n        opacity: 1;"));
-    assert!(script.contains("removeCodexServiceTierBadges"));
-    assert!(script.contains("installCodexServiceTierDispatcherPatch"));
-    assert!(script.contains("服务模式"));
-    assert!(script.contains("data-codex-service-tier-status"));
-    assert!(script.contains("data-codex-service-tier-inherit"));
-    assert!(script.contains("data-codex-service-tier-standard"));
-    assert!(script.contains("data-codex-service-tier-fast"));
-    assert!(script.contains("data-codex-service-tier-custom"));
-    assert!(script.contains("data-codex-service-tier-thread-inherit"));
-    assert!(script.contains("data-codex-service-tier-thread-standard"));
-    assert!(script.contains("data-codex-service-tier-thread-fast"));
-    assert!(script.contains("global-standard"));
-    assert!(script.contains("global-fast"));
-    assert!(script.contains("defaultMode"));
-    assert!(script.contains("codexServiceTierEffectiveThreadMode"));
-    assert!(script.contains("codexServiceTierDefaultModeForControlMode"));
-    assert!(script.contains("normalizeCodexServiceTierControlMode(state.mode) !== \"custom\""));
-    assert!(script.contains("state.draft = null"));
-    assert!(script.contains("后端未连接，无法切换服务模式"));
-    assert!(script.contains("未连接"));
-    assert!(script.contains("thread/start"));
-    assert!(script.contains("thread/resume"));
-    assert!(script.contains("turn/start"));
-    assert!(script.contains("send-cli-request-for-host"));
-    assert!(script.contains("start-conversation"));
-    assert!(script.contains("applyCodexServiceTierRequestOverride(\"thread/start\", message)"));
-    assert!(script.contains("codex-service-tier-badge"));
-    assert!(script.contains("installCodexServiceTierBadge"));
-    assert!(script.contains(
-        "syncCodexServiceTierBadgeLayoutListener();\n      installCodexServiceTierBadge();"
-    ));
-    assert!(script.contains("toggleCodexServiceTierFromBadge"));
-    assert!(script.contains("wireCodexServiceTierBadge"));
-    assert!(script.contains("codexServiceTierBadgePlacement"));
-    assert!(script.contains("codexServiceTierNativeServiceTierSlot"));
-    assert!(script.contains("[class*=\"_footer_\"]"));
-    assert!(script.contains("codexServiceTierComposerFooterSelector"));
-    assert!(script.contains("ComposerLayoutFooter"));
-    assert!(script.contains("codexServiceTierBadgeFooterGroup"));
-    assert!(script.contains("codexServiceTierFindComposerEl"));
-    assert!(script.contains("codexServiceTierVisibleComposerFooters"));
-    assert!(script.contains("codexServiceTierBestComposerFooter"));
-    assert!(script.contains("codexServiceTierComposerCandidates"));
-    assert!(script.contains("codexServiceTierComposerScore"));
-    assert!(script.contains("codexServiceTierSelectedModelTexts"));
-    assert!(script.contains("data-codex-intelligence-trigger"));
-    assert!(script.contains("data-composer-navigation-target=\"reasoning\""));
-    assert!(script.contains("!node.closest?.('[aria-hidden=\"true\"]')"));
-    assert!(script.contains("data-codex-service-tier-badge"));
-    assert!(script.contains("codexServiceTierBadgeWired"));
-    assert!(script.contains("setAttribute(\"role\", \"button\")"));
-    assert!(script.contains("setAttribute(\"tabindex\", \"0\")"));
-    assert!(script.contains("继承 config.toml"));
-    assert!(script.contains("service_tier=\\\"priority\\\""));
-    assert!(script.contains("Fast 仅支持"));
-    assert!(script.contains("当前 thread"));
-    assert!(script.contains("standard"));
-    assert!(script.contains("fast"));
+fn injection_script_uses_native_fast_without_custom_controls_or_request_overrides() {
+    let script = assets::renderer_features_script();
+    assert!(script.contains("原生 Fast 入口"));
+    assert!(script.contains("codexAppNativeFastUnlock"));
+    assert!(!script.contains("data-codex-service-tier-controls"));
+    assert!(!script.contains("data-codex-service-tier-badge"));
+    assert!(!script.contains("codexThreadServiceTierOverrides"));
+    assert!(!script.contains("applyCodexServiceTierRequestOverride"));
+    assert!(!script.contains("update-thread-settings-for-next-turn"));
+    assert!(!script.contains("global-fast"));
+    assert!(!script.contains("global-standard"));
 }
 
 #[test]
@@ -4994,24 +4897,12 @@ fn renderer_service_tier_targets_main_composer_only() {
         .find("  const codexServiceTierComposerFooterSelector =")
         .unwrap();
     let end = script[start..]
-        .find("  function codexServiceTierBadgeAnchor(")
+        .find("  function conversationViewRememberOriginals(")
         .map(|offset| start + offset)
-        .unwrap();
-    let input_start = script
-        .find("  function codexServiceTierHasVisibleComposerInput() {")
-        .unwrap();
-    let input_end = script[input_start..]
-        .find("  function codexServiceTierPositionPortalBadge(")
-        .map(|offset| input_start + offset)
         .unwrap();
     let node_script = format!(
         "const source = {};\n",
-        serde_json::to_string(&format!(
-            "{}\n{}",
-            &script[start..end],
-            &script[input_start..input_end]
-        ))
-        .unwrap()
+        serde_json::to_string(&script[start..end]).unwrap()
     ) + r#"
 const assert = require("node:assert/strict");
 globalThis.HTMLElement = Object;
@@ -5032,7 +4923,7 @@ const api = new Function(
   "document", "codexServiceTierBadgeVisibleElement", "codexServiceTierFooterHasNearbyComposerInput",
   "codexServiceTierKnownProviderNames", "codexServiceTierBadgeText", "codexServiceTierLooksLikeProviderButton",
   "conversationViewFindComposerEl", "codexServiceTierComposerInputs",
-  `${source}\nreturn {footers:codexServiceTierVisibleComposerFooters,best:codexServiceTierBestComposerFooter,candidates:codexServiceTierComposerCandidates,hasInput:codexServiceTierHasVisibleComposerInput};`
+  `${source}\nreturn {footers:codexServiceTierVisibleComposerFooters,best:codexServiceTierBestComposerFooter,candidates:codexServiceTierComposerCandidates,hasInput:()=>codexServiceTierComposerInputs(document).some(codexServiceTierIsMainComposerElement)};`
 )(
   document, node => node.visible, () => true, () => [], node => node.textContent, () => false,
   () => footers[0], () => inputs
@@ -5070,131 +4961,13 @@ assert.equal(api.hasInput(), true);
 }
 
 #[test]
-fn renderer_service_tier_badge_shows_unsupported_in_all_modes() {
-    let script = assets::renderer_features_script();
-    let start = script
-        .find("  function codexServiceTierBadgeState() {")
-        .unwrap();
-    let end = script[start..]
-        .find("  function refreshCodexServiceTierBadges() {")
-        .map(|offset| start + offset)
-        .unwrap();
-    let node_script = format!(
-        "const source = {};\n",
-        serde_json::to_string(&script[start..end]).unwrap()
-    ) + r#"
-const assert = require("node:assert/strict");
-const backend = {status: "ok"};
-const state = {status: "ok", controlMode: "inherit", threadMode: "inherit"};
-const availability = {modelName: "claude-opus-5-5", supported: false};
-const badgeState = new Function(
-  "codexElvesBackendStatus", "codexServiceTierState", "codexServiceTierFastAvailability",
-  "serviceTierStatusMessage", "codexServiceTierFastModelListLabel", "codexServiceTierFastUnsupportedMessage",
-  `${source}\nreturn codexServiceTierBadgeState;`
-)(backend, state, () => availability, () => "", () => "GPT", () => "当前模型不支持");
-for (const effectiveMode of ["standard", "fast"]) {
-  state.effectiveMode = effectiveMode;
-  assert.equal(badgeState().tier, "unsupported");
-  assert.equal(badgeState().label, "不支持");
-  assert.match(badgeState().title, /当前请求会按 Standard 发送/);
-}
-availability.modelName = "gpt-6-astra[600K]";
-availability.supported = true;
-for (const effectiveMode of ["standard", "fast"]) {
-  state.effectiveMode = effectiveMode;
-  assert.equal(badgeState().tier, effectiveMode);
-  assert.equal(badgeState().label, effectiveMode);
-}
-availability.supported = false;
-backend.status = "checking";
-assert.equal(badgeState().tier, "loading");
-assert.equal(badgeState().label, "...");
-backend.status = "failed";
-assert.equal(badgeState().tier, "failed");
-assert.equal(badgeState().label, "未连接");
-backend.status = "ok";
-state.status = "loading";
-assert.equal(badgeState().tier, "loading");
-state.status = "failed";
-assert.equal(badgeState().tier, "failed");
-"#;
-    let output = Command::new("node")
-        .arg("-e")
-        .arg(node_script)
-        .output()
-        .expect("node should be available");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
-fn injection_script_portals_fast_badge_outside_react_owned_composer() {
+fn injection_script_updates_native_fast_settings_without_installing_request_patches() {
     let script = assets::injection_script(45221);
-
-    assert!(script.contains("data-codex-service-tier-portal"));
-    assert!(script.contains("codexServiceTierPositionPortalBadge"));
-    assert!(script.contains("codexServiceTierPlacementRowRect"));
-    assert!(script.contains("codexServiceTierPortalBadgeLeft"));
-    assert!(script.contains("const controlPadding = 6"));
-    assert!(script.contains("const footer = codexServiceTierComposerFooter(composer) || composer"));
-    assert!(script.contains("button.matches('[data-composer-navigation-target=\"permissions\"]')"));
-    assert!(script.contains("return { parent: permissions.parentElement, after: permissions }"));
-    assert!(
-        script
-            .contains("placement.after ? anchorRect.right + 6 : anchorRect.left - badgeWidth - 6")
-    );
-    assert!(
-        script.contains(
-            "rect.height > 90 && !footer.matches?.(\"[data-composer-footer-responsive]\")"
-        )
-    );
-    assert!(script.contains("button, [role='button'], [role='img'][aria-label]"));
-    assert!(script.contains(
-        "document.querySelectorAll(`[${codexPromptOptimizeButtonAttribute}=\"true\"], [${codexWorkspaceCheckpointButtonAttribute}=\"true\"]`)"
-    ));
-    assert!(script.contains("if (!gaps.length) return null"));
-    assert!(script.contains("if (left === null) return false"));
-    assert!(script.contains("const labelChanged = node.textContent !== state.label"));
-    assert!(script.contains("if (labelChanged) {\n        node.style.visibility = \"hidden\";"));
-    assert!(script.contains("rect.left - cursor >= badgeWidth"));
-    assert!(script.contains(
-        "const left = codexServiceTierPortalBadgeLeft(footer, verticalAnchorRect, badgeWidth, desiredLeft)"
-    ));
-    assert!(script.contains(
-        "const verticalAnchorRect = codexServiceTierPlacementRowRect(placement, footer, anchorRect)"
-    ));
-    assert!(
-        script.contains("verticalAnchorRect.top + (verticalAnchorRect.height - badgeHeight) / 2")
-    );
-    assert!(!script.contains("footerRect.top + (footerRect.height - badgeHeight) / 2"));
-    assert!(script.contains("portalRoot.appendChild(badge)"));
-    assert!(script.contains("codexServiceTierKeepPortalBadgeDuringTransientLayout"));
-    assert!(script.contains("codexServiceTierBadgePlacementGraceMs"));
-    assert!(script.contains("codexServiceTierBadgeRetryMaxAttempts"));
-    assert!(script.contains("codexServiceTierBadgeRetryMaxDelayMs"));
-    assert!(script.contains("scheduleCodexServiceTierBadgeLayout"));
-    assert!(!script.contains("placement.parent.insertBefore(badge, before)"));
-}
-
-#[test]
-fn injection_script_refreshes_fast_state_after_backend_load_and_route_entry() {
-    let script = assets::injection_script(45221).replace("\r\n", "\n");
-
-    assert!(script.contains("refreshCodexServiceTierFeatureState"));
-    assert!(script.contains("if (key === codexElvesBackendSettingMap.serviceTierControls)"));
-    assert!(script.contains("refreshCodexServiceTierFeatureState();"));
-    assert!(script.contains("refreshCodexTokenUsageFeatureState();"));
-    assert!(script.contains("void applyLoadedBackendSettings(settings, \"settings-loaded\")"));
-    assert!(script.contains("installCodexServiceTierDispatcherPatch();"));
-    assert!(script.contains("installCodexServiceTierRequestClientPatch();"));
-    assert!(script.contains("refreshUpstreamBranchDropdownAdapter();"));
-    assert!(script.contains("syncChatsSortVisibilityListener();"));
-    assert!(script.contains(
-        "scheduleConversationViewRouteRefresh();\n    refreshCodexServiceTierFeatureState();"
-    ));
+    assert!(script.contains("refreshCodexNativeFastUnlockState"));
+    assert!(script.contains("key === codexElvesBackendSettingMap.nativeFastUnlock"));
+    assert!(script.contains("window.__codexElvesNativeFastUnlock?.runtime?.update?.("));
+    assert!(!script.contains("installCodexServiceTierDispatcherPatch"));
+    assert!(!script.contains("installCodexServiceTierRequestClientPatch"));
 }
 
 #[test]
@@ -5303,81 +5076,9 @@ assert.deepEqual(texts(null), []);
 }
 
 #[test]
-fn injection_script_applies_fast_service_tier_contract() {
-    let cases = run_service_tier_contract_harness();
+fn renderer_model_catalog_matching_preserves_aliases() {
+    let cases = run_renderer_compatibility_harness();
 
-    assert_eq!(cases["supportedFast"]["serviceTier"], "priority");
-    assert_eq!(cases["supportedFast"]["service_tier"], "priority");
-
-    assert_eq!(
-        cases["unsupportedModel"]["serviceTier"],
-        serde_json::Value::Null
-    );
-    assert_eq!(
-        cases["unsupportedModel"]["service_tier"],
-        serde_json::Value::Null
-    );
-
-    assert_eq!(cases["turnWithoutModel"]["serviceTier"], "priority");
-    assert_eq!(cases["turnWithoutModelDiagnosticModel"], "gpt-5.4");
-
-    assert_eq!(
-        cases["customInheritUnsupported"]["serviceTier"],
-        serde_json::Value::Null
-    );
-    assert_eq!(
-        cases["customInheritUnsupported"]["service_tier"],
-        serde_json::Value::Null
-    );
-
-    assert_eq!(cases["startConversation"]["serviceTier"], "priority");
-
-    for model in [
-        "gpt-5.6",
-        "gpt-5.6-sol",
-        "gpt-5.6-terra",
-        "gpt-5.6-luna",
-        "openai/gpt-5.6-terra",
-        "gpt-5.6-sol-2026-07-09",
-    ] {
-        assert_eq!(
-            cases["gpt56Fast"][model]["service_tier"], "priority",
-            "{model} 应启用 Fast"
-        );
-        assert_eq!(
-            cases["gpt56Fast"][model]["serviceTier"], "priority",
-            "{model} 应同步 serviceTier"
-        );
-    }
-    assert_eq!(cases["gpt56EmptyCatalogFast"]["service_tier"], "priority");
-    for model in [
-        "gpt-6",
-        "gpt-6-astra",
-        "openai/gpt-6-astra",
-        "gpt-6-astra[600K]",
-        "gpt-7-sol",
-    ] {
-        assert_eq!(
-            cases["futureGptFast"][model]["service_tier"], "priority",
-            "{model} 应按版本继承 Fast"
-        );
-        assert_eq!(
-            cases["futureGptFast"][model]["serviceTier"], "priority",
-            "{model} 应同步 serviceTier"
-        );
-    }
-    for model in [
-        "gpt-5.4-mini",
-        "gpt-5.7-custom",
-        "gpt-6-custom",
-        "gpt-6custom",
-    ] {
-        assert_eq!(
-            cases["unsupportedGptVariants"][model]["service_tier"],
-            serde_json::Value::Null,
-            "{model} 不应被版本判定误放行"
-        );
-    }
     assert_eq!(cases["displayNameMatches"]["gpt56Sol"], true);
     assert_eq!(cases["displayNameMatches"]["gpt56Terra"], true);
     assert_eq!(cases["displayNameMatches"]["gpt55"], true);
@@ -5436,40 +5137,6 @@ fn injection_script_applies_fast_service_tier_contract() {
         serde_json::Value::Null
     );
     assert_eq!(
-        cases["aliasFast"]["displayName"]["service_tier"],
-        "priority"
-    );
-    assert_eq!(
-        cases["aliasFast"]["catalogSlug"]["service_tier"],
-        "priority"
-    );
-    assert_eq!(
-        cases["aliasFast"]["unsupported"]["service_tier"],
-        serde_json::Value::Null
-    );
-    assert_eq!(
-        cases["aliasFast"]["ambiguous"]["service_tier"],
-        serde_json::Value::Null
-    );
-
-    // catalog 驱动：白名单之外但 catalog 标记 supports_fast 的模型也能注入 priority
-    assert_eq!(cases["catalogDrivenFast"]["service_tier"], "priority");
-    assert_eq!(cases["catalogDrivenFast"]["serviceTier"], "priority");
-    // catalog 明确 supports_fast=false 时，名字像 gpt-5.4 也被阻断
-    assert_eq!(
-        cases["catalogDrivenBlocked"]["service_tier"],
-        serde_json::Value::Null
-    );
-    assert_eq!(
-        cases["patchedCreateRequest"]["params"]["serviceTier"],
-        "priority"
-    );
-    assert_eq!(
-        cases["patchedCreateRequest"]["params"]["service_tier"],
-        "priority"
-    );
-    assert_eq!(cases["patchedCreateRequest"]["options"]["timeoutMs"], 123);
-    assert_eq!(
         cases["relayModelNames"],
         json!(["first-model", "second-model", "current-model"])
     );
@@ -5480,67 +5147,6 @@ fn injection_script_applies_fast_service_tier_contract() {
             "use_hidden_models": false,
             "available_models": ["gpt-5.4"]
         })
-    );
-    assert_eq!(
-        cases["badgeTooltip"]["dataCodexTooltip"],
-        serde_json::Value::Null
-    );
-    assert_eq!(
-        cases["badgeTooltip"]["title"],
-        cases["badgeTooltip"]["ariaLabel"]
-    );
-    assert!(
-        cases["badgeTooltip"]["title"]
-            .as_str()
-            .is_some_and(|value| value.contains("服务模式"))
-    );
-    assert_eq!(cases["serviceTierRetry"]["dispatcherAttempts"], 3);
-    assert_eq!(cases["serviceTierRetry"]["requestClientAttempts"], 2);
-    assert_eq!(cases["serviceTierRetry"]["dispatcherInstalled"], true);
-    assert_eq!(cases["serviceTierRetry"]["requestClientInstalled"], true);
-    assert_eq!(cases["serviceTierRetry"]["dispatcherRetryPending"], false);
-    assert_eq!(
-        cases["serviceTierRetry"]["requestClientRetryPending"],
-        false
-    );
-    assert_eq!(cases["modernServiceTierModule"]["setting"], "priority");
-    assert_eq!(
-        cases["modernServiceTierModule"]["turnMessage"]["type"],
-        "start-turn-for-host"
-    );
-    assert_eq!(
-        cases["modernServiceTierModule"]["turnMessage"]["payload"]["params"]["serviceTier"],
-        "priority"
-    );
-    assert_eq!(
-        cases["modernServiceTierModule"]["dispatcherInstalled"],
-        true
-    );
-    assert_eq!(
-        cases["modernServiceTierModule"]["requestClientInstalled"],
-        true
-    );
-    assert_eq!(
-        cases["modernServiceTierModule"]["dispatcherRetryPending"],
-        false
-    );
-    assert_eq!(
-        cases["modernServiceTierModule"]["requestClientRetryPending"],
-        false
-    );
-    assert_eq!(cases["sharedServiceTierModule"]["setting"], "priority");
-    assert_eq!(cases["sharedServiceTierModule"]["invalidHookCalls"], 0);
-    assert_eq!(
-        cases["sharedServiceTierModule"]["turnMessage"]["payload"]["params"]["serviceTier"],
-        "priority"
-    );
-    assert_eq!(
-        cases["sharedServiceTierModule"]["dispatcherInstalled"],
-        true
-    );
-    assert_eq!(
-        cases["sharedServiceTierModule"]["requestClientInstalled"],
-        true
     );
     assert_eq!(
         cases["serviceTierAssetReferences"]["direct"],
@@ -5564,7 +5170,7 @@ fn injection_script_does_not_patch_app_server_model_requests() {
 #[test]
 fn injection_script_adds_safe_app_server_restart_recovery() {
     let script = assets::renderer_features_script();
-    let cases = run_service_tier_contract_harness();
+    let cases = run_renderer_compatibility_harness();
 
     assert!(script.contains("failed to start turn: internal error; agent loop died unexpectedly"));
     assert!(script.contains("button.dataset.codexAppServerRestart = \"true\""));
@@ -7118,7 +6724,7 @@ function element(tag, rect) {
     serde_json::from_slice(&output.stdout).expect("harness stdout should be JSON")
 }
 
-fn run_service_tier_contract_harness() -> serde_json::Value {
+fn run_renderer_compatibility_harness() -> serde_json::Value {
     let temp = tempfile::tempdir().expect("temp dir should be created");
     let script_path = temp.path().join("renderer-inject.js");
     let harness_path = temp.path().join("service-tier-harness.cjs");
@@ -7131,7 +6737,7 @@ fn run_service_tier_contract_harness() -> serde_json::Value {
 const scriptPath = {script_path};
 const store = new Map();
 store.set("codexElvesSettings", JSON.stringify({{
-  serviceTierControls: true,
+  nativeFastUnlock: true,
 }}));
 function node() {{
   return {{
@@ -7364,7 +6970,6 @@ const appServerRestart = {{
     (entry) => entry.value
   ),
 }};
-api.setServiceTierState({{ serviceTier: "priority", fastTierValue: "priority" }});
 api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4", "gpt-5.5"] }});
 const displayNameMatches = {{
   gpt56Sol: api.modelMatchesText("gpt-5.6-sol", "5.6 Sol"),
@@ -7419,13 +7024,6 @@ Object.assign(aliasCatalogResolution, {{
   nativeOtherContextWithEffort: api.catalogSlugForText("6 Astra[1M] 极高"),
   unicodeAliasWithEffort: api.catalogSlugForText("主力编程模型 最高"),
 }});
-api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
-const aliasFast = {{
-  displayName: api.applyServiceTierOverride("turn/start", {{ model: "英文模型的中文别名", service_tier: null }}),
-  catalogSlug: api.applyServiceTierOverride("turn/start", {{ model: "主力编程模型", service_tier: null }}),
-  unsupported: api.applyServiceTierOverride("turn/start", {{ model: "不支持的模型", service_tier: "priority" }}),
-  ambiguous: api.applyServiceTierOverride("turn/start", {{ model: "同名模型", service_tier: "priority" }}),
-}};
 api.setModelCatalog({{
   model_entries: [
     {{ slug: "gpt-6-astra[600K]" }},
@@ -7441,153 +7039,6 @@ api.setModelCatalog({{
 }});
 aliasCatalogResolution.literalAliasBeforeNativeShorthand = api.catalogSlugForText("6 Astra[600K] 极高");
 api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4", "gpt-5.5"] }});
-
-api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
-const supportedFast = api.applyServiceTierOverride("turn/start", {{
-  threadId: "thread-12345678",
-  model: "gpt-5.4",
-  service_tier: null,
-}}, "conv-should-not-be-model");
-
-const unsupportedModel = api.applyServiceTierOverride("turn/start", {{
-  threadId: "thread-12345678",
-  model: "gpt-4.1",
-  service_tier: "priority",
-}}, "conv-should-not-be-model");
-
-const turnWithoutModel = api.applyServiceTierOverride("turn/start", {{
-  threadId: "thread-12345678",
-  service_tier: null,
-}}, "conversation-should-not-be-model");
-const turnWithoutModelDiagnosticModel = api.diagnostics().at(-1)?.detail?.model;
-
-api.setModelCatalog({{ status: "ok", model: "gpt-4.1", default_model: "gpt-4.1", models: ["gpt-4.1"] }});
-api.setThreadState({{ mode: "custom", defaultMode: "inherit", entries: {{}}, draft: {{ mode: "inherit", at: Date.now() }} }});
-api.setServiceTierState({{ serviceTier: "priority" }});
-const customInheritUnsupported = api.applyServiceTierOverride("turn/start", {{
-  threadId: "thread-12345678",
-  service_tier: "priority",
-}}, "");
-
-api.setModelCatalog({{ status: "ok", model: "gpt-5.5", default_model: "gpt-5.5", models: ["gpt-5.5"] }});
-api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
-const startConversation = api.requestOverride({{
-  type: "start-conversation",
-  threadId: "thread-12345678",
-  model: "gpt-5.5",
-}});
-
-const gpt56Fast = {{}};
-for (const model of [
-  "gpt-5.6",
-  "gpt-5.6-sol",
-  "gpt-5.6-terra",
-  "gpt-5.6-luna",
-  "openai/gpt-5.6-terra",
-  "gpt-5.6-sol-2026-07-09",
-]) {{
-  api.setModelCatalog({{ status: "ok", model, default_model: model, models: [model] }});
-  api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
-  gpt56Fast[model] = api.applyServiceTierOverride("turn/start", {{
-    threadId: "thread-12345678",
-    model,
-    service_tier: null,
-  }}, "");
-}}
-
-api.setModelCatalog({{
-  status: "ok",
-  model: "gpt-5.6-luna",
-  default_model: "gpt-5.6-luna",
-  models: ["gpt-5.6-luna"],
-  model_entries: [{{ slug: "gpt-5.6-luna", service_tiers: [] }}],
-}});
-api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
-const gpt56EmptyCatalogFast = api.applyServiceTierOverride("turn/start", {{
-  threadId: "thread-12345678",
-  model: "gpt-5.6-luna",
-  service_tier: null,
-}}, "");
-
-const futureGptFast = {{}};
-for (const model of [
-  "gpt-6",
-  "gpt-6-astra",
-  "openai/gpt-6-astra",
-  "gpt-6-astra[600K]",
-  "gpt-7-sol",
-]) {{
-  api.setModelCatalog({{
-    status: "ok",
-    model,
-    default_model: model,
-    models: [model],
-    model_entries: [{{ slug: model, service_tiers: [] }}],
-  }});
-  api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
-  futureGptFast[model] = api.applyServiceTierOverride("turn/start", {{
-    threadId: "thread-12345678",
-    model,
-    service_tier: null,
-  }}, "");
-}}
-
-const unsupportedGptVariants = {{}};
-for (const model of ["gpt-5.4-mini", "gpt-5.7-custom", "gpt-6-custom", "gpt-6custom"]) {{
-  api.setModelCatalog({{ status: "ok", model, default_model: model, models: [model] }});
-  api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
-  unsupportedGptVariants[model] = api.applyServiceTierOverride("turn/start", {{
-    threadId: "thread-12345678",
-    model,
-    service_tier: null,
-  }}, "");
-}}
-
-// catalog 驱动：内置白名单之外的模型，但 catalog 标记 supports_fast=true 也应支持
-api.setModelCatalog({{
-  status: "ok",
-  model: "gpt-5.6-custom",
-  default_model: "gpt-5.6-custom",
-  models: ["gpt-5.6-custom"],
-  model_entries: [{{ slug: "gpt-5.6-custom", supports_fast: true, service_tiers: [{{ id: "priority", name: "Fast" }}] }}],
-}});
-api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
-const catalogDrivenFast = api.applyServiceTierOverride("turn/start", {{
-  threadId: "thread-12345678",
-  model: "gpt-5.6-custom",
-  service_tier: null,
-}}, "");
-
-// catalog 明确标记不支持（supports_fast=false）时，即使属于 GPT-5.6 系列也应被阻断
-api.setModelCatalog({{
-  status: "ok",
-  model: "gpt-5.6-terra",
-  default_model: "gpt-5.6-terra",
-  models: ["gpt-5.6-terra"],
-  model_entries: [{{ slug: "gpt-5.6-terra", supports_fast: false, service_tiers: [] }}],
-}});
-api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
-const catalogDrivenBlocked = api.applyServiceTierOverride("turn/start", {{
-  threadId: "thread-12345678",
-  model: "gpt-5.6-terra",
-  service_tier: "priority",
-}}, "");
-
-class RequestClient {{
-  createRequest(method, params, options) {{
-    return {{ request: {{ method, params, options }}, promise: Promise.resolve(null) }};
-  }}
-  sendRequest() {{}}
-  prewarmThreadStart() {{}}
-}}
-api.patchRequestClientPrototype(RequestClient);
-api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4"] }});
-api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
-const patchedCreateRequest = new RequestClient().createRequest("turn/start", {{
-  threadId: "thread-12345678",
-  model: "gpt-5.4",
-  service_tier: null,
-}}, {{ timeoutMs: 123 }}).request;
 
 api.setModelCatalog({{
   status: "ok",
@@ -7707,202 +7158,6 @@ const pluginScopedFilters = {{
   ordinaryFilter: [1, 2, 3].filter((value) => value > 1),
 }};
 
-const badgeNode = {{
-  dataset: {{ codexTooltip: "stale custom tooltip" }},
-  style: {{}},
-  textContent: "",
-  attributes: {{}},
-  removeAttribute(name) {{
-    delete this.attributes[name];
-    if (name === "data-codex-tooltip") delete this.dataset.codexTooltip;
-    if (name === "title") delete this.title;
-  }},
-  setAttribute(name, value) {{
-    this.attributes[name] = String(value);
-    if (name === "title") this.title = String(value);
-  }},
-}};
-api.refreshBadgeNode(badgeNode);
-const badgeTooltip = {{
-  dataCodexTooltip: Object.prototype.hasOwnProperty.call(badgeNode.dataset, "codexTooltip") ? badgeNode.dataset.codexTooltip : null,
-  title: badgeNode.title || "",
-  ariaLabel: badgeNode.attributes["aria-label"] || "",
-}};
-
-async function waitForCondition(predicate, timeoutMs = 6000) {{
-  const startedAt = Date.now();
-  while (!predicate()) {{
-    if (Date.now() - startedAt > timeoutMs) throw new Error("condition wait timed out");
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }}
-}}
-
-async function runServiceTierRetryCase() {{
-  api.resetServiceTierInstallState();
-  let dispatcherAttempts = 0;
-  let requestClientAttempts = 0;
-  const dispatcher = {{
-    dispatchMessage() {{}},
-  }};
-  function DispatcherFactory() {{
-    return "dispatchMessage";
-  }}
-  DispatcherFactory.getInstance = () => dispatcher;
-  class RetryRequestClient {{
-    createRequest(method, params, options) {{
-      return {{ request: {{ method, params, options }}, promise: Promise.resolve(null) }};
-    }}
-    sendRequest() {{}}
-    prewarmThreadStart() {{}}
-  }}
-  api.setModuleLoader(async (namePart) => {{
-    if (namePart === "thread-context-inputs-") {{
-      requestClientAttempts += 1;
-      if (requestClientAttempts === 1) throw new Error("request client module not ready");
-      return {{ RetryRequestClient }};
-    }}
-    if (namePart === "vscode-api-" || namePart === "setting-storage-") {{
-      dispatcherAttempts += 1;
-      if (dispatcherAttempts <= 2) throw new Error("dispatcher module not ready");
-      return {{ DispatcherFactory }};
-    }}
-    throw new Error(`unexpected module: ${{namePart}}`);
-  }});
-  await Promise.allSettled([
-    api.installDispatcherPatch(),
-    api.installRequestClientPatch(),
-  ]);
-  await waitForCondition(() => {{
-    const state = api.serviceTierInstallState();
-    return state.dispatcherInstalled && state.requestClientInstalled;
-  }});
-  const state = api.serviceTierInstallState();
-  api.setModuleLoader(null);
-  return {{
-    dispatcherAttempts,
-    requestClientAttempts,
-    ...state,
-  }};
-}}
-
-async function runModernServiceTierModuleCase() {{
-  api.resetServiceTierInstallState();
-  api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4"] }});
-  api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
-  const dispatched = [];
-  const dispatcher = {{
-    handlers: new Map(),
-    dispatchMessage(type, payload) {{
-      dispatched.push({{ type, payload }});
-    }},
-    handleMessage() {{}},
-  }};
-  async function modernSettingReader(setting) {{
-    const request = {{ method: "get-setting", params: {{ key: setting.key }} }};
-    const result = {{
-      value: request.params.key === "default-service-tier" ? "priority" : setting.default,
-    }};
-    return result.value ?? setting.default;
-  }}
-  api.setModuleLoader(async (namePart) => {{
-    if (namePart === "app-initial-") {{
-      return {{ modernSettingReader, dispatcher }};
-    }}
-    throw new Error(`legacy module unavailable: ${{namePart}}`);
-  }});
-  const setting = await api.readServiceTierSetting();
-  await Promise.all([
-    api.installDispatcherPatch(),
-    api.installRequestClientPatch(),
-  ]);
-  dispatcher.dispatchMessage("start-turn-for-host", {{
-    conversationId: "thread-12345678",
-    params: {{
-      model: "gpt-5.4",
-      serviceTier: null,
-    }},
-  }});
-  const state = api.serviceTierInstallState();
-  const turnMessage = dispatched.find((message) => message.type === "start-turn-for-host");
-  api.setModuleLoader(null);
-  return {{
-    setting,
-    dispatched,
-    turnMessage,
-    ...state,
-  }};
-}}
-
-async function runSharedServiceTierModuleCase() {{
-  api.resetServiceTierInstallState();
-  api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4"] }});
-  api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
-  let invalidHookCalls = 0;
-  const dispatched = [];
-  const dispatcher = {{
-    handlers: new Map(),
-    dispatchMessage(type, payload) {{
-      dispatched.push({{ type, payload }});
-    }},
-    handleMessage() {{}},
-  }};
-  function invalidReactSettingHook(setting) {{
-    const request = {{ method: "get-settings", params: {{ key: setting.key }} }};
-    const result = {{ value: setting.default }};
-    invalidHookCalls += 1;
-    throw new Error(`invalid hook call: ${{request.method}} ${{result.value}}`);
-  }}
-  async function sharedSettingReader(setting) {{
-    const request = {{ method: "get-setting", params: {{ key: setting.key }} }};
-    const result = {{
-      value: request.params.key === "default-service-tier" ? "priority" : setting.default,
-    }};
-    return result.value ?? setting.default;
-  }}
-  function legacyCollisionReader() {{
-    invalidHookCalls += 1;
-    throw new Error("app-shared short export collision");
-  }}
-  function legacyCollisionWriter() {{}}
-  api.setModuleLoader(async (namePart) => {{
-    if (namePart === "app-shared-") {{
-      return {{
-        n: legacyCollisionReader,
-        s: legacyCollisionWriter,
-        invalidReactSettingHook,
-        sharedSettingReader,
-        dispatcher,
-      }};
-    }}
-    if (namePart === "app-initial-") {{
-      return {{ invalidReactSettingHook }};
-    }}
-    throw new Error(`legacy module unavailable: ${{namePart}}`);
-  }});
-  const setting = await api.readServiceTierSetting();
-  await Promise.all([
-    api.installDispatcherPatch(),
-    api.installRequestClientPatch(),
-  ]);
-  dispatcher.dispatchMessage("start-turn-for-host", {{
-    conversationId: "thread-12345678",
-    params: {{
-      model: "gpt-5.4",
-      serviceTier: null,
-    }},
-  }});
-  const state = api.serviceTierInstallState();
-  const turnMessage = dispatched.find((message) => message.type === "start-turn-for-host");
-  api.setModuleLoader(null);
-  return {{
-    setting,
-    invalidHookCalls,
-    dispatched,
-    turnMessage,
-    ...state,
-  }};
-}}
-
 async function runAppServerRestartDispatchCase() {{
   const conversation = restartConversation(
     "restart-safe",
@@ -7931,40 +7186,19 @@ async function runAppServerRestartDispatchCase() {{
 }}
 
 (async () => {{
-  const serviceTierRetry = await runServiceTierRetryCase();
-  const modernServiceTierModule = await runModernServiceTierModuleCase();
-  const sharedServiceTierModule = await runSharedServiceTierModuleCase();
   const appServerRestartDispatch = await runAppServerRestartDispatchCase();
   const pluginMarketplaceRequestClientCase = await runPluginMarketplaceRequestClientCase();
   process.stdout.write(JSON.stringify({{
-    supportedFast,
-    unsupportedModel,
-    turnWithoutModel,
-    turnWithoutModelDiagnosticModel,
-    customInheritUnsupported,
-    startConversation,
-    gpt56Fast,
-    gpt56EmptyCatalogFast,
-    futureGptFast,
-    unsupportedGptVariants,
     displayNameMatches,
     unicodeAliasMatches,
     aliasCatalogResolution,
-    aliasFast,
-    catalogDrivenFast,
-    catalogDrivenBlocked,
-    patchedCreateRequest,
     relayModelNames,
     modelVisibilityConfig,
     pluginMarketplaceRequestParams,
     pluginMarketplaceRequestClient: pluginMarketplaceRequestClientCase,
     pluginScopedFilters,
-    badgeTooltip,
     appServerRestart,
     appServerRestartDispatch,
-    serviceTierRetry,
-    modernServiceTierModule,
-    sharedServiceTierModule,
     serviceTierAssetReferences,
   }}));
 }})().catch((error) => {{
@@ -14297,4 +13531,545 @@ fn noop_handler() -> bridge::BridgeHandler {
         Box::pin(async { Ok(json!({ "status": "ok" })) })
             as Pin<Box<dyn Future<Output = anyhow::Result<serde_json::Value>> + Send>>
     })
+}
+
+#[test]
+fn native_fast_preserves_native_requirements_and_module_transport() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("native-fast-unlock.js"),
+        assets::native_fast_unlock_script(),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("renderer-features.js"),
+        assets::renderer_features_script(),
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("native-fast-unlock.test.cjs"), r####"const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+
+// 来自已解包的 app-initial；只缩短队列门控之后与测试无关的执行逻辑。
+const ui = function Mxo(e){let t=(0,Nxo.c)(10),n=q(gk),r=e?.hostId??n,i=OT(r),a=i?.authMethod===`chatgpt`||i?.authMethod===`personalAccessToken`,o=i?.authMethod??null,s;t[0]!==r||t[1]!==o?(s={authMethod:o,hostId:r},t[0]=r,t[1]=o,t[2]=s):s=t[2];let{data:c,isPending:l}=Eu(nC,s),u=!!i?.isLoading||a&&l,d;t[3]!==c||t[4]!==u||t[5]!==a?(d=a&&!u&&c!=null?Tr(c):null,t[3]=c,t[4]=u,t[5]=a,t[6]=d):d=t[6];let f=d,p;return t[7]!==u||t[8]!==f?(p={serviceTierAccess:f,isLoading:u},t[7]=u,t[8]=f,t[9]=p):p=t[9],p}.toString();
+const request = async function S$s(e,t){let n=await v$s(e,t);if(n!==`chatgpt`&&n!==`personalAccessToken`)return null;let r=await kSn(e,t,{priority:`critical`});return e.query.setData(nC,{authMethod:n,hostId:t},r),Tr(r)}.toString();
+const requestTier = async function x$s(e,t,n,r){try{let i=await S$s(e,t);if(r!==void 0)return Xi(null,r,i);let a=e.get(lar,t);if(a.type!==`fromConfig`)return Xi(null,Cir(a,null),i);let{config:o}=await k_o(e,t,{includeLayers:!1,cwd:null},{priority:`critical`}),s=Eb(o);return s.service_tier==null?Xi(await C$s(e,t,n??s.model),s.service_tier,i):Xi(null,s.service_tier,i)}catch(e){return fn.error(`Failed to read service tier for request`,{safe:{},sensitive:{error:e}}),null}}.toString();
+const savedTier = async function zin(e,t,n,r){try{if(!await r())return null;let t=await e.sendRequest(`configRequirements/read`,void 0,{priority:`critical`}),i=Tr(t),{config:a}=await e.sendRequest(`config/read`,{includeLayers:!1,cwd:null},{priority:`critical`}),o=Eb(a);if(o.service_tier!=null)return Xi(null,o.service_tier,i);let{data:s}=await e.sendRequest(`model/list`,{includeHidden:!0,cursor:null,limit:100},{priority:`critical`}),c=n??o.model,l=c==null?s.find(e=>e.isDefault):s.find(e=>e.model===c||e.id===c);return Xi(l,null,i)}catch(e){return t.error(`Failed to read saved service tier for request`,{safe:{},sensitive:{error:e}}),null}}.toString();
+const queueDefault = function Vin(e,{runtime:t,storage:n},r,i){let a=null;return{async readServiceTier(i){for(;a!=null;)await a.catch(()=>void 0);return r(),zin(e.requestClient,e.logger,i,async()=>e.getHostId()===`local`&&await n.readGlobalState(`use-copilot-auth-if-available`)===!0&&await t.isCopilotApiAvailable()?!1:(await e.getAccount({priority:`critical`})).account?.type===`chatgpt`)},async writeServiceTier(t,n){let o=a,s=(async()=>(await o?.catch(()=>void 0),r(),e.sendRequest(`config/batchWrite`,{edits:[{keyPath:n==null?`service_tier`:`profiles.${n}.service_tier`,value:t??`default`,mergeStrategy:`upsert`}],filePath:null,expectedVersion:null,reloadUserConfig:!0})))();a=s;try{return await s}finally{a===s&&(a=null,i())}},writeModel(t,n,r){return e.sendRequest(`config/batchWrite`,a1t(t,n,r))},readShellEnvironmentPolicy(e,t){return Promise.resolve(null)}}}.toString();
+const queueExplicit = function Mfn(e,{settings:t,storage:n,filesystem:r,runtime:i},a,o,s){return async(c,l)=>{let u=l.submissionOptions,d=l.context.workPermissions,f=d!=null,p=u?.executionHostId??e.getHostId();if(Aln(l.context,p,i.accountId(),i.threadMode(p)===`durable`))return{status:`paused`,reason:Nln};let m=e.getConversation(c),h=tx(m?.threadStartKind,m?.threadSource),g=u?.collaborationMode??null;u!=null&&h&&m!=null&&(g={...m.latestCollaborationMode,mode:g?.mode??m.latestCollaborationMode.mode});let _=e.getConversationCwd(c)??l.cwd,v=l.context.workspaceRoots??(e.needsResume(c)?await r.readThreadWorkspaceRoots?.(c):m?.currentPermissions?.runtimeWorkspaceRoots??[_]);if(v==null||!v.every(e=>e.length>0))return{status:`paused`,reason:`workspace-unavailable`};let[y,b]=await Promise.all([(async()=>{if(u==null)return a(m?.latestModel||null);if(u.serviceTier==null)return null;let{account:t}=await e.getAccount({priority:`critical`});return t?.type===`chatgpt`?u.serviceTier:null})(),u?.usePermissionSelection??t.readPermissionRefreshEnabled()]);return{serviceTier:y,executionHostId:p}}}.toString();
+
+// 原生 requirements 和 tier 解析函数也直接保留，验证补丁没有绕开它们。
+const access = function Uat(e){let t=e.requirements?.featureRequirements,n=t?.fast_mode!==!1;return{fast:n,ultrafast:(`supportsIndependentSpeedModes`in e&&e.supportsIndependentSpeedModes===!0||n)&&t?.ultrafast_mode!==!1}};
+const permitted = function Wat(e,t){if(e==null||e===eot)return!0;if(t==null)return!1;let n=Gat(e);return e===`flex`||t[n??`fast`]};
+const speedKind = function Gat(e,t){let n=t?.trim().toLowerCase();return e===`priority`||e===`fast`||n===`fast`?`fast`:e===$at||n===`ultrafast`?`ultrafast`:null};
+const modelTier = function Kat(e,t){return t==null?null:t===`fast`?qat(e):e?.serviceTiers?.find(e=>e.id===t)??null};
+const fastTier = function qat(e){return e?.serviceTiers?.find(e=>Gat(e.id,e.name)===`fast`||e.name.trim().toLowerCase()===`priority`)??null};
+const tierId = function Yat(e,t){return Kat(e,t)?.id??null};
+const selectedTier = function Xat(e,t,n={fast:!0,ultrafast:!0}){let r=t??Yat(e,e?.defaultServiceTier??null);return r===eot||!Wat(r,n)?null:r};
+
+const uiModel = function _wo(e,t,n,r,i){let a=(0,ywo.c)(56),{modelSettings:o,setModelAndReasoningEffort:s}=t,host=q(gk),O;a[8]===host?O=a[9]:(O={hostId:host},a[8]=host,a[9]=O);let{serviceTierAccess:k}=Mxo(O),A;return{serviceTierAccess:k}}.toString();
+const source = [ui, request, queueDefault, queueExplicit, savedTier, requestTier, uiModel].join("\n");
+const url = "app://-/assets/app-initial-fixture.js";
+const helper = fs.readFileSync(require.resolve("./native-fast-unlock.js"), "utf8");
+const enabled = { enhancementsEnabled: true, codexAppNativeFastUnlock: true };
+
+function environment(patch = true) {
+  const state = {
+    host: "local", auth: "apikey", accountType: "apiKey", authLoading: false,
+    requirements: { requirements: null }, requirementsPending: false,
+    config: { model: "gpt-5.6", service_tier: "priority" }, override: { type: "fromConfig" },
+    model: { model: "gpt-5.6", isDefault: true, defaultServiceTier: "fast", serviceTiers: [{ id: "priority", name: "Fast" }] },
+    copilotPreferred: false, copilotAvailable: false, accountReads: 0, requirementsReads: 0, publications: 0,
+  };
+  const sendRequest = async method => {
+    if (method === "configRequirements/read") { state.requirementsReads++; return state.requirements; }
+    if (method === "config/read") return { config: state.config };
+    if (method === "model/list") return { data: [state.model] };
+    throw new Error(`Unexpected fixture request: ${method}`);
+  };
+  const manager = {
+    getHostId: () => state.host,
+    getAccount: async () => { state.accountReads++; return { account: { type: state.accountType } }; },
+    getConversation: () => ({ latestModel: state.model.model }), getConversationCwd: () => "/fixture", needsResume: () => false,
+    requestClient: { sendRequest }, logger: { error() {} }, sendRequest,
+  };
+  const scope = {
+    get: () => state.override,
+    query: { setData: () => { state.publications++; } },
+  };
+  const context = vm.createContext({
+    module: { exports: {} }, window: {},
+    Nxo: { c: () => state.accessCache ??= [] }, ywo: { c: () => state.modelCache ??= [] }, gk: {}, nC: {}, lar: {}, q: () => state.host,
+    OT: () => ({ authMethod: state.auth, isLoading: state.authLoading }),
+    Eu: () => ({ data: state.requirements, isPending: state.requirementsPending }),
+    v$s: async () => state.auth,
+    kSn: async () => { state.requirementsReads++; return state.requirements; },
+    k_o: async () => ({ config: state.config }), C$s: async () => state.model, Eb: value => value,
+    Cir: (override, config) => override.type === "custom" ? override.serviceTier : override.type === "standard" ? "default" : config,
+    Aln: () => false, tx: () => false, Nln: "fixture", fn: { error() {} },
+  });
+  vm.runInContext(helper, context);
+  const api = context.module.exports;
+  api.runtime.update(enabled);
+  const result = api.transform(source, url);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  const shared = [access, permitted, speedKind, modelTier, fastTier, tierId, selectedTier].map(fn => fn.toString()).join("\n");
+  vm.runInContext(`const eot=\`default\`,$at=\`ultrafast\`;${shared};const Tr=Uat,Xi=Xat;\n${patch ? result.patchedSource : source};globalThis.fixtures={Mxo,S$s,x$s,Vin,Mfn,modelUi:_wo};`, context);
+  const fns = context.fixtures;
+  const queueRuntime = {
+    isCopilotApiAvailable: async () => state.copilotAvailable,
+    accountId: () => "fixture", threadMode: () => "default",
+  };
+  const queue = () => fns.Vin(manager, { runtime: queueRuntime, storage: { readGlobalState: async () => state.copilotPreferred } }, () => {}, () => {});
+  const explicit = async (serviceTier, executionHostId = state.host, hasOptions = true, collaborationModel = undefined) => {
+    const prepare = fns.Mfn(manager, {
+      settings: { readPermissionRefreshEnabled: () => false },
+      storage: { readGlobalState: async () => state.copilotPreferred }, filesystem: {}, runtime: queueRuntime,
+    }, model => queue().readServiceTier(model), () => "id", () => {});
+    return prepare("thread", {
+      submissionOptions: hasOptions ? { serviceTier, executionHostId, usePermissionSelection: false, ...(collaborationModel === undefined ? {} : {collaborationMode:{settings:{model:collaborationModel}}}) } : undefined,
+      context: { workspaceRoots: ["/fixture"] }, cwd: "/fixture",
+    });
+  };
+  return { api, state, fns, manager, scope, queue, explicit, result, context };
+}
+
+async function runNativeFastTests() {
+  const env = environment();
+  const { api, state, fns, result } = env;
+  assert.deepEqual(Object.values(result.diagnostics.matches), [1, 1, 1, 1, 1, 1]);
+  assert.equal(result.replacements.length, 6);
+  assert.equal(result.patchedSource.split("\n").length, source.split("\n").length);
+  for (const replacement of result.replacements) {
+    assert.ok(!/[\r\n]/.test(source.slice(replacement.start, replacement.end)));
+    assert.ok(!/[\r\n]/.test(replacement.text));
+  }
+  const renamed = source.replace(/\b(Mxo|Vin|Mfn)\b|S\$s/g, name => `renamed_${name.replaceAll("$", "_")}`);
+  assert.equal(api.plan(renamed, url).ok, true, "压缩函数改名后仍按结构定位");
+  const renamedLocals = source.replace(/(?<![.\w$])\b(e|t|n|r|i|a|o|s|c|l|u|d|f|p|m|h|g|v|y|b)\b/g, name => `_${name}`);
+  assert.equal(api.plan(renamedLocals, url).ok, true, "局部绑定改名后仍按引用关系定位");
+  const unicode = api.plan(`// 🥷 中文\n${source}`, url);
+  assert.equal(unicode.ok, true);
+  assert.equal(unicode.replacements[0].start, result.replacements[0].start + "// 🥷 中文\n".length);
+
+  for (const fixture of [ui, request, queueDefault, queueExplicit, uiModel, requestTier]) {
+    const missingSource = source.replace(fixture, "");
+    const missing = api.transform(missingSource, url);
+    assert.equal(missing.ok, false, "缺少任一门控时不允许部分应用");
+    assert.equal(missing.patchedSource, missingSource);
+    assert.equal(missing.replacements.length, 0);
+    const duplicateSource = `${source}\n${fixture}`;
+    const duplicate = api.transform(duplicateSource, url);
+    assert.equal(duplicate.ok, false, "任一门控多匹配时不允许部分应用");
+    assert.equal(duplicate.diagnostics.reason, "ambiguous-gates");
+    assert.equal(duplicate.patchedSource, duplicateSource);
+  }
+  assert.equal(api.plan(source.replace("serviceTierAccess:f", "otherAccess:f"), url).ok, false);
+  assert.equal(api.plan(source, "").ok, false);
+  assert.equal(api.plan(null, url).ok, false);
+  assert.equal(api.transform(result.patchedSource, url).patchedSource, result.patchedSource, "重复拦截不能重复插入补丁");
+
+  for (const host of ["remote", "durable", "LOCAL", null]) assert.equal(api.runtime.allow(host, "apikey"), false);
+  for (const auth of ["chatgpt", "personalAccessToken", "copilot", "amazonBedrock", "ApiKey", null]) assert.equal(api.runtime.allow("local", auth), false);
+  assert.equal(api.runtime.allow("local", "apikey"), true);
+  assert.equal(api.runtime.allow("local", "apiKey"), true);
+  for (const settings of [null, {}, { ...enabled, enhancementsEnabled: false }, { ...enabled, codexAppNativeFastUnlock: false }, { ...enabled, codexAppNativeFastUnlock: "true" }]) {
+    api.runtime.update(settings);
+    assert.equal(api.runtime.allow("local", "apikey"), false, "两个开关都必须明确开启");
+    assert.equal(fns.Mxo({model:state.model.model}).serviceTierAccess, null);
+  }
+  api.runtime.update(enabled);
+  env.context.window.__codexElvesNativeFastSettings = { ...enabled, codexAppNativeFastUnlock: false };
+  assert.equal(api.runtime.allow("local", "apikey"), false, "每次读取最新设置，关闭后立即停止放行");
+  api.runtime.update(enabled);
+
+  assert.equal(environment(false).fns.Mxo({model:state.model.model}).serviceTierAccess, null, "原生 API key UI 确实被门控");
+  assert.equal(fns.Mxo({model:state.model.model}).serviceTierAccess.fast, true);
+  state.authLoading = true;
+  assert.equal(fns.Mxo({model:state.model.model}).serviceTierAccess, null);
+  assert.equal(fns.Mxo({model:state.model.model}).isLoading, true);
+  state.authLoading = false;
+  state.requirementsPending = true;
+  assert.equal(fns.Mxo({model:state.model.model}).serviceTierAccess, null);
+  assert.equal(fns.Mxo({model:state.model.model}).isLoading, true);
+  state.requirementsPending = false;
+  state.requirements = { requirements: { featureRequirements: { fast_mode: false, ultrafast_mode: false } } };
+  assert.equal(fns.Mxo({model:state.model.model}).serviceTierAccess.fast, false, "保留 fast_mode 管理限制");
+  assert.equal(await fns.x$s(env.scope, "local", "gpt-5.6", "priority"), null);
+  assert.equal(await env.queue().readServiceTier("gpt-5.6"), null);
+  state.requirements = { requirements: null };
+
+  assert.equal(await fns.x$s(env.scope, "local", "gpt-5.6", "priority"), "priority");
+  assert.equal(await fns.x$s(env.scope, "local", "gpt-5.6", "default"), null, "Standard 请求保持默认值");
+  state.config.service_tier = null;
+  assert.equal(await fns.x$s(env.scope, "local", "gpt-5.6"), "priority", "使用模型声明的 Fast tier id");
+  state.model = { model: "gpt-5.6", isDefault: true };
+  assert.equal(await fns.x$s(env.scope, "local", "gpt-5.6"), null, "未声明的模型 tier 不会凭空补齐");
+  state.config.service_tier = "priority";
+  state.override = { type: "standard" };
+  assert.equal(await fns.x$s(env.scope, "local", "gpt-5.6"), null, "保留会话 Standard 覆盖");
+  state.override = { type: "custom", serviceTier: "priority" };
+  assert.equal(await fns.x$s(env.scope, "local", "gpt-5.6"), "priority");
+  state.override = { type: "fromConfig" };
+
+  for (const auth of ["copilot", "amazonBedrock", null]) {
+    state.auth = auth;
+    assert.equal(fns.Mxo({model:state.model.model}).serviceTierAccess, null);
+    assert.equal(await fns.x$s(env.scope, "local", "gpt-5.6", "priority"), null);
+  }
+  for (const auth of ["chatgpt", "personalAccessToken"]) {
+    state.auth = auth;
+    api.runtime.update(null);
+    assert.equal(fns.Mxo({model:state.model.model}).serviceTierAccess.fast, true, "保留已有官方认证路径");
+    assert.equal(await fns.x$s(env.scope, "remote", "gpt-5.6", "priority"), "priority");
+  }
+  api.runtime.update(enabled);
+  state.auth = "apikey";
+  state.host = "remote";
+  assert.equal(fns.Mxo({model:state.model.model}).serviceTierAccess, null);
+  assert.equal(await fns.x$s(env.scope, "remote", "gpt-5.6", "priority"), null);
+  assert.equal(await env.queue().readServiceTier("gpt-5.6"), null);
+  assert.equal((await env.explicit("priority", "local")).serviceTier, null, "远端 manager 不借本机执行参数放行");
+  state.host = "local";
+
+  state.accountReads = 0;
+  assert.equal(await env.queue().readServiceTier("gpt-5.6"), "priority");
+  assert.equal(state.accountReads, 1, "默认队列只读取一次账号类型");
+  state.copilotPreferred = true;
+  state.copilotAvailable = true;
+  state.accountReads = 0;
+  assert.equal(await env.queue().readServiceTier("gpt-5.6"), null);
+  assert.equal(state.accountReads, 0, "保留 Copilot 优先分支的短路");
+  assert.equal((await env.explicit("priority")).serviceTier, null, "显式队列不能借底层 API 身份放行所选 Copilot");
+  state.copilotAvailable = false;
+  assert.equal((await env.explicit("priority")).serviceTier, "priority", "Copilot 不可用时仍使用 API 身份");
+  state.copilotPreferred = false;
+  state.copilotAvailable = true;
+  assert.equal((await env.explicit("priority")).serviceTier, "priority", "未选择 Copilot 时不受其可用性影响");
+  state.copilotAvailable = false;
+  state.accountReads = 0;
+  assert.equal((await env.explicit("priority")).serviceTier, "priority");
+  assert.equal(state.accountReads, 1, "显式队列只读取一次账号类型");
+  assert.equal((await env.explicit("priority", "remote")).serviceTier, null, "本机 manager 不能放行远端执行队列");
+  assert.equal((await env.explicit(null)).serviceTier, null);
+  assert.equal((await env.explicit(null, "local", false)).serviceTier, "priority", "无选项时沿用原有默认读取器");
+  state.accountType = "amazonBedrock";
+  assert.equal(await env.queue().readServiceTier("gpt-5.6"), null);
+  assert.equal((await env.explicit("priority")).serviceTier, null);
+  state.accountType = "chatgpt";
+  api.runtime.update(null);
+  assert.equal(await env.queue().readServiceTier("gpt-5.6"), "priority");
+  assert.equal((await env.explicit("priority", "remote")).serviceTier, "priority", "已有官方账号的远端行为保持不变");
+  state.accountType = "apiKey";
+  assert.equal(await env.queue().readServiceTier("gpt-5.6"), null);
+  assert.equal((await env.explicit("priority")).serviceTier, null);
+
+
+  // 同一个原生组件保留 memo 缓存时，模型切换也必须立即改变入口权限。
+  api.runtime.update(enabled);
+  const modelUiAccess = model => fns.modelUi(null, {modelSettings:{model},setModelAndReasoningEffort(){}}).serviceTierAccess;
+  const gptModel = state.model.model;
+  for (const model of ["claude-opus-5-5", "deepseek-v4", "qwen3-coder", "gemini-3-pro", "kimi-k2.5", "swe-2", "unknown-model", "", null, undefined]) {
+    assert.equal(modelUiAccess(gptModel).fast, true);
+    assert.equal(modelUiAccess(model), null, `${model} 不开放原生 Fast`);
+    assert.equal(await fns.x$s(env.scope, "local", model, "priority"), null);
+    assert.equal(await env.queue().readServiceTier(model), null);
+    state.model.model = model;
+    assert.equal((await env.explicit("priority")).serviceTier, null);
+    assert.equal((await env.explicit(null, "local", false)).serviceTier, null);
+    state.model.model = gptModel;
+    assert.equal(modelUiAccess(gptModel).fast, true);
+  }
+  assert.equal((await env.explicit("priority", "local", true, "claude-opus-5-5")).serviceTier, null, "排队消息使用实际协作模型，不能继承输入框 GPT 的 Fast");
+  state.model.model = "claude-opus-5-5";
+  assert.equal((await env.explicit("priority", "local", true, "gpt-6-astra")).serviceTier, "priority", "GPT 排队消息不受另一个会话的非 GPT 选择影响");
+  state.model.model = gptModel;
+  api.runtime.update({...enabled, modelAliases:{"主力模型":"gpt-6-astra", "gpt-6-alias":"claude-opus-5-5", "备用模型":"deepseek-v4"}});
+  assert.equal(modelUiAccess("主力模型").fast, true);
+  assert.equal(modelUiAccess("gpt-6-alias"), null);
+  assert.equal(modelUiAccess("备用模型"), null);
+  assert.equal(await env.queue().readServiceTier("主力模型"), "priority");
+  assert.equal(await env.queue().readServiceTier("gpt-6-alias"), null);
+  for (const model of ["gpt-5.4", "gpt-5.6-sol", "gpt-6-astra[600K]", "openai/gpt-6-astra", "gpt-7-sol"]) assert.equal(api.runtime.isGptModel(model), true);
+  state.auth = "chatgpt";
+  state.accountType = "chatgpt";
+  api.runtime.update(null);
+  assert.equal(modelUiAccess("claude-opus-5-5"), null, "官方登录也不能为非 GPT 模型开放 Fast");
+  assert.equal(await fns.x$s(env.scope, "local", "claude-opus-5-5", "priority"), null);
+  assert.equal(await env.queue().readServiceTier("claude-opus-5-5"), null);
+  state.model.model = "claude-opus-5-5";
+  assert.equal((await env.explicit("priority")).serviceTier, null);
+  state.model.model = gptModel;
+  state.auth = "apikey";
+  state.accountType = "apiKey";
+  api.runtime.update(enabled);
+
+  await require("./native-fast-module.test.cjs")({ source, url });
+  return "Native Fast structure matching, four auth paths, requirements, local scope, opt-in, queue and module transport behavior passed";
+}
+
+module.exports = runNativeFastTests;
+if (require.main === module) {
+  runNativeFastTests().then(message => console.log(message)).catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
+"####).unwrap();
+    std::fs::write(temp.path().join("native-fast-module.test.cjs"), r####"const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+const { createRequire } = require("node:module");
+
+const helper = fs.readFileSync(require.resolve("./native-fast-unlock.js"), "utf8");
+const enabled = { enhancementsEnabled: true, codexAppNativeFastUnlock: true };
+
+function browser({ existing = false, location = "app://-/index.html", storage = new Map(), supports = true } = {}) {
+  const events = [];
+  const listeners = new Map();
+  const timers = new Map();
+  let nextTimer = 0;
+  let reloads = 0;
+  const document = {
+    readyState: "loading",
+    documentElement: existing ? { existing: true } : null,
+    addEventListener(type, listener, options) {
+      const current = listeners.get(type) ?? [];
+      current.push({ listener, once: options?.once === true });
+      listeners.set(type, current);
+    },
+    removeEventListener(type, listener) {
+      listeners.set(type, (listeners.get(type) ?? []).filter(item => item.listener !== listener));
+    },
+    createElement(tag) {
+      const node = { tag, parentNode: null, children: [], relList: { supports: () => supports } };
+      node.appendChild = child => { node.children.push(child); child.parentNode = node; events.push([tag, child]); return child; };
+      return node;
+    },
+    appendChild(node) {
+      assert.equal(this.documentElement, null);
+      this.documentElement = node;
+      node.parentNode = this;
+      events.push(["document-append", node]);
+      return node;
+    },
+    removeChild(node) {
+      assert.equal(this.documentElement, node);
+      this.documentElement = null;
+      node.parentNode = null;
+      events.push(["document-remove", node]);
+      return node;
+    },
+  };
+  const window = {
+    document,
+    location: { href: location, reload: () => { reloads++; } },
+    URL: class extends URL { static createObjectURL() { events.push(["blob"]); return "blob:app://-/fixture"; } },
+    Blob,
+    HTMLScriptElement: { supports: () => supports },
+    setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    sessionStorage: {
+      getItem: key => storage.get(key) ?? null,
+      setItem: (key, value) => storage.set(key, value),
+      removeItem: key => storage.delete(key),
+    },
+  };
+  const context = vm.createContext({ module: { exports: {} }, window, URL });
+  vm.runInContext(helper, context);
+  const api = context.module.exports;
+  api.runtime.update(enabled);
+  const domContentLoaded = () => {
+    document.readyState = "interactive";
+    for (const item of [...(listeners.get("DOMContentLoaded") ?? [])]) {
+      if (item.once) document.removeEventListener("DOMContentLoaded", item.listener);
+      item.listener();
+    }
+  };
+  const runTimers = () => {
+    for (const [id, timer] of [...timers]) { timers.delete(id); timer.callback(); }
+  };
+  return { api, window, events, storage, timers, listeners, domContentLoaded, runTimers, reloads: () => reloads };
+}
+
+function moduleReferences(parser, source) {
+  const ast = parser.parse(source, { sourceType: "module", createImportExpressions: true });
+  const references = { static: [], dynamic: [], meta: 0 };
+  const pending = [ast];
+  while (pending.length) {
+    const node = pending.pop();
+    if (!node || typeof node !== "object") continue;
+    if (node.type === "ImportExpression") references.dynamic.push(node.source.value ?? node.source.quasis?.[0]?.value.cooked);
+    if ((node.type === "ImportDeclaration" || node.type?.startsWith("Export")) && node.source) references.static.push(node.source.value);
+    if (node.type === "MetaProperty" && node.meta.name === "import") references.meta++;
+    for (const [key, value] of Object.entries(node)) {
+      if (["loc", "extra", "comments", "leadingComments", "trailingComments", "innerComments"].includes(key)) continue;
+      if (Array.isArray(value)) pending.push(...value);
+      else if (value && typeof value === "object") pending.push(value);
+    }
+  }
+  return references;
+}
+
+async function runNativeFastModuleTests({ source, url }) {
+  const fixture = [
+    'import dependency from "./static.js"; import "./side.js";',
+    'export { dependency } from "../export.js"; export * from "./star.js";',
+    'const dynamic = import("./dynamic.js"); const escaped = import("./\\u0061.js");',
+    'const tick = import(`./tick.js`, { with: { type: "json" } });',
+    'const object = { import: () => import("./property.js"), import() { return import("./method.js") }, export() {} }; object.import; object?.import;',
+    'const template = `raw import("./untouched.js") import.meta.url ${import("./nested.js")} ${`${import.meta.url}`}`;',
+    'const text = "import(\'./text.js\') import.meta.url";',
+    'const pattern = /import\\("\\.\\/regex.js"\\)|import.meta.url/v;',
+    'if (true) /import\\("regex"\\)|import.meta.url/.test(text);',
+    'const division = 1 / 2 / 3; const objectDivision = ({ value: 1 }) / 2;',
+    '// import("./comment.js"); import.meta.url',
+    '/* import("./block-comment.js"); import.meta.url */',
+    source,
+  ].join("\n");
+  const env = browser();
+  const prepared = env.api.prepareModule(fixture, url);
+  assert.equal(prepared.ok, true, JSON.stringify(prepared.diagnostics));
+  assert.equal(prepared.diagnostics.staticImports, 4);
+  assert.equal(prepared.diagnostics.dynamicImports, 6);
+  assert.equal(prepared.diagnostics.importMetaUrls, 1);
+  assert.ok(prepared.patchedSource.includes('const text = "import(\'./text.js\') import.meta.url";'));
+  assert.ok(prepared.patchedSource.includes('/import\\("\\.\\/regex.js"\\)|import.meta.url/v'));
+  assert.ok(prepared.patchedSource.includes('raw import("./untouched.js") import.meta.url'));
+  assert.ok(prepared.patchedSource.includes('// import("./comment.js"); import.meta.url'));
+  assert.ok(prepared.patchedSource.includes(`//# sourceURL=${url}\n`));
+  assert.ok(prepared.patchedSource.includes('window.__codexElvesNativeFastCompiled="v2";'));
+
+  const renderer = fs.readFileSync(path.join(__dirname, "renderer-features.js"), "utf8");
+  const candidate = renderer.match(/  function codexAppAssetUrl\([^]*?\n  }/)[0];
+  const assetWindow = { __codexElvesNativeFastCompiled: "v2", __codexElvesNativeFastModuleDiagnostics: { url } };
+  const candidates = () => vm.runInNewContext(`${candidate};codexAppAssetUrl("app-initial-")`, {
+    window: assetWindow, document: { scripts: [], querySelectorAll: () => [] },
+    performance: { getEntriesByType: () => [{ name: "blob:app://-/fixture" }] },
+  });
+  assert.equal(candidates(), url);
+  assetWindow.__codexElvesNativeFastCompiled = undefined;
+  assert.equal(candidates(), "");
+
+  // 纯 cargo test 不要求先安装 manager 的前端依赖；本机完整验证可额外核对 AST。
+  let parser;
+  try { parser = createRequire(path.resolve(process.cwd(), "apps/codex-elves-manager/package.json"))("@babel/parser"); }
+  catch (error) { if (process.env.CODEX_NATIVE_FAST_MODULE_SOURCE) throw error; }
+  if (parser) {
+    const before = moduleReferences(parser, fixture);
+    const after = moduleReferences(parser, prepared.patchedSource);
+    assert.equal(after.meta, 0);
+    assert.deepEqual(after.static, before.static.map(value => new URL(value, url).href));
+    assert.deepEqual(after.dynamic, before.dynamic.map(value => new URL(value, url).href));
+  }
+
+  for (const unsupported of ['import("./" + name)', 'import(name)', 'import.meta.resolve("./x")']) {
+    const rejected = env.api.prepareModule(`${source}\n${unsupported};`, url);
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.patchedSource, `${source}\n${unsupported};`);
+  }
+  assert.equal(env.api.prepareModule(source, "https://example.com/assets/app.js").ok, false);
+  env.api.runtime.update({ ...enabled, enhancementsEnabled: false });
+  assert.equal(env.api.prepareModule(fixture, url).diagnostics.reason, "disabled");
+  assert.equal(env.api.installModule(prepared.patchedSource, url).diagnostics.reason, "disabled");
+  assert.equal(env.events.length, 0);
+  env.api.runtime.update(enabled);
+
+  const installed = env.api.installModule(prepared.patchedSource, url);
+  assert.equal(installed.ok, true, JSON.stringify(installed.diagnostics));
+  assert.equal(env.window.document.documentElement, null, "原 parser 继续接管文档，临时 html 必须同步移除");
+  const nodes = env.events.filter(([kind]) => kind === "html").map(([, node]) => node);
+  assert.deepEqual(nodes.map(node => node.tag), ["script", "link"]);
+  assert.equal(nodes[0].type, "importmap");
+  assert.equal(JSON.parse(nodes[0].textContent).imports[url], "blob:app://-/fixture");
+  assert.equal(nodes[1].rel, "modulepreload");
+  assert.equal(nodes[1].href, "blob:app://-/fixture");
+  assert.equal(env.window.__codexElvesNativeFastCompiled, undefined, "预加载不能伪造原生模块已执行标记");
+  JSON.stringify(installed);
+
+  nodes[1].onerror();
+  assert.equal(env.reloads(), 1);
+  assert.equal(env.window.__codexElvesNativeFastPatchState, "failed");
+  const fallback = browser({ storage: env.storage });
+  assert.equal(fallback.api.installModule(prepared.patchedSource, url).diagnostics.reason, "module-preload-failed-open");
+  assert.equal(fallback.events.length, 0, "失败后的下一文档直接加载原模块");
+  assert.equal(fallback.reloads(), 0, "不形成重载循环");
+
+  const executionFailure = browser();
+  assert.equal(executionFailure.api.installModule(prepared.patchedSource, url).ok, true);
+  const preloaded = executionFailure.events.find(([kind, node]) => kind === "html" && node.tag === "link")[1];
+  preloaded.onload?.();
+  assert.equal(executionFailure.timers.size, 0, "DOMContentLoaded 之前不判断目标模块执行失败");
+  executionFailure.domContentLoaded();
+  assert.equal(executionFailure.timers.size, 1, "预加载成功但模块执行 throw 时仍有完成标记守护");
+  assert.equal([...executionFailure.timers.values()][0].delay, 30000);
+  assert.equal(executionFailure.listeners.has("error"), false, "不把其他脚本的异常当成目标模块失败");
+  executionFailure.runTimers();
+  assert.equal(executionFailure.window.__codexElvesNativeFastModuleDiagnostics.reason, "module-execution-timeout");
+  assert.equal(executionFailure.reloads(), 1);
+  preloaded.onerror();
+  assert.equal(executionFailure.reloads(), 1, "同一文档的重复失败只恢复一次");
+  const executionFallback = browser({ storage: executionFailure.storage });
+  assert.equal(executionFallback.api.installModule(prepared.patchedSource, url).ok, false);
+  assert.equal(executionFallback.events.length, 0, "执行失败的下一文档同样加载原模块");
+
+  for (const beforeDomReady of [true, false]) {
+    const success = browser();
+    assert.equal(success.api.installModule(prepared.patchedSource, url).ok, true);
+    if (!beforeDomReady) { success.domContentLoaded(); assert.equal(success.timers.size, 1); }
+    success.window.__codexElvesNativeFastCompiled = "v2";
+    success.window.__codexElvesNativeFastModuleComplete();
+    if (beforeDomReady) success.domContentLoaded();
+    assert.equal(success.timers.size, 0, "目标模块执行成功立即撤销守护");
+    assert.equal(success.window.__codexElvesNativeFastModuleComplete, undefined);
+    success.runTimers();
+    assert.equal(success.reloads(), 0);
+  }
+
+  const existing = browser({ existing: true });
+  assert.equal(existing.api.installModule(prepared.patchedSource, url).diagnostics.reason, "document-already-started");
+  assert.equal(existing.events.length, 0);
+  assert.equal(existing.window.document.documentElement.existing, true);
+  const foreign = browser({ location: "https://example.com/" });
+  assert.equal(foreign.api.installModule(prepared.patchedSource, url).ok, false);
+  assert.equal(foreign.events.length, 0);
+  const unavailable = browser({ supports: false });
+  assert.equal(unavailable.api.installModule(prepared.patchedSource, url).ok, false);
+  assert.equal(unavailable.events.length, 0);
+  const file = browser({ location: "file:///tmp/native-fast-test.html" });
+  const filePrepared = file.api.prepareModule(source, "file:///tmp/assets/app.js");
+  assert.equal(filePrepared.ok, true);
+  assert.equal(file.api.installModule(filePrepared.patchedSource, "file:///tmp/assets/app.js").ok, true);
+
+  // 真实解包源码是本机可选证据，不把安装文件或大体积 fixture 收入仓库。
+  const nativeSource = process.env.CODEX_NATIVE_FAST_MODULE_SOURCE;
+  if (nativeSource) {
+    const original = fs.readFileSync(nativeSource, "utf8");
+    const nativePrepared = env.api.prepareModule(original, url);
+    assert.equal(nativePrepared.ok, true, JSON.stringify(nativePrepared.diagnostics));
+    const originalReferences = moduleReferences(parser, original);
+    const patchedReferences = moduleReferences(parser, nativePrepared.patchedSource);
+    assert.equal(nativePrepared.diagnostics.staticImports, originalReferences.static.length);
+    assert.equal(nativePrepared.diagnostics.dynamicImports, originalReferences.dynamic.length);
+    assert.equal(nativePrepared.diagnostics.importMetaUrls, originalReferences.meta);
+    assert.equal(patchedReferences.meta, 0);
+    assert.deepEqual(patchedReferences.static, originalReferences.static.map(value => new URL(value, url).href));
+    assert.deepEqual(patchedReferences.dynamic, originalReferences.dynamic.map(value => new URL(value, url).href));
+  }
+  return "Native Fast module base rewrite, lexical boundaries, preload, document isolation and one-shot fallback passed";
+}
+
+module.exports = runNativeFastModuleTests;
+"####).unwrap();
+    let output = Command::new("node")
+        .arg(temp.path().join("native-fast-unlock.test.cjs"))
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

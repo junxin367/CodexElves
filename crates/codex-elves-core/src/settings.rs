@@ -845,8 +845,12 @@ pub struct BackendSettings {
     pub codex_app_native_menu_placement: bool,
     #[serde(rename = "codexAppOpenInQuickAccess", default = "default_true")]
     pub codex_app_open_in_quick_access: bool,
-    #[serde(rename = "codexAppServiceTierControls", default)]
-    pub codex_app_service_tier_controls: bool,
+    #[serde(
+        rename = "codexAppNativeFastUnlock",
+        alias = "codexAppServiceTierControls",
+        default
+    )]
+    pub codex_app_native_fast_unlock: bool,
     #[serde(rename = "codexAppImageOverlayEnabled", default)]
     pub codex_app_image_overlay_enabled: bool,
     #[serde(rename = "codexAppImageOverlayPath", default)]
@@ -966,7 +970,7 @@ impl Default for BackendSettings {
             codex_app_upstream_worktree_create: false,
             codex_app_native_menu_placement: true,
             codex_app_open_in_quick_access: true,
-            codex_app_service_tier_controls: false,
+            codex_app_native_fast_unlock: false,
             codex_app_image_overlay_enabled: false,
             codex_app_image_overlay_path: String::new(),
             codex_app_image_overlay_opacity: default_image_overlay_opacity(),
@@ -1331,8 +1335,12 @@ impl SettingsStore {
             }
         };
 
+        let mut raw: Value = serde_json::from_str(&contents).unwrap_or_default();
+        if let Some(raw) = raw.as_object_mut() {
+            migrate_native_fast_setting(raw);
+        }
         let settings =
-            normalize_settings_config_sections(serde_json::from_str(&contents).unwrap_or_default());
+            normalize_settings_config_sections(serde_json::from_value(raw).unwrap_or_default());
         validate_relay_model_protocol_assignments(&settings)?;
         Ok(settings)
     }
@@ -1353,6 +1361,7 @@ impl SettingsStore {
         };
 
         let mut raw = self.load_raw_object()?;
+        migrate_native_fast_setting(&mut raw);
         raw.remove("wsFailureFallbackToHttp");
         merge_known_setting_fields(&mut raw, &payload)?;
         let settings = normalize_settings_config_sections(
@@ -1395,6 +1404,12 @@ impl SettingsStore {
                 self.path.display()
             ),
         }
+    }
+}
+
+fn migrate_native_fast_setting(raw: &mut Map<String, Value>) {
+    if let Some(legacy) = raw.remove("codexAppServiceTierControls") {
+        raw.entry("codexAppNativeFastUnlock").or_insert(legacy);
     }
 }
 
@@ -1495,7 +1510,7 @@ fn merge_known_setting_fields(
     merge_bool_setting(target, source, "codexAppUpstreamWorktreeCreate");
     merge_bool_setting(target, source, "codexAppNativeMenuPlacement");
     merge_bool_setting(target, source, "codexAppOpenInQuickAccess");
-    merge_bool_setting(target, source, "codexAppServiceTierControls");
+    merge_bool_setting(target, source, "codexAppNativeFastUnlock");
     merge_bool_setting(target, source, "codexAppImageOverlayEnabled");
     if let Some(value) = source
         .get("codexAppImageOverlayPath")
@@ -3550,6 +3565,44 @@ experimental_bearer_token = "sk-existing""#
     }
 
     #[test]
+    fn native_fast_migrates_legacy_opt_in_and_preserves_explicit_new_setting() {
+        let dir = temp_dir();
+        let store = SettingsStore::new(dir.join("settings.json"));
+        for (raw, expected) in [
+            (json!({}), false),
+            (json!({"codexAppServiceTierControls": true}), true),
+            (json!({"codexAppServiceTierControls": false}), false),
+            (
+                json!({
+                    "codexAppServiceTierControls": true,
+                    "codexAppNativeFastUnlock": false,
+                    "unrelatedField": "preserved",
+                }),
+                false,
+            ),
+        ] {
+            fs::write(&store.path, serde_json::to_vec(&raw).unwrap()).unwrap();
+            assert_eq!(store.load().unwrap().codex_app_native_fast_unlock, expected);
+            assert_eq!(
+                store
+                    .update(json!({"providerSyncEnabled": true}))
+                    .unwrap()
+                    .codex_app_native_fast_unlock,
+                expected
+            );
+            let saved: Value = serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
+            assert!(saved.get("codexAppServiceTierControls").is_none());
+            if raw.get("unrelatedField").is_some() {
+                assert_eq!(saved["unrelatedField"], "preserved");
+            }
+            let updated = store
+                .update(json!({"codexAppNativeFastUnlock": !expected}))
+                .unwrap();
+            assert_eq!(updated.codex_app_native_fast_unlock, !expected);
+        }
+    }
+
+    #[test]
     fn settings_store_update_only_mutates_present_known_fields() {
         let dir = temp_dir();
         let store = SettingsStore::new(dir.join("settings.json"));
@@ -3575,7 +3628,7 @@ experimental_bearer_token = "sk-existing""#
             "codexAppSessionDelete": false,
             "codexAppConversationView": true,
             "codexAppTokenUsage": true,
-            "codexAppServiceTierControls": true,
+            "codexAppNativeFastUnlock": true,
             "codexGoalsEnabled": true,
             "relayBaseUrl": "https://relay.example.test/v1",
             "relayApiKey": "sk-relay",
@@ -3595,7 +3648,7 @@ experimental_bearer_token = "sk-existing""#
         assert!(!updated.codex_app_session_delete);
         assert!(updated.codex_app_conversation_view);
         assert!(updated.codex_app_token_usage);
-        assert!(updated.codex_app_service_tier_controls);
+        assert!(updated.codex_app_native_fast_unlock);
         assert!(updated.codex_goals_enabled);
         assert_eq!(updated.relay_base_url, "https://relay.example.test/v1");
         assert_eq!(updated.relay_api_key, "sk-relay");

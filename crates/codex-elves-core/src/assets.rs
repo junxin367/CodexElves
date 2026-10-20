@@ -10,7 +10,9 @@ use crate::settings::BackendSettings;
 
 const RENDERER_BOOTSTRAP_SCRIPT: &str = include_str!("../../../assets/inject/renderer-inject.js");
 const RENDERER_FEATURES_SCRIPT: &str = include_str!("../../../assets/inject/renderer-features.js");
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20260831-12";
+const NATIVE_FAST_UNLOCK_SCRIPT: &str =
+    include_str!("../../../assets/inject/native-fast-unlock.js");
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261020-native-fast-gpt";
 
 pub fn renderer_script() -> &'static str {
     RENDERER_FEATURES_SCRIPT
@@ -22,6 +24,24 @@ pub fn renderer_bootstrap_script() -> &'static str {
 
 pub fn renderer_features_script() -> &'static str {
     RENDERER_FEATURES_SCRIPT
+}
+
+pub fn native_fast_unlock_script() -> &'static str {
+    NATIVE_FAST_UNLOCK_SCRIPT
+}
+
+pub(crate) fn native_fast_bootstrap(settings: &BackendSettings) -> String {
+    format!(
+        "{}\nwindow.__codexElvesNativeFastUnlock.runtime.update({});",
+        native_fast_unlock_script(),
+        json!({
+            "enhancementsEnabled": settings.enhancements_enabled,
+            "codexAppNativeFastUnlock": settings.codex_app_native_fast_unlock,
+            "modelAliases": crate::relay_config::native_fast_model_aliases(
+                &settings.active_relay_profile()
+            ).unwrap_or_default(),
+        }),
+    )
 }
 
 pub fn injection_script(helper_port: u16) -> String {
@@ -53,8 +73,16 @@ fn injection_script_source_with_settings(
     let codex_home = crate::codex_home::codex_home_dir_for_settings(settings);
     let plugin_marketplaces = local_plugin_marketplaces_from_home(&codex_home);
     let suppressed_threads = crate::suppressed_threads::load_suppressed_ids();
+    // 原生 Fast 的模块映射需要在解析文档前注册；DOM 增强等待 body 就绪。
+    let source = if settings.enhancements_enabled && settings.codex_app_native_fast_unlock {
+        format!(
+            "(()=>{{const start=()=>{{{source}\n}};if(document.body)start();else document.addEventListener('DOMContentLoaded',start,{{once:true}});}})();"
+        )
+    } else {
+        source.to_string()
+    };
     format!(
-        "window.__CODEX_SESSION_DELETE_HELPER__ = {};\nwindow.__CODEX_ELVES_VERSION__ = {};\nwindow.__CODEX_ELVES_BUILD__ = {};\nwindow.__CODEX_ELVES_LAUNCH_CYCLE__ = {};\nwindow.__CODEX_ELVES_IMAGE_OVERLAY__ = {};\nwindow.__CODEX_ELVES_PLUGIN_MARKETPLACES__ = {};\nwindow.__CODEX_ELVES_SUPPRESSED_THREADS__ = {};\n{}",
+        "window.__CODEX_SESSION_DELETE_HELPER__ = {};\nwindow.__CODEX_ELVES_VERSION__ = {};\nwindow.__CODEX_ELVES_BUILD__ = {};\nwindow.__CODEX_ELVES_LAUNCH_CYCLE__ = {};\nwindow.__CODEX_ELVES_IMAGE_OVERLAY__ = {};\nwindow.__CODEX_ELVES_PLUGIN_MARKETPLACES__ = {};\nwindow.__CODEX_ELVES_SUPPRESSED_THREADS__ = {};\n{}\n{}",
         serde_json::to_string(&helper_url).expect("helper URL should serialize"),
         serde_json::to_string(crate::version::VERSION).expect("version should serialize"),
         serde_json::to_string(DIAGNOSTIC_BUILD_ID).expect("build id should serialize"),
@@ -63,6 +91,7 @@ fn injection_script_source_with_settings(
         serde_json::to_string(&image_overlay).expect("image overlay config should serialize"),
         serde_json::to_string(&plugin_marketplaces).expect("plugin marketplaces should serialize"),
         serde_json::to_string(&suppressed_threads).expect("suppressed threads should serialize"),
+        native_fast_bootstrap(settings),
         source,
     )
 }
@@ -501,6 +530,49 @@ fn image_content_type(path: &Path) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_fast_bootstrap_resolves_model_aliases_without_exposing_provider_secrets() {
+        let mut profile = crate::settings::RelayProfile {
+            id: "mixed-models".to_string(),
+            local_proxy_enabled: Some(true),
+            api_key: "private-native-fast-test-key".to_string(),
+            ..crate::settings::RelayProfile::default()
+        };
+        profile.model_mappings = vec![
+            crate::settings::RelayModelMapping {
+                request_model: "gpt-6-astra".to_string(),
+                alias: "主力模型".to_string(),
+                protocol: crate::settings::RelayProtocol::Responses,
+                context_window: String::new(),
+                system_prompt_override: String::new(),
+            },
+            crate::settings::RelayModelMapping {
+                request_model: "claude-opus-5-5".to_string(),
+                alias: "gpt-6-alias".to_string(),
+                protocol: crate::settings::RelayProtocol::Anthropic,
+                context_window: String::new(),
+                system_prompt_override: String::new(),
+            },
+        ];
+        let settings = BackendSettings {
+            active_relay_id: profile.id.clone(),
+            relay_profiles: vec![profile],
+            codex_app_native_fast_unlock: true,
+            ..BackendSettings::default()
+        };
+        let script = native_fast_bootstrap(&settings);
+        let (_, update) = script.rsplit_once(".runtime.update(").unwrap();
+        let runtime_settings: Value =
+            serde_json::from_str(update.strip_suffix(");").unwrap()).unwrap();
+        assert_eq!(runtime_settings["modelAliases"]["主力模型"], "gpt-6-astra");
+        assert_eq!(
+            runtime_settings["modelAliases"]["gpt-6-alias"],
+            "claude-opus-5-5"
+        );
+        assert!(!script.contains("private-native-fast-test-key"));
+        assert_eq!(runtime_settings.as_object().unwrap().len(), 3);
+    }
 
     #[test]
     fn local_plugin_marketplaces_includes_api_marketplace_snapshot() {

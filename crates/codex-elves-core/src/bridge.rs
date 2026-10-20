@@ -13,6 +13,8 @@ use serde_json::{Value, json};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
 
+mod native_fast;
+
 pub const BRIDGE_BINDING_NAME: &str = "codexSessionDeleteV2";
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -227,11 +229,36 @@ pub async fn add_script_to_new_documents(
         .await
 }
 
+pub async fn reload_page(websocket_url: &str) -> anyhow::Result<()> {
+    let socket = connect_cdp_websocket(websocket_url).await?;
+    CdpSession::new(socket)
+        .send_command(1, "Page.reload", json!({"ignoreCache": true}))
+        .await?;
+    Ok(())
+}
+
 pub async fn install_bridge(
     websocket_url: &str,
     binding_name: &str,
     handler: BridgeHandler,
     new_document_scripts: &[String],
+) -> anyhow::Result<BridgeRuntime> {
+    install_bridge_with_settings(
+        websocket_url,
+        binding_name,
+        handler,
+        new_document_scripts,
+        &crate::settings::BackendSettings::default(),
+    )
+    .await
+}
+
+pub async fn install_bridge_with_settings(
+    websocket_url: &str,
+    binding_name: &str,
+    handler: BridgeHandler,
+    new_document_scripts: &[String],
+    settings: &crate::settings::BackendSettings,
 ) -> anyhow::Result<BridgeRuntime> {
     let socket = connect_cdp_websocket(websocket_url).await?;
     let diagnostic_websocket_url = websocket_url.to_string();
@@ -242,6 +269,11 @@ pub async fn install_bridge(
     let binding_name = binding_name.to_string();
     let mut script_identifiers = Vec::with_capacity(new_document_scripts.len() + 1);
     let install_result: anyhow::Result<()> = async {
+        if settings.enhancements_enabled && settings.codex_app_native_fast_unlock {
+            session
+                .send_command(next_message_id(), "Page.enable", json!({}))
+                .await?;
+        }
         session.send_command(1, "Runtime.enable", json!({})).await?;
         session
             .send_command(2, "Runtime.removeBinding", json!({ "name": binding_name }))
@@ -303,6 +335,27 @@ pub async fn install_bridge(
         )
         .await;
         return Err(error);
+    }
+
+    if settings.enhancements_enabled
+        && settings.codex_app_native_fast_unlock
+        && let Err(error) =
+            native_fast::install(&mut session, settings, &mut script_identifiers).await
+    {
+        let _ = session
+            .send_command(
+                next_message_id(),
+                "Runtime.evaluate",
+                runtime_evaluate_params(
+                    "window.__codexElvesNativeFastAssetPatchReady=false;\
+                     window.__codexElvesNativeFastPatchState='unsupported';",
+                ),
+            )
+            .await;
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "bridge.native_fast_module_unsupported",
+            json!({"message": error.to_string()}),
+        );
     }
 
     let _ = crate::diagnostic_log::append_diagnostic_log(

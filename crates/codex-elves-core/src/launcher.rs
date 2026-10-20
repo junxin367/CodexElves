@@ -203,6 +203,9 @@ pub trait LaunchHooks: Send + Sync {
         Ok(None)
     }
     async fn inject(&self, debug_port: u16, helper_port: u16) -> anyhow::Result<()>;
+    async fn apply_native_fast_unlock_on_launch(&self, _debug_port: u16) -> anyhow::Result<()> {
+        Ok(())
+    }
     async fn inject_bridge(
         &self,
         debug_port: u16,
@@ -382,6 +385,15 @@ where
             hooks.start_bridge_watchdog(debug_port, helper_port).await?;
             if injection_ready {
                 keep_launched_on_error = false;
+                if settings.codex_app_native_fast_unlock
+                    && let Err(error) =
+                        hooks.apply_native_fast_unlock_on_launch(debug_port).await
+                {
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "launcher.native_fast_unlock_failed",
+                        serde_json::json!({"message": error.to_string()}),
+                    );
+                }
             } else {
                 let degraded = launch_status(
                     "running_degraded",
@@ -879,6 +891,10 @@ impl LaunchHooks for DefaultLaunchHooks {
 
     async fn inject(&self, debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
         retry_injection_with_runtime(debug_port, helper_port, self.bridge_runtime.clone()).await
+    }
+
+    async fn apply_native_fast_unlock_on_launch(&self, debug_port: u16) -> anyhow::Result<()> {
+        apply_native_fast_unlock_on_launch(debug_port).await
     }
 
     async fn start_bridge_watchdog(&self, debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
@@ -5140,7 +5156,7 @@ async fn try_inject(
     if let Some(previous_runtime) = bridge_runtime.take() {
         previous_runtime.shutdown().await;
     }
-    let runtime = crate::bridge::install_bridge(
+    let runtime = crate::bridge::install_bridge_with_settings(
         websocket_url,
         crate::bridge::BRIDGE_BINDING_NAME,
         Arc::new(move |path, payload| {
@@ -5150,11 +5166,56 @@ async fn try_inject(
             )
         }),
         &[script],
+        &settings,
     )
     .await?;
     *bridge_runtime = Some(runtime);
     cache_bridge_websocket_url(debug_port, websocket_url);
     Ok(())
+}
+
+// 仅用户主动启动时应用新文档模块映射；watchdog 重注入不刷新页面。
+async fn apply_native_fast_unlock_on_launch(debug_port: u16) -> anyhow::Result<()> {
+    let targets = crate::cdp::list_targets(debug_port).await?;
+    let target = crate::cdp::pick_injectable_codex_page_target(&targets)?;
+    let websocket_url = target
+        .web_socket_debugger_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("selected CDP target has no websocket URL"))?;
+    let probe = "JSON.stringify({ready:window.__codexElvesNativeFastAssetPatchReady===true,compiled:window.__codexElvesNativeFastCompiled==='v2',failed:['unsupported','failed'].includes(window.__codexElvesNativeFastPatchState)})";
+    let state =
+        native_fast_launch_state(&crate::bridge::evaluate_script(websocket_url, probe).await?);
+    if state.1 {
+        return Ok(());
+    }
+    anyhow::ensure!(!state.2, "当前 Codex 版本不支持原生 Fast 模块适配");
+    anyhow::ensure!(state.0, "原生 Fast 模块适配未就绪，请重新启动 Codex");
+    crate::bridge::reload_page(websocket_url).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if let Ok(result) = crate::bridge::evaluate_script(websocket_url, probe).await {
+            let state = native_fast_launch_state(&result);
+            anyhow::ensure!(!state.2, "当前 Codex 版本不支持原生 Fast 模块适配");
+            if state.1 {
+                return Ok(());
+            }
+        }
+    }
+    anyhow::bail!("原生 Fast 模块未完成加载")
+}
+
+fn native_fast_launch_state(result: &Value) -> (bool, bool, bool) {
+    let state = result
+        .pointer("/result/result/value")
+        .and_then(Value::as_str)
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .unwrap_or(Value::Null);
+    (
+        state["ready"] == true,
+        state["compiled"] == true,
+        state["failed"] == true,
+    )
 }
 
 pub fn build_macos_open_command(

@@ -313,6 +313,18 @@ async fn activate_existing_codex_app(options: &LaunchOptions) -> anyhow::Result<
     let launch_result = hooks
         .launch_codex(&app_dir, options.debug_port, &settings.codex_extra_args)
         .await;
+    if settings.enhancements_enabled
+        && settings.codex_app_native_fast_unlock
+        && launch_result.is_ok()
+        && let Err(error) = hooks
+            .apply_native_fast_unlock_on_launch(options.debug_port)
+            .await
+    {
+        let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+            "launcher.native_fast_unlock_failed",
+            json!({"message": error.to_string(), "phase": "activate_existing"}),
+        );
+    }
     let process_ids = codex_elves_core::watcher::find_codex_processes();
     let mut activated = false;
     #[cfg(windows)]
@@ -561,6 +573,12 @@ impl LaunchHooks for LauncherHooks {
 
     async fn inject(&self, debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
         self.core.inject(debug_port, helper_port).await
+    }
+
+    async fn apply_native_fast_unlock_on_launch(&self, debug_port: u16) -> anyhow::Result<()> {
+        self.core
+            .apply_native_fast_unlock_on_launch(debug_port)
+            .await
     }
 
     async fn start_bridge_watchdog(&self, debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
@@ -1128,7 +1146,7 @@ async fn try_inject_with_context(
     if let Some(previous_runtime) = bridge_runtime.take() {
         previous_runtime.shutdown().await;
     }
-    let installed_runtime = codex_elves_core::bridge::install_bridge(
+    let installed_runtime = codex_elves_core::bridge::install_bridge_with_settings(
         websocket_url,
         codex_elves_core::bridge::BRIDGE_BINDING_NAME,
         Arc::new(move |path, payload| {
@@ -1138,6 +1156,7 @@ async fn try_inject_with_context(
             })
         }),
         &[script],
+        &settings,
     )
     .await?;
     *bridge_runtime = Some(installed_runtime);

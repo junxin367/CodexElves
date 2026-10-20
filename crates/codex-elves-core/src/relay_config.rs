@@ -2920,6 +2920,15 @@ pub(crate) fn relay_profile_catalog_rows(
     Ok(rows)
 }
 
+pub(crate) fn native_fast_model_aliases(
+    profile: &RelayProfile,
+) -> anyhow::Result<Map<String, Value>> {
+    Ok(relay_profile_catalog_rows(profile)?
+        .into_iter()
+        .map(|row| (row.catalog_slug, Value::String(row.model)))
+        .collect())
+}
+
 fn upstream_response_protocol_for_relay(
     protocol: RelayProtocol,
 ) -> crate::protocol_proxy::UpstreamResponseProtocol {
