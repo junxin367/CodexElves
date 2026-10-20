@@ -5,6 +5,175 @@ const MAX_IMAGE_DIMENSION = 16_384;
 const MAX_IMAGE_PIXELS = 100_000_000;
 const remoteImagePattern = /^\/api\/images\/[A-Za-z0-9_-]{20,128}$/u;
 const supportedMimes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const remoteVideoPattern = /^\/api\/videos\/[a-f0-9]{64}$/u;
+
+export function videoPreviewMarkup(asset, label = "") {
+  if (!remoteVideoPattern.test(asset?.url || "") || asset.poster !== `${asset.url}/poster`) return "";
+  const escape = value => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+  const name = escape(label || asset.name || "视频");
+  // 正文只包含静态封面；这里不能创建 video、source 或指向视频的链接。
+  return `<button type="button" class="message-video-preview" title="${name}">`
+    + `<span class="message-video-cover"><img class="message-video-poster" src="${escape(asset.poster)}" alt="${name}" loading="lazy" decoding="async">`
+    + `<span class="message-video-badge">▶</span></span><span class="message-video-name">${name}</span></button>`;
+}
+
+function videoTime(value) {
+  const seconds = Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+export function openVideoPreview(trigger, source, poster, name, prepareAccess = () => {}) {
+  if (!remoteVideoPattern.test(source) || poster !== `${source}/poster`) return;
+  prepareAccess();
+  document.querySelector("#video-preview-dialog")?.close();
+  const dialog = document.createElement("dialog");
+  dialog.id = "video-preview-dialog";
+  dialog.className = "image-preview-dialog video-preview-dialog";
+  dialog.setAttribute("aria-label", `视频预览：${name}`);
+  const panel = document.createElement("div");
+  panel.className = "video-preview-panel";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "image-preview-close";
+  close.textContent = "×";
+  close.setAttribute("aria-label", "关闭视频预览");
+  close.onclick = () => dialog.close();
+  const video = document.createElement("video");
+  video.className = "video-preview-media";
+  video.preload = "none";
+  video.playsInline = true;
+  video.poster = poster;
+  // 弹窗打开时仍然没有 src。只有下方播放按钮的点击事件可以设置 src。
+  const controls = document.createElement("div");
+  controls.className = "video-preview-controls";
+  const play = document.createElement("button");
+  play.type = "button";
+  play.className = "video-preview-play";
+  play.textContent = "播放";
+  play.setAttribute("aria-label", "播放视频");
+  const progress = document.createElement("input");
+  progress.type = "range";
+  progress.className = "video-preview-progress";
+  progress.min = "0";
+  progress.max = "0";
+  progress.step = "0.1";
+  progress.value = "0";
+  progress.disabled = true;
+  progress.setAttribute("aria-label", "视频播放进度");
+  const time = document.createElement("span");
+  time.className = "video-preview-time";
+  time.textContent = "0:00 / 0:00";
+  const status = document.createElement("p");
+  status.className = "video-preview-status";
+  status.setAttribute("role", "status");
+  status.textContent = "点击播放后加载视频";
+  const title = document.createElement("p");
+  title.className = "image-preview-caption";
+  title.textContent = name;
+  let closed = false, seeking = false, failed = false;
+  const sync = () => {
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    progress.max = String(duration);
+    progress.disabled = !duration || !video.getAttribute("src");
+    if (!seeking) progress.value = String(video.currentTime || 0);
+    progress.setAttribute("aria-valuetext", `${videoTime(video.currentTime)} / ${videoTime(duration)}`);
+    time.textContent = `${videoTime(video.currentTime)} / ${videoTime(duration)}`;
+    play.textContent = video.paused ? video.ended ? "重播" : failed ? "重试" : "播放" : "暂停";
+    play.setAttribute("aria-label", video.paused ? "播放视频" : "暂停视频");
+  };
+  play.onclick = () => {
+    if (closed) return;
+    if (!video.paused) { video.pause(); return; }
+    prepareAccess();
+    failed = false;
+    if (!video.getAttribute("src") || video.error) {
+      video.src = source;
+    }
+    if (video.ended) video.currentTime = 0;
+    status.textContent = "正在加载视频…";
+    void video.play().catch(() => {
+      if (closed) return;
+      failed = true;
+      status.textContent = "无法播放视频，请重试或在电脑端查看";
+      sync();
+    });
+  };
+  progress.oninput = () => { seeking = true; time.textContent = `${videoTime(Number(progress.value))} / ${videoTime(video.duration)}`; };
+  progress.onchange = () => {
+    seeking = false;
+    if (!progress.disabled && Number.isFinite(Number(progress.value))) video.currentTime = Number(progress.value);
+    sync();
+  };
+  for (const event of ["loadedmetadata", "durationchange", "timeupdate", "pause", "ended"]) video.addEventListener(event, sync);
+  video.onplaying = () => { status.textContent = ""; sync(); };
+  video.onwaiting = () => { status.textContent = "正在缓冲…"; };
+  video.onerror = () => {
+    if (closed || !video.getAttribute("src")) return;
+    failed = true;
+    status.textContent = "视频无法播放，格式可能不受支持或文件已不可用";
+    sync();
+  };
+  // 用 click 关闭遮罩，避免关闭后的合成点击落到会话页面。
+  let backdropPressed = false;
+  const onBackdrop = event => {
+    const rect = dialog.getBoundingClientRect();
+    return event.target === dialog && (event.clientX < rect.left || event.clientX > rect.right
+      || event.clientY < rect.top || event.clientY > rect.bottom);
+  };
+  dialog.onpointerdown = event => { backdropPressed = onBackdrop(event); };
+  dialog.onpointermove = event => { if (!onBackdrop(event)) backdropPressed = false; };
+  dialog.onpointercancel = () => { backdropPressed = false; };
+  dialog.onclick = event => {
+    if (backdropPressed && onBackdrop(event)) {
+      event.preventDefault(); event.stopPropagation(); dialog.close();
+    }
+    backdropPressed = false;
+  };
+  dialog.oncancel = event => { event.preventDefault(); dialog.close(); };
+  const stop = () => {
+    closed = true;
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+  };
+  const hide = () => { if (document.visibilityState === "hidden") video.pause(); };
+  const leave = () => dialog.close();
+  window.addEventListener("pagehide", leave);
+  document.addEventListener("visibilitychange", hide);
+  dialog.onclose = () => {
+    stop();
+    window.removeEventListener("pagehide", leave);
+    document.removeEventListener("visibilitychange", hide);
+    dialog.remove();
+    document.body.classList.toggle("modal-open", !!document.querySelector("dialog[open]"));
+    if (trigger?.isConnected) trigger.focus({ preventScroll: true });
+  };
+  controls.append(play, progress, time);
+  panel.append(close, video, controls, status, title);
+  dialog.append(panel);
+  document.body.append(dialog);
+  document.body.classList.add("modal-open");
+  dialog.showModal();
+  play.focus();
+}
+
+export function bindMessageVideos(root, prepareAccess = () => {}) {
+  for (const button of root.querySelectorAll(".message-video-preview")) {
+    const poster = button.querySelector(".message-video-poster");
+    const posterUrl = poster?.getAttribute("src") || "";
+    const source = posterUrl.replace(/\/poster$/u, "");
+    if (!remoteVideoPattern.test(source) || posterUrl !== `${source}/poster`) continue;
+    const name = button.querySelector(".message-video-name")?.textContent || "视频";
+    button.setAttribute("aria-label", `预览视频：${name}`);
+    button.setAttribute("aria-haspopup", "dialog");
+    poster.onerror = () => { poster.hidden = true; };
+    button.onclick = event => {
+      event.preventDefault(); event.stopPropagation();
+      openVideoPreview(button, source, posterUrl, name, prepareAccess);
+    };
+  }
+}
 
 export function retryOriginalImage(image) {
   const source = image.originalImageSource;

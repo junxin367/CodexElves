@@ -695,12 +695,14 @@ public final class MainActivity extends Activity {
         if (generation != connectionGeneration.get() || requestView != webView) {
             return blockedResponse();
         }
-        if (!"GET".equalsIgnoreCase(request.getMethod())) {
-            return null;
-        }
         Uri uri = request.getUrl();
         if (!ServiceOrigin.matches(origin, uri)) {
-            return blockedResponse();
+            return ServiceOrigin.allowsChannelRequest(
+                uri.toString(), request.getMethod(), request.getRequestHeaders()
+            ) ? null : blockedResponse();
+        }
+        if (!"GET".equalsIgnoreCase(request.getMethod())) {
+            return null;
         }
         final String path;
         try {
@@ -1405,7 +1407,7 @@ public final class MainActivity extends Activity {
         headers.put(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; "
-                + "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+                + "img-src 'self' data:; connect-src 'self' " + ServiceOrigin.CHANNEL_CONNECT_SOURCES + "; object-src 'none'; "
                 + "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
         );
         return headers;

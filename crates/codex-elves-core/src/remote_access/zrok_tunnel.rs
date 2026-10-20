@@ -1614,7 +1614,10 @@ async fn bounded_response_text(mut response: reqwest::Response) -> anyhow::Resul
 }
 
 #[cfg(windows)]
-fn child_job(child: &Child, name: &str) -> anyhow::Result<std::os::windows::io::OwnedHandle> {
+pub(super) fn child_job(
+    child: &Child,
+    name: &str,
+) -> anyhow::Result<std::os::windows::io::OwnedHandle> {
     use std::os::windows::io::{FromRawHandle, OwnedHandle};
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::JobObjects::{

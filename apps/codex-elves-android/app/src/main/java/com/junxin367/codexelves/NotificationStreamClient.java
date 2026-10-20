@@ -26,6 +26,17 @@ final class NotificationStreamClient implements Runnable {
     private final Set<HttpURLConnection> connections = new HashSet<>();
     private volatile boolean closed;
     private volatile boolean resyncRequested;
+    private String routeOrigin;
+    private volatile String routeToken;
+    private volatile String routeServerId;
+    private volatile NotificationStreamClient secondary;
+    private volatile Thread secondaryThread;
+    private volatile Thread discoveryThread;
+    private volatile boolean primaryConnected;
+    private volatile boolean secondaryConnected;
+    private long nextDiscoveryAt;
+    private String channelDeviceId;
+    private volatile int secondaryGeneration;
 
     interface Callback {
         boolean active();
@@ -56,11 +67,12 @@ final class NotificationStreamClient implements Runnable {
     public void run() {
         int failures = 0;
         try {
+            startDiscovery();
             while (!closed && callback.active()) {
                 HttpURLConnection stream = null;
                 long connectedAt = 0;
                 try {
-                    callback.state("connecting");
+                    deliveryState("connecting");
                     synchronizeSnapshot();
                     stream = open("/api/events?notifications=true", "GET", "text/event-stream");
                     checkStatus(stream);
@@ -72,7 +84,7 @@ final class NotificationStreamClient implements Runnable {
                     }
                     // SSE is already subscribed while the baseline gap is read.
                     synchronizeSnapshot();
-                    callback.state("connected");
+                    deliveryState("connected");
                     connectedAt = System.nanoTime();
                     try (Reader input = new InputStreamReader(
                         stream.getInputStream(), StandardCharsets.UTF_8
@@ -102,7 +114,7 @@ final class NotificationStreamClient implements Runnable {
                     if (closed || !callback.active()) {
                         return;
                     }
-                    callback.state("disconnected");
+                    deliveryState("disconnected");
                     if (connectedAt != 0 && System.nanoTime() - connectedAt > 60_000_000_000L) {
                         failures = 0;
                     }
@@ -122,6 +134,8 @@ final class NotificationStreamClient implements Runnable {
 
     void requestResync() {
         resyncRequested = true;
+        NotificationStreamClient other = secondary;
+        if (other != null) other.resyncRequested = true;
     }
 
     void close() {
@@ -134,6 +148,142 @@ final class NotificationStreamClient implements Runnable {
         }
         for (HttpURLConnection connection : active) {
             connection.disconnect();
+        }
+        NotificationStreamClient other = secondary;
+        if (other != null) other.close();
+        Thread thread = secondaryThread;
+        if (thread != null) thread.interrupt();
+        Thread discovery = discoveryThread;
+        if (discovery != null) discovery.interrupt();
+    }
+
+    private void deliveryState(String state) {
+        primaryConnected = "connected".equals(state);
+        callback.state(primaryConnected || secondaryConnected ? "connected" : state);
+    }
+
+    private synchronized void startDiscovery() {
+        if (routeOrigin != null || closed || discoveryThread != null) return;
+        discoveryThread = new Thread(() -> {
+            while (!closed && callback.active()) {
+                refreshSecondary();
+                if (!backoff(60_000)) return;
+            }
+        }, "codex-elves-notifications-discovery");
+        discoveryThread.setDaemon(true);
+        discoveryThread.start();
+    }
+
+    private JSONObject readDiscovery(NotificationStreamClient route) throws IOException, JSONException {
+        HttpURLConnection connection = null;
+        try {
+            connection = route.open("/api/channels", "GET", "application/json");
+            connection.setConnectTimeout(10_000);
+            connection.setReadTimeout(10_000);
+            route.checkStatus(connection);
+            JSONObject discovery;
+            try (InputStream input = connection.getInputStream();
+                 ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[4096];
+                int count;
+                while ((count = input.read(buffer)) != -1) {
+                    ensureActive();
+                    if (output.size() + count > 16384) throw new IOException("Channel discovery too large");
+                    output.write(buffer, 0, count);
+                }
+                discovery = new JSONObject(output.toString(StandardCharsets.UTF_8.name()));
+            }
+            String serverId = discovery.getString("serverId");
+            if (!discovery.getBoolean("ok") || discovery.getInt("schemaVersion") != 1
+                || !discovery.getString("token").matches("[a-f0-9]{64}")
+                || !serverId.matches("[a-f0-9-]{36}")
+                || !serverId.equals(connection.getHeaderField("x-codex-channel-server"))
+                || discovery.getLong("expiresAtMs") <= System.currentTimeMillis()
+                || discovery.getJSONArray("origins").length() > 2
+                || discovery.getString("deviceId").isEmpty()
+                || channelDeviceId != null && !channelDeviceId.equals(discovery.getString("deviceId"))) {
+                throw new IOException("Invalid channel discovery");
+            }
+            return discovery;
+        } finally {
+            route.release(connection);
+        }
+    }
+
+    private void refreshSecondary() {
+        if (routeOrigin != null || closed || System.currentTimeMillis() < nextDiscoveryAt) return;
+        nextDiscoveryAt = System.currentTimeMillis() + 60_000;
+        try {
+            JSONObject discovery;
+            try {
+                discovery = readDiscovery(this);
+            } catch (IOException | JSONException | IllegalArgumentException error) {
+                NotificationStreamClient other = secondary;
+                if (other == null || other.closed) return;
+                discovery = readDiscovery(other);
+            }
+            String token = discovery.getString("token");
+            org.json.JSONArray origins = discovery.getJSONArray("origins");
+            String candidate = null;
+            for (int index = 0; index < origins.length(); index++) {
+                String origin = ServiceOrigin.normalize(origins.getString(index));
+                String host = new URL(origin).getHost();
+                if (!origin.equals(identity.origin)
+                    && host.matches("[a-zA-Z0-9-]+\\.(ngrok-free\\.app|ngrok-free\\.dev|ngrok\\.app|ngrok\\.dev|ngrok\\.io)"))
+                    candidate = origin;
+            }
+            ensureActive();
+            synchronized (this) {
+                if (closed) return;
+                channelDeviceId = discovery.getString("deviceId");
+                if (candidate == null) {
+                    ++secondaryGeneration;
+                    if (secondary != null) secondary.close();
+                    if (secondaryThread != null) secondaryThread.interrupt();
+                    secondary = null;
+                    secondaryThread = null;
+                    secondaryConnected = false;
+                } else if (secondary != null && !secondary.closed && candidate.equals(secondary.routeOrigin)) {
+                    secondary.routeToken = token;
+                    secondary.routeServerId = discovery.getString("serverId");
+                    return;
+                } else {
+                    int sourceGeneration = ++secondaryGeneration;
+                    if (secondary != null) secondary.close();
+                    if (secondaryThread != null) secondaryThread.interrupt();
+                    secondaryConnected = false;
+                    Callback secondaryCallback = new Callback() {
+                        public boolean active() { return !closed && sourceGeneration == secondaryGeneration && callback.active(); }
+                        public void state(String state) {
+                            if (!active()) return;
+                            secondaryConnected = "connected".equals(state);
+                            callback.state(primaryConnected || secondaryConnected ? "connected" : "connecting");
+                        }
+                        public void journal(JSONObject journal) { callback.journal(journal); }
+                        public void unauthorized() { /* Short-lived ticket failures do not revoke the primary login. */ }
+                        public void unsupported() { }
+                        public void stopped() {
+                            if (sourceGeneration != secondaryGeneration) return;
+                            secondaryConnected = false;
+                            if (!closed && !primaryConnected) callback.state("disconnected");
+                        }
+                        public void deleteThread(String threadId) { callback.deleteThread(threadId); }
+                        public void heartbeat() { callback.heartbeat(); }
+                    };
+                    NotificationStreamClient other = new NotificationStreamClient(identity, events, sink, secondaryCallback, identityLock);
+                    other.routeOrigin = candidate;
+                    other.routeToken = token;
+                    other.routeServerId = discovery.getString("serverId");
+                    secondary = other;
+                    secondaryThread = new Thread(other, "codex-elves-notifications-secondary");
+                    secondaryThread.setDaemon(true);
+                    secondaryThread.start();
+                }
+            }
+            if (candidate == null && !closed && callback.active())
+                callback.state(primaryConnected ? "connected" : "connecting");
+        } catch (IOException | JSONException | IllegalArgumentException ignored) {
+            // Discovery is optional; older servers and a failed second tunnel keep the primary subscription.
         }
     }
 
@@ -242,17 +392,19 @@ final class NotificationStreamClient implements Runnable {
 
     private HttpURLConnection open(String path, String method, String accept) throws IOException {
         ensureActive();
-        URL url = new URL(identity.origin + path);
+        URL url = new URL((routeOrigin == null ? identity.origin : routeOrigin) + path);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setInstanceFollowRedirects(false);
         connection.setConnectTimeout(15_000);
         connection.setReadTimeout(45_000);
         connection.setRequestMethod(method);
         connection.setRequestProperty("Origin", identity.origin);
-        connection.setRequestProperty("Cookie", identity.requestCookie());
+        if (routeOrigin == null) connection.setRequestProperty("Cookie", identity.requestCookie());
+        else connection.setRequestProperty("Authorization", "Bearer " + routeToken);
         connection.setRequestProperty("Accept", accept);
         connection.setRequestProperty("Cache-Control", "no-cache");
         connection.setRequestProperty("skip_zrok_interstitial", "1");
+        connection.setRequestProperty("ngrok-skip-browser-warning", "1");
         synchronized (this) {
             if (closed) {
                 connection.disconnect();
@@ -275,6 +427,11 @@ final class NotificationStreamClient implements Runnable {
         if (status < 200 || status >= 300) {
             // All redirects, including same-origin redirects, are rejected.
             throw new IOException("Notification request failed");
+        }
+        String expectedServer = routeServerId;
+        if (routeOrigin != null && expectedServer != null
+            && !expectedServer.equals(connection.getHeaderField("x-codex-channel-server"))) {
+            throw new IOException("Notification channel server mismatch");
         }
     }
 

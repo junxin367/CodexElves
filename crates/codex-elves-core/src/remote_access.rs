@@ -31,9 +31,12 @@ use tokio::sync::{Mutex, broadcast};
 
 use crate::settings::{RemoteAccessSettings, SettingsStore};
 
+mod channels;
 mod credentials;
 mod image_preview;
+mod ngrok_tunnel;
 mod service;
+mod video;
 mod zrok_tunnel;
 use credentials::{AccessKey, AccessKeyStore, lock_access_key_store};
 pub use credentials::{access_credentials_status, configure_access_key};
@@ -46,6 +49,7 @@ const WEB_JS: &str = include_str!("../../../assets/remote-access/app.js");
 const WEB_ATTACHMENTS_JS: &str = include_str!("../../../assets/remote-access/attachments.js");
 const WEB_RECOVERY_STORE_JS: &str = include_str!("../../../assets/remote-access/recovery-store.js");
 const WEB_EVENTS_CLIENT_JS: &str = include_str!("../../../assets/remote-access/events-client.js");
+const WEB_CHANNELS_JS: &str = include_str!("../../../assets/remote-access/channels.js");
 const WEB_EVENTS_WORKER_JS: &str = include_str!("../../../assets/remote-access/events-worker.js");
 const WEB_CSS: &str = include_str!("../../../assets/remote-access/style.css");
 const WEB_MARKDOWN_JS: &str = include_str!("../../../assets/remote-access/markdown.js");
@@ -442,6 +446,7 @@ struct LiveService {
     pump: Option<tokio::task::JoinHandle<()>>,
     error: Option<String>,
     zrok: ZrokTunnelService,
+    ngrok: ngrok_tunnel::NgrokTunnelService,
 }
 
 pub struct RemoteAccessController {
@@ -455,7 +460,9 @@ pub struct RemoteAccessController {
     events: broadcast::Sender<Value>,
     key_checks: Arc<tokio::sync::Semaphore>,
     public_origin: Arc<RwLock<Option<String>>>,
+    channels: channels::Channels,
     images: RwLock<ImageRegistry>,
+    videos: RwLock<video::Registry>,
     image_previews: std::sync::Mutex<image_preview::PreviewCache>,
     image_preview_slots: Arc<tokio::sync::Semaphore>,
 }
@@ -494,6 +501,9 @@ impl RemoteAccessController {
         let (events, _) = broadcast::channel(512);
         let public_origin = Arc::new(RwLock::new(None));
         let zrok = ZrokTunnelService::new(state_dir.clone(), public_origin.clone());
+        let channels = channels::Channels::new();
+        let ngrok =
+            ngrok_tunnel::NgrokTunnelService::new(state_dir.clone(), channels.secondary.clone());
         Ok(Arc::new(Self {
             native,
             state_dir,
@@ -512,13 +522,16 @@ impl RemoteAccessController {
                 pump: None,
                 error: None,
                 zrok,
+                ngrok,
             }),
             running: AtomicBool::new(false),
             native_connected: AtomicBool::new(false),
             events,
             key_checks: Arc::new(tokio::sync::Semaphore::new(4)),
             public_origin,
+            channels,
             images: RwLock::new(ImageRegistry::default()),
+            videos: RwLock::new(video::Registry::default()),
             image_previews: std::sync::Mutex::new(image_preview::PreviewCache::default()),
             image_preview_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         }))
@@ -529,9 +542,17 @@ impl RemoteAccessController {
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
+            .or_else(|| {
+                self.channels
+                    .primary
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone()
+            })
     }
 
     fn attach_item_images(&self, item: &mut Value) {
+        video::attach_item(self, item);
         let sources = canonical_item_image_sources(item);
         if let Some(object) = item.as_object_mut() {
             object.remove("remoteImages");
@@ -729,9 +750,7 @@ impl RemoteAccessController {
             auth.devices
                 .retain(|device| key.as_ref().is_some_and(|key| device.key_id == key.id));
             auth.login_storage_failed_for = None;
-            let _ = self
-                .events
-                .send(json!({"method":"remote/authorizationChanged"}));
+            self.publish_event(json!({"method":"remote/authorizationChanged"}));
         }
         auth.login_locked = locked
             || key
@@ -769,9 +788,7 @@ impl RemoteAccessController {
             return;
         }
         let _ = self.save_devices(&auth).await;
-        let _ = self
-            .events
-            .send(json!({"method":"remote/authorizationChanged"}));
+        self.publish_event(json!({"method":"remote/authorizationChanged"}));
     }
 
     pub async fn reconcile(self: &Arc<Self>, settings: RemoteAccessSettings) {
@@ -797,13 +814,28 @@ impl RemoteAccessController {
             live.zrok
                 .reconcile(self.running.load(Ordering::SeqCst), &zrok_target)
                 .await;
+            let zrok = live.zrok.status();
+            *self
+                .channels
+                .primary
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = zrok["publicUrl"]
+                .as_str()
+                .filter(|origin| !origin.is_empty())
+                .map(str::to_owned);
+            let public_running = self.running.load(Ordering::SeqCst)
+                && zrok["bound"] == true
+                && zrok["publicUrl"]
+                    .as_str()
+                    .is_some_and(|origin| !origin.is_empty());
+            live.ngrok.reconcile(public_running, &zrok_target).await;
             drop(live);
             self.prune_stale_public_devices().await;
             return;
         }
         self.running.store(false, Ordering::SeqCst);
         self.native_connected.store(false, Ordering::SeqCst);
-        let _ = self.events.send(json!({"method":"remote/disconnected"}));
+        self.publish_event(json!({"method":"remote/disconnected"}));
         if let Some(handle) = live.handle.take() {
             handle.shutdown();
         }
@@ -818,6 +850,7 @@ impl RemoteAccessController {
         live.settings = Some(settings.clone());
         live.error = None;
         if !settings.enabled {
+            live.ngrok.stop().await;
             live.zrok.reconcile(false, &zrok_target).await;
             if finished || was_enabled {
                 let _ = self.native.call("dispose", json!({})).await;
@@ -827,6 +860,7 @@ impl RemoteAccessController {
             return;
         }
         if let Some(error) = key_error {
+            live.ngrok.stop().await;
             live.error = Some(error);
             live.zrok.reconcile(false, &zrok_target).await;
             drop(live);
@@ -845,6 +879,21 @@ impl RemoteAccessController {
         live.zrok
             .reconcile(self.running.load(Ordering::SeqCst), &zrok_target)
             .await;
+        let zrok = live.zrok.status();
+        *self
+            .channels
+            .primary
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = zrok["publicUrl"]
+            .as_str()
+            .filter(|origin| !origin.is_empty())
+            .map(str::to_owned);
+        let public_running = self.running.load(Ordering::SeqCst)
+            && zrok["bound"] == true
+            && zrok["publicUrl"]
+                .as_str()
+                .is_some_and(|origin| !origin.is_empty());
+        live.ngrok.reconcile(public_running, &zrok_target).await;
         drop(live);
         self.prune_stale_public_devices().await;
     }
@@ -884,26 +933,22 @@ impl RemoteAccessController {
                 {
                     Ok(response) if response["ok"] == true => {
                         if !controller.native_connected.swap(true, Ordering::SeqCst) {
-                            let _ = controller
-                                .events
-                                .send(json!({"method":"remote/reconnected"}));
+                            controller.publish_event(json!({"method":"remote/reconnected"}));
                         }
                         epoch = response["epoch"].as_str().unwrap_or("").to_string();
                         cursor = response["cursor"].as_u64().unwrap_or(0);
                         if response["reset"] == true {
-                            let _ = controller.events.send(json!({"method":"remote/resync"}));
+                            controller.publish_event(json!({"method":"remote/resync"}));
                         }
                         for event in response["events"].as_array().into_iter().flatten() {
                             let mut event = event.clone();
                             controller.attach_event_images(&mut event);
-                            let _ = controller.events.send(event);
+                            controller.publish_event(event);
                         }
                     }
                     _ => {
                         if controller.native_connected.swap(false, Ordering::SeqCst) {
-                            let _ = controller
-                                .events
-                                .send(json!({"method":"remote/disconnected"}));
+                            controller.publish_event(json!({"method":"remote/disconnected"}));
                         }
                     }
                 }
@@ -917,6 +962,7 @@ impl RemoteAccessController {
         let live = self.live.lock().await;
         let error = live.error.clone();
         let zrok = live.zrok.status();
+        let ngrok = live.ngrok.status();
         drop(live);
         let auth = self.auth.lock().await;
         json!({
@@ -927,7 +973,7 @@ impl RemoteAccessController {
             "devices":auth.devices.iter().filter(|device|device.expires_at_ms>now_ms())
                 .filter(|device|auth.access_key.as_ref().is_some_and(|key|device.key_id==key.id))
                 .map(Device::public).collect::<Vec<_>>(),
-            "settings":settings, "zrok":zrok,
+            "settings":settings, "zrok":zrok, "ngrok":ngrok,
             "accessKeyConfigured":auth.access_key.is_some(),
             "loginLocked":auth.login_locked
         })
@@ -965,13 +1011,25 @@ impl RemoteAccessController {
                 );
                 let token = payload["token"].as_str();
                 let fixed_name = payload["fixedName"].as_str().context("缺少固定公网名称")?;
+                let mut live = self.live.lock().await;
+                live.zrok
+                    .start_public(token, fixed_name, true, &zrok_target(&settings))
+                    .await?;
+                live.ngrok.reconcile(true, &zrok_target(&settings)).await;
+                drop(live);
+                Ok(self.admin_status(&settings).await)
+            }
+            "saveNgrok" => {
+                let settings = SettingsStore::default().load()?.remote_access;
+                self.reconcile(settings.clone()).await;
+                anyhow::ensure!(self.running.load(Ordering::SeqCst), "请先启用远程会话网页");
+                let token = payload["token"].as_str().context("缺少 ngrok Token")?;
                 self.live
                     .lock()
                     .await
-                    .zrok
-                    .start_public(token, fixed_name, true, &zrok_target(&settings))
-                    .await?;
-                Ok(self.admin_status(&settings).await)
+                    .ngrok
+                    .save_and_test(token, &zrok_target(&settings))
+                    .await
             }
             "testZrok" => {
                 let settings = SettingsStore::default().load()?.remote_access;
@@ -983,9 +1041,7 @@ impl RemoteAccessController {
                 let mut auth = self.auth.lock().await;
                 auth.devices.retain(|device| device.id != id);
                 self.save_devices(&auth).await?;
-                let _ = self
-                    .events
-                    .send(json!({"method":"remote/authorizationChanged"}));
+                self.publish_event(json!({"method":"remote/authorizationChanged"}));
                 Ok(json!({"status":"ok"}))
             }
             _ => anyhow::bail!("不支持的远程管理操作"),
@@ -1001,6 +1057,20 @@ impl RemoteAccessController {
                 .enabled
         {
             return None;
+        }
+        if channels::bearer(headers).is_some() {
+            let id = self.channels.device_id(headers)?;
+            if !self.device_active(&id).await {
+                return None;
+            }
+            return self
+                .auth
+                .lock()
+                .await
+                .devices
+                .iter()
+                .find(|device| device.id == id)
+                .cloned();
         }
         let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
         let token = cookies.split(';').find_map(|cookie| {
@@ -1346,6 +1416,13 @@ fn web_assets() -> &'static HashMap<&'static str, StaticWebAsset> {
                 ),
             ),
             (
+                "/channels.js",
+                StaticWebAsset::new(
+                    "application/javascript; charset=utf-8",
+                    WEB_CHANNELS_JS.as_bytes(),
+                ),
+            ),
+            (
                 "/markdown.js",
                 StaticWebAsset::new(
                     "application/javascript; charset=utf-8",
@@ -1518,6 +1595,7 @@ fn is_static_web_asset_path(path: &str) -> bool {
             | "/recovery-store.js"
             | "/events-client.js"
             | "/events-worker.js"
+            | "/channels.js"
             | "/markdown.js"
             | "/markdown-renderer.js"
             | "/vendor/marked.esm.js"
@@ -1700,6 +1778,7 @@ pub fn web_router(
         .route("/recovery-store.js", get(static_web_asset))
         .route("/events-client.js", get(static_web_asset))
         .route("/events-worker.js", get(static_web_asset))
+        .route("/channels.js", get(static_web_asset))
         .route("/markdown.js", get(static_web_asset))
         .route("/markdown-renderer.js", get(static_web_asset))
         .route("/vendor/marked.esm.js", get(static_web_asset))
@@ -1719,6 +1798,8 @@ pub fn web_router(
         .route("/api/login-status", get(login_status))
         .route("/api/connect", post(connect))
         .route("/api/session", get(session))
+        .route("/api/channels", get(channels::discover))
+        .route("/api/channel-events", get(channels::catch_up))
         .route("/api/logout", post(logout))
         .route("/api/read/{action}", post(read))
         .route(
@@ -1728,6 +1809,8 @@ pub fn web_router(
         .route("/api/receipts/{id}", get(receipt))
         .route("/api/images/{id}", get(image))
         .route("/api/images/{id}/thumbnail", get(image_thumbnail))
+        .route("/api/videos/{id}", get(video::content))
+        .route("/api/videos/{id}/poster", get(video::poster))
         .route("/api/events", get(events))
         .route("/api/events/ws", get(events_ws))
         .layer(DefaultBodyLimit::max(256 * 1024))
@@ -1803,8 +1886,10 @@ async fn access_boundary(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     let external_origin = state.controller.public_origin();
+    let secondary_origins = state.controller.channels.origins();
     let mut origins = allowed_origins(&state.settings);
     origins.extend(external_origin.iter().cloned());
+    origins.extend(secondary_origins.iter().cloned());
     let matched_origin = origins
         .iter()
         .find(|origin| origin_matches_host(origin, host))
@@ -1812,14 +1897,64 @@ async fn access_boundary(
     let valid_host = matched_origin.is_some();
     let external_https = external_origin
         .as_ref()
-        .is_some_and(|origin| origin_matches_host(origin, host));
+        .is_some_and(|origin| origin_matches_host(origin, host))
+        || secondary_origins
+            .iter()
+            .any(|origin| origin_matches_host(origin, host));
     let request_origin = if external_https {
-        external_origin.as_deref().unwrap_or_default().to_string()
+        matched_origin.clone().unwrap_or_default()
     } else {
         matched_origin.unwrap_or_else(|| format!("http://{host}"))
     };
     let origin_header = request.headers().get(header::ORIGIN);
     let origin = origin_header.and_then(|value| value.to_str().ok());
+    let cors_origin = origin.map(str::to_owned);
+    let path = request.uri().path().to_owned();
+    let channel_request = channels::bearer(request.headers()).is_some()
+        && channels::request_path(request.method(), &path)
+        && external_https;
+    if request.method() == axum::http::Method::OPTIONS {
+        let method = request
+            .headers()
+            .get("access-control-request-method")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok());
+        let headers_valid = request
+            .headers()
+            .get("access-control-request-headers")
+            .and_then(|value| value.to_str().ok())
+            .is_none_or(|value| {
+                value.split(',').all(|name| {
+                    matches!(
+                        name.trim().to_ascii_lowercase().as_str(),
+                        "content-type"
+                            | "authorization"
+                            | "idempotency-key"
+                            | "ngrok-skip-browser-warning"
+                            | "skip_zrok_interstitial"
+                    )
+                })
+            });
+        if !valid_host
+            || !external_https
+            || !headers_valid
+            || !origin.is_some_and(|value| origins.iter().any(|allowed| allowed == value))
+            || !method.is_some_and(|method| channels::request_path(&method, &path))
+        {
+            return ApiError::new(403, "双通道来源未授权").into_response();
+        }
+        return (StatusCode::NO_CONTENT, [
+            ("access-control-allow-origin", cors_origin.unwrap()),
+            ("access-control-allow-methods", "GET, POST, OPTIONS".into()),
+            ("access-control-allow-headers", "Content-Type, Authorization, Idempotency-Key, ngrok-skip-browser-warning, skip_zrok_interstitial".into()),
+            ("access-control-max-age", "300".into()),
+            ("vary", "Origin".into()),
+            ("cache-control", "no-store".into()),
+        ]).into_response();
+    }
+    if channels::bearer(request.headers()).is_some() && !channel_request {
+        return ApiError::new(403, "双通道凭证不支持此操作").into_response();
+    }
     let bad_origin = origin_header.is_some_and(|value| {
         value.to_str().map_or(true, |origin| {
             !origins.iter().any(|allowed| allowed == origin)
@@ -1846,19 +1981,23 @@ async fn access_boundary(
             .get("sec-fetch-dest")
             .and_then(|value| value.to_str().ok())
             == Some("document");
-    if !valid_host || bad_origin || missing_origin || (cross_site && !root_document_navigation) {
+    if !valid_host
+        || bad_origin
+        || missing_origin
+        || (cross_site && !root_document_navigation && !channel_request)
+    {
         return ApiError::new(403, "只允许从已配置的访问地址操作").into_response();
     }
-    if origin.is_some_and(|origin| origin != request_origin) {
+    if !channel_request && origin.is_some_and(|origin| origin != request_origin) {
         return ApiError::new(403, "请求来源与访问地址不一致").into_response();
     }
     request
         .extensions_mut()
         .insert(RequestTrustContext { external_https });
-    let path = request.uri().path();
     let private_api = (path == "/api" || path.starts_with("/api/"))
-        && !matches!(path, "/api/connect" | "/api/login-status");
-    let private_image = path.starts_with("/api/images/");
+        && !matches!(path.as_str(), "/api/connect" | "/api/login-status");
+    let private_image = path.starts_with("/api/images/")
+        || path.starts_with("/api/videos/") && path.ends_with("/poster");
     // Reject unauthorized uploads before JSON/body extraction and before routing.
     let mut response = if private_api {
         match authorized(&state, request.headers()).await {
@@ -1872,6 +2011,20 @@ async fn access_boundary(
         && matches!(response.status(), StatusCode::OK | StatusCode::NOT_MODIFIED)
         && response.headers().contains_key(header::ETAG);
     let headers = response.headers_mut();
+    headers.insert(
+        "x-codex-channel-server",
+        HeaderValue::from_str(&state.controller.channels.epoch).unwrap(),
+    );
+    headers.insert(
+        "access-control-expose-headers",
+        HeaderValue::from_static("x-codex-channel-server"),
+    );
+    if channel_request
+        && let Some(origin) = cors_origin.and_then(|origin| HeaderValue::from_str(&origin).ok())
+    {
+        headers.insert("access-control-allow-origin", origin);
+        headers.append(header::VARY, HeaderValue::from_static("Origin"));
+    }
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(if revalidated_image {
@@ -1889,7 +2042,7 @@ async fn access_boundary(
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
     headers.insert("content-security-policy", HeaderValue::from_static(
-        "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+        "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://*.ngrok-free.app wss://*.ngrok-free.app https://*.ngrok-free.dev wss://*.ngrok-free.dev https://*.ngrok.app wss://*.ngrok.app https://*.ngrok.dev wss://*.ngrok.dev https://*.ngrok.io wss://*.ngrok.io https://*.shares.zrok.io wss://*.shares.zrok.io; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
     ));
     if external_https {
         headers.insert(
@@ -3254,12 +3407,14 @@ async fn events_ws(
     ws: WebSocketUpgrade,
     State(state): State<WebState>,
     headers: HeaderMap,
+    uri: Uri,
 ) -> Result<Response, ApiError> {
     let device = authorized(&state, &headers).await?;
     let controller = state.controller.clone();
     let id = device.id;
     Ok(ws
-        .on_upgrade(move |socket| stream_websocket_events(socket, controller, id))
+        .protocols(["codex-elves-channel-v1"])
+        .on_upgrade(move |socket| stream_websocket_events(socket, controller, id, uri))
         .into_response())
 }
 
@@ -3267,8 +3422,21 @@ async fn stream_websocket_events(
     mut socket: WebSocket,
     controller: Arc<RemoteAccessController>,
     id: String,
+    uri: Uri,
 ) {
     let mut receiver = controller.events.subscribe();
+    let ready = channels::replay(&controller, &uri);
+    if !controller.device_active(&id).await || !controller.accepting_requests() {
+        let _ = socket.close().await;
+        return;
+    }
+    if socket
+        .send(WebSocketMessage::Text(ready.to_string().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
     let heartbeat = tokio::time::sleep(Duration::from_secs(15));
     tokio::pin!(heartbeat);
     loop {
@@ -3447,6 +3615,10 @@ fn replace_queue_inline_image_sources(message: &mut Value, replacements: &HashMa
 }
 
 fn markdown_image_sources(text: &str) -> Vec<String> {
+    markdown_attachment_sources(text, false)
+}
+
+fn markdown_attachment_sources(text: &str, include_links: bool) -> Vec<String> {
     let bytes = text.as_bytes();
     let mut sources = Vec::new();
     let mut index = 0;
@@ -3514,12 +3686,16 @@ fn markdown_image_sources(text: &str) -> Vec<String> {
             index = (index + 2).min(bytes.len());
             continue;
         }
-        if bytes[index] != b'!' || bytes.get(index + 1) != Some(&b'[') {
+        let open = if bytes[index] == b'!' && bytes.get(index + 1) == Some(&b'[') {
+            index + 1
+        } else if include_links && bytes[index] == b'[' {
+            index
+        } else {
             index += 1;
             continue;
-        }
-        let Some(alt_end) = matching_square_bracket(bytes, index + 1) else {
-            index += 2;
+        };
+        let Some(alt_end) = matching_square_bracket(bytes, open) else {
+            index = open + 1;
             continue;
         };
         if bytes.get(alt_end + 1) != Some(&b'(') {
@@ -4767,6 +4943,298 @@ mod tests {
     }
 
     const LOGIN_TEST_KEY: &str = "isolated-login-key";
+
+    #[test]
+    fn channel_journal_replays_in_order_and_reports_expired_cursors() {
+        let directory = tempfile::tempdir().unwrap();
+        let controller =
+            RemoteAccessController::new(Arc::new(OfflineNativeBridge), directory.path().to_owned())
+                .unwrap();
+        let epoch = controller.channels.epoch.clone();
+        for number in 0..1030 {
+            controller.publish_event(json!({"method":"test/event","params":{"number":number}}));
+        }
+        let replay = channels::replay(
+            &controller,
+            &format!("/api/channel-events?epoch={epoch}&after=1025")
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(replay["reset"], false);
+        let entries = replay["events"].as_array().unwrap();
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries[0]["channelSequence"], 1026);
+        assert_eq!(entries[4]["channelSequence"], 1030);
+        assert_eq!(entries[4]["channelEpoch"], epoch);
+        for query in [
+            format!("epoch={epoch}&after=0"),
+            "epoch=retired&after=1025".into(),
+            format!("epoch={epoch}&after=9999999999999999999"),
+        ] {
+            let replay = channels::replay(
+                &controller,
+                &format!("/api/channel-events?{query}").parse().unwrap(),
+            );
+            assert_eq!(replay["reset"], true);
+            assert_eq!(replay["cursor"], 1030);
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_ticket_cors_websockets_and_revocation_share_one_device() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let (_directory, state) = login_lock_test_state();
+        let response = login_lock_attempt(&state, LOGIN_TEST_KEY, "192.0.2.1:1000")
+            .await
+            .unwrap();
+        let cookie = login_cookie(&response);
+        let controller = state.controller.clone();
+        let primary = "https://channel-test.shares.zrok.io";
+        let secondary = "https://channel-test.ngrok-free.app";
+        *controller.public_origin.write().unwrap() = Some(primary.into());
+        *controller.channels.secondary.write().unwrap() = Some(secondary.into());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = web_router(
+            controller.clone(),
+            RemoteAccessSettings {
+                enabled: true,
+                port: address.port(),
+                ..Default::default()
+            },
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let discovery: Value = client
+            .get(format!("http://{address}/api/channels"))
+            .header("Host", "channel-test.shares.zrok.io")
+            .header("Cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(discovery["ok"], true);
+        assert_eq!(discovery["origins"], json!([primary, secondary]));
+        let token = discovery["token"].as_str().unwrap();
+        let second = client
+            .get(format!("http://{address}/api/session"))
+            .header("Host", "channel-test.ngrok-free.app")
+            .header("Origin", primary)
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(second.status(), reqwest::StatusCode::OK);
+        assert_eq!(second.headers()["access-control-allow-origin"], primary);
+        assert_eq!(
+            second.headers()["x-codex-channel-server"],
+            controller.channels.epoch
+        );
+        assert_eq!(
+            second.json::<Value>().await.unwrap()["device"]["id"],
+            discovery["deviceId"]
+        );
+        let preflight = client
+            .request(
+                reqwest::Method::OPTIONS,
+                format!("http://{address}/api/read/history"),
+            )
+            .header("Host", "channel-test.ngrok-free.app")
+            .header("Origin", primary)
+            .header("access-control-request-method", "POST")
+            .header(
+                "access-control-request-headers",
+                "authorization,content-type,ngrok-skip-browser-warning",
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(preflight.status(), reqwest::StatusCode::NO_CONTENT);
+        for (path, origin) in [
+            ("/api/action/stop", primary),
+            ("/api/read/history", "https://attacker.example"),
+        ] {
+            let rejected = client
+                .post(format!("http://{address}{path}"))
+                .header("Host", "channel-test.ngrok-free.app")
+                .header("Origin", origin)
+                .bearer_auth(token)
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(rejected.status(), reqwest::StatusCode::FORBIDDEN);
+        }
+        let mut first_request = format!("ws://{address}/api/events/ws")
+            .into_client_request()
+            .unwrap();
+        first_request
+            .headers_mut()
+            .insert("host", "channel-test.shares.zrok.io".parse().unwrap());
+        first_request
+            .headers_mut()
+            .insert("cookie", cookie.parse().unwrap());
+        let (mut first, _) = tokio_tungstenite::connect_async(first_request)
+            .await
+            .unwrap();
+        let ready: Value =
+            serde_json::from_str(first.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(ready["method"], "remote/streamReady");
+        let mut second_request = format!(
+            "ws://{address}/api/events/ws?epoch={}&after={}",
+            ready["channelEpoch"].as_str().unwrap(),
+            ready["cursor"]
+        )
+        .into_client_request()
+        .unwrap();
+        second_request
+            .headers_mut()
+            .insert("host", "channel-test.ngrok-free.app".parse().unwrap());
+        second_request
+            .headers_mut()
+            .insert("origin", primary.parse().unwrap());
+        second_request.headers_mut().insert(
+            "sec-websocket-protocol",
+            format!("codex-elves-channel-v1, codex-channel.{token}")
+                .parse()
+                .unwrap(),
+        );
+        let (mut second, _) = tokio_tungstenite::connect_async(second_request)
+            .await
+            .unwrap();
+        second.next().await.unwrap().unwrap();
+        for sequence in 1..=3 {
+            controller.publish_event(json!({"method":"test/event","value":sequence}));
+            let one: Value =
+                serde_json::from_str(first.next().await.unwrap().unwrap().to_text().unwrap())
+                    .unwrap();
+            let two: Value =
+                serde_json::from_str(second.next().await.unwrap().unwrap().to_text().unwrap())
+                    .unwrap();
+            assert_eq!(one, two);
+            assert_eq!(one["channelSequence"], sequence);
+        }
+        controller.auth.lock().await.devices.clear();
+        let revoked = client
+            .get(format!("http://{address}/api/session"))
+            .header("Host", "channel-test.ngrok-free.app")
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), reqwest::StatusCode::UNAUTHORIZED);
+        first.close(None).await.unwrap();
+        second.close(None).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "仅在明确授权 ngrok 真实网络验证后手工运行"]
+    async fn channel_ngrok_live_token_validation() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        assert_eq!(
+            std::env::var("CODEX_ELVES_NGROK_LIVE_TEST").as_deref(),
+            Ok("1")
+        );
+        let config: Value = serde_json::from_slice(
+            &std::fs::read(crate::paths::default_app_state_dir().join("remote-access-ngrok.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        let (_directory, state) = login_lock_test_state();
+        let controller = state.controller.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = web_router(
+            controller.clone(),
+            RemoteAccessSettings {
+                enabled: true,
+                port: address.port(),
+                ..Default::default()
+            },
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let result = controller
+            .live
+            .lock()
+            .await
+            .ngrok
+            .save_and_test(
+                config["agent"]["authtoken"].as_str().unwrap(),
+                &format!("http://{address}"),
+            )
+            .await;
+        let verified = async {
+            anyhow::ensure!(result?["status"] == "ok", "ngrok HTTP 验证失败");
+            let login = login_lock_attempt(&state, LOGIN_TEST_KEY, "192.0.2.1:1000")
+                .await
+                .map_err(|_| anyhow::anyhow!("隔离设备登录失败"))?;
+            let mut headers = HeaderMap::new();
+            headers.insert(header::COOKIE, login_cookie(&login).parse()?);
+            let discovery = channels::discover(State(state.clone()), headers)
+                .await
+                .map_err(|_| anyhow::anyhow!("双通道发现失败"))?
+                .0;
+            let origin = controller.channels.origins().remove(0);
+            let mut request = format!("{}/api/events/ws", origin.replacen("https:", "wss:", 1))
+                .into_client_request()?;
+            request.headers_mut().insert("origin", origin.parse()?);
+            request.headers_mut().insert(
+                "sec-websocket-protocol",
+                format!(
+                    "codex-elves-channel-v1, codex-channel.{}",
+                    discovery["token"].as_str().unwrap()
+                )
+                .parse()?,
+            );
+            let (mut socket, _) = tokio::time::timeout(
+                Duration::from_secs(20),
+                tokio_tungstenite::connect_async(request),
+            )
+            .await??;
+            let ready = tokio::time::timeout(Duration::from_secs(20), socket.next())
+                .await?
+                .context("公网 WebSocket 已关闭")??;
+            let ready: Value = serde_json::from_str(ready.to_text()?)?;
+            anyhow::ensure!(
+                ready["method"] == "remote/streamReady",
+                "公网 WebSocket 未返回事件基线"
+            );
+            controller.publish_event(json!({"method":"test/dualChannel"}));
+            let event = tokio::time::timeout(Duration::from_secs(20), socket.next())
+                .await?
+                .context("公网事件连接已关闭")??;
+            let event: Value = serde_json::from_str(event.to_text()?)?;
+            anyhow::ensure!(
+                event["method"] == "test/dualChannel" && event["channelSequence"] == 1,
+                "公网事件未按序送达"
+            );
+            socket.close(None).await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        controller.live.lock().await.ngrok.stop().await;
+        server.abort();
+        verified.unwrap();
+    }
 
     fn login_lock_test_state() -> (tempfile::TempDir, WebState) {
         let temp_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp");

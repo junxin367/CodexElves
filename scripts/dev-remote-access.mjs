@@ -50,6 +50,7 @@ const files = new Map([
   ["/recovery-store.js", ["recovery-store.js", "application/javascript; charset=utf-8"]],
   ["/events-client.js", ["events-client.js", "application/javascript; charset=utf-8"]],
   ["/events-worker.js", ["events-worker.js", "application/javascript; charset=utf-8"]],
+  ["/channels.js", ["channels.js", "application/javascript; charset=utf-8"]],
   ["/markdown.js", ["markdown.js", "application/javascript; charset=utf-8"]],
   ["/markdown-renderer.js", ["markdown-renderer.js", "application/javascript; charset=utf-8"]],
   ["/message-actions.js", ["message-actions.js", "application/javascript; charset=utf-8"]],

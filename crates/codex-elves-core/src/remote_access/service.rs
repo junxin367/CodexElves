@@ -199,7 +199,14 @@ pub async fn ensure_running() -> anyhow::Result<()> {
 fn supported_action(action: &str) -> bool {
     matches!(
         action,
-        "status" | "apply" | "revoke" | "downloadZrok" | "registerZrok" | "startZrok" | "testZrok"
+        "status"
+            | "apply"
+            | "revoke"
+            | "downloadZrok"
+            | "registerZrok"
+            | "startZrok"
+            | "testZrok"
+            | "saveNgrok"
     )
 }
 

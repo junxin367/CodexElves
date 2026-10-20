@@ -51,6 +51,11 @@ export type RemoteAccessStatus = {
   settings?: RemoteAccessSettings;
   accessKeyConfigured?: boolean;
   loginLocked?: boolean;
+  ngrok?: {
+    configured: boolean;
+    state: "stopped" | "starting" | "ready" | "error";
+    error?: string | null;
+  };
   zrok?: {
     state: ZrokState;
     running: boolean;

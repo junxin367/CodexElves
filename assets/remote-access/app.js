@@ -1,5 +1,6 @@
 import { markdown, prepareMessageImage, renderMermaidBlocks, settleMessageImage, withStableMessageLayout } from "./markdown.js";
 import { createRemoteEventStream, sharedEventsAvailable } from "./events-client.js";
+import { activateRemoteChannels, clearRemoteChannels, observeChannelConfiguration, prepareRemoteTunnelAccess, raceRemoteRead, remoteChannelRoutes, sendRemoteMessage, validateRemoteReceipt } from "./channels.js";
 import { renderMessageActions } from "./message-actions.js";
 import {
   getAndroidAppInfo,
@@ -16,6 +17,8 @@ import {
 import { createReadCache, createRecoveryStore, createTranscriptCache, recoveryStorageMessage } from "./recovery-store.js";
 import { beginPwaForegroundWork, getPwaCacheState, retryPwaCache } from "./pwa.js";
 import {
+  bindMessageVideos,
+  videoPreviewMarkup,
   attachmentsFromQueuedMessage,
   attachmentsFromRemoteImages,
   clearComposerAttachments,
@@ -58,7 +61,9 @@ let sessionRequest = null, connectionPollVersion = 0, connectionPollPending = nu
 const sessionRecoveryReads = new WeakMap();
 let nativeConnectionVersion = 0;
 let connectionCycleVersion = 0, connectionRtt = null;
-const connectionRttDescription = "点击刷新会话。网页到当前接入服务的 /api/session HTTP 往返时长；不代表模型响应耗时，也不代表端到端原生执行延迟。";
+let connectionLatencyVersion = 0, connectionLatencyFloor = 0, connectionRouteSignature = "", connectionLatencyRefresh = null;
+const channelRtts = new Map();
+const connectionRttDescription = "点击刷新会话。网页到接入服务的 /api/session HTTP 完整往返时长；双路连接时分别测量 zrok 和 ngrok，不代表模型响应耗时或端到端原生执行延迟。消息使用此处可用线路中延迟最低的一路发送，发出后不自动换路重发。";
 let pageLeaving = false;
 const expandedProjects = new Set();
 const collapsedSidebarSections = new Set();
@@ -134,6 +139,7 @@ try {
 } catch {}
 let sidebarFilterDeviceId = null;
 let sidebarFilters = { mode: null, chats: null, projects: null, pinned: null };
+let sidebarViewSave = null;
 let messageFrame = null, activityTimer = null, stopping = false, messageVersion = 0, statusVersion = 0, notifiedStatus = null;
 let followMessages = true;
 let messagesResizeObserver = null;
@@ -2997,16 +3003,58 @@ async function checkThreadDeletion(record) {
     if (session?.device.id === record.deviceId) { renderSidebar(); updateComposer(); }
   }
 }
+async function changeSidebarView(mode) {
+  if (!session || !sidebar || !["project", "list"].includes(mode)) return;
+  sidebarFilters.mode = mode;
+  renderSidebar();
+  const deviceId = session.device.id, generation = recoveryGeneration;
+  if (sidebarViewSave?.deviceId === deviceId && sidebarViewSave.generation === generation) {
+    sidebarViewSave.mode = mode;
+    return sidebarViewSave.promise;
+  }
+  if (session.readOnly || !connected) return;
+  const request = { deviceId, generation, mode, promise: null };
+  sidebarViewSave = request;
+  const isCurrent = () => sidebarViewSave === request && session?.device.id === deviceId
+    && recoveryGeneration === generation;
+  request.promise = (async () => {
+    while (isCurrent() && !session.readOnly && connected) {
+      const mode = request.mode;
+      try {
+        await mutate("sort", { target: "grouping", mode: "updated_at", grouping: mode });
+      } catch (error) {
+        if (!isCurrent()) return;
+        if (request.mode !== mode) continue;
+        notice(`视图已切换，但偏好保存失败：${error.message}`, true);
+        return;
+      }
+      if (!isCurrent() || session.readOnly || !connected) return;
+      if (request.mode !== mode) continue;
+      try { await loadSidebar(null, { fresh: true }); }
+      catch (error) {
+        if (isCurrent() && request.mode === mode)
+          notice(`视图已切换，但侧栏刷新失败：${error.message}`, true);
+      }
+      if (!isCurrent()) return;
+      if (request.mode !== mode) continue;
+      if (sidebarFilters.mode === mode && sidebar.preferences.mode === mode) {
+        sidebarFilters.mode = null;
+        renderSidebar();
+      }
+      return;
+    }
+  })().finally(() => { if (sidebarViewSave === request) sidebarViewSave = null; });
+  return request.promise;
+}
 async function changeSidebar(payload) {
+  if (payload.target === "grouping") return changeSidebarView(payload.grouping);
   if (!session || sidebarBusy || payload.threadId && (threadDeletionLocked(payload.threadId) || threadDeleted(payload.threadId))) return;
   const deviceId = session.device.id;
   const focus = $("#sidebar-content").contains(document.activeElement) ? document.activeElement : null;
   const focusedThread = focus?.closest(".thread-row")?.dataset.threadId;
-  const filterKey = payload.target === "grouping" ? "mode"
-    : ["chats", "projects", "pinned"].includes(payload.target) ? payload.target : null;
-  const filterValue = filterKey === "mode" ? payload.grouping : payload.mode;
-  const validFilter = filterKey === "mode" ? ["project", "list"].includes(filterValue)
-    : filterKey != null && ["manual", "updated_at"].includes(filterValue);
+  const filterKey = ["chats", "projects", "pinned"].includes(payload.target) ? payload.target : null;
+  const filterValue = payload.mode;
+  const validFilter = filterKey != null && ["manual", "updated_at"].includes(filterValue);
   const previousFilter = validFilter ? sidebarFilters[filterKey] : null;
   if (validFilter) {
     sidebarFilters[filterKey] = filterValue;
@@ -3071,7 +3119,7 @@ function notice(message, error = false) {
     if (node.hasAttribute("popover") && node.matches(":popover-open")) node.hidePopover();
   }, 6500);
 }
-async function api(path, body, id, signal, { resourcePriority = "foreground" } = {}) {
+async function api(path, body, id, signal, { resourcePriority = "foreground", onChannelLatency = null } = {}) {
   if (path.startsWith("/api/action/") && path !== "/api/action/deleteThread" && body?.threadId
       && (threadDeletionLocked(body.threadId) || threadDeleted(body.threadId)))
     throw Object.assign(new Error("此会话正在删除或已删除，请先核对删除结果。"), { code: 409 });
@@ -3092,11 +3140,14 @@ async function api(path, body, id, signal, { resourcePriority = "foreground" } =
   try {
     if (!["/api/read/models", "/api/read/skills"].includes(path))
       releaseForeground = beginPwaForegroundWork({ priority: resourcePriority });
-    const response = await fetch(path, {
+    const messageSend = /^\/api\/action\/(?:send|create|setGoal)$/.test(path);
+    const request = messageSend ? sendRemoteMessage : raceRemoteRead;
+    const measurements = messageSend ? currentChannelMeasurements() : null;
+    const result = await request(path, {
       method: body === undefined ? "GET" : "POST", credentials: "same-origin",
       headers: { ...(body !== undefined ? { "Content-Type": "application/json" } : {}), ...(id ? { "Idempotency-Key": id } : {}) },
       body: encodedBody, signal: controller?.signal || signal
-    });
+    }, async response => {
     const result = await response.json().catch(error => {
       if (controller?.signal.aborted || signal?.aborted) throw error;
       if (response.ok) throw Object.assign(new Error(actionTimeout
@@ -3107,14 +3158,21 @@ async function api(path, body, id, signal, { resourcePriority = "foreground" } =
       return { message: `HTTP ${response.status}` };
     });
     if (!response.ok) {
-      if (response.status === 401 && !path.endsWith("/connect") && session && deviceId === session.device.id)
-        requireAuthentication();
       throw Object.assign(new Error(typeof result?.message === "string" && result.message || `HTTP ${response.status}`), {
         code: response.status, ...(result?.outcomeUnknown === true ? { outcomeUnknown: true } : {})
       });
     }
+      if (path.startsWith("/api/receipts/"))
+        return validateRemoteReceipt(result, path.slice("/api/receipts/".length));
+      return result;
+    }, messageSend ? measurements : onChannelLatency,
+    messageSend ? origin => markMessageChannelUnavailable(origin, measurements) : undefined);
+    if (path === "/api/session" && result?.device?.id) activateRemoteChannels(result.device.id);
     return result;
   } catch (error) {
+    if (error.code === 401 && !error.secondaryChannel && !path.endsWith("/connect") && session && deviceId === session.device.id)
+      requireAuthentication();
+    if (error.notSubmitted) throw error;
     if (timedOut && actionTimeout) throw Object.assign(
       new Error("等待上传或回包已超时，正在核对原请求回执；不会自动重发。"), { outcomeUnknown: true, actionTimedOut: true });
     if (timedOut) throw new Error(path.startsWith("/api/read/")
@@ -3145,6 +3203,7 @@ function readConnectionSession(signal, recoveryObservation = undefined, { resour
     return sessionRequest.promise;
   }
   const controller = new AbortController();
+  const latencyVersion = ++connectionLatencyVersion;
   const abort = () => controller.abort();
   if (signal?.aborted) abort();
   else signal?.addEventListener("abort", abort, { once: true });
@@ -3160,7 +3219,17 @@ function readConnectionSession(signal, recoveryObservation = undefined, { resour
       const startedAt = performance.now();
       request.apiStarted = true;
       const latest = await api("/api/session", undefined, undefined, controller.signal,
-        { resourcePriority: request.resourcePriority });
+        {
+          resourcePriority: request.resourcePriority,
+          onChannelLatency: measurement => {
+            if (latencyVersion < connectionLatencyFloor || controller.signal.aborted || pageLeaving
+                || session?.device.id !== deviceId || stream !== source || pollVersion !== connectionPollVersion
+                || nativeVersion !== nativeConnectionVersion || connectionVersion !== connectionCycleVersion) return;
+            if ((channelRtts.get(measurement.name)?.latencyVersion ?? 0) > latencyVersion) return;
+            channelRtts.set(measurement.name, { ...measurement, deviceId, nativeVersion, connectionVersion, latencyVersion });
+            renderConnectionIndicator();
+          }
+        });
       const elapsed = performance.now() - startedAt;
       const sameDevice = deviceId === undefined ? !session : session?.device.id === deviceId;
       if (sessionRequest === request && !controller.signal.aborted && sameDevice
@@ -3184,6 +3253,8 @@ function readConnectionSession(signal, recoveryObservation = undefined, { resour
   return request.promise;
 }
 function cancelConnectionProbe() {
+  connectionLatencyFloor = ++connectionLatencyVersion;
+  channelRtts.clear();
   sessionRequest?.controller.abort();
   sessionRequest = null;
   connectionRtt = null;
@@ -3648,6 +3719,21 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
   let result;
   try { result = await api(`/api/action/${action}`, payload, id); }
   catch (error) {
+    if (error.notSubmitted) {
+      if (goalAction) Object.assign(error, { receiptId: id, goalReceipt: {
+        state: "failed", result: { ok: false, notSent: true, message: error.message }
+      } });
+      if (ownsPending()) {
+        const unsent = pending;
+        try { await recoverFailedInput(unsent); }
+        catch {
+          error.message += " 本地恢复记录更新失败，请保留当前输入。";
+        } finally {
+          if (pending === unsent) savePending(null);
+        }
+      }
+      throw error;
+    }
     if (goalAction && ownsPending()) {
       const rejected = error.outcomeUnknown !== true && Number.isInteger(error.code)
         && error.code >= 400 && error.code < 500 && error.code !== 408;
@@ -3928,6 +4014,7 @@ function showLogin() {
   modelDefaults = { model: "", reasoningEffort: "" };
   creationProject = ""; notifiedTokenUsage = null; ++threadReadVersion;
   sidebarBusy = false;
+  sidebarViewSave = null;
   $("#confirmation-dialog")?.close("cancel");
   $("#appearance-dialog")?.close();
   app.replaceChildren();
@@ -4154,6 +4241,7 @@ function showLogin() {
   announceAppReady();
 }
 function requireAuthentication() {
+  clearRemoteChannels();
   disconnect();
   pendingNotificationOpen = null;
   initialAuthenticationRequired = true;
@@ -4419,7 +4507,7 @@ function shell() {
     catch (error) { notice(error.message, true); if ($("#logout")) $("#logout").disabled = false; }
   };
   $("#connection-state").onclick = () => void Promise.all([
-    refreshAll({ fresh: true }), loadModels(true), refreshSkillCatalog()
+    syncConnectionState(), refreshAll({ fresh: true }), loadModels(true), refreshSkillCatalog()
   ]).catch(error => notice(error.message, true));
   $("#appearance-button").onclick = openAppearance;
   $("#sidebar-view-toggle").onclick = () => void changeSidebar({
@@ -4653,8 +4741,11 @@ function renderSidebar() {
   const viewToggle = $("#sidebar-view-toggle");
   const viewLabel = preferences.mode === "project" ? "切换到最近会话" : "切换到项目视图";
   viewToggle.title = viewLabel; viewToggle.setAttribute("aria-label", viewLabel);
-  viewToggle.setAttribute("aria-busy", String(sidebarBusy)); viewToggle.disabled = sidebarBusy;
-  viewToggle.replaceChildren(icon(preferences.mode === "project" ? "chat" : "folderClosed"));
+  viewToggle.removeAttribute("aria-busy"); viewToggle.disabled = false;
+  if (viewToggle.dataset.mode !== preferences.mode) {
+    viewToggle.dataset.mode = preferences.mode;
+    viewToggle.replaceChildren(icon(preferences.mode === "project" ? "chat" : "folderClosed"));
+  }
   const domId = (type, id) => `${type}-${encodeURIComponent(id)}`;
   const normalizedSearch = search.replace(/[\\/]+/g, " ");
   const matches = item => !search || `${item.title || ""} ${item.name || ""} ${item.cwd || ""} ${(item.roots || []).join(" ")}`
@@ -4784,13 +4875,10 @@ function renderSidebar() {
     const unassigned = sortThreads(sidebar.recent.filter(item => !item.projectId && !pinnedIds.has(item.id) && matches(item)), preferences.chats);
     appendSection("project:recent", "最近", unassigned.map(item => row(item)));
   } else {
-    appendSection("list:pinned", "置顶",
-      sortThreads(sidebar.pinnedThreads.filter(matches), preferences.pinned)
-        .map(item => row(item, "pinned", true)));
     const mergedRecent = [];
     const mergedIds = new Set();
-    for (const item of sidebar.recent) {
-      if (pinnedIds.has(item.id) || mergedIds.has(item.id)) continue;
+    for (const item of [...sidebar.recent, ...sidebar.pinnedThreads]) {
+      if (mergedIds.has(item.id)) continue;
       mergedIds.add(item.id); mergedRecent.push(item);
     }
     const eligible = item => item.priority?.eligible !== false;
@@ -5273,10 +5361,20 @@ function bindMessageImages(node) {
       if (retryOriginalImage(image)) return;
       updateLayout(() => {
         settleMessageImage(image);
-        const placeholder = element("span", "attachment-placeholder", `图片不可用：${image.alt || "附件"}`);
+        const source = image.originalImageSource || link?.getAttribute("href") || image.getAttribute("src");
+        const placeholder = element("button", "attachment-placeholder image-load-retry", "重试图片");
+        placeholder.type = "button";
+        placeholder.title = `图片不可用：${image.alt || "附件"}，点击重新加载`;
+        placeholder.setAttribute("aria-label", `重新加载图片：${image.alt || "附件"}`);
         placeholder.messageImageSource = image.getAttribute("src");
         placeholder.messageImageLabel = image.alt;
         placeholder.messageImageKey = JSON.stringify([image.getAttribute("src"), image.alt, link?.getAttribute("href") || ""]);
+        placeholder.onclick = () => {
+          if (!placeholder.isConnected) return;
+          prepareRemoteTunnelAccess();
+          const retry = messageImage({ url: source }, image.alt, source);
+          if (retry) placeholder.replaceWith(retry);
+        };
         image.closest(".message-image-link")?.replaceWith(placeholder);
       });
     };
@@ -5311,14 +5409,15 @@ function setMarkdown(node, text, remoteImages = [], options) {
   scheduleMermaidBlocks();
   const html = markdown(text, remoteImages, options).trim();
   if (node.markdownHtml === html) return;
-  if (node.querySelector(".message-image,.attachment-placeholder,.mermaid-block")) {
+  if (node.querySelector(".message-image,.attachment-placeholder,.mermaid-block,.message-video-preview")) {
     const template = document.createElement("template");
     template.innerHTML = html;
     const imageKeys = parent => {
       if (parent.nodeType !== Node.ELEMENT_NODE) return "";
-      const elements = parent.matches(".message-image,.attachment-placeholder,.mermaid-block") ? [parent]
-        : [...parent.querySelectorAll(".message-image,.attachment-placeholder,.mermaid-block")];
+      const elements = parent.matches(".message-image,.attachment-placeholder,.mermaid-block,.message-video-preview") ? [parent]
+        : [...parent.querySelectorAll(".message-image,.attachment-placeholder,.mermaid-block,.message-video-preview")];
       const keys = elements.flatMap(image => image.messageImageKey ? [image.messageImageKey]
+        : image.matches(".message-video-preview") ? [JSON.stringify(["video", image.querySelector("img")?.getAttribute("src"), image.textContent])]
         : image.matches(".mermaid-block") ? [JSON.stringify(["mermaid", image.querySelector("pre code")?.textContent])]
         : image.matches(".message-image") ? [JSON.stringify([image.getAttribute("src"), image.alt,
           image.closest(".message-image-link")?.getAttribute("href") || ""])] : []);
@@ -5332,7 +5431,7 @@ function setMarkdown(node, text, remoteImages = [], options) {
           && imageKeys(node) === key) : -1;
         const current = index < 0 ? null : previous.splice(index, 1)[0];
         if (!current) { children.push(child); continue; }
-        if (!current.messageImageKey && !current.matches(".mermaid-block")) {
+        if (!current.messageImageKey && !current.matches(".mermaid-block,.message-video-preview")) {
           for (const attribute of [...current.attributes])
             if (!child.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
           for (const attribute of child.attributes)
@@ -5356,6 +5455,7 @@ function setMarkdown(node, text, remoteImages = [], options) {
   node.markdownHtml = html;
   for (const copy of node.querySelectorAll(".copy-code")) copy.onclick = () => copyText(copy.closest(".code-block").querySelector("code").textContent);
   bindMessageImages(node);
+  bindMessageVideos(node, prepareRemoteTunnelAccess);
 }
 function scheduleMermaidBlocks() {
   if (mermaidScanPending) return;
@@ -5920,7 +6020,7 @@ function renderItem(item, previous, inActivity = false, running = false) {
       }
     } else {
       bubble.classList.add("markdown");
-      setMarkdown(bubble, display.text, item.remoteImages, { userMessage: true, ...userMessageSkillOptions(item) });
+      setMarkdown(bubble, display.text, item.remoteImages, { userMessage: true, ...userMessageSkillOptions(item), remoteVideos: item.remoteVideos });
     }
     const attachments = $(".user-attachments", node) || element("div", "user-attachments");
     const previousImages = [...attachments.children], images = [];
@@ -5930,7 +6030,20 @@ function renderItem(item, previous, inActivity = false, running = false) {
       const image = messageImage(item.remoteImages?.find(image => image.source === source), label, source, previousImages[images.length]);
       images.push(image || element("span", "attachment-placeholder", "图片附件 · 请在 Codex 桌面查看"));
     }
+    for (const content of item.content || []) if (["video", "localVideo"].includes(content.type)) {
+      const asset = item.remoteVideos?.find(video => video.source === (content.path || content.url));
+      const markup = videoPreviewMarkup(asset);
+      if (!markup) continue;
+      const previous = previousImages[images.length];
+      if (previous?.videoSource === asset.url) { images.push(previous); continue; }
+      const template = document.createElement("template");
+      template.innerHTML = markup;
+      const preview = template.content.firstElementChild;
+      preview.videoSource = asset.url;
+      images.push(preview);
+    }
     reconcileChildren(attachments, images);
+    bindMessageVideos(attachments, prepareRemoteTunnelAccess);
     reconcileChildren(node, [...(images.length ? [attachments] : []),
       ...(editing ? [messageEditor()] : display.text.trim() || display.questionReplies ? [bubble] : [])]);
     return node;
@@ -5939,7 +6052,7 @@ function renderItem(item, previous, inActivity = false, running = false) {
     const node = previous || element("article");
     node.className = `message agent-message${inActivity || item.phase === "commentary" ? " commentary" : ""}`;
     const body = $(".markdown", node) || element("div", "markdown");
-    setMarkdown(body, textContent(item), item.remoteImages); reconcileChildren(node, [body]);
+    setMarkdown(body, textContent(item), item.remoteImages, { remoteVideos: item.remoteVideos }); reconcileChildren(node, [body]);
     return node;
   }
   if (isSubagentItem(item)) return renderSubagentItem(item, previous, running);
@@ -8020,7 +8133,7 @@ function completedItem(item) {
 function mergeItemProjection(previous, item) {
   const projection = {};
   for (const field of ["messageMetadata", "sentAtMs", "startedAtMs", "completedAtMs", "completed",
-    "remoteImages", "clientId", "remoteCompactionInput", "remoteHistoryContext", "remoteItemCompleted"])
+    "remoteImages", "remoteVideos", "clientId", "remoteCompactionInput", "remoteHistoryContext", "remoteItemCompleted"])
     if (!Object.hasOwn(item, field) && Object.hasOwn(previous || {}, field)) projection[field] = previous[field];
   const merged = { ...projection, ...item };
   return previous && JSON.stringify(previous) === JSON.stringify(merged) ? previous : merged;
@@ -8065,6 +8178,8 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
       const merged = newer ? { ...item, ...live } : { ...live, ...item };
       if (Array.isArray(item.remoteImages) || Array.isArray(live.remoteImages))
         merged.remoteImages = [...new Map([...(item.remoteImages || []), ...(live.remoteImages || [])].map(image => [image.source, image])).values()];
+      if (Array.isArray(item.remoteVideos) || Array.isArray(live.remoteVideos))
+        merged.remoteVideos = [...new Map([...(item.remoteVideos || []), ...(live.remoteVideos || [])].map(video => [video.source, video])).values()];
       for (const field of ["text", "aggregatedOutput"]) if (typeof item[field] === "string" || typeof live[field] === "string")
         merged[field] = mergeLiveText(item[field], live[field], partialItems.has(key), newer);
       for (const field of ["summary", "content"]) if (live.type === "reasoning" && Array.isArray(item[field]) && Array.isArray(live[field])) {
@@ -9379,7 +9494,7 @@ function updateComposer() {
   $("#new-chat").disabled = session.readOnly || !connected;
   $("#model-button").disabled = session.readOnly || deleting || compacting || !!editingQueuedMessage
     || !!editingMessage && (busy || stopping || !!pending || !connected);
-  $("#sidebar-view-toggle").disabled = sidebarBusy || !sidebar;
+  $("#sidebar-view-toggle").disabled = !sidebar;
   syncNewChatProjectPicker();
   updatePromptOptimization();
   for (const control of document.querySelectorAll(".row-menu-button")) control.disabled = session.readOnly || sidebarBusy || !connected;
@@ -9680,23 +9795,76 @@ function setConnection(value) {
     messageSkillLoadScope = ""; scheduleMessages();
   }
   if (!value) stopGoalLiveTimer();
-  if (!value) connectionRtt = null;
+  if (!value) { connectionRtt = null; channelRtts.clear(); }
   else if (connectionRtt && (connectionRtt.deviceId !== session?.device.id
       || connectionRtt.nativeVersion !== nativeConnectionVersion
       || connectionRtt.connectionVersion !== connectionCycleVersion)) connectionRtt = null;
   const guidance = $("#desktop-connection-guidance");
   if (guidance) guidance.hidden = session?.nativeConnected !== false;
-  const node = $("#connection-state"); if (!node) return;
-  const measured = value && connectionRtt?.deviceId === session?.device.id
-    && connectionRtt.nativeVersion === nativeConnectionVersion
-    && connectionRtt.connectionVersion === connectionCycleVersion ? connectionRtt : null;
-  node.textContent = !value ? "连接中断 · 自动重连" : measured ? `${Math.round(measured.milliseconds)} ms` : "连接中…";
-  node.title = connectionRttDescription;
-  node.setAttribute("aria-label", `${node.textContent}。${connectionRttDescription}`);
-  node.classList.toggle("online", !!measured);
-  node.classList.toggle("pending", value && !measured);
+  renderConnectionIndicator();
   updateComposer();
   if (thread?.requests?.some(request => request.method === "remote/requestUserInputAsync")) renderApprovals();
+}
+function currentChannelMeasurements() {
+  return remoteChannelRoutes().map(route => {
+    const measurement = channelRtts.get(route.name);
+    const current = connected && measurement?.deviceId === session?.device.id
+      && measurement.nativeVersion === nativeConnectionVersion
+      && measurement.connectionVersion === connectionCycleVersion
+      && measurement.latencyVersion >= connectionLatencyFloor
+      && route.origin === measurement.origin;
+    return current ? measurement : { ...route, status: "unknown", deviceId: session?.device.id,
+      nativeVersion: nativeConnectionVersion, connectionVersion: connectionCycleVersion, latencyVersion: connectionLatencyVersion };
+  });
+}
+function markMessageChannelUnavailable(origin, observed) {
+  if (!connected || pageLeaving) return;
+  const previous = observed.find(measurement => measurement.origin === origin);
+  if (!previous || previous.deviceId !== session?.device.id
+      || previous.nativeVersion !== nativeConnectionVersion || previous.connectionVersion !== connectionCycleVersion
+      || previous.latencyVersion < connectionLatencyFloor) return;
+  const latest = currentChannelMeasurements().find(measurement => measurement.origin === origin);
+  // 旧发送结果不能覆盖后续已完成的连接测量，也不能污染新入口。
+  if (!latest || latest.status !== "unknown" && latest !== previous) return;
+  channelRtts.set(previous.name, { ...previous, status: "unavailable", latencyVersion: ++connectionLatencyVersion });
+  renderConnectionIndicator();
+}
+function renderConnectionIndicator() {
+  const node = $("#connection-state"); if (!node) return;
+  const measured = connected && connectionRtt?.deviceId === session?.device.id
+    && connectionRtt.nativeVersion === nativeConnectionVersion
+    && connectionRtt.connectionVersion === connectionCycleVersion ? connectionRtt : null;
+  const activeRoutes = remoteChannelRoutes();
+  const dual = activeRoutes.length > 1;
+  const currentMeasurements = currentChannelMeasurements();
+  const measurements = dual ? ["zrok", "ngrok"].map(name => {
+    const measurement = currentMeasurements.find(measurement => measurement.name === name);
+    return { name, measurement: measurement?.status === "unknown" ? null : measurement };
+  }) : [];
+  renderConnectionLatency(node, { connected, measured, measurements, dual });
+}
+function renderConnectionLatency(node, { connected, measured, measurements, dual }) {
+  const ready = measurement => measurement?.status === "ready"
+    && Number.isFinite(measurement.milliseconds) && measurement.milliseconds >= 0;
+  if (dual) {
+    const rows = measurements.map(({ name, measurement }) => {
+      const row = document.createElement("span");
+      const status = !connected ? "连接中断" : ready(measurement) ? `${Math.round(measurement.milliseconds)} ms`
+        : measurement?.status === "unavailable" ? "暂不可用" : "测量中…";
+      row.className = `connection-route ${ready(measurement) ? "online" : measurement?.status === "unavailable" || !connected ? "unavailable" : "pending"}`;
+      row.textContent = `${name} ${status}`;
+      return row;
+    });
+    node.replaceChildren(...rows);
+  } else {
+    node.textContent = !connected ? "连接中断 · 自动重连" : measured ? `${Math.round(measured.milliseconds)} ms` : "连接中…";
+  }
+  const online = dual ? connected && measurements.some(({ measurement }) => ready(measurement)) : !!measured;
+  node.classList.toggle("dual-channel", dual);
+  node.title = connectionRttDescription;
+  node.setAttribute("aria-label", `${dual ? measurements.map(({ name }, index) => node.children[index].textContent).join("；") : node.textContent}。${connectionRttDescription}`);
+  node.classList.toggle("online", online);
+  node.classList.toggle("pending", connected && !online);
 }
 function scheduleReload() {
   if (refreshTimer) return;
@@ -9943,6 +10111,9 @@ function receive(event) {
   }
 }
 function disconnect() {
+  $("#video-preview-dialog")?.close();
+  clearRemoteChannels();
+  sidebarViewSave = null;
   stopCatalogRefresh();
   stopGoalLiveTimer();
   closeContextUsageTip();
@@ -10228,4 +10399,18 @@ window.addEventListener("popstate", () => {
   else if (!id && selectedId) showWelcome();
 });
 postPlatformMessage("ready");
+observeChannelConfiguration(configuration => {
+  const routes = remoteChannelRoutes();
+  const signature = [configuration?.serverId || "", ...routes.map(route => route.origin)].join("\n");
+  if (signature === connectionRouteSignature) return;
+  connectionRouteSignature = signature;
+  connectionLatencyFloor = ++connectionLatencyVersion;
+  channelRtts.clear();
+  connectionRtt = null;
+  renderConnectionIndicator();
+  clearTimeout(connectionLatencyRefresh);
+  if (routes.length > 1) connectionLatencyRefresh = setTimeout(() => {
+    if (session && !pageLeaving && !document.hidden) void syncConnectionState().catch(() => {});
+  }, 0);
+});
 connect().catch(handleInitialConnectionError);

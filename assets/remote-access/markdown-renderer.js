@@ -1,3 +1,5 @@
+import { videoPreviewMarkup } from "./attachments.js";
+
 export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
 
   const purifier = createDOMPurify(globalThis.window);
@@ -24,6 +26,7 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
 
   const imagePathPattern = /^\/api\/images\/[A-Za-z0-9_-]{20,128}$/u;
   const safeImagePath = url => typeof url === "string" && imagePathPattern.test(url) ? url : null;
+  const safeVideoPoster = url => typeof url === "string" && /^\/api\/videos\/[a-f0-9]{64}\/poster$/u.test(url) ? url : null;
 
   const isLocalReference = href => {
     const value = String(href ?? "").trim();
@@ -35,7 +38,9 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
     ? renderer.parser.parseInline(token.tokens)
     : escapeHtml(token.text);
 
-  const createRenderer = (remoteImages, { userMessage = false, skills = [], skillLink } = {}) => {
+  const createRenderer = (remoteImages, { userMessage = false, skills = [], skillLink, remoteVideos = [] } = {}) => {
+    const registeredVideos = new Map((Array.isArray(remoteVideos) ? remoteVideos : [])
+      .filter(video => typeof video?.source === "string").map(video => [video.source, video]));
     const registeredImages = new Map();
     if (Array.isArray(remoteImages)) {
       for (const image of remoteImages) {
@@ -75,6 +80,9 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
     renderer.html = ({ text }) => escapeHtml(text);
 
     renderer.link = function (token) {
+      const video = registeredVideos.get(token.href);
+      const preview = videoPreviewMarkup(video, token.text);
+      if (preview && linkDepth === 0) return preview;
       let label;
       linkDepth++;
       try { label = inlineContent(this, token); }
@@ -99,6 +107,8 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
     renderer.image = token => {
       const alt = String(token.text ?? "");
       const source = String(token.href ?? "");
+      const video = videoPreviewMarkup(registeredVideos.get(source), alt);
+      if (video) return video;
       const url = registeredImages.get(source);
       if (url) {
         const safeUrl = escapeHtml(url);
@@ -141,20 +151,20 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
     if (data.attrName === "href" && safeHref(data.attrValue) === null && safeImagePath(data.attrValue) === null) {
       data.keepAttr = false;
     }
-    if (data.attrName === "src" && safeImagePath(data.attrValue) === null) data.keepAttr = false;
+    if (data.attrName === "src" && safeImagePath(data.attrValue) === null && safeVideoPoster(data.attrValue) === null) data.keepAttr = false;
     if (data.attrName === "srcset" || data.attrName === "xlink:href") {
       data.keepAttr = false;
     }
   });
 
-  function markdown(text, remoteImages = [], { userMessage = false, skills = [], skillLink } = {}) {
+  function markdown(text, remoteImages = [], { userMessage = false, skills = [], skillLink, remoteVideos = [] } = {}) {
     const source = String(text ?? "");
     const html = marked.parse(userMessage ? source : source.replace(/\uE200[^\uE201]*\uE201/g, ""), {
       async: false,
       breaks: userMessage,
       gfm: true,
       pedantic: false,
-      renderer: createRenderer(remoteImages, { userMessage, skills, skillLink })
+      renderer: createRenderer(remoteImages, { userMessage, skills, skillLink, remoteVideos })
     });
     return purifier.sanitize(html, sanitizeOptions);
   }

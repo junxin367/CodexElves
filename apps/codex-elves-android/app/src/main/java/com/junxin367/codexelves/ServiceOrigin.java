@@ -8,6 +8,10 @@ import java.net.URISyntaxException;
 import java.util.Locale;
 
 final class ServiceOrigin {
+    static final String CHANNEL_CONNECT_SOURCES =
+        "https://*.ngrok-free.app wss://*.ngrok-free.app https://*.ngrok-free.dev wss://*.ngrok-free.dev "
+        + "https://*.ngrok.app wss://*.ngrok.app https://*.ngrok.dev wss://*.ngrok.dev "
+        + "https://*.ngrok.io wss://*.ngrok.io";
     private ServiceOrigin() {
     }
 
@@ -77,5 +81,46 @@ final class ServiceOrigin {
         } catch (IllegalArgumentException error) {
             return false;
         }
+    }
+
+    /** Permit credentialed secondary reads and idempotent message sends; no documents or assets. */
+    static boolean allowsChannelRequest(String rawUrl, String method, java.util.Map<String, String> headers) {
+        try {
+            URI uri = new URI(rawUrl);
+            String origin = normalize(uri.getScheme() + "://" + uri.getRawAuthority());
+            String host = new URI(origin).getHost();
+            if (uri.getRawFragment() != null || uri.getPort() != -1 && uri.getPort() != 443
+                || !host.matches("[a-zA-Z0-9-]+\\.(ngrok-free\\.app|ngrok-free\\.dev|ngrok\\.app|ngrok\\.dev|ngrok\\.io)"))
+                return false;
+            boolean preflight = "OPTIONS".equals(method);
+            String requestedMethod = preflight ? channelHeader(headers, "Access-Control-Request-Method") : method;
+            String path = uri.getRawPath();
+            boolean messageSend = "POST".equals(requestedMethod)
+                && ("/api/action/send".equals(path) || "/api/action/create".equals(path) || "/api/action/setGoal".equals(path));
+            boolean allowed = "GET".equals(requestedMethod)
+                && ("/api/session".equals(path) || "/api/channels".equals(path) || "/api/channel-events".equals(path)
+                    || path != null && path.matches("/api/receipts/[a-zA-Z0-9-]{1,100}"))
+                || "POST".equals(requestedMethod) && path != null && path.matches("/api/read/[a-zA-Z]+")
+                || messageSend;
+            if (!allowed) return false;
+            if (preflight) {
+                boolean authorization = false, idempotency = false;
+                for (String name : channelHeader(headers, "Access-Control-Request-Headers").split(",")) {
+                    if ("authorization".equalsIgnoreCase(name.trim())) authorization = true;
+                    if ("idempotency-key".equalsIgnoreCase(name.trim())) idempotency = true;
+                }
+                return authorization && (!messageSend || idempotency);
+            }
+            return channelHeader(headers, "Authorization").matches("Bearer [a-f0-9]{64}")
+                && (!messageSend || channelHeader(headers, "Idempotency-Key").matches("[a-zA-Z0-9-]{1,100}"));
+        } catch (URISyntaxException | IllegalArgumentException error) {
+            return false;
+        }
+    }
+
+    private static String channelHeader(java.util.Map<String, String> headers, String name) {
+        for (java.util.Map.Entry<String, String> entry : headers.entrySet())
+            if (name.equalsIgnoreCase(entry.getKey())) return entry.getValue() == null ? "" : entry.getValue();
+        return "";
     }
 }

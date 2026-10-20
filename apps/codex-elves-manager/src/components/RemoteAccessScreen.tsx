@@ -32,6 +32,9 @@ export function RemoteAccessScreen({
   const [loginLocked, setLoginLocked] = useState(false);
   const [zrokValue, setZrokValue] = useState(settings.zrokSetupValue);
   const [fixedNameValue, setFixedNameValue] = useState("");
+  const [ngrokToken, setNgrokToken] = useState("");
+  const [ngrokTokenConfigured, setNgrokTokenConfigured] = useState(false);
+  const [showNgrokToken, setShowNgrokToken] = useState(false);
   const [keyValue, setKeyValue] = useState("");
   const [keyDirty, setKeyDirty] = useState(false);
   const [showKey, setShowKey] = useState(false);
@@ -43,6 +46,7 @@ export function RemoteAccessScreen({
   const fixedNameDirtyRef = useRef(false);
   const loadedKeyValue = useRef<string | null>(null);
   const loginLockRevision = useRef(0);
+  const ngrokTokenRevision = useRef(0);
   const keyDirtyRef = useRef(false);
   const latestSettings = useRef(settings);
   latestSettings.current = settings;
@@ -51,6 +55,7 @@ export function RemoteAccessScreen({
     if (refreshing.current) return;
     refreshing.current = true;
     const loginLockReadRevision = loginLockRevision.current;
+    const ngrokTokenReadRevision = ngrokTokenRevision.current;
     try {
       const saved = await command<RemoteAccessCredentials>("credentials");
       if (!mounted.current || loginLockReadRevision !== loginLockRevision.current) return;
@@ -69,6 +74,8 @@ export function RemoteAccessScreen({
       const result = await command<RemoteAccessStatus>("status");
       if (!mounted.current) return;
       setStatus(result);
+      if (ngrokTokenReadRevision === ngrokTokenRevision.current && typeof result.ngrok?.configured === "boolean")
+        setNgrokTokenConfigured(result.ngrok.configured);
       if (loginLockReadRevision === loginLockRevision.current && result.status === "ok" && typeof result.loginLocked === "boolean")
         setLoginLocked(result.loginLocked);
       if (result.status !== "ok") setMessage(result.message || "本机服务未连接");
@@ -227,6 +234,17 @@ export function RemoteAccessScreen({
     if (!mounted.current) return;
     if (result.status !== "ok") throw new Error(result.message || "公网访问验证失败，请检查网络连接后重试。");
     onSuccess(result.message || "公网访问验证通过。");
+  });
+  const saveNgrokToken = () => runApply(async () => {
+    const result = await command<{ status: string; message?: string }>("saveNgrok", { token: ngrokToken.trim() });
+    if (!mounted.current) return;
+    if (result.status !== "ok") throw new Error(result.message || "ngrok 验证失败");
+    ++ngrokTokenRevision.current;
+    setNgrokTokenConfigured(true);
+    setNgrokToken("");
+    setShowNgrokToken(false);
+    await refresh();
+    if (mounted.current) onSuccess(result.message || "ngrok Token 已保存并通过测试。");
   });
   const confirmKeyChange = () => credentials?.accessKeyConfigured === false || window.confirm("更换访问密钥会使所有已授权设备失效，需要重新输入新密钥。继续？");
   const applySettings = async (next: RemoteAccessSettings) => {
@@ -424,6 +442,44 @@ export function RemoteAccessScreen({
                 <Button variant="secondary" size="sm" className="h-9" disabled={busy || !settings.enabled || !publicUrl || !zrok?.running} onClick={() => void testPublicUrl()}>{busy ? "处理中…" : "测试访问"}</Button>
               </div>
               <small>关闭并重新启动 CodexElves 后复用同一地址；首次访问若出现 zrok 提示页，请点击「Visit Share」。</small>
+            </div>
+            <div className="remote-access-wide">
+              <Label htmlFor="remote-ngrok-token">ngrok Token</Label>
+              <div className="remote-access-input-row remote-access-public-row">
+                <div className="remote-access-key-input">
+                  <Input
+                    id="remote-ngrok-token"
+                    type={showNgrokToken ? "text" : "password"}
+                    autoComplete="off"
+                    spellCheck={false}
+                    disabled={busy}
+                    value={ngrokToken}
+                    placeholder={ngrokTokenConfigured ? "已保存；输入新 Token 可替换" : "输入 ngrok Token"}
+                    onChange={event => {
+                      setNgrokToken(event.target.value);
+                      if (!event.target.value) setShowNgrokToken(false);
+                    }}
+                  />
+                  <div className="remote-access-key-actions">
+                    <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={busy || !ngrokToken}
+                      aria-label={showNgrokToken ? "隐藏 ngrok Token" : "显示 ngrok Token"}
+                      aria-pressed={showNgrokToken}
+                      onClick={() => setShowNgrokToken(value => !value)}>
+                      {showNgrokToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </Button>
+                    <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={busy || !ngrokToken}
+                      aria-label="复制 ngrok Token" onClick={() => void copy(ngrokToken)}>
+                      <Copy className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+                <Button variant="secondary" size="sm" className="h-9"
+                  disabled={busy || !settings.enabled || !ngrokToken.trim()}
+                  onClick={() => void saveNgrokToken()}>{busy ? "处理中…" : "保存并测试"}</Button>
+              </div>
+              <small>{status?.ngrok?.state === "ready" ? "第二通道已连接，安卓端将自动发现并同时使用。"
+                : status?.ngrok?.state === "starting" ? "第二通道正在启动…"
+                  : status?.ngrok?.error || "保存后随 zrok 同步启动，安卓端自动连接，无需填写第二个域名。"}</small>
             </div>
           </div>
           {["connecting", "retry_wait", "error"].includes(zrok?.state || "") && zrok?.error ? <p className="remote-access-error" role="alert">{zrok.error}</p> : null}

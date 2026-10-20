@@ -18,6 +18,7 @@ final class NotificationEventState {
     private static final int MAX_SEEN = 1024;
     private String epoch;
     private long cursor;
+    private final Set<String> retiredEpochs = new HashSet<>();
     private final LinkedHashMap<String, Boolean> seen = new LinkedHashMap<>();
     private final Map<String, Event> pending = new LinkedHashMap<>();
 
@@ -145,6 +146,11 @@ final class NotificationEventState {
         }
         String nextEpoch = epoch(value, "notificationEpoch");
         long nextCursor = integer(value, "notificationCursor");
+        // The other tunnel may still be returning an older in-flight snapshot.
+        if (retiredEpochs.contains(nextEpoch)
+            || nextEpoch.equals(epoch) && (nextCursor < cursor || value.getBoolean("reset"))) {
+            return;
+        }
         List<Event> nextPending = events(value.getJSONArray("pending"), nextEpoch, nextCursor, false);
         List<Event> events = events(value.getJSONArray("events"), nextEpoch, nextCursor, true);
         Set<String> pendingIds = new HashSet<>();
@@ -154,11 +160,14 @@ final class NotificationEventState {
                 throw new JSONException("Invalid pending notification");
             }
         }
-        boolean reset = value.getBoolean("reset") || !nextEpoch.equals(epoch);
+        // Both routes can request an initial baseline before either one returns.
+        // A late reset for the already established epoch must preserve deduplication.
+        boolean reset = !nextEpoch.equals(epoch);
         if (!reset && nextCursor < cursor) {
             throw new JSONException("Notification cursor moved backwards");
         }
         if (reset) {
+            if (epoch != null && !nextEpoch.equals(epoch)) retiredEpochs.add(epoch);
             sink.reset();
             epoch = nextEpoch;
             cursor = 0;

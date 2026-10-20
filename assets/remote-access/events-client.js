@@ -1,3 +1,5 @@
+import { createChannelEventStream, observeChannelConfiguration } from "./channels.js";
+
 let sharedWorkerFailed = false;
 
 const READY_STATE = {
@@ -5,9 +7,6 @@ const READY_STATE = {
   OPEN: 1,
   CLOSED: 2
 };
-const RETRY_DELAYS = [500, 1000, 2000, 5000, 10000];
-const HANDSHAKE_TIMEOUT = 45000;
-const ACTIVITY_TIMEOUT = 75000;
 const WORKER_START_TIMEOUT = 20000;
 const WORKER_RESPONSE_TIMEOUT = 90000;
 const WATCH_INTERVAL = 5000;
@@ -18,200 +17,17 @@ export function sharedEventsAvailable() {
   return !sharedWorkerFailed && typeof SharedWorker === "function";
 }
 
-function eventsSocketUrl() {
-  const url = new URL("/api/events/ws", location.href);
-  url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  return url.href;
-}
-
-function retryDelay(attempt) {
-  const base = RETRY_DELAYS[Math.min(attempt, RETRY_DELAYS.length - 1)];
-  return Math.round(base * (0.8 + Math.random() * 0.4));
-}
-
-function fallbackStream() {
-  let readyState = READY_STATE.CONNECTING;
-  let socket = null;
-  let retryTimer = null;
-  let watchTimer = null;
-  let retryAttempt = 0;
-  let openedAt = null;
-  let lastActivityAt = 0;
-  let connectingAt = 0;
-  let lastWatchAt = 0;
-  let graceUntil = 0;
-  let errorReported = false;
-  let closed = false;
-  let online = navigator.onLine !== false;
-  let hidden = document.hidden;
-
-  const stream = {
-    transport: "fallback",
-    onopen: null,
-    onmessage: null,
-    onerror: null,
-    get readyState() { return readyState; },
-    close() {
-      if (closed) return;
-      closed = true;
-      readyState = READY_STATE.CLOSED;
-      clearTimeout(retryTimer);
-      clearTimeout(watchTimer);
-      retryTimer = null;
-      watchTimer = null;
-      closeSocket();
-      window.removeEventListener("offline", offline);
-      window.removeEventListener("online", restore);
-      window.removeEventListener("pagehide", stream.close);
-      document.removeEventListener("visibilitychange", visibility);
-    }
-  };
-
-  const closeSocket = () => {
-    const current = socket;
-    socket = null;
-    if (!current) return;
-    current.onopen = null;
-    current.onmessage = null;
-    current.onerror = null;
-    current.onclose = null;
-    try { current.close(); } catch {}
-  };
-
-  const reportError = event => {
-    if (errorReported || closed) return;
-    errorReported = true;
-    stream.onerror?.(event);
-  };
-
-  const scheduleRetry = () => {
-    if (closed || hidden || !online || retryTimer !== null) return;
-    readyState = READY_STATE.CONNECTING;
-    retryTimer = setTimeout(() => {
-      retryTimer = null;
-      connect();
-    }, retryDelay(retryAttempt));
-    retryAttempt = Math.min(retryAttempt + 1, RETRY_DELAYS.length - 1);
-  };
-
-  const fail = event => {
-    if (closed) return;
-    if (openedAt !== null && Date.now() - openedAt >= 30000) retryAttempt = 0;
-    openedAt = null;
-    clearTimeout(watchTimer);
-    watchTimer = null;
-    closeSocket();
-    readyState = READY_STATE.CONNECTING;
-    reportError(event);
-    scheduleRetry();
-  };
-
-  const watch = () => {
-    watchTimer = null;
-    if (closed || !socket || hidden || !online) return;
-    const now = Date.now();
-    // A suspended tab may run its timer before queued heartbeat messages.
-    if (now - lastWatchAt > TIMER_SUSPENSION) graceUntil = now + RESUME_GRACE;
-    lastWatchAt = now;
-    const deadline = openedAt === null
-      ? connectingAt + HANDSHAKE_TIMEOUT
-      : lastActivityAt + ACTIVITY_TIMEOUT;
-    if (now >= deadline && now >= graceUntil) {
-      fail({ type: "error", reason: openedAt === null ? "handshake-timeout" : "activity-timeout" });
-      return;
-    }
-    watchTimer = setTimeout(watch, WATCH_INTERVAL);
-  };
-
-  const connect = () => {
-    if (closed || hidden || !online || socket || retryTimer !== null) return;
-    readyState = READY_STATE.CONNECTING;
-    errorReported = false;
-    openedAt = null;
-    connectingAt = lastWatchAt = Date.now();
-    graceUntil = 0;
-
-    let current;
-    try {
-      current = new WebSocket(eventsSocketUrl());
-    } catch (error) {
-      reportError(error);
-      scheduleRetry();
-      return;
-    }
-
-    socket = current;
-    watchTimer = setTimeout(watch, WATCH_INTERVAL);
-    current.onopen = event => {
-      if (closed || socket !== current) return;
-      readyState = READY_STATE.OPEN;
-      openedAt = lastActivityAt = Date.now();
-      stream.onopen?.(event);
-    };
-    current.onmessage = event => {
-      if (closed || socket !== current || typeof event.data !== "string") return;
-      lastActivityAt = Date.now();
-      stream.onmessage?.({ data: event.data });
-    };
-    current.onerror = event => {
-      if (closed || socket !== current) return;
-      fail(event);
-    };
-    current.onclose = event => {
-      if (closed || socket !== current) return;
-      fail(event);
-    };
-  };
-
-  const pause = reason => {
-    clearTimeout(retryTimer);
-    clearTimeout(watchTimer);
-    retryTimer = watchTimer = null;
-    closeSocket();
-    readyState = READY_STATE.CONNECTING;
-    if (reason) reportError({ type: "error", reason });
-  };
-  const offline = () => {
-    online = false;
-    pause("offline");
-  };
-  const restore = () => {
-    if (closed) return;
-    online = navigator.onLine !== false;
-    if (!online || hidden) return;
-    if (!socket) {
-      connect();
-      return;
-    }
-    const now = Date.now();
-    lastWatchAt = now;
-    graceUntil = Math.max(graceUntil, now + RESUME_GRACE);
-    if (watchTimer === null) watchTimer = setTimeout(watch, WATCH_INTERVAL);
-  };
-  const visibility = () => {
-    hidden = document.hidden;
-    if (hidden) {
-      clearTimeout(retryTimer);
-      clearTimeout(watchTimer);
-      retryTimer = watchTimer = null;
-    } else restore();
-  };
-  window.addEventListener("offline", offline);
-  window.addEventListener("online", restore);
-  window.addEventListener("pagehide", stream.close);
-  document.addEventListener("visibilitychange", visibility);
-  connect();
-  return stream;
-}
-
 function sharedStream() {
-  const worker = new SharedWorker("/events-worker.js", "codex-elves-remote-events");
+  const worker = new SharedWorker("/events-worker.js", { name: "codex-elves-remote-events-v2", type: "module" });
   const port = worker.port;
   let readyState = READY_STATE.CONNECTING;
   let closed = false;
   let fallback = null;
   let watchTimer = null;
   let workerReady = false;
+  const stopConfiguration = observeChannelConfiguration(channels => {
+    try { port.postMessage({ type: "channels", channels }); } catch {}
+  });
   let startedAt = Date.now();
   let lastActivityAt = startedAt;
   let lastWatchAt = startedAt;
@@ -234,6 +50,7 @@ function sharedStream() {
     }
   };
   const detachWorker = () => {
+    stopConfiguration();
     clearTimeout(watchTimer);
     watchTimer = null;
     try { port.postMessage({ type: "unsubscribe" }); } catch {}
@@ -255,7 +72,7 @@ function sharedStream() {
     if (closed || fallback) return;
     sharedWorkerFailed = true;
     detachWorker();
-    fallback = fallbackStream();
+    fallback = createChannelEventStream();
     fallback.onopen = event => {
       if (closed) return;
       errorReported = false;
@@ -350,5 +167,5 @@ export function createRemoteEventStream() {
     try { return sharedStream(); }
     catch { sharedWorkerFailed = true; }
   }
-  return fallbackStream();
+  return createChannelEventStream();
 }

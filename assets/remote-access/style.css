@@ -131,7 +131,7 @@ html{scrollbar-color:var(--muted) transparent}
 .skill-option:disabled{opacity:.48;cursor:default}
 .skill-option strong{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
 .skill-option small{display:block;max-width:100%;font-size:calc(var(--font-size)*.75);line-height:1.6;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
-.slash-command-option{display:grid;grid-template-columns:20px minmax(0,1fr);align-items:center;gap:9px;padding:9px 10px}
+.slash-command-option{display:grid;grid-template-columns:20px minmax(0,1fr);align-items:center;gap:9px;min-height:36px;padding:5px 10px}
 .slash-command-option .slash-command-icon{width:18px;height:18px;display:grid;place-items:center;color:var(--muted)}
 .slash-command-icon svg{width:18px;height:18px}
 .slash-command-copy{display:flex;align-items:baseline;gap:7px;min-width:0}
@@ -306,7 +306,6 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 #notice{inset:auto;top:max(24px,env(safe-area-inset-top));bottom:auto;left:50%;margin:0;border:0;z-index:var(--layer-toast)}
 #notice.error{color:#fff}
 .modal-open{overflow:hidden}
-.sidebar-view-toggle[aria-busy=true] .ui-icon{animation:pulse 1s infinite}
 .send-button{display:grid;place-items:center;width:var(--control-toolbar-size);height:var(--control-toolbar-size);padding:0;border:0;line-height:1}
 .send-button .ui-icon{width:18px;height:18px}
 .send-button .ui-icon svg{stroke-width:1.8}
@@ -368,6 +367,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .markdown th[align=right],.markdown td[align=right]{text-align:right}
 .local-file-reference{font-family:"JetBrains Mono",Consolas,monospace;font-size:.9em;background:var(--code);border-radius:4px;padding:2px 4px;overflow-wrap:anywhere}
 .attachment-placeholder{display:block;margin-top:8px;color:var(--muted);font-size:.85714rem}
+.image-load-retry{white-space:normal}
 .transcript-event{display:flex;align-items:center;gap:7px;min-width:0;margin:20px 0;font-size:.78571rem;line-height:1.5;text-align:center}
 .transcript-event::before,.transcript-event::after{content:"";height:1px;min-width:18px;flex:1;background:var(--line)}
 .transcript-event-icon{width:14px;height:14px;flex-shrink:0;opacity:.72}
@@ -491,6 +491,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .user-attachments .message-image-link{flex:0 0 var(--thumbnail-size);width:var(--thumbnail-size);height:var(--thumbnail-size);margin:0}
 .user-attachments button.message-image-link{padding:0;border:0;background:transparent;border-radius:8px}
 .user-attachments .message-image{width:var(--thumbnail-size);height:var(--thumbnail-size);max-width:var(--thumbnail-size);max-height:var(--thumbnail-size);object-fit:cover}
+.user-attachments .message-video-preview{flex:0 0 140px;margin:0}
 .image-preview-dialog{width:min(960px,calc(100vw - 32px));max-width:none;max-height:calc(100dvh - 32px);margin:auto;padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--text);overflow:hidden}
 .image-preview-dialog::backdrop{background:#000b}
 .image-preview-panel{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:0;min-height:180px;max-height:calc(100dvh - 34px);margin:0;padding:44px 16px 14px;overflow:auto}
@@ -500,6 +501,19 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .image-preview-close{position:absolute;top:8px;right:8px;display:grid;place-items:center;width:var(--control-icon-size);height:var(--control-icon-size);padding:0;border-radius:50%;background:color-mix(in srgb,var(--bg) 88%,transparent);line-height:1;z-index:1}
 .image-preview-caption{max-width:100%;margin-top:10px;color:var(--muted);font-size:.78571rem;overflow-wrap:anywhere;text-align:center}
 .image-preview-unavailable{color:var(--muted)}
+.message-video-preview{display:inline-flex;flex-direction:column;width:160px;max-width:100%;margin:8px 4px 4px 0;padding:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--side);color:var(--text);text-align:left;vertical-align:top;cursor:pointer}
+.message-video-cover{position:relative;display:grid;place-items:center;width:100%;aspect-ratio:16/9;background:#252830}
+.message-video-poster{display:block;width:100%;height:100%;object-fit:cover}
+.message-video-badge{position:absolute;display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:#0009;color:#fff;font-size:15px;pointer-events:none}
+.message-video-name{display:block;max-width:100%;padding:6px 8px;font-size:.78571rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.video-preview-panel{position:relative;padding:44px 16px 12px;min-width:0}
+.video-preview-media{display:block;width:100%;height:min(60dvh,540px);object-fit:contain;background:#111;border-radius:6px}
+.video-preview-controls{display:flex;align-items:center;gap:12px;min-width:0;margin-top:12px}
+.video-preview-play{flex:0 0 auto;min-width:60px}
+.video-preview-progress{flex:1 1 0;min-width:0;width:0;accent-color:var(--accent)}
+.video-preview-time{flex:0 0 auto;font-size:.78571rem;font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--muted)}
+.video-preview-status{min-height:1.5em;margin:8px 0 0;font-size:.78571rem;color:var(--muted);text-align:center}
+@media(max-width:760px){.message-video-preview{width:140px}.video-preview-panel{padding:40px 8px 8px}.video-preview-controls{gap:8px}.video-preview-play{min-width:48px}.video-preview-media{height:50dvh}}
 .image-view-item,.image-view-item[open]{border-color:transparent;background:transparent}
 .image-view-summary{width:fit-content;max-width:100%;min-width:0}
 .image-view-summary::-webkit-details-marker{display:none}
@@ -750,3 +764,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .appearance-notification-categories[aria-disabled=true]{opacity:.45}
 .appearance-notification-action{font-size:calc(var(--font-size)*.82)}
 .appearance-notification-action:disabled{opacity:1;cursor:wait}
+.connection-state.dual-channel{flex-direction:column;align-items:flex-end;justify-content:center;gap:2px}
+.connection-state .connection-route{display:block;white-space:nowrap}
+.connection-state .connection-route.online{color:var(--green)}
+.connection-state .connection-route.pending{color:var(--muted)}
+.connection-state .connection-route.unavailable{color:var(--danger)}

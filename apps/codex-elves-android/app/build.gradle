@@ -103,6 +103,7 @@ def bundledWebResources = [
     [source: "attachments.js", path: "/attachments.js", contentType: "application/javascript; charset=utf-8"],
     [source: "events-client.js", path: "/events-client.js", contentType: "application/javascript; charset=utf-8"],
     [source: "events-worker.js", path: "/events-worker.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "channels.js", path: "/channels.js", contentType: "application/javascript; charset=utf-8"],
     [source: "markdown.js", path: "/markdown.js", contentType: "application/javascript; charset=utf-8"],
     [source: "markdown-renderer.js", path: "/markdown-renderer.js", contentType: "application/javascript; charset=utf-8"],
     [source: "vendor/marked.esm.js", path: "/vendor/marked.esm.js", contentType: "application/javascript; charset=utf-8"],
