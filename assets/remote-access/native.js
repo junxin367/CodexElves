@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 47) return;
+  if (window.__codexElvesRemoteAccess?.version === 55) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -25,6 +25,14 @@
   const sidebarSignatures = new Map();
   const deletedThreadIds = new Set();
   let goalMaterializer = null;
+  const nativeModuleSnapshots = new Map();
+  let relatedNativeState = null;
+  const sideThreadsStateKey = "codex-elves-remote-side-threads-v1";
+  const sideThreadsContainerKey = "persisted-atom-state";
+  let sideThreadsManager = null;
+  const registeredSideThreads = new Map();
+  const sideThreadHistories = new Map();
+  const sideThreadTitleSequences = new Map();
   const goalSubmissions = new Map();
   const isDeletedThread = id => typeof id === "string" && deletedThreadIds.has(id.toLowerCase());
   const questionReplyStore = (() => {
@@ -55,6 +63,8 @@
   const pushNotification = event => {
     if (event.method === "thread/deleted") forgetDeletedThread(event.params?.threadId);
     else if (event.method !== "remote/sidebarChanged" && isDeletedThread(event.params?.threadId)) return;
+    const inherited = sideThreadHistories.get(event.params?.threadId)?.inheritedTurnIds;
+    if (inherited?.has(event.params?.turnId ?? event.params?.turn?.id)) return;
     if (["thread/archived", "thread/deleted"].includes(event.method)) {
       nativeCatalog.delete(event.params?.threadId);
       catalogLoaded = false;
@@ -157,6 +167,15 @@
       }
     }
     if (!manager) throw failure(503, "未发现本机原生会话管理器，请检查 CodexElves 注入连接");
+    if (sideThreadsManager !== manager) {
+      sideThreadsManager = manager;
+      registeredSideThreads.clear();
+      sideThreadHistories.clear();
+      sideThreadTitleSequences.clear();
+      const sourceManager = manager;
+      void restoreSideThreadVisibility(sourceManager).catch(error =>
+        sourceManager.logger?.warning?.("侧边会话显示状态恢复失败", { safe: {}, sensitive: { error } }));
+    }
     if (notificationManager !== manager) {
       if (notificationManager) {
         notificationEpoch = crypto.randomUUID();
@@ -174,14 +193,17 @@
       unsubscribe.push(manager.addUserInputRequestListener(syncRequestNotification));
       if (typeof manager.addConversationStateCallback === "function")
         unsubscribe.push(manager.addConversationStateCallback((id, conversation) => {
+          if (registeredSideThreads.has(id) && conversation && conversation.sideConversation !== true)
+            markSideConversation(id);
           syncPendingNotifications(id, conversation);
           if (observedRequestThreads.has(id)) syncBlockingRequests(id, conversation);
           if (asyncQuestionSignatures.has(id)) syncAsyncQuestions(id, conversation);
-          if (conversation && !isDeletedThread(id) && nativeCatalog.has(id)) {
+          if (conversation && !isDeletedThread(id) && (nativeCatalog.has(id) || registeredSideThreads.has(id))) {
             const previous = sidebarSignatures.get(id);
             const item = summary(conversation);
-            nativeCatalog.set(id, item);
-            if (previous !== sidebarSignatures.get(id)) emit({ method: "remote/sidebarChanged" });
+            if (!registeredSideThreads.has(id)) nativeCatalog.set(id, item);
+            if (previous !== sidebarSignatures.get(id)) emit({ method: "remote/sidebarChanged",
+              params: { threadId: id, parentThreadId: registeredSideThreads.get(id)?.parentThreadId } });
           }
         }));
       refreshPendingNotifications();
@@ -497,22 +519,34 @@
   function summary(thread, activityTimes) {
     const id = thread.conversationId || thread.id;
     const current = manager.getThreadListSummary?.(id) || thread;
+    // 目录读取可能比桌面缓存新；随后采用旧摘要时不能把更新时间回退。
+    const updatedAt = Math.max(timestamp(current.updatedAt), timestamp(thread.updatedAt),
+      nativeCatalog.get(id)?.updatedAt || 0);
     const unread = nativeUnreadState(thread, id);
     const { status, ...priority } = sidebarPriority(id, current, unread, activityTimes);
     const result = {
       id, title: current.title || thread.title || thread.name || thread.preview || "新会话", cwd: current.cwd || thread.cwd || "",
-      createdAt: timestamp(current.createdAt ?? thread.createdAt), updatedAt: timestamp(current.updatedAt ?? thread.updatedAt),
+      createdAt: timestamp(current.createdAt ?? thread.createdAt), updatedAt,
       recencyAt: timestamp(current.recencyAt ?? current.updatedAt ?? thread.recencyAt ?? thread.updatedAt), hasUnreadTurn: unread,
       status, priority,
       threadSource: current.threadSource ?? thread.threadSource, projectId: null, pinned: false
     };
-    sidebarSignatures.set(id, JSON.stringify([result.title, result.recencyAt, unread, status, priority]));
+    sidebarSignatures.set(id, JSON.stringify([result.title, updatedAt, result.recencyAt, unread, status, priority]));
     return result;
+  }
+  function completedSideThreadUnread(thread) {
+    const item = summary(thread);
+    const status = typeof item.status === "string" ? item.status : item.status?.type;
+    return item.hasUnreadTurn === true && !item.priority.active
+      && item.priority.attentionState !== "waiting" && !["waiting", "systemError"].includes(status);
   }
   function sortMode(value, preferences) {
     return value === "manual" && preferences.manualSortVersion === 1 ? "manual" : "updated_at";
   }
   async function sidebar(payload) {
+    const sideEntries = await sideThreadEntries();
+    const sideIds = new Set(sideEntries.map(entry => entry.threadId));
+    for (const id of sideIds) nativeCatalog.delete(id);
     const keys = ["local-projects", "pinned-project-ids", "project-order", "pinned-thread-ids",
       "sidebar-project-thread-orders", "thread-project-assignments", "projectless-thread-ids"];
     const stored = Object.fromEntries(await Promise.all(keys.map(async key => [key, await state(key)])));
@@ -540,7 +574,8 @@
     const observeThreads = threads => {
       for (const thread of array(threads)) {
         const id = thread.conversationId || thread.id;
-        if (isDeletedThread(id)) continue;
+        if (isDeletedThread(id) || sideIds.has(id) || thread.sideConversation === true
+            || manager.getConversation(id)?.sideConversation === true) continue;
         if (thread.threadSource === "subagent" || thread.source?.subAgent || thread.source?.subagent) {
           nativeCatalog.delete(id);
           continue;
@@ -578,7 +613,7 @@
     }));
     const assignments = stored["thread-project-assignments"] || {};
     const projectless = new Set(array(stored["projectless-thread-ids"]));
-    const threads = [...nativeCatalog.values()].map(thread => {
+    const threads = [...nativeCatalog.values()].filter(thread => !sideIds.has(thread.id)).map(thread => {
       const assigned = assignments[thread.id];
       let projectId = typeof assigned === "string" ? assigned : assigned?.projectKind === "local" ? assigned.projectId : null;
       if (assigned == null && !projectless.has(thread.id)) {
@@ -590,12 +625,15 @@
         priority: { ...thread.priority, eligible: thread.priority.eligible && (!pinned || !sidebarPriorityOptions.showPinned) } };
     });
     const manualOrder = stored["sidebar-project-thread-orders"] || {};
+    const updatedAt = thread => thread.updatedAt || thread.recencyAt || thread.createdAt || 0;
+    const compareUpdatedAt = (a, b) => updatedAt(b) - updatedAt(a)
+      || b.createdAt - a.createdAt || a.id.localeCompare(b.id);
     const sortThreads = (items, ids, mode) => items.sort((a, b) => mode === "manual"
-      ? (ids.indexOf(a.id) < 0 ? ids.length : ids.indexOf(a.id)) - (ids.indexOf(b.id) < 0 ? ids.length : ids.indexOf(b.id)) || b.recencyAt - a.recencyAt
-      : b.recencyAt - a.recencyAt);
+      ? (ids.indexOf(a.id) < 0 ? ids.length : ids.indexOf(a.id)) - (ids.indexOf(b.id) < 0 ? ids.length : ids.indexOf(b.id)) || compareUpdatedAt(a, b)
+      : compareUpdatedAt(a, b));
     for (const project of projects) {
       const children = threads.filter(thread => thread.projectId === project.id);
-      project.recencyAt = Math.max(0, ...children.map(thread => thread.recencyAt));
+      project.recencyAt = Math.max(0, ...children.map(updatedAt));
       project.threads = sortThreads(children.filter(thread => !thread.pinned), array(manualOrder[project.id]?.threadIds), projectSort);
     }
     const projectOrder = array(stored["project-order"]);
@@ -607,16 +645,461 @@
         - (projectOrder.indexOf(b.id) < 0 ? projectOrder.length : projectOrder.indexOf(b.id)));
     const pinnedThreads = sortThreads(threads.filter(thread => thread.pinned), pinnedIds, pinnedSort);
     const recent = sortThreads(threads.filter(thread => !thread.pinned), array(manager.storage.readValue("codex-sidebar-chat-order-v1")?.threadIds), chatSort);
-    return { ok: true, projects, pinnedThreads, recent, nextCursor: null,
+    const unreadSideThreads = sideEntries.filter(entry => !entry.closed && !isDeletedThread(entry.threadId)
+      && completedSideThreadUnread(manager.getConversation(entry.threadId) || { id: entry.threadId }))
+      .map(entry => ({ id: entry.threadId, parentThreadId: entry.parentThreadId }));
+    return { ok: true, projects, pinnedThreads, recent, nextCursor: null, sideThreadIds: [...sideIds], unreadSideThreads,
       creationAvailable: !!appScope,
       preferences: { mode: preferences.mode === "list" ? "list" : "project", chats: chatSort, projects: projectSort, pinned: pinnedSort } };
   }
   async function readThread(id) {
+    id = requiredId(id);
     if (isDeletedThread(id)) throw failure(404, "会话已永久删除");
-    const response = await manager.readThread(requiredId(id), { includeTurns: false });
+    const response = await manager.readThread(id, { includeTurns: false });
     const thread = response.thread || response;
     if (!thread?.id) throw failure(404, "会话不存在或已删除");
     return thread;
+  }
+  function missingThreadError(error) {
+    if (error?.code === 404 || error?.status === 404) return true;
+    const code = error?.code ?? error?.jsonRpcCode;
+    const rpcError = Number.isInteger(code) && (code >= -32099 && code <= -32000
+      || code === -32700 || code >= -32603 && code <= -32600);
+    // 与原生 thread_not_found 分类一致；普通超时、配置及 rollout 读取失败仍向上传播。
+    return rpcError && typeof error?.message === "string"
+      && (error.message.includes("thread not found:")
+        || error.message.includes("Client specified an invalid argument: unknown thread:"));
+  }
+  function subagentIdentity(thread) {
+    if (!thread || typeof thread !== "object") return null;
+    const source = thread.source;
+    const spawn = source && typeof source === "object"
+      ? (source.subAgent ?? source.subagent)?.thread_spawn : null;
+    const parentThreadId = thread.parentThreadId ?? spawn?.parent_thread_id ?? null;
+    const marked = parentThreadId != null || thread.threadSource === "subagent"
+      || source === "subagent" || !!(source && typeof source === "object"
+        && (Object.hasOwn(source, "subAgent") || Object.hasOwn(source, "subagent")));
+    if (!marked) return null;
+    const name = thread.agentNickname ?? spawn?.agent_nickname;
+    return { readOnly: true, viewKind: "subagent",
+      parentThreadId: typeof parentThreadId === "string" && parentThreadId ? parentThreadId : null,
+      agentName: typeof name === "string" ? name.trim().replace(/^@/, "") : "" };
+  }
+  async function assertWritableThread(id) {
+    id = requiredId(id);
+    const cached = manager.getConversation(id);
+    if (subagentIdentity(cached) || subagentIdentity(manager.getThreadListSummary?.(id)))
+      throw failure(403, "子代理会话仅支持只读查看");
+    const thread = await readThread(id);
+    if (subagentIdentity(thread)) throw failure(403, "子代理会话仅支持只读查看");
+    return thread;
+  }
+  const nativeReadActions = new Set(["events", "notifications", "sidebar", "history", "thread",
+    "models", "skills", "queue", "queueEdit", "sendState", "promptOptimization",
+    "workspaceContext", "relatedThreads"]);
+  async function guardThreadAction(action, payload) {
+    if (payload?.threadId == null || nativeReadActions.has(action) || action === "dispose") return null;
+    const id = requiredId(payload.threadId);
+    const thread = await readThread(id);
+    const identity = subagentIdentity(thread) || subagentIdentity(manager.getConversation(id));
+    if (!identity) return null;
+    if (action === "markRead") return { ok: true, threadId: id, skipped: true, readOnly: true };
+    throw failure(403, "子代理会话仅支持只读查看");
+  }
+  async function nativeResource(name) {
+    if (!["initial", "primary"].includes(name))
+      throw failure(503, "原生关联会话模块名称无效");
+    const expression = new RegExp(`^app://-/assets/app-${name}-[A-Za-z0-9_-]+\\.js$`);
+    const observed = [...document.querySelectorAll('link[rel="modulepreload"]')].map(link => link.href)
+      .concat(performance.getEntriesByType("resource").map(entry => entry.name));
+    const resources = [...new Set(observed.filter(value => expression.test(value)))];
+    if (resources.length === 1) return resources[0];
+    if (resources.length > 1) throw failure(503, `原生关联会话模块版本不唯一（${name}）`);
+    // 静态依赖不一定出现在 DOM 或当前 Resource Timing 中；只沿已观察到的可信 app-main 导入定位。
+    if (name === "initial") {
+      const mains = [...new Set(observed.filter(value =>
+        /^app:\/\/-\/assets\/app-main-[A-Za-z0-9_-]+\.js$/.test(value)))];
+      if (mains.length === 1) {
+        const response = await fetch(mains[0]);
+        if (!response.ok) throw failure(503, "无法读取原生入口模块");
+        const source = await response.text();
+        const dependencies = [...new Set([...source.matchAll(
+          /\b(?:from|import)\s*["'](\.\/app-initial-[A-Za-z0-9_-]+\.js)["']/g)]
+          .map(match => new URL(match[1], mains[0]).href)
+          .filter(value => expression.test(value)))];
+        if (dependencies.length === 1) return dependencies[0];
+      }
+    }
+    throw failure(503, `当前 Codex 版本的原生关联会话模块不可用（${name}）`);
+  }
+  async function nativeModuleSnapshot(name) {
+    const resource = await nativeResource(name);
+    if (!nativeModuleSnapshots.has(resource)) {
+      const pending = (async () => {
+        const [module, response] = await Promise.all([import(resource), fetch(resource)]);
+        if (!response.ok) throw failure(503, "无法读取原生关联会话接口");
+        return { module, source: await response.text() };
+      })();
+      nativeModuleSnapshots.set(resource, pending);
+      pending.catch(() => { if (nativeModuleSnapshots.get(resource) === pending) nativeModuleSnapshots.delete(resource); });
+    }
+    return await nativeModuleSnapshots.get(resource);
+  }
+  function nativeFunction(module, predicate, label) {
+    const matches = Object.values(module).filter(value => typeof value === "function"
+      && predicate(Function.prototype.toString.call(value), value));
+    if (matches.length !== 1) throw failure(503, `当前 Codex 版本的原生${label}接口无法唯一识别`);
+    return matches[0];
+  }
+  function nativeExport(snapshot, symbol) {
+    if (typeof symbol !== "string" || !/^[\w$]+$/.test(symbol))
+      throw failure(503, "原生关联会话接口标识无效");
+    const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const exports = [...snapshot.source.matchAll(/\bexport\s*\{([^{}]*)\}/g)].at(-1)?.[1] ?? "";
+    const name = exports.match(new RegExp(`(?:^|,)\\s*${escaped}\\s+as\\s+([\\w$]+)\\s*(?=,|$)`))?.[1];
+    if (!name || snapshot.module[name] == null)
+      throw failure(503, "当前 Codex 版本的原生关联会话接口未导出");
+    return snapshot.module[name];
+  }
+  function nativeFamilyBefore(source, marker) {
+    const index = source.lastIndexOf(marker);
+    if (index < 0) throw failure(503, "原生关联会话状态标记缺失");
+    const assignments = [...source.slice(0, index).matchAll(
+      /([\w$]+)=[\w$]+\([\w$]+,\([\w$]+,\{get:[\w$]+(?:,scope:[\w$]+)?\}\)=>\{/g)];
+    const symbol = assignments.at(-1)?.[1];
+    if (!symbol) throw failure(503, "当前 Codex 版本的原生关联会话状态无法识别");
+    return symbol;
+  }
+  async function nativeRelatedState() {
+    if (!appScope) discover();
+    if (!appScope || typeof appScope.get !== "function")
+      throw failure(503, "原生关联会话上下文尚未就绪");
+    if (!relatedNativeState) {
+      relatedNativeState = (async () => {
+        const [initial, primary] = await Promise.all([
+          nativeModuleSnapshot("initial"), nativeModuleSnapshot("primary")
+        ]);
+        const rowsMarker = "sourceLinkedThreadsDiscoveryComplete:";
+        const beforeRows = primary.source.slice(0, primary.source.lastIndexOf(rowsMarker));
+        const initializer = [...beforeRows.matchAll(/function\s+([\w$]+)\(\)\{return\(\1=/g)].at(-1);
+        if (!initializer || !beforeRows.slice(initializer.index).includes("getIndexedSubagentProgress:"))
+          throw failure(503, "当前 Codex 版本的原生子代理列表无法识别");
+        // 打包器首次执行后会改写初始化函数，必须从静态源码识别导出，不能检查当前函数体。
+        const initializeRows = nativeExport(primary, initializer[1]);
+        if (typeof initializeRows !== "function") throw failure(503, "原生子代理列表初始化接口无效");
+        const rowsSymbol = nativeFamilyBefore(primary.source, rowsMarker);
+        initializeRows();
+        const rowsFamily = nativeExport(primary, rowsSymbol);
+        if (typeof rowsFamily?.read !== "function") throw failure(503, "原生子代理列表状态无效");
+        const sortRows = nativeFunction(primary.module, source => source.length < 240
+          && source.includes(".sort(") && source.includes("recencyAtMs"), "子代理排序");
+        const formatAgentPath = nativeFunction(initial.module, source => source.length < 500
+          && source.includes(".split(`/`)") && source.includes("`root`")
+          && source.includes(".toUpperCase()"), "子代理名称");
+        return { rowsFamily, sortRows, formatAgentPath };
+      })();
+      relatedNativeState.catch(() => { relatedNativeState = null; });
+    }
+    return await relatedNativeState;
+  }
+  function sideThreadsState(value) {
+    if (value == null) return { version: 1, threads: [] };
+    const seen = new Set();
+    if (value.version !== 1 || !Array.isArray(value.threads)
+        || value.threads.some(entry => {
+          if (!entry || typeof entry !== "object" || typeof entry.threadId !== "string"
+              || !/^[a-zA-Z0-9_-]{1,120}$/.test(entry.threadId)
+              || typeof entry.parentThreadId !== "string"
+              || !/^[a-zA-Z0-9_-]{1,120}$/.test(entry.parentThreadId)
+              || entry.threadId === entry.parentThreadId || seen.has(entry.threadId)
+              || !Number.isFinite(entry.createdAtMs) || entry.createdAtMs < 0
+              || typeof entry.closed !== "boolean"
+              || entry.titleIndex !== undefined && (!Number.isSafeInteger(entry.titleIndex) || entry.titleIndex < 1)
+              || entry.inheritedTurnIds !== undefined && (!Array.isArray(entry.inheritedTurnIds)
+                || entry.inheritedTurnIds.some(id => typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,120}$/.test(id))
+                || new Set(entry.inheritedTurnIds).size !== entry.inheritedTurnIds.length)) return true;
+          seen.add(entry.threadId);
+          return false;
+        })) throw failure(503, "侧边会话登记数据无效，请在桌面检查");
+    return value;
+  }
+  async function sideThreadEntries() {
+    const sourceManager = manager;
+    const container = sideThreadsContainer(await sourceManager.storage.readGlobalState(sideThreadsContainerKey));
+    if (manager !== sourceManager || sourceManager.disposed)
+      throw failure(503, "本机连接已变化，请重新读取侧边会话");
+    const entries = sideThreadsState(container[sideThreadsStateKey]).threads;
+    registeredSideThreads.clear();
+    for (const entry of entries) {
+      registeredSideThreads.set(entry.threadId, entry);
+      markSideConversation(entry.threadId);
+    }
+    return entries;
+  }
+  function markSideConversation(id) {
+    if (!registeredSideThreads.has(id)) return;
+    const conversation = manager.getConversation(id);
+    if (conversation && conversation.sideConversation !== true)
+      manager.updateConversationState(id, current => { current.sideConversation = true; });
+  }
+  async function restoreSideThreadVisibility(sourceManager) {
+    const entries = await sideThreadEntries();
+    for (const entry of entries) {
+      if (manager !== sourceManager || sourceManager.disposed) return;
+      if (!sourceManager.getConversation(entry.threadId)) {
+        try { await sourceManager.hydrateBackgroundThreads([entry.threadId], { includeTurns: false }); }
+        catch (error) { if (!missingThreadError(error)) throw error; }
+      }
+      if (manager === sourceManager) markSideConversation(entry.threadId);
+    }
+  }
+  async function sideThreadTurnSummaries(sourceManager, threadId) {
+    const turns = [], cursors = new Set();
+    let cursor = null;
+    do {
+      const page = await sourceManager.requestClient.sendRequest("thread/turns/list", {
+        threadId, cursor, limit: 100, itemsView: "notLoaded", sortDirection: "desc"
+      });
+      if (!Array.isArray(page?.data)) throw failure(503, "侧边会话上下文边界读取失败");
+      for (const turn of page.data) turns.push({ id: requiredId(turn?.id), startedAt: turn.startedAt });
+      cursor = optionalCursor(page.nextCursor, "侧边会话分页游标");
+      if (cursor && cursors.has(cursor)) throw failure(503, "侧边会话分页游标未前进");
+      if (cursor) cursors.add(cursor);
+    } while (cursor);
+    return turns;
+  }
+  async function sideThreadHistory(threadId, thread = null) {
+    const entries = await sideThreadEntries();
+    const entry = entries.find(entry => entry.threadId === threadId);
+    if (!entry) return null;
+    registeredSideIdentity(thread ?? await readThread(threadId), entries);
+    let history = sideThreadHistories.get(threadId);
+    if (!history) {
+      history = { inheritedTurnIds: null, promise: null };
+      const sourceManager = manager;
+      history.promise = (async () => {
+        let ids = entry.inheritedTurnIds;
+        if (ids === undefined) {
+          const turns = await sideThreadTurnSummaries(sourceManager, threadId);
+          const parentIds = turns.some(turn => !Number.isFinite(turn.startedAt))
+            ? new Set((await sideThreadTurnSummaries(sourceManager, entry.parentThreadId)).map(turn => turn.id)) : null;
+          // 旧登记没有边界；原生轮次时间与创建回调都来自本机，只隐藏创建前已有的轮次。
+          ids = turns.filter(turn => Number.isFinite(turn.startedAt)
+            ? timestamp(turn.startedAt) <= entry.createdAtMs : parentIds.has(turn.id)).map(turn => turn.id);
+          await updateSideThreadsRegistry(sourceManager, registry => ({
+            ...registry, threads: registry.threads.map(current => current.threadId === threadId
+              ? { ...current, inheritedTurnIds: current.inheritedTurnIds ?? ids } : current)
+          }));
+        }
+        if (manager !== sourceManager || sourceManager.disposed)
+          throw failure(503, "本机连接已变化，请重新打开侧边会话");
+        history.inheritedTurnIds = new Set(ids);
+        return history;
+      })();
+      sideThreadHistories.set(threadId, history);
+      history.promise.catch(() => {
+        if (sideThreadHistories.get(threadId) === history) sideThreadHistories.delete(threadId);
+      });
+    }
+    return await history.promise;
+  }
+  function sideThreadsContainer(value) {
+    if (value == null) return {};
+    if (typeof value !== "object" || Array.isArray(value))
+      throw failure(503, "原生侧边会话存储容器无效");
+    return value;
+  }
+  async function updateSideThreadsRegistry(sourceManager, update) {
+    // 原生全局键是固定枚举；产品登记只占用合法容器内的命名空间字段。
+    await sourceManager.storage.updateGlobalState(sideThreadsContainerKey, current => {
+      const container = sideThreadsContainer(current);
+      const registry = sideThreadsState(container[sideThreadsStateKey]);
+      const next = update(registry);
+      return next === registry ? current : { ...container, [sideThreadsStateKey]: next };
+    });
+  }
+  function registeredSideIdentity(thread, entries) {
+    const entry = entries.find(entry => entry.threadId === thread.id);
+    if (!entry) return null;
+    if (thread.ephemeral === true || thread.forkedFromId !== entry.parentThreadId
+        || subagentIdentity(thread)) throw failure(503, "侧边会话原生来源与登记关系不一致");
+    return { readOnly: false, viewKind: "side", parentThreadId: entry.parentThreadId,
+      sideThreadClosed: entry.closed, sideHistoryVersion: 1 };
+  }
+  async function threadViewIdentity(thread) {
+    const identity = subagentIdentity(thread) || subagentIdentity(manager.getConversation(thread.id));
+    if (identity) {
+      const native = await nativeRelatedState();
+      const spawn = (thread.source?.subAgent ?? thread.source?.subagent)?.thread_spawn;
+      const pathName = typeof spawn?.agent_path === "string" ? native.formatAgentPath(spawn.agent_path) : null;
+      return { ...identity, agentName: pathName || identity.agentName || "子代理" };
+    }
+    return registeredSideIdentity(thread, await sideThreadEntries())
+      ?? { readOnly: false, viewKind: "main", parentThreadId: null };
+  }
+  async function relatedThreads(payload) {
+    const threadId = requiredId(payload.threadId);
+    const parent = await readThread(threadId);
+    const native = await nativeRelatedState();
+    if (typeof manager.discoverSubagentDescendantSnapshot !== "function")
+      throw failure(503, "当前 Codex 版本不支持原生子代理关系读取");
+    const snapshot = await manager.discoverSubagentDescendantSnapshot(threadId);
+    if (!Array.isArray(snapshot?.descendantThreads))
+      throw failure(503, "原生子代理关系读取结果无效");
+    if (!manager.getConversation(threadId)) {
+      if (typeof manager.hydrateBackgroundThreads !== "function")
+        throw failure(503, "当前 Codex 版本不支持只读加载关联会话");
+      await manager.hydrateBackgroundThreads([threadId], { includeTurns: true });
+    }
+    const rows = appScope.get(native.rowsFamily, { conversationId: threadId, hostId: "local" });
+    if (!Array.isArray(rows)) throw failure(503, "原生子代理列表尚未就绪");
+    const threads = new Map(snapshot.descendantThreads.map(thread => [thread.id, thread]));
+    const belongsToParent = id => {
+      if (isDeletedThread(id) || !threads.has(id)) return false;
+      const seen = new Set([id]);
+      for (let current = id; current;) {
+        const thread = threads.get(current) || manager.getConversation(current);
+        const parentId = subagentIdentity(thread)?.parentThreadId;
+        if (parentId === threadId) return true;
+        if (!parentId || seen.has(parentId)) return false;
+        seen.add(parentId);
+        current = parentId;
+      }
+      return false;
+    };
+    const sorted = native.sortRows(rows);
+    if (!Array.isArray(sorted) || sorted.length !== rows.length
+        || sorted.some(row => typeof row?.conversationId !== "string"
+          || !["active", "waiting", "done"].includes(row.status)))
+      throw failure(503, "原生子代理列表无效");
+    const confirmed = sorted.filter(row => belongsToParent(row.conversationId));
+    const now = Date.now();
+    const subagents = confirmed.filter(row => row.status !== "done").map(row => {
+      const startedAtMs = Number.isFinite(row.startedAtMs) ? row.startedAtMs : null;
+      return { id: row.conversationId, name: row.displayName || "子代理", status: row.status, startedAtMs,
+        ...(startedAtMs == null ? {} : { elapsedMs: Math.max(0, now - startedAtMs) }) };
+    });
+    const entries = await sideThreadEntries();
+    const sideThreads = [];
+    for (const entry of entries.filter(entry => entry.parentThreadId === threadId && !entry.closed)
+      .sort((a, b) => a.createdAtMs - b.createdAtMs)) {
+      let thread;
+      try { thread = await readThread(entry.threadId); }
+      catch (error) {
+        if (missingThreadError(error)) continue;
+        throw error;
+      }
+      registeredSideIdentity(thread, entries);
+      sideThreads.push({ id: thread.id, title: summary(thread).title, createdAtMs: entry.createdAtMs,
+        hasUnreadTurn: completedSideThreadUnread(thread) });
+    }
+    return { ok: true, threadId, subagents,
+      completedSubagentCount: confirmed.filter(row => row.status === "done").length,
+      subagentsComplete: snapshot.isComplete === true, sideThreads,
+      canCreateSideThread: typeof manager.forkConversationFromLatest === "function"
+        && typeof manager.setThreadTitle === "function"
+        && typeof manager.storage.updateGlobalState === "function"
+        && !subagentIdentity(parent) && parent.ephemeral !== true
+        && !entries.some(entry => entry.threadId === threadId) };
+  }
+  async function createSideThread(payload) {
+    const parentThreadId = requiredId(payload.threadId);
+    const parent = await assertWritableThread(parentThreadId);
+    const existingEntries = await sideThreadEntries();
+    if (parent.ephemeral === true || existingEntries.some(entry => entry.threadId === parentThreadId))
+      throw failure(409, "请从主会话创建侧边会话");
+    if (typeof manager.forkConversationFromLatest !== "function"
+        || typeof manager.setThreadTitle !== "function"
+        || typeof manager.storage.updateGlobalState !== "function")
+      throw failure(503, "当前 Codex 版本不支持持久侧边会话");
+    const siblings = existingEntries.filter(entry => entry.parentThreadId === parentThreadId);
+    const titleIndex = Math.max(sideThreadTitleSequences.get(parentThreadId) || 0, siblings.length,
+      ...siblings.map(entry => entry.titleIndex || 0)) + 1;
+    sideThreadTitleSequences.set(parentThreadId, titleIndex);
+    const initialTitle = titleIndex === 1 ? "侧边会话" : `侧边会话 ${titleIndex}`;
+    let threadId = null, forkSubmitted = false, createdAtMs = null;
+    const sourceManager = manager;
+    try {
+      const conversation = manager.getConversation(parentThreadId);
+      forkSubmitted = true;
+      const result = await sourceManager.forkConversationFromLatest({
+        sourceConversationId: parentThreadId, threadSource: "user", cwd: parent.cwd,
+        workspaceRoots: [parent.cwd], collaborationMode: conversation?.latestCollaborationMode ?? null,
+        ephemeral: false, sideConversation: true, addForkedSyntheticItem: false,
+        afterConversationCreated(id) { threadId = requiredId(id); createdAtMs = Date.now(); }
+      });
+      if (result?.status === "not-ready")
+        throw failure(409, "主会话尚未就绪，请稍后再创建侧边会话");
+      if (result?.status !== "created" || typeof result.conversationId !== "string")
+        throw new Error("原生 fork 未确认创建结果");
+      if (threadId != null && threadId !== result.conversationId)
+        throw new Error("原生 fork 返回的会话身份不一致");
+      threadId = requiredId(result.conversationId);
+      const thread = await readThread(threadId);
+      if (manager !== sourceManager || sourceManager.disposed || thread.forkedFromId !== parentThreadId
+          || thread.ephemeral === true || subagentIdentity(thread))
+        throw new Error("原生 fork 父子关系尚未确认");
+      const [inheritedTurns, titleSaved] = await Promise.all([
+        sideThreadTurnSummaries(sourceManager, threadId),
+        sourceManager.setThreadTitle(threadId, initialTitle, { requireAcknowledgement: true })
+      ]);
+      if (titleSaved !== true) throw new Error("侧边会话独立标题尚未保存");
+      const inheritedTurnIds = inheritedTurns.map(turn => turn.id);
+      const entry = { threadId, parentThreadId, createdAtMs: createdAtMs ?? timestamp(thread.createdAt),
+        closed: false, inheritedTurnIds, titleIndex };
+      await updateSideThreadsRegistry(sourceManager, registry => {
+        const previous = registry.threads.find(item => item.threadId === threadId);
+        if (previous && previous.parentThreadId !== parentThreadId)
+          throw failure(409, "侧边会话已登记到其他主会话");
+        return previous ? registry : { ...registry, threads: [...registry.threads, entry] };
+      });
+      const persisted = (await sideThreadEntries()).find(entry => entry.threadId === threadId
+        && entry.parentThreadId === parentThreadId && !entry.closed);
+      if (!persisted) throw new Error("侧边会话登记尚未确认");
+      const history = { inheritedTurnIds: new Set(inheritedTurnIds), promise: null };
+      history.promise = Promise.resolve(history);
+      sideThreadHistories.set(threadId, history);
+      const view = registeredSideIdentity(thread, [persisted]);
+      const initialThread = { ...summary(thread), ...runtimeThread(threadId, thread, view), ...view, title: initialTitle,
+        inheritedTurnIds };
+      const response = { ok: true, threadId, parentThreadId, thread: initialThread };
+      emit({ method: "remote/sidebarChanged", params: { threadId: parentThreadId } });
+      if (result.synchronization?.status === "failed")
+        return { ...response,
+          warning: "侧边会话已创建并保存，但原生设置同步未完成，请进入会话检查设置",
+          synchronization: { status: "failed",
+            ...(typeof result.synchronization.message === "string"
+              ? { message: result.synchronization.message } : {}) } };
+      return response;
+    } catch (error) {
+      if (forkSubmitted && (threadId != null || !error.remoteValidationFailure))
+        return { ok: false, code: 503, outcomeUnknown: true, threadId, parentThreadId,
+          message: "侧边会话创建或登记结果未确认，请检查会话，不要重复新建" };
+      throw error;
+    }
+  }
+  async function closeSideThread(payload) {
+    const threadId = requiredId(payload.threadId), parentThreadId = requiredId(payload.parentThreadId);
+    if (threadId === parentThreadId) throw failure(400, "不能将主会话作为侧边会话关闭");
+    if (typeof manager.storage.updateGlobalState !== "function")
+      throw failure(503, "当前 Codex 版本不支持保存侧边会话状态");
+    const entries = await sideThreadEntries();
+    const entry = entries.find(entry => entry.threadId === threadId && entry.parentThreadId === parentThreadId);
+    if (!entry) throw failure(404, "该会话未登记到此主会话");
+    const thread = await readThread(threadId);
+    const identity = registeredSideIdentity(thread, entries);
+    if (identity?.parentThreadId !== parentThreadId) throw failure(409, "侧边会话父子关系已变化");
+    await updateSideThreadsRegistry(manager, registry => {
+      const latest = registry.threads.find(entry => entry.threadId === threadId && entry.parentThreadId === parentThreadId);
+      if (!latest) throw failure(409, "侧边会话登记已变化");
+      return { ...registry, threads: registry.threads.map(entry =>
+        entry === latest ? { ...entry, closed: true } : entry) };
+    });
+    if (!(await sideThreadEntries()).some(entry => entry.threadId === threadId
+        && entry.parentThreadId === parentThreadId && entry.closed))
+      throw failure(503, "侧边会话关闭状态尚未确认，请刷新列表");
+    emit({ method: "remote/sidebarChanged", params: { threadId: parentThreadId } });
+    return { ok: true, threadId, parentThreadId, closed: true };
   }
   function forgetDeletedThread(id) {
     if (typeof id !== "string" || !id) return;
@@ -705,7 +1188,7 @@
       pageLimit: limit, newestSnapshotItemId: items.at(-1)?.id ?? null
     };
   }
-  function enrichHistoryTurn(threadId, turn, itemPage) {
+  function enrichHistoryTurn(threadId, turn, itemPage, { readOnly = false } = {}) {
     const items = [...itemPage.items];
     const input = compactionInputItem(threadId, turn.id, items);
     if (input) {
@@ -719,7 +1202,7 @@
       ...turn,
       items,
       itemsView: itemPage.nextCursor == null ? "full" : "summary"
-    }], { itemStartedAtMsById: itemPage.itemStartedAtMsById })[0];
+    }], { itemStartedAtMsById: itemPage.itemStartedAtMsById, readOnly })[0];
     return {
       ...enriched,
       itemsPageComplete: true,
@@ -770,8 +1253,14 @@
   }
   async function historyPage(payload = {}) {
     const threadId = requiredId(payload.threadId);
+    const nativeThread = await readThread(threadId);
+    const readOnly = !!subagentIdentity(nativeThread)
+      || !!subagentIdentity(manager.getConversation(threadId));
+    const sideHistory = await sideThreadHistory(threadId, nativeThread);
     const turnId = payload.turnId == null ? null : requiredId(payload.turnId);
     if (turnId != null) {
+      if (sideHistory?.inheritedTurnIds.has(turnId))
+        throw failure(404, "继承的上下文不属于侧边会话聊天记录");
       const itemCursor = optionalCursor(payload.itemCursor, "消息分页游标");
       const itemPage = await nativeItemsPage(threadId, turnId, itemCursor);
       const turn = enrichHistoryTurn(threadId, {
@@ -779,7 +1268,7 @@
         status: typeof payload.turnStatus === "string" ? payload.turnStatus : "completed",
         startedAt: Number.isFinite(payload.turnStartedAt) ? payload.turnStartedAt : null,
         completedAt: Number.isFinite(payload.turnCompletedAt) ? payload.turnCompletedAt : null
-      }, itemPage);
+      }, itemPage, { readOnly });
       return {
         ok: true,
         scope: "items",
@@ -805,9 +1294,16 @@
       sortDirection: "desc"
     });
     if (!Array.isArray(page?.data)) throw failure(503, "原生会话历史分页返回无效");
-    const nextCursor = optionalCursor(page.nextCursor, "原生会话分页游标");
+    let nextCursor = optionalCursor(page.nextCursor, "原生会话分页游标");
     if (nextCursor != null && nextCursor === cursor)
       throw failure(503, "原生会话历史分页游标未前进");
+    if (sideHistory) {
+      const boundary = page.data.findIndex(turn => sideHistory.inheritedTurnIds.has(turn.id));
+      if (boundary >= 0) {
+        page.data = page.data.slice(0, boundary);
+        nextCursor = null;
+      }
+    }
     const pages = new Array(page.data.length);
     let nextTurn = 0, failed = false;
     // 不同轮次独立读取；按原页索引归并，避免首屏等待逐轮叠加，也限制桌面请求并发。
@@ -829,7 +1325,7 @@
               itemPage.itemStartedAtMsById = { ...firstPage.itemStartedAtMsById, ...itemPage.itemStartedAtMsById };
             }
           }
-          pages[index] = { turn: enrichHistoryTurn(threadId, turn, itemPage), itemPage };
+          pages[index] = { turn: enrichHistoryTurn(threadId, turn, itemPage, { readOnly }), itemPage };
         } catch (error) {
           failed = true;
           throw error;
@@ -858,6 +1354,7 @@
       itemOrder: "asc",
       turnsPageComplete: true,
       turnsComplete: nextCursor == null,
+      ...(sideHistory ? { sideHistoryVersion: 1, inheritedTurnIds: [...sideHistory.inheritedTurnIds] } : {}),
       itemsPaginationByTurnId,
       transcriptEvents: nativeTranscriptEvents(manager.getConversation(threadId), data.map(turn => turn.id))
     };
@@ -1110,7 +1607,8 @@
     const turns = conversation?.turnHistory?.kind === "canonical"
       ? manager.threadStore?.getLoadedConversationHistoryTurns?.(conversation.turnHistory.history)
       : conversation?.turns;
-    return array(turns);
+    const inherited = sideThreadHistories.get(conversation?.id)?.inheritedTurnIds;
+    return inherited ? array(turns).filter(turn => !inherited.has(nativeTurnId(turn))) : array(turns);
   }
   function messageActionManager() {
     if (manager?.disposed) {
@@ -1234,7 +1732,8 @@
   }
   function enrichMessageMetadata(id, historyTurns, {
     assistantMessageStartedAtMsById = null,
-    itemStartedAtMsById = null
+    itemStartedAtMsById = null,
+    readOnly = false
   } = {}) {
     messageActionManager();
     const conversation = manager.getConversation(id);
@@ -1243,7 +1742,7 @@
       const turnId = nativeTurnId(turn);
       return turnId ? [[turnId, turn]] : [];
     }));
-    const editable = editableMessageState(id).metadata;
+    const editable = readOnly || subagentIdentity(conversation) ? null : editableMessageState(id).metadata;
     return array(historyTurns).map(turn => {
       const turnId = typeof turn?.id === "string" ? turn.id : null;
       const sourceTurn = nativeById.get(turnId) || null;
@@ -1692,15 +2191,15 @@
       try { syncAsyncQuestions(id, manager.getConversation(id)); } catch {}
     }
   }
-  function runtimeThread(id, nativeThread = null) {
+  function runtimeThread(id, nativeThread = null, { readOnly = false } = {}) {
     const conversation = manager.getConversation(id);
-    const requestsSnapshot = blockingRequestsSnapshot(id, conversation);
-    recoverAsyncQuestionDesktop(id, conversation);
-    const queued = manager.getTurnCoordinator?.()?.readMessages?.(id)
+    const requestsSnapshot = readOnly ? null : blockingRequestsSnapshot(id, conversation);
+    if (!readOnly) recoverAsyncQuestionDesktop(id, conversation);
+    const queued = readOnly ? [] : manager.getTurnCoordinator?.()?.readMessages?.(id)
       ?? manager.storage.readQueuedFollowUps?.()?.value?.[id];
     const modelSettings = threadModelSettings(conversation, nativeThread);
-    const asyncQuestions = asyncQuestionRequests(id, conversation);
-    asyncQuestionSignatures.set(id, JSON.stringify(asyncQuestions));
+    const asyncQuestions = readOnly ? [] : asyncQuestionRequests(id, conversation);
+    if (!readOnly) asyncQuestionSignatures.set(id, JSON.stringify(asyncQuestions));
     return {
       id,
       model: modelSettings.model,
@@ -1710,10 +2209,10 @@
       goal: runtimeGoal(conversation?.threadGoal),
       compaction: runtimeCompaction(id, conversation),
       transcriptEvents: nativeTranscriptEvents(conversation),
-      editableMessage: editableMessageState(id).metadata,
+      editableMessage: readOnly ? null : editableMessageState(id).metadata,
       status: manager.getThreadRuntimeStatusEvidence(id) || { type: "idle" },
-      requestsKnown: !!requestsSnapshot,
-      ...(requestsSnapshot ? { ...requestsSnapshot, requests: [...requestsSnapshot.requests, ...asyncQuestions] }
+      requestsKnown: readOnly || !!requestsSnapshot,
+      ...(readOnly ? { requests: [] } : requestsSnapshot ? { ...requestsSnapshot, requests: [...requestsSnapshot.requests, ...asyncQuestions] }
         : asyncQuestions.length ? { requests: asyncQuestions } : {}),
       ...queueSnapshotFields(id, queued)
     };
@@ -3213,6 +3712,8 @@
         emit({ method: "remote/resync" });
       }
       if (!manager) discover();
+      const skipped = await guardThreadAction(action, payload);
+      if (skipped) return skipped;
       switch (action) {
         case "optimizePrompt":
         case "promptOptimization":
@@ -3239,6 +3740,9 @@
         }
         case "notifications": return notificationSnapshot(payload);
         case "sidebar": return await sidebar(payload);
+        case "relatedThreads": return await relatedThreads(payload);
+        case "createSideThread": return await createSideThread(payload);
+        case "closeSideThread": return await closeSideThread(payload);
         case "queue": return await queueSnapshot(payload.threadId);
         case "queueEdit": return await queueEditState(payload);
         case "markRead": return await markThreadRead(payload.threadId);
@@ -3254,20 +3758,40 @@
         case "updateGoal": return await updateThreadGoal(payload);
         case "setGoal": return await setComposerGoal(payload);
         case "history": return await historyPage(payload);
+        case "workspaceContext": {
+          if (payload.threadId) {
+            const id = requiredId(payload.threadId);
+            const current = await readThread(id);
+            const cwd = manager.getConversationCwd?.(id) || current.cwd;
+            if (typeof cwd !== "string" || !cwd)
+              throw failure(404, "当前会话没有可读取的工作目录");
+            return { ok: true, hostId: "local", threadId: id, cwd };
+          }
+          const projectId = requestedProjectId(payload.projectId);
+          if (!projectId) throw failure(400, "请先选择会话或本机项目");
+          const workspace = await localProjectWorkspace(projectId);
+          return { ok: true, hostId: "local", projectId, cwd: workspace.cwd };
+        }
         case "thread": {
           const thread = await readThread(payload.threadId);
-          if (!manager.getConversation(thread.id) || manager.getConversation(thread.id).resumeState === "needs_resume") {
+          const view = await threadViewIdentity(thread);
+          const sideHistory = view.viewKind === "side" ? await sideThreadHistory(thread.id, thread) : null;
+          if (!view.readOnly && (!manager.getConversation(thread.id)
+              || manager.getConversation(thread.id).resumeState === "needs_resume")) {
             await manager.resumeConversation({
               conversationId: thread.id, model: null, reasoningEffort: null,
               workspaceRoots: [thread.cwd], collaborationMode: null
             });
           }
-          const coordinator = await manager.getTurnCoordinator?.();
-          if (typeof coordinator?.loadMessages === "function") await coordinator.loadMessages(thread.id);
-          const runtime = runtimeThread(thread.id, thread);
+          if (!view.readOnly) {
+            const coordinator = await manager.getTurnCoordinator?.();
+            if (typeof coordinator?.loadMessages === "function") await coordinator.loadMessages(thread.id);
+          }
+          const runtime = runtimeThread(thread.id, thread, view);
           const status = manager.getThreadRuntimeStatusEvidence(thread.id)
             || thread.threadRuntimeStatus || thread.status || runtime.status;
-          return { ok: true, thread: { ...summary(thread), ...runtime, status } };
+          return { ok: true, thread: { ...summary(thread), ...runtime, status, ...view,
+            ...(sideHistory ? { inheritedTurnIds: [...sideHistory.inheritedTurnIds] } : {}) } };
         }
         case "models": {
           const models = (await nativeModelCatalog()).map(model => ({
@@ -3525,7 +4049,13 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 47, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
+    version: 55, call,
+    removeQueued: payload => call("removeQueued", payload),
+    reorderQueued: payload => call("reorderQueued", payload),
+    beginQueuedEdit: payload => call("beginQueuedEdit", payload),
+    editQueued: payload => call("editQueued", payload),
+    cancelQueuedEdit: payload => call("cancelQueuedEdit", payload),
+    queueMessage: (payload, allowImmediate = false) => call("send", { ...payload, queueOnly: !allowImmediate }),
     dispose() {
       for (const dispose of unsubscribe) { try { dispose?.(); } catch {} }
       unsubscribe = [];

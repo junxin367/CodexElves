@@ -46,6 +46,8 @@ export function createRemoteEventStream() {
 const files = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "application/javascript; charset=utf-8"]],
+  ["/session-tools.js", ["session-tools.js", "application/javascript; charset=utf-8"]],
+  ["/session-menu.js", ["session-menu.js", "application/javascript; charset=utf-8"]],
   ["/attachments.js", ["attachments.js", "application/javascript; charset=utf-8"]],
   ["/recovery-store.js", ["recovery-store.js", "application/javascript; charset=utf-8"]],
   ["/events-client.js", ["events-client.js", "application/javascript; charset=utf-8"]],
@@ -160,7 +162,7 @@ function rejectUpgrade(socket, status, message) {
 function allowedApi(method, path) {
   return method === "GET" && (["/api/session", "/api/events"].includes(path)
     || /^\/api\/(?:receipts|images)\/[a-zA-Z0-9_-]+$/.test(path))
-    || method === "POST" && (["/api/connect", "/api/logout"].includes(path)
+    || method === "POST" && (["/api/connect", "/api/logout", "/api/workspace/changes", "/api/workspace/change"].includes(path)
       || /^\/api\/(?:read|action)\/[a-zA-Z][a-zA-Z0-9_-]*$/.test(path));
 }
 function mappedCookie(req) {
@@ -304,8 +306,8 @@ const server = createServer(async (req, res) => {
 server.on("upgrade", (req, socket, head) => {
   const validated = validateRequest(req);
   if (validated.error) { rejectUpgrade(socket, ...validated.error); return; }
-  if (eventsTransport !== "websocket" || req.method !== "GET"
-      || validated.url.pathname !== "/api/events/ws") {
+  const supportedPath = eventsTransport === "websocket" && validated.url.pathname === "/api/events/ws";
+  if (req.method !== "GET" || !supportedPath) {
     rejectUpgrade(socket, 404, "调试入口不存在"); return;
   }
   proxyWebSocket(req, socket, head, validated.url);

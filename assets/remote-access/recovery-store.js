@@ -270,7 +270,8 @@ export function createTranscriptCache({ maxEntries = 5, maxBytes = 6 * 1024 * 10
   };
 }
 
-const readCacheKinds = new Set(["sidebar", "view", "transcript", "models", "skills"]);
+const readCacheKinds = new Set(["sidebar", "view", "transcript", "models", "skills",
+  "workspace-list", "workspace-detail", "session-menu"]);
 const readCacheDay = 24 * 60 * 60 * 1000;
 
 // 与输入恢复库独立：这里只保存已授权用户的只读展示数据，不保存 Cookie、审批或可执行队列。

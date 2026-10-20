@@ -2,6 +2,8 @@ import { markdown, prepareMessageImage, renderMermaidBlocks, settleMessageImage,
 import { createRemoteEventStream, sharedEventsAvailable } from "./events-client.js";
 import { activateRemoteChannels, clearRemoteChannels, observeChannelConfiguration, prepareRemoteTunnelAccess, raceRemoteRead, remoteChannelRoutes, sendRemoteMessage, validateRemoteReceipt } from "./channels.js";
 import { renderMessageActions } from "./message-actions.js";
+import { mountSessionTools } from "./session-tools.js";
+import { mountSessionMenu } from "./session-menu.js";
 import {
   getAndroidAppInfo,
   getAndroidNotificationSettings,
@@ -164,6 +166,17 @@ const retiredQueueEpochs = new Set();
 let queueDrag = null, queueReorder = null;
 let sidebarRequest = null, refreshRequest = null, threadRequest = null, historyRequest = null;
 let desktopSidebarOpen = true, sidebarLayoutCleanup = null, closeMobileSidebar = () => {};
+let sessionTools = null;
+let sessionMenu = null, relatedSessionView = null, relatedReturnTranscript = null, syncRelatedSidebarLayout = null;
+let relatedBackPending = false;
+let relatedExitTransition = null, relatedSelectionVersion = 0;
+let sideCreationView = null;
+let relatedMenuTimer = null, relatedOperationTimer = null;
+let transientHistoryView = null, restoringTransientHistory = null;
+const relatedThreadViews = new Map(), relatedThreadOperations = new Map();
+const relatedHistoryKey = "codexElvesRelatedSession", relatedOperationStorageKey = "codex-elves-related-operations";
+const sideCreationHistoryKey = "codexElvesSideCreation";
+const conversationHistoryKey = "codexElvesConversationPosition";
 const itemVersions = new Map(), turnVersions = new Map(), renderedItems = new Map(), renderedTurns = new Map();
 const turnFieldVersions = new Map();
 let markdownRenderVersion = 0;
@@ -294,6 +307,7 @@ try {
 const escapes = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 const escape = value => String(value ?? "").replace(/[&<>"']/g, character => escapes[character]);
 const randomId = () => globalThis.crypto?.randomUUID?.() || [...crypto.getRandomValues(new Uint8Array(24))].map(byte => byte.toString(16).padStart(2, "0")).join("");
+const relatedNavigationOwner = randomId();
 let selectionToken = randomId();
 const appearancePresets = {
   light: { background: "#ffffff", foreground: "#1f1f1f", accent: "#171717" },
@@ -1251,10 +1265,511 @@ function privateInputScope(value) {
   return typeof value?.device?.id === "string"
     ? JSON.stringify([value.device.id, value.device.createdAtMs ?? null]) : null;
 }
+function validRelatedThreadId(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,120}$/.test(value);
+}
+function normalizeRelatedView(value, id = value?.threadId) {
+  const scope = privateInputScope(session);
+  const parent = value?.parentThreadId, source = value?.openedFromThreadId;
+  return scope && value?.scope === scope && value.threadId === id && validRelatedThreadId(id)
+    && (parent == null || validRelatedThreadId(parent) && id !== parent)
+    && (source == null || validRelatedThreadId(source) && id !== source)
+    && (parent != null || source != null)
+    && ["subagent", "side"].includes(value.kind)
+    ? { scope, threadId: id, ...(parent != null ? { parentThreadId: parent } : {}),
+      ...(source != null ? { openedFromThreadId: source } : {}), kind: value.kind,
+      ...(typeof value.name === "string" ? { name: value.name } : {}),
+      ...(value.returnToParent === true ? { returnToParent: true } : {}),
+      ...(value.owner === relatedNavigationOwner ? { owner: value.owner } : {}) } : null;
+}
+function threadReadOnly(id = selectedId) {
+  return !!session?.readOnly || !!id && (
+    thread?.id === id && (thread.readOnly === true || thread.viewKind === "subagent")
+    || normalizeRelatedView(relatedThreadViews.get(id), id)?.kind === "subagent"
+    || relatedSessionView?.threadId === id && relatedSessionView.kind === "subagent"
+  );
+}
+function rememberRelatedView(id, kind, parentThreadId, name = "", { openedFromThreadId = null } = {}) {
+  const known = normalizeRelatedView(relatedThreadViews.get(id), id);
+  const value = normalizeRelatedView({ scope: privateInputScope(session), threadId: id,
+    parentThreadId: parentThreadId ?? (known?.kind === kind ? known.parentThreadId : null),
+    openedFromThreadId, kind, name });
+  if (value) relatedThreadViews.set(id, value);
+  return value;
+}
+function relatedViewForThread(id) {
+  return normalizeRelatedView(relatedSessionView, id)
+    || normalizeRelatedView(history.state?.[relatedHistoryKey], id)
+    || normalizeRelatedView(relatedThreadViews.get(id), id);
+}
+function syncRelatedSessionLayout() {
+  const view = normalizeRelatedView(relatedSessionView, selectedId);
+  const workspace = $(".workspace");
+  workspace?.classList.toggle("related-session-view", !!view);
+  workspace?.classList.toggle("related-session-readonly", view?.kind === "subagent");
+  if (!view) workspace?.classList.remove("related-session-prepared");
+  if (view) workspace?.classList.remove("sidebar-open");
+  for (const id of ["open-sidebar", "connection-state", "open-session-tools"]) {
+    const control = $(`#${id}`);
+    if (control) control.hidden = !!view;
+  }
+  const back = $("#related-session-back");
+  if (back) { back.hidden = !view; back.disabled = relatedBackPending; }
+  const composer = $("#composer");
+  if (composer) composer.hidden = view?.kind === "subagent";
+  const pendingArea = $("#pending-area");
+  if (pendingArea) pendingArea.hidden = view?.kind === "subagent";
+  syncSideThreadUnread();
+  sessionMenu?.updateContext();
+  syncRelatedSidebarLayout?.();
+}
+function syncSideThreadUnread() {
+  const trigger = $("#open-session-tools");
+  if (!trigger) return;
+  const unread = !creating && !relatedSessionView && (sidebar?.unreadSideThreads || [])
+    .some(item => item.parentThreadId === selectedId);
+  trigger.classList.toggle("has-unread-side-thread", unread);
+  const label = unread ? "会话菜单，有未读的侧边会话" : "会话菜单";
+  trigger.setAttribute("aria-label", label); trigger.title = label;
+}
+function finishRelatedSessionExit() {
+  const transition = relatedExitTransition;
+  if (!transition) return;
+  relatedExitTransition = null;
+  clearTimeout(transition.timer);
+  transition.conversation.removeEventListener("animationend", transition.onAnimation);
+  transition.conversation.removeEventListener("animationcancel", transition.onAnimation);
+  transition.workspace.classList.remove("related-session-exiting");
+  transition.conversation.style.removeProperty("--related-session-exit-from");
+  transition.conversation.inert = transition.wasInert;
+  relatedBackPending = false;
+  syncRelatedSessionLayout();
+  transition.resolve();
+}
+function animateRelatedSessionExit() {
+  if (relatedExitTransition) return relatedExitTransition.promise;
+  const workspace = $(".workspace"), conversation = workspace?.querySelector(".conversation");
+  if (!conversation || matchMedia("(prefers-reduced-motion: reduce)").matches) return Promise.resolve();
+  const transition = { workspace, conversation, wasInert: conversation.inert, timer: null,
+    promise: null, resolve: null, onAnimation: null };
+  transition.promise = new Promise(resolve => { transition.resolve = resolve; });
+  transition.onAnimation = event => {
+    if (event.target === conversation && event.animationName === "related-session-exit")
+      finishRelatedSessionExit();
+  };
+  relatedExitTransition = transition;
+  relatedBackPending = true;
+  syncRelatedSessionLayout();
+  const transform = getComputedStyle(conversation).transform;
+  conversation.style.setProperty("--related-session-exit-from",
+    transform === "none" ? "translate3d(0,0,0)" : transform);
+  conversation.inert = true;
+  conversation.addEventListener("animationend", transition.onAnimation);
+  conversation.addEventListener("animationcancel", transition.onAnimation);
+  workspace.classList.add("related-session-exiting");
+  transition.timer = setTimeout(finishRelatedSessionExit, 250);
+  return transition.promise;
+}
+function applyRelatedThreadMetadata(value) {
+  if (!value || value.id !== selectedId) return;
+  const previous = normalizeRelatedView(relatedSessionView, value.id);
+  const inferred = validRelatedThreadId(value.parentThreadId) && value.parentThreadId !== value.id
+    && ["subagent", "side"].includes(value.viewKind)
+    ? rememberRelatedView(value.id, value.viewKind, value.parentThreadId, value.agentName || value.title || "") : null;
+  if (inferred) {
+    // 原生直接父会话和本次打开来源不同：主会话菜单也会列出孙级子代理。
+    const source = previous?.kind === inferred.kind
+      ? previous.openedFromThreadId || (previous.returnToParent ? previous.parentThreadId : null) : null;
+    // 打开来源只用于返回，不作为原生类型或父关系的证据；完成后退出运行列表也不改变来源。
+    relatedSessionView = { ...rememberRelatedView(value.id, inferred.kind, inferred.parentThreadId, inferred.name,
+      { openedFromThreadId: source }),
+      ...(source && previous.returnToParent
+        ? { returnToParent: true } : {}),
+      ...(source && previous.owner
+        ? { owner: previous.owner } : {}) };
+  } else if (relatedSessionView?.threadId === value.id) {
+    // 历史路由只是恢复提示，真实会话关系以原生返回为准。
+    relatedThreadViews.delete(value.id);
+    relatedSessionView = null;
+  }
+  syncRelatedSessionLayout();
+  syncThreadHash(value.id);
+}
+function sessionMenuIsOpen() {
+  return typeof sessionMenu?.isOpen === "function" ? sessionMenu.isOpen() : !!sessionMenu?.isOpen;
+}
+function conversationHistoryPosition(state) {
+  const value = state?.[conversationHistoryKey];
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+function rememberTransientHistory() {
+  transientHistoryView = { scope: privateInputScope(session), threadId: selectedId,
+    state: history.state, url: location.href };
+}
+function handleTransientHistoryPop(event) {
+  if (restoringTransientHistory) {
+    const scope = restoringTransientHistory.scope;
+    restoringTransientHistory = null;
+    if (scope === privateInputScope(session)) event.stopImmediatePropagation();
+    return;
+  }
+  const preview = document.querySelector("#image-preview-dialog[open], #video-preview-dialog[open]");
+  const menuOpen = sessionMenuIsOpen(), saved = transientHistoryView;
+  if ((!preview && !menuOpen) || !saved || saved.scope !== privateInputScope(session) || saved.threadId !== selectedId) return;
+  const from = conversationHistoryPosition(saved.state), to = conversationHistoryPosition(event.state);
+  const depth = state => state?.codexElvesTools?.route === "detail" ? 2 : state?.codexElvesTools ? 1 : 0;
+  const direction = from !== to ? from > to ? 1 : -1
+    : depth(saved.state) !== depth(event.state) ? depth(saved.state) > depth(event.state) ? 1 : -1 : 0;
+  if (!direction) return;
+  event.stopImmediatePropagation();
+  if (preview) preview.close();
+  else sessionMenu.close(true);
+  // popstate 本身不可取消；恢复原历史位置，让下一次返回再离开当前页面。
+  restoringTransientHistory = { scope: saved.scope };
+  history.go(direction);
+}
+function stopRelatedSessionTimers() {
+  clearTimeout(relatedMenuTimer); relatedMenuTimer = null;
+  clearTimeout(relatedOperationTimer); relatedOperationTimer = null;
+}
+function resetRelatedSessions({ persisted = false } = {}) {
+  dismissSideCreation({ canceled: true });
+  ++relatedSelectionVersion;
+  finishRelatedSessionExit();
+  stopRelatedSessionTimers();
+  sessionMenu?.dispose(); sessionMenu = null;
+  relatedSessionView = null; relatedReturnTranscript = null; relatedBackPending = false;
+  transientHistoryView = restoringTransientHistory = null;
+  relatedThreadViews.clear(); relatedThreadOperations.clear();
+  if (persisted) try { sessionStorage.removeItem(relatedOperationStorageKey); } catch {}
+}
+async function loadRelatedThreads(parentThreadId) {
+  if (!session || !validRelatedThreadId(parentThreadId))
+    throw new Error("请先选择主会话");
+  const scope = privateInputScope(session);
+  const result = await api("/api/read/relatedThreads", { threadId: parentThreadId });
+  if (scope !== privateInputScope(session)) throw new Error("当前授权已变化");
+  if (result?.threadId !== parentThreadId || !Array.isArray(result.subagents) || !Array.isArray(result.sideThreads))
+    throw new Error("关联会话返回内容无效");
+  return result;
+}
+function adoptRelatedMenu(result) {
+  const parentThreadId = result.threadId;
+  if (selectedId !== parentThreadId || relatedSessionView) return;
+  for (const item of result.subagents) rememberRelatedView(item.id, "subagent", null, item.name,
+    { openedFromThreadId: parentThreadId });
+  for (const item of result.sideThreads) rememberRelatedView(item.id, "side", null, item.title,
+    { openedFromThreadId: parentThreadId });
+  filterSideThreadSidebar(sidebar);
+  renderSidebar();
+}
+function scheduleRelatedMenuRefresh(event) {
+  const params = event.params || {}, id = params.threadId ?? params.conversationId ?? params.thread?.id;
+  if (!["thread/started", "thread/deleted", "turn/started", "turn/completed",
+    "thread/status/changed", "thread/name/updated", "remote/sidebarChanged", "remote/relatedThreadsChanged",
+    "remote/resync", "remote/reconnected",
+    "item/started", "item/completed"].includes(event.method)
+    || event.method.startsWith("item/") && !isSubagentItem(params.item || {})) return;
+  const relevant = sessionMenu?.invalidate(event.method === "thread/deleted" ? null : id, params.parentThreadId);
+  if (!relevant || relatedSessionView || !selectedId || !connected || relatedMenuTimer) return;
+  const scope = privateInputScope(session), parent = selectedId;
+  relatedMenuTimer = setTimeout(() => {
+    relatedMenuTimer = null;
+    if (scope === privateInputScope(session) && selectedId === parent && !relatedSessionView)
+      void Promise.resolve(sessionMenu.refresh({ background: true })).catch(() => {});
+  }, 450);
+}
+async function openRelatedThread(item, kind, parentThreadId = selectedId, {
+  owner = relatedNavigationOwner, initialThread = null, replaceHistory = false,
+  preparedView = false, onViewReady = null
+} = {}) {
+  if (relatedSessionView || !validRelatedThreadId(item?.id) || parentThreadId !== selectedId) return;
+  const view = rememberRelatedView(item.id, kind, null, item.name || item.title || "",
+    { openedFromThreadId: parentThreadId });
+  if (!view) return;
+  sessionMenu?.close(); closePopup(); closeComposerMenus();
+  await selectThread(item.id, { closeSidebar: false, relatedView: { ...view, owner, returnToParent: true },
+    initialThread, replaceHistory, preparedView, onViewReady });
+  if (kind === "side" && selectedId === item.id && (item.hasUnreadTurn === true || thread?.hasUnreadTurn === true))
+    await markVisibleThreadRead(item.id, { opened: true });
+}
+async function returnToParentSession() {
+  const view = normalizeRelatedView(relatedSessionView, selectedId);
+  if (!view || relatedBackPending) return;
+  sessionMenu?.close();
+  if (normalizeRelatedView(history.state?.[relatedHistoryKey], selectedId)?.returnToParent && view.returnToParent) {
+    relatedBackPending = true; syncRelatedSessionLayout();
+    history.back();
+    return;
+  }
+  await selectThread(view.openedFromThreadId || view.parentThreadId,
+    { closeSidebar: false, relatedView: null, replaceHistory: true });
+}
+function showSideCreation(record, { recordHistory = true } = {}) {
+  if (sideCreationView?.record === record) return;
+  const workspace = $(".workspace");
+  if (!workspace || sideCreationView) return;
+  const panel = element("section", "session-tools-screen side-creation-screen");
+  panel.setAttribute("aria-label", "新建侧边会话");
+  const header = element("header", "session-tools-heading");
+  const back = button("返回", "返回主会话", requestSideCreationBack, "text-button");
+  header.append(element("h1", "", "侧边会话"), back);
+  const status = element("div", "side-creation-status");
+  status.setAttribute("role", "status");
+  status.append(element("span", "spinner"), element("p", "", "正在创建侧边会话…"));
+  panel.append(header, status);
+  sideCreationView = { record, workspace, panel, status, wasInert: workspace.inert };
+  workspace.inert = true;
+  document.body.append(panel);
+  panel.getBoundingClientRect();
+  panel.classList.add("session-tools-visible");
+  if (recordHistory) history.pushState({ ...(history.state || {}), [sideCreationHistoryKey]: {
+      owner: relatedNavigationOwner, requestId: record.id
+    } }, "", location.href);
+  back.focus({ preventScroll: true });
+}
+function updateSideCreationStatus(record) {
+  if (sideCreationView?.record !== record) return;
+  const unknown = record.state === "unknown";
+  sideCreationView.status.querySelector("p").textContent = unknown
+    ? "创建结果暂未确认，可返回主会话查询原回执。" : "正在创建侧边会话…";
+  sideCreationView.status.querySelector(".spinner").hidden = unknown;
+}
+function dismissSideCreation({ canceled = false, animate = false } = {}) {
+  const view = sideCreationView;
+  if (!view) return;
+  sideCreationView = null;
+  if (canceled) {
+    view.record.autoOpen = false;
+    if (ownsRelatedOperation(view.record)) persistRelatedOperations();
+  }
+  view.workspace.inert = view.wasInert;
+  if (!animate || matchMedia("(prefers-reduced-motion: reduce)").matches) { view.panel.remove(); return; }
+  view.panel.inert = true;
+  view.panel.classList.remove("session-tools-visible");
+  const finish = () => { clearTimeout(timer); view.panel.remove(); };
+  const timer = setTimeout(finish, 250);
+  view.panel.addEventListener("transitionend", event => {
+    if (event.target === view.panel && event.propertyName === "transform") finish();
+  });
+}
+function requestSideCreationBack() {
+  const view = sideCreationView;
+  if (!view) return;
+  const owned = history.state?.[sideCreationHistoryKey]?.owner === relatedNavigationOwner
+    && history.state[sideCreationHistoryKey].requestId === view.record.id;
+  dismissSideCreation({ canceled: true, animate: true });
+  if (owned) history.back();
+}
+function persistRelatedOperations(required = false) {
+  try {
+    const records = [...relatedThreadOperations.values()].map(record => ({
+      id: record.id, action: record.action, scope: record.scope, parentThreadId: record.parentThreadId,
+      threadId: record.threadId, state: record.state, selectionToken: record.selectionToken, autoOpen: record.autoOpen
+    }));
+    if (records.length) sessionStorage.setItem(relatedOperationStorageKey, JSON.stringify(records));
+    else sessionStorage.removeItem(relatedOperationStorageKey);
+  } catch {
+    if (required) throw new Error("无法保存侧边会话操作回执，操作未提交。请允许浏览器会话存储。");
+  }
+}
+function relatedOperationKey(record) {
+  return JSON.stringify([record.scope, record.action, record.parentThreadId, record.threadId || null]);
+}
+function ownsRelatedOperation(record) {
+  return record.scope === privateInputScope(session)
+    && relatedThreadOperations.get(relatedOperationKey(record)) === record;
+}
+function restoreRelatedOperations() {
+  const scope = privateInputScope(session);
+  try {
+    const records = JSON.parse(sessionStorage.getItem(relatedOperationStorageKey) || "[]");
+    if (Array.isArray(records)) for (const record of records) {
+      if (record?.scope !== scope || !/^[A-Za-z0-9-]{1,100}$/.test(record.id)
+          || !validRelatedThreadId(record.parentThreadId)
+          || !["createSideThread", "closeSideThread"].includes(record.action)
+          || record.action === "closeSideThread" && (!validRelatedThreadId(record.threadId)
+            || record.threadId === record.parentThreadId)) continue;
+      relatedThreadOperations.set(relatedOperationKey(record), { ...record,
+        state: record.state === "pending" ? "pending" : "unknown", selectionToken: null, autoOpen: false });
+    }
+  } catch {}
+  scheduleRelatedOperationCheck();
+}
+function scheduleRelatedOperationCheck() {
+  clearTimeout(relatedOperationTimer); relatedOperationTimer = null;
+  if (!session || !connected || pageLeaving || document.hidden) return;
+  const records = [...relatedThreadOperations.values()].filter(record =>
+    ownsRelatedOperation(record) && record.state === "pending" && !record.request);
+  if (!records.length) return;
+  relatedOperationTimer = setTimeout(() => {
+    relatedOperationTimer = null;
+    for (const record of records) if (ownsRelatedOperation(record))
+      void resolveRelatedOperation(record, { allowSelection: record.autoOpen === true }).catch(() => {});
+  }, 2000);
+}
+async function finishRelatedOperation(record, result, { allowSelection = false } = {}) {
+  if (!ownsRelatedOperation(record)) return;
+  if (result?.ok !== true || result.parentThreadId !== record.parentThreadId
+      || !validRelatedThreadId(result.threadId) || result.threadId === record.parentThreadId
+      || record.action === "closeSideThread" && (result.threadId !== record.threadId || result.closed !== true))
+    throw Object.assign(new Error("侧边会话回执内容无效，请在本机核对。不会重复执行"), { outcomeUnknown: true });
+  relatedThreadOperations.delete(relatedOperationKey(record)); persistRelatedOperations();
+  if (record.action === "createSideThread") {
+    sessionMenu?.updateSideThread(record.parentThreadId, { id: result.threadId,
+      title: result.thread?.title || "侧边会话", hasUnreadTurn: false });
+    rememberRelatedView(result.threadId, "side", record.parentThreadId);
+    filterSideThreadSidebar(sidebar);
+    renderSidebar();
+    if (allowSelection && record.autoOpen !== false && !relatedSessionView && selectedId === record.parentThreadId
+        && record.selectionToken === selectionToken) {
+      const prepared = sideCreationView?.record === record;
+      if (prepared && history.state?.[sideCreationHistoryKey]?.requestId === record.id) {
+        const state = { ...history.state }; delete state[sideCreationHistoryKey];
+        history.replaceState(state, "", location.href);
+      }
+      await openRelatedThread({ id: result.threadId, title: result.thread?.title || "侧边会话" }, "side",
+        record.parentThreadId, { initialThread: record.state === "submitting"
+            && result.synchronization?.status !== "failed" ? result.thread : null,
+          replaceHistory: prepared, preparedView: prepared,
+          onViewReady: prepared ? () => dismissSideCreation() : null });
+    } else {
+      if (sideCreationView?.record === record) requestSideCreationBack();
+      notice("侧边会话已创建，可从主会话菜单打开");
+    }
+    if (record.scope === privateInputScope(session) && typeof result.warning === "string" && result.warning.trim())
+      notice(`侧边会话已创建。${result.warning.trim()}`, true);
+  } else {
+    sessionMenu?.updateSideThread(record.parentThreadId, { id: result.threadId }, { remove: true });
+    transcriptCache.remove(session?.device.id, result.threadId);
+    if (readScope) void readCache.remove(readScope, "transcript", result.threadId).catch(() => {});
+    notice("侧边会话已关闭");
+  }
+  updateComposer();
+  if (sessionMenuIsOpen()) void Promise.resolve(sessionMenu.refresh()).catch(() => {});
+}
+async function resolveRelatedOperation(record, { allowSelection = false } = {}) {
+  if (!ownsRelatedOperation(record) || !connected) return;
+  if (record.request) return record.request;
+  record.request = (async () => {
+    try {
+      const receipt = await api(`/api/receipts/${record.id}`);
+      if (!ownsRelatedOperation(record)) return;
+      if (receipt.state === "completed") await finishRelatedOperation(record, receipt.result, { allowSelection });
+      else if (receipt.state === "failed" && receipt.result?.outcomeUnknown !== true) {
+        relatedThreadOperations.delete(relatedOperationKey(record)); persistRelatedOperations();
+        if (sideCreationView?.record === record) requestSideCreationBack();
+        notice(receipt.result?.message || "侧边会话操作未完成", true);
+      } else {
+        record.state = receipt.state === "pending" ? "pending" : "unknown"; persistRelatedOperations();
+        updateSideCreationStatus(record);
+      }
+    } catch (error) {
+      if (!ownsRelatedOperation(record)) return;
+      record.state = "unknown"; persistRelatedOperations();
+      updateSideCreationStatus(record);
+      notice(`侧边会话操作待核对：${error.message}。原请求标识已保留，不会重复执行`, true);
+    } finally {
+      record.request = null;
+      if (record.scope === privateInputScope(session)) { scheduleRelatedOperationCheck(); updateComposer(); }
+    }
+  })();
+  return record.request;
+}
+async function runRelatedOperation(action, item = null) {
+  const parentThreadId = selectedId, scope = privateInputScope(session);
+  if (!session || relatedSessionView || !validRelatedThreadId(parentThreadId) || thread?.id !== parentThreadId
+      || threadReadOnly(parentThreadId) || !connected) return;
+  if (action === "closeSideThread") {
+    const view = normalizeRelatedView(relatedThreadViews.get(item?.id), item?.id);
+    if ((view?.openedFromThreadId || view?.parentThreadId) !== parentThreadId || view.kind !== "side") return;
+  }
+  const record = { id: randomId(), action, scope, parentThreadId,
+    ...(item ? { threadId: item.id } : {}), state: "submitting", selectionToken,
+    autoOpen: action === "createSideThread" };
+  const key = relatedOperationKey(record), existing = relatedThreadOperations.get(key);
+  if (existing) {
+    if (action === "createSideThread") {
+      existing.autoOpen = true; existing.selectionToken = selectionToken;
+      showSideCreation(existing); updateSideCreationStatus(existing);
+    }
+    if (existing.state === "submitting") return;
+    await resolveRelatedOperation(existing, { allowSelection: true });
+    return;
+  }
+  relatedThreadOperations.set(key, record);
+  try { persistRelatedOperations(true); }
+  catch (error) { relatedThreadOperations.delete(key); throw error; }
+  updateComposer();
+  if (action === "createSideThread") showSideCreation(record);
+  try {
+    const payload = action === "createSideThread" ? { threadId: parentThreadId }
+      : { threadId: item.id, parentThreadId };
+    const result = await mutate(action, payload, { receiptId: record.id });
+    await finishRelatedOperation(record, result, { allowSelection: true });
+  } catch (error) {
+    if (!ownsRelatedOperation(record)) return;
+    if (error.notSubmitted || error.operationState === "failed" && !error.outcomeUnknown) {
+      relatedThreadOperations.delete(key);
+      if (sideCreationView?.record === record) requestSideCreationBack();
+    } else record.state = error.operationState === "pending" ? "pending" : "unknown";
+    updateSideCreationStatus(record);
+    persistRelatedOperations(); scheduleRelatedOperationCheck();
+    throw error;
+  } finally { if (scope === privateInputScope(session)) updateComposer(); }
+}
+function renderRelatedOperationStatus(root) {
+  if (relatedSessionView) return;
+  for (const record of relatedThreadOperations.values()) {
+    if (!ownsRelatedOperation(record) || record.parentThreadId !== selectedId) continue;
+    const box = element("div", "pending-banner", record.action === "createSideThread"
+      ? "侧边会话正在创建或结果待确认，原请求标识已保留。" : "侧边会话关闭结果待确认，原请求标识已保留。");
+    const check = button("查回执", "查询原操作回执，不会重复创建或关闭",
+      () => void resolveRelatedOperation(record, { allowSelection: true }), "text-button");
+    check.disabled = !connected || !!record.request || record.state === "submitting";
+    box.append(check); root.append(box);
+  }
+}
 function cacheDisplayData(kind, id, value, options) {
   if (!readScope || readScope !== privateInputScope(session)) return;
   void readCache.put(readScope, kind, id, value, options).catch(() => {});
 }
+function ownsWorkspaceCache(scope, kind) {
+  return !!scope && scope === readScope && scope === privateInputScope(session)
+    && ["workspace-list", "workspace-detail"].includes(kind);
+}
+const workspaceViewCache = {
+  async get(scope, kind, id) {
+    if (!ownsWorkspaceCache(scope, kind)) return null;
+    const generation = readGeneration;
+    const value = await readCache.get(scope, kind, id);
+    return generation === readGeneration && ownsWorkspaceCache(scope, kind) ? value : null;
+  },
+  put(scope, kind, id, value) {
+    return ownsWorkspaceCache(scope, kind)
+      ? readCache.put(scope, kind, id, value) : Promise.resolve(false);
+  },
+  remove(scope, kind, id) {
+    return ownsWorkspaceCache(scope, kind)
+      ? readCache.remove(scope, kind, id) : Promise.resolve();
+  }
+};
+const relatedMenuCache = {
+  async get(scope, id) {
+    if (!scope || scope !== readScope || scope !== privateInputScope(session)) return null;
+    const generation = readGeneration;
+    const value = await readCache.get(scope, "session-menu", id);
+    return generation === readGeneration && scope === readScope && scope === privateInputScope(session) ? value : null;
+  },
+  put(scope, id, value) {
+    return scope && scope === readScope && scope === privateInputScope(session)
+      ? readCache.put(scope, "session-menu", id, value) : Promise.resolve(false);
+  },
+  remove(scope, id) {
+    return scope && scope === readScope && scope === privateInputScope(session)
+      ? readCache.remove(scope, "session-menu", id) : Promise.resolve();
+  }
+};
 async function optionalCachedRead(task, timeout = 250) {
   let timer;
   try {
@@ -1265,6 +1780,7 @@ async function optionalCachedRead(task, timeout = 250) {
 function readingPosition() {
   const root = $("#messages"), anchor = root && visibleMessageAnchor(root);
   return { threadId: selectedId, scrollTop: root?.scrollTop || 0, followMessages,
+    ...(relatedSessionView ? { relatedView: normalizeRelatedView(relatedSessionView, selectedId) } : {}),
     anchor: anchor?.key ? { key: anchor.key, offset: anchor.offset } : null };
 }
 function rememberReadingPosition() {
@@ -1285,11 +1801,12 @@ function cachedReadingPosition(snapshot, position) {
   return { followMessages: false, scrollTop: position.scrollTop || 0, anchor: containsAnchor ? anchor : null };
 }
 function sidebarSnapshot(value) {
+  const { unreadSideThreads, ...snapshot } = value;
   const displayThread = item => {
     const { status, priority, hasUnreadTurn, requests, queuedMessages, queuedEdits, ...display } = item;
     return display;
   };
-  return { ...value,
+  return { ...snapshot,
     recent: value.recent.map(displayThread),
     pinnedThreads: value.pinnedThreads.map(displayThread),
     projects: value.projects.map(project => ({ ...project, threads: project.threads.map(displayThread) })) };
@@ -1332,6 +1849,7 @@ async function restoreReadViews(value) {
   const validSummary = item => item && typeof item.id === "string";
   if (saved.savedSidebar?.preferences && Array.isArray(saved.savedSidebar.recent)
       && Array.isArray(saved.savedSidebar.pinnedThreads) && Array.isArray(saved.savedSidebar.projects)
+      && Array.isArray(saved.savedSidebar.sideThreadIds)
       && saved.savedSidebar.recent.every(validSummary) && saved.savedSidebar.pinnedThreads.every(validSummary)
       && saved.savedSidebar.projects.every(project => validSummary(project) && Array.isArray(project.threads)
         && project.threads.every(validSummary)))
@@ -1358,14 +1876,20 @@ async function restoreReadViews(value) {
       transcriptCache.put(value.device.id, saved.id,
         { ...saved.snapshot, ...cachedReadingPosition(saved.snapshot, position) });
     }
-    if (!saved.requested)
-      history.replaceState(null, "", `${location.pathname}${location.search}#thread=${encodeURIComponent(saved.id)}`);
+    if (!saved.requested) {
+      const state = { ...(history.state || {}) };
+      const view = normalizeRelatedView(saved.view?.relatedView || saved.snapshot?.relatedView, saved.id);
+      if (view) state[relatedHistoryKey] = view;
+      else delete state[relatedHistoryKey];
+      history.replaceState(state, "", `${location.pathname}${location.search}#thread=${encodeURIComponent(saved.id)}`);
+    }
   }
 }
 function clearPrivateInputs({ persisted = true } = {}) {
   let previousScope = recoveryScope || privateInputScope(session);
   if (!previousScope) try { previousScope = sessionStorage.getItem("codex-elves-input-owner"); } catch {}
   ++recoveryGeneration; recoveryScope = null;
+  resetRelatedSessions({ persisted: true });
   drafts.clear(); skillDrafts.clear(); attachmentDrafts.clear(); goalDrafts.clear();
   draftWrites.clear(); failedInputRecoveries.clear(); goalComposerRecoveries.clear();
   queuedEdits.clear(); questionDrafts.clear(); questionReplyReceipts.clear(); compactions.clear();
@@ -1599,7 +2123,7 @@ function updatePromptOptimization() {
   const loading = record?.state === "pending", optimized = record?.state === "optimized";
   control.dataset.state = loading ? "loading" : optimized ? "optimized" : "idle";
   control.setAttribute("aria-busy", String(loading));
-  control.disabled = session?.capabilities?.promptOptimization !== true || !connected || session.readOnly
+  control.disabled = session?.capabilities?.promptOptimization !== true || !connected || threadReadOnly()
     || $("#prompt").disabled || compactionLocked() || busy || stopping || !!pending;
   const label = loading ? "取消提示词优化" : optimized ? "恢复原提示词" : "优化提示词";
   control.setAttribute("aria-label", label);
@@ -1618,7 +2142,7 @@ function promptOptimizationRecentContext() {
   return null;
 }
 async function activatePromptOptimization() {
-  if ($("#prompt-optimize").disabled) return;
+  if (threadReadOnly() || $("#prompt-optimize").disabled) return;
   closePopup(); closeComposerMenus();
   const scope = promptOptimizationScope(), current = promptOptimizations.get(scope), prompt = $("#prompt");
   if (current?.state === "pending") {
@@ -1707,6 +2231,7 @@ function changeCreationProject() {
   if (!creating || project === creationProject) return;
   rememberDraft();
   creationProject = project; ++selectionVersion; selectionToken = randomId();
+  sessionTools?.updateContext();
   restoreDraft(draftKey()); resetComposerOptions(); updateComposer();
 }
 function selectCreatedThread(id) {
@@ -2069,7 +2594,7 @@ function slashQuery() {
   return match ? { query: match[1].toLowerCase(), start: prompt.selectionStart - match[1].length - 1, end: prompt.selectionStart } : null;
 }
 function compactCommandAvailable() {
-  return !!session && !creating && !!selectedId && thread?.id === selectedId && !session.readOnly && connected
+  return !!session && !creating && !!selectedId && thread?.id === selectedId && !threadReadOnly() && connected
     && !busy && !stopping && !pending && !editingMessage && !editingQueuedMessage && !compactionLocked(selectedId);
 }
 function compactCommandMatches(query) {
@@ -2081,7 +2606,7 @@ function unfinishedGoal(goal = thread?.goal) {
 }
 function goalComposerReason() {
   if (!session || !creating && (!selectedId || thread?.id !== selectedId)) return "请先打开会话或新建会话";
-  if (session.readOnly) return "当前设备为只读模式";
+  if (threadReadOnly()) return "当前设备为只读模式";
   if (session.capabilities?.goalComposer !== true) return "当前服务尚不支持创建目标，请更新远程服务；目标草稿会保留";
   if (editingMessage || editingQueuedMessage) return "请先完成消息或队列编辑";
   if (threadDeletionLocked() || threadDeleted(selectedId)) return "会话正在删除或已删除，请先核对删除结果";
@@ -2158,7 +2683,7 @@ function moveSlashIndex(entries, offset) {
 }
 function renderSkillMenu(message) {
   const menu = $("#skill-menu"), query = slashQuery();
-  if (!menu || !query || session?.readOnly) { closeSkillMenu(); return; }
+  if (!menu || !query || threadReadOnly()) { closeSkillMenu(); return; }
   closePopup(); closeContextUsageTip();
   menu.hidden = false; $("#model-settings").hidden = true; $("#model-button").setAttribute("aria-expanded", "false");
   $("#prompt").setAttribute("aria-expanded", "true");
@@ -2430,7 +2955,7 @@ async function refreshSkillCatalog() {
 async function updateSkillMenu() {
   if (editingMessage || editingQueuedMessage) { closeSkillMenu(); return; }
   const query = slashQuery(), prompt = $("#prompt");
-  if (!query || !session || session.readOnly || document.activeElement !== prompt) { closeSkillMenu(); return; }
+  if (!query || !session || threadReadOnly() || document.activeElement !== prompt) { closeSkillMenu(); return; }
   const projectId = creating ? $("#project-select").value : "";
   const scope = selectedId ? `thread:${selectedId}` : projectId ? `project:${projectId}`
     : creating && session.capabilities?.projectlessCreation === true ? "projectless" : "";
@@ -2528,6 +3053,7 @@ document.addEventListener("keydown", event => {
   if (event.key === "Tab") document.documentElement.dataset.inputModality = "keyboard";
   if (event.key === "Escape") {
     if (queueDrag) { event.preventDefault(); finishQueueDrag(); return; }
+    if (sessionMenuIsOpen()) { event.preventDefault(); sessionMenu.close(); return; }
     if (contextUsageTip) { event.preventDefault(); closeContextUsageTip(); return; }
     if (activePopup) { event.preventDefault(); event.stopPropagation(); closePopup(true); return; }
     const modelOpen = $("#model-settings") && !$("#model-settings").hidden;
@@ -2537,9 +3063,46 @@ document.addEventListener("keydown", event => {
     if (skillOpen) { event.preventDefault(); return; }
     if (!document.querySelector("dialog[open]") && $(".workspace")?.classList.contains("sidebar-open")) {
       event.preventDefault(); closeMobileSidebar();
+      return;
+    }
+    if (!event.defaultPrevented && relatedSessionView && !document.querySelector("dialog[open]")) {
+      event.preventDefault();
+      void returnToParentSession().catch(error => notice(error.message, true));
+    }
+    if (!event.defaultPrevented && sideCreationView && !document.querySelector("dialog[open]")) {
+      event.preventDefault(); requestSideCreationBack();
     }
   }
 });
+window.addEventListener("codex-elves-native-back", event => {
+  if (event.defaultPrevented) return;
+  const preview = document.querySelector("#image-preview-dialog[open], #video-preview-dialog[open]");
+  if (preview) { event.preventDefault(); preview.close(); return; }
+  if (sessionMenuIsOpen()) { event.preventDefault(); sessionMenu.close(); return; }
+  if (activePopup) { event.preventDefault(); closePopup(true); return; }
+  if (sideCreationView && !document.querySelector("dialog[open]")) {
+    event.preventDefault(); requestSideCreationBack(); return;
+  }
+  if (relatedSessionView && !document.querySelector("dialog[open], .session-tools-screen.session-tools-visible")) {
+    event.preventDefault();
+    void returnToParentSession().catch(error => notice(error.message, true));
+  }
+});
+window.addEventListener("popstate", handleTransientHistoryPop, true);
+window.addEventListener("popstate", event => {
+  const target = event.state?.[sideCreationHistoryKey];
+  if (sideCreationView && (target?.owner !== relatedNavigationOwner
+      || target.requestId !== sideCreationView.record.id))
+    dismissSideCreation({ canceled: true, animate: true });
+  if (!sideCreationView && target?.owner === relatedNavigationOwner && !relatedSessionView) {
+    const record = [...relatedThreadOperations.values()].find(record => record.id === target.requestId
+      && ownsRelatedOperation(record) && record.parentThreadId === selectedId);
+    if (record) {
+      record.autoOpen = true; record.selectionToken = selectionToken;
+      showSideCreation(record, { recordHistory: false }); updateSideCreationStatus(record);
+    }
+  }
+}, true);
 const element = (tag, className, text) => {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -2583,7 +3146,7 @@ function icon(name) {
     steer: '<path d="M4 5v5a4 4 0 0 0 4 4h12m-5-5 5 5-5 5"/>',
     terminal: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3m6 0h4"/>',
     globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z"/>',
-    tools: '<rect x="3" y="3" width="6" height="6" rx="2"/><rect x="15" y="3" width="6" height="6" rx="2"/><rect x="3" y="15" width="6" height="6" rx="2"/><rect x="15" y="15" width="6" height="6" rx="2"/>',
+    tools: '<rect x="3" y="3" width="6" height="6" rx="2"/><rect x="15" y="3" width="6" height="6" rx="2"/><rect class="session-tools-lower-left" x="3" y="15" width="6" height="6" rx="2"/><rect x="15" y="15" width="6" height="6" rx="2"/><circle class="session-tools-unread-dot" cx="6" cy="18" r="3"/>',
     laptop: '<path d="M5 4h14v12H5ZM2 20h20l-3-4H5Z"/>',
     copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h3"/>',
     edit: '<path d="m16 3 5 5-12 12-6 1 1-6Z"/><path d="m13 6 5 5"/>',
@@ -2629,11 +3192,12 @@ function setSelectOptions(node, options, value = node.value) {
 }
 function closePopup(restoreFocus = false) {
   if (!activePopup) return;
-  const { node, trigger } = activePopup;
+  const { node, trigger, dismiss } = activePopup;
   activePopup = null;
   trigger.setAttribute("aria-expanded", "false");
   trigger.removeAttribute("aria-controls");
   if (node.hasAttribute("popover") && node.matches(":popover-open")) node.hidePopover();
+  dismiss?.remove();
   node.remove();
   if (restoreFocus && trigger.isConnected && !trigger.disabled) trigger.focus();
 }
@@ -2664,6 +3228,15 @@ function openPopup(trigger, { query = "", edge = null, focus = true, position = 
   activePopup = { node, trigger, list, input, query, position, index: Math.max(0, choices.findIndex(option => option.value === trigger.value)), choices: [] };
   trigger.setAttribute("aria-expanded", "true"); trigger.setAttribute("aria-controls", node.id);
   const host = trigger.closest("dialog") || document.body;
+  if (trigger.popupDismissLayer) {
+    const dismiss = element("div", "session-tools-menu-dismiss");
+    dismiss.onpointerdown = event => { event.preventDefault(); event.stopPropagation(); };
+    dismiss.onclick = event => {
+      event.preventDefault(); event.stopPropagation(); closePopup(true);
+    };
+    activePopup.dismiss = dismiss;
+    host.append(dismiss);
+  }
   if (typeof node.showPopover === "function") node.setAttribute("popover", "manual");
   host.append(node);
   renderPopup();
@@ -2882,6 +3455,17 @@ function filterDeletedSidebar(value, deviceId = session?.device.id) {
   value.pinnedThreads = value.pinnedThreads.filter(keep);
   for (const project of value.projects) project.threads = project.threads.filter(keep);
 }
+function filterSideThreadSidebar(value) {
+  if (!value) return;
+  const sideIds = new Set(value.sideThreadIds || []);
+  for (const [id, view] of relatedThreadViews)
+    if (normalizeRelatedView(view, id)?.kind === "side") sideIds.add(id);
+  value.sideThreadIds = [...sideIds];
+  const keep = item => !sideIds.has(item.id);
+  value.recent = value.recent.filter(keep);
+  value.pinnedThreads = value.pinnedThreads.filter(keep);
+  for (const project of value.projects) project.threads = project.threads.filter(keep);
+}
 function applyThreadDeletion(id, deviceId = session?.device.id) {
   transcriptCache.remove(deviceId, id);
   if (readScope && session?.device.id === deviceId)
@@ -2889,6 +3473,7 @@ function applyThreadDeletion(id, deviceId = session?.device.id) {
   const key = threadDeletionKey(id, deviceId), previous = threadDeletions.get(key);
   setThreadDeletion(key, { ...previous, deviceId, threadId: id, state: "deleted" });
   if (session?.device.id !== deviceId) return;
+  sessionMenu?.removeThread(id);
   if (selectedId === id) {
     stopGoalLiveTimer(); showWelcome();
   }
@@ -3120,6 +3705,8 @@ function notice(message, error = false) {
   }, 6500);
 }
 async function api(path, body, id, signal, { resourcePriority = "foreground", onChannelLatency = null } = {}) {
+  if (path.startsWith("/api/action/") && body?.threadId && threadReadOnly(body.threadId))
+    throw Object.assign(new Error("此会话仅供查看，不能提交操作。"), { code: 403, notSubmitted: true });
   if (path.startsWith("/api/action/") && path !== "/api/action/deleteThread" && body?.threadId
       && (threadDeletionLocked(body.threadId) || threadDeleted(body.threadId)))
     throw Object.assign(new Error("此会话正在删除或已删除，请先核对删除结果。"), { code: 409 });
@@ -3671,6 +4258,9 @@ function refreshTranscriptEvents() {
   for (const [id, turn] of turns) turns.set(id, enrichTurnTranscriptEvents(turn));
 }
 async function mutate(action, payload, { reliable = false, receiptId = null } = {}) {
+  if (payload?.threadId && threadReadOnly(payload.threadId))
+    throw Object.assign(new Error("此会话仅供查看，不能提交操作。"), { code: 403, notSubmitted: true });
+  const trackedOperation = ["deleteThread", "createSideThread", "closeSideThread"].includes(action);
   const version = selectionVersion;
   const deviceId = session?.device.id, generation = recoveryGeneration;
   const id = receiptId || (reliable && pending ? pending.id : randomId());
@@ -3743,7 +4333,7 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
       updateGoalComposerPending({ ...pending, result: receipt.result, receiptState: receipt.state });
       throw error;
     }
-    if (action === "deleteThread") {
+    if (trackedOperation) {
       const rejected = error.outcomeUnknown !== true && Number.isInteger(error.code)
         && error.code >= 400 && error.code < 500 && error.code !== 408;
       Object.assign(error, { receiptId: id, operationState: rejected ? "failed" : "unknown", outcomeUnknown: !rejected });
@@ -3783,7 +4373,7 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
     else {
       if (ownsPending()) void resolvePending();
       throw Object.assign(new Error("操作仍在处理，请稍后查看会话或回执"), { deliveryPending: action === "send",
-        ...(action === "deleteThread" ? { receiptId: id, operationState: "pending", outcomeUnknown: true } : {}),
+        ...(trackedOperation ? { receiptId: id, operationState: "pending", outcomeUnknown: true } : {}),
         ...(["approve", "answer"].includes(action) ? { approvalState: "pending" } : {}) });
     }
   }
@@ -3796,7 +4386,7 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
           || queuedEditActions.has(action) && session.capabilities?.queueEditRecovery === true))
         void resolvePending();
       throw Object.assign(new Error(result.result?.message || "送达状态未知，请在会话中确认，勿重复发送"), {
-        ...(action === "deleteThread" ? { receiptId: id, operationState: "unknown", outcomeUnknown: true } : {}),
+        ...(trackedOperation ? { receiptId: id, operationState: "unknown", outcomeUnknown: true } : {}),
         ...(["approve", "answer"].includes(action) ? { approvalState: "unknown" } : {}),
         deliveryPending: action === "send"
           && typeof (result.result?.clientUserMessageId ?? payload.clientUserMessageId) === "string"
@@ -3811,7 +4401,7 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
     }
     throw Object.assign(new Error(result.result?.message || "原生操作未完成"), {
       result: result.result, goalSubmission: result.result?.goalSubmission, code: result.result?.code,
-      ...(action === "deleteThread" ? { receiptId: id, operationState: "failed", outcomeUnknown: result.result?.outcomeUnknown === true }
+      ...(trackedOperation ? { receiptId: id, operationState: "failed", outcomeUnknown: result.result?.outcomeUnknown === true }
         : ["approve", "answer"].includes(action) ? { approvalState: "failed" } : {})
     });
   }
@@ -3998,6 +4588,8 @@ async function resolvePending() {
 let loginPageCleanup = null;
 function showLogin() {
   loginPageCleanup?.();
+  resetRelatedSessions();
+  sessionTools?.dispose(); sessionTools = null;
   stopGoalLiveTimer();
   closePopup(); closeContextUsageTip();
   composerScroll?.dispose(); composerScroll = null;
@@ -4302,6 +4894,10 @@ function handleInitialConnectionError(error) {
 }
 function shell() {
   loginPageCleanup?.();
+  closePopup();
+  sessionMenu?.dispose(); sessionMenu = null;
+  stopRelatedSessionTimers();
+  sessionTools?.dispose(); sessionTools = null;
   closeContextUsageTip();
   approvalSignature = null;
   search = "";
@@ -4316,7 +4912,7 @@ function shell() {
       <div class="sidebar-footer"><div class="footer-actions"><button id="appearance-button" class="footer-button" type="button" aria-label="设置"></button><button id="logout" class="footer-button" type="button"></button></div></div>
     </aside>
     <main class="conversation">
-      <header class="conversation-header"><button id="open-sidebar" class="icon-button" type="button" aria-label="打开侧边栏" aria-controls="session-sidebar"></button><div class="thread-heading"><strong id="thread-title">远程会话</strong><span id="thread-path" class="muted"></span></div><button id="connection-state" class="connection-state pending" type="button" aria-live="polite" title="${connectionRttDescription}" aria-label="连接中…。${connectionRttDescription}">连接中…</button></header>
+      <header class="conversation-header"><button id="open-sidebar" class="icon-button" type="button" aria-label="打开侧边栏" aria-controls="session-sidebar"></button><div class="thread-heading"><strong id="thread-title">远程会话</strong><span id="thread-path" class="muted"></span></div><button id="connection-state" class="connection-state pending" type="button" aria-live="polite" title="${connectionRttDescription}" aria-label="连接中…。${connectionRttDescription}">连接中…</button><button id="open-session-tools" class="icon-button session-tools-trigger" type="button" title="会话菜单" aria-label="会话菜单" aria-haspopup="menu" aria-expanded="false"></button><button id="related-session-back" class="text-button" type="button" aria-label="返回主会话" hidden>返回</button></header>
       <div id="desktop-connection-guidance" class="desktop-connection-guidance" role="status" aria-live="polite" hidden>Codex 桌面尚未连接或正在重启。请在电脑端 CodexElves 管理器右上角点击「重启 Codex」；若已点击，请等待 Codex 主界面完全打开、能够正常查看会话后，再刷新远程网页。</div>
       <div class="messages-shell"><div id="messages" class="messages" role="log" aria-label="会话消息"></div><button id="scroll-to-bottom" class="scroll-to-bottom" type="button" aria-label="跳转到最新消息" hidden></button></div>
       <div class="composer-area"><div class="composer-context"><div id="queued-area" hidden></div><div id="goal-area" hidden></div></div><div id="pending-area"></div><div id="project-select-slot" hidden></div><div class="composer-anchor"><div id="approval-area" class="approval-area" aria-live="polite"></div><form id="composer" class="composer">
@@ -4332,6 +4928,7 @@ function shell() {
   configurePromptEditor($("#prompt"));
   mountContextUsage();
   $("#open-sidebar").append(icon("menu"));
+  $("#related-session-back").onclick = () => void returnToParentSession().catch(error => notice(error.message, true));
   $("#prompt-optimize").onclick = () => void activatePromptOptimization();
   $("#prompt-optimize").oncontextmenu = event => event.preventDefault();
   $("#prompt-optimize").onpointerdown = event => {
@@ -4433,7 +5030,7 @@ function shell() {
     ? workspace.classList.contains("sidebar-open") : desktopSidebarOpen;
   const syncSidebarLayout = () => {
     const compact = compactSidebarMedia.matches;
-    const open = sidebarIsOpen();
+    const open = !relatedSessionView && sidebarIsOpen();
     const toggle = $("#open-sidebar");
     workspace.classList.toggle("sidebar-collapsed", !compact && !open);
     if (!compact) workspace.classList.remove("sidebar-open");
@@ -4448,6 +5045,7 @@ function shell() {
   const focusSidebarControl = () => (compactSidebarMedia.matches && sidebarIsOpen()
     ? sidebarPanel.querySelector("button:not(:disabled)") : $("#open-sidebar"))?.focus({ preventScroll: true });
   const setSidebarOpen = (open, { focus = true } = {}) => {
+    if (relatedSessionView) return;
     closePopup(); closeComposerMenus();
     if (open && !sidebarIsOpen()) {
       renderSidebar();
@@ -4467,7 +5065,11 @@ function shell() {
     syncSidebarLayout();
   };
   compactSidebarMedia.addEventListener("change", onSidebarMediaChange);
-  sidebarLayoutCleanup = () => compactSidebarMedia.removeEventListener("change", onSidebarMediaChange);
+  syncRelatedSidebarLayout = syncSidebarLayout;
+  sidebarLayoutCleanup = () => {
+    compactSidebarMedia.removeEventListener("change", onSidebarMediaChange);
+    if (syncRelatedSidebarLayout === syncSidebarLayout) syncRelatedSidebarLayout = null;
+  };
   syncSidebarLayout();
   $("#open-sidebar").onclick = () => setSidebarOpen(!sidebarIsOpen());
   $(".sidebar-backdrop").onclick = closeSidebar;
@@ -4509,6 +5111,38 @@ function shell() {
   $("#connection-state").onclick = () => void Promise.all([
     syncConnectionState(), refreshAll({ fresh: true }), loadModels(true), refreshSkillCatalog()
   ]).catch(error => notice(error.message, true));
+  const toolsTrigger = $("#open-session-tools");
+  toolsTrigger.append(icon("tools"));
+  sessionTools = mountSessionTools({
+    workspace: $(".workspace"), trigger: $("#open-session-tools"),
+    getContext: () => ({ deviceId: session?.device.id, threadId: selectedId, creating,
+      projectId: creationProject, readOnly: threadReadOnly(), cacheScope: privateInputScope(session) }),
+    cache: workspaceViewCache,
+    beforeOpen: () => { sessionMenu?.close(); closePopup(); closeComposerMenus(); closeMobileSidebar({ focus: false }); },
+    onUnauthorized: requireAuthentication,
+    openImagePreview
+  });
+  sessionMenu = mountSessionMenu({
+    trigger: toolsTrigger,
+    getContext: () => ({ deviceId: session?.device.id, cacheScope: privateInputScope(session),
+      threadId: !creating && !relatedSessionView ? selectedId : null, readOnly: threadReadOnly(), connected,
+      createPending: [...relatedThreadOperations.values()].some(record => ownsRelatedOperation(record)
+        && record.parentThreadId === selectedId && record.action === "createSideThread") }),
+    cache: relatedMenuCache,
+    onData: adoptRelatedMenu,
+    load: loadRelatedThreads,
+    openChanges: () => sessionTools?.open("changes"),
+    openSubagent: item => openRelatedThread(item, "subagent"),
+    createSideThread: () => runRelatedOperation("createSideThread"),
+    openSideThread: item => openRelatedThread(item, "side"),
+    closeSideThread: item => runRelatedOperation("closeSideThread", item),
+    beforeOpen: () => {
+      closePopup(); closeComposerMenus(); closeMobileSidebar({ focus: false }); rememberTransientHistory();
+    },
+    onError: error => notice(error.message || "无法读取会话菜单", true)
+  });
+  restoreRelatedOperations();
+  syncRelatedSessionLayout();
   $("#appearance-button").onclick = openAppearance;
   $("#sidebar-view-toggle").onclick = () => void changeSidebar({
     target: "grouping", mode: "updated_at",
@@ -4516,6 +5150,7 @@ function shell() {
   });
   $("#composer").onsubmit = async event => {
     event.preventDefault();
+    if (threadReadOnly()) return;
     if ($("#send").dataset.action === "stop") await stopGeneration();
     else await sendMessage();
   };
@@ -4525,6 +5160,7 @@ function shell() {
       event.preventDefault();
   };
   $("#prompt").onkeydown = event => {
+    if (threadReadOnly()) { event.preventDefault(); return; }
     if (event.isComposing) return;
     if (!$("#skill-menu").hidden && ["ArrowDown", "ArrowUp", "Enter", "Tab"].includes(event.key) && !event.ctrlKey && !event.metaKey) {
       const entries = slashMenuEntries();
@@ -4556,6 +5192,7 @@ function shell() {
     }
   };
   $("#prompt").onbeforeinput = event => {
+    if (threadReadOnly()) { event.preventDefault(); return; }
     if (!event.isComposing && ["deleteContentBackward", "deleteContentForward"].includes(event.inputType)
         && removeAdjacentPromptToken($("#prompt"), event.inputType === "deleteContentBackward" ? -1 : 1)) {
       event.preventDefault(); return;
@@ -4567,6 +5204,7 @@ function shell() {
     }
   };
   $("#prompt").onpaste = event => {
+    if (threadReadOnly()) { event.preventDefault(); return; }
     if (handleComposerImagePaste(event)) return;
     event.preventDefault();
     const text = (event.clipboardData?.getData("text/plain") || "").replace(/\r\n?/g, "\n");
@@ -4586,6 +5224,7 @@ function shell() {
   $("#prompt").onclick = () => void updateSkillMenu();
   $("#project-select").onchange = changeCreationProject;
   $("#model-button").onclick = async () => {
+    if (threadReadOnly()) return;
     const opening = $("#model-settings").hidden;
     closePopup(); closeComposerMenus();
     if (!opening) return;
@@ -4634,6 +5273,7 @@ function selectedThreadProjectId() {
   return projects.some(project => project.id === projectId) ? projectId : "";
 }
 async function startNewChat(projectId, { focus = true } = {}) {
+  if (relatedSessionView) return;
   cancelMessageEdit({ focus: false });
   if (!session || session.readOnly) return;
   if (projectId === undefined && selectedId && !sidebar) {
@@ -4649,8 +5289,11 @@ async function startNewChat(projectId, { focus = true } = {}) {
   editingQueuedMessage = null;
   setSelectValue($("#project-select"), project);
   ++selectionVersion; creating = true; selectedId = null; thread = null; historyCursor = null; historyInitialized = false; turns.clear(); transcriptEvents.clear(); renderMessages();
+  relatedSessionView = null; relatedReturnTranscript = null; sessionMenu?.close(); syncRelatedSessionLayout();
   selectionToken = randomId();
   creationProject = $("#project-select").value; notifiedTokenUsage = null; ++threadReadVersion;
+  syncNewChatHash();
+  sessionTools?.updateContext();
   restoreDraft(draftKey()); resetComposerOptions(); renderApprovals();
   $("#thread-title").textContent = "新建会话"; $("#thread-path").textContent = "在本机创建会话";
   $("#project-select-slot").hidden = false;
@@ -4692,6 +5335,7 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
       result.pinnedThreads = result.pinnedThreads.filter(isMainThread);
       for (const project of result.projects) project.threads = project.threads.filter(isMainThread);
       filterDeletedSidebar(result, deviceId);
+      filterSideThreadSidebar(result);
       if (JSON.stringify(sidebar) !== JSON.stringify(result)) {
         sidebar = result;
         cacheDisplayData("sidebar", "main", sidebarSnapshot(result));
@@ -4710,6 +5354,9 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
     if (sidebarRequest?.promise === promise) sidebarRequest = null;
   }
 }
+function sidebarUpdatedAt(item) {
+  return item.updatedAt || item.recencyAt || item.createdAt || 0;
+}
 function sidebarAttentionState(item) {
   if (["waiting", "unread", "active", "idle"].includes(item.priority?.attentionState))
     return item.priority.attentionState;
@@ -4721,9 +5368,11 @@ function sidebarAttentionState(item) {
   return type === "active" || type === "inProgress" ? "active" : "idle";
 }
 function renderSidebar() {
+  syncSideThreadUnread();
   const root = $("#sidebar-content");
   if (!root || !sidebar) return;
   filterDeletedSidebar(sidebar);
+  filterSideThreadSidebar(sidebar);
   const scrollTop = root.scrollTop;
   const popupState = activePopup && root.contains(activePopup.trigger)
     ? { id: activePopup.trigger.id, index: activePopup.index, focused: activePopup.node.contains(document.activeElement), position: activePopup.position } : null;
@@ -4751,7 +5400,8 @@ function renderSidebar() {
   const matches = item => !search || `${item.title || ""} ${item.name || ""} ${item.cwd || ""} ${(item.roots || []).join(" ")}`
     .toLowerCase().replace(/[\\/]+/g, " ").includes(normalizedSearch);
   const sortThreads = (items, mode) => mode === "updated_at"
-    ? [...items].sort((left, right) => (right.recencyAt ?? right.updatedAt ?? 0) - (left.recencyAt ?? left.updatedAt ?? 0))
+    ? [...items].sort((left, right) => sidebarUpdatedAt(right) - sidebarUpdatedAt(left)
+      || (right.createdAt || 0) - (left.createdAt || 0) || left.id.localeCompare(right.id))
     : [...items];
   const pinnedIds = new Set(sidebar.pinnedThreads.map(item => item.id));
   const projectNames = new Map(sidebar.projects.map(project => [project.id, project.name]));
@@ -4765,7 +5415,7 @@ function renderSidebar() {
   };
   const openThread = async item => {
     await selectThread(item.id);
-    if (!item.hasUnreadTurn || session?.readOnly || !connected || selectedId !== item.id || thread?.id !== item.id) return;
+    if (!item.hasUnreadTurn || threadReadOnly(item.id) || !connected || selectedId !== item.id || thread?.id !== item.id) return;
     try {
       await markVisibleThreadRead(item.id);
     } catch (error) { notice(error.message, true); }
@@ -4886,7 +5536,7 @@ function renderSidebar() {
     const attentionOrder = { waiting: 0, unread: 1, active: 2, idle: 3 };
     const candidates = mergedRecent.filter(needsPriority).sort((left, right) =>
       attentionOrder[sidebarAttentionState(left)] - attentionOrder[sidebarAttentionState(right)]
-      || (right.recencyAt ?? right.updatedAt ?? 0) - (left.recencyAt ?? left.updatedAt ?? 0));
+      || sidebarUpdatedAt(right) - sidebarUpdatedAt(left));
     if (recentPriorityIds === null) {
       recentPriorityOpenedAt = Date.now();
       recentPriorityKnownIds = new Set(mergedRecent.map(item => item.id));
@@ -4901,7 +5551,8 @@ function renderSidebar() {
       ]);
       for (const item of mergedRecent) recentPriorityKnownIds.add(item.id);
     }
-    const recent = sortThreads(mergedRecent.filter(matches), preferences.chats);
+    // 日期分组始终按最近更新展示，不继承桌面的手动会话顺序。
+    const recent = sortThreads(mergedRecent.filter(matches), "updated_at");
     const recentById = new Map(recent.map(item => [item.id, item]));
     const priority = [...recentPriorityIds].flatMap(id => recentById.has(id) ? [recentById.get(id)] : []);
     if (priority.length) {
@@ -4921,7 +5572,7 @@ function renderSidebar() {
     const todayAt = today.getTime(), yesterdayAt = yesterday.getTime();
     const todayThreads = [], yesterdayThreads = [], historyThreads = [];
     for (const item of visible) {
-      const timestamp = item.recencyAt ?? item.updatedAt ?? 0;
+      const timestamp = sidebarUpdatedAt(item);
       (timestamp >= todayAt ? todayThreads : timestamp >= yesterdayAt ? yesterdayThreads : historyThreads).push(item);
     }
     for (const [label, items] of [["今天", todayThreads], ["昨天", yesterdayThreads], ["历史", historyThreads]]) {
@@ -5103,15 +5754,21 @@ function loadMessageSkillChoices(items) {
   // 目录只用于历史显示名与旧消息的精确匹配；失败不阻塞记录，也不循环重试。
   void loadSkillChoices(scope, { threadId: selectedId }).catch(() => {});
 }
-async function markVisibleThreadRead(id = selectedId) {
-  if (!id || id !== selectedId || thread?.id !== id || session?.readOnly || !connected
+async function markVisibleThreadRead(id = selectedId, { opened = false } = {}) {
+  if (!id || id !== selectedId || thread?.id !== id || threadReadOnly(id) || !connected
       || !historyInitialized || historyError || transcriptChecking
-      || threadDeletionLocked(id) || threadDeleted(id) || document.hidden || !followMessages) return;
+      || threadDeletionLocked(id) || threadDeleted(id) || document.hidden || !opened && !followMessages) return;
   if (readMarkRequests.has(id)) return readMarkRequests.get(id);
   const deviceId = session.device.id;
   const request = (async () => {
     await mutate("markRead", { threadId: id });
-    if (session?.device.id === deviceId) await loadSidebar();
+    if (session?.device.id === deviceId) {
+      sessionMenu?.markSideThreadRead(id);
+      if (Array.isArray(sidebar?.unreadSideThreads))
+        sidebar.unreadSideThreads = sidebar.unreadSideThreads.filter(item => item.id !== id);
+      syncSideThreadUnread();
+      await loadSidebar(null, { fresh: relatedSessionView?.kind === "side" });
+    }
   })();
   readMarkRequests.set(id, request);
   try { await request; }
@@ -5120,7 +5777,7 @@ async function markVisibleThreadRead(id = selectedId) {
 function beginMessageEdit(threadId, item) {
   const metadata = item.messageMetadata;
   if (threadId !== selectedId || thread?.id !== threadId || metadata?.editable !== true
-      || session.readOnly || !connected || busy || stopping || pending || compactionLocked() || isActiveThread()) return;
+      || threadReadOnly(threadId) || !connected || busy || stopping || pending || compactionLocked() || isActiveThread()) return;
   if (editingMessage || editingQueuedMessage) { (editingMessage?.input || $("#prompt")).focus(); return; }
   rememberDraft();
   editingMessage = {
@@ -5144,7 +5801,7 @@ function updateMessageEditor() {
   const target = thread?.editableMessage;
   const stale = Object.hasOwn(thread || {}, "editableMessage")
     && (target?.turnId !== edit.turnId || target?.messageId !== edit.messageId);
-  const unavailable = !connected || session?.readOnly || stopping || compactionLocked() || isActiveThread() || stale;
+  const unavailable = !connected || threadReadOnly(edit.threadId) || stopping || compactionLocked() || isActiveThread() || stale;
   const unsupportedModelSettings = !!(selectedModel && selectedModel !== thread?.model
     || selectedEffort && selectedEffort !== thread?.reasoningEffort)
     && session?.capabilities?.messageEditModelSettings !== true;
@@ -5202,11 +5859,11 @@ function renderMessageEditBanner() {
       }, "text-button"));
   }
   if (kind) $("button", area).disabled = busy || !!editingQueuedMessage
-    && (!!pending || !connected || session?.readOnly || compactionLocked());
+    && (!!pending || !connected || threadReadOnly() || compactionLocked());
 }
 async function submitMessageEdit() {
   const edit = editingMessage;
-  if (!edit || busy || stopping || pending || session.readOnly || !connected
+  if (!edit || busy || stopping || pending || threadReadOnly(edit.threadId) || !connected
       || edit.threadId !== selectedId || thread?.id !== selectedId || compactionLocked() || isActiveThread()) return;
   if (Object.hasOwn(thread, "editableMessage")
       && (thread.editableMessage?.turnId !== edit.turnId || thread.editableMessage?.messageId !== edit.messageId)) {
@@ -5226,7 +5883,7 @@ async function submitMessageEdit() {
   busy = true; updateComposer();
   try {
     if (editingMessage !== edit || selectedId !== edit.threadId || version !== selectionVersion
-        || session.readOnly || !connected || compactionLocked() || isActiveThread())
+        || threadReadOnly(edit.threadId) || !connected || compactionLocked() || isActiveThread())
       throw new Error("会话状态已变化，请重新核对后编辑");
     await mutate("editMessage", {
       threadId: edit.threadId, turnId: edit.turnId, messageId: edit.messageId, prompt,
@@ -5305,6 +5962,7 @@ function openImagePreview(link, image) {
   const source = link.getAttribute("href") || image.originalImageSource || image.getAttribute("src") || "";
   if (!/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(source) && !safeInlineImageSource(source)) return;
   $("#image-preview-dialog")?.close();
+  rememberTransientHistory();
   const trigger = link;
   const dialog = element("dialog", "image-preview-dialog");
   dialog.id = "image-preview-dialog";
@@ -5940,6 +6598,19 @@ function renderSubagentItem(item, previous, running = false) {
   node.replaceChildren(icon, element("strong", "subagent-title", name), state);
   node.setAttribute("aria-label", `${name}，${presentation.label}`);
   if (presentation.active) node.setAttribute("role", "status"); else node.removeAttribute("role");
+  const ids = subagentThreadIds(item).filter(id => validRelatedThreadId(id) && id !== selectedId);
+  const canOpen = !relatedSessionView && ids.length === 1, parentThreadId = selectedId;
+  node.onclick = canOpen ? () => void openRelatedThread({ id: ids[0], name }, "subagent", parentThreadId)
+    .catch(error => notice(error.message, true)) : null;
+  node.onkeydown = canOpen ? event => {
+    if (!["Enter", " "].includes(event.key)) return;
+    event.preventDefault(); node.click();
+  } : null;
+  if (canOpen) {
+    node.tabIndex = 0; node.setAttribute("role", "button"); node.title = `查看 ${name} 的会话`;
+  } else {
+    node.removeAttribute("tabindex"); node.removeAttribute("title");
+  }
   return node;
 }
 function transcriptModelName(id) {
@@ -6870,7 +7541,7 @@ const queuedActionBusy = new Set();
 const sameQueueOrder = (left, right) => left.length === right.length && left.every((id, index) => id === right[index]);
 function queueReorderAvailable() {
   const messages = thread?.queuedMessages;
-  return !!selectedId && thread?.id === selectedId && connected && !session?.readOnly
+  return !!selectedId && thread?.id === selectedId && connected && !threadReadOnly()
     && !busy && !stopping && !pending && !compactionLocked() && !queuedActionBusy.size
     && editingQueuedMessage?.state !== "starting"
     && Array.isArray(messages) && messages.length > 1
@@ -7122,6 +7793,7 @@ function renderQueuedMessages(messages, previous = null) {
     queueIcon.title = "拖动消息或左侧手柄排序；手机请长按手柄，也可使用上下方向键";
     queueIcon.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown");
     queueIcon.disabled = !queueReorderAvailable();
+    queueIcon.hidden = threadReadOnly(threadId);
     row.dataset.reorderable = String(!queueIcon.disabled);
     queueIcon.append(icon("queue"));
     queueIcon.onpointerdown = event => beginQueueDrag(event, queueIcon, row, queue, messageId);
@@ -7151,7 +7823,7 @@ function renderQueuedMessages(messages, previous = null) {
     if (attachments) attachments.remoteAttachmentSignature = attachmentSignature;
     row.append(queueIcon, ...(attachments ? [attachments] : []),
       element("p", "queued-message-text", queueMessageText(message) || "待执行消息"));
-    const unavailable = !threadId || !messageId || session?.readOnly || !connected
+    const unavailable = !threadId || !messageId || threadReadOnly(threadId) || !connected
       || busy || stopping || !!pending || queuedActionBusy.has(key) || compactionLocked(threadId)
       || !!message.submission?.status && message.submission.status !== "queued";
     const steer = button("", "引导此队列消息", () => void steerQueuedMessage(threadId, messageId), "queued-steer-button");
@@ -7190,7 +7862,7 @@ function renderQueuedMessages(messages, previous = null) {
       if (queueDrag || event.target.closest(".queued-drag-handle")) return;
       openPopup(menu, { position: { x: event.clientX, y: event.clientY } });
     };
-    row.append(steer, menu);
+    if (!threadReadOnly(threadId)) row.append(steer, menu);
     queue.append(row);
   }
   return queue;
@@ -7198,7 +7870,7 @@ function renderQueuedMessages(messages, previous = null) {
 function renderQueueArea() {
   const root = $("#queued-area");
   if (!root) return;
-  const signature = JSON.stringify([selectedId, thread?.queuedMessages, thread?.queuedEdits, session?.device.id, session?.readOnly, connected,
+  const signature = JSON.stringify([selectedId, thread?.queuedMessages, thread?.queuedEdits, session?.device.id, threadReadOnly(), connected,
     compactionLocked(), [...queuedActionBusy], editingQueuedMessage?.message.id, editingQueuedMessage?.state,
     !!editingMessage, busy, stopping, pending?.id, queueReorder, queuedEditCheckVersion]);
   if (root.dataset.queueSignature === signature) return;
@@ -7215,7 +7887,7 @@ function renderQueueArea() {
   root.dataset.queueThread = selectedId || "";
   root.dataset.queueDevice = session?.device.id || "";
   const queue = renderQueuedMessages(thread?.queuedMessages, previous);
-  const recovery = !editingQueuedMessage && thread?.queuedEdits?.find(edit => typeof edit.editId === "string"
+  const recovery = !threadReadOnly() && !editingQueuedMessage && thread?.queuedEdits?.find(edit => typeof edit.editId === "string"
     && !(queuedEditActions.has(pending?.action) && pending.payload?.editId === edit.editId));
   const children = queue ? [queue] : [];
   if (recovery) {
@@ -7225,7 +7897,7 @@ function renderQueueArea() {
     row.append(status);
     if (recovery.state === "editing") {
       const resume = button("继续编辑", "取回尚未完成的队列编辑", () => resumeQueuedMessageEdit(recovery), "text-button");
-      resume.disabled = busy || !!pending || !!editingMessage || !connected || session?.readOnly || compactionLocked();
+      resume.disabled = busy || !!pending || !!editingMessage || !connected || threadReadOnly() || compactionLocked();
       row.append(resume);
     } else renderQueuedEditRecoveryControls(row, selectedId, recovery.editId);
     children.push(row);
@@ -7302,13 +7974,13 @@ function renderQueuedEditRecoveryControls(root, threadId, editId) {
       && queuedEditActions.has(pending?.action) && pending.payload.editId === editId) {
     const resume = button("继续编辑", "核对后继续本机保留的编辑，不会重发上次请求",
       () => void resumePendingQueuedMessageEdit(threadId, editId), "text-button");
-    resume.disabled = !connected || session.readOnly || busy || !!check?.loading;
+    resume.disabled = !connected || threadReadOnly(threadId) || busy || !!check?.loading;
     actions.append(resume);
   }
   if (result?.canDismiss) {
     const finish = button("结束待确认编辑", "核对后只结束编辑标记，不会修改队列或重发消息",
       () => void dismissQueuedMessageEdit(threadId, editId), "text-button");
-    finish.disabled = !connected || session.readOnly || busy || !!check?.loading;
+    finish.disabled = !connected || threadReadOnly(threadId) || busy || !!check?.loading;
     actions.append(finish);
   }
   root.append(actions);
@@ -7325,25 +7997,25 @@ async function resumePendingQueuedMessageEdit(threadId, editId) {
   const current = pending, deviceId = session?.device.id;
   if (!queuedEditActions.has(current?.action) || current.deviceId !== deviceId
       || current.payload.threadId !== threadId || current.payload.editId !== editId
-      || editingQueuedMessage?.editId !== editId || selectedId !== threadId || busy || session.readOnly) return;
+      || editingQueuedMessage?.editId !== editId || selectedId !== threadId || busy || threadReadOnly(threadId)) return;
   if (!await confirmAction("继续队列编辑",
     "本机仍保留可恢复的编辑。继续只解除此页的待确认锁定，不会重发上次请求，也不会自动保存或取消；后续保存和取消仍由本机编辑标识防止重复恢复。",
     "继续编辑")) return;
   const result = await checkQueuedMessageEdit(threadId, editId);
   if (pending !== current || session?.device.id !== deviceId || selectedId !== threadId
-      || editingQueuedMessage?.editId !== editId || !result?.canResume || !connected || session.readOnly || busy) return;
+      || editingQueuedMessage?.editId !== editId || !result?.canResume || !connected || threadReadOnly(threadId) || busy) return;
   savePending(null); updateComposer(); $("#prompt").focus({ preventScroll: true });
 }
 async function dismissQueuedMessageEdit(threadId, editId) {
   const deviceId = session?.device.id, check = queuedEditChecks.get(editId);
-  if (!check?.result?.canDismiss || !connected || session.readOnly || busy
+  if (!check?.result?.canDismiss || !connected || threadReadOnly(threadId) || busy
       || selectedId !== threadId || thread?.id !== threadId) return;
   if (pending && (!queuedEditActions.has(pending.action) || pending.payload.editId !== editId
       || pending.payload.threadId !== threadId || pending.deviceId !== deviceId)) return;
   if (!await confirmAction("结束待确认编辑",
     "请先核对会话和当前队列。此操作只结束编辑标记，不会保存、恢复、删除或重发队列消息。结束后恢复编辑前的草稿；本次修改及附件不会重新提交，需要保留请先复制或备份。",
     "已核对，结束编辑", true)) return;
-  if (session?.device.id !== deviceId || selectedId !== threadId || !connected || session.readOnly || busy) return;
+  if (session?.device.id !== deviceId || selectedId !== threadId || !connected || threadReadOnly(threadId) || busy) return;
   if (pending && (!queuedEditActions.has(pending.action) || pending.payload.editId !== editId
       || pending.payload.threadId !== threadId || pending.deviceId !== deviceId)) return;
   const readVersion = queueVersion;
@@ -7365,7 +8037,7 @@ async function dismissQueuedMessageEdit(threadId, editId) {
   finally { busy = false; updateComposer(); }
 }
 function resumeQueuedMessageEdit(summary) {
-  if (busy || pending || editingMessage || editingQueuedMessage || !connected || session?.readOnly
+  if (busy || pending || editingMessage || editingQueuedMessage || !connected || threadReadOnly()
       || compactionLocked() || !selectedId || thread?.id !== selectedId || summary.state !== "editing") return;
   rememberDraft();
   const edit = {
@@ -7381,7 +8053,7 @@ function resumeQueuedMessageEdit(summary) {
   closeComposerMenus(); updateComposer(); $("#prompt").focus({ preventScroll: true });
 }
 async function removeQueuedMessage(threadId, messageId) {
-  if (!threadId || !messageId || session?.readOnly || !connected) return;
+  if (!threadId || !messageId || threadReadOnly(threadId) || !connected) return;
   const key = `${threadId}:${messageId}`;
   if (queuedActionBusy.has(key)) return;
   queuedActionBusy.add(key);
@@ -7403,7 +8075,7 @@ async function removeQueuedMessage(threadId, messageId) {
   }
 }
 async function steerQueuedMessage(threadId, messageId) {
-  if (!threadId || !messageId || session?.readOnly || !connected || compactionLocked(threadId)) return;
+  if (!threadId || !messageId || threadReadOnly(threadId) || !connected || compactionLocked(threadId)) return;
   const key = `${threadId}:${messageId}`;
   if (queuedActionBusy.has(key)) return;
   queuedActionBusy.add(key);
@@ -7430,7 +8102,7 @@ async function beginQueuedMessageEdit(threadId, message) {
   const messageId = message?.id;
   if (!threadId || !messageId || selectedId !== threadId || thread?.id !== threadId
       || typeof message.clientUserMessageId !== "string" || !Number.isFinite(message.createdAt)
-      || session?.readOnly || !connected || busy || stopping || pending || compactionLocked(threadId)
+      || threadReadOnly(threadId) || !connected || busy || stopping || pending || compactionLocked(threadId)
       || queuedActionBusy.has(`${threadId}:${messageId}`)) return;
   if (editingMessage || editingQueuedMessage) { $("#prompt").focus(); return; }
   const version = selectionVersion;
@@ -7440,7 +8112,7 @@ async function beginQueuedMessageEdit(threadId, message) {
   catch (error) { notice(error.message || "无法读取排队消息的图片，请刷新后重试", true); return; }
   finally { busy = false; updateComposer(); }
   if (selectionVersion !== version || selectedId !== threadId || thread?.id !== threadId
-      || editingMessage || editingQueuedMessage || pending || !connected || session?.readOnly
+      || editingMessage || editingQueuedMessage || pending || !connected || threadReadOnly(threadId)
       || compactionLocked(threadId)) return;
   rememberDraft();
   const originalImageSources = attachments.map(attachment => attachment.source);
@@ -7465,7 +8137,7 @@ async function beginQueuedMessageEdit(threadId, message) {
   await requestQueuedMessageEdit(edit);
 }
 async function requestQueuedMessageEdit(edit) {
-  if (!edit || edit.state !== "starting" || busy || pending || !connected || session?.readOnly
+  if (!edit || edit.state !== "starting" || busy || pending || !connected || threadReadOnly(edit.threadId)
       || edit.deviceId !== session?.device.id || compactionLocked(edit.threadId)) return;
   const payload = {
     threadId: edit.threadId, messageId: edit.message.id, editId: edit.editId, originalText: edit.originalText,
@@ -7525,7 +8197,7 @@ async function cancelQueuedMessageEdit() {
 }
 async function submitQueuedMessageEdit(cancel = false) {
   const edit = editingQueuedMessage;
-  if (!edit || edit.state !== "editing" || busy || stopping || pending || session?.readOnly || !connected
+  if (!edit || edit.state !== "editing" || busy || stopping || pending || threadReadOnly(edit.threadId) || !connected
       || edit.threadId !== selectedId || thread?.id !== selectedId || compactionLocked()) return;
   const prompt = $("#prompt").value.trim();
   if (!cancel && composerAttachmentsLoading()) { notice("图片正在读取，请稍后保存"); return; }
@@ -7658,6 +8330,7 @@ function renderMessages(keepScroll = true) {
   const oldHeight = root.scrollHeight, oldTop = root.scrollTop;
   const anchor = !keepScroll || !bottom ? visibleMessageAnchor(root) : null;
   const children = [], itemKeys = new Set(), turnKeys = new Set(), activityKeys = new Set();
+  const relatedViewKind = relatedSessionView?.kind || "";
   const sorted = [...turns.values()];
   loadMessageSkillChoices(sorted.flatMap(turn => turn.items || []));
   if (historyError && sorted.length)
@@ -7689,14 +8362,15 @@ function renderMessages(keepScroll = true) {
         ? JSON.stringify([skillRenderVersion, (item.content || []).filter(part => part.type === "skill")]) : "";
       const node = cached?.item === item && cached.inActivity === inActivity && cached.running === running
         && cached.editing === editing && cached.skillKey === skillKey && cached.markdownVersion === markdownRenderVersion
+        && cached.relatedViewKind === relatedViewKind
         ? cached.node : renderItem(item, cached?.item.type === item.type ? cached.node : null, inActivity, running);
       node.dataset.key = key;
-      renderedItems.set(key, { item, node, inActivity, running, editing, skillKey, markdownVersion: markdownRenderVersion });
+      renderedItems.set(key, { item, node, inActivity, running, editing, skillKey, relatedViewKind, markdownVersion: markdownRenderVersion });
       if (editing) node.messageActionBinding?.dispose();
       else if (item.type === "userMessage" || item.type === "agentMessage") {
         const threadId = selectedId;
         renderMessageActions(node, item, {
-          threadId, inActivity, readOnly: session.readOnly,
+          threadId, inActivity, readOnly: threadReadOnly(threadId),
           turnInProgress: isActiveThread(),
           editSupported: thread?.id === selectedId && connected && !busy && !stopping && !pending && !editingMessage && !editingQueuedMessage && !compactionLocked(),
           completed: turn.status !== "inProgress" || item.status === "completed"
@@ -7799,7 +8473,7 @@ function renderMessages(keepScroll = true) {
   updateScrollControl();
   scheduleHistoryLoad();
 }
-function rememberTranscript({ retainView = false } = {}) {
+function rememberTranscript({ retainView = false, retainRelatedParent = false } = {}) {
   if (!session || !selectedId || !historyInitialized || threadDeleted(selectedId)) return;
   const summary = [...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
     ...(sidebar?.projects || []).flatMap(project => project.threads || [])].find(item => item.id === selectedId);
@@ -7814,13 +8488,20 @@ function rememberTranscript({ retainView = false } = {}) {
     turns: currentTurns, transcriptEvents: events, historyCursor,
     ...readingPosition(), recentWindow, recentPage: recentHistoryPage,
     title: thread?.title || summary?.title || "",
-    cwd: thread?.cwd || summary?.cwd || ""
+    cwd: thread?.cwd || summary?.cwd || "",
+    ...(recentHistoryPage?.sideHistoryVersion === 1 ? { sideHistoryVersion: 1 } : {}),
+    ...(relatedSessionView ? { relatedView: normalizeRelatedView(relatedSessionView, selectedId) } : {})
   };
   // 仅离开会话时保留渲染节点，和正文共用容量限制；超限回退窗口时不复用整页视图。
   const view = retainView ? {
     turns: new Map(turns), items: new Map(renderedItems),
     groups: new Map(renderedTurns), activities: new Map(renderedActivities)
   } : null;
+  // 子页仅保留一层返回位置，正文超出普通缓存窗口时也保留主会话原节点。
+  if (retainRelatedParent && view) relatedReturnTranscript = {
+    scope: privateInputScope(session), threadId: selectedId, snapshot, view,
+    selectedModel, selectedEffort
+  };
   const retained = transcriptCache.put(session.device.id, selectedId, snapshot, view);
   if (retained) {
     const completed = retained.turns.filter(turn => ["completed", "failed", "interrupted"].includes(turn.status));
@@ -7834,9 +8515,26 @@ function rememberTranscript({ retainView = false } = {}) {
   rememberReadingPosition();
 }
 function restoreTranscript(id) {
-  const cached = transcriptCache.get(session?.device.id, id);
+  const returning = relatedReturnTranscript?.scope === privateInputScope(session)
+    && relatedReturnTranscript.threadId === id ? relatedReturnTranscript : null;
+  const cached = returning?.snapshot || transcriptCache.get(session?.device.id, id);
   if (!cached) return null;
-  const view = transcriptCache.takeView(session.device.id, id);
+  const cachedView = normalizeRelatedView(cached.relatedView, id);
+  if ((relatedSessionView?.kind === "side" || cachedView?.kind === "side") && cached.sideHistoryVersion !== 1) {
+    transcriptCache.remove(session?.device.id, id);
+    if (readScope) void readCache.remove(readScope, "transcript", id).catch(() => {});
+    return null;
+  }
+  const view = returning?.view || transcriptCache.takeView(session.device.id, id);
+  if (returning) {
+    selectedModel = returning.selectedModel; selectedEffort = returning.selectedEffort;
+    relatedReturnTranscript = null;
+  }
+  if (!relatedSessionView && cachedView) {
+    relatedSessionView = cachedView;
+    if (!relatedThreadViews.has(id)) relatedThreadViews.set(id, cachedView);
+    syncRelatedSessionLayout();
+  }
   turns = view?.turns || new Map(cached.turns.map(turn => [turn.id, turn]));
   if (view) {
     for (const [key, value] of view.items) renderedItems.set(key, value);
@@ -7858,13 +8556,30 @@ function restoreTranscript(id) {
   }
   return cached;
 }
-async function selectThread(id, { closeSidebar = true, force = false } = {}) {
+async function selectThread(id, { closeSidebar = true, force = false, relatedView = undefined, replaceHistory = false,
+  initialThread = null, preparedView = false, onViewReady = null } = {}) {
+  if (!validRelatedThreadId(id) || !session) return;
+  const navigationVersion = ++relatedSelectionVersion;
+  const nextRelatedView = relatedView === undefined ? relatedViewForThread(id) : normalizeRelatedView(relatedView, id);
+  const initialSide = !force && nextRelatedView?.kind === "side" && initialThread?.id === id
+    && initialThread.viewKind === "side" && initialThread.sideHistoryVersion === 1
+    && initialThread.parentThreadId === (nextRelatedView.parentThreadId || nextRelatedView.openedFromThreadId)
+    ? initialThread : null;
   if (threadDeleted(id)) {
     if (!selectedId || selectedId === id) applyThreadDeletion(id);
     return;
   }
+  if (normalizeRelatedView(relatedSessionView, selectedId) && id !== selectedId) {
+    const previousId = selectedId, scope = privateInputScope(session), version = selectionVersion;
+    await animateRelatedSessionExit();
+    if (navigationVersion !== relatedSelectionVersion || previousId !== selectedId
+        || scope !== privateInputScope(session) || version !== selectionVersion || threadDeleted(id)) return;
+  } else finishRelatedSessionExit();
   if (!force && selectedId === id && !creating
+      && JSON.stringify(nextRelatedView) === JSON.stringify(normalizeRelatedView(relatedSessionView, id))
       && (thread?.id === id || historyInitialized || selectionController || historyLoading)) {
+    relatedSessionView = nextRelatedView;
+    syncRelatedSessionLayout(); syncThreadHash(id, { replace: replaceHistory });
     if (closeSidebar) { closePopup(); closeMobileSidebar(); }
     return;
   }
@@ -7872,12 +8587,23 @@ async function selectThread(id, { closeSidebar = true, force = false } = {}) {
   cancelMessageEdit({ focus: false });
   if (closeSidebar) closePopup();
   rememberDraft();
-  if (!force) rememberTranscript({ retainView: true });
+  if (!force) rememberTranscript({ retainView: true,
+    retainRelatedParent: !!nextRelatedView
+      && selectedId === (nextRelatedView.openedFromThreadId || nextRelatedView.parentThreadId) });
+  if (relatedReturnTranscript && id !== relatedReturnTranscript.threadId
+      && (nextRelatedView?.openedFromThreadId || nextRelatedView?.parentThreadId) !== relatedReturnTranscript.threadId)
+    relatedReturnTranscript = null;
+  relatedBackPending = false;
+  sessionMenu?.close(); clearTimeout(relatedMenuTimer); relatedMenuTimer = null;
   resetMessages();
   editingQueuedMessage = null;
   const version = ++selectionVersion;
   selectionToken = randomId();
-  selectedId = id; creating = false; thread = null; turns.clear(); transcriptEvents.clear(); historyCursor = null; historyInitialized = false;
+  selectedId = id; creating = false; thread = initialSide; turns.clear(); transcriptEvents.clear(); historyCursor = null; historyInitialized = false;
+  relatedSessionView = nextRelatedView;
+  if (preparedView) $(".workspace")?.classList.add("related-session-prepared");
+  syncRelatedSessionLayout();
+  sessionTools?.updateContext();
   restoreDraft(id); resetComposerOptions(); restoreQueuedMessageEdit();
   notifiedTokenUsage = null; notifiedGoal = null;
   notifiedQuestions = null;
@@ -7888,9 +8614,17 @@ async function selectThread(id, { closeSidebar = true, force = false } = {}) {
   renderApprovals();
   $("#project-select-slot").hidden = true;
   $("#messages").replaceChildren();
-  let cached = force ? null : restoreTranscript(id);
-  if (!cached) $("#messages").replaceChildren(historyPlaceholder());
-  if (!force && !cached && readScope) {
+  let cached = force || initialSide || preparedView ? null : restoreTranscript(id);
+  if (initialSide) {
+    historyInitialized = true; transcriptChecking = false;
+    recentHistoryPage = { turns: [], transcriptEvents: [], historyCursor: null,
+      followMessages: true, scrollTop: 0, sideHistoryVersion: 1 };
+    mergeBlockingRequestsRead(id, thread, requestsReadVersion);
+    applyQueueRead(id, thread, queueReadVersion);
+    reconcileCompaction(id, thread.compaction);
+    renderMessages();
+  } else if (!cached) $("#messages").replaceChildren(historyPlaceholder());
+  if (!force && !initialSide && !preparedView && !cached && readScope) {
     const owner = readScope;
     const snapshot = await optionalCachedRead(readCache.get(owner, "transcript", id), 50);
     if (version !== selectionVersion || selectedId !== id || owner !== readScope || threadDeleted(id)) return;
@@ -7902,11 +8636,13 @@ async function selectThread(id, { closeSidebar = true, force = false } = {}) {
   rememberReadingPosition();
   const summary = [...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
     ...(sidebar?.projects || []).flatMap(project => project.threads || [])].find(item => item.id === id);
-  $("#thread-title").textContent = summary?.title || cached?.title || "正在打开会话";
-  $("#thread-path").textContent = summary?.cwd || cached?.cwd || "正在读取会话设置…";
+  $("#thread-title").textContent = initialSide?.title || relatedSessionView?.name || summary?.title || cached?.title || "正在打开会话";
+  $("#thread-path").textContent = initialSide?.cwd || summary?.cwd || cached?.cwd || "正在读取会话设置…";
   if (closeSidebar) closeMobileSidebar();
   renderSidebar(); updateComposer();
-  syncThreadHash(id);
+  syncThreadHash(id, { replace: replaceHistory });
+  onViewReady?.();
+  if (initialSide) return;
   const latest = loadHistory(false, version);
   const controller = new AbortController();
   selectionController = controller;
@@ -7914,6 +8650,8 @@ async function selectThread(id, { closeSidebar = true, force = false } = {}) {
     const result = await api("/api/read/thread", { threadId: id }, undefined, controller.signal);
     if (version !== selectionVersion || read !== threadReadVersion || selectedId !== id || threadDeleted(id)) return;
     thread = result.thread;
+    if (thread?.id !== id) throw new Error("会话返回内容与当前会话不一致");
+    applyRelatedThreadMetadata(thread);
     mergeBlockingRequestsRead(id, thread, requestsReadVersion);
     if (questionReadVersion !== questionVersion && notifiedQuestions)
       replaceAsyncQuestions(thread, notifiedQuestions);
@@ -7930,7 +8668,7 @@ async function selectThread(id, { closeSidebar = true, force = false } = {}) {
     }
     if (compactionReadVersion === compactionVersion) reconcileCompaction(id, thread.compaction);
     else thread.compaction = normalizeCompaction(currentCompaction(id));
-    $("#thread-title").textContent = thread.title;
+    $("#thread-title").textContent = thread.viewKind === "subagent" ? thread.agentName || thread.title || "子代理" : thread.title;
     $("#thread-path").textContent = thread.cwd;
     syncEditableMessageMetadata();
     updateComposer(); renderApprovals();
@@ -7945,9 +8683,30 @@ async function selectThread(id, { closeSidebar = true, force = false } = {}) {
   if (version === selectionVersion && !isActiveThread())
     void markVisibleThreadRead(id).catch(error => notice(error.message, true));
 }
-function syncThreadHash(id) {
-  const hash = `#thread=${encodeURIComponent(id)}`;
-  if (location.hash !== hash) history.pushState(null, "", hash);
+function syncThreadHash(id, { replace = false } = {}) {
+  if (relatedExitTransition && id === selectedId) return;
+  const hash = new URLSearchParams(location.hash.slice(1));
+  const previousId = hash.get("thread");
+  hash.set("thread", id);
+  const state = { ...(history.state || {}) };
+  state[conversationHistoryKey] = conversationHistoryPosition(state) + (previousId !== id && !replace ? 1 : 0);
+  if (relatedSessionView?.threadId === id) state[relatedHistoryKey] = normalizeRelatedView(relatedSessionView, id);
+  else delete state[relatedHistoryKey];
+  // 只在新会话条目中清除旧工具路由，保留此前变更页的历史条目。
+  if (previousId !== id) delete state.codexElvesTools;
+  const url = `${location.pathname}${location.search}#${hash}`;
+  if (!replace && previousId !== id) history.pushState(state, "", url);
+  else history.replaceState(state, "", url);
+}
+function syncNewChatHash() {
+  const hash = new URLSearchParams(location.hash.slice(1));
+  if (!hash.has("thread")) return;
+  hash.delete("thread");
+  const state = { ...(history.state || {}) };
+  state[conversationHistoryKey] = conversationHistoryPosition(state) + 1;
+  delete state[relatedHistoryKey]; delete state.codexElvesTools;
+  // 新建会话是独立历史条目，工具页返回时不能再命中上一条会话。
+  history.pushState(state, "", `${location.pathname}${location.search}${hash.size ? `#${hash}` : ""}`);
 }
 function welcomeNode() {
   const node = element("div", "welcome");
@@ -7955,6 +8714,9 @@ function welcomeNode() {
   return node;
 }
 function showWelcome() {
+  ++relatedSelectionVersion;
+  finishRelatedSessionExit();
+  relatedSessionView = null; relatedReturnTranscript = null; sessionMenu?.close(); syncRelatedSessionLayout();
   if (session && !session.readOnly) {
     void startNewChat("", { focus: false });
     return;
@@ -7964,6 +8726,7 @@ function showWelcome() {
   editingQueuedMessage = null;
   ++selectionVersion; ++threadReadVersion; selectionToken = randomId();
   selectedId = null; thread = null; creating = false; historyCursor = null; historyInitialized = false; turns.clear(); transcriptEvents.clear(); notifiedTokenUsage = null;
+  sessionTools?.updateContext();
   $("#prompt").value = ""; selectedSkills = []; selectedGoal = null; clearComposerAttachments(); resetComposerOptions();
   $("#thread-title").textContent = "远程会话"; $("#thread-path").textContent = "";
   $("#project-select-slot").hidden = true;
@@ -8024,9 +8787,15 @@ async function readHistoryPage(older, version, itemsTurnId) {
     if (controller.signal.aborted || pageLeaving || version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
     if (!Array.isArray(result?.data)) throw new Error("会话历史返回格式无效");
     if (itemsTurnId && (result.scope !== "items" || result.turnId !== itemsTurnId)) throw new Error("会话消息分页归属无效");
+    if (result.sideHistoryVersion === 1) {
+      const inherited = new Set(result.inheritedTurnIds || []);
+      for (const turnId of inherited) turns.delete(turnId);
+      for (const [key, event] of transcriptEvents) if (inherited.has(event.turnId)) transcriptEvents.delete(key);
+    }
     if (latestPage) recentHistoryPage = {
       turns: [...result.data].reverse(), transcriptEvents: result.transcriptEvents || [],
-      historyCursor: result.nextCursor, followMessages: true, scrollTop: 0
+      historyCursor: result.nextCursor, followMessages: true, scrollTop: 0,
+      ...(result.sideHistoryVersion === 1 ? { sideHistoryVersion: 1 } : {})
     };
     if (checkingCached && !pruneCachedHistory(result.data, readVersion)) historyCursor = result.nextCursor;
     mergeTranscriptEvents(result.transcriptEvents);
@@ -8269,6 +9038,8 @@ async function reloadThread() {
         if (notifiedQueueEdits) latest.queuedEdits = notifiedQueueEdits;
       }
       thread = latest;
+      if (thread?.id !== id) throw new Error("会话返回内容与当前会话不一致");
+      applyRelatedThreadMetadata(thread);
       mergeBlockingRequestsRead(id, thread, requestsReadVersion);
       if (questionReadVersion !== questionVersion && notifiedQuestions)
         replaceAsyncQuestions(thread, notifiedQuestions);
@@ -8278,7 +9049,7 @@ async function reloadThread() {
       if (!$("#model-settings").hidden) renderModelMenu();
       if (compactionReadVersion === compactionVersion) reconcileCompaction(id, thread.compaction);
       else thread.compaction = normalizeCompaction(currentCompaction(id));
-      $("#thread-title").textContent = thread.title;
+      $("#thread-title").textContent = thread.viewKind === "subagent" ? thread.agentName || thread.title || "子代理" : thread.title;
       $("#thread-path").textContent = thread.cwd || ""; syncThreadHash(id);
       updateComposer(); renderApprovals();
       await historyRead;
@@ -8482,6 +9253,7 @@ async function resolveGoalEditReceipt() {
   return goalEditReceiptRequest;
 }
 function beginGoalEdit(goal) {
+  if (threadReadOnly()) return;
   const pendingRecord = goalEditPending?.payload.threadId === thread?.id ? goalEditPending : null;
   const baseline = goalEditBaseline(goal) || (pendingRecord ? {
     objective: pendingRecord.payload.expectedObjective,
@@ -8489,8 +9261,8 @@ function beginGoalEdit(goal) {
     createdAt: pendingRecord.payload.expectedCreatedAt
   } : null);
   if (!baseline) { notice("当前目标不可编辑，请重新读取会话", true); return; }
-  if (!pendingRecord && (session?.readOnly || !connected)) {
-    notice(session?.readOnly ? "当前为只读访问，不能编辑目标" : "本机连接中断，不能编辑目标", true);
+  if (!pendingRecord && (threadReadOnly() || !connected)) {
+    notice(threadReadOnly() ? "当前为只读访问，不能编辑目标" : "本机连接中断，不能编辑目标", true);
     return;
   }
   if (goalEditDraft?.threadId === thread?.id) {
@@ -8515,7 +9287,7 @@ function cancelGoalEdit() {
 }
 async function submitGoalEdit() {
   const draft = goalEditDraft;
-  if (!draft || goalEditPending || session?.readOnly || !connected || selectedId !== draft.threadId
+  if (!draft || goalEditPending || threadReadOnly(draft.threadId) || !connected || selectedId !== draft.threadId
       || thread?.id !== draft.threadId) return;
   if (!sameGoalEditBaseline(thread.goal, draft.baseline)) {
     await reloadThread().catch(() => {});
@@ -8639,7 +9411,7 @@ function renderGoalEditor(goal, pendingRecord) {
     unlock.hidden = !record;
     revert.disabled = !!record;
     input.disabled = !!record;
-    save.disabled = !!record || session?.readOnly || !connected || !input.value.trim()
+    save.disabled = !!record || threadReadOnly() || !connected || !input.value.trim()
       || bytes > 16 * 1024 || input.value.trim() === baseline.objective || baselineChanged;
     resizeInput();
   };
@@ -8726,7 +9498,7 @@ function renderGoalStatus() {
   const pendingRecord = goalEditPending?.payload.threadId === thread?.id ? goalEditPending : null;
   const editing = goalEditDraft?.threadId === thread?.id;
   const signature = JSON.stringify([thread?.id, objective, status, goal?.createdAt ?? null,
-    session?.readOnly, connected, editing,
+    threadReadOnly(), connected, editing,
     pendingRecord ? [pendingRecord.id, pendingRecord.state, pendingRecord.deviceId === session?.device.id] : null]);
   if (root.dataset.goalSignature === signature) {
     updateGoalLiveView(root, goal);
@@ -8783,12 +9555,13 @@ function renderGoalStatus() {
   const edit = button("", pendingRecord ? "核对目标编辑回执" : editing ? "继续编辑目标" : "编辑目标",
     () => beginGoalEdit(goal), "goal-edit-button");
   edit.replaceChildren(icon("edit"));
+  edit.hidden = threadReadOnly();
   const editable = editableGoalStatuses.includes(status);
-  edit.disabled = !pendingRecord && (!editable || session?.readOnly || !connected);
+  edit.disabled = !pendingRecord && (!editable || threadReadOnly() || !connected);
   edit.title = pendingRecord ? "目标编辑待确认，点击核对回执"
     : editing ? "继续编辑目标"
     : !editable ? "已完成目标不能编辑"
-      : session?.readOnly ? "当前为只读访问"
+      : threadReadOnly() ? "当前为只读访问"
         : !connected ? "本机连接中断" : "编辑目标";
   shell.append(card, edit);
   root.append(shell);
@@ -8887,7 +9660,7 @@ function invalidateBlockingRequests(id, requestId, resolved = false) {
   }
 }
 async function submitBlockingRequest(requestThreadId, request, action, value, identity = blockingApprovalIdentity(requestThreadId, request)) {
-  if (!connected || session?.readOnly || !session?.allowApprovals || thread?.id !== requestThreadId) return;
+  if (!connected || threadReadOnly(requestThreadId) || !session?.allowApprovals || thread?.id !== requestThreadId) return;
   const current = (thread.requests || []).find(value => value.id === request.id && value.method === request.method);
   if (!current || blockingApprovalIdentity(requestThreadId, current) !== identity) return;
   const deviceId = session.device.id, key = approvalReplyKey(requestThreadId, request, deviceId);
@@ -8958,7 +9731,7 @@ async function applyQuestionReceipt(key, receipt) {
   }
 }
 async function submitAsyncQuestion(requestThreadId, request, answers) {
-  if (!connected || session.readOnly || !session.allowApprovals || thread?.id !== requestThreadId) return;
+  if (!connected || threadReadOnly(requestThreadId) || !session.allowApprovals || thread?.id !== requestThreadId) return;
   const key = JSON.stringify([session.device.id, requestThreadId, request.id]);
   if (questionReplyReceipts.has(key) || request.params?.submissionState) return;
   const record = { id: randomId(), deviceId: session.device.id, threadId: requestThreadId,
@@ -8985,7 +9758,7 @@ function renderAsyncQuestion(card, request, requestThreadId) {
   const key = JSON.stringify([session.device.id, requestThreadId, request.id]);
   const receipt = questionReplyReceipts.get(key);
   const submissionState = receipt?.state || request.params?.submissionState;
-  const allowed = !session.readOnly && session.allowApprovals && connected;
+  const allowed = !threadReadOnly(requestThreadId) && session.allowApprovals && connected;
   const draft = questionDrafts.get(key) || new Map();
   questionDrafts.set(key, draft);
   card.append(element("strong", "", "Codex 需要你回答"));
@@ -9022,7 +9795,9 @@ function renderAsyncQuestion(card, request, requestThreadId) {
   }
   const status = element("p", "async-question-status muted");
   status.setAttribute("role", "status");
+  const footer = element("div", "async-question-footer");
   const actions = element("div", "approval-actions");
+  actions.hidden = threadReadOnly(requestThreadId);
   const submit = button("提交回答", "提交问答选择", () => {}, "primary");
   submit.type = "submit"; actions.append(submit);
   const update = () => {
@@ -9031,18 +9806,9 @@ function renderAsyncQuestion(card, request, requestThreadId) {
   };
   if (submissionState) {
     status.textContent = submissionState === "unknown"
-      ? "回答送达状态待确认，不会自动重发。请核对回答状态。"
+      ? "回答送达状态待确认，不会自动重发。"
       : "回答已提交，正在确认结果…";
-    const check = button(receipt ? "核对回答状态" : "刷新问题状态", "核对回答状态", async event => {
-      const control = event.currentTarget; control.disabled = true;
-      try {
-        if (receipt) await applyQuestionReceipt(key, await api(`/api/receipts/${receipt.id}`));
-        if (selectedId === requestThreadId) await reloadThread();
-      } catch (error) { notice(error.message, true); }
-      finally { if (control.isConnected) control.disabled = false; approvalSignature = null; renderApprovals(); }
-    });
-    check.disabled = !connected; actions.append(check);
-  } else if (!allowed) status.textContent = session.readOnly || !session.allowApprovals
+  } else if (!allowed) status.textContent = threadReadOnly(requestThreadId) || !session.allowApprovals
     ? "此设备没有问答回复权限，请在 Codex 桌面处理。" : "连接恢复后可以提交回答。";
   form.onsubmit = event => {
     event.preventDefault();
@@ -9050,7 +9816,7 @@ function renderAsyncQuestion(card, request, requestThreadId) {
     void submitAsyncQuestion(requestThreadId, request, Object.fromEntries(fields.map(question =>
       [question.id, { answers: [draft.get(question.id).trim()] }])));
   };
-  update(); form.append(status, actions); card.append(form);
+  update(); footer.append(status, actions); form.append(footer); card.append(form);
 }
 function commandApprovalPresentation(params = {}) {
   const network = params.networkApprovalContext;
@@ -9189,7 +9955,7 @@ function updateBlockingApprovalControls(card, key) {
 function renderApprovals() {
   const root = $("#approval-area"); if (!root) return;
   const requests = thread?.requests || [];
-  const signature = JSON.stringify([session?.device.id, thread?.id, requests, session?.readOnly, session?.allowApprovals, connected,
+  const signature = JSON.stringify([session?.device.id, thread?.id, requests, threadReadOnly(), session?.allowApprovals, connected,
     thread?.id ? [blockingRequestState(thread.id).epoch, blockingRequestState(thread.id).sourceVersion] : null,
     [...approvalReplies].filter(([, reply]) => reply.deviceId === session?.device.id && reply.threadId === thread?.id)
       .map(([key, reply]) => [key, reply.state]),
@@ -9216,7 +9982,7 @@ function renderApprovals() {
     const asyncQuestion = request.method === "remote/requestUserInputAsync";
     const questionKey = asyncQuestion ? JSON.stringify([session.device.id, requestThreadId, request.id]) : null;
     const requestSignature = JSON.stringify([blockingApprovalIdentity(requestThreadId, request),
-      session?.readOnly, session?.allowApprovals, connected,
+      threadReadOnly(), session?.allowApprovals, connected,
       asyncQuestion ? questionReplyReceipts.get(questionKey)?.state : null]);
     const previous = previousCards.get(requestSignature);
     if (previous) {
@@ -9237,7 +10003,7 @@ function renderApprovals() {
       const description = request.params?.command || request.params?.reason || request.params?.message || request.method;
       card.append(element("pre", "approval-description", typeof description === "string" ? description : JSON.stringify(description, null, 2)));
     }
-    if (session.readOnly || !session.allowApprovals) { card.append(element("small", "muted", "请在 Codex 桌面处理，此设备没有审批权限。")); cards.push(card); continue; }
+    if (threadReadOnly() || !session.allowApprovals) { card.append(element("small", "muted", "请在 Codex 桌面处理，此设备没有审批权限。")); cards.push(card); continue; }
     const requestIdentity = blockingApprovalIdentity(requestThreadId, request);
     const reply = (action, value) => submitBlockingRequest(requestThreadId, request, action, value, requestIdentity);
     const actions = element("div", "approval-actions");
@@ -9248,7 +10014,7 @@ function renderApprovals() {
         actions.append(button(label, label, async () => {
           const deviceId = session?.device.id;
           if (decision === "acceptForSession" && !await confirmAction("本会话允许", "允许此会话后续同类操作，不再逐次询问。请确认已了解该操作范围。", "允许本会话")) return;
-          if (!card.isConnected || session?.device.id !== deviceId || session.readOnly || !session.allowApprovals) return;
+          if (!card.isConnected || session?.device.id !== deviceId || threadReadOnly() || !session.allowApprovals) return;
           void reply("approve", { decision });
         }, decision === "accept" ? "primary" : ""));
       }
@@ -9398,7 +10164,7 @@ function renderGoalComposerRecovery(root) {
     box.append(check, confirm);
   }
   const restore = button("恢复目标草稿", "将本次保留的目标草稿恢复到输入框", () => {
-    if (busy || editingMessage || editingQueuedMessage || session.readOnly || threadDeletionLocked() || compactionLocked()) return;
+    if (busy || editingMessage || editingQueuedMessage || threadReadOnly() || threadDeletionLocked() || compactionLocked()) return;
     const current = snapshotDraft(), payload = goalPayloadForThread(record, selectedId);
     if (!matchingDraft(current, payload) && (current.text || current.skills.length || current.attachments.length || current.goalMode)) {
       notice("当前输入已有其他草稿，请先保留该草稿，再恢复本次目标。", true); return;
@@ -9406,12 +10172,14 @@ function renderGoalComposerRecovery(root) {
     storeDraft(selectedId, record.draft); restoreDraft(selectedId); updateComposer();
     $("#prompt").focus({ preventScroll: true });
   }, "text-button");
-  restore.disabled = busy || !!editingMessage || !!editingQueuedMessage || session.readOnly || threadDeletionLocked() || compactionLocked();
+  restore.disabled = busy || !!editingMessage || !!editingQueuedMessage || threadReadOnly() || threadDeletionLocked() || compactionLocked();
   box.append(restore);
   if (dismiss) box.append(dismiss);
   root.append(box);
 }
 function updateComposer() {
+  sessionTools?.updateContext();
+  syncRelatedSessionLayout();
   if (!$("#composer")) return;
   resizeComposerInput();
   renderGoalStatus();
@@ -9454,7 +10222,7 @@ function updateComposer() {
       : queueImageNote;
     attachmentNote.hidden = !unsupportedImages && !queueImageNote;
   }
-  setComposerAttachmentsDisabled(session.readOnly || deleting || compacting && editing || busy || stopping
+  setComposerAttachmentsDisabled(threadReadOnly() || deleting || compacting && editing || busy || stopping
     || !!editingMessage || editing && !!pending || editingQueuedMessage?.state === "starting" || (!creating && !selectedId));
   const add = $("#composer-add");
   const usage = contextUsage(thread?.tokenUsage);
@@ -9485,21 +10253,21 @@ function updateComposer() {
   if (unsupportedImages) send.title = "当前服务版本尚不支持图片发送，请先更新程序";
   if (unsupportedProjectless) send.title = "当前服务版本尚不支持无项目会话，请先更新程序或选择已有项目";
   send.setAttribute("aria-busy", String(busy || stopping));
-  send.disabled = deleting || busy || stopping || compacting && editing || !!compactionSendReason || !connected || session.readOnly || unsupportedImages || unsupportedProjectless || !!goalReason || composerAttachmentsLoading()
+  send.disabled = deleting || busy || stopping || compacting && editing || !!compactionSendReason || !connected || threadReadOnly() || unsupportedImages || unsupportedProjectless || !!goalReason || composerAttachmentsLoading()
     || (action !== "stop" && (!!pending || !prompt && !hasAttachments))
     || (!creating && (!selectedId || thread?.id !== selectedId));
   if (editingMessage || editingQueuedMessage?.state === "starting") send.disabled = true;
-  $("#prompt").disabled = session.readOnly || deleting || compacting && editing || !!editingMessage || editing && (busy || !!pending)
+  $("#prompt").disabled = threadReadOnly() || deleting || compacting && editing || !!editingMessage || editing && (busy || !!pending)
     || editingQueuedMessage?.state === "starting" || (!creating && !selectedId);
-  $("#new-chat").disabled = session.readOnly || !connected;
-  $("#model-button").disabled = session.readOnly || deleting || compacting || !!editingQueuedMessage
+  $("#new-chat").disabled = threadReadOnly() || !connected;
+  $("#model-button").disabled = threadReadOnly() || deleting || compacting || !!editingQueuedMessage
     || !!editingMessage && (busy || stopping || !!pending || !connected);
   $("#sidebar-view-toggle").disabled = !sidebar;
   syncNewChatProjectPicker();
   updatePromptOptimization();
-  for (const control of document.querySelectorAll(".row-menu-button")) control.disabled = session.readOnly || sidebarBusy || !connected;
+  for (const control of document.querySelectorAll(".row-menu-button")) control.disabled = threadReadOnly() || sidebarBusy || !connected;
   fitPopup();
-  $("#prompt").placeholder = session.readOnly ? "当前设备为只读模式" : compacting && !editing && !goalMode
+  $("#prompt").placeholder = threadReadOnly() ? "当前设备为只读模式" : compacting && !editing && !goalMode
     ? queueOnly ? "继续输入，发送后会排队等待压缩完成…" : "可继续编辑草稿，压缩期间暂不能发送…"
     : editingQueuedMessage ? "修改排队消息…" : goalMode ? goalComposerPlaceholder : active ? "补充要求，会使用原生消息队列…" : "给 Codex 发送消息，输入 / 选择命令或 Skill…";
   const model = currentModel(), effort = currentEffort();
@@ -9510,7 +10278,7 @@ function updateComposer() {
   $("#model-button").title = `模型：${name}${effort ? ` · 思考深度：${effortLabels[effort] || effort}` : ""}`;
   updateContextUsage();
   if ($("#skill-menu") && !$("#skill-menu").hidden) renderSkillMenu();
-  if (session.readOnly) closeComposerMenus({ keepContextUsage: true });
+  if (threadReadOnly()) closeComposerMenus({ keepContextUsage: true });
   refitComposerMenus();
   $("#pending-area").replaceChildren();
   const deletion = threadDeletions.get(threadDeletionKey(selectedId));
@@ -9525,9 +10293,9 @@ function updateComposer() {
     }
     $("#pending-area").append(box);
   }
-  if (unsupportedProjectless && !session.readOnly) $("#pending-area").append(element("div", "pending-banner",
+  if (unsupportedProjectless && !threadReadOnly()) $("#pending-area").append(element("div", "pending-banner",
     "当前运行的服务尚不支持无项目会话；更新程序后可直接发送，或先选择已有项目。"));
-  if (goalMode && goalReason && !busy && !pending && !session.readOnly)
+  if (goalMode && goalReason && !busy && !pending && !threadReadOnly())
     $("#pending-area").append(element("div", "pending-banner goal-composer-note", goalReason));
   if (pending && (!sending || pending.payload !== sending.payload)) {
     const unavailable = pending.invalid || (pending.deviceId && pending.deviceId !== session.device.id);
@@ -9554,6 +10322,7 @@ function updateComposer() {
   }
   renderFailedInputRecovery($("#pending-area"));
   renderGoalComposerRecovery($("#pending-area"));
+  renderRelatedOperationStatus($("#pending-area"));
   renderCompactionBanner($("#pending-area"), selectedId, compaction);
   if (historyInitialized && selectedId) scheduleMessages();
   updateMessageEditor();
@@ -9568,7 +10337,7 @@ function renderFailedInputRecovery(root) {
     ? "上次发送失败，原文字、Skill 和图片已保留，可恢复到输入框。"
     : "上次发送失败，原输入已保留；清空当前输入后可恢复，当前内容不会被覆盖。");
   const restore = button("恢复输入", "恢复上次失败的输入，不会自动发送", async () => {
-    if (draftKey() !== key || privateInputScope(session) !== scope || editingQueuedMessage || editingMessage
+    if (threadReadOnly() || draftKey() !== key || privateInputScope(session) !== scope || editingQueuedMessage || editingMessage
         || !inputDraftEmpty(snapshotDraft())) return;
     storeDraft(key, record.draft); restoreDraft(key); resizeComposerInput();
     if (!record.sessionRecovery) {
@@ -9580,14 +10349,14 @@ function renderFailedInputRecovery(root) {
     }
     updateComposer();
   }, "text-button");
-  restore.disabled = !empty || busy || stopping || !!pending;
+  restore.disabled = threadReadOnly() || !empty || busy || stopping || !!pending;
   box.append(restore); root.append(box);
 }
 async function sendMessage() {
   if (threadDeletionLocked() || threadDeleted(selectedId)) return;
   if (editingQueuedMessage) return submitQueuedMessageEdit();
   if (editingMessage) return;
-  if (busy || stopping || pending || session.readOnly || !connected) return;
+  if (busy || stopping || pending || threadReadOnly() || !connected) return;
   if (composerAttachmentsLoading()) { notice("图片正在读取，请稍后发送"); return; }
   let draft = snapshotDraft();
   const prefix = goalPrefix(draft.text, draft.skills);
@@ -9683,7 +10452,7 @@ async function sendMessage() {
   } finally { sending = null; busy = false; updateComposer(); }
 }
 async function stopGeneration() {
-  if (stopping || compactionLocked() || busy || session.readOnly || !connected || !selectedId || !isActiveThread()) return;
+  if (stopping || compactionLocked() || busy || threadReadOnly() || !connected || !selectedId || !isActiveThread()) return;
   const id = selectedId, version = selectionVersion;
   stopping = true; updateComposer();
   try {
@@ -9759,7 +10528,7 @@ async function recoverCompaction(id) {
   updateComposer();
 }
 async function compactContext() {
-  if (stopping || busy || pending || session.readOnly || !connected || !selectedId
+  if (stopping || busy || pending || threadReadOnly() || !connected || !selectedId
       || thread?.id !== selectedId || compactionLocked(selectedId)) return;
   const id = selectedId, baseline = normalizeCompaction(thread.compaction), receiptId = randomId();
   try {
@@ -9791,6 +10560,8 @@ function setConnection(value) {
   const restored = !connected && value;
   if (connected && !value) ++connectionCycleVersion;
   connected = value;
+  if (!value) stopRelatedSessionTimers();
+  else scheduleRelatedOperationCheck();
   if (restored && messageSkillLoadScope && skillScope !== messageSkillLoadScope && !skillLoading) {
     messageSkillLoadScope = ""; scheduleMessages();
   }
@@ -9913,6 +10684,7 @@ function receiveCompactionLifecycle(event, params) {
   }
 }
 function receive(event) {
+  scheduleRelatedMenuRefresh(event);
   if (event.method === "remote/notification") return;
   if (event.method === "remote/unauthorized") { requireAuthentication(); return; }
   if (["remote/disconnected", "remote/reconnected"].includes(event.method)) {
@@ -10113,6 +10885,7 @@ function receive(event) {
 function disconnect() {
   $("#video-preview-dialog")?.close();
   clearRemoteChannels();
+  resetRelatedSessions();
   sidebarViewSave = null;
   stopCatalogRefresh();
   stopGoalLiveTimer();
@@ -10241,6 +11014,7 @@ function suspendPage() {
   stopActivityTimer();
   stopGoalLiveTimer();
   finishQueueDrag();
+  sessionMenu?.close(); stopRelatedSessionTimers();
   if (session && $("#prompt")) { rememberDraft(); rememberTranscript(); rememberReadingPosition(); }
   closeContextUsageTip();
   pageLeaving = true;
@@ -10258,6 +11032,7 @@ function resumePage() {
   refreshCachedCatalogs();
   syncGoalLiveTimer();
   startConnectionPoll(session.device.id);
+  scheduleRelatedOperationCheck();
   ensureStream();
   void Promise.all([syncConnectionState(), refreshAll({ fresh: true })])
     .catch(() => {}).finally(drainPendingNotificationOpen);
@@ -10392,10 +11167,12 @@ window.addEventListener("pagehide", suspendPage);
 window.addEventListener("blur", () => finishQueueDrag());
 window.addEventListener("beforeunload", suspendPage);
 window.addEventListener("pageshow", resumePage);
-window.addEventListener("popstate", () => {
+window.addEventListener("popstate", event => {
   if (!session) return;
   const id = new URLSearchParams(location.hash.slice(1)).get("thread");
-  if (id && id !== selectedId) void selectThread(id, { closeSidebar: false }).catch(error => notice(error.message, true));
+  const view = normalizeRelatedView(event.state?.[relatedHistoryKey], id);
+  if (id && (relatedExitTransition || id !== selectedId || JSON.stringify(view) !== JSON.stringify(relatedSessionView)))
+    void selectThread(id, { closeSidebar: false, relatedView: view }).catch(error => notice(error.message, true));
   else if (!id && selectedId) showWelcome();
 });
 postPlatformMessage("ready");

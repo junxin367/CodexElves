@@ -279,9 +279,28 @@ async fn ensure_program(directory: &Path) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+fn ngrok_command(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    // Managed tunnels connect directly. Inherited proxy settings can trigger ERR_NGROK_9009.
+    // Restrict removal to this child so the manager and downloads retain their proxy settings.
+    for key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "HTTP_PROXY_ENV",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "http_proxy_env",
+    ] {
+        command.env_remove(key);
+    }
+    command
+}
+
 async fn start(directory: &Path, target: &str) -> anyhow::Result<Running> {
     let program = ensure_program(directory).await?;
-    let mut command = Command::new(program);
+    let mut command = ngrok_command(&program);
     command
         .args(["http", target, "--config"])
         .arg(directory.join(CONFIG_FILE))
@@ -316,4 +335,81 @@ async fn start(directory: &Path, target: &str) -> anyhow::Result<Running> {
         }
     }
     anyhow::bail!("ngrok 未建立 HTTPS 入口")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ngrok_command_does_not_inherit_proxy_settings() {
+        const PROXY_KEYS: [&str; 8] = [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "HTTP_PROXY_ENV",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "http_proxy_env",
+        ];
+        const STAGE: &str = "CODEX_ELVES_NGROK_ENV_TEST_STAGE";
+        const PRESERVED: &str = "CODEX_ELVES_NGROK_ENV_TEST_PRESERVED";
+        const PROXY: &str = "http://127.0.0.1:9";
+        let stage = std::env::var(STAGE).unwrap_or_default();
+        if stage == "child" {
+            for key in PROXY_KEYS {
+                assert!(std::env::var_os(key).is_none(), "{key} leaked into ngrok");
+            }
+            assert_eq!(std::env::var(PRESERVED).as_deref(), Ok("preserved"));
+            assert_eq!(std::env::var("NO_PROXY").as_deref(), Ok("localhost"));
+            return;
+        }
+
+        let before: Vec<_> = PROXY_KEYS.iter().map(std::env::var_os).collect();
+        let executable = std::env::current_exe().unwrap();
+        let mut command = if stage == "parent" {
+            for key in PROXY_KEYS {
+                assert_eq!(std::env::var(key).as_deref(), Ok(PROXY));
+            }
+            let mut command = ngrok_command(&executable);
+            command.env(STAGE, "child");
+            command
+        } else {
+            // Seed a separate parent process without changing the test runner's environment.
+            let mut command = Command::new(&executable);
+            command
+                .envs(PROXY_KEYS.map(|key| (key, PROXY)))
+                .env(STAGE, "parent")
+                .env(PRESERVED, "preserved")
+                .env("NO_PROXY", "localhost");
+            command
+        };
+        command
+            .args([
+                "--exact",
+                "remote_access::ngrok_tunnel::tests::ngrok_command_does_not_inherit_proxy_settings",
+                "--nocapture",
+            ])
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(crate::windows_integration::CREATE_NO_WINDOW);
+        let output = tokio::time::timeout(Duration::from_secs(15), command.output())
+            .await
+            .expect("environment test child timed out")
+            .expect("environment test child could not start");
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "environment test child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for (key, value) in PROXY_KEYS.iter().zip(before) {
+            assert!(
+                std::env::var_os(key) == value,
+                "{key} changed in the parent process"
+            );
+        }
+    }
 }

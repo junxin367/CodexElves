@@ -37,6 +37,7 @@ mod image_preview;
 mod ngrok_tunnel;
 mod service;
 mod video;
+mod workspace;
 mod zrok_tunnel;
 use credentials::{AccessKey, AccessKeyStore, lock_access_key_store};
 pub use credentials::{access_credentials_status, configure_access_key};
@@ -46,6 +47,8 @@ use zrok_tunnel::ZrokTunnelService;
 const NATIVE_SCRIPT: &str = include_str!("../../../assets/remote-access/native.js");
 const WEB_HTML: &str = include_str!("../../../assets/remote-access/index.html");
 const WEB_JS: &str = include_str!("../../../assets/remote-access/app.js");
+const WEB_SESSION_TOOLS_JS: &str = include_str!("../../../assets/remote-access/session-tools.js");
+const WEB_SESSION_MENU_JS: &str = include_str!("../../../assets/remote-access/session-menu.js");
 const WEB_ATTACHMENTS_JS: &str = include_str!("../../../assets/remote-access/attachments.js");
 const WEB_RECOVERY_STORE_JS: &str = include_str!("../../../assets/remote-access/recovery-store.js");
 const WEB_EVENTS_CLIENT_JS: &str = include_str!("../../../assets/remote-access/events-client.js");
@@ -1041,6 +1044,7 @@ impl RemoteAccessController {
                 let mut auth = self.auth.lock().await;
                 auth.devices.retain(|device| device.id != id);
                 self.save_devices(&auth).await?;
+                drop(auth);
                 self.publish_event(json!({"method":"remote/authorizationChanged"}));
                 Ok(json!({"status":"ok"}))
             }
@@ -1394,6 +1398,20 @@ fn web_assets() -> &'static HashMap<&'static str, StaticWebAsset> {
             (
                 "/app.js",
                 StaticWebAsset::new("application/javascript; charset=utf-8", WEB_JS.as_bytes()),
+            ),
+            (
+                "/session-tools.js",
+                StaticWebAsset::new(
+                    "application/javascript; charset=utf-8",
+                    WEB_SESSION_TOOLS_JS.as_bytes(),
+                ),
+            ),
+            (
+                "/session-menu.js",
+                StaticWebAsset::new(
+                    "application/javascript; charset=utf-8",
+                    WEB_SESSION_MENU_JS.as_bytes(),
+                ),
             ),
             (
                 "/attachments.js",
@@ -1782,6 +1800,8 @@ pub fn web_router(
         .route("/", get(static_web_asset))
         .route("/app-resources.json", get(static_web_asset))
         .route("/app.js", get(static_web_asset))
+        .route("/session-tools.js", get(static_web_asset))
+        .route("/session-menu.js", get(static_web_asset))
         .route("/attachments.js", get(static_web_asset))
         .route("/recovery-store.js", get(static_web_asset))
         .route("/events-client.js", get(static_web_asset))
@@ -1810,6 +1830,8 @@ pub fn web_router(
         .route("/api/channel-events", get(channels::catch_up))
         .route("/api/logout", post(logout))
         .route("/api/read/{action}", post(read))
+        .route("/api/workspace/changes", post(workspace::changes))
+        .route("/api/workspace/change", post(workspace::change))
         .route(
             "/api/action/{action}",
             post(action).layer(DefaultBodyLimit::max(MAX_ACTION_BODY_BYTES)),
@@ -2305,6 +2327,105 @@ async fn logout(
         .into_response())
 }
 
+fn workspace_identity(payload: &Value) -> Result<Value, ApiError> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| ApiError::new(400, "工作目录请求无效"))?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "threadId" | "projectId" | "path" | "section" | "ifRevision"
+        )
+    }) {
+        return Err(ApiError::new(400, "只能通过会话或项目标识读取变更"));
+    }
+    if let Some(revision) = object.get("ifRevision")
+        && !revision.as_str().is_some_and(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        return Err(ApiError::new(400, "变更缓存版本无效"));
+    }
+    fn valid_id(value: &Value) -> Option<&str> {
+        value.as_str().filter(|id| {
+            !id.is_empty()
+                && id.len() <= 120
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+    }
+    match (object.get("threadId"), object.get("projectId")) {
+        (Some(value), None) => valid_id(value)
+            .map(|id| json!({"threadId": id}))
+            .ok_or_else(|| ApiError::new(400, "会话 ID 无效")),
+        (None, Some(value)) => valid_id(value)
+            .map(|id| json!({"projectId": id}))
+            .ok_or_else(|| ApiError::new(400, "项目 ID 无效")),
+        _ => Err(ApiError::new(400, "请指定一个会话或本机项目")),
+    }
+}
+
+async fn workspace_context(
+    state: &WebState,
+    payload: &Value,
+    authorization: &RemoteAuthorization,
+) -> Result<PathBuf, ApiError> {
+    let identity = workspace_identity(payload)?;
+    let result = state
+        .controller
+        .native
+        .call_authorized("workspaceContext", identity.clone(), authorization)
+        .await
+        .map_err(|error| {
+            error
+                .downcast_ref::<ApiError>()
+                .cloned()
+                .unwrap_or_else(|| ApiError::new(503, DESKTOP_READ_GUIDANCE))
+        })?;
+    let result = native_result(result)?;
+    if result["hostId"] != "local"
+        || identity
+            .as_object()
+            .unwrap()
+            .iter()
+            .any(|(key, value)| result.get(key) != Some(value))
+    {
+        return Err(ApiError::new(409, "会话工作目录身份已变化，请重新打开会话"));
+    }
+    let cwd = result["cwd"]
+        .as_str()
+        .filter(|cwd| !cwd.is_empty() && cwd.len() <= 32_768 && !cwd.contains('\0'))
+        .ok_or_else(|| ApiError::new(404, "当前会话没有可读取的工作目录"))?;
+    let path = PathBuf::from(cwd);
+    if !path.is_absolute() {
+        return Err(ApiError::new(400, "会话工作目录必须是本机绝对路径"));
+    }
+    #[cfg(windows)]
+    if !matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+    ) {
+        return Err(ApiError::new(400, "仅支持本机磁盘上的项目变更"));
+    }
+    let path = tokio::task::spawn_blocking(move || {
+        let path = std::fs::canonicalize(path)
+            .map_err(|_| ApiError::new(404, "会话工作目录不存在或无法读取"))?;
+        if !path.is_dir() || !canonical_path_is_local(&path) {
+            return Err(ApiError::new(400, "仅支持本机磁盘上的项目目录"));
+        }
+        Ok(path)
+    })
+    .await
+    .map_err(|_| ApiError::new(503, "读取会话工作目录失败"))??;
+    authorization.check().await.map_err(authorization_error)?;
+    Ok(path)
+}
+
 async fn read(
     State(state): State<WebState>,
     Path(action): Path<String>,
@@ -2324,6 +2445,7 @@ async fn read(
             | "sendState"
             | "promptOptimization"
             | "notifications"
+            | "relatedThreads"
     ) {
         return Err(ApiError::new(404, "不支持的读取操作"));
     }
@@ -2332,6 +2454,9 @@ async fn read(
     }
     if action == "notifications" {
         validate_notifications_payload(&payload)?;
+    }
+    if action == "relatedThreads" {
+        validate_related_threads_payload(&action, &payload)?;
     }
     if action == "promptOptimization" {
         payload = json!({"requestId": prompt_optimization_request_id(&device.id, payload["requestId"].as_str().unwrap_or(""))?});
@@ -2412,6 +2537,25 @@ fn notification_thread_id(value: &Value) -> Option<&str> {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     })
+}
+
+fn validate_related_threads_payload(action: &str, payload: &Value) -> Result<(), ApiError> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| ApiError::new(400, "关联会话参数无效"))?;
+    let close = action == "closeSideThread";
+    if object.len() != if close { 2 } else { 1 }
+        || object
+            .keys()
+            .any(|key| key != "threadId" && !(close && key == "parentThreadId"))
+        || notification_thread_id(&payload["threadId"]).is_none()
+        || close
+            && (notification_thread_id(&payload["parentThreadId"]).is_none()
+                || payload["threadId"] == payload["parentThreadId"])
+    {
+        return Err(ApiError::new(400, "关联会话标识无效"));
+    }
+    Ok(())
 }
 
 fn validate_notifications_payload(payload: &Value) -> Result<(), ApiError> {
@@ -3088,6 +3232,8 @@ async fn action(
             | "updateGoal"
             | "setGoal"
             | "create"
+            | "createSideThread"
+            | "closeSideThread"
             | "pinProject"
             | "pinThread"
             | "deleteThread"
@@ -3100,6 +3246,9 @@ async fn action(
     }
     if matches!(action.as_str(), "approve" | "answer") && !state.settings.allow_approvals {
         return Err(ApiError::new(403, "远程审批与询问回答已关闭，请在桌面处理"));
+    }
+    if matches!(action.as_str(), "createSideThread" | "closeSideThread") {
+        validate_related_threads_payload(&action, &payload)?;
     }
     validate_compaction_queue_send_payload(&action, &payload)?;
     if matches!(action.as_str(), "send" | "create" | "setGoal") {
@@ -4146,6 +4295,229 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn related_threads_payload_rejects_extra_fields_and_parent_self_close() {
+        for action in ["relatedThreads", "createSideThread"] {
+            assert!(
+                validate_related_threads_payload(action, &json!({"threadId":"parent-1"})).is_ok()
+            );
+            for payload in [
+                Value::Null,
+                json!([]),
+                json!({}),
+                json!({"threadId":null}),
+                json!({"threadId":"../private"}),
+                json!({"threadId":"parent-1","cwd":"C:\\private"}),
+                json!({"threadId":"parent-1","parentThreadId":"other"}),
+                json!({"threadId":"parent-1","prompt":"不要注入额外消息"}),
+            ] {
+                assert_eq!(
+                    validate_related_threads_payload(action, &payload)
+                        .unwrap_err()
+                        .code,
+                    400
+                );
+            }
+        }
+        assert!(
+            validate_related_threads_payload(
+                "closeSideThread",
+                &json!({"threadId":"side-1","parentThreadId":"parent-1"})
+            )
+            .is_ok()
+        );
+        for payload in [
+            json!({"threadId":"side-1"}),
+            json!({"threadId":"side-1","parentThreadId":null}),
+            json!({"threadId":"parent-1","parentThreadId":"parent-1"}),
+            json!({"threadId":"side-1","parentThreadId":"parent-1","delete":true}),
+        ] {
+            assert_eq!(
+                validate_related_threads_payload("closeSideThread", &payload)
+                    .unwrap_err()
+                    .code,
+                400
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn related_threads_routes_preserve_auth_read_only_and_idempotency() {
+        let temp_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp");
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let state_dir = tempfile::Builder::new()
+            .prefix("related-route-")
+            .tempdir_in(temp_root)
+            .unwrap();
+        configure_access_key(state_dir.path(), "related-test-key").unwrap();
+        let native = Arc::new(RecordingActionBridge {
+            calls: Mutex::new(Vec::new()),
+            result: Mutex::new(json!({"ok":true,"threadId":"side-1","parentThreadId":"parent-1"})),
+        });
+        let controller =
+            RemoteAccessController::new(native.clone(), state_dir.path().to_path_buf()).unwrap();
+        controller.publish_access_policy(&RemoteAccessSettings {
+            enabled: true,
+            ..RemoteAccessSettings::default()
+        });
+        controller.running.store(true, Ordering::SeqCst);
+        {
+            let mut auth = controller.auth.lock().await;
+            let key_id = auth.access_key.as_ref().unwrap().id.clone();
+            auth.devices.push(Device {
+                id: "related-device".into(),
+                name: "关联会话隔离验证".into(),
+                token_hash: hash("related-cookie"),
+                created_at_ms: now_ms(),
+                expires_at_ms: now_ms() + 60_000,
+                last_seen_at_ms: now_ms(),
+                key_id,
+                public_origin: None,
+            });
+        }
+        let state = WebState {
+            controller: controller.clone(),
+            settings: RemoteAccessSettings::default(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("codex_elves_device=related-cookie"),
+        );
+        let invoke = |name: &str, state, headers, payload| {
+            action(State(state), Path(name.to_string()), headers, Json(payload))
+        };
+        for (index, (name, payload)) in [
+            ("createSideThread", json!({"threadId":"parent-1"})),
+            (
+                "closeSideThread",
+                json!({"threadId":"side-1","parentThreadId":"parent-1"}),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("related-{index}");
+            headers.insert("idempotency-key", HeaderValue::from_str(&id).unwrap());
+            assert_eq!(
+                invoke(name, state.clone(), HeaderMap::new(), payload.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                401
+            );
+            let mut read_only = state.clone();
+            read_only.settings.read_only = true;
+            assert_eq!(
+                invoke(name, read_only, headers.clone(), payload.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                403
+            );
+            let mut no_id = headers.clone();
+            no_id.remove("idempotency-key");
+            assert_eq!(
+                invoke(name, state.clone(), no_id, payload.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                400
+            );
+            assert_eq!(native.calls.lock().await.len(), index);
+            let first = invoke(name, state.clone(), headers.clone(), payload.clone())
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(first["state"], "completed");
+            assert_eq!(
+                invoke(name, state.clone(), headers.clone(), payload)
+                    .await
+                    .unwrap()
+                    .0,
+                first
+            );
+            assert_eq!(native.calls.lock().await.len(), index + 1);
+        }
+        let list_payload = json!({"threadId":"parent-1"});
+        assert_eq!(
+            read(
+                State(state.clone()),
+                Path("relatedThreads".into()),
+                HeaderMap::new(),
+                Json(list_payload.clone())
+            )
+            .await
+            .unwrap_err()
+            .code,
+            401
+        );
+        let mut read_only = state.clone();
+        read_only.settings.read_only = true;
+        *native.result.lock().await = json!({"ok":true,"threadId":"parent-1","subagents":[],
+            "completedSubagentCount":0,"sideThreads":[]});
+        assert_eq!(
+            read(
+                State(read_only),
+                Path("relatedThreads".into()),
+                headers.clone(),
+                Json(list_payload)
+            )
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(native.calls.lock().await.len(), 3);
+        controller.auth.lock().await.devices.clear();
+        assert_eq!(
+            invoke(
+                "createSideThread",
+                state,
+                headers,
+                json!({"threadId":"parent-1"})
+            )
+            .await
+            .unwrap_err()
+            .code,
+            401
+        );
+        assert_eq!(native.calls.lock().await.len(), 3);
+    }
+
+    #[test]
+    fn workspace_identity_requires_one_native_owner_and_never_accepts_a_cwd() {
+        assert_eq!(
+            workspace_identity(&json!({"threadId":"thread-1","path":"a.txt","section":"staged"}))
+                .unwrap(),
+            json!({"threadId":"thread-1"})
+        );
+        assert_eq!(
+            workspace_identity(&json!({"projectId":"project-1"})).unwrap(),
+            json!({"projectId":"project-1"})
+        );
+        assert_eq!(
+            workspace_identity(&json!({"threadId":"thread-1","ifRevision":"a".repeat(64)}))
+                .unwrap(),
+            json!({"threadId":"thread-1"})
+        );
+        for payload in [
+            json!({}),
+            json!({"threadId":"thread-1","projectId":"project-1"}),
+            json!({"threadId":"thread-1","cwd":"C:\\private"}),
+            json!({"threadId":"thread-1","root":"C:\\private"}),
+            json!({"threadId":"../../private"}),
+            json!({"projectId":null}),
+            json!({"projectId":""}),
+            json!({"threadId":"thread-1","ifRevision":null}),
+            json!({"threadId":"thread-1","ifRevision":"a".repeat(63)}),
+            json!({"threadId":"thread-1","ifRevision":"A".repeat(64)}),
+            json!([]),
+        ] {
+            assert_eq!(workspace_identity(&payload).unwrap_err().code, 400);
+        }
+    }
 
     #[tokio::test]
     async fn recovered_desktop_remains_readable_with_degraded_launch_status() {

@@ -28,7 +28,7 @@ const deferredResourcePaths = new Set([
 const criticalResourceOrder = [
   "/", "/style.css", "/platform.js", "/pwa.js", "/markdown.js", "/app.js",
   "/events-client.js", "/recovery-store.js", "/attachments.js", "/message-actions.js",
-  "/events-worker.js", "/channels.js"
+  "/events-worker.js", "/channels.js", "/session-tools.js", "/session-menu.js"
 ];
 const recoveryPaths = new Set(["/cache-recovery.html", "/cache-recovery.js"]);
 const metadataPath = "/sw.js?__codex_elves_cache_metadata=manifest";
