@@ -870,16 +870,19 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-related-menu-item.session-related-menu-heading-action{flex:0 0 auto;justify-content:center;width:1.25em;min-height:0;height:1.25em;padding:0;border-radius:0;background:transparent;color:var(--muted);font-size:calc(var(--font-size)*.75);line-height:1}
 .session-related-menu-heading-action:hover,.session-related-menu-heading-action:focus-visible{background:transparent}
 .session-related-menu-heading-action svg{width:100%;height:100%}
+.session-related-menu-collapsible-header{cursor:pointer}
+.session-related-menu-heading-toggle[aria-expanded=false] svg{transform:rotate(-90deg)}
+.session-related-menu-subagents[hidden]{display:none}
 .session-related-menu-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .session-related-menu-time{flex-shrink:0;color:var(--muted);font-size:inherit;font-variant-numeric:tabular-nums;white-space:nowrap}
 .session-related-menu-unread{flex:0 0 auto;width:.45em;height:.45em;border-radius:50%;background:#3076df}
 .session-related-menu-completed,.session-related-menu-status{margin:0;padding:6px 9px;color:var(--muted);font-size:inherit;line-height:1.6;text-align:left;overflow-wrap:anywhere}
-.session-related-menu-completed{display:flex;align-items:center;gap:6px}
-.session-related-menu-completed-icons{display:inline-flex;align-items:center;gap:2px;flex-shrink:0;line-height:1}
-.session-related-menu-agent-icon{display:inline-flex;width:1.1em;height:1.1em;color:#bb743e}
-.session-related-menu-agent-icon:nth-child(2){color:#329774}
-.session-related-menu-agent-icon:nth-child(3){color:#508ee4}
-.session-related-menu-agent-icon:nth-child(4){color:#9a72cd}
+.session-related-menu-completed{display:flex;align-items:center;gap:6px;min-height:32px;padding:4px 9px}
+.session-related-menu-completed-icons{display:inline-flex;align-items:center;gap:2px;min-width:0;overflow:hidden;line-height:1}
+.session-related-menu-agent-icon{display:inline-flex;flex:0 0 1.1em;width:1.1em;height:1.1em;color:#9a72cd}
+.session-related-menu-agent-icon[data-variant="1"]{color:#508ee4}
+.session-related-menu-agent-icon[data-variant="2"]{color:#329774}
+.session-related-menu-agent-icon[data-variant="3"]{color:#d7a64b}
 .session-related-menu-agent-icon svg{width:100%;height:100%}
 .session-related-menu-completed-count{min-width:0;font-variant-numeric:tabular-nums}
 .session-related-menu-status{padding-top:9px;border-top:1px solid var(--line)}

@@ -51,6 +51,8 @@
   }
 
   // 同时核对四条身份路径及当前模型的 UI、请求调用点；不依赖压缩变量名。
+  // 原生菜单也会只传 hostId 读取账号能力；有 model 字段时才校验模型，
+  // ui-model 始终显式传入当前模型，因此空值和非 GPT 仍无法产生 Fast 选项。
   // 不修改 requirements、模型 serviceTiers 或 Standard 的解析规则。
   const gates = [
     {
@@ -65,7 +67,7 @@
         `[^{}]{0,300}\\k<variable>&&!\\k<loading>&&\\k<data>!=null\\?${id}\\(\\k<data>\\):null`,
         `[^{}]{0,300}\\{serviceTierAccess:${id},isLoading:\\k<loading>\\}`,
       ].join(""),
-      replacement: (groups) => `(${gpt(`${groups.argument}?.model`)}&&(${groups.gate}||${allow(groups.host, `${groups.identity}?.authMethod`)}))`,
+      replacement: (groups) => `((!Object.hasOwn(${groups.argument}??{},'model')||${gpt(`${groups.argument}?.model`)})&&(${groups.gate}||${allow(groups.host, `${groups.identity}?.authMethod`)}))`,
     },
     {
       kind: "request-access",
@@ -439,7 +441,7 @@
       const rewritten = rewriteModuleBase(transformed.patchedSource, url);
       return {
         ...transformed,
-        patchedSource: `${rewritten.source}\n;window.__codexElvesNativeFastCompiled="v2";window.__codexElvesNativeFastPatchState="patched";window.__codexElvesNativeFastModuleComplete?.();\n//# sourceURL=${url}\n`,
+        patchedSource: `${rewritten.source}\n;window.__codexElvesNativeFastCompiled="v3";window.__codexElvesNativeFastPatchState="patched";window.__codexElvesNativeFastModuleComplete?.();\n//# sourceURL=${url}\n`,
         diagnostics: { ...transformed.diagnostics, ...rewritten.counts, reason: "module-prepared" },
       };
     } catch (error) {
@@ -459,11 +461,11 @@
     const document = root.document;
     if (!moduleUrl(url) || !moduleUrl(root.location?.href)) return { ok: false, diagnostics: { url, reason: "unsupported-document-url" } };
     if (!document || document.documentElement) return failed("document-already-started");
-    if (typeof patchedSource !== "string" || !patchedSource.includes('window.__codexElvesNativeFastCompiled="v2";')) return failed("unprepared-module");
+    if (typeof patchedSource !== "string" || !patchedSource.includes('window.__codexElvesNativeFastCompiled="v3";')) return failed("unprepared-module");
     let temporaryRoot = null;
     try {
       // import map 不能撤销。预加载失败时仅重载一次，下一文档跳过映射并正常加载原模块。
-      const fallbackKey = "codex-elves-native-fast-fallback-v2";
+      const fallbackKey = "codex-elves-native-fast-fallback-v3";
       const storage = root.sessionStorage;
       if (!storage) return failed("fallback-storage-unavailable");
       if (storage.getItem(fallbackKey) === url) {
@@ -489,7 +491,7 @@
         if (root.__codexElvesNativeFastModuleComplete === complete) delete root.__codexElvesNativeFastModuleComplete;
       };
       const recover = (reason) => {
-        if (recovering || root.__codexElvesNativeFastCompiled === "v2") return;
+        if (recovering || root.__codexElvesNativeFastCompiled === "v3") return;
         recovering = true;
         cleanup();
         failed(reason);
@@ -499,10 +501,10 @@
         } catch { /* 存储失败时禁止重载，避免重载循环。 */ }
       };
       const complete = () => {
-        if (root.__codexElvesNativeFastCompiled === "v2") cleanup();
+        if (root.__codexElvesNativeFastCompiled === "v3") cleanup();
       };
       const armWatchdog = () => {
-        if (root.__codexElvesNativeFastCompiled === "v2") { cleanup(); return; }
+        if (root.__codexElvesNativeFastCompiled === "v3") { cleanup(); return; }
         if (watchdog != null) return;
         // 不监听普通 error/unhandledrejection。只检查目标模块自己的执行完成标记。
         watchdog = root.setTimeout(() => {

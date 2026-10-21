@@ -1,4 +1,10 @@
 let menuSequence = 0;
+const agentIconPaths = [
+  '<circle cx="10" cy="10" r="7"/><ellipse cx="10" cy="10" rx="3" ry="7"/><path d="M3 10h14"/>',
+  '<path d="M10 9C4 10 2 6 5 4c3-2 6 0 5 5Zm1 1c-1-6 3-8 5-5 2 3 0 6-5 5Zm-1 1c6-1 8 3 5 5-3 2-6 0-5-5Zm-1-1c1 6-3 8-5 5-2-3 0-6 5-5Z"/>',
+  '<circle cx="10" cy="5" r="2.5"/><path d="M7 8h6m-5 0c0 4-1 5-3 7v2h10v-2c-2-2-3-3-3-7ZM6 15h8"/>',
+  '<path d="m10 2 1.7 4.3L16 4l-2.3 4.3L18 10l-4.3 1.7L16 16l-4.3-2.3L10 18l-1.7-4.3L4 16l2.3-4.3L2 10l4.3-1.7L4 4l4.3 2.3Z"/>'
+];
 
 function element(tag, className = "", text = "") {
   const node = document.createElement(tag);
@@ -19,11 +25,15 @@ function menuResponse(value, threadId) {
   const validItem = item => item && nonempty(item.id);
   if (!value || value.ok !== true || value.threadId !== threadId
       || !Array.isArray(value.subagents) || !value.subagents.every(validItem)
+      || value.completedSubagents != null && (!Array.isArray(value.completedSubagents)
+        || !value.completedSubagents.every(validItem)
+        || value.completedSubagents.length !== value.completedSubagentCount)
       || !Array.isArray(value.sideThreads) || !value.sideThreads.every(validItem)
       || !Number.isInteger(value.completedSubagentCount) || value.completedSubagentCount < 0) {
     throw new Error("会话菜单数据格式无效，请重试。");
   }
-  return { ...value, subagents: [...value.subagents], sideThreads: [...value.sideThreads] };
+  return { ...value, subagents: [...value.subagents],
+    completedSubagents: [...(value.completedSubagents || [])], sideThreads: [...value.sideThreads] };
 }
 function menuSignature(data) {
   return JSON.stringify({ ...data,
@@ -99,7 +109,7 @@ export function mountSessionMenu({
   function entryFor(value = syncContext()) {
     if (!canRead(value)) return null;
     let entry = entries.get(value.owner);
-    if (!entry) entry = { context: value, snapshot: null, revision: 0,
+    if (!entry) entry = { context: value, snapshot: null, revision: 0, subagentsExpanded: true,
       dirty: true, request: null, restoring: null, restored: false, again: false };
     entries.delete(value.owner); entries.set(value.owner, entry);
     while (entries.size > maxEntries) {
@@ -114,9 +124,13 @@ export function mountSessionMenu({
       && entries.get(entry.context.owner) === entry;
   }
   function save(entry) {
+    const data = entry.snapshot.data;
+    const completedSubagents = data.completedSubagents.filter(item => item.ephemeral === false);
     try {
       Promise.resolve(cache?.put?.(entry.context.cacheScope, entry.context.threadId,
-        { version: 1, ...entry.snapshot })).catch(() => {});
+        { version: 3, ...entry.snapshot,
+          data: { ...data, subagents: data.subagents.filter(item => item.ephemeral === false),
+            completedSubagents, completedSubagentCount: completedSubagents.length, sideThreads: [] } })).catch(() => {});
     } catch {}
   }
   function applySnapshot(entry, snapshot, persist = false) {
@@ -141,7 +155,7 @@ export function mountSessionMenu({
     const revision = entry.revision;
     entry.restoring = Promise.resolve().then(() => cache.get(entry.context.cacheScope, entry.context.threadId))
       .then(saved => {
-        if (!accepts(entry, revision) || entry.snapshot || saved?.version !== 1
+        if (!accepts(entry, revision) || entry.snapshot || saved?.version !== 3
             || !finiteTime(saved.loadedAtMs)) return;
         applySnapshot(entry, { data: menuResponse(saved.data, entry.context.threadId), loadedAtMs: saved.loadedAtMs });
       }).catch(() => {}).finally(() => {
@@ -228,6 +242,16 @@ export function mountSessionMenu({
     menu.append(group);
     return group;
   }
+  function agentIcon(index) {
+    const node = element("span", "session-related-menu-agent-icon");
+    node.dataset.variant = index % agentIconPaths.length;
+    node.setAttribute("aria-hidden", "true");
+    node.innerHTML = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${agentIconPaths[index % agentIconPaths.length]}</svg>`;
+    return node;
+  }
+  function menuButtons(root = menu) {
+    return [...root.querySelectorAll("button:not(:disabled)")].filter(node => !node.closest("[hidden]"));
+  }
   function render() {
     const focusedKey = menu.contains(document.activeElement) ? document.activeElement.dataset.menuKey : null;
     cancelPress(); hideContext(); times.length = 0; mutationButtons.clear(); menu.replaceChildren();
@@ -235,28 +259,51 @@ export function mountSessionMenu({
     menu.append(tools);
     const changes = itemButton("变更", openChanges, []);
     changes.dataset.menuKey = "changes"; tools.append(changes);
-    const subagents = section("子代理"), data = cached?.data;
+    const data = cached?.data, entry = entries.get(owner), expected = owner;
+    const toggleSubagents = element("button", "session-related-menu-item session-related-menu-heading-action session-related-menu-heading-toggle");
+    toggleSubagents.type = "button"; toggleSubagents.tabIndex = -1;
+    toggleSubagents.setAttribute("role", "menuitem");
+    toggleSubagents.dataset.menuKey = "toggle-subagents";
+    toggleSubagents.disabled = !entry;
+    toggleSubagents.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8.5 7 7 7-7"/></svg>';
+    const subagents = section("子智能体", toggleSubagents);
+    const subagentHeader = subagents.querySelector(".session-related-menu-group-header");
+    subagentHeader.classList.add("session-related-menu-collapsible-header");
+    const subagentContents = element("div", "session-related-menu-subagents");
+    subagentContents.id = `${id}-subagents`;
+    toggleSubagents.setAttribute("aria-controls", subagentContents.id);
+    const updateExpanded = () => {
+      const expanded = entry?.subagentsExpanded !== false;
+      subagentContents.hidden = !expanded;
+      toggleSubagents.setAttribute("aria-expanded", String(expanded));
+      const label = `${expanded ? "收起" : "展开"}子智能体`;
+      toggleSubagents.setAttribute("aria-label", label); toggleSubagents.title = label;
+      if (!expanded && subagentContents.contains(document.activeElement)) toggleSubagents.focus();
+    };
+    subagentHeader.addEventListener("click", event => {
+      event.preventDefault(); event.stopPropagation();
+      if (!entry || !owns(expected)) return;
+      entry.subagentsExpanded = !entry.subagentsExpanded;
+      updateExpanded(); fit();
+    });
+    updateExpanded(); subagents.append(subagentContents);
     for (const item of data?.subagents || []) {
-      const button = itemButton(nonempty(item.name) ? item.name : "子代理", openSubagent, [item]);
+      const button = itemButton(nonempty(item.name) ? item.name : "子智能体", openSubagent, [item]);
       button.classList.add("session-related-menu-thread");
       button.dataset.menuKey = `subagent:${item.id}`;
       const time = element("span", "session-related-menu-time");
       time.setAttribute("title", "执行时间");
-      button.append(time); subagents.append(button);
+      button.append(time); subagentContents.append(button);
       times.push({ node: time, item, loadedAtMs: cached.loadedAtMs });
     }
     if (data?.completedSubagentCount > 0) {
       const completed = element("div", "session-related-menu-completed");
       const icons = element("span", "session-related-menu-completed-icons");
       icons.setAttribute("aria-hidden", "true");
-      for (let index = 0; index < Math.min(4, data.completedSubagentCount); index++) {
-        const icon = element("span", "session-related-menu-agent-icon");
-        icon.innerHTML = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v2M6 13c-2 .7-3 2-3 4m11-4c2 .7 3 2 3 4"/><rect x="4" y="4" width="12" height="8" rx="2.5"/><path d="M7 7.5v1M13 7.5v1"/></svg>';
-        icons.append(icon);
-      }
+      for (let index = 0; index < Math.min(4, data.completedSubagentCount); index++) icons.append(agentIcon(index));
       completed.append(icons, element("span", "session-related-menu-completed-count",
-        `已完成 ${data.completedSubagentCount} 个`));
-      subagents.append(completed);
+        `${data.completedSubagentCount} 完成`));
+      subagentContents.append(completed);
     }
     const create = itemButton("新建侧边会话", createSideThread, [], "create");
     create.dataset.menuKey = "create";
@@ -283,7 +330,7 @@ export function mountSessionMenu({
     }
     updatePermissions(); updateTimes();
     if (focusedKey) {
-      [...menu.querySelectorAll("button")].find(node => node.dataset.menuKey === focusedKey && !node.disabled)?.focus();
+      menuButtons().find(node => node.dataset.menuKey === focusedKey)?.focus();
     }
     if (opened) fit();
   }
@@ -350,7 +397,7 @@ export function mountSessionMenu({
     });
   }
   function focusEdge(last = false) {
-    const buttons = [...menu.querySelectorAll("button:not(:disabled)")];
+    const buttons = menuButtons();
     (last ? buttons.at(-1) : buttons[0] || menu)?.focus();
   }
   function refresh({ background = false } = {}) {
@@ -448,7 +495,7 @@ export function mountSessionMenu({
     if (!layer.contains(event.target) && event.target !== trigger) return;
     if (event.key === "Tab") { close(); return; }
     const currentMenu = actionMenu.hidden ? menu : actionMenu;
-    const buttons = [...currentMenu.querySelectorAll("button:not(:disabled)")];
+    const buttons = menuButtons(currentMenu);
     if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
       event.preventDefault(); event.stopPropagation();
       const index = buttons.indexOf(document.activeElement);
@@ -510,6 +557,7 @@ export function mountSessionMenu({
         const data = entry.snapshot?.data;
         if (threadId && entry.context.threadId !== threadId && entry.context.threadId !== parentThreadId
             && !data?.subagents.some(item => item.id === threadId)
+            && !data?.completedSubagents.some(item => item.id === threadId)
             && !data?.sideThreads.some(item => item.id === threadId)) continue;
         entry.dirty = true;
         if (entry.request) entry.again = true;

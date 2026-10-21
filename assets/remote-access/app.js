@@ -86,6 +86,7 @@ let skillCatalogRevision = 0, globalSkillEpoch = "", globalSkillsInvalidated = f
 let appliedSkillCatalog = null, appliedGlobalSkills = null;
 let catalogRefreshTimer = null, modelsRetryAt = 0;
 let readScope = null, readGeneration = 0, readingPositionTimer = null, recentHistoryPage = null;
+let readingPositionRevision = 0;
 const draftWrites = new Map(), failedInputRecoveries = new Map();
 let recoveryScope = null, recoveryGeneration = 0, draftStorageError = "", connecting = null;
 let initialAuthenticationRequired = false, appReadySent = false, transcriptChecking = false;
@@ -1279,6 +1280,7 @@ function normalizeRelatedView(value, id = value?.threadId) {
     ? { scope, threadId: id, ...(parent != null ? { parentThreadId: parent } : {}),
       ...(source != null ? { openedFromThreadId: source } : {}), kind: value.kind,
       ...(typeof value.name === "string" ? { name: value.name } : {}),
+      ...(typeof value.ephemeral === "boolean" ? { ephemeral: value.ephemeral } : {}),
       ...(value.returnToParent === true ? { returnToParent: true } : {}),
       ...(value.owner === relatedNavigationOwner ? { owner: value.owner } : {}) } : null;
 }
@@ -1289,12 +1291,14 @@ function threadReadOnly(id = selectedId) {
     || relatedSessionView?.threadId === id && relatedSessionView.kind === "subagent"
   );
 }
-function rememberRelatedView(id, kind, parentThreadId, name = "", { openedFromThreadId = null } = {}) {
+function rememberRelatedView(id, kind, parentThreadId, name = "", { openedFromThreadId = null, ephemeral } = {}) {
   const known = normalizeRelatedView(relatedThreadViews.get(id), id);
   const value = normalizeRelatedView({ scope: privateInputScope(session), threadId: id,
     parentThreadId: parentThreadId ?? (known?.kind === kind ? known.parentThreadId : null),
-    openedFromThreadId, kind, name });
+    openedFromThreadId, kind, name,
+    ephemeral: ephemeral === true || known?.ephemeral === true ? true : ephemeral ?? known?.ephemeral });
   if (value) relatedThreadViews.set(id, value);
+  if (value?.ephemeral === true && known?.ephemeral !== true) discardPersistentThreadDisplay(id);
   return value;
 }
 function relatedViewForThread(id) {
@@ -1375,14 +1379,15 @@ function applyRelatedThreadMetadata(value) {
   const previous = normalizeRelatedView(relatedSessionView, value.id);
   const inferred = validRelatedThreadId(value.parentThreadId) && value.parentThreadId !== value.id
     && ["subagent", "side"].includes(value.viewKind)
-    ? rememberRelatedView(value.id, value.viewKind, value.parentThreadId, value.agentName || value.title || "") : null;
+    ? rememberRelatedView(value.id, value.viewKind, value.parentThreadId, value.agentName || value.title || "",
+      { ephemeral: value.ephemeral }) : null;
   if (inferred) {
     // 原生直接父会话和本次打开来源不同：主会话菜单也会列出孙级子代理。
     const source = previous?.kind === inferred.kind
       ? previous.openedFromThreadId || (previous.returnToParent ? previous.parentThreadId : null) : null;
     // 打开来源只用于返回，不作为原生类型或父关系的证据；完成后退出运行列表也不改变来源。
     relatedSessionView = { ...rememberRelatedView(value.id, inferred.kind, inferred.parentThreadId, inferred.name,
-      { openedFromThreadId: source }),
+      { openedFromThreadId: source, ephemeral: value.ephemeral }),
       ...(source && previous.returnToParent
         ? { returnToParent: true } : {}),
       ...(source && previous.owner
@@ -1392,6 +1397,7 @@ function applyRelatedThreadMetadata(value) {
     relatedThreadViews.delete(value.id);
     relatedSessionView = null;
   }
+  if (!inferred && value.ephemeral === true) discardPersistentThreadDisplay(value.id);
   syncRelatedSessionLayout();
   syncThreadHash(value.id);
 }
@@ -1456,12 +1462,38 @@ async function loadRelatedThreads(parentThreadId) {
 function adoptRelatedMenu(result) {
   const parentThreadId = result.threadId;
   if (selectedId !== parentThreadId || relatedSessionView) return;
-  for (const item of result.subagents) rememberRelatedView(item.id, "subagent", null, item.name,
-    { openedFromThreadId: parentThreadId });
+  const openSideIds = new Set(result.sideThreads.map(item => item.id));
+  const closedIds = [...relatedThreadViews.values()].filter(view => view.kind === "side"
+    && (view.parentThreadId || view.openedFromThreadId) === parentThreadId
+    && !openSideIds.has(view.threadId)).map(view => view.threadId);
+  if (closedIds.length) void retireNativeSideThreads(closedIds, { notify: false });
+  for (const item of [...result.subagents, ...(result.completedSubagents || [])])
+    rememberRelatedView(item.id, "subagent", null, item.name,
+      { openedFromThreadId: parentThreadId, ephemeral: item.ephemeral });
   for (const item of result.sideThreads) rememberRelatedView(item.id, "side", null, item.title,
     { openedFromThreadId: parentThreadId });
   filterSideThreadSidebar(sidebar);
   renderSidebar();
+}
+async function retireNativeSideThreads(ids, { notify = true } = {}) {
+  const closed = new Set(ids.filter(validRelatedThreadId));
+  const current = normalizeRelatedView(relatedSessionView, selectedId);
+  for (const id of closed) {
+    sessionMenu?.removeThread(id);
+    relatedThreadViews.delete(id);
+    transcriptCache.remove(session?.device.id, id);
+    if (readScope) void readCache.remove(readScope, "transcript", id).catch(() => {});
+  }
+  if (sidebar?.unreadSideThreads)
+    sidebar.unreadSideThreads = sidebar.unreadSideThreads.filter(item => !closed.has(item.id));
+  syncSideThreadUnread();
+  if (current?.kind === "side" && closed.has(current.threadId)) {
+    if (thread?.id === current.threadId) thread = { ...thread, readOnly: true, sideThreadClosed: true };
+    historyInitialized = false;
+    updateComposer();
+    if (notify) notice("此侧边会话已在 Codex 关闭");
+    await returnToParentSession();
+  }
 }
 function scheduleRelatedMenuRefresh(event) {
   const params = event.params || {}, id = params.threadId ?? params.conversationId ?? params.thread?.id;
@@ -1485,7 +1517,7 @@ async function openRelatedThread(item, kind, parentThreadId = selectedId, {
 } = {}) {
   if (relatedSessionView || !validRelatedThreadId(item?.id) || parentThreadId !== selectedId) return;
   const view = rememberRelatedView(item.id, kind, null, item.name || item.title || "",
-    { openedFromThreadId: parentThreadId });
+    { openedFromThreadId: parentThreadId, ephemeral: item.ephemeral });
   if (!view) return;
   sessionMenu?.close(); closePopup(); closeComposerMenus();
   await selectThread(item.id, { closeSidebar: false, relatedView: { ...view, owner, returnToParent: true },
@@ -1641,8 +1673,7 @@ async function finishRelatedOperation(record, result, { allowSelection = false }
       notice(`侧边会话已创建。${result.warning.trim()}`, true);
   } else {
     sessionMenu?.updateSideThread(record.parentThreadId, { id: result.threadId }, { remove: true });
-    transcriptCache.remove(session?.device.id, result.threadId);
-    if (readScope) void readCache.remove(readScope, "transcript", result.threadId).catch(() => {});
+    await retireNativeSideThreads([result.threadId], { notify: false });
     notice("侧边会话已关闭");
   }
   updateComposer();
@@ -1683,6 +1714,8 @@ async function runRelatedOperation(action, item = null) {
   if (action === "closeSideThread") {
     const view = normalizeRelatedView(relatedThreadViews.get(item?.id), item?.id);
     if ((view?.openedFromThreadId || view?.parentThreadId) !== parentThreadId || view.kind !== "side") return;
+    if (!await confirmAction("关闭侧边会话", "关闭后，此临时侧边会话及其内容将无法恢复。确定关闭吗？", "关闭会话", true)
+        || selectedId !== parentThreadId || scope !== privateInputScope(session) || relatedSessionView) return;
   }
   const record = { id: randomId(), action, scope, parentThreadId,
     ...(item ? { threadId: item.id } : {}), state: "submitting", selectionToken,
@@ -1730,8 +1763,60 @@ function renderRelatedOperationStatus(root) {
     box.append(check); root.append(box);
   }
 }
+function threadEphemeralState(id, value = null) {
+  const flags = [value?.ephemeral, value?.relatedView?.ephemeral,
+    thread?.id === id ? thread?.ephemeral : undefined,
+    relatedSessionView?.threadId === id ? relatedSessionView?.ephemeral : undefined,
+    normalizeRelatedView(relatedThreadViews.get(id), id)?.ephemeral,
+    selectedId === id ? recentHistoryPage?.ephemeral : undefined];
+  return flags.includes(true) ? true : flags.includes(false) ? false : undefined;
+}
+function discardPersistentThreadDisplay(id) {
+  const scope = readScope, generation = readGeneration, positionRevision = readingPositionRevision;
+  if (!scope || scope !== privateInputScope(session)) return;
+  void (async () => {
+    await readCache.remove(scope, "transcript", id);
+    const position = await readCache.get(scope, "view", "last");
+    if (generation === readGeneration && scope === readScope && scope === privateInputScope(session)
+        && positionRevision === readingPositionRevision
+        && position?.threadId === id) await readCache.remove(scope, "view", "last");
+  })().catch(() => {});
+}
+function retireMissingEphemeralTranscript(id) {
+  if (id !== selectedId || threadEphemeralState(id) !== true
+      || relatedSessionView?.kind === "side" || relatedThreadViews.get(id)?.kind === "side"
+      || thread?.id === id && thread.viewKind === "side") return;
+  // 原生已确认不存在：使同轮回包失效，并允许重新选择同一 ID 核对原生状态。
+  ++selectionVersion;
+  resetMessages();
+  thread = null;
+  transcriptCache.remove(session?.device.id, id);
+  discardPersistentThreadDisplay(id);
+  turns.clear(); transcriptEvents.clear(); recentHistoryPage = null; historyCursor = null;
+  historyInitialized = false; transcriptChecking = false;
+  historyError = "此原生临时会话已关闭或不存在";
+  renderMessages();
+}
+function persistentThreadDisplayAllowed(id, value) {
+  const ephemeral = threadEphemeralState(id, value);
+  if (ephemeral === true) return false;
+  const view = normalizeRelatedView(value?.relatedView, id)
+    || normalizeRelatedView(relatedSessionView, id)
+    || normalizeRelatedView(relatedThreadViews.get(id), id);
+  const subagent = view?.kind === "subagent" || value?.viewKind === "subagent"
+    || thread?.id === id && thread.viewKind === "subagent";
+  // 旧子代理快照没有原生生命周期标识，重新读取原生数据后再决定能否缓存。
+  return view?.kind !== "side" && (!subagent || ephemeral === false);
+}
 function cacheDisplayData(kind, id, value, options) {
   if (!readScope || readScope !== privateInputScope(session)) return;
+  if (["thread", "transcript", "view"].includes(kind)) {
+    const threadId = kind === "view" ? value?.threadId : id;
+    if (!persistentThreadDisplayAllowed(threadId, value) || value?.viewKind === "side"
+        || relatedThreadViews.get(threadId)?.kind === "side") return;
+  }
+  if (kind === "sidebar") value = { ...value, sideThreadIds: [], unreadSideThreads: [] };
+  if (kind === "view") readingPositionRevision++;
   void readCache.put(readScope, kind, id, value, options).catch(() => {});
 }
 function ownsWorkspaceCache(scope, kind) {
@@ -1779,7 +1864,9 @@ async function optionalCachedRead(task, timeout = 250) {
 }
 function readingPosition() {
   const root = $("#messages"), anchor = root && visibleMessageAnchor(root);
+  const ephemeral = threadEphemeralState(selectedId);
   return { threadId: selectedId, scrollTop: root?.scrollTop || 0, followMessages,
+    ...(typeof ephemeral === "boolean" ? { ephemeral } : {}),
     ...(relatedSessionView ? { relatedView: normalizeRelatedView(relatedSessionView, selectedId) } : {}),
     anchor: anchor?.key ? { key: anchor.key, offset: anchor.offset } : null };
 }
@@ -1871,6 +1958,12 @@ async function restoreReadViews(value) {
     globalSkillsInvalidated = saved.globalSkills.invalidated === true;
   }
   if (typeof saved.id === "string" && /^[A-Za-z0-9_-]{1,120}$/.test(saved.id) && !threadDeleted(saved.id)) {
+    if (!persistentThreadDisplayAllowed(saved.id, saved.snapshot)
+        || !persistentThreadDisplayAllowed(saved.id, saved.view?.threadId === saved.id
+          ? { ...saved.snapshot, ...saved.view } : null)) {
+      discardPersistentThreadDisplay(saved.id);
+      return;
+    }
     if (Array.isArray(saved.snapshot?.turns) && saved.snapshot.turns.length) {
       const position = saved.view?.threadId === saved.id ? saved.view : saved.snapshot;
       transcriptCache.put(value.device.id, saved.id,
@@ -8475,6 +8568,7 @@ function renderMessages(keepScroll = true) {
 }
 function rememberTranscript({ retainView = false, retainRelatedParent = false } = {}) {
   if (!session || !selectedId || !historyInitialized || threadDeleted(selectedId)) return;
+  const ephemeral = threadEphemeralState(selectedId);
   const summary = [...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
     ...(sidebar?.projects || []).flatMap(project => project.threads || [])].find(item => item.id === selectedId);
   const currentTurns = [...turns.values()], events = [...transcriptEvents.values()];
@@ -8486,6 +8580,7 @@ function rememberTranscript({ retainView = false, retainRelatedParent = false } 
     transcriptEvents: events.filter(event => recentIds.has(event.turnId)) } : recentHistoryPage;
   const snapshot = {
     turns: currentTurns, transcriptEvents: events, historyCursor,
+    ...(typeof ephemeral === "boolean" ? { ephemeral } : {}),
     ...readingPosition(), recentWindow, recentPage: recentHistoryPage,
     title: thread?.title || summary?.title || "",
     cwd: thread?.cwd || summary?.cwd || "",
@@ -8624,13 +8719,16 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     reconcileCompaction(id, thread.compaction);
     renderMessages();
   } else if (!cached) $("#messages").replaceChildren(historyPlaceholder());
-  if (!force && !initialSide && !preparedView && !cached && readScope) {
+  if (!force && !initialSide && !preparedView && !cached && readScope
+      && threadEphemeralState(id) !== true) {
     const owner = readScope;
     const snapshot = await optionalCachedRead(readCache.get(owner, "transcript", id), 50);
     if (version !== selectionVersion || selectedId !== id || owner !== readScope || threadDeleted(id)) return;
-    if (snapshot?.turns?.length) {
+    if (snapshot?.turns?.length && persistentThreadDisplayAllowed(id, snapshot)) {
       transcriptCache.put(session.device.id, id, snapshot);
       cached = restoreTranscript(id);
+    } else if (snapshot && !persistentThreadDisplayAllowed(id, snapshot)) {
+      discardPersistentThreadDisplay(id);
     }
   }
   rememberReadingPosition();
@@ -8674,8 +8772,15 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     updateComposer(); renderApprovals();
     if (historyInitialized) scheduleMessages();
   } catch (error) {
-    if (!controller.signal.aborted && version === selectionVersion && selectedId === id)
+    if (!controller.signal.aborted && version === selectionVersion && selectedId === id
+        && relatedSessionView?.kind === "side" && error.code === 404) {
+      await retireNativeSideThreads([id]);
+      return;
+    }
+    if (!controller.signal.aborted && version === selectionVersion && selectedId === id) {
+      if (error.code === 404) retireMissingEphemeralTranscript(id);
       notice(`会话设置读取失败，可点击刷新重试：${error.message}`, true);
+    }
   } finally {
     if (selectionController === controller) selectionController = null;
   }
@@ -8787,6 +8892,13 @@ async function readHistoryPage(older, version, itemsTurnId) {
     if (controller.signal.aborted || pageLeaving || version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
     if (!Array.isArray(result?.data)) throw new Error("会话历史返回格式无效");
     if (itemsTurnId && (result.scope !== "items" || result.turnId !== itemsTurnId)) throw new Error("会话消息分页归属无效");
+    if (result.ephemeral === true) {
+      if (thread?.id === id) thread.ephemeral = true;
+      if (relatedSessionView?.threadId === id) relatedSessionView = { ...relatedSessionView, ephemeral: true };
+      const view = normalizeRelatedView(relatedThreadViews.get(id), id);
+      if (view) relatedThreadViews.set(id, { ...view, ephemeral: true });
+      discardPersistentThreadDisplay(id);
+    }
     if (result.sideHistoryVersion === 1) {
       const inherited = new Set(result.inheritedTurnIds || []);
       for (const turnId of inherited) turns.delete(turnId);
@@ -8795,6 +8907,8 @@ async function readHistoryPage(older, version, itemsTurnId) {
     if (latestPage) recentHistoryPage = {
       turns: [...result.data].reverse(), transcriptEvents: result.transcriptEvents || [],
       historyCursor: result.nextCursor, followMessages: true, scrollTop: 0,
+      ...(typeof result.ephemeral === "boolean" ? { ephemeral: result.ephemeral }
+        : typeof threadEphemeralState(id) === "boolean" ? { ephemeral: threadEphemeralState(id) } : {}),
       ...(result.sideHistoryVersion === 1 ? { sideHistoryVersion: 1 } : {})
     };
     if (checkingCached && !pruneCachedHistory(result.data, readVersion)) historyCursor = result.nextCursor;
@@ -8829,6 +8943,7 @@ async function readHistoryPage(older, version, itemsTurnId) {
     rememberTranscript();
   } catch (error) {
     if (controller.signal.aborted || pageLeaving || version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
+    if (!itemsTurnId && error.code === 404) retireMissingEphemeralTranscript(id);
     historyAutoFailed = true;
     if (!historyInitialized) {
       historyError = `最新消息加载失败：${error.message}`;
@@ -9027,7 +9142,17 @@ async function reloadThread() {
       const historyRead = loadHistory(false, version);
       let latest;
       try { ({ thread: latest } = await api("/api/read/thread", { threadId: id })); }
-      catch (error) { if (request.again && version === selectionVersion) continue; throw error; }
+      catch (error) {
+        if (version === selectionVersion && relatedSessionView?.kind === "side" && error.code === 404) {
+          await historyRead.catch(() => {});
+          await retireNativeSideThreads([id]);
+          return;
+        }
+        if (version === selectionVersion && selectedId === id && error.code === 404)
+          retireMissingEphemeralTranscript(id);
+        if (request.again && version === selectionVersion) continue;
+        throw error;
+      }
       if (version !== selectionVersion || read !== threadReadVersion || selectedId !== id || threadDeleted(id)) return;
       if (usageVersion !== tokenUsageVersion) latest.tokenUsage = notifiedTokenUsage;
       if (runtimeVersion !== statusVersion && notifiedStatus) latest.status = notifiedStatus;
@@ -10704,6 +10829,13 @@ function receive(event) {
   }
   const params = { ...event.params || {} };
   const eventThreadId = params.threadId ?? params.conversationId ?? params.thread?.id;
+  if (event.method === "remote/relatedThreadsChanged") {
+    void retireNativeSideThreads(Array.isArray(params.closedThreadIds) ? params.closedThreadIds : [])
+      .catch(error => notice(error.message, true));
+    if (relatedSessionView?.kind === "side" && relatedSessionView.parentThreadId === eventThreadId)
+      scheduleReload();
+    return;
+  }
   if (event.method === "thread/deleted" && typeof eventThreadId === "string") {
     applyThreadDeletion(eventThreadId);
     void loadSidebar().catch(() => {});

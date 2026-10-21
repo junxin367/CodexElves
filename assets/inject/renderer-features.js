@@ -4548,7 +4548,7 @@
   ];
   function codexAppAssetUrl(namePart) {
     const urls = [
-      ...(window.__codexElvesNativeFastCompiled === "v2"
+      ...(["v2", "v3"].includes(window.__codexElvesNativeFastCompiled)
         ? [window.__codexElvesNativeFastModuleDiagnostics?.url] : []),
       ...Array.from(document.scripts || []).map((script) => script.src),
       ...Array.from(document.querySelectorAll("link[href]") || []).map((link) => link.href),

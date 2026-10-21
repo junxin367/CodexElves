@@ -13568,7 +13568,15 @@ const tierId = function Yat(e,t){return Kat(e,t)?.id??null};
 const selectedTier = function Xat(e,t,n={fast:!0,ultrafast:!0}){let r=t??Yat(e,e?.defaultServiceTier??null);return r===eot||!Wat(r,n)?null:r};
 
 const uiModel = function _wo(e,t,n,r,i){let a=(0,ywo.c)(56),{modelSettings:o,setModelAndReasoningEffort:s}=t,host=q(gk),O;a[8]===host?O=a[9]:(O={hostId:host},a[8]=host,a[9]=O);let{serviceTierAccess:k}=Mxo(O),A;return{serviceTierAccess:k}}.toString();
-const source = [ui, request, queueDefault, queueExplicit, savedTier, requestTier, uiModel].join("\n");
+// 模型菜单同时读取账号能力和当前模型选项；账号能力调用原生只传 hostId。
+const modelMenu = function menu(model, tiers) {
+  const {serviceTierAccess:access} = _wo(null, {modelSettings:{model},setModelAndReasoningEffort(){}});
+  const {serviceTierAccess:at} = Mxo({hostId:q(gk)});
+  const availableOptions = [{value:null}, ...tiers.map(tier => ({value:tier.id}))]
+    .filter(option => Wat(option.value, access));
+  return {visible:at!=null&&availableOptions.length>1,availableOptions,access:at};
+}.toString();
+const source = [ui, request, queueDefault, queueExplicit, savedTier, requestTier, uiModel, modelMenu].join("\n");
 const url = "app://-/assets/app-initial-fixture.js";
 const helper = fs.readFileSync(require.resolve("./native-fast-unlock.js"), "utf8");
 const enabled = { enhancementsEnabled: true, codexAppNativeFastUnlock: true };
@@ -13614,7 +13622,7 @@ function environment(patch = true) {
   const result = api.transform(source, url);
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
   const shared = [access, permitted, speedKind, modelTier, fastTier, tierId, selectedTier].map(fn => fn.toString()).join("\n");
-  vm.runInContext(`const eot=\`default\`,$at=\`ultrafast\`;${shared};const Tr=Uat,Xi=Xat;\n${patch ? result.patchedSource : source};globalThis.fixtures={Mxo,S$s,x$s,Vin,Mfn,modelUi:_wo};`, context);
+  vm.runInContext(`const eot=\`default\`,$at=\`ultrafast\`;${shared};const Tr=Uat,Xi=Xat;\n${patch ? result.patchedSource : source};globalThis.fixtures={Mxo,S$s,x$s,Vin,Mfn,modelUi:_wo,modelMenu:menu};`, context);
   const fns = context.fixtures;
   const queueRuntime = {
     isCopilotApiAvailable: async () => state.copilotAvailable,
@@ -13685,6 +13693,12 @@ async function runNativeFastTests() {
 
   assert.equal(environment(false).fns.Mxo({model:state.model.model}).serviceTierAccess, null, "原生 API key UI 确实被门控");
   assert.equal(fns.Mxo({model:state.model.model}).serviceTierAccess.fast, true);
+  assert.equal(fns.modelMenu(state.model.model, state.model.serviceTiers).visible, true,
+    "真实菜单的账号能力二次校验不能因没有模型参数而隐藏已支持的 Fast");
+  assert.equal(fns.Mxo({hostId:"local"}).serviceTierAccess.fast, true, "保留原生账号能力读取契约");
+  assert.equal(fns.Mxo().serviceTierAccess.fast, true, "保留原生默认 hostId 的能力读取");
+  assert.equal(fns.Mxo({hostId:"local",model:undefined}).serviceTierAccess, null, "明确的未知模型仍默认关闭");
+  assert.equal(fns.modelMenu(state.model.model, []).visible, false, "目录没有声明 Fast 时不显示入口");
   state.authLoading = true;
   assert.equal(fns.Mxo({model:state.model.model}).serviceTierAccess, null);
   assert.equal(fns.Mxo({model:state.model.model}).isLoading, true);
@@ -13695,6 +13709,7 @@ async function runNativeFastTests() {
   state.requirementsPending = false;
   state.requirements = { requirements: { featureRequirements: { fast_mode: false, ultrafast_mode: false } } };
   assert.equal(fns.Mxo({model:state.model.model}).serviceTierAccess.fast, false, "保留 fast_mode 管理限制");
+  assert.equal(fns.modelMenu(state.model.model, state.model.serviceTiers).visible, false, "管理限制仍关闭真实菜单入口");
   assert.equal(await fns.x$s(env.scope, "local", "gpt-5.6", "priority"), null);
   assert.equal(await env.queue().readServiceTier("gpt-5.6"), null);
   state.requirements = { requirements: null };
@@ -13772,6 +13787,9 @@ async function runNativeFastTests() {
   for (const model of ["claude-opus-5-5", "deepseek-v4", "qwen3-coder", "gemini-3-pro", "kimi-k2.5", "swe-2", "unknown-model", "", null, undefined]) {
     assert.equal(modelUiAccess(gptModel).fast, true);
     assert.equal(modelUiAccess(model), null, `${model} 不开放原生 Fast`);
+    assert.equal(fns.modelMenu(model, [{id:"priority",name:"Fast"}]).visible, false,
+      `${model} 即使声明 Fast，也不能借账号能力读取打开菜单`);
+    assert.equal(fns.modelMenu(gptModel, [{id:"priority",name:"Fast"}]).visible, true, "切回 GPT 后菜单立即恢复");
     assert.equal(await fns.x$s(env.scope, "local", model, "priority"), null);
     assert.equal(await env.queue().readServiceTier(model), null);
     state.model.model = model;
@@ -13788,6 +13806,9 @@ async function runNativeFastTests() {
   assert.equal(modelUiAccess("主力模型").fast, true);
   assert.equal(modelUiAccess("gpt-6-alias"), null);
   assert.equal(modelUiAccess("备用模型"), null);
+  assert.equal(fns.modelMenu("主力模型", [{id:"priority",name:"Fast"}]).visible, true);
+  assert.equal(fns.modelMenu("gpt-6-alias", [{id:"priority",name:"Fast"}]).visible, false);
+  assert.equal(fns.modelMenu("备用模型", [{id:"priority",name:"Fast"}]).visible, false);
   assert.equal(await env.queue().readServiceTier("主力模型"), "priority");
   assert.equal(await env.queue().readServiceTier("gpt-6-alias"), null);
   for (const model of ["gpt-5.4", "gpt-5.6-sol", "gpt-6-astra[600K]", "openai/gpt-6-astra", "gpt-7-sol"]) assert.equal(api.runtime.isGptModel(model), true);
@@ -13795,6 +13816,7 @@ async function runNativeFastTests() {
   state.accountType = "chatgpt";
   api.runtime.update(null);
   assert.equal(modelUiAccess("claude-opus-5-5"), null, "官方登录也不能为非 GPT 模型开放 Fast");
+  assert.equal(fns.modelMenu("claude-opus-5-5", [{id:"priority",name:"Fast"}]).visible, false);
   assert.equal(await fns.x$s(env.scope, "local", "claude-opus-5-5", "priority"), null);
   assert.equal(await env.queue().readServiceTier("claude-opus-5-5"), null);
   state.model.model = "claude-opus-5-5";
@@ -13939,16 +13961,18 @@ async function runNativeFastModuleTests({ source, url }) {
   assert.ok(prepared.patchedSource.includes('raw import("./untouched.js") import.meta.url'));
   assert.ok(prepared.patchedSource.includes('// import("./comment.js"); import.meta.url'));
   assert.ok(prepared.patchedSource.includes(`//# sourceURL=${url}\n`));
-  assert.ok(prepared.patchedSource.includes('window.__codexElvesNativeFastCompiled="v2";'));
+  assert.ok(prepared.patchedSource.includes('window.__codexElvesNativeFastCompiled="v3";'));
 
   const renderer = fs.readFileSync(path.join(__dirname, "renderer-features.js"), "utf8");
   const candidate = renderer.match(/  function codexAppAssetUrl\([^]*?\n  }/)[0];
-  const assetWindow = { __codexElvesNativeFastCompiled: "v2", __codexElvesNativeFastModuleDiagnostics: { url } };
+  const assetWindow = { __codexElvesNativeFastCompiled: "v3", __codexElvesNativeFastModuleDiagnostics: { url } };
   const candidates = () => vm.runInNewContext(`${candidate};codexAppAssetUrl("app-initial-")`, {
     window: assetWindow, document: { scripts: [], querySelectorAll: () => [] },
     performance: { getEntriesByType: () => [{ name: "blob:app://-/fixture" }] },
   });
   assert.equal(candidates(), url);
+  assetWindow.__codexElvesNativeFastCompiled = "v2";
+  assert.equal(candidates(), url, "后台升级时仍能识别旧补丁模块，重启后加载 v3");
   assetWindow.__codexElvesNativeFastCompiled = undefined;
   assert.equal(candidates(), "");
 
@@ -14018,7 +14042,7 @@ async function runNativeFastModuleTests({ source, url }) {
     const success = browser();
     assert.equal(success.api.installModule(prepared.patchedSource, url).ok, true);
     if (!beforeDomReady) { success.domContentLoaded(); assert.equal(success.timers.size, 1); }
-    success.window.__codexElvesNativeFastCompiled = "v2";
+    success.window.__codexElvesNativeFastCompiled = "v3";
     success.window.__codexElvesNativeFastModuleComplete();
     if (beforeDomReady) success.domContentLoaded();
     assert.equal(success.timers.size, 0, "目标模块执行成功立即撤销守护");

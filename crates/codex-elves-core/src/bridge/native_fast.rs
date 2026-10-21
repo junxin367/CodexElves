@@ -110,7 +110,7 @@ pub(super) async fn install(
     evaluate(
         session,
         "window.__codexElvesNativeFastAssetPatchReady=true;\
-         if(window.__codexElvesNativeFastCompiled!=='v2')window.__codexElvesNativeFastPatchState='armed';",
+         if(window.__codexElvesNativeFastCompiled!=='v3')window.__codexElvesNativeFastPatchState='armed';",
     )
     .await?;
     Ok(())

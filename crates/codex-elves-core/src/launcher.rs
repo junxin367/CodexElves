@@ -5182,7 +5182,7 @@ async fn apply_native_fast_unlock_on_launch(debug_port: u16) -> anyhow::Result<(
         .web_socket_debugger_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("selected CDP target has no websocket URL"))?;
-    let probe = "JSON.stringify({ready:window.__codexElvesNativeFastAssetPatchReady===true,compiled:window.__codexElvesNativeFastCompiled==='v2',failed:['unsupported','failed'].includes(window.__codexElvesNativeFastPatchState)})";
+    let probe = "JSON.stringify({ready:window.__codexElvesNativeFastAssetPatchReady===true,compiled:window.__codexElvesNativeFastCompiled==='v3',failed:['unsupported','failed'].includes(window.__codexElvesNativeFastPatchState)})";
     let state =
         native_fast_launch_state(&crate::bridge::evaluate_script(websocket_url, probe).await?);
     if state.1 {
