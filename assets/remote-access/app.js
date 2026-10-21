@@ -6068,7 +6068,13 @@ function openImagePreview(link, image) {
   const caption = element("figcaption", "image-preview-caption", image.alt || "图片");
   let disposeZoom = null;
   preview.draggable = false;
-  preview.onload = () => { if (viewport && dialog.open) disposeZoom = enableImagePreviewZoom(viewport, preview); };
+  const initializeZoom = () => {
+    if (!viewport || !dialog.open || disposeZoom || !preview.complete
+        || !preview.naturalWidth || !preview.naturalHeight) return;
+    disposeZoom = enableImagePreviewZoom(viewport, preview);
+    preview.classList.add("image-preview-ready");
+  };
+  preview.onload = initializeZoom;
   preview.alt = image.alt || "图片预览"; preview.src = source;
   preview.onerror = () => {
     disposeZoom?.();
@@ -6095,7 +6101,7 @@ function openImagePreview(link, image) {
     if (trigger.isConnected && document.activeElement === document.body) trigger.focus({ preventScroll: true });
   };
   document.body.classList.add("modal-open");
-  dialog.showModal(); close.focus();
+  dialog.showModal(); initializeZoom(); close.focus();
 }
 function bindMessageImages(node) {
   for (const image of node.querySelectorAll(".message-image")) {
@@ -9846,7 +9852,7 @@ async function applyQuestionReceipt(key, receipt) {
       approvalSignature = null; renderApprovals();
       await reloadThread();
     }
-    notice("回答已提交");
+    notice(receipt.result?.skipped === true ? "问题已跳过" : "回答已提交");
   } else if (receipt.state === "failed") {
     setQuestionReceipt(key, null);
     throw new Error(receipt.result?.message || "回答未提交，请核对问题后重试");
@@ -9855,18 +9861,19 @@ async function applyQuestionReceipt(key, receipt) {
     approvalSignature = null; renderApprovals();
   }
 }
-async function submitAsyncQuestion(requestThreadId, request, answers) {
+async function submitAsyncQuestion(requestThreadId, request, answers, { skip = false } = {}) {
   if (!connected || threadReadOnly(requestThreadId) || !session.allowApprovals || thread?.id !== requestThreadId) return;
   const key = JSON.stringify([session.device.id, requestThreadId, request.id]);
   if (questionReplyReceipts.has(key) || request.params?.submissionState) return;
   const record = { id: randomId(), deviceId: session.device.id, threadId: requestThreadId,
-    requestId: request.id, state: "pending" };
+    requestId: request.id, state: "pending", ...(skip ? { skip: true } : {}) };
   try { setQuestionReceipt(key, record); }
   catch (error) { notice(error.message, true); return; }
   approvalSignature = null; renderApprovals();
   try {
     const receipt = await api("/api/action/answer", {
-      threadId: requestThreadId, requestId: request.id, method: request.method, response: { answers }
+      threadId: requestThreadId, requestId: request.id, method: request.method,
+      response: skip ? { skip: true } : { answers }
     }, record.id);
     await applyQuestionReceipt(key, receipt);
   } catch (error) {
@@ -9923,16 +9930,20 @@ function renderAsyncQuestion(card, request, requestThreadId) {
   const footer = element("div", "async-question-footer");
   const actions = element("div", "approval-actions");
   actions.hidden = threadReadOnly(requestThreadId);
+  const skip = button("跳过", "跳过此次问答", () => {
+    if (!skip.disabled) void submitAsyncQuestion(requestThreadId, request, null, { skip: true });
+  });
   const submit = button("提交回答", "提交问答选择", () => {}, "primary");
-  submit.type = "submit"; actions.append(submit);
+  submit.type = "submit"; actions.append(skip, submit);
   const update = () => {
+    skip.disabled = !allowed || !!submissionState || !fields.length;
     submit.disabled = !allowed || !!submissionState || !fields.length
       || fields.some(question => !draft.get(question.id)?.trim());
   };
   if (submissionState) {
     status.textContent = submissionState === "unknown"
-      ? "回答送达状态待确认，不会自动重发。"
-      : "回答已提交，正在确认结果…";
+      ? receipt?.skip ? "跳过状态待确认，不会自动重复操作。" : "回答送达状态待确认，不会自动重发。"
+      : receipt?.skip ? "正在跳过问题…" : "回答已提交，正在确认结果…";
   } else if (!allowed) status.textContent = threadReadOnly(requestThreadId) || !session.allowApprovals
     ? "此设备没有问答回复权限，请在 Codex 桌面处理。" : "连接恢复后可以提交回答。";
   form.onsubmit = event => {

@@ -508,7 +508,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .image-preview-panel{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:0;min-height:180px;max-height:calc(100dvh - 34px);margin:0;padding:44px 16px 14px;overflow:auto}
 .image-preview-image{display:block;max-width:100%;max-height:calc(100dvh - 116px);width:auto;height:auto;object-fit:contain}
 .image-preview-viewport{position:relative;min-height:0;width:100%;height:calc(100dvh - 116px);overflow:hidden;touch-action:none;user-select:none}
-.image-preview-viewport .image-preview-image{position:absolute;top:50%;left:50%;max-width:none;max-height:none;transform-origin:center;-webkit-user-drag:none}
+.image-preview-viewport .image-preview-image{position:absolute;top:50%;left:50%;max-width:none;max-height:none;transform-origin:center;visibility:hidden;-webkit-user-drag:none}
+.image-preview-viewport .image-preview-image.image-preview-ready{visibility:visible}
 .image-preview-close{position:absolute;top:8px;right:8px;display:grid;place-items:center;width:var(--control-icon-size);height:var(--control-icon-size);padding:0;border-radius:50%;background:color-mix(in srgb,var(--bg) 88%,transparent);line-height:1;z-index:1}
 .image-preview-caption{max-width:100%;margin-top:10px;color:var(--muted);font-size:.78571rem;overflow-wrap:anywhere;text-align:center}
 .image-preview-unavailable{color:var(--muted)}

@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 58) return;
+  if (window.__codexElvesRemoteAccess?.version === 62) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -24,6 +24,7 @@
   const observedRequestThreads = new Set();
   const asyncQuestionStateModules = new WeakMap();
   const asyncQuestionRecoveries = new Map();
+  let asyncQuestionNativeBindings = null;
   const sidebarSignatures = new Map();
   const deletedThreadIds = new Set();
   let goalMaterializer = null;
@@ -307,7 +308,8 @@
         const answered = acceptedAsyncQuestionReplies(turn);
         return array(turn.items).flatMap(item => item?.type === "agentMessage"
           && array(item.questions).some((question, index) => typeof question?.title === "string"
-            && !answered.has(JSON.stringify(["request_user_input_async", item.id, index])))
+            && !answered.has(JSON.stringify(["request_user_input_async", item.id, index]))
+            && !nativeAsyncQuestionSkipped(id, turn, item, question, index, conversation))
           ? [{ id: JSON.stringify(["async-question", turnId, item.id]),
             method: "remote/requestUserInputAsync", params: { turnId } }] : []);
       });
@@ -871,7 +873,8 @@
       for (const placement of ["right", "bottom"]) {
         const controller = native.panel(placement);
         for (const tab of scope.get(controller.tabs$)) {
-          const id = tab.props?.conversationId, conversation = id && sourceManager.getConversation(id);
+          const id = tab.props?.content?.conversationId ?? tab.props?.conversationId;
+          const conversation = id && sourceManager.getConversation(id);
           if (tab.tabType?.kind !== "local-side-chat" || !conversation?.sideConversation
               || conversation.forkedFromId !== parentThreadId || subagentIdentity(conversation)) continue;
           next.set(id, { threadId: id, parentThreadId, title: tab.title,
@@ -1902,6 +1905,7 @@
       const questions = array(item.questions).flatMap((question, index) => {
         const questionId = JSON.stringify(["request_user_input_async", item.id, index]);
         return typeof question?.title === "string" && !answered.has(questionId)
+          && !nativeAsyncQuestionSkipped(id, turn, item, question, index, conversation)
           ? [{ id: questionId, question: question.title,
             options: array(question.options).filter(option => typeof option === "string").map(label => ({ label })) }]
           : [];
@@ -1915,7 +1919,7 @@
   }
   function nativeAsyncQuestionState(module) {
     const cached = asyncQuestionStateModules.get(module);
-    if (cached) return cached;
+    if (cached) return asyncQuestionNativeBindings = cached;
     const functions = Object.values(module).filter(value => typeof value === "function")
       .map(value => ({ value, source: Function.prototype.toString.call(value) }));
     const unique = predicate => {
@@ -1931,9 +1935,12 @@
     const setPanel = unique(({ value, source }) => value.length === 3 && source.length < 600
       && [".hostId", ".threadId", "new Map(", ".delete(", ".get(", ".set("]
         .every(marker => source.includes(marker)));
+    const skipQuestion = unique(({ source }) => source.length < 900
+      && source.includes("isSkipped:!0") && source.includes(".notifications")
+      && source.includes(".hide("));
     const key = { hostId: "__remote_question_probe__", threadId: "__remote_question_probe__",
       entityKey: "__remote_question_probe__", itemId: "__remote_question_probe__" };
-    const draftReads = [], panelReads = [];
+    const draftReads = [], panelReads = [], skipReads = [];
     let writes = 0;
     const probe = reads => ({
       get(family, key) { reads.push({ family, key }); return null; },
@@ -1942,21 +1949,113 @@
     try {
       draftSetter(probe(draftReads), key, "");
       selectQuestion(probe(panelReads), key);
+      skipQuestion(probe(skipReads), key);
     } catch {
       throw failure(503, "当前 Codex 版本的原生问答状态接口验证失败");
     }
-    if (writes || draftReads.length !== 1 || panelReads.length !== 2
+    if (writes || draftReads.length !== 1 || panelReads.length !== 2 || skipReads.length !== 1
         || !draftReads[0].family || !panelReads[0].family
         || !["object", "function"].includes(typeof draftReads[0].family)
         || !["object", "function"].includes(typeof panelReads[0].family)
         || panelReads[0].family === draftReads[0].family
         || panelReads[1].family !== draftReads[0].family
+        || skipReads[0].family !== draftReads[0].family || skipReads[0].key !== key
         || draftReads[0].key !== key || panelReads[1].key !== key
         || panelReads[0].key?.hostId !== key.hostId || panelReads[0].key?.threadId !== key.threadId)
       throw failure(503, "当前 Codex 版本的原生问答状态接口验证失败");
-    const resolved = { questionFamily: draftReads[0].family, panelFamily: panelReads[0].family, setPanel };
+    const resolved = { questionFamily: draftReads[0].family, panelFamily: panelReads[0].family,
+      setPanel, skipQuestion, setDraft: draftSetter };
     asyncQuestionStateModules.set(module, resolved);
-    return resolved;
+    return asyncQuestionNativeBindings = resolved;
+  }
+  async function prepareAsyncQuestionState() {
+    if (asyncQuestionNativeBindings || !appScope) return;
+    const conversations = [...manager.getCachedConversations?.() || []].map(entry =>
+      Array.isArray(entry) && entry.length === 2 ? entry[1] : entry);
+    if (!conversations.some(conversation => nativeConversationTurns(conversation).some(turn =>
+      nativeTurnStatus(turn) === "inProgress"
+        && array(turn.items).some(item => item.type === "agentMessage" && array(item.questions).length)))) return;
+    nativeAsyncQuestionState(await nativeCreationModule());
+  }
+  function nativeAsyncQuestionEntry(id, turn, item, question, index, conversation = manager.getConversation(id)) {
+    const native = asyncQuestionNativeBindings;
+    if (!native || !appScope || typeof question?.title !== "string") return null;
+    const itemId = JSON.stringify(["request_user_input_async", item.id, index]), turnId = nativeTurnId(turn);
+    const entityKeys = Object.entries(conversation?.turnHistory?.history?.entitiesByKey || {})
+      .filter(([, entity]) => nativeTurnId(entity) === turnId
+        && array(entity.items).some(value => value.type === "agentMessage" && value.id === item.id))
+      .map(([key]) => key);
+    const panel = appScope.get(native.panelFamily, { hostId: "local", threadId: id });
+    const selected = panel?.selectedQuestionKey;
+    if (selected?.hostId === "local" && selected.threadId === id
+        && array(panel.questionIds).includes(itemId) && typeof selected.entityKey === "string")
+      entityKeys.push(selected.entityKey);
+    const entries = [...new Set(entityKeys)].map(entityKey => {
+      const key = { hostId: "local", threadId: id, entityKey, itemId };
+      const state = appScope.get(native.questionFamily, key);
+      return { key, state };
+    }).filter(({ state }) => state == null || state.turnId === turnId && state.title === question.title);
+    if (entries.length !== 1) return null;
+    return entries[0];
+  }
+  function nativeAsyncQuestionSkipped(id, turn, item, question, index, conversation) {
+    return nativeAsyncQuestionEntry(id, turn, item, question, index, conversation)?.state?.isSkipped === true;
+  }
+  async function skipAsyncQuestion(id, request) {
+    if (!appScope || typeof appScope.set !== "function") throw failure(503, "Codex 原生问答状态上下文尚未就绪");
+    const sourceManager = manager, scope = appScope;
+    const native = nativeAsyncQuestionState(await nativeCreationModule());
+    if (manager !== sourceManager || appScope !== scope || sourceManager.disposed)
+      throw failure(409, "Codex 界面上下文已变化，请重新读取问题");
+    const key = JSON.stringify([id, request.id]);
+    if (questionReplyStore.has(key)) throw failure(409, "此问题已提交或结果待确认，请先核对状态");
+    const current = asyncQuestionRequests(id).find(value => value.id === request.id);
+    if (!current || current.params.turnId !== request.params.turnId
+        || JSON.stringify(current.params.questions.map(question => question.id))
+          !== JSON.stringify(request.params.questions.map(question => question.id)))
+      throw failure(409, "问题状态已变化，请重新读取会话");
+    const conversation = manager.getConversation(id);
+    const turn = nativeConversationTurns(conversation).find(value => nativeTurnId(value) === request.params.turnId);
+    const targets = request.params.questions.map(question => {
+      const [, itemId, index] = JSON.parse(question.id);
+      const item = array(turn?.items).find(value => value.type === "agentMessage" && value.id === itemId);
+      const source = item?.questions?.[index];
+      const entry = item && source?.title === question.question
+        ? nativeAsyncQuestionEntry(id, turn, item, source, index, conversation) : null;
+      if (!entry) throw failure(503, "原生问题状态尚未就绪，请在 Codex 打开此会话后重试");
+      if (entry.state?.isSubmitting === true) throw failure(409, "此问题正在提交，请稍后核对状态");
+      return { ...entry, title: question.question };
+    });
+    let changed = false;
+    try {
+      for (const target of targets) {
+        changed = true;
+        if (!target.state) scope.set(native.questionFamily, target.key, {
+          turnId: request.params.turnId, title: target.title, draft: "", draftBaseline: "",
+          lastSubmission: null, isSubmitting: false, isSkipped: false
+        });
+        native.skipQuestion(scope, target.key);
+        native.setDraft(scope, target.key, "");
+        if (scope.get(native.questionFamily, target.key)?.isSkipped !== true)
+          throw new Error("原生跳过状态未确认");
+      }
+      const panelKey = { hostId: "local", threadId: id }, panel = scope.get(native.panelFamily, panelKey);
+      if (panel && targets.some(target => target.key.entityKey === panel.selectedQuestionKey?.entityKey)) {
+        const ids = new Set(targets.map(target => target.key.itemId));
+        const questionIds = array(panel.questionIds).filter(itemId => !ids.has(itemId));
+        native.setPanel(scope, panelKey, questionIds.length
+          ? { ...panel, questionIds, selectedQuestionKey: questionIds.includes(panel.selectedQuestionKey.itemId)
+            ? panel.selectedQuestionKey : { ...panel.selectedQuestionKey, itemId: questionIds[0] } } : null);
+      }
+      syncAsyncQuestions(id, manager.getConversation(id));
+      syncPendingNotifications(id);
+      return { ok: true, threadId: id, requestId: request.id, skipped: true };
+    } catch (error) {
+      syncAsyncQuestions(id, manager.getConversation(id));
+      if (!changed) throw error;
+      return { ok: false, code: 503, outcomeUnknown: true, threadId: id,
+        message: "跳过状态待确认，请重新读取问题，不要重复提交" };
+    }
   }
   function asyncQuestionDesktopBaseline(native, scope, id, replies) {
     const panel = scope.get(native.panelFamily, { hostId: "local", threadId: id });
@@ -2132,6 +2231,12 @@
     const id = requiredId(payload.threadId);
     const request = asyncQuestionRequests(id).find(request => request.id === payload.requestId);
     if (!request) throw failure(409, "此问题已回答或当前轮次已结束，请刷新会话");
+    if (payload.response?.skip === true) {
+      if (Object.keys(payload.response).some(key => key !== "skip"))
+        throw failure(400, "跳过问题不能同时提交回答");
+      return await skipAsyncQuestion(id, request);
+    }
+    if (payload.response && Object.hasOwn(payload.response, "skip")) throw failure(400, "跳过问题参数无效");
     const answers = payload.response?.answers;
     const questions = request.params.questions;
     if (!answers || typeof answers !== "object" || Array.isArray(answers)
@@ -3651,11 +3756,7 @@
     }
   }
   async function nativeCreationModule() {
-    const resource = [...document.querySelectorAll('link[rel="modulepreload"]')].map(link => link.href)
-      .concat(performance.getEntriesByType("resource").map(entry => entry.name))
-      .find(name => /\/app-initial-[^/]+\.js$/.test(name));
-    if (!resource || !resource.startsWith("app://-/")) throw failure(503, "未发现原生创建模块");
-    return await import(resource);
+    return await import(await nativeResource("initial"));
   }
   function nativeCreationProvider(module) {
     if (!appScope) discover();
@@ -3744,6 +3845,8 @@
         emit({ method: "remote/resync" });
       }
       if (!manager) discover();
+      if (["events", "notifications", "thread"].includes(action))
+        await prepareAsyncQuestionState().catch(() => {});
       if (action === "events" || action === "notifications")
         await sideThreadEntries().catch(() => {});
       const skipped = await guardThreadAction(action, payload);
@@ -3759,6 +3862,7 @@
           return await runtime[method](payload);
         }
         case "events": {
+          for (const id of asyncQuestionSignatures.keys()) syncAsyncQuestions(id, manager.getConversation(id));
           refreshPendingNotifications();
           const reset = payload.epoch !== epoch || payload.cursor < (notifications[0]?.sequence || 1) - 1;
           return { ok: true, epoch, cursor: eventSequence, reset,
@@ -4081,7 +4185,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 58, call,
+    version: 62, call,
     removeQueued: payload => call("removeQueued", payload),
     reorderQueued: payload => call("reorderQueued", payload),
     beginQueuedEdit: payload => call("beginQueuedEdit", payload),
