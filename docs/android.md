@@ -2,7 +2,7 @@
 
 Android 客户端位于 `apps/codex-elves-android`，使用 Java 17、Android Gradle Plugin 8.9.2、Gradle 8.11.1、`compileSdk 35`、`minSdk 26` 和 AndroidX WebKit 1.17.1。
 
-应用版本独立维护于 `apps/codex-elves-android/version.properties`，当前 `versionName=0.0.1`、`versionCode=2`，不随桌面管理器版本变化。旧正式包为 `versionName=0.5.0`、`versionCode=1`；Android 按递增的 `versionCode` 判断覆盖升级，因此新的显示版本仍能升级旧包。每次正式发布必须递增 `versionCode` 并沿用现有签名。原生 Shell 协议版本仍为 `1`，不等同于应用版本。
+应用版本独立维护于 `apps/codex-elves-android/version.properties`，当前 `versionName=0.0.3`、`versionCode=5`，不随桌面管理器版本变化。旧正式包为 `versionName=0.5.0`、`versionCode=1`；Android 按递增的 `versionCode` 判断覆盖升级，因此新的显示版本仍能升级旧包。每次正式发布必须递增 `versionCode` 并沿用现有签名。原生 Shell 协议版本仍为 `1`，不等同于应用版本。
 
 版本文件必须包含唯一的 `versionName` 和 `versionCode`：前者为 `主版本.次版本.修订版本` 三段数字，后者为 `2` 到 `2100000000` 的整数；缺失或无效时构建失败。
 
