@@ -13558,6 +13558,16 @@ const savedTier = async function zin(e,t,n,r){try{if(!await r())return null;let 
 const queueDefault = function Vin(e,{runtime:t,storage:n},r,i){let a=null;return{async readServiceTier(i){for(;a!=null;)await a.catch(()=>void 0);return r(),zin(e.requestClient,e.logger,i,async()=>e.getHostId()===`local`&&await n.readGlobalState(`use-copilot-auth-if-available`)===!0&&await t.isCopilotApiAvailable()?!1:(await e.getAccount({priority:`critical`})).account?.type===`chatgpt`)},async writeServiceTier(t,n){let o=a,s=(async()=>(await o?.catch(()=>void 0),r(),e.sendRequest(`config/batchWrite`,{edits:[{keyPath:n==null?`service_tier`:`profiles.${n}.service_tier`,value:t??`default`,mergeStrategy:`upsert`}],filePath:null,expectedVersion:null,reloadUserConfig:!0})))();a=s;try{return await s}finally{a===s&&(a=null,i())}},writeModel(t,n,r){return e.sendRequest(`config/batchWrite`,a1t(t,n,r))},readShellEnvironmentPolicy(e,t){return Promise.resolve(null)}}}.toString();
 const queueExplicit = function Mfn(e,{settings:t,storage:n,filesystem:r,runtime:i},a,o,s){return async(c,l)=>{let u=l.submissionOptions,d=l.context.workPermissions,f=d!=null,p=u?.executionHostId??e.getHostId();if(Aln(l.context,p,i.accountId(),i.threadMode(p)===`durable`))return{status:`paused`,reason:Nln};let m=e.getConversation(c),h=tx(m?.threadStartKind,m?.threadSource),g=u?.collaborationMode??null;u!=null&&h&&m!=null&&(g={...m.latestCollaborationMode,mode:g?.mode??m.latestCollaborationMode.mode});let _=e.getConversationCwd(c)??l.cwd,v=l.context.workspaceRoots??(e.needsResume(c)?await r.readThreadWorkspaceRoots?.(c):m?.currentPermissions?.runtimeWorkspaceRoots??[_]);if(v==null||!v.every(e=>e.length>0))return{status:`paused`,reason:`workspace-unavailable`};let[y,b]=await Promise.all([(async()=>{if(u==null)return a(m?.latestModel||null);if(u.serviceTier==null)return null;let{account:t}=await e.getAccount({priority:`critical`});return t?.type===`chatgpt`?u.serviceTier:null})(),u?.usePermissionSelection??t.readPermissionRefreshEnabled()]);return{serviceTier:y,executionHostId:p}}}.toString();
 
+const legacyFixture = { ui, request, queueDefault, queueExplicit, nativeBedrock: false };
+// 当前 Codex 的账号分支和块状队列回调；保留旧版样本以验证双向兼容。
+const bedrockFixture = {
+  ui: ui.replace("i?.authMethod===`personalAccessToken`", "i?.authMethod===`personalAccessToken`||i?.authMethod===`amazonBedrock`"),
+  request: request.replace("n!==`personalAccessToken`", "n!==`personalAccessToken`&&n!==`amazonBedrock`"),
+  queueDefault: function Vin(e,{runtime:t,storage:n},r,i){let a=null;return{async readServiceTier(i){for(;a!=null;)await a.catch(()=>void 0);return r(),zin(e.requestClient,e.logger,i,async()=>{if(e.getHostId()===`local`&&await n.readGlobalState(`use-copilot-auth-if-available`)===!0&&await t.isCopilotApiAvailable())return!1;let r=await e.getAccount({priority:`critical`});return r.account?.type===`chatgpt`||r.account?.type===`amazonBedrock`})},async writeServiceTier(t,n){let o=a,s=(async()=>(await o?.catch(()=>void 0),r(),e.sendRequest(`config/batchWrite`,{edits:[{keyPath:n==null?`service_tier`:`profiles.${n}.service_tier`,value:t??`default`,mergeStrategy:`upsert`}],filePath:null,expectedVersion:null,reloadUserConfig:!0})))();a=s;try{return await s}finally{a===s&&(a=null,i())}},writeModel(t,n,r){return e.sendRequest(`config/batchWrite`,a1t(t,n,r))},readShellEnvironmentPolicy(e,t){return Promise.resolve(null)}}}.toString(),
+  queueExplicit: queueExplicit.replace("t?.type===`chatgpt`?u.serviceTier", "t?.type===`chatgpt`||t?.type===`amazonBedrock`?u.serviceTier"),
+  nativeBedrock: true,
+};
+
 // 原生 requirements 和 tier 解析函数也直接保留，验证补丁没有绕开它们。
 const access = function Uat(e){let t=e.requirements?.featureRequirements,n=t?.fast_mode!==!1;return{fast:n,ultrafast:(`supportsIndependentSpeedModes`in e&&e.supportsIndependentSpeedModes===!0||n)&&t?.ultrafast_mode!==!1}};
 const permitted = function Wat(e,t){if(e==null||e===eot)return!0;if(t==null)return!1;let n=Gat(e);return e===`flex`||t[n??`fast`]};
@@ -13581,7 +13591,7 @@ const url = "app://-/assets/app-initial-fixture.js";
 const helper = fs.readFileSync(require.resolve("./native-fast-unlock.js"), "utf8");
 const enabled = { enhancementsEnabled: true, codexAppNativeFastUnlock: true };
 
-function environment(patch = true) {
+function environment(patch = true, fixtureSource = source) {
   const state = {
     host: "local", auth: "apikey", accountType: "apiKey", authLoading: false,
     requirements: { requirements: null }, requirementsPending: false,
@@ -13619,10 +13629,10 @@ function environment(patch = true) {
   vm.runInContext(helper, context);
   const api = context.module.exports;
   api.runtime.update(enabled);
-  const result = api.transform(source, url);
+  const result = api.transform(fixtureSource, url);
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
   const shared = [access, permitted, speedKind, modelTier, fastTier, tierId, selectedTier].map(fn => fn.toString()).join("\n");
-  vm.runInContext(`const eot=\`default\`,$at=\`ultrafast\`;${shared};const Tr=Uat,Xi=Xat;\n${patch ? result.patchedSource : source};globalThis.fixtures={Mxo,S$s,x$s,Vin,Mfn,modelUi:_wo,modelMenu:menu};`, context);
+  vm.runInContext(`const eot=\`default\`,$at=\`ultrafast\`;${shared};const Tr=Uat,Xi=Xat;\n${patch ? result.patchedSource : fixtureSource};globalThis.fixtures={Mxo,S$s,x$s,Vin,Mfn,modelUi:_wo,modelMenu:menu};`, context);
   const fns = context.fixtures;
   const queueRuntime = {
     isCopilotApiAvailable: async () => state.copilotAvailable,
@@ -13642,8 +13652,10 @@ function environment(patch = true) {
   return { api, state, fns, manager, scope, queue, explicit, result, context };
 }
 
-async function runNativeFastTests() {
-  const env = environment();
+async function runNativeFastFixture(fixture) {
+  const { ui, request, queueDefault, queueExplicit, nativeBedrock } = fixture;
+  const source = [ui, request, queueDefault, queueExplicit, savedTier, requestTier, uiModel, modelMenu].join("\n");
+  const env = environment(true, source);
   const { api, state, fns, result } = env;
   assert.deepEqual(Object.values(result.diagnostics.matches), [1, 1, 1, 1, 1, 1]);
   assert.equal(result.replacements.length, 6);
@@ -13672,6 +13684,14 @@ async function runNativeFastTests() {
     assert.equal(duplicate.diagnostics.reason, "ambiguous-gates");
     assert.equal(duplicate.patchedSource, duplicateSource);
   }
+  const alternateQueue = nativeBedrock ? legacyFixture.queueDefault : bedrockFixture.queueDefault;
+  const mixedQueues = api.transform(`${source}\n${alternateQueue}`, url);
+  assert.equal(mixedQueues.ok, false, "新旧队列结构同时出现时也必须拒绝歧义匹配");
+  assert.equal(mixedQueues.diagnostics.reason, "ambiguous-gates");
+  if (nativeBedrock) {
+    assert.equal(api.plan(source.replaceAll("`amazonBedrock`", "`unknownAuth`"), url).ok, false,
+      "未知账号分支仍需停止适配，不能泛化为任意身份");
+  }
   assert.equal(api.plan(source.replace("serviceTierAccess:f", "otherAccess:f"), url).ok, false);
   assert.equal(api.plan(source, "").ok, false);
   assert.equal(api.plan(null, url).ok, false);
@@ -13691,7 +13711,7 @@ async function runNativeFastTests() {
   assert.equal(api.runtime.allow("local", "apikey"), false, "每次读取最新设置，关闭后立即停止放行");
   api.runtime.update(enabled);
 
-  assert.equal(environment(false).fns.Mxo({model:state.model.model}).serviceTierAccess, null, "原生 API key UI 确实被门控");
+  assert.equal(environment(false, source).fns.Mxo({model:state.model.model}).serviceTierAccess, null, "原生 API key UI 确实被门控");
   assert.equal(fns.Mxo({model:state.model.model}).serviceTierAccess.fast, true);
   assert.equal(fns.modelMenu(state.model.model, state.model.serviceTiers).visible, true,
     "真实菜单的账号能力二次校验不能因没有模型参数而隐藏已支持的 Fast");
@@ -13727,12 +13747,12 @@ async function runNativeFastTests() {
   assert.equal(await fns.x$s(env.scope, "local", "gpt-5.6"), "priority");
   state.override = { type: "fromConfig" };
 
-  for (const auth of ["copilot", "amazonBedrock", null]) {
+  for (const auth of ["copilot", ...(nativeBedrock ? [] : ["amazonBedrock"]), null]) {
     state.auth = auth;
     assert.equal(fns.Mxo({model:state.model.model}).serviceTierAccess, null);
     assert.equal(await fns.x$s(env.scope, "local", "gpt-5.6", "priority"), null);
   }
-  for (const auth of ["chatgpt", "personalAccessToken"]) {
+  for (const auth of ["chatgpt", "personalAccessToken", ...(nativeBedrock ? ["amazonBedrock"] : [])]) {
     state.auth = auth;
     api.runtime.update(null);
     assert.equal(fns.Mxo({model:state.model.model}).serviceTierAccess.fast, true, "保留已有官方认证路径");
@@ -13769,8 +13789,13 @@ async function runNativeFastTests() {
   assert.equal((await env.explicit(null)).serviceTier, null);
   assert.equal((await env.explicit(null, "local", false)).serviceTier, "priority", "无选项时沿用原有默认读取器");
   state.accountType = "amazonBedrock";
-  assert.equal(await env.queue().readServiceTier("gpt-5.6"), null);
-  assert.equal((await env.explicit("priority")).serviceTier, null);
+  assert.equal(await env.queue().readServiceTier("gpt-5.6"), nativeBedrock ? "priority" : null,
+    "只保留原生版本已有的 Bedrock 队列能力");
+  assert.equal((await env.explicit("priority")).serviceTier, nativeBedrock ? "priority" : null);
+  api.runtime.update(null);
+  assert.equal(await env.queue().readServiceTier("gpt-5.6"), nativeBedrock ? "priority" : null,
+    "原生 Bedrock 能力不依赖本机 API Key 增强开关");
+  assert.equal((await env.explicit("priority", "remote")).serviceTier, nativeBedrock ? "priority" : null);
   state.accountType = "chatgpt";
   api.runtime.update(null);
   assert.equal(await env.queue().readServiceTier("gpt-5.6"), "priority");
@@ -13812,22 +13837,28 @@ async function runNativeFastTests() {
   assert.equal(await env.queue().readServiceTier("主力模型"), "priority");
   assert.equal(await env.queue().readServiceTier("gpt-6-alias"), null);
   for (const model of ["gpt-5.4", "gpt-5.6-sol", "gpt-6-astra[600K]", "openai/gpt-6-astra", "gpt-7-sol"]) assert.equal(api.runtime.isGptModel(model), true);
-  state.auth = "chatgpt";
-  state.accountType = "chatgpt";
   api.runtime.update(null);
-  assert.equal(modelUiAccess("claude-opus-5-5"), null, "官方登录也不能为非 GPT 模型开放 Fast");
-  assert.equal(fns.modelMenu("claude-opus-5-5", [{id:"priority",name:"Fast"}]).visible, false);
-  assert.equal(await fns.x$s(env.scope, "local", "claude-opus-5-5", "priority"), null);
-  assert.equal(await env.queue().readServiceTier("claude-opus-5-5"), null);
-  state.model.model = "claude-opus-5-5";
-  assert.equal((await env.explicit("priority")).serviceTier, null);
+  for (const auth of ["chatgpt", ...(nativeBedrock ? ["amazonBedrock"] : [])]) {
+    state.auth = auth;
+    state.accountType = auth;
+    assert.equal(modelUiAccess("claude-opus-5-5"), null, "原生支持的账号也不能为非 GPT 模型开放 Fast");
+    assert.equal(fns.modelMenu("claude-opus-5-5", [{id:"priority",name:"Fast"}]).visible, false);
+    assert.equal(await fns.x$s(env.scope, "local", "claude-opus-5-5", "priority"), null);
+    assert.equal(await env.queue().readServiceTier("claude-opus-5-5"), null);
+    state.model.model = "claude-opus-5-5";
+    assert.equal((await env.explicit("priority")).serviceTier, null);
+  }
   state.model.model = gptModel;
   state.auth = "apikey";
   state.accountType = "apiKey";
   api.runtime.update(enabled);
 
+}
+
+async function runNativeFastTests() {
+  for (const fixture of [legacyFixture, bedrockFixture]) await runNativeFastFixture(fixture);
   await require("./native-fast-module.test.cjs")({ source, url });
-  return "Native Fast structure matching, four auth paths, requirements, local scope, opt-in, queue and module transport behavior passed";
+  return "Native Fast legacy/current structures, native auth, requirements, local scope, opt-in, queue and module transport behavior passed";
 }
 
 module.exports = runNativeFastTests;

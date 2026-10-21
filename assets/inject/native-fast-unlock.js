@@ -3,6 +3,7 @@
   const id = "[A-Za-z_$][\\w$]*";
   const chatgpt = "`chatgpt`";
   const token = "`personalAccessToken`";
+  const bedrock = "`amazonBedrock`";
   const apiKey = "`apiKey`";
   const local = "`local`";
   const critical = "`critical`";
@@ -50,6 +51,13 @@
     return `window.__codexElvesNativeFastUnlock?.runtime?.isGptModel?.(${model})===true`;
   }
 
+  const queueDefaultPrefix = [
+    `function ${id}\\((?<manager>${id}),\\{runtime:(?<runtime>${id}),storage:(?<storage>${id})\\},(?<before>${id}),${id}\\)\\{let (?<pending>${id})=null;`,
+    `return\\{async readServiceTier\\((?<model>${id})\\)\\{for\\(;\\k<pending>!=null;\\)await \\k<pending>\\.catch\\(\\(\\)=>void 0\\);`,
+    `return \\k<before>\\(\\),${id}\\(\\k<manager>\\.requestClient,\\k<manager>\\.logger,\\k<model>,async\\(\\)=>`,
+  ].join("");
+  const queueCopilotCondition = `\\k<manager>\\.getHostId\\(\\)===${local}&&await \\k<storage>\\.readGlobalState\\(\`use-copilot-auth-if-available\`\\)===!0&&await \\k<runtime>\\.isCopilotApiAvailable\\(\\)`;
+
   // 同时核对四条身份路径及当前模型的 UI、请求调用点；不依赖压缩变量名。
   // 原生菜单也会只传 hostId 读取账号能力；有 model 字段时才校验模型，
   // ui-model 始终显式传入当前模型，因此空值和非 GPT 仍无法产生 Fast 选项。
@@ -60,7 +68,7 @@
       pattern: [
         `function ${id}\\((?<argument>${id})\\)\\{let ${id}=\\(0,${id}\\.c\\)\\(\\d+\\),(?<fallback>${id})=${id}\\(${id}\\),`,
         `(?<host>${id})=\\k<argument>\\?\\.hostId\\?\\?\\k<fallback>,(?<identity>${id})=${id}\\(\\k<host>\\),`,
-        `(?<variable>${id})=(?<gate>\\k<identity>\\?\\.authMethod===${chatgpt}\\|\\|\\k<identity>\\?\\.authMethod===${token}),`,
+        `(?<variable>${id})=(?<gate>\\k<identity>\\?\\.authMethod===${chatgpt}\\|\\|\\k<identity>\\?\\.authMethod===${token}(?:\\|\\|\\k<identity>\\?\\.authMethod===${bedrock})?),`,
         `(?<method>${id})=\\k<identity>\\?\\.authMethod\\?\\?null,[^{}]{0,300}\\{authMethod:\\k<method>,hostId:\\k<host>\\}`,
         `[^{}]{0,300}\\{data:(?<data>${id}),isPending:(?<pending>${id})\\}=${id}\\(${id},${id}\\),`,
         `(?<loading>${id})=!!\\k<identity>\\?\\.isLoading\\|\\|\\k<variable>&&\\k<pending>,${id};`,
@@ -73,7 +81,7 @@
       kind: "request-access",
       pattern: [
         `async function ${id}\\((?<scope>${id}),(?<host>${id})\\)\\{let (?<auth>${id})=await ${id}\\(\\k<scope>,\\k<host>\\);`,
-        `if\\((?<gate>\\k<auth>!==${chatgpt}&&\\k<auth>!==${token})\\)return null;`,
+        `if\\((?<gate>\\k<auth>!==${chatgpt}&&\\k<auth>!==${token}(?:&&\\k<auth>!==${bedrock})?)\\)return null;`,
         `let (?<requirements>${id})=await ${id}\\(\\k<scope>,\\k<host>,\\{priority:${critical}\\}\\);`,
         `return \\k<scope>\\.query\\.setData\\(${id},\\{authMethod:\\k<auth>,hostId:\\k<host>\\},\\k<requirements>\\),${id}\\(\\k<requirements>\\)\\}`,
       ].join(""),
@@ -81,15 +89,21 @@
     },
     {
       kind: "queue-default-access",
-      pattern: [
-        `function ${id}\\((?<manager>${id}),\\{runtime:(?<runtime>${id}),storage:(?<storage>${id})\\},(?<before>${id}),${id}\\)\\{let (?<pending>${id})=null;`,
-        `return\\{async readServiceTier\\((?<model>${id})\\)\\{for\\(;\\k<pending>!=null;\\)await \\k<pending>\\.catch\\(\\(\\)=>void 0\\);`,
-        `return \\k<before>\\(\\),${id}\\(\\k<manager>\\.requestClient,\\k<manager>\\.logger,\\k<model>,async\\(\\)=>`,
-        `\\k<manager>\\.getHostId\\(\\)===${local}&&await \\k<storage>\\.readGlobalState\\(\`use-copilot-auth-if-available\`\\)===!0&&await \\k<runtime>\\.isCopilotApiAvailable\\(\\)\\?!1:`,
-        `(?<gate>(?<account>\\(await \\k<manager>\\.getAccount\\(\\{priority:${critical}\\}\\)\\)\\.account\\?\\.type)===${chatgpt})\\)\\},async writeServiceTier\\(`,
-      ].join(""),
-      // includes 只消费一次 account/read；外层 Copilot 分支原样保留。
-      replacement: (groups) => `(${gpt(groups.model)}&&[${chatgpt},...(${allow(`${groups.manager}.getHostId()`, apiKey)}?[${apiKey}]:[])].includes(${groups.account}))`,
+      patterns: [
+        [
+          queueDefaultPrefix,
+          `${queueCopilotCondition}\\?!1:`,
+          `(?<gate>(?<account>\\(await \\k<manager>\\.getAccount\\(\\{priority:${critical}\\}\\)\\)\\.account\\?\\.type)===${chatgpt})\\)\\},async writeServiceTier\\(`,
+        ].join(""),
+        [
+          queueDefaultPrefix,
+          `\\{if\\(${queueCopilotCondition}\\)return!1;`,
+          `let (?<accountResult>${id})=await \\k<manager>\\.getAccount\\(\\{priority:${critical}\\}\\);`,
+          `return (?<gate>(?<account>\\k<accountResult>\\.account\\?\\.type)===${chatgpt}(?<bedrock>\\|\\|\\k<accountResult>\\.account\\?\\.type===${bedrock})?)\\}\\)\\},async writeServiceTier\\(`,
+        ].join(""),
+      ],
+      // includes 只消费一次 account/read；保留各版本原有账号和 Copilot 分支。
+      replacement: (groups) => `(${gpt(groups.model)}&&[${chatgpt}${groups.bedrock ? `,${bedrock}` : ""},...(${allow(`${groups.manager}.getHostId()`, apiKey)}?[${apiKey}]:[])].includes(${groups.account}))`,
     },
     {
       kind: "queue-explicit-access",
@@ -100,7 +114,7 @@
         `[\\s\\S]{0,400}?let (?<conversation>${id})=\\k<manager>\\.getConversation\\(${id}\\),${id}=${id}\\([^;]{0,200}\\),(?<collaboration>${id})=\\k<options>\\?\\.collaborationMode\\?\\?null;`,
         `[\\s\\S]{0,1800}?let\\[${id},${id}\\]=await Promise\\.all\\(\\[\\(async\\(\\)=>\\{if\\(\\k<options>==null\\)return \\k<readDefault>\\(${id}\\?\\.latestModel\\|\\|null\\);`,
         `if\\(\\k<options>\\.serviceTier==null\\)return null;let\\{account:(?<account>${id})\\}=await \\k<manager>\\.getAccount\\(\\{priority:${critical}\\}\\);`,
-        `return (?<gate>\\k<account>\\?\\.type===${chatgpt})\\?\\k<options>\\.serviceTier:null\\}\\)\\(\\),\\k<options>\\?\\.usePermissionSelection\\?\\?\\k<settings>\\.readPermissionRefreshEnabled\\(\\)\\]\\)`,
+        `return (?<gate>\\k<account>\\?\\.type===${chatgpt}(?:\\|\\|\\k<account>\\?\\.type===${bedrock})?)\\?\\k<options>\\.serviceTier:null\\}\\)\\(\\),\\k<options>\\?\\.usePermissionSelection\\?\\?\\k<settings>\\.readPermissionRefreshEnabled\\(\\)\\]\\)`,
       ].join(""),
       // manager 和实际执行端都必须是本机；所选 Copilot 不能借底层 API 身份放行。
       replacement: (groups) => `(${gpt(`${groups.collaboration}?.settings?.model??${groups.conversation}?.latestModel`)}&&(${groups.gate}||${groups.host}===${local}&&${allow(`${groups.manager}.getHostId()`, `${groups.account}?.type`)}&&!(await ${groups.storage}.readGlobalState(\`use-copilot-auth-if-available\`)===!0&&await ${groups.runtime}.isCopilotApiAvailable())))`,
@@ -133,7 +147,8 @@
     }
     const replacements = [];
     for (const definition of gates) {
-      const matches = [...source.matchAll(new RegExp(definition.pattern, "g"))];
+      const matches = (definition.patterns ?? [definition.pattern])
+        .flatMap((pattern) => [...source.matchAll(new RegExp(pattern, "g"))]);
       diagnostics.matches[definition.kind] = matches.length;
       if (matches.length !== 1) continue;
       const match = matches[0];

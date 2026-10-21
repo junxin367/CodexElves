@@ -12,7 +12,7 @@ const RENDERER_BOOTSTRAP_SCRIPT: &str = include_str!("../../../assets/inject/ren
 const RENDERER_FEATURES_SCRIPT: &str = include_str!("../../../assets/inject/renderer-features.js");
 const NATIVE_FAST_UNLOCK_SCRIPT: &str =
     include_str!("../../../assets/inject/native-fast-unlock.js");
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261020-native-fast-gpt";
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261021-native-fast-compat";
 
 pub fn renderer_script() -> &'static str {
     RENDERER_FEATURES_SCRIPT
