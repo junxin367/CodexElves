@@ -1,11 +1,13 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 62) return;
+  if (window.__codexElvesRemoteAccess?.version === 64) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
   let nativeIntl = null;
   let nativeNavigate = null;
   let unsubscribe = [];
+  let sidebarUnsubscribe = [];
+  const sidebarListeners = new Set();
   let eventSequence = 0;
   let queueSequence = 0;
   let requestsSequence = 0;
@@ -61,6 +63,18 @@
   ];
   const isManager = value => value?.hostId === "local" && typeof value.sendFollowUpMessage === "function"
     && typeof value.listThreadTurns === "function" && value.storage?.readGlobalState;
+  function resetStaleManager() {
+    const existing = window.__codexElvesConversationStateManager;
+    if (!manager || !manager.disposed && !(isManager(existing) && !existing.disposed && existing !== manager)) return;
+    for (const dispose of [...unsubscribe, ...sidebarUnsubscribe]) { try { dispose?.(); } catch {} }
+    unsubscribe = []; sidebarUnsubscribe = [];
+    for (const watcher of sideScopeWatchers.values()) watcher.dispose?.();
+    sideScopeWatchers.clear(); nativeSideThreads.clear();
+    manager = null; appScope = null; nativeNavigate = null; nativeIntl = null;
+    nativeCatalog.clear(); sidebarSignatures.clear(); catalogLoaded = false;
+    catalogLoading = null; catalogGeneration++;
+    emit({ method: "remote/resync" });
+  }
   const pushNotification = event => {
     if (event.method === "thread/deleted") forgetDeletedThread(event.params?.threadId);
     else if (event.method !== "remote/sidebarChanged" && isDeletedThread(event.params?.threadId)) return;
@@ -95,6 +109,12 @@
     if (notifications.length > 2048) notifications.splice(0, notifications.length - 2048);
   };
   const emit = event => {
+    if (["remote/sidebarChanged", "thread/started", "thread/status/changed", "thread/name/updated",
+      "thread/archived", "thread/unarchived", "thread/deleted"].includes(event.method)) {
+      for (const listener of sidebarListeners) {
+        try { listener({ method: event.method, threadId: event.params?.threadId }); } catch {}
+      }
+    }
     observeNotificationEvent(event);
     if (event.method === "serverRequest/resolved")
       event = { ...event, params: { ...event.params, requestsEpoch: epoch } };
@@ -115,61 +135,74 @@
     }
     pushNotification(event);
   };
-  function discover() {
+  function discover(sidebarOnly = false, quick = false) {
     const existing = window.__codexElvesConversationStateManager;
     if (isManager(existing) && !existing.disposed) manager = existing;
-    const scopes = new Set(), fibers = new Set(), values = new WeakSet();
-    const queue = [];
-    for (const element of document.querySelectorAll("#root, #root *")) {
-      const key = Object.keys(element).find(key => key.startsWith("__reactFiber$") || key.startsWith("__reactContainer$"));
-      for (let fiber = element[key], depth = 0; fiber && depth < 160 && !fibers.has(fiber); fiber = fiber.return, depth++) {
-        fibers.add(fiber);
-        for (let hook = fiber.memoizedState, n = 0; hook && n < 128; hook = hook.next, n++) {
-          const value = hook.memoizedState?.current;
-          if (value?.node?.familyBindings instanceof Map && typeof value.get === "function") appScope = value;
-        }
-        queue.push([fiber.memoizedProps, 0], [fiber.memoizedState, 0]);
-        const contexts = [fiber.memoizedProps?.value];
-        for (let dep = fiber.dependencies?.firstContext, n = 0; dep && n < 32; dep = dep.next, n++) contexts.push(dep.memoizedValue);
-        for (const context of contexts) {
-          if (typeof context?.formatMessage === "function") nativeIntl = context;
-          if (typeof context?.intl?.formatMessage === "function") nativeIntl = context.intl;
-          if (typeof context?.router?.navigate === "function")
-            nativeNavigate = path => context.router.navigate(path);
-          if (!(context instanceof Map)) continue;
-          for (const initial of context.values()) {
-            for (let scope = initial, n = 0; scope && n < 16 && !scopes.has(scope); scope = scope.parent, n++) {
-              scopes.add(scope);
-              if (!(scope.familyBindings instanceof Map)) continue;
-              for (const bindings of scope.familyBindings.values()) {
-                const signal = bindings.get?.("local")?.value;
-                if (!signal?.atom || !signal.store?.get) continue;
-                try {
-                  const candidate = signal.store.get(signal.atom);
-                  if (isManager(candidate) && !candidate.disposed) manager = candidate;
-                } catch {}
+    const cached = window.__codexElvesNativeConversationContext;
+    if (cached?.manager === manager && !manager?.disposed && cached.appScope && cached.nativeNavigate) {
+      ({ appScope, nativeIntl, nativeNavigate } = cached);
+    } else if (!(sidebarOnly && quick && isManager(manager) && !manager.disposed)) {
+      const scopes = new Set(), fibers = new Set(), values = new WeakSet();
+      const queue = [];
+      const scan = elements => {
+        for (const element of elements) {
+          const key = Object.keys(element).find(key => key.startsWith("__reactFiber$") || key.startsWith("__reactContainer$"));
+          for (let fiber = element[key], depth = 0; fiber && depth < 160 && !fibers.has(fiber); fiber = fiber.return, depth++) {
+            fibers.add(fiber);
+            for (let hook = fiber.memoizedState, n = 0; hook && n < 128; hook = hook.next, n++) {
+              const value = hook.memoizedState?.current;
+              if (value?.node?.familyBindings instanceof Map && typeof value.get === "function") appScope = value;
+            }
+            queue.push([fiber.memoizedProps, 0], [fiber.memoizedState, 0]);
+            const contexts = [fiber.memoizedProps?.value];
+            for (let dep = fiber.dependencies?.firstContext, n = 0; dep && n < 32; dep = dep.next, n++) contexts.push(dep.memoizedValue);
+            for (const context of contexts) {
+              if (typeof context?.formatMessage === "function") nativeIntl = context;
+              if (typeof context?.intl?.formatMessage === "function") nativeIntl = context.intl;
+              if (typeof context?.router?.navigate === "function")
+                nativeNavigate = path => context.router.navigate(path);
+              if (!(context instanceof Map)) continue;
+              for (const initial of context.values()) {
+                for (let scope = initial, n = 0; scope && n < 16 && !scopes.has(scope); scope = scope.parent, n++) {
+                  scopes.add(scope);
+                  if (!(scope.familyBindings instanceof Map)) continue;
+                  for (const bindings of scope.familyBindings.values()) {
+                    const signal = bindings.get?.("local")?.value;
+                    if (!signal?.atom || !signal.store?.get) continue;
+                    try {
+                      const candidate = signal.store.get(signal.atom);
+                      if (isManager(candidate) && !candidate.disposed) manager = candidate;
+                    } catch {}
+                  }
+                }
               }
             }
           }
         }
-      }
-    }
-    for (let n = 0; n < queue.length && n < 20_000; n++) {
-      const [value, depth] = queue[n];
-      if (!value || (typeof value !== "object" && typeof value !== "function") || values.has(value)) continue;
-      values.add(value);
-      if (value.node?.familyBindings instanceof Map && typeof value.get === "function") appScope = value;
-      if (isManager(value) && !value.disposed) manager = value;
-      if (depth > 7 || value instanceof Node || value === window || value === document) continue;
-      if (value instanceof Map) {
-        for (const entry of value.values()) queue.push([entry, depth + 1]);
-      } else {
-        for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
-          if ("value" in descriptor) queue.push([descriptor.value, depth + 1]);
+        for (let n = 0; n < queue.length && n < 20_000; n++) {
+          const [value, depth] = queue[n];
+          if (!value || (typeof value !== "object" && typeof value !== "function") || values.has(value)) continue;
+          values.add(value);
+          if (value.node?.familyBindings instanceof Map && typeof value.get === "function") appScope = value;
+          if (isManager(value) && !value.disposed) manager = value;
+          if (depth > 7 || value instanceof Node || value === window || value === document) continue;
+          if (value instanceof Map) {
+            for (const entry of value.values()) queue.push([entry, depth + 1]);
+          } else {
+            for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+              if ("value" in descriptor) queue.push([descriptor.value, depth + 1]);
+            }
+          }
         }
-      }
+      };
+      if (sidebarOnly) scan(document.querySelectorAll(
+        "#root, [data-above-composer-conversation-id], nav[role='navigation'], [data-app-shell-titlebar]"
+      ));
+      if (!sidebarOnly || !manager || !appScope || !nativeNavigate)
+        scan(document.querySelectorAll("#root, #root *"));
+      if (!manager) throw failure(503, "未发现本机原生会话管理器，请检查 CodexElves 注入连接");
+      window.__codexElvesNativeConversationContext = { manager, appScope, nativeIntl, nativeNavigate };
     }
-    if (!manager) throw failure(503, "未发现本机原生会话管理器，请检查 CodexElves 注入连接");
     if (sideThreadsManager !== manager) {
       for (const watcher of sideScopeWatchers.values()) watcher.dispose?.();
       sideScopeWatchers.clear();
@@ -186,7 +219,35 @@
       }
       notificationManager = manager;
     }
-    if (!unsubscribe.length) {
+    if (sidebarOnly && !unsubscribe.length && !sidebarUnsubscribe.length) {
+      sidebarUnsubscribe.push(manager.addNotificationCallback([
+        "thread/started", "thread/status/changed", "thread/name/updated",
+        "thread/archived", "thread/unarchived", "thread/deleted"
+      ], event => {
+        if (["thread/archived", "thread/deleted"].includes(event.method))
+          nativeCatalog.delete(event.params?.threadId);
+        if (event.method === "thread/deleted") forgetDeletedThread(event.params?.threadId);
+        if (event.method === "thread/started") catalogLoaded = false;
+        emit(event);
+      }));
+      if (typeof manager.addConversationStateCallback === "function")
+        sidebarUnsubscribe.push(manager.addConversationStateCallback((id, conversation) => {
+          if (!conversation || isDeletedThread(id) || !nativeCatalog.has(id)) return;
+          if (conversation.sideConversation === true) {
+            nativeCatalog.delete(id);
+            emit({ method: "remote/sidebarChanged", params: { threadId: id } });
+            return;
+          }
+          const previous = sidebarSignatures.get(id);
+          const item = summary(conversation);
+          nativeCatalog.set(id, item);
+          if (previous !== sidebarSignatures.get(id))
+            emit({ method: "remote/sidebarChanged", params: { threadId: id } });
+        }));
+    }
+    if (!sidebarOnly && !unsubscribe.length) {
+      for (const dispose of sidebarUnsubscribe) { try { dispose?.(); } catch {} }
+      sidebarUnsubscribe = [];
       unsubscribe.push(manager.addNotificationCallback(methods, emit));
       unsubscribe.push(manager.addApprovalRequestListener(syncRequestNotification));
       unsubscribe.push(manager.addApprovalResolvedListener(syncRequestNotification));
@@ -483,6 +544,7 @@
   let sidebarPriorityOptions = { enabled: true, showPinned: false, showScheduled: false, scheduledIds: new Set() };
   let catalogLoaded = false;
   let catalogLoading = null;
+  let catalogGeneration = 0;
   function nativeUnreadState(thread, id) {
     const current = typeof manager.getThreadListSummary === "function" ? manager.getThreadListSummary(id) : null;
     return current?.hasUnreadTurn === true || current?.hasUnreadTurn !== false && thread.hasUnreadTurn === true;
@@ -542,13 +604,17 @@
   function sortMode(value, preferences) {
     return value === "manual" && preferences.manualSortVersion === 1 ? "manual" : "updated_at";
   }
-  async function sidebar(payload) {
-    const sideEntries = await sideThreadEntries();
+  async function sidebar(payload = {}) {
+    const readGeneration = catalogGeneration;
+    const recentOnly = payload.recentOnly === true;
+    const sideEntries = recentOnly ? [...nativeSideThreads.values()] : await sideThreadEntries();
     const sideIds = new Set(sideEntries.map(entry => entry.threadId));
     for (const id of sideIds) nativeCatalog.delete(id);
-    const keys = ["local-projects", "pinned-project-ids", "project-order", "pinned-thread-ids",
-      "sidebar-project-thread-orders", "thread-project-assignments", "projectless-thread-ids"];
+    const keys = recentOnly ? ["local-projects", "thread-project-assignments", "projectless-thread-ids"]
+      : ["local-projects", "pinned-project-ids", "project-order", "pinned-thread-ids",
+        "sidebar-project-thread-orders", "thread-project-assignments", "projectless-thread-ids"];
     const stored = Object.fromEntries(await Promise.all(keys.map(async key => [key, await state(key)])));
+    if (readGeneration !== catalogGeneration) throw failure(409, "会话列表读取已取消");
     const preferences = manager.storage.readValue("flat-project-sidebar-preferences-v1") || {};
     const sharedSort = manager.storage.readValue("codex-sidebar-sort-mode-v1");
     const pinnedSort = manager.storage.readValue("pinned-sidebar-sort-mode-v1") === "manual" ? "manual" : "updated_at";
@@ -571,10 +637,14 @@
     const chatSort = sharedSort == null ? sortMode(preferences.chatSortMode, preferences) : "updated_at";
     const projectSort = sharedSort == null ? sortMode(preferences.projectSortMode, preferences) : "updated_at";
     const observeThreads = threads => {
+      if (readGeneration !== catalogGeneration) return;
       for (const thread of array(threads)) {
         const id = thread.conversationId || thread.id;
-        if (isDeletedThread(id) || sideIds.has(id) || thread.sideConversation === true
-            || manager.getConversation(id)?.sideConversation === true) continue;
+        if (isDeletedThread(id)) continue;
+        if (sideIds.has(id) || thread.sideConversation === true
+            || manager.getConversation(id)?.sideConversation === true) {
+          sideIds.add(id); nativeCatalog.delete(id); continue;
+        }
         if (thread.threadSource === "subagent" || thread.source?.subAgent || thread.source?.subagent) {
           nativeCatalog.delete(id);
           continue;
@@ -582,29 +652,42 @@
         nativeCatalog.set(id, summary(thread, activityTimes));
       }
     };
-    if (!catalogLoaded) {
-      if (!catalogLoading) catalogLoading = (async () => {
-        let cursor = null;
-        const cursors = new Set();
-        do {
-          const page = await manager.requestClient.sendRequest("thread/list", { cursor, limit: 100, sortKey: "updated_at", archived: false });
-          observeThreads(page.data);
-          cursor = page.nextCursor || null;
-          if (cursor && cursors.has(cursor)) throw failure(503, "原生会话目录分页游标重复");
-          if (cursor) cursors.add(cursor);
-        } while (cursor);
-        catalogLoaded = true;
-      })().finally(() => { catalogLoading = null; });
+    if (recentOnly && payload.cachedOnly === true) {
+      // 首屏复用原生内存摘要；完整目录由下一次后台读取补齐。
+    } else if (!catalogLoaded) {
+      if (!catalogLoading) {
+        const loading = (async () => {
+          let cursor = null;
+          const cursors = new Set();
+          do {
+            const page = await manager.requestClient.sendRequest("thread/list", { cursor, limit: 100, sortKey: "updated_at", archived: false });
+            if (readGeneration !== catalogGeneration) throw failure(409, "会话列表读取已取消");
+            observeThreads(page.data);
+            cursor = page.nextCursor || null;
+            if (cursor && cursors.has(cursor)) throw failure(503, "原生会话目录分页游标重复");
+            if (cursor) cursors.add(cursor);
+          } while (cursor);
+          catalogLoaded = true;
+        })().finally(() => { if (catalogLoading === loading) catalogLoading = null; });
+        catalogLoading = loading;
+      }
       await catalogLoading;
     } else {
       const page = await manager.requestClient.sendRequest("thread/list", { cursor: null, limit: 100, sortKey: "updated_at", archived: false });
       observeThreads(page.data);
     }
+    if (readGeneration !== catalogGeneration) throw failure(409, "会话列表读取已取消");
     observeThreads(manager.getRecentThreadSummaries());
     const pins = await manager.runtime.pinnedThreads();
     if (!pins) throw failure(503, "当前 Codex 版本的原生置顶服务不可用");
     const pinnedState = await pins.list({ hostId: "local", useAppServerPins: true });
+    if (readGeneration !== catalogGeneration) throw failure(409, "会话列表读取已取消");
     const pinnedIds = array(pinnedState.threadIds);
+    if (recentOnly) for (const id of nativeCatalog.keys()) {
+      if (manager.getConversation(id)?.sideConversation === true) {
+        sideIds.add(id); nativeCatalog.delete(id);
+      }
+    }
     const projects = Object.entries(stored["local-projects"] || {}).map(([id, project]) => ({
       id, name: project.name || project.rootPaths?.[0]?.split(/[\\/]/).at(-1) || id,
       roots: array(project.rootPaths), pinned: array(stored["pinned-project-ids"]).includes(id),
@@ -630,6 +713,13 @@
     const sortThreads = (items, ids, mode) => items.sort((a, b) => mode === "manual"
       ? (ids.indexOf(a.id) < 0 ? ids.length : ids.indexOf(a.id)) - (ids.indexOf(b.id) < 0 ? ids.length : ids.indexOf(b.id)) || compareUpdatedAt(a, b)
       : compareUpdatedAt(a, b));
+    if (recentOnly) return {
+      ok: true, complete: catalogLoaded,
+      projects: projects.map(project => ({ id: project.id, name: project.name })),
+      recent: threads.filter(thread => !thread.pinned),
+      pinnedThreads: threads.filter(thread => thread.pinned),
+      sideThreadIds: [...sideIds]
+    };
     for (const project of projects) {
       const children = threads.filter(thread => thread.projectId === project.id);
       project.recencyAt = Math.max(0, ...children.map(updatedAt));
@@ -3832,19 +3922,13 @@
       projectlessOutputDirectory: workspace.projectlessOutputDirectory
     };
   }
-  async function call(action, payload = {}) {
+  async function call(action, payload = {}, sidebarOnly = false) {
     try {
       validateCompactionQueueSendPayload(action, payload);
       if (action === "dispose") { window.__codexElvesRemoteAccess.dispose(); return { ok: true }; }
       if (["send", "create", "setGoal"].includes(action)) validateGoalComposerPayload(action, payload);
-      if (manager?.disposed) {
-        for (const dispose of unsubscribe) { try { dispose?.(); } catch {} }
-        unsubscribe = [];
-        manager = null;
-        appScope = null;
-        emit({ method: "remote/resync" });
-      }
-      if (!manager) discover();
+      resetStaleManager();
+      if (!manager || !sidebarOnly && !unsubscribe.length) discover(sidebarOnly);
       if (["events", "notifications", "thread"].includes(action))
         await prepareAsyncQuestionState().catch(() => {});
       if (action === "events" || action === "notifications")
@@ -4185,7 +4269,46 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 62, call,
+    version: 64, call,
+    async recentSidebar(payload = {}) {
+      try {
+        resetStaleManager();
+        if (!manager || !unsubscribe.length && !sidebarUnsubscribe.length
+            || !payload.cachedOnly && (!appScope || !nativeNavigate)) discover(true, payload.cachedOnly === true);
+        return await sidebar({ recentOnly: true, cachedOnly: payload.cachedOnly === true });
+      } catch (error) {
+        return { ok: false, code: error.code || 503, message: error.message || "原生会话列表读取失败" };
+      }
+    },
+    subscribeSidebar(listener) {
+      sidebarListeners.add(listener);
+      return () => sidebarListeners.delete(listener);
+    },
+    recentAction(action, payload) {
+      if (!["pinThread", "deleteThread"].includes(action))
+        return Promise.resolve({ ok: false, code: 400, message: "不支持的会话列表操作" });
+      return call(action, payload, true);
+    },
+    releaseSidebar() {
+      if (sidebarListeners.size || unsubscribe.length) return;
+      for (const dispose of sidebarUnsubscribe) { try { dispose?.(); } catch {} }
+      sidebarUnsubscribe = [];
+      nativeCatalog.clear(); sidebarSignatures.clear(); catalogLoaded = false;
+      catalogLoading = null; catalogGeneration++;
+    },
+    async openThread(threadId) {
+      try {
+        resetStaleManager();
+        if (!manager || !nativeNavigate) discover(true);
+        const id = requiredId(threadId);
+        if (isDeletedThread(id)) throw failure(404, "会话已永久删除");
+        if (!nativeNavigate) throw failure(503, "原生导航尚未就绪，请重试");
+        await nativeNavigate(`/local/${encodeURIComponent(id)}`);
+        return { ok: true, threadId: id };
+      } catch (error) {
+        return { ok: false, code: error.code || 503, message: error.message || "无法打开此会话" };
+      }
+    },
     removeQueued: payload => call("removeQueued", payload),
     reorderQueued: payload => call("reorderQueued", payload),
     beginQueuedEdit: payload => call("beginQueuedEdit", payload),
@@ -4193,8 +4316,8 @@
     cancelQueuedEdit: payload => call("cancelQueuedEdit", payload),
     queueMessage: (payload, allowImmediate = false) => call("send", { ...payload, queueOnly: !allowImmediate }),
     dispose() {
-      for (const dispose of unsubscribe) { try { dispose?.(); } catch {} }
-      unsubscribe = [];
+      for (const dispose of [...unsubscribe, ...sidebarUnsubscribe]) { try { dispose?.(); } catch {} }
+      unsubscribe = []; sidebarUnsubscribe = []; sidebarListeners.clear();
       for (const watcher of sideScopeWatchers.values()) watcher.dispose?.();
       sideScopeWatchers.clear();
       if (window.__codexElvesRemoteAccess?.epoch === epoch) delete window.__codexElvesRemoteAccess;

@@ -112,7 +112,7 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
       const url = registeredImages.get(source);
       if (url) {
         const safeUrl = escapeHtml(url);
-        return `<a class="message-image-link" href="${safeUrl}" target="_blank" rel="noopener noreferrer"><img class="message-image" src="${safeUrl}" alt="${escapeHtml(alt)}" loading="lazy" decoding="async"></a>`;
+        return `<a class="message-image-link" href="${safeUrl}" target="_blank" rel="noopener noreferrer"><img class="message-image" data-remote-media="${safeUrl}" alt="${escapeHtml(alt)}" loading="lazy" decoding="async"></a>`;
       }
       const label = alt.trim() || "图片";
       const title = source ? ` title="${escapeHtml(source)}"` : "";
@@ -135,7 +135,7 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
     ],
     ALLOWED_ATTR: [
       "align", "alt", "checked", "class", "decoding", "disabled", "href", "loading", "rel", "src",
-      "start", "target", "title", "type"
+      "start", "target", "title", "type", "data-remote-media"
     ],
     ALLOW_ARIA_ATTR: false,
     ALLOW_DATA_ATTR: false,
@@ -152,6 +152,7 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
       data.keepAttr = false;
     }
     if (data.attrName === "src" && safeImagePath(data.attrValue) === null && safeVideoPoster(data.attrValue) === null) data.keepAttr = false;
+    if (data.attrName === "data-remote-media" && safeImagePath(data.attrValue) === null && safeVideoPoster(data.attrValue) === null) data.keepAttr = false;
     if (data.attrName === "srcset" || data.attrName === "xlink:href") {
       data.keepAttr = false;
     }

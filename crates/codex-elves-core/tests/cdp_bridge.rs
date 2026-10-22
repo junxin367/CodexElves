@@ -70,6 +70,33 @@ fn injection_script_prefixes_helper_url_and_version() {
     assert!(script.contains("window.__CODEX_ELVES_VERSION__"));
     assert!(script.contains(codex_elves_core::version::VERSION));
     assert!(script.contains("window.__CODEX_ELVES_LAUNCH_CYCLE__"));
+    let cache_scope = |source: &str| {
+        source
+            .lines()
+            .find(|line| line.starts_with("window.__CODEX_ELVES_SESSION_CACHE_SCOPE__ = "))
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(
+        cache_scope(&script),
+        cache_scope(&assets::injection_script(45222))
+    );
+    let different_home = codex_elves_core::settings::BackendSettings {
+        codex_home_path: tempfile::tempdir()
+            .unwrap()
+            .path()
+            .join("other-home")
+            .to_string_lossy()
+            .to_string(),
+        ..Default::default()
+    };
+    assert_ne!(
+        cache_scope(&script),
+        cache_scope(&assets::injection_script_with_settings(
+            45221,
+            &different_home
+        ))
+    );
 }
 
 #[test]
@@ -2257,7 +2284,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "99";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "101";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -4382,7 +4409,7 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("codex-open-in-menu"));
     assert!(script.contains(r#"const codexOpenInVersion = "11";"#));
     assert!(script.contains("window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion"));
-    assert!(script.contains(r#"const codexDeleteStyleVersion = "99";"#));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "101";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
     assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
     assert!(script.contains("width: 30px !important;"));
@@ -4836,7 +4863,8 @@ fn injection_script_uses_codex_native_model_catalog_without_model_list_patching(
     assert!(!script.contains("installStatsigModelConfigPatch"));
     assert!(!script.contains("available_models: availableModels"));
     assert!(!script.contains("ensureCodexModelIntegration"));
-    assert!(!script.contains("model/list"));
+    // 远程适配器按需安装并保留其模型读取操作；桌面模型选择仍只读原生目录。
+    assert!(!assets::renderer_script().contains("model/list"));
     assert!(!script.contains("list-models-for-host"));
     assert!(script.contains(r#"queryKey: ["models", "list"]"#));
     assert!(!script.contains("model_unlock_path_applied"));

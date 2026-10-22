@@ -1,3 +1,5 @@
+import { requestRemote } from "./channels.js";
+
 const sections = [
   ["staged", "已暂存"], ["unstaged", "未暂存"], ["untracked", "未跟踪"]
 ];
@@ -80,7 +82,7 @@ function responseBytes(value) {
   const serialized = JSON.stringify(value);
   return typeof TextEncoder === "function" ? new TextEncoder().encode(serialized).length : serialized.length * 2;
 }
-export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, cache }) {
+export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, cache, request: transport = requestRemote }) {
   let disposed = false, opened = false, activePage = "changes", detailVisible = false, contextKey = "";
   let changesEpoch = 0, detailEpoch = 0, changesController = null, detailController = null;
   let files = [], selectedFile = null, changesLoaded = false, changesBusy = false;
@@ -185,27 +187,26 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     };
     try {
       ensureCurrent();
-      // 变更接口固定走当前登录入口。
-      const response = await fetch(path, {
+      return await transport(path, {
         method: "POST", credentials: "same-origin", redirect: "error",
-        headers: { "Content-Type": "application/json", skip_zrok_interstitial: "1", "ngrok-skip-browser-warning": "1" },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body), signal: controller.signal
-      });
-      ensureCurrent();
-      let result;
-      try { result = await response.json(); }
-      catch (error) {
-        if (error?.name === "AbortError") throw error;
+      }, async response => {
         ensureCurrent();
-        result = { message: `无法读取服务响应（HTTP ${response.status}）` };
-      }
-      ensureCurrent();
-      if (!response.ok || result?.ok === false) {
-        if (response.status === 401) { forgetAuthorization(); onUnauthorized?.(); }
-        throw Object.assign(new Error(result?.message || result?.error || `请求失败（HTTP ${response.status}）`), { code: response.status });
-      }
-      return result;
+        let result;
+        try { result = await response.json(); }
+        catch (error) {
+          if (error?.name === "AbortError") throw error;
+          ensureCurrent();
+          result = { message: `无法读取服务响应（HTTP ${response.status}）` };
+        }
+        ensureCurrent();
+        if (!response.ok || result?.ok === false)
+          throw Object.assign(new Error(result?.message || result?.error || `请求失败（HTTP ${response.status}）`), { code: response.status });
+        return result;
+      });
     } catch (error) {
+      if (error.code === 401 && !error.secondaryChannel) { forgetAuthorization(); onUnauthorized?.(); }
       if (timedOut) throw new Error("服务响应超时，请检查电脑端服务后重试。");
       if (error instanceof TypeError) throw new Error("无法连接电脑端服务，请检查远程连接后重试。");
       throw error;

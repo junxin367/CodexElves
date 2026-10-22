@@ -1,3 +1,5 @@
+import { remoteMediaUrl } from "./channels.js";
+
 const MAX_IMAGE_COUNT = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 12 * 1024 * 1024;
@@ -14,13 +16,59 @@ export function videoPreviewMarkup(asset, label = "") {
   const name = escape(label || asset.name || "视频");
   // 正文只包含静态封面；这里不能创建 video、source 或指向视频的链接。
   return `<button type="button" class="message-video-preview" title="${name}">`
-    + `<span class="message-video-cover"><img class="message-video-poster" src="${escape(asset.poster)}" alt="${name}" loading="lazy" decoding="async">`
+    + `<span class="message-video-cover"><img class="message-video-poster" data-remote-media="${escape(asset.poster)}" alt="${name}" loading="lazy" decoding="async">`
     + `<span class="message-video-badge">▶</span></span><span class="message-video-name">${name}</span></button>`;
 }
 
 function videoTime(value) {
   const seconds = Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function videoPreviewIcon(name) {
+  const paths = {
+    close: '<path d="m6 6 12 12M18 6 6 18"/>',
+    play: '<circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4Z" fill="currentColor" stroke="none"/>',
+    pause: '<circle cx="12" cy="12" r="9"/><path d="M9 8h2v8H9ZM13 8h2v8h-2Z" fill="currentColor" stroke="none"/>'
+  };
+  const icon = document.createElement("span");
+  icon.className = "ui-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths[name]}</svg>`;
+  return icon;
+}
+
+export function fitMediaPreview(dialog, panel, media, dimensions) {
+  const pixels = (style, property) => Number.parseFloat(style.getPropertyValue(property)) || 0;
+  const resize = () => {
+    const { width, height } = dimensions();
+    if (!dialog.open || !width || !height) return;
+    const dialogStyle = getComputedStyle(dialog), panelStyle = getComputedStyle(panel);
+    const margin = pixels(dialogStyle, "--preview-margin");
+    const maxWidth = Math.max(1, Math.min(pixels(dialogStyle, "--preview-max-width"), window.innerWidth - margin * 2));
+    const frameWidth = pixels(dialogStyle, "border-left-width") + pixels(dialogStyle, "border-right-width")
+      + pixels(panelStyle, "padding-left") + pixels(panelStyle, "padding-right");
+    let frameHeight = pixels(dialogStyle, "border-top-width") + pixels(dialogStyle, "border-bottom-width")
+      + pixels(panelStyle, "padding-top") + pixels(panelStyle, "padding-bottom");
+    for (const child of panel.children) {
+      if (child === media) continue;
+      const style = getComputedStyle(child);
+      if (style.position === "absolute" || style.display === "none") continue;
+      frameHeight += child.getBoundingClientRect().height + pixels(style, "margin-top") + pixels(style, "margin-bottom");
+    }
+    const scale = Math.min(1, Math.max(1, maxWidth - frameWidth) / width,
+      Math.max(1, window.innerHeight - margin * 2 - frameHeight) / height);
+    dialog.style.width = `${Math.min(maxWidth, Math.max(pixels(dialogStyle, "--preview-min-width"), width * scale + frameWidth))}px`;
+    media.style.width = `${width * scale}px`;
+    media.style.height = `${height * scale}px`;
+  };
+  const observer = new ResizeObserver(resize);
+  observer.observe(panel);
+  window.addEventListener("resize", resize);
+  return {
+    resize,
+    dispose() { observer.disconnect(); window.removeEventListener("resize", resize); }
+  };
 }
 
 export function openVideoPreview(trigger, source, poster, name, prepareAccess = () => {}) {
@@ -36,27 +84,28 @@ export function openVideoPreview(trigger, source, poster, name, prepareAccess = 
   const close = document.createElement("button");
   close.type = "button";
   close.className = "image-preview-close";
-  close.textContent = "×";
+  close.append(videoPreviewIcon("close"));
   close.setAttribute("aria-label", "关闭视频预览");
   close.onclick = () => dialog.close();
   const video = document.createElement("video");
   video.className = "video-preview-media";
   video.preload = "none";
   video.playsInline = true;
-  video.poster = poster;
+  video.poster = remoteMediaUrl(poster);
   // 弹窗打开时仍然没有 src。只有下方播放按钮的点击事件可以设置 src。
   const controls = document.createElement("div");
   controls.className = "video-preview-controls";
   const play = document.createElement("button");
   play.type = "button";
-  play.className = "video-preview-play";
-  play.textContent = "播放";
+  play.className = "icon-button video-preview-play";
+  play.append(videoPreviewIcon("play"));
   play.setAttribute("aria-label", "播放视频");
+  play.title = "播放视频";
   const progress = document.createElement("input");
   progress.type = "range";
   progress.className = "video-preview-progress";
   progress.min = "0";
-  progress.max = "0";
+  progress.max = "1";
   progress.step = "0.1";
   progress.value = "0";
   progress.disabled = true;
@@ -71,24 +120,49 @@ export function openVideoPreview(trigger, source, poster, name, prepareAccess = 
   const title = document.createElement("p");
   title.className = "image-preview-caption";
   title.textContent = name;
-  let closed = false, seeking = false, failed = false;
+  const cover = new Image();
+  const thumbnail = trigger?.querySelector(".message-video-poster");
+  const layout = fitMediaPreview(dialog, panel, video, () => ({
+    width: video.videoWidth || cover.naturalWidth || thumbnail?.naturalWidth || 320,
+    height: video.videoHeight || cover.naturalHeight || thumbnail?.naturalHeight || 180
+  }));
+  cover.onload = layout.resize;
+  cover.src = video.poster;
+  video.addEventListener("loadedmetadata", layout.resize);
+  video.addEventListener("resize", layout.resize);
+  let closed = false, seeking = false, failed = false, pendingSeek = null;
   const sync = () => {
     const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
-    progress.max = String(duration);
+    if (duration && pendingSeek !== null) {
+      const target = pendingSeek;
+      pendingSeek = null;
+      video.currentTime = Math.min(target, duration);
+    }
+    progress.max = String(duration || 1);
     progress.disabled = !duration || !video.getAttribute("src");
     if (!seeking) progress.value = String(video.currentTime || 0);
     progress.setAttribute("aria-valuetext", `${videoTime(video.currentTime)} / ${videoTime(duration)}`);
     time.textContent = `${videoTime(video.currentTime)} / ${videoTime(duration)}`;
-    play.textContent = video.paused ? video.ended ? "重播" : failed ? "重试" : "播放" : "暂停";
-    play.setAttribute("aria-label", video.paused ? "播放视频" : "暂停视频");
+    play.replaceChildren(videoPreviewIcon(video.paused ? "play" : "pause"));
+    const playLabel = video.paused ? video.ended ? "重播视频" : failed ? "重试播放视频" : "播放视频" : "暂停视频";
+    play.setAttribute("aria-label", playLabel);
+    play.title = playLabel;
   };
   play.onclick = () => {
     if (closed) return;
     if (!video.paused) { video.pause(); return; }
     prepareAccess();
     failed = false;
-    if (!video.getAttribute("src") || video.error) {
-      video.src = source;
+    const selectedSource = remoteMediaUrl(source);
+    if (!selectedSource) {
+      failed = true;
+      status.textContent = "当前没有可用的播放线路，请稍后重试";
+      sync();
+      return;
+    }
+    if (video.getAttribute("src") !== selectedSource || video.error) {
+      pendingSeek = video.ended ? 0 : video.currentTime || 0;
+      video.src = selectedSource;
     }
     if (video.ended) video.currentTime = 0;
     status.textContent = "正在加载视频…";
@@ -102,7 +176,18 @@ export function openVideoPreview(trigger, source, poster, name, prepareAccess = 
   progress.oninput = () => { seeking = true; time.textContent = `${videoTime(Number(progress.value))} / ${videoTime(video.duration)}`; };
   progress.onchange = () => {
     seeking = false;
-    if (!progress.disabled && Number.isFinite(Number(progress.value))) video.currentTime = Number(progress.value);
+    if (!progress.disabled && Number.isFinite(Number(progress.value))) {
+      const target = Number(progress.value), selectedSource = remoteMediaUrl(source);
+      if (selectedSource && video.getAttribute("src") !== selectedSource) {
+        const playing = !video.paused;
+        pendingSeek = target;
+        video.src = selectedSource;
+        video.load();
+        if (playing) void video.play().catch(() => {
+          if (!closed) { failed = true; status.textContent = "无法播放视频，请重试"; sync(); }
+        });
+      } else if (selectedSource) video.currentTime = target;
+    }
     sync();
   };
   for (const event of ["loadedmetadata", "durationchange", "timeupdate", "pause", "ended"]) video.addEventListener(event, sync);
@@ -142,6 +227,9 @@ export function openVideoPreview(trigger, source, poster, name, prepareAccess = 
   window.addEventListener("pagehide", leave);
   document.addEventListener("visibilitychange", hide);
   dialog.onclose = () => {
+    layout.dispose();
+    cover.onload = null;
+    cover.removeAttribute("src");
     stop();
     window.removeEventListener("pagehide", leave);
     document.removeEventListener("visibilitychange", hide);
@@ -155,19 +243,21 @@ export function openVideoPreview(trigger, source, poster, name, prepareAccess = 
   document.body.append(dialog);
   document.body.classList.add("modal-open");
   dialog.showModal();
+  layout.resize();
   play.focus();
 }
 
 export function bindMessageVideos(root, prepareAccess = () => {}) {
   for (const button of root.querySelectorAll(".message-video-preview")) {
     const poster = button.querySelector(".message-video-poster");
-    const posterUrl = poster?.getAttribute("src") || "";
+    const posterUrl = poster?.getAttribute("data-remote-media") || poster?.getAttribute("src") || "";
     const source = posterUrl.replace(/\/poster$/u, "");
     if (!remoteVideoPattern.test(source) || posterUrl !== `${source}/poster`) continue;
     const name = button.querySelector(".message-video-name")?.textContent || "视频";
     button.setAttribute("aria-label", `预览视频：${name}`);
     button.setAttribute("aria-haspopup", "dialog");
     poster.onerror = () => { poster.hidden = true; };
+    if (!poster.getAttribute("src")) poster.src = remoteMediaUrl(posterUrl);
     button.onclick = event => {
       event.preventDefault(); event.stopPropagation();
       openVideoPreview(button, source, posterUrl, name, prepareAccess);
@@ -177,14 +267,18 @@ export function bindMessageVideos(root, prepareAccess = () => {}) {
 
 export function retryOriginalImage(image) {
   const source = image.originalImageSource;
-  if (!source || image.getAttribute("src") === source) return false;
-  image.src = source;
+  if (!source) return false;
+  const selectedSource = remoteMediaUrl(source);
+  if (!selectedSource || image.getAttribute("src") === selectedSource) return false;
+  image.src = selectedSource;
   return true;
 }
 
 export function loadAttachmentThumbnail(image, source, mime = "") {
   image.originalImageSource = source;
-  image.src = remoteImagePattern.test(source) && mime !== "image/gif" ? `${source}/thumbnail` : source;
+  const thumbnail = remoteImagePattern.test(source) && mime !== "image/gif" ? `${source}/thumbnail` : source;
+  if (remoteImagePattern.test(source)) image.setAttribute("data-remote-media", source);
+  image.src = remoteMediaUrl(thumbnail);
   // 兼容尚未提供缩略图接口的旧服务；失败后只回退一次原图。
   image.onerror = () => { retryOriginalImage(image); };
 }

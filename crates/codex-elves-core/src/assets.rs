@@ -1,6 +1,7 @@
 use base64::Engine;
 use serde_json::Map;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,6 +11,8 @@ use crate::settings::BackendSettings;
 
 const RENDERER_BOOTSTRAP_SCRIPT: &str = include_str!("../../../assets/inject/renderer-inject.js");
 const RENDERER_FEATURES_SCRIPT: &str = include_str!("../../../assets/inject/renderer-features.js");
+const RECENT_SESSIONS_SCRIPT: &str = include_str!("../../../assets/inject/recent-sessions.js");
+const RECENT_SESSIONS_NATIVE_SCRIPT: &str = include_str!("../../../assets/remote-access/native.js");
 const NATIVE_FAST_UNLOCK_SCRIPT: &str =
     include_str!("../../../assets/inject/native-fast-unlock.js");
 pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261021-native-fast-compat";
@@ -23,7 +26,12 @@ pub fn renderer_bootstrap_script() -> &'static str {
 }
 
 pub fn renderer_features_script() -> &'static str {
-    RENDERER_FEATURES_SCRIPT
+    static SCRIPT: OnceLock<String> = OnceLock::new();
+    SCRIPT.get_or_init(|| {
+        format!(
+            "window.__codexElvesInstallRecentSessionsAdapter = () => {{\n{RECENT_SESSIONS_NATIVE_SCRIPT}\n}};\n{RECENT_SESSIONS_SCRIPT}\n{RENDERER_FEATURES_SCRIPT}"
+        )
+    })
 }
 
 pub fn native_fast_unlock_script() -> &'static str {
@@ -82,8 +90,10 @@ fn injection_script_source_with_settings(
         source.to_string()
     };
     format!(
-        "window.__CODEX_SESSION_DELETE_HELPER__ = {};\nwindow.__CODEX_ELVES_VERSION__ = {};\nwindow.__CODEX_ELVES_BUILD__ = {};\nwindow.__CODEX_ELVES_LAUNCH_CYCLE__ = {};\nwindow.__CODEX_ELVES_IMAGE_OVERLAY__ = {};\nwindow.__CODEX_ELVES_PLUGIN_MARKETPLACES__ = {};\nwindow.__CODEX_ELVES_SUPPRESSED_THREADS__ = {};\n{}\n{}",
+        "window.__CODEX_SESSION_DELETE_HELPER__ = {};\nwindow.__CODEX_ELVES_SESSION_CACHE_SCOPE__ = {};\nwindow.__CODEX_ELVES_VERSION__ = {};\nwindow.__CODEX_ELVES_BUILD__ = {};\nwindow.__CODEX_ELVES_LAUNCH_CYCLE__ = {};\nwindow.__CODEX_ELVES_IMAGE_OVERLAY__ = {};\nwindow.__CODEX_ELVES_PLUGIN_MARKETPLACES__ = {};\nwindow.__CODEX_ELVES_SUPPRESSED_THREADS__ = {};\n{}\n{}",
         serde_json::to_string(&helper_url).expect("helper URL should serialize"),
+        serde_json::to_string(&recent_sessions_cache_scope(&codex_home))
+            .expect("session cache scope should serialize"),
         serde_json::to_string(crate::version::VERSION).expect("version should serialize"),
         serde_json::to_string(DIAGNOSTIC_BUILD_ID).expect("build id should serialize"),
         serde_json::to_string(injection_launch_cycle_id())
@@ -93,6 +103,19 @@ fn injection_script_source_with_settings(
         serde_json::to_string(&suppressed_threads).expect("suppressed threads should serialize"),
         native_fast_bootstrap(settings),
         source,
+    )
+}
+
+fn recent_sessions_cache_scope(home: &Path) -> String {
+    let path = home.to_string_lossy().replace('\\', "/");
+    let path = if cfg!(windows) {
+        path.to_lowercase()
+    } else {
+        path
+    };
+    format!(
+        "local:{:x}",
+        Sha256::digest(path.trim_end_matches('/').as_bytes())
     )
 }
 

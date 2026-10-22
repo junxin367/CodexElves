@@ -7,6 +7,7 @@ const JOURNAL_SIZE: usize = 1024;
 struct Ticket {
     device_id: String,
     expires_at: u64,
+    media_only: bool,
 }
 
 struct Journal {
@@ -54,11 +55,13 @@ impl Channels {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&hash(token))
-            .filter(|ticket| ticket.expires_at > now_ms())
+            .filter(|ticket| {
+                ticket.expires_at > now_ms() && ticket.media_only == media_authorization(headers)
+            })
             .map(|ticket| ticket.device_id.clone())
     }
 
-    fn issue(&self, device: &Device) -> (String, u64) {
+    fn issue(&self, device: &Device, media_only: bool) -> (String, u64) {
         let token = random_token();
         let expires_at = (now_ms() + TICKET_LIFETIME_MS).min(device.expires_at_ms);
         let mut tickets = self.tickets.lock().unwrap_or_else(|e| e.into_inner());
@@ -78,6 +81,7 @@ impl Channels {
             Ticket {
                 device_id: device.id.clone(),
                 expires_at,
+                media_only,
             },
         );
         (token, expires_at)
@@ -88,7 +92,10 @@ pub(super) fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(|v| {
+            v.strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("Media "))
+        })
         .or_else(|| {
             headers
                 .get("sec-websocket-protocol")
@@ -101,7 +108,17 @@ pub(super) fn bearer(headers: &HeaderMap) -> Option<&str> {
         })
 }
 
+pub(super) fn media_authorization(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("Media "))
+}
+
 pub(super) fn read_path(method: &Method, path: &str) -> bool {
+    if media_path(method, path) {
+        return true;
+    }
     match method {
         &Method::GET => {
             matches!(
@@ -113,7 +130,10 @@ pub(super) fn read_path(method: &Method, path: &str) -> bool {
                     | "/api/channel-events"
             ) || path.starts_with("/api/receipts/")
         }
-        &Method::POST => path.starts_with("/api/read/"),
+        &Method::POST => {
+            path.starts_with("/api/read/")
+                || matches!(path, "/api/workspace/changes" | "/api/workspace/change")
+        }
         _ => false,
     }
 }
@@ -121,10 +141,50 @@ pub(super) fn read_path(method: &Method, path: &str) -> bool {
 pub(super) fn request_path(method: &Method, path: &str) -> bool {
     read_path(method, path)
         || method == Method::POST
-            && matches!(
-                path,
-                "/api/action/send" | "/api/action/create" | "/api/action/setGoal"
-            )
+            && (path == "/api/logout"
+                || path.strip_prefix("/api/action/").is_some_and(|action| {
+                    !action.is_empty()
+                        && action.len() <= 64
+                        && action.bytes().all(|byte| byte.is_ascii_alphabetic())
+                }))
+}
+
+pub(super) fn media_path(method: &Method, path: &str) -> bool {
+    if !matches!(*method, Method::GET | Method::HEAD) {
+        return false;
+    }
+    let (id, video) = if let Some(path) = path.strip_prefix("/api/images/") {
+        (path.strip_suffix("/thumbnail").unwrap_or(path), false)
+    } else if let Some(path) = path.strip_prefix("/api/videos/") {
+        (path.strip_suffix("/poster").unwrap_or(path), true)
+    } else {
+        return false;
+    };
+    if video {
+        id.len() == 64
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    } else {
+        (20..=128).contains(&id.len())
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    }
+}
+
+pub(super) fn media_token(uri: &Uri) -> Option<String> {
+    let mut url = reqwest::Url::parse("http://localhost").ok()?;
+    url.set_query(uri.query());
+    let tokens = url
+        .query_pairs()
+        .filter(|(key, _)| key == "channel_token")
+        .map(|(_, value)| value.into_owned())
+        .collect::<Vec<_>>();
+    (tokens.len() == 1
+        && tokens[0].len() == 64
+        && tokens[0].bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then(|| tokens[0].clone())
 }
 
 impl RemoteAccessController {
@@ -151,7 +211,8 @@ pub(super) async fn discover(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let device = authorized(&state, &headers).await?;
-    let (token, expires_at) = state.controller.channels.issue(&device);
+    let (token, expires_at) = state.controller.channels.issue(&device, false);
+    let (media_token, _) = state.controller.channels.issue(&device, true);
     let origins = state
         .controller
         .public_origin()
@@ -166,7 +227,7 @@ pub(super) async fn discover(
         .map_err(authorization_error)?;
     Ok(Json(
         json!({"ok":true,"schemaVersion":1,"deviceId":device.id,"serverId":state.controller.channels.epoch,
-        "origins":origins,"token":token,"expiresAtMs":expires_at,"sendActions":["send","create","setGoal"]}),
+        "origins":origins,"token":token,"mediaToken":media_token,"expiresAtMs":expires_at,"sendActions":["send","create","setGoal"],"requestRoutingVersion":2}),
     ))
 }
 

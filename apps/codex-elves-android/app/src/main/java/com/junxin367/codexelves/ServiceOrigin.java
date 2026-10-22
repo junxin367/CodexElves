@@ -11,7 +11,10 @@ final class ServiceOrigin {
     static final String CHANNEL_CONNECT_SOURCES =
         "https://*.ngrok-free.app wss://*.ngrok-free.app https://*.ngrok-free.dev wss://*.ngrok-free.dev "
         + "https://*.ngrok.app wss://*.ngrok.app https://*.ngrok.dev wss://*.ngrok.dev "
-        + "https://*.ngrok.io wss://*.ngrok.io";
+        + "https://*.ngrok.io wss://*.ngrok.io https://*.shares.zrok.io wss://*.shares.zrok.io";
+    static final String CHANNEL_MEDIA_SOURCES =
+        "https://*.ngrok-free.app https://*.ngrok-free.dev https://*.ngrok.app https://*.ngrok.dev "
+        + "https://*.ngrok.io https://*.shares.zrok.io";
     private ServiceOrigin() {
     }
 
@@ -83,25 +86,28 @@ final class ServiceOrigin {
         }
     }
 
-    /** Permit credentialed secondary reads and idempotent message sends; no documents or assets. */
+    /** Permit authenticated session requests and short-lived media links; no documents or assets. */
     static boolean allowsChannelRequest(String rawUrl, String method, java.util.Map<String, String> headers) {
         try {
             URI uri = new URI(rawUrl);
             String origin = normalize(uri.getScheme() + "://" + uri.getRawAuthority());
             String host = new URI(origin).getHost();
             if (uri.getRawFragment() != null || uri.getPort() != -1 && uri.getPort() != 443
-                || !host.matches("[a-zA-Z0-9-]+\\.(ngrok-free\\.app|ngrok-free\\.dev|ngrok\\.app|ngrok\\.dev|ngrok\\.io)"))
+                || !host.matches("[a-zA-Z0-9-]+\\.(shares\\.zrok\\.io|ngrok-free\\.app|ngrok-free\\.dev|ngrok\\.app|ngrok\\.dev|ngrok\\.io)"))
                 return false;
             boolean preflight = "OPTIONS".equals(method);
             String requestedMethod = preflight ? channelHeader(headers, "Access-Control-Request-Method") : method;
             String path = uri.getRawPath();
-            boolean messageSend = "POST".equals(requestedMethod)
-                && ("/api/action/send".equals(path) || "/api/action/create".equals(path) || "/api/action/setGoal".equals(path));
+            boolean messageSend = "POST".equals(requestedMethod) && path != null
+                && path.matches("/api/action/[a-zA-Z]{1,64}");
+            boolean media = ("GET".equals(requestedMethod) || "HEAD".equals(requestedMethod)) && path != null
+                && path.matches("/api/(images/[a-zA-Z0-9_-]{20,128}(/thumbnail)?|videos/[a-f0-9]{64}(/poster)?)");
             boolean allowed = "GET".equals(requestedMethod)
                 && ("/api/session".equals(path) || "/api/channels".equals(path) || "/api/channel-events".equals(path)
                     || path != null && path.matches("/api/receipts/[a-zA-Z0-9-]{1,100}"))
-                || "POST".equals(requestedMethod) && path != null && path.matches("/api/read/[a-zA-Z]+")
-                || messageSend;
+                || "POST".equals(requestedMethod) && path != null
+                    && (path.matches("/api/read/[a-zA-Z]+") || path.matches("/api/workspace/changes?") || "/api/logout".equals(path))
+                || messageSend || media;
             if (!allowed) return false;
             if (preflight) {
                 boolean authorization = false, idempotency = false;
@@ -111,7 +117,18 @@ final class ServiceOrigin {
                 }
                 return authorization && (!messageSend || idempotency);
             }
-            return channelHeader(headers, "Authorization").matches("Bearer [a-f0-9]{64}")
+            boolean mediaToken = false;
+            if (media && uri.getRawQuery() != null) {
+                int count = 0;
+                for (String pair : uri.getRawQuery().split("&")) {
+                    if (pair.startsWith("channel_token=")) {
+                        count++;
+                        mediaToken = pair.matches("channel_token=[a-f0-9]{64}");
+                    }
+                }
+                mediaToken = mediaToken && count == 1;
+            }
+            return (mediaToken || channelHeader(headers, "Authorization").matches("Bearer [a-f0-9]{64}"))
                 && (!messageSend || channelHeader(headers, "Idempotency-Key").matches("[a-zA-Z0-9-]{1,100}"));
         } catch (URISyntaxException | IllegalArgumentException error) {
             return false;

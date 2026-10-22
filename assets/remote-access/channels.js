@@ -1,16 +1,22 @@
+import { getAndroidAppInfo, isAndroidContainer } from "./platform.js";
+
 let deviceId = null;
 let generation = 0;
 let discoveryTimer = null;
 let discoveryPending = null;
 let configuration = null;
+let channelMeasurements = [];
+let measurementSignature = "";
 const listeners = new Set();
 const latencyObservations = new Set();
 const primaryOrigin = () => globalThis.location.origin;
 const messageActions = new Set(["send", "create", "setGoal"]);
-const readPaths = new Set([
-  "/api/session", "/api/channels", "/api/channel-events", "/api/read/sidebar", "/api/read/history", "/api/read/thread",
-  "/api/read/queue", "/api/read/queueEdit", "/api/read/sendState", "/api/read/notifications"
-]);
+const mediaPath = /^\/api\/(?:images\/[A-Za-z0-9_-]{20,128}(?:\/thumbnail)?|videos\/[a-f0-9]{64}(?:\/poster)?)$/;
+let fullRequestRouting = !isAndroidContainer();
+if (!fullRequestRouting) void getAndroidAppInfo().then(info => {
+  fullRequestRouting = info?.requestRoutingVersion === 2;
+  changed();
+});
 
 export function prepareRemoteTunnelAccess() {
   if (!globalThis.document || globalThis.location?.protocol !== "https:"
@@ -37,6 +43,8 @@ export function clearRemoteChannels() {
   ++generation;
   deviceId = null;
   configuration = null;
+  channelMeasurements = [];
+  measurementSignature = "";
   discoveryPending = null;
   clearInterval(discoveryTimer);
   discoveryTimer = null;
@@ -60,6 +68,51 @@ export function remoteChannelRoutes() {
   }));
 }
 
+export function setRemoteChannelMeasurements(values) {
+  const next = (Array.isArray(values) ? values : []).filter(value =>
+    typeof value?.origin === "string" && ["ready", "unknown", "unavailable"].includes(value.status))
+    .map(({ origin, status, milliseconds }) => ({ origin, status, milliseconds }));
+  const signature = JSON.stringify(next);
+  if (signature === measurementSignature) return;
+  measurementSignature = signature;
+  channelMeasurements = next;
+  changed();
+}
+
+function orderedRoutes(candidates = routes(), measurements = channelMeasurements) {
+  return candidates.map((route, index) => ({ ...route, index, measurement: measurements.find(value => value.origin === route.origin) }))
+    .filter(route => route.measurement?.status !== "unavailable")
+    .sort((left, right) => {
+      const latency = route => route.measurement?.status === "ready"
+        && Number.isFinite(route.measurement.milliseconds) && route.measurement.milliseconds >= 0
+        ? route.measurement.milliseconds : Infinity;
+      return latency(left) - latency(right) || left.index - right.index;
+    });
+}
+
+function supportsRequest(route, path, method) {
+  if (["/api/connect", "/api/login-status"].includes(path.split("?")[0])) return !route.token;
+  if (!route.token) return true;
+  if (!fullRequestRouting && new URL(route.origin).hostname.endsWith(".shares.zrok.io")) return false;
+  if (fullRequestRouting && configuration?.requestRoutingVersion === 2) return true;
+  if (method === "GET") return ["/api/session", "/api/channels", "/api/channel-events", "/api/events", "/api/events/ws"].includes(path.split("?")[0])
+    || path.startsWith("/api/receipts/");
+  if (path.startsWith("/api/read/")) return true;
+  return configuration?.sendActions?.includes(path.slice("/api/action/".length)) === true;
+}
+
+// 媒体元素不能设置 Authorization；独立只读凭证仅可用于受限的媒体读取地址。
+export function remoteMediaUrl(path) {
+  if (!mediaPath.test(path)) return path;
+  const route = orderedRoutes(routes().filter(route => supportsRequest(route, path, "GET")))[0];
+  if (!route) return "";
+  if (!route.token) return path;
+  if (!/^[a-f0-9]{64}$/.test(configuration?.mediaToken || "")) return path;
+  const url = new URL(path, route.origin);
+  url.searchParams.set("channel_token", configuration.mediaToken);
+  return url.href;
+}
+
 export function validateRemoteReceipt(value, requestId) {
   if (!value || Array.isArray(value) || value.requestId !== requestId
       || !["pending", "completed", "failed", "unknown"].includes(value.state)
@@ -70,25 +123,22 @@ export function validateRemoteReceipt(value, requestId) {
   return value;
 }
 
-export async function sendRemoteMessage(path, options, consume, measurements = [], onUnavailable = null) {
+export async function requestRemote(path, options, consume, measurements = channelMeasurements, onUnavailable = null) {
   prepareRemoteTunnelAccess();
-  const action = path.startsWith("/api/action/") ? path.slice("/api/action/".length) : "";
+  const action = path.startsWith("/api/action/");
   const headers = new Headers(options.headers);
   const notSubmitted = message => Object.assign(new Error(message), { notSubmitted: true, outcomeUnknown: false });
-  if (!messageActions.has(action) || options.method !== "POST"
-      || !/^[a-zA-Z0-9-]{1,100}$/.test(headers.get("Idempotency-Key") || ""))
-    throw notSubmitted("消息发送参数无效，操作未提交。");
-  if (options.signal?.aborted) throw notSubmitted("消息发送已取消，操作未提交。");
-  // 使用页面已展示的同一份线路状态；不探测、不竞速写入，也不在失败后换路重发。
-  const candidates = routes().filter(route => !route.token || configuration?.sendActions?.includes(action))
-    .map(route => ({ ...route, measurement: measurements.find(value => value.origin === route.origin) }))
-    .filter(route => route.measurement?.status !== "unavailable");
-  const measured = candidates.filter(route => route.measurement?.status === "ready"
-    && Number.isFinite(route.measurement.milliseconds) && route.measurement.milliseconds >= 0);
-  measured.sort((left, right) => left.measurement.milliseconds - right.measurement.milliseconds);
-  // 尚无有效测量时，在未标记不可用的候选线路中优先原入口。
-  const route = measured[0] || candidates[0];
-  if (!route) throw notSubmitted("当前没有可用的消息发送线路，草稿已保留，请等待连接恢复。");
+  const target = new URL(path, primaryOrigin());
+  if (!path.startsWith("/api/") || target.origin !== primaryOrigin() || target.hash
+      || target.pathname !== path.split("?")[0] || !target.pathname.startsWith("/api/"))
+    throw notSubmitted("请求地址无效，操作未提交。");
+  if (action && (options.method !== "POST"
+      || !/^[a-zA-Z0-9-]{1,100}$/.test(headers.get("Idempotency-Key") || "")))
+    throw notSubmitted("请求参数无效，操作未提交。");
+  if (options.signal?.aborted) throw notSubmitted("请求已取消，操作未提交。");
+  // 所有业务请求使用同一份延迟状态；只向选中的一路发送一次。
+  const route = orderedRoutes(routes().filter(route => supportsRequest(route, path, options.method)), measurements)[0];
+  if (!route) throw notSubmitted("当前没有可用的请求线路，请等待连接恢复后重试。");
   const expectedServer = configuration?.serverId;
   headers.set("skip_zrok_interstitial", "1");
   headers.set("ngrok-skip-browser-warning", "1");
@@ -103,7 +153,8 @@ export async function sendRemoteMessage(path, options, consume, measurements = [
       throw Object.assign(new Error("发送线路服务身份不匹配，请核对原请求回执，勿重复发送。"), {
         responseReadFailed: true, outcomeUnknown: true
       });
-    return validateRemoteReceipt(await consume(response), headers.get("Idempotency-Key"));
+    const value = await consume(response);
+    return action ? validateRemoteReceipt(value, headers.get("Idempotency-Key")) : value;
   } catch (error) {
     if (route.token) error.secondaryChannel = true;
     if (!receivedResponse || error.responseReadFailed || route.token && error.code === 401)
@@ -112,10 +163,15 @@ export async function sendRemoteMessage(path, options, consume, measurements = [
   }
 }
 
+export const sendRemoteMessage = requestRemote;
+
 export async function raceRemoteRead(path, options, consume, onLatency = null) {
   prepareRemoteTunnelAccess();
   const pathname = path.split("?")[0];
-  const candidates = readPaths.has(pathname) || pathname.startsWith("/api/receipts/") ? routes() : routes().slice(0, 1);
+  if (pathname !== "/api/session" || typeof onLatency !== "function")
+    return requestRemote(path, options, consume);
+  // 唯一双路并行请求是连接测速；普通业务读取也不再竞速。
+  const candidates = routes();
   const controllers = candidates.map(() => new AbortController());
   const abort = () => controllers.forEach(controller => controller.abort());
   const measureBoth = pathname === "/api/session" && candidates.length > 1 && typeof onLatency === "function";
@@ -182,12 +238,14 @@ async function discover() {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 12000);
   const pending = (async () => {
-    const value = await raceRemoteRead("/api/channels", { credentials: "same-origin", signal: controller.signal }, async response => {
+    const value = await requestRemote("/api/channels", { method: "GET", credentials: "same-origin", signal: controller.signal }, async response => {
       if (!response.ok) throw new Error("第二通道发现暂不可用");
       const value = await response.json();
       if (value.ok !== true || value.schemaVersion !== 1 || value.deviceId !== expectedDevice
           || !/^[a-f0-9-]{36}$/.test(value.serverId) || !/^[a-f0-9]{64}$/.test(value.token)
           || !Number.isSafeInteger(value.expiresAtMs) || value.expiresAtMs <= Date.now()
+          || value.requestRoutingVersion !== undefined && value.requestRoutingVersion !== 2
+          || value.requestRoutingVersion === 2 && !/^[a-f0-9]{64}$/.test(value.mediaToken || "")
           || value.sendActions !== undefined && (!Array.isArray(value.sendActions)
             || value.sendActions.length > messageActions.size || value.sendActions.some(action => !messageActions.has(action)))
           || !Array.isArray(value.origins) || value.origins.length > 2 || value.origins.some(origin => !validOrigin(origin)))
@@ -216,7 +274,9 @@ export function activateRemoteChannels(id) {
 
 // One ordered sequence for both sockets. The bounded journal repairs missing frames.
 export function observeChannelConfiguration(listener) {
-  const update = () => listener(configuration);
+  const update = () => listener(configuration ? {
+    ...configuration, measurements: channelMeasurements, channelRequestVersion: fullRequestRouting ? 2 : 1
+  } : null);
   listeners.add(update);
   update();
   return () => listeners.delete(update);
@@ -227,6 +287,9 @@ export function applyChannelConfiguration(value) {
   if (value && (!Array.isArray(value.origins) || value.origins.some(origin => !validOrigin(origin))
       || !/^[a-f0-9]{64}$/.test(value.token))) return;
   configuration = value;
+  if (value?.channelRequestVersion === 1) fullRequestRouting = false;
+  else if (value?.channelRequestVersion === 2 && !isAndroidContainer()) fullRequestRouting = true;
+  setRemoteChannelMeasurements(value?.measurements || []);
   changed();
 }
 
@@ -282,7 +345,8 @@ export class ChannelEventMerger {
 
 export function createChannelEventStream() {
   const sockets = new Map();
-  let closed = false, gapTimer = null, recovering = false, recoveryController = null;
+  const retries = new Map();
+  let closed = false, gapTimer = null, routeRetry = null, recovering = false, recoveryController = null;
   let readyState = 0;
   const merger = new ChannelEventMerger(
     event => stream.onmessage?.({ data: JSON.stringify(event) }),
@@ -295,6 +359,7 @@ export function createChannelEventStream() {
       if (closed) return;
       closed = true; readyState = 2;
       clearTimeout(gapTimer);
+      clearTimeout(routeRetry);
       recoveryController?.abort();
       listeners.delete(update);
       globalThis.removeEventListener?.("online", update);
@@ -311,8 +376,8 @@ export function createChannelEventStream() {
     const controller = recoveryController = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
     try {
-      const value = await raceRemoteRead(`/api/channel-events${merger.query()}`,
-        { credentials: "same-origin", signal: controller.signal }, async response => {
+      const value = await requestRemote(`/api/channel-events${merger.query()}`,
+        { method: "GET", credentials: "same-origin", signal: controller.signal }, async response => {
           if (!response.ok) throw new Error("事件补读失败");
           return response.json();
         });
@@ -336,6 +401,7 @@ export function createChannelEventStream() {
   }
   function connected(entry) {
     entry.active = true;
+    retries.delete(entry.origin);
     if (readyState !== 1) { readyState = 1; stream.onopen?.(); }
   }
   function open(entry) {
@@ -386,11 +452,12 @@ export function createChannelEventStream() {
     if (entry.openedAt !== null && Date.now() - entry.openedAt >= 30000) entry.failures = 0;
     entry.openedAt = null;
     dispose(entry); entry.socket = null; entry.active = false;
+    const failures = (retries.get(entry.origin)?.failures || 0) + 1;
+    retries.set(entry.origin, { failures, at: Date.now() + Math.min(10000, 500 * 2 ** Math.min(failures - 1, 5)) });
     if (!closed && ![...sockets.values()].some(entry => entry.active)) {
       readyState = 0; stream.onerror?.({ reason: "all-channels-disconnected" });
     }
-    if (!closed && !globalThis.document?.hidden)
-      entry.retry = setTimeout(() => open(entry), Math.min(10000, 500 * 2 ** Math.min(entry.failures++, 5)));
+    update();
   }
   function offline() {
     for (const entry of sockets.values()) { dispose(entry); entry.socket = null; entry.active = false; }
@@ -407,18 +474,22 @@ export function createChannelEventStream() {
   }
   function update() {
     if (closed) return;
-    const available = routes();
+    clearTimeout(routeRetry);
+    const now = Date.now();
+    const available = orderedRoutes(routes().filter(route => supportsRequest(route, "/api/events/ws", "GET")))
+      .filter(route => (retries.get(route.origin)?.at || 0) <= now).slice(0, 1);
     for (const [origin, entry] of sockets) if (!available.some(route => route.origin === origin)) {
       dispose(entry); sockets.delete(origin);
     }
-    if (readyState === 1 && ![...sockets.values()].some(entry => entry.active)) {
-      readyState = 0; stream.onerror?.({ reason: "all-channels-disconnected" });
-    }
+    // 延迟变化时主动切换连接，不把计划内切换当成断网并清除刚测得的延迟。
     for (const route of available) {
       if (!sockets.has(route.origin)) sockets.set(route.origin, { origin: route.origin, failures: 0 });
       const entry = sockets.get(route.origin);
       if (!entry.socket) { clearTimeout(entry.retry); open(entry); }
     }
+    const waiting = [...retries.values()].filter(value => value.at > now);
+    if (waiting.length && !globalThis.document?.hidden)
+      routeRetry = setTimeout(update, Math.max(100, Math.min(...waiting.map(value => value.at)) - now));
   }
   listeners.add(update);
   globalThis.addEventListener?.("online", update);

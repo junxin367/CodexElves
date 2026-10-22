@@ -632,6 +632,7 @@ public final class MainActivity extends Activity {
                                 .put("versionName", BuildConfig.VERSION_NAME)
                                 .put("versionCode", BuildConfig.VERSION_CODE)
                                 .put("updateSupported", !BuildConfig.DEBUG)
+                                .put("requestRoutingVersion", 2)
                                 .toString());
                         } catch (JSONException ignored) {
                             // These BuildConfig values are always valid JSON primitives.
@@ -1407,7 +1408,9 @@ public final class MainActivity extends Activity {
         headers.put(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; "
-                + "img-src 'self' data:; connect-src 'self' " + ServiceOrigin.CHANNEL_CONNECT_SOURCES + "; object-src 'none'; "
+                + "img-src 'self' data: " + ServiceOrigin.CHANNEL_MEDIA_SOURCES + "; "
+                + "media-src 'self' " + ServiceOrigin.CHANNEL_MEDIA_SOURCES + "; "
+                + "connect-src 'self' " + ServiceOrigin.CHANNEL_CONNECT_SOURCES + "; object-src 'none'; "
                 + "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
         );
         return headers;

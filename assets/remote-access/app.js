@@ -1,6 +1,6 @@
 import { markdown, prepareMessageImage, renderMermaidBlocks, settleMessageImage, withStableMessageLayout } from "./markdown.js";
 import { createRemoteEventStream, sharedEventsAvailable } from "./events-client.js";
-import { activateRemoteChannels, clearRemoteChannels, observeChannelConfiguration, prepareRemoteTunnelAccess, raceRemoteRead, remoteChannelRoutes, sendRemoteMessage, validateRemoteReceipt } from "./channels.js";
+import { activateRemoteChannels, clearRemoteChannels, observeChannelConfiguration, prepareRemoteTunnelAccess, raceRemoteRead, remoteChannelRoutes, remoteMediaUrl, requestRemote, setRemoteChannelMeasurements, validateRemoteReceipt } from "./channels.js";
 import { renderMessageActions } from "./message-actions.js";
 import { mountSessionTools } from "./session-tools.js";
 import { mountSessionMenu } from "./session-menu.js";
@@ -31,6 +31,7 @@ import {
   composerAttachmentsPayload,
   composerHasAttachments,
   composerRemoteAttachmentSources,
+  fitMediaPreview,
   handleComposerImagePaste,
   loadAttachmentThumbnail,
   mountComposerAttachments,
@@ -1343,34 +1344,70 @@ function finishRelatedSessionExit() {
   clearTimeout(transition.timer);
   transition.conversation.removeEventListener("animationend", transition.onAnimation);
   transition.conversation.removeEventListener("animationcancel", transition.onAnimation);
-  transition.workspace.classList.remove("related-session-exiting");
-  transition.conversation.style.removeProperty("--related-session-exit-from");
-  transition.conversation.inert = transition.wasInert;
+  transition.layer.remove();
+  transition.workspace.inert = transition.wasInert;
   relatedBackPending = false;
   syncRelatedSessionLayout();
   transition.resolve();
 }
-function animateRelatedSessionExit() {
-  if (relatedExitTransition) return relatedExitTransition.promise;
+function prepareRelatedSessionExit() {
+  finishRelatedSessionExit();
   const workspace = $(".workspace"), conversation = workspace?.querySelector(".conversation");
-  if (!conversation || matchMedia("(prefers-reduced-motion: reduce)").matches) return Promise.resolve();
-  const transition = { workspace, conversation, wasInert: conversation.inert, timer: null,
+  if (!conversation || matchMedia("(prefers-reduced-motion: reduce)").matches) return null;
+  if (typeof CSSStyleSheet !== "function" || typeof CSSStyleSheet.prototype.replaceSync !== "function"
+      || typeof ShadowRoot !== "function" || !("adoptedStyleSheets" in ShadowRoot.prototype)) return null;
+  let style;
+  try {
+    const sheet = document.querySelector('link[rel="stylesheet"][href$="/style.css"]')?.sheet;
+    if (!sheet) return null;
+    style = new CSSStyleSheet();
+    style.replaceSync([...sheet.cssRules].map(rule => rule.cssText).join("\n"));
+  } catch { return null; }
+  const layer = element("div", "related-session-exit-layer");
+  layer.inert = true; layer.setAttribute("aria-hidden", "true");
+  const shadow = layer.attachShadow({ mode: "closed" });
+  shadow.adoptedStyleSheets = [style];
+  const frame = workspace.cloneNode(false);
+  frame.removeAttribute("id"); frame.classList.add("related-session-prepared");
+  Object.assign(frame.dataset, document.documentElement.dataset);
+  const snapshot = conversation.cloneNode(true);
+  snapshot.style.background = "var(--bg)";
+  const transform = getComputedStyle(conversation).transform;
+  snapshot.style.transform = transform === "none" ? "translate3d(0,0,0)" : transform;
+  snapshot.style.setProperty("--related-session-exit-from", snapshot.style.transform);
+  const originals = [conversation, ...conversation.querySelectorAll("*")];
+  const copies = [snapshot, ...snapshot.querySelectorAll("*")];
+  const scrollPositions = [];
+  for (const [index, source] of originals.entries()) {
+    if (source.scrollTop || source.scrollLeft)
+      scrollPositions.push([copies[index], source.scrollTop, source.scrollLeft]);
+    if (source instanceof HTMLInputElement) {
+      copies[index].value = source.value; copies[index].checked = source.checked;
+    } else if (source instanceof HTMLTextAreaElement || source instanceof HTMLSelectElement)
+      copies[index].value = source.value;
+  }
+  frame.append(snapshot); shadow.append(frame); document.body.append(layer);
+  for (const [node, top, left] of scrollPositions) { node.scrollTop = top; node.scrollLeft = left; }
+  const transition = { workspace, conversation: snapshot, frame, layer, wasInert: workspace.inert, timer: null,
     promise: null, resolve: null, onAnimation: null };
   transition.promise = new Promise(resolve => { transition.resolve = resolve; });
   transition.onAnimation = event => {
-    if (event.target === conversation && event.animationName === "related-session-exit")
+    if (event.target === snapshot && event.animationName === "related-session-exit")
       finishRelatedSessionExit();
   };
   relatedExitTransition = transition;
   relatedBackPending = true;
   syncRelatedSessionLayout();
-  const transform = getComputedStyle(conversation).transform;
-  conversation.style.setProperty("--related-session-exit-from",
-    transform === "none" ? "translate3d(0,0,0)" : transform);
-  conversation.inert = true;
-  conversation.addEventListener("animationend", transition.onAnimation);
-  conversation.addEventListener("animationcancel", transition.onAnimation);
-  workspace.classList.add("related-session-exiting");
+  workspace.inert = true;
+  snapshot.addEventListener("animationend", transition.onAnimation);
+  snapshot.addEventListener("animationcancel", transition.onAnimation);
+  transition.timer = setTimeout(finishRelatedSessionExit, 250);
+  return transition;
+}
+function animateRelatedSessionExit(transition) {
+  if (!transition || relatedExitTransition !== transition) return Promise.resolve();
+  clearTimeout(transition.timer);
+  transition.frame.classList.add("related-session-exiting");
   transition.timer = setTimeout(finishRelatedSessionExit, 250);
   return transition.promise;
 }
@@ -3215,6 +3252,7 @@ function icon(name) {
     chevron: '<path d="m6 9 6 6 6-6"/>', folder: '<path d="M3 9V5a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v2"/><path d="M3 10h18l-3 10H3a1 1 0 0 1-1-1Z"/>',
     search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
     chat: '<path d="M20 11.5a8.5 8.5 0 0 1-8.5 8.5 9 9 0 0 1-4-.9L3 21l1.9-4.5A9 9 0 0 1 4 12.5 8.5 8.5 0 0 1 12.5 4h.5a8.5 8.5 0 0 1 7 7.5Z"/>',
+    recent: '<path d="M8 3a5 5 0 1 1-4.4 2.6"/><path d="M1.5 3.5v3h3"/><path d="M8 5v3l2 1.5"/>',
     more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
     menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
     folderClosed: '<path d="M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2Z"/><path d="M2 10h20"/>',
@@ -3253,7 +3291,8 @@ function icon(name) {
   };
   const node = element("span", "ui-icon");
   node.setAttribute("aria-hidden", "true");
-  node.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths[name] || ""}</svg>`;
+  const recent = name === "recent";
+  node.innerHTML = `<svg viewBox="${recent ? "0 0 16 16" : "0 0 24 24"}" fill="none" stroke="currentColor" stroke-width="${recent ? "1.3" : "1.6"}" stroke-linecap="round" stroke-linejoin="round">${paths[name] || ""}</svg>`;
   return node;
 }
 function selectControl(id, label, options, value, className = "", renderValue = null) {
@@ -3820,9 +3859,9 @@ async function api(path, body, id, signal, { resourcePriority = "foreground", on
   try {
     if (!["/api/read/models", "/api/read/skills"].includes(path))
       releaseForeground = beginPwaForegroundWork({ priority: resourcePriority });
-    const messageSend = /^\/api\/action\/(?:send|create|setGoal)$/.test(path);
-    const request = messageSend ? sendRemoteMessage : raceRemoteRead;
-    const measurements = messageSend ? currentChannelMeasurements() : null;
+    const connectionProbe = path === "/api/session" && typeof onChannelLatency === "function";
+    const request = connectionProbe ? raceRemoteRead : requestRemote;
+    const measurements = currentChannelMeasurements();
     const result = await request(path, {
       method: body === undefined ? "GET" : "POST", credentials: "same-origin",
       headers: { ...(body !== undefined ? { "Content-Type": "application/json" } : {}), ...(id ? { "Idempotency-Key": id } : {}) },
@@ -3845,8 +3884,8 @@ async function api(path, body, id, signal, { resourcePriority = "foreground", on
       if (path.startsWith("/api/receipts/"))
         return validateRemoteReceipt(result, path.slice("/api/receipts/".length));
       return result;
-    }, messageSend ? measurements : onChannelLatency,
-    messageSend ? origin => markMessageChannelUnavailable(origin, measurements) : undefined);
+    }, connectionProbe ? onChannelLatency : measurements,
+    origin => markMessageChannelUnavailable(origin, measurements));
     if (path === "/api/session" && result?.device?.id) activateRemoteChannels(result.device.id);
     return result;
   } catch (error) {
@@ -5211,6 +5250,10 @@ function shell() {
     getContext: () => ({ deviceId: session?.device.id, threadId: selectedId, creating,
       projectId: creationProject, readOnly: threadReadOnly(), cacheScope: privateInputScope(session) }),
     cache: workspaceViewCache,
+    request: (path, options, consume) => {
+      const measurements = currentChannelMeasurements();
+      return requestRemote(path, options, consume, measurements, origin => markMessageChannelUnavailable(origin, measurements));
+    },
     beforeOpen: () => { sessionMenu?.close(); closePopup(); closeComposerMenus(); closeMobileSidebar({ focus: false }); },
     onUnauthorized: requireAuthentication,
     openImagePreview
@@ -5486,7 +5529,7 @@ function renderSidebar() {
   viewToggle.removeAttribute("aria-busy"); viewToggle.disabled = false;
   if (viewToggle.dataset.mode !== preferences.mode) {
     viewToggle.dataset.mode = preferences.mode;
-    viewToggle.replaceChildren(icon(preferences.mode === "project" ? "chat" : "folderClosed"));
+    viewToggle.replaceChildren(icon(preferences.mode === "project" ? "recent" : "folderClosed"));
   }
   const domId = (type, id) => `${type}-${encodeURIComponent(id)}`;
   const normalizedSearch = search.replace(/[\\/]+/g, " ");
@@ -6066,6 +6109,9 @@ function openImagePreview(link, image) {
   const preview = element("img", "image-preview-image");
   const viewport = isAndroidContainer() ? element("div", "image-preview-viewport") : null;
   const caption = element("figcaption", "image-preview-caption", image.alt || "图片");
+  const layout = fitMediaPreview(dialog, panel, viewport || preview, () => ({
+    width: preview.naturalWidth, height: preview.naturalHeight
+  }));
   let disposeZoom = null;
   preview.draggable = false;
   const initializeZoom = () => {
@@ -6074,9 +6120,10 @@ function openImagePreview(link, image) {
     disposeZoom = enableImagePreviewZoom(viewport, preview);
     preview.classList.add("image-preview-ready");
   };
-  preview.onload = initializeZoom;
-  preview.alt = image.alt || "图片预览"; preview.src = source;
+  preview.onload = () => { layout.resize(); initializeZoom(); };
+  preview.alt = image.alt || "图片预览"; preview.src = remoteMediaUrl(source);
   preview.onerror = () => {
+    layout.dispose();
     disposeZoom?.();
     (viewport || preview).remove();
     panel.classList.add("image-preview-unavailable");
@@ -6095,17 +6142,20 @@ function openImagePreview(link, image) {
   dialog.onpointerup = event => { if (backdropPressed && onBackdrop(event)) dialog.close(); backdropPressed = false; };
   dialog.oncancel = event => { event.preventDefault(); dialog.close(); };
   dialog.onclose = () => {
+    layout.dispose();
     disposeZoom?.();
     dialog.remove();
     document.body.classList.toggle("modal-open", !!document.querySelector("dialog[open]"));
     if (trigger.isConnected && document.activeElement === document.body) trigger.focus({ preventScroll: true });
   };
   document.body.classList.add("modal-open");
-  dialog.showModal(); initializeZoom(); close.focus();
+  dialog.showModal(); layout.resize(); initializeZoom(); close.focus();
 }
 function bindMessageImages(node) {
   for (const image of node.querySelectorAll(".message-image")) {
     const link = image.closest(".message-image-link");
+    const source = image.getAttribute("data-remote-media");
+    if (source && !image.getAttribute("src")) loadAttachmentThumbnail(image, source);
     prepareMessageImage(image);
     const updateLayout = change => {
       const root = $("#messages");
@@ -6123,9 +6173,9 @@ function bindMessageImages(node) {
         placeholder.type = "button";
         placeholder.title = `图片不可用：${image.alt || "附件"}，点击重新加载`;
         placeholder.setAttribute("aria-label", `重新加载图片：${image.alt || "附件"}`);
-        placeholder.messageImageSource = image.getAttribute("src");
+        placeholder.messageImageSource = image.getAttribute("data-remote-media") || image.getAttribute("src");
         placeholder.messageImageLabel = image.alt;
-        placeholder.messageImageKey = JSON.stringify([image.getAttribute("src"), image.alt, link?.getAttribute("href") || ""]);
+        placeholder.messageImageKey = JSON.stringify([placeholder.messageImageSource, image.alt, link?.getAttribute("href") || ""]);
         placeholder.onclick = () => {
           if (!placeholder.isConnected) return;
           prepareRemoteTunnelAccess();
@@ -6174,9 +6224,9 @@ function setMarkdown(node, text, remoteImages = [], options) {
       const elements = parent.matches(".message-image,.attachment-placeholder,.mermaid-block,.message-video-preview") ? [parent]
         : [...parent.querySelectorAll(".message-image,.attachment-placeholder,.mermaid-block,.message-video-preview")];
       const keys = elements.flatMap(image => image.messageImageKey ? [image.messageImageKey]
-        : image.matches(".message-video-preview") ? [JSON.stringify(["video", image.querySelector("img")?.getAttribute("src"), image.textContent])]
+        : image.matches(".message-video-preview") ? [JSON.stringify(["video", image.querySelector("img")?.getAttribute("data-remote-media") || image.querySelector("img")?.getAttribute("src"), image.textContent])]
         : image.matches(".mermaid-block") ? [JSON.stringify(["mermaid", image.querySelector("pre code")?.textContent])]
-        : image.matches(".message-image") ? [JSON.stringify([image.getAttribute("src"), image.alt,
+        : image.matches(".message-image") ? [JSON.stringify([image.getAttribute("data-remote-media") || image.getAttribute("src"), image.alt,
           image.closest(".message-image-link")?.getAttribute("href") || ""])] : []);
       return keys.length ? JSON.stringify(keys) : "";
     };
@@ -6188,7 +6238,7 @@ function setMarkdown(node, text, remoteImages = [], options) {
           && imageKeys(node) === key) : -1;
         const current = index < 0 ? null : previous.splice(index, 1)[0];
         if (!current) { children.push(child); continue; }
-        if (!current.messageImageKey && !current.matches(".mermaid-block,.message-video-preview")) {
+        if (!current.messageImageKey && !current.matches(".message-image,.mermaid-block,.message-video-preview")) {
           for (const attribute of [...current.attributes])
             if (!child.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
           for (const attribute of child.attributes)
@@ -8670,12 +8720,8 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     if (!selectedId || selectedId === id) applyThreadDeletion(id);
     return;
   }
-  if (normalizeRelatedView(relatedSessionView, selectedId) && id !== selectedId) {
-    const previousId = selectedId, scope = privateInputScope(session), version = selectionVersion;
-    await animateRelatedSessionExit();
-    if (navigationVersion !== relatedSelectionVersion || previousId !== selectedId
-        || scope !== privateInputScope(session) || version !== selectionVersion || threadDeleted(id)) return;
-  } else finishRelatedSessionExit();
+  const exitTransition = normalizeRelatedView(relatedSessionView, selectedId) && id !== selectedId
+    ? prepareRelatedSessionExit() : (finishRelatedSessionExit(), null);
   if (!force && selectedId === id && !creating
       && JSON.stringify(nextRelatedView) === JSON.stringify(normalizeRelatedView(relatedSessionView, id))
       && (thread?.id === id || historyInitialized || selectionController || historyLoading)) {
@@ -8694,7 +8740,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   if (relatedReturnTranscript && id !== relatedReturnTranscript.threadId
       && (nextRelatedView?.openedFromThreadId || nextRelatedView?.parentThreadId) !== relatedReturnTranscript.threadId)
     relatedReturnTranscript = null;
-  relatedBackPending = false;
+  relatedBackPending = !!exitTransition;
   sessionMenu?.close(); clearTimeout(relatedMenuTimer); relatedMenuTimer = null;
   resetMessages();
   editingQueuedMessage = null;
@@ -8744,6 +8790,12 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   $("#thread-path").textContent = initialSide?.cwd || summary?.cwd || cached?.cwd || "正在读取会话设置…";
   if (closeSidebar) closeMobileSidebar();
   renderSidebar(); updateComposer();
+  if (exitTransition) {
+    const scope = privateInputScope(session);
+    await animateRelatedSessionExit(exitTransition);
+    if (navigationVersion !== relatedSelectionVersion || version !== selectionVersion || selectedId !== id
+        || scope !== privateInputScope(session) || threadDeleted(id)) return;
+  }
   syncThreadHash(id, { replace: replaceHistory });
   onViewReady?.();
   if (initialSide) return;
@@ -10737,6 +10789,7 @@ function markMessageChannelUnavailable(origin, observed) {
   renderConnectionIndicator();
 }
 function renderConnectionIndicator() {
+  setRemoteChannelMeasurements(currentChannelMeasurements());
   const node = $("#connection-state"); if (!node) return;
   const measured = connected && connectionRtt?.deviceId === session?.device.id
     && connectionRtt.nativeVersion === nativeConnectionVersion

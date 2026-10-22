@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "99";
+  const codexDeleteStyleVersion = "101";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -21018,6 +21018,7 @@
       if (!taskBoardState.active) return;
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
       if (!target || target.closest?.(`[${taskBoardEntryAttribute}="true"]`)) return;
+      if (target.closest("[data-codex-recent-sessions-entry], [data-codex-recent-sessions-root], .codex-recent-menu")) return;
       const nativeNavigationTarget = taskBoardNativeNavigationControl(target);
       if (!nativeNavigationTarget) return;
       const releaseId = ++taskBoardState.navigationReleaseId;
@@ -25929,6 +25930,7 @@
 
   function installCodexElvesRuntimeOnce() {
     installStyle();
+    refreshRecentSessionsRuntime();
     installPromptOptimizeFeature();
     if (window.__codexElvesRuntimeOnceInstalled === codexElvesBuild) return;
     cleanupLegacyCodexComposerOverflowGuards();
@@ -25951,6 +25953,7 @@
     const headerDirty = !!dirty.header || shellDirty;
     const pluginsDirty = !!dirty.plugins || shellDirty;
 
+    if (shellDirty || sidebarDirty || headerDirty) refreshRecentSessionsRuntime();
     if (shellDirty) cleanupDisconnectedSessionArtifacts();
     if (pluginsDirty) {
       if (pluginPatchDisabledInRelayMode()) {
@@ -26106,7 +26109,18 @@
     requestAnimationFrame(() => runScanStep(() => scanDeferred(dirty)));
   }
 
+  function refreshRecentSessionsRuntime() {
+    window.__codexElvesRecentSessions?.configure({
+      enabled: codexElvesBackendSettings.enhancementsEnabled !== false,
+      beforeNavigate: () => deactivateTaskBoard(),
+      currentSessionId: () => activeConversationIdFromDom() || currentSessionRefFromDom()?.session_id,
+      confirmDelete,
+      notify: showToast,
+    });
+  }
+
   function isExtensionUiNode(node) {
+    if (node?.closest?.("[data-codex-recent-sessions-root], [data-codex-recent-sessions-entry], .codex-recent-menu")) return true;
     return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-elves-modal-overlay, .codex-workspace-checkpoint-overlay, [${codexWorkspaceCheckpointEditButtonAttribute}="true"], [${codexWorkspaceCheckpointButtonAttribute}="true"], .${projectMoveOverlayClass}, .codex-conversation-timeline, .${codexTokenUsageCardClass}, .${codexAppServerRestartButtonClass}, .${codexAppServerRestartDialogClass}, .${taskBoardMainHostClass}, .${taskBoardEntryContextMenuClass}, [${taskBoardEntryAttribute}="true"], .${codexOpenInMenuClass}, [${codexOpenInButtonAttribute}="true"], .${codexPromptOptimizePortalClass}, .${codexPromptOptimizeSettingsOverlayClass}, [${codexPromptOptimizeButtonAttribute}="true"], #codex-elves-menu`);
   }
 
@@ -26358,6 +26372,7 @@
   installScanObservers();
   window.__codexElvesRefreshRuntime = () => {
     installStyle();
+    refreshRecentSessionsRuntime();
     cleanupLegacyForcePluginInstallRuntime();
     void loadBackendSettingsForStartup();
     installCodexElvesImageOverlay();

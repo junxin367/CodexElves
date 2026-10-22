@@ -307,7 +307,8 @@ export function getAndroidAppInfo() {
       finish(null);
       return;
     }
-    finish({ versionName, versionCode: data.versionCode, updateSupported: data.updateSupported });
+    finish({ versionName, versionCode: data.versionCode, updateSupported: data.updateSupported,
+      requestRoutingVersion: data.requestRoutingVersion === 2 ? 2 : 1 });
   };
 
   try {

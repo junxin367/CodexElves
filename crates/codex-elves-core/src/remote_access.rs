@@ -1936,12 +1936,23 @@ async fn access_boundary(
     } else {
         matched_origin.unwrap_or_else(|| format!("http://{host}"))
     };
-    let origin_header = request.headers().get(header::ORIGIN);
-    let origin = origin_header.and_then(|value| value.to_str().ok());
+    let origin_header = request.headers().get(header::ORIGIN).cloned();
+    let origin = origin_header.as_ref().and_then(|value| value.to_str().ok());
     let cors_origin = origin.map(str::to_owned);
     let path = request.uri().path().to_owned();
+    if channels::media_path(request.method(), &path)
+        && !request.headers().contains_key(header::AUTHORIZATION)
+        && let Some(token) = channels::media_token(request.uri())
+    {
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Media {token}")).unwrap(),
+        );
+    }
     let channel_request = channels::bearer(request.headers()).is_some()
         && channels::request_path(request.method(), &path)
+        && (!channels::media_authorization(request.headers())
+            || channels::media_path(request.method(), &path))
         && external_https;
     if request.method() == axum::http::Method::OPTIONS {
         let method = request
@@ -1962,6 +1973,9 @@ async fn access_boundary(
                             | "idempotency-key"
                             | "ngrok-skip-browser-warning"
                             | "skip_zrok_interstitial"
+                            | "range"
+                            | "if-range"
+                            | "if-none-match"
                     )
                 })
             });
@@ -1975,8 +1989,8 @@ async fn access_boundary(
         }
         return (StatusCode::NO_CONTENT, [
             ("access-control-allow-origin", cors_origin.unwrap()),
-            ("access-control-allow-methods", "GET, POST, OPTIONS".into()),
-            ("access-control-allow-headers", "Content-Type, Authorization, Idempotency-Key, ngrok-skip-browser-warning, skip_zrok_interstitial".into()),
+            ("access-control-allow-methods", "GET, HEAD, POST, OPTIONS".into()),
+            ("access-control-allow-headers", "Content-Type, Authorization, Idempotency-Key, ngrok-skip-browser-warning, skip_zrok_interstitial, Range, If-Range, If-None-Match".into()),
             ("access-control-max-age", "300".into()),
             ("vary", "Origin".into()),
             ("cache-control", "no-store".into()),
@@ -1985,7 +1999,7 @@ async fn access_boundary(
     if channels::bearer(request.headers()).is_some() && !channel_request {
         return ApiError::new(403, "双通道凭证不支持此操作").into_response();
     }
-    let bad_origin = origin_header.is_some_and(|value| {
+    let bad_origin = origin_header.as_ref().is_some_and(|value| {
         value.to_str().map_or(true, |origin| {
             !origins.iter().any(|allowed| allowed == origin)
         })
@@ -2047,7 +2061,7 @@ async fn access_boundary(
     );
     headers.insert(
         "access-control-expose-headers",
-        HeaderValue::from_static("x-codex-channel-server"),
+        HeaderValue::from_static("x-codex-channel-server, ETag, Accept-Ranges, Content-Range"),
     );
     if channel_request
         && let Some(origin) = cors_origin.and_then(|origin| HeaderValue::from_str(&origin).ok())
@@ -2072,7 +2086,12 @@ async fn access_boundary(
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
     headers.insert("content-security-policy", HeaderValue::from_static(
-        "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://*.ngrok-free.app wss://*.ngrok-free.app https://*.ngrok-free.dev wss://*.ngrok-free.dev https://*.ngrok.app wss://*.ngrok.app https://*.ngrok.dev wss://*.ngrok.dev https://*.ngrok.io wss://*.ngrok.io https://*.shares.zrok.io wss://*.shares.zrok.io; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+        concat!(
+            "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; ",
+            "img-src 'self' data: https://*.ngrok-free.app https://*.ngrok-free.dev https://*.ngrok.app https://*.ngrok.dev https://*.ngrok.io https://*.shares.zrok.io; ",
+            "media-src 'self' https://*.ngrok-free.app https://*.ngrok-free.dev https://*.ngrok.app https://*.ngrok.dev https://*.ngrok.io https://*.shares.zrok.io; ",
+            "connect-src 'self' https://*.ngrok-free.app wss://*.ngrok-free.app https://*.ngrok-free.dev wss://*.ngrok-free.dev https://*.ngrok.app wss://*.ngrok.app https://*.ngrok.dev wss://*.ngrok.dev https://*.ngrok.io wss://*.ngrok.io https://*.shares.zrok.io wss://*.shares.zrok.io; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+        )
     ));
     if external_https {
         headers.insert(
@@ -5405,7 +5424,10 @@ mod tests {
             .unwrap();
         assert_eq!(discovery["ok"], true);
         assert_eq!(discovery["origins"], json!([primary, secondary]));
+        assert_eq!(discovery["requestRoutingVersion"], 2);
         let token = discovery["token"].as_str().unwrap();
+        let media_token = discovery["mediaToken"].as_str().unwrap();
+        assert_ne!(token, media_token);
         let second = client
             .get(format!("http://{address}/api/session"))
             .header("Host", "channel-test.ngrok-free.app")
@@ -5440,8 +5462,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(preflight.status(), reqwest::StatusCode::NO_CONTENT);
+        for path in [
+            "/api/action/optimizePrompt",
+            "/api/action/cancelPromptOptimize",
+            "/api/action/answer",
+            "/api/action/approve",
+            "/api/action/stop",
+            "/api/action/createSideThread",
+            "/api/action/deleteThread",
+            "/api/read/promptOptimization",
+            "/api/read/models",
+            "/api/workspace/changes",
+            "/api/workspace/change",
+            "/api/logout",
+        ] {
+            let preflight = client
+                .request(reqwest::Method::OPTIONS, format!("http://{address}{path}"))
+                .header("Host", "channel-test.ngrok-free.app")
+                .header("Origin", primary)
+                .header("access-control-request-method", "POST")
+                .header(
+                    "access-control-request-headers",
+                    "authorization,content-type,idempotency-key",
+                )
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                preflight.status(),
+                reqwest::StatusCode::NO_CONTENT,
+                "{path}"
+            );
+        }
         for (path, origin) in [
-            ("/api/action/stop", primary),
+            ("/api/connect", primary),
             ("/api/read/history", "https://attacker.example"),
         ] {
             let rejected = client
@@ -5455,6 +5509,73 @@ mod tests {
                 .unwrap();
             assert_eq!(rejected.status(), reqwest::StatusCode::FORBIDDEN);
         }
+        let invalid_optimization = client
+            .post(format!("http://{address}/api/action/optimizePrompt"))
+            .header("Host", "channel-test.ngrok-free.app")
+            .header("Origin", primary)
+            .bearer_auth(token)
+            .header("Idempotency-Key", "routing-optimization")
+            .json(&json!({"unexpected": true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            invalid_optimization.status(),
+            reqwest::StatusCode::BAD_REQUEST
+        );
+        let image_path = _directory.path().join("channel.png");
+        image::RgbaImage::new(4, 4).save(&image_path).unwrap();
+        let image_id = controller.images.write().unwrap().register(image_path);
+        let image_url =
+            format!("http://{address}/api/images/{image_id}?channel_token={media_token}");
+        let image = client
+            .get(&image_url)
+            .header("Host", "channel-test.ngrok-free.app")
+            .header("sec-fetch-site", "cross-site")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(image.status(), reqwest::StatusCode::OK);
+        assert_eq!(image.headers()["content-type"], "image/png");
+        for scheme in ["Bearer", "Media"] {
+            let denied_media_api = client
+                .get(format!("http://{address}/api/session"))
+                .header("Host", "channel-test.ngrok-free.app")
+                .header("Origin", primary)
+                .header("Authorization", format!("{scheme} {media_token}"))
+                .send()
+                .await
+                .unwrap();
+            assert!(matches!(denied_media_api.status().as_u16(), 401 | 403));
+        }
+        let api_token_media_link = client
+            .get(format!(
+                "http://{address}/api/images/{image_id}?channel_token={token}"
+            ))
+            .header("Host", "channel-test.ngrok-free.app")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            api_token_media_link.status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        let token_on_api = client
+            .get(format!(
+                "http://{address}/api/session?channel_token={token}"
+            ))
+            .header("Host", "channel-test.ngrok-free.app")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(token_on_api.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let duplicate_token = client
+            .get(format!("{image_url}&channel_token={token}"))
+            .header("Host", "channel-test.ngrok-free.app")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(duplicate_token.status(), reqwest::StatusCode::UNAUTHORIZED);
         let mut first_request = format!("ws://{address}/api/events/ws")
             .into_client_request()
             .unwrap();
@@ -5513,6 +5634,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(revoked.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let revoked_image = client
+            .get(&image_url)
+            .header("Host", "channel-test.ngrok-free.app")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(revoked_image.status(), reqwest::StatusCode::UNAUTHORIZED);
         first.close(None).await.unwrap();
         second.close(None).await.unwrap();
         server.abort();
