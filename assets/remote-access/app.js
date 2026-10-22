@@ -414,7 +414,7 @@ function openAppearance() {
       if (!dialog.isConnected) return;
       diagnosticsSupported = info?.diagnosticsVersion === 1;
       diagnosticsStatus.textContent = diagnosticsSupported
-        ? "记录连接与图片错误，不含消息正文或密钥；断网时可导出。"
+        ? "记录运行日志，便于排查问题。"
         : "当前 App 未提供诊断采集，请安装新版 APK。";
       update();
     }).catch(() => {});
@@ -2304,7 +2304,7 @@ function updatePromptOptimization() {
   for (const record of promptOptimizations.values()) {
     if (record.state === "pending" && (record.scope !== scope || record.version !== selectionVersion
         || record.deviceId !== session?.device.id || record.signature !== signature
-        || $("#prompt").disabled || compactionLocked() || busy || stopping || pending))
+        || $("#prompt").disabled || busy || stopping || pending))
       cancelPromptOptimization(record);
   }
   let record = promptOptimizations.get(scope);
@@ -2315,7 +2315,7 @@ function updatePromptOptimization() {
   control.dataset.state = loading ? "loading" : optimized ? "optimized" : "idle";
   control.setAttribute("aria-busy", String(loading));
   control.disabled = session?.capabilities?.promptOptimization !== true || !connected || threadReadOnly()
-    || $("#prompt").disabled || compactionLocked() || busy || stopping || !!pending;
+    || $("#prompt").disabled || busy || stopping || !!pending;
   const label = loading ? "取消提示词优化" : optimized ? "恢复原提示词" : "优化提示词";
   control.setAttribute("aria-label", label);
   control.title = session?.capabilities?.promptOptimization !== true
@@ -2795,13 +2795,13 @@ const goalComposerPlaceholder = "描述你的目标，定义可衡量的成果�
 function unfinishedGoal(goal = thread?.goal) {
   return !!goal && goal.status !== "complete" && goal.status !== "completed";
 }
-function goalComposerReason() {
+function goalComposerReason({ submitting = false } = {}) {
   if (!session || !creating && (!selectedId || thread?.id !== selectedId)) return "请先打开会话或新建会话";
   if (threadReadOnly()) return "当前设备为只读模式";
   if (session.capabilities?.goalComposer !== true) return "当前服务尚不支持创建目标，请更新远程服务；目标草稿会保留";
   if (editingMessage || editingQueuedMessage) return "请先完成消息或队列编辑";
   if (threadDeletionLocked() || threadDeleted(selectedId)) return "会话正在删除或已删除，请先核对删除结果";
-  if (compactionLocked()) return "请等待上下文压缩完成后创建目标";
+  if (submitting && compactionLocked()) return "可继续编辑目标，压缩完成后再创建";
   if (!creating && unfinishedGoal()) return "此会话已有未完成目标，请通过上方目标栏编辑";
   if (!connected) return "连接恢复后可创建目标";
   if (busy || stopping) return "请等待当前提交完成";
@@ -3884,6 +3884,9 @@ function confirmAction(title, message, action, danger = false) {
   });
 }
 function notice(message, error = false) {
+  // 线路状态由右上角显示，后台重试不再弹出线路不可用提示。
+  if (message === "当前没有可用的请求线路，请等待连接恢复后重试。"
+      || message === "线路正在等待重试，请稍后再试。") return;
   const node = $("#notice");
   node.textContent = message;
   node.className = `visible${error ? " error" : ""}`;
@@ -6031,10 +6034,10 @@ function messageEditor() {
     const send = element("button", "message-editor-send", "发送");
     send.type = "submit"; send.setAttribute("aria-label", "发送修改后的消息");
     const actions = element("div", "message-editor-actions");
-    actions.append(cancel, send);
     const status = element("small", "message-editor-status error-text");
     status.setAttribute("role", "status"); status.hidden = true;
-    form.append(input, status, actions);
+    actions.append(status, cancel, send);
+    form.append(input, actions);
     form.onsubmit = event => { event.preventDefault(); void submitMessageEdit(); };
     input.oninput = () => { edit.text = input.value; edit.error = ""; updateMessageEditor(); };
     input.onkeydown = event => {
@@ -10425,7 +10428,7 @@ function renderGoalComposerRecovery(root) {
     box.append(check, confirm);
   }
   const restore = button("恢复目标草稿", "将本次保留的目标草稿恢复到输入框", () => {
-    if (busy || editingMessage || editingQueuedMessage || threadReadOnly() || threadDeletionLocked() || compactionLocked()) return;
+    if (busy || editingMessage || editingQueuedMessage || threadReadOnly() || threadDeletionLocked()) return;
     const current = snapshotDraft(), payload = goalPayloadForThread(record, selectedId);
     if (!matchingDraft(current, payload) && (current.text || current.skills.length || current.attachments.length || current.goalMode)) {
       notice("当前输入已有其他草稿，请先保留该草稿，再恢复本次目标。", true); return;
@@ -10433,7 +10436,7 @@ function renderGoalComposerRecovery(root) {
     storeDraft(selectedId, record.draft); restoreDraft(selectedId); updateComposer();
     $("#prompt").focus({ preventScroll: true });
   }, "text-button");
-  restore.disabled = busy || !!editingMessage || !!editingQueuedMessage || threadReadOnly() || threadDeletionLocked() || compactionLocked();
+  restore.disabled = busy || !!editingMessage || !!editingQueuedMessage || threadReadOnly() || threadDeletionLocked();
   box.append(restore);
   if (dismiss) box.append(dismiss);
   root.append(box);
@@ -10452,7 +10455,7 @@ function updateComposer() {
   const active = isActiveThread(), prompt = composerPrompt(typedGoal && !selectedGoal
     ? $("#prompt").value.slice(typedGoal.end) : $("#prompt").value, selectedSkills, goalMode),
     hasAttachments = composerHasAttachments(), send = $("#send");
-  const goalReason = goalMode ? goalComposerReason() : "";
+  const goalReason = goalMode ? goalComposerReason({ submitting: true }) : "";
   const deleting = threadDeletionLocked();
   const unsupportedProjectless = creating && !$("#project-select").value && session.capabilities?.projectlessCreation !== true;
   const compaction = currentCompaction(), compacting = compactionLocked();
@@ -10521,7 +10524,7 @@ function updateComposer() {
   $("#prompt").disabled = threadReadOnly() || deleting || compacting && editing || !!editingMessage || editing && (busy || !!pending)
     || editingQueuedMessage?.state === "starting" || (!creating && !selectedId);
   $("#new-chat").disabled = threadReadOnly() || !connected;
-  $("#model-button").disabled = threadReadOnly() || deleting || compacting || !!editingQueuedMessage
+  $("#model-button").disabled = threadReadOnly() || deleting || !!editingQueuedMessage
     || !!editingMessage && (busy || stopping || !!pending || !connected);
   $("#sidebar-view-toggle").disabled = !sidebar;
   syncNewChatProjectPicker();
@@ -10627,7 +10630,7 @@ async function sendMessage() {
   }
   const goalMode = !!draft.goalMode;
   if (goalMode) {
-    const reason = goalComposerReason();
+    const reason = goalComposerReason({ submitting: true });
     if (reason) { notice(reason, true); return; }
   }
   const prompt = composerPrompt(draft.text, draft.skills, goalMode);

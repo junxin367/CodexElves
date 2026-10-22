@@ -583,12 +583,12 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .message-editor{width:100%;min-width:0;margin:0;padding:12px 14px;box-sizing:border-box;background:var(--hover);border-radius:18px}
 .message-editor-input{display:block;box-sizing:border-box;width:100%;min-height:54px;max-height:var(--prompt-editor-max-height);overflow-y:hidden;margin:0;padding:0;resize:none;border:0;outline:0;background:transparent;color:var(--text);font:inherit;line-height:1.625}
 .message-editor-actions{display:flex;justify-content:flex-end;align-items:center;gap:6px;margin-top:10px}
-.message-editor-actions>button{display:inline-flex;align-items:center;justify-content:center;min-width:44px;min-height:28px;padding:3px 7px;border:1px solid transparent;border-radius:8px;font-size:1rem;line-height:20px;white-space:nowrap}
+.message-editor-actions>button{display:inline-flex;flex-shrink:0;align-items:center;justify-content:center;min-width:44px;min-height:28px;padding:3px 7px;border:1px solid transparent;border-radius:8px;font-size:1rem;line-height:20px;white-space:nowrap}
 .message-editor-actions>.message-editor-cancel{border-color:color-mix(in srgb,var(--text) 12%,transparent);background:color-mix(in srgb,var(--text) 8%,transparent);color:var(--text)}
 .message-editor-cancel:hover:not(:disabled){background:color-mix(in srgb,var(--text) 12%,transparent)}
 .message-editor-send,.message-editor-send:disabled:hover{background:var(--text);color:var(--bg)}
 .message-editor-send:hover:not(:disabled){background:var(--text);opacity:.85}
-.message-editor-status{display:block;margin-top:8px;line-height:1.5}
+.message-editor-status{display:block;flex:1;min-width:0;margin:0;line-height:1.5;overflow-wrap:anywhere}
 .message-editor:focus-within{outline:1px solid var(--line)}
 @media(max-width:760px){.message-editor-actions>button{min-height:32px}}
 .message-time{white-space:nowrap}

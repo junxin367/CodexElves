@@ -112,9 +112,12 @@ function routes() {
 }
 
 export function remoteChannelRoutes() {
-  return routes().map(({ origin }, index) => ({
-    origin, name: `线路${index + 1}`
-  }));
+  return routes().map(({ origin }) => {
+    const host = new URL(origin).hostname;
+    const name = host.endsWith(".shares.zrok.io") ? "zrok"
+      : /\.(?:ngrok-free\.app|ngrok-free\.dev|ngrok\.app|ngrok\.dev|ngrok\.io)$/.test(host) ? "ngrok" : host;
+    return { origin, name };
+  });
 }
 
 export function setRemoteChannelMeasurements(values) {
