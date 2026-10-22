@@ -67,7 +67,7 @@ let nativeConnectionVersion = 0;
 let connectionCycleVersion = 0, connectionRtt = null;
 let connectionLatencyVersion = 0, connectionLatencyFloor = 0, connectionRouteSignature = "", connectionLatencyRefresh = null;
 const channelRtts = new Map();
-const connectionRttDescription = "点击刷新会话。网页到接入服务的 /api/session HTTP 完整往返时长；双路连接时分别测量 zrok 和 ngrok，不代表模型响应耗时或端到端原生执行延迟。消息使用此处可用线路中延迟最低的一路发送，发出后不自动换路重发。";
+const connectionRttDescription = "点击刷新会话。网页到接入服务的 /api/session HTTP 完整往返时长；存在两条已授权线路时分别测量，不代表模型响应耗时或端到端原生执行延迟。消息使用此处可用线路中延迟最低的一路发送，发出后不自动换路重发。";
 let pageLeaving = false;
 const expandedProjects = new Set();
 const collapsedSidebarSections = new Set();
@@ -3965,7 +3965,7 @@ async function api(path, body, id, signal, { resourcePriority = "foreground", on
     if (timedOut && actionTimeout) throw Object.assign(
       new Error("等待上传或回包已超时，正在核对原请求回执；不会自动重发。"), { outcomeUnknown: true, actionTimedOut: true });
     if (timedOut) throw new Error(path.startsWith("/api/read/")
-      ? "桌面数据读取超时。若刚启动或重启 Codex，请等待主界面完全打开、能够正常查看会话后，再刷新远程网页。"
+      ? "会话数据读取超时，请检查线路状态后重试；若刚重启 Codex，请等待主界面就绪。"
       : "读取超时，请检查网络后重试");
     throw error;
   } finally {
@@ -4014,8 +4014,8 @@ function readConnectionSession(signal, recoveryObservation = undefined, { resour
             if (latencyVersion < connectionLatencyFloor || controller.signal.aborted || pageLeaving
                 || session?.device.id !== deviceId || stream !== source || pollVersion !== connectionPollVersion
                 || nativeVersion !== nativeConnectionVersion || connectionVersion !== connectionCycleVersion) return;
-            if ((channelRtts.get(measurement.name)?.latencyVersion ?? 0) > latencyVersion) return;
-            channelRtts.set(measurement.name, { ...measurement, deviceId, nativeVersion, connectionVersion, latencyVersion });
+            if ((channelRtts.get(measurement.origin)?.latencyVersion ?? 0) > latencyVersion) return;
+            channelRtts.set(measurement.origin, { ...measurement, deviceId, nativeVersion, connectionVersion, latencyVersion });
             renderConnectionIndicator();
           }
         });
@@ -10839,7 +10839,7 @@ function setConnection(value) {
 }
 function currentChannelMeasurements() {
   return remoteChannelRoutes().map(route => {
-    const measurement = channelRtts.get(route.name);
+    const measurement = channelRtts.get(route.origin);
     const current = connected && measurement?.deviceId === session?.device.id
       && measurement.nativeVersion === nativeConnectionVersion
       && measurement.connectionVersion === connectionCycleVersion
@@ -10858,7 +10858,7 @@ function markMessageChannelUnavailable(origin, observed) {
   const latest = currentChannelMeasurements().find(measurement => measurement.origin === origin);
   // 旧发送结果不能覆盖后续已完成的连接测量，也不能污染新入口。
   if (!latest || latest.status !== "unknown" && latest !== previous) return;
-  channelRtts.set(previous.name, { ...previous, status: "unavailable", latencyVersion: ++connectionLatencyVersion });
+  channelRtts.set(previous.origin, { ...previous, status: "unavailable", latencyVersion: ++connectionLatencyVersion });
   renderConnectionIndicator();
 }
 function renderConnectionIndicator() {
@@ -10870,9 +10870,9 @@ function renderConnectionIndicator() {
   const activeRoutes = remoteChannelRoutes();
   const dual = activeRoutes.length > 1;
   const currentMeasurements = currentChannelMeasurements();
-  const measurements = dual ? ["zrok", "ngrok"].map(name => {
-    const measurement = currentMeasurements.find(measurement => measurement.name === name);
-    return { name, measurement: measurement?.status === "unknown" ? null : measurement };
+  const measurements = dual ? activeRoutes.map(route => {
+    const measurement = currentMeasurements.find(measurement => measurement.origin === route.origin);
+    return { name: route.name, measurement: measurement?.status === "unknown" ? null : measurement };
   }) : [];
   renderConnectionLatency(node, { connected, measured, measurements, dual });
 }
@@ -10895,7 +10895,7 @@ function renderConnectionLatency(node, { connected, measured, measurements, dual
   const online = dual ? connected && measurements.some(({ measurement }) => ready(measurement)) : !!measured;
   node.classList.toggle("dual-channel", dual);
   node.title = connectionRttDescription;
-  node.setAttribute("aria-label", `${dual ? measurements.map(({ name }, index) => node.children[index].textContent).join("；") : node.textContent}。${connectionRttDescription}`);
+  node.setAttribute("aria-label", `${dual ? measurements.map((_, index) => node.children[index].textContent).join("；") : node.textContent}。${connectionRttDescription}`);
   node.classList.toggle("online", online);
   node.classList.toggle("pending", connected && !online);
 }

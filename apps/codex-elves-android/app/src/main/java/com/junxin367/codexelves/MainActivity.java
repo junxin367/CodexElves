@@ -928,7 +928,7 @@ public final class MainActivity extends Activity {
             return new WebResourceResponse(response.mime, response.charset, response.status,
                 response.reason, response.headers, response.body);
         } catch (IOException | RuntimeException failure) {
-            return errorResponse(502, "媒体读取失败");
+            return errorResponse(502, "媒体读取失败", origin);
         }
     }
 
@@ -1790,12 +1790,22 @@ public final class MainActivity extends Activity {
     }
 
     private static WebResourceResponse errorResponse(int status, String body) {
+        return errorResponse(status, body, null);
+    }
+
+    private static WebResourceResponse errorResponse(int status, String body, String allowedOrigin) {
+        Map<String, String> headers = localResourceHeaders();
+        // 仅已通过媒体来源校验的本地错误携带当前页面 Origin，避免掩盖为 CORS 故障。
+        if (allowedOrigin != null) {
+            headers.put("Access-Control-Allow-Origin", allowedOrigin);
+            headers.put("Vary", "Origin");
+        }
         return new WebResourceResponse(
             "text/plain",
             "UTF-8",
             status,
-            status == 403 ? "Forbidden" : "Internal Server Error",
-            localResourceHeaders(),
+            status == 403 ? "Forbidden" : status == 502 ? "Bad Gateway" : "Internal Server Error",
+            headers,
             new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8))
         );
     }

@@ -227,10 +227,13 @@ final class NotificationStreamClient implements Runnable {
             String candidate = null;
             for (int index = 0; index < origins.length(); index++) {
                 String origin = ServiceOrigin.normalize(origins.getString(index));
-                String host = new URL(origin).getHost();
-                if (!origin.equals(identity.origin)
-                    && host.matches("[a-zA-Z0-9-]+\\.(ngrok-free\\.app|ngrok-free\\.dev|ngrok\\.app|ngrok\\.dev|ngrok\\.io)"))
-                    candidate = origin;
+                if (!origin.equals(identity.origin)) {
+                    try {
+                        candidate = ServiceOrigin.normalizeChannelOrigin(origin);
+                    } catch (IllegalArgumentException ignored) {
+                        // Only the existing channel domain allowlist can receive a ticket.
+                    }
+                }
             }
             ensureActive();
             synchronized (this) {

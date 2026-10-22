@@ -1,4 +1,4 @@
-import { remoteMediaUrl } from "./channels.js";
+import { remoteMediaCandidates, remoteMediaUrl } from "./channels.js";
 
 const MAX_IMAGE_COUNT = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -8,6 +8,35 @@ const MAX_IMAGE_PIXELS = 100_000_000;
 const remoteImagePattern = /^\/api\/images\/[A-Za-z0-9_-]{20,128}$/u;
 const supportedMimes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const remoteVideoPattern = /^\/api\/videos\/[a-f0-9]{64}$/u;
+const MEDIA_RECOVERY_TIMEOUT_MS = 15_000;
+
+function loadVideoPoster(image, path, loaded = () => {}) {
+  if (image.posterRecovery?.path === path) return;
+  image.posterRecovery?.dispose();
+  const candidates = [...new Set(remoteMediaCandidates(path))];
+  let next = 0, disposed = false, settled = false;
+  const currentSource = () => !image.currentSrc
+    || image.currentSrc === new URL(image.getAttribute("src"), location.href).href;
+  const advance = () => {
+    if (disposed || settled) return;
+    const source = candidates[next++];
+    if (source) image.src = source;
+    else image.hidden = true;
+  };
+  image.posterRecovery = {
+    path,
+    dispose() { disposed = true; image.onload = null; image.onerror = null; }
+  };
+  image.crossOrigin = "anonymous";
+  image.onload = () => {
+    if (disposed || settled || !currentSource()) return;
+    settled = true;
+    image.hidden = false;
+    loaded(image.getAttribute("src"));
+  };
+  image.onerror = () => { if (currentSource()) advance(); };
+  advance();
+}
 
 export function videoPreviewMarkup(asset, label = "") {
   if (!remoteVideoPattern.test(asset?.url || "") || asset.poster !== `${asset.url}/poster`) return "";
@@ -92,7 +121,8 @@ export function openVideoPreview(trigger, source, poster, name, prepareAccess = 
   video.preload = "none";
   video.playsInline = true;
   video.crossOrigin = "anonymous";
-  video.poster = remoteMediaUrl(poster);
+  const initialPoster = remoteMediaCandidates(poster)[0];
+  if (initialPoster) video.poster = initialPoster;
   // 弹窗打开时仍然没有 src。只有下方播放按钮的点击事件可以设置 src。
   const controls = document.createElement("div");
   controls.className = "video-preview-controls";
@@ -122,20 +152,30 @@ export function openVideoPreview(trigger, source, poster, name, prepareAccess = 
   title.className = "image-preview-caption";
   title.textContent = name;
   const cover = new Image();
-  cover.crossOrigin = "anonymous";
   const thumbnail = trigger?.querySelector(".message-video-poster");
   const layout = fitMediaPreview(dialog, panel, video, () => ({
     width: video.videoWidth || cover.naturalWidth || thumbnail?.naturalWidth || 320,
     height: video.videoHeight || cover.naturalHeight || thumbnail?.naturalHeight || 180
   }));
-  cover.onload = layout.resize;
-  cover.src = video.poster;
+  loadVideoPoster(cover, poster, source => {
+    video.poster = source;
+    if (thumbnail?.hidden) thumbnail.src = source;
+    layout.resize();
+  });
   video.addEventListener("loadedmetadata", layout.resize);
   video.addEventListener("resize", layout.resize);
   let closed = false, seeking = false, failed = false, pendingSeek = null;
+  let wantsPlayback = false, recoveryTimer = null, attempt = 0, playRequest = 0;
+  let candidates = [], lastMediaTime = 0;
+  const attempted = new Set();
+  const clearRecovery = () => { clearTimeout(recoveryTimer); recoveryTimer = null; };
+  const currentSource = () => {
+    const source = video.getAttribute("src");
+    return source && (!video.currentSrc || video.currentSrc === new URL(source, location.href).href);
+  };
   const sync = () => {
     const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
-    if (duration && pendingSeek !== null) {
+    if (duration && video.readyState >= 1 && currentSource() && pendingSeek !== null) {
       const target = pendingSeek;
       pendingSeek = null;
       video.currentTime = Math.min(target, duration);
@@ -145,61 +185,139 @@ export function openVideoPreview(trigger, source, poster, name, prepareAccess = 
     if (!seeking) progress.value = String(video.currentTime || 0);
     progress.setAttribute("aria-valuetext", `${videoTime(video.currentTime)} / ${videoTime(duration)}`);
     time.textContent = `${videoTime(video.currentTime)} / ${videoTime(duration)}`;
-    play.replaceChildren(videoPreviewIcon(video.paused ? "play" : "pause"));
-    const playLabel = video.paused ? video.ended ? "重播视频" : failed ? "重试播放视频" : "播放视频" : "暂停视频";
+    play.replaceChildren(videoPreviewIcon(wantsPlayback ? "pause" : "play"));
+    const playLabel = wantsPlayback ? "暂停视频" : video.ended ? "重播视频" : failed ? "重试播放视频" : "播放视频";
     play.setAttribute("aria-label", playLabel);
     play.title = playLabel;
   };
+  const fail = message => {
+    clearRecovery();
+    wantsPlayback = false;
+    failed = true;
+    ++playRequest;
+    video.pause();
+    status.textContent = message;
+    sync();
+  };
+  const armRecovery = () => {
+    if (recoveryTimer !== null || !wantsPlayback || closed || !dialog.open) return;
+    const observed = attempt;
+    recoveryTimer = setTimeout(() => {
+      recoveryTimer = null;
+      if (closed || !dialog.open || !wantsPlayback || observed !== attempt) return;
+      if (video.error && video.error.code !== 2) {
+        fail("视频无法播放，格式可能不受支持或文件已不可用");
+        return;
+      }
+      recover();
+    }, MEDIA_RECOVERY_TIMEOUT_MS);
+  };
+  const requestPlayback = () => {
+    const observed = attempt, request = ++playRequest;
+    armRecovery();
+    void video.play().catch(error => {
+      if (closed || !dialog.open || observed !== attempt || request !== playRequest || !wantsPlayback) return;
+      if (error?.name === "AbortError") { fail("播放已取消，请重试"); return; }
+      if (video.error?.code === 2) { recover(); return; }
+      fail("无法播放视频，请重试或在电脑端查看");
+    });
+  };
+  const selectSource = (source, target) => {
+    clearRecovery();
+    ++attempt;
+    ++playRequest;
+    attempted.add(source);
+    pendingSeek = target;
+    lastMediaTime = target;
+    if (video.getAttribute("src") !== source || video.error) {
+      video.src = source;
+      video.load();
+    }
+    status.textContent = "正在加载视频…";
+    sync();
+    requestPlayback();
+  };
+  const recover = () => {
+    if (closed || !dialog.open || !wantsPlayback) return;
+    const source = candidates.find(value => !attempted.has(value));
+    if (!source) { fail("播放线路暂不可用，请重试或在电脑端查看"); return; }
+    selectSource(source, pendingSeek ?? video.currentTime ?? 0);
+    status.textContent = "正在切换播放线路…";
+  };
   play.onclick = () => {
     if (closed) return;
-    if (!video.paused) { video.pause(); return; }
-    prepareAccess();
-    failed = false;
-    const selectedSource = remoteMediaUrl(source);
-    if (!selectedSource) {
-      failed = true;
-      status.textContent = "当前没有可用的播放线路，请稍后重试";
+    if (wantsPlayback) {
+      wantsPlayback = false;
+      ++playRequest;
+      clearRecovery();
+      video.pause();
+      status.textContent = "已暂停";
       sync();
       return;
     }
-    if (video.getAttribute("src") !== selectedSource || video.error) {
-      pendingSeek = video.ended ? 0 : video.currentTime || 0;
-      video.src = selectedSource;
+    prepareAccess();
+    failed = false;
+    candidates = [...new Set(remoteMediaCandidates(source))];
+    attempted.clear();
+    const selectedSource = candidates[0];
+    if (!selectedSource) {
+      fail("当前没有可用的播放线路，请稍后重试");
+      return;
     }
-    if (video.ended) video.currentTime = 0;
-    status.textContent = "正在加载视频…";
-    void video.play().catch(() => {
-      if (closed) return;
-      failed = true;
-      status.textContent = "无法播放视频，请重试或在电脑端查看";
-      sync();
-    });
+    wantsPlayback = true;
+    selectSource(selectedSource, video.ended ? 0 : pendingSeek ?? video.currentTime ?? 0);
   };
   progress.oninput = () => { seeking = true; time.textContent = `${videoTime(Number(progress.value))} / ${videoTime(video.duration)}`; };
   progress.onchange = () => {
     seeking = false;
     if (!progress.disabled && Number.isFinite(Number(progress.value))) {
-      const target = Number(progress.value), selectedSource = remoteMediaUrl(source);
+      const target = Number(progress.value), selectedSource = remoteMediaCandidates(source)[0];
       if (selectedSource && video.getAttribute("src") !== selectedSource) {
-        const playing = !video.paused;
+        candidates = [...new Set(remoteMediaCandidates(source))];
+        attempted.clear();
         pendingSeek = target;
-        video.src = selectedSource;
-        video.load();
-        if (playing) void video.play().catch(() => {
-          if (!closed) { failed = true; status.textContent = "无法播放视频，请重试"; sync(); }
-        });
+        if (wantsPlayback) selectSource(selectedSource, target);
+        else {
+          ++attempt;
+          ++playRequest;
+          attempted.add(selectedSource);
+          video.src = selectedSource;
+          video.load();
+        }
       } else if (selectedSource) video.currentTime = target;
+      lastMediaTime = target;
+      clearRecovery();
+      armRecovery();
     }
     sync();
   };
   for (const event of ["loadedmetadata", "durationchange", "timeupdate", "pause", "ended"]) video.addEventListener(event, sync);
-  video.onplaying = () => { status.textContent = ""; sync(); };
-  video.onwaiting = () => { status.textContent = "正在缓冲…"; };
+  video.addEventListener("timeupdate", () => {
+    if (closed || !dialog.open || !wantsPlayback || !currentSource()) return;
+    if (video.currentTime > lastMediaTime + 0.01) {
+      lastMediaTime = video.currentTime;
+      clearRecovery();
+      armRecovery();
+    }
+  });
+  video.addEventListener("ended", () => {
+    if (closed || !dialog.open || !currentSource() || !video.ended) return;
+    wantsPlayback = false; clearRecovery(); sync();
+  });
+  video.onplaying = () => {
+    if (closed || !dialog.open || !wantsPlayback || !currentSource()) return;
+    status.textContent = ""; sync();
+  };
+  video.onwaiting = video.onstalled = () => {
+    if (closed || !dialog.open || !wantsPlayback || !currentSource()) return;
+    status.textContent = "正在缓冲…"; armRecovery();
+  };
   video.onerror = () => {
-    if (closed || !video.getAttribute("src")) return;
-    failed = true;
-    status.textContent = "视频无法播放，格式可能不受支持或文件已不可用";
-    sync();
+    if (closed || !dialog.open || !video.getAttribute("src") || !video.error || !currentSource()) return;
+    if (video.error.code === 2) {
+      if (wantsPlayback) recover();
+      else fail("播放线路暂不可用，请重试或在电脑端查看");
+    } else fail(video.error.code === 1 ? "播放已取消，请重试" : "视频无法播放，格式可能不受支持或文件已不可用");
   };
   // 用 click 关闭遮罩，避免关闭后的合成点击落到会话页面。
   let backdropPressed = false;
@@ -219,18 +337,31 @@ export function openVideoPreview(trigger, source, poster, name, prepareAccess = 
   };
   dialog.oncancel = event => { event.preventDefault(); dialog.close(); };
   const stop = () => {
+    if (closed) return;
     closed = true;
+    wantsPlayback = false;
+    ++attempt;
+    ++playRequest;
+    clearRecovery();
     video.pause();
     video.removeAttribute("src");
     video.load();
   };
-  const hide = () => { if (document.visibilityState === "hidden") video.pause(); };
+  const hide = () => {
+    if (document.visibilityState !== "hidden") return;
+    wantsPlayback = false;
+    ++playRequest;
+    clearRecovery();
+    video.pause();
+    status.textContent = "已暂停";
+    sync();
+  };
   const leave = () => dialog.close();
   window.addEventListener("pagehide", leave);
   document.addEventListener("visibilitychange", hide);
   dialog.onclose = () => {
     layout.dispose();
-    cover.onload = null;
+    cover.posterRecovery?.dispose();
     cover.removeAttribute("src");
     stop();
     window.removeEventListener("pagehide", leave);
@@ -258,9 +389,7 @@ export function bindMessageVideos(root, prepareAccess = () => {}) {
     const name = button.querySelector(".message-video-name")?.textContent || "视频";
     button.setAttribute("aria-label", `预览视频：${name}`);
     button.setAttribute("aria-haspopup", "dialog");
-    poster.onerror = () => { poster.hidden = true; };
-    poster.crossOrigin = "anonymous";
-    if (!poster.getAttribute("src")) poster.src = remoteMediaUrl(posterUrl);
+    loadVideoPoster(poster, posterUrl);
     button.onclick = event => {
       event.preventDefault(); event.stopPropagation();
       openVideoPreview(button, source, posterUrl, name, prepareAccess);
@@ -271,8 +400,11 @@ export function bindMessageVideos(root, prepareAccess = () => {}) {
 export function retryOriginalImage(image) {
   const source = image.originalImageSource;
   if (!source) return false;
-  const selectedSource = remoteMediaUrl(source);
-  if (!selectedSource || image.getAttribute("src") === selectedSource) return false;
+  const recovery = image.attachmentRecovery;
+  if (!recovery || recovery.source !== source) return false;
+  const selectedSource = recovery.candidates.find(value => !recovery.attempted.has(value));
+  if (!selectedSource) return false;
+  recovery.attempted.add(selectedSource);
   image.src = selectedSource;
   return true;
 }
@@ -285,9 +417,18 @@ export function loadAttachmentThumbnail(image, source, mime = "") {
     image.crossOrigin = "anonymous";
     image.setAttribute("data-remote-media", source);
   }
-  image.src = remoteMediaUrl(thumbnail);
-  // 兼容尚未提供缩略图接口的旧服务；失败后只回退一次原图。
+  const candidates = remoteImagePattern.test(source)
+    ? [...remoteMediaCandidates(thumbnail), ...remoteMediaCandidates(source)]
+    : [remoteMediaUrl(source)];
+  image.attachmentRecovery = { source, candidates: [...new Set(candidates)], attempted: new Set() };
+  // 每条缩略图线路只尝试一次，再回退原图；显式重试时重新创建尝试列表。
   image.onerror = () => { retryOriginalImage(image); };
+  if (!retryOriginalImage(image)) {
+    const recovery = image.attachmentRecovery;
+    queueMicrotask(() => {
+      if (image.attachmentRecovery === recovery) image.dispatchEvent(new Event("error"));
+    });
+  }
 }
 
 let attachments = [];

@@ -86,15 +86,26 @@ final class ServiceOrigin {
         }
     }
 
+    static String normalizeChannelOrigin(String rawInput) {
+        String origin = normalize(rawInput);
+        try {
+            URI parsed = new URI(origin);
+            if (parsed.getPort() != -1
+                || !parsed.getHost().matches("[a-zA-Z0-9-]+\\.(shares\\.zrok\\.io|ngrok-free\\.app|ngrok-free\\.dev|ngrok\\.app|ngrok\\.dev|ngrok\\.io)")) {
+                throw new IllegalArgumentException("线路域名无效");
+            }
+            return origin;
+        } catch (URISyntaxException error) {
+            throw new IllegalArgumentException("线路域名无效");
+        }
+    }
+
     /** Permit authenticated session requests and short-lived media links; no documents or assets. */
     static boolean allowsChannelRequest(String rawUrl, String method, java.util.Map<String, String> headers) {
         try {
             URI uri = new URI(rawUrl);
-            String origin = normalize(uri.getScheme() + "://" + uri.getRawAuthority());
-            String host = new URI(origin).getHost();
-            if (uri.getRawFragment() != null || uri.getPort() != -1 && uri.getPort() != 443
-                || !host.matches("[a-zA-Z0-9-]+\\.(shares\\.zrok\\.io|ngrok-free\\.app|ngrok-free\\.dev|ngrok\\.app|ngrok\\.dev|ngrok\\.io)"))
-                return false;
+            normalizeChannelOrigin(uri.getScheme() + "://" + uri.getRawAuthority());
+            if (uri.getRawFragment() != null) return false;
             boolean preflight = "OPTIONS".equals(method);
             String requestedMethod = preflight ? channelHeader(headers, "Access-Control-Request-Method") : method;
             String path = uri.getRawPath();
