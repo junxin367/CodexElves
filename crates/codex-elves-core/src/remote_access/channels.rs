@@ -141,7 +141,7 @@ pub(super) fn read_path(method: &Method, path: &str) -> bool {
 pub(super) fn request_path(method: &Method, path: &str) -> bool {
     read_path(method, path)
         || method == Method::POST
-            && (path == "/api/logout"
+            && (matches!(path, "/api/logout" | "/api/diagnostics")
                 || path.strip_prefix("/api/action/").is_some_and(|action| {
                     !action.is_empty()
                         && action.len() <= 64

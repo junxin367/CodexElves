@@ -25,6 +25,7 @@ final class LoginView extends ScrollView {
     private boolean busy;
     private boolean keyVisible;
     private Runnable submit;
+    private Runnable export;
 
     public LoginView(Context context, HapticFeedbackController haptics) {
         super(context);
@@ -67,6 +68,10 @@ final class LoginView extends ScrollView {
             haptics.perform(view, "haptic-click");
             submit();
         });
+        findViewById(R.id.login_export_diagnostics).setOnClickListener(view -> {
+            haptics.perform(view, "haptic-click");
+            if (export != null) export.run();
+        });
         keyInput.setOnEditorActionListener((view, actionId, event) -> {
             boolean enterPressed = event != null
                 && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
@@ -103,6 +108,10 @@ final class LoginView extends ScrollView {
 
     void setOnSubmit(Runnable action) {
         submit = action;
+    }
+
+    void setOnExport(Runnable action) {
+        export = action;
     }
 
     void setBusy(boolean value) {

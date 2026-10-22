@@ -26,6 +26,15 @@
             android:name=".NotificationDismissReceiver"
             android:exported="false" />
         <provider
+            android:name=".DiagnosticsFileProvider"
+            android:authorities="${applicationId}.diagnostics"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/diagnostics_paths" />
+        </provider>
+        <provider
             android:name=".AppUpdateFileProvider"
             android:authorities="${applicationId}.app-updates"
             android:exported="false"

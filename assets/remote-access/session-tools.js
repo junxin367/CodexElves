@@ -33,7 +33,7 @@ function byteSize(size) {
 function statusLabel(value) {
   return statusLabels[value] || statusLabels[String(value).trim()] || String(value || "变更");
 }
-const cacheSchema = 1, responseVersion = 1, memoryLimit = 16 * 1024 * 1024;
+const cacheSchema = 1, responseVersion = 2, memoryLimit = 16 * 1024 * 1024;
 const validRevision = value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const objectValue = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const safeString = (value, maximum = 32768) => typeof value === "string" && value.length <= maximum;
@@ -174,11 +174,14 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     const owner = authorizationKey();
     const controller = new AbortController();
     controllers.add(controller);
-    const abort = () => controller.abort();
+    const abort = () => controller.abort(signal?.reason);
     if (signal?.aborted) abort();
     else signal?.addEventListener("abort", abort, { once: true });
     let timedOut = false;
-    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 45000);
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new DOMException("服务响应超时", "TimeoutError"));
+    }, 45000);
     const ensureCurrent = () => {
       if (controller.signal.aborted || !ownsAuthorization(owner)) {
         controller.abort();

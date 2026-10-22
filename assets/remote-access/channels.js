@@ -1,4 +1,5 @@
 import { getAndroidAppInfo, isAndroidContainer } from "./platform.js";
+import { diagnosticLocation, recordDiagnostic, traceDiagnosticRequest } from "./diagnostics.js";
 
 let deviceId = null;
 let generation = 0;
@@ -76,6 +77,10 @@ export function setRemoteChannelMeasurements(values) {
   if (signature === measurementSignature) return;
   measurementSignature = signature;
   channelMeasurements = next;
+  for (const value of next) recordDiagnostic("channel.measurement", {
+    ...diagnosticLocation(value.origin), phase: value.status === "ready" ? "ready"
+      : value.status === "unavailable" ? "failure" : "pending", durationMs: value.milliseconds
+  });
   changed();
 }
 
@@ -144,20 +149,26 @@ export async function requestRemote(path, options, consume, measurements = chann
   headers.set("ngrok-skip-browser-warning", "1");
   if (route.token) headers.set("Authorization", `Bearer ${route.token}`);
   let receivedResponse = false;
+  const trace = traceDiagnosticRequest(path, options, route.origin);
   try {
     const response = await fetch(new URL(path, route.origin), {
       ...options, headers, credentials: route.token ? "omit" : options.credentials, redirect: "error"
     });
     receivedResponse = true;
+    trace.response(response);
     if (route.token && response.headers.get("x-codex-channel-server") !== expectedServer)
       throw Object.assign(new Error("发送线路服务身份不匹配，请核对原请求回执，勿重复发送。"), {
         responseReadFailed: true, outcomeUnknown: true
       });
     const value = await consume(response);
-    return action ? validateRemoteReceipt(value, headers.get("Idempotency-Key")) : value;
+    const result = action ? validateRemoteReceipt(value, headers.get("Idempotency-Key")) : value;
+    trace.finish();
+    return result;
   } catch (error) {
+    trace.finish(error);
     if (route.token) error.secondaryChannel = true;
-    if (!receivedResponse || error.responseReadFailed || route.token && error.code === 401)
+    const cancelled = options.signal?.aborted && options.signal.reason?.name !== "TimeoutError";
+    if (!cancelled && (!receivedResponse || error.responseReadFailed || route.token && error.code === 401))
       onUnavailable?.(route.origin);
     throw error;
   }
@@ -178,7 +189,8 @@ export async function raceRemoteRead(path, options, consume, onLatency = null) {
   const observedGeneration = generation;
   const names = remoteChannelRoutes();
   let attempts;
-  const observationTimer = measureBoth ? setTimeout(abort, 15000) : null;
+  let observationTimedOut = false;
+  const observationTimer = measureBoth ? setTimeout(() => { observationTimedOut = true; abort(); }, 15000) : null;
   if (measureBoth) latencyObservations.add(abort);
   const cleanup = () => {
     clearTimeout(observationTimer);
@@ -190,6 +202,7 @@ export async function raceRemoteRead(path, options, consume, onLatency = null) {
   try {
     attempts = candidates.map(async (route, index) => {
       const startedAt = performance.now();
+      const trace = traceDiagnosticRequest(path, { ...options, signal: controllers[index].signal }, route.origin);
       const report = value => {
         if (measureBoth && observedGeneration === generation)
           onLatency({ origin: route.origin, name: names[index].name, ...value });
@@ -205,12 +218,15 @@ export async function raceRemoteRead(path, options, consume, onLatency = null) {
           ...options, headers, credentials: route.token ? "omit" : options.credentials,
           redirect: "error", signal: controllers[index].signal
         });
+        trace.response(response);
         if (route.token && response.headers.get("x-codex-channel-server") !== configuration?.serverId)
           throw new Error("第二通道服务身份不匹配");
         const result = await consume(response);
+        trace.finish();
         report({ status: "ready", milliseconds: performance.now() - startedAt });
         return result;
       } catch (error) {
+        trace.finish(error, observationTimedOut || options.signal?.reason?.name === "TimeoutError" ? "timeout" : null);
         report({ status: "unavailable" });
         throw error;
       }

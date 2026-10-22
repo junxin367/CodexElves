@@ -16,7 +16,7 @@ export function videoPreviewMarkup(asset, label = "") {
   const name = escape(label || asset.name || "视频");
   // 正文只包含静态封面；这里不能创建 video、source 或指向视频的链接。
   return `<button type="button" class="message-video-preview" title="${name}">`
-    + `<span class="message-video-cover"><img class="message-video-poster" data-remote-media="${escape(asset.poster)}" alt="${name}" loading="lazy" decoding="async">`
+    + `<span class="message-video-cover"><img class="message-video-poster" crossorigin="anonymous" data-remote-media="${escape(asset.poster)}" alt="${name}" loading="lazy" decoding="async">`
     + `<span class="message-video-badge">▶</span></span><span class="message-video-name">${name}</span></button>`;
 }
 
@@ -91,6 +91,7 @@ export function openVideoPreview(trigger, source, poster, name, prepareAccess = 
   video.className = "video-preview-media";
   video.preload = "none";
   video.playsInline = true;
+  video.crossOrigin = "anonymous";
   video.poster = remoteMediaUrl(poster);
   // 弹窗打开时仍然没有 src。只有下方播放按钮的点击事件可以设置 src。
   const controls = document.createElement("div");
@@ -121,6 +122,7 @@ export function openVideoPreview(trigger, source, poster, name, prepareAccess = 
   title.className = "image-preview-caption";
   title.textContent = name;
   const cover = new Image();
+  cover.crossOrigin = "anonymous";
   const thumbnail = trigger?.querySelector(".message-video-poster");
   const layout = fitMediaPreview(dialog, panel, video, () => ({
     width: video.videoWidth || cover.naturalWidth || thumbnail?.naturalWidth || 320,
@@ -257,6 +259,7 @@ export function bindMessageVideos(root, prepareAccess = () => {}) {
     button.setAttribute("aria-label", `预览视频：${name}`);
     button.setAttribute("aria-haspopup", "dialog");
     poster.onerror = () => { poster.hidden = true; };
+    poster.crossOrigin = "anonymous";
     if (!poster.getAttribute("src")) poster.src = remoteMediaUrl(posterUrl);
     button.onclick = event => {
       event.preventDefault(); event.stopPropagation();
@@ -277,7 +280,11 @@ export function retryOriginalImage(image) {
 export function loadAttachmentThumbnail(image, source, mime = "") {
   image.originalImageSource = source;
   const thumbnail = remoteImagePattern.test(source) && mime !== "image/gif" ? `${source}/thumbnail` : source;
-  if (remoteImagePattern.test(source)) image.setAttribute("data-remote-media", source);
+  if (remoteImagePattern.test(source)) {
+    // 第二线路仍由服务端校验 Origin 和媒体凭证；无 CORS 的图片会被 CORP 拦截。
+    image.crossOrigin = "anonymous";
+    image.setAttribute("data-remote-media", source);
+  }
   image.src = remoteMediaUrl(thumbnail);
   // 兼容尚未提供缩略图接口的旧服务；失败后只回退一次原图。
   image.onerror = () => { retryOriginalImage(image); };

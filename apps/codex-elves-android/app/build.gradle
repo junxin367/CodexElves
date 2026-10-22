@@ -100,6 +100,7 @@ def remoteAssets = new File(repositoryRoot, "assets/remote-access")
 def bundledWebResources = [
     [source: "index.html", path: "/", contentType: "text/html; charset=utf-8"],
     [source: "app.js", path: "/app.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "diagnostics.js", path: "/diagnostics.js", contentType: "application/javascript; charset=utf-8"],
     [source: "session-tools.js", path: "/session-tools.js", contentType: "application/javascript; charset=utf-8"],
     [source: "session-menu.js", path: "/session-menu.js", contentType: "application/javascript; charset=utf-8"],
     [source: "attachments.js", path: "/attachments.js", contentType: "application/javascript; charset=utf-8"],

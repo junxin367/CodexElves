@@ -33,6 +33,7 @@ use crate::settings::{RemoteAccessSettings, SettingsStore};
 
 mod channels;
 mod credentials;
+mod diagnostics;
 mod image_preview;
 mod ngrok_tunnel;
 mod service;
@@ -53,6 +54,7 @@ const WEB_ATTACHMENTS_JS: &str = include_str!("../../../assets/remote-access/att
 const WEB_RECOVERY_STORE_JS: &str = include_str!("../../../assets/remote-access/recovery-store.js");
 const WEB_EVENTS_CLIENT_JS: &str = include_str!("../../../assets/remote-access/events-client.js");
 const WEB_CHANNELS_JS: &str = include_str!("../../../assets/remote-access/channels.js");
+const WEB_DIAGNOSTICS_JS: &str = include_str!("../../../assets/remote-access/diagnostics.js");
 const WEB_EVENTS_WORKER_JS: &str = include_str!("../../../assets/remote-access/events-worker.js");
 const WEB_CSS: &str = include_str!("../../../assets/remote-access/style.css");
 const WEB_MARKDOWN_JS: &str = include_str!("../../../assets/remote-access/markdown.js");
@@ -464,6 +466,7 @@ pub struct RemoteAccessController {
     key_checks: Arc<tokio::sync::Semaphore>,
     public_origin: Arc<RwLock<Option<String>>>,
     channels: channels::Channels,
+    diagnostics: diagnostics::Diagnostics,
     images: RwLock<ImageRegistry>,
     videos: RwLock<video::Registry>,
     image_previews: std::sync::Mutex<image_preview::PreviewCache>,
@@ -533,6 +536,7 @@ impl RemoteAccessController {
             key_checks: Arc::new(tokio::sync::Semaphore::new(4)),
             public_origin,
             channels,
+            diagnostics: diagnostics::Diagnostics::default(),
             images: RwLock::new(ImageRegistry::default()),
             videos: RwLock::new(video::Registry::default()),
             image_previews: std::sync::Mutex::new(image_preview::PreviewCache::default()),
@@ -1048,6 +1052,7 @@ impl RemoteAccessController {
                 self.publish_event(json!({"method":"remote/authorizationChanged"}));
                 Ok(json!({"status":"ok"}))
             }
+            "diagnostics" => self.diagnostics_admin(payload).await,
             _ => anyhow::bail!("不支持的远程管理操作"),
         }
     }
@@ -1449,6 +1454,13 @@ fn web_assets() -> &'static HashMap<&'static str, StaticWebAsset> {
                 ),
             ),
             (
+                "/diagnostics.js",
+                StaticWebAsset::new(
+                    "application/javascript; charset=utf-8",
+                    WEB_DIAGNOSTICS_JS.as_bytes(),
+                ),
+            ),
+            (
                 "/markdown.js",
                 StaticWebAsset::new(
                     "application/javascript; charset=utf-8",
@@ -1622,6 +1634,7 @@ fn is_static_web_asset_path(path: &str) -> bool {
             | "/events-client.js"
             | "/events-worker.js"
             | "/channels.js"
+            | "/diagnostics.js"
             | "/markdown.js"
             | "/markdown-renderer.js"
             | "/vendor/marked.esm.js"
@@ -1807,6 +1820,7 @@ pub fn web_router(
         .route("/events-client.js", get(static_web_asset))
         .route("/events-worker.js", get(static_web_asset))
         .route("/channels.js", get(static_web_asset))
+        .route("/diagnostics.js", get(static_web_asset))
         .route("/markdown.js", get(static_web_asset))
         .route("/markdown-renderer.js", get(static_web_asset))
         .route("/vendor/marked.esm.js", get(static_web_asset))
@@ -1829,6 +1843,10 @@ pub fn web_router(
         .route("/api/channels", get(channels::discover))
         .route("/api/channel-events", get(channels::catch_up))
         .route("/api/logout", post(logout))
+        .route(
+            "/api/diagnostics",
+            post(diagnostics::upload).layer(DefaultBodyLimit::max(diagnostics::MAX_BODY_BYTES)),
+        )
         .route("/api/read/{action}", post(read))
         .route("/api/workspace/changes", post(workspace::changes))
         .route("/api/workspace/change", post(workspace::change))
@@ -2315,9 +2333,11 @@ async fn session(
         .access_policy
         .read()
         .unwrap_or_else(|error| error.into_inner());
+    let diagnostics_request = state.controller.diagnostics.pending_for(&device.id).await;
     Ok(Json(
         json!({"ok":true,"device":device.public(),"nativeConnected":state.controller.native_connected.load(Ordering::SeqCst),
         "readOnly":policy.read_only,"allowApprovals":policy.allow_approvals,
+        "diagnosticsRequest":diagnostics_request,
         "capabilities":{"imageInput":true,"queuedImageRemoval":true,"queuedImageEditing":true,"queueEditRecovery":true,"queueSendRecovery":true,"projectlessCreation":true,"promptOptimization":true,"messageEditModelSettings":true,"goalComposer":true,"compactionQueueSend":true}}),
     ))
 }

@@ -5,6 +5,9 @@ import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.net.ConnectivityManager;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -18,6 +21,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.webkit.CookieManager;
+import android.webkit.ConsoleMessage;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.SslErrorHandler;
 import android.webkit.URLUtil;
@@ -37,6 +41,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.webkit.JavaScriptReplyProxy;
+import androidx.core.content.FileProvider;
 import androidx.webkit.WebMessageCompat;
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
@@ -62,6 +67,7 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 
 public final class MainActivity extends Activity {
     private static final String BRIDGE_NAME = "CodexElvesAndroid";
@@ -79,13 +85,17 @@ public final class MainActivity extends Activity {
     private final AtomicLong updateCheckGeneration = new AtomicLong(-1L);
     private final HapticFeedbackController haptics = new HapticFeedbackController();
     private final Object notificationVisibility = new Object();
+    private final TunnelMediaClient tunnelMedia = new TunnelMediaClient();
 
     private SessionStore sessionStore;
     private ResourceStore resourceStore;
     private AppUpdateController appUpdates;
     private NotificationController notifications;
+    private DiagnosticsStore diagnostics;
+    private String diagnosticsOrigin = "";
+    private String webViewVersion = "unknown";
     private FrameLayout root;
-    private WebView webView;
+    private volatile WebView webView;
     private ResourceStore.Snapshot snapshot;
     private volatile String currentOrigin;
     private ResourceStore.Cancellation resourceCancellation;
@@ -110,6 +120,13 @@ public final class MainActivity extends Activity {
         configureWindow();
         sessionStore = new SessionStore(this);
         resourceStore = new ResourceStore(this);
+        diagnosticsOrigin = normalizedDiagnosticsOrigin(sessionStore.getOrigin());
+        diagnostics = new DiagnosticsStore(this, diagnosticsOrigin);
+        webViewVersion = readWebViewVersion();
+        diagnostic("native.lifecycle", DiagnosticsPolicy.fields(
+            "phase", "create", "sdk", Build.VERSION.SDK_INT,
+            "webViewVersion", webViewVersion, "network", diagnosticsNetwork()
+        ));
         root = new FrameLayout(this);
         root.setBackgroundColor(getColor(R.color.login_background));
         root.setFitsSystemWindows(true);
@@ -169,6 +186,9 @@ public final class MainActivity extends Activity {
         LoginView login = new LoginView(this, haptics);
         login.setInitialValues(sessionStore.getOrigin(), message);
         login.setOnSubmit(() -> authenticate(login));
+        login.setOnExport(() -> exportDiagnostics(
+            () -> !isFinishing() && !isDestroyed() && webView == null, null, null
+        ));
         return login;
     }
 
@@ -191,6 +211,10 @@ public final class MainActivity extends Activity {
             showStatus(status, "请输入访问密钥");
             return;
         }
+        diagnostics.activateOrigin(origin);
+        diagnosticsOrigin = origin;
+        diagnostic("native.login", DiagnosticsPolicy.fields("phase", "request",
+            "host", Uri.parse(origin).getHost(), "network", diagnosticsNetwork()));
 
         notifications.onPageChanged();
         NotificationService.stop(this, "auth-required", true);
@@ -202,7 +226,7 @@ public final class MainActivity extends Activity {
         long generation = connectionGeneration.incrementAndGet();
 
         background.execute(() -> {
-            LoginResult result = requestLogin(origin, key);
+            LoginResult result = requestLogin(origin, key, generation);
             runOnUiThread(() -> {
                 if (generation != connectionGeneration.get() || isFinishing()) {
                     return;
@@ -210,6 +234,8 @@ public final class MainActivity extends Activity {
                 login.setBusy(false);
                 status.setTextColor(0xFFB42318);
                 if (!result.success) {
+                    diagnostic("native.login", DiagnosticsPolicy.fields(
+                        "phase", "failure", "reason", "login-failed"));
                     showStatus(status, result.message);
                     return;
                 }
@@ -220,20 +246,25 @@ public final class MainActivity extends Activity {
                         return;
                     }
                     if (!Boolean.TRUE.equals(accepted)) {
+                        diagnostic("native.login", DiagnosticsPolicy.fields(
+                            "phase", "failure", "reason", "cookie-failed"));
                         showStatus(status, "设备会话保存失败，请重试");
                         return;
                     }
                     cookies.flush();
                     keyInput.setText("");
                     sessionStore.saveAuthorizedConnection(origin);
+                    diagnostic("native.login", DiagnosticsPolicy.fields(
+                        "phase", "success", "reason", "login-success"));
                     openSession(origin);
                 });
             });
         });
     }
 
-    private LoginResult requestLogin(String origin, String key) {
+    private LoginResult requestLogin(String origin, String key, long generation) {
         HttpURLConnection connection = null;
+        long startedAt = android.os.SystemClock.elapsedRealtime();
         try {
             URL url = new URL(origin + "/api/connect");
             connection = (HttpURLConnection) url.openConnection();
@@ -255,6 +286,12 @@ public final class MainActivity extends Activity {
             }
 
             int status = connection.getResponseCode();
+            diagnostics.recordAtOrigin(origin, "native", "native.login.http",
+                DiagnosticsPolicy.urlFields(origin + "/api/connect",
+                    "method", "POST", "status", status,
+                    "mime", DiagnosticsPolicy.mime(connection.getContentType()),
+                    "durationMs", android.os.SystemClock.elapsedRealtime() - startedAt),
+                () -> generation == connectionGeneration.get());
             if (status == HttpURLConnection.HTTP_UNAUTHORIZED
                 || status == HttpURLConnection.HTTP_FORBIDDEN) {
                 return LoginResult.failure("域名或访问密钥无效");
@@ -271,6 +308,11 @@ public final class MainActivity extends Activity {
             }
             return LoginResult.success(cookie);
         } catch (Exception error) {
+            diagnostics.recordAtOrigin(origin, "native", "native.login.failed",
+                DiagnosticsPolicy.fields("errorType", DiagnosticsPolicy.errorType(error),
+                    "reason", "login-failed",
+                    "durationMs", android.os.SystemClock.elapsedRealtime() - startedAt),
+                () -> generation == connectionGeneration.get());
             return LoginResult.failure("无法连接服务，请检查网络和域名");
         } finally {
             if (connection != null) {
@@ -305,6 +347,10 @@ public final class MainActivity extends Activity {
         cancelResourceWork();
         long generation = connectionGeneration.incrementAndGet();
         currentOrigin = origin;
+        diagnostics.activateOrigin(origin);
+        diagnosticsOrigin = origin;
+        diagnostic("native.page", DiagnosticsPolicy.fields(
+            "phase", "start", "generation", generation, "host", Uri.parse(origin).getHost()));
         resourceCancellation = new ResourceStore.Cancellation(
             () -> generation == connectionGeneration.get() && origin.equals(currentOrigin)
         );
@@ -345,6 +391,9 @@ public final class MainActivity extends Activity {
                         return;
                     }
                     snapshot = selected;
+                    diagnostic("native.resources", DiagnosticsPolicy.fields(
+                        "phase", "select", "reason", "success", "resourceVersion",
+                        selected.manifest.version, "generation", generation));
                     root.removeAllViews();
                     displaySessionPage(origin, generation, selected);
                 });
@@ -352,6 +401,10 @@ public final class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     if (generation == connectionGeneration.get() && !cancellation.isCancelled()
                         && !isFinishing()) {
+                        diagnostic("native.resources", DiagnosticsPolicy.fields(
+                            "phase", "select", "reason", "select-failed",
+                            "errorType", DiagnosticsPolicy.errorType(error),
+                            "generation", generation));
                         showSessionLaunchError(origin, "本地页面资源不可用，请重新安装应用");
                     }
                 });
@@ -443,6 +496,21 @@ public final class MainActivity extends Activity {
             new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
         retryParams.topMargin = dp(18);
         content.addView(retry, retryParams);
+
+        long generation = connectionGeneration.get();
+        Button export = new Button(this);
+        export.setText(R.string.diagnostics_export);
+        export.setAllCaps(false);
+        export.setOnClickListener(ignored -> exportDiagnostics(
+            () -> generation == connectionGeneration.get() && origin.equals(currentOrigin)
+                && webView == null && !isFinishing() && !isDestroyed(),
+            null,
+            null
+        ));
+        LinearLayout.LayoutParams exportParams =
+            new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
+        exportParams.topMargin = dp(8);
+        content.addView(export, exportParams);
         root.addView(content, matchParent());
     }
 
@@ -473,11 +541,29 @@ public final class MainActivity extends Activity {
         cookies.setAcceptCookie(true);
         cookies.setAcceptThirdPartyCookies(view, false);
 
-        view.setWebChromeClient(new ShellChromeClient());
+        view.setWebChromeClient(new ShellChromeClient(view, origin, generation));
         view.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) ->
             enqueueDownload(url, userAgent, contentDisposition, mimeType)
         );
         view.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageStarted(WebView requestView, String url, android.graphics.Bitmap icon) {
+                if (isCurrentDiagnosticsPage(requestView, origin, generation)) {
+                    diagnostic("native.page", DiagnosticsPolicy.urlFields(url,
+                        "phase", "start", "resourceVersion", pageSnapshot.manifest.version,
+                        "generation", generation, "network", diagnosticsNetwork()));
+                }
+            }
+
+            @Override
+            public void onPageFinished(WebView requestView, String url) {
+                if (isCurrentDiagnosticsPage(requestView, origin, generation)) {
+                    diagnostic("native.page", DiagnosticsPolicy.urlFields(url,
+                        "phase", "complete", "resourceVersion", pageSnapshot.manifest.version,
+                        "generation", generation));
+                }
+            }
+
             @Override
             public WebResourceResponse shouldInterceptRequest(
                 WebView requestView,
@@ -520,7 +606,10 @@ public final class MainActivity extends Activity {
                 android.net.http.SslError error
             ) {
                 handler.cancel();
-                if (generation == connectionGeneration.get()) {
+                if (isCurrentDiagnosticsPage(requestView, origin, generation)) {
+                    diagnostic("native.webview.ssl", DiagnosticsPolicy.urlFields(error.getUrl(),
+                        "reason", "ssl-failed", "errorType", "ssl",
+                        "errorCode", error.getPrimaryError(), "generation", generation));
                     runOnUiThread(() ->
                         Toast.makeText(
                             MainActivity.this,
@@ -537,6 +626,16 @@ public final class MainActivity extends Activity {
                 WebResourceRequest request,
                 WebResourceError error
             ) {
+                if (isCurrentDiagnosticsPage(requestView, origin, generation)
+                    && isDiagnosticResource(request)) {
+                    diagnostic("native.webview.error", DiagnosticsPolicy.urlFields(
+                        request.getUrl().toString(), "method", request.getMethod(),
+                        "errorCode", error.getErrorCode(),
+                        "errorType", error.getErrorCode() == WebViewClient.ERROR_TIMEOUT
+                            ? "timeout" : "network",
+                        "reason", error.getErrorCode() == WebViewClient.ERROR_TIMEOUT
+                            ? "timeout" : "load-failed", "generation", generation));
+                }
                 if (request.isForMainFrame() && generation == connectionGeneration.get()) {
                     handlePageStartupFailure(
                         "页面加载失败",
@@ -548,10 +647,31 @@ public final class MainActivity extends Activity {
             }
 
             @Override
+            public void onReceivedHttpError(
+                WebView requestView,
+                WebResourceRequest request,
+                WebResourceResponse response
+            ) {
+                if (isCurrentDiagnosticsPage(requestView, origin, generation)
+                    && isDiagnosticResource(request)) {
+                    diagnostic("native.webview.http", DiagnosticsPolicy.urlFields(
+                        request.getUrl().toString(), "method", request.getMethod(),
+                        "status", response.getStatusCode(),
+                        "mime", DiagnosticsPolicy.mime(response.getMimeType()),
+                        "reason", "http-error", "generation", generation));
+                }
+            }
+
+            @Override
             public boolean onRenderProcessGone(
                 WebView requestView,
                 RenderProcessGoneDetail detail
             ) {
+                if (isCurrentDiagnosticsPage(requestView, origin, generation)) {
+                    diagnostic("native.webview.renderer", DiagnosticsPolicy.fields(
+                        "reason", detail.didCrash() ? "renderer-crashed" : "renderer-killed",
+                        "errorType", "renderer", "generation", generation));
+                }
                 handleRendererExit(requestView, origin, generation);
                 return true;
             }
@@ -600,7 +720,9 @@ public final class MainActivity extends Activity {
                         return;
                     }
                     type = (String) rawType;
-                    if (!NotificationSettings.isRequestType(type) && payload.length() != 1) {
+                    if (DiagnosticsPolicy.isRequestType(type)) {
+                        if (!DiagnosticsPolicy.isValidRequest(payload)) return;
+                    } else if (!NotificationSettings.isRequestType(type) && payload.length() != 1) {
                         return;
                     }
                 } catch (JSONException error) {
@@ -611,7 +733,21 @@ public final class MainActivity extends Activity {
                         || !origin.equals(currentOrigin) || isFinishing() || isDestroyed()) {
                         return;
                     }
-                    if (HapticFeedbackController.isRequestType(type)) {
+                    if (DiagnosticsPolicy.isRequestType(type)) {
+                        BooleanSupplier current = () ->
+                            isCurrentDiagnosticsPage(sourceView, origin, generation)
+                                && sourcePageUrl.equals(sourceView.getUrl());
+                        if (!current.getAsBoolean()) return;
+                        if ("diagnostics-log".equals(type)) {
+                            JSONObject event = payload.optJSONObject("event");
+                            diagnostics.record("web", event.optString("name"),
+                                event.optJSONObject("fields"));
+                        } else if ("diagnostics-snapshot".equals(type)) {
+                            snapshotDiagnostics(payload.optString("requestId"), current, replyProxy);
+                        } else {
+                            exportDiagnostics(current, payload.optString("requestId"), replyProxy);
+                        }
+                    } else if (HapticFeedbackController.isRequestType(type)) {
                         String activePageUrl = sourceView.getUrl();
                         if (activePageUrl == null || !sourcePageUrl.equals(activePageUrl)
                             || !ServiceOrigin.matches(origin, Uri.parse(activePageUrl))) {
@@ -633,6 +769,7 @@ public final class MainActivity extends Activity {
                                 .put("versionCode", BuildConfig.VERSION_CODE)
                                 .put("updateSupported", !BuildConfig.DEBUG)
                                 .put("requestRoutingVersion", 2)
+                                .put("diagnosticsVersion", 1)
                                 .toString());
                         } catch (JSONException ignored) {
                             // These BuildConfig values are always valid JSON primitives.
@@ -660,6 +797,9 @@ public final class MainActivity extends Activity {
         switch (type) {
             case "ready":
                 pageReady = true;
+                diagnostic("native.page", DiagnosticsPolicy.fields(
+                    "phase", "ready", "generation", generation,
+                    "resourceVersion", pageSnapshot.manifest.version));
                 cancelReadyTimeout();
                 ResourceStore.Cancellation cancellation = resourceCancellation;
                 resources.execute(() -> {
@@ -673,6 +813,8 @@ public final class MainActivity extends Activity {
             case "authenticated":
                 sessionStore.saveAuthorizedConnection(origin);
                 pageAuthenticated = true;
+                diagnostic("native.page", DiagnosticsPolicy.fields(
+                    "phase", "authenticated", "generation", generation));
                 notifications.onAuthenticated();
                 openPendingNotification();
                 break;
@@ -697,11 +839,16 @@ public final class MainActivity extends Activity {
             return blockedResponse();
         }
         Uri uri = request.getUrl();
-        if (!ServiceOrigin.matches(origin, uri)) {
-            return ServiceOrigin.allowsChannelRequest(
-                uri.toString(), request.getMethod(), request.getRequestHeaders()
-            ) ? null : blockedResponse();
+        boolean sameOrigin = ServiceOrigin.matches(origin, uri);
+        if (!sameOrigin && !ServiceOrigin.allowsChannelRequest(
+            uri.toString(), request.getMethod(), request.getRequestHeaders()
+        )) {
+            return blockedResponse();
         }
+        if (TunnelMediaClient.handles(uri.toString(), request.getMethod())) {
+            return interceptTunnelMedia(request, origin, generation, requestView, sameOrigin);
+        }
+        if (!sameOrigin) return null;
         if (!"GET".equalsIgnoreCase(request.getMethod())) {
             return null;
         }
@@ -729,7 +876,59 @@ public final class MainActivity extends Activity {
             response.setResponseHeaders(localResourceHeaders());
             return response;
         } catch (IOException error) {
+            if (isCurrentDiagnosticsPage(requestView, origin, generation)) {
+                diagnostics.recordAtOrigin(origin, "native", "native.resources", DiagnosticsPolicy.urlFields(
+                    uri.toString(), "reason", "local-read-failed",
+                    "errorType", DiagnosticsPolicy.errorType(error),
+                    "resourceVersion", pageSnapshot.manifest.version, "generation", generation),
+                    () -> generation == connectionGeneration.get());
+            }
             return errorResponse(500, "本地资源读取失败");
+        }
+    }
+
+    private WebResourceResponse interceptTunnelMedia(
+        WebResourceRequest request,
+        String origin,
+        long generation,
+        WebView requestView,
+        boolean sameOrigin
+    ) {
+        String url = request.getUrl().toString();
+        long started = android.os.SystemClock.elapsedRealtime();
+        BooleanSupplier stillCurrent = () -> generation == connectionGeneration.get()
+            && requestView == webView && origin.equals(currentOrigin);
+        Map<String, String> headers = new LinkedHashMap<>(request.getRequestHeaders());
+        headers.keySet().removeIf(name -> "Cookie".equalsIgnoreCase(name)
+            || "Origin".equalsIgnoreCase(name));
+        headers.put("Origin", origin);
+        if (sameOrigin) {
+            String cookies = CookieManager.getInstance().getCookie(url);
+            if (cookies != null && !cookies.isEmpty()) headers.put("Cookie", cookies);
+        }
+        try {
+            TunnelMediaClient.Response response = tunnelMedia.open(
+                url, request.getMethod(), headers, stillCurrent,
+                (status, bytes, failure) -> diagnostics.recordAtOrigin(
+                    origin, "native", "native.media", DiagnosticsPolicy.urlFields(url,
+                        "method", request.getMethod(), "phase", failure == null ? "complete" : "failure",
+                        "status", status, "bytes", bytes,
+                        "durationMs", android.os.SystemClock.elapsedRealtime() - started,
+                        "reason", failure == null ? "success" : !stillCurrent.getAsBoolean()
+                            ? "cancelled" : "network-error",
+                        "errorType", DiagnosticsPolicy.errorType(failure), "generation", generation),
+                    stillCurrent
+                )
+            );
+            diagnostics.recordAtOrigin(origin, "native", "native.media", DiagnosticsPolicy.urlFields(url,
+                "method", request.getMethod(), "phase", "body", "status", response.status,
+                "mime", DiagnosticsPolicy.mime(response.mime),
+                "durationMs", android.os.SystemClock.elapsedRealtime() - started,
+                "generation", generation), stillCurrent);
+            return new WebResourceResponse(response.mime, response.charset, response.status,
+                response.reason, response.headers, response.body);
+        } catch (IOException | RuntimeException failure) {
+            return errorResponse(502, "媒体读取失败");
         }
     }
 
@@ -754,6 +953,12 @@ public final class MainActivity extends Activity {
         }
         resources.execute(() -> {
             try {
+                if (generation == connectionGeneration.get() && !cancellation.isCancelled()) {
+                    diagnostics.recordAtOrigin(origin, "native", "native.resources", DiagnosticsPolicy.fields(
+                        "phase", "check", "resourceVersion", pageSnapshot.manifest.version,
+                        "generation", generation),
+                        () -> generation == connectionGeneration.get() && !cancellation.isCancelled());
+                }
                 ResourceStore.UpdateResult result = resourceStore.checkForUpdate(
                     origin,
                     pageSnapshot,
@@ -764,6 +969,11 @@ public final class MainActivity extends Activity {
                         || isFinishing()) {
                         return;
                     }
+                    diagnostic("native.resources", DiagnosticsPolicy.fields(
+                        "phase", "complete", "reason", result.kind.name().toLowerCase(Locale.ROOT),
+                        "resourceVersion", result.kind == ResourceStore.UpdateResult.Kind.DOWNLOADED
+                            ? result.detail : pageSnapshot.manifest.version,
+                        "generation", generation));
                     switch (result.kind) {
                         case DOWNLOADED:
                             Toast.makeText(
@@ -833,11 +1043,15 @@ public final class MainActivity extends Activity {
     protected void onStart() {
         super.onStart();
         NotificationService.setAppVisible(notificationVisibility, true);
+        diagnostic("native.lifecycle", DiagnosticsPolicy.fields(
+            "phase", "start", "visible", true, "network", diagnosticsNetwork()));
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        diagnostic("native.lifecycle", DiagnosticsPolicy.fields(
+            "phase", "resume", "network", diagnosticsNetwork()));
         haptics.setForeground(true);
         appUpdates.onResume();
         notifications.onResume();
@@ -859,6 +1073,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        diagnostic("native.lifecycle", DiagnosticsPolicy.fields("phase", "pause"));
         haptics.setForeground(false);
         appUpdates.onPause();
         notifications.onPause();
@@ -867,6 +1082,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onStop() {
+        diagnostic("native.lifecycle", DiagnosticsPolicy.fields("phase", "stop", "visible", false));
         NotificationService.setAppVisible(notificationVisibility, false);
         super.onStop();
     }
@@ -921,9 +1137,14 @@ public final class MainActivity extends Activity {
                     return;
                 }
                 if (rolledBack) {
+                    diagnostic("native.resources", DiagnosticsPolicy.fields(
+                        "phase", "rollback", "reason", "success", "generation", generation));
                     Toast.makeText(this, "新版页面启动失败，已回退", Toast.LENGTH_LONG).show();
                     openSession(origin);
                 } else {
+                    diagnostic("native.page", DiagnosticsPolicy.fields(
+                        "phase", "failure", "reason", "页面启动超时".equals(reason)
+                            ? "startup-timeout" : "load-failed", "generation", generation));
                     Toast.makeText(this, reason + "，请检查网络后重试", Toast.LENGTH_LONG).show();
                 }
             });
@@ -938,6 +1159,8 @@ public final class MainActivity extends Activity {
         cancelResourceWork();
         connectionGeneration.incrementAndGet();
         sessionStore.setAuthorized(false);
+        diagnostics.clear();
+        diagnostic("native.authorization", DiagnosticsPolicy.fields("reason", "auth-required"));
         CookieManager cookies = CookieManager.getInstance();
         cookies.setCookie(
             origin,
@@ -1091,15 +1314,17 @@ public final class MainActivity extends Activity {
 
     private void destroyWebView() {
         cancelFileChooser();
-        if (webView == null) {
+        WebView previous = webView;
+        webView = null;
+        tunnelMedia.cancelAll();
+        if (previous == null) {
             return;
         }
-        webView.stopLoading();
-        webView.setWebChromeClient(null);
-        webView.setWebViewClient(null);
-        root.removeView(webView);
-        webView.destroy();
-        webView = null;
+        previous.stopLoading();
+        previous.setWebChromeClient(null);
+        previous.setWebViewClient(null);
+        root.removeView(previous);
+        previous.destroy();
     }
 
     @Override
@@ -1226,6 +1451,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        diagnostic("native.lifecycle", DiagnosticsPolicy.fields("phase", "destroy"));
         NotificationService.setAppVisible(notificationVisibility, false);
         haptics.setForeground(false);
         appUpdates.onDestroy();
@@ -1239,6 +1465,7 @@ public final class MainActivity extends Activity {
         destroyWebView();
         background.shutdownNow();
         resources.shutdownNow();
+        diagnostics.close();
         super.onDestroy();
     }
 
@@ -1341,6 +1568,29 @@ public final class MainActivity extends Activity {
     }
 
     private final class ShellChromeClient extends WebChromeClient {
+        private final WebView owner;
+        private final String origin;
+        private final long generation;
+
+        ShellChromeClient(WebView owner, String origin, long generation) {
+            this.owner = owner;
+            this.origin = origin;
+            this.generation = generation;
+        }
+
+        @Override
+        public boolean onConsoleMessage(ConsoleMessage message) {
+            if (message.messageLevel() == ConsoleMessage.MessageLevel.ERROR
+                && isCurrentDiagnosticsPage(owner, origin, generation)) {
+                diagnostic("native.console.error", DiagnosticsPolicy.urlFields(
+                    message.sourceId(), "line", Math.max(0, Math.min(10_000_000, message.lineNumber())),
+                    "reason", DiagnosticsPolicy.consoleReason(message.message()),
+                    "generation", generation));
+            }
+            // Retain only the fixed browser-error category, source path, and line number.
+            return true;
+        }
+
         @Override
         public boolean onShowFileChooser(
             WebView webView,
@@ -1380,6 +1630,158 @@ public final class MainActivity extends Activity {
             completeFileChooser(null);
             Toast.makeText(MainActivity.this, "没有可用的文件选择器", Toast.LENGTH_SHORT).show();
             return true;
+        }
+    }
+
+    private void diagnostic(String name, JSONObject fields) {
+        if (diagnostics != null) diagnostics.record("native", name, fields);
+    }
+
+    private boolean isCurrentDiagnosticsPage(WebView view, String origin, long generation) {
+        return generation == connectionGeneration.get() && view == webView
+            && origin.equals(currentOrigin) && !isFinishing() && !isDestroyed();
+    }
+
+    private static boolean isDiagnosticResource(WebResourceRequest request) {
+        String path = request.getUrl().getEncodedPath();
+        return request.isForMainFrame() || path != null && path.startsWith("/api/");
+    }
+
+    private JSONObject diagnosticsApp() {
+        String originHost = Uri.parse(diagnosticsOrigin).getHost();
+        try {
+            return new JSONObject()
+                .put("versionName", BuildConfig.VERSION_NAME)
+                .put("versionCode", BuildConfig.VERSION_CODE)
+                .put("sdk", Build.VERSION.SDK_INT)
+                .put("webViewVersion", webViewVersion)
+                .put("resourceVersion", snapshot == null ? "unknown" : snapshot.manifest.version)
+                .put("originHost", originHost == null ? "" : originHost)
+                .put("generation", connectionGeneration.get());
+        } catch (JSONException ignored) {
+            return new JSONObject();
+        }
+    }
+
+    private void snapshotDiagnostics(
+        String requestId,
+        BooleanSupplier current,
+        JavaScriptReplyProxy reply
+    ) {
+        diagnostics.snapshot(diagnosticsApp(), (bundle, errorCode) -> {
+            final String response;
+            try {
+                JSONObject result = new JSONObject().put("type", "diagnostics-snapshot")
+                    .put("requestId", requestId);
+                if (bundle != null) {
+                    result.put("bundle", bundle);
+                } else {
+                    result.put("error", errorCode);
+                }
+                response = result.toString();
+            } catch (JSONException ignored) {
+                return;
+            }
+            runOnUiThread(() -> {
+                if (current.getAsBoolean()
+                    && WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+                    reply.postMessage(response);
+                }
+            });
+        });
+    }
+
+    private void exportDiagnostics(
+        BooleanSupplier current,
+        String requestId,
+        JavaScriptReplyProxy reply
+    ) {
+        long generation = connectionGeneration.get();
+        diagnostic("native.diagnostics.export", DiagnosticsPolicy.fields("reason", "manual"));
+        diagnostics.export(diagnosticsApp(), (file, errorCode) -> {
+            Uri sharedUri = null;
+            String failure = errorCode;
+            if (file != null) {
+                try {
+                    sharedUri = FileProvider.getUriForFile(
+                        this, getPackageName() + ".diagnostics", file);
+                } catch (IllegalArgumentException | SecurityException ignored) {
+                    failure = "export_failed";
+                }
+            }
+            Uri uri = sharedUri;
+            String exportError = failure;
+            runOnUiThread(() -> {
+                if (generation != connectionGeneration.get() || !current.getAsBoolean()) return;
+                boolean ok = false;
+                String error = exportError;
+                if (uri != null) {
+                    Intent share = new Intent(Intent.ACTION_SEND).setType("application/json");
+                    share.putExtra(Intent.EXTRA_STREAM, uri);
+                    share.setClipData(ClipData.newRawUri(getString(R.string.diagnostics_share_title), uri));
+                    share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    Intent chooser = Intent.createChooser(
+                        share, getString(R.string.diagnostics_share_title));
+                    chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    try {
+                        startActivity(chooser);
+                        ok = true;
+                    } catch (ActivityNotFoundException | SecurityException ignored) {
+                        error = "share_unavailable";
+                    }
+                }
+                if (reply != null
+                    && WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+                    try {
+                        JSONObject response = new JSONObject()
+                            .put("type", "diagnostics-export").put("requestId", requestId)
+                            .put("ok", ok);
+                        if (!ok) response.put("error", error == null ? "export_failed" : error);
+                        reply.postMessage(response.toString());
+                    } catch (JSONException ignored) {
+                        // Reply fields are fixed codes and a previously checked request ID.
+                    }
+                } else if (!ok) {
+                    Toast.makeText(this, R.string.diagnostics_export_failed, Toast.LENGTH_LONG).show();
+                }
+            });
+        });
+    }
+
+    private String diagnosticsNetwork() {
+        try {
+            ConnectivityManager manager = getSystemService(ConnectivityManager.class);
+            if (manager == null) return "unknown";
+            android.net.Network network = manager.getActiveNetwork();
+            if (network == null) return "none";
+            NetworkCapabilities capabilities = manager.getNetworkCapabilities(network);
+            if (capabilities == null) return "unknown";
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return "vpn";
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return "wifi";
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) return "cellular";
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) return "ethernet";
+            return "other";
+        } catch (SecurityException ignored) {
+            return "unknown";
+        }
+    }
+
+    private static String readWebViewVersion() {
+        try {
+            PackageInfo info = WebView.getCurrentWebViewPackage();
+            String version = info == null ? "" : info.versionName;
+            return version != null && version.matches("[0-9]+(?:\\.[0-9]+){1,4}")
+                ? version : "unknown";
+        } catch (RuntimeException ignored) {
+            return "unknown";
+        }
+    }
+
+    private static String normalizedDiagnosticsOrigin(String origin) {
+        try {
+            return ServiceOrigin.normalize(origin);
+        } catch (IllegalArgumentException ignored) {
+            return "";
         }
     }
 

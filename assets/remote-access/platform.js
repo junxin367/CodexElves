@@ -308,7 +308,8 @@ export function getAndroidAppInfo() {
       return;
     }
     finish({ versionName, versionCode: data.versionCode, updateSupported: data.updateSupported,
-      requestRoutingVersion: data.requestRoutingVersion === 2 ? 2 : 1 });
+      requestRoutingVersion: data.requestRoutingVersion === 2 ? 2 : 1,
+      diagnosticsVersion: data.diagnosticsVersion === 1 ? 1 : 0 });
   };
 
   try {
@@ -331,7 +332,7 @@ export function setAndroidNotificationSettings(settings) {
   if (!isValidNotificationSettings(settings))
     return Promise.reject(notificationBridgeError("invalid-settings", "通知设置格式无效。"));
   return requestAndroidNotificationBridge("notification-settings-set", {
-    settings: Object.fromEntries(notificationSettingsKeys.map(key => [key, settings[key]]))
+    settings: Object.fromEntries(notificationSettingsKeys.map(key => [key, key === "failed" ? false : settings[key]]))
   });
 }
 

@@ -106,7 +106,8 @@ final class ServiceOrigin {
                 && ("/api/session".equals(path) || "/api/channels".equals(path) || "/api/channel-events".equals(path)
                     || path != null && path.matches("/api/receipts/[a-zA-Z0-9-]{1,100}"))
                 || "POST".equals(requestedMethod) && path != null
-                    && (path.matches("/api/read/[a-zA-Z]+") || path.matches("/api/workspace/changes?") || "/api/logout".equals(path))
+                    && (path.matches("/api/read/[a-zA-Z]+") || path.matches("/api/workspace/changes?")
+                        || "/api/logout".equals(path) || "/api/diagnostics".equals(path))
                 || messageSend || media;
             if (!allowed) return false;
             if (preflight) {

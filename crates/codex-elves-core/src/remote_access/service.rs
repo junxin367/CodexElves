@@ -202,6 +202,7 @@ fn supported_action(action: &str) -> bool {
         "status"
             | "apply"
             | "revoke"
+            | "diagnostics"
             | "downloadZrok"
             | "registerZrok"
             | "startZrok"

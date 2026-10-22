@@ -16,7 +16,7 @@ final class NotificationSettings {
         "enabled", "approval", "question", "completed", "failed"
     };
     static final NotificationSettings DEFAULT =
-        new NotificationSettings(false, true, true, true, true);
+        new NotificationSettings(false, true, true, true);
     private static final Object INITIALIZATION_LOCK = new Object();
     private static final Object WRITE_LOCK = new Object();
     private static volatile Confirmed confirmed;
@@ -24,16 +24,14 @@ final class NotificationSettings {
     final boolean approval;
     final boolean question;
     final boolean completed;
-    final boolean failed;
 
     NotificationSettings(
-        boolean enabled, boolean approval, boolean question, boolean completed, boolean failed
+        boolean enabled, boolean approval, boolean question, boolean completed
     ) {
         this.enabled = enabled;
         this.approval = approval;
         this.question = question;
         this.completed = completed;
-        this.failed = failed;
     }
 
     static NotificationSettings parse(JSONObject value) throws JSONException {
@@ -47,13 +45,14 @@ final class NotificationSettings {
         }
         return new NotificationSettings(
             value.getBoolean("enabled"), value.getBoolean("approval"),
-            value.getBoolean("question"), value.getBoolean("completed"), value.getBoolean("failed")
+            value.getBoolean("question"), value.getBoolean("completed")
         );
     }
 
     JSONObject toJson() throws JSONException {
         return new JSONObject().put("enabled", enabled).put("approval", approval)
-            .put("question", question).put("completed", completed).put("failed", failed);
+            // 保留旧网页桥接字段，读取旧配置后也不会重新启用失败通知。
+            .put("question", question).put("completed", completed).put("failed", false);
     }
 
     boolean allows(String kind) {
@@ -64,7 +63,6 @@ final class NotificationSettings {
             case "approval": return approval;
             case "question": return question;
             case "completed": return completed;
-            case "failed": return failed;
             default: return false;
         }
     }

@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 64) return;
+  if (window.__codexElvesRemoteAccess?.version === 65) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -414,7 +414,7 @@
     if (event.method !== "turn/completed") return;
     const { threadId, turn, turnId = turn?.id ?? turn?.turnId } = event.params || {};
     const status = typeof turn?.status === "string" ? turn.status : turn?.status?.type;
-    const kind = status === "completed" ? "completed" : status === "failed" ? "failed" : null;
+    const kind = status === "completed" ? "completed" : null;
     const thread = notificationThread(threadId);
     if (!kind || !thread || typeof turnId !== "string" || !turnId) return;
     const key = JSON.stringify([threadId, turnId]);
@@ -4269,7 +4269,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 64, call,
+    version: 65, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();

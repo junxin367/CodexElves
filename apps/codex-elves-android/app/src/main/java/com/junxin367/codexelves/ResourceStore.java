@@ -67,6 +67,42 @@ final class ResourceStore {
                 .apply();
         }
         active = recovery.active;
+        Snapshot bundled = null;
+        try {
+            bundled = loadSnapshot(origin, BUILTIN, cancellation, true);
+        } catch (CancelledException cancelled) {
+            throw cancelled;
+        } catch (IOException invalidBundled) {
+            // A damaged APK must not prevent an existing healthy cache from starting.
+        }
+        if (bundled != null && ResourceStatePolicy.shouldPreferBundled(
+            preferences.getString(prefix + "bundledVersion", ""),
+            bundled.manifest.version
+        )) {
+            String previous = active;
+            if (BUILTIN.equals(previous) || !validateCached(origin, previous, cancellation)) {
+                previous = preferences.getString(prefix + "previous", BUILTIN);
+                if (BUILTIN.equals(previous) || !validateCached(origin, previous, cancellation)) {
+                    previous = BUILTIN;
+                }
+            }
+            synchronized (cancellation) {
+                cancellation.check();
+                SharedPreferences.Editor update = preferences.edit()
+                    .putString(prefix + "bundledVersion", bundled.manifest.version)
+                    .putString(prefix + "active", BUILTIN)
+                    .remove(prefix + "pending");
+                if (BUILTIN.equals(previous)) {
+                    update.remove(prefix + "previous").remove(prefix + "trial");
+                } else {
+                    update.putString(prefix + "previous", previous)
+                        .putString(prefix + "trial", BUILTIN);
+                }
+                // Record the APK even before ready so rollback cannot repeat this migration.
+                update.apply();
+            }
+            return bundled;
+        }
         String pending = preferences.getString(prefix + "pending", "");
         if (!pending.isEmpty()) {
             try {

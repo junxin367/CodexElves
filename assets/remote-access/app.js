@@ -1,5 +1,6 @@
 import { markdown, prepareMessageImage, renderMermaidBlocks, settleMessageImage, withStableMessageLayout } from "./markdown.js";
 import { createRemoteEventStream, sharedEventsAvailable } from "./events-client.js";
+import { configureAndroidDiagnostics, exportAndroidDiagnostics, receiveDiagnosticRequest, sendAndroidDiagnostics } from "./diagnostics.js";
 import { activateRemoteChannels, clearRemoteChannels, observeChannelConfiguration, prepareRemoteTunnelAccess, raceRemoteRead, remoteChannelRoutes, remoteMediaUrl, requestRemote, setRemoteChannelMeasurements, validateRemoteReceipt } from "./channels.js";
 import { renderMessageActions } from "./message-actions.js";
 import { mountSessionTools } from "./session-tools.js";
@@ -378,23 +379,70 @@ function openAppearance() {
   dialog.innerHTML = `<div class="appearance-heading"><h2 id="appearance-title">设置</h2><button type="button" class="icon-button" title="关闭设置" aria-label="关闭设置"></button></div>
     <div class="appearance-body">
     <div class="appearance-field"><span id="appearance-theme-label">主题</span><div id="appearance-theme-slot" class="appearance-theme-options" role="group" aria-labelledby="appearance-theme-label"></div></div>
+    <div class="appearance-field"><button type="button" id="appearance-customization-entry" class="appearance-page-entry" title="打开外观设置" aria-label="打开外观设置" aria-controls="appearance-customization-page"><span>外观设置</span></button></div>
+    <div id="appearance-notifications-field" class="appearance-field" hidden><button type="button" id="appearance-notifications-entry" class="appearance-page-entry" title="打开通知事件设置" aria-label="打开通知事件设置" aria-controls="appearance-notifications-page"><span>通知事件</span></button></div>
     <div class="appearance-field appearance-thread-limit-field"><span>每个项目显示会话数</span><div id="appearance-project-thread-limit-slot"></div></div>
-    <div id="appearance-colors"></div>
     <div id="appearance-cache-state" class="appearance-field" role="status"></div>
+    <div id="appearance-diagnostics-field" class="appearance-field" hidden><span>诊断日志</span><div class="appearance-action-buttons"><button type="button" id="appearance-diagnostics-export" disabled>导出</button><button type="button" id="appearance-diagnostics-send" disabled>发送到电脑</button></div></div>
+    <p id="appearance-diagnostics-status" class="appearance-notification-status" role="status" hidden></p></div>
+    <div id="appearance-customization-page" class="appearance-body appearance-subpage" hidden>
+    <div id="appearance-colors"></div>
     <label class="appearance-field">字体大小<span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="字体大小"><output id="appearance-font-value"></output></span></label>
-    <div id="appearance-notifications-field" class="appearance-field" hidden><button type="button" id="appearance-notifications-entry" class="appearance-notifications-entry" title="打开通知事件设置" aria-label="打开通知事件设置" aria-controls="appearance-notifications-page"><span>通知事件</span></button></div></div>
+    </div>
     <div class="appearance-actions"><button type="button" class="appearance-version" id="appearance-app-version" hidden disabled></button><div class="appearance-action-buttons"><button type="button" id="appearance-reset">恢复默认</button><button type="button" class="primary" id="appearance-close">完成</button></div></div>`;
   document.body.append(dialog);
   const title = $("#appearance-title", dialog);
   const headingButton = $(".appearance-heading button", dialog);
   const primaryBody = $(".appearance-body", dialog);
+  const customizationEntry = $("#appearance-customization-entry", dialog);
+  const customizationPage = $("#appearance-customization-page", dialog);
   const entryButton = $("#appearance-notifications-entry", dialog);
   const resetButton = $("#appearance-reset", dialog);
   const notificationVersionButton = $("#appearance-app-version", dialog);
   if (androidContainer) {
+    const diagnosticsField = $("#appearance-diagnostics-field", dialog);
+    const diagnosticsStatus = $("#appearance-diagnostics-status", dialog);
+    const exportButton = $("#appearance-diagnostics-export", dialog);
+    const sendButton = $("#appearance-diagnostics-send", dialog);
+    diagnosticsField.hidden = diagnosticsStatus.hidden = false;
+    let diagnosticsSupported = false, diagnosticsBusy = false;
+    const update = () => {
+      exportButton.disabled = !diagnosticsSupported || diagnosticsBusy;
+      sendButton.disabled = !diagnosticsSupported || diagnosticsBusy || !session || !connected;
+    };
+    void getAndroidAppInfo().then(info => {
+      if (!dialog.isConnected) return;
+      diagnosticsSupported = info?.diagnosticsVersion === 1;
+      diagnosticsStatus.textContent = diagnosticsSupported
+        ? "记录连接与图片错误，不含消息正文或密钥；断网时可导出。"
+        : "当前 App 未提供诊断采集，请安装新版 APK。";
+      update();
+    }).catch(() => {});
+    const run = async sending => {
+      if (diagnosticsBusy || !diagnosticsSupported) return;
+      diagnosticsBusy = true;
+      diagnosticsStatus.textContent = sending ? "正在发送诊断日志…" : "正在准备诊断日志…";
+      update();
+      try {
+        if (sending) await sendAndroidDiagnostics();
+        else await exportAndroidDiagnostics();
+        if (dialog.isConnected) diagnosticsStatus.textContent = sending
+          ? "电脑端已收到诊断日志。" : "已打开系统分享，可选择保存或发送日志文件。";
+      } catch (error) {
+        if (dialog.isConnected) diagnosticsStatus.textContent = error.message;
+      } finally {
+        diagnosticsBusy = false;
+        update();
+      }
+    };
+    exportButton.onclick = () => { void run(false); };
+    sendButton.onclick = () => { void run(true); };
+  }
+  if (androidContainer) {
     $("#appearance-notifications-field", dialog).hidden = false;
     entryButton.append(icon("chevron"));
   }
+  customizationEntry.append(icon("chevron"));
   headingButton.append(icon("close"));
   renderPwaCacheState();
   const versionButton = notificationVersionButton;
@@ -405,6 +453,7 @@ function openAppearance() {
   let activeNotificationPage = null;
   let notificationOperations = 0;
   let androidVersionLoaded = false;
+  let subpageEntry = null;
   const notificationEntry = entryButton;
   const updateNotificationOperationState = () => {
     notificationEntry.disabled = notificationOperations > 0;
@@ -427,8 +476,24 @@ function openAppearance() {
   const notificationPageIsCurrent = (page, revision) => androidContainer && notificationPageVisible
     && notificationPage === page && notificationPageRevision === revision && page.isConnected
     && dialog.isConnected && dialog.open;
+  const showAppearancePage = (page, pageTitle, entry) => {
+    subpageEntry = entry;
+    primaryBody.hidden = true;
+    page.hidden = false;
+    page.scrollTop = 0;
+    title.textContent = pageTitle;
+    headingButton.title = "返回设置";
+    headingButton.setAttribute("aria-label", "返回设置");
+    headingButton.replaceChildren(icon("back"));
+    resetButton.hidden = true;
+    versionButton.hidden = true;
+    dialog.classList.add("appearance-subpage-open");
+    headingButton.focus({ preventScroll: true });
+  };
   const restoreAppearanceRoot = () => {
-    if (!notificationPageVisible) return;
+    if (!subpageEntry) return;
+    const returnEntry = subpageEntry;
+    subpageEntry = null;
     notificationPageVisible = false;
     notificationPageRevision++;
     notificationPageUnsubscribe?.();
@@ -437,7 +502,8 @@ function openAppearance() {
     activeNotificationPage = null;
     notificationPage?.remove();
     notificationPage = null;
-    dialog.classList.remove("appearance-notifications-open");
+    customizationPage.hidden = true;
+    dialog.classList.remove("appearance-subpage-open");
     primaryBody.hidden = false;
     title.textContent = "设置";
     headingButton.title = "关闭设置";
@@ -445,17 +511,20 @@ function openAppearance() {
     headingButton.replaceChildren(icon("close"));
     resetButton.hidden = false;
     versionButton.hidden = !androidVersionLoaded;
-    dialog.style.removeProperty("height");
     updateNotificationOperationState();
-    notificationEntry.focus({ preventScroll: true });
+    returnEntry.focus({ preventScroll: true });
+  };
+  customizationEntry.onclick = () => {
+    if (!dialog.isConnected || !dialog.open || subpageEntry) return;
+    showAppearancePage(customizationPage, "外观设置", customizationEntry);
   };
   if (androidContainer) entryButton.onclick = () => {
-    if (!dialog.isConnected || !dialog.open || notificationPageVisible) return;
-    dialog.style.height = `${dialog.getBoundingClientRect().height}px`;
+    if (!dialog.isConnected || !dialog.open || subpageEntry) return;
     notificationPageVisible = true;
     const revision = ++notificationPageRevision;
-    const page = element("div", "appearance-body appearance-notifications-page");
+    const page = element("div", "appearance-body appearance-subpage appearance-notifications-page");
     page.id = "appearance-notifications-page";
+    page.hidden = true;
     notificationPage = page;
     const status = element("p", "appearance-notification-status");
     status.setAttribute("role", "status");
@@ -482,8 +551,7 @@ function openAppearance() {
     for (const [key, label] of [
       ["approval", "需要授权"],
       ["question", "需要回答"],
-      ["completed", "执行完成"],
-      ["failed", "执行失败"]
+      ["completed", "执行完成"]
     ]) addSwitch(key, label, categories);
     rows.append(categories);
     const systemSettingsButton = button("打开系统通知设置", "打开系统通知设置", async () => {
@@ -508,14 +576,7 @@ function openAppearance() {
     page.append(status, rows);
     $("#appearance-close", dialog).before(systemSettingsButton);
     dialog.insertBefore(page, $(".appearance-actions", dialog));
-    primaryBody.hidden = true;
-    title.textContent = "通知事件";
-    headingButton.title = "返回设置";
-    headingButton.setAttribute("aria-label", "返回设置");
-    headingButton.replaceChildren(icon("back"));
-    resetButton.hidden = true;
-    versionButton.hidden = true;
-    dialog.classList.add("appearance-notifications-open");
+    showAppearancePage(page, "通知事件", notificationEntry);
     let state = null;
     const setBusy = busy => {
       for (const [key, control] of controls)
@@ -657,19 +718,19 @@ function openAppearance() {
   const onNativeBack = event => {
     if (!dialog.open || !dialog.isConnected || document.querySelector("dialog[open]") !== dialog) return;
     event.preventDefault();
-    if (notificationPageVisible) restoreAppearanceRoot();
+    if (subpageEntry) restoreAppearanceRoot();
     else dialog.close();
   };
-  const onNotificationEscape = event => {
-    if (event.key !== "Escape" || event.isComposing || !dialog.open || !notificationPageVisible) return;
+  const onAppearanceEscape = event => {
+    if (event.key !== "Escape" || event.isComposing || !dialog.open || !subpageEntry) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     restoreAppearanceRoot();
   };
   if (androidContainer) {
     window.addEventListener("codex-elves-native-back", onNativeBack);
-    window.addEventListener("keydown", onNotificationEscape, true);
   }
+  window.addEventListener("keydown", onAppearanceEscape, true);
   if (androidContainer) {
     void getAndroidAppInfo().then(info => {
       if (!info || !dialog.isConnected || !dialog.open || !versionButton.isConnected) return;
@@ -680,7 +741,7 @@ function openAppearance() {
       versionButton.setAttribute("aria-label", info.updateSupported
         ? `当前应用版本 v${info.versionName}，点击检查更新`
         : `当前应用版本 v${info.versionName}，暂不支持在线更新`);
-      versionButton.hidden = notificationPageVisible;
+      versionButton.hidden = !!subpageEntry;
     }).catch(() => {});
   }
   versionButton.onclick = () => {
@@ -759,7 +820,7 @@ function openAppearance() {
   };
   $("#appearance-font").oninput = event => { appearance.fontSize = Number(event.target.value); applyAppearance(true); sync(); };
   $("#appearance-reset").onclick = () => {
-    if (notificationPageVisible) return;
+    if (subpageEntry) return;
     appearance = defaultAppearance(appearance.theme);
     applyAppearance(true);
     expandedProjects.clear();
@@ -768,7 +829,7 @@ function openAppearance() {
   };
   $("#appearance-close").onclick = () => dialog.close();
   headingButton.onclick = () => {
-    if (notificationPageVisible) restoreAppearanceRoot();
+    if (subpageEntry) restoreAppearanceRoot();
     else dialog.close();
   };
   let backdropPressed = false;
@@ -790,13 +851,13 @@ function openAppearance() {
   };
   dialog.oncancel = event => {
     event.preventDefault();
-    if (notificationPageVisible) restoreAppearanceRoot();
+    if (subpageEntry) restoreAppearanceRoot();
     else dialog.close();
   };
   dialog.onclose = () => {
     notificationPageRevision++;
     notificationPageVisible = false;
-    dialog.style.removeProperty("height");
+    subpageEntry = null;
     notificationPageUnsubscribe?.();
     notificationPageUnsubscribe = null;
     activeNotificationPage?.systemSettingsButton.remove();
@@ -804,7 +865,7 @@ function openAppearance() {
     notificationPage?.remove();
     notificationPage = null;
     window.removeEventListener("codex-elves-native-back", onNativeBack);
-    window.removeEventListener("keydown", onNotificationEscape, true);
+    window.removeEventListener("keydown", onAppearanceEscape, true);
     if (activePopup?.trigger.closest("dialog") === dialog) closePopup();
     document.body.classList.toggle("modal-open", !!document.querySelector("dialog[open]"));
     if (trigger?.isConnected && document.activeElement === document.body) trigger.focus();
@@ -3847,14 +3908,17 @@ async function api(path, body, id, signal, { resourcePriority = "foreground", on
   // 16 KiB/s 包含 base64 上传；12 MiB 图片可等待约 18 分钟，仍有有限上限。
   const actionTimeout = path.startsWith("/api/action/")
     ? Math.min(20 * 60000, 90000 + Math.ceil(new TextEncoder().encode(encodedBody || "").length / 16384) * 1000) : 0;
-  const timeout = path.startsWith("/api/read/") ? 60000
+  const timeout = path === "/api/diagnostics" ? 45000 : path.startsWith("/api/read/") ? 60000
     : path === "/api/session" || path.startsWith("/api/receipts/") ? 15000 : actionTimeout;
   const controller = timeout ? new AbortController() : null;
-  const abort = () => controller?.abort();
+  const abort = () => controller?.abort(signal?.reason);
   let timedOut = false;
   if (signal?.aborted) abort();
   else if (controller) signal?.addEventListener("abort", abort, { once: true });
-  const timer = timeout ? setTimeout(() => { timedOut = true; controller.abort(); }, timeout) : null;
+  const timer = timeout ? setTimeout(() => {
+    timedOut = true;
+    controller.abort(new DOMException("远程请求超时", "TimeoutError"));
+  }, timeout) : null;
   let releaseForeground = null;
   try {
     if (!["/api/read/models", "/api/read/skills"].includes(path))
@@ -3886,7 +3950,13 @@ async function api(path, body, id, signal, { resourcePriority = "foreground", on
       return result;
     }, connectionProbe ? onChannelLatency : measurements,
     origin => markMessageChannelUnavailable(origin, measurements));
-    if (path === "/api/session" && result?.device?.id) activateRemoteChannels(result.device.id);
+    if (path === "/api/session" && result?.device?.id) {
+      activateRemoteChannels(result.device.id);
+      // 冷启动会建立新的事件基线，尚未完成的采集请求由原有状态轮询补达。
+      if (result.diagnosticsRequest) setTimeout(() => {
+        if (session?.device.id === result.device.id) receiveDiagnosticRequest(result.diagnosticsRequest);
+      }, 0);
+    }
     return result;
   } catch (error) {
     if (error.code === 401 && !error.secondaryChannel && !path.endsWith("/connect") && session && deviceId === session.device.id)
@@ -6121,6 +6191,7 @@ function openImagePreview(link, image) {
     preview.classList.add("image-preview-ready");
   };
   preview.onload = () => { layout.resize(); initializeZoom(); };
+  if (/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(source)) preview.crossOrigin = "anonymous";
   preview.alt = image.alt || "图片预览"; preview.src = remoteMediaUrl(source);
   preview.onerror = () => {
     layout.dispose();
@@ -9865,8 +9936,9 @@ async function submitBlockingRequest(requestThreadId, request, action, value, id
   } catch (error) {
     if (session?.device.id !== deviceId || blockingRequestState(requestThreadId).sourceVersion !== sourceVersion) return;
     if (approvalReplies.get(key) === record) {
-      if (error.approvalState === "failed" && error.code !== 409
-          || error.code && ![409, 503].includes(error.code)) approvalReplies.delete(key);
+      const notSubmitted = error.notSubmitted === true && error.outcomeUnknown !== true;
+      if (notSubmitted || error.outcomeUnknown !== true && (error.approvalState === "failed" && error.code !== 409
+          || error.code && ![409, 503].includes(error.code))) approvalReplies.delete(key);
       else record.state = error.approvalState === "pending" || error.code === 409 ? "pending" : "unknown";
     }
     notice(error.message, true);
@@ -9929,8 +10001,9 @@ async function submitAsyncQuestion(requestThreadId, request, answers, { skip = f
     }, record.id);
     await applyQuestionReceipt(key, receipt);
   } catch (error) {
-    if (questionReplyReceipts.has(key)) {
-      if (error.code && error.code !== 503) setQuestionReceipt(key, null);
+    if (questionReplyReceipts.get(key)?.id === record.id) {
+      const notSubmitted = error.notSubmitted === true && error.outcomeUnknown !== true;
+      if (notSubmitted || error.outcomeUnknown !== true && error.code && error.code !== 503) setQuestionReceipt(key, null);
       else setQuestionReceipt(key, { ...record, state: "unknown" });
     }
     notice(error.message, true);
@@ -10892,6 +10965,10 @@ function receive(event) {
     return;
   }
   const params = { ...event.params || {} };
+  if (event.method === "remote/diagnosticsRequested") {
+    receiveDiagnosticRequest(params);
+    return;
+  }
   const eventThreadId = params.threadId ?? params.conversationId ?? params.thread?.id;
   if (event.method === "remote/relatedThreadsChanged") {
     void retireNativeSideThreads(Array.isArray(params.closedThreadIds) ? params.closedThreadIds : [])
@@ -11200,7 +11277,7 @@ function startConnectionPoll(deviceId) {
       if (!isCurrent()) return;
       if (privateInputScope(current) !== privateInputScope(session)) { await reconnectChangedAuthorization(); return; }
       session = current; setConnection(current.nativeConnected && stream?.readyState === EventSource.OPEN); renderApprovals();
-      await loadSidebar(null, { resourcePriority: "background" }).catch(() => {});
+      void loadSidebar(null, { resourcePriority: "background" }).catch(() => {});
     }
     finally { if (connectionPollPending === request) connectionPollPending = null; }
   }, 15000);
@@ -11372,6 +11449,11 @@ window.addEventListener("popstate", event => {
   else if (!id && selectedId) showWelcome();
 });
 postPlatformMessage("ready");
+configureAndroidDiagnostics({
+  getSession: () => session,
+  upload: (requestId, bundle) => api("/api/diagnostics", { requestId, bundle }, undefined, undefined,
+    { resourcePriority: "background" })
+});
 observeChannelConfiguration(configuration => {
   const routes = remoteChannelRoutes();
   const signature = [configuration?.serverId || "", ...routes.map(route => route.origin)].join("\n");

@@ -4,6 +4,10 @@ final class ResourceStatePolicy {
     private ResourceStatePolicy() {
     }
 
+    static boolean shouldPreferBundled(String recognizedBundledVersion, String bundledVersion) {
+        return !bundledVersion.equals(recognizedBundledVersion);
+    }
+
     static Recovery recoverInterruptedTrial(String active, String previous, String trial) {
         if (trial == null || trial.isEmpty()) {
             return new Recovery(active, false);

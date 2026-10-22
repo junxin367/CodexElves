@@ -34,7 +34,7 @@ final class NotificationPublisher implements NotificationEventState.Sink {
     private static final String THREAD_ID = "codex_elves_notification_thread";
     private static final String KIND = "codex_elves_notification_kind";
     private static final String SUPPRESSED = "codex_elves_notification_suppressed";
-    private static final String[] KINDS = { "approval", "question", "completed", "failed" };
+    private static final String[] KINDS = { "approval", "question", "completed" };
     private final Context context;
     private final NotificationManager manager;
     private final NotificationIdentity identity;
@@ -58,6 +58,7 @@ final class NotificationPublisher implements NotificationEventState.Sink {
 
     static void createChannels(Context context) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
+        manager.deleteNotificationChannel(channelId("failed"));
         for (String kind : KINDS) {
             NotificationChannel channel = new NotificationChannel(
                 channelId(kind), label(context, kind), NotificationManager.IMPORTANCE_DEFAULT
@@ -549,7 +550,6 @@ final class NotificationPublisher implements NotificationEventState.Sink {
             case "approval": return context.getString(R.string.notification_approval);
             case "question": return context.getString(R.string.notification_question);
             case "completed": return context.getString(R.string.notification_completed);
-            case "failed": return context.getString(R.string.notification_failed);
             default: throw new IllegalArgumentException("Unknown notification kind");
         }
     }

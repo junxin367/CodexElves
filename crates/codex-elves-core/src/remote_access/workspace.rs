@@ -1,4 +1,5 @@
 //! Read-only Git views scoped to the workspace resolved by the native session bridge.
+use std::collections::HashSet;
 #[cfg(windows)]
 use std::ffi::OsString;
 use std::fs::{File, Metadata, OpenOptions};
@@ -301,7 +302,76 @@ impl Repository {
         if !output.success && !output.truncated {
             return Err(ApiError::new(503, "无法读取 Git 变更，请确认仓库仍可访问"));
         }
-        parse_status(&output.bytes, output.truncated)
+        let mut snapshot = parse_status(&output.bytes, output.truncated)?;
+        // 分区批量核对内容，不为每个文件启动 Git，也不生成文本或二进制补丁。
+        for section in ["staged", "unstaged"] {
+            if !snapshot
+                .files
+                .iter()
+                .any(|entry| entry.section == section && entry.status == "M")
+            {
+                continue;
+            }
+            let mut args = vec![
+                "diff",
+                "-z",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--ignore-submodules=all",
+                "--no-renames",
+                "--diff-filter=M",
+            ];
+            if section == "staged" {
+                args.extend(["--raw", "--no-abbrev"]);
+                args.push("--cached");
+                if let Some(head) = self.head.as_deref() {
+                    args.push(head);
+                }
+            } else {
+                args.push("--name-only");
+            }
+            args.push("--");
+            // 只在本次工作区查询中忽略执行权限；不修改仓库配置，也不影响已暂存内容。
+            let config = if section == "unstaged" {
+                &["core.filemode=false"][..]
+            } else {
+                &[][..]
+            };
+            let output = git_configured(
+                &self.root,
+                &args,
+                MAX_STATUS_BYTES,
+                Some(&self.authorization),
+                config,
+            )
+            .await?;
+            if !output.success && !output.truncated {
+                return Err(ApiError::new(503, "无法核对 Git 文件内容变化"));
+            }
+            snapshot.truncated |= output.truncated;
+            if section == "staged" {
+                let contentless = contentless_index_paths(&output.bytes);
+                snapshot.files.retain(|entry| {
+                    entry.section != section
+                        || entry.status != "M"
+                        || !contentless.contains(&entry.path)
+                });
+            } else if !output.truncated {
+                // 只有完整结果才能用“未出现”判定内容未变，截断时保留未知条目。
+                let changed: HashSet<_> = output
+                    .bytes
+                    .split(|byte| *byte == 0)
+                    .filter_map(|path| std::str::from_utf8(path).ok())
+                    .collect();
+                snapshot.files.retain(|entry| {
+                    entry.section != section
+                        || entry.status != "M"
+                        || changed.contains(entry.path.as_str())
+                });
+            }
+        }
+        Ok(snapshot)
     }
 
     async fn listing(&self) -> Result<Value, ApiError> {
@@ -611,6 +681,35 @@ impl Repository {
     }
 }
 
+fn contentless_index_paths(bytes: &[u8]) -> HashSet<String> {
+    // --raw --no-abbrev -z：元数据与原始路径各用 NUL 结束，内容相同的 blob ID 完全一致。
+    let mut records = bytes.split_inclusive(|byte| *byte == 0);
+    let mut paths = HashSet::new();
+    while let Some(header) = records.next().and_then(|record| record.strip_suffix(&[0])) {
+        let Some(path) = records.next().and_then(|record| record.strip_suffix(&[0])) else {
+            break;
+        };
+        let Some(header) = header.strip_prefix(b":") else {
+            continue;
+        };
+        let fields: Vec<_> = header.split(|byte| *byte == b' ').collect();
+        if fields.len() != 5 || fields[4] != b"M" || fields[2] != fields[3] {
+            continue;
+        }
+        if !std::str::from_utf8(fields[2]).is_ok_and(valid_oid)
+            || fields[2].iter().all(|byte| *byte == b'0')
+        {
+            continue;
+        }
+        if let Ok(path) = std::str::from_utf8(path)
+            && !path.is_empty()
+        {
+            paths.insert(path.to_owned());
+        }
+    }
+    paths
+}
+
 fn parse_status(bytes: &[u8], input_truncated: bool) -> Result<Snapshot, ApiError> {
     // A capped command may stop inside a filename. Never turn that tail into a
     // selectable path, including the old-path half of a rename.
@@ -732,12 +831,12 @@ async fn git(
         .check()
         .await
         .map_err(super::authorization_error)?;
-    git_configured(cwd, args, limit, Some(authorization)).await
+    git_configured(cwd, args, limit, Some(authorization), &[]).await
 }
 
 #[cfg(test)]
 async fn git_unchecked(cwd: &Path, args: &[&str], limit: usize) -> Result<GitOutput, ApiError> {
-    git_configured(cwd, args, limit, None).await
+    git_configured(cwd, args, limit, None, &[]).await
 }
 
 async fn git_configured(
@@ -745,8 +844,12 @@ async fn git_configured(
     args: &[&str],
     limit: usize,
     authorization: Option<&RemoteAuthorization>,
+    extra_config: &[&str],
 ) -> Result<GitOutput, ApiError> {
-    let mut config = Vec::new();
+    let mut config: Vec<_> = extra_config
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect();
     // status/diff can invoke arbitrary clean/process filters while hashing a
     // worktree file. Clear every configured driver, not just the common LFS one.
     if matches!(args.first(), Some(&"status") | Some(&"diff")) {
@@ -1314,6 +1417,133 @@ mod tests {
         assert_eq!(snapshot.files[2].old_path.as_deref(), Some("old name.txt"));
         assert_eq!(snapshot.files[3].section, "untracked");
         assert_eq!(snapshot.files[4].status, "U");
+    }
+
+    #[test]
+    fn workspace_content_identifiers_preserve_paths_and_truncation() {
+        let oid = "1".repeat(40);
+        let other = "2".repeat(40);
+        let zero = "0".repeat(40);
+        let raw = format!(
+            ":100644 100755 {oid} {oid} M\0权限 [1].sh\0\
+             :100644 100755 {oid} {oid} M\0path\twith\ncontrols.txt\0\
+             :100644 100644 {oid} {other} M\0modified.bin\0\
+             :000000 100644 {zero} {oid} A\0new.txt\0\
+             :100644 120000 {oid} {oid} T\0type-change.txt\0\
+             :100644 100755 {zero} {zero} M\0unknown.txt\0\
+             :100644 100755 {oid} {oid} M\0incomplete"
+        );
+        let paths = contentless_index_paths(raw.as_bytes());
+        assert_eq!(
+            paths,
+            HashSet::from([
+                "权限 [1].sh".to_owned(),
+                "path\twith\ncontrols.txt".to_owned()
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_lists_omit_permission_only_modifications() {
+        let (_fixture, _state, mut repo) = fixture_repo().await;
+        for (path, content) in [
+            ("权限 [1].sh", b"same\n".as_slice()),
+            ("mode-binary.bin", b"\0same"),
+            ("mode-and-content.sh", b"before\n"),
+            ("both-sections.sh", b"before\n"),
+            ("binary.bin", b"\0before"),
+            ("empty-deleted.txt", b""),
+        ] {
+            std::fs::write(repo.root.join(path), content).unwrap();
+        }
+        for args in [&["add", "--all"][..], &["write-tree"][..]] {
+            let output = git_unchecked(&repo.root, args, 16 * 1024).await.unwrap();
+            assert!(output.success);
+            if args[0] == "write-tree" {
+                let tree = String::from_utf8(output.bytes).unwrap();
+                let commit = git_unchecked(
+                    &repo.root,
+                    &[
+                        "-c",
+                        "user.name=Workspace tests",
+                        "-c",
+                        "user.email=workspace@example.invalid",
+                        "commit-tree",
+                        tree.trim(),
+                        "-m",
+                        "Workspace fixture",
+                    ],
+                    16 * 1024,
+                )
+                .await
+                .unwrap();
+                assert!(commit.success);
+                let commit = String::from_utf8(commit.bytes).unwrap().trim().to_owned();
+                assert!(
+                    git_unchecked(&repo.root, &["update-ref", "HEAD", &commit], 16 * 1024)
+                        .await
+                        .unwrap()
+                        .success
+                );
+                repo.head = Some(commit);
+            }
+        }
+        std::fs::write(repo.root.join("mode-and-content.sh"), b"after\n").unwrap();
+        assert!(
+            git_unchecked(&repo.root, &["add", "--", "mode-and-content.sh"], 16 * 1024,)
+                .await
+                .unwrap()
+                .success
+        );
+        assert!(
+            git_unchecked(
+                &repo.root,
+                &[
+                    "update-index",
+                    "--chmod=+x",
+                    "--",
+                    "权限 [1].sh",
+                    "mode-binary.bin",
+                    "mode-and-content.sh",
+                    "both-sections.sh",
+                ],
+                16 * 1024,
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        std::fs::write(repo.root.join("both-sections.sh"), b"working\n").unwrap();
+        std::fs::write(repo.root.join("binary.bin"), b"\0after").unwrap();
+        std::fs::write(repo.root.join("empty-new.txt"), b"").unwrap();
+        std::fs::remove_file(repo.root.join("empty-deleted.txt")).unwrap();
+        // 临时仓库的文件为非可执行状态，因此还覆盖 index 与工作目录之间的权限差异。
+        assert!(
+            git_unchecked(&repo.root, &["config", "core.filemode", "true"], 16 * 1024)
+                .await
+                .unwrap()
+                .success
+        );
+        let index = std::fs::read(repo.root.join(".git/index")).unwrap();
+        let snapshot = repo.snapshot().await.unwrap();
+        let contains = |path: &str, section: &str| {
+            snapshot
+                .files
+                .iter()
+                .any(|entry| entry.path == path && entry.section == section)
+        };
+        assert!(!contains("权限 [1].sh", "staged"));
+        assert!(!contains("权限 [1].sh", "unstaged"));
+        assert!(!contains("mode-binary.bin", "staged"));
+        assert!(!contains("mode-binary.bin", "unstaged"));
+        assert!(!contains("both-sections.sh", "staged"));
+        assert!(contains("both-sections.sh", "unstaged"));
+        assert!(contains("mode-and-content.sh", "staged"));
+        assert!(!contains("mode-and-content.sh", "unstaged"));
+        assert!(contains("binary.bin", "unstaged"));
+        assert!(contains("empty-deleted.txt", "unstaged"));
+        assert!(contains("empty-new.txt", "untracked"));
+        assert_eq!(std::fs::read(repo.root.join(".git/index")).unwrap(), index);
     }
 
     #[test]
