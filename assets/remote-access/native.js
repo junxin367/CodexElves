@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 65) return;
+  if (window.__codexElvesRemoteAccess?.version === 66) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -139,7 +139,8 @@
     const existing = window.__codexElvesConversationStateManager;
     if (isManager(existing) && !existing.disposed) manager = existing;
     const cached = window.__codexElvesNativeConversationContext;
-    if (cached?.manager === manager && !manager?.disposed && cached.appScope && cached.nativeNavigate) {
+    if (cached?.manager === manager && !manager?.disposed && cached.appScope && cached.nativeNavigate
+        && (sidebarOnly || typeof cached.nativeIntl?.formatMessage === "function")) {
       ({ appScope, nativeIntl, nativeNavigate } = cached);
     } else if (!(sidebarOnly && quick && isManager(manager) && !manager.disposed)) {
       const scopes = new Set(), fibers = new Set(), values = new WeakSet();
@@ -1099,7 +1100,7 @@
       completedSubagentCount: completedSubagents.length,
       subagentsComplete: snapshot.isComplete === true, sideThreads,
       canCreateSideThread: (sideScope ? sideScope.get(sideNative.feature) === true : !!nativeNavigate)
-        && !!nativeIntl
+        && typeof nativeIntl?.formatMessage === "function"
         && !subagentIdentity(parent) && parent.ephemeral !== true
         && !entries.some(entry => entry.threadId === threadId) };
   }
@@ -1111,7 +1112,7 @@
       throw failure(409, "请从主会话创建侧边会话");
     const native = await nativeSideState();
     const scope = await nativeSideScope(parentThreadId, native);
-    if (!nativeIntl || scope.get(native.feature) !== true)
+    if (typeof nativeIntl?.formatMessage !== "function" || scope.get(native.feature) !== true)
       throw failure(503, "当前 Codex 页面尚未提供原生侧边会话入口");
     const { LocalConversationSideChatTab } = await import(native.componentUrl);
     if (typeof LocalConversationSideChatTab !== "function")
@@ -3928,7 +3929,8 @@
       if (action === "dispose") { window.__codexElvesRemoteAccess.dispose(); return { ok: true }; }
       if (["send", "create", "setGoal"].includes(action)) validateGoalComposerPayload(action, payload);
       resetStaleManager();
-      if (!manager || !sidebarOnly && !unsubscribe.length) discover(sidebarOnly);
+      if (!manager || !sidebarOnly && (!unsubscribe.length || !appScope || !nativeNavigate
+          || typeof nativeIntl?.formatMessage !== "function")) discover(sidebarOnly);
       if (["events", "notifications", "thread"].includes(action))
         await prepareAsyncQuestionState().catch(() => {});
       if (action === "events" || action === "notifications")
@@ -4269,7 +4271,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 65, call,
+    version: 66, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();
