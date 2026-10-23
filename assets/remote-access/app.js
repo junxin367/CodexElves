@@ -77,6 +77,7 @@ const attachmentDrafts = new Map();
 const goalDrafts = new Map();
 const recoveryStore = createRecoveryStore();
 const transcriptCache = createTranscriptCache();
+const threadDisplays = new Map();
 const readCache = createReadCache();
 const catalogCacheMs = 60 * 60 * 1000;
 const catalogRefreshAheadMs = 5 * 60 * 1000, catalogRetryMs = 60 * 1000;
@@ -1580,6 +1581,7 @@ async function retireNativeSideThreads(ids, { notify = true } = {}) {
     sessionMenu?.removeThread(id);
     relatedThreadViews.delete(id);
     transcriptCache.remove(session?.device.id, id);
+    threadDisplays.delete(threadDisplayKey(id));
     if (readScope) void readCache.remove(readScope, "transcript", id).catch(() => {});
   }
   if (sidebar?.unreadSideThreads)
@@ -1874,6 +1876,7 @@ function discardPersistentThreadDisplay(id) {
   if (!scope || scope !== privateInputScope(session)) return;
   void (async () => {
     await readCache.remove(scope, "transcript", id);
+    await readCache.remove(scope, "thread", id);
     const position = await readCache.get(scope, "view", "last");
     if (generation === readGeneration && scope === readScope && scope === privateInputScope(session)
         && positionRevision === readingPositionRevision
@@ -1888,6 +1891,7 @@ function retireMissingEphemeralTranscript(id) {
   ++selectionVersion;
   resetMessages();
   thread = null;
+  threadDisplays.delete(threadDisplayKey(id));
   transcriptCache.remove(session?.device.id, id);
   discardPersistentThreadDisplay(id);
   turns.clear(); transcriptEvents.clear(); recentHistoryPage = null; historyCursor = null;
@@ -1916,6 +1920,32 @@ function cacheDisplayData(kind, id, value, options) {
   if (kind === "sidebar") value = { ...value, sideThreadIds: [], unreadSideThreads: [] };
   if (kind === "view") readingPositionRevision++;
   void readCache.put(readScope, kind, id, value, options).catch(() => {});
+}
+function threadDisplayKey(id) {
+  return JSON.stringify([privateInputScope(session), id]);
+}
+function currentThreadDisplay() {
+  if (!selectedId) return null;
+  return thread?.id === selectedId ? thread : threadDisplays.get(threadDisplayKey(selectedId)) || null;
+}
+function rememberThreadDisplay(value = thread, { persist = true } = {}) {
+  if (!session || !validRelatedThreadId(value?.id) || threadDeleted(value.id) || value.sideThreadClosed
+      || value.model != null && typeof value.model !== "string"
+      || value.reasoningEffort != null && typeof value.reasoningEffort !== "string") return null;
+  const usage = contextUsage(value.tokenUsage), ephemeral = threadEphemeralState(value.id, value);
+  // 只缓存模型及用量展示，不把审批、队列、权限或运行状态作为实时会话恢复。
+  const display = {
+    id: value.id, model: value.model || "", reasoningEffort: value.reasoningEffort || "",
+    tokenUsage: usage ? { modelContextWindow: usage.total,
+      last: { totalTokens: value.tokenUsage.last.totalTokens } } : null,
+    ...(typeof ephemeral === "boolean" ? { ephemeral } : {}),
+    ...(["side", "subagent"].includes(value.viewKind) ? { viewKind: value.viewKind } : {})
+  };
+  const key = threadDisplayKey(value.id);
+  threadDisplays.delete(key); threadDisplays.set(key, display);
+  while (threadDisplays.size > 32) threadDisplays.delete(threadDisplays.keys().next().value);
+  if (persist) cacheDisplayData("thread", value.id, display);
+  return display;
 }
 function ownsWorkspaceCache(scope, kind) {
   return !!scope && scope === readScope && scope === privateInputScope(session)
@@ -1999,6 +2029,7 @@ function sidebarSnapshot(value) {
 function clearReadViews() {
   const previousScope = readScope;
   readScope = null; readGeneration++;
+  threadDisplays.clear();
   clearTimeout(readingPositionTimer); readingPositionTimer = null;
   skillCatalogs.clear(); skillScopeAliases.clear();
   skillCatalogRequests.clear(); skillCatalogRevision++;
@@ -2024,9 +2055,9 @@ async function restoreReadViews(value) {
     ]);
     const requested = new URLSearchParams(location.hash.slice(1)).get("thread");
     const id = requested || view?.threadId;
-    const snapshot = typeof id === "string" && /^[A-Za-z0-9_-]{1,120}$/.test(id)
-      ? await readCache.get(scope, "transcript", id) : null;
-    return { savedSidebar, view, modelCatalog, globalSkills, id, snapshot, requested };
+    const [snapshot, display] = typeof id === "string" && /^[A-Za-z0-9_-]{1,120}$/.test(id)
+      ? await Promise.all([readCache.get(scope, "transcript", id), readCache.get(scope, "thread", id)]) : [];
+    return { savedSidebar, view, modelCatalog, globalSkills, id, snapshot, display, requested };
   })().catch(() => null);
   // 缓存损坏、空间不足或旧标签页锁住数据库时，首屏直接走网络，不等待缓存修复。
   const saved = await optionalCachedRead(load);
@@ -2057,11 +2088,13 @@ async function restoreReadViews(value) {
   }
   if (typeof saved.id === "string" && /^[A-Za-z0-9_-]{1,120}$/.test(saved.id) && !threadDeleted(saved.id)) {
     if (!persistentThreadDisplayAllowed(saved.id, saved.snapshot)
+        || !persistentThreadDisplayAllowed(saved.id, saved.display)
         || !persistentThreadDisplayAllowed(saved.id, saved.view?.threadId === saved.id
           ? { ...saved.snapshot, ...saved.view } : null)) {
       discardPersistentThreadDisplay(saved.id);
       return;
     }
+    if (saved.display?.id === saved.id) rememberThreadDisplay(saved.display, { persist: false });
     if (Array.isArray(saved.snapshot?.turns) && saved.snapshot.turns.length) {
       const position = saved.view?.threadId === saved.id ? saved.view : saved.snapshot;
       transcriptCache.put(value.device.id, saved.id,
@@ -2455,7 +2488,7 @@ function contextUsage(info) {
   return { used, total, percent: Math.round(used / total * 100) };
 }
 function contextUsageText() {
-  const usage = contextUsage(thread?.tokenUsage);
+  const usage = contextUsage(currentThreadDisplay()?.tokenUsage);
   return usage ? {
     value: `${tokenCount(usage.used)} / ${usage.percent}%，${tokenCount(usage.total)}`,
     description: `最后一次请求的上下文占用：${usage.used.toLocaleString()} / ${usage.total.toLocaleString()} Token，不是累计用量`
@@ -2500,7 +2533,7 @@ function fitContextUsageTip() {
 function updateContextUsage() {
   const trigger = $("#context-info");
   if (!trigger) return;
-  const usage = contextUsage(thread?.tokenUsage), text = contextUsageText();
+  const usage = contextUsage(currentThreadDisplay()?.tokenUsage), text = contextUsageText();
   let ring = $(".context-usage-ring", trigger);
   if (!ring) {
     ring = element("span", "context-usage-ring");
@@ -2629,14 +2662,15 @@ function defaultModelEffort(model) {
     || efforts.find(value => value.reasoningEffort === "medium")?.reasoningEffort || efforts[0]?.reasoningEffort || "";
 }
 function currentModelId() {
-  return selectedModel || (selectedId ? thread?.model
+  return selectedModel || (selectedId ? currentThreadDisplay()?.model
     : creating && rememberedNewChatModel()?.model || modelDefaults.model) || "";
 }
 function currentModel() { return models.find(model => model.model === currentModelId()); }
 function currentEffort() {
   if (selectedEffort) return selectedEffort;
   const model = currentModelId();
-  if (selectedId) return model === thread?.model ? thread.reasoningEffort || "" : "";
+  const display = currentThreadDisplay();
+  if (selectedId) return model && model === display?.model ? display.reasoningEffort || "" : "";
   return model === modelDefaults.model ? modelDefaults.reasoningEffort
     : creating && !selectedModel ? defaultModelEffort(currentModel()) : "";
 }
@@ -2893,7 +2927,7 @@ function renderSkillMenu(message) {
   const appendOption = (entry, index, root) => {
     if (entry.type === "compact" || entry.type === "goal") {
       const goal = entry.type === "goal";
-      const usage = contextUsage(thread?.tokenUsage);
+      const usage = contextUsage(currentThreadDisplay()?.tokenUsage);
       const label = goal ? "目标" : "压缩";
       const reason = goal ? goalComposerReason() : "";
       const node = button("", reason || label, goal ? () => selectGoalCommand() : selectCompactCommand,
@@ -3661,8 +3695,11 @@ function filterSideThreadSidebar(value) {
 }
 function applyThreadDeletion(id, deviceId = session?.device.id) {
   transcriptCache.remove(deviceId, id);
-  if (readScope && session?.device.id === deviceId)
+  if (session?.device.id === deviceId) threadDisplays.delete(threadDisplayKey(id));
+  if (readScope && session?.device.id === deviceId) {
     void readCache.remove(readScope, "transcript", id).catch(() => {});
+    void readCache.remove(readScope, "thread", id).catch(() => {});
+  }
   const key = threadDeletionKey(id, deviceId), previous = threadDeletions.get(key);
   setThreadDeletion(key, { ...previous, deviceId, threadId: id, state: "deleted" });
   if (session?.device.id !== deviceId) return;
@@ -8697,6 +8734,7 @@ function renderMessages(keepScroll = true) {
   scheduleHistoryLoad();
 }
 function rememberTranscript({ retainView = false, retainRelatedParent = false } = {}) {
+  rememberThreadDisplay();
   if (!session || !selectedId || !historyInitialized || threadDeleted(selectedId)) return;
   const ephemeral = threadEphemeralState(selectedId);
   const summary = [...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
@@ -8837,6 +8875,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   $("#messages").replaceChildren();
   let cached = force || initialSide || preparedView ? null : restoreTranscript(id);
   if (initialSide) {
+    rememberThreadDisplay();
     historyInitialized = true; transcriptChecking = false;
     recentHistoryPage = { turns: [], transcriptEvents: [], historyCursor: null,
       followMessages: true, scrollTop: 0, sideHistoryVersion: 1 };
@@ -8845,11 +8884,22 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     reconcileCompaction(id, thread.compaction);
     renderMessages();
   } else if (!cached) $("#messages").replaceChildren(historyPlaceholder());
-  if (!force && !initialSide && !preparedView && !cached && readScope
-      && threadEphemeralState(id) !== true) {
+  const readDisplay = !currentThreadDisplay() && nextRelatedView?.kind !== "side";
+  const readTranscript = !force && !initialSide && !preparedView && !cached;
+  updateComposer();
+  if ((readDisplay || readTranscript) && readScope && threadEphemeralState(id) !== true) {
     const owner = readScope;
-    const snapshot = await optionalCachedRead(readCache.get(owner, "transcript", id), 50);
+    const [display, snapshot] = await optionalCachedRead(Promise.all([
+      readDisplay ? readCache.get(owner, "thread", id) : null,
+      readTranscript ? readCache.get(owner, "transcript", id) : null
+    ]), 50) || [];
     if (version !== selectionVersion || selectedId !== id || owner !== readScope || threadDeleted(id)) return;
+    if (display?.id === id && persistentThreadDisplayAllowed(id, display))
+      rememberThreadDisplay({ ...display,
+        ...(usageVersion !== tokenUsageVersion ? { tokenUsage: notifiedTokenUsage } : {}) },
+        { persist: usageVersion !== tokenUsageVersion });
+    else if (display && !persistentThreadDisplayAllowed(id, display))
+      discardPersistentThreadDisplay(id);
     if (snapshot?.turns?.length && persistentThreadDisplayAllowed(id, snapshot)) {
       transcriptCache.put(session.device.id, id, snapshot);
       cached = restoreTranscript(id);
@@ -8898,6 +8948,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     }
     if (compactionReadVersion === compactionVersion) reconcileCompaction(id, thread.compaction);
     else thread.compaction = normalizeCompaction(currentCompaction(id));
+    rememberThreadDisplay();
     $("#thread-title").textContent = thread.viewKind === "subagent" ? thread.agentName || thread.title || "子代理" : thread.title;
     $("#thread-path").textContent = thread.cwd;
     syncEditableMessageMetadata();
@@ -8911,7 +8962,8 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     }
     if (!controller.signal.aborted && version === selectionVersion && selectedId === id) {
       if (error.code === 404) retireMissingEphemeralTranscript(id);
-      notice(`会话设置读取失败，可点击刷新重试：${error.message}`, true);
+      if (error.code === 404 || !currentThreadDisplay())
+        notice(`会话设置读取失败，可点击刷新重试：${error.message}`, true);
     }
   } finally {
     if (selectionController === controller) selectionController = null;
@@ -9296,6 +9348,7 @@ async function reloadThread() {
       }
       thread = latest;
       if (thread?.id !== id) throw new Error("会话返回内容与当前会话不一致");
+      rememberThreadDisplay();
       applyRelatedThreadMetadata(thread);
       mergeBlockingRequestsRead(id, thread, requestsReadVersion);
       if (questionReadVersion !== questionVersion && notifiedQuestions)
@@ -10489,7 +10542,7 @@ function updateComposer() {
   setComposerAttachmentsDisabled(threadReadOnly() || deleting || compacting && editing || busy || stopping
     || !!editingMessage || editing && !!pending || editingQueuedMessage?.state === "starting" || (!creating && !selectedId));
   const add = $("#composer-add");
-  const usage = contextUsage(thread?.tokenUsage);
+  const usage = contextUsage(currentThreadDisplay()?.tokenUsage);
   add.menuOptions = [
     { value: "compact", label: "压缩", icon: "compactContext",
       description: compactUsageDescription(usage),
@@ -11040,7 +11093,11 @@ function receive(event) {
   }
   if (event.method === "remote/threadReverted" && typeof eventThreadId === "string") {
     transcriptCache.remove(session?.device.id, eventThreadId);
-    if (readScope) void readCache.remove(readScope, "transcript", eventThreadId).catch(() => {});
+    threadDisplays.delete(threadDisplayKey(eventThreadId));
+    if (readScope) {
+      void readCache.remove(readScope, "transcript", eventThreadId).catch(() => {});
+      void readCache.remove(readScope, "thread", eventThreadId).catch(() => {});
+    }
     if (eventThreadId === selectedId)
       void selectThread(selectedId, { closeSidebar: false, force: true }).catch(error => notice(error.message, true));
     return;
@@ -11055,7 +11112,11 @@ function receive(event) {
     }
     if (event.method === "thread/tokenUsage/updated") {
       notifiedTokenUsage = params.tokenUsage; ++tokenUsageVersion;
-      if (thread) { thread.tokenUsage = params.tokenUsage; updateComposer(); }
+      if (thread) thread.tokenUsage = params.tokenUsage;
+      const display = currentThreadDisplay();
+      rememberThreadDisplay({ ...display, id: selectedId, tokenUsage: params.tokenUsage },
+        { persist: !!thread || !!display?.model });
+      updateComposer();
     }
     if (event.method === "thread/status/changed") {
       notifiedStatus = params.status; ++statusVersion;

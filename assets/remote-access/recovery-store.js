@@ -270,7 +270,7 @@ export function createTranscriptCache({ maxEntries = 5, maxBytes = 6 * 1024 * 10
   };
 }
 
-const readCacheKinds = new Set(["sidebar", "view", "transcript", "models", "skills",
+const readCacheKinds = new Set(["sidebar", "view", "thread", "transcript", "models", "skills",
   "workspace-list", "workspace-detail", "session-menu"]);
 const readCacheDay = 24 * 60 * 60 * 1000;
 
