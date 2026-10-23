@@ -36,7 +36,7 @@
   </svg>
   <div class="review-bar">
     <div class="review-title"><span class="review-dot"></span><strong>交互原型</strong><span class="review-divider"></span><span>主链路切换</span><small>所有操作仅演示</small></div>
-    <div class="review-controls"><label for="scenario">预览场景</label><select id="scenario"><option value="ready">FRP 已就绪</option><option value="missing">FRP 待配置 HTTPS</option><option value="failure">FRP 验证失败</option></select><button id="reset" class="review-reset">重置演示</button></div>
+    <div class="review-controls"><label for="scenario">预览场景</label><select id="scenario"><option value="ready">frp HTTP 已就绪</option><option value="missing">frp 待填写端口</option><option value="failure">frp 验证失败</option></select><button id="reset" class="review-reset">重置演示</button></div>
   </div>
   <div class="shell">
     <aside class="sidebar">
@@ -76,11 +76,10 @@
                 <div class="field token-field"><label for="frp-token">Token</label><div class="secret-input"><input id="frp-token" type="password" value="demo-frp-token" autocomplete="off" spellcheck="false"><div class="input-tools"><button class="plain-icon" data-reveal="frp-token" aria-label="显示 FRP Token" aria-pressed="false"><svg><use href="#i-eye"/></svg></button><button class="plain-icon" data-copy="frp-token" aria-label="复制 FRP Token"><svg><use href="#i-copy"/></svg></button></div></div></div>
                 <div class="field port-field"><label for="frp-port">服务端口</label><input id="frp-port" type="number" min="1" max="65535" value="39397"></div>
                 <div class="field port-field"><label for="frp-remote-port">公网映射端口</label><input id="frp-remote-port" type="number" min="1" max="65535" value="39399"></div>
-                <div class="field span-all"><label for="frp-url">固定公网地址</label><input id="frp-url" type="url" autocomplete="off" value="https://remote.example.com:39399" placeholder="https://服务商提供的访问地址:端口" spellcheck="false"><small>填写手机访问的完整地址；可稍后填写，先保存并测试隧道。</small></div>
+                <div class="field span-all"><label for="frp-url">固定公网地址</label><div class="secret-input single-tool"><input id="frp-url" readonly value="http://hs.wwszxc.tax:39399" placeholder="填写服务器地址和公网映射端口后自动生成"><div class="input-tools"><button class="plain-icon" data-copy="frp-url" aria-label="复制固定公网地址"><svg><use href="#i-copy"/></svg></button></div></div><small>由服务器地址和公网映射端口自动生成，无需重复填写。</small></div>
               </div>
             </div>
-            <div class="apply-row"><p id="apply-hint" role="status" aria-live="polite" aria-atomic="true">切换公网地址后，远程设备需用新地址重新登录。</p><div class="row-actions"><button class="button secondary" id="test-provider">保存并测试</button><button class="button primary" id="apply-provider">应用为主链路</button></div></div>
-            <div class="field current-entry"><label for="active-url">当前公网地址 <span class="entry-provider" id="entry-provider">zrok</span></label><div class="input-row"><div class="secret-input single-tool"><input id="active-url" value="https://demo.shares.zrok.io" readonly><div class="input-tools"><button class="plain-icon" data-copy="active-url" aria-label="复制当前公网地址"><svg><use href="#i-copy"/></svg></button></div></div><button class="button secondary" id="test-active">测试访问</button></div></div>
+            <div class="apply-row"><p id="apply-hint" role="status" aria-live="polite" aria-atomic="true">切换公网地址后，远程设备需用新地址重新登录。</p><div class="row-actions"><button class="button secondary" id="open-frp-directory" type="button">打开程序目录</button><button class="button secondary" id="test-provider">保存并测试</button><button class="button primary" id="apply-provider">应用为主链路</button></div></div>
             <div id="ngrok-block" class="field ngrok-field">
               <label for="ngrok-token">ngrok Token</label>
               <div class="input-row"><div class="secret-input"><input id="ngrok-token" type="password" value="demo-ngrok-token-preview-only" autocomplete="off"><div class="input-tools"><button class="plain-icon" data-reveal="ngrok-token" aria-label="显示 ngrok Token" aria-pressed="false"><svg><use href="#i-eye"/></svg></button><button class="plain-icon" data-copy="ngrok-token" aria-label="复制 ngrok Token"><svg><use href="#i-copy"/></svg></button></div></div><button class="button secondary" id="save-ngrok">保存并测试</button></div>

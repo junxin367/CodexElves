@@ -3,7 +3,7 @@
     <string name="login_brand_mark" translatable="false">✦</string>
     <string name="login_description">输入访问密钥，继续使用你的 Codex 会话。</string>
     <string name="login_origin_label">服务链接</string>
-    <string name="login_origin_hint">https://example.com</string>
+    <string name="login_origin_hint">https://域名 或 http://服务器地址:端口</string>
     <string name="login_key_label">访问密钥</string>
     <string name="login_key_hint">粘贴或输入访问密钥</string>
     <string name="login_show_key">显示密钥</string>

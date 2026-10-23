@@ -1,3 +1,5 @@
+import { sha256Hex } from "./sha256.js";
+
 (() => {
   "use strict";
 
@@ -71,8 +73,7 @@
       bytes.set(part, offset);
       offset += part.length;
     }
-    const digest = await crypto.subtle.digest("SHA-256", bytes);
-    return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, "0")).join("");
+    return sha256Hex(bytes);
   }
 
   async function readManifest(signal) {

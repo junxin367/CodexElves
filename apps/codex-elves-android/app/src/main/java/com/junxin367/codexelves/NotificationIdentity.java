@@ -70,15 +70,16 @@ final class NotificationIdentity {
             URI uri = new URI(origin);
             String host = uri.getHost();
             int port = uri.getPort();
-            if (!"https".equals(uri.getScheme()) || host == null || host.isEmpty()
+            String scheme = uri.getScheme();
+            if (!("https".equals(scheme) || "http".equals(scheme)) || host == null || host.isEmpty()
                 || uri.getRawUserInfo() != null || uri.getRawQuery() != null
                 || uri.getRawFragment() != null
                 || uri.getRawPath() != null && !uri.getRawPath().isEmpty()
-                || port == 0 || port < -1 || port > 65535 || port == 443) {
+                || port == 0 || port < -1 || port > 65535 || port == ("https".equals(scheme) ? 443 : 80)) {
                 return false;
             }
             return origin.equals(new URI(
-                "https", null, host.toLowerCase(Locale.ROOT), port, null, null, null
+                scheme, null, host.toLowerCase(Locale.ROOT), port, null, null, null
             ).toASCIIString());
         } catch (URISyntaxException error) {
             return false;

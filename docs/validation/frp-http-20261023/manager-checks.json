@@ -1,0 +1,18 @@
+{
+  "applied": true,
+  "currentUrlRemoved": true,
+  "feedback": "浏览器预览：主链路已切换，请使用固定公网地址重新登录。",
+  "origin": "http://hs.wwszxc.tax:39399",
+  "ports": [
+    {
+      "appearance": "textfield",
+      "width": "80px"
+    },
+    {
+      "appearance": "textfield",
+      "width": "80px"
+    }
+  ],
+  "readonly": true,
+  "server": "hs.wwszxc.tax"
+}

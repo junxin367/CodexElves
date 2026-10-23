@@ -19,8 +19,12 @@
 .remote-primary-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
 .remote-primary-actions > p { flex: 1; min-width: 0; margin: 0; font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
 .remote-primary-buttons { display: flex; gap: 8px; flex-shrink: 0; }
-.remote-primary-current { padding-top: 16px; border-top: 1px solid hsl(var(--border)); }
-.remote-primary-provider-label { display: inline-block; margin-left: 4px; font-size: 10px; color: hsl(var(--muted-foreground)); background: hsl(var(--muted)); border-radius: 4px; padding: 2px 5px; font-weight: 400; }
+.remote-frp-download { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; flex: 1; min-width: 0; max-width: 360px; margin-left: auto; font-size: 11px; color: hsl(var(--muted-foreground)); }
+.remote-frp-download > span { overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.remote-frp-download-track { grid-column: 1 / -1; position: relative; height: 5px; overflow: hidden; border-radius: 999px; background: hsl(var(--muted)); }
+.remote-frp-download-fill { height: 100%; background: hsl(var(--primary)); border-radius: inherit; transition: width 180ms ease; }
+.remote-frp-download-fill.indeterminate { width: 38%; position: absolute; animation: zrok-download 1.1s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .remote-frp-download-fill { transition: none; }.remote-frp-download-fill.indeterminate { animation: none; } }
 .remote-primary-feedback { color: hsl(var(--primary)); }
 .remote-primary-feedback.warning { color: #a87620; }
 .remote-primary-feedback.error { color: #dc4444; }

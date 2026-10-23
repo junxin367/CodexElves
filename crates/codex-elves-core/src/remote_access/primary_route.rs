@@ -49,6 +49,7 @@ pub(super) struct Primary {
     operation: Mutex<()>,
     pub busy: AtomicBool,
     pub generation: AtomicU64,
+    pub frp_download: frp_tunnel::DownloadProgress,
     last_error: RwLock<Option<String>>,
 }
 
@@ -64,7 +65,10 @@ impl Primary {
         let origin = if provider == Provider::Frp {
             let saved = frp_tunnel::Saved::load(directory, true)?;
             saved.config.validate()?;
-            anyhow::ensure!(saved.https_configured(), "已选 FRP 主入口缺少 HTTPS 配置");
+            anyhow::ensure!(
+                frp_tunnel::valid_origin(&saved.config.public_origin),
+                "已选 FRP 主入口缺少有效公网地址"
+            );
             Some(saved.config.public_origin)
         } else {
             None
@@ -79,6 +83,7 @@ impl Primary {
             operation: Mutex::new(()),
             busy: AtomicBool::new(false),
             generation: AtomicU64::new(0),
+            frp_download: frp_tunnel::DownloadProgress::default(),
             last_error: RwLock::new(None),
         })
     }
@@ -178,7 +183,10 @@ impl Primary {
         let origin = if provider == Provider::Frp {
             let saved = frp_tunnel::Saved::load(directory, false)?;
             saved.config.validate()?;
-            anyhow::ensure!(saved.https_configured(), "请先配置 FRP 的 HTTPS 访问地址");
+            anyhow::ensure!(
+                frp_tunnel::valid_origin(&saved.config.public_origin),
+                "请先填写服务器地址和公网映射端口"
+            );
             saved.store(directory, true)?;
             Some(saved.config.public_origin)
         } else {
@@ -209,14 +217,23 @@ impl RemoteAccessController {
     pub(super) fn primary_status(&self, live: &LiveService) -> Value {
         let saved = frp_tunnel::Saved::load(&self.state_dir, false).unwrap_or_default();
         let mut frp = saved.public();
-        frp["state"] = json!(if live.frp_start.is_some() {
+        let download = self.primary.frp_download.status();
+        for field in [
+            "version",
+            "downloadedBytes",
+            "downloadTotalBytes",
+            "downloadPercent",
+        ] {
+            frp[field] = download[field].clone();
+        }
+        frp["state"] = json!(if download["downloading"] == true {
+            "downloading"
+        } else if live.frp_start.is_some() {
             "starting"
         } else if live.frp.is_some() {
             "ready"
         } else if live.frp_error.is_some() {
             "error"
-        } else if !saved.https_configured() {
-            "https_required"
         } else {
             "stopped"
         });
@@ -236,7 +253,9 @@ impl RemoteAccessController {
             task.abort();
             let _ = task.await;
         }
-        live.frp = None;
+        if let Some(running) = live.frp.take() {
+            running.stop().await;
+        }
         self.primary.set_ingress(None);
     }
 
@@ -295,9 +314,11 @@ impl RemoteAccessController {
                             live.frp = Some(running);
                             live.frp_error = None;
                         }
-                        _ => {
-                            live.frp_error =
-                                Some("FRP 主入口启动或 HTTPS 验证失败，请检查配置后重试".into());
+                        result => {
+                            live.frp_error = Some(match result {
+                                Ok(Err(error)) => error.to_string(),
+                                _ => "FRP 主入口启动任务已结束，等待重试".into(),
+                            });
                             live.frp_retry_at = now_ms() + 30_000;
                         }
                     }
@@ -311,8 +332,9 @@ impl RemoteAccessController {
                         let generation = controller.primary.generation.load(Ordering::SeqCst);
                         controller.primary.busy.store(true, Ordering::SeqCst);
                         let _trial = Trial(&controller.primary);
+                        let https = saved.https_configured();
                         let running =
-                            frp_tunnel::start(&controller, &settings, saved, true).await?;
+                            frp_tunnel::start(&controller, &settings, saved, https).await?;
                         controller
                             .probe_entry(
                                 &running.saved.config.public_origin,
@@ -387,7 +409,7 @@ impl RemoteAccessController {
             }
             if tokio::time::Instant::now() >= deadline {
                 anyhow::bail!(
-                    "公网入口验证失败，请确认 HTTPS 地址、证书、端口转发和服务商配置；原主入口未切换"
+                    "公网入口验证失败，请检查访问地址、端口转发和服务商配置；原主入口未切换"
                 );
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -478,10 +500,6 @@ impl RemoteAccessController {
                 let saved = frp_tunnel::Saved::load(&self.state_dir, false)?;
                 saved.config.validate()?;
                 let https = saved.https_configured();
-                anyhow::ensure!(
-                    !apply || https,
-                    "当前只有 TCP/HTTP 映射，尚无有效 HTTPS 会话入口。可先测试隧道；域名属于服务商时，无需自行上传证书"
-                );
                 let mut live = self.live.lock().await;
                 if original == Provider::Frp {
                     let running = live
@@ -496,19 +514,12 @@ impl RemoteAccessController {
                     (
                         saved.config.public_origin.clone(),
                         Some(running.id.clone()),
-                        true,
+                        https,
                     )
                 } else {
                     drop(live);
                     let running = frp_tunnel::start(self, settings, saved, https).await?;
-                    let origin = if https {
-                        running.saved.config.public_origin.clone()
-                    } else {
-                        format!(
-                            "http://{}:{}",
-                            running.saved.config.server_addr, running.saved.config.remote_port
-                        )
-                    };
+                    let origin = running.saved.config.public_origin.clone();
                     let id = running.id.clone();
                     candidate = Some(running);
                     (origin, Some(id), https)
@@ -583,12 +594,18 @@ impl RemoteAccessController {
             drop(live);
             self.prune_stale_public_devices().await;
         }
-        let message = if !https {
-            "FRP 隧道已连通，待配置 HTTPS。未传输会话或登录凭据，当前主入口保持不变。"
-        } else if apply {
-            "主链路已应用，请使用新的公网地址重新登录。"
+        let message = if apply {
+            if https {
+                "主链路已应用，请使用新的公网地址重新登录。"
+            } else {
+                "frp HTTP 主链路已应用，请使用固定公网地址登录；公网传输不加密。"
+            }
         } else {
-            "公网 HTTPS、回源身份及未登录访问边界验证通过，当前主入口未改变。"
+            if https {
+                "公网 HTTPS、回源身份及未登录访问边界验证通过，当前主入口未改变。"
+            } else {
+                "frp HTTP 入口、回源身份及未登录访问边界验证通过，可应用为主链路；公网传输不加密。"
+            }
         };
         Ok(json!({"status":"ok","httpsReady":https,"publicUrl":origin,"message":message}))
     }
@@ -810,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn frp_selection_defaults_to_zrok_and_rejects_plaintext_persisted_entry() {
+    fn frp_selection_defaults_to_zrok_and_restores_http_or_https_entry() {
         let directory = tempfile::tempdir().unwrap();
         assert_eq!(
             Primary::new(directory.path()).unwrap().provider(),
@@ -833,7 +850,12 @@ mod tests {
             b"\"frp\"",
         )
         .unwrap();
-        assert!(Primary::new(directory.path()).is_err());
+        let http = Primary::new(directory.path()).unwrap();
+        assert_eq!(
+            http.frp_origin().as_deref(),
+            Some("http://entry.example.com:39400")
+        );
+        assert!(!http.permits_frp(Some("unverified")));
         let mut saved = saved;
         saved.config.public_origin = "https://entry.example.com:39400".into();
         saved.store(directory.path(), false).unwrap();
@@ -843,6 +865,7 @@ mod tests {
             operation: Mutex::new(()),
             busy: AtomicBool::new(false),
             generation: AtomicU64::new(0),
+            frp_download: frp_tunnel::DownloadProgress::default(),
             last_error: RwLock::new(None),
         };
         primary
@@ -878,5 +901,236 @@ mod tests {
             Primary::new(directory.path()).unwrap().provider(),
             Provider::Zrok
         );
+    }
+
+    #[tokio::test]
+    async fn frp_http_login_media_and_logout_keep_authorization_and_ngrok_isolation() {
+        let directory = tempfile::tempdir().unwrap();
+        super::super::configure_access_key(directory.path(), "test-http-access-key").unwrap();
+        let controller =
+            RemoteAccessController::new(Arc::new(Bridge), directory.path().into()).unwrap();
+        controller.publish_access_policy(&RemoteAccessSettings {
+            enabled: true,
+            ..Default::default()
+        });
+        controller.running.store(true, Ordering::SeqCst);
+        let origin = "http://entry.example.com:39399";
+        *controller.primary.selection.write().unwrap() = Selection {
+            provider: Provider::Frp,
+            origin: Some(origin.into()),
+            ingress: Some("verified-http".into()),
+        };
+        *controller.channels.secondary.write().unwrap() =
+            Some("https://second.ngrok-free.app".into());
+        let (url, task) = server(controller.clone(), Some("verified-http")).await;
+        let (plain, plain_task) = server(controller.clone(), None).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let root = client
+            .get(&url)
+            .header("Host", "entry.example.com:39399")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(root.status(), 200);
+        assert!(!root.headers().contains_key("strict-transport-security"));
+        assert_eq!(
+            client
+                .get(format!("{url}/api/session"))
+                .header("Host", "entry.example.com:39399")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+        let login = client
+            .post(format!("{url}/api/connect"))
+            .header("Host", "entry.example.com:39399")
+            .header("Origin", origin)
+            .json(&json!({"key":"test-http-access-key"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(login.status(), 200);
+        let cookie = login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+        assert!(!cookie.contains("; Secure"));
+        assert_eq!(
+            controller.auth.lock().await.devices[0]
+                .public_origin
+                .as_deref(),
+            Some(origin)
+        );
+        let discovery = client
+            .get(format!("{url}/api/channels"))
+            .header("Host", "entry.example.com:39399")
+            .header("Cookie", cookie.split(';').next().unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(discovery.status(), 200);
+        let discovery: Value = discovery.json().await.unwrap();
+        assert_eq!(
+            discovery["origins"],
+            json!([origin, "https://second.ngrok-free.app"])
+        );
+        let cookie_header = cookie.split(';').next().unwrap();
+        let image_path = directory.path().join("http-preview.png");
+        image::RgbaImage::from_pixel(64, 48, image::Rgba([40, 120, 200, 255]))
+            .save(&image_path)
+            .unwrap();
+        let image_id = controller.images.write().unwrap().register(image_path);
+        let mut image_etag = None;
+        for suffix in ["", "/thumbnail"] {
+            let media_url = format!("{url}/api/images/{image_id}{suffix}");
+            let image = client
+                .get(&media_url)
+                .header("Host", "entry.example.com:39399")
+                .header("Cookie", cookie_header)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(image.status(), 200);
+            assert!(
+                image.headers()[header::CONTENT_TYPE]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("image/")
+            );
+            let etag = image.headers()[header::ETAG].to_str().unwrap().to_owned();
+            let cached = client
+                .get(&media_url)
+                .header("Host", "entry.example.com:39399")
+                .header("Cookie", cookie_header)
+                .header(header::IF_NONE_MATCH, &etag)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(cached.status(), 304);
+            image_etag = Some(etag);
+        }
+        let video_path = directory.path().join("http-video.mp4");
+        let video_bytes: Vec<u8> = (0..2048).map(|value| (value % 251) as u8).collect();
+        std::fs::write(&video_path, &video_bytes).unwrap();
+        let mut video_item =
+            json!({"type":"userMessage","content":[{"type":"localVideo","path":video_path}]});
+        super::super::video::attach_item(&controller, &mut video_item);
+        let video_path = video_item["remoteVideos"][0]["url"].as_str().unwrap();
+        let video_url = format!("{url}{video_path}");
+        let video = client
+            .get(&video_url)
+            .header("Host", "entry.example.com:39399")
+            .header("Cookie", cookie_header)
+            .header(header::RANGE, "bytes=100-199")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(video.status(), 206);
+        assert_eq!(video.headers()[header::CONTENT_RANGE], "bytes 100-199/2048");
+        assert_eq!(
+            video.bytes().await.unwrap().as_ref(),
+            &video_bytes[100..200]
+        );
+        let head = client
+            .head(&video_url)
+            .header("Host", "entry.example.com:39399")
+            .header("Cookie", cookie_header)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(head.status(), 200);
+        assert_eq!(head.headers()[header::CONTENT_LENGTH], "2048");
+        assert!(head.bytes().await.unwrap().is_empty());
+        let invalid_range = client
+            .get(&video_url)
+            .header("Host", "entry.example.com:39399")
+            .header("Cookie", cookie_header)
+            .header(header::RANGE, "bytes=9999-")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid_range.status(), 416);
+        let poster = client
+            .get(format!("{video_url}/poster"))
+            .header("Host", "entry.example.com:39399")
+            .header("Cookie", cookie_header)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(poster.status(), 200);
+        let preflight = client
+            .request(
+                reqwest::Method::OPTIONS,
+                format!("{plain}/api/read/history"),
+            )
+            .header("Host", "second.ngrok-free.app")
+            .header("Origin", origin)
+            .header("access-control-request-method", "POST")
+            .header(
+                "access-control-request-headers",
+                "authorization,content-type",
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(preflight.status(), 204);
+        let foreign = client
+            .post(format!("{url}/api/connect"))
+            .header("Host", "entry.example.com:39399")
+            .header("Origin", "http://other.example.com")
+            .json(&json!({"key":"test-http-access-key"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), 403);
+        let bypass = client
+            .get(&plain)
+            .header("Host", "entry.example.com:39399")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bypass.status(), 403);
+        let logout = client
+            .post(format!("{url}/api/logout"))
+            .header("Host", "entry.example.com:39399")
+            .header("Origin", origin)
+            .header("Cookie", cookie_header)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(logout.status(), 200);
+        assert!(
+            !logout.headers()[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .contains("; Secure")
+        );
+        let after_logout = client
+            .get(format!("{url}/api/images/{image_id}/thumbnail"))
+            .header("Host", "entry.example.com:39399")
+            .header("Cookie", cookie_header)
+            .header(header::IF_NONE_MATCH, image_etag.unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(after_logout.status(), 401);
+        assert_eq!(
+            client
+                .get(video_url)
+                .header("Host", "entry.example.com:39399")
+                .header("Cookie", cookie_header)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+        task.abort();
+        plain_task.abort();
     }
 }

@@ -1,0 +1,62 @@
+[
+  {
+    "path": "/api/images/synthetic-image-1234567890/thumbnail",
+    "method": "GET",
+    "status": 200
+  },
+  {
+    "path": "/api/images/synthetic-image-1234567890",
+    "method": "GET",
+    "status": 200
+  },
+  {
+    "path": "/api/images/synthetic-image-1234567890",
+    "method": "GET",
+    "status": 200
+  },
+  {
+    "path": "/api/images/synthetic-image-1234567890",
+    "method": "GET",
+    "status": 200
+  },
+  {
+    "path": "/api/videos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "method": "GET",
+    "range": "bytes=100-199",
+    "status": 206,
+    "start": 100,
+    "end": 199
+  },
+  {
+    "path": "/api/videos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "method": "GET",
+    "range": "bytes=0-",
+    "status": 206,
+    "start": 0,
+    "end": 217945
+  },
+  {
+    "path": "/api/videos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "method": "HEAD",
+    "status": 200,
+    "start": 0,
+    "end": 217945
+  },
+  {
+    "path": "/api/videos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/poster",
+    "method": "GET",
+    "status": 200
+  },
+  {
+    "path": "/api/videos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "method": "GET",
+    "range": "bytes=0-",
+    "status": 206,
+    "start": 0,
+    "end": 217945
+  },
+  {
+    "path": "/api/events/ws",
+    "status": 101
+  }
+]

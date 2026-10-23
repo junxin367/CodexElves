@@ -38,9 +38,9 @@ prepareRemoteTunnelAccess();
 function validOrigin(value) {
   try {
     const url = new URL(value);
-    return url.origin === value && url.protocol === "https:" && !url.username && !url.password
-      && (value === primaryOrigin()
-        || !url.port && /\.(?:shares\.zrok\.io|ngrok-free\.app|ngrok-free\.dev|ngrok\.app|ngrok\.dev|ngrok\.io)$/.test(url.hostname));
+    return url.origin === value && !url.username && !url.password
+      && (value === primaryOrigin() && ["http:", "https:"].includes(url.protocol)
+        || url.protocol === "https:" && !url.port && /\.(?:shares\.zrok\.io|ngrok-free\.app|ngrok-free\.dev|ngrok\.app|ngrok\.dev|ngrok\.io)$/.test(url.hostname));
   } catch { return false; }
 }
 

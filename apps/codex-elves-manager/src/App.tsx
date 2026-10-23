@@ -73,7 +73,7 @@ import type { RelayMode, RelayModelMapping, RelayProtocol } from "@/relay-types"
 import { readProxyRequestCacheTtl, readProxyTokenUsage } from "@/proxy-token-usage";
 import { JsonViewer } from "@/components/JsonViewer";
 import { RemoteAccessScreen } from "@/components/RemoteAccessScreen";
-import { defaultRemoteAccessSettings, defaultFrpConfig, type FrpConfig, type PrimaryProvider, type RemoteAccessSettings } from "@/remote-access-types";
+import { defaultRemoteAccessSettings, defaultFrpConfig, frpPublicOrigin, normalizeFrpServerAddress, type FrpConfig, type PrimaryProvider, type RemoteAccessSettings } from "@/remote-access-types";
 import {
   defaultModelContextWindow,
   knownModelContextWindow,
@@ -1072,6 +1072,9 @@ let browserPreviewFrpToken = "";
 let browserPreviewFrpCertificate = "";
 let browserPreviewFrpPrivateKey = "";
 let browserPreviewFrpActiveOrigin = "";
+let browserPreviewFrpInstalled = false;
+let browserPreviewFrpDownloadStartedAt = 0;
+const browserPreviewFrpDownloadBytes = 14_152_383;
 
 function isBrowserPreview(): boolean {
   return typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
@@ -2006,6 +2009,9 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     case "remote_access_command": {
       const action = args?.action as string;
       const remote = settings.remoteAccess;
+      if (action === "openFrpDirectory") {
+        return Promise.resolve({ status: "ok", message: "浏览器预览不打开本地目录；桌面版会打开 frp 程序目录。" } as T);
+      }
       if (action === "credentials") {
         return Promise.resolve({ status: "ok", ...browserPreviewRemoteCredentials, frpToken: browserPreviewFrpToken } as T);
       }
@@ -2026,12 +2032,14 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       if (action === "saveFrp") {
         const payload = args?.payload as Record<string, unknown> | undefined;
         browserPreviewFrp = { ...defaultFrpConfig, ...payload?.config as FrpConfig };
+        browserPreviewFrp.serverAddr = normalizeFrpServerAddress(browserPreviewFrp.serverAddr);
+        browserPreviewFrp.publicOrigin = frpPublicOrigin(browserPreviewFrp);
         browserPreviewFrpToken = String(payload?.token || "");
         browserPreviewFrpCertificate = String(payload?.certificateName || browserPreviewFrpCertificate);
         browserPreviewFrpPrivateKey = String(payload?.privateKeyName || browserPreviewFrpPrivateKey);
         return Promise.resolve({ status: "ok", message: "浏览器预览：FRP 候选配置已保存。" } as T);
       }
-      const frpHttpsReady = Boolean(browserPreviewFrp.publicOrigin)
+      const frpHttpsReady = browserPreviewFrp.publicOrigin.startsWith("https://")
         && (browserPreviewFrp.httpsMode === "provider" || Boolean(browserPreviewFrpCertificate && browserPreviewFrpPrivateKey));
       if (action === "testPrimaryRoute" || action === "applyPrimaryRoute") {
         const payload = args?.payload as Record<string, unknown> | undefined;
@@ -2039,8 +2047,16 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         if (!running && action === "testPrimaryRoute") return Promise.resolve({ status: "failed", message: "请先启用远程会话网页。" } as T);
         if (provider === "zrok" && !browserPreviewZrokBound)
           return Promise.resolve({ status: "failed", message: "请先绑定 zrok 并设置固定名称。" } as T);
-        if (provider === "frp" && action === "applyPrimaryRoute" && !frpHttpsReady)
-          return Promise.resolve({ status: "failed", message: "当前只有 TCP 映射，尚无 HTTPS 会话入口。" } as T);
+        if (provider === "frp" && !frpPublicOrigin(browserPreviewFrp))
+          return Promise.resolve({ status: "failed", message: "请先填写服务器地址和公网映射端口。" } as T);
+        if (provider === "frp" && running && !browserPreviewFrpInstalled) {
+          browserPreviewFrpDownloadStartedAt ||= Date.now();
+          return new Promise<T>(resolve => window.setTimeout(() => {
+            browserPreviewFrpInstalled = true;
+            browserPreviewFrpDownloadStartedAt = 0;
+            resolve(browserPreviewCommand<T>(command, args));
+          }, 8000));
+        }
         if (action === "applyPrimaryRoute") {
           browserPreviewPrimary = provider;
           browserPreviewZrokRunning = provider === "zrok";
@@ -2048,8 +2064,8 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         }
         return Promise.resolve({
           status: "ok", httpsReady: provider === "zrok" || frpHttpsReady,
-          message: provider === "frp" && !frpHttpsReady ? "浏览器预览：隧道已连通，待配置 HTTPS，当前主入口保持不变。"
-            : action === "applyPrimaryRoute" ? (running ? "浏览器预览：主链路已切换，请使用新地址重新登录。" : "浏览器预览：主链路选择已保存，启用远程会话网页后启动。")
+          message: action === "applyPrimaryRoute" ? (running ? "浏览器预览：主链路已切换，请使用固定公网地址重新登录。" : "浏览器预览：主链路选择已保存，启用远程会话网页后启动。")
+              : provider === "frp" && !frpHttpsReady ? "浏览器预览：HTTP 入口验证通过，可应用为主链路；公网传输不加密。"
               : "浏览器预览：入口验证通过，当前主链路未改变。",
         } as T);
       }
@@ -2113,8 +2129,10 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         addresses: [`http://${remote.bindHost}:${remote.port}`],
         primary: {
           provider: browserPreviewPrimary, publicUrl: browserPreviewPrimary === "frp" ? browserPreviewFrpActiveOrigin : publicUrl,
-          switching: false, error: null,
-          frp: { config: browserPreviewFrp, state: running && browserPreviewPrimary === "frp" ? "ready" : frpHttpsReady ? "stopped" : "https_required",
+          switching: browserPreviewFrpDownloadStartedAt > 0, error: null,
+          frp: { config: browserPreviewFrp, state: browserPreviewFrpDownloadStartedAt ? "downloading" : running && browserPreviewPrimary === "frp" ? "ready" : "stopped",
+            downloadedBytes: browserPreviewFrpDownloadStartedAt ? Math.min(browserPreviewFrpDownloadBytes - 1, Math.floor((Date.now() - browserPreviewFrpDownloadStartedAt) / 8000 * browserPreviewFrpDownloadBytes)) : 0,
+            downloadTotalBytes: browserPreviewFrpDownloadStartedAt ? browserPreviewFrpDownloadBytes : null,
             running: running && browserPreviewPrimary === "frp", tokenConfigured: Boolean(browserPreviewFrpToken),
             certificateName: browserPreviewFrpCertificate, privateKeyName: browserPreviewFrpPrivateKey, httpsConfigured: frpHttpsReady, error: null },
         },

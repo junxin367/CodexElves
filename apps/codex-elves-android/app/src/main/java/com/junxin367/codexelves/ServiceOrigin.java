@@ -33,8 +33,9 @@ final class ServiceOrigin {
         } catch (URISyntaxException error) {
             throw new IllegalArgumentException("域名格式无效");
         }
-        if (!"https".equalsIgnoreCase(parsed.getScheme())) {
-            throw new IllegalArgumentException("仅支持 HTTPS 地址");
+        String scheme = parsed.getScheme().toLowerCase(Locale.ROOT);
+        if (!"https".equals(scheme) && !"http".equals(scheme)) {
+            throw new IllegalArgumentException("仅支持 HTTP 或 HTTPS 地址");
         }
         if (parsed.getRawUserInfo() != null) {
             throw new IllegalArgumentException("地址不能包含用户名或密码");
@@ -58,7 +59,7 @@ final class ServiceOrigin {
         if (port == 0 || port < -1 || port > 65535) {
             throw new IllegalArgumentException("端口无效");
         }
-        if (port == 443) {
+        if (port == ("https".equals(scheme) ? 443 : 80)) {
             port = -1;
         }
 
@@ -69,7 +70,7 @@ final class ServiceOrigin {
             throw new IllegalArgumentException("域名格式无效");
         }
         try {
-            return new URI("https", null, asciiHost, port, null, null, null).toASCIIString();
+            return new URI(scheme, null, asciiHost, port, null, null, null).toASCIIString();
         } catch (URISyntaxException error) {
             throw new IllegalArgumentException("域名格式无效");
         }
@@ -90,7 +91,7 @@ final class ServiceOrigin {
         String origin = normalize(rawInput);
         try {
             URI parsed = new URI(origin);
-            if (parsed.getPort() != -1
+            if (!"https".equals(parsed.getScheme()) || parsed.getPort() != -1
                 || !parsed.getHost().matches("[a-zA-Z0-9-]+\\.(shares\\.zrok\\.io|ngrok-free\\.app|ngrok-free\\.dev|ngrok\\.app|ngrok\\.dev|ngrok\\.io)")) {
                 throw new IllegalArgumentException("线路域名无效");
             }

@@ -17,7 +17,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.CodexElves"
-        android:usesCleartextTraffic="false">
+        android:usesCleartextTraffic="true">
         <service
             android:name=".NotificationService"
             android:exported="false"

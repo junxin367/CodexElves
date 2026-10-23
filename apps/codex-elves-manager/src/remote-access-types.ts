@@ -102,9 +102,29 @@ export type FrpConfig = {
 export const defaultFrpConfig: FrpConfig = {
   serverAddr: "", serverPort: 7000, remotePort: 0, publicOrigin: "", httpsMode: "provider",
 };
+export function normalizeFrpServerAddress(value: string): string {
+  const trimmed = value.trim();
+  try {
+    const url = new URL(trimmed.includes("://") ? trimmed : `http://${trimmed}`);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return trimmed;
+    return url.hostname;
+  } catch { return trimmed; }
+}
+export function frpPublicOrigin(config: FrpConfig): string {
+  try {
+    const host = normalizeFrpServerAddress(config.serverAddr);
+    if (!/^[a-z0-9][a-z0-9.-]*$/i.test(host) || !Number.isInteger(config.remotePort) || config.remotePort < 1 || config.remotePort > 65535) return "";
+    const url = new URL(config.publicOrigin.trim() || `http://${host}:${config.remotePort}`);
+    return ["http:", "https:"].includes(url.protocol) && url.pathname === "/" && !url.search && !url.hash && !url.username && !url.password ? url.origin : "";
+  } catch { return ""; }
+}
 export type FrpStatus = {
   config: FrpConfig;
-  state: "stopped" | "starting" | "ready" | "error" | "https_required";
+  state: "stopped" | "downloading" | "starting" | "ready" | "error" | "https_required";
+  version?: string;
+  downloadedBytes?: number;
+  downloadTotalBytes?: number | null;
+  downloadPercent?: number | null;
   running: boolean;
   tokenConfigured: boolean;
   certificateName: string;

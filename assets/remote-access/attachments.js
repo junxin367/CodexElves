@@ -1,4 +1,5 @@
 import { remoteMediaCandidates, remoteMediaUrl } from "./channels.js";
+import { sha256Hex } from "./sha256.js";
 
 const MAX_IMAGE_COUNT = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -789,8 +790,7 @@ export async function attachmentsFromQueuedMessage(message) {
     if (!source) continue;
     const binary = atob(source.slice(source.indexOf(",") + 1));
     const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
-    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-    const reference = `inline:${[...digest].map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
+    const reference = `inline:${await sha256Hex(bytes)}`;
     attachments.push(registeredImages.find(entry => entry.source === reference) || {
       kind: "remote",
       name: attachmentName(image.filename || image.name, "图片附件"),

@@ -1164,7 +1164,8 @@ public final class MainActivity extends Activity {
         CookieManager cookies = CookieManager.getInstance();
         cookies.setCookie(
             origin,
-            DEVICE_COOKIE + "; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
+            DEVICE_COOKIE + "; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
+                + (origin.startsWith("https://") ? "; Secure" : "")
         );
         cookies.flush();
     }

@@ -5,6 +5,7 @@ import { activateRemoteChannels, clearRemoteChannels, observeChannelConfiguratio
 import { renderMessageActions } from "./message-actions.js";
 import { mountSessionTools } from "./session-tools.js";
 import { mountSessionMenu } from "./session-menu.js";
+import { sha256Hex } from "./sha256.js";
 import {
   getAndroidAppInfo,
   getAndroidNotificationSettings,
@@ -8171,8 +8172,7 @@ async function queuedEditFingerprint(action, payload) {
   const value = JSON.stringify([action, action === "editQueued" ? payload.prompt.trim() : null,
     payload.retainedImageSources ?? null,
     (payload.images || []).map(image => [image.name, image.mime, image.dataUrl, image.size])]);
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(value);
 }
 async function checkQueuedMessageEdit(threadId, editId) {
   if (!connected || session?.capabilities?.queueEditRecovery !== true) return null;
@@ -11444,7 +11444,21 @@ function retryConnectionRecovery() {
   void Promise.all([syncConnectionState(), refreshAll({ fresh: true })]).catch(() => {});
 }
 async function copyText(text) {
-  try { await navigator.clipboard.writeText(text); notice("已复制"); }
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+    else {
+      const previous = document.activeElement;
+      const field = document.createElement("textarea");
+      field.value = text;
+      field.readOnly = true;
+      field.style.position = "fixed";
+      field.style.opacity = "0";
+      document.body.append(field);
+      try { field.select(); if (!document.execCommand("copy")) throw new Error("copy failed"); }
+      finally { field.remove(); previous?.focus?.({ preventScroll: true }); }
+    }
+    notice("已复制");
+  }
   catch { notice("无法访问剪贴板，请手动选择代码复制", true); }
 }
 function closeDialogsForNotification() {

@@ -643,6 +643,20 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
 
 #[tauri::command]
 pub async fn remote_access_command(action: String, payload: Option<Value>) -> Value {
+    if action == "openFrpDirectory" {
+        let directory = codex_elves_core::remote_access::frp_program_directory(
+            &codex_elves_core::paths::default_app_state_dir(),
+        );
+        let result = std::fs::create_dir_all(&directory)
+            .context("无法创建 frp 程序目录")
+            .and_then(|_| open_local_directory(&directory));
+        return match result {
+            Ok(()) => json!({"status":"ok","message":"已打开 frp 程序目录。"}),
+            Err(error) => {
+                json!({"status":"failed","message":format!("打开 frp 程序目录失败：{error:#}")})
+            }
+        };
+    }
     if matches!(action.as_str(), "credentials" | "setKey" | "generateKey") {
         let _guard = settings_write_mutex().lock().await;
         return codex_elves_core::remote_access::local_settings_command(

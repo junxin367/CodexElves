@@ -34,6 +34,7 @@ use crate::settings::{RemoteAccessSettings, SettingsStore};
 mod channels;
 mod credentials;
 mod diagnostics;
+mod frp_recovery;
 mod frp_tunnel;
 mod image_preview;
 mod ngrok_tunnel;
@@ -44,6 +45,7 @@ mod workspace;
 mod zrok_tunnel;
 use credentials::{AccessKey, AccessKeyStore, lock_access_key_store};
 pub use credentials::{access_credentials_status, configure_access_key};
+pub use frp_tunnel::program_directory as frp_program_directory;
 pub use service::{ensure_running as ensure_service_running, run as run_service};
 use zrok_tunnel::ZrokTunnelService;
 
@@ -53,6 +55,7 @@ const WEB_JS: &str = include_str!("../../../assets/remote-access/app.js");
 const WEB_SESSION_TOOLS_JS: &str = include_str!("../../../assets/remote-access/session-tools.js");
 const WEB_SESSION_MENU_JS: &str = include_str!("../../../assets/remote-access/session-menu.js");
 const WEB_ATTACHMENTS_JS: &str = include_str!("../../../assets/remote-access/attachments.js");
+const WEB_SHA256_JS: &str = include_str!("../../../assets/remote-access/sha256.js");
 const WEB_RECOVERY_STORE_JS: &str = include_str!("../../../assets/remote-access/recovery-store.js");
 const WEB_EVENTS_CLIENT_JS: &str = include_str!("../../../assets/remote-access/events-client.js");
 const WEB_CHANNELS_JS: &str = include_str!("../../../assets/remote-access/channels.js");
@@ -1341,6 +1344,7 @@ struct WebState {
 
 #[derive(Clone, Copy, Default)]
 struct RequestTrustContext {
+    external_public: bool,
     external_https: bool,
 }
 
@@ -1418,6 +1422,13 @@ fn web_assets() -> &'static HashMap<&'static str, StaticWebAsset> {
                 StaticWebAsset::new(
                     "application/javascript; charset=utf-8",
                     WEB_ATTACHMENTS_JS.as_bytes(),
+                ),
+            ),
+            (
+                "/sha256.js",
+                StaticWebAsset::new(
+                    "application/javascript; charset=utf-8",
+                    WEB_SHA256_JS.as_bytes(),
                 ),
             ),
             (
@@ -1625,6 +1636,7 @@ fn is_static_web_asset_path(path: &str) -> bool {
         "/" | "/app-resources.json"
             | "/app.js"
             | "/attachments.js"
+            | "/sha256.js"
             | "/recovery-store.js"
             | "/events-client.js"
             | "/events-worker.js"
@@ -1811,6 +1823,7 @@ pub fn web_router(
         .route("/session-tools.js", get(static_web_asset))
         .route("/session-menu.js", get(static_web_asset))
         .route("/attachments.js", get(static_web_asset))
+        .route("/sha256.js", get(static_web_asset))
         .route("/recovery-store.js", get(static_web_asset))
         .route("/events-client.js", get(static_web_asset))
         .route("/events-worker.js", get(static_web_asset))
@@ -1952,7 +1965,7 @@ async fn access_boundary(
             return response;
         }
     }
-    // A public FRP Host on the ordinary HTTP listener must not enable a plaintext login.
+    // Only the verified FRP ingress may serve its configured public Host.
     if (frp_ingress.is_some() && !(active_host && accepted_frp_ingress))
         || (active_frp && active_host && !accepted_frp_ingress)
     {
@@ -1967,13 +1980,17 @@ async fn access_boundary(
         .find(|origin| origin_matches_host(origin, host))
         .cloned();
     let valid_host = matched_origin.is_some();
-    let external_https = external_origin
+    let external_public = external_origin
         .as_ref()
         .is_some_and(|origin| origin_matches_host(origin, host))
         || secondary_origins
             .iter()
             .any(|origin| origin_matches_host(origin, host));
-    let request_origin = if external_https {
+    let external_https = external_public
+        && matched_origin
+            .as_ref()
+            .is_some_and(|origin| origin.starts_with("https://"));
+    let request_origin = if external_public {
         matched_origin.clone().unwrap_or_default()
     } else {
         matched_origin.unwrap_or_else(|| format!("http://{host}"))
@@ -1995,7 +2012,7 @@ async fn access_boundary(
         && channels::request_path(request.method(), &path)
         && (!channels::media_authorization(request.headers())
             || channels::media_path(request.method(), &path))
-        && external_https;
+        && external_public;
     if request.method() == axum::http::Method::OPTIONS {
         let method = request
             .headers()
@@ -2022,7 +2039,7 @@ async fn access_boundary(
                 })
             });
         if !valid_host
-            || !external_https
+            || !external_public
             || !headers_valid
             || !origin.is_some_and(|value| origins.iter().any(|allowed| allowed == value))
             || !method.is_some_and(|method| channels::request_path(&method, &path))
@@ -2077,9 +2094,10 @@ async fn access_boundary(
     if !channel_request && origin.is_some_and(|origin| origin != request_origin) {
         return ApiError::new(403, "请求来源与访问地址不一致").into_response();
     }
-    request
-        .extensions_mut()
-        .insert(RequestTrustContext { external_https });
+    request.extensions_mut().insert(RequestTrustContext {
+        external_public,
+        external_https,
+    });
     let private_api = (path == "/api" || path.starts_with("/api/"))
         && !matches!(path.as_str(), "/api/connect" | "/api/login-status");
     let private_image = path.starts_with("/api/images/")
@@ -2308,7 +2326,7 @@ async fn complete_login(
         expires_at_ms,
         last_seen_at_ms: now_ms(),
         key_id: key.id.clone(),
-        public_origin: if trust.external_https {
+        public_origin: if trust.external_public {
             state.controller.public_origin()
         } else {
             None

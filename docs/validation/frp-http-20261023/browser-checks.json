@@ -1,0 +1,32 @@
+{
+  "scope": "真实 FRP HTTP 线路上的合成媒体页面，复用生产前端模块；不包含真实会话内容",
+  "context": "安全上下文：false；SubtleCrypto：false；地址：http://hs.wwszxc.tax:39401",
+  "events": "HTTP WebSocket 消息接收成功",
+  "fingerprint": "HTTP 图片指纹校验通过",
+  "images": [
+    {
+      "complete": true,
+      "height": 192,
+      "id": "thumbnail",
+      "width": 192
+    },
+    {
+      "complete": true,
+      "height": 192,
+      "id": "original",
+      "width": 192
+    }
+  ],
+  "login": "测试登录成功",
+  "range": "视频 Range/HEAD 分段下载通过",
+  "routes": "已识别主链路：frp http://hs.wwszxc.tax:39401",
+  "upload": "图片上传成功：52387 字节",
+  "videoDialogClosed": true,
+  "video": {
+    "currentTime": 2.5,
+    "duration": 4,
+    "error": null,
+    "readyState": 4,
+    "slider": "2.5"
+  }
+}

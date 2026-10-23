@@ -1,7 +1,7 @@
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -16,10 +16,62 @@ use tokio::process::{Child, Command};
 
 use super::{RemoteAccessController, RemoteAccessSettings};
 
-const VERSION: &str = "0.54.0";
-const ARCHIVE_HASH: &str = "95f0d8c8f4781fc8e42b7d644024c647032e3f6cd0ffe425e8f7d5a46d601557";
-const PROGRAM_HASH: &str = "15846490706281424a0f5b0b7d3e6ea92173dbeaf6a10a566f4dc8a6a1e977bb";
+const VERSION: &str = "0.71.1";
+const ARCHIVE_HASH: &str = "b90074b2b6a1d792a7a40f085ac6d276bcab2d1bc60201f8a86ca53ce65ce821";
+const PROGRAM_HASH: &str = "23d11640bee87207c7a99d006b84c554df997feeba7ac7243db20a88a9cb5e01";
 const MAX_PEM_BYTES: usize = 64 * 1024;
+
+#[derive(Default)]
+pub(super) struct DownloadProgress(Mutex<DownloadSnapshot>);
+
+#[derive(Default)]
+struct DownloadSnapshot {
+    active: bool,
+    downloaded: u64,
+    total: Option<u64>,
+}
+
+impl DownloadProgress {
+    fn begin(&self) -> DownloadGuard<'_> {
+        *self.0.lock().unwrap_or_else(|error| error.into_inner()) = DownloadSnapshot {
+            active: true,
+            ..Default::default()
+        };
+        DownloadGuard(self)
+    }
+
+    fn update(&self, downloaded: u64, total: Option<u64>) {
+        let mut progress = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        progress.downloaded = downloaded;
+        progress.total = total;
+    }
+
+    pub fn status(&self) -> Value {
+        let progress = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        let percent = progress
+            .total
+            .filter(|total| *total > 0)
+            .map(|total| (progress.downloaded.saturating_mul(100) / total).min(100));
+        json!({
+            "downloading": progress.active,
+            "downloadedBytes": progress.downloaded,
+            "downloadTotalBytes": progress.total,
+            "downloadPercent": percent,
+            "version": VERSION
+        })
+    }
+}
+
+struct DownloadGuard<'a>(&'a DownloadProgress);
+impl Drop for DownloadGuard<'_> {
+    fn drop(&mut self) {
+        self.0
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .active = false;
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +104,36 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn normalize(&mut self) -> anyhow::Result<()> {
+        let address = self.server_addr.trim();
+        if !address.is_empty() {
+            let url = reqwest::Url::parse(
+                if address.contains("://") {
+                    address.to_owned()
+                } else {
+                    format!("http://{address}")
+                }
+                .as_str(),
+            )
+            .context("FRP 服务器地址格式无效")?;
+            anyhow::ensure!(
+                matches!(url.scheme(), "http" | "https")
+                    && url.username().is_empty()
+                    && url.password().is_none(),
+                "FRP 服务器地址只支持域名、IP 或 HTTP/HTTPS 地址"
+            );
+            self.server_addr = url.host_str().context("FRP 服务器地址缺少域名")?.to_owned();
+        }
+        self.public_origin = self.public_origin.trim().to_owned();
+        if self.public_origin.is_empty() && !self.server_addr.is_empty() && self.remote_port > 0 {
+            self.public_origin =
+                reqwest::Url::parse(&format!("http://{}:{}", self.server_addr, self.remote_port))?
+                    .origin()
+                    .ascii_serialization();
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.server_addr.is_empty()
@@ -68,7 +150,7 @@ impl Config {
         if !self.public_origin.is_empty() {
             anyhow::ensure!(
                 valid_origin(&self.public_origin),
-                "FRP 公网地址必须是 HTTPS 根地址，可包含端口，不能包含路径、账号或参数"
+                "FRP 公网地址必须是 HTTP 或 HTTPS 根地址，可包含端口，不能包含路径、账号或参数"
             );
         }
         Ok(())
@@ -79,7 +161,7 @@ pub(super) fn valid_origin(origin: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(origin) else {
         return false;
     };
-    url.scheme() == "https"
+    matches!(url.scheme(), "http" | "https")
         && url.origin().ascii_serialization() == origin
         && url.username().is_empty()
         && url.password().is_none()
@@ -103,7 +185,9 @@ pub(super) struct Saved {
 
 impl Saved {
     pub fn load(directory: &Path, active: bool) -> anyhow::Result<Self> {
-        super::read_json_or_default(&config_path(directory, active))
+        let mut saved: Self = super::read_json_or_default(&config_path(directory, active))?;
+        saved.config.normalize()?;
+        Ok(saved)
     }
 
     pub fn store(&self, directory: &Path, active: bool) -> anyhow::Result<()> {
@@ -123,15 +207,16 @@ impl Saved {
     }
 
     pub fn https_configured(&self) -> bool {
-        !self.config.public_origin.is_empty()
+        self.config.public_origin.starts_with("https://")
             && (self.config.https_mode == HttpsMode::Provider
                 || (!self.certificate_pem.is_empty() && !self.private_key_pem.is_empty()))
     }
 
     pub fn from_payload(directory: &Path, payload: Value) -> anyhow::Result<Self> {
         let previous = Self::load(directory, false)?;
-        let config: Config =
+        let mut config: Config =
             serde_json::from_value(payload["config"].clone()).context("FRP 配置格式无效")?;
+        config.normalize()?;
         config.validate()?;
         let token = payload["token"]
             .as_str()
@@ -226,6 +311,11 @@ pub(super) struct Running {
 }
 
 impl Running {
+    pub async fn stop(mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill().await;
+        }
+    }
     pub fn alive(&mut self) -> bool {
         !self.server.is_finished()
             && self
@@ -255,9 +345,67 @@ pub(super) async fn start(
     saved: Saved,
     https: bool,
 ) -> anyhow::Result<Running> {
+    match start_once(controller, settings, saved.clone(), https).await {
+        Ok(running) => Ok(running),
+        Err(error) if error.downcast_ref::<StartFailure>() == Some(&StartFailure::PortInUse) => {
+            let program =
+                ensure_program(&controller.state_dir, &controller.primary.frp_download).await?;
+            super::frp_recovery::release_local_mapping(&controller.state_dir, &program, &saved)
+                .await?;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            start_once(controller, settings, saved, https)
+                .await
+                .context("FRP 映射自动恢复后仍未启动；请确认该端口未被其他设备占用")
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StartFailure {
+    PortInUse,
+}
+impl std::fmt::Display for StartFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FRP 公网端口被占用，正在核对同一份本机映射")
+    }
+}
+impl std::error::Error for StartFailure {}
+
+fn startup_failure(line: &str) -> Option<anyhow::Error> {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("port already used") || lower.contains("port already in use") {
+        return Some(StartFailure::PortInUse.into());
+    }
+    if lower.contains("port not allowed") || lower.contains("port is not allowed") {
+        return Some(anyhow::anyhow!(
+            "FRP 服务商未授权此公网映射端口；请填写购买范围内的端口或联系服务商，重启不能解除端口限制"
+        ));
+    }
+    if lower.contains("token")
+        && (lower.contains("not match")
+            || lower.contains("doesn't match")
+            || lower.contains("invalid"))
+    {
+        return Some(anyhow::anyhow!("FRP Token 验证失败，请核对商家提供的令牌"));
+    }
+    if lower.contains("login to server failed") || lower.contains("start error") {
+        return Some(anyhow::anyhow!(
+            "FRP 连接失败，请检查服务器和服务端口后重试"
+        ));
+    }
+    None
+}
+
+async fn start_once(
+    controller: &Arc<RemoteAccessController>,
+    settings: &RemoteAccessSettings,
+    saved: Saved,
+    https: bool,
+) -> anyhow::Result<Running> {
     saved.config.validate()?;
     anyhow::ensure!(!saved.token.is_empty(), "请先保存 FRP Token");
-    let program = ensure_program(&controller.state_dir).await?;
+    let program = ensure_program(&controller.state_dir, &controller.primary.frp_download).await?;
     let tls = if https && saved.config.https_mode == HttpsMode::LocalCertificate {
         Some(saved.tls_config()?)
     } else {
@@ -349,16 +497,17 @@ pub(super) async fn start(
     .lines();
     tokio::time::timeout(Duration::from_secs(20), async {
         while let Some(line) = lines.next_line().await? {
-            if line.contains("start proxy success") { return Ok(()); }
-            if line.contains("port already used") || line.contains("port already in use") {
-                anyhow::bail!("FRP 公网端口已被占用；请先在原客户端释放该映射或使用其他端口，程序不会停止外部客户端");
+            if line.contains("start proxy success") {
+                return Ok(());
             }
-            if line.contains("start error") || line.contains("login to server failed") {
-                anyhow::bail!("FRP 连接失败，请检查服务器、Token、端口许可或已有映射");
+            if let Some(error) = startup_failure(&line) {
+                return Err(error);
             }
         }
         anyhow::bail!("FRP 客户端未建立映射")
-    }).await.context("FRP 建立映射超时")??;
+    })
+    .await
+    .context("FRP 建立映射超时")??;
     running.reader = Some(tokio::spawn(async move {
         while matches!(lines.next_line().await, Ok(Some(_))) {}
     }));
@@ -378,20 +527,27 @@ fn client_config(saved: &Saved, id: &str, port: u16) -> anyhow::Result<String> {
     Ok(toml::to_string(&config)?)
 }
 
-async fn ensure_program(directory: &Path) -> anyhow::Result<PathBuf> {
+pub fn program_directory(directory: &Path) -> PathBuf {
+    directory.join("tools").join("frp").join(VERSION)
+}
+
+async fn ensure_program(directory: &Path, progress: &DownloadProgress) -> anyhow::Result<PathBuf> {
     anyhow::ensure!(
         cfg!(all(windows, target_arch = "x86_64")),
         "FRP 托管客户端当前支持 Windows x64"
     );
-    let path = directory.join(format!("tools/frp/{VERSION}/frpc.exe"));
+    let path = program_directory(directory).join("frpc.exe");
     if std::fs::read(&path).ok().is_some_and(|bytes| {
         format!("{:x}", Sha256::digest(bytes)).eq_ignore_ascii_case(PROGRAM_HASH)
     }) {
         return Ok(path);
     }
-    let mut response = reqwest::Client::builder().https_only(true).timeout(Duration::from_secs(75)).build()?
+    let _download = progress.begin();
+    let mut response = reqwest::Client::builder().https_only(true).connect_timeout(Duration::from_secs(20)).timeout(Duration::from_secs(300)).build()?
         .get(format!("https://github.com/fatedier/frp/releases/download/v{VERSION}/frp_{VERSION}_windows_amd64.zip"))
         .send().await?.error_for_status()?;
+    let total = response.content_length();
+    progress.update(0, total);
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
         anyhow::ensure!(
@@ -399,6 +555,7 @@ async fn ensure_program(directory: &Path) -> anyhow::Result<PathBuf> {
             "FRP 下载文件过大"
         );
         bytes.extend_from_slice(&chunk);
+        progress.update(bytes.len() as u64, total);
     }
     anyhow::ensure!(
         format!("{:x}", Sha256::digest(&bytes)) == ARCHIVE_HASH,
@@ -421,6 +578,29 @@ async fn ensure_program(directory: &Path) -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frp_download_progress_reports_bytes_and_clears_on_completion_or_failure() {
+        let progress = DownloadProgress::default();
+        assert_eq!(progress.status()["downloading"], false);
+        {
+            let _guard = progress.begin();
+            assert_eq!(progress.status()["downloading"], true);
+            assert!(progress.status()["downloadPercent"].is_null());
+            progress.update(25, Some(100));
+            assert_eq!(progress.status()["downloadedBytes"], 25);
+            assert_eq!(progress.status()["downloadPercent"], 25);
+            progress.update(110, Some(100));
+            assert_eq!(progress.status()["downloadPercent"], 100);
+        }
+        assert_eq!(progress.status()["downloading"], false);
+        {
+            let _guard = progress.begin();
+            assert_eq!(progress.status()["downloadedBytes"], 0);
+            assert!(progress.status()["downloadTotalBytes"].is_null());
+        }
+        assert_eq!(progress.status()["downloading"], false);
+    }
 
     #[test]
     fn frp_client_config_preserves_quoted_tokens_and_binds_only_loopback() {
@@ -449,15 +629,16 @@ mod tests {
     }
 
     #[test]
-    fn frp_https_origin_requires_an_exact_https_authority() {
+    fn frp_public_origin_requires_an_exact_http_authority() {
         for valid in [
+            "http://remote.example.com:39399",
             "https://remote.example.com",
             "https://remote.example.com:39399",
         ] {
             assert!(valid_origin(valid), "{valid}");
         }
         for invalid in [
-            "http://remote.example.com:39399",
+            "ftp://remote.example.com:39399",
             "https://remote.example.com/",
             "https://remote.example.com/path",
             "https://user:secret@remote.example.com",
@@ -467,6 +648,54 @@ mod tests {
         ] {
             assert!(!valid_origin(invalid), "{invalid}");
         }
+    }
+
+    #[test]
+    fn frp_normalizes_pasted_server_urls_and_generates_the_public_address() {
+        for input in [
+            " relay.example.com ",
+            "http://relay.example.com",
+            "https://relay.example.com/",
+            "http://relay.example.com:39398/static/#/proxies/tcp",
+        ] {
+            let mut config = Config {
+                server_addr: input.into(),
+                server_port: 39397,
+                remote_port: 39399,
+                ..Default::default()
+            };
+            config.normalize().unwrap();
+            config.validate().unwrap();
+            assert_eq!(config.server_addr, "relay.example.com");
+            assert_eq!(config.server_port, 39397);
+            assert_eq!(config.public_origin, "http://relay.example.com:39399");
+        }
+        for address in [
+            "ftp://relay.example.com",
+            "https://user:password@relay.example.com",
+        ] {
+            let mut config = Config {
+                server_addr: address.into(),
+                ..Default::default()
+            };
+            assert!(config.normalize().is_err());
+        }
+    }
+
+    #[test]
+    fn frp_start_errors_distinguish_port_conflicts_from_authorization_failures() {
+        let conflict = startup_failure("start error: port already used").unwrap();
+        assert_eq!(
+            conflict.downcast_ref::<StartFailure>(),
+            Some(&StartFailure::PortInUse)
+        );
+        let denied = startup_failure("start error: port not allowed").unwrap();
+        assert!(denied.to_string().contains("未授权"));
+        assert!(denied.downcast_ref::<StartFailure>().is_none());
+        let token =
+            startup_failure("login to server failed: token in login doesn't match").unwrap();
+        assert!(token.to_string().contains("Token 验证失败"));
+        assert!(startup_failure("start proxy success").is_none());
     }
 
     #[test]

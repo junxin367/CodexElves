@@ -108,11 +108,11 @@ export function RemoteAccessScreen({
     setEditingPrimary(status.primary.provider);
   }, [status?.primary]);
   useEffect(() => {
-    const active = status?.primary?.switching || status?.primary?.frp.state === "starting"
+    const active = busy || status?.primary?.switching || ["starting", "downloading"].includes(status?.primary?.frp.state || "")
       || ["checking", "downloading", "starting", "connecting"].includes(status?.zrok?.state || "");
     const timer = window.setInterval(() => void refresh(), active ? 500 : 5000);
     return () => clearInterval(timer);
-  }, [status?.zrok?.state, status?.primary?.switching, status?.primary?.frp.state]);
+  }, [busy, status?.zrok?.state, status?.primary?.switching, status?.primary?.frp.state]);
   useEffect(() => {
     if (settings.zrokSetupValue === loadedZrokSetupValue.current) return;
     loadedZrokSetupValue.current = settings.zrokSetupValue;
@@ -374,7 +374,7 @@ export function RemoteAccessScreen({
           </div>
           <div className="panel-head-actions flex items-center gap-3">
             {status?.primary?.provider === "frp"
-              ? <span className={`zrok-status-badge ${status.primary.frp.state === "ready" ? "connected" : status.primary.frp.state === "error" ? "error" : "connecting"}`}><span className="zrok-status-dot" />当前主链路：FRP · {status.primary.frp.state === "ready" ? "可访问" : status.primary.frp.state === "starting" ? "正在启动" : status.primary.frp.state === "error" ? "异常" : "已停止"}</span>
+              ? <span className={`zrok-status-badge ${status.primary.frp.state === "ready" ? "connected" : status.primary.frp.state === "error" ? "error" : "connecting"}`}><span className="zrok-status-dot" />当前主链路：FRP · {status.primary.frp.state === "ready" ? "可访问" : status.primary.frp.state === "downloading" ? "正在下载" : status.primary.frp.state === "starting" ? "正在启动" : status.primary.frp.state === "error" ? "异常" : "已停止"}</span>
               : <><span className="text-xs text-muted-foreground">当前主链路：zrok</span>{renderZrokBadge()}</>}
           </div>
         </CardHeader>

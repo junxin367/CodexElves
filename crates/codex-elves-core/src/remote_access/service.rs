@@ -216,9 +216,16 @@ fn supported_action(action: &str) -> bool {
 
 async fn request(endpoint: &Endpoint, action: &str, payload: &Value) -> anyhow::Result<Value> {
     anyhow::ensure!(supported_action(action), "不支持的远程管理操作");
+    let timeout = if matches!(action, "testPrimaryRoute" | "applyPrimaryRoute")
+        && payload["provider"] == "frp"
+    {
+        Duration::from_secs(420)
+    } else {
+        Duration::from_secs(150)
+    };
     let response = reqwest::Client::builder()
         .no_proxy()
-        .timeout(Duration::from_secs(150))
+        .timeout(timeout)
         .build()?
         .post(format!("http://127.0.0.1:{}/admin/{action}", endpoint.port))
         .bearer_auth(&endpoint.token)

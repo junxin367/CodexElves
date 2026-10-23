@@ -104,6 +104,7 @@ def bundledWebResources = [
     [source: "session-tools.js", path: "/session-tools.js", contentType: "application/javascript; charset=utf-8"],
     [source: "session-menu.js", path: "/session-menu.js", contentType: "application/javascript; charset=utf-8"],
     [source: "attachments.js", path: "/attachments.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "sha256.js", path: "/sha256.js", contentType: "application/javascript; charset=utf-8"],
     [source: "events-client.js", path: "/events-client.js", contentType: "application/javascript; charset=utf-8"],
     [source: "events-worker.js", path: "/events-worker.js", contentType: "application/javascript; charset=utf-8"],
     [source: "channels.js", path: "/channels.js", contentType: "application/javascript; charset=utf-8"],
