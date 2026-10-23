@@ -39,7 +39,8 @@ function validOrigin(value) {
   try {
     const url = new URL(value);
     return url.origin === value && url.protocol === "https:" && !url.username && !url.password
-      && !url.port && /\.(?:shares\.zrok\.io|ngrok-free\.app|ngrok-free\.dev|ngrok\.app|ngrok\.dev|ngrok\.io)$/.test(url.hostname);
+      && (value === primaryOrigin()
+        || !url.port && /\.(?:shares\.zrok\.io|ngrok-free\.app|ngrok-free\.dev|ngrok\.app|ngrok\.dev|ngrok\.io)$/.test(url.hostname));
   } catch { return false; }
 }
 
@@ -114,7 +115,8 @@ function routes() {
 export function remoteChannelRoutes() {
   return routes().map(({ origin }) => {
     const host = new URL(origin).hostname;
-    const name = host.endsWith(".shares.zrok.io") ? "zrok"
+    const name = configuration?.primaryProvider === "frp" && configuration.primaryOrigin === origin ? "FRP"
+      : host.endsWith(".shares.zrok.io") ? "zrok"
       : /\.(?:ngrok-free\.app|ngrok-free\.dev|ngrok\.app|ngrok\.dev|ngrok\.io)$/.test(host) ? "ngrok" : host;
     return { origin, name };
   });

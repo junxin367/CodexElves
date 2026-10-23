@@ -1,0 +1,35 @@
+{
+  "date": "2026-10-23",
+  "addressLabel": "固定公网地址",
+  "certificateControls": 0,
+  "fields": [
+    {
+      "id": "remote-frp-server",
+      "width": 706.5,
+      "x": 243,
+      "y": 370.09375
+    },
+    {
+      "id": "remote-frp-token",
+      "width": 706.5,
+      "x": 967.5,
+      "y": 370.09375
+    },
+    {
+      "id": "remote-frp-server-port",
+      "width": 80,
+      "x": 1692,
+      "y": 370.09375
+    },
+    {
+      "id": "remote-frp-remote-port",
+      "width": 80,
+      "x": 1790,
+      "y": 370.09375
+    }
+  ],
+  "tabText": "frp",
+  "tabsBesideTitle": true,
+  "passed": true,
+  "portArrowsHidden": true
+}

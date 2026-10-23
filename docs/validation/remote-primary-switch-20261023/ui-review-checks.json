@@ -1,0 +1,137 @@
+{
+  "date": "2026-10-23",
+  "scope": "原型及实际 React 组件，使用模拟后端，未连接真实 FRP",
+  "manager": [
+    {
+      "case": "停用时保存配置",
+      "text": "FRP 候选配置已保存；启用远程会话网页后可测试入口。",
+      "toast": false
+    },
+    {
+      "background": "rgba(0, 0, 0, 0)",
+      "case": "仅隧道连通",
+      "kind": "remote-primary-feedback warning",
+      "text": "浏览器预览：隧道已连通，待配置 HTTPS，当前主入口保持不变。"
+    },
+    {
+      "case": "失败保留原主链路",
+      "kind": "remote-primary-feedback error",
+      "text": "请先绑定 zrok 并设置固定名称。",
+      "toast": false,
+      "url": "https://entry.example.com:39399"
+    },
+    {
+      "case": "测试当前入口",
+      "kind": "remote-primary-feedback success",
+      "text": "浏览器预览：入口验证通过，当前主链路未改变。",
+      "toast": false
+    },
+    {
+      "case": "启停清除旧提示",
+      "cleared": true,
+      "text": "修改正在使用的 FRP 配置后，请先切回 zrok，再验证并应用新配置。"
+    }
+  ],
+  "prototype": [
+    {
+      "case": "原型失败保留入口",
+      "kind": "inline-status error",
+      "text": "FRP 公网验证超时，未应用切换。当前继续使用 zrok，请检查地址或稍后重试。",
+      "toast": false,
+      "url": "https://demo.shares.zrok.io"
+    },
+    {
+      "case": "原型停用保存",
+      "expected": true,
+      "text": "FRP 候选配置已保存；启用远程会话网页后可测试入口。"
+    },
+    {
+      "case": "原型停用时禁止测试zrok",
+      "disabled": true
+    },
+    {
+      "case": "原型成功无重复提示",
+      "oldNotice": false,
+      "text": "已切换为 FRP 主链路。请在远程设备打开下方新地址并登录。",
+      "toast": false
+    }
+  ],
+  "responsive": [
+    {
+      "background": "rgba(0, 0, 0, 0)",
+      "border": "0px",
+      "gridOverflow": false,
+      "leftOfButtons": true,
+      "ports": [
+        {
+          "appearance": "textfield",
+          "width": "80px"
+        },
+        {
+          "appearance": "textfield",
+          "width": "80px"
+        }
+      ],
+      "rowOverflow": false,
+      "verticalOverlap": true,
+      "width": 1200
+    },
+    {
+      "background": "rgba(0, 0, 0, 0)",
+      "border": "0px",
+      "gridOverflow": false,
+      "leftOfButtons": true,
+      "ports": [
+        {
+          "appearance": "textfield",
+          "width": "80px"
+        },
+        {
+          "appearance": "textfield",
+          "width": "80px"
+        }
+      ],
+      "rowOverflow": false,
+      "verticalOverlap": true,
+      "width": 920
+    },
+    {
+      "background": "rgba(0, 0, 0, 0)",
+      "border": "0px",
+      "gridOverflow": false,
+      "leftOfButtons": true,
+      "ports": [
+        {
+          "appearance": "textfield",
+          "width": "80px"
+        },
+        {
+          "appearance": "textfield",
+          "width": "80px"
+        }
+      ],
+      "rowOverflow": false,
+      "verticalOverlap": true,
+      "width": 800
+    },
+    {
+      "background": "rgba(0, 0, 0, 0)",
+      "border": "0px",
+      "gridOverflow": false,
+      "leftOfButtons": true,
+      "ports": [
+        {
+          "appearance": "textfield",
+          "width": "80px"
+        },
+        {
+          "appearance": "textfield",
+          "width": "80px"
+        }
+      ],
+      "rowOverflow": false,
+      "verticalOverlap": true,
+      "width": 400
+    }
+  ]
+}

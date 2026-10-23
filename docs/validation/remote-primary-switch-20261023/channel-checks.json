@@ -1,0 +1,4 @@
+{
+  "checksPassed": 8,
+  "scope": "实际 channels.js 的 Origin 校验与双线路命名，隔离 VM 执行"
+}

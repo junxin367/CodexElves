@@ -10,7 +10,7 @@ aes-gcm.workspace = true
 anyhow.workspace = true
 async-trait = "0.1"
 axum = { version = "0.8", features = ["json", "tokio", "http1", "ws"], default-features = false }
-axum-server = { version = "0.8", default-features = false }
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"], default-features = false }
 base64.workspace = true
 directories.workspace = true
 flate2.workspace = true
@@ -20,6 +20,7 @@ if-addrs.workspace = true
 image.workspace = true
 reqwest.workspace = true
 ring = "0.17"
+rustls = { version = "0.23", features = ["ring", "std"], default-features = false }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,0 +1,30 @@
+{
+  "date": "2026-10-23",
+  "scope": "仅本地交互原型，不涉及真实隧道",
+  "checks": [
+    {
+      "check": "切换 FRP 后 ngrok 区块和输入内容不变",
+      "passed": true
+    },
+    {
+      "check": "面包屑只切换表单",
+      "passed": true
+    },
+    {
+      "check": "FRP 切回 zrok",
+      "passed": true
+    },
+    {
+      "check": "FRP 验证失败后保留 zrok",
+      "passed": true
+    },
+    {
+      "check": "缺少 HTTPS 时禁用应用按钮",
+      "passed": true
+    },
+    {
+      "check": "隧道测试不冒充会话入口就绪",
+      "passed": true
+    }
+  ]
+}

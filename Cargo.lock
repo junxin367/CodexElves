@@ -104,6 +104,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -206,6 +215,7 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1df331683d982a0b9492b38127151e6453639cd34926eb9c07d4cd8c6d22bfc"
 dependencies = [
+ "arc-swap",
  "bytes",
  "either",
  "fs-err",
@@ -213,7 +223,11 @@ dependencies = [
  "http-body",
  "hyper",
  "hyper-util",
+ "pin-project-lite",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tower-service",
 ]
 
@@ -497,6 +511,7 @@ dependencies = [
  "reqwest 0.12.28",
  "ring",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

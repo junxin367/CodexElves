@@ -51,6 +51,13 @@ export type RemoteAccessStatus = {
   settings?: RemoteAccessSettings;
   accessKeyConfigured?: boolean;
   loginLocked?: boolean;
+  primary?: {
+    provider: PrimaryProvider;
+    publicUrl: string | null;
+    switching: boolean;
+    error?: string | null;
+    frp: FrpStatus;
+  };
   ngrok?: {
     configured: boolean;
     state: "stopped" | "starting" | "ready" | "error";
@@ -81,6 +88,29 @@ export type RemoteAccessCredentials = {
   key?: string;
   ngrokTokenConfigured?: boolean;
   ngrokToken?: string;
+  frpToken?: string;
+};
+
+export type PrimaryProvider = "zrok" | "frp";
+export type FrpConfig = {
+  serverAddr: string;
+  serverPort: number;
+  remotePort: number;
+  publicOrigin: string;
+  httpsMode: "provider" | "localCertificate";
+};
+export const defaultFrpConfig: FrpConfig = {
+  serverAddr: "", serverPort: 7000, remotePort: 0, publicOrigin: "", httpsMode: "provider",
+};
+export type FrpStatus = {
+  config: FrpConfig;
+  state: "stopped" | "starting" | "ready" | "error" | "https_required";
+  running: boolean;
+  tokenConfigured: boolean;
+  certificateName: string;
+  privateKeyName: string;
+  httpsConfigured: boolean;
+  error?: string | null;
 };
 
 export type ZrokAccessTest = {

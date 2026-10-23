@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CodexElves · 主链路切换原型</title>
+  <link rel="stylesheet" href="./style.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <svg class="svg-library" aria-hidden="true">
+    <defs>
+      <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="15" y="3" width="6" height="6" rx="1"/><rect x="3" y="15" width="6" height="6" rx="1"/><rect x="15" y="15" width="6" height="6" rx="1"/></symbol>
+      <symbol id="i-key" viewBox="0 0 24 24"><circle cx="15" cy="8" r="5"/><path d="m11 12-8 8v-4l3-3h3l2-2"/></symbol>
+      <symbol id="i-network" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="5" rx="1"/><rect x="2" y="17" width="6" height="5" rx="1"/><rect x="16" y="17" width="6" height="5" rx="1"/><path d="M12 7v5M5 17v-5h14v5"/></symbol>
+      <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 11a9 9 0 0 1-9 9 10 10 0 0 1-4-.9L3 21l1.8-5A9 9 0 1 1 21 11Z"/></symbol>
+      <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M10 18h4"/></symbol>
+      <symbol id="i-wand" viewBox="0 0 24 24"><path d="m4 20 12-12 4 4L8 24M14 3v3M20 4l-2 2M21 10h3M5 4v6M2 7h6"/></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2 7M3 4v7h7M12 7v5l3 2"/></symbol>
+      <symbol id="i-code" viewBox="0 0 24 24"><path d="m8 3-5 5 5 5m8-10 5 5-5 5M5 15v6h14v-6M13 2l-2 12"/></symbol>
+      <symbol id="i-palette" viewBox="0 0 24 24"><path d="M21 11a9 9 0 1 0-9 10h2a2 2 0 0 0 0-4h-1a2 2 0 0 1 0-4h5a3 3 0 0 0 3-2Z"/><path d="M7 8h.01M11 5h.01M16 7h.01M5 12h.01"/></symbol>
+      <symbol id="i-tool" viewBox="0 0 24 24"><path d="M14 3a6 6 0 0 0-7 8l-5 5a3 3 0 0 0 4 4l5-5a6 6 0 0 0 8-7l-4 4-4-4Z"/></symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24"><path d="m10 2-1 3-3 1-3-1-2 4 2 2v3l-2 2 2 4 3-1 3 1 1 3h4l1-3 3-1 3 1 2-4-2-2v-3l2-2-2-4-3 1-3-1-1-3Z" transform="translate(0 -1) scale(.95)"/><circle cx="11.5" cy="11" r="3"/></symbol>
+      <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V3H3v12h5"/></symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 8a9 9 0 0 0-15-3L2 8m0-6v6h6M4 16a9 9 0 0 0 15 3l3-3m0 6v-6h-6"/></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14A9 9 0 0 1 10 3a9 9 0 1 0 10 11Z"/></symbol>
+      <symbol id="i-rocket" viewBox="0 0 24 24"><path d="M9 15c-4 1-5 5-5 5s4-1 5-5ZM9 12l-4-1 3-5 5 1M12 15l1 4 5-3-1-5M8 12C12 4 17 3 21 3c0 4-1 9-9 13Z"/><circle cx="16" cy="8" r="1.5"/></symbol>
+      <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-2 2M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l2-2"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+      <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 3h7v7m0-7L10 14M10 3H3v18h18v-7"/></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H4v20h16V8ZM14 2v6h6M8 13h8M8 17h6"/></symbol>
+      <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 2 8 3v6c0 5-8 11-8 11S4 16 4 11V5Z"/><path d="m8 11 3 3 5-6"/></symbol>
+    </defs>
+  </svg>
+  <div class="review-bar">
+    <div class="review-title"><span class="review-dot"></span><strong>交互原型</strong><span class="review-divider"></span><span>主链路切换</span><small>所有操作仅演示</small></div>
+    <div class="review-controls"><label for="scenario">预览场景</label><select id="scenario"><option value="ready">FRP 已就绪</option><option value="missing">FRP 待配置 HTTPS</option><option value="failure">FRP 验证失败</option></select><button id="reset" class="review-reset">重置演示</button></div>
+  </div>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><img src="./logo.png" alt="" width="36" height="36"><div><strong>CodexElves</strong><small>管理控制台</small></div></div>
+      <nav aria-label="管理器导航">
+        <div class="nav-group"><p>工作台</p><button data-static><svg><use href="#i-grid"/></svg>概览</button><button data-static><svg><use href="#i-key"/></svg>供应商配置</button><button data-static><svg><use href="#i-network"/></svg>本地代理</button></div>
+        <div class="nav-group"><p>功能增强</p><button data-static><svg><use href="#i-chat"/></svg>会话管理</button><button class="selected" aria-current="page"><svg><use href="#i-phone"/></svg>远程会话</button><button data-static><svg><use href="#i-wand"/></svg>功能增强</button><button data-static><svg><use href="#i-clock"/></svg>Checkpoint</button></div>
+        <div class="nav-group"><p>扩展与外观</p><button data-static><svg><use href="#i-wand"/></svg>工具与插件</button><button data-static><svg><use href="#i-code"/></svg>脚本市场</button><button data-static><svg><use href="#i-palette"/></svg>皮肤管理</button></div>
+        <div class="nav-group"><p>系统管理</p><button data-static><svg><use href="#i-tool"/></svg>安装维护</button><button data-static><svg><use href="#i-settings"/></svg>设置</button></div>
+      </nav>
+      <div class="about"><svg><use href="#i-info"/></svg>关于<span>v0.5.4</span></div>
+    </aside>
+    <main>
+      <header class="topbar"><div><h1>远程会话</h1><p>设置手机网页访问、设备授权与原生会话交互</p></div><div class="top-actions"><span class="badge success"><i></i>代理运行中</span><button class="icon-button" id="theme" aria-label="切换预览主题"><svg><use href="#i-moon"/></svg></button><button class="button outline" data-static><svg><use href="#i-rocket"/></svg>重启 Codex</button><button class="icon-button" id="refresh" aria-label="刷新预览状态"><svg><use href="#i-refresh"/></svg></button></div></header>
+      <div class="page-content">
+        <article class="panel">
+          <section class="service-section">
+            <div class="section-heading"><div><h2>远程会话网页</h2><p>通过手机浏览器安全访问本机会话；修改监听地址或端口会断开当前连接。</p></div><div class="row-actions"><button class="toggle" id="service-toggle" role="switch" aria-checked="true" aria-label="启用远程会话网页"><span class="switch-track"></span><span id="service-label">已启用</span></button><button class="button primary" id="save-service">保存并应用</button></div></div>
+            <div class="service-grid">
+              <div class="field"><label for="bind">监听 IP 地址</label><input id="bind" value="127.0.0.1"><small>仅支持本机回环地址；公网访问由所选主链路转发。</small></div>
+              <div class="field"><label for="port">独立端口</label><input id="port" type="number" value="45222"></div>
+              <div class="field"><label for="expiry">设备授权有效期（小时）<span class="off-toggle"><span></span>已关闭</span></label><input id="expiry" value="未开启有效期限制（长期有效）" disabled><small>默认关闭，已授权设备长期有效。</small></div>
+            </div>
+          </section>
+          <section class="public-section">
+            <div class="section-heading public-heading"><div><div class="public-title-row"><h2>公网入口</h2>
+              <div class="breadcrumbs" role="tablist" aria-label="主链路配置">
+                <button id="tab-zrok" role="tab" aria-controls="form-zrok" aria-selected="false" tabindex="-1" data-provider="zrok">zrok</button><span class="slash" aria-hidden="true">/</span><button id="tab-frp" role="tab" aria-controls="form-frp" aria-selected="true" tabindex="0" data-provider="frp">frp</button>
+              </div></div><p>选择一种主链路连接本机会话，配置会分别保留。</p></div><div class="public-heading-status"><span class="badge success" id="active-badge"><i></i>当前生效：zrok</span><span class="provider-status" id="provider-status"><i></i>配置已就绪</span></div></div>
+            <div class="provider-panel" id="form-zrok" role="tabpanel" aria-labelledby="tab-zrok" hidden>
+              <div class="field"><label for="zrok-token">zrok token 或注册邮箱 <button class="inline-link" data-static><svg><use href="#i-external"/></svg>访问官网</button></label><div class="input-row"><input id="zrok-token" value="demo-zrok-token" spellcheck="false"><input id="zrok-name" value="demo" aria-label="固定公网名称"><button class="button secondary" data-demo-action="绑定信息已保存，可以测试并应用为主链路。">保存绑定</button></div><small>Codex 桌面已连接，固定公网名称已绑定。</small></div>
+              <div class="field zrok-url"><label for="zrok-url">固定公网地址</label><input id="zrok-url" value="https://demo.shares.zrok.io" readonly><small>关闭并重新启动 CodexElves 后复用同一地址。</small></div>
+            </div>
+            <div class="provider-panel" id="form-frp" role="tabpanel" aria-labelledby="tab-frp">
+              <div class="frp-grid">
+                <div class="field server-field"><label for="frp-server">服务器地址</label><input id="frp-server" value="hs.wwszxc.tax" spellcheck="false"></div>
+                <div class="field token-field"><label for="frp-token">Token</label><div class="secret-input"><input id="frp-token" type="password" value="demo-frp-token" autocomplete="off" spellcheck="false"><div class="input-tools"><button class="plain-icon" data-reveal="frp-token" aria-label="显示 FRP Token" aria-pressed="false"><svg><use href="#i-eye"/></svg></button><button class="plain-icon" data-copy="frp-token" aria-label="复制 FRP Token"><svg><use href="#i-copy"/></svg></button></div></div></div>
+                <div class="field port-field"><label for="frp-port">服务端口</label><input id="frp-port" type="number" min="1" max="65535" value="39397"></div>
+                <div class="field port-field"><label for="frp-remote-port">公网映射端口</label><input id="frp-remote-port" type="number" min="1" max="65535" value="39399"></div>
+                <div class="field span-all"><label for="frp-url">固定公网地址</label><input id="frp-url" type="url" autocomplete="off" value="https://remote.example.com:39399" placeholder="https://服务商提供的访问地址:端口" spellcheck="false"><small>填写手机访问的完整地址；可稍后填写，先保存并测试隧道。</small></div>
+              </div>
+            </div>
+            <div class="apply-row"><p id="apply-hint" role="status" aria-live="polite" aria-atomic="true">切换公网地址后，远程设备需用新地址重新登录。</p><div class="row-actions"><button class="button secondary" id="test-provider">保存并测试</button><button class="button primary" id="apply-provider">应用为主链路</button></div></div>
+            <div class="field current-entry"><label for="active-url">当前公网地址 <span class="entry-provider" id="entry-provider">zrok</span></label><div class="input-row"><div class="secret-input single-tool"><input id="active-url" value="https://demo.shares.zrok.io" readonly><div class="input-tools"><button class="plain-icon" data-copy="active-url" aria-label="复制当前公网地址"><svg><use href="#i-copy"/></svg></button></div></div><button class="button secondary" id="test-active">测试访问</button></div></div>
+            <div id="ngrok-block" class="field ngrok-field">
+              <label for="ngrok-token">ngrok Token</label>
+              <div class="input-row"><div class="secret-input"><input id="ngrok-token" type="password" value="demo-ngrok-token-preview-only" autocomplete="off"><div class="input-tools"><button class="plain-icon" data-reveal="ngrok-token" aria-label="显示 ngrok Token" aria-pressed="false"><svg><use href="#i-eye"/></svg></button><button class="plain-icon" data-copy="ngrok-token" aria-label="复制 ngrok Token"><svg><use href="#i-copy"/></svg></button></div></div><button class="button secondary" id="save-ngrok">保存并测试</button></div>
+              <small id="ngrok-status">第二通道已连接，安卓端将自动发现并同时使用。</small>
+            </div>
+          </section>
+          <section class="auth-section">
+            <div class="section-heading"><div><h2>访问密钥与设备授权</h2><p>访问密钥已设置。手机端输入此密钥即可连接，更换后旧设备需重新登录。</p></div></div>
+            <div class="field"><label for="access-key">设置访问密钥</label><div class="input-row"><div class="secret-input"><input id="access-key" type="password" value="demo-access-key" autocomplete="off"><div class="input-tools"><button class="plain-icon" data-reveal="access-key" aria-label="显示访问密钥" aria-pressed="false"><svg><use href="#i-eye"/></svg></button><button class="plain-icon" data-copy="access-key" aria-label="复制访问密钥"><svg><use href="#i-copy"/></svg></button></div></div><button class="button secondary" id="generate-key">生成</button><button class="button primary" data-demo-action="演示密钥已保存。">保存</button></div><small>支持 8–64 个非空格 ASCII 字符；输入框默认使用圆点遮挡，可点击小眼睛查看。</small></div>
+            <p class="empty-devices">尚无已授权设备。</p>
+          </section>
+        </article>
+        <p class="preview-footnote">原型中的域名、Token 及运行状态为演示数据。</p>
+      </div>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden><svg><use href="#i-check"/></svg><span></span></div>
+</body>
+</html>

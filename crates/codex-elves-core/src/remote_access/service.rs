@@ -208,6 +208,9 @@ fn supported_action(action: &str) -> bool {
             | "startZrok"
             | "testZrok"
             | "saveNgrok"
+            | "saveFrp"
+            | "testPrimaryRoute"
+            | "applyPrimaryRoute"
     )
 }
 
@@ -285,6 +288,14 @@ async fn admin(
     Ok(Json(response))
 }
 
+async fn save_frp(
+    state: State<ServiceState>,
+    headers: HeaderMap,
+    payload: Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    admin(state, RoutePath("saveFrp".into()), headers, payload).await
+}
+
 pub async fn run() -> anyhow::Result<()> {
     let directory = crate::paths::default_app_state_dir();
     let Some(_lock) = acquire_service_lock(&directory)? else {
@@ -304,6 +315,10 @@ pub async fn run() -> anyhow::Result<()> {
     let router = Router::new()
         .route("/health", get(health))
         .route("/admin/{action}", post(admin))
+        .route(
+            "/admin/saveFrp",
+            post(save_frp).layer(DefaultBodyLimit::max(160 * 1024)),
+        )
         .layer(DefaultBodyLimit::max(16 * 1024))
         .with_state(state);
     let server = axum_server::from_tcp(listener)?.serve(router.into_make_service());

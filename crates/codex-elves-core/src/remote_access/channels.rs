@@ -227,6 +227,7 @@ pub(super) async fn discover(
         .map_err(authorization_error)?;
     Ok(Json(
         json!({"ok":true,"schemaVersion":1,"deviceId":device.id,"serverId":state.controller.channels.epoch,
+        "primaryProvider":state.controller.primary.provider(),"primaryOrigin":state.controller.public_origin(),
         "origins":origins,"token":token,"mediaToken":media_token,"expiresAtMs":expires_at,"sendActions":["send","create","setGoal"],"requestRoutingVersion":2}),
     ))
 }

@@ -4,7 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { remoteAccessValidation, type RemoteAccessCredentials, type RemoteAccessSettings, type RemoteAccessStatus, type ZrokAccessTest } from "@/remote-access-types";
+import { PrimaryRouteControls, PrimaryRouteTabs } from "@/components/PrimaryRouteControls";
+import { remoteAccessValidation, type PrimaryProvider, type RemoteAccessCredentials, type RemoteAccessSettings, type RemoteAccessStatus, type ZrokAccessTest } from "@/remote-access-types";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const FIXED_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$/;
@@ -28,6 +29,8 @@ export function RemoteAccessScreen({
   onSuccess: (message: string) => void;
 }) {
   const [status, setStatus] = useState<RemoteAccessStatus | null>(null);
+  const [editingPrimary, setEditingPrimary] = useState<PrimaryProvider>("zrok");
+  const initializedPrimary = useRef(false);
   const [credentials, setCredentials] = useState<RemoteAccessCredentials | null>(null);
   const [loginLocked, setLoginLocked] = useState(false);
   const [zrokValue, setZrokValue] = useState(settings.zrokSetupValue);
@@ -100,10 +103,16 @@ export function RemoteAccessScreen({
     return () => { mounted.current = false; };
   }, []);
   useEffect(() => {
-    const active = ["checking", "downloading", "starting", "connecting"].includes(status?.zrok?.state || "");
+    if (!status?.primary || initializedPrimary.current) return;
+    initializedPrimary.current = true;
+    setEditingPrimary(status.primary.provider);
+  }, [status?.primary]);
+  useEffect(() => {
+    const active = status?.primary?.switching || status?.primary?.frp.state === "starting"
+      || ["checking", "downloading", "starting", "connecting"].includes(status?.zrok?.state || "");
     const timer = window.setInterval(() => void refresh(), active ? 500 : 5000);
     return () => clearInterval(timer);
-  }, [status?.zrok?.state]);
+  }, [status?.zrok?.state, status?.primary?.switching, status?.primary?.frp.state]);
   useEffect(() => {
     if (settings.zrokSetupValue === loadedZrokSetupValue.current) return;
     loadedZrokSetupValue.current = settings.zrokSetupValue;
@@ -146,7 +155,7 @@ export function RemoteAccessScreen({
       ? "下载程序"
       : zrokEmail
         ? "注册公网"
-        : "启动公网";
+        : status?.primary?.provider === "frp" ? "保存绑定" : "启动公网";
   const zrokActionDisabled = busy
     || !zrok
     || zrokTransitioning
@@ -235,7 +244,8 @@ export function RemoteAccessScreen({
     if (result.status !== "ok") throw new Error(result.message || "zrok 公网启动失败");
     fixedNameDirtyRef.current = false;
     setFixedNameValue(result.zrok?.fixedName || fixedName);
-    onSuccess(result.zrok?.state === "ready" ? "zrok 固定公网已启动。" : "zrok 固定公网正在启动并验证访问。");
+    onSuccess(result.primary?.provider === "frp" ? "zrok 绑定已保存，可验证并应用为主链路。"
+      : result.zrok?.state === "ready" ? "zrok 固定公网已启动。" : "zrok 固定公网正在启动并验证访问。");
   });
   const testPublicUrl = () => runApply(async () => {
     if (!publicUrl) return;
@@ -313,7 +323,7 @@ export function RemoteAccessScreen({
         <CardContent>
           {status?.error ? <p className="remote-access-error" role="alert">{status.error}</p> : null}
           <div className="remote-access-fields remote-access-fields-top remote-access-service-fields">
-            <div><Label htmlFor="remote-bind">监听 IP 地址</Label><Input id="remote-bind" value={settings.bindHost} onChange={event => patch({ bindHost: event.target.value.trim() })} /><small>仅支持本机回环地址；公网访问由 zrok 转发。</small></div>
+            <div><Label htmlFor="remote-bind">监听 IP 地址</Label><Input id="remote-bind" value={settings.bindHost} onChange={event => patch({ bindHost: event.target.value.trim() })} /><small>仅支持本机回环地址；公网访问由所选主链路转发。</small></div>
             <div><Label htmlFor="remote-port">独立端口</Label><Input id="remote-port" type="number" min={1} max={65535} value={settings.port} onChange={event => patch({ port: Number(event.target.value) })} /></div>
             <div>
               <div className="remote-access-expiry-heading">
@@ -356,14 +366,21 @@ export function RemoteAccessScreen({
         </CardContent>
         <CardHeader className="panel-head border-t border-border pt-6 pb-[10px]">
           <div className="panel-head-copy">
-            <CardTitle>公网入口 · zrok</CardTitle>
-            <CardDescription>绑定一次后复用固定公网地址；程序退出时远程网页与 zrok 同步停止。</CardDescription>
+            <div className="remote-public-title-row">
+              <CardTitle>公网入口</CardTitle>
+              <PrimaryRouteTabs value={editingPrimary} onChange={provider => { initializedPrimary.current = true; setEditingPrimary(provider); }} disabled={busy || Boolean(status?.primary?.switching)} />
+            </div>
+            <CardDescription>选择一种主链路连接本机会话，配置会分别保留。</CardDescription>
           </div>
           <div className="panel-head-actions flex items-center gap-3">
-            {renderZrokBadge()}
+            {status?.primary?.provider === "frp"
+              ? <span className={`zrok-status-badge ${status.primary.frp.state === "ready" ? "connected" : status.primary.frp.state === "error" ? "error" : "connecting"}`}><span className="zrok-status-dot" />当前主链路：FRP · {status.primary.frp.state === "ready" ? "可访问" : status.primary.frp.state === "starting" ? "正在启动" : status.primary.frp.state === "error" ? "异常" : "已停止"}</span>
+              : <><span className="text-xs text-muted-foreground">当前主链路：zrok</span>{renderZrokBadge()}</>}
           </div>
         </CardHeader>
         <CardContent>
+          <PrimaryRouteControls status={status} token={credentials?.frpToken} busy={busy} enabled={settings.enabled}
+            editing={editingPrimary} target={`${settings.bindHost}:${settings.port}`} command={command} run={run} refresh={refresh}>
           <div className="remote-access-fields">
             <div className="remote-access-wide">
               <div className="remote-access-field-heading">
@@ -457,6 +474,11 @@ export function RemoteAccessScreen({
               </div>
               <small>关闭并重新启动 CodexElves 后复用同一地址；首次访问若出现 zrok 提示页，请点击「Visit Share」。</small>
             </div>
+          </div>
+          {["connecting", "retry_wait", "error"].includes(zrok?.state || "") && zrok?.error ? <p className="remote-access-error" role="alert">{zrok.error}</p> : null}
+          {zrok?.state === "retry_wait" && zrok.retryAtMs ? <p className="remote-access-hint">将在 {new Date(zrok.retryAtMs).toLocaleTimeString()} 自动重试。</p> : null}
+          </PrimaryRouteControls>
+          <div className="remote-access-fields">
             <div className="remote-access-wide">
               <Label htmlFor="remote-ngrok-token">ngrok Token</Label>
               <div className="remote-access-input-row remote-access-key-row">
@@ -484,11 +506,9 @@ export function RemoteAccessScreen({
               </div>
               <small>{status?.ngrok?.state === "ready" ? "第二通道已连接，安卓端将自动发现并同时使用。"
                 : status?.ngrok?.state === "starting" ? "第二通道正在启动…"
-                  : status?.ngrok?.error || "保存后随 zrok 同步启动，安卓端自动连接，无需填写第二个域名。"}</small>
+                  : status?.ngrok?.error || "保存后随主链路同步启动，安卓端自动连接，无需填写第二个域名。"}</small>
             </div>
           </div>
-          {["connecting", "retry_wait", "error"].includes(zrok?.state || "") && zrok?.error ? <p className="remote-access-error" role="alert">{zrok.error}</p> : null}
-          {zrok?.state === "retry_wait" && zrok.retryAtMs ? <p className="remote-access-hint">将在 {new Date(zrok.retryAtMs).toLocaleTimeString()} 自动重试。</p> : null}
         </CardContent>
         <CardHeader className="panel-head border-t border-border pt-6 pb-[10px]">
           <div className="panel-head-copy">

@@ -1,0 +1,34 @@
+{
+  "date": "2026-10-23",
+  "scope": "实际 React 页面，浏览器预览后端；未连接真实隧道",
+  "checks": [
+    {
+      "check": "HTTP 隧道测试后仍禁止应用",
+      "passed": true
+    },
+    {
+      "check": "停止服务时允许保存 FRP 候选配置",
+      "passed": true
+    },
+    {
+      "check": "默认服务商 HTTPS 模式不要求本机证书",
+      "passed": true
+    },
+    {
+      "check": "保存 zrok 绑定不替换 FRP 主入口",
+      "passed": true
+    },
+    {
+      "check": "FRP 切回 zrok 后显示正确公网地址",
+      "passed": true
+    },
+    {
+      "check": "zrok 再切回 FRP，ngrok 输入草稿不变",
+      "passed": true
+    },
+    {
+      "check": "证书文件控件仅在高级模式下出现",
+      "passed": true
+    }
+  ]
+}

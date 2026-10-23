@@ -34,8 +34,10 @@ use crate::settings::{RemoteAccessSettings, SettingsStore};
 mod channels;
 mod credentials;
 mod diagnostics;
+mod frp_tunnel;
 mod image_preview;
 mod ngrok_tunnel;
+mod primary_route;
 mod service;
 mod video;
 mod workspace;
@@ -452,6 +454,10 @@ struct LiveService {
     error: Option<String>,
     zrok: ZrokTunnelService,
     ngrok: ngrok_tunnel::NgrokTunnelService,
+    frp: Option<frp_tunnel::Running>,
+    frp_start: Option<tokio::task::JoinHandle<anyhow::Result<frp_tunnel::Running>>>,
+    frp_error: Option<String>,
+    frp_retry_at: u64,
 }
 
 pub struct RemoteAccessController {
@@ -465,6 +471,7 @@ pub struct RemoteAccessController {
     events: broadcast::Sender<Value>,
     key_checks: Arc<tokio::sync::Semaphore>,
     public_origin: Arc<RwLock<Option<String>>>,
+    primary: primary_route::Primary,
     channels: channels::Channels,
     diagnostics: diagnostics::Diagnostics,
     images: RwLock<ImageRegistry>,
@@ -510,6 +517,7 @@ impl RemoteAccessController {
         let channels = channels::Channels::new();
         let ngrok =
             ngrok_tunnel::NgrokTunnelService::new(state_dir.clone(), channels.secondary.clone());
+        let primary = primary_route::Primary::new(&state_dir)?;
         Ok(Arc::new(Self {
             native,
             state_dir,
@@ -529,12 +537,17 @@ impl RemoteAccessController {
                 error: None,
                 zrok,
                 ngrok,
+                frp: None,
+                frp_start: None,
+                frp_error: None,
+                frp_retry_at: 0,
             }),
             running: AtomicBool::new(false),
             native_connected: AtomicBool::new(false),
             events,
             key_checks: Arc::new(tokio::sync::Semaphore::new(4)),
             public_origin,
+            primary,
             channels,
             diagnostics: diagnostics::Diagnostics::default(),
             images: RwLock::new(ImageRegistry::default()),
@@ -545,6 +558,9 @@ impl RemoteAccessController {
     }
 
     fn public_origin(&self) -> Option<String> {
+        if self.primary.provider() == primary_route::Provider::Frp {
+            return self.primary.frp_origin();
+        }
         self.public_origin
             .read()
             .unwrap_or_else(|error| error.into_inner())
@@ -818,29 +834,14 @@ impl RemoteAccessController {
             && key_error.is_none()
             && (live.server.is_some() || !settings.enabled)
         {
-            live.zrok
-                .reconcile(self.running.load(Ordering::SeqCst), &zrok_target)
-                .await;
-            let zrok = live.zrok.status();
-            *self
-                .channels
-                .primary
-                .write()
-                .unwrap_or_else(|e| e.into_inner()) = zrok["publicUrl"]
-                .as_str()
-                .filter(|origin| !origin.is_empty())
-                .map(str::to_owned);
-            let public_running = self.running.load(Ordering::SeqCst)
-                && zrok["bound"] == true
-                && zrok["publicUrl"]
-                    .as_str()
-                    .is_some_and(|origin| !origin.is_empty());
-            live.ngrok.reconcile(public_running, &zrok_target).await;
+            self.reconcile_primary(&mut live, &settings).await;
             drop(live);
             self.prune_stale_public_devices().await;
             return;
         }
         self.running.store(false, Ordering::SeqCst);
+        self.primary.generation.fetch_add(1, Ordering::SeqCst);
+        self.stop_frp(&mut live).await;
         self.native_connected.store(false, Ordering::SeqCst);
         self.publish_event(json!({"method":"remote/disconnected"}));
         if let Some(handle) = live.handle.take() {
@@ -883,24 +884,7 @@ impl RemoteAccessController {
             }
             Err(error) => live.error = Some(error.to_string()),
         }
-        live.zrok
-            .reconcile(self.running.load(Ordering::SeqCst), &zrok_target)
-            .await;
-        let zrok = live.zrok.status();
-        *self
-            .channels
-            .primary
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = zrok["publicUrl"]
-            .as_str()
-            .filter(|origin| !origin.is_empty())
-            .map(str::to_owned);
-        let public_running = self.running.load(Ordering::SeqCst)
-            && zrok["bound"] == true
-            && zrok["publicUrl"]
-                .as_str()
-                .is_some_and(|origin| !origin.is_empty());
-        live.ngrok.reconcile(public_running, &zrok_target).await;
+        self.reconcile_primary(&mut live, &settings).await;
         drop(live);
         self.prune_stale_public_devices().await;
     }
@@ -970,6 +954,7 @@ impl RemoteAccessController {
         let error = live.error.clone();
         let zrok = live.zrok.status();
         let ngrok = live.ngrok.status();
+        let primary = self.primary_status(&live);
         drop(live);
         let auth = self.auth.lock().await;
         json!({
@@ -980,7 +965,7 @@ impl RemoteAccessController {
             "devices":auth.devices.iter().filter(|device|device.expires_at_ms>now_ms())
                 .filter(|device|auth.access_key.as_ref().is_some_and(|key|device.key_id==key.id))
                 .map(Device::public).collect::<Vec<_>>(),
-            "settings":settings, "zrok":zrok, "ngrok":ngrok,
+            "settings":settings, "zrok":zrok, "ngrok":ngrok, "primary":primary,
             "accessKeyConfigured":auth.access_key.is_some(),
             "loginLocked":auth.login_locked
         })
@@ -988,6 +973,9 @@ impl RemoteAccessController {
 
     pub async fn admin(self: &Arc<Self>, action: &str, payload: Value) -> anyhow::Result<Value> {
         match action {
+            "saveFrp" | "testPrimaryRoute" | "applyPrimaryRoute" => {
+                self.primary_command(action, payload).await
+            }
             "status" | "apply" => {
                 let settings = SettingsStore::default().load()?.remote_access;
                 self.reconcile(settings.clone()).await;
@@ -1006,6 +994,7 @@ impl RemoteAccessController {
                 self.live.lock().await.zrok.register(email).await
             }
             "startZrok" => {
+                let _operation = self.primary.try_operation()?;
                 let settings = SettingsStore::default().load()?.remote_access;
                 self.reconcile(settings.clone()).await;
                 anyhow::ensure!(
@@ -1022,7 +1011,11 @@ impl RemoteAccessController {
                 live.zrok
                     .start_public(token, fixed_name, true, &zrok_target(&settings))
                     .await?;
-                live.ngrok.reconcile(true, &zrok_target(&settings)).await;
+                if self.primary.provider() == primary_route::Provider::Zrok {
+                    live.ngrok.reconcile(true, &zrok_target(&settings)).await;
+                } else {
+                    live.zrok.reconcile(false, &zrok_target(&settings)).await;
+                }
                 drop(live);
                 Ok(self.admin_status(&settings).await)
             }
@@ -1322,6 +1315,8 @@ pub async fn local_settings_command(action: &str, payload: Value) -> anyhow::Res
                 if let Some(token) = token {
                     credentials["ngrokToken"] = json!(token);
                 }
+                let frp = frp_tunnel::Saved::load(&directory, false).unwrap_or_default();
+                credentials["frpToken"] = json!(frp.token);
                 Ok(credentials)
             }
             "setKey" => {
@@ -1838,6 +1833,7 @@ pub fn web_router(
         .route("/icons/icon-512.png", get(static_web_asset))
         .route("/icons/apple-touch-icon.png", get(static_web_asset))
         .route("/api/login-status", get(login_status))
+        .route("/api/entry-check", get(|| async { StatusCode::NOT_FOUND }))
         .route("/api/connect", post(connect))
         .route("/api/session", get(session))
         .route("/api/channels", get(channels::discover))
@@ -1934,6 +1930,34 @@ async fn access_boundary(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     let external_origin = state.controller.public_origin();
+    let frp_ingress = request
+        .extensions()
+        .get::<frp_tunnel::Ingress>()
+        .map(|v| v.0.clone());
+    let active_host = external_origin
+        .as_ref()
+        .is_some_and(|origin| origin_matches_host(origin, host));
+    let active_frp = state.controller.primary.provider() == primary_route::Provider::Frp;
+    let accepted_frp_ingress = state.controller.primary.permits_frp(frp_ingress.as_deref());
+    if request.uri().path() == "/api/entry-check"
+        || !active_host
+        || (active_frp && !accepted_frp_ingress)
+    {
+        if let Some(response) =
+            state
+                .controller
+                .primary
+                .probe_response(host, frp_ingress.as_deref(), &request)
+        {
+            return response;
+        }
+    }
+    // A public FRP Host on the ordinary HTTP listener must not enable a plaintext login.
+    if (frp_ingress.is_some() && !(active_host && accepted_frp_ingress))
+        || (active_frp && active_host && !accepted_frp_ingress)
+    {
+        return ApiError::new(403, "FRP 入口尚未生效或请求未经过已验证的入口").into_response();
+    }
     let secondary_origins = state.controller.channels.origins();
     let mut origins = allowed_origins(&state.settings);
     origins.extend(external_origin.iter().cloned());
