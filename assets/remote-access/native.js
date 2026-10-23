@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 66) return;
+  if (window.__codexElvesRemoteAccess?.version === 68) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -110,7 +110,7 @@
   };
   const emit = event => {
     if (["remote/sidebarChanged", "thread/started", "thread/status/changed", "thread/name/updated",
-      "thread/archived", "thread/unarchived", "thread/deleted"].includes(event.method)) {
+      "thread/archived", "thread/unarchived", "thread/deleted", "turn/started", "turn/completed"].includes(event.method)) {
       for (const listener of sidebarListeners) {
         try { listener({ method: event.method, threadId: event.params?.threadId }); } catch {}
       }
@@ -223,7 +223,7 @@
     if (sidebarOnly && !unsubscribe.length && !sidebarUnsubscribe.length) {
       sidebarUnsubscribe.push(manager.addNotificationCallback([
         "thread/started", "thread/status/changed", "thread/name/updated",
-        "thread/archived", "thread/unarchived", "thread/deleted"
+        "thread/archived", "thread/unarchived", "thread/deleted", "turn/started", "turn/completed"
       ], event => {
         if (["thread/archived", "thread/deleted"].includes(event.method))
           nativeCatalog.delete(event.params?.threadId);
@@ -232,19 +232,7 @@
         emit(event);
       }));
       if (typeof manager.addConversationStateCallback === "function")
-        sidebarUnsubscribe.push(manager.addConversationStateCallback((id, conversation) => {
-          if (!conversation || isDeletedThread(id) || !nativeCatalog.has(id)) return;
-          if (conversation.sideConversation === true) {
-            nativeCatalog.delete(id);
-            emit({ method: "remote/sidebarChanged", params: { threadId: id } });
-            return;
-          }
-          const previous = sidebarSignatures.get(id);
-          const item = summary(conversation);
-          nativeCatalog.set(id, item);
-          if (previous !== sidebarSignatures.get(id))
-            emit({ method: "remote/sidebarChanged", params: { threadId: id } });
-        }));
+        sidebarUnsubscribe.push(manager.addConversationStateCallback(syncSidebarConversationState));
     }
     if (!sidebarOnly && !unsubscribe.length) {
       for (const dispose of sidebarUnsubscribe) { try { dispose?.(); } catch {} }
@@ -258,13 +246,7 @@
           syncPendingNotifications(id, conversation);
           if (observedRequestThreads.has(id)) syncBlockingRequests(id, conversation);
           if (asyncQuestionSignatures.has(id)) syncAsyncQuestions(id, conversation);
-          if (conversation && !isDeletedThread(id) && (nativeCatalog.has(id) || nativeSideThreads.has(id))) {
-            const previous = sidebarSignatures.get(id);
-            const item = summary(conversation);
-            if (!nativeSideThreads.has(id)) nativeCatalog.set(id, item);
-            if (previous !== sidebarSignatures.get(id)) emit({ method: "remote/sidebarChanged",
-              params: { threadId: id, parentThreadId: nativeSideThreads.get(id)?.parentThreadId } });
-          }
+          syncSidebarConversationState(id, conversation);
         }));
       refreshPendingNotifications();
     }
@@ -546,15 +528,23 @@
   let catalogLoaded = false;
   let catalogLoading = null;
   let catalogGeneration = 0;
+  function nativeListSummary(id) {
+    const conversation = manager.getConversation(id);
+    return manager.getThreadListSummary?.(id)
+      || conversation && manager.threadStore?.stateReaders?.getListSummary?.(conversation)
+      || manager.getThreadSummary?.(id) || null;
+  }
   function nativeUnreadState(thread, id) {
-    const current = typeof manager.getThreadListSummary === "function" ? manager.getThreadListSummary(id) : null;
+    const unread = manager.getThreadHasUnreadTurn?.(id);
+    if (typeof unread === "boolean") return unread;
+    const current = nativeListSummary(id);
     return current?.hasUnreadTurn === true || current?.hasUnreadTurn !== false && thread.hasUnreadTurn === true;
   }
   function sidebarPriority(id, current, unread, activityTimes) {
     const conversation = manager.getConversation(id);
     const view = conversation && manager.threadStore?.stateReaders?.getListState?.(conversation);
     const status = manager.getThreadRuntimeStatusEvidence?.(id)
-      || current.threadRuntimeStatus || current.status || { type: "idle" };
+      || conversation?.threadRuntimeStatus || current.threadRuntimeStatus || current.status || { type: "idle" };
     const type = typeof status === "string" ? status : status.type;
     const waiting = !!view?.pendingRequest
       || array(view?.unansweredAsyncQuestions?.questionIds ?? view?.unansweredAsyncQuestions).length > 0
@@ -580,7 +570,7 @@
   }
   function summary(thread, activityTimes) {
     const id = thread.conversationId || thread.id;
-    const current = manager.getThreadListSummary?.(id) || thread;
+    const current = nativeListSummary(id) || thread;
     // 目录读取可能比桌面缓存新；随后采用旧摘要时不能把更新时间回退。
     const updatedAt = Math.max(timestamp(current.updatedAt), timestamp(thread.updatedAt),
       nativeCatalog.get(id)?.updatedAt || 0);
@@ -596,11 +586,57 @@
     sidebarSignatures.set(id, JSON.stringify([result.title, updatedAt, result.recencyAt, unread, status, priority]));
     return result;
   }
-  function completedSideThreadUnread(thread) {
-    const item = summary(thread);
+  function syncSidebarConversationState(id, conversation) {
+    if (isDeletedThread(id)) return;
+    if (!conversation) {
+      if (sidebarSignatures.delete(id))
+        emit({ method: "remote/sidebarChanged", params: { threadId: id } });
+      return;
+    }
+    const side = conversation.sideConversation === true || nativeSideThreads.has(id);
+    if (!side && !nativeCatalog.has(id)) return;
+    const previous = sidebarSignatures.get(id);
+    const item = summary(conversation);
+    if (side) nativeCatalog.delete(id);
+    else nativeCatalog.set(id, item);
+    if (previous !== sidebarSignatures.get(id)) emit({ method: "remote/sidebarChanged",
+      params: { threadId: id, parentThreadId: side
+        ? conversation.forkedFromId ?? nativeSideThreads.get(id)?.parentThreadId : undefined } });
+  }
+  function completedSideThreadUnread(thread, item = summary(thread)) {
     const status = typeof item.status === "string" ? item.status : item.status?.type;
     return item.hasUnreadTurn === true && !item.priority.active
       && item.priority.attentionState !== "waiting" && !["waiting", "systemError"].includes(status);
+  }
+  function recentSideThreadEntries() {
+    // 原生关闭侧边标签时会丢弃内存会话，直接读取内存即可覆盖生命周期，
+    // 不让最近列表首屏依赖侧边面板模块的动态加载。
+    const conversations = manager.threadStore?.getCachedConversations?.()
+      || [...nativeSideThreads.keys()].map(id => manager.getConversation(id)).filter(Boolean);
+    return array(conversations).flatMap(conversation => {
+      const threadId = conversation.conversationId || conversation.id;
+      const parentThreadId = conversation.forkedFromId;
+      if (conversation.sideConversation !== true || !threadId || typeof parentThreadId !== "string"
+          || !parentThreadId || threadId === parentThreadId || isDeletedThread(threadId)
+          || isDeletedThread(parentThreadId) || subagentIdentity(conversation)) return [];
+      return [{ threadId, parentThreadId }];
+    });
+  }
+  function sideThreadAttentionByParent(entries, activityTimes) {
+    const parents = new Map();
+    for (const entry of entries) {
+      const conversation = manager.getConversation(entry.threadId);
+      if (!conversation) continue;
+      const item = summary(conversation, activityTimes);
+      const active = item.priority.active === true;
+      const waiting = item.priority.attentionState === "waiting";
+      const unread = completedSideThreadUnread(conversation, item);
+      if (!active && !waiting && !unread) continue;
+      const attention = parents.get(entry.parentThreadId) || { active: false, waiting: false, unread: false };
+      attention.active ||= active; attention.waiting ||= waiting; attention.unread ||= unread;
+      parents.set(entry.parentThreadId, attention);
+    }
+    return parents;
   }
   function sortMode(value, preferences) {
     return value === "manual" && preferences.manualSortVersion === 1 ? "manual" : "updated_at";
@@ -608,7 +644,7 @@
   async function sidebar(payload = {}) {
     const readGeneration = catalogGeneration;
     const recentOnly = payload.recentOnly === true;
-    const sideEntries = recentOnly ? [...nativeSideThreads.values()] : await sideThreadEntries();
+    const sideEntries = recentOnly ? recentSideThreadEntries() : await sideThreadEntries();
     const sideIds = new Set(sideEntries.map(entry => entry.threadId));
     for (const id of sideIds) nativeCatalog.delete(id);
     const keys = recentOnly ? ["local-projects", "thread-project-assignments", "projectless-thread-ids"]
@@ -696,6 +732,7 @@
     }));
     const assignments = stored["thread-project-assignments"] || {};
     const projectless = new Set(array(stored["projectless-thread-ids"]));
+    const sideAttention = sideThreadAttentionByParent(sideEntries, activityTimes);
     const threads = [...nativeCatalog.values()].filter(thread => !sideIds.has(thread.id)).map(thread => {
       const assigned = assignments[thread.id];
       let projectId = typeof assigned === "string" ? assigned : assigned?.projectKind === "local" ? assigned.projectId : null;
@@ -705,6 +742,7 @@
       }
       const pinned = pinnedIds.includes(thread.id);
       return { ...thread, projectId, pinned,
+        ...(sideAttention.has(thread.id) ? { sideThreadAttention: sideAttention.get(thread.id) } : {}),
         priority: { ...thread.priority, eligible: thread.priority.eligible && (!pinned || !sidebarPriorityOptions.showPinned) } };
     });
     const manualOrder = stored["sidebar-project-thread-orders"] || {};
@@ -4271,7 +4309,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 66, call,
+    version: 68, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();

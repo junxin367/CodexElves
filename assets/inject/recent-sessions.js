@@ -1,5 +1,5 @@
 (() => {
-  const version = 12;
+  const version = 13;
   if (window.__codexElvesRecentSessions?.version === version) return;
   window.__codexElvesRecentSessions?.dispose?.();
 
@@ -37,7 +37,7 @@
   function persistentCacheKey() {
     return options.cacheScope || window.__CODEX_ELVES_SESSION_CACHE_SCOPE__ ? cachePrefix + cacheScope : null;
   }
-  function compactSnapshot(value) {
+  function compactSnapshot(value, includeSideAttention = true) {
     const sides = new Set(value.sideThreadIds || []);
     const suppressed = window.__codexElvesSuppressedThreadIds
       || new Set((window.__CODEX_ELVES_SUPPRESSED_THREADS__ || []).map(normalizedId));
@@ -48,7 +48,12 @@
         createdAt: Number(item.createdAt) || 0, updatedAt: Number(item.updatedAt) || 0,
         recencyAt: Number(item.recencyAt) || 0, hasUnreadTurn: item.hasUnreadTurn === true,
         status: item.status, priority: item.priority, projectId: item.projectId ?? null,
-        pinned: item.pinned === true
+        pinned: item.pinned === true,
+        ...(includeSideAttention && item.sideThreadAttention ? { sideThreadAttention: {
+          active: item.sideThreadAttention.active === true,
+          waiting: item.sideThreadAttention.waiting === true,
+          unread: item.sideThreadAttention.unread === true
+        } } : {})
       }));
     return {
       ok: true, recent: threads(value.recent), pinnedThreads: threads(value.pinnedThreads),
@@ -79,7 +84,7 @@
     }
     if (!validCache(record)) return;
     try {
-      snapshot = compactSnapshot(record.snapshot);
+      snapshot = compactSnapshot(record.snapshot, false);
       signature = JSON.stringify(snapshot);
       cachedSnapshot = true;
       snapshotComplete = true;
@@ -103,7 +108,8 @@
   function rememberSnapshot(changed = false, force = false) {
     if (!snapshot || cachedSnapshot || !snapshotComplete) return;
     window.__codexElvesRecentSessionsSnapshotCache = {
-      version: 1, scope: cacheScope, savedAt: snapshotSavedAt, snapshot
+      version: 1, scope: cacheScope, savedAt: snapshotSavedAt,
+      snapshot: compactSnapshot(snapshot, false)
     };
     const elapsed = Date.now() - lastCacheWriteAt;
     if (!persistentCacheKey() || !changed && !force && elapsed < 60000) return;
@@ -124,14 +130,14 @@
     if (active) render();
   }
   function attention(item) {
-    if (["waiting", "unread", "active", "idle"].includes(item.priority?.attentionState))
-      return item.priority.attentionState;
+    const side = item.sideThreadAttention;
+    const own = item.priority?.attentionState;
     const status = item.status?.status || item.status;
     const type = typeof status === "string" ? status : status?.type;
-    if (type === "waiting" || (status?.activeFlags || []).some(flag =>
-      flag === "waitingOnApproval" || flag === "waitingOnUserInput")) return "waiting";
-    if (item.hasUnreadTurn) return "unread";
-    return type === "active" || type === "inProgress" ? "active" : "idle";
+    if (side?.waiting || own === "waiting" || !own && (type === "waiting" || (status?.activeFlags || []).some(flag =>
+      flag === "waitingOnApproval" || flag === "waitingOnUserInput"))) return "waiting";
+    if (side?.unread || own === "unread" || item.hasUnreadTurn) return "unread";
+    return side?.active || own === "active" || !own && (type === "active" || type === "inProgress") ? "active" : "idle";
   }
   const eligible = item => item.priority?.eligible !== false;
   const needsPriority = item => eligible(item) && attention(item) !== "idle";
@@ -602,9 +608,10 @@
       element("span", "codex-recent-project", projectName(item)));
     const tail = element("div", "codex-recent-row-tail");
     const state = attention(item);
-    const running = state !== "waiting" && (typeof item.priority?.active === "boolean"
-      ? item.priority.active : ["active", "inProgress"].includes(item.status?.type || item.status));
-    if (running || item.hasUnreadTurn || state === "waiting") {
+    const running = state !== "waiting" && (item.sideThreadAttention?.active === true
+      || (typeof item.priority?.active === "boolean" ? item.priority.active
+        : ["active", "inProgress"].includes(item.status?.type || item.status)));
+    if (running || state === "unread" || state === "waiting") {
       const indicator = element("span", "codex-recent-state");
       indicator.dataset.active = String(running);
       indicator.title = state === "waiting" ? "等待你的回复" : running ? "正在运行" : "有未读消息";
@@ -696,7 +703,11 @@
     active = true; revision += 1;
     priorityIds = null; priorityKnownIds = new Set(); limit = 40; collapsed.clear();
     restoreSnapshot();
-    if (snapshot) cachedSnapshot = true;
+    if (snapshot) {
+      snapshot = compactSnapshot(snapshot, false);
+      signature = JSON.stringify(snapshot);
+      cachedSnapshot = true;
+    }
     root = element("div"); root.setAttribute("data-codex-recent-sessions-root", "true");
     root.setAttribute("role", "region"); root.setAttribute("aria-label", "最近会话");
     feedback = element("div", "codex-recent-feedback"); feedback.setAttribute("role", "status");

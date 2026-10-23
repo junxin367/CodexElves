@@ -2018,7 +2018,7 @@ function cachedReadingPosition(snapshot, position) {
 function sidebarSnapshot(value) {
   const { unreadSideThreads, ...snapshot } = value;
   const displayThread = item => {
-    const { status, priority, hasUnreadTurn, requests, queuedMessages, queuedEdits, ...display } = item;
+    const { status, priority, hasUnreadTurn, sideThreadAttention, requests, queuedMessages, queuedEdits, ...display } = item;
     return display;
   };
   return { ...snapshot,
@@ -2069,7 +2069,7 @@ async function restoreReadViews(value) {
       && saved.savedSidebar.recent.every(validSummary) && saved.savedSidebar.pinnedThreads.every(validSummary)
       && saved.savedSidebar.projects.every(project => validSummary(project) && Array.isArray(project.threads)
         && project.threads.every(validSummary)))
-    sidebar = saved.savedSidebar;
+    sidebar = sidebarSnapshot(saved.savedSidebar);
   if (saved.modelCatalog && Array.isArray(saved.modelCatalog.models)
       && saved.modelCatalog.models.every(model => model && typeof model.model === "string"
         && (model.supportedReasoningEfforts == null || Array.isArray(model.supportedReasoningEfforts)))
@@ -5604,14 +5604,14 @@ function sidebarUpdatedAt(item) {
   return item.updatedAt || item.recencyAt || item.createdAt || 0;
 }
 function sidebarAttentionState(item) {
-  if (["waiting", "unread", "active", "idle"].includes(item.priority?.attentionState))
-    return item.priority.attentionState;
+  const side = item.sideThreadAttention;
+  const own = item.priority?.attentionState;
   const status = item.status?.status || item.status;
   const type = typeof status === "string" ? status : status?.type;
-  if (type === "waiting" || (status?.activeFlags || []).some(flag =>
-    flag === "waitingOnApproval" || flag === "waitingOnUserInput")) return "waiting";
-  if (item.hasUnreadTurn) return "unread";
-  return type === "active" || type === "inProgress" ? "active" : "idle";
+  if (side?.waiting || own === "waiting" || !own && (type === "waiting" || (status?.activeFlags || []).some(flag =>
+    flag === "waitingOnApproval" || flag === "waitingOnUserInput"))) return "waiting";
+  if (side?.unread || own === "unread" || item.hasUnreadTurn) return "unread";
+  return side?.active || own === "active" || !own && (type === "active" || type === "inProgress") ? "active" : "idle";
 }
 function renderSidebar() {
   syncSideThreadUnread();
@@ -5681,10 +5681,11 @@ function renderSidebar() {
     } else title.replaceChildren(element("span", "thread-label", item.title));
     if (selectedId === item.id) title.setAttribute("aria-current", "page");
     const attention = sidebarAttentionState(item);
-    const active = attention !== "waiting" && (typeof item.priority?.active === "boolean" ? item.priority.active : isActive(item));
+    const active = attention !== "waiting" && (item.sideThreadAttention?.active === true
+      || (typeof item.priority?.active === "boolean" ? item.priority.active : isActive(item)));
     if (scope === "pinned") title.prepend(icon("chat"));
     container.append(title);
-    if (active || item.hasUnreadTurn || attention === "waiting") {
+    if (active || attention === "unread" || attention === "waiting") {
       const state = element("span", `thread-state${active ? " active" : " unread"}`);
       state.title = attention === "waiting" ? "等待你的回复" : active ? "正在运行" : "有未读消息";
       state.setAttribute("role", "img"); state.setAttribute("aria-label", state.title);
@@ -11001,6 +11002,10 @@ function receiveCompactionLifecycle(event, params) {
     }
   }
 }
+function scheduleSidebarRefresh() {
+  clearTimeout(sidebarTimer);
+  sidebarTimer = setTimeout(() => void loadSidebar().catch(() => {}), 1200);
+}
 function receive(event) {
   scheduleRelatedMenuRefresh(event);
   if (event.method === "remote/notification") return;
@@ -11031,6 +11036,7 @@ function receive(event) {
       .catch(error => notice(error.message, true));
     if (relatedSessionView?.kind === "side" && relatedSessionView.parentThreadId === eventThreadId)
       scheduleReload();
+    scheduleSidebarRefresh();
     return;
   }
   if (event.method === "thread/deleted" && typeof eventThreadId === "string") {
@@ -11056,8 +11062,7 @@ function receive(event) {
     } else if (!snapshot && typeof id === "string") {
       invalidateBlockingRequests(id, params.requestId, resolved);
     }
-    clearTimeout(sidebarTimer);
-    sidebarTimer = setTimeout(() => void loadSidebar().catch(() => {}), 1200);
+    scheduleSidebarRefresh();
     return;
   }
   const pendingClientId = pending?.payload?.clientUserMessageId ?? pending?.confirmationClientUserMessageId;
@@ -11065,8 +11070,7 @@ function receive(event) {
       && typeof pendingClientId === "string" && params.item && acceptedSendItem([params.item], pendingClientId))
     void resolvePending();
   if (event.method === "remote/asyncQuestionsChanged") {
-    clearTimeout(sidebarTimer);
-    sidebarTimer = setTimeout(() => void loadSidebar().catch(() => {}), 1200);
+    scheduleSidebarRefresh();
     if (params.threadId === selectedId) {
       notifiedQuestions = Array.isArray(params.requests) ? params.requests : [];
       ++questionVersion;
@@ -11214,9 +11218,9 @@ function receive(event) {
   if (event.method === "skills/changed") {
     void refreshSkillCatalog().catch(() => {});
   }
-  if (["thread/started", "turn/completed", "remote/sidebarChanged", "thread/name/updated", "thread/status/changed",
+  if (["thread/started", "turn/started", "turn/completed", "remote/sidebarChanged", "thread/name/updated", "thread/status/changed",
     "remote/requestsChanged", "serverRequest/resolved"].includes(event.method)) {
-    clearTimeout(sidebarTimer); sidebarTimer = setTimeout(() => void loadSidebar().catch(() => {}), 1200);
+    scheduleSidebarRefresh();
   }
 }
 function disconnect() {
