@@ -28,6 +28,7 @@ import androidx.webkit.ProxyConfig;
 import androidx.webkit.ProxyController;
 import androidx.webkit.WebStorageCompat;
 import androidx.webkit.WebViewFeature;
+import org.json.JSONObject;
 import java.util.List;
 import java.util.function.Consumer;
 
@@ -128,7 +129,7 @@ final class BrowserSession {
         context = new MutableContextWrapper(activity);
         preferences = new BrowserPreferences(activity);
         domains = preferences.load(identity.origin());
-        proxy = new BrowserProxy(() -> {
+        proxy = new BrowserProxy(authority, () -> {
             try {
                 BrowserAuthority.Snapshot fresh = BrowserAuthority.read(authority);
                 if (!identity.owner().equals(fresh.owner())) return null;
@@ -183,22 +184,46 @@ final class BrowserSession {
             }
             @Override public void onPageStarted(WebView webView, String address, Bitmap favicon) {
                 ++pageGeneration;
+                diagnostic("native.browser.page", DiagnosticsPolicy.urlFields(address,
+                    "phase", "start", "generation", pageGeneration));
                 url = address; error = ""; changed();
             }
             @Override public void onPageFinished(WebView webView, String address) {
+                diagnostic("native.browser.page", DiagnosticsPolicy.urlFields(address,
+                    "phase", "complete", "generation", pageGeneration));
                 url = address; changed();
             }
             @Override public void onReceivedError(WebView webView, WebResourceRequest request, WebResourceError failure) {
-                if (request.isForMainFrame()) { error = "网页加载失败，请检查地址或网络后重试"; changed(); }
+                if (request.isForMainFrame()) {
+                    int code = failure.getErrorCode();
+                    diagnostic("native.browser.error", DiagnosticsPolicy.urlFields(
+                        request.getUrl().toString(), "phase", "failure",
+                        "errorCode", code, "errorType",
+                        code == WebViewClient.ERROR_TIMEOUT ? "timeout" : "network",
+                        "reason", code == WebViewClient.ERROR_TIMEOUT ? "timeout" : "load-failed",
+                        "generation", pageGeneration));
+                    error = "网页加载失败，请检查地址或网络后重试"; changed();
+                }
             }
             @Override public void onReceivedHttpError(WebView webView, WebResourceRequest request, WebResourceResponse response) {
-                if (request.isForMainFrame() && response.getStatusCode() >= 500) {
-                    error = "网页请求失败（" + response.getStatusCode() + "），请稍后重试"; changed();
+                if (request.isForMainFrame()) {
+                    diagnostic("native.browser.http", DiagnosticsPolicy.urlFields(
+                        request.getUrl().toString(), "phase", "response",
+                        "status", response.getStatusCode(),
+                        "mime", DiagnosticsPolicy.mime(response.getMimeType()),
+                        "reason", "http-error", "generation", pageGeneration));
+                    if (response.getStatusCode() >= 500) {
+                        error = "网页请求失败（" + response.getStatusCode() + "），请稍后重试"; changed();
+                    }
                 }
             }
             @Override public void onReceivedSslError(WebView webView, SslErrorHandler handler,
                 android.net.http.SslError failure) {
                 handler.cancel();
+                diagnostic("native.browser.ssl", DiagnosticsPolicy.urlFields(
+                    failure.getUrl(), "phase", "failure", "errorType", "ssl",
+                    "errorCode", failure.getPrimaryError(), "reason", "ssl-failed",
+                    "generation", pageGeneration));
                 // Only onReceivedError's isForMainFrame may replace the page with an error.
             }
             @Override public void onReceivedHttpAuthRequest(WebView webView, HttpAuthHandler handler, String host, String realm) {
@@ -209,6 +234,9 @@ final class BrowserSession {
                 else handler.cancel();
             }
             @Override public boolean onRenderProcessGone(WebView webView, RenderProcessGoneDetail detail) {
+                diagnostic("native.browser.renderer", DiagnosticsPolicy.fields(
+                    "phase", "failure", "errorType", "renderer",
+                    "reason", detail.didCrash() ? "renderer-crashed" : "renderer-killed"));
                 invalidate("浏览器页面已退出，请返回会话后重新打开");
                 return true;
             }
@@ -255,14 +283,27 @@ final class BrowserSession {
         ProxyConfig.Builder configuration = new ProxyConfig.Builder()
             .addProxyRule("http://" + BrowserRoutePolicy.PROXY_HOST + ":" + proxy.port())
             .removeImplicitRules().setReverseBypassEnabled(true);
-        for (String rule : BrowserRoutePolicy.proxyRules(domains)) configuration.addBypassRule(rule);
-        ProxyController.getInstance().setProxyOverride(configuration.build(), MAIN::post, () -> {
-            if (!closed && generation == proxyGeneration) {
-                routeReady = true;
-                proxy.setActive(attached && !home);
-                complete.run();
-            }
-        });
+        List<String> rules = BrowserRoutePolicy.proxyRules(domains);
+        for (String rule : rules) configuration.addBypassRule(rule);
+        diagnostic("native.browser.route", DiagnosticsPolicy.fields(
+            "phase", "request", "routeName", "proxy-config",
+            "count", domains.size(), "port", proxy.port()));
+        try {
+            ProxyController.getInstance().setProxyOverride(configuration.build(), MAIN::post, () -> {
+                if (!closed && generation == proxyGeneration) {
+                    routeReady = true;
+                    proxy.setActive(attached && !home);
+                    diagnostic("native.browser.route", DiagnosticsPolicy.fields(
+                        "phase", "success", "routeName", "proxy-config",
+                        "count", rules.size(), "port", proxy.port()));
+                    complete.run();
+                }
+            });
+        } catch (RuntimeException failure) {
+            diagnostic("native.browser.route", DiagnosticsPolicy.fields(
+                "phase", "failure", "routeName", "proxy-config",
+                "errorType", DiagnosticsPolicy.errorType(failure), "reason", "failed"));
+        }
     }
 
     List<String> domains() { return List.copyOf(domains); }
@@ -288,7 +329,10 @@ final class BrowserSession {
     void navigate(String input) {
         if (closed || !attached) return;
         if (!routeReady) throw new IllegalArgumentException("网络设置正在更新，请稍后再试");
-        String target = BrowserRoutePolicy.navigationUrl(input);
+        String target = BrowserRoutePolicy.navigationUrl(input, domains);
+        diagnostic("native.browser.navigation", DiagnosticsPolicy.urlFields(target,
+            "phase", "request", "routeName",
+            BrowserRoutePolicy.usesComputer(Uri.parse(target).getHost(), domains) ? "computer" : "device"));
         home = false; error = ""; url = target; proxy.setActive(true); ++pageGeneration;
         view.onResume(); view.resumeTimers(); view.loadUrl(target); changed();
     }
@@ -300,6 +344,9 @@ final class BrowserSession {
     }
     void reload() { if (!closed && attached && !home) { error = ""; view.reload(); changed(); } }
     private void changed() { if (!closed && listener != null) listener.changed(); }
+    private void diagnostic(String name, JSONObject fields) {
+        BrowserAuthority.recordDiagnostic(authority, name, fields);
+    }
 
     private void invalidate(String message) {
         if (closed) return;

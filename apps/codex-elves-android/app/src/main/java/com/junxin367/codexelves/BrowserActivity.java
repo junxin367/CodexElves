@@ -13,6 +13,7 @@ import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.IBinder;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -31,6 +32,7 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -47,6 +49,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     private ImageButton back, homeButton, reload, settingsButton;
     private ProgressBar progress;
     private BrowserSession session;
+    private IBinder authority;
     private boolean settings, resumed, ready;
     private android.window.OnBackInvokedCallback backCallback;
     private AlertDialog authDialog;
@@ -65,6 +68,10 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         line = getIntent().getIntExtra("line", Color.rgb(232, 232, 232));
         surface = getIntent().getIntExtra("surface", Color.rgb(249, 249, 249));
         fontSize = Math.max(12, Math.min(24, getIntent().getFloatExtra("fontSize", 14)));
+        authority = getIntent().getExtras() == null ? null
+            : getIntent().getExtras().getBinder(BrowserAuthority.EXTRA);
+        diagnostic("native.browser.lifecycle", DiagnosticsPolicy.fields(
+            "phase", "create", "sdk", Build.VERSION.SDK_INT));
         configureWindow();
         buildLayout();
         if (Build.VERSION.SDK_INT >= 33) {
@@ -72,8 +79,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
                 android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
         }
-        BrowserSession.acquire(this, getIntent().getExtras() == null ? null
-            : getIntent().getExtras().getBinder(BrowserAuthority.EXTRA), value -> {
+        BrowserSession.acquire(this, authority, value -> {
                 if (isFinishing() || isDestroyed()) return;
                 session = value;
                 if (resumed) attachSession();
@@ -304,6 +310,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
 
     @Override public void changed() { if (!isFinishing() && !isDestroyed()) render(); }
     @Override public void invalidated(String message) {
+        diagnostic("native.browser.lifecycle", DiagnosticsPolicy.fields(
+            "phase", "failure", "reason", "failed"));
         cancelFileChooser();
         ready = false;
         failure.setText(message); failure.setVisibility(View.VISIBLE);
@@ -414,6 +422,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         super.onPause();
     }
     @Override protected void onDestroy() {
+        diagnostic("native.browser.lifecycle", DiagnosticsPolicy.fields(
+            "phase", "destroy"));
         cancelFileChooser();
         if (session != null) session.detach(this);
         if (Build.VERSION.SDK_INT >= 33 && backCallback != null)
@@ -437,6 +447,9 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         InputMethodManager keyboard = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
         keyboard.hideSoftInputFromWindow(root.getWindowToken(), 0);
         root.requestFocus();
+    }
+    private void diagnostic(String name, JSONObject fields) {
+        BrowserAuthority.recordDiagnostic(authority, name, fields);
     }
     private int dp(float value) { return Math.round(value * getResources().getDisplayMetrics().density); }
     private LinearLayout column() {

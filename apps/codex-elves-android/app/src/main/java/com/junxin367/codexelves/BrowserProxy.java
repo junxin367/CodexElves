@@ -1,5 +1,6 @@
 package com.junxin367.codexelves;
 
+import android.os.IBinder;
 import org.json.JSONObject;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -43,6 +44,7 @@ final class BrowserProxy implements AutoCloseable {
     private static final int MAX_QUEUE = 256 * 1024;
     private final Supplier<Credentials> credentials;
     private final Listener listener;
+    private final IBinder authority;
     private final ServerSocket server;
     private final ExecutorService workers = Executors.newFixedThreadPool(8);
     private final Semaphore slots = new Semaphore(8);
@@ -60,8 +62,10 @@ final class BrowserProxy implements AutoCloseable {
     private volatile boolean closed;
     private volatile boolean active = true;
 
-    BrowserProxy(Supplier<Credentials> credentials, Collection<String> domains, Listener listener)
+    BrowserProxy(IBinder authority, Supplier<Credentials> credentials,
+        Collection<String> domains, Listener listener)
         throws IOException {
+        this.authority = authority;
         this.credentials = credentials;
         this.listener = listener;
         this.domains = List.copyOf(domains);
@@ -146,6 +150,8 @@ final class BrowserProxy implements AutoCloseable {
                 return;
             }
             ParsedRequest request = parseRequest(lines);
+            diagnostic("native.browser.proxy", DiagnosticsPolicy.fields(
+                "phase", "request", "host", request.host, "port", request.port));
             if (!active) throw new IOException("Browser is inactive");
             Credentials identity = credentials.get();
             if (identity == null) throw new IOException("Authorization expired");
@@ -172,6 +178,9 @@ final class BrowserProxy implements AutoCloseable {
                 tunnel.done.await(120, TimeUnit.SECONDS);
             }
         } catch (Exception failure) {
+            diagnostic("native.browser.proxy", DiagnosticsPolicy.fields(
+                "phase", "failure", "errorType", DiagnosticsPolicy.errorType(failure),
+                "reason", "failed"));
             if (!responseStarted && !socket.isClosed()) {
                 try {
                     socket.getOutputStream().write(("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n"
@@ -199,9 +208,18 @@ final class BrowserProxy implements AutoCloseable {
             throw new IOException("Invalid target");
         String host = BrowserRoutePolicy.normalizeHost(target.getHost());
         int port = target.getPort() == -1 ? connect ? 443 : 80 : target.getPort();
-        if (port < 1 || port > 65535 || BrowserRoutePolicy.reservedProxyHost(host)
-            || !BrowserRoutePolicy.usesComputer(host, domains))
+        if (port < 1 || port > 65535 || BrowserRoutePolicy.reservedProxyHost(host)) {
+            diagnostic("native.browser.proxy", DiagnosticsPolicy.fields(
+                "phase", "failure", "host", host, "port", Math.max(1, Math.min(65535, port)),
+                "routeName", "invalid-target", "reason", "failed"));
+            throw new IOException("Invalid proxy target");
+        }
+        if (!BrowserRoutePolicy.usesComputer(host, domains)) {
+            diagnostic("native.browser.proxy", DiagnosticsPolicy.fields(
+                "phase", "failure", "host", host, "port", port,
+                "routeName", "not-matched", "reason", "failed"));
             throw new IOException("Target is not a computer route");
+        }
         boolean upgrade = false;
         String hostHeader = null;
         List<String> headers = new ArrayList<>();
@@ -240,6 +258,10 @@ final class BrowserProxy implements AutoCloseable {
         return new ParsedRequest(host, port, connect, ByteString.of(rewritten.getBytes(StandardCharsets.ISO_8859_1)));
     }
 
+    private void diagnostic(String name, JSONObject fields) {
+        BrowserAuthority.recordDiagnostic(authority, name, fields);
+    }
+
     private static String readHeader(InputStream input) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         int matched = 0;
@@ -273,6 +295,8 @@ final class BrowserProxy implements AutoCloseable {
 
         @Override public void onOpen(WebSocket webSocket, Response response) {
             if (closed || !active || client.isClosed()) { webSocket.cancel(); finish(); return; }
+            diagnostic("native.browser.tunnel", DiagnosticsPolicy.fields(
+                "phase", "start", "host", target.host, "port", target.port));
             try {
                 webSocket.send(new JSONObject().put("host", target.host).put("port", target.port).toString());
             } catch (Exception invalid) { finish(); }
@@ -287,6 +311,8 @@ final class BrowserProxy implements AutoCloseable {
                     return;
                 }
                 connected = true; ready.countDown();
+                diagnostic("native.browser.tunnel", DiagnosticsPolicy.fields(
+                    "phase", "success", "host", target.host, "port", target.port));
             } catch (Exception invalid) { finish(); }
         }
 
@@ -315,6 +341,9 @@ final class BrowserProxy implements AutoCloseable {
         }
         @Override public void onClosed(WebSocket webSocket, int code, String reason) { finish(); }
         @Override public void onFailure(WebSocket webSocket, Throwable failure, Response response) {
+            diagnostic("native.browser.tunnel", DiagnosticsPolicy.fields(
+                "phase", "failure", "host", target.host, "port", target.port,
+                "errorType", DiagnosticsPolicy.errorType(failure), "reason", "failed"));
             if (response != null && response.code() == 401) listener.unauthorized();
             finish();
         }

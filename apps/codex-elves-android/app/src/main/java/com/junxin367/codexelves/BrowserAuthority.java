@@ -7,6 +7,8 @@ import android.os.Process;
 import android.os.RemoteException;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 /** A non-exported, same-UID capability passed directly to the browser Activity. */
 final class BrowserAuthority extends Binder {
@@ -15,14 +17,18 @@ final class BrowserAuthority extends Binder {
     private static final int REGISTER = FIRST_CALL_TRANSACTION + 1;
     private static final int INVALIDATED = FIRST_CALL_TRANSACTION + 2;
     private static final int UNREGISTER = FIRST_CALL_TRANSACTION + 3;
+    private static final int DIAGNOSTIC = FIRST_CALL_TRANSACTION + 4;
     static final String EXTRA = "browser-authority";
     record Snapshot(String owner, String origin, String cookie) { }
+    interface DiagnosticSink { void record(String name, JSONObject fields); }
     private final Snapshot identity;
+    private final DiagnosticSink diagnosticSink;
     private final ConcurrentHashMap<IBinder, IBinder.DeathRecipient> listeners = new ConcurrentHashMap<>();
     private volatile boolean valid = true;
 
-    BrowserAuthority(String origin, String cookie) {
+    BrowserAuthority(String origin, String cookie, DiagnosticSink diagnosticSink) {
         identity = new Snapshot(UUID.randomUUID().toString(), ServiceOrigin.normalize(origin), cookie);
+        this.diagnosticSink = diagnosticSink;
     }
 
     boolean valid() { return valid; }
@@ -90,7 +96,37 @@ final class BrowserAuthority extends Binder {
             if (reply != null) reply.writeNoException();
             return true;
         }
+        if (code == DIAGNOSTIC) {
+            String name = data.readString();
+            String rawFields = data.readString();
+            if (valid && diagnosticSink != null && DiagnosticsPolicy.validName(name)
+                && rawFields != null && rawFields.length() <= DiagnosticsPolicy.MAX_EVENT_CHARS) {
+                try {
+                    JSONObject fields = new JSONObject(rawFields);
+                    if (DiagnosticsPolicy.validFields(fields)) diagnosticSink.record(name, fields);
+                } catch (JSONException ignored) {
+                    // Ignore malformed diagnostics from the browser process.
+                }
+            }
+            return true;
+        }
         return false;
+    }
+
+    static void recordDiagnostic(IBinder authority, String name, JSONObject fields) {
+        if (authority == null || !DiagnosticsPolicy.validName(name)
+            || !DiagnosticsPolicy.validFields(fields)) return;
+        Parcel data = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(DESCRIPTOR);
+            data.writeString(name);
+            data.writeString(fields.toString());
+            authority.transact(DIAGNOSTIC, data, null, IBinder.FLAG_ONEWAY);
+        } catch (RemoteException | RuntimeException ignored) {
+            // Diagnostics must never change browser behavior.
+        } finally {
+            data.recycle();
+        }
     }
 
     static Snapshot read(IBinder authority) throws RemoteException {

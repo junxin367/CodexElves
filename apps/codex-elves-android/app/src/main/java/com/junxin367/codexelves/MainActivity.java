@@ -1514,7 +1514,10 @@ public final class MainActivity extends Activity {
             if (cookie == null) throw new IllegalStateException("设备授权已失效，请重新连接");
             if (browserAuthority == null || !browserAuthority.matches(currentOrigin, cookie)) {
                 invalidateBrowser();
-                browserAuthority = new BrowserAuthority(currentOrigin, cookie);
+                String authorityOrigin = currentOrigin;
+                browserAuthority = new BrowserAuthority(authorityOrigin, cookie,
+                    (name, fields) -> diagnostics.recordAtOrigin(
+                        authorityOrigin, "native", name, fields));
             }
             Bundle parameters = new Bundle();
             parameters.putBinder(BrowserAuthority.EXTRA, browserAuthority);

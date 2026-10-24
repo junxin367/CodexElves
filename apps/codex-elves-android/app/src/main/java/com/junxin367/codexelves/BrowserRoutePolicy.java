@@ -127,6 +127,10 @@ final class BrowserRoutePolicy {
     }
 
     static String navigationUrl(String input) {
+        return navigationUrl(input, List.of());
+    }
+
+    static String navigationUrl(String input, Collection<String> domains) {
         if (input == null) throw new IllegalArgumentException("请输入网址或搜索内容");
         String text = input.trim();
         if (text.isEmpty() || text.length() > 8192 || text.matches("(?s).*[\\x00-\\x1f\\x7f].*"))
@@ -169,7 +173,7 @@ final class BrowserRoutePolicy {
                 throw new IllegalArgumentException("端口必须为 1 到 65535");
             if (reservedProxyHost(host)) throw new IllegalArgumentException("该地址由浏览器内部代理使用");
             String scheme = explicit ? parsed.getScheme().toLowerCase(Locale.ROOT)
-                : usesComputer(host, List.of()) || hostPort || port >= 0 ? "http" : "https";
+                : usesComputer(host, domains) || hostPort || port >= 0 ? "http" : "https";
             String targetHost = host.contains(":") ? "[" + host + "]" : host;
             String path = parsed.getRawPath();
             String result = scheme + "://" + targetHost + (port < 0 ? "" : ":" + port)
