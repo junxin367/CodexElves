@@ -118,9 +118,9 @@ final class BrowserRoutePolicy {
                 rules.add(domain + ".");
             } else {
                 rules.add(domain);
-                rules.add("*." + domain);
+                rules.add("*" + domain);
                 rules.add(domain + ".");
-                rules.add("*." + domain + ".");
+                rules.add("*" + domain + ".");
             }
         }
         return rules;
