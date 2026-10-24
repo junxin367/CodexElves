@@ -276,10 +276,10 @@ export function mountSessionMenu({
     menu.append(tools);
     const changes = itemButton("变更", openChanges, []);
     changes.dataset.menuKey = "changes"; tools.append(changes);
-    const browser = itemButton("浏览器", openBrowser, []);
-    browser.dataset.menuKey = "browser"; tools.append(browser);
     const files = itemButton("文件", openFiles, []);
     files.dataset.menuKey = "files"; tools.append(files);
+    const browser = itemButton("浏览器", openBrowser, []);
+    browser.dataset.menuKey = "browser"; tools.append(browser);
     const data = cached?.data, entry = entries.get(owner), expected = owner;
     const toggleSubagents = element("button", "session-related-menu-item session-related-menu-heading-action session-related-menu-heading-toggle");
     toggleSubagents.type = "button"; toggleSubagents.tabIndex = -1;
