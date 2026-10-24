@@ -53,7 +53,10 @@ final class BrowserRoutePolicy {
     }
 
     static String normalizeDomain(String input) {
-        String host = normalizeHost(input);
+        if (input == null) throw new IllegalArgumentException("域名为空");
+        String value = input.trim();
+        if (value.startsWith("*.")) value = value.substring(2);
+        String host = normalizeHost(value);
         if (isIp(host)) throw new IllegalArgumentException("请填写域名，IP 地址按内网规则自动分流");
         return host;
     }

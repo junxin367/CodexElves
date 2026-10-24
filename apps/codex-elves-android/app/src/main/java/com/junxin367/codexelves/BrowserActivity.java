@@ -181,7 +181,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         TextView label = text("通过电脑访问的域名", fontSize, foreground);
         label.setTypeface(null, Typeface.BOLD); body.addView(label);
         LinearLayout addRow = row();
-        domainInput = input("例如 example.com", fontSize);
+        domainInput = input("例如 example.com 或 *.example.com", fontSize);
         domainInput.setBackground(rounded(surface, line, 12)); domainInput.setPadding(dp(12), 0, dp(12), 0);
         addRow.addView(domainInput, new LinearLayout.LayoutParams(0, dp(46), 1));
         addRow.addView(textButton("添加", this::addDomain));
