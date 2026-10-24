@@ -272,9 +272,17 @@ final class BrowserSession {
     }
     void saveDomains(List<String> values, Runnable complete) {
         preferences.save(identity.origin(), values);
+        List<String> previous = domains;
         domains = preferences.load(identity.origin());
+        boolean changed = !previous.equals(domains);
         proxy.updateRules(domains);
-        applyRules(complete);
+        applyRules(() -> {
+            if (changed && attached && !home) {
+                error = "";
+                view.reload();
+            }
+            complete.run();
+        });
     }
 
     void navigate(String input) {
