@@ -74,13 +74,18 @@ const fileIconPaths = {
   data: '<path d="M5 4c0-1 2-2 5-2s5 1 5 2-2 2-5 2-5-1-5-2ZM5 4v5c0 1 2 2 5 2s5-1 5-2V4M5 9v5c0 1 2 2 5 2s5-1 5-2V9"/>',
   component: '<path d="m10 2 7 4v8l-7 4-7-4V6z"/><path d="M10 2v8m7-4-7 4-7-4"/>'
 };
-function fileIcon(kind, expanded = false) {
+function fileIcon(kind) {
   const result = node("span", `session-files-icon session-files-icon-${kind === "folder" ? "folder" : kind}`);
   result.dataset.icon = kind;
   result.innerHTML = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${kind === "folder" ? fileIconPaths.folder : fileIconPaths[kind] || fileIconPaths.file}</svg>`;
-  if (kind === "folder") {
-    result.prepend(node("span", "session-files-folder-chevron", "›"));
+  return result;
+}
+function fileTwisty(isFolder, expanded = false) {
+  const result = node("span", "session-files-twist");
+  result.setAttribute("aria-hidden", "true");
+  if (isFolder) {
     result.dataset.expanded = String(expanded);
+    result.append(node("span", "session-files-folder-chevron", "›"));
   }
   return result;
 }
@@ -295,7 +300,7 @@ export function mountSessionFiles({
     button.setAttribute("aria-selected", String(!isFolder && renderedFile === file.path));
     if (isFolder) button.setAttribute("aria-expanded", String(isExpanded));
     button.classList.toggle("session-files-selected", !isFolder && renderedFile === file.path);
-    button.append(fileIcon(isFolder ? "folder" : fileIconKind(file.path), isExpanded));
+    button.append(fileTwisty(isFolder, isExpanded), fileIcon(isFolder ? "folder" : fileIconKind(file.path)));
     const copy = node("span", "session-tools-file-copy");
     copy.append(node("strong", "session-tools-file-name", file.name));
     if (searchResult) copy.append(node("span", "session-tools-file-directory", parentPath(file.path) || "项目根目录"));
