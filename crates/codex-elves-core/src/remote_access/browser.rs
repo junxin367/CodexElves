@@ -127,7 +127,14 @@ pub(super) async fn tunnel(
                 )
                 .await;
             }
-            let _ = tokio::time::timeout(Duration::from_secs(2), socket.close()).await;
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                socket.send(WebSocketMessage::Close(Some(CloseFrame {
+                    code: 1000,
+                    reason: "".into(),
+                }))),
+            )
+            .await;
         })
         .into_response())
 }
