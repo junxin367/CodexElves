@@ -937,6 +937,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-files-icon>svg{display:block;width:14px;height:14px}
 .session-files-folder-chevron{display:inline-block;width:7px;font-size:1rem;line-height:1;transform:rotate(0deg);transition:transform var(--duration-control)}
 .session-files-twist[data-expanded=true] .session-files-folder-chevron{transform:rotate(90deg)}
+.session-files-icon:not(.session-files-icon-folder)>svg{width:16px;height:16px}
 .session-files-icon-folder>svg{width:14px;height:14px}
 .session-files-icon-folder{color:#d69b35}
 .session-files-twist[data-expanded=true] + .session-files-icon-folder{color:#e5b64d}
