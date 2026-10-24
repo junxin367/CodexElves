@@ -920,10 +920,10 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 @media(pointer:coarse){.session-related-menu-item{min-height:44px}}
 /* /session-related-menu */
 .session-files-screen .session-tools-page{min-height:0}
-.session-files-list{padding:4px 8px 16px}
-.session-files-list .session-tools-file{position:relative;min-height:32px;height:32px;padding:3px 8px 3px calc(8px + var(--file-depth,0) * 18px);border-radius:4px;gap:5px;font-size:.82143rem;line-height:1.35;transition:background-color var(--duration-control),color var(--duration-control)}
-.session-files-list .session-tools-file::before{position:absolute;top:0;bottom:0;left:8px;width:calc(var(--file-depth,0) * 18px);background:repeating-linear-gradient(90deg,transparent 0 8px,color-mix(in srgb,var(--line) 75%,transparent) 8px 9px,transparent 9px 18px);content:"";pointer-events:none}
-.session-files-list .session-tools-file::after{position:absolute;top:50%;left:calc(8px + var(--file-depth,0) * 18px - 9px);width:9px;border-top:1px solid color-mix(in srgb,var(--line) 80%,transparent);content:"";pointer-events:none}
+.session-files-list{padding:2px 6px 12px}
+.session-files-list .session-tools-file{position:relative;min-height:30px;height:30px;padding:2px 6px 2px calc(6px + var(--file-depth,0) * 18px);border-radius:4px;gap:4px;font-size:.82143rem;line-height:1.25;transition:background-color var(--duration-control),color var(--duration-control)}
+.session-files-list .session-tools-file::before{position:absolute;top:0;bottom:0;left:6px;width:calc(var(--file-depth,0) * 18px);background:repeating-linear-gradient(90deg,transparent 0 8px,color-mix(in srgb,var(--line) 75%,transparent) 8px 9px,transparent 9px 18px);content:"";pointer-events:none}
+.session-files-list .session-tools-file::after{position:absolute;top:50%;left:calc(6px + var(--file-depth,0) * 18px - 9px);width:9px;border-top:1px solid color-mix(in srgb,var(--line) 80%,transparent);content:"";pointer-events:none}
 .session-files-list .session-tools-file[data-depth="0"]::after{display:none}
 .session-files-list .session-tools-file:hover{background:var(--hover)}
 .session-files-list .session-tools-file:focus-visible{position:relative;z-index:1;outline:2px solid color-mix(in srgb,var(--skill) 65%,transparent);outline-offset:-2px}
@@ -931,12 +931,12 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-files-list .session-tools-file.session-files-selected:hover{background:color-mix(in srgb,var(--skill) 24%,var(--side))}
 .session-files-list .session-tools-file:disabled{cursor:not-allowed;opacity:.58}
 .session-files-list .session-tools-file>*{position:relative;z-index:1}
-.session-files-tree-status{margin:0;min-height:28px;padding:6px 8px 6px calc(8px + var(--file-depth,0) * 18px);color:var(--muted);font-size:.75rem;line-height:1.35}
-.session-files-icon{display:inline-flex;align-items:center;justify-content:center;flex:0 0 18px;width:18px;height:18px;color:var(--muted)}
-.session-files-icon>svg{display:block;width:16px;height:16px}
+.session-files-tree-status{margin:0;min-height:24px;padding:4px 6px 4px calc(6px + var(--file-depth,0) * 18px);color:var(--muted);font-size:.75rem;line-height:1.25}
+.session-files-icon{display:inline-flex;align-items:center;justify-content:center;flex:0 0 16px;width:16px;height:16px;color:var(--muted)}
+.session-files-icon>svg{display:block;width:14px;height:14px}
 .session-files-folder-chevron{display:inline-block;width:7px;margin-right:1px;font-size:1rem;line-height:1;transform:rotate(0deg);transition:transform var(--duration-control)}
 .session-files-icon-folder[data-expanded=true] .session-files-folder-chevron{transform:rotate(90deg)}
-.session-files-icon-folder>svg{width:15px;height:15px}
+.session-files-icon-folder>svg{width:14px;height:14px}
 .session-files-icon-folder{color:#d69b35}
 .session-files-icon-folder[data-expanded=true]{color:#e5b64d}
 .session-files-icon-javascript,.session-files-icon-typescript{color:#d3a52e}
@@ -969,6 +969,6 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-files-selected-line{background:color-mix(in srgb,#3b82f6 16%,var(--bg))}
 .session-files-image{display:flex;align-items:flex-start;justify-content:center;padding:16px}
 .session-files-image>img{display:block;max-width:100%;height:auto}
-@media(pointer:coarse){
-  .session-files-list .session-tools-file{min-height:36px;height:36px}
+@media(pointer:coarse),(max-width:760px){
+  .session-files-list .session-tools-file{min-height:30px;height:30px}
 }
