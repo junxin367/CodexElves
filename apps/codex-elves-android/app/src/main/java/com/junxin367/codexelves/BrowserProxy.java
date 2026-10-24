@@ -337,7 +337,14 @@ final class BrowserProxy implements AutoCloseable {
         }
         void cancel() { finish(); socket.cancel(); }
         @Override public void onClosing(WebSocket webSocket, int code, String reason) {
-            webSocket.close(code, null); finish();
+            boolean valid = validCloseCode(code);
+            diagnostic("native.browser.tunnel", DiagnosticsPolicy.fields(
+                "phase", valid ? "complete" : "failure", "host", target.host, "port", target.port,
+                "closeCode", Math.max(0, Math.min(65535, code)),
+                "reason", valid ? "success" : "failed"));
+            try { webSocket.close(valid ? code : 1000, null); }
+            catch (IllegalArgumentException invalid) { webSocket.cancel(); }
+            finish();
         }
         @Override public void onClosed(WebSocket webSocket, int code, String reason) { finish(); }
         @Override public void onFailure(WebSocket webSocket, Throwable failure, Response response) {
@@ -347,6 +354,11 @@ final class BrowserProxy implements AutoCloseable {
             if (response != null && response.code() == 401) listener.unauthorized();
             finish();
         }
+    }
+
+    private static boolean validCloseCode(int code) {
+        return code == 1000 || code == 1001 || code == 1002 || code == 1003
+            || code >= 1007 && code <= 1014 || code >= 3000 && code <= 4999;
     }
 
     private static void closeSocket(Socket socket) {

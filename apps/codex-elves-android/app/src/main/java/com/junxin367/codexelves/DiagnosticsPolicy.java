@@ -125,7 +125,7 @@ final class DiagnosticsPolicy {
             return value instanceof Boolean;
         }
         if (set("status", "durationMs", "bytes", "sdk", "generation", "expectedBytes",
-            "loadedBytes", "line", "width", "height", "count", "port").contains(key)) {
+            "loadedBytes", "line", "width", "height", "count", "port", "closeCode").contains(key)) {
             if (!(value instanceof Number)) {
                 return false;
             }
@@ -141,6 +141,7 @@ final class DiagnosticsPolicy {
             }
             if ("port".equals(key)) return number >= 1 && number <= 65_535;
             if ("count".equals(key)) return number <= 10_000;
+            if ("closeCode".equals(key)) return number <= 65_535;
             return number <= 9_007_199_254_740_991d;
         }
         if (!(value instanceof String) || ((String) value).length() > 160) {
