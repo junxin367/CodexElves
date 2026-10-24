@@ -1,5 +1,30 @@
 import { videoPreviewMarkup } from "./attachments.js";
 
+function localFileReference(value, explicit = false) {
+  let path = String(value ?? "").trim(), line = null;
+  if (!path || path.length > 16384 || /[\u0000-\u001f\u007f<>"`]/u.test(path)) return null;
+  const position = /(?::([1-9]\d*)(?::[1-9]\d*)?|#L([1-9]\d*)(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)$/u.exec(path);
+  if (position) { line = Number(position[1] || position[2]); path = path.slice(0, position.index); }
+  if (/^file:/iu.test(path)) {
+    try {
+      const url = new URL(path);
+      if (url.hostname && url.hostname !== "localhost") return null;
+      path = decodeURIComponent(url.pathname);
+    } catch { return null; }
+  } else {
+    if (/^[a-z][a-z\d+.-]*:/iu.test(path) && !/^[a-z]:[\\/]/iu.test(path)) return null;
+    try { path = decodeURIComponent(path); } catch { return null; }
+  }
+  path = path.replaceAll("\\", "/");
+  if (/^\/[a-z]:\//iu.test(path)) path = path.slice(1);
+  if (path.startsWith("//") || path.startsWith("#") || /[\u0000-\u001f\u007f?#]/u.test(path)) return null;
+  const name = path.split("/").at(-1);
+  if (!name || name === "." || name === "..") return null;
+  if (!explicit && !/\.(?:md|mdx|txt|rst|log|json|jsonl|ya?ml|toml|xml|ini|conf|config|csv|tsv|js|mjs|cjs|jsx|ts|tsx|vue|svelte|css|scss|less|html?|rs|py|java|kt|kts|go|c|cc|cpp|h|hpp|cs|swift|sh|ps1|bat|sql|proto|gradle|properties|png|jpe?g|gif|webp|svg|pdf)$/iu.test(name)
+      && !/^(?:README|LICENSE|Dockerfile|Makefile|Cargo\.lock|\.gitignore|\.env)$/u.test(name)) return null;
+  return { path, name, line: Number.isSafeInteger(line) && line <= 1000000 ? line : null };
+}
+
 export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
 
   const purifier = createDOMPurify(globalThis.window);
@@ -62,11 +87,31 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
       : null;
     const skillPlaceholder = skill => `<span class="message-skill-reference" title="${escapeHtml(skill.path)}">${escapeHtml(skill.displayName || skill.name)}</span>`;
     let linkDepth = 0;
+    const fileLink = reference => `<a class="local-file-reference" href="#project-file" data-local-file-path="${escapeHtml(reference.path)}"${reference.line ? ` data-local-file-line="${reference.line}"` : ""} title="${escapeHtml(reference.path)}">${escapeHtml(reference.name)}</a>`;
+    const renderPaths = text => {
+      const pattern = /(?:file:\/\/\/|\/?[a-z]:[\\/]|\.{1,2}[\\/]|\/)?[\p{L}\p{N}_.@+~-]+(?:[\\/][\p{L}\p{N}_.@+~-]+)*(?::[1-9]\d*(?::[1-9]\d*)?|#L[1-9]\d*(?:C\d+)?)?/giu;
+      let result = "", start = 0;
+      for (const match of text.matchAll(pattern)) {
+        const candidate = match[0].replace(/[.,;!?]+$/u, "");
+        const reference = localFileReference(candidate);
+        if (!reference || match.index > 0 && /[\p{L}\p{N}_@:/\\.-]/u.test(text[match.index - 1])) continue;
+        result += escapeHtml(text.slice(start, match.index)) + fileLink(reference);
+        start = match.index + candidate.length;
+      }
+      return result + escapeHtml(text.slice(start));
+    };
     const renderText = renderer.text;
     renderer.text = function (token) {
       const html = renderText.call(this, token);
-      if (!skillPattern || linkDepth || token.type !== "text" || token.tokens) return html;
-      return html.replace(skillPattern, (_match, prefix, name) => `${prefix}${skillPlaceholder(skillNames.get(name))}`);
+      if (linkDepth || token.type !== "text" || token.tokens) return html;
+      const linked = renderPaths(token.text);
+      return skillPattern ? linked.replace(skillPattern, (_match, prefix, name) =>
+        `${prefix}${skillPlaceholder(skillNames.get(name))}`) : linked;
+    };
+    const renderCodespan = renderer.codespan;
+    renderer.codespan = function (token) {
+      const reference = !linkDepth && localFileReference(token.text);
+      return reference ? fileLink(reference) : renderCodespan.call(this, token);
     };
 
     renderer.code = ({ text, lang, raw }) => {
@@ -99,6 +144,8 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
         return `<a href="${escapeHtml(href)}"${title} target="_blank" rel="noopener noreferrer">${label}</a>`;
       }
       if (isLocalReference(token.href)) {
+        const reference = localFileReference(token.href, true);
+        if (reference) return fileLink(reference);
         return `<span class="local-file-reference" title="${escapeHtml(token.href)}">${label}</span>`;
       }
       return label;
@@ -135,10 +182,13 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
     ],
     ALLOWED_ATTR: [
       "align", "alt", "checked", "class", "decoding", "disabled", "href", "loading", "rel", "src",
-      "start", "target", "title", "type", "data-remote-media"
+      "start", "target", "title", "type", "data-remote-media", "data-local-file-path", "data-local-file-line"
     ],
     ALLOW_ARIA_ATTR: false,
     ALLOW_DATA_ATTR: false,
+    // This attribute is inert file metadata, never a navigable URI. Windows
+    // drive letters must survive the sanitizer's generic URI check.
+    ADD_URI_SAFE_ATTR: ["data-local-file-path"],
     ALLOW_UNKNOWN_PROTOCOLS: false,
     FORBID_ATTR: ["style"],
     FORBID_TAGS: [
@@ -148,6 +198,7 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
   };
 
   purifier.addHook("uponSanitizeAttribute", (_node, data) => {
+    if (data.attrName === "data-local-file-path" && !localFileReference(data.attrValue, true)) data.keepAttr = false;
     if (data.attrName === "href" && safeHref(data.attrValue) === null && safeImagePath(data.attrValue) === null) {
       data.keepAttr = false;
     }
@@ -158,8 +209,18 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
     }
   });
 
-  function markdown(text, remoteImages = [], { userMessage = false, skills = [], skillLink, remoteVideos = [] } = {}) {
+  function markdown(text, remoteImages = [], { userMessage = false, skills = [], skillLink, remoteVideos = [], inline = false } = {}) {
     const source = String(text ?? "");
+    if (inline) {
+      const renderer = new Renderer();
+      renderer.html = ({ text }) => escapeHtml(text);
+      renderer.link = function (token) { return inlineContent(this, token); };
+      renderer.image = ({ text }) => escapeHtml(text);
+      renderer.br = () => " ";
+      return purifier.sanitize(marked.parseInline(source.replace(/\uE200[^\uE201]*\uE201/g, ""), {
+        async: false, gfm: true, renderer
+      }), { ...sanitizeOptions, ALLOWED_TAGS: ["code", "del", "em", "strong"], ALLOWED_ATTR: [] });
+    }
     const html = marked.parse(userMessage ? source : source.replace(/\uE200[^\uE201]*\uE201/g, ""), {
       async: false,
       breaks: userMessage,

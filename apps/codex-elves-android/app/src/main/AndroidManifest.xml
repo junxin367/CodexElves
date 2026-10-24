@@ -44,6 +44,12 @@
                 android:resource="@xml/app_update_paths" />
         </provider>
         <activity
+            android:name=".BrowserActivity"
+            android:process=":browser"
+            android:exported="false"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
             android:name=".MainActivity"
             android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
             android:exported="true"

@@ -74,6 +74,7 @@ export function markdown(text, remoteImages = [], options = {}) {
   if (!source) return "";
   void loadRenderer();
   const plain = options.userMessage ? source : source.replace(/\uE200[^\uE201]*\uE201/g, "");
+  if (options.inline) return escapeHtml(plain);
   const message = status === "failed" ? "格式加载失败，正文仍可阅读" : "正在加载正文格式…";
   const retryLabel = attempt >= maximumRetries ? "刷新后重试格式加载" : "重试格式加载";
   return `<div class="markdown-plain-text">${escapeHtml(plain)}</div>`

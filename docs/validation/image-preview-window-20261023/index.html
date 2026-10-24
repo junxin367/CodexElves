@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>远程会话弹窗效果列表</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f5f6f8;color:#202329;font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+main{max-width:1440px;margin:auto;padding:28px}
+header{margin-bottom:22px}h1{margin:0 0 10px;font-size:26px;line-height:1.35}
+.rule{display:inline-block;margin:0 8px 8px 0;padding:5px 11px;border:1px solid #d9e3e1;border-radius:7px;background:#edf6f1;color:#276149;font-weight:600}
+.intro{margin:5px 0;color:#656b76}.list{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:18px;padding:0;margin:0;list-style:none}
+li{min-width:0;padding:15px;background:#fff;border:1px solid #e0e3e8;border-radius:12px;box-shadow:0 2px 7px #19243a04}
+h2{display:flex;align-items:center;gap:7px;font-size:16px;line-height:1.4;margin:0 0 9px}
+.number{display:inline-grid;place-items:center;flex-shrink:0;width:24px;height:24px;background:#edf0f5;border-radius:7px;font-size:12px;color:#566173}
+.entry{min-height:42px;margin:0 0 12px;font-size:12px;line-height:1.65;color:#737987}
+.shot{display:flex;justify-content:center;align-items:center;height:390px;padding:7px;background:#f2f3f5;border:1px solid #eaecf0;border-radius:8px;overflow:hidden}
+.shot img{display:block;max-width:100%;height:100%;object-fit:contain;box-shadow:0 1px 7px #0002;border-radius:5px}
+.caption{margin:10px 0 0;font-size:12px;color:#657080}.caption a{color:#267251;text-decoration:none}
+footer{margin-top:22px;padding:16px 18px;background:#fff;border:1px solid #e0e3e8;border-radius:10px;color:#68707d;font-size:12px}
+footer p{margin:4px 0}
+@media(max-width:1000px){.list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:540px){main{padding:18px}.list{grid-template-columns:1fr}.shot{height:440px}h1{font-size:22px}}
+</style>
+</head>
+<body><main>
+<header>
+<h1>远程会话 · 弹窗效果列表</h1>
+<div class="rule">图片窗口固定为视口高度的 80%</div>
+<div class="rule">其他弹窗最多为视口高度的 80%</div>
+<p class="intro">范围：会话顶部、消息正文、输入区。点击效果图可查看原尺寸截图。</p>
+<p class="intro">以下为本地浏览器实拍，手机视口 412 × 915；会话、模型、Skill 和项目使用示例数据。</p>
+</header>
+<ol class="list">
+<li><h2><span class="number">01</span>图片预览 · 默认</h2><p class="entry">入口：点击正文、附件或输入区中的图片缩略图。</p><a class="shot" href="default-full.jpg" target="_blank"><img src="default-full.jpg" alt="默认图片预览"></a><p class="caption">保持窗口大小，图片等比完整显示。<a href="portrait-default.jpg" target="_blank">查看竖图效果</a></p></li>
+<li><h2><span class="number">02</span>图片预览 · 放大</h2><p class="entry">入口：在图片内双指／滚轮缩放，放大后拖动查看。</p><a class="shot" href="zoomed-pan.jpg" target="_blank"><img src="zoomed-pan.jpg" alt="图片放大拖动"></a><p class="caption">仅图片缩放，窗口尺寸保持不变。</p></li>
+<li><h2><span class="number">03</span>视频预览</h2><p class="entry">入口：点击正文或附件中的视频封面。</p><a class="shot" href="popup-list/video.jpg" target="_blank"><img src="popup-list/video.jpg" alt="视频预览"></a><p class="caption">点击播放后加载，播放区域保持稳定。</p></li>
+<li><h2><span class="number">04</span>顶部会话菜单</h2><p class="entry">入口：会话标题右侧的四宫格按钮。</p><a class="shot" href="popup-list/session.jpg" target="_blank"><img src="popup-list/session.jpg" alt="会话菜单"></a><p class="caption">包含变更、子智能体和侧边会话。</p></li>
+<li><h2><span class="number">05</span>侧边会话操作</h2><p class="entry">入口：在会话菜单中长按／右键侧边会话。</p><a class="shot" href="popup-list/side-context.jpg" target="_blank"><img src="popup-list/side-context.jpg" alt="侧边会话操作"></a><p class="caption">显示关闭会话入口。</p></li>
+<li><h2><span class="number">06</span>输入区“＋”菜单</h2><p class="entry">入口：点击输入框左下方的“＋”。</p><a class="shot" href="popup-list/plus.jpg" target="_blank"><img src="popup-list/plus.jpg" alt="输入区加号菜单"></a><p class="caption">包含压缩、目标和添加图片。</p></li>
+<li><h2><span class="number">07</span>模型与思考深度</h2><p class="entry">入口：点击输入区下方的模型名称。</p><a class="shot" href="popup-list/models.jpg" target="_blank"><img src="popup-list/models.jpg" alt="模型与思考深度"></a><p class="caption">模型列表和思考深度分组显示。</p></li>
+<li><h2><span class="number">08</span>命令与 Skill</h2><p class="entry">入口：在输入框中输入“/”。</p><a class="shot" href="popup-list/skills.jpg" target="_blank"><img src="popup-list/skills.jpg" alt="命令与 Skill"></a><p class="caption">Skill 列表，以及压缩、目标快捷命令。</p></li>
+<li><h2><span class="number">09</span>上下文用量</h2><p class="entry">入口：点击输入区的上下文用量圆环。</p><a class="shot" href="popup-list/context.jpg" target="_blank"><img src="popup-list/context.jpg" alt="上下文用量提示"></a><p class="caption">显示最后一次请求的上下文占用。</p></li>
+<li><h2><span class="number">10</span>新会话项目选择</h2><p class="entry">入口：新建会话时点击输入区上方的项目选择器。</p><a class="shot" href="popup-list/projects.jpg" target="_blank"><img src="popup-list/projects.jpg" alt="新会话项目选择"></a><p class="caption">支持搜索，底部保留“不在项目中工作”。</p></li>
+<li><h2><span class="number">11</span>目标编辑</h2><p class="entry">入口：已有目标栏中的“编辑”按钮。</p><a class="shot" href="popup-list/goal.jpg" target="_blank"><img src="popup-list/goal.jpg" alt="目标编辑"></a><p class="caption">编辑区可滚动，操作按钮保持可用。</p></li>
+<li><h2><span class="number">12</span>排队消息操作</h2><p class="entry">入口：排队消息右侧“…”或右键消息。</p><a class="shot" href="popup-list/queue.jpg" target="_blank"><img src="popup-list/queue.jpg" alt="排队消息操作"></a><p class="caption">包含编辑消息、删除排队消息。</p></li>
+<li><h2><span class="number">13</span>通用操作确认</h2><p class="entry">入口：关闭侧边会话、允许本会话或解除锁定等操作。</p><a class="shot" href="popup-list/confirm.jpg" target="_blank"><img src="popup-list/confirm.jpg" alt="操作确认"></a><p class="caption">相同确认版式合并展示。</p></li>
+<li><h2><span class="number">14</span>操作结果提示</h2><p class="entry">入口：复制消息、出现操作错误等情况。</p><a class="shot" href="popup-list/toast.jpg" target="_blank"><img src="popup-list/toast.jpg" alt="操作结果提示"></a><p class="caption">短暂显示的非模态提示。</p></li>
+</ol>
+<footer>
+<p>“添加图片”会另外调用系统文件选择器，该窗口由浏览器／系统管理。</p>
+<p>消息编辑、会话工具、文件和 Diff 使用行内编辑区或整页视图；此处列出网页内的弹窗、菜单与提示。</p>
+<p>长列表和长内容已检查高度上限与内部滚动；未执行发送消息、保存目标、关闭会话等真实操作。</p>
+</footer>
+</main><script>window.addEventListener("load",()=>{document.body.dataset.galleryReady="true"});</script></body></html>

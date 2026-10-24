@@ -2,6 +2,8 @@ const messageTypes = new Set(["ready", "authenticated", "auth-required", "logged
 const appInfoTimeoutMs = 3000;
 let androidAppInfo = null;
 let androidAppInfoPending = null;
+let browserOpenPending = null;
+let browserRequestSequence = 0;
 const notificationRequestTypes = new Set([
   "notification-settings-get",
   "notification-settings-set",
@@ -309,7 +311,8 @@ export function getAndroidAppInfo() {
     }
     finish({ versionName, versionCode: data.versionCode, updateSupported: data.updateSupported,
       requestRoutingVersion: data.requestRoutingVersion === 2 ? 2 : 1,
-      diagnosticsVersion: data.diagnosticsVersion === 1 ? 1 : 0 });
+      diagnosticsVersion: data.diagnosticsVersion === 1 ? 1 : 0,
+      browserVersion: data.browserVersion === 1 ? 1 : 0 });
   };
 
   try {
@@ -325,6 +328,63 @@ export function getAndroidAppInfo() {
 
 export function getAndroidNotificationSettings() {
   return requestAndroidNotificationBridge("notification-settings-get");
+}
+
+function browserAppearance() {
+  const defaults = {
+    background: "#ffffff", foreground: "#1f1f1f", muted: "#717171", line: "#e8e8e8", surface: "#f9f9f9"
+  };
+  const style = typeof document !== "undefined" && typeof getComputedStyle === "function"
+    ? getComputedStyle(document.body || document.documentElement) : null;
+  const colors = {};
+  for (const [name, property] of Object.entries({
+    background: "--bg", foreground: "--text", muted: "--muted", line: "--line", surface: "--side"
+  })) {
+    let value = style?.getPropertyValue(property)?.trim() || defaults[name];
+    if (/^#[0-9a-f]{3}$/i.test(value)) value = "#" + [...value.slice(1)].map(x => x + x).join("");
+    colors[name] = /^#[0-9a-f]{6}$/i.test(value) ? value : defaults[name];
+  }
+  return { colors, fontSize: Math.max(12, Math.min(24, parseFloat(style?.fontSize) || 14)) };
+}
+
+export function openAndroidBrowser() {
+  if (!isAndroidContainer()) return Promise.reject(new Error("请在 Android App 中使用浏览器。"));
+  if (browserOpenPending) return browserOpenPending;
+  const pending = (async () => {
+    const info = await getAndroidAppInfo();
+    if (info?.browserVersion !== 1) throw new Error("当前 App 不支持浏览器，请更新 Android App 后重试。");
+    const bridge = globalThis.CodexElvesAndroid;
+    if (typeof bridge?.addEventListener !== "function" || typeof bridge?.removeEventListener !== "function")
+      throw new Error("无法连接 Android 浏览器，请重新打开 App。");
+    const requestId = `browser-${Date.now().toString(36)}-${++browserRequestSequence}`;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = error => {
+        if (settled) return;
+        settled = true; clearTimeout(timer);
+        try { bridge.removeEventListener("message", receive); } catch {}
+        error ? reject(error) : resolve();
+      };
+      const receive = event => {
+        if (typeof event?.data !== "string" || event.data.length > 2048) return;
+        let value;
+        try { value = JSON.parse(event.data); } catch { return; }
+        if (!isPlainObject(value) || value.type !== "browser-open-result"
+          || value.requestId !== requestId || typeof value.ok !== "boolean") return;
+        finish(value.ok ? null : new Error(
+          typeof value.message === "string" && value.message.length <= 256
+            ? value.message : "无法打开浏览器，请重试。"));
+      };
+      const timer = setTimeout(() => finish(new Error("Android 浏览器未响应，请更新 App 后重试。")), 10000);
+      try {
+        bridge.addEventListener("message", receive);
+        if (bridge.postMessage(JSON.stringify({ type: "browser-open", requestId, ...browserAppearance() })) === false)
+          finish(new Error("当前 Android App 无法打开浏览器，请更新后重试。"));
+      } catch { finish(new Error("无法打开 Android 浏览器，请重试。")); }
+    });
+  })().finally(() => { if (browserOpenPending === pending) browserOpenPending = null; });
+  browserOpenPending = pending;
+  return pending;
 }
 
 export function setAndroidNotificationSettings(settings) {

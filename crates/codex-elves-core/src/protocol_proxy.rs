@@ -13650,8 +13650,7 @@ fn infer_chat_reasoning_style(model: &str) -> ChatReasoningStyle {
     if model.contains("qwen") || model.contains("dashscope") || model.contains("bailian") {
         return ChatReasoningStyle::EnableThinking;
     }
-    if model.contains("kimi")
-        || model.contains("moonshot")
+    if is_kimi_reasoning_model(&model)
         || model.contains("glm")
         || model.contains("zhipu")
         || model.contains("z.ai")
@@ -13730,6 +13729,9 @@ pub fn supported_reasoning_efforts_for_model(
     if is_openai_o_series(&model) {
         return levels(&["minimal", "low", "medium", "high", "xhigh"]);
     }
+    if is_kimi_reasoning_model(&model) {
+        return default_reasoning_efforts(protocol);
+    }
     if model.contains("deepseek") {
         return levels(&["high", "max"]);
     }
@@ -13757,9 +13759,13 @@ pub fn supported_reasoning_efforts_for_model(
         return levels(&["low", "high"]);
     }
 
+    default_reasoning_efforts(protocol)
+}
+
+fn default_reasoning_efforts(protocol: UpstreamResponseProtocol) -> Vec<&'static str> {
     match protocol {
-        UpstreamResponseProtocol::Anthropic => levels(&["low", "medium", "high"]),
-        _ => levels(&["minimal", "low", "medium", "high", "xhigh"]),
+        UpstreamResponseProtocol::Anthropic => levels(&["low", "medium", "high", "xhigh", "max"]),
+        _ => levels(&["minimal", "low", "medium", "high", "xhigh", "max"]),
     }
 }
 
@@ -14164,10 +14170,16 @@ fn supports_chat_reasoning_effort(model: &str) -> bool {
             .strip_prefix("gpt-")
             .and_then(|rest| rest.chars().next())
             .is_some_and(|ch| ch.is_ascii_digit() && ch >= '5')
+        || is_kimi_reasoning_model(model)
         || infer_chat_reasoning_style(model) == ChatReasoningStyle::DeepSeek
         || is_glm_reasoning_model(model)
         || swe_reasoning_efforts(model).is_some()
         || infer_chat_reasoning_style(model) == ChatReasoningStyle::LowHigh
+}
+
+fn is_kimi_reasoning_model(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model.contains("kimi") || model.contains("moonshot")
 }
 
 fn supports_anthropic_reasoning_effort(model: &str) -> bool {

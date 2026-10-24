@@ -31,6 +31,7 @@ use tokio::sync::{Mutex, broadcast};
 
 use crate::settings::{RemoteAccessSettings, SettingsStore};
 
+mod browser;
 mod channels;
 mod credentials;
 mod diagnostics;
@@ -53,6 +54,7 @@ const NATIVE_SCRIPT: &str = include_str!("../../../assets/remote-access/native.j
 const WEB_HTML: &str = include_str!("../../../assets/remote-access/index.html");
 const WEB_JS: &str = include_str!("../../../assets/remote-access/app.js");
 const WEB_SESSION_TOOLS_JS: &str = include_str!("../../../assets/remote-access/session-tools.js");
+const WEB_SESSION_FILES_JS: &str = include_str!("../../../assets/remote-access/session-files.js");
 const WEB_SESSION_MENU_JS: &str = include_str!("../../../assets/remote-access/session-menu.js");
 const WEB_ATTACHMENTS_JS: &str = include_str!("../../../assets/remote-access/attachments.js");
 const WEB_SHA256_JS: &str = include_str!("../../../assets/remote-access/sha256.js");
@@ -481,6 +483,7 @@ pub struct RemoteAccessController {
     videos: RwLock<video::Registry>,
     image_previews: std::sync::Mutex<image_preview::PreviewCache>,
     image_preview_slots: Arc<tokio::sync::Semaphore>,
+    browser_tunnels: browser::Registry,
 }
 
 impl RemoteAccessController {
@@ -557,6 +560,7 @@ impl RemoteAccessController {
             videos: RwLock::new(video::Registry::default()),
             image_previews: std::sync::Mutex::new(image_preview::PreviewCache::default()),
             image_preview_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            browser_tunnels: browser::Registry::new(),
         }))
     }
 
@@ -827,16 +831,23 @@ impl RemoteAccessController {
             .err()
             .map(|error| error.to_string());
         let mut live = self.live.lock().await;
+        self.configure_secondary_channel(settings.enabled && settings.ngrok_enabled);
         let finished = live.server.as_ref().is_some_and(|task| task.is_finished());
         let was_enabled = live
             .settings
             .as_ref()
             .is_some_and(|settings| settings.enabled);
-        if live.settings.as_ref() == Some(&settings)
+        let listener_settings_unchanged = live.settings.as_ref().is_some_and(|previous| {
+            let mut previous = previous.clone();
+            previous.ngrok_enabled = settings.ngrok_enabled;
+            previous == settings
+        });
+        if listener_settings_unchanged
             && !finished
             && key_error.is_none()
             && (live.server.is_some() || !settings.enabled)
         {
+            live.settings = Some(settings.clone());
             self.reconcile_primary(&mut live, &settings).await;
             drop(live);
             self.prune_stale_public_devices().await;
@@ -1015,7 +1026,9 @@ impl RemoteAccessController {
                     .start_public(token, fixed_name, true, &zrok_target(&settings))
                     .await?;
                 if self.primary.provider() == primary_route::Provider::Zrok {
-                    live.ngrok.reconcile(true, &zrok_target(&settings)).await;
+                    live.ngrok
+                        .reconcile(settings.ngrok_enabled, &zrok_target(&settings))
+                        .await;
                 } else {
                     live.zrok.reconcile(false, &zrok_target(&settings)).await;
                 }
@@ -1025,6 +1038,7 @@ impl RemoteAccessController {
             "saveNgrok" => {
                 let settings = SettingsStore::default().load()?.remote_access;
                 self.reconcile(settings.clone()).await;
+                anyhow::ensure!(settings.ngrok_enabled, "请先启用 ngrok 第二线路");
                 anyhow::ensure!(self.running.load(Ordering::SeqCst), "请先启用远程会话网页");
                 let token = payload["token"].as_str().context("缺少 ngrok Token")?;
                 self.live
@@ -1408,6 +1422,13 @@ fn web_assets() -> &'static HashMap<&'static str, StaticWebAsset> {
                 StaticWebAsset::new(
                     "application/javascript; charset=utf-8",
                     WEB_SESSION_TOOLS_JS.as_bytes(),
+                ),
+            ),
+            (
+                "/session-files.js",
+                StaticWebAsset::new(
+                    "application/javascript; charset=utf-8",
+                    WEB_SESSION_FILES_JS.as_bytes(),
                 ),
             ),
             (
@@ -1821,6 +1842,7 @@ pub fn web_router(
         .route("/app-resources.json", get(static_web_asset))
         .route("/app.js", get(static_web_asset))
         .route("/session-tools.js", get(static_web_asset))
+        .route("/session-files.js", get(static_web_asset))
         .route("/session-menu.js", get(static_web_asset))
         .route("/attachments.js", get(static_web_asset))
         .route("/sha256.js", get(static_web_asset))
@@ -1859,6 +1881,9 @@ pub fn web_router(
         .route("/api/read/{action}", post(read))
         .route("/api/workspace/changes", post(workspace::changes))
         .route("/api/workspace/change", post(workspace::change))
+        .route("/api/workspace/files", post(workspace::files))
+        .route("/api/workspace/file", post(workspace::file))
+        .route("/api/browser/tunnel", get(browser::tunnel))
         .route(
             "/api/action/{action}",
             post(action).layer(DefaultBodyLimit::max(MAX_ACTION_BODY_BYTES)),
@@ -2415,7 +2440,7 @@ fn workspace_identity(payload: &Value) -> Result<Value, ApiError> {
     if object.keys().any(|key| {
         !matches!(
             key.as_str(),
-            "threadId" | "projectId" | "path" | "section" | "ifRevision"
+            "threadId" | "projectId" | "path" | "section" | "ifRevision" | "query"
         )
     }) {
         return Err(ApiError::new(400, "只能通过会话或项目标识读取变更"));
@@ -5453,6 +5478,7 @@ mod tests {
         let controller = state.controller.clone();
         let primary = "https://channel-test.shares.zrok.io";
         let secondary = "https://channel-test.ngrok-free.app";
+        controller.configure_secondary_channel(true);
         *controller.public_origin.write().unwrap() = Some(primary.into());
         *controller.channels.secondary.write().unwrap() = Some(secondary.into());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -5536,6 +5562,8 @@ mod tests {
             "/api/read/models",
             "/api/workspace/changes",
             "/api/workspace/change",
+            "/api/workspace/files",
+            "/api/workspace/file",
             "/api/logout",
         ] {
             let preflight = client
@@ -5653,6 +5681,7 @@ mod tests {
         let ready: Value =
             serde_json::from_str(first.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(ready["method"], "remote/streamReady");
+        let initial_cursor = ready["cursor"].as_u64().unwrap();
         let mut second_request = format!(
             "ws://{address}/api/events/ws?epoch={}&after={}",
             ready["channelEpoch"].as_str().unwrap(),
@@ -5685,8 +5714,29 @@ mod tests {
                 serde_json::from_str(second.next().await.unwrap().unwrap().to_text().unwrap())
                     .unwrap();
             assert_eq!(one, two);
-            assert_eq!(one["channelSequence"], sequence);
+            assert_eq!(one["channelSequence"], initial_cursor + sequence);
         }
+        controller.configure_secondary_channel(false);
+        let changed: Value =
+            serde_json::from_str(first.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(changed["method"], "remote/channelsChanged");
+        assert_eq!(changed["params"]["secondaryEnabled"], false);
+        let closed_discovery: Value = client
+            .get(format!("http://{address}/api/channels"))
+            .header("Host", "channel-test.shares.zrok.io")
+            .header("Cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(closed_discovery["origins"], json!([primary]));
+        assert_eq!(closed_discovery["secondaryEnabled"], false);
+        assert!(
+            closed_discovery["revision"].as_u64().unwrap()
+                > discovery["revision"].as_u64().unwrap()
+        );
         controller.auth.lock().await.devices.clear();
         let revoked = client
             .get(format!("http://{address}/api/session"))
@@ -6388,6 +6438,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ngrok_switch_preserves_web_listener_and_authorization() {
+        let (directory, state) = login_lock_test_state();
+        let controller = state.controller;
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut settings = RemoteAccessSettings {
+            enabled: true,
+            port,
+            ..Default::default()
+        };
+        controller.reconcile(settings.clone()).await;
+        let generation = controller.primary.generation.load(Ordering::SeqCst);
+        let base = format!("http://127.0.0.1:{port}");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .post(format!("{base}/api/connect"))
+            .header(reqwest::header::ORIGIN, &base)
+            .json(&json!({"key": LOGIN_TEST_KEY}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let cookie = response.headers()[reqwest::header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let mut channel_events = controller.events.subscribe();
+        let mut revision = 0;
+        for enabled in [true, false] {
+            settings.ngrok_enabled = enabled;
+            controller.reconcile(settings.clone()).await;
+            let event = channel_events.try_recv().unwrap();
+            assert_eq!(event["method"], "remote/channelsChanged");
+            assert_eq!(event["params"]["secondaryEnabled"], enabled);
+            assert_eq!(event["channelEpoch"], controller.channels.epoch);
+            assert!(event["params"]["revision"].as_u64().unwrap() > revision);
+            revision = event["params"]["revision"].as_u64().unwrap();
+            assert_eq!(
+                controller.primary.generation.load(Ordering::SeqCst),
+                generation
+            );
+            assert_eq!(
+                controller.live.lock().await.settings.as_ref(),
+                Some(&settings)
+            );
+            let response = client
+                .get(format!("{base}/api/session"))
+                .header(reqwest::header::COOKIE, &cookie)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        }
+        controller.reconcile(RemoteAccessSettings::default()).await;
+        drop(directory);
+    }
+
+    #[tokio::test]
     async fn native_restart_preserves_web_listener_and_device_authorization() {
         let directory = tempfile::Builder::new()
             .prefix("remote-native-restart-")
@@ -6728,6 +6842,7 @@ mod tests {
         assert!(!paths.contains(&"/cache-recovery.html"));
         assert!(!paths.contains(&"/cache-recovery.js"));
         assert!(paths.iter().all(|path| !path.starts_with("/api/")));
+        assert!(paths.contains(&"/session-files.js"));
 
         for (path, content_type) in [
             ("/cache-recovery.html", "text/html; charset=utf-8"),
@@ -6861,6 +6976,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bad_host.status(), reqwest::StatusCode::FORBIDDEN);
+        for path in ["/api/workspace/files", "/api/workspace/file"] {
+            let response = client
+                .post(format!("{base_url}{path}"))
+                .header(reqwest::header::ORIGIN, &base_url)
+                .json(&json!({"threadId":"thread-1","path":"README.md"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        }
         let bad_origin = client
             .get(format!("{base_url}/app-resources.json"))
             .header(reqwest::header::ORIGIN, "https://untrusted.example")

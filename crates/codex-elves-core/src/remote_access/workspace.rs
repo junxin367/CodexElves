@@ -185,6 +185,300 @@ pub(super) async fn change(
     Ok(no_store(result))
 }
 
+pub(super) async fn files(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Result<Response, ApiError> {
+    browse_workspace(state, headers, payload, false).await
+}
+
+pub(super) async fn file(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Result<Response, ApiError> {
+    browse_workspace(state, headers, payload, true).await
+}
+
+async fn browse_workspace(
+    state: WebState,
+    headers: HeaderMap,
+    payload: Value,
+    content: bool,
+) -> Result<Response, ApiError> {
+    let device = super::authorized(&state, &headers).await?;
+    let authorization = state.controller.authorization(device, None);
+    authorization
+        .check()
+        .await
+        .map_err(super::authorization_error)?;
+    let revision = requested_revision(&payload)?;
+    let requested = payload.get("path").and_then(Value::as_str).unwrap_or("");
+    let query = payload
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    if payload.get("path").is_some_and(|value| !value.is_string()) || requested.len() > 16 * 1024 {
+        return Err(ApiError::new(400, "文件路径无效"));
+    }
+    if payload.get("query").is_some_and(|value| !value.is_string()) || query.len() > 256 {
+        return Err(ApiError::new(400, "文件搜索条件无效"));
+    }
+    let cwd = super::workspace_context(&state, &payload, &authorization).await?;
+    let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
+        // Git projects use the actual worktree root. A non-Git project uses its
+        // native working directory; the client never chooses this boundary.
+        let git_root = git(
+            &cwd,
+            &["rev-parse", "--show-toplevel"],
+            32 * 1024,
+            &authorization,
+        )
+        .await?;
+        let root = if git_root.success && !git_root.truncated {
+            let value = String::from_utf8(git_root.bytes)
+                .map_err(|_| ApiError::new(422, "项目目录编码无法识别"))?;
+            PathBuf::from(value.trim_end_matches(['\r', '\n']))
+        } else {
+            cwd.clone()
+        };
+        let requested = requested.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let root = std::fs::canonicalize(root)
+                .map_err(|_| ApiError::new(404, "当前项目目录已失效"))?;
+            if !cwd.starts_with(&root) || !super::canonical_path_is_local(&root) {
+                return Err(ApiError::new(403, "项目目录与当前会话不一致"));
+            }
+            let path = project_relative_path(&root, &requested, !content)?;
+            if content {
+                project_file_content(&root, &path)
+            } else if !query.trim().is_empty() {
+                project_search(&root, &query)
+            } else {
+                project_directory(&root, &path)
+            }
+        })
+        .await
+        .map_err(|_| ApiError::new(503, "读取项目文件失败"))?
+    })
+    .await
+    .map_err(|_| ApiError::new(504, "读取项目文件超时，请重试"))??;
+    authorization
+        .check()
+        .await
+        .map_err(super::authorization_error)?;
+    Ok(no_store(revision_payload(result, revision)?))
+}
+
+fn display_project_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    path.strip_prefix(r"\\?\")
+        .unwrap_or(&path)
+        .replace('\\', "/")
+}
+
+fn project_relative_path(
+    root: &Path,
+    requested: &str,
+    allow_root: bool,
+) -> Result<String, ApiError> {
+    let mut path = requested.replace('\\', "/");
+    if path.starts_with("//?/") {
+        path = path[4..].to_owned();
+    }
+    if path.starts_with('/') && path.as_bytes().get(2) == Some(&b':') {
+        path.remove(0);
+    }
+    let root_name = display_project_path(root);
+    let absolute = path.starts_with('/') || path.as_bytes().get(1) == Some(&b':');
+    if absolute {
+        let equal = |left: &str, right: &str| {
+            if cfg!(windows) {
+                left.eq_ignore_ascii_case(right)
+            } else {
+                left == right
+            }
+        };
+        if equal(&path, &root_name) {
+            path.clear();
+        } else if path
+            .get(..root_name.len())
+            .is_some_and(|prefix| equal(prefix, &root_name))
+            && path.as_bytes().get(root_name.len()) == Some(&b'/')
+        {
+            path = path[root_name.len() + 1..].to_owned();
+        } else {
+            return Err(ApiError::new(403, "只能查看当前会话项目内的文件"));
+        }
+    }
+    while path.starts_with("./") {
+        path = path[2..].to_owned();
+    }
+    if allow_root && path.is_empty() {
+        return Ok(path);
+    }
+    if !safe_relative_path(&path) {
+        return Err(ApiError::new(400, "文件路径无效，不能越出当前项目"));
+    }
+    Ok(path)
+}
+
+fn project_directory(root: &Path, relative: &str) -> Result<Value, ApiError> {
+    let path = if relative.is_empty() {
+        root.to_owned()
+    } else {
+        safe_local_path(root, relative)?
+    };
+    let entries =
+        std::fs::read_dir(&path).map_err(|_| ApiError::new(404, "目录不存在或无法读取"))?;
+    let mut files = Vec::new();
+    let mut truncated = false;
+    for entry in entries {
+        let entry = entry.map_err(|_| ApiError::new(403, "无法读取目录内容"))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let child = if relative.is_empty() {
+            name.clone()
+        } else {
+            format!("{relative}/{name}")
+        };
+        if !safe_relative_path(&child) {
+            continue;
+        }
+        if files.len() == MAX_FILES {
+            truncated = true;
+            break;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path())
+            .map_err(|_| ApiError::new(409, "目录内容已更新，请重新打开"))?;
+        let kind = if is_link(&metadata) {
+            "unsupported"
+        } else if metadata.is_dir() {
+            "directory"
+        } else if metadata.is_file() {
+            "file"
+        } else {
+            "unsupported"
+        };
+        files.push(json!({"name": name, "path": child, "kind": kind,
+            "size": metadata.is_file().then_some(metadata.len())}));
+    }
+    // Reject a directory replaced by a junction while it was being read.
+    if !relative.is_empty() {
+        safe_local_path(root, relative)?;
+    }
+    Ok(
+        json!({"ok": true, "root": display_project_path(root), "path": relative,
+        "files": files, "truncated": truncated}),
+    )
+}
+
+fn project_search(root: &Path, query: &str) -> Result<Value, ApiError> {
+    let query = query.trim().to_lowercase();
+    let mut files = Vec::new();
+    let mut pending = vec![PathBuf::new()];
+    let mut truncated = false;
+    while let Some(relative) = pending.pop() {
+        let directory = if relative.as_os_str().is_empty() {
+            root.to_owned()
+        } else {
+            safe_local_path(root, &relative.to_string_lossy())?
+        };
+        let entries = std::fs::read_dir(directory)
+            .map_err(|_| ApiError::new(404, "项目目录不存在或无法读取"))?;
+        for entry in entries {
+            let entry = entry.map_err(|_| ApiError::new(403, "无法读取项目目录"))?;
+            let metadata = std::fs::symlink_metadata(entry.path())
+                .map_err(|_| ApiError::new(409, "项目目录已更新，请重新搜索"))?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let child = if relative.as_os_str().is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{name}", relative.to_string_lossy().replace('\\', "/"))
+            };
+            if !safe_relative_path(&child) {
+                continue;
+            }
+            if is_link(&metadata) {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(PathBuf::from(&child));
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            if !child.to_lowercase().contains(&query) {
+                continue;
+            }
+            if files.len() == MAX_FILES {
+                truncated = true;
+                break;
+            }
+            files.push(json!({
+                "name": name,
+                "path": child,
+                "kind": "file",
+                "size": metadata.len()
+            }));
+        }
+        if truncated {
+            break;
+        }
+    }
+    Ok(json!({
+        "ok": true,
+        "root": display_project_path(root),
+        "path": "",
+        "query": query,
+        "files": files,
+        "truncated": truncated
+    }))
+}
+
+fn project_file_content(root: &Path, path: &str) -> Result<Value, ApiError> {
+    let side = read_local(root, path)?;
+    if !side.exists {
+        return Err(ApiError::new(404, "文件不存在或已被删除"));
+    }
+    let mut result = json!({"ok": true, "root": display_project_path(root), "path": path,
+        "size": side.size, "kind": "unsupported", "truncated": side.truncated});
+    if side.unsupported {
+        result["message"] = json!("符号链接和特殊文件不提供内容预览");
+    } else if side.truncated {
+        result["message"] = json!("文件超过 4 MiB，暂不提供内容预览");
+    } else if let Some(mime) = raster_mime(&side.bytes) {
+        result["kind"] = json!("image");
+        result["mime"] = json!(mime);
+        result["dataUrl"] = json!(format!(
+            "data:{mime};base64,{}",
+            STANDARD.encode(&side.bytes)
+        ));
+    } else if is_text(&side.bytes) {
+        let text = std::str::from_utf8(&side.bytes).expect("validated UTF-8");
+        let mut end = text.len().min(MAX_TEXT_BYTES);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        result["kind"] = json!("text");
+        result["text"] = json!(&text[..end]);
+        result["truncated"] = json!(end < text.len());
+        if end < text.len() {
+            result["message"] = json!("文件较大，仅显示前 512 KiB 内容");
+        }
+    } else {
+        result["kind"] = json!("binary");
+        result["message"] = json!("此文件为二进制格式，暂不支持内容预览");
+    }
+    Ok(result)
+}
+
 fn no_store(value: Value) -> Response {
     ([(header::CACHE_CONTROL, "no-store")], Json(value)).into_response()
 }
@@ -1339,6 +1633,215 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn project_files_read_content_and_revalidate_without_git_changes() {
+        let (_fixture, _state, repo) = fixture_repo().await;
+        std::fs::create_dir(repo.root.join("docs")).unwrap();
+        std::fs::write(repo.root.join("docs/说明.md"), "# 文件预览\n第二行\n").unwrap();
+        std::fs::write(repo.root.join("empty.txt"), "").unwrap();
+        let (state, headers) = fixture_web_state(&repo);
+        let directory = fixture_response_json(
+            files(
+                State(state.clone()),
+                headers.clone(),
+                Json(json!({"threadId":"thread-1","path":""})),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(directory["files"][0]["kind"], "directory");
+        assert_eq!(directory["files"][0]["name"], "docs");
+        assert_eq!(directory["files"].as_array().unwrap().len(), 2);
+        let payload = json!({"threadId":"thread-1","path":"docs/说明.md"});
+        let first = fixture_response_json(
+            file(State(state.clone()), headers.clone(), Json(payload.clone()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(first["kind"], "text");
+        assert_eq!(first["text"], "# 文件预览\n第二行\n");
+        let mut conditional = payload;
+        conditional["ifRevision"] = first["revision"].clone();
+        let unchanged = fixture_response_json(
+            file(
+                State(state.clone()),
+                headers.clone(),
+                Json(conditional.clone()),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(unchanged["notModified"], true);
+        assert!(unchanged.get("text").is_none());
+        std::fs::write(repo.root.join("docs/说明.md"), "修改后的内容").unwrap();
+        let changed = fixture_response_json(
+            file(State(state.clone()), headers.clone(), Json(conditional))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(changed["text"], "修改后的内容");
+        assert_ne!(changed["revision"], first["revision"]);
+        let absolute = fixture_response_json(file(State(state.clone()), headers.clone(),
+            Json(json!({"threadId":"thread-1","path":display_project_path(&repo.root.join("docs/说明.md"))})))
+            .await.unwrap()).await;
+        assert_eq!(absolute["path"], "docs/说明.md");
+        assert_eq!(absolute["text"], changed["text"]);
+        let empty = fixture_response_json(
+            file(
+                State(state),
+                headers,
+                Json(json!({"threadId":"thread-1","path":"empty.txt"})),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(empty["text"], "");
+    }
+
+    #[tokio::test]
+    async fn project_files_search_returns_relative_paths_without_reordering_directory_entries() {
+        let (_fixture, _state, repo) = fixture_repo().await;
+        std::fs::create_dir(repo.root.join("src")).unwrap();
+        std::fs::create_dir(repo.root.join("src/components")).unwrap();
+        std::fs::write(repo.root.join("src/app.ts"), "app").unwrap();
+        std::fs::write(repo.root.join("src/components/App.tsx"), "component").unwrap();
+        std::fs::write(repo.root.join("README.md"), "readme").unwrap();
+        let (state, headers) = fixture_web_state(&repo);
+        let result = fixture_response_json(
+            files(
+                State(state.clone()),
+                headers.clone(),
+                Json(json!({"threadId":"thread-1","path":"","query":"app"})),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(result["query"], "app");
+        let paths: Vec<_> = result["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap())
+            .collect();
+        assert!(paths.contains(&"src/app.ts"));
+        assert!(paths.contains(&"src/components/App.tsx"));
+        assert!(!paths.contains(&"README.md"));
+        assert!(paths.iter().all(|path| !path.starts_with('/')));
+        assert!(paths.iter().all(|path| !path.contains('\\')));
+    }
+
+    #[tokio::test]
+    async fn project_files_reject_outside_paths_and_revoked_devices() {
+        let (_fixture, _state, repo) = fixture_repo().await;
+        let (state, headers) = fixture_web_state(&repo);
+        for path in [
+            "../secret.txt",
+            "docs/../../secret.txt",
+            ".git/config",
+            "a.txt:secret",
+            "//server/share/private.txt",
+        ] {
+            assert!(
+                file(
+                    State(state.clone()),
+                    headers.clone(),
+                    Json(json!({"threadId":"thread-1","path":path}))
+                )
+                .await
+                .is_err(),
+                "{path}"
+            );
+        }
+        let outside = fixture_dir();
+        std::fs::write(outside.path().join("secret.txt"), "must not leak").unwrap();
+        let error = file(State(state.clone()), headers.clone(),
+            Json(json!({"threadId":"thread-1","path":display_project_path(&outside.path().join("secret.txt"))})))
+            .await.unwrap_err();
+        assert_eq!(error.code, 403);
+        assert_eq!(
+            files(
+                State(state.clone()),
+                HeaderMap::new(),
+                Json(json!({"threadId":"thread-1","path":""}))
+            )
+            .await
+            .unwrap_err()
+            .code,
+            401
+        );
+        assert_eq!(
+            file(
+                State(state.clone()),
+                headers.clone(),
+                Json(json!({"threadId":"thread-1","path":"missing.txt"}))
+            )
+            .await
+            .unwrap_err()
+            .code,
+            404
+        );
+        state.controller.auth.lock().await.devices.clear();
+        assert_eq!(
+            file(
+                State(state),
+                headers,
+                Json(json!({"threadId":"thread-1","path":"missing.txt"}))
+            )
+            .await
+            .unwrap_err()
+            .code,
+            401
+        );
+    }
+
+    #[test]
+    fn project_files_preview_limits_and_binary_types() {
+        let fixture = fixture_dir();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        std::fs::write(root.join("binary.dat"), b"a\0b").unwrap();
+        assert_eq!(
+            project_file_content(&root, "binary.dat").unwrap()["kind"],
+            "binary"
+        );
+        let png = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=").unwrap();
+        std::fs::write(root.join("image.png"), &png).unwrap();
+        let image = project_file_content(&root, "image.png").unwrap();
+        assert_eq!(image["kind"], "image");
+        assert!(
+            image["dataUrl"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
+        let text = "中".repeat(MAX_TEXT_BYTES / 3 + 50);
+        std::fs::write(root.join("large.txt"), text).unwrap();
+        let large = project_file_content(&root, "large.txt").unwrap();
+        assert_eq!(large["truncated"], true);
+        assert_eq!(
+            large["text"].as_str().unwrap().len(),
+            MAX_TEXT_BYTES / 3 * 3
+        );
+        File::create(root.join("huge.txt"))
+            .unwrap()
+            .set_len(MAX_IMAGE_BYTES as u64 + 1)
+            .unwrap();
+        assert_eq!(
+            project_file_content(&root, "huge.txt").unwrap()["kind"],
+            "unsupported"
+        );
+        std::fs::write(root.join("page.html"), "<script>alert(1)</script>").unwrap();
+        assert_eq!(
+            project_file_content(&root, "page.html").unwrap()["kind"],
+            "text"
+        );
     }
 
     async fn fixture_conflict_index(repo: &Repository, path: &str, stages: &[(u8, &str)]) {

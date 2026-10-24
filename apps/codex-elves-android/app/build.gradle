@@ -102,6 +102,7 @@ def bundledWebResources = [
     [source: "app.js", path: "/app.js", contentType: "application/javascript; charset=utf-8"],
     [source: "diagnostics.js", path: "/diagnostics.js", contentType: "application/javascript; charset=utf-8"],
     [source: "session-tools.js", path: "/session-tools.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "session-files.js", path: "/session-files.js", contentType: "application/javascript; charset=utf-8"],
     [source: "session-menu.js", path: "/session-menu.js", contentType: "application/javascript; charset=utf-8"],
     [source: "attachments.js", path: "/attachments.js", contentType: "application/javascript; charset=utf-8"],
     [source: "sha256.js", path: "/sha256.js", contentType: "application/javascript; charset=utf-8"],
@@ -194,4 +195,5 @@ tasks.named("preBuild").configure {
 
 dependencies {
     implementation "androidx.webkit:webkit:1.17.1"
+    implementation "com.squareup.okhttp3:okhttp:4.12.0"
 }

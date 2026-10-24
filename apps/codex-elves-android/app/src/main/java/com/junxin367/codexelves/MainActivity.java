@@ -113,6 +113,7 @@ public final class MainActivity extends Activity {
     private int fileChooserRequestCode = -1;
     private int nextFileChooserRequestCode = FILE_CHOOSER_REQUEST;
     private long lastUpdateCheckAt;
+    private BrowserAuthority browserAuthority;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -163,6 +164,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showLogin(String message) {
+        invalidateBrowser();
         notifications.onPageChanged();
         cancelResourceWork();
         connectionGeneration.incrementAndGet();
@@ -340,6 +342,7 @@ public final class MainActivity extends Activity {
     }
 
     private void openSession(String origin) {
+        invalidateBrowser();
         notifications.onPageChanged();
         if (currentOrigin != null && !origin.equals(currentOrigin)) {
             NotificationService.stop(this, "auth-required", true);
@@ -722,6 +725,8 @@ public final class MainActivity extends Activity {
                     type = (String) rawType;
                     if (DiagnosticsPolicy.isRequestType(type)) {
                         if (!DiagnosticsPolicy.isValidRequest(payload)) return;
+                    } else if ("browser-open".equals(type)) {
+                        if (!validBrowserOpen(payload)) return;
                     } else if (!NotificationSettings.isRequestType(type) && payload.length() != 1) {
                         return;
                     }
@@ -761,6 +766,8 @@ public final class MainActivity extends Activity {
                                 && origin.equals(currentOrigin) && !isFinishing() && !isDestroyed(),
                             replyProxy::postMessage
                         );
+                    } else if ("browser-open".equals(type)) {
+                        openBrowser(payload, replyProxy);
                     } else if ("app-info".equals(type)) {
                         try {
                             replyProxy.postMessage(new JSONObject()
@@ -770,6 +777,7 @@ public final class MainActivity extends Activity {
                                 .put("updateSupported", !BuildConfig.DEBUG)
                                 .put("requestRoutingVersion", 2)
                                 .put("diagnosticsVersion", 1)
+                                .put("browserVersion", 1)
                                 .toString());
                         } catch (JSONException ignored) {
                             // These BuildConfig values are always valid JSON primitives.
@@ -1152,6 +1160,7 @@ public final class MainActivity extends Activity {
     }
 
     private void clearAuthorization(String origin) {
+        invalidateBrowser();
         notifications.onPageChanged();
         NotificationService.stop(this, "auth-required", true);
         pendingNotificationOpen = null;
@@ -1452,6 +1461,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        invalidateBrowser();
         diagnostic("native.lifecycle", DiagnosticsPolicy.fields("phase", "destroy"));
         NotificationService.setAppVisible(notificationVisibility, false);
         haptics.setForeground(false);
@@ -1468,6 +1478,64 @@ public final class MainActivity extends Activity {
         resources.shutdownNow();
         diagnostics.close();
         super.onDestroy();
+    }
+
+    private void invalidateBrowser() {
+        if (browserAuthority != null) { browserAuthority.invalidate(); browserAuthority = null; }
+    }
+
+    private static boolean validBrowserOpen(JSONObject payload) {
+        if (payload.length() != 4 || !payload.optString("requestId").matches("[A-Za-z0-9_-]{1,80}")
+            || !(payload.opt("fontSize") instanceof Number)) return false;
+        double size = payload.optDouble("fontSize", 0);
+        if (!Double.isFinite(size) || size < 12 || size > 24) return false;
+        JSONObject colors = payload.optJSONObject("colors");
+        if (colors == null || colors.length() != 5) return false;
+        for (String name : new String[]{"background", "foreground", "muted", "line", "surface"})
+            if (!colors.optString(name).matches("#[0-9a-fA-F]{6}")) return false;
+        return true;
+    }
+
+    @SuppressWarnings("deprecation")
+    @SuppressLint("RequiresFeature") // Called only by registerBridge's WEB_MESSAGE_LISTENER callback.
+    private void openBrowser(JSONObject payload, JavaScriptReplyProxy reply) {
+        String message = null;
+        try {
+            if (!pageAuthenticated || currentOrigin == null) throw new IllegalStateException("请先连接远程会话");
+            if (Build.VERSION.SDK_INT < 28) throw new IllegalStateException("浏览器需要 Android 9 或更新版本");
+            String cookie = null;
+            String allCookies = CookieManager.getInstance().getCookie(currentOrigin);
+            if (allCookies != null) {
+                for (String item : allCookies.split(";")) {
+                    String candidate = item.trim();
+                    if (candidate.matches("codex_elves_device=[A-Za-z0-9._~-]{16,512}")) cookie = candidate;
+                }
+            }
+            if (cookie == null) throw new IllegalStateException("设备授权已失效，请重新连接");
+            if (browserAuthority == null || !browserAuthority.matches(currentOrigin, cookie)) {
+                invalidateBrowser();
+                browserAuthority = new BrowserAuthority(currentOrigin, cookie);
+            }
+            Bundle parameters = new Bundle();
+            parameters.putBinder(BrowserAuthority.EXTRA, browserAuthority);
+            parameters.putFloat("fontSize", (float) payload.getDouble("fontSize"));
+            JSONObject colors = payload.getJSONObject("colors");
+            for (String name : new String[]{"background", "foreground", "muted", "line", "surface"})
+                parameters.putInt(name, android.graphics.Color.parseColor(colors.getString(name)));
+            Intent browser = new Intent(this, BrowserActivity.class).putExtras(parameters);
+            startActivity(browser);
+            overridePendingTransition(R.anim.browser_enter, R.anim.browser_hold);
+        } catch (IllegalStateException unavailable) {
+            message = unavailable.getMessage();
+        } catch (Exception unavailable) {
+            message = "无法打开浏览器，请返回会话后重试";
+        }
+        try {
+            JSONObject result = new JSONObject().put("type", "browser-open-result")
+                .put("requestId", payload.optString("requestId")).put("ok", message == null);
+            if (message != null) result.put("message", message);
+            reply.postMessage(result.toString());
+        } catch (JSONException ignored) { /* All fields above are native scalar values. */ }
     }
 
     @Override

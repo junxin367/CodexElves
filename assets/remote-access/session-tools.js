@@ -1,4 +1,5 @@
 import { requestRemote } from "./channels.js";
+import { mountSessionFiles } from "./session-files.js";
 
 const sections = [
   ["staged", "已暂存"], ["unstaged", "未暂存"], ["untracked", "未跟踪"]
@@ -82,7 +83,8 @@ function responseBytes(value) {
   const serialized = JSON.stringify(value);
   return typeof TextEncoder === "function" ? new TextEncoder().encode(serialized).length : serialized.length * 2;
 }
-export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, cache, request: transport = requestRemote }) {
+export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, copyText, cache, request: transport = requestRemote }) {
+  let projectFiles = null;
   let disposed = false, opened = false, activePage = "changes", detailVisible = false, contextKey = "";
   let changesEpoch = 0, detailEpoch = 0, changesController = null, detailController = null;
   let files = [], selectedFile = null, changesLoaded = false, changesBusy = false;
@@ -441,6 +443,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
   }
   function updateContext() {
     if (disposed) return;
+    projectFiles?.updateContext();
     const value = currentContext(), identity = targetIdentity(value);
     const key = JSON.stringify([value.deviceId, value.cacheScope, identity]);
     if (key === contextKey) return;
@@ -991,14 +994,19 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
   document.addEventListener("keydown", handleKey, true);
   window.addEventListener("popstate", handlePopState, true);
   window.addEventListener("codex-elves-native-back", handleNativeBack);
+  projectFiles = mountSessionFiles({
+    workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, copyText, request: transport
+  });
   updateContext();
 
   return {
     updateContext,
-    open: openPage,
+    open: name => name === "files" ? projectFiles.open() : openPage(name),
+    openFile: (path, line) => projectFiles.openFile(path, line),
     close: requestBack,
     dispose() {
       if (disposed) return;
+      projectFiles.dispose();
       saveCurrentView(true);
       disposed = true; opened = false; detailVisible = false; ++changesEpoch; ++detailEpoch;
       changesController?.abort(); detailController?.abort();

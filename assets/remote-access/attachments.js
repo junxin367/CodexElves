@@ -68,27 +68,45 @@ function videoPreviewIcon(name) {
   return icon;
 }
 
-export function fitMediaPreview(dialog, panel, media, dimensions) {
+export function fitMediaPreview(dialog, panel, media, dimensions, { fillAvailable = false } = {}) {
   const pixels = (style, property) => Number.parseFloat(style.getPropertyValue(property)) || 0;
   const resize = () => {
-    const { width, height } = dimensions();
-    if (!dialog.open || !width || !height) return;
+    if (!dialog.open) return;
+    const { width, height } = dimensions?.() || {};
+    if (!fillAvailable && (!width || !height)) return;
     const dialogStyle = getComputedStyle(dialog), panelStyle = getComputedStyle(panel);
     const margin = pixels(dialogStyle, "--preview-margin");
-    const maxWidth = Math.max(1, Math.min(pixels(dialogStyle, "--preview-max-width"), window.innerWidth - margin * 2));
+    const maxWidth = Math.max(1, pixels(dialogStyle, "max-width"));
+    const maxHeight = Math.min(window.innerHeight - margin * 2, pixels(dialogStyle, "max-height") || Infinity);
     const frameWidth = pixels(dialogStyle, "border-left-width") + pixels(dialogStyle, "border-right-width")
       + pixels(panelStyle, "padding-left") + pixels(panelStyle, "padding-right");
-    let frameHeight = pixels(dialogStyle, "border-top-width") + pixels(dialogStyle, "border-bottom-width")
+    const framePadding = pixels(dialogStyle, "border-top-width") + pixels(dialogStyle, "border-bottom-width")
       + pixels(panelStyle, "padding-top") + pixels(panelStyle, "padding-bottom");
-    for (const child of panel.children) {
-      if (child === media) continue;
-      const style = getComputedStyle(child);
-      if (style.position === "absolute" || style.display === "none") continue;
-      frameHeight += child.getBoundingClientRect().height + pixels(style, "margin-top") + pixels(style, "margin-bottom");
+    const frameHeight = () => {
+      let value = framePadding;
+      for (const child of panel.children) {
+        if (child === media) continue;
+        const style = getComputedStyle(child);
+        if (style.position === "absolute" || style.position === "fixed" || style.display === "none") continue;
+        value += child.getBoundingClientRect().height + pixels(style, "margin-top") + pixels(style, "margin-bottom");
+      }
+      return value;
+    };
+    // 先按可用宽度测量文案，再确定窗口宽度，避免沿用上一帧的换行结果反复缩放。
+    // 测量时移除媒体的旧尺寸，避免临时滚动条挤窄文案、触发下一帧再次调整。
+    media.style.width = "0px";
+    media.style.height = "0px";
+    dialog.style.width = `${maxWidth}px`;
+    if (fillAvailable) {
+      media.style.width = `${Math.max(1, maxWidth - frameWidth)}px`;
+      media.style.height = `${Math.max(1, maxHeight - frameHeight())}px`;
+      return;
     }
-    const scale = Math.min(1, Math.max(1, maxWidth - frameWidth) / width,
-      Math.max(1, window.innerHeight - margin * 2 - frameHeight) / height);
+    let scale = Math.min(1, Math.max(1, maxWidth - frameWidth) / width,
+      Math.max(1, maxHeight - frameHeight()) / height);
     dialog.style.width = `${Math.min(maxWidth, Math.max(pixels(dialogStyle, "--preview-min-width"), width * scale + frameWidth))}px`;
+    // 最终宽度下文案可能换行；只收缩媒体区域，窗口宽度不再随换行来回变化。
+    scale = Math.min(scale, Math.max(1, maxHeight - frameHeight()) / height);
     media.style.width = `${width * scale}px`;
     media.style.height = `${height * scale}px`;
   };
@@ -148,23 +166,17 @@ export function openVideoPreview(trigger, source, poster, name, prepareAccess = 
   const status = document.createElement("p");
   status.className = "video-preview-status";
   status.setAttribute("role", "status");
-  status.textContent = "点击播放后加载视频";
   const title = document.createElement("p");
   title.className = "image-preview-caption";
   title.textContent = name;
   const cover = new Image();
   const thumbnail = trigger?.querySelector(".message-video-poster");
-  const layout = fitMediaPreview(dialog, panel, video, () => ({
-    width: video.videoWidth || cover.naturalWidth || thumbnail?.naturalWidth || 320,
-    height: video.videoHeight || cover.naturalHeight || thumbnail?.naturalHeight || 180
-  }));
+  // 预留完整播放区域，封面和不同宽高比的视频都在其中适配，不改变窗口尺寸。
+  const layout = fitMediaPreview(dialog, panel, video, null, { fillAvailable: true });
   loadVideoPoster(cover, poster, source => {
     video.poster = source;
     if (thumbnail?.hidden) thumbnail.src = source;
-    layout.resize();
   });
-  video.addEventListener("loadedmetadata", layout.resize);
-  video.addEventListener("resize", layout.resize);
   let closed = false, seeking = false, failed = false, pendingSeek = null;
   let wantsPlayback = false, recoveryTimer = null, attempt = 0, playRequest = 0;
   let candidates = [], lastMediaTime = 0;

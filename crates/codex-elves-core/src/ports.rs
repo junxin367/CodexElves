@@ -180,6 +180,65 @@ pub fn can_connect_loopback_port(port: u16) -> bool {
         .is_some()
 }
 
+pub async fn loopback_listener_is_running(port: u16) -> bool {
+    for attempt in 0..3 {
+        #[cfg(windows)]
+        let listener_state = tokio::task::spawn_blocking(move || {
+            let listeners = crate::windows_integration::loopback_tcp_listeners().ok()?;
+            let owners = listeners
+                .iter()
+                .filter(|listener| listener.port == port)
+                .map(|listener| listener.process_id)
+                .collect::<Vec<_>>();
+            if owners.is_empty() {
+                return Some(false);
+            }
+            let processes = crate::windows_integration::enumerate_processes()
+                .into_iter()
+                .map(|process| process.process_id)
+                .collect::<Vec<_>>();
+            listener_owner_state(&owners, &processes)
+        })
+        .await
+        .ok()
+        .flatten();
+        #[cfg(not(windows))]
+        let listener_state: Option<bool> = None;
+
+        match listener_state {
+            Some(true) => return true,
+            Some(false) => {}
+            None => {
+                if matches!(
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+                    )
+                    .await,
+                    Ok(Ok(_))
+                ) {
+                    return true;
+                }
+            }
+        }
+        if attempt < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+    false
+}
+
+#[cfg(any(windows, test))]
+fn listener_owner_state(owners: &[u32], processes: &[u32]) -> Option<bool> {
+    if owners.is_empty() {
+        Some(false)
+    } else if processes.is_empty() {
+        None
+    } else {
+        Some(owners.iter().any(|owner| processes.contains(owner)))
+    }
+}
+
 fn guard_listener_is_active(port: u16) -> bool {
     if !can_connect_loopback_port(port) {
         return false;
@@ -331,6 +390,56 @@ fn normalize_lock_error(error: std::io::Error) -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listener_owner_state_distinguishes_exit_from_unavailable_process_snapshot() {
+        assert_eq!(listener_owner_state(&[42], &[42, 100]), Some(true));
+        assert_eq!(listener_owner_state(&[42], &[100]), Some(false));
+        assert_eq!(listener_owner_state(&[42], &[]), None);
+        assert_eq!(listener_owner_state(&[], &[42]), Some(false));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn listener_status_stays_running_when_the_accept_queue_is_full() {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind(([127, 0, 0, 1], 0).into()).unwrap();
+        let listener = socket.listen(1).unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut queued = Vec::new();
+        let mut probe_failed = false;
+        for _ in 0..8 {
+            match std::net::TcpStream::connect_timeout(
+                &address,
+                std::time::Duration::from_millis(200),
+            ) {
+                Ok(stream) => queued.push(stream),
+                Err(_) => {
+                    probe_failed = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(probe_failed, "接入队列应已占满，旧 TCP 探测必须失败");
+        assert!(loopback_listener_is_running(address.port()).await);
+        drop(queued);
+        drop(listener);
+        assert!(!loopback_listener_is_running(address.port()).await);
+    }
+
+    #[tokio::test]
+    async fn listener_status_retries_a_transiently_missing_listener() {
+        let port = find_available_loopback_port();
+        let start_listener = async {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            TcpListener::bind(("127.0.0.1", port)).unwrap()
+        };
+        let (running, listener) = tokio::join!(loopback_listener_is_running(port), start_listener);
+        assert!(running);
+        drop(listener);
+        assert!(!loopback_listener_is_running(port).await);
+    }
 
     #[test]
     fn resilient_guard_holds_lock_and_listener_when_requested_port_is_available() {

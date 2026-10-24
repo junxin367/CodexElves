@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 68) return;
+  if (window.__codexElvesRemoteAccess?.version === 72) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -29,6 +29,9 @@
   let asyncQuestionNativeBindings = null;
   const sidebarSignatures = new Map();
   const deletedThreadIds = new Set();
+  const pendingThreadMetadataReads = new Map();
+  const INITIAL_THREAD_METADATA_WINDOW_MS = 15_000;
+  const INITIAL_THREAD_METADATA_RETRY_DELAYS = [100, 200, 400, 800, 1000];
   let goalMaterializer = null;
   const nativeModuleSnapshots = new Map();
   let relatedNativeState = null;
@@ -69,7 +72,7 @@
     for (const dispose of [...unsubscribe, ...sidebarUnsubscribe]) { try { dispose?.(); } catch {} }
     unsubscribe = []; sidebarUnsubscribe = [];
     for (const watcher of sideScopeWatchers.values()) watcher.dispose?.();
-    sideScopeWatchers.clear(); nativeSideThreads.clear();
+    sideScopeWatchers.clear(); nativeSideThreads.clear(); pendingThreadMetadataReads.clear();
     manager = null; appScope = null; nativeNavigate = null; nativeIntl = null;
     nativeCatalog.clear(); sidebarSignatures.clear(); catalogLoaded = false;
     catalogLoading = null; catalogGeneration++;
@@ -110,7 +113,8 @@
   };
   const emit = event => {
     if (["remote/sidebarChanged", "thread/started", "thread/status/changed", "thread/name/updated",
-      "thread/archived", "thread/unarchived", "thread/deleted", "turn/started", "turn/completed"].includes(event.method)) {
+      "thread/archived", "thread/unarchived", "thread/deleted", "turn/started", "turn/completed",
+      "remote/asyncQuestionsChanged"].includes(event.method)) {
       for (const listener of sidebarListeners) {
         try { listener({ method: event.method, threadId: event.params?.threadId }); } catch {}
       }
@@ -304,7 +308,7 @@
     const sources = [conversation, current, nativeCatalog.get(id)].filter(Boolean);
     if (!sources.length || sources.some(thread => thread.threadSource === "subagent"
         || thread.source === "subagent" || thread.source?.subAgent || thread.source?.subagent)) return null;
-    const title = Array.from(String(current?.title || conversation?.title || conversation?.name || "新会话")
+    const title = Array.from(String(sideThreadTitle(conversation) || current?.title || conversation?.title || conversation?.name || "新会话")
       .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")).slice(0, 160).join("") || "新会话";
     return { threadId: id, title };
   }
@@ -547,7 +551,7 @@
       || conversation?.threadRuntimeStatus || current.threadRuntimeStatus || current.status || { type: "idle" };
     const type = typeof status === "string" ? status : status.type;
     const waiting = !!view?.pendingRequest
-      || array(view?.unansweredAsyncQuestions?.questionIds ?? view?.unansweredAsyncQuestions).length > 0
+      || asyncQuestionRequests(id, conversation).length > 0
       || array(status.activeFlags).some(flag => flag === "waitingOnApproval" || flag === "waitingOnUserInput");
     const active = type === "active" || type === "inProgress"
       || type !== "systemError" && view?.resumeState !== "needs_resume"
@@ -568,6 +572,21 @@
         && current.threadStartKind !== "aeon" && current.threadSource !== "aeon"
     };
   }
+  function sideThreadTitle(conversation) {
+    if (conversation?.sideConversation !== true || subagentIdentity(conversation)) return null;
+    for (const turn of nativeConversationTurns(conversation)) {
+      if (turn.pendingUserMessageAdmission) continue;
+      const message = array(turn.items).find(item =>
+        (item?.type === "userMessage" || item?.type === "steeringUserMessage" && item.status === "accepted")
+        && !item.remotePendingInput && !item.remoteCompactionInput);
+      if (!message) continue;
+      const input = message.type === "userMessage" ? message.content : message.input;
+      const text = array(input).filter(part => part?.type === "text" && typeof part.text === "string")
+        .map(part => part.text).join(" ").replace(/\s+/g, " ").trim();
+      return Array.from(text).slice(0, 10).join("") || "新建侧边会话";
+    }
+    return "新建侧边会话";
+  }
   function summary(thread, activityTimes) {
     const id = thread.conversationId || thread.id;
     const current = nativeListSummary(id) || thread;
@@ -577,7 +596,8 @@
     const unread = nativeUnreadState(thread, id);
     const { status, ...priority } = sidebarPriority(id, current, unread, activityTimes);
     const result = {
-      id, title: current.title || thread.title || thread.name || thread.preview || "新会话", cwd: current.cwd || thread.cwd || "",
+      id, title: sideThreadTitle(manager.getConversation(id) || thread)
+        || current.title || thread.title || thread.name || thread.preview || "新会话", cwd: current.cwd || thread.cwd || "",
       createdAt: timestamp(current.createdAt ?? thread.createdAt), updatedAt,
       recencyAt: timestamp(current.recencyAt ?? current.updatedAt ?? thread.recencyAt ?? thread.updatedAt), hasUnreadTurn: unread,
       status, priority,
@@ -600,7 +620,7 @@
     if (side) nativeCatalog.delete(id);
     else nativeCatalog.set(id, item);
     if (previous !== sidebarSignatures.get(id)) emit({ method: "remote/sidebarChanged",
-      params: { threadId: id, parentThreadId: side
+      params: { threadId: id, ...(side ? { title: item.title } : {}), parentThreadId: side
         ? conversation.forkedFromId ?? nativeSideThreads.get(id)?.parentThreadId : undefined } });
   }
   function completedSideThreadUnread(thread, item = summary(thread)) {
@@ -643,6 +663,7 @@
   }
   async function sidebar(payload = {}) {
     const readGeneration = catalogGeneration;
+    await prepareAsyncQuestionState().catch(() => {});
     const recentOnly = payload.recentOnly === true;
     const sideEntries = recentOnly ? recentSideThreadEntries() : await sideThreadEntries();
     const sideIds = new Set(sideEntries.map(entry => entry.threadId));
@@ -734,6 +755,12 @@
     const projectless = new Set(array(stored["projectless-thread-ids"]));
     const sideAttention = sideThreadAttentionByParent(sideEntries, activityTimes);
     const threads = [...nativeCatalog.values()].filter(thread => !sideIds.has(thread.id)).map(thread => {
+      // 跳过状态独立于会话摘要，旧目录条目也须读取当前内存状态。
+      const conversation = manager.getConversation(thread.id);
+      if (conversation) {
+        thread = summary(conversation, activityTimes);
+        nativeCatalog.set(thread.id, thread);
+      }
       const assigned = assignments[thread.id];
       let projectId = typeof assigned === "string" ? assigned : assigned?.projectKind === "local" ? assigned.projectId : null;
       if (assigned == null && !projectless.has(thread.id)) {
@@ -784,14 +811,51 @@
     id = requiredId(id);
     if (isDeletedThread(id)) throw failure(404, "会话已永久删除");
     let response;
-    try { response = await manager.readThread(id, { includeTurns: false }); }
+    try { response = await readThreadMetadata(id); }
     catch (error) {
+      if (isDeletedThread(id)) throw failure(404, "会话已永久删除");
       if (missingThreadError(error)) throw failure(404, "会话已关闭或不存在");
       throw error;
     }
     const thread = response.thread || response;
     if (!thread?.id) throw failure(404, "会话不存在或已删除");
     return thread;
+  }
+  async function readThreadMetadata(id) {
+    const sourceManager = manager;
+    const createdAt = timestamp(sourceManager.getConversation(id)?.createdAt);
+    const now = Date.now(), expiresAt = createdAt + INITIAL_THREAD_METADATA_WINDOW_MS;
+    if (!Number.isFinite(createdAt) || createdAt <= 0 || createdAt > now || now >= expiresAt)
+      return sourceManager.readThread(id, { includeTurns: false });
+    const current = pendingThreadMetadataReads.get(id);
+    if (current?.manager === sourceManager) return current.promise;
+    const pending = { manager: sourceManager, promise: null };
+    const active = () => manager === sourceManager && !sourceManager.disposed && !isDeletedThread(id)
+      && pendingThreadMetadataReads.get(id) === pending;
+    // 首轮接受可能早于元数据写入；只恢复刚创建会话的精确空文件错误，并合并设置与历史的并发读取。
+    pending.promise = Promise.resolve().then(async () => {
+      for (let attempt = 0; ; attempt++) {
+        try { return await sourceManager.readThread(id, { includeTurns: false }); }
+        catch (error) {
+          const delay = INITIAL_THREAD_METADATA_RETRY_DELAYS[attempt];
+          if (delay == null || !initialThreadMetadataError(error, id) || !active()
+              || Date.now() + delay >= expiresAt) throw error;
+          await new Promise(resolve => setTimeout(resolve, delay));
+          if (!active() || Date.now() >= expiresAt) throw error;
+        }
+      }
+    });
+    pendingThreadMetadataReads.set(id, pending);
+    try { return await pending.promise; }
+    finally {
+      if (pendingThreadMetadataReads.get(id) === pending) pendingThreadMetadataReads.delete(id);
+    }
+  }
+  function initialThreadMetadataError(error, id) {
+    const message = typeof error?.message === "string" ? error.message : "";
+    return (error?.code ?? error?.jsonRpcCode) === -32603
+      && message.includes("failed to read session metadata ") && message.includes("rollout at ")
+      && message.toLowerCase().includes(`-${id.toLowerCase()}.jsonl`) && message.endsWith(" is empty");
   }
   function missingThreadError(error) {
     if (error?.code === 404 || error?.status === 404) return true;
@@ -1006,7 +1070,7 @@
           const conversation = id && sourceManager.getConversation(id);
           if (tab.tabType?.kind !== "local-side-chat" || !conversation?.sideConversation
               || conversation.forkedFromId !== parentThreadId || subagentIdentity(conversation)) continue;
-          next.set(id, { threadId: id, parentThreadId, title: tab.title,
+          next.set(id, { threadId: id, parentThreadId, title: sideThreadTitle(conversation),
             createdAtMs: timestamp(conversation.createdAt), closed: false, scope, controller, tab });
         }
       }
@@ -1129,8 +1193,10 @@
       const thread = manager.getConversation(entry.threadId);
       if (!thread) continue;
       nativeSideIdentity(thread, entries);
+      const item = summary(thread);
       sideThreads.push({ id: thread.id, title: entry.title, createdAtMs: entry.createdAtMs,
-        hasUnreadTurn: completedSideThreadUnread(thread) });
+        running: item.priority.active && item.priority.attentionState !== "waiting",
+        hasUnreadTurn: completedSideThreadUnread(thread, item) });
     }
     const sideNative = await nativeSideState();
     const sideScope = nativeSideScopes(sideNative).find(scope => scope.value.conversationId === threadId);
@@ -1214,7 +1280,7 @@
     const canonicalId = id.toLowerCase();
     deletedThreadIds.add(canonicalId);
     const matches = value => typeof value === "string" && value.toLowerCase() === canonicalId;
-    for (const cache of [nativeCatalog, sidebarSignatures, asyncQuestionSignatures,
+    for (const cache of [nativeCatalog, sidebarSignatures, asyncQuestionSignatures, pendingThreadMetadataReads,
       blockingRequestSnapshots, asyncQuestionRecoveries, observedRequestThreads, queuedReorders]) {
       for (const key of cache.keys()) if (matches(key)) cache.delete(key);
     }
@@ -1841,9 +1907,12 @@
     const turns = nativeConversationTurns(conversation);
     const status = manager.getThreadRuntimeStatusEvidence(id)
       || conversation.threadRuntimeStatus || conversation.status;
-    const statusType = typeof status === "string" ? status : status?.type;
-    if (["active", "inProgress", "running", "pending"].includes(statusType)
-        || turns.some(turn => nativeTurnStatus(turn) === "inProgress"))
+    const statusValue = status?.status || status;
+    const statusType = typeof statusValue === "string" ? statusValue : statusValue?.type;
+    const statusActive = ["active", "inProgress", "running", "pending"].includes(statusType);
+    const statusTerminal = ["idle", "stopped", "completed", "failed", "interrupted", "cancelled", "canceled"]
+      .includes(statusType);
+    if (statusActive || !statusTerminal && turns.some(turn => nativeTurnStatus(turn) === "inProgress"))
       return { reason: "会话正在执行，不能编辑消息", metadata: null };
     if (runtimeCompaction(id, conversation).state !== "idle")
       return { reason: "会话正在压缩上下文，不能编辑消息", metadata: null };
@@ -4309,7 +4378,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 68, call,
+    version: 72, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();
@@ -4359,7 +4428,7 @@
       for (const dispose of [...unsubscribe, ...sidebarUnsubscribe]) { try { dispose?.(); } catch {} }
       unsubscribe = []; sidebarUnsubscribe = []; sidebarListeners.clear();
       for (const watcher of sideScopeWatchers.values()) watcher.dispose?.();
-      sideScopeWatchers.clear();
+      sideScopeWatchers.clear(); pendingThreadMetadataReads.clear();
       if (window.__codexElvesRemoteAccess?.epoch === epoch) delete window.__codexElvesRemoteAccess;
     },
     epoch

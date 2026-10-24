@@ -641,6 +641,53 @@ async fn default_helper_accepts_diagnostic_log_events_over_http() {
     assert!(contents.contains("fetch failed"));
 }
 
+#[tokio::test]
+async fn helper_lifetime_wait_keeps_serving_until_explicit_shutdown() {
+    let temp =
+        tempfile::tempdir_in(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp")).unwrap();
+    let _diagnostics = DiagnosticLogCapture::new(temp.path().join("diagnostic.jsonl"));
+    let hooks = DefaultLaunchHooks::default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    hooks.start_helper(port).await.unwrap();
+    let wait = hooks.wait_for_helper_exit();
+    tokio::pin!(wait);
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), &mut wait)
+            .await
+            .is_err()
+    );
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/backend/status"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), &mut wait)
+            .await
+            .is_err()
+    );
+
+    hooks.shutdown_helper(port).await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), wait)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_err()
+    );
+    hooks.wait_for_helper_exit().await.unwrap();
+}
+
 #[test]
 fn helper_exposes_user_script_bundle_for_bootstrap_fallback() {
     let source = include_str!("../src/launcher.rs");
@@ -1907,6 +1954,7 @@ async fn launch_lifecycle_runs_sync_before_launch_writes_success_and_shutdowns_o
             "bridge-watchdog:9229:45221",
             "status:running",
             "wait-codex",
+            "load-settings",
             "shutdown-helper:45221",
         ]
     );
@@ -1990,6 +2038,7 @@ async fn launch_lifecycle_keeps_js_injection_in_relay_mode() {
             "bridge-watchdog:9229:45221",
             "status:running",
             "wait-codex",
+            "load-settings",
             "shutdown-helper:45221",
         ]
     );
@@ -2074,6 +2123,7 @@ async fn remote_access_starts_helper_without_enhancements_or_model_proxy() {
             "launch:9229",
             "status:running",
             "wait-codex",
+            "load-settings",
             "shutdown-helper:45221",
         ]
     );
@@ -2118,6 +2168,7 @@ async fn launch_lifecycle_runs_computer_use_guard_when_enabled() {
             "bridge-watchdog:9229:45221",
             "status:running",
             "wait-codex",
+            "load-settings",
             "shutdown-helper:45221",
         ]
     );
@@ -2186,6 +2237,7 @@ async fn launch_lifecycle_runs_browser_compat_without_full_computer_use_guard() 
 #[tokio::test]
 async fn launch_lifecycle_does_not_apply_relay_profile_while_launching_codex() {
     let temp = tempfile::tempdir().unwrap();
+    let _proxy_log_guard = LauncherProxyLogPathGuard::set(temp.path().join("proxy-requests.jsonl"));
     let app_dir = temp.path().join("Codex.app");
     std::fs::create_dir_all(&app_dir).unwrap();
     let status_store = StatusStore::new(temp.path().join("latest-status.json"));
@@ -2391,7 +2443,7 @@ async fn launch_lifecycle_cleans_helper_when_launch_fails_after_helper_started()
 }
 
 #[tokio::test]
-async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
+async fn launch_keeps_protocol_proxy_running_until_helper_stops() {
     let temp = tempfile::tempdir().unwrap();
     let app_dir = temp.path().join("Codex.app");
     std::fs::create_dir_all(&app_dir).unwrap();
@@ -2448,7 +2500,9 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
         active_relay_id: "relay-chat".to_string(),
         ..BackendSettings::default()
     };
-    let hooks = FakeHooks::new(events.clone()).with_settings(settings);
+    let helper_exit = Arc::new(tokio::sync::Notify::new());
+    let mut hooks = FakeHooks::new(events.clone()).with_settings(settings);
+    hooks.helper_exit = Some(helper_exit.clone());
 
     let handle = launch_and_inject_with_hooks(
         LaunchOptions {
@@ -2489,10 +2543,26 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
             .is_none()
     );
 
-    handle.wait_for_codex_exit().await.unwrap();
+    let wait = handle.wait_for_exit();
+    tokio::pin!(wait);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), &mut wait)
+            .await
+            .is_err()
+    );
+    let while_running = events.lock().unwrap().clone();
+    assert!(while_running.contains(&"wait-helper".to_string()));
+    assert!(!while_running.contains(&"wait-codex".to_string()));
+    assert!(!while_running.contains(&"shutdown-helper:45221".to_string()));
+
+    helper_exit.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(1), wait)
+        .await
+        .unwrap()
+        .unwrap();
 
     let after_stop = events.lock().unwrap().clone();
-    assert!(after_stop.contains(&"wait-codex".to_string()));
+    assert!(!after_stop.contains(&"wait-codex".to_string()));
     assert!(after_stop.contains(&"shutdown-helper:45221".to_string()));
 }
 
@@ -2542,6 +2612,72 @@ async fn launch_lifecycle_cleans_helper_and_codex_when_status_save_fails() {
             "terminate-packaged:4242",
             "status:failed",
         ]
+    );
+}
+
+#[tokio::test]
+async fn launch_keeps_proxy_enabled_after_start_when_codex_exits() {
+    let temp =
+        tempfile::tempdir_in(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp")).unwrap();
+    let _diagnostics = DiagnosticLogCapture::new(temp.path().join("diagnostic.jsonl"));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let codex_exit = Arc::new(tokio::sync::Notify::new());
+    let helper_exit = Arc::new(tokio::sync::Notify::new());
+    let mut hooks = FakeHooks::new(events.clone()).with_settings(BackendSettings {
+        relay_profiles: vec![RelayProfile {
+            id: "runtime-relay".to_string(),
+            local_proxy_enabled: Some(false),
+            ..RelayProfile::default()
+        }],
+        active_relay_id: "runtime-relay".to_string(),
+        ..BackendSettings::default()
+    });
+    hooks.codex_exit = Some(codex_exit.clone());
+    hooks.helper_exit = Some(helper_exit.clone());
+    let handle = launch_and_inject_with_hooks(
+        LaunchOptions {
+            app_dir: Some(temp.path().join("Codex.app")),
+            status_store: StatusStore::new(temp.path().join("latest-status.json")),
+            ..LaunchOptions::default()
+        },
+        &hooks,
+    )
+    .await
+    .unwrap();
+    let wait = handle.wait_for_exit();
+    tokio::pin!(wait);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), &mut wait)
+            .await
+            .is_err()
+    );
+
+    {
+        let mut settings = hooks.settings.lock().unwrap();
+        settings.relay_profiles[0].local_proxy_enabled = Some(true);
+        assert!(settings.active_relay_uses_protocol_proxy());
+    }
+    codex_exit.notify_one();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), &mut wait)
+            .await
+            .is_err(),
+        "运行中启用的本地代理不应随 Codex 退出而关闭"
+    );
+    let running = events.lock().unwrap().clone();
+    assert!(running.contains(&"wait-helper".to_string()));
+    assert!(!running.contains(&"shutdown-helper:45221".to_string()));
+
+    helper_exit.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(1), wait)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .contains(&"shutdown-helper:45221".to_string())
     );
 }
 
@@ -2675,24 +2811,26 @@ async fn default_launch_hooks_provider_sync_enabled_returns_explicit_error() {
 #[derive(Clone)]
 struct FakeHooks {
     events: Arc<Mutex<Vec<String>>>,
-    settings: BackendSettings,
+    settings: Arc<Mutex<BackendSettings>>,
     launch_result: CodexLaunch,
     launch_error: Option<String>,
     inject_error: Option<String>,
     provider_sync_unsupported: bool,
     plugin_marketplace_error: Option<String>,
     existing_codex: Option<ExistingCodex>,
+    codex_exit: Option<Arc<tokio::sync::Notify>>,
+    helper_exit: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl FakeHooks {
     fn new(events: Arc<Mutex<Vec<String>>>) -> Self {
         Self {
             events,
-            settings: BackendSettings {
+            settings: Arc::new(Mutex::new(BackendSettings {
                 computer_use_guard_enabled: false,
                 computer_use_api_key_browser_compat_enabled: false,
                 ..BackendSettings::default()
-            },
+            })),
             launch_result: CodexLaunch::Process {
                 command: vec!["codex".to_string()],
                 wait_strategy: codex_elves_core::launcher::ProcessWaitStrategy::TrackedChild,
@@ -2703,11 +2841,13 @@ impl FakeHooks {
             provider_sync_unsupported: false,
             plugin_marketplace_error: None,
             existing_codex: None,
+            codex_exit: None,
+            helper_exit: None,
         }
     }
 
     fn with_settings(mut self, settings: BackendSettings) -> Self {
-        self.settings = settings;
+        self.settings = Arc::new(Mutex::new(settings));
         self
     }
 
@@ -2773,7 +2913,7 @@ impl LaunchHooks for FakeHooks {
 
     async fn load_settings(&self) -> anyhow::Result<BackendSettings> {
         self.event("load-settings");
-        Ok(self.settings.clone())
+        Ok(self.settings.lock().unwrap().clone())
     }
 
     async fn run_provider_sync(&self) -> anyhow::Result<()> {
@@ -2872,6 +3012,17 @@ impl LaunchHooks for FakeHooks {
 
     async fn wait_for_codex_exit(&self, _launch: &CodexLaunch) -> anyhow::Result<()> {
         self.event("wait-codex");
+        if let Some(exit) = &self.codex_exit {
+            exit.notified().await;
+        }
+        Ok(())
+    }
+
+    async fn wait_for_helper_exit(&self) -> anyhow::Result<()> {
+        self.event("wait-helper");
+        if let Some(exit) = &self.helper_exit {
+            exit.notified().await;
+        }
         Ok(())
     }
 

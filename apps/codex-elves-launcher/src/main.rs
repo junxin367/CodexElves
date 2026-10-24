@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
         );
     }
     let handle = launch_and_inject_with_hooks(options, &hooks).await?;
-    handle.wait_for_codex_exit().await?;
+    handle.wait_for_exit().await?;
     Ok(())
 }
 
@@ -672,6 +672,10 @@ impl LaunchHooks for LauncherHooks {
         launch: &codex_elves_core::launcher::CodexLaunch,
     ) -> anyhow::Result<()> {
         self.core.wait_for_codex_exit(launch).await
+    }
+
+    async fn wait_for_helper_exit(&self) -> anyhow::Result<()> {
+        self.core.wait_for_helper_exit().await
     }
 
     async fn shutdown_helper(&self, helper_port: u16) {

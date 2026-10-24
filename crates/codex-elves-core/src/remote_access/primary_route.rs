@@ -273,6 +273,9 @@ impl RemoteAccessController {
             return;
         }
         if self.primary.busy.load(Ordering::SeqCst) {
+            if !settings.ngrok_enabled {
+                live.ngrok.reconcile(false, &target).await;
+            }
             return;
         }
         match self.primary.provider() {
@@ -290,12 +293,14 @@ impl RemoteAccessController {
                     .map(str::to_owned);
                 let configured = status["bound"] == true
                     && status["publicUrl"].as_str().is_some_and(|s| !s.is_empty());
-                live.ngrok.reconcile(configured, &target).await;
+                live.ngrok
+                    .reconcile(settings.ngrok_enabled && configured, &target)
+                    .await;
             }
             Provider::Frp => {
                 live.zrok.reconcile(false, &target).await;
-                // Preserve the existing ngrok process, credentials and routing.
-                live.ngrok.reconcile(true, &target).await;
+                // Keep the optional secondary route independent of the primary provider.
+                live.ngrok.reconcile(settings.ngrok_enabled, &target).await;
                 if live.frp.as_mut().is_some_and(|running| !running.alive()) {
                     live.frp = None;
                     self.primary.set_ingress(None);
@@ -526,27 +531,14 @@ impl RemoteAccessController {
                 }
             }
             Provider::Zrok => {
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-                let origin = loop {
-                    let mut live = self.live.lock().await;
-                    live.zrok
-                        .reconcile(true, &super::zrok_target(settings))
-                        .await;
-                    let status = live.zrok.status();
-                    if status["running"] == true {
-                        break status["publicUrl"]
-                            .as_str()
-                            .context("zrok 地址未就绪")?
-                            .to_owned();
-                    }
-                    anyhow::ensure!(status["installed"] == true, "请先下载并绑定 zrok");
-                    anyhow::ensure!(
-                        tokio::time::Instant::now() < deadline,
-                        "zrok 未启动，请先完成绑定和固定名称配置"
-                    );
-                    drop(live);
-                    tokio::time::sleep(Duration::from_millis(400)).await;
-                };
+                let mut live = self.live.lock().await;
+                let origin = live
+                    .zrok
+                    .start_for_primary(&super::zrok_target(settings))
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("zrok 候选入口启动失败，原主入口未切换：{error:#}")
+                    })?;
                 (origin, None, true)
             }
         };
@@ -587,9 +579,9 @@ impl RemoteAccessController {
                     self.stop_frp(&mut live).await;
                 }
             }
-            // No ngrok stop/rebind occurs when changing the primary provider.
+            // Changing the primary provider preserves the secondary route preference.
             live.ngrok
-                .reconcile(true, &super::zrok_target(settings))
+                .reconcile(settings.ngrok_enabled, &super::zrok_target(settings))
                 .await;
             drop(live);
             self.prune_stale_public_devices().await;
@@ -650,6 +642,39 @@ mod tests {
             .unwrap();
         });
         (format!("http://{address}"), task)
+    }
+
+    #[tokio::test]
+    async fn ngrok_switch_gates_frp_secondary_and_cancels_startup_while_primary_busy() {
+        let directory = tempfile::tempdir().unwrap();
+        let token_path = directory.path().join("remote-access-ngrok.json");
+        let token_config = br#"{"version":"3","agent":{"authtoken":"isolated_test_token"}}"#;
+        std::fs::write(&token_path, token_config).unwrap();
+        let controller =
+            RemoteAccessController::new(Arc::new(Bridge), directory.path().into()).unwrap();
+        controller.running.store(true, Ordering::SeqCst);
+        controller.primary.selection.write().unwrap().provider = Provider::Frp;
+        let mut settings = RemoteAccessSettings {
+            enabled: true,
+            ..Default::default()
+        };
+        let mut live = controller.live.lock().await;
+        live.frp_retry_at = u64::MAX;
+        controller.reconcile_primary(&mut live, &settings).await;
+        assert_eq!(live.ngrok.status()["configured"], true);
+        assert_eq!(live.ngrok.status()["state"], "stopped");
+
+        settings.ngrok_enabled = true;
+        controller.reconcile_primary(&mut live, &settings).await;
+        assert_eq!(live.ngrok.status()["state"], "starting");
+
+        controller.primary.busy.store(true, Ordering::SeqCst);
+        settings.ngrok_enabled = false;
+        controller.reconcile_primary(&mut live, &settings).await;
+        assert_eq!(live.ngrok.status()["state"], "stopped");
+        assert!(controller.channels.secondary.read().unwrap().is_none());
+        assert_eq!(controller.primary.provider(), Provider::Frp);
+        assert_eq!(std::fs::read(token_path).unwrap(), token_config);
     }
 
     #[tokio::test]
@@ -909,6 +934,7 @@ mod tests {
         super::super::configure_access_key(directory.path(), "test-http-access-key").unwrap();
         let controller =
             RemoteAccessController::new(Arc::new(Bridge), directory.path().into()).unwrap();
+        controller.configure_secondary_channel(true);
         controller.publish_access_policy(&RemoteAccessSettings {
             enabled: true,
             ..Default::default()

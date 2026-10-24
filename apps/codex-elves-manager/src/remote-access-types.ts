@@ -1,5 +1,6 @@
 export type RemoteAccessSettings = {
   enabled: boolean;
+  ngrokEnabled: boolean;
   bindHost: string;
   port: number;
   zrokSetupValue: string;
@@ -10,6 +11,7 @@ export type RemoteAccessSettings = {
 
 export const defaultRemoteAccessSettings: RemoteAccessSettings = {
   enabled: false,
+  ngrokEnabled: false,
   bindHost: "127.0.0.1",
   port: 45222,
   zrokSetupValue: "",

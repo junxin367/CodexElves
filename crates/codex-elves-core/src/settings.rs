@@ -739,6 +739,7 @@ pub enum RelayMode {
 #[serde(rename_all = "camelCase", default)]
 pub struct RemoteAccessSettings {
     pub enabled: bool,
+    pub ngrok_enabled: bool,
     pub bind_host: String,
     pub port: u16,
     pub zrok_setup_value: String,
@@ -751,6 +752,7 @@ impl Default for RemoteAccessSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            ngrok_enabled: false,
             bind_host: "127.0.0.1".into(),
             port: 45222,
             zrok_setup_value: String::new(),
@@ -2017,6 +2019,26 @@ mod tests {
 
         settings.bind_host = "0.0.0.0".into();
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn remote_access_ngrok_switch_defaults_off_and_persists() {
+        let legacy: RemoteAccessSettings =
+            serde_json::from_value(json!({"enabled": true})).unwrap();
+        assert!(!legacy.ngrok_enabled);
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path().join("settings.json"));
+        let mut settings = BackendSettings::default();
+        for enabled in [true, false] {
+            settings.remote_access.ngrok_enabled = enabled;
+            store.save(&settings).unwrap();
+            let saved = store.load().unwrap();
+            assert_eq!(saved.remote_access.ngrok_enabled, enabled);
+            assert_eq!(
+                serde_json::to_value(saved.remote_access).unwrap()["ngrokEnabled"],
+                json!(enabled)
+            );
+        }
     }
 
     #[test]

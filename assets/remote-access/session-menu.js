@@ -1,10 +1,4 @@
 let menuSequence = 0;
-const agentIconPaths = [
-  '<circle cx="10" cy="10" r="7"/><ellipse cx="10" cy="10" rx="3" ry="7"/><path d="M3 10h14"/>',
-  '<path d="M10 9C4 10 2 6 5 4c3-2 6 0 5 5Zm1 1c-1-6 3-8 5-5 2 3 0 6-5 5Zm-1 1c6-1 8 3 5 5-3 2-6 0-5-5Zm-1-1c1 6-3 8-5 5-2-3 0-6 5-5Z"/>',
-  '<circle cx="10" cy="5" r="2.5"/><path d="M7 8h6m-5 0c0 4-1 5-3 7v2h10v-2c-2-2-3-3-3-7ZM6 15h8"/>',
-  '<path d="m10 2 1.7 4.3L16 4l-2.3 4.3L18 10l-4.3 1.7L16 16l-4.3-2.3L10 18l-1.7-4.3L4 16l2.3-4.3L2 10l4.3-1.7L4 4l4.3 2.3Z"/>'
-];
 
 function element(tag, className = "", text = "") {
   const node = document.createElement(tag);
@@ -41,10 +35,11 @@ function menuSignature(data) {
 }
 
 export function mountSessionMenu({
-  trigger, getContext, load, openChanges, openSubagent, createSideThread, openSideThread,
-  closeSideThread, beforeOpen, onError, onData, cache
+  trigger, getContext, load, openChanges, openBrowser, openFiles, openSubagent, createSideThread, openSideThread,
+  closeSideThread, beforeOpen, onError, onData, cache, renderSubagentIcon
 }) {
   let disposed = false, opened = false, owner = "", authorization = "", context = null, cached = null;
+  let suspended = false;
   let ticker = null, press = null, suppressedClick = null, blockedContext = null;
   const entries = new Map(), maxEntries = 32, refreshAgeMs = 30000;
   let contextSource = null, contextItem = null, contextPosition = null, message = "";
@@ -88,6 +83,7 @@ export function mountSessionMenu({
       connected: value.connected === true, owner: JSON.stringify([deviceId, cacheScope, threadId]) };
   }
   function syncContext() {
+    if (suspended) return context;
     const next = readContext();
     const changed = next.owner !== owner;
     if (next.authorization !== authorization) {
@@ -180,13 +176,41 @@ export function mountSessionMenu({
   }
   function close(restoreFocus = false) {
     if (!opened) { cancelPress(); return; }
-    opened = false; clearInterval(ticker); ticker = null; cancelPress(); hideContext();
+    opened = false; suspended = false; clearInterval(ticker); ticker = null; cancelPress(); hideContext();
     trigger.setAttribute("aria-expanded", "false");
     if (layer.hasAttribute("popover")) {
       try { layer.hidePopover(); } catch {}
     }
+    layer.classList.remove("session-related-menu-suspended");
     layer.hidden = true;
     if (restoreFocus && trigger.isConnected && !trigger.disabled) trigger.focus();
+  }
+  function suspend() {
+    if (!opened || suspended) return;
+    suspended = true; cancelPress(); hideContext();
+    trigger.setAttribute("aria-expanded", "false");
+    if (layer.hasAttribute("popover")) {
+      try { layer.hidePopover(); } catch {}
+    }
+    layer.classList.add("session-related-menu-suspended");
+    layer.hidden = true;
+  }
+  function resume() {
+    if (!opened || !suspended) return;
+    suspended = false;
+    layer.classList.remove("session-related-menu-suspended");
+    layer.hidden = false;
+    (trigger.closest("dialog") || document.body).append(layer);
+    if (layer.hasAttribute("popover")) {
+      try { layer.showPopover(); } catch { layer.removeAttribute("popover"); }
+    }
+    trigger.setAttribute("aria-expanded", "true");
+    (window.requestAnimationFrame || (cb => setTimeout(cb, 16)))(() => {
+      if (opened && !suspended) {
+        fit();
+        focusEdge(false);
+      }
+    });
   }
   function updatePermissions() {
     for (const [button, kind] of mutationButtons) {
@@ -205,16 +229,16 @@ export function mountSessionMenu({
       if (node.textContent !== text) node.textContent = text;
     }
   }
-  function invoke(callback, args, expected, mutation = false, onSuccess) {
+  function invoke(callback, args, expected, mutation = false, onSuccess, { keepMenu = false } = {}) {
     if (!owns(expected) || mutation && !canMutate(context) || typeof callback !== "function") return;
-    close();
+    if (keepMenu) suspend(); else close();
     try {
       Promise.resolve(callback(...args)).then(() => {
         if (onSuccess && owns(expected)) onSuccess();
       }).catch(report);
     } catch (error) { report(error); }
   }
-  function itemButton(label, callback, args, kind = "", item = null) {
+  function itemButton(label, callback, args, kind = "", item = null, { keepMenu = false } = {}) {
     const node = element("button", "session-related-menu-item");
     node.type = "button"; node.tabIndex = -1; node.setAttribute("role", "menuitem");
     node.append(element("span", "session-related-menu-name", label));
@@ -224,7 +248,7 @@ export function mountSessionMenu({
       event.preventDefault(); event.stopPropagation();
       if (node.disabled) return;
       if (kind === "create" && (context.createPending || cached?.data.canCreateSideThread === false)) return;
-      invoke(callback, args, expected, !!kind);
+      invoke(callback, args, expected, !!kind, undefined, { keepMenu });
     });
     if (kind) mutationButtons.set(node, kind);
     if (item) bindSideThread(node, item, expected);
@@ -242,13 +266,6 @@ export function mountSessionMenu({
     menu.append(group);
     return group;
   }
-  function agentIcon(index) {
-    const node = element("span", "session-related-menu-agent-icon");
-    node.dataset.variant = index % agentIconPaths.length;
-    node.setAttribute("aria-hidden", "true");
-    node.innerHTML = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${agentIconPaths[index % agentIconPaths.length]}</svg>`;
-    return node;
-  }
   function menuButtons(root = menu) {
     return [...root.querySelectorAll("button:not(:disabled)")].filter(node => !node.closest("[hidden]"));
   }
@@ -259,6 +276,10 @@ export function mountSessionMenu({
     menu.append(tools);
     const changes = itemButton("变更", openChanges, []);
     changes.dataset.menuKey = "changes"; tools.append(changes);
+    const browser = itemButton("浏览器", openBrowser, []);
+    browser.dataset.menuKey = "browser"; tools.append(browser);
+    const files = itemButton("文件", openFiles, []);
+    files.dataset.menuKey = "files"; tools.append(files);
     const data = cached?.data, entry = entries.get(owner), expected = owner;
     const toggleSubagents = element("button", "session-related-menu-item session-related-menu-heading-action session-related-menu-heading-toggle");
     toggleSubagents.type = "button"; toggleSubagents.tabIndex = -1;
@@ -300,21 +321,32 @@ export function mountSessionMenu({
       const completed = element("div", "session-related-menu-completed");
       const icons = element("span", "session-related-menu-completed-icons");
       icons.setAttribute("aria-hidden", "true");
-      for (let index = 0; index < Math.min(4, data.completedSubagentCount); index++) icons.append(agentIcon(index));
+      for (const item of data.completedSubagents.slice(0, 4)) {
+        const icon = renderSubagentIcon?.(item);
+        if (icon) {
+          icon.classList.add("session-related-menu-agent-icon");
+          icons.append(icon);
+        }
+      }
+      icons.hidden = !icons.childElementCount;
       completed.append(icons, element("span", "session-related-menu-completed-count",
         `${data.completedSubagentCount} 完成`));
       subagentContents.append(completed);
     }
-    const create = itemButton("新建侧边会话", createSideThread, [], "create");
+    const create = itemButton("新建侧边会话", createSideThread, [], "create", null, { keepMenu: true });
     create.dataset.menuKey = "create";
     create.classList.add("session-related-menu-heading-action");
     create.setAttribute("aria-label", "新建侧边会话"); create.title = "新建侧边会话";
     create.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
     const sides = section("侧边会话", create);
     for (const item of data?.sideThreads || []) {
-      const button = itemButton(nonempty(item.title) ? item.title : "侧边会话", openSideThread, [item], "", item);
+      const button = itemButton(nonempty(item.title) ? item.title : "新建侧边会话", openSideThread, [item], "", item, { keepMenu: true });
       button.classList.add("session-related-menu-thread");
-      if (item.hasUnreadTurn === true) {
+      if (item.running === true) {
+        const running = element("span", "spinner session-related-menu-running");
+        running.setAttribute("role", "img"); running.setAttribute("aria-label", "正在执行");
+        button.append(running);
+      } else if (item.hasUnreadTurn === true) {
         const unread = element("span", "session-related-menu-unread");
         unread.setAttribute("role", "img"); unread.setAttribute("aria-label", "有未读消息");
         button.append(unread);
@@ -340,9 +372,13 @@ export function mountSessionMenu({
       width: view?.width || window.innerWidth, height: view?.height || window.innerHeight };
   }
   function fit() {
-    if (!opened) return;
+    if (!opened || suspended) return;
     if (!trigger.isConnected || trigger.disabled || trigger.hidden) { close(); return; }
     const view = viewport(), box = trigger.getBoundingClientRect(), padding = 8;
+    if (box.width === 0 && box.height === 0) {
+      (window.requestAnimationFrame || (cb => setTimeout(cb, 16)))(() => { if (opened && !suspended) fit(); });
+      return;
+    }
     if (box.bottom <= view.top || box.top >= view.top + view.height
         || box.right <= view.left || box.left >= view.left + view.width) { close(); return; }
     const width = Math.max(0, Math.min(view.width * .65, view.width - padding * 2));
@@ -350,7 +386,7 @@ export function mountSessionMenu({
     menu.style.width = `${width}px`;
     menu.style.left = `${Math.max(view.left + padding, Math.min(box.right - width, view.left + view.width - width - padding))}px`;
     menu.style.top = `${top}px`;
-    menu.style.maxHeight = `${Math.max(0, Math.min(480, view.top + view.height - top - padding))}px`;
+    menu.style.maxHeight = `${Math.max(0, Math.min(480, view.height * .8, view.top + view.height - top - padding))}px`;
     if (!actionMenu.hidden) {
       const source = contextSource.getBoundingClientRect();
       const x = contextPosition?.x ?? source.right, y = contextPosition?.y ?? source.bottom;
@@ -444,6 +480,7 @@ export function mountSessionMenu({
   }
   function open(options = {}) {
     if (disposed || trigger.disabled || !trigger.isConnected) return Promise.resolve(null);
+    if (suspended) { resume(); return Promise.resolve(cached?.data || null); }
     if (opened) return refresh();
     try { beforeOpen?.(); } catch (error) { report(error); return Promise.resolve(null); }
     const value = syncContext(); restore(entryFor(value)); opened = true; layer.hidden = false;
@@ -543,7 +580,7 @@ export function mountSessionMenu({
   listen(window, "blur", () => cancelPress({ suppress: true, blockContext: true }));
   listen(document, "visibilitychange", () => { if (document.hidden) close(); });
   syncContext();
-  return { toggle, open, close, refresh, isOpen: () => opened,
+  return { toggle, open, close, suspend, resume, refresh, isOpen: () => opened && !suspended, isSuspended: () => opened && suspended,
     updateContext() {
       const value = syncContext(), entry = entryFor(value);
       restore(entry);

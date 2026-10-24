@@ -84,9 +84,11 @@ export function PrimaryRouteControls({
   const pending = busy || Boolean(operation) || Boolean(primary?.switching) || downloading;
   const known = Boolean(primary);
   const canUse = enabled && status?.running && status?.nativeConnected;
+  const providerError = editing === "frp" ? primary?.frp.error
+    : ["connecting", "retry_wait", "error"].includes(status?.zrok?.state || "") ? status?.zrok?.error : null;
   const actionFeedback: Feedback | null = feedback || (operation
     ? { text: operation === "apply" ? "正在验证并切换主链路…" : enabled ? "正在保存并测试入口…" : "正在保存配置…", kind: "success" }
-    : editing === "frp" && primary?.frp.error ? { text: primary.frp.error, kind: "error" } : null);
+    : providerError ? { text: providerError, kind: "error" } : null);
   const saveFrp = async () => {
     const normalized: FrpConfig = {
       ...config, serverAddr: normalizeFrpServerAddress(config.serverAddr), publicOrigin, httpsMode: "provider",

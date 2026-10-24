@@ -5,7 +5,9 @@ let deviceId = null;
 let generation = 0;
 let discoveryTimer = null;
 let discoveryPending = null;
+let discoveryAgain = false;
 let configuration = null;
+let latestConfigurationVersion = null;
 let channelMeasurements = [];
 let measurementSignature = "";
 let routeRequestSequence = 0;
@@ -50,9 +52,11 @@ export function clearRemoteChannels() {
   ++generation;
   deviceId = null;
   configuration = null;
+  latestConfigurationVersion = null;
   channelMeasurements = [];
   measurementSignature = "";
   discoveryPending = null;
+  discoveryAgain = false;
   clearInterval(discoveryTimer);
   discoveryTimer = null;
   routeHealth.clear();
@@ -107,7 +111,7 @@ function healthyRoute(route, sequence) {
 
 function routes() {
   const primary = { origin: primaryOrigin(), token: null };
-  if (!configuration || configuration.expiresAtMs <= Date.now()) return [primary];
+  if (!configuration || configuration.secondaryEnabled === false || configuration.expiresAtMs <= Date.now()) return [primary];
   return [primary, ...configuration.origins.filter(origin => origin !== primary.origin)
     .slice(0, 1).map(origin => ({ origin, token: configuration.token }))];
 }
@@ -203,7 +207,7 @@ export async function requestRemote(path, options, consume, measurements = chann
   const read = options.method === "GET" && (["/api/session", "/api/channels", "/api/channel-events"].includes(pathname)
       || /^\/api\/receipts\/[a-zA-Z0-9-]{1,100}$/.test(pathname))
     || options.method === "POST" && (/^\/api\/read\/[a-zA-Z]+$/.test(pathname)
-      || ["/api/workspace/changes", "/api/workspace/change"].includes(pathname));
+      || ["/api/workspace/changes", "/api/workspace/change", "/api/workspace/files", "/api/workspace/file"].includes(pathname));
   let candidates = orderedRoutes(routes().filter(route => supportsRequest(route, path, options.method)), measurements);
   if (!candidates.length) throw notSubmitted("当前没有可用的请求线路，请等待连接恢复后重试。");
   const observedGeneration = generation;
@@ -228,7 +232,7 @@ export async function requestRemote(path, options, consume, measurements = chann
     const routeChanged = () => {
       if (observedGeneration !== generation) controller?.abort(new DOMException("授权已更新", "AbortError"));
       else if (remainingRoutes().length) {
-        if (health(route).retryAt > Date.now()
+        if (!routes().some(current => current.origin === route.origin) || health(route).retryAt > Date.now()
             || channelMeasurements.some(value => value.origin === route.origin && value.status === "unavailable"))
           controller?.abort(new DOMException("读取线路已失效", "TimeoutError"));
         else if (timer === null)
@@ -457,6 +461,16 @@ export async function raceRemoteRead(path, options, consume, onLatency = null) {
   finally { finished = true; clearTimeout(timer); }
 }
 
+const configurationRevision = value => value?.revision ?? 0;
+function staleConfiguration(value) {
+  const latest = configuration || latestConfigurationVersion;
+  return value && latest && value.serverId === latest.serverId
+    && configurationRevision(value) < configurationRevision(latest);
+}
+function rememberConfigurationVersion(value) {
+  if (value) latestConfigurationVersion = { serverId: value.serverId, revision: configurationRevision(value) };
+}
+
 async function discover() {
   if (!deviceId || discoveryPending) return discoveryPending;
   const observed = generation, expectedDevice = deviceId;
@@ -471,17 +485,28 @@ async function discover() {
           || !Number.isSafeInteger(value.expiresAtMs) || value.expiresAtMs <= Date.now()
           || value.requestRoutingVersion !== undefined && value.requestRoutingVersion !== 2
           || value.requestRoutingVersion === 2 && !/^[a-f0-9]{64}$/.test(value.mediaToken || "")
+          || value.revision !== undefined && (!Number.isSafeInteger(value.revision) || value.revision < 0)
+          || value.secondaryEnabled !== undefined && typeof value.secondaryEnabled !== "boolean"
           || value.sendActions !== undefined && (!Array.isArray(value.sendActions)
             || value.sendActions.length > messageActions.size || value.sendActions.some(action => !messageActions.has(action)))
           || !Array.isArray(value.origins) || value.origins.length > 2 || value.origins.some(origin => !validOrigin(origin)))
         throw new Error("第二通道发现数据无效");
       return value;
     });
-    if (generation !== observed || deviceId !== expectedDevice) return;
+    if (generation !== observed || deviceId !== expectedDevice || staleConfiguration(value)) return;
     configuration = value;
+    rememberConfigurationVersion(value);
     changed();
   })().catch(() => { /* The primary connection remains usable while discovery retries. */ })
-    .finally(() => { clearTimeout(timeout); if (discoveryPending === pending) discoveryPending = null; });
+    .finally(() => {
+      clearTimeout(timeout);
+      if (discoveryPending !== pending) return;
+      discoveryPending = null;
+      if (discoveryAgain && generation === observed && deviceId === expectedDevice) {
+        discoveryAgain = false;
+        void discover();
+      }
+    });
   discoveryPending = pending;
   return pending;
 }
@@ -510,12 +535,41 @@ export function observeChannelConfiguration(listener) {
 // Called only by the same-origin SharedWorker's trusted MessagePorts.
 export function applyChannelConfiguration(value) {
   if (value && (!Array.isArray(value.origins) || value.origins.some(origin => !validOrigin(origin))
-      || !/^[a-f0-9]{64}$/.test(value.token))) return;
+      || !/^[a-f0-9]{64}$/.test(value.token)
+      || value.revision !== undefined && (!Number.isSafeInteger(value.revision) || value.revision < 0)
+      || value.secondaryEnabled !== undefined && typeof value.secondaryEnabled !== "boolean")) return;
+  if (staleConfiguration(value)) return;
   configuration = value;
+  rememberConfigurationVersion(value);
   if (value?.channelRequestVersion === 1) fullRequestRouting = false;
   else if (value?.channelRequestVersion === 2 && !isAndroidContainer()) fullRequestRouting = true;
   setRemoteChannelMeasurements(value?.measurements || []);
   changed();
+}
+
+export function handleRemoteChannelEvent(event) {
+  if (event?.method !== "remote/channelsChanged") return false;
+  const params = event.params;
+  const latest = configuration || latestConfigurationVersion;
+  if (!/^[a-f0-9-]{36}$/.test(event.channelEpoch || "")
+      || latest && event.channelEpoch !== latest.serverId
+      || !Number.isSafeInteger(params?.revision) || params.revision < 0
+      || typeof params.secondaryEnabled !== "boolean"
+      || params.revision <= configurationRevision(latest)) return true;
+  latestConfigurationVersion = { serverId: event.channelEpoch, revision: params.revision };
+  if (configuration) configuration = {
+    ...configuration, revision: params.revision,
+    secondaryEnabled: false, origins: configuration.origins.filter(origin => origin === primaryOrigin())
+  };
+  // 事件只撤下旧线路；开启后的地址和凭证仍须通过授权发现重新确认。
+  channelMeasurements = channelMeasurements.filter(value => value.origin === primaryOrigin());
+  measurementSignature = JSON.stringify(channelMeasurements);
+  changed();
+  if (deviceId) {
+    if (discoveryPending) discoveryAgain = true;
+    else void discover();
+  }
+  return true;
 }
 
 export class ChannelEventMerger {
@@ -574,7 +628,10 @@ export function createChannelEventStream() {
   let closed = false, gapTimer = null, routeRetry = null, recovering = false, recoveryController = null;
   let readyState = 0;
   const merger = new ChannelEventMerger(
-    event => stream.onmessage?.({ data: JSON.stringify(event) }),
+    event => {
+      handleRemoteChannelEvent(event);
+      stream.onmessage?.({ data: JSON.stringify(event) });
+    },
     () => { if (!gapTimer) gapTimer = setTimeout(() => { gapTimer = null; void recover(); }, 200); }
   );
   const stream = {

@@ -15,12 +15,19 @@ struct Journal {
     entries: VecDeque<Value>,
 }
 
+#[derive(Default)]
+struct Configuration {
+    revision: u64,
+    secondary_enabled: bool,
+}
+
 pub(super) struct Channels {
     pub secondary: Arc<RwLock<Option<String>>>,
     pub primary: RwLock<Option<String>>,
     pub(super) epoch: String,
     journal: std::sync::Mutex<Journal>,
     tickets: std::sync::Mutex<HashMap<String, Ticket>>,
+    configuration: RwLock<Configuration>,
 }
 
 impl Channels {
@@ -34,7 +41,13 @@ impl Channels {
                 entries: VecDeque::new(),
             }),
             tickets: std::sync::Mutex::new(HashMap::new()),
+            configuration: RwLock::new(Configuration::default()),
         }
+    }
+
+    fn configuration(&self) -> (u64, bool) {
+        let configuration = self.configuration.read().unwrap_or_else(|e| e.into_inner());
+        (configuration.revision, configuration.secondary_enabled)
     }
 
     pub fn origins(&self) -> Vec<String> {
@@ -132,7 +145,13 @@ pub(super) fn read_path(method: &Method, path: &str) -> bool {
         }
         &Method::POST => {
             path.starts_with("/api/read/")
-                || matches!(path, "/api/workspace/changes" | "/api/workspace/change")
+                || matches!(
+                    path,
+                    "/api/workspace/changes"
+                        | "/api/workspace/change"
+                        | "/api/workspace/files"
+                        | "/api/workspace/file"
+                )
         }
         _ => false,
     }
@@ -188,6 +207,26 @@ pub(super) fn media_token(uri: &Uri) -> Option<String> {
 }
 
 impl RemoteAccessController {
+    pub(super) fn configure_secondary_channel(&self, enabled: bool) {
+        let revision = {
+            let mut configuration = self
+                .channels
+                .configuration
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if configuration.secondary_enabled == enabled {
+                return;
+            }
+            configuration.secondary_enabled = enabled;
+            configuration.revision += 1;
+            configuration.revision
+        };
+        self.publish_event(json!({
+            "method":"remote/channelsChanged",
+            "params":{"revision":revision,"secondaryEnabled":enabled}
+        }));
+    }
+
     pub(super) fn publish_event(&self, mut event: Value) {
         let mut journal = self
             .channels
@@ -213,11 +252,16 @@ pub(super) async fn discover(
     let device = authorized(&state, &headers).await?;
     let (token, expires_at) = state.controller.channels.issue(&device, false);
     let (media_token, _) = state.controller.channels.issue(&device, true);
+    let (revision, secondary_enabled) = state.controller.channels.configuration();
     let origins = state
         .controller
         .public_origin()
         .into_iter()
-        .chain(state.controller.channels.origins())
+        .chain(if secondary_enabled {
+            state.controller.channels.origins()
+        } else {
+            Vec::new()
+        })
         .collect::<Vec<_>>();
     state
         .controller
@@ -228,7 +272,8 @@ pub(super) async fn discover(
     Ok(Json(
         json!({"ok":true,"schemaVersion":1,"deviceId":device.id,"serverId":state.controller.channels.epoch,
         "primaryProvider":state.controller.primary.provider(),"primaryOrigin":state.controller.public_origin(),
-        "origins":origins,"token":token,"mediaToken":media_token,"expiresAtMs":expires_at,"sendActions":["send","create","setGoal"],"requestRoutingVersion":2}),
+        "origins":origins,"token":token,"mediaToken":media_token,"expiresAtMs":expires_at,"sendActions":["send","create","setGoal"],"requestRoutingVersion":2,
+        "revision":revision,"secondaryEnabled":secondary_enabled}),
     ))
 }
 

@@ -35,6 +35,7 @@ const RETRY_MS: u64 = 30_000;
 const PUBLIC_RETRY_MS: u64 = 5_000;
 const PUBLIC_RECHECK_MS: u64 = 30_000;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+const NAME_QUERY_RETRY_DELAY: Duration = Duration::from_millis(500);
 const PUBLIC_TIMEOUT: Duration = Duration::from_secs(15);
 const SHARE_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 static DOWNLOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -360,6 +361,27 @@ impl ZrokTunnelService {
         .await
     }
 
+    pub(super) async fn start_for_primary(&mut self, target: &str) -> anyhow::Result<String> {
+        self.start_for_primary_with_commands(target, &SystemEnvironmentCommands)
+            .await
+    }
+
+    async fn start_for_primary_with_commands(
+        &mut self,
+        target: &str,
+        commands: &impl EnvironmentCommands,
+    ) -> anyhow::Result<String> {
+        self.refresh_download().await;
+        self.refresh_process().await;
+        if self.child.is_none() || target_requires_restart(self.target.as_deref(), target) {
+            // 主入口切换是显式启动，不能沿用后台巡检留下的错误或退避状态。
+            let fixed_name = self.fixed_name.clone();
+            self.start_public_with_commands(None, &fixed_name, true, target, commands)
+                .await?;
+        }
+        self.current_origin().context("zrok 地址未就绪")
+    }
+
     async fn start_public_with_commands(
         &mut self,
         token: Option<&str>,
@@ -398,7 +420,7 @@ impl ZrokTunnelService {
         commands.verify_program(&program)?;
         self.ensure_environment_bound(&program, token, commands)
             .await?;
-        ensure_reserved_name(&program, &fixed_name).await?;
+        ensure_reserved_name(&program, &fixed_name, commands).await?;
         save_config(
             &self.state_dir,
             &ZrokConfig {
@@ -1198,15 +1220,34 @@ fn status_without_ansi_styles(output: &str) -> String {
 }
 
 async fn detect_reserved_name(program: &Path) -> anyhow::Result<Option<String>> {
-    let output = run_command(program, &["list", "names", "--json"], COMMAND_TIMEOUT).await?;
-    anyhow::ensure!(
-        output.success,
-        "无法读取 zrok 固定公网名称：{}",
-        command_diagnostic(&output)
-    );
-    let names: Vec<ZrokName> =
-        serde_json::from_str(&output.stdout).context("zrok 固定公网名称列表格式无效")?;
+    let names = read_reserved_names(program, &SystemEnvironmentCommands).await?;
     Ok(select_reserved_name(&names))
+}
+
+async fn read_reserved_names(
+    program: &Path,
+    commands: &impl EnvironmentCommands,
+) -> anyhow::Result<Vec<ZrokName>> {
+    // Only this read can be retried; both attempts share the original command deadline.
+    tokio::time::timeout(COMMAND_TIMEOUT, async {
+        let mut output = commands
+            .run(program, &["list", "names", "--json"], COMMAND_TIMEOUT)
+            .await?;
+        if !output.success && command_diagnostic(&output).contains("TLS handshake timeout") {
+            tokio::time::sleep(NAME_QUERY_RETRY_DELAY).await;
+            output = commands
+                .run(program, &["list", "names", "--json"], COMMAND_TIMEOUT)
+                .await?;
+        }
+        anyhow::ensure!(
+            output.success,
+            "无法读取 zrok 固定公网名称：{}",
+            command_diagnostic(&output)
+        );
+        serde_json::from_str(&output.stdout).context("zrok 固定公网名称列表格式无效")
+    })
+    .await
+    .context("读取 zrok 固定公网名称超时，请稍后重试")?
 }
 
 fn select_reserved_name(names: &[ZrokName]) -> Option<String> {
@@ -1250,15 +1291,12 @@ async fn enable_environment(
     anyhow::bail!("zrok token 绑定失败：{}", command_diagnostic(&output))
 }
 
-async fn ensure_reserved_name(program: &Path, fixed_name: &str) -> anyhow::Result<()> {
-    let output = run_command(program, &["list", "names", "--json"], COMMAND_TIMEOUT).await?;
-    anyhow::ensure!(
-        output.success,
-        "无法读取 zrok 固定公网名称：{}",
-        command_diagnostic(&output)
-    );
-    let names: Vec<ZrokName> =
-        serde_json::from_str(&output.stdout).context("zrok 固定公网名称列表格式无效")?;
+async fn ensure_reserved_name(
+    program: &Path,
+    fixed_name: &str,
+    commands: &impl EnvironmentCommands,
+) -> anyhow::Result<()> {
+    let names = read_reserved_names(program, commands).await?;
     if names
         .iter()
         .any(|name| name.name == fixed_name && name.namespace_token == "public" && name.reserved)
@@ -1271,12 +1309,13 @@ async fn ensure_reserved_name(program: &Path, fixed_name: &str) -> anyhow::Resul
             .any(|name| name.name == fixed_name && name.namespace_token == "public"),
         "该固定公网名称已存在但不是可复用的保留名称"
     );
-    let output = run_command(
-        program,
-        &["create", "name", fixed_name, "--namespace-token", "public"],
-        COMMAND_TIMEOUT,
-    )
-    .await?;
+    let output = commands
+        .run(
+            program,
+            &["create", "name", fixed_name, "--namespace-token", "public"],
+            COMMAND_TIMEOUT,
+        )
+        .await?;
     anyhow::ensure!(
         output.success,
         "固定公网名称注册失败：{}",
@@ -1418,12 +1457,24 @@ fn command_diagnostic(output: &CommandOutput) -> String {
     } else {
         output.stderr.trim()
     };
-    if text.is_empty() {
+    let text = status_without_ansi_styles(text);
+    if text.to_ascii_lowercase().contains("tls handshake timeout") {
+        return "连接 zrok 控制服务超时（TLS handshake timeout），请稍后重试".into();
+    }
+    let message = text
+        .lines()
+        .map(str::trim)
+        .take_while(|line| !line.starts_with("goroutine ") && !line.starts_with("runtime stack:"))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let message = message.strip_prefix("panic:").unwrap_or(&message).trim();
+    if message.is_empty() {
         output
             .code
             .map_or_else(|| "未知错误".into(), |code| format!("退出码 {code}"))
     } else {
-        text.chars().take(600).collect()
+        message.chars().take(600).collect()
     }
 }
 
@@ -1757,6 +1808,112 @@ mod tests {
         })
     }
 
+    #[test]
+    fn command_diagnostic_summarizes_tls_panics() {
+        let output = command_failure(
+            "panic: client version error accessing api endpoint 'https://api-v2.zrok.io': \
+             Post \"https://api-v2.zrok.io/api/v2/clientVersionCheck\": net/http: TLS handshake timeout\n\
+             \ngoroutine 1 [running]:\nmain.(*listNamesCommand).run()\n\t/home/runner/work/zrok/listNames.go:43",
+        )
+        .unwrap();
+
+        let diagnostic = command_diagnostic(&output);
+        assert_eq!(
+            diagnostic,
+            "连接 zrok 控制服务超时（TLS handshake timeout），请稍后重试"
+        );
+    }
+
+    #[test]
+    fn command_diagnostic_keeps_failure_reason_without_panic_stack() {
+        let output = command_failure(
+            "\x1b[31mpanic: permission denied: name is already reserved\x1b[0m\n\
+             \ngoroutine 1 [running]:\nmain.(*listNamesCommand).run()\n\t/home/runner/work/zrok/listNames.go:43",
+        )
+        .unwrap();
+
+        assert_eq!(
+            command_diagnostic(&output),
+            "permission denied: name is already reserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn reserved_name_query_retries_tls_timeout_and_reuses_existing_name() {
+        let commands = ScriptedCommands::new([
+            (
+                "list",
+                command_failure("panic: net/http: TLS handshake timeout\n\ngoroutine 1 [running]:"),
+            ),
+            (
+                "list",
+                command_success(
+                    r#"[{"name":"codex-elves-test","namespaceToken":"public","reserved":true}]"#,
+                ),
+            ),
+        ]);
+
+        ensure_reserved_name(Path::new("unused-zrok.exe"), "codex-elves-test", &commands)
+            .await
+            .unwrap();
+
+        commands.assert_calls(&["list", "list"]);
+    }
+
+    #[tokio::test]
+    async fn reserved_name_query_stops_after_second_tls_timeout() {
+        let commands = ScriptedCommands::new([
+            ("list", command_failure("panic: TLS handshake timeout")),
+            ("list", command_failure("panic: TLS handshake timeout")),
+        ]);
+
+        let error =
+            ensure_reserved_name(Path::new("unused-zrok.exe"), "codex-elves-test", &commands)
+                .await
+                .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "无法读取 zrok 固定公网名称：连接 zrok 控制服务超时（TLS handshake timeout），请稍后重试"
+        );
+        commands.assert_calls(&["list", "list"]);
+    }
+
+    #[tokio::test]
+    async fn reserved_name_query_does_not_retry_credentials_or_invalid_json() {
+        for reply in [
+            command_failure("permission denied"),
+            command_success("invalid json"),
+            Err(anyhow::anyhow!("无法执行 zrok 命令")),
+        ] {
+            let commands = ScriptedCommands::new([("list", reply)]);
+
+            assert!(
+                ensure_reserved_name(Path::new("unused-zrok.exe"), "codex-elves-test", &commands)
+                    .await
+                    .is_err()
+            );
+            commands.assert_calls(&["list"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn reserved_name_registration_is_not_retried_after_tls_timeout() {
+        let commands = ScriptedCommands::new([
+            ("list", command_success("[]")),
+            ("create", command_failure("panic: TLS handshake timeout")),
+        ]);
+
+        let error =
+            ensure_reserved_name(Path::new("unused-zrok.exe"), "codex-elves-test", &commands)
+                .await
+                .unwrap_err();
+
+        assert!(error.to_string().starts_with("固定公网名称注册失败："));
+        assert!(!error.to_string().contains("panic"));
+        commands.assert_calls(&["list", "create"]);
+    }
+
     fn test_service() -> ZrokTunnelService {
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../temp/zrok-binding-fix-20261017")
@@ -2078,9 +2235,10 @@ mod tests {
         let second = ScriptedCommands::new([
             ("status", command_success(UNBOUND_STATUS)),
             ("enable", command_success("environment enabled")),
+            ("list", Err(anyhow::anyhow!("无法执行 zrok 命令"))),
         ]);
 
-        // 使用不存在的测试程序，使第二次启动在名称检查处结束，绝不运行真实 zrok。
+        // 模拟名称查询失败，使第二次启动在绑定完成后结束，不运行真实 zrok。
         let error = service
             .start_public_with_commands(
                 Some("test-token"),
@@ -2095,7 +2253,7 @@ mod tests {
         assert!(format!("{error:#}").contains("无法执行 zrok 命令"));
         assert!(service.bound && service.environment_checked);
         assert_eq!(service.state.as_str(), "error");
-        second.assert_calls(&["status", "enable"]);
+        second.assert_calls(&["status", "enable", "list"]);
     }
 
     #[tokio::test]
@@ -2204,6 +2362,96 @@ mod tests {
         child
     }
 
+    #[tokio::test]
+    async fn primary_start_rechecks_binding_after_stale_error_or_backoff() {
+        for state in [ZrokState::Error, ZrokState::Backoff] {
+            let mut service = test_service();
+            service.bound = true;
+            service.environment_checked = true;
+            service.fixed_name = "codex-elves-test".into();
+            service.target = Some("http://127.0.0.1:45222".into());
+            service.retry_at_ms = if state == ZrokState::Backoff {
+                now_ms() + RETRY_MS
+            } else {
+                0
+            };
+            service.error = Some("previous TLS handshake timeout".into());
+            service.state = state;
+            service.reconcile(true, "http://127.0.0.1:45222").await;
+            assert!(service.child.is_none());
+
+            let commands = ScriptedCommands::new([("status", command_success(UNBOUND_STATUS))]);
+            let error = service
+                .start_for_primary_with_commands("http://127.0.0.1:45222", &commands)
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), "请输入 zrok token");
+            assert!(!service.bound);
+            assert_eq!(service.retry_at_ms, 0);
+            commands.assert_calls(&["status"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn primary_start_preserves_actual_control_service_error() {
+        let mut service = test_service();
+        service.fixed_name = "codex-elves-test".into();
+        let commands = ScriptedCommands::new([(
+            "status",
+            Err(anyhow::anyhow!(
+                "clientVersionCheck: net/http: TLS handshake timeout"
+            )),
+        )]);
+        let error = service
+            .start_for_primary_with_commands("http://127.0.0.1:45222", &commands)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("TLS handshake timeout"));
+        assert!(!error.to_string().contains("请先完成绑定"));
+        assert_eq!(service.state.as_str(), "error");
+        commands.assert_calls(&["status"]);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn primary_start_reuses_live_process_and_preserves_it_on_failed_target_change() {
+        let mut service = test_service();
+        let target = "http://127.0.0.1:45222";
+        service.bound = true;
+        service.environment_checked = true;
+        service.fixed_name = "codex-elves-test".into();
+        service.target = Some(target.into());
+        service.child = Some(test_child().await);
+        service.state = ZrokState::Ready;
+        let origin = origin_for_name(&service.fixed_name);
+        *service.origin.write().unwrap() = Some(origin.clone());
+        let process_id = service.child.as_ref().unwrap().id();
+
+        let commands = ScriptedCommands::new([]);
+        assert_eq!(
+            service
+                .start_for_primary_with_commands(target, &commands)
+                .await
+                .unwrap(),
+            origin
+        );
+        assert_eq!(service.child.as_ref().unwrap().id(), process_id);
+        commands.assert_calls(&[]);
+
+        let commands =
+            ScriptedCommands::new([("status", Err(anyhow::anyhow!("TLS handshake timeout")))]);
+        assert!(
+            service
+                .start_for_primary_with_commands("http://127.0.0.1:45223", &commands)
+                .await
+                .is_err()
+        );
+        assert_eq!(service.child.as_ref().unwrap().id(), process_id);
+        assert_eq!(service.current_origin(), Some(origin));
+        commands.assert_calls(&["status"]);
+        service.stop(true).await;
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     async fn failed_start_preflight_keeps_current_process_and_origin() {
@@ -2251,22 +2499,42 @@ mod tests {
         assert_eq!(service.state.as_str(), "ready");
         assert!(service.environment_check.is_none());
         commands.assert_calls(&["status"]);
-        let commands = ScriptedCommands::new([("status", command_success(BOUND_STATUS))]);
-        let error = service
-            .start_public_with_commands(
-                None,
-                "codex-elves-test",
-                true,
-                "http://127.0.0.1:45222",
-                &commands,
-            )
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("无法执行 zrok 命令"));
-        assert_eq!(service.child.as_ref().unwrap().id(), process_id);
-        assert_eq!(service.current_origin(), Some(origin));
-        assert_eq!(service.state.as_str(), "ready");
-        commands.assert_calls(&["status"]);
+        for (replies, expected_calls, expected_error) in [
+            (
+                vec![
+                    ("status", command_success(BOUND_STATUS)),
+                    ("list", Err(anyhow::anyhow!("无法执行 zrok 命令"))),
+                ],
+                vec!["status", "list"],
+                "无法执行 zrok 命令",
+            ),
+            (
+                vec![
+                    ("status", command_success(BOUND_STATUS)),
+                    ("list", command_failure("panic: TLS handshake timeout")),
+                    ("list", command_failure("panic: TLS handshake timeout")),
+                ],
+                vec!["status", "list", "list"],
+                "TLS handshake timeout",
+            ),
+        ] {
+            let commands = ScriptedCommands::new(replies);
+            let error = service
+                .start_public_with_commands(
+                    None,
+                    "codex-elves-test",
+                    true,
+                    "http://127.0.0.1:45222",
+                    &commands,
+                )
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains(expected_error));
+            assert_eq!(service.child.as_ref().unwrap().id(), process_id);
+            assert_eq!(service.current_origin(), Some(origin.clone()));
+            assert_eq!(service.state.as_str(), "ready");
+            commands.assert_calls(&expected_calls);
+        }
         service.stop(true).await;
     }
 

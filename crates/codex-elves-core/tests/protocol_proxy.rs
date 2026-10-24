@@ -7506,7 +7506,7 @@ fn responses_request_applies_ccswitch_reasoning_dialects() {
     }))
     .unwrap();
     assert_eq!(kimi["thinking"]["type"], "enabled");
-    assert!(kimi.get("reasoning_effort").is_none());
+    assert_eq!(kimi["reasoning_effort"], "high");
 }
 
 #[test]
@@ -7703,6 +7703,56 @@ fn deepseek_reasoning_efforts_match_official_levels() {
         ),
         vec!["high", "max"]
     );
+}
+
+#[test]
+fn kimi_and_default_reasoning_efforts_include_xhigh_and_max() {
+    for (protocol, expected) in [
+        (
+            UpstreamResponseProtocol::Responses,
+            vec!["minimal", "low", "medium", "high", "xhigh", "max"],
+        ),
+        (
+            UpstreamResponseProtocol::ChatCompletions,
+            vec!["minimal", "low", "medium", "high", "xhigh", "max"],
+        ),
+        (
+            UpstreamResponseProtocol::Anthropic,
+            vec!["low", "medium", "high", "xhigh", "max"],
+        ),
+    ] {
+        for model in [
+            "kimi-k3",
+            " MoonshotAI/Kimi-K3 ",
+            "kimi-for-coding",
+            "moonshot-v1",
+            "unknown-model",
+        ] {
+            assert_eq!(
+                supported_reasoning_efforts_for_model(model, protocol),
+                expected,
+                "{model} {protocol:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn kimi_reasoning_efforts_survive_protocol_conversion() {
+    for effort in ["xhigh", "max"] {
+        let request = json!({
+            "model": "moonshotai/Kimi-K3",
+            "reasoning": { "effort": effort },
+            "input": "hi"
+        });
+        let chat = responses_to_chat_completions(request.clone()).unwrap();
+        assert_eq!(chat["thinking"], json!({ "type": "enabled" }));
+        assert_eq!(chat["reasoning_effort"], effort, "{request}");
+
+        let anthropic = responses_to_anthropic_messages(request.clone()).unwrap();
+        assert_eq!(anthropic["thinking"], json!({ "type": "adaptive" }));
+        assert_eq!(anthropic["output_config"]["effort"], effort, "{request}");
+    }
 }
 
 #[test]

@@ -2204,11 +2204,7 @@ pub async fn local_proxy_status() -> CommandResult<LocalProxyStatusPayload> {
     let active_aggregate = settings.active_aggregate_relay_profile();
     let enabled = settings.active_relay_uses_protocol_proxy();
     let port = codex_elves_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT;
-    let listening = std::net::TcpStream::connect_timeout(
-        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-        Duration::from_millis(200),
-    )
-    .is_ok();
+    let listening = codex_elves_core::ports::loopback_listener_is_running(port).await;
     let latest_launch = StatusStore::default().load_latest().ok().flatten();
     let lan_listening = latest_launch_uses_lan_listener(latest_launch.as_ref(), listening, port);
     let lan_addresses = if lan_listening {

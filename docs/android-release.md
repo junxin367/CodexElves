@@ -47,6 +47,6 @@ Android Release 显式设置 `make_latest=false`（`gh --latest=false`），不�
 
 ## PWA 与运行时资源
 
-APK 包含 Android 原生外壳和首版网页资源；PWA 页面和 Android 后续更新的静态资源由用户配置的 HTTPS 服务域名提供。GitHub Release 分发 APK 和应用更新清单；应用内更新与网页静态资源更新互相独立。
+APK 包含 Android 原生外壳和首版网页资源；Android 后续更新的静态资源由用户配置的 HTTP/HTTPS 服务地址提供，支持 frp 固定公网主地址及端口。普通浏览器的 PWA 离线安装要求安全上下文，公网 HTTP 地址可在线访问。GitHub Release 分发 APK 和应用更新清单；应用内更新与网页静态资源更新互相独立。
 
 先更新电脑端 CodexElves，使用户服务域名提供 PWA 清单和 Android 资源清单，再通过 APK 连接该域名。Android 构建环境和本地构建参数见 [Android 构建与运行](android.md)。

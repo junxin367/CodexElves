@@ -1,7 +1,7 @@
 import { markdown, prepareMessageImage, renderMermaidBlocks, settleMessageImage, withStableMessageLayout } from "./markdown.js";
 import { createRemoteEventStream, sharedEventsAvailable } from "./events-client.js";
 import { configureAndroidDiagnostics, exportAndroidDiagnostics, receiveDiagnosticRequest, sendAndroidDiagnostics } from "./diagnostics.js";
-import { activateRemoteChannels, clearRemoteChannels, observeChannelConfiguration, prepareRemoteTunnelAccess, raceRemoteRead, remoteChannelRoutes, remoteMediaUrl, requestRemote, setRemoteChannelMeasurements, validateRemoteReceipt } from "./channels.js";
+import { activateRemoteChannels, clearRemoteChannels, handleRemoteChannelEvent, observeChannelConfiguration, prepareRemoteTunnelAccess, raceRemoteRead, remoteChannelRoutes, remoteMediaUrl, requestRemote, setRemoteChannelMeasurements, validateRemoteReceipt } from "./channels.js";
 import { renderMessageActions } from "./message-actions.js";
 import { mountSessionTools } from "./session-tools.js";
 import { mountSessionMenu } from "./session-menu.js";
@@ -12,6 +12,7 @@ import {
   installAndroidClickHapticFeedback,
   isAndroidContainer,
   openAndroidNotificationSystemSettings,
+  openAndroidBrowser,
   performAndroidHapticFeedback,
   postPlatformMessage,
   requestAndroidNotificationPermission,
@@ -70,7 +71,7 @@ let connectionLatencyVersion = 0, connectionLatencyFloor = 0, connectionRouteSig
 const channelRtts = new Map();
 const connectionRttDescription = "点击刷新会话。网页到接入服务的 /api/session HTTP 完整往返时长；存在两条已授权线路时分别测量，不代表模型响应耗时或端到端原生执行延迟。消息使用此处可用线路中延迟最低的一路发送，发出后不自动换路重发。";
 let pageLeaving = false;
-const expandedProjects = new Set();
+const projectVisibleThreadCounts = new Map();
 const collapsedSidebarSections = new Set();
 const drafts = new Map();
 const skillDrafts = new Map();
@@ -94,6 +95,14 @@ let readingPositionRevision = 0;
 const draftWrites = new Map(), failedInputRecoveries = new Map();
 let recoveryScope = null, recoveryGeneration = 0, draftStorageError = "", connecting = null;
 let initialAuthenticationRequired = false, appReadySent = false, transcriptChecking = false;
+try { initialAuthenticationRequired = sessionStorage.getItem("codex-elves-auth-required") === "1"; } catch {}
+function setAuthenticationRequired(required) {
+  initialAuthenticationRequired = required;
+  try {
+    if (required) sessionStorage.setItem("codex-elves-auth-required", "1");
+    else sessionStorage.removeItem("codex-elves-auth-required");
+  } catch {}
+}
 function announceAppReady() {
   if (appReadySent) return;
   appReadySent = true;
@@ -816,7 +825,7 @@ function openAppearance() {
   $("#appearance-project-thread-limit").onchange = event => {
     appearance.projectThreadLimit = Number(event.target.value);
     applyAppearance(true);
-    expandedProjects.clear();
+    projectVisibleThreadCounts.clear();
     renderSidebar();
     sync();
   };
@@ -825,7 +834,7 @@ function openAppearance() {
     if (subpageEntry) return;
     appearance = defaultAppearance(appearance.theme);
     applyAppearance(true);
-    expandedProjects.clear();
+    projectVisibleThreadCounts.clear();
     renderSidebar();
     sync();
   };
@@ -1620,7 +1629,9 @@ async function openRelatedThread(item, kind, parentThreadId = selectedId, {
   const view = rememberRelatedView(item.id, kind, null, item.name || item.title || "",
     { openedFromThreadId: parentThreadId, ephemeral: item.ephemeral });
   if (!view) return;
-  sessionMenu?.close(); closePopup(); closeComposerMenus();
+  if (kind === "side" && (sessionMenu?.isOpen() || sessionMenu?.isSuspended())) sessionMenu.suspend();
+  else sessionMenu?.close();
+  closePopup(); closeComposerMenus();
   await selectThread(item.id, { closeSidebar: false, relatedView: { ...view, owner, returnToParent: true },
     initialThread, replaceHistory, preparedView, onViewReady });
   if (kind === "side" && selectedId === item.id && (item.hasUnreadTurn === true || thread?.hasUnreadTurn === true))
@@ -1629,13 +1640,14 @@ async function openRelatedThread(item, kind, parentThreadId = selectedId, {
 async function returnToParentSession() {
   const view = normalizeRelatedView(relatedSessionView, selectedId);
   if (!view || relatedBackPending) return;
-  sessionMenu?.close();
+  const parentThreadId = view.openedFromThreadId || view.parentThreadId;
+  if (!validRelatedThreadId(parentThreadId)) return;
   if (normalizeRelatedView(history.state?.[relatedHistoryKey], selectedId)?.returnToParent && view.returnToParent) {
     relatedBackPending = true; syncRelatedSessionLayout();
     history.back();
     return;
   }
-  await selectThread(view.openedFromThreadId || view.parentThreadId,
+  await selectThread(parentThreadId,
     { closeSidebar: false, relatedView: null, replaceHistory: true });
 }
 function showSideCreation(record, { recordHistory = true } = {}) {
@@ -1646,7 +1658,7 @@ function showSideCreation(record, { recordHistory = true } = {}) {
   panel.setAttribute("aria-label", "新建侧边会话");
   const header = element("header", "session-tools-heading");
   const back = button("返回", "返回主会话", requestSideCreationBack, "text-button");
-  header.append(element("h1", "", "侧边会话"), back);
+  header.append(element("h1", "", "新建侧边会话"), back);
   const status = element("div", "side-creation-status");
   status.setAttribute("role", "status");
   status.append(element("span", "spinner"), element("p", "", "正在创建侧边会话…"));
@@ -1750,7 +1762,7 @@ async function finishRelatedOperation(record, result, { allowSelection = false }
   relatedThreadOperations.delete(relatedOperationKey(record)); persistRelatedOperations();
   if (record.action === "createSideThread") {
     sessionMenu?.updateSideThread(record.parentThreadId, { id: result.threadId,
-      title: result.thread?.title || "侧边会话", hasUnreadTurn: false });
+      title: result.thread?.title || "新建侧边会话", hasUnreadTurn: false });
     rememberRelatedView(result.threadId, "side", record.parentThreadId);
     filterSideThreadSidebar(sidebar);
     renderSidebar();
@@ -1761,7 +1773,7 @@ async function finishRelatedOperation(record, result, { allowSelection = false }
         const state = { ...history.state }; delete state[sideCreationHistoryKey];
         history.replaceState(state, "", location.href);
       }
-      await openRelatedThread({ id: result.threadId, title: result.thread?.title || "侧边会话" }, "side",
+      await openRelatedThread({ id: result.threadId, title: result.thread?.title || "新建侧边会话" }, "side",
         record.parentThreadId, { initialThread: record.state === "submitting"
             && result.synchronization?.status !== "failed" ? result.thread : null,
           replaceHistory: prepared, preparedView: prepared,
@@ -2522,9 +2534,9 @@ function fitContextUsageTip() {
   node.style.width = "max-content";
   node.style.minWidth = `${Math.min(140, maxWidth)}px`;
   node.style.maxWidth = `${maxWidth}px`;
-  node.style.maxHeight = `${Math.max(above, below)}px`;
+  node.style.maxHeight = `${Math.min(height * .8, Math.max(above, below))}px`;
   const upwards = below < node.getBoundingClientRect().height && above > below;
-  node.style.maxHeight = `${upwards ? above : below}px`;
+  node.style.maxHeight = `${Math.min(height * .8, upwards ? above : below)}px`;
   const actual = node.getBoundingClientRect();
   node.style.left = `${Math.max(left + padding, Math.min(box.left, left + width - actual.width - padding))}px`;
   node.style.top = `${Math.max(top + padding, Math.min(upwards ? box.top - gap - actual.height : box.bottom + gap,
@@ -2756,14 +2768,14 @@ function fitComposerMenu(menu) {
     const box = anchor.getBoundingClientRect(), gap = 4, padding = 8;
     const above = Math.max(0, box.top - top - gap - padding);
     const below = Math.max(0, top + height - box.bottom - gap - padding);
-    const limit = Math.min(560, Math.max(above, below));
+    const limit = Math.min(560, height * .8, Math.max(above, below));
     menu.style.width = "max-content";
     menu.style.minWidth = `${Math.min(300, width - padding * 2)}px`;
     menu.style.maxWidth = `${Math.min(350, width - padding * 2)}px`;
     menu.style.maxHeight = `${limit}px`;
     $(".effort-options", menu)?.style.setProperty("max-height", `${Math.max(0, (limit - 80) * .45)}px`);
     const upwards = below < menu.getBoundingClientRect().height && above > below;
-    const available = Math.min(560, upwards ? above : below);
+    const available = Math.min(560, height * .8, upwards ? above : below);
     menu.style.maxHeight = `${available}px`;
     $(".effort-options", menu)?.style.setProperty("max-height", `${Math.max(0, (available - 80) * .45)}px`);
     const actual = menu.getBoundingClientRect();
@@ -2773,7 +2785,8 @@ function fitComposerMenu(menu) {
     return;
   }
   const top = $("#composer")?.getBoundingClientRect().top || 300;
-  menu.style.maxHeight = `${Math.max(0, Math.min(480, top - (window.visualViewport?.offsetTop || 0) - 16))}px`;
+  const viewport = window.visualViewport, height = viewport?.height || window.innerHeight;
+  menu.style.maxHeight = `${Math.max(0, Math.min(480, height * .8, top - (viewport?.offsetTop || 0) - 16))}px`;
 }
 function fitApprovalArea() {
   const root = $("#approval-area"), anchor = root?.parentElement;
@@ -3559,7 +3572,7 @@ function fitPopup() {
   const availableBelow = Math.max(0, top + height - originBottom - padding);
   const availableAbove = Math.max(0, originTop - (position ? 0 : gap) - top - padding);
   const preferredWidth = trigger.popupWidth || (trigger.selectSearchable ? 300 : 200);
-  const maxHeight = trigger.popupMaxHeight || 360;
+  const maxHeight = Math.min(trigger.popupMaxHeight || 360, height * .8);
   node.style.width = `${Math.min(Math.max(box.width, preferredWidth), width - padding * 2)}px`;
   node.style.maxHeight = `${Math.min(maxHeight, Math.max(availableAbove, availableBelow))}px`;
   const menuHeight = node.getBoundingClientRect().height;
@@ -4840,7 +4853,7 @@ function showLogin() {
   editingMessage = null; editingQueuedMessage = null;
   session = null;
   sidebar = null; recentPriorityIds = null; selectedId = null; thread = null; creating = false;
-  expandedProjects.clear(); collapsedSidebarSections.clear();
+  projectVisibleThreadCounts.clear(); collapsedSidebarSections.clear();
   historyCursor = null; historyInitialized = false; approvalSignature = null;
   turns.clear(); transcriptEvents.clear(); drafts.clear(); skillDrafts.clear(); attachmentDrafts.clear(); goalDrafts.clear();
   selectedSkills = []; selectedGoal = null; selectedModel = selectedEffort = "";
@@ -5079,7 +5092,7 @@ function requireAuthentication() {
   clearRemoteChannels();
   disconnect();
   pendingNotificationOpen = null;
-  initialAuthenticationRequired = true;
+  setAuthenticationRequired(true);
   void clearPrivateInputs().catch(() => {});
   session = null; selectedId = null; thread = null; sidebar = null;
   postPlatformMessage("auth-required");
@@ -5104,31 +5117,69 @@ function showConnectionRecovery(error) {
   message.setAttribute("role", "alert");
   const retry = element("button", "primary pair-submit", "重新连接");
   retry.type = "button";
+  const exit = element("button", "pair-exit", "退出");
+  exit.type = "button";
   const status = element("p", "pair-status muted", "设备授权仍保留，恢复连接后会继续打开会话。");
+  const controller = new AbortController();
+  let exiting = false;
+  loginPageCleanup = () => {
+    controller.abort();
+    loginPageCleanup = null;
+  };
   retry.onclick = async () => {
+    if (exiting || !panel.isConnected) return;
     retry.disabled = true;
     retry.textContent = "正在重试…";
     status.textContent = "正在连接远程服务…";
     try {
-      await connect();
+      await connect(controller.signal);
     } catch (retryError) {
+      if (exiting || !panel.isConnected) return;
       if (retryError.code === 401) {
         requireAuthentication();
         return;
       }
-      if (!panel.isConnected) return;
       message.textContent = connectionErrorMessage(retryError);
       status.textContent = "设备授权仍保留，恢复连接后会继续打开会话。";
       retry.disabled = false;
       retry.textContent = "重新连接";
     }
   };
-  panel.append(heading, message, retry, status);
+  exit.onclick = async () => {
+    if (exiting || !await confirmAction("退出", "将清理当前设备的本地草稿并返回连接页面；再次进入需要重新输入访问密钥。", "退出", true)
+        || !panel.isConnected || exiting) return;
+    exiting = true;
+    setAuthenticationRequired(true);
+    controller.abort();
+    disconnect();
+    savePending(null);
+    pendingNotificationOpen = null;
+    const cleanup = clearPrivateInputs().catch(() => {});
+    session = null;
+    retry.disabled = true;
+    exit.disabled = true;
+    exit.textContent = "正在退出…";
+    const logoutController = new AbortController();
+    const timeout = setTimeout(() => logoutController.abort(), 2000);
+    let revoked = false;
+    try {
+      await api("/api/logout", {}, undefined, logoutController.signal);
+      revoked = true;
+    } catch {
+      // 断网时仍完成本地退出，Android 通过桥清除授权 Cookie。
+    } finally { clearTimeout(timeout); }
+    await cleanup;
+    postPlatformMessage("logged-out");
+    showLogin();
+    if (!revoked && !isAndroidContainer()) notice("已退出本地会话；设备授权可在电脑端撤销。");
+  };
+  panel.append(heading, message, retry, exit, status);
   page.append(panel);
   app.replaceChildren(page);
   announceAppReady();
 }
 function handleInitialConnectionError(error) {
+  if (initialAuthenticationRequired) return;
   if (error.code === 401) {
     requireAuthentication();
     return;
@@ -5345,7 +5396,7 @@ function shell() {
       disconnect(); savePending(null);
       pendingNotificationOpen = null;
       await clearPrivateInputs().catch(() => {});
-      initialAuthenticationRequired = true;
+      setAuthenticationRequired(true);
       postPlatformMessage("logged-out");
       showLogin();
     }
@@ -5367,7 +5418,7 @@ function shell() {
     },
     beforeOpen: () => { sessionMenu?.close(); closePopup(); closeComposerMenus(); closeMobileSidebar({ focus: false }); },
     onUnauthorized: requireAuthentication,
-    openImagePreview
+    openImagePreview, copyText
   });
   sessionMenu = mountSessionMenu({
     trigger: toolsTrigger,
@@ -5378,7 +5429,10 @@ function shell() {
     cache: relatedMenuCache,
     onData: adoptRelatedMenu,
     load: loadRelatedThreads,
+    renderSubagentIcon: item => createSubagentIcon(subagentName({ displayName: item.name })),
     openChanges: () => sessionTools?.open("changes"),
+    openBrowser: () => openAndroidBrowser(),
+    openFiles: () => sessionTools?.open("files"),
     openSubagent: item => openRelatedThread(item, "subagent"),
     createSideThread: () => runRelatedOperation("createSideThread"),
     openSideThread: item => openRelatedThread(item, "side"),
@@ -5562,7 +5616,7 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
     sidebarFilterDeviceId = deviceId;
     sidebarFilters = { mode: null, chats: null, projects: null, pinned: null };
     recentPriorityIds = null;
-    expandedProjects.clear(); collapsedSidebarSections.clear();
+    projectVisibleThreadCounts.clear(); collapsedSidebarSections.clear();
   }
   const request = { deviceId, cursor, nextCursor: cursor, again: false, resourcePriority,
     apiStarted: false, releasePriority: null, promise: null };
@@ -5739,7 +5793,12 @@ function renderSidebar() {
     const header = element("div", "project-header");
     const projectTitle = button("", project.name, () => {
       if (search) return;
-      collapsed.has(project.id) ? collapsed.delete(project.id) : collapsed.add(project.id); renderSidebar();
+      if (collapsed.has(project.id)) collapsed.delete(project.id);
+      else {
+        collapsed.add(project.id);
+        projectVisibleThreadCounts.delete(project.id);
+      }
+      renderSidebar();
     }, "project-title");
     projectTitle.id = domId("project", project.id);
     const projectExpanded = !!search || !collapsed.has(project.id);
@@ -5753,10 +5812,11 @@ function renderSidebar() {
     ]));
     group.append(header);
     if (projectExpanded) {
-      const visible = search || expandedProjects.has(project.id) ? items : items.slice(0, projectThreadLimit);
+      const visible = search ? items : items.slice(0, projectVisibleThreadCounts.get(project.id) ?? projectThreadLimit);
       visible.forEach(item => group.append(row(item, project.id)));
-      if (visible.length < items.length) group.append(button(`查看其余 ${items.length - visible.length} 个会话`, "显示更多项目会话", () => {
-        expandedProjects.add(project.id); renderSidebar();
+      if (visible.length < items.length) group.append(button("查看更多", "查看更多", () => {
+        projectVisibleThreadCounts.set(project.id, Math.min(items.length, visible.length + projectThreadLimit));
+        renderSidebar();
       }, "load-more project-load-more"));
       if (!items.length) group.append(element("small", "empty-project", project.threads.length ? "会话已移至置顶区" : "暂无会话"));
     }
@@ -6158,19 +6218,32 @@ function enableImagePreviewZoom(viewport, image) {
     x = Math.max(-limitX, Math.min(limitX, x));
     y = Math.max(-limitY, Math.min(limitY, y));
     image.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${scale})`;
+    viewport.classList.toggle("image-preview-zoomed", scale > minScale);
   };
+  const point = (clientX, clientY) => {
+    const box = viewport.getBoundingClientRect();
+    return { x: clientX - box.left - box.width / 2, y: clientY - box.top - box.height / 2 };
+  };
+  const zoomAt = (nextScale, center = { x: 0, y: 0 }) => {
+    nextScale = Math.max(minScale, nextScale);
+    const ratio = nextScale / scale;
+    x = center.x - (center.x - x) * ratio;
+    y = center.y - (center.y - y) * ratio;
+    scale = nextScale;
+    render();
+  };
+  const reset = () => { scale = minScale; x = 0; y = 0; render(); };
   const gesture = () => {
     const [first, second] = pointers.values();
-    const box = viewport.getBoundingClientRect();
     return {
-      x: (second ? (first.x + second.x) / 2 : first.x) - box.left - box.width / 2,
-      y: (second ? (first.y + second.y) / 2 : first.y) - box.top - box.height / 2,
+      ...point(second ? (first.x + second.x) / 2 : first.x, second ? (first.y + second.y) / 2 : first.y),
       distance: second ? Math.hypot(first.x - second.x, first.y - second.y) : 0
     };
   };
   viewport.onpointerdown = event => {
-    if (event.pointerType !== "touch") return;
+    if (event.pointerType !== "touch" && event.button !== 0) return;
     event.preventDefault();
+    viewport.focus({ preventScroll: true });
     pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     viewport.setPointerCapture(event.pointerId);
   };
@@ -6192,6 +6265,25 @@ function enableImagePreviewZoom(viewport, image) {
   viewport.onpointerup = release;
   viewport.onpointercancel = release;
   viewport.onlostpointercapture = release;
+  const wheel = event => {
+    if (!event.deltaY) return;
+    event.preventDefault();
+    const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1);
+    zoomAt(scale * Math.exp(-Math.max(-400, Math.min(400, delta)) * .002), point(event.clientX, event.clientY));
+  };
+  viewport.addEventListener("wheel", wheel, { passive: false });
+  viewport.ondblclick = event => {
+    event.preventDefault();
+    if (scale > minScale) reset();
+    else zoomAt(scale * 2, point(event.clientX, event.clientY));
+  };
+  viewport.onkeydown = event => {
+    if (event.ctrlKey || event.metaKey || event.altKey || !["+", "=", "-", "0"].includes(event.key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === "0") reset();
+    else zoomAt(scale * (event.key === "-" ? 1 / 1.25 : 1.25));
+  };
   const resizeObserver = new ResizeObserver(() => {
     pointers.clear();
     const nextMinScale = fittedScale();
@@ -6204,7 +6296,7 @@ function enableImagePreviewZoom(viewport, image) {
   });
   resizeObserver.observe(viewport);
   render();
-  return () => { resizeObserver.disconnect(); pointers.clear(); };
+  return () => { resizeObserver.disconnect(); viewport.removeEventListener("wheel", wheel); pointers.clear(); };
 }
 function openImagePreview(link, image) {
   const source = link.getAttribute("href") || image.originalImageSource || image.getAttribute("src") || "";
@@ -6212,38 +6304,71 @@ function openImagePreview(link, image) {
   $("#image-preview-dialog")?.close();
   rememberTransientHistory();
   const trigger = link;
-  const dialog = element("dialog", "image-preview-dialog");
+  const dialog = element("dialog", "image-preview-dialog media-preview-loading");
   dialog.id = "image-preview-dialog";
   dialog.setAttribute("aria-label", image.alt || "图片预览");
+  dialog.setAttribute("aria-busy", "true");
   const panel = element("figure", "image-preview-panel");
   const close = button("", "关闭图片预览", () => dialog.close(), "image-preview-close");
   close.append(icon("close"));
+  const loading = element("div", "media-preview-loading-indicator");
+  loading.hidden = true;
+  const loadingStatus = element("span", "media-preview-loading-label", "正在加载图片…");
+  loadingStatus.setAttribute("role", "status");
+  loadingStatus.prepend(element("span", "spinner"));
+  const cancel = button("取消", "取消加载图片", () => dialog.close(), "media-preview-loading-cancel");
+  loading.append(loadingStatus, cancel);
   const preview = element("img", "image-preview-image");
-  const viewport = isAndroidContainer() ? element("div", "image-preview-viewport") : null;
+  const viewport = element("div", "image-preview-viewport");
+  viewport.tabIndex = 0;
+  viewport.setAttribute("role", "group");
+  viewport.setAttribute("aria-label", "图片预览，可双指或滚轮缩放、拖动查看，按 0 恢复完整显示");
+  viewport.title = "双指或滚轮缩放，拖动查看；双击缩放或恢复完整显示";
   const caption = element("figcaption", "image-preview-caption", image.alt || "图片");
-  const layout = fitMediaPreview(dialog, panel, viewport || preview, () => ({
-    width: preview.naturalWidth, height: preview.naturalHeight
-  }));
-  let disposeZoom = null;
+  const layout = fitMediaPreview(dialog, panel, viewport, null, { fillAvailable: true });
+  let disposeZoom = null, presenting = false, loadingTimer = null;
   preview.draggable = false;
+  preview.decoding = "async";
   const initializeZoom = () => {
-    if (!viewport || !dialog.open || disposeZoom || !preview.complete
+    if (!dialog.open || disposeZoom || !preview.complete
         || !preview.naturalWidth || !preview.naturalHeight) return;
     disposeZoom = enableImagePreviewZoom(viewport, preview);
     preview.classList.add("image-preview-ready");
   };
-  preview.onload = () => { layout.resize(); initializeZoom(); };
+  const focusControl = control => {
+    const focusedDialog = document.activeElement?.closest("dialog");
+    if (!focusedDialog || focusedDialog === dialog) control.focus({ preventScroll: true });
+  };
+  const finishLoading = () => {
+    clearTimeout(loadingTimer);
+    loadingTimer = null;
+    dialog.classList.remove("media-preview-loading");
+    dialog.classList.add("image-preview-presented");
+    dialog.removeAttribute("aria-busy");
+    focusControl(close);
+    loading.remove();
+  };
+  const present = async () => {
+    if (presenting || !dialog.open || !preview.complete || !preview.naturalWidth || !preview.naturalHeight) return;
+    presenting = true;
+    try { await preview.decode(); } catch {}
+    if (!dialog.open) return;
+    layout.resize();
+    initializeZoom();
+    finishLoading();
+  };
+  preview.onload = present;
   if (/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(source)) preview.crossOrigin = "anonymous";
   preview.alt = image.alt || "图片预览"; preview.src = remoteMediaUrl(source);
   preview.onerror = () => {
-    layout.dispose();
     disposeZoom?.();
-    (viewport || preview).remove();
-    panel.classList.add("image-preview-unavailable");
+    viewport.textContent = "图片不可用，请关闭后重试";
+    viewport.classList.add("image-preview-unavailable");
     caption.textContent = `图片不可用：${image.alt || "附件"}`;
+    finishLoading();
   };
-  viewport?.append(preview);
-  panel.append(close, viewport || preview, caption); dialog.append(panel); document.body.append(dialog);
+  viewport.append(preview);
+  panel.append(close, viewport, caption); dialog.append(panel, loading); document.body.append(dialog);
   let backdropPressed = false;
   const onBackdrop = event => {
     const box = dialog.getBoundingClientRect();
@@ -6255,6 +6380,7 @@ function openImagePreview(link, image) {
   dialog.onpointerup = event => { if (backdropPressed && onBackdrop(event)) dialog.close(); backdropPressed = false; };
   dialog.oncancel = event => { event.preventDefault(); dialog.close(); };
   dialog.onclose = () => {
+    clearTimeout(loadingTimer);
     layout.dispose();
     disposeZoom?.();
     dialog.remove();
@@ -6262,7 +6388,16 @@ function openImagePreview(link, image) {
     if (trigger.isConnected && document.activeElement === document.body) trigger.focus({ preventScroll: true });
   };
   document.body.classList.add("modal-open");
-  dialog.showModal(); layout.resize(); initializeZoom(); close.focus();
+  dialog.showModal();
+  layout.resize();
+  // 缓存命中时跳过短暂的 loading，慢速加载仍可取消。
+  loadingTimer = setTimeout(() => {
+    loadingTimer = null;
+    if (!dialog.open || !dialog.classList.contains("media-preview-loading")) return;
+    loading.hidden = false;
+    focusControl(cancel);
+  }, 150);
+  void present();
 }
 function bindMessageImages(node) {
   for (const image of node.querySelectorAll(".message-image")) {
@@ -6374,6 +6509,10 @@ function setMarkdown(node, text, remoteImages = [], options) {
   }
   node.markdownHtml = html;
   for (const copy of node.querySelectorAll(".copy-code")) copy.onclick = () => copyText(copy.closest(".code-block").querySelector("code").textContent);
+  for (const reference of node.querySelectorAll("a[data-local-file-path]")) reference.onclick = event => {
+    event.preventDefault(); event.stopPropagation();
+    void sessionTools?.openFile(reference.dataset.localFilePath, Number(reference.dataset.localFileLine) || null);
+  };
   bindMessageImages(node);
   bindMessageVideos(node, prepareRemoteTunnelAccess);
 }
@@ -6397,7 +6536,7 @@ function refreshMarkdown() {
   ++markdownRenderVersion;
   const root = $("#messages");
   const refresh = () => {
-    for (const node of document.querySelectorAll(".markdown")) {
+    for (const node of document.querySelectorAll(".markdown,.markdown-inline")) {
       const source = node.markdownSource;
       if (source) setMarkdown(node, source.text, source.remoteImages, source.options);
     }
@@ -6837,24 +6976,37 @@ function subagentPresentation(item, running = false) {
   };
 }
 function subagentIcon(name) {
-  const symbols = ["✿", "✣", "✦", "❋", "◆", "✺"];
+  const shapes = [
+    '<circle cx="10" cy="5" r="3"/><circle cx="14.33" cy="7.5" r="3"/><circle cx="14.33" cy="12.5" r="3"/><circle cx="10" cy="15" r="3"/><circle cx="5.67" cy="12.5" r="3"/><circle cx="5.67" cy="7.5" r="3"/><circle cx="10" cy="10" r="3"/>',
+    '<path d="M10 10C3 10 1 5 5 3 9 1 10 6 10 10ZM10 10C10 3 15 1 17 5 19 9 14 10 10 10ZM10 10C17 10 19 15 15 17 11 19 10 14 10 10ZM10 10C10 17 5 19 3 15 1 11 6 10 10 10Z"/>',
+    '<path d="M10 1.5 12.5 7.5 18.5 10 12.5 12.5 10 18.5 7.5 12.5 1.5 10 7.5 7.5Z"/>',
+    '<path d="M10 2v16M2 10h16M4.35 4.35l11.3 11.3M4.35 15.65l11.3-11.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+    '<path d="M10 2 18 10 10 18 2 10Z"/>',
+    Array.from({ length: 16 }, (_, index) =>
+      `<path d="M10 2v5.5" transform="rotate(${index * 22.5} 10 10)"/>`).join("")
+  ];
   let hash = 2166136261;
   for (const character of name) {
     hash ^= character.codePointAt(0);
     hash = Math.imul(hash, 16777619);
   }
-  const variant = (hash >>> 0) % symbols.length;
-  return { symbol: symbols[variant], variant };
+  const variant = (hash >>> 0) % shapes.length;
+  return { shape: shapes[variant], variant };
+}
+function createSubagentIcon(name) {
+  const identity = subagentIcon(name);
+  const icon = element("span", "subagent-icon");
+  icon.dataset.variant = identity.variant;
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML = `<svg viewBox="0 0 20 20" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" aria-hidden="true" focusable="false">${identity.shape}</svg>`;
+  return icon;
 }
 function renderSubagentItem(item, previous, running = false) {
   const node = previous || element("article");
   const name = subagentName(item), presentation = subagentPresentation(item, running);
   node.className = `subagent-item${presentation.active ? " running" : ""}${presentation.failed ? " failed" : ""}`;
   node.dataset.status = presentation.state;
-  const identity = subagentIcon(name);
-  const icon = element("span", "subagent-icon", identity.symbol);
-  icon.dataset.variant = identity.variant;
-  icon.setAttribute("aria-hidden", "true");
+  const icon = createSubagentIcon(name);
   const state = element("span", "subagent-state");
   state.textContent = presentation.label;
   node.replaceChildren(icon, element("strong", "subagent-title", name), state);
@@ -6990,6 +7142,20 @@ function renderItem(item, previous, inActivity = false, running = false) {
   }
   if (isSubagentItem(item)) return renderSubagentItem(item, previous, running);
   if (transcriptEventTypes.has(item.type)) return renderTranscriptEvent(item, previous);
+  const reconnect = item.type === "error" && typeof item.message === "string"
+    ? item.message.trim().match(/^Reconnecting(?:\.{3}|…)?\s+(\d+)\s*\/\s*(\d+)$/i) : null;
+  if (reconnect) {
+    const node = previous?.tagName === "DETAILS" && previous.classList.contains("reconnecting-status")
+      ? previous : element("details");
+    node.className = "reconnecting-status muted";
+    const summary = element("summary", "", `正在重新连接 ${reconnect[1]}/${reconnect[2]}`);
+    const chevron = icon("chevron");
+    chevron.classList.add("reconnecting-chevron");
+    summary.append(chevron);
+    const description = typeof item.additionalDetails === "string" ? item.additionalDetails.trim() : "";
+    node.replaceChildren(summary, ...(description ? [element("pre", "reconnecting-error", description)] : []));
+    return node;
+  }
   if (item.type === "imageView") return renderImageViewItem(item, previous);
   const skillRead = skillReadInfo(item);
   if (skillRead) return renderSkillReadItem(item, previous, skillRead);
@@ -6998,7 +7164,7 @@ function renderItem(item, previous, inActivity = false, running = false) {
     dynamicToolCall: "调用工具", webSearch: "搜索网页", imageGeneration: "生成图片",
     collabAgentToolCall: "协作任务", error: "执行出错"
   };
-  const details = previous || element("details");
+  const details = previous?.tagName === "DETAILS" ? previous : element("details");
   const active = running;
   const genericTool = ["mcpToolCall", "dynamicToolCall"].includes(item.type);
   const failed = item.status === "failed" || genericTool && (item.success === false || !!item.error || item.result?.isError === true);
@@ -7697,9 +7863,14 @@ function renderCommandGroup(items, previous, renderMessage, running = false, his
     state.visual.replaceChildren(icon(presentation.icon));
     state.icon = presentation.icon;
   }
-  const titleClass = `command-group-title${active ? " working-label" : ""}`;
+  const titleClass = `command-group-title${active ? " working-label" : ""}${presentation.thinking ? " markdown-inline" : ""}`;
   if (state.title.className !== titleClass) state.title.className = titleClass;
-  if (state.title.textContent !== presentation.text) state.title.textContent = presentation.text;
+  if (presentation.thinking) setMarkdown(state.title, presentation.text, [], { inline: true });
+  else {
+    state.title.markdownSource = null;
+    state.title.markdownHtml = null;
+    if (state.title.textContent !== presentation.text) state.title.textContent = presentation.text;
+  }
   if (group.open) state.renderBody();
   else state.clearBody();
   return group;
@@ -8825,6 +8996,9 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   if (!validRelatedThreadId(id) || !session) return;
   const navigationVersion = ++relatedSelectionVersion;
   const nextRelatedView = relatedView === undefined ? relatedViewForThread(id) : normalizeRelatedView(relatedView, id);
+  const currentRelatedView = normalizeRelatedView(relatedSessionView, selectedId);
+  const returningToParent = !!(sessionMenu?.isSuspended() && !nextRelatedView && currentRelatedView?.kind === "side"
+    && (currentRelatedView.openedFromThreadId === id || currentRelatedView.parentThreadId === id));
   const initialSide = !force && nextRelatedView?.kind === "side" && initialThread?.id === id
     && initialThread.viewKind === "side" && initialThread.sideHistoryVersion === 1
     && initialThread.parentThreadId === (nextRelatedView.parentThreadId || nextRelatedView.openedFromThreadId)
@@ -8841,6 +9015,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     relatedSessionView = nextRelatedView;
     syncRelatedSessionLayout(); syncThreadHash(id, { replace: replaceHistory });
     if (closeSidebar) { closePopup(); closeMobileSidebar(); }
+    if (returningToParent && sessionMenu?.isSuspended()) sessionMenu.resume();
     return;
   }
   stopGoalLiveTimer();
@@ -8854,7 +9029,8 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
       && (nextRelatedView?.openedFromThreadId || nextRelatedView?.parentThreadId) !== relatedReturnTranscript.threadId)
     relatedReturnTranscript = null;
   relatedBackPending = !!exitTransition;
-  sessionMenu?.close(); clearTimeout(relatedMenuTimer); relatedMenuTimer = null;
+  if (!returningToParent && nextRelatedView?.kind !== "side") sessionMenu?.close();
+  clearTimeout(relatedMenuTimer); relatedMenuTimer = null;
   resetMessages();
   editingQueuedMessage = null;
   const version = ++selectionVersion;
@@ -8923,6 +9099,9 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   }
   syncThreadHash(id, { replace: replaceHistory });
   onViewReady?.();
+  if (returningToParent && sessionMenu?.isSuspended() && !relatedSessionView && selectedId === id) {
+    sessionMenu.resume();
+  }
   if (initialSide) return;
   const latest = loadHistory(false, version);
   const controller = new AbortController();
@@ -10397,7 +10576,8 @@ function renderApprovals() {
 }
 function isActiveThread() {
   const status = thread?.status?.status || thread?.status;
-  return ["active", "inProgress"].includes(typeof status === "string" ? status : status?.type);
+  const statusType = typeof status === "string" ? status : status?.type;
+  return ["active", "inProgress", "running", "pending"].includes(statusType);
 }
 function renderCompactionBanner(root, id, compaction) {
   if (!id || !compactionLocked(id)) return;
@@ -11007,6 +11187,7 @@ function scheduleSidebarRefresh() {
   sidebarTimer = setTimeout(() => void loadSidebar().catch(() => {}), 1200);
 }
 function receive(event) {
+  if (handleRemoteChannelEvent(event)) return;
   scheduleRelatedMenuRefresh(event);
   if (event.method === "remote/notification") return;
   if (event.method === "remote/unauthorized") { requireAuthentication(); return; }
@@ -11039,6 +11220,9 @@ function receive(event) {
     scheduleSidebarRefresh();
     return;
   }
+  if (event.method === "remote/sidebarChanged" && eventThreadId === selectedId
+      && relatedSessionView?.kind === "side" && typeof params.title === "string" && params.title !== thread?.title)
+    scheduleReload();
   if (event.method === "thread/deleted" && typeof eventThreadId === "string") {
     applyThreadDeletion(eventThreadId);
     void loadSidebar().catch(() => {});
@@ -11126,6 +11310,10 @@ function receive(event) {
       notifiedStatus = params.status; ++statusVersion;
       if (thread) thread.status = notifiedStatus;
       updateComposer(); scheduleMessages();
+      const status = params.status?.status || params.status;
+      const statusType = typeof status === "string" ? status : status?.type;
+      if (!["active", "inProgress", "running", "pending"].includes(statusType))
+        scheduleReload();
     }
     const turnId = params.turnId || params.turn?.id;
     if (turnId) {
@@ -11418,8 +11606,9 @@ async function connectPage(signal) {
   if (session !== latest) return;
   if (signal?.aborted) throw new Error("连接已取消，请重试。");
   await restoreReadViews(session);
+  if (session !== latest) return;
   if (signal?.aborted) throw new Error("连接已取消，请重试。");
-  initialAuthenticationRequired = false;
+  setAuthenticationRequired(false);
   restoreSmallInputRecoveries();
   postPlatformMessage("authenticated");
   pageLeaving = false;
@@ -11550,4 +11739,5 @@ observeChannelConfiguration(configuration => {
     if (session && !pageLeaving && !document.hidden) void syncConnectionState().catch(() => {});
   }, 0);
 });
-connect().catch(handleInitialConnectionError);
+if (initialAuthenticationRequired) showLogin();
+else connect().catch(handleInitialConnectionError);

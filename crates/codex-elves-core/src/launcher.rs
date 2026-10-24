@@ -113,6 +113,7 @@ pub struct LaunchHandle {
     pub launch: CodexLaunch,
     pub status_store: StatusStore,
     helper_started: bool,
+    keep_proxy_running: bool,
     hooks: Arc<dyn LaunchHooks>,
 }
 
@@ -130,10 +131,38 @@ impl std::fmt::Debug for LaunchHandle {
 }
 
 impl LaunchHandle {
-    pub async fn wait_for_codex_exit(&self) -> anyhow::Result<()> {
-        let result = self.hooks.wait_for_codex_exit(&self.launch).await;
+    pub async fn wait_for_exit(&self) -> anyhow::Result<()> {
+        let mut keep_proxy_running = self.keep_proxy_running;
+        let result = if keep_proxy_running {
+            self.hooks.wait_for_helper_exit().await
+        } else {
+            let result = self.hooks.wait_for_codex_exit(&self.launch).await;
+            if self.helper_started
+                && self.helper_port == crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT
+            {
+                keep_proxy_running = match self.hooks.load_settings().await {
+                    Ok(settings) => settings.active_relay_uses_protocol_proxy(),
+                    Err(error) => {
+                        let _ = crate::diagnostic_log::append_diagnostic_log(
+                            "launcher.proxy_lifetime_settings_unavailable",
+                            serde_json::json!({ "message": error.to_string() }),
+                        );
+                        true
+                    }
+                };
+            }
+            if keep_proxy_running {
+                self.hooks.wait_for_helper_exit().await
+            } else {
+                result
+            }
+        };
         let _ = crate::diagnostic_log::append_diagnostic_log(
-            "launcher.codex_wait_finished",
+            if keep_proxy_running {
+                "launcher.helper_wait_finished"
+            } else {
+                "launcher.codex_wait_finished"
+            },
             serde_json::json!({
                 "process_id": self.launch.process_id(),
                 "helper_port": self.helper_port,
@@ -145,6 +174,10 @@ impl LaunchHandle {
             self.hooks.shutdown_helper(self.helper_port).await;
         }
         result
+    }
+
+    pub async fn wait_for_codex_exit(&self) -> anyhow::Result<()> {
+        self.wait_for_exit().await
     }
 }
 
@@ -250,6 +283,9 @@ pub trait LaunchHooks: Send + Sync {
     }
     async fn write_status(&self, status: &str);
     async fn wait_for_codex_exit(&self, launch: &CodexLaunch) -> anyhow::Result<()>;
+    async fn wait_for_helper_exit(&self) -> anyhow::Result<()> {
+        std::future::pending().await
+    }
     async fn shutdown_helper(&self, helper_port: u16);
     async fn terminate_codex(&self, launch: &CodexLaunch);
 }
@@ -266,6 +302,7 @@ pub struct DefaultLaunchHooks {
 
 struct HelperRuntime {
     shutdown: tokio::sync::oneshot::Sender<()>,
+    finished: tokio::sync::watch::Receiver<bool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -429,6 +466,7 @@ where
             launch,
             status_store: status_store.clone(),
             helper_started,
+            keep_proxy_running: helper_started && protocol_proxy_enabled,
             hooks: Arc::clone(&hooks),
         })
     }
@@ -524,6 +562,7 @@ impl DefaultLaunchHooks {
             }),
         );
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let (finished_tx, finished) = tokio::sync::watch::channel(false);
         let connection_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_HELPER_CONNECTIONS));
         let task = tokio::spawn(async move {
             loop {
@@ -565,9 +604,11 @@ impl DefaultLaunchHooks {
                     }
                 }
             }
+            let _ = finished_tx.send(true);
         });
         *self.helper.lock().await = Some(HelperRuntime {
             shutdown: shutdown_tx,
+            finished,
             task,
         });
         Ok(())
@@ -1039,6 +1080,25 @@ impl LaunchHooks for DefaultLaunchHooks {
         {
             wait_for_launch.await
         }
+    }
+
+    async fn wait_for_helper_exit(&self) -> anyhow::Result<()> {
+        let Some(mut finished) = self
+            .helper
+            .lock()
+            .await
+            .as_ref()
+            .map(|runtime| runtime.finished.clone())
+        else {
+            return Ok(());
+        };
+        while !*finished.borrow_and_update() {
+            finished
+                .changed()
+                .await
+                .context("helper runtime stopped unexpectedly")?;
+        }
+        Ok(())
     }
 
     async fn shutdown_helper(&self, _helper_port: u16) {

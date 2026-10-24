@@ -181,6 +181,10 @@ export function RemoteAccessScreen({
     }
   };
   const toggleWebService = () => runApply(() => applySettings({ ...settings, enabled: !settings.enabled }));
+  const toggleNgrok = () => runApply(() => {
+    const next = { ...latestSettings.current, ngrokEnabled: !latestSettings.current.ngrokEnabled };
+    return applySettings(next, next.ngrokEnabled ? "ngrok 第二线路已启用。" : "ngrok 第二线路已停用，Token 已保留。");
+  });
   const renderZrokBadge = () => {
     switch (zrok?.state) {
       case "ready":
@@ -271,14 +275,14 @@ export function RemoteAccessScreen({
     if (mounted.current) onSuccess(result.message || "ngrok Token 已保存并通过测试。");
   });
   const confirmKeyChange = () => credentials?.accessKeyConfigured === false || window.confirm("更换访问密钥会使所有已授权设备失效，需要重新输入新密钥。继续？");
-  const applySettings = async (next: RemoteAccessSettings) => {
+  const applySettings = async (next: RemoteAccessSettings, successMessage?: string) => {
     const error = remoteAccessValidation(next);
     if (error) throw new Error(error);
     onChange(next);
     try {
       await onSave(next);
     } catch (error) {
-      onChange({ ...latestSettings.current, enabled: settings.enabled });
+      onChange({ ...latestSettings.current, enabled: settings.enabled, ngrokEnabled: settings.ngrokEnabled });
       throw error;
     }
     const result = await command<RemoteAccessStatus>("apply");
@@ -298,9 +302,9 @@ export function RemoteAccessScreen({
     const authorizationNotice = keyConfigured
       ? ""
       : "访问密钥尚未设置，网页只显示登录页，无法进入会话。";
-    onSuccess(result.running
+    onSuccess(successMessage || (result.running
       ? `设置已保存，远程网页服务已启动。${zrokNotice}${authorizationNotice}`
-      : "设置已保存，远程访问已关闭。");
+      : "设置已保存，远程访问已关闭。"));
   };
   const save = () => runApply(() => applySettings(settings));
 
@@ -475,12 +479,28 @@ export function RemoteAccessScreen({
               <small>关闭并重新启动 CodexElves 后复用同一地址；首次访问若出现 zrok 提示页，请点击「Visit Share」。</small>
             </div>
           </div>
-          {["connecting", "retry_wait", "error"].includes(zrok?.state || "") && zrok?.error ? <p className="remote-access-error" role="alert">{zrok.error}</p> : null}
+          {!status?.primary && ["connecting", "retry_wait", "error"].includes(zrok?.state || "") && zrok?.error ? <p className="remote-access-error" role="alert">{zrok.error}</p> : null}
           {zrok?.state === "retry_wait" && zrok.retryAtMs ? <p className="remote-access-hint">将在 {new Date(zrok.retryAtMs).toLocaleTimeString()} 自动重试。</p> : null}
           </PrimaryRouteControls>
           <div className="remote-access-fields">
             <div className="remote-access-wide">
-              <Label htmlFor="remote-ngrok-token">ngrok Token</Label>
+              <div className="remote-access-expiry-heading">
+                <span className="text-sm font-medium">ngrok 第二线路</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-label="启用 ngrok 第二线路"
+                  aria-checked={settings.ngrokEnabled}
+                  disabled={busy}
+                  className={`context-enabled-switch checkpoint-enabled-switch ${settings.ngrokEnabled ? "active" : ""}`}
+                  onClick={() => void toggleNgrok()}
+                >
+                  <span className="context-switch-track" aria-hidden="true"><span className="context-switch-thumb" /></span>
+                  <span>{settings.ngrokEnabled ? "已启用" : "已停用"}</span>
+                </button>
+              </div>
+              {settings.ngrokEnabled ? <>
+              <Label className="sr-only" htmlFor="remote-ngrok-token">ngrok Token</Label>
               <div className="remote-access-input-row remote-access-key-row">
                 <SecretInput
                   id="remote-ngrok-token"
@@ -501,12 +521,14 @@ export function RemoteAccessScreen({
                   onCopy={() => void copy(ngrokToken)}
                 />
                 <Button variant="secondary" size="sm" className="h-9"
-                  disabled={busy || !settings.enabled || !ngrokToken.trim()}
+                  disabled={busy || !settings.enabled || !settings.ngrokEnabled || !ngrokToken.trim()}
                   onClick={() => void saveNgrokToken()}>{busy ? "处理中…" : "保存并测试"}</Button>
               </div>
-              <small>{status?.ngrok?.state === "ready" ? "第二通道已连接，安卓端将自动发现并同时使用。"
+              <small>{!settings.enabled ? "远程会话网页未启用，第二线路将在网页服务启动后连接。"
+                  : status?.ngrok?.state === "ready" ? "第二通道已连接，安卓端将自动发现并同时使用。"
                 : status?.ngrok?.state === "starting" ? "第二通道正在启动…"
-                  : status?.ngrok?.error || "保存后随主链路同步启动，安卓端自动连接，无需填写第二个域名。"}</small>
+                  : status?.ngrok?.error || "请保存并测试 Token，第二线路启用后安卓端会自动发现，无需填写第二个域名。"}</small>
+              </> : null}
             </div>
           </div>
         </CardContent>
