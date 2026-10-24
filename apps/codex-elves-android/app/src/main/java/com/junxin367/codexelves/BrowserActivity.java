@@ -38,11 +38,12 @@ import java.util.List;
 public final class BrowserActivity extends Activity implements BrowserSession.Listener {
     private int background, foreground, muted, line, surface;
     private float fontSize;
-    private LinearLayout root, footer, settingsList;
+    private LinearLayout root, footer;
     private FrameLayout content, webContainer;
     private View homePage, settingsPage;
     private TextView heading, failure;
     private EditText homeInput, addressInput, domainInput;
+    private Button saveDomainsButton;
     private ImageButton back, homeButton, reload, settingsButton;
     private ProgressBar progress;
     private BrowserSession session;
@@ -175,61 +176,69 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         scroll.addView(body);
         TextView defaultRoute = text("默认使用本机网络", fontSize * 1.07f, foreground);
         defaultRoute.setTypeface(null, Typeface.BOLD); body.addView(defaultRoute);
-        TextView description = text("内网地址自动通过电脑访问。下方添加的域名及其子域名也通过电脑访问。",
+        TextView description = text("内网地址自动通过电脑访问。下方每行填写一个域名及其子域名规则，空行会自动忽略。",
             fontSize * .9f, muted);
         description.setLineSpacing(dp(4), 1); description.setPadding(0, dp(10), 0, dp(24)); body.addView(description);
         TextView label = text("通过电脑访问的域名", fontSize, foreground);
         label.setTypeface(null, Typeface.BOLD); body.addView(label);
-        LinearLayout addRow = row();
-        domainInput = input("例如 example.com 或 *.example.com", fontSize);
-        domainInput.setBackground(rounded(surface, line, 12)); domainInput.setPadding(dp(12), 0, dp(12), 0);
-        addRow.addView(domainInput, new LinearLayout.LayoutParams(0, dp(46), 1));
-        addRow.addView(textButton("添加", this::addDomain));
-        LinearLayout.LayoutParams addLayout = new LinearLayout.LayoutParams(-1, -2); addLayout.topMargin = dp(12);
-        body.addView(addRow, addLayout);
-        domainInput.setOnEditorActionListener((view, action, event) -> {
-            if (action == EditorInfo.IME_ACTION_GO) { addDomain(); return true; }
-            return false;
-        });
-        settingsList = column();
-        LinearLayout.LayoutParams listLayout = new LinearLayout.LayoutParams(-1, -2); listLayout.topMargin = dp(16);
-        body.addView(settingsList, listLayout);
+        domainInput = input("每行一个域名，例如：\nexample.com\n*.example.com", fontSize);
+        domainInput.setSingleLine(false);
+        domainInput.setMaxLines(100);
+        domainInput.setHorizontallyScrolling(false);
+        domainInput.setGravity(Gravity.TOP | Gravity.START);
+        domainInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI
+            | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        domainInput.setImeOptions(EditorInfo.IME_ACTION_NONE);
+        domainInput.setBackground(rounded(surface, line, 12));
+        domainInput.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams editorLayout = new LinearLayout.LayoutParams(-1, dp(176));
+        editorLayout.topMargin = dp(12);
+        body.addView(domainInput, editorLayout);
+        saveDomainsButton = textButton("保存", this::saveDomainEditor);
+        LinearLayout.LayoutParams saveLayout = new LinearLayout.LayoutParams(-1, -2);
+        saveLayout.topMargin = dp(10);
+        body.addView(saveDomainsButton, saveLayout);
         return scroll;
     }
 
     private void renderSettings() {
-        settingsList.removeAllViews();
         if (session == null) return;
-        if (session.domains().isEmpty()) {
-            TextView empty = text("尚未添加域名", fontSize * .9f, muted);
-            empty.setPadding(0, dp(8), 0, dp(8)); settingsList.addView(empty);
-        }
+        StringBuilder content = new StringBuilder();
         for (String domain : session.domains()) {
-            LinearLayout row = row(); row.setMinimumHeight(dp(48));
-            TextView name = text(domain, fontSize, foreground);
-            row.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
-            row.addView(textButton("删除", () -> {
-                List<String> values = new ArrayList<>(session.domains()); values.remove(domain);
-                saveDomains(values);
-            }));
-            settingsList.addView(row);
-            settingsList.addView(divider(), new LinearLayout.LayoutParams(-1, dp(1)));
+            if (content.length() > 0) content.append('\n');
+            content.append(domain);
         }
+        domainInput.setText(content.toString());
+        domainInput.setSelection(domainInput.length());
     }
 
-    private void addDomain() {
+    private void saveDomainEditor() {
         if (session == null) return;
         try {
-            String domain = BrowserRoutePolicy.normalizeDomain(domainInput.getText().toString());
-            List<String> values = new ArrayList<>(session.domains());
-            if (!values.contains(domain)) values.add(domain);
+            List<String> values = new ArrayList<>();
+            java.util.LinkedHashSet<String> unique = new java.util.LinkedHashSet<>();
+            String[] lines = domainInput.getText().toString().split("\\R", -1);
+            for (int index = 0; index < lines.length; index++) {
+                String value = lines[index].trim();
+                if (value.isEmpty()) continue;
+                try {
+                    unique.add(BrowserRoutePolicy.normalizeDomain(value));
+                } catch (IllegalArgumentException invalid) {
+                    throw new IllegalArgumentException("第 " + (index + 1) + " 行：" + invalid.getMessage());
+                }
+            }
+            values.addAll(unique);
             saveDomains(values);
-            domainInput.setText(""); hideKeyboard();
         } catch (IllegalArgumentException invalid) { domainInput.setError(invalid.getMessage()); }
     }
 
     private void saveDomains(List<String> values) {
-        try { session.saveDomains(values, this::renderSettings); }
+        try {
+            session.saveDomains(values, () -> {
+                domainInput.setError(null);
+                renderSettings();
+            });
+        }
         catch (Exception failure) { domainInput.setError(failure.getMessage()); }
     }
 
@@ -262,6 +271,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         settingsButton.setEnabled(ready);
         homeInput.setEnabled(ready);
         addressInput.setEnabled(ready);
+        domainInput.setEnabled(ready);
+        saveDomainsButton.setEnabled(ready);
         progress.setVisibility(ready && !settings && !home && session.progress < 100 ? View.VISIBLE : View.INVISIBLE);
         if (session != null) {
             progress.setProgress(session.progress);

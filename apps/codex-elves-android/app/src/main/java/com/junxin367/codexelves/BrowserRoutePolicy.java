@@ -55,10 +55,11 @@ final class BrowserRoutePolicy {
     static String normalizeDomain(String input) {
         if (input == null) throw new IllegalArgumentException("域名为空");
         String value = input.trim();
-        if (value.startsWith("*.")) value = value.substring(2);
+        boolean wildcard = value.startsWith("*.");
+        if (wildcard) value = value.substring(2);
         String host = normalizeHost(value);
         if (isIp(host)) throw new IllegalArgumentException("请填写域名，IP 地址按内网规则自动分流");
-        return host;
+        return wildcard ? "*." + host : host;
     }
 
     static boolean isIp(String host) {
@@ -94,6 +95,9 @@ final class BrowserRoutePolicy {
     }
 
     private static boolean matchesDomain(String host, String domain) {
+        if (domain.startsWith("*.")) {
+            return host.endsWith(domain.substring(1));
+        }
         return host.equals(domain) || host.endsWith("." + domain);
     }
 
@@ -109,10 +113,15 @@ final class BrowserRoutePolicy {
         }
         for (String value : domains) {
             String domain = normalizeDomain(value);
-            rules.add(domain);
-            rules.add("*." + domain);
-            rules.add(domain + ".");
-            rules.add("*." + domain + ".");
+            if (domain.startsWith("*.")) {
+                rules.add(domain);
+                rules.add(domain + ".");
+            } else {
+                rules.add(domain);
+                rules.add("*." + domain);
+                rules.add(domain + ".");
+                rules.add("*." + domain + ".");
+            }
         }
         return rules;
     }
