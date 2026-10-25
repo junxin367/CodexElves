@@ -141,10 +141,12 @@ export function setRemoteChannelMeasurements(values) {
   changed();
 }
 
-function orderedRoutes(candidates = routes(), measurements = channelMeasurements) {
+function orderedRoutes(candidates = routes(), measurements = channelMeasurements, { allowCooldownProbe = false } = {}) {
   return candidates.map((route, index) => ({ ...route, index, measurement: measurements.find(value => value.origin === route.origin) }))
-    .filter(route => route.measurement?.status !== "unavailable"
-      && health(route).failures === 0 && health(route).retryAt <= Date.now())
+    .filter(route => allowCooldownProbe
+      ? health(route).retryAt <= Date.now()
+      : route.measurement?.status !== "unavailable"
+        && health(route).failures === 0 && health(route).retryAt <= Date.now())
     .sort((left, right) => {
       const latency = route => route.measurement?.status === "ready"
         && Number.isFinite(route.measurement.milliseconds) && route.measurement.milliseconds >= 0
@@ -681,8 +683,9 @@ export function createChannelEventStream() {
       try { entry.socket.close(); } catch {}
     }
   }
-  function connected(entry) {
+  function connected(entry, route) {
     entry.active = true;
+    if (route) healthyRoute(route, entry.sequence);
     retries.delete(entry.origin);
     if (readyState !== 1) { readyState = 1; stream.onopen?.(); }
   }
@@ -697,6 +700,7 @@ export function createChannelEventStream() {
     try { socket = route.token ? new WebSocket(url, ["codex-elves-channel-v1", `codex-channel.${route.token}`]) : new WebSocket(url); }
     catch { fail(entry); return; }
     entry.socket = socket; entry.active = false; entry.verified = !route.token;
+    entry.sequence = ++routeRequestSequence;
     entry.openedAt = null;
     entry.activity = entry.lastWatch = Date.now(); entry.graceUntil = 0;
     entry.watch = setInterval(() => {
@@ -709,7 +713,7 @@ export function createChannelEventStream() {
     socket.onopen = () => {
       if (closed || entry.socket !== socket) return;
       entry.openedAt = entry.activity = Date.now();
-      if (entry.verified) connected(entry);
+      if (entry.verified) connected(entry, route);
     };
     socket.onmessage = message => {
       if (closed || entry.socket !== socket) return;
@@ -723,7 +727,7 @@ export function createChannelEventStream() {
             return;
           }
           entry.verified = true;
-          connected(entry);
+          connected(entry, route);
         }
         merger.accept(event);
       } catch {}
@@ -758,7 +762,9 @@ export function createChannelEventStream() {
     if (closed) return;
     clearTimeout(routeRetry);
     const now = Date.now();
-    const candidates = orderedRoutes(routes().filter(route => supportsRequest(route, "/api/events/ws", "GET")))
+    const candidates = orderedRoutes(
+      routes().filter(route => supportsRequest(route, "/api/events/ws", "GET")),
+      channelMeasurements, { allowCooldownProbe: true })
       .filter(route => (retries.get(route.origin)?.at || 0) <= now);
     const current = candidates.find(route => sockets.get(route.origin)?.active);
     let selected = candidates[0];
@@ -771,15 +777,22 @@ export function createChannelEventStream() {
     for (const [origin, entry] of sockets) if (!available.some(route => route.origin === origin)) {
       dispose(entry); sockets.delete(origin);
     }
+    if (readyState === 1 && ![...sockets.values()].some(entry => entry.active)) {
+      readyState = 0;
+      stream.onerror?.({ reason: "all-channels-disconnected" });
+    }
     // 小幅延迟抖动保留已有连接；明确故障或明显更快的线路才接替。
     for (const route of available) {
       if (!sockets.has(route.origin)) sockets.set(route.origin, { origin: route.origin, failures: 0 });
       const entry = sockets.get(route.origin);
       if (!entry.socket) { clearTimeout(entry.retry); open(entry); }
     }
-    const waiting = [...retries.values()].filter(value => value.at > now);
+    const waiting = [
+      ...retries.values().map(value => value.at),
+      ...routes().map(route => health(route).retryAt)
+    ].filter(at => at > now);
     if (waiting.length && !globalThis.document?.hidden)
-      routeRetry = setTimeout(update, Math.max(100, Math.min(...waiting.map(value => value.at)) - now));
+      routeRetry = setTimeout(update, Math.max(100, Math.min(...waiting) - now));
   }
   listeners.add(update);
   globalThis.addEventListener?.("online", update);

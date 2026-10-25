@@ -11605,7 +11605,10 @@ function openStream() {
   current.onerror = () => {
     if (!isCurrent()) return;
     setConnection(false);
-    if (current.readyState === EventSource.CLOSED) reconnectStream(streamBackoff = Math.min(streamBackoff * 2, 30000));
+    if (streamRetry !== null) return;
+    const delay = streamBackoff;
+    streamBackoff = Math.min(streamBackoff * 2, 30000);
+    reconnectStream(delay);
   };
 }
 function reconnectStream(delay = streamBackoff) {
