@@ -102,7 +102,9 @@ final class BrowserSession {
     private String userAgentMode;
     private String pageTitle = "";
     private boolean desktopRootScrollLocked;
+    private boolean desktopFullPageFitReload;
     private final ArrayDeque<DiagnosticEvent> diagnosticEvents = new ArrayDeque<>();
+    private final Runnable desktopRootScrollPolicyRefresh = this::updateDesktopRootScrollPolicy;
     private final Runnable diagnosticRefresh = () -> {
         if (!closed && listener != null) listener.changed();
     };
@@ -266,8 +268,8 @@ final class BrowserSession {
         initializationStage.accept("webview");
         view = new WebView(context);
         view.setOnScrollChangeListener((webView, scrollX, scrollY, oldScrollX, oldScrollY) -> {
-            if (desktopRootScrollLocked && (scrollX != 0 || scrollY != 0)) {
-                webView.scrollTo(0, 0);
+            if (desktopRootScrollLocked && scrollY != 0) {
+                webView.scrollTo(scrollX, 0);
             }
         });
         view.setSaveEnabled(false);
@@ -316,7 +318,7 @@ final class BrowserSession {
                 progress = value;
                 changed();
                 if (value >= 100 && BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
-                    MAIN.postDelayed(BrowserSession.this::updateDesktopRootScrollPolicy, 250L);
+                    MAIN.postDelayed(desktopRootScrollPolicyRefresh, 250L);
                 }
             }
             @Override public void onReceivedTitle(WebView webView, String title) {
@@ -377,16 +379,25 @@ final class BrowserSession {
                 recordDiagnosticEvent("page-start", "GET", address, "", "", true, "");
                 diagnostic("native.browser.page", DiagnosticsPolicy.urlFields(address,
                     "phase", "start", "generation", pageGeneration));
-                webView.setVisibility(View.VISIBLE);
+                webView.setVisibility(desktopFullPageFitReload ? View.INVISIBLE : View.VISIBLE);
                 url = address; error = ""; progress = 0; pageTitle = ""; changed();
             }
             @Override public void onPageFinished(WebView webView, String address) {
                 if (home || !mainFrameStarted) return;
                 mainFrameStarted = true;
                 pendingNavigationUrl = address;
+                boolean fittingReload = desktopFullPageFitReload;
+                desktopFullPageFitReload = false;
                 if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
                     webView.scrollTo(0, webView.getScrollY());
-                    MAIN.postDelayed(BrowserSession.this::updateDesktopRootScrollPolicy, 120L);
+                    MAIN.postDelayed(desktopRootScrollPolicyRefresh, 120L);
+                    if (!fittingReload) {
+                        long fitGeneration = pageGeneration;
+                        MAIN.postDelayed(
+                            () -> requestDesktopFullPageFit(webView, address, fitGeneration), 180L);
+                        MAIN.postDelayed(
+                            () -> requestDesktopFullPageFit(webView, address, fitGeneration), 800L);
+                    }
                 }
                 webView.setVisibility(View.VISIBLE);
                 recordDiagnosticEvent("page-finish", "GET", address, "", "page-loaded", true, "");
@@ -399,6 +410,15 @@ final class BrowserSession {
                 }
                 mainFrameFinished = true;
                 changed();
+            }
+            @Override public void onScaleChanged(WebView webView, float oldScale, float newScale) {
+                if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
+                    // The page height can cross the viewport boundary while the user
+                    // pinches. Recompute the short-page policy instead of retaining
+                    // the state from the initial page scale.
+                    MAIN.removeCallbacks(desktopRootScrollPolicyRefresh);
+                    MAIN.post(desktopRootScrollPolicyRefresh);
+                }
             }
             @Override public void onReceivedError(WebView webView, WebResourceRequest request, WebResourceError failure) {
                 if (home || !allowed(request.getUrl())) return;
@@ -416,6 +436,8 @@ final class BrowserSession {
                 recordDiagnosticEvent("failure", request.getMethod(), target, "", detail,
                     mainFrame, "");
                 if (mainFrame) {
+                    desktopFullPageFitReload = false;
+                    webView.setVisibility(View.VISIBLE);
                     diagnostic("native.browser.error", DiagnosticsPolicy.urlFields(
                         target, "phase", "failure",
                         "errorCode", code, "errorType",
@@ -641,6 +663,7 @@ final class BrowserSession {
         view.stopLoading();
         view.setVisibility(View.INVISIBLE);
         pendingNavigationUrl = target;
+        desktopFullPageFitReload = false;
         mainFrameStarted = false;
         mainFrameFinished = false;
         pageTitle = "";
@@ -653,6 +676,7 @@ final class BrowserSession {
         error = "";
         url = "";
         pendingNavigationUrl = "";
+        desktopFullPageFitReload = false;
         mainFrameStarted = false;
         mainFrameFinished = false;
         pageTitle = "";
@@ -672,6 +696,7 @@ final class BrowserSession {
             int previousIndex = history.getCurrentIndex() - 1;
             pendingNavigationUrl = previousIndex >= 0
                 ? history.getItemAtIndex(previousIndex).getUrl() : "";
+            desktopFullPageFitReload = false;
             mainFrameStarted = false;
             mainFrameFinished = false;
             pageTitle = "";
@@ -687,6 +712,7 @@ final class BrowserSession {
         if (!closed && attached && !home) {
             error = "";
             pendingNavigationUrl = url;
+            desktopFullPageFitReload = false;
             mainFrameStarted = false;
             mainFrameFinished = false;
             pageTitle = "";
@@ -768,12 +794,16 @@ final class BrowserSession {
             ? iphoneUserAgent : androidUserAgent;
         settings.setUserAgentString(userAgent);
         settings.setUseWideViewPort(true);
-        settings.setLoadWithOverviewMode(true);
+        settings.setLoadWithOverviewMode(!desktop);
         settings.setLayoutAlgorithm(desktop
             ? WebSettings.LayoutAlgorithm.NORMAL
             : WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING);
-        settings.setSupportZoom(!desktop);
-        settings.setBuiltInZoomControls(!desktop);
+        view.setInitialScale(100);
+        // Desktop UA must retain pinch zoom as well. The UA changes layout and
+        // server-side content selection; it must not remove the browser's zoom
+        // gesture or prevent users from fitting more of a page on screen.
+        settings.setSupportZoom(true);
+        settings.setBuiltInZoomControls(true);
         settings.setDisplayZoomControls(false);
         view.setHorizontalScrollBarEnabled(false);
         view.setOverScrollMode(View.OVER_SCROLL_NEVER);
@@ -781,6 +811,60 @@ final class BrowserSession {
         applyUserAgentMetadata(settings);
         diagnostic("native.browser.display", DiagnosticsPolicy.fields(
             "phase", "success", "reason", "success"));
+    }
+    private void requestDesktopFullPageFit(WebView webView, String address, long generation) {
+        if (closed || !attached || home || !BrowserPreferences.UA_DESKTOP.equals(userAgentMode)
+            || desktopFullPageFitReload || generation != pageGeneration
+            || webView.getWidth() <= 0 || webView.getHeight() <= 0) {
+            return;
+        }
+        webView.evaluateJavascript(
+            "(function(){var d=document.documentElement,b=document.body;"
+                + "var w=Math.max(d?d.scrollWidth:0,d?d.offsetWidth:0,d?d.clientWidth:0,"
+                + "b?b.scrollWidth:0,b?b.offsetWidth:0,b?b.clientWidth:0);"
+                + "var h=Math.max(d?d.scrollHeight:0,d?d.offsetHeight:0,d?d.clientHeight:0,"
+                + "b?b.scrollHeight:0,b?b.offsetHeight:0,b?b.clientHeight:0);"
+                + "return Math.round(w)+','+Math.round(h);})()",
+            value -> {
+                if (closed || !attached || home || generation != pageGeneration
+                    || desktopFullPageFitReload || !sameAddress(address, url)) {
+                    return;
+                }
+                int[] dimensions = pageDimensions(value);
+                if (dimensions == null) return;
+                int scalePercent = BrowserScalePolicy.fullPageScalePercent(
+                    webView.getWidth(), webView.getHeight(), dimensions[0], dimensions[1]);
+                diagnostic("native.browser.scale", DiagnosticsPolicy.fields(
+                    "phase", "measure", "reason", "full-page-fit",
+                    "contentWidth", dimensions[0], "contentHeight", dimensions[1],
+                    "viewportWidth", webView.getWidth(), "viewportHeight", webView.getHeight(),
+                    "scalePercent", scalePercent, "generation", generation));
+                if (scalePercent >= 100) {
+                    webView.setVisibility(View.VISIBLE);
+                    return;
+                }
+                desktopFullPageFitReload = true;
+                webView.setInitialScale(scalePercent);
+                webView.setVisibility(View.INVISIBLE);
+                webView.reload();
+            });
+    }
+    private static int[] pageDimensions(String value) {
+        if (value == null || value.isEmpty()) return null;
+        String decoded = value;
+        try {
+            Object parsed = new org.json.JSONTokener(value).nextValue();
+            if (parsed != null) decoded = parsed.toString();
+        } catch (Exception ignored) { }
+        String[] parts = decoded.split(",");
+        if (parts.length < 2) return null;
+        try {
+            int width = Integer.parseInt(parts[0].trim());
+            int height = Integer.parseInt(parts[1].trim());
+            return width > 0 && height > 0 ? new int[] { width, height } : null;
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
     private void updateDesktopRootScrollPolicy() {
         if (closed || home || !BrowserPreferences.UA_DESKTOP.equals(userAgentMode)
@@ -790,12 +874,14 @@ final class BrowserSession {
         }
         int contentHeight = Math.round(view.getContentHeight() * view.getScale());
         desktopRootScrollLocked = contentHeight > 0 && contentHeight <= view.getHeight() + 8;
-        if (desktopRootScrollLocked) view.scrollTo(0, 0);
-        String overflow = desktopRootScrollLocked ? "hidden" : "";
+        if (desktopRootScrollLocked) view.scrollTo(view.getScrollX(), 0);
+        String overflowY = desktopRootScrollLocked ? "hidden" : "";
+        String overflowX = "auto";
         view.evaluateJavascript(
-            "(function(){var d=document.documentElement,b=document.body,o='" + overflow + "';"
-                + "if(d)d.style.overflowY=o;"
-                + "if(b)b.style.overflowY=o;})()",
+            "(function(){var d=document.documentElement,b=document.body,oy='" + overflowY
+                + "',ox='" + overflowX + "';"
+                + "if(d){d.style.overflowY=oy;d.style.overflowX=ox;}"
+                + "if(b){b.style.overflowY=oy;b.style.overflowX=ox;}})()",
             null);
     }
     private void applyUserAgentMetadata(WebSettings settings) {
