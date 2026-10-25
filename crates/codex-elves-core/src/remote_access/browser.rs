@@ -18,31 +18,35 @@ struct Slots {
 impl Registry {
     pub(super) fn new() -> Self {
         Self {
-            all: Arc::new(Semaphore::new(32)),
+            all: Arc::new(Semaphore::new(128)),
             devices: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
-    fn acquire(&self, device: &str) -> Result<Slots, ApiError> {
-        let mut devices = self.devices.lock().unwrap_or_else(|e| e.into_inner());
-        devices.retain(|_, value| value.strong_count() > 0);
-        let limit = devices
-            .get(device)
-            .and_then(Weak::upgrade)
-            .unwrap_or_else(|| {
-                let limit = Arc::new(Semaphore::new(8));
-                devices.insert(device.to_string(), Arc::downgrade(&limit));
-                limit
-            });
+    async fn acquire(&self, device: &str) -> Result<Slots, ApiError> {
+        let limit = {
+            let mut devices = self.devices.lock().unwrap_or_else(|e| e.into_inner());
+            devices.retain(|_, value| value.strong_count() > 0);
+            devices
+                .get(device)
+                .and_then(Weak::upgrade)
+                .unwrap_or_else(|| {
+                    let limit = Arc::new(Semaphore::new(32));
+                    devices.insert(device.to_string(), Arc::downgrade(&limit));
+                    limit
+                })
+        };
+        let all = tokio::time::timeout(Duration::from_secs(20), self.all.clone().acquire_owned())
+            .await
+            .map_err(|_| ApiError::new(429, "浏览器连接排队超时"))?
+            .map_err(|_| ApiError::new(429, "浏览器连接数已满"))?;
+        let device = tokio::time::timeout(Duration::from_secs(20), limit.acquire_owned())
+            .await
+            .map_err(|_| ApiError::new(429, "浏览器连接排队超时"))?
+            .map_err(|_| ApiError::new(429, "浏览器连接数已满"))?;
         Ok(Slots {
-            _device: limit
-                .try_acquire_owned()
-                .map_err(|_| ApiError::new(429, "浏览器连接数已满"))?,
-            _all: self
-                .all
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| ApiError::new(429, "浏览器连接数已满"))?,
+            _device: device,
+            _all: all,
         })
     }
 }
@@ -108,7 +112,7 @@ pub(super) async fn tunnel(
         .controller
         .authorization(device.clone(), Some("browserTunnel"));
     authorization.check().await.map_err(authorization_error)?;
-    let slots = state.controller.browser_tunnels.acquire(&device.id)?;
+    let slots = state.controller.browser_tunnels.acquire(&device.id).await?;
     Ok(upgrade
         .max_message_size(65536)
         .max_frame_size(65536)
@@ -182,8 +186,10 @@ async fn transfer(
     let (mut outgoing, mut incoming) = socket.split();
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<WebSocketMessage>(32);
     let (mut tcp_read, mut tcp_write) = tcp.split();
+    let upload_write_closed = Arc::new(AtomicBool::new(false));
     // Independent pumps are necessary when both peers write more than a TCP window.
-    let download = async {
+    let download_sender = sender.clone();
+    let download = async move {
         let mut buffer = [0u8; 32768];
         loop {
             let count = tcp_read
@@ -195,14 +201,16 @@ async fn transfer(
             }
             tokio::time::timeout(
                 Duration::from_secs(30),
-                sender.send(WebSocketMessage::Binary(buffer[..count].to_vec().into())),
+                download_sender.send(WebSocketMessage::Binary(buffer[..count].to_vec().into())),
             )
             .await
             .map_err(|_| ApiError::new(504, "浏览器接收超时"))?
             .map_err(|_| ApiError::new(502, "浏览器连接中断"))?;
         }
     };
-    let upload = async {
+    let upload_sender = sender.clone();
+    let upload_write_closed_for_pump = upload_write_closed.clone();
+    let upload = async move {
         let mut write_closed = false;
         loop {
             match incoming.next().await {
@@ -222,12 +230,13 @@ async fn transfer(
                         .shutdown()
                         .await
                         .map_err(|_| ApiError::new(502, "目标连接中断"))?;
+                    upload_write_closed_for_pump.store(true, Ordering::SeqCst);
                     write_closed = true;
                 }
                 Some(Ok(WebSocketMessage::Ping(bytes))) => {
                     tokio::time::timeout(
                         Duration::from_secs(30),
-                        sender.send(WebSocketMessage::Pong(bytes)),
+                        upload_sender.send(WebSocketMessage::Pong(bytes)),
                     )
                     .await
                     .map_err(|_| ApiError::new(504, "浏览器接收超时"))?
@@ -247,10 +256,49 @@ async fn transfer(
         }
         Ok(())
     };
-    tokio::select! {
-        result = upload => result,
-        result = download => result,
-        result = write => result,
+    let shutdown_sender = sender.clone();
+    drop(sender);
+    let mut download = Box::pin(download);
+    let mut upload = Box::pin(upload);
+    let mut write = Box::pin(write);
+    let selected = tokio::select! {
+        result = &mut upload => ("upload", result),
+        result = &mut download => ("download", result),
+        result = &mut write => ("write", result),
+    };
+    let (branch, result) = selected;
+    match branch {
+        "write" => {
+            drop(download);
+            drop(upload);
+            drop(shutdown_sender);
+            result
+        }
+        "upload" | "download" => {
+            if branch == "download" && !upload_write_closed.load(Ordering::SeqCst) {
+                let wait = tokio::time::sleep(Duration::from_secs(2));
+                tokio::pin!(wait);
+                tokio::select! {
+                    _ = &mut wait => {},
+                    upload_result = &mut upload => {
+                        if let Err(error) = upload_result {
+                            return Err(error);
+                        }
+                    }
+                    write_result = &mut write => {
+                        return write_result;
+                    }
+                }
+            }
+            drop(download);
+            drop(upload);
+            drop(shutdown_sender);
+            let flushed = tokio::time::timeout(Duration::from_secs(2), write)
+                .await
+                .map_err(|_| ApiError::new(504, "浏览器响应刷新超时"))?;
+            result.and(flushed)
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -393,21 +441,22 @@ mod tests {
         );
     }
 
-    #[test]
-    fn connection_limits_are_per_device_and_global_and_released() {
+    #[tokio::test]
+    async fn connection_limits_are_per_device_and_global_and_released() {
         let registry = Registry::new();
         let mut slots = Vec::new();
         for device in ["a", "b", "c", "d"] {
-            for _ in 0..8 {
-                slots.push(registry.acquire(device).unwrap());
+            for _ in 0..32 {
+                slots.push(registry.acquire(device).await.unwrap());
             }
-            assert!(registry.acquire(device).is_err());
         }
-        assert!(registry.acquire("e").is_err());
+        assert_eq!(registry.all.available_permits(), 0);
+        let waiting = tokio::time::timeout(Duration::from_millis(25), registry.acquire("e")).await;
+        assert!(waiting.is_err());
         slots.pop();
-        assert!(registry.acquire("e").is_ok());
+        assert!(registry.acquire("e").await.is_ok());
         drop(slots);
-        assert_eq!(registry.all.available_permits(), 32);
+        assert_eq!(registry.all.available_permits(), 128);
     }
 
     #[tokio::test]
@@ -433,6 +482,7 @@ mod tests {
             };
             let transmit = async {
                 writer.write_all(&download).await.unwrap();
+                writer.shutdown().await.unwrap();
             };
             tokio::join!(receive, transmit);
         });
@@ -493,6 +543,67 @@ mod tests {
         })
         .await
         .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn flushes_http_response_before_clean_close() {
+        let (_directory, _controller, url, server) = fixture().await;
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = target.local_addr().unwrap().port();
+        let request_bytes =
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec();
+        let expected_request = request_bytes.clone();
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nHELLO".to_vec();
+        let expected_response = response.clone();
+        let peer = tokio::spawn(async move {
+            let (mut connection, _) = target.accept().await.unwrap();
+            let mut received_request = Vec::new();
+            connection.read_to_end(&mut received_request).await.unwrap();
+            assert_eq!(received_request, expected_request);
+            connection.write_all(&response).await.unwrap();
+            connection.shutdown().await.unwrap();
+        });
+        let (mut socket, _) = tokio_tungstenite::connect_async(request(&url, true))
+            .await
+            .unwrap();
+        socket
+            .send(Message::Text(
+                json!({"host":"localhost","port":port}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            socket.next().await.unwrap().unwrap().into_text().unwrap(),
+            r#"{"ok":true}"#
+        );
+        socket
+            .send(Message::Binary(request_bytes.clone().into()))
+            .await
+            .unwrap();
+        socket
+            .send(Message::Text(r#"{"eof":true}"#.into()))
+            .await
+            .unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut received = Vec::new();
+            loop {
+                match socket.next().await.unwrap().unwrap() {
+                    Message::Binary(bytes) => received.extend_from_slice(&bytes),
+                    Message::Close(Some(frame)) => {
+                        assert_eq!(frame.code, tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal);
+                        break received;
+                    }
+                    Message::Pong(_) => {}
+                    other => panic!("unexpected frame: {other:?}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(received, expected_response);
+        peer.await.unwrap();
         server.abort();
     }
 

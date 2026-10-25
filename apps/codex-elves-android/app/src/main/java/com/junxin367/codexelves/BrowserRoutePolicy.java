@@ -6,13 +6,13 @@ import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 
-/** URL-host rules only: ordinary DNS is never resolved to guess a route. */
+/** Local-address helpers used for URL normalization and external-link routing. */
 final class BrowserRoutePolicy {
     static final String PROXY_HOST = "127.0.0.2";
+    static final String PROXY_FALLBACK_HOST = "127.0.0.1";
     private static final List<String> LOCAL_SUFFIXES =
         List.of("localhost", "local", "lan", "home.arpa");
 
@@ -52,25 +52,20 @@ final class BrowserRoutePolicy {
         return ascii;
     }
 
-    static String normalizeDomain(String input) {
-        if (input == null) throw new IllegalArgumentException("域名为空");
-        String value = input.trim();
-        boolean wildcard = value.startsWith("*.");
-        if (wildcard) value = value.substring(2);
-        String host = normalizeHost(value);
-        if (isIp(host)) throw new IllegalArgumentException("请填写域名，IP 地址按内网规则自动分流");
-        return wildcard ? "*." + host : host;
-    }
-
     static boolean isIp(String host) {
         return host.contains(":") || host.matches("[0-9]+(?:\\.[0-9]+){3}");
     }
 
     static boolean reservedProxyHost(String host) {
-        return PROXY_HOST.equals(normalizeHost(host));
+        try {
+            String normalized = normalizeHost(host);
+            return PROXY_HOST.equals(normalized) || PROXY_FALLBACK_HOST.equals(normalized);
+        } catch (IllegalArgumentException invalid) {
+            return false;
+        }
     }
 
-    static boolean usesComputer(String input, Collection<String> domains) {
+    static boolean usesComputer(String input) {
         String host = normalizeHost(input);
         if (isIp(host)) {
             try {
@@ -89,8 +84,6 @@ final class BrowserRoutePolicy {
         if (!host.contains(".")) return true;
         for (String suffix : LOCAL_SUFFIXES)
             if (matchesDomain(host, suffix)) return true;
-        for (String domain : domains)
-            if (matchesDomain(host, normalizeDomain(domain))) return true;
         return false;
     }
 
@@ -101,36 +94,7 @@ final class BrowserRoutePolicy {
         return host.equals(domain) || host.endsWith("." + domain);
     }
 
-    static List<String> proxyRules(Collection<String> domains) {
-        List<String> rules = new ArrayList<>(List.of(
-            "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-            "169.254.0.0/16", "[::1]", "fc00::/7", "fe80::/10", "<local>"));
-        for (String suffix : LOCAL_SUFFIXES) {
-            rules.add(suffix);
-            rules.add("*." + suffix);
-            rules.add(suffix + ".");
-            rules.add("*." + suffix + ".");
-        }
-        for (String value : domains) {
-            String domain = normalizeDomain(value);
-            if (domain.startsWith("*.")) {
-                rules.add(domain);
-                rules.add(domain + ".");
-            } else {
-                rules.add(domain);
-                rules.add("*" + domain);
-                rules.add(domain + ".");
-                rules.add("*" + domain + ".");
-            }
-        }
-        return rules;
-    }
-
     static String navigationUrl(String input) {
-        return navigationUrl(input, List.of());
-    }
-
-    static String navigationUrl(String input, Collection<String> domains) {
         if (input == null) throw new IllegalArgumentException("请输入网址或搜索内容");
         String text = input.trim();
         if (text.isEmpty() || text.length() > 8192 || text.matches("(?s).*[\\x00-\\x1f\\x7f].*"))
@@ -173,7 +137,7 @@ final class BrowserRoutePolicy {
                 throw new IllegalArgumentException("端口必须为 1 到 65535");
             if (reservedProxyHost(host)) throw new IllegalArgumentException("该地址由浏览器内部代理使用");
             String scheme = explicit ? parsed.getScheme().toLowerCase(Locale.ROOT)
-                : usesComputer(host, domains) || hostPort || port >= 0 ? "http" : "https";
+                : usesComputer(host) || hostPort || port >= 0 ? "http" : "https";
             String targetHost = host.contains(":") ? "[" + host + "]" : host;
             String path = parsed.getRawPath();
             String result = scheme + "://" + targetHost + (port < 0 ? "" : ":" + port)

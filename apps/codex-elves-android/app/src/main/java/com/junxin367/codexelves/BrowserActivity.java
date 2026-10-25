@@ -3,6 +3,7 @@ package com.junxin367.codexelves;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
+import android.content.ClipboardManager;
 import android.content.ClipData;
 import android.content.Intent;
 import android.content.res.ColorStateList;
@@ -15,7 +16,10 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.text.InputType;
+import android.text.TextUtils;
 import android.view.Gravity;
+import android.view.KeyEvent;
+import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -28,29 +32,50 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.PopupMenu;
+import android.widget.PopupWindow;
 import android.widget.ScrollView;
+import android.widget.Space;
 import android.widget.TextView;
+import android.widget.Toast;
 import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.text.SimpleDateFormat;
 
 /** Browser chrome is native; third-party pages never receive a native message bridge. */
 public final class BrowserActivity extends Activity implements BrowserSession.Listener {
     private int background, foreground, muted, line, surface;
     private float fontSize;
+    private enum InternalPage { NONE, HISTORY, BOOKMARKS, DIAGNOSTICS }
     private LinearLayout root, footer;
     private FrameLayout content, webContainer;
-    private View homePage, settingsPage;
+    private View homePage, settingsPage, historyPage, bookmarksPage, diagnosticsPage;
     private TextView heading, failure;
-    private EditText homeInput, addressInput, domainInput;
-    private Button saveDomainsButton;
-    private ImageButton back, homeButton, reload, settingsButton;
+    private EditText homeInput, addressInput;
+    private LinearLayout userAgentRow;
+    private TextView userAgentValue;
+    private ImageView userAgentArrow;
+    private PopupWindow userAgentPopup;
+    private ImageButton back, homeButton, reload, settingsButton, bookmarkButton;
+    private ImageButton historyButton, bookmarksButton;
+    private Button clearPageButton;
+    private Button diagnosticsButton;
+    private ScrollView homeScroll;
+    private LinearLayout homeBody, recentPanel, historyPageBody, bookmarksPageBody, diagnosticsPageBody;
+    private Space homeTopSpacer, homeBottomSpacer;
     private ProgressBar progress;
     private BrowserSession session;
     private IBinder authority;
-    private boolean settings, resumed, ready;
+    private String initialUrl = "";
+    private boolean settings, resumed, ready, acquiring;
+    private InternalPage internalPage = InternalPage.NONE;
+    private String diagnosticsFilter = "all";
+    private final HapticFeedbackController haptics = new HapticFeedbackController();
     private android.window.OnBackInvokedCallback backCallback;
     private AlertDialog authDialog;
     private ValueCallback<Uri[]> fileChooser;
@@ -70,6 +95,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         fontSize = Math.max(12, Math.min(24, getIntent().getFloatExtra("fontSize", 14)));
         authority = getIntent().getExtras() == null ? null
             : getIntent().getExtras().getBinder(BrowserAuthority.EXTRA);
+        initialUrl = getIntent().getStringExtra("initialUrl");
+        if (initialUrl == null) initialUrl = "";
         diagnostic("native.browser.lifecycle", DiagnosticsPolicy.fields(
             "phase", "create", "sdk", Build.VERSION.SDK_INT));
         configureWindow();
@@ -79,11 +106,26 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
                 android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
         }
+        acquireSession();
+    }
+
+    private void acquireSession() {
+        if (acquiring || isFinishing() || isDestroyed()) return;
+        if (authority == null) {
+            invalidated("浏览器授权已失效，请返回会话后重试");
+            return;
+        }
+        acquiring = true;
+        failure.setText("正在准备浏览器…");
         BrowserSession.acquire(this, authority, value -> {
+                acquiring = false;
                 if (isFinishing() || isDestroyed()) return;
                 session = value;
                 if (resumed) attachSession();
-            }, this::invalidated);
+            }, message -> {
+                acquiring = false;
+                invalidated(message);
+            });
     }
 
     @SuppressWarnings("deprecation")
@@ -106,8 +148,11 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         heading = text("浏览器", fontSize * 1.07143f, foreground);
         heading.setTypeface(null, Typeface.BOLD); heading.setSingleLine(true);
         header.addView(heading, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        clearPageButton = textButton("清空", this::clearCurrentPage);
+        header.addView(clearPageButton);
         Button returnButton = textButton("返回", () -> {
             if (settings) { settings = false; hideKeyboard(); render(); }
+            else if (internalPage != InternalPage.NONE) { internalPage = InternalPage.NONE; render(); }
             else finish();
         });
         header.addView(returnButton);
@@ -124,20 +169,42 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         content.addView(homePage, new FrameLayout.LayoutParams(-1, -1));
         settingsPage = buildSettings();
         content.addView(settingsPage, new FrameLayout.LayoutParams(-1, -1));
+        historyPage = buildHistoryPage();
+        content.addView(historyPage, new FrameLayout.LayoutParams(-1, -1));
+        bookmarksPage = buildBookmarksPage();
+        content.addView(bookmarksPage, new FrameLayout.LayoutParams(-1, -1));
+        diagnosticsPage = buildDiagnosticsPage();
+        content.addView(diagnosticsPage, new FrameLayout.LayoutParams(-1, -1));
         failure = text("正在准备浏览器…", fontSize, muted);
         failure.setGravity(Gravity.CENTER); failure.setPadding(dp(24), dp(24), dp(24), dp(24));
         failure.setBackgroundColor(background);
-        failure.setOnClickListener(ignored -> { if (session != null) session.reload(); });
+        failure.setOnClickListener(ignored -> {
+            haptics.perform(failure, "haptic-click");
+            if (session != null) session.reload();
+            else acquireSession();
+        });
         content.addView(failure, new FrameLayout.LayoutParams(-1, -1));
         root.addView(divider(), new LinearLayout.LayoutParams(-1, dp(1)));
-        footer = row(); footer.setPadding(dp(4), dp(5), dp(4), dp(7)); footer.setMinimumHeight(dp(58));
+        footer = row(); footer.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
+        footer.setPadding(dp(4), dp(5), dp(4), dp(7)); footer.setMinimumHeight(dp(58));
         back = icon(R.drawable.browser_back, "网页后退", () -> { if (ready) session.back(); });
-        homeButton = icon(R.drawable.browser_home, "浏览器首页", () -> { if (ready) session.showHome(); });
+        homeButton = icon(R.drawable.browser_home, "浏览器首页", () -> {
+            if (!ready) return;
+            internalPage = InternalPage.NONE;
+            session.showHome();
+        });
         reload = icon(R.drawable.browser_reload, "刷新网页", () -> { if (ready) session.reload(); });
         settingsButton = icon(R.drawable.browser_settings, "浏览器设置", () -> {
             if (!ready) return;
             settings = true; hideKeyboard(); renderSettings(); render();
         });
+        bookmarkButton = icon(R.drawable.browser_bookmark, "添加或取消当前页书签", () -> {
+            if (!ready || session == null) return;
+            if (session.home || internalPage != InternalPage.NONE) openBookmarksPage();
+            else session.toggleBookmark();
+        });
+        historyButton = icon(R.drawable.browser_history, "打开访问历史", this::openHistoryPage);
+        bookmarksButton = icon(R.drawable.browser_bookmark, "打开书签", this::openBookmarksPage);
         addressInput = input("网址或搜索", fontSize * .92f);
         addressInput.setBackground(rounded(surface, line, 16));
         addressInput.setPadding(dp(12), 0, dp(12), 0);
@@ -149,18 +216,26 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         submitOnEnter(addressInput);
         footer.addView(back); footer.addView(homeButton);
         footer.addView(addressInput, new LinearLayout.LayoutParams(0, dp(44), 1));
-        footer.addView(reload); footer.addView(settingsButton);
+        footer.addView(bookmarksButton); footer.addView(historyButton);
+        footer.addView(bookmarkButton); footer.addView(reload); footer.addView(settingsButton);
         root.addView(footer);
         root.requestFocus();
         render();
     }
 
     private View buildHome() {
-        LinearLayout page = column(); page.setGravity(Gravity.CENTER);
-        page.setPadding(dp(24), dp(16), dp(24), dp(60));
+        homeScroll = new ScrollView(this);
+        homeScroll.setFillViewport(true);
+        homeScroll.setClipToPadding(false);
+        homeScroll.setBackgroundColor(background);
+        homeBody = column();
+        homeBody.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        homeBody.setPadding(dp(24), 0, dp(24), 0);
+        homeTopSpacer = new Space(this);
+        homeBody.addView(homeTopSpacer, new LinearLayout.LayoutParams(-1, dp(16)));
         TextView brand = text("CodexElves", Math.min(fontSize * 2.6f, 44), foreground);
         brand.setTypeface(null, Typeface.BOLD); brand.setGravity(Gravity.CENTER);
-        page.addView(brand, new LinearLayout.LayoutParams(-1, -2));
+        homeBody.addView(brand, new LinearLayout.LayoutParams(-1, -2));
         LinearLayout search = row(); search.setBackground(rounded(background, line, 22));
         search.setPadding(dp(8), dp(5), dp(6), dp(5));
         homeInput = input("输入网址或百度搜索", fontSize);
@@ -169,10 +244,26 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         search.addView(homeInput, new LinearLayout.LayoutParams(0, dp(52), 1));
         search.addView(icon(R.drawable.browser_search, "访问或搜索", () -> navigate(homeInput)));
         LinearLayout.LayoutParams searchLayout = new LinearLayout.LayoutParams(-1, -2);
-        searchLayout.topMargin = dp(32);
-        page.addView(search, searchLayout);
+        searchLayout.topMargin = dp(24);
+        homeBody.addView(search, searchLayout);
+        recentPanel = column();
+        LinearLayout.LayoutParams recentLayout = new LinearLayout.LayoutParams(-1, -2);
+        recentLayout.topMargin = dp(8);
+        homeBody.addView(recentPanel, recentLayout);
+        homeBottomSpacer = new Space(this);
+        homeBody.addView(homeBottomSpacer, new LinearLayout.LayoutParams(-1, dp(60)));
+
+        homeScroll.addView(homeBody, new ScrollView.LayoutParams(-1, -2));
+        homeScroll.addOnLayoutChangeListener((view, left, top, right, bottom,
+            oldLeft, oldTop, oldRight, oldBottom) -> updateHomeOffset());
+        homeInput.setOnFocusChangeListener((view, focused) -> {
+            renderHomeSections();
+            if (focused) homeInput.selectAll();
+        });
+        homeInput.setOnClickListener(ignored -> renderHomeSections());
         submitOnEnter(homeInput);
-        return page;
+        homeScroll.post(this::updateHomeOffset);
+        return homeScroll;
     }
 
     private View buildSettings() {
@@ -180,72 +271,448 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         scroll.setFillViewport(true); scroll.setBackgroundColor(background);
         LinearLayout body = column(); body.setPadding(dp(20), dp(20), dp(20), dp(24));
         scroll.addView(body);
-        TextView defaultRoute = text("默认使用本机网络", fontSize * 1.07f, foreground);
-        defaultRoute.setTypeface(null, Typeface.BOLD); body.addView(defaultRoute);
-        TextView description = text("内网地址自动通过电脑访问。下方每行填写一个域名及其子域名规则，空行会自动忽略。",
-            fontSize * .9f, muted);
-        description.setLineSpacing(dp(4), 1); description.setPadding(0, dp(10), 0, dp(24)); body.addView(description);
-        TextView label = text("通过电脑访问的域名", fontSize, foreground);
-        label.setTypeface(null, Typeface.BOLD); body.addView(label);
-        domainInput = input("每行一个域名，例如：\nexample.com\n*.example.com", fontSize);
-        domainInput.setSingleLine(false);
-        domainInput.setMaxLines(100);
-        domainInput.setHorizontallyScrolling(false);
-        domainInput.setGravity(Gravity.TOP | Gravity.START);
-        domainInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI
-            | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
-        domainInput.setImeOptions(EditorInfo.IME_ACTION_NONE);
-        domainInput.setBackground(rounded(surface, line, 12));
-        domainInput.setPadding(dp(12), dp(10), dp(12), dp(10));
-        LinearLayout.LayoutParams editorLayout = new LinearLayout.LayoutParams(-1, dp(176));
-        editorLayout.topMargin = dp(12);
-        body.addView(domainInput, editorLayout);
-        saveDomainsButton = textButton("保存", this::saveDomainEditor);
-        LinearLayout.LayoutParams saveLayout = new LinearLayout.LayoutParams(-1, -2);
-        saveLayout.topMargin = dp(10);
-        body.addView(saveDomainsButton, saveLayout);
+        TextView routeTitle = text("网络访问", fontSize * 1.12f, foreground);
+        routeTitle.setTypeface(null, Typeface.BOLD); body.addView(routeTitle);
+        LinearLayout routeRow = row();
+        routeRow.setMinimumHeight(dp(52));
+        routeRow.setPadding(dp(14), dp(6), dp(14), dp(6));
+        routeRow.setBackground(rounded(surface, line, 10));
+        TextView routeLabel = text("请求通道", fontSize, foreground);
+        routeRow.addView(routeLabel, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView routeValue = text("电脑端网络", fontSize * .92f, muted);
+        routeValue.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
+        routeRow.addView(routeValue, new LinearLayout.LayoutParams(-2, -1));
+        LinearLayout.LayoutParams routeLayout = new LinearLayout.LayoutParams(-1, dp(52));
+        routeLayout.topMargin = dp(12);
+        body.addView(routeRow, routeLayout);
+
+        addSettingsDivider(body);
+        TextView displayTitle = text("网站显示方式", fontSize * 1.12f, foreground);
+        displayTitle.setTypeface(null, Typeface.BOLD); body.addView(displayTitle);
+        userAgentRow = row();
+        userAgentRow.setMinimumHeight(dp(52));
+        userAgentRow.setPadding(dp(14), dp(6), dp(12), dp(6));
+        userAgentRow.setBackground(rounded(surface, line, 10));
+        TextView userAgentLabel = text("浏览器标识（UA）", fontSize, foreground);
+        userAgentRow.addView(userAgentLabel, new LinearLayout.LayoutParams(0, -2, 1));
+        userAgentValue = text("", fontSize * .92f, muted);
+        userAgentValue.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
+        userAgentRow.addView(userAgentValue, new LinearLayout.LayoutParams(-2, -1));
+        userAgentArrow = new ImageView(this);
+        userAgentArrow.setImageResource(R.drawable.ic_chevron_down);
+        userAgentArrow.setImageTintList(ColorStateList.valueOf(muted));
+        userAgentArrow.setContentDescription("展开网站显示方式");
+        userAgentArrow.setScaleType(ImageView.ScaleType.CENTER);
+        LinearLayout.LayoutParams arrowLayout = new LinearLayout.LayoutParams(dp(28), -1);
+        userAgentRow.addView(userAgentArrow, arrowLayout);
+        userAgentRow.setOnClickListener(ignored -> showUserAgentMenu());
+        userAgentArrow.setOnClickListener(ignored -> showUserAgentMenu());
+        LinearLayout.LayoutParams modeRowLayout = new LinearLayout.LayoutParams(-1, dp(52));
+        modeRowLayout.topMargin = dp(12);
+        body.addView(userAgentRow, modeRowLayout);
+        diagnosticsButton = textButton("网页诊断", this::openDiagnosticsPage);
+        LinearLayout.LayoutParams diagnosticsLayout = new LinearLayout.LayoutParams(-1, -2);
+        diagnosticsLayout.topMargin = dp(16);
+        body.addView(diagnosticsButton, diagnosticsLayout);
         return scroll;
+    }
+
+    private View buildHistoryPage() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(background);
+        historyPageBody = column();
+        historyPageBody.setPadding(dp(16), dp(10), dp(16), dp(20));
+        scroll.addView(historyPageBody);
+        return scroll;
+    }
+
+    private View buildBookmarksPage() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(background);
+        bookmarksPageBody = column();
+        bookmarksPageBody.setPadding(dp(16), dp(10), dp(16), dp(20));
+        scroll.addView(bookmarksPageBody);
+        return scroll;
+    }
+
+    private View buildDiagnosticsPage() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(background);
+        diagnosticsPageBody = column();
+        diagnosticsPageBody.setPadding(dp(16), dp(10), dp(16), dp(20));
+        scroll.addView(diagnosticsPageBody);
+        return scroll;
+    }
+
+    private void openHistoryPage() {
+        if (!ready || session == null) return;
+        settings = false;
+        internalPage = InternalPage.HISTORY;
+        hideKeyboard();
+        renderInternalPages();
+        render();
+    }
+
+    private void openBookmarksPage() {
+        if (!ready || session == null) return;
+        settings = false;
+        internalPage = InternalPage.BOOKMARKS;
+        hideKeyboard();
+        renderInternalPages();
+        render();
+    }
+
+    private void openDiagnosticsPage() {
+        if (!ready || session == null) return;
+        settings = false;
+        internalPage = InternalPage.DIAGNOSTICS;
+        hideKeyboard();
+        renderDiagnosticsPage();
+        render();
+    }
+
+    private void renderInternalPages() {
+        if (session == null || historyPageBody == null || bookmarksPageBody == null) return;
+        historyPageBody.removeAllViews();
+        List<BrowserPreferences.HistoryEntry> history = session.history();
+        if (history.isEmpty()) {
+            historyPageBody.addView(emptyState("还没有访问记录"));
+        } else {
+            for (BrowserPreferences.HistoryEntry entry : history)
+                addRecordRow(historyPageBody, entry.title, entry.url,
+                    () -> navigateSaved(entry.url),
+                    () -> session.removeHistory(entry.url));
+        }
+
+        bookmarksPageBody.removeAllViews();
+        List<BrowserPreferences.BookmarkEntry> bookmarks = session.bookmarks();
+        if (bookmarks.isEmpty()) {
+            bookmarksPageBody.addView(emptyState("还没有收藏网页"));
+        } else {
+            for (BrowserPreferences.BookmarkEntry entry : bookmarks)
+                addRecordRow(bookmarksPageBody, entry.title, entry.url,
+                    () -> navigateSaved(entry.url),
+                    () -> session.removeBookmark(entry.url));
+        }
+        if (internalPage == InternalPage.DIAGNOSTICS) renderDiagnosticsPage();
+    }
+
+    private void renderDiagnosticsPage() {
+        if (session == null || diagnosticsPageBody == null) return;
+        diagnosticsPageBody.removeAllViews();
+        List<BrowserSession.DiagnosticEvent> allEvents = session.diagnosticEvents();
+        TextView summary = text(
+            "页面：" + (session.url.isEmpty() ? "首页" : session.url)
+                + "\nUA：" + userAgentLabel(session.userAgentMode())
+                + "\n记录：" + allEvents.size(),
+            fontSize * .86f, muted);
+        summary.setPadding(dp(8), dp(4), dp(8), dp(12));
+        summary.setLineSpacing(dp(3), 1);
+        diagnosticsPageBody.addView(summary);
+
+        LinearLayout toolbar = row();
+        Button filterButton = textButton(diagnosticsFilterLabel(), () -> showDiagnosticsFilterMenu(toolbar));
+        toolbar.addView(filterButton, new LinearLayout.LayoutParams(-2, -2));
+        TextView filterCount = text(eventsCountLabel(allEvents), fontSize * .78f, muted);
+        filterCount.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
+        toolbar.addView(filterCount, new LinearLayout.LayoutParams(0, -2, 1));
+        diagnosticsPageBody.addView(toolbar, new LinearLayout.LayoutParams(-1, -2));
+
+        List<BrowserSession.DiagnosticEvent> events = new ArrayList<>();
+        for (BrowserSession.DiagnosticEvent event : allEvents) {
+            if (diagnosticsFilterMatches(event)) events.add(event);
+        }
+        if (events.isEmpty()) {
+            diagnosticsPageBody.addView(emptyState(
+                allEvents.isEmpty() ? "暂无网页请求或控制台记录" : "当前筛选没有记录"));
+            return;
+        }
+        SimpleDateFormat time = new SimpleDateFormat("HH:mm:ss", Locale.getDefault());
+        for (int index = events.size() - 1; index >= 0; index--) {
+            BrowserSession.DiagnosticEvent event = events.get(index);
+            addDiagnosticsRow(event, time.format(event.timeMs));
+        }
+    }
+
+    private String eventsCountLabel(List<BrowserSession.DiagnosticEvent> events) {
+        int count = 0;
+        for (BrowserSession.DiagnosticEvent event : events) {
+            if (diagnosticsFilterMatches(event)) count++;
+        }
+        return count + " 条";
+    }
+
+    private void showDiagnosticsFilterMenu(View anchor) {
+        PopupMenu menu = new PopupMenu(this, anchor);
+        menu.getMenu().add("全部");
+        menu.getMenu().add("请求");
+        menu.getMenu().add("失败");
+        menu.getMenu().add("HTTP");
+        menu.getMenu().add("SSL");
+        menu.getMenu().add("Console");
+        menu.getMenu().add("页面");
+        String currentLabel = diagnosticsFilterLabel();
+        for (int index = 0; index < menu.getMenu().size(); index++) {
+            MenuItem item = menu.getMenu().getItem(index);
+            item.setCheckable(true);
+            item.setChecked(currentLabel.equals(item.getTitle().toString()));
+        }
+        menu.setOnMenuItemClickListener(item -> {
+            String label = item.getTitle().toString();
+            diagnosticsFilter = diagnosticsFilterForLabel(label);
+            haptics.perform(anchor, "haptic-click");
+            renderDiagnosticsPage();
+            return true;
+        });
+        menu.show();
+    }
+
+    private String diagnosticsFilterForLabel(String label) {
+        if ("请求".equals(label)) return "request";
+        if ("失败".equals(label)) return "failure";
+        if ("HTTP".equals(label)) return "http-error";
+        if ("SSL".equals(label)) return "ssl-error";
+        if ("Console".equals(label)) return "console";
+        if ("页面".equals(label)) return "page";
+        return "all";
+    }
+
+    private String diagnosticsFilterLabel() {
+        if ("request".equals(diagnosticsFilter)) return "请求";
+        if ("failure".equals(diagnosticsFilter)) return "失败";
+        if ("http-error".equals(diagnosticsFilter)) return "HTTP";
+        if ("ssl-error".equals(diagnosticsFilter)) return "SSL";
+        if ("console".equals(diagnosticsFilter)) return "Console";
+        if ("page".equals(diagnosticsFilter)) return "页面";
+        return "全部";
+    }
+
+    private boolean diagnosticsFilterMatches(BrowserSession.DiagnosticEvent event) {
+        if ("all".equals(diagnosticsFilter)) return true;
+        if ("page".equals(diagnosticsFilter)) {
+            return "page-start".equals(event.phase) || "page-finish".equals(event.phase);
+        }
+        if ("failure".equals(diagnosticsFilter)) {
+            return "failure".equals(event.phase) || "http-error".equals(event.phase)
+                || "ssl-error".equals(event.phase);
+        }
+        return diagnosticsFilter.equals(event.phase);
+    }
+
+    private String diagnosticsPhaseLabel(String phase) {
+        if ("request".equals(phase)) return "请求";
+        if ("page-start".equals(phase)) return "开始";
+        if ("page-finish".equals(phase)) return "完成";
+        if ("failure".equals(phase)) return "失败";
+        if ("http-error".equals(phase)) return "HTTP";
+        if ("ssl-error".equals(phase)) return "SSL";
+        if ("console".equals(phase)) return "Console";
+        return phase == null ? "" : phase;
+    }
+
+    private void addDiagnosticsRow(BrowserSession.DiagnosticEvent event, String time) {
+        LinearLayout row = row();
+        row.setMinimumHeight(dp(50));
+        row.setPadding(dp(8), dp(4), dp(8), dp(4));
+        row.setBackground(ripple());
+        row.setOnClickListener(ignored -> {
+            haptics.perform(row, "haptic-click");
+            showDiagnosticsEvent(event, time);
+        });
+        TextView phase = text(diagnosticsPhaseLabel(event.phase), fontSize * .75f, muted);
+        phase.setGravity(Gravity.CENTER);
+        phase.setMinWidth(dp(68));
+        row.addView(phase, new LinearLayout.LayoutParams(dp(68), -1));
+        LinearLayout details = column();
+        String title = event.method + " " + shortUrl(event.url);
+        TextView titleView = text(title, fontSize * .84f, foreground);
+        titleView.setSingleLine(true);
+        titleView.setEllipsize(TextUtils.TruncateAt.END);
+        String scope = "console".equals(event.phase)
+            ? "控制台" : event.mainFrame ? "主页面" : "子资源";
+        TextView subtitle = text(
+            (event.status.isEmpty() ? "" : event.status + " · ")
+                + scope + " · " + time,
+            fontSize * .72f, muted);
+        subtitle.setSingleLine(true);
+        details.addView(titleView, new LinearLayout.LayoutParams(0, -2, 1));
+        details.addView(subtitle, new LinearLayout.LayoutParams(0, -2, 1));
+        row.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, -2);
+        layout.topMargin = dp(2);
+        diagnosticsPageBody.addView(row, layout);
+    }
+
+    private String shortUrl(String value) {
+        if (value == null) return "";
+        return value.length() > 100 ? value.substring(0, 97) + "..." : value;
+    }
+
+    private void showDiagnosticsEvent(BrowserSession.DiagnosticEvent event, String time) {
+        StringBuilder content = new StringBuilder();
+        content.append("时间：").append(time)
+            .append("\n类型：").append(diagnosticsPhaseLabel(event.phase))
+            .append("\n方法：").append(event.method)
+            .append("\n状态：").append(event.status.isEmpty() ? "未返回" : event.status);
+        if ("console".equals(event.phase)) content.append("\n内容：").append(event.url);
+        else content.append("\n地址：").append(event.url);
+        if (!event.detail.isEmpty()) content.append("\n详情：").append(event.detail);
+        if (!event.headers.isEmpty()) content.append("\n请求头（已脱敏）：\n").append(event.headers);
+        TextView body = text(content.toString(), fontSize * .86f, foreground);
+        body.setTextIsSelectable(true);
+        body.setPadding(dp(8), dp(4), dp(8), dp(4));
+        new AlertDialog.Builder(this)
+            .setTitle("网页诊断详情")
+            .setView(body)
+            .setNeutralButton("复制", (dialog, which) -> {
+                ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                if (clipboard != null) {
+                    clipboard.setPrimaryClip(ClipData.newPlainText(
+                        "网页诊断", event.url == null ? "" : event.url));
+                    Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show();
+                }
+            })
+            .setPositiveButton("关闭", null)
+            .show();
     }
 
     private void renderSettings() {
         if (session == null) return;
-        StringBuilder content = new StringBuilder();
-        for (String domain : session.domains()) {
-            if (content.length() > 0) content.append('\n');
-            content.append(domain);
-        }
-        domainInput.setText(content.toString());
-        domainInput.setSelection(domainInput.length());
+        String selectedUserAgent = userAgentLabel(session.userAgentMode());
+        userAgentValue.setText(selectedUserAgent);
+        userAgentRow.setContentDescription("浏览器标识（UA），当前为" + selectedUserAgent);
     }
 
-    private void saveDomainEditor() {
-        if (session == null) return;
+    private void showUserAgentMenu() {
+        if (!ready || session == null || userAgentRow == null) return;
+        dismissUserAgentMenu();
+        haptics.perform(userAgentRow, "haptic-click");
+        userAgentArrow.setRotation(180f);
+        String current = session.userAgentMode();
+        LinearLayout menuBody = column();
+        menuBody.setPadding(dp(4), dp(4), dp(4), dp(4));
+        menuBody.setBackground(rounded(background, line, 12));
+
+        addUserAgentMenuItem(menuBody, "手机版", BrowserPreferences.UA_ANDROID, current);
+        addUserAgentMenuItem(menuBody, "电脑版", BrowserPreferences.UA_DESKTOP, current);
+        addUserAgentMenuItem(menuBody, "iPhone", BrowserPreferences.UA_IPHONE, current);
+
+        int maxWidth = Math.max(dp(168), userAgentRow.getWidth() - dp(24));
+        int menuWidth = Math.min(dp(220), maxWidth);
+        userAgentPopup = new PopupWindow(menuBody, menuWidth, ViewGroup.LayoutParams.WRAP_CONTENT, true);
+        userAgentPopup.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+        userAgentPopup.setOutsideTouchable(true);
+        userAgentPopup.setClippingEnabled(true);
+        userAgentPopup.setInputMethodMode(PopupWindow.INPUT_METHOD_NOT_NEEDED);
+        if (Build.VERSION.SDK_INT >= 21) userAgentPopup.setElevation(dp(8));
+        userAgentPopup.setOnDismissListener(this::dismissedUserAgentMenu);
+        userAgentPopup.showAsDropDown(userAgentRow, dp(0), dp(4), Gravity.END);
+    }
+
+    private void addUserAgentMenuItem(LinearLayout menuBody, String label, String mode, String current) {
+        LinearLayout item = row();
+        item.setMinimumHeight(dp(42));
+        item.setPadding(dp(12), dp(4), dp(8), dp(4));
+        item.setBackground(ripple());
+        item.setContentDescription(label + (mode.equals(current) ? "，当前已选择" : ""));
+        item.setOnClickListener(ignored -> {
+            haptics.perform(item, "haptic-click");
+            dismissUserAgentMenu();
+            setUserAgentMode(mode);
+        });
+
+        TextView labelView = text(label, fontSize, foreground);
+        labelView.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        item.addView(labelView, new LinearLayout.LayoutParams(0, -1, 1));
+
+        TextView indicator = text(mode.equals(current) ? "✓" : "", fontSize * 1.05f,
+            mode.equals(current) ? background : muted);
+        indicator.setGravity(Gravity.CENTER);
+        indicator.setTypeface(null, Typeface.BOLD);
+        indicator.setBackground(rounded(mode.equals(current) ? foreground : Color.TRANSPARENT,
+            mode.equals(current) ? foreground : muted, 3));
+        item.addView(indicator, new LinearLayout.LayoutParams(dp(24), dp(24)));
+        menuBody.addView(item, new LinearLayout.LayoutParams(-1, dp(42)));
+    }
+
+    private void dismissUserAgentMenu() {
+        if (userAgentPopup != null) {
+            userAgentPopup.setOnDismissListener(null);
+            userAgentPopup.dismiss();
+            userAgentPopup = null;
+        }
+        if (userAgentArrow != null) userAgentArrow.setRotation(0f);
+    }
+
+    private void dismissedUserAgentMenu() {
+        userAgentPopup = null;
+        if (userAgentArrow != null) userAgentArrow.setRotation(0f);
+    }
+
+    private String userAgentLabel(String mode) {
+        if (BrowserPreferences.UA_DESKTOP.equals(mode)) return "电脑版";
+        if (BrowserPreferences.UA_IPHONE.equals(mode)) return "iPhone";
+        return "手机版";
+    }
+
+    private void setUserAgentMode(String mode) {
+        if (!ready || session == null) return;
         try {
-            List<String> values = new ArrayList<>();
-            java.util.LinkedHashSet<String> unique = new java.util.LinkedHashSet<>();
-            String[] lines = domainInput.getText().toString().split("\\R", -1);
-            for (int index = 0; index < lines.length; index++) {
-                String value = lines[index].trim();
-                if (value.isEmpty()) continue;
+            session.saveUserAgentMode(mode, this::renderSettings);
+        } catch (RuntimeException failure) {
+            Toast.makeText(this, failure.getMessage(), Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void clearCurrentPage() {
+        if (internalPage == InternalPage.HISTORY) confirmClearHistory();
+        else if (internalPage == InternalPage.BOOKMARKS) confirmClearBookmarks();
+        else if (internalPage == InternalPage.DIAGNOSTICS && session != null) {
+            session.clearDiagnosticEvents();
+            renderDiagnosticsPage();
+            Toast.makeText(this, "网页诊断记录已清空", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void confirmClearHistory() {
+        if (!ready || session == null) return;
+        new AlertDialog.Builder(this)
+            .setTitle("清空访问历史")
+            .setMessage("确定删除当前来源的全部访问历史吗？")
+            .setNegativeButton("暂不清空", null)
+            .setPositiveButton("清空", (dialog, which) -> {
                 try {
-                    unique.add(BrowserRoutePolicy.normalizeDomain(value));
-                } catch (IllegalArgumentException invalid) {
-                    throw new IllegalArgumentException("第 " + (index + 1) + " 行：" + invalid.getMessage());
+                    session.clearHistory();
+                    Toast.makeText(this, "访问历史已清空", Toast.LENGTH_SHORT).show();
+                } catch (RuntimeException failure) {
+                    Toast.makeText(this, failure.getMessage(), Toast.LENGTH_SHORT).show();
                 }
-            }
-            values.addAll(unique);
-            saveDomains(values);
-        } catch (IllegalArgumentException invalid) { domainInput.setError(invalid.getMessage()); }
+                renderInternalPages();
+                renderHomeSections();
+            })
+            .show();
     }
 
-    private void saveDomains(List<String> values) {
-        try {
-            session.saveDomains(values, () -> {
-                domainInput.setError(null);
-                renderSettings();
-            });
-        }
-        catch (Exception failure) { domainInput.setError(failure.getMessage()); }
+    private void confirmClearBookmarks() {
+        if (!ready || session == null) return;
+        new AlertDialog.Builder(this)
+            .setTitle("清空全部书签")
+            .setMessage("确定删除当前来源的全部书签吗？")
+            .setNegativeButton("暂不清空", null)
+            .setPositiveButton("清空", (dialog, which) -> {
+                try {
+                    session.clearBookmarks();
+                    Toast.makeText(this, "全部书签已清空", Toast.LENGTH_SHORT).show();
+                } catch (RuntimeException failure) {
+                    Toast.makeText(this, failure.getMessage(), Toast.LENGTH_SHORT).show();
+                }
+                renderInternalPages();
+                renderHomeSections();
+            })
+            .show();
     }
 
     private void navigate(EditText input) {
@@ -256,37 +723,161 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         } catch (IllegalArgumentException invalid) { input.setError(invalid.getMessage()); }
     }
 
+    private void navigateSaved(String target) {
+        if (!ready || session == null || target == null || target.isEmpty()) return;
+        try {
+            internalPage = InternalPage.NONE;
+            session.navigate(target);
+            homeInput.clearFocus();
+            hideKeyboard();
+            render();
+        } catch (IllegalArgumentException invalid) { homeInput.setError(invalid.getMessage()); }
+    }
+
     private void submitOnEnter(EditText input) {
         input.setOnEditorActionListener((view, action, event) -> {
-            if (action == EditorInfo.IME_ACTION_GO) { navigate(input); return true; }
+            boolean enter = event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                && event.getAction() == KeyEvent.ACTION_DOWN;
+            if (action == EditorInfo.IME_ACTION_GO || action == EditorInfo.IME_ACTION_DONE || enter) {
+                navigate(input); return true;
+            }
             return false;
         });
     }
 
     private void render() {
         boolean home = session == null || session.home;
-        heading.setText(settings ? "浏览器设置" : "浏览器");
-        homePage.setVisibility(!settings && home ? View.VISIBLE : View.GONE);
-        webContainer.setVisibility(!settings && !home ? View.VISIBLE : View.GONE);
+        boolean internal = internalPage != InternalPage.NONE;
+        boolean showHome = !settings && !internal && home;
+        boolean showWeb = !settings && !internal && !home;
+        heading.setText(settings ? "浏览器设置"
+            : internalPage == InternalPage.HISTORY ? "访问历史"
+            : internalPage == InternalPage.BOOKMARKS ? "书签"
+            : internalPage == InternalPage.DIAGNOSTICS ? "网页诊断" : "浏览器");
+        homePage.setVisibility(showHome ? View.VISIBLE : View.GONE);
+        webContainer.setVisibility(showWeb ? View.VISIBLE : View.GONE);
         settingsPage.setVisibility(settings ? View.VISIBLE : View.GONE);
+        historyPage.setVisibility(!settings && internalPage == InternalPage.HISTORY ? View.VISIBLE : View.GONE);
+        bookmarksPage.setVisibility(!settings && internalPage == InternalPage.BOOKMARKS ? View.VISIBLE : View.GONE);
+        diagnosticsPage.setVisibility(!settings && internalPage == InternalPage.DIAGNOSTICS ? View.VISIBLE : View.GONE);
         footer.setVisibility(settings ? View.GONE : View.VISIBLE);
-        back.setVisibility(home ? View.GONE : View.VISIBLE);
-        homeButton.setVisibility(home ? View.GONE : View.VISIBLE);
-        reload.setVisibility(home ? View.GONE : View.VISIBLE);
-        addressInput.setVisibility(home ? View.INVISIBLE : View.VISIBLE);
+        back.setVisibility(showWeb ? View.VISIBLE : View.GONE);
+        homeButton.setVisibility(showWeb || internal ? View.VISIBLE : View.GONE);
+        reload.setVisibility(showWeb ? View.VISIBLE : View.GONE);
+        bookmarkButton.setVisibility(showWeb ? View.VISIBLE : View.GONE);
+        bookmarksButton.setVisibility(!settings && (showHome
+            || internalPage == InternalPage.HISTORY || internalPage == InternalPage.BOOKMARKS) ? View.VISIBLE : View.GONE);
+        historyButton.setVisibility(!settings && (showHome
+            || internalPage == InternalPage.HISTORY || internalPage == InternalPage.BOOKMARKS) ? View.VISIBLE : View.GONE);
+        addressInput.setVisibility(showWeb ? View.VISIBLE : View.GONE);
+        settingsButton.setVisibility(settings ? View.GONE : View.VISIBLE);
+        clearPageButton.setVisibility(internal ? View.VISIBLE : View.GONE);
+        clearPageButton.setEnabled(ready && internal);
         settingsButton.setEnabled(ready);
-        homeInput.setEnabled(ready);
-        addressInput.setEnabled(ready);
-        domainInput.setEnabled(ready);
-        saveDomainsButton.setEnabled(ready);
-        progress.setVisibility(ready && !settings && !home && session.progress < 100 ? View.VISIBLE : View.INVISIBLE);
+        homeInput.setEnabled(ready && showHome);
+        addressInput.setEnabled(ready && showWeb);
+        boolean settingsReady = ready && settings;
+        userAgentRow.setEnabled(settingsReady);
+        userAgentRow.setAlpha(settingsReady ? 1f : .55f);
+        diagnosticsButton.setEnabled(settingsReady);
+        progress.setVisibility(ready && showWeb && session.progress < 100 ? View.VISIBLE : View.INVISIBLE);
         if (session != null) {
             progress.setProgress(session.progress);
-            if (!addressInput.hasFocus()) addressInput.setText(displayAddress(session.url));
-            if (!session.error.isEmpty() && !home && !settings) {
+            if (showWeb && !addressInput.hasFocus()) addressInput.setText(displayAddress(session.url));
+            bookmarkButton.setImageTintList(ColorStateList.valueOf(
+                session.bookmarked() ? Color.rgb(48, 118, 223) : foreground));
+            bookmarkButton.setContentDescription(session.bookmarked() ? "取消当前页书签" : "添加当前页书签");
+            if (!session.error.isEmpty() && showWeb) {
                 failure.setText(getString(R.string.browser_retry_message, session.error)); failure.setVisibility(View.VISIBLE);
             } else failure.setVisibility(ready ? View.GONE : View.VISIBLE);
         }
+        if (internal) renderInternalPages();
+        renderHomeSections();
+    }
+
+    private void renderHomeSections() {
+        if (recentPanel == null) return;
+        recentPanel.removeAllViews();
+        boolean showHome = ready && session != null && session.home && !settings;
+        if (!showHome) {
+            recentPanel.setVisibility(View.GONE);
+            return;
+        }
+
+        List<BrowserPreferences.HistoryEntry> recent = session.recentHistory(6);
+        if (homeInput.hasFocus() && !recent.isEmpty()) {
+            for (BrowserPreferences.HistoryEntry entry : recent)
+                addRecordRow(recentPanel, entry.title, entry.url,
+                    () -> navigateSaved(entry.url), () -> session.removeHistory(entry.url));
+            recentPanel.setVisibility(View.VISIBLE);
+        } else {
+            recentPanel.setVisibility(View.GONE);
+        }
+    }
+
+    private TextView emptyState(String value) {
+        TextView view = text(value, fontSize * .9f, muted);
+        view.setPadding(dp(8), dp(8), dp(8), dp(8));
+        return view;
+    }
+
+    private void addRecordRow(LinearLayout container, String title, String target,
+        Runnable open, Runnable remove) {
+        LinearLayout row = row();
+        row.setMinimumHeight(dp(40));
+        row.setPadding(dp(8), dp(1), dp(2), dp(1));
+        row.setBackground(ripple());
+        row.setOnClickListener(ignored -> {
+            haptics.perform(row, "haptic-click");
+            open.run();
+        });
+        LinearLayout labels = column();
+        String primary = recordLabel(title, target);
+        TextView titleView = text(primary, fontSize * .9f, foreground);
+        titleView.setSingleLine(true);
+        titleView.setEllipsize(TextUtils.TruncateAt.END);
+        TextView targetView = text(recordSubtitle(target), fontSize * .74f, muted);
+        targetView.setSingleLine(true);
+        targetView.setEllipsize(TextUtils.TruncateAt.END);
+        labels.addView(titleView, new LinearLayout.LayoutParams(-1, -2));
+        labels.addView(targetView, new LinearLayout.LayoutParams(-1, -2));
+        row.addView(labels, new LinearLayout.LayoutParams(0, -2, 1));
+        if (remove != null) {
+            ImageButton removeButton = icon(R.drawable.browser_delete, "删除记录", remove);
+            row.addView(removeButton, new LinearLayout.LayoutParams(dp(40), dp(40)));
+        }
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, -2);
+        layout.topMargin = 0;
+        container.addView(row, layout);
+    }
+
+    private String recordLabel(String title, String target) {
+        Uri uri = Uri.parse(target);
+        if ("www.baidu.com".equals(uri.getHost()) && "/s".equals(uri.getPath())
+            && uri.getQueryParameter("wd") != null) return uri.getQueryParameter("wd");
+        return title == null || title.trim().isEmpty() ? displayAddress(target) : title.trim();
+    }
+
+    private String recordSubtitle(String target) {
+        Uri uri = Uri.parse(target);
+        if ("www.baidu.com".equals(uri.getHost()) && "/s".equals(uri.getPath())
+            && uri.getQueryParameter("wd") != null) return "搜索：" + uri.getQueryParameter("wd");
+        return target;
+    }
+
+    private void updateHomeOffset() {
+        if (homeScroll == null || homeBody == null || homeTopSpacer == null || homeBottomSpacer == null) return;
+        int top = Math.round(homeScroll.getHeight() * .28f);
+        updateSpacer(homeTopSpacer, top);
+        updateSpacer(homeBottomSpacer, dp(60));
+        homeBody.setTranslationY(0);
+    }
+
+    private void updateSpacer(Space spacer, int height) {
+        ViewGroup.LayoutParams params = spacer.getLayoutParams();
+        if (params.height == height) return;
+        params.height = height;
+        spacer.setLayoutParams(params);
     }
 
     private String displayAddress(String address) {
@@ -304,7 +895,14 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
             if (!resumed || isFinishing()) return;
             if (session.view.getParent() instanceof ViewGroup parent) parent.removeView(session.view);
             webContainer.addView(session.view, new FrameLayout.LayoutParams(-1, -1));
-            ready = true; deliverFileResult(); render();
+            ready = true;
+            String pendingUrl = initialUrl;
+            initialUrl = "";
+            if (!pendingUrl.isEmpty()) {
+                try { session.navigate(pendingUrl); }
+                catch (IllegalArgumentException invalid) { homeInput.setError(invalid.getMessage()); }
+            }
+            deliverFileResult(); render();
         });
     }
 
@@ -316,6 +914,10 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         ready = false;
         failure.setText(message); failure.setVisibility(View.VISIBLE);
         settingsButton.setEnabled(false); homeInput.setEnabled(false); addressInput.setEnabled(false);
+        bookmarkButton.setEnabled(false); userAgentRow.setEnabled(false);
+        diagnosticsButton.setEnabled(false);
+        bookmarksButton.setEnabled(false); historyButton.setEnabled(false);
+        clearPageButton.setEnabled(false);
         progress.setVisibility(View.INVISIBLE);
     }
 
@@ -412,11 +1014,12 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     }
 
     @Override protected void onResume() {
-        super.onResume(); resumed = true;
+        super.onResume(); resumed = true; haptics.setForeground(true);
         if (session != null) attachSession();
     }
     @Override protected void onPause() {
-        resumed = false; ready = false;
+        resumed = false; ready = false; haptics.setForeground(false);
+        dismissUserAgentMenu();
         if (authDialog != null) { authDialog.cancel(); authDialog = null; }
         if (session != null) session.detach(this);
         super.onPause();
@@ -424,6 +1027,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     @Override protected void onDestroy() {
         diagnostic("native.browser.lifecycle", DiagnosticsPolicy.fields(
             "phase", "destroy"));
+        haptics.setForeground(false);
+        dismissUserAgentMenu();
         cancelFileChooser();
         if (session != null) session.detach(this);
         if (Build.VERSION.SDK_INT >= 33 && backCallback != null)
@@ -436,6 +1041,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
             hideKeyboard(); return;
         }
         if (settings) { settings = false; render(); return; }
+        if (internalPage != InternalPage.NONE) { internalPage = InternalPage.NONE; render(); return; }
         if (ready && session.back()) return;
         finish();
     }
@@ -450,6 +1056,13 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     }
     private void diagnostic(String name, JSONObject fields) {
         BrowserAuthority.recordDiagnostic(authority, name, fields);
+    }
+    private void addSettingsDivider(LinearLayout body) {
+        View divider = divider();
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, dp(1));
+        layout.topMargin = dp(28);
+        layout.bottomMargin = dp(24);
+        body.addView(divider, layout);
     }
     private int dp(float value) { return Math.round(value * getResources().getDisplayMetrics().density); }
     private LinearLayout column() {
@@ -474,14 +1087,28 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         view.setTextSize(fontSize * .85714f); view.setTextColor(foreground);
         view.setMinWidth(0); view.setMinimumWidth(dp(48)); view.setMinHeight(0); view.setMinimumHeight(dp(36));
         view.setPadding(dp(8), dp(6), dp(8), dp(6)); view.setBackground(ripple());
-        view.setOnClickListener(ignored -> action.run()); return view;
+        view.setOnClickListener(ignored -> {
+            haptics.perform(view, "haptic-click");
+            action.run();
+        }); return view;
+    }
+    private Button primaryButton(String label, Runnable action) {
+        Button view = textButton(label, action);
+        view.setTextSize(fontSize * .95f);
+        view.setTextColor(background);
+        view.setMinimumHeight(dp(48));
+        view.setBackground(rounded(foreground, foreground, 10));
+        return view;
     }
     private ImageButton icon(int resource, String description, Runnable action) {
         ImageButton view = new ImageButton(this); view.setImageResource(resource);
         view.setImageTintList(ColorStateList.valueOf(foreground)); view.setContentDescription(description);
         view.setPadding(dp(10), dp(10), dp(10), dp(10)); view.setBackground(ripple());
         view.setLayoutParams(new LinearLayout.LayoutParams(dp(44), dp(44)));
-        view.setOnClickListener(ignored -> action.run()); return view;
+        view.setOnClickListener(ignored -> {
+            haptics.perform(view, "haptic-click");
+            action.run();
+        }); return view;
     }
     private RippleDrawable ripple() {
         return new RippleDrawable(ColorStateList.valueOf((foreground & 0x00ffffff) | 0x22000000),

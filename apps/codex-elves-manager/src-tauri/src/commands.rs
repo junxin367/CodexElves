@@ -2199,7 +2199,19 @@ pub fn read_latest_logs(request: LogRequest) -> CommandResult<LogsPayload> {
 
 #[tauri::command]
 pub async fn local_proxy_status() -> CommandResult<LocalProxyStatusPayload> {
-    let settings = SettingsStore::default().load().unwrap_or_default();
+    let (settings, settings_load_error) = match SettingsStore::default().load() {
+        Ok(settings) => (settings, None),
+        Err(error) => {
+            let message = error.to_string();
+            let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+                "manager.local_proxy_status_settings_load_failed",
+                json!({
+                    "message": message
+                }),
+            );
+            (BackendSettings::default(), Some(message))
+        }
+    };
     let active_relay = settings.active_relay_profile();
     let active_aggregate = settings.active_aggregate_relay_profile();
     let enabled = settings.active_relay_uses_protocol_proxy();
@@ -2237,6 +2249,37 @@ pub async fn local_proxy_status() -> CommandResult<LocalProxyStatusPayload> {
         } else {
             active_relay.base_url.clone()
         };
+    let message = if enabled && lan_listening {
+        "本地代理正在通过局域网监听。"
+    } else if enabled && listening {
+        "本地代理正在监听。"
+    } else if enabled {
+        "本地代理已启用，但当前未监听端口。"
+    } else {
+        "当前供应商未启用本地代理。"
+    };
+    let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+        "manager.local_proxy_status",
+        json!({
+            "enabled": enabled,
+            "listening": listening,
+            "message": message,
+            "port": port,
+            "relayProfilesEnabled": settings.relay_profiles_enabled,
+            "activeRelayId": active_relay.id,
+            "activeRelayName": active_relay.name,
+            "activeRelayMode": active_relay.relay_mode,
+            "activeRelayLocalProxyEnabled": active_relay.local_proxy_enabled(),
+            "aggregateRelayActive": active_aggregate.is_some(),
+            "lanProxyEnabled": settings.lan_proxy_enabled,
+            "latestLaunchStatus": latest_launch.as_ref().map(|status| status.status.as_str()),
+            "latestLaunchHelperPort": latest_launch.as_ref().and_then(|status| status.helper_port),
+            "latestLaunchLanProxyListening": latest_launch
+                .as_ref()
+                .map(|status| status.lan_proxy_listening),
+            "settingsLoadError": settings_load_error
+        }),
+    );
     let payload = LocalProxyStatusPayload {
         enabled,
         listening,
@@ -2257,15 +2300,6 @@ pub async fn local_proxy_status() -> CommandResult<LocalProxyStatusPayload> {
             .to_string(),
         latest_request_at_ms,
         recent_count,
-    };
-    let message = if enabled && lan_listening {
-        "本地代理正在通过局域网监听。"
-    } else if enabled && listening {
-        "本地代理正在监听。"
-    } else if enabled {
-        "本地代理已启用，但当前未监听端口。"
-    } else {
-        "当前供应商未启用本地代理。"
     };
     ok(message, payload)
 }

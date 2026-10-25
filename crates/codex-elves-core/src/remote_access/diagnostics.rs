@@ -267,6 +267,17 @@ fn string_field(key: &str, value: &str) -> Option<String> {
                 | "FileNotFoundException"
                 | "SSLException"
                 | "SSLHandshakeException"
+                | "RemoteException"
+                | "MissingWebViewPackageException"
+                | "BindException"
+                | "UnsupportedOperationException"
+                | "Exception"
+                | "NullPointerException"
+                | "ClassCastException"
+                | "IndexOutOfBoundsException"
+                | "ArrayIndexOutOfBoundsException"
+                | "NoSuchElementException"
+                | "ConcurrentModificationException"
                 | "UnknownHostException"
                 | "SocketTimeoutException"
                 | "ConnectException"
@@ -409,7 +420,25 @@ fn string_field(key: &str, value: &str) -> Option<String> {
                 | "after"
                 | "body"
         ),
-        "routeName" => matches!(value, "zrok" | "ngrok"),
+        "routeName" => matches!(
+            value,
+            "zrok"
+                | "ngrok"
+                | "local-browser"
+                | "proxy-config"
+                | "invalid-target"
+                | "not-matched"
+                | "computer"
+                | "device"
+                | "prepare"
+                | "profile"
+                | "authority"
+                | "session"
+                | "preferences"
+                | "proxy"
+                | "webview"
+                | "ready"
+        ),
         _ => false,
     };
     allowed.then(|| value.to_owned())
@@ -874,6 +903,12 @@ mod tests {
         assert_eq!(clean["events"][0]["fields"]["path"], "/api/read/history");
         assert_eq!(clean["events"][0]["fields"]["durationMs"], 1.25);
         assert_eq!(clean["events"][0]["fields"]["width"], 50);
+        let mut stage = bundle();
+        stage["events"][0]["fields"]["routeName"] = json!("session");
+        assert_eq!(
+            sanitize_bundle(&stage).unwrap()["events"][0]["fields"]["routeName"],
+            "session"
+        );
         let text = serde_json::to_string(&clean).unwrap();
         for private in [
             "secret",

@@ -507,7 +507,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 @media(max-width:760px){.message-image-link,.message-image{max-width:min(100%,120px)}.message-image{max-height:120px}}
 .user-bubble .message-image-link:last-child{margin-bottom:0}
 .user-message{flex-direction:column;align-items:flex-end;gap:8px}
-.user-bubble.markdown{white-space:normal;line-height:1.625}
+.user-bubble.markdown{white-space:pre-wrap;line-height:1.625}
 .user-attachments,.image-view-body{--thumbnail-size:80px;min-width:0;overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;scrollbar-width:thin}
 .user-attachments{display:flex;justify-content:flex-start;flex-wrap:nowrap;gap:8px;max-width:100%}
 .user-attachments .message-image-link{flex:0 0 var(--thumbnail-size);width:var(--thumbnail-size);height:var(--thumbnail-size);margin:0}

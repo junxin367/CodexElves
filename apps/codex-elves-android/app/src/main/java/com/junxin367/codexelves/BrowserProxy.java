@@ -24,7 +24,6 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -35,19 +34,23 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
-/** Authenticated local forward proxy. Only the configured computer routes reach it. */
+/** Authenticated local forward proxy. Every browser request reaches the computer through it. */
 final class BrowserProxy implements AutoCloseable {
     record Credentials(String origin, String cookie) { }
     interface Listener { void unauthorized(); }
     static final String USER = "browser";
     private static final int MAX_HEADER = 32768;
     private static final int MAX_QUEUE = 256 * 1024;
+    // Keep the active client count aligned with the manager browser-tunnel limit.
+    private static final int MAX_CONNECTIONS = 32;
+    private static final int ACCEPT_BACKLOG = 64;
     private final Supplier<Credentials> credentials;
     private final Listener listener;
     private final IBinder authority;
     private final ServerSocket server;
-    private final ExecutorService workers = Executors.newFixedThreadPool(8);
-    private final Semaphore slots = new Semaphore(8);
+    private final String host;
+    private final ExecutorService workers = Executors.newFixedThreadPool(MAX_CONNECTIONS);
+    private final Semaphore slots = new Semaphore(MAX_CONNECTIONS);
     private final Set<Socket> clients = ConcurrentHashMap.newKeySet();
     private final Set<Tunnel> tunnels = ConcurrentHashMap.newKeySet();
     private final OkHttpClient http = new OkHttpClient.Builder()
@@ -58,22 +61,36 @@ final class BrowserProxy implements AutoCloseable {
     private final String realm = "codex-browser-" + randomToken();
     private final byte[] expectedAuthorization = ("Basic " + Base64.getEncoder().encodeToString(
         (USER + ":" + password).getBytes(StandardCharsets.US_ASCII))).getBytes(StandardCharsets.US_ASCII);
-    private volatile List<String> domains;
     private volatile boolean closed;
     private volatile boolean active = true;
 
     BrowserProxy(IBinder authority, Supplier<Credentials> credentials,
-        Collection<String> domains, Listener listener)
+        Listener listener)
         throws IOException {
         this.authority = authority;
         this.credentials = credentials;
         this.listener = listener;
-        this.domains = List.copyOf(domains);
-        server = new ServerSocket();
-        server.bind(new InetSocketAddress(InetAddress.getByName(BrowserRoutePolicy.PROXY_HOST), 0), 8);
+        server = bindServer();
+        host = server.getInetAddress().getHostAddress();
         Thread acceptor = new Thread(this::accept, "codex-browser-proxy");
         acceptor.setDaemon(true);
         acceptor.start();
+    }
+
+    private static ServerSocket bindServer() throws IOException {
+        IOException failure = null;
+        for (String candidate : List.of(
+            BrowserRoutePolicy.PROXY_HOST, BrowserRoutePolicy.PROXY_FALLBACK_HOST)) {
+            ServerSocket socket = new ServerSocket();
+            try {
+                socket.bind(new InetSocketAddress(InetAddress.getByName(candidate), 0), ACCEPT_BACKLOG);
+                return socket;
+            } catch (IOException unavailable) {
+                failure = unavailable;
+                try { socket.close(); } catch (IOException ignored) { }
+            }
+        }
+        throw failure == null ? new IOException("Unable to bind browser proxy") : failure;
     }
 
     private static String randomToken() {
@@ -83,16 +100,11 @@ final class BrowserProxy implements AutoCloseable {
     }
 
     int port() { return server.getLocalPort(); }
+    String host() { return host; }
     String password() { return password; }
     boolean matchesChallenge(String host, String challengeRealm) {
         try { return !closed && realm.equals(challengeRealm) && BrowserRoutePolicy.reservedProxyHost(host); }
         catch (IllegalArgumentException invalid) { return false; }
-    }
-
-    void updateRules(Collection<String> values) {
-        domains = List.copyOf(values);
-        // Existing CONNECT streams cannot be rerouted without inspecting TLS.
-        closeConnections();
     }
 
     void closeConnections() {
@@ -109,7 +121,23 @@ final class BrowserProxy implements AutoCloseable {
         while (!closed) {
             try {
                 Socket socket = server.accept();
-                if (closed || !active || !slots.tryAcquire()) {
+                if (closed || !active) {
+                    closeSocket(socket);
+                    continue;
+                }
+                boolean acquired = false;
+                while (!closed && active && !acquired) {
+                    try { acquired = slots.tryAcquire(500, TimeUnit.MILLISECONDS); }
+                    catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+                if (!acquired) {
+                    if (!closed) {
+                        diagnostic("native.browser.proxy", DiagnosticsPolicy.fields(
+                            "phase", "failure", "routeName", "capacity", "reason", "failed"));
+                    }
                     closeSocket(socket);
                     continue;
                 }
@@ -178,9 +206,11 @@ final class BrowserProxy implements AutoCloseable {
                 tunnel.done.await(120, TimeUnit.SECONDS);
             }
         } catch (Exception failure) {
-            diagnostic("native.browser.proxy", DiagnosticsPolicy.fields(
-                "phase", "failure", "errorType", DiagnosticsPolicy.errorType(failure),
-                "reason", "failed"));
+            if (tunnel == null || !tunnel.cleanClose) {
+                diagnostic("native.browser.proxy", DiagnosticsPolicy.fields(
+                    "phase", "failure", "errorType", DiagnosticsPolicy.errorType(failure),
+                    "reason", "failed"));
+            }
             if (!responseStarted && !socket.isClosed()) {
                 try {
                     socket.getOutputStream().write(("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n"
@@ -213,12 +243,6 @@ final class BrowserProxy implements AutoCloseable {
                 "phase", "failure", "host", host, "port", Math.max(1, Math.min(65535, port)),
                 "routeName", "invalid-target", "reason", "failed"));
             throw new IOException("Invalid proxy target");
-        }
-        if (!BrowserRoutePolicy.usesComputer(host, domains)) {
-            diagnostic("native.browser.proxy", DiagnosticsPolicy.fields(
-                "phase", "failure", "host", host, "port", port,
-                "routeName", "not-matched", "reason", "failed"));
-            throw new IOException("Target is not a computer route");
         }
         boolean upgrade = false;
         String hostHeader = null;
@@ -283,7 +307,7 @@ final class BrowserProxy implements AutoCloseable {
         private final ParsedRequest target;
         private final CountDownLatch ready = new CountDownLatch(1), done = new CountDownLatch(1);
         private final WebSocket socket;
-        private volatile boolean connected, finished;
+        private volatile boolean connected, finished, cleanClose;
 
         Tunnel(Socket client, OutputStream output, ParsedRequest target, Credentials identity) {
             this.client = client; this.output = output; this.target = target;
@@ -335,22 +359,32 @@ final class BrowserProxy implements AutoCloseable {
             finished = true; ready.countDown(); done.countDown(); closeSocket(client);
             synchronized (this) { notifyAll(); }
         }
+        private void finishClean() {
+            finished = true; ready.countDown(); done.countDown();
+            try { client.shutdownInput(); } catch (IOException ignored) { }
+            synchronized (this) { notifyAll(); }
+        }
         void cancel() { finish(); socket.cancel(); }
         @Override public void onClosing(WebSocket webSocket, int code, String reason) {
             boolean valid = validCloseCode(code);
+            cleanClose = valid;
             diagnostic("native.browser.tunnel", DiagnosticsPolicy.fields(
                 "phase", valid ? "complete" : "failure", "host", target.host, "port", target.port,
                 "closeCode", Math.max(0, Math.min(65535, code)),
                 "reason", valid ? "success" : "failed"));
             try { webSocket.close(valid ? code : 1000, null); }
             catch (IllegalArgumentException invalid) { webSocket.cancel(); }
-            finish();
+            if (valid) finishClean(); else finish();
         }
-        @Override public void onClosed(WebSocket webSocket, int code, String reason) { finish(); }
+        @Override public void onClosed(WebSocket webSocket, int code, String reason) {
+            if (cleanClose) finishClean(); else finish();
+        }
         @Override public void onFailure(WebSocket webSocket, Throwable failure, Response response) {
-            diagnostic("native.browser.tunnel", DiagnosticsPolicy.fields(
-                "phase", "failure", "host", target.host, "port", target.port,
-                "errorType", DiagnosticsPolicy.errorType(failure), "reason", "failed"));
+            if (!cleanClose) {
+                diagnostic("native.browser.tunnel", DiagnosticsPolicy.fields(
+                    "phase", "failure", "host", target.host, "port", target.port,
+                    "errorType", DiagnosticsPolicy.errorType(failure), "reason", "failed"));
+            }
             if (response != null && response.code() == 401) listener.unauthorized();
             finish();
         }

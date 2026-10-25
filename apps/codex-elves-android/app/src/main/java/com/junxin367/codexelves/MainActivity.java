@@ -538,8 +538,6 @@ public final class MainActivity extends Activity {
         settings.setDisplayZoomControls(false);
         settings.setSaveFormData(false);
         settings.setUserAgentString(settings.getUserAgentString() + " CodexElvesAndroid/1");
-        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
-
         CookieManager cookies = CookieManager.getInstance();
         cookies.setAcceptCookie(true);
         cookies.setAcceptThirdPartyCookies(view, false);
@@ -597,6 +595,12 @@ public final class MainActivity extends Activity {
                     return true;
                 }
                 if (request.isForMainFrame()) {
+                    if (isLocalOrLanAddress(uri)) {
+                        diagnostic("native.browser.link", DiagnosticsPolicy.urlFields(
+                            uri.toString(), "phase", "open", "routeName", "local-browser"));
+                        openBrowserLink(uri);
+                        return true;
+                    }
                     openExternal(uri);
                 }
                 return true;
@@ -1313,6 +1317,63 @@ public final class MainActivity extends Activity {
         } catch (ActivityNotFoundException error) {
             Toast.makeText(this, "没有可打开此链接的应用", Toast.LENGTH_SHORT).show();
         }
+    }
+
+    private boolean isLocalOrLanAddress(Uri uri) {
+        String scheme = uri.getScheme();
+        String host = uri.getHost();
+        if (host == null || scheme == null
+            || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
+            return false;
+        }
+        try {
+            return BrowserRoutePolicy.usesComputer(host);
+        } catch (IllegalArgumentException invalid) {
+            return false;
+        }
+    }
+
+    private void openBrowserLink(Uri uri) {
+        String message = null;
+        try {
+            if (!pageAuthenticated || currentOrigin == null)
+                throw new IllegalStateException("请先连接远程会话");
+            if (Build.VERSION.SDK_INT < 28)
+                throw new IllegalStateException("浏览器需要 Android 9 或更新版本");
+            String cookie = null;
+            String allCookies = CookieManager.getInstance().getCookie(currentOrigin);
+            if (allCookies != null) {
+                for (String item : allCookies.split(";")) {
+                    String candidate = item.trim();
+                    if (candidate.matches("codex_elves_device=[A-Za-z0-9._~-]{16,512}")) cookie = candidate;
+                }
+            }
+            if (cookie == null) throw new IllegalStateException("设备授权已失效，请重新连接");
+            if (browserAuthority == null || !browserAuthority.matches(currentOrigin, cookie)) {
+                invalidateBrowser();
+                browserAuthority = new BrowserAuthority(currentOrigin, cookie,
+                    (name, fields) -> diagnostics.recordAtOrigin(
+                        currentOrigin, "native", name, fields));
+            }
+            Bundle parameters = new Bundle();
+            parameters.putBinder(BrowserAuthority.EXTRA, browserAuthority);
+            parameters.putFloat("fontSize", 14f);
+            parameters.putInt("background", getColor(R.color.login_background));
+            parameters.putInt("foreground", getColor(R.color.login_text));
+            parameters.putInt("muted", getColor(R.color.login_muted));
+            parameters.putInt("line", getColor(R.color.login_line));
+            parameters.putInt("surface", getColor(R.color.login_background));
+            parameters.putString("initialUrl", uri.toString());
+            Intent browser = new Intent(this, BrowserActivity.class).putExtras(parameters);
+            startActivity(browser);
+            overridePendingTransition(R.anim.browser_enter, R.anim.browser_hold);
+        } catch (IllegalStateException unavailable) {
+            message = unavailable.getMessage();
+        } catch (Exception unavailable) {
+            message = "无法打开浏览器，请返回会话后重试";
+        }
+        if (message != null)
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
     }
 
     private void cancelReadyTimeout() {

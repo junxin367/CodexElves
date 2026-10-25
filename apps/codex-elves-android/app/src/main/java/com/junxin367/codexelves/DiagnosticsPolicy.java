@@ -44,6 +44,11 @@ final class DiagnosticsPolicy {
         "NetworkError", "SecurityError", "IOException", "InterruptedIOException",
         "FileNotFoundException", "SSLException", "SSLHandshakeException",
         "SocketTimeoutException", "ConnectException", "UnknownHostException",
+        "BindException", "RemoteException", "MissingWebViewPackageException",
+        "UnsupportedOperationException",
+        "Exception", "NullPointerException", "ClassCastException",
+        "IndexOutOfBoundsException", "ArrayIndexOutOfBoundsException",
+        "NoSuchElementException", "ConcurrentModificationException",
         "JSONException", "IllegalArgumentException", "IllegalStateException",
         "SecurityException", "RuntimeException", "CancelledException"
     );

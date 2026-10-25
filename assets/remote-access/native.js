@@ -85,6 +85,21 @@
       nativeCatalog.delete(event.params?.threadId);
       catalogLoaded = false;
     }
+    const displayItem = nativeDisplayMessageItem(event.params?.item);
+    const displayTurnItems = Array.isArray(event.params?.turn?.items)
+      ? event.params.turn.items.map(nativeDisplayMessageItem) : null;
+    const turnChanged = displayTurnItems
+      && displayTurnItems.some((item, index) => item !== event.params.turn.items[index]);
+    if (displayItem !== event.params?.item || turnChanged) {
+      event = {
+        ...event,
+        params: {
+          ...event.params,
+          ...(displayItem !== event.params?.item ? { item: displayItem } : {}),
+          ...(turnChanged ? { turn: { ...event.params.turn, items: displayTurnItems } } : {})
+        }
+      };
+    }
     if (transcriptEventTypes.has(event.params?.item?.type)) {
       const item = nativeTranscriptItem(event.params.item);
       if (!item) return;
@@ -1351,10 +1366,11 @@
       if (entry && typeof entry === "object" && "item" in entry && entry.turnId !== turnId)
         throw failure(503, "原生会话消息归属错误");
       if (!item || typeof item !== "object") throw failure(503, "原生会话消息内容无效");
-      if (typeof item.id === "string") {
-        if (Number.isFinite(entry?.startedAtMs)) itemStartedAtMsById[item.id] = entry.startedAtMs;
-      }
-      return Number.isFinite(entry?.completedAtMs) ? { ...item, completedAtMs: entry.completedAtMs } : item;
+      const displayItem = nativeDisplayMessageItem(item);
+      if (typeof displayItem.id === "string" && Number.isFinite(entry?.startedAtMs))
+        itemStartedAtMsById[displayItem.id] = entry.startedAtMs;
+      return Number.isFinite(entry?.completedAtMs)
+        ? { ...displayItem, completedAtMs: entry.completedAtMs } : displayItem;
     });
     if (sortDirection === "desc") items.reverse();
     return {
@@ -1425,15 +1441,28 @@
     }
     return events;
   }
+  function nativeDisplayMessageItem(item) {
+    if (!item || item.type !== "steeringUserMessage"
+        || item.status !== "accepted" && typeof item.serverUserMessageId !== "string") return item;
+    const id = typeof item.serverUserMessageId === "string" && item.serverUserMessageId
+      ? item.serverUserMessageId : item.id;
+    if (typeof id !== "string" || !id) return item;
+    const content = Array.isArray(item.input) ? item.input
+      : Array.isArray(item.content) ? item.content : [];
+    return {
+      ...item,
+      type: "userMessage",
+      id,
+      ...(typeof (item.clientUserMessageId ?? item.clientId) === "string"
+        ? { clientId: item.clientUserMessageId ?? item.clientId } : {}),
+      content
+    };
+  }
   function nativeSideItemsPage(turn, cursor = null) {
     const byId = new Map();
     for (const item of array(turn.items)) {
-      if (item.type === "steeringUserMessage") {
-        if (item.serverUserMessageId) byId.set(item.serverUserMessageId, {
-          type: "userMessage", id: item.serverUserMessageId,
-          clientId: item.clientUserMessageId, content: item.input
-        });
-      } else if (typeof item?.id === "string") byId.set(item.id, item);
+      const displayItem = nativeDisplayMessageItem(item);
+      if (typeof displayItem?.id === "string") byId.set(displayItem.id, displayItem);
     }
     const all = [...byId.values()], prefix = "native-side-item:";
     const end = cursor == null ? all.length

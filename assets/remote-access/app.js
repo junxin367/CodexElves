@@ -5431,7 +5431,13 @@ function shell() {
     load: loadRelatedThreads,
     renderSubagentIcon: item => createSubagentIcon(subagentName({ displayName: item.name })),
     openChanges: () => sessionTools?.open("changes"),
-    openBrowser: () => openAndroidBrowser(),
+    openBrowser: () => {
+      if (!remoteChannelRoutes().some(route => route.name === "FRP")) {
+        notice("浏览器网络要求较高，需要在管理端开启FRP", true);
+        return Promise.resolve();
+      }
+      return openAndroidBrowser();
+    },
     openFiles: () => sessionTools?.open("files"),
     openSubagent: item => openRelatedThread(item, "subagent"),
     createSideThread: () => runRelatedOperation("createSideThread"),
@@ -9372,6 +9378,23 @@ function mergeLiveText(snapshot, live, partial = false, newer = true) {
   // 此处仅处理读取开始后收到的未知开头增量；即使零重叠，也要保留历史前缀。
   return snapshot + live.slice(overlap);
 }
+function normalizeDisplayedUserMessage(item) {
+  if (!item || item.type !== "steeringUserMessage"
+      || item.status !== "accepted" && typeof item.serverUserMessageId !== "string") return item;
+  const id = typeof item.serverUserMessageId === "string" && item.serverUserMessageId
+    ? item.serverUserMessageId : item.id;
+  if (typeof id !== "string" || !id) return item;
+  const content = Array.isArray(item.input) ? item.input
+    : Array.isArray(item.content) ? item.content : [];
+  return {
+    ...item,
+    type: "userMessage",
+    id,
+    ...(typeof (item.clientUserMessageId ?? item.clientId) === "string"
+      ? { clientId: item.clientUserMessageId ?? item.clientId } : {}),
+    content
+  };
+}
 function completedItem(item) {
   // 普通消息的 completed 可能仅为原生展示推导，不能证明这份正文已经定稿。
   return item?.remoteItemCompleted === true || Number.isFinite(item?.completedAtMs)
@@ -9387,6 +9410,9 @@ function mergeItemProjection(previous, item) {
   return previous && JSON.stringify(previous) === JSON.stringify(merged) ? previous : merged;
 }
 function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = null, cached = false } = {}) {
+  if (Array.isArray(snapshot?.items)) {
+    snapshot = { ...snapshot, items: snapshot.items.map(normalizeDisplayedUserMessage) };
+  }
   const current = turns.get(snapshot.id);
   const contextItems = (snapshot.items || []).filter(item => item.remoteHistoryContext);
   if (contextItems.length)
@@ -11207,6 +11233,13 @@ function receive(event) {
     return;
   }
   const params = { ...event.params || {} };
+  const displayItem = normalizeDisplayedUserMessage(params.item);
+  const displayTurnItems = Array.isArray(params.turn?.items)
+    ? params.turn.items.map(normalizeDisplayedUserMessage) : null;
+  const turnChanged = displayTurnItems
+    && displayTurnItems.some((item, index) => item !== params.turn.items[index]);
+  if (displayItem !== params.item) params.item = displayItem;
+  if (turnChanged) params.turn = { ...params.turn, items: displayTurnItems };
   if (event.method === "remote/diagnosticsRequested") {
     receiveDiagnosticRequest(params);
     return;
