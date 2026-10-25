@@ -404,6 +404,33 @@
     });
   }
   function failure(code, message) { return Object.assign(new Error(message), { code, remoteValidationFailure: true }); }
+  const EXECUTION_CONFIG_RETRY_DELAYS_MS = [100, 250, 500, 1000, 2000, 3000];
+  function isExecutionConfigLoading(value) {
+    if (value?.status === "not-ready" && value.reason === "execution-config-loading") return true;
+    if (value?.result?.status === "not-ready" && value.result.reason === "execution-config-loading") return true;
+    return value instanceof Error && value.message === "App-server task is not ready: execution-config-loading";
+  }
+  function executionConfigLoadingFailure() {
+    return failure(409, "桌面正在加载执行配置，请稍后重试");
+  }
+  async function retryExecutionConfigLoading(operation, assertCurrent = null) {
+    for (let attempt = 0; ; attempt++) {
+      assertCurrent?.();
+      let result;
+      let loading = false;
+      try {
+        result = await operation();
+        loading = isExecutionConfigLoading(result);
+      } catch (error) {
+        if (!isExecutionConfigLoading(error)) throw error;
+        loading = true;
+      }
+      if (!loading) return result;
+      if (attempt >= EXECUTION_CONFIG_RETRY_DELAYS_MS.length)
+        throw executionConfigLoadingFailure();
+      await new Promise(resolve => setTimeout(resolve, EXECUTION_CONFIG_RETRY_DELAYS_MS[attempt]));
+    }
+  }
   function requiredId(value) {
     if (typeof value !== "string" || !/^[a-zA-Z0-9_-]{1,120}$/.test(value)) throw failure(400, "会话 ID 无效");
     return value;
@@ -3661,13 +3688,18 @@
   async function steerQueued(payload = {}) {
     let submitted = false;
     try {
-      messageActionManager();
+      const sourceManager = messageActionManager();
       const threadId = requiredId(payload.threadId);
       const messageId = requiredId(payload.messageId);
+      const assertCurrent = () => {
+        if (manager !== sourceManager || sourceManager.disposed || isDeletedThread(threadId))
+          throw failure(409, "会话连接已变化或会话已删除，请重新核对后引导");
+      };
       await readThread(threadId);
+      assertCurrent();
       if (runtimeCompaction(threadId).state !== "idle")
         throw failure(409, "上下文压缩完成前不能引导队列消息");
-      const coordinator = await manager.getTurnCoordinator?.();
+      const coordinator = await sourceManager.getTurnCoordinator?.();
       if (typeof coordinator?.sendQueuedMessageNow !== "function"
           || typeof coordinator.readMessages !== "function"
           || typeof coordinator.execution?.prepare !== "function")
@@ -3685,7 +3717,11 @@
             && message.submissionOptions.clientUserMessageId !== message.id
             || clientUserMessageId != null && clientUserMessageId !== message.id))
           throw failure(409, "队列消息身份与原生准备参数不一致，请刷新会话");
-        const prepared = await coordinator.execution.prepare(request.conversationId, request.message, phase);
+        const prepared = await retryExecutionConfigLoading(
+          () => coordinator.execution.prepare(request.conversationId, request.message, phase),
+          assertCurrent
+        );
+        assertCurrent();
         if (prepared?.status === "paused") throw new Error(prepared.reason || "原生队列消息暂时不可用");
         if (prepared?.status !== "ready" || !prepared.submission)
           throw failure(503, "原生队列消息准备失败");
@@ -3937,18 +3973,21 @@
       const conversation = sourceManager.getConversation(threadId);
       const threadSettings = await requestedThreadModelSettings(payload, thread, conversation);
       assertCurrent();
-      const resumed = await sourceManager.resumeConversation({
+      const resumed = await retryExecutionConfigLoading(() => sourceManager.resumeConversation({
         conversationId: threadId,
         model: threadSettings?.model ?? null,
         reasoningEffort: threadSettings?.effort ?? null,
         workspaceRoots: [cwd],
         collaborationMode: conversation?.latestCollaborationMode ?? null
-      });
+      }), assertCurrent);
       assertCurrent();
       if (resumed?.status === "not-ready") throw failure(409, "会话暂不可用，请稍后重试");
       await applyThreadModelSettings(threadId, threadSettings);
       assertCurrent();
-      const prepared = await coordinator.execution.prepare(threadId, message, "start");
+      const prepared = await retryExecutionConfigLoading(
+        () => coordinator.execution.prepare(threadId, message, "start"),
+        assertCurrent
+      );
       assertCurrent();
       if (prepared?.status === "paused")
         throw failure(409, prepared.reason || "原生队列消息暂时不可用");
@@ -4008,7 +4047,10 @@
           assertCurrent();
           if (request.conversationId !== threadId || request.message?.id !== clientUserMessageId)
             throw failure(409, "原生队列消息身份已变化，请刷新会话");
-          const current = await coordinator.execution.prepare(threadId, request.message, phase);
+          const current = await retryExecutionConfigLoading(
+            () => coordinator.execution.prepare(threadId, request.message, phase),
+            assertCurrent
+          );
           assertCurrent();
           if (current?.status === "paused") throw failure(409, current.reason || "原生队列消息暂时不可用");
           if (current?.status !== "ready" || current.submission?.conversationId !== threadId)
