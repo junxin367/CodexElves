@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 73) return;
+  if (window.__codexElvesRemoteAccess?.version === 75) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -1498,6 +1498,52 @@
       pageLimit: limit, newestSnapshotItemId: items.at(-1)?.id ?? null
     };
   }
+  function addVisibleTranscriptContext(itemPage, firstPage) {
+    const loadedIds = new Set(itemPage.items.map(item => item.id));
+    const firstUser = firstPage.items.findIndex(item => item.type === "userMessage");
+    const context = firstPage.items.filter((item, index) =>
+      !loadedIds.has(item.id)
+      && (index <= firstUser || item.type === "agentMessage")
+    ).map(item => ({ ...item, remoteHistoryContext: true }));
+    if (!context.length) return;
+    itemPage.items.unshift(...context);
+    itemPage.itemStartedAtMsById = { ...firstPage.itemStartedAtMsById, ...itemPage.itemStartedAtMsById };
+  }
+  function executingTurnStatus(value) {
+    const status = typeof value === "string" ? value : value?.type;
+    return ["active", "inProgress", "running", "pending"].includes(status);
+  }
+  async function nativeCompleteItemsPage(threadId, turnId, cursor = null) {
+    const pages = [], seenCursors = new Set(), itemStartedAtMsById = {};
+    let nextCursor = cursor, firstPage = null, pageLimit = HISTORY_ITEM_PAGE_LIMIT;
+    for (;;) {
+      if (nextCursor != null) {
+        if (seenCursors.has(nextCursor))
+          throw failure(503, "原生会话消息分页游标循环");
+        seenCursors.add(nextCursor);
+      }
+      const page = await nativeItemsPage(threadId, turnId, nextCursor);
+      firstPage ||= page;
+      pages.unshift(page.items);
+      Object.assign(itemStartedAtMsById, page.itemStartedAtMsById);
+      pageLimit = Math.min(pageLimit, page.pageLimit);
+      nextCursor = page.nextCursor;
+      if (nextCursor == null) break;
+    }
+    const items = [], loadedIds = new Set();
+    for (const page of pages) {
+      for (const item of page) {
+        const id = typeof item?.id === "string" ? item.id : null;
+        if (id && loadedIds.has(id)) continue;
+        if (id) loadedIds.add(id);
+        items.push(item);
+      }
+    }
+    return {
+      items, nextCursor: null, itemStartedAtMsById, pageLimit,
+      newestSnapshotItemId: firstPage?.newestSnapshotItemId ?? items.at(-1)?.id ?? null
+    };
+  }
   function enrichHistoryTurn(threadId, turn, itemPage, { readOnly = false } = {}) {
     const items = [...itemPage.items];
     const input = compactionInputItem(threadId, turn.id, items);
@@ -1597,6 +1643,23 @@
       itemStartedAtMsById: turn.commandExecutionStartedAtMsById || {},
       newestSnapshotItemId: items.at(-1)?.id ?? null, pageLimit: HISTORY_ITEM_PAGE_LIMIT };
   }
+  function nativeCompleteSideItemsPage(turn, cursor = null) {
+    const byId = new Map();
+    for (const item of array(turn.items)) {
+      const displayItem = nativeDisplayMessageItem(item);
+      if (typeof displayItem?.id === "string") byId.set(displayItem.id, displayItem);
+    }
+    const all = [...byId.values()], prefix = "native-side-item:";
+    const end = cursor == null
+      ? all.length
+      : cursor.startsWith(prefix) ? all.findIndex(item => item.id === cursor.slice(prefix.length)) : -1;
+    if (end < 0) throw failure(409, "侧边会话消息已变化，请重新读取");
+    const items = all.slice(0, end);
+    return {
+      items, nextCursor: null, itemStartedAtMsById: turn.commandExecutionStartedAtMsById || {},
+      newestSnapshotItemId: items.at(-1)?.id ?? null, pageLimit: HISTORY_ITEM_PAGE_LIMIT
+    };
+  }
   function nativeSideHistoryPage(payload, readOnly) {
     const threadId = requiredId(payload.threadId), conversation = manager.getConversation(threadId);
     if (!conversation?.ephemeral) throw failure(404, "原生临时会话已关闭");
@@ -1606,7 +1669,8 @@
       const startedAt = Number.isFinite(turn.turnStartedAtMs) ? turn.turnStartedAtMs / 1000 : null;
       const completedAt = startedAt != null && Number.isFinite(turn.durationMs)
         ? startedAt + turn.durationMs / 1000 : null;
-      const itemPage = nativeSideItemsPage(turn, cursor);
+      const itemPage = executingTurnStatus(nativeTurnStatus(turn))
+        ? nativeCompleteSideItemsPage(turn, cursor) : nativeSideItemsPage(turn, cursor);
       return { itemPage, turn: enrichHistoryTurn(threadId, {
         id: nativeTurnId(turn), status: nativeTurnStatus(turn),
         startedAt, completedAt, error: turn.error ?? null, diff: turn.diff ?? null
@@ -1650,10 +1714,15 @@
     const turnId = payload.turnId == null ? null : requiredId(payload.turnId);
     if (turnId != null) {
       const itemCursor = optionalCursor(payload.itemCursor, "消息分页游标");
-      const itemPage = await nativeItemsPage(threadId, turnId, itemCursor);
+      const turnStatus = typeof payload.turnStatus === "string" ? payload.turnStatus : "completed";
+      const itemPage = executingTurnStatus(turnStatus)
+        ? await nativeCompleteItemsPage(threadId, turnId, itemCursor)
+        : await nativeItemsPage(threadId, turnId, itemCursor);
+      if (!executingTurnStatus(turnStatus) && itemCursor == null && itemPage.nextCursor != null)
+        addVisibleTranscriptContext(itemPage, await nativeItemsPage(threadId, turnId, null, "asc"));
       const turn = enrichHistoryTurn(threadId, {
         id: turnId,
-        status: typeof payload.turnStatus === "string" ? payload.turnStatus : "completed",
+        status: turnStatus,
         startedAt: Number.isFinite(payload.turnStartedAt) ? payload.turnStartedAt : null,
         completedAt: Number.isFinite(payload.turnCompletedAt) ? payload.turnCompletedAt : null
       }, itemPage, { readOnly });
@@ -1693,18 +1762,13 @@
         const index = nextTurn++, turn = page.data[index];
         try {
           const pageTurnId = requiredId(turn?.id);
-          const itemPage = await nativeItemsPage(threadId, pageTurnId, null);
+          const itemPage = executingTurnStatus(nativeTurnStatus(turn))
+            ? await nativeCompleteItemsPage(threadId, pageTurnId)
+            : await nativeItemsPage(threadId, pageTurnId, null);
           if (failed) return;
-          if (itemPage.nextCursor != null) {
+          if (!executingTurnStatus(nativeTurnStatus(turn)) && itemPage.nextCursor != null) {
             const firstPage = await nativeItemsPage(threadId, pageTurnId, null, "asc");
-            const firstUser = firstPage.items.findIndex(item => item.type === "userMessage");
-            if (firstUser >= 0) {
-              const loadedIds = new Set(itemPage.items.map(item => item.id));
-              const prefix = firstPage.items.slice(0, firstUser + 1)
-                .filter(item => !loadedIds.has(item.id)).map(item => ({ ...item, remoteHistoryContext: true }));
-              itemPage.items.unshift(...prefix);
-              itemPage.itemStartedAtMsById = { ...firstPage.itemStartedAtMsById, ...itemPage.itemStartedAtMsById };
-            }
+            addVisibleTranscriptContext(itemPage, firstPage);
           }
           pages[index] = { turn: enrichHistoryTurn(threadId, turn, itemPage, { readOnly }), itemPage };
         } catch (error) {
@@ -4542,7 +4606,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 73, call,
+    version: 75, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();
