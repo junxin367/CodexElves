@@ -373,6 +373,7 @@ export function mountSessionMenu({
   }
   function fit() {
     if (!opened || suspended) return;
+    if (trigger.closest?.(".related-session-view")) return;
     if (!trigger.isConnected || trigger.disabled || trigger.hidden) { close(); return; }
     const view = viewport(), box = trigger.getBoundingClientRect(), padding = 8;
     if (box.width === 0 && box.height === 0) {
@@ -524,6 +525,7 @@ export function mountSessionMenu({
   });
   listen(window, "keydown", event => {
     if (!opened || event.isComposing) return;
+    if (trigger.closest?.(".related-session-view")) return;
     if (event.key === "Escape") {
       event.preventDefault(); event.stopImmediatePropagation();
       if (!actionMenu.hidden) hideContext(true); else close(true);
@@ -580,7 +582,8 @@ export function mountSessionMenu({
   listen(window, "blur", () => cancelPress({ suppress: true, blockContext: true }));
   listen(document, "visibilitychange", () => { if (document.hidden) close(); });
   syncContext();
-  return { toggle, open, close, suspend, resume, refresh, isOpen: () => opened && !suspended, isSuspended: () => opened && suspended,
+  return { toggle, open, close, suspend, resume, refresh, reposition: fit,
+    isOpen: () => opened && !suspended, isSuspended: () => opened && suspended,
     updateContext() {
       const value = syncContext(), entry = entryFor(value);
       restore(entry);

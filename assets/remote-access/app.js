@@ -185,7 +185,7 @@ let sessionMenu = null, relatedSessionView = null, relatedReturnTranscript = nul
 let relatedBackPending = false;
 let relatedExitTransition = null, relatedSelectionVersion = 0;
 let sideCreationView = null;
-let relatedMenuTimer = null, relatedOperationTimer = null;
+let relatedMenuTimer = null, relatedOperationTimer = null, relatedSessionCheckTimer = null;
 let transientHistoryView = null, restoringTransientHistory = null;
 const relatedThreadViews = new Map(), relatedThreadOperations = new Map();
 const relatedHistoryKey = "codexElvesRelatedSession", relatedOperationStorageKey = "codex-elves-related-operations";
@@ -917,7 +917,8 @@ function promptPlainText(prompt = $("#prompt")) {
   return prompt ? [...prompt.childNodes].map(promptNodeText).join("") : "";
 }
 function syncPromptTrailingBreak(prompt) {
-  if (prompt.childNodes.length === 1 && prompt.firstChild.nodeName === "BR") prompt.replaceChildren();
+  if (prompt.childNodes.length === 1 && prompt.firstChild.nodeName === "BR"
+      && !prompt.firstChild.hasAttribute("data-prompt-line-break")) prompt.replaceChildren();
   const tail = prompt.querySelector("br[data-prompt-tail]");
   if (!promptPlainText(prompt).endsWith("\n")) tail?.remove();
   else if (tail !== prompt.lastChild) {
@@ -1073,6 +1074,17 @@ function promptTokenPlacements(prompt = $("#prompt")) {
 function promptSkillPlacements(prompt = $("#prompt")) {
   return promptTokenPlacements(prompt).filter(placement => placement.key !== goalPromptTokenKey);
 }
+function appendPromptText(nodes, text) {
+  const parts = String(text ?? "").split("\n");
+  for (let index = 0; index < parts.length; index++) {
+    if (parts[index]) nodes.push(document.createTextNode(parts[index]));
+    if (index < parts.length - 1) {
+      const lineBreak = document.createElement("br");
+      lineBreak.dataset.promptLineBreak = "";
+      nodes.push(lineBreak);
+    }
+  }
+}
 function writePromptContent(prompt, text, skills = selectedSkills, goalMode = !!selectedGoal) {
   const ordered = skills.map((skill, index) => ({
     skill, index, offset: Math.min(text.length, Math.max(0, Number.isFinite(skill._offset) ? skill._offset : 0))
@@ -1080,12 +1092,12 @@ function writePromptContent(prompt, text, skills = selectedSkills, goalMode = !!
   const nodes = goalMode ? [goalToken()] : [];
   let cursor = 0;
   for (const entry of ordered) {
-    if (entry.offset > cursor) nodes.push(document.createTextNode(text.slice(cursor, entry.offset)));
+    if (entry.offset > cursor) appendPromptText(nodes, text.slice(cursor, entry.offset));
     entry.skill._offset = entry.offset;
     nodes.push(skillToken(entry.skill));
     cursor = entry.offset;
   }
-  if (cursor < text.length) nodes.push(document.createTextNode(text.slice(cursor)));
+  if (cursor < text.length) appendPromptText(nodes, text.slice(cursor));
   prompt.replaceChildren(...nodes);
   syncPromptTrailingBreak(prompt);
 }
@@ -1364,6 +1376,11 @@ function threadReadOnly(id = selectedId) {
     || relatedSessionView?.threadId === id && relatedSessionView.kind === "subagent"
   );
 }
+function threadSentMessageEditAllowed(id = selectedId) {
+  if (!id) return false;
+  const view = relatedViewForThread(id);
+  return view?.kind !== "side" && !(thread?.id === id && thread.viewKind === "side");
+}
 function rememberRelatedView(id, kind, parentThreadId, name = "", { openedFromThreadId = null, ephemeral } = {}) {
   const known = normalizeRelatedView(relatedThreadViews.get(id), id);
   const value = normalizeRelatedView({ scope: privateInputScope(session), threadId: id,
@@ -1386,10 +1403,12 @@ function syncRelatedSessionLayout() {
   workspace?.classList.toggle("related-session-readonly", view?.kind === "subagent");
   if (!view) workspace?.classList.remove("related-session-prepared");
   if (view) workspace?.classList.remove("sidebar-open");
-  for (const id of ["open-sidebar", "connection-state", "open-session-tools"]) {
+  for (const id of ["open-sidebar", "connection-state"]) {
     const control = $(`#${id}`);
     if (control) control.hidden = !!view;
   }
+  const sessionMenuTrigger = $("#open-session-tools");
+  if (sessionMenuTrigger) sessionMenuTrigger.hidden = false;
   const back = $("#related-session-back");
   if (back) { back.hidden = !view; back.disabled = relatedBackPending; }
   const composer = $("#composer");
@@ -1399,6 +1418,8 @@ function syncRelatedSessionLayout() {
   syncSideThreadUnread();
   sessionMenu?.updateContext();
   syncRelatedSidebarLayout?.();
+  sessionMenu?.reposition?.();
+  scheduleRelatedSessionCheck();
 }
 function syncSideThreadUnread() {
   const trigger = $("#open-session-tools");
@@ -1511,6 +1532,7 @@ function applyRelatedThreadMetadata(value) {
   syncThreadHash(value.id);
 }
 function sessionMenuIsOpen() {
+  if (relatedSessionView) return false;
   return typeof sessionMenu?.isOpen === "function" ? sessionMenu.isOpen() : !!sessionMenu?.isOpen;
 }
 function conversationHistoryPosition(state) {
@@ -1546,6 +1568,40 @@ function handleTransientHistoryPop(event) {
 function stopRelatedSessionTimers() {
   clearTimeout(relatedMenuTimer); relatedMenuTimer = null;
   clearTimeout(relatedOperationTimer); relatedOperationTimer = null;
+  clearTimeout(relatedSessionCheckTimer); relatedSessionCheckTimer = null;
+}
+function scheduleRelatedSessionCheck() {
+  clearTimeout(relatedSessionCheckTimer);
+  relatedSessionCheckTimer = null;
+  const view = normalizeRelatedView(relatedSessionView, selectedId);
+  if (!view || view.kind !== "side" || !selectedId || !session || !connected) return;
+  const id = selectedId, scope = privateInputScope(session), version = selectionVersion;
+  relatedSessionCheckTimer = setTimeout(async () => {
+    relatedSessionCheckTimer = null;
+    if (scope !== privateInputScope(session) || selectedId !== id || version !== selectionVersion
+        || !normalizeRelatedView(relatedSessionView, id) || !connected) return;
+    try {
+      const currentView = normalizeRelatedView(relatedSessionView, id);
+      const parentThreadId = currentView?.parentThreadId || currentView?.openedFromThreadId;
+      const [threadResult, related] = await Promise.all([
+        api("/api/read/thread", { threadId: id }),
+        parentThreadId ? api("/api/read/relatedThreads", { threadId: parentThreadId }) : null
+      ]);
+      if (related && !related.sideThreads.some(item => item?.id === id)) {
+        await retireNativeSideThreads([id]);
+        return;
+      }
+      if (threadResult?.thread?.id !== id) throw Object.assign(new Error("侧边会话读取结果不匹配"), { code: 409 });
+    } catch (error) {
+      if (error.code === 404 && selectedId === id && version === selectionVersion
+          && normalizeRelatedView(relatedSessionView, id)?.kind === "side") {
+        await retireNativeSideThreads([id]).catch(expiredError => notice(expiredError.message, true));
+        return;
+      }
+    }
+    if (scope === privateInputScope(session) && selectedId === id && version === selectionVersion)
+      scheduleRelatedSessionCheck();
+  }, 10000);
 }
 function resetRelatedSessions({ persisted = false } = {}) {
   dismissSideCreation({ canceled: true });
@@ -1629,8 +1685,9 @@ async function openRelatedThread(item, kind, parentThreadId = selectedId, {
   const view = rememberRelatedView(item.id, kind, null, item.name || item.title || "",
     { openedFromThreadId: parentThreadId, ephemeral: item.ephemeral });
   if (!view) return;
-  if (kind === "side" && (sessionMenu?.isOpen() || sessionMenu?.isSuspended())) sessionMenu.suspend();
-  else sessionMenu?.close();
+  if (kind === "side") {
+    if (sessionMenu?.isSuspended()) sessionMenu.resume();
+  } else sessionMenu?.close();
   closePopup(); closeComposerMenus();
   await selectThread(item.id, { closeSidebar: false, relatedView: { ...view, owner, returnToParent: true },
     initialThread, replaceHistory, preparedView, onViewReady });
@@ -5422,10 +5479,14 @@ function shell() {
   });
   sessionMenu = mountSessionMenu({
     trigger: toolsTrigger,
-    getContext: () => ({ deviceId: session?.device.id, cacheScope: privateInputScope(session),
-      threadId: !creating && !relatedSessionView ? selectedId : null, readOnly: threadReadOnly(), connected,
-      createPending: [...relatedThreadOperations.values()].some(record => ownsRelatedOperation(record)
-        && record.parentThreadId === selectedId && record.action === "createSideThread") }),
+    getContext: () => {
+      const parentThreadId = relatedSessionView?.kind === "side"
+        ? relatedSessionView.openedFromThreadId || relatedSessionView.parentThreadId : null;
+      return { deviceId: session?.device.id, cacheScope: privateInputScope(session),
+        threadId: !creating ? parentThreadId || selectedId : null, readOnly: threadReadOnly(), connected,
+        createPending: [...relatedThreadOperations.values()].some(record => ownsRelatedOperation(record)
+          && record.parentThreadId === (parentThreadId || selectedId) && record.action === "createSideThread") };
+    },
     cache: relatedMenuCache,
     onData: adoptRelatedMenu,
     load: loadRelatedThreads,
@@ -6091,7 +6152,8 @@ async function markVisibleThreadRead(id = selectedId, { opened = false } = {}) {
 function beginMessageEdit(threadId, item) {
   const metadata = item.messageMetadata;
   if (threadId !== selectedId || thread?.id !== threadId || metadata?.editable !== true
-      || threadReadOnly(threadId) || !connected || busy || stopping || pending || compactionLocked() || isActiveThread()) return;
+      || threadReadOnly(threadId) || !threadSentMessageEditAllowed(threadId)
+      || !connected || busy || stopping || pending || compactionLocked() || isActiveThread()) return;
   if (editingMessage || editingQueuedMessage) { (editingMessage?.input || $("#prompt")).focus(); return; }
   rememberDraft();
   editingMessage = {
@@ -6115,7 +6177,8 @@ function updateMessageEditor() {
   const target = thread?.editableMessage;
   const stale = Object.hasOwn(thread || {}, "editableMessage")
     && (target?.turnId !== edit.turnId || target?.messageId !== edit.messageId);
-  const unavailable = !connected || threadReadOnly(edit.threadId) || stopping || compactionLocked() || isActiveThread() || stale;
+  const unavailable = !connected || threadReadOnly(edit.threadId) || !threadSentMessageEditAllowed(edit.threadId)
+    || stopping || compactionLocked() || isActiveThread() || stale;
   const unsupportedModelSettings = !!(selectedModel && selectedModel !== thread?.model
     || selectedEffort && selectedEffort !== thread?.reasoningEffort)
     && session?.capabilities?.messageEditModelSettings !== true;
@@ -6177,7 +6240,7 @@ function renderMessageEditBanner() {
 }
 async function submitMessageEdit() {
   const edit = editingMessage;
-  if (!edit || busy || stopping || pending || threadReadOnly(edit.threadId) || !connected
+  if (!edit || busy || stopping || pending || threadReadOnly(edit.threadId) || !threadSentMessageEditAllowed(edit.threadId) || !connected
       || edit.threadId !== selectedId || thread?.id !== selectedId || compactionLocked() || isActiveThread()) return;
   if (Object.hasOwn(thread, "editableMessage")
       && (thread.editableMessage?.turnId !== edit.turnId || thread.editableMessage?.messageId !== edit.messageId)) {
@@ -6197,7 +6260,8 @@ async function submitMessageEdit() {
   busy = true; updateComposer();
   try {
     if (editingMessage !== edit || selectedId !== edit.threadId || version !== selectionVersion
-        || threadReadOnly(edit.threadId) || !connected || compactionLocked() || isActiveThread())
+        || threadReadOnly(edit.threadId) || !threadSentMessageEditAllowed(edit.threadId)
+        || !connected || compactionLocked() || isActiveThread())
       throw new Error("会话状态已变化，请重新核对后编辑");
     await mutate("editMessage", {
       threadId: edit.threadId, turnId: edit.turnId, messageId: edit.messageId, prompt,
@@ -8823,9 +8887,11 @@ function renderMessages(keepScroll = true) {
       else if (item.type === "userMessage" || item.type === "agentMessage") {
         const threadId = selectedId;
         renderMessageActions(node, item, {
-          threadId, inActivity, readOnly: threadReadOnly(threadId),
+          threadId, inActivity, readOnly: threadReadOnly(threadId) || !threadSentMessageEditAllowed(threadId),
           turnInProgress: isActiveThread(),
-          editSupported: thread?.id === selectedId && connected && !busy && !stopping && !pending && !editingMessage && !editingQueuedMessage && !compactionLocked(),
+          editSupported: thread?.id === selectedId && connected && !busy && !stopping && !pending
+            && !editingMessage && !editingQueuedMessage && !compactionLocked()
+            && threadSentMessageEditAllowed(threadId),
           completed: turn.status !== "inProgress" || item.status === "completed"
         }, {
           icon,
@@ -9018,7 +9084,8 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   const navigationVersion = ++relatedSelectionVersion;
   const nextRelatedView = relatedView === undefined ? relatedViewForThread(id) : normalizeRelatedView(relatedView, id);
   const currentRelatedView = normalizeRelatedView(relatedSessionView, selectedId);
-  const returningToParent = !!(sessionMenu?.isSuspended() && !nextRelatedView && currentRelatedView?.kind === "side"
+  const menuHeld = sessionMenu?.isOpen?.() || sessionMenu?.isSuspended?.();
+  const returningToParent = !!(menuHeld && !nextRelatedView && currentRelatedView?.kind === "side"
     && (currentRelatedView.openedFromThreadId === id || currentRelatedView.parentThreadId === id));
   const initialSide = !force && nextRelatedView?.kind === "side" && initialThread?.id === id
     && initialThread.viewKind === "side" && initialThread.sideHistoryVersion === 1
@@ -9328,6 +9395,10 @@ async function readHistoryPage(older, version, itemsTurnId) {
     rememberTranscript();
   } catch (error) {
     if (controller.signal.aborted || pageLeaving || version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
+    if (error.code === 404 && relatedSessionView?.kind === "side" && selectedId === id) {
+      await retireNativeSideThreads([id]).catch(expiredError => notice(expiredError.message, true));
+      return;
+    }
     if (!itemsTurnId && error.code === 404) retireMissingEphemeralTranscript(id);
     historyAutoFailed = true;
     if (!historyInitialized) {

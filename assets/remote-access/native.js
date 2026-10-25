@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 75) return;
+  if (window.__codexElvesRemoteAccess?.version === 76) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -954,6 +954,10 @@
     }
     const thread = response.thread || response;
     if (!thread?.id) throw failure(404, "会话不存在或已删除");
+    if (thread.sideConversation === true || manager.getConversation(id)?.sideConversation === true) {
+      const side = nativeSideIdentity(thread, await sideThreadEntries());
+      if (!side) throw failure(404, "原生临时侧边会话已关闭或不存在");
+    }
     return thread;
   }
   async function readThreadMetadata(id) {
@@ -1256,6 +1260,7 @@
     const entry = entries.find(entry => entry.threadId === thread.id);
     if (!entry) return null;
     const conversation = manager.getConversation(thread.id);
+    if (!conversation) return null;
     // 临时会话的 thread/read 不返回 fork 来源；父关系由原生内存会话和侧边标签共同确认。
     if (conversation?.sideConversation !== true || conversation.forkedFromId !== entry.parentThreadId
         || subagentIdentity(thread) || subagentIdentity(conversation))
@@ -2244,6 +2249,9 @@
     messageActionManager();
     const id = requiredId(payload.threadId);
     const loaded = await readThread(id);
+    const view = await threadViewIdentity(loaded);
+    if (view.viewKind === "side")
+      throw failure(403, "侧边会话不支持编辑已发送消息");
     const state = editableMessageState(id);
     if (!state.metadata) throw failure(409, state.reason || "最后一条用户消息当前不可编辑");
     if (payload.turnId !== state.metadata.turnId || payload.messageId !== state.metadata.messageId)
@@ -4606,7 +4614,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 75, call,
+    version: 76, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();
