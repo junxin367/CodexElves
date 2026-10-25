@@ -5774,11 +5774,21 @@
     }
 
     removeCodexWorkspaceCheckpointTurnCompletionListener();
-    const callback = (notification) =>
-      trackCodexWorkspaceCheckpointCompletion(
-        notification,
-        completeCodexWorkspaceCheckpointTurn(manager, notification)
-      ).catch((error) => {
+    const callback = (notification) => {
+      try {
+        return trackCodexWorkspaceCheckpointCompletion(
+          notification,
+          completeCodexWorkspaceCheckpointTurn(manager, notification)
+        ).catch((error) => {
+          sendCodexElvesDiagnostic("workspace_checkpoint_complete_turn_failed", {
+            threadId: String(notification?.params?.threadId || ""),
+            turnId: String(notification?.params?.turn?.id || ""),
+            errorName: error?.name || "",
+            errorMessage: error?.message || String(error),
+          });
+          return false;
+        });
+      } catch (error) {
         sendCodexElvesDiagnostic("workspace_checkpoint_complete_turn_failed", {
           threadId: String(notification?.params?.threadId || ""),
           turnId: String(notification?.params?.turn?.id || ""),
@@ -5786,7 +5796,8 @@
           errorMessage: error?.message || String(error),
         });
         return false;
-      });
+      }
+    };
     let unsubscribe = null;
     try {
       unsubscribe = manager.addNotificationCallback("turn/completed", callback);

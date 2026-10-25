@@ -124,6 +124,20 @@ fn renderer_features_diagnostics_prefer_bridge_before_http_fallback() {
 }
 
 #[test]
+fn remote_native_callbacks_are_isolated_from_codex_ui_errors() {
+    let script = assets::renderer_features_script();
+
+    assert!(script.contains("function safeNativeCallback(callbackName, callback)"));
+    assert!(script.contains("renderer.remote_native_callback_failed"));
+    assert!(script.contains("safeNativeCallback(\"notification\", emit)"));
+    assert!(script.contains("\"conversation_state\""));
+    assert!(script.contains("const emitUnsafe = event =>"));
+    assert!(script.contains("const pushNotificationUnsafe = event =>"));
+    assert!(script.contains("request_notification_microtask"));
+    assert!(script.contains("workspace_checkpoint_complete_turn_failed"));
+}
+
+#[test]
 fn renderer_features_delete_is_permanent_without_undo_ui() {
     let script = assets::renderer_features_script();
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 72) return;
+  if (window.__codexElvesRemoteAccess?.version === 73) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -30,6 +30,7 @@
   const sidebarSignatures = new Map();
   const deletedThreadIds = new Set();
   const pendingThreadMetadataReads = new Map();
+  const nativeCallbackFailureCounts = new Map();
   const INITIAL_THREAD_METADATA_WINDOW_MS = 15_000;
   const INITIAL_THREAD_METADATA_RETRY_DELAYS = [100, 200, 400, 800, 1000];
   let goalMaterializer = null;
@@ -66,6 +67,61 @@
   ];
   const isManager = value => value?.hostId === "local" && typeof value.sendFollowUpMessage === "function"
     && typeof value.listThreadTurns === "function" && value.storage?.readGlobalState;
+  function reportNativeCallbackFailure(callbackName, error) {
+    try {
+      const name = String(callbackName || "unknown").slice(0, 120);
+      const count = (nativeCallbackFailureCounts.get(name) || 0) + 1;
+      nativeCallbackFailureCounts.set(name, count);
+      if (count > 20 && count % 20 !== 0) return;
+      const payload = {
+        event: "renderer.remote_native_callback_failed",
+        detail: {
+          callback: name,
+          count,
+          errorName: String(error?.name || "").slice(0, 120),
+          errorMessage: String(error?.message || error || "").slice(0, 1000),
+        },
+        helperBase: window.__CODEX_SESSION_DELETE_HELPER__ || "",
+        location: window.location?.href || "",
+        userAgent: navigator.userAgent || "",
+        timestamp: new Date().toISOString(),
+      };
+      const bridge = window.__codexSessionDeleteBridge;
+      const fallback = () => {
+        try {
+          fetch(`${payload.helperBase || "http://127.0.0.1:45221"}/diagnostics/log`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            keepalive: true,
+          }).catch(() => {});
+        } catch {}
+      };
+      if (typeof bridge === "function") {
+        try {
+          Promise.resolve(bridge("/diagnostics/log", payload)).catch(fallback);
+          return;
+        } catch {}
+      }
+      fallback();
+    } catch {}
+  }
+  function safeNativeCallback(callbackName, callback) {
+    return (...args) => {
+      try {
+        const result = callback(...args);
+        if (result && typeof result.then === "function")
+          return Promise.resolve(result).catch(error => {
+            reportNativeCallbackFailure(callbackName, error);
+            return undefined;
+          });
+        return result;
+      } catch (error) {
+        reportNativeCallbackFailure(callbackName, error);
+        return undefined;
+      }
+    };
+  }
   function resetStaleManager() {
     const existing = window.__codexElvesConversationStateManager;
     if (!manager || !manager.disposed && !(isManager(existing) && !existing.disposed && existing !== manager)) return;
@@ -78,7 +134,7 @@
     catalogLoading = null; catalogGeneration++;
     emit({ method: "remote/resync" });
   }
-  const pushNotification = event => {
+  const pushNotificationUnsafe = event => {
     if (event.method === "thread/deleted") forgetDeletedThread(event.params?.threadId);
     else if (event.method !== "remote/sidebarChanged" && isDeletedThread(event.params?.threadId)) return;
     if (["thread/archived", "thread/deleted"].includes(event.method)) {
@@ -126,7 +182,19 @@
     notifications.push({ sequence: ++eventSequence, event });
     if (notifications.length > 2048) notifications.splice(0, notifications.length - 2048);
   };
-  const emit = event => {
+  const pushNotification = event => {
+    try {
+      return pushNotificationUnsafe(event);
+    } catch (error) {
+      reportNativeCallbackFailure("notification_delivery", error);
+      try {
+        notifications.push({ sequence: ++eventSequence, event });
+        if (notifications.length > 2048) notifications.splice(0, notifications.length - 2048);
+      } catch {}
+      return false;
+    }
+  };
+  const emitUnsafe = event => {
     if (["remote/sidebarChanged", "thread/started", "thread/status/changed", "thread/name/updated",
       "thread/archived", "thread/unarchived", "thread/deleted", "turn/started", "turn/completed",
       "remote/asyncQuestionsChanged"].includes(event.method)) {
@@ -153,6 +221,14 @@
       return;
     }
     pushNotification(event);
+  };
+  const emit = event => {
+    try {
+      return emitUnsafe(event);
+    } catch (error) {
+      reportNativeCallbackFailure("notification_emit", error);
+      return pushNotification(event);
+    }
   };
   function discover(sidebarOnly = false, quick = false) {
     const existing = window.__codexElvesConversationStateManager;
@@ -243,30 +319,43 @@
       sidebarUnsubscribe.push(manager.addNotificationCallback([
         "thread/started", "thread/status/changed", "thread/name/updated",
         "thread/archived", "thread/unarchived", "thread/deleted", "turn/started", "turn/completed"
-      ], event => {
+      ], safeNativeCallback("sidebar_notification", event => {
         if (["thread/archived", "thread/deleted"].includes(event.method))
           nativeCatalog.delete(event.params?.threadId);
         if (event.method === "thread/deleted") forgetDeletedThread(event.params?.threadId);
         if (event.method === "thread/started") catalogLoaded = false;
         emit(event);
-      }));
+      })));
       if (typeof manager.addConversationStateCallback === "function")
-        sidebarUnsubscribe.push(manager.addConversationStateCallback(syncSidebarConversationState));
+        sidebarUnsubscribe.push(manager.addConversationStateCallback(
+          safeNativeCallback("sidebar_conversation_state", syncSidebarConversationState)
+        ));
     }
     if (!sidebarOnly && !unsubscribe.length) {
       for (const dispose of sidebarUnsubscribe) { try { dispose?.(); } catch {} }
       sidebarUnsubscribe = [];
-      unsubscribe.push(manager.addNotificationCallback(methods, emit));
-      unsubscribe.push(manager.addApprovalRequestListener(syncRequestNotification));
-      unsubscribe.push(manager.addApprovalResolvedListener(syncRequestNotification));
-      unsubscribe.push(manager.addUserInputRequestListener(syncRequestNotification));
+      unsubscribe.push(manager.addNotificationCallback(
+        methods, safeNativeCallback("notification", emit)
+      ));
+      unsubscribe.push(manager.addApprovalRequestListener(
+        safeNativeCallback("approval_request", syncRequestNotification)
+      ));
+      unsubscribe.push(manager.addApprovalResolvedListener(
+        safeNativeCallback("approval_resolved", syncRequestNotification)
+      ));
+      unsubscribe.push(manager.addUserInputRequestListener(
+        safeNativeCallback("user_input_request", syncRequestNotification)
+      ));
       if (typeof manager.addConversationStateCallback === "function")
-        unsubscribe.push(manager.addConversationStateCallback((id, conversation) => {
-          syncPendingNotifications(id, conversation);
-          if (observedRequestThreads.has(id)) syncBlockingRequests(id, conversation);
-          if (asyncQuestionSignatures.has(id)) syncAsyncQuestions(id, conversation);
-          syncSidebarConversationState(id, conversation);
-        }));
+        unsubscribe.push(manager.addConversationStateCallback(safeNativeCallback(
+          "conversation_state",
+          (id, conversation) => {
+            syncPendingNotifications(id, conversation);
+            if (observedRequestThreads.has(id)) syncBlockingRequests(id, conversation);
+            if (asyncQuestionSignatures.has(id)) syncAsyncQuestions(id, conversation);
+            syncSidebarConversationState(id, conversation);
+          }
+        )));
       refreshPendingNotifications();
     }
     return manager;
@@ -299,15 +388,19 @@
     const sourceManager = manager;
     // Owner callbacks precede removeConversationRequest; inspect the settled native state.
     queueMicrotask(() => {
-      if (manager !== sourceManager || sourceManager.disposed) return;
-      if (typeof threadId !== "string" || !threadId) {
-        emit({ method: "remote/requestsChanged" }); return;
+      try {
+        if (manager !== sourceManager || sourceManager.disposed) return;
+        if (typeof threadId !== "string" || !threadId) {
+          emit({ method: "remote/requestsChanged" }); return;
+        }
+        const identity = { threadId,
+          ...(["string", "number"].includes(typeof requestId) ? { requestId } : {}) };
+        syncPendingNotifications(threadId, sourceManager.getConversation(threadId));
+        if (!syncBlockingRequests(threadId, sourceManager.getConversation(threadId), identity))
+          emit({ method: "remote/requestsChanged", params: identity });
+      } catch (error) {
+        reportNativeCallbackFailure("request_notification_microtask", error);
       }
-      const identity = { threadId,
-        ...(["string", "number"].includes(typeof requestId) ? { requestId } : {}) };
-      syncPendingNotifications(threadId, sourceManager.getConversation(threadId));
-      if (!syncBlockingRequests(threadId, sourceManager.getConversation(threadId), identity))
-        emit({ method: "remote/requestsChanged", params: identity });
     });
   }
   function failure(code, message) { return Object.assign(new Error(message), { code, remoteValidationFailure: true }); }
@@ -4407,7 +4500,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 72, call,
+    version: 73, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();
