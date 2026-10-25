@@ -8140,8 +8140,22 @@ function queueSnapshotIsVersioned(snapshot) {
   return typeof snapshot?.queueEpoch === "string" && snapshot.queueEpoch.length > 0
     && Number.isSafeInteger(snapshot.queueRevision) && snapshot.queueRevision >= 0;
 }
+function queueMessageIdentity(message) {
+  return message?.clientUserMessageId ?? message?.submissionOptions?.clientUserMessageId
+    ?? (!message?.serverQueuedMessageId ? message?.id : null);
+}
+function queueSnapshotRemovedMessage(previous, next) {
+  const nextIds = new Set((next || []).map(queueMessageIdentity).filter(Boolean));
+  return (previous || []).some(message => {
+    const id = queueMessageIdentity(message);
+    return id && !nextIds.has(id);
+  });
+}
 function applyQueueSnapshot(id, messages, edits, snapshot = null, { authoritative = false, readVersion = null } = {}) {
   if (id !== selectedId || !Array.isArray(messages)) return false;
+  const previousMessages = thread?.id === id && Array.isArray(thread.queuedMessages)
+    ? thread.queuedMessages : Array.isArray(notifiedQueue) ? notifiedQueue : [];
+  const removedMessage = queueSnapshotRemovedMessage(previousMessages, messages);
   if (queueSnapshotIsVersioned(snapshot)) {
     if (retiredQueueEpochs.has(snapshot.queueEpoch)) return true;
     if (queueSnapshotVersion?.queueEpoch === snapshot.queueEpoch
@@ -8162,6 +8176,7 @@ function applyQueueSnapshot(id, messages, edits, snapshot = null, { authoritativ
     if (Array.isArray(edits)) thread.queuedEdits = edits;
     renderQueueArea();
   }
+  if (removedMessage) scheduleReload();
   return true;
 }
 function applyQueueRead(id, snapshot, readVersion) {
