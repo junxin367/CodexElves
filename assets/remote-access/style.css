@@ -2,7 +2,7 @@
 :root{--control-icon-size:32px;--control-inline-size:28px;--control-toolbar-size:32px;--control-menu-height:36px;--prompt-editor-max-height:180px;--popup-max-height:80dvh}
 .workspace.related-session-view{--sidebar-layout-width:0px;grid-template-columns:minmax(0,1fr)}
 .workspace.related-session-view>.sidebar,.workspace.related-session-view>.sidebar-backdrop{display:none!important}
-.workspace.related-session-view>.conversation{grid-column:1;min-width:0;width:100%;position:relative;z-index:calc(var(--layer-menu,200) + 1);animation:related-session-enter .17s ease-out}
+.workspace.related-session-view>.conversation{grid-column:1;min-width:0;width:100%;background:var(--bg);position:relative;z-index:calc(var(--layer-menu,200) + 1);animation:related-session-enter .17s ease-out}
 .workspace.related-session-view.related-session-prepared>.conversation{animation:none}
 .workspace.related-session-view.related-session-exiting>.conversation{animation:related-session-exit .22s ease-out forwards;will-change:transform;pointer-events:none}
 .related-session-exit-layer{position:fixed;inset:0;z-index:299;overflow:hidden;pointer-events:none}
