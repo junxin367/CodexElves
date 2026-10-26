@@ -102,7 +102,7 @@ final class BrowserSession {
     private String userAgentMode;
     private String pageTitle = "";
     private boolean desktopRootScrollLocked;
-    private boolean desktopFullPageFitReload;
+    private boolean pageWidthFitApplied;
     private final ArrayDeque<DiagnosticEvent> diagnosticEvents = new ArrayDeque<>();
     private final Runnable desktopRootScrollPolicyRefresh = this::updateDesktopRootScrollPolicy;
     private final Runnable diagnosticRefresh = () -> {
@@ -374,30 +374,29 @@ final class BrowserSession {
                 if (!mainFrameStarted && !sameAddress(address, pendingNavigationUrl)) return;
                 mainFrameStarted = true;
                 mainFrameFinished = false;
+                if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
+                    pageWidthFitApplied = false;
+                }
                 pendingNavigationUrl = address;
                 ++pageGeneration;
                 recordDiagnosticEvent("page-start", "GET", address, "", "", true, "");
                 diagnostic("native.browser.page", DiagnosticsPolicy.urlFields(address,
                     "phase", "start", "generation", pageGeneration));
-                webView.setVisibility(desktopFullPageFitReload ? View.INVISIBLE : View.VISIBLE);
+                webView.setVisibility(View.VISIBLE);
                 url = address; error = ""; progress = 0; pageTitle = ""; changed();
             }
             @Override public void onPageFinished(WebView webView, String address) {
                 if (home || !mainFrameStarted) return;
                 mainFrameStarted = true;
                 pendingNavigationUrl = address;
-                boolean fittingReload = desktopFullPageFitReload;
-                desktopFullPageFitReload = false;
                 if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
                     webView.scrollTo(0, webView.getScrollY());
                     MAIN.postDelayed(desktopRootScrollPolicyRefresh, 120L);
-                    if (!fittingReload) {
-                        long fitGeneration = pageGeneration;
-                        MAIN.postDelayed(
-                            () -> requestDesktopFullPageFit(webView, address, fitGeneration), 180L);
-                        MAIN.postDelayed(
-                            () -> requestDesktopFullPageFit(webView, address, fitGeneration), 800L);
-                    }
+                    long fitGeneration = pageGeneration;
+                    MAIN.postDelayed(
+                        () -> requestPageWidthFit(webView, address, fitGeneration), 180L);
+                    MAIN.postDelayed(
+                        () -> requestPageWidthFit(webView, address, fitGeneration), 800L);
                 }
                 webView.setVisibility(View.VISIBLE);
                 recordDiagnosticEvent("page-finish", "GET", address, "", "page-loaded", true, "");
@@ -436,7 +435,9 @@ final class BrowserSession {
                 recordDiagnosticEvent("failure", request.getMethod(), target, "", detail,
                     mainFrame, "");
                 if (mainFrame) {
-                    desktopFullPageFitReload = false;
+                    if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
+                        pageWidthFitApplied = false;
+                    }
                     webView.setVisibility(View.VISIBLE);
                     diagnostic("native.browser.error", DiagnosticsPolicy.urlFields(
                         target, "phase", "failure",
@@ -528,17 +529,21 @@ final class BrowserSession {
         if (closed) { listener.invalidated("浏览器已关闭"); return; }
         this.listener = listener;
         context.setBaseContext(activity);
-        applyRules(() -> {
-            if (closed || this.listener != listener || activity.isFinishing()) return;
-            attached = true;
-            proxy.setActive(!home);
-            if (!home) { view.onResume(); view.resumeTimers(); }
-            ready.run(); changed();
-        }, () -> {
-            if (!closed && this.listener == listener) {
-                listener.invalidated("网络设置应用失败，请返回会话后重试");
-            }
-        });
+        syncIdentityCookie(() -> applyRules(() -> {
+                if (closed || this.listener != listener || activity.isFinishing()) return;
+                attached = true;
+                proxy.setActive(!home);
+                if (!home) { view.onResume(); view.resumeTimers(); }
+                ready.run(); changed();
+            }, () -> {
+                if (!closed && this.listener == listener) {
+                    listener.invalidated("网络设置应用失败，请返回会话后重试");
+                }
+            }), () -> {
+                if (!closed && this.listener == listener) {
+                    listener.invalidated("设备会话 Cookie 写入失败，请返回会话后重试");
+                }
+            });
     }
 
     void detach(Listener owner) {
@@ -580,6 +585,49 @@ final class BrowserSession {
                 failure.run();
             }
         }
+    }
+
+    private void syncIdentityCookie(Runnable complete, Runnable failure) {
+        CookieManager cookies = CookieManager.getInstance();
+        try {
+            cookies.setAcceptCookie(true);
+            cookies.setAcceptThirdPartyCookies(view, false);
+            String cookie = identity.cookie()
+                + "; Path=/; HttpOnly; SameSite=Strict"
+                + (identity.origin().startsWith("https://") ? "; Secure" : "");
+            cookies.setCookie(identity.origin(), cookie, accepted -> {
+                if (closed) return;
+                if (!Boolean.TRUE.equals(accepted)) {
+                    diagnostic("native.browser.cookies", DiagnosticsPolicy.fields(
+                        "phase", "failure", "reason", "write-rejected"));
+                    failure.run();
+                    return;
+                }
+                cookies.flush();
+                if (!containsCookie(cookies.getCookie(identity.origin()), identity.cookie())) {
+                    diagnostic("native.browser.cookies", DiagnosticsPolicy.fields(
+                        "phase", "failure", "reason", "readback-missing"));
+                    failure.run();
+                    return;
+                }
+                diagnostic("native.browser.cookies", DiagnosticsPolicy.fields(
+                    "phase", "success", "reason", "synced"));
+                complete.run();
+            });
+        } catch (RuntimeException unavailable) {
+            diagnostic("native.browser.cookies", DiagnosticsPolicy.fields(
+                "phase", "failure", "reason", "unsupported",
+                "errorType", DiagnosticsPolicy.errorType(unavailable)));
+            failure.run();
+        }
+    }
+
+    private static boolean containsCookie(String header, String expected) {
+        if (header == null || expected == null || expected.isEmpty()) return false;
+        for (String value : header.split(";")) {
+            if (expected.equals(value.trim())) return true;
+        }
+        return false;
     }
 
     long pageGeneration() { return pageGeneration; }
@@ -663,7 +711,9 @@ final class BrowserSession {
         view.stopLoading();
         view.setVisibility(View.INVISIBLE);
         pendingNavigationUrl = target;
-        desktopFullPageFitReload = false;
+        if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
+            pageWidthFitApplied = false;
+        }
         mainFrameStarted = false;
         mainFrameFinished = false;
         pageTitle = "";
@@ -676,7 +726,9 @@ final class BrowserSession {
         error = "";
         url = "";
         pendingNavigationUrl = "";
-        desktopFullPageFitReload = false;
+        if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
+            pageWidthFitApplied = false;
+        }
         mainFrameStarted = false;
         mainFrameFinished = false;
         pageTitle = "";
@@ -696,7 +748,9 @@ final class BrowserSession {
             int previousIndex = history.getCurrentIndex() - 1;
             pendingNavigationUrl = previousIndex >= 0
                 ? history.getItemAtIndex(previousIndex).getUrl() : "";
-            desktopFullPageFitReload = false;
+            if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
+                pageWidthFitApplied = false;
+            }
             mainFrameStarted = false;
             mainFrameFinished = false;
             pageTitle = "";
@@ -712,7 +766,9 @@ final class BrowserSession {
         if (!closed && attached && !home) {
             error = "";
             pendingNavigationUrl = url;
-            desktopFullPageFitReload = false;
+            if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
+                pageWidthFitApplied = false;
+            }
             mainFrameStarted = false;
             mainFrameFinished = false;
             pageTitle = "";
@@ -812,9 +868,10 @@ final class BrowserSession {
         diagnostic("native.browser.display", DiagnosticsPolicy.fields(
             "phase", "success", "reason", "success"));
     }
-    private void requestDesktopFullPageFit(WebView webView, String address, long generation) {
-        if (closed || !attached || home || !BrowserPreferences.UA_DESKTOP.equals(userAgentMode)
-            || desktopFullPageFitReload || generation != pageGeneration
+    private void requestPageWidthFit(WebView webView, String address, long generation) {
+        if (closed || !attached || home
+            || !BrowserPreferences.UA_DESKTOP.equals(userAgentMode)
+            || pageWidthFitApplied || generation != pageGeneration
             || webView.getWidth() <= 0 || webView.getHeight() <= 0) {
             return;
         }
@@ -826,27 +883,27 @@ final class BrowserSession {
                 + "b?b.scrollHeight:0,b?b.offsetHeight:0,b?b.clientHeight:0);"
                 + "return Math.round(w)+','+Math.round(h);})()",
             value -> {
-                if (closed || !attached || home || generation != pageGeneration
-                    || desktopFullPageFitReload || !sameAddress(address, url)) {
+                if (closed || !attached || home
+                    || !BrowserPreferences.UA_DESKTOP.equals(userAgentMode)
+                    || generation != pageGeneration
+                    || pageWidthFitApplied || !sameAddress(address, url)) {
                     return;
                 }
                 int[] dimensions = pageDimensions(value);
                 if (dimensions == null) return;
-                int scalePercent = BrowserScalePolicy.fullPageScalePercent(
-                    webView.getWidth(), webView.getHeight(), dimensions[0], dimensions[1]);
+                float currentScale = webView.getScale();
+                int scalePercent = BrowserScalePolicy.widthFitScalePercent(
+                    webView.getWidth(), dimensions[0], currentScale);
                 diagnostic("native.browser.scale", DiagnosticsPolicy.fields(
-                    "phase", "measure", "reason", "full-page-fit",
+                    "phase", "measure", "reason", "page-width-fit",
                     "contentWidth", dimensions[0], "contentHeight", dimensions[1],
                     "viewportWidth", webView.getWidth(), "viewportHeight", webView.getHeight(),
-                    "scalePercent", scalePercent, "generation", generation));
-                if (scalePercent >= 100) {
-                    webView.setVisibility(View.VISIBLE);
-                    return;
-                }
-                desktopFullPageFitReload = true;
-                webView.setInitialScale(scalePercent);
-                webView.setVisibility(View.INVISIBLE);
-                webView.reload();
+                    "currentScale", currentScale, "scalePercent", scalePercent,
+                    "generation", generation));
+                float zoomFactor = BrowserScalePolicy.widthFitZoomFactor(
+                    webView.getWidth(), dimensions[0], currentScale);
+                pageWidthFitApplied = true;
+                if (zoomFactor < 0.999f) webView.zoomBy(zoomFactor);
             });
     }
     private static int[] pageDimensions(String value) {

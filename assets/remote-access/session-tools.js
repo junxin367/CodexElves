@@ -61,7 +61,7 @@ function detailResponse(value, file) {
   if (!objectValue(value) || value.ok === false || !validRoot(value.root) || !validRevision(value.revision)
       || value.path !== file.path || value.section !== file.section
       || !["text", "image", "binary", "unsupported"].includes(value.kind)
-      || typeof value.truncated !== "boolean" || value.diff != null && !safeString(value.diff, 2 * 1024 * 1024)
+      || typeof value.truncated !== "boolean" || value.diff != null && !safeString(value.diff, 4 * 1024 * 1024)
       || value.message != null && !safeString(value.message, 10000)
       || !sideValid(value.before) || !sideValid(value.after)) return null;
   const side = value => value == null ? null : {

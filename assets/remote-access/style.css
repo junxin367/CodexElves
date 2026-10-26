@@ -172,14 +172,14 @@ input:focus,textarea:focus,.prompt-editor:focus,select:focus,button:focus-visibl
 .agent-message{font-size:var(--font-size)}
 .agent-message.commentary{font-size:calc(var(--font-size)*.93)}
 @media(max-width:760px){.composer-toolbar{margin-left:-7px}.composer-toolbar>.composer-controls{gap:2px}.composer-toolbar .model-button{max-width:100%;min-width:0}.context-info{font-size:calc(var(--font-size)*.72)}.conversation-header .icon-button{padding:5px;font-size:18px}.user-bubble{font-size:var(--font-size)}.appearance-font input{max-width:120px}}
-:root{--radius-control:8px;--radius-popup:12px;--layer-menu:200;--layer-toast:600;--duration-control:150ms;--duration-popup:200ms}
+:root{--radius-control:8px;--radius-popup:12px;--layer-sidebar:20;--layer-session-menu:18;--layer-menu:200;--layer-toast:600;--duration-control:150ms;--duration-popup:200ms}
 button,input,textarea,.prompt-editor{transition:background-color var(--duration-control),border-color var(--duration-control),opacity var(--duration-control)}
 button:disabled:hover{background:transparent}
 input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px solid var(--accent);outline-offset:2px}
 :root[data-input-modality=pointer] :is(button,input,textarea,select,.prompt-editor):focus{outline:none;box-shadow:none}
 .ui-icon{width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
 .ui-icon svg{display:block;width:100%;height:100%}
-.sidebar{padding:16px 12px 12px}
+.sidebar{position:relative;z-index:var(--layer-sidebar);padding:16px 12px 12px}
 .sidebar-header{gap:8px;padding:0 8px 16px}
 .sidebar-header strong{display:flex;align-items:center;min-width:0;line-height:24px}
 .sidebar-header-actions{display:flex;align-items:center;gap:4px;flex-shrink:0}
@@ -884,7 +884,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 @media(prefers-reduced-motion:reduce){.session-tools-screen{transition-duration:1ms}}
 
 /* session-related-menu */
-.session-related-menu-layer{position:fixed;inset:0;width:100%;height:100%;max-width:none;max-height:none;margin:0;padding:0;border:0;background:transparent;color:var(--text);z-index:var(--layer-menu);overflow:visible}
+.session-related-menu-layer{position:fixed;inset:0;width:100%;height:100%;max-width:none;max-height:none;margin:0;padding:0;border:0;background:transparent;color:var(--text);z-index:var(--layer-session-menu);overflow:visible}
 .session-related-menu-layer[hidden],.session-related-menu-context[hidden]{display:none}
 .session-related-menu-suspended{display:none!important;pointer-events:none!important}
 .session-related-menu-layer::backdrop{background:transparent}

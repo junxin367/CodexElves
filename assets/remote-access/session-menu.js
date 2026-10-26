@@ -58,7 +58,6 @@ export function mountSessionMenu({
   actionMenu.setAttribute("aria-label", "侧边会话操作");
   closeAction.type = "button"; closeAction.tabIndex = -1; closeAction.setAttribute("role", "menuitem");
   actionMenu.append(closeAction); layer.append(menu, actionMenu);
-  if (typeof layer.showPopover === "function") layer.setAttribute("popover", "manual");
   trigger.setAttribute("aria-haspopup", "menu"); trigger.setAttribute("aria-expanded", "false");
   trigger.setAttribute("aria-controls", id);
 

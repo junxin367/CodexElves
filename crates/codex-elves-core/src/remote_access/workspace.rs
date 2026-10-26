@@ -24,9 +24,9 @@ use super::{ApiError, RemoteAuthorization, WebState};
 
 const MAX_STATUS_BYTES: usize = 2 * 1024 * 1024;
 const MAX_FILES: usize = 2_000;
-const MAX_TEXT_BYTES: usize = 512 * 1024;
+const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_DIFF_BYTES: usize = 512 * 1024;
+const MAX_DIFF_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 8 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(40);
@@ -470,7 +470,7 @@ fn project_file_content(root: &Path, path: &str) -> Result<Value, ApiError> {
         result["text"] = json!(&text[..end]);
         result["truncated"] = json!(end < text.len());
         if end < text.len() {
-            result["message"] = json!("文件较大，仅显示前 512 KiB 内容");
+            result["message"] = json!("文件较大，仅显示前 4 MiB 内容");
         }
     } else {
         result["kind"] = json!("binary");
@@ -881,7 +881,7 @@ impl Repository {
         } else if before.size > MAX_TEXT_BYTES as u64 || after.size > MAX_TEXT_BYTES as u64 {
             truncated = true;
             message = Some(
-                "文本超过每侧 512 KiB 的差异上限，不生成文本差异，仅显示类型和大小；请在电脑端查看完整差异。",
+                "文本超过每侧 4 MiB 的差异上限，不生成文本差异，仅显示类型和大小；请在电脑端查看完整差异。",
             );
             "text"
         } else {
@@ -927,7 +927,7 @@ impl Repository {
             diff = String::from_utf8_lossy(&output.bytes).into_owned();
             truncated |= output.truncated;
             if truncated {
-                message = Some("差异超过 512 KiB，已截断；请在电脑端查看完整差异。");
+                message = Some("差异超过 4 MiB，已截断；请在电脑端查看完整差异。");
             }
             "text"
         };
@@ -1821,13 +1821,14 @@ mod tests {
                 .unwrap()
                 .starts_with("data:image/png;base64,")
         );
-        let text = "中".repeat(MAX_TEXT_BYTES / 3 + 50);
+        let text = "中".repeat(MAX_TEXT_BYTES / 3 - 50);
         std::fs::write(root.join("large.txt"), text).unwrap();
         let large = project_file_content(&root, "large.txt").unwrap();
-        assert_eq!(large["truncated"], true);
+        assert_eq!(large["kind"], "text");
+        assert_eq!(large["truncated"], false);
         assert_eq!(
             large["text"].as_str().unwrap().len(),
-            MAX_TEXT_BYTES / 3 * 3
+            MAX_TEXT_BYTES / 3 * 3 - 150
         );
         File::create(root.join("huge.txt"))
             .unwrap()
@@ -2389,17 +2390,23 @@ mod tests {
     #[tokio::test]
     async fn workspace_large_text_and_replaced_directory_are_explicit() {
         let (_fixture, _state, repo) = fixture_repo().await;
-        std::fs::write(repo.root.join("large.txt"), vec![b'a'; MAX_TEXT_BYTES + 1]).unwrap();
+        std::fs::write(repo.root.join("large.txt"), vec![b'a'; 700 * 1024]).unwrap();
         let detail = fixture_detail(&repo, "large.txt", "untracked").await;
         assert_eq!(detail["kind"], "text");
+        assert_eq!(detail["truncated"], false);
+        assert!(detail["diff"].as_str().unwrap().len() > 512 * 1024);
+        assert!(detail["diff"].as_str().unwrap().len() <= MAX_DIFF_BYTES);
+
+        std::fs::write(
+            repo.root.join("too-large.txt"),
+            vec![b'a'; MAX_TEXT_BYTES + 1],
+        )
+        .unwrap();
+        let detail = fixture_detail(&repo, "too-large.txt", "untracked").await;
+        assert_eq!(detail["kind"], "unsupported");
         assert_eq!(detail["truncated"], true);
         assert_eq!(detail["diff"], "");
-        assert!(
-            detail["message"]
-                .as_str()
-                .unwrap()
-                .contains("不生成文本差异")
-        );
+        assert!(detail["message"].as_str().unwrap().contains("4 MiB"));
 
         std::fs::write(repo.root.join("replaced.txt"), b"index content\n").unwrap();
         assert!(

@@ -114,7 +114,7 @@ Debug APK 仅用于本地验收和 PR 检查，不更新正式成功基线。应
 
 - 服务链接支持显式 `http://` 或 `https://` 根 Origin，可保留自定义端口；省略协议时默认 HTTPS。使用 frp 时，填写管理器中已应用为主链路的固定公网地址及其映射端口。地址不能包含 userinfo、路径、query 或 fragment。
 - 原生登录只向当前 Origin 的 `/api/connect` 提交访问密钥；成功后立即清空输入，密钥输入框禁用 View 状态保存，不随 Activity 状态持久化明文密钥。
-- 设备会话使用服务返回的 `codex_elves_device` HttpOnly Cookie，并同步到 WebView。
+- 设备会话使用服务返回的 `codex_elves_device` HttpOnly Cookie；原生登录后写入主 WebView，打开独立浏览器入口时再同步到浏览器 WebView 的 CookieManager。
 - 对严格匹配 `*.shares.zrok.io` 的 HTTPS Origin，原生层会在首次加载页面前写入仅限当前主机、有效期 7 天的 `zrok_interstitial=1` Cookie，并在应用回到前台时刷新；其他域名不会写入该 Cookie。
 - WebView 地址保持用户填写的 HTTP/HTTPS 服务 Origin。只有已校验清单内的静态路径从本地资源返回，`/api/` 和 WebSocket 始终访问真实同源服务；HTTP 主地址使用 `ws://`，HTTPS 主地址使用 `wss://`。
 - `CodexElvesAndroid` 消息桥只允许当前 Origin 的主 frame 发送受支持的消息；应用版本及更新消息为 `app-info`、`check-app-update`，网页不能指定 APK 下载地址或签名。

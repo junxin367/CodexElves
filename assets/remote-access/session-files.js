@@ -131,8 +131,9 @@ export function mountSessionFiles({
   const contentControls = node("div", "session-tools-detail-controls");
   const metadata = node("span", "session-files-metadata");
   const modeButton = control("源码", () => { sourceMode = !sourceMode; renderContent(); });
+  modeButton.setAttribute("aria-label", "切换源码和预览");
   const wrapButton = control("自动换行", () => { wrap = !wrap; renderContent(); });
-  contentControls.append(metadata, modeButton, wrapButton);
+  contentControls.append(metadata, wrapButton, modeButton);
   const fileStatus = node("p", "session-tools-status"); fileStatus.setAttribute("role", "status");
   const body = node("div", "session-tools-detail session-files-content");
   content.screen.append(contentControls, fileStatus, body);
@@ -206,7 +207,7 @@ export function mountSessionFiles({
             || value.files.some(file => !file || typeof file.name !== "string" || typeof file.path !== "string"
               || !["directory", "file", "unsupported"].includes(file.kind)))
           || kind === "file" && (!["text", "image", "binary", "unsupported"].includes(value.kind)
-            || value.kind === "text" && (typeof value.text !== "string" || value.text.length > 524288)
+            || value.kind === "text" && (typeof value.text !== "string" || value.text.length > 4 * 1024 * 1024)
             || value.kind === "image" && !imageValid(value.dataUrl))) throw new Error("文件响应格式无效");
       retain(key, value); return value;
     } catch (error) {
@@ -399,6 +400,7 @@ export function mountSessionFiles({
     modeButton.hidden = value?.kind !== "text" || !/\.mdx?$/iu.test(value.path);
     wrapButton.hidden = value?.kind !== "text" || !sourceMode;
     modeButton.textContent = sourceMode ? "预览" : "源码";
+    modeButton.title = sourceMode ? "切换到预览" : "切换到源码";
     wrapButton.setAttribute("aria-pressed", String(wrap));
     if (!value) return;
     metadata.textContent = bytesLabel(value.size);
