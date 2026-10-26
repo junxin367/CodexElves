@@ -377,7 +377,7 @@ export function RemoteAccessScreen({
             <CardDescription>
               {editingPrimary === "zrok"
                 ? <>免费，但是稳定性欠佳，建议开启 <strong>ngrok 第二线路</strong></>
-                : "自行搭建或者购买，速度快稳定性好，frp程序会被误杀需要自行加白"}
+                : <>自行搭建或者购买，速度快稳定性好，<strong className="text-red-600">frp程序会被误杀需要自行加白</strong></>}
             </CardDescription>
           </div>
           <div className="panel-head-actions flex items-center gap-3">
