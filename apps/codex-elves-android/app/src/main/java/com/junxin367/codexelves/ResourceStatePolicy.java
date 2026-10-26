@@ -10,12 +10,14 @@ final class ResourceStatePolicy {
 
     static Recovery recoverInterruptedTrial(String active, String previous, String trial) {
         if (trial == null || trial.isEmpty()) {
-            return new Recovery(active, false);
+            return new Recovery(active, "", false);
         }
         String recovered = previous == null || previous.isEmpty()
             ? ResourceStore.BUILTIN
             : previous;
-        return new Recovery(recovered, true);
+        // Keep the verified candidate as pending so an interrupted startup
+        // retries the existing directory instead of downloading it again.
+        return new Recovery(recovered, trial, true);
     }
 
     static String pendingAfterDownload(
@@ -32,10 +34,12 @@ final class ResourceStatePolicy {
 
     static final class Recovery {
         final String active;
+        final String pending;
         final boolean clearTrial;
 
-        Recovery(String active, boolean clearTrial) {
+        Recovery(String active, String pending, boolean clearTrial) {
             this.active = active;
+            this.pending = pending;
             this.clearTrial = clearTrial;
         }
     }

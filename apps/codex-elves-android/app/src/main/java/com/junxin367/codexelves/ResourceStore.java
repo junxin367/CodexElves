@@ -60,11 +60,14 @@ final class ResourceStore {
             unfinishedTrial
         );
         if (recovery.clearTrial) {
-            preferences.edit()
+            SharedPreferences.Editor update = preferences.edit()
                 .putString(prefix + "active", recovery.active)
                 .remove(prefix + "trial")
-                .remove(prefix + "previous")
-                .apply();
+                .remove(prefix + "previous");
+            if (recovery.pending != null && !recovery.pending.isEmpty()) {
+                update.putString(prefix + "pending", recovery.pending);
+            }
+            requireCommit(update);
         }
         active = recovery.active;
         Snapshot bundled = null;
@@ -99,7 +102,7 @@ final class ResourceStore {
                         .putString(prefix + "trial", BUILTIN);
                 }
                 // Record the APK even before ready so rollback cannot repeat this migration.
-                update.apply();
+                requireCommit(update);
             }
             return bundled;
         }
@@ -107,20 +110,30 @@ final class ResourceStore {
         if (!pending.isEmpty()) {
             try {
                 Snapshot candidate = loadSnapshot(origin, pending, cancellation, true);
+                try {
+                    Snapshot activeSnapshot = loadSnapshot(origin, active, cancellation, true);
+                    if (candidate.manifest.revision <= activeSnapshot.manifest.revision) {
+                        requireCommit(preferences.edit().remove(prefix + "pending"));
+                        return activeSnapshot;
+                    }
+                } catch (CancelledException cancelled) {
+                    throw cancelled;
+                } catch (IOException ignored) {
+                    // If the active snapshot is damaged, let the candidate recover it.
+                }
                 synchronized (cancellation) {
                     cancellation.check();
-                    preferences.edit()
+                    requireCommit(preferences.edit()
                         .putString(prefix + "previous", active)
                         .putString(prefix + "active", pending)
                         .putString(prefix + "trial", pending)
-                        .remove(prefix + "pending")
-                        .apply();
+                        .remove(prefix + "pending"));
                 }
                 return candidate;
             } catch (CancelledException cancelled) {
                 throw cancelled;
             } catch (IOException invalidPending) {
-                preferences.edit().remove(prefix + "pending").apply();
+                requireCommit(preferences.edit().remove(prefix + "pending"));
             }
         }
 
@@ -139,11 +152,10 @@ final class ResourceStore {
                 fallback = loadSnapshot(origin, BUILTIN, cancellation, true);
             }
             cancellation.check();
-            preferences.edit()
+            requireCommit(preferences.edit()
                 .putString(prefix + "active", fallback.version)
                 .remove(prefix + "trial")
-                .remove(prefix + "previous")
-                .apply();
+                .remove(prefix + "previous"));
             return fallback;
         }
     }
@@ -155,8 +167,7 @@ final class ResourceStore {
     synchronized void markReady(String origin, String version) {
         String prefix = prefix(origin);
         if (version.equals(preferences.getString(prefix + "trial", ""))) {
-            preferences.edit().remove(prefix + "trial").apply();
-            cleanup(origin);
+            if (preferences.edit().remove(prefix + "trial").commit()) cleanup(origin);
         }
     }
 
@@ -166,12 +177,11 @@ final class ResourceStore {
             return false;
         }
         String previous = preferences.getString(prefix + "previous", BUILTIN);
-        preferences.edit()
+        return preferences.edit()
             .putString(prefix + "active", previous)
             .remove(prefix + "trial")
             .remove(prefix + "previous")
-            .apply();
-        return true;
+            .commit();
     }
 
     UpdateResult checkForUpdate(
@@ -189,6 +199,9 @@ final class ResourceStore {
             }
             if (current != null && origin.equals(current.origin)
                 && manifest.version.equals(current.manifest.version)) {
+                return UpdateResult.unchanged();
+            }
+            if (current != null && manifest.revision <= current.manifest.revision) {
                 return UpdateResult.unchanged();
             }
             cancellation.check();
@@ -259,7 +272,9 @@ final class ResourceStore {
                         fullyVerified,
                         true
                     );
-                    preferences.edit().putString(prefix + "pending", nextPending).apply();
+                    if (!preferences.edit().putString(prefix + "pending", nextPending).commit()) {
+                        throw new IOException("资源状态保存失败");
+                    }
                 }
             }
             return UpdateResult.downloaded(manifest.version);
@@ -604,6 +619,10 @@ final class ResourceStore {
             output.write(bytes);
             output.getFD().sync();
         }
+    }
+
+    private static void requireCommit(SharedPreferences.Editor update) throws IOException {
+        if (!update.commit()) throw new IOException("资源状态保存失败");
     }
 
     private static String sha256(File file, Cancellation cancellation) throws IOException {

@@ -25,12 +25,14 @@ final class ResourceManifest {
     private static final Pattern HASH = Pattern.compile("[0-9a-f]{64}");
 
     final int minShellVersion;
+    final long revision;
     final String version;
     final List<Entry> files;
     final Map<String, Entry> byPath;
 
-    private ResourceManifest(int minShellVersion, String version, List<Entry> files) {
+    private ResourceManifest(int minShellVersion, long revision, String version, List<Entry> files) {
         this.minShellVersion = minShellVersion;
+        this.revision = revision;
         this.version = version;
         this.files = Collections.unmodifiableList(files);
         Map<String, Entry> indexed = new LinkedHashMap<>();
@@ -58,6 +60,10 @@ final class ResourceManifest {
             int minShellVersion = root.getInt("minShellVersion");
             if (minShellVersion < 1) {
                 throw new IOException("资源清单的 minShellVersion 无效");
+            }
+            long revision = root.has("revision") ? root.getLong("revision") : 0;
+            if (revision < 0) {
+                throw new IOException("资源清单的 revision 无效");
             }
             String version = root.getString("version");
             if (!HASH.matcher(version).matches()) {
@@ -105,7 +111,7 @@ final class ResourceManifest {
             if (!duplicates.containsKey("/")) {
                 throw new IOException("资源清单缺少入口页面");
             }
-            return new ResourceManifest(minShellVersion, version, files);
+            return new ResourceManifest(minShellVersion, revision, version, files);
         } catch (JSONException | ArithmeticException error) {
             throw new IOException("资源清单字段无效", error);
         }

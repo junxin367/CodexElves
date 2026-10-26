@@ -5,6 +5,7 @@ import android.os.IBinder;
 import android.os.Parcel;
 import android.os.Process;
 import android.os.RemoteException;
+import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import org.json.JSONException;
@@ -27,8 +28,18 @@ final class BrowserAuthority extends Binder {
     private volatile boolean valid = true;
 
     BrowserAuthority(String origin, String cookie, DiagnosticSink diagnosticSink) {
-        identity = new Snapshot(UUID.randomUUID().toString(), ServiceOrigin.normalize(origin), cookie);
+        String normalizedOrigin = ServiceOrigin.normalize(origin);
+        identity = new Snapshot(ownerFor(normalizedOrigin, cookie), normalizedOrigin, cookie);
         this.diagnosticSink = diagnosticSink;
+    }
+
+    /**
+     * Keep the browser profile stable across Android process restarts while
+     * separating different service origins or device authorizations.
+     */
+    private static String ownerFor(String origin, String cookie) {
+        byte[] identity = (origin + "\n" + cookie).getBytes(StandardCharsets.UTF_8);
+        return UUID.nameUUIDFromBytes(identity).toString();
     }
 
     boolean valid() { return valid; }

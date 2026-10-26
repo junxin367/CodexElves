@@ -255,7 +255,7 @@ public final class MainActivity extends Activity {
                     }
                     cookies.flush();
                     keyInput.setText("");
-                    sessionStore.saveAuthorizedConnection(origin);
+                    sessionStore.saveAuthorizedConnection(origin, result.cookie);
                     diagnostic("native.login", DiagnosticsPolicy.fields(
                         "phase", "success", "reason", "login-success"));
                     openSession(origin);
@@ -341,6 +341,20 @@ public final class MainActivity extends Activity {
         return null;
     }
 
+    private static String readDeviceCookie(String origin) {
+        String allCookies = CookieManager.getInstance().getCookie(origin);
+        if (allCookies == null) {
+            return null;
+        }
+        for (String item : allCookies.split(";")) {
+            String candidate = item.trim();
+            if (candidate.matches("codex_elves_device=[A-Za-z0-9._~-]{16,512}")) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
     private void openSession(String origin) {
         invalidateBrowser();
         notifications.onPageChanged();
@@ -368,7 +382,7 @@ public final class MainActivity extends Activity {
         cancelReadyTimeout();
         destroyWebView();
         root.removeAllViews();
-        prepareZrokCookie(origin, generation, accepted -> {
+        restoreDeviceCookie(origin, generation, () -> prepareZrokCookie(origin, generation, accepted -> {
             if (generation != connectionGeneration.get() || isFinishing()) {
                 return;
             }
@@ -377,7 +391,29 @@ public final class MainActivity extends Activity {
                 return;
             }
             startSessionPage(origin, generation);
-        });
+        }));
+    }
+
+    private void restoreDeviceCookie(String origin, long generation, Runnable completion) {
+        String cookie = sessionStore.getDeviceCookie();
+        if (cookie == null || cookie.trim().isEmpty()) {
+            completion.run();
+            return;
+        }
+        CookieManager cookies = CookieManager.getInstance();
+        cookies.setAcceptCookie(true);
+        cookies.setCookie(origin, cookie, accepted -> runOnUiThread(() -> {
+            if (generation != connectionGeneration.get() || isFinishing()) {
+                return;
+            }
+            if (Boolean.TRUE.equals(accepted)) {
+                cookies.flush();
+            } else {
+                diagnostic("native.login", DiagnosticsPolicy.fields(
+                    "phase", "cookie-restore-failed", "reason", "cookie-failed"));
+            }
+            completion.run();
+        }));
     }
 
     private void startSessionPage(String origin, long generation) {
@@ -822,14 +858,23 @@ public final class MainActivity extends Activity {
                 checkForResourceUpdate(origin, pageSnapshot, generation, true);
                 openPendingNotification();
                 break;
-            case "authenticated":
-                sessionStore.saveAuthorizedConnection(origin);
+            case "authenticated": {
+                String cookie = readDeviceCookie(origin);
+                if (cookie == null) {
+                    sessionStore.markAuthorized(origin);
+                } else {
+                    // Older installs did not persist the cookie outside WebView.
+                    // Saving the name/value pair here lets the next cold start
+                    // rehydrate it even when the WebView cookie database is late.
+                    sessionStore.saveAuthorizedConnection(origin, cookie);
+                }
                 pageAuthenticated = true;
                 diagnostic("native.page", DiagnosticsPolicy.fields(
                     "phase", "authenticated", "generation", generation));
                 notifications.onAuthenticated();
                 openPendingNotification();
                 break;
+            }
             case "auth-required":
             case "logged-out":
                 clearAuthorization(origin);

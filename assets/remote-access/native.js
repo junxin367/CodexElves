@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 76) return;
+  if (window.__codexElvesRemoteAccess?.version === 77) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -31,6 +31,7 @@
   const deletedThreadIds = new Set();
   const pendingThreadMetadataReads = new Map();
   const nativeCallbackFailureCounts = new Map();
+  const remoteImageDiagnosticCounts = new Map();
   const INITIAL_THREAD_METADATA_WINDOW_MS = 15_000;
   const INITIAL_THREAD_METADATA_RETRY_DELAYS = [100, 200, 400, 800, 1000];
   let goalMaterializer = null;
@@ -122,6 +123,85 @@
       }
     };
   }
+  function reportRemoteImageDiagnostic(eventName, detail = {}) {
+    try {
+      const name = String(eventName || "remote_image_diagnostic").slice(0, 120);
+      const count = (remoteImageDiagnosticCounts.get(name) || 0) + 1;
+      remoteImageDiagnosticCounts.set(name, count);
+      if (count > 20 && count % 20 !== 0) return;
+      const payload = {
+        event: name,
+        detail: {
+          ...detail,
+          count,
+        },
+        helperBase: window.__CODEX_SESSION_DELETE_HELPER__ || "",
+        location: window.location?.href || "",
+        userAgent: navigator.userAgent || "",
+        timestamp: new Date().toISOString(),
+      };
+      const bridge = window.__codexSessionDeleteBridge;
+      const fallback = () => {
+        try {
+          fetch(`${payload.helperBase || "http://127.0.0.1:45221"}/diagnostics/log`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            keepalive: true,
+          }).catch(() => {});
+        } catch {}
+      };
+      if (typeof bridge === "function") {
+        try {
+          Promise.resolve(bridge("/diagnostics/log", payload)).catch(fallback);
+          return;
+        } catch {}
+      }
+      fallback();
+    } catch {}
+  }
+  function nativeImageAttachmentId() {
+    return `remote-image:${crypto.randomUUID()}`;
+  }
+  function validateNativeImageAttachments(images, phase) {
+    const invalid = array(images).flatMap((attachment, index) =>
+      typeof attachment?.id === "string" && attachment.id
+        ? []
+        : [{ index, keys: attachment && typeof attachment === "object" ? Object.keys(attachment) : [] }]);
+    if (!invalid.length) return;
+    reportRemoteImageDiagnostic("remote_image_attachment_invalid", {
+      phase,
+      invalidCount: invalid.length,
+      firstInvalidIndex: invalid[0].index,
+      firstInvalidKeys: invalid[0].keys.slice(0, 16),
+    });
+    throw failure(500, "原生图片附件上下文缺少附件 ID");
+  }
+  function installRemoteImageErrorDiagnostics() {
+    const previous = window.__codexElvesRemoteImageErrorDiagnostics;
+    previous?.dispose?.();
+    const onError = event => {
+      const error = event?.error;
+      const message = String(error?.message || event?.message || "");
+      const stack = String(error?.stack || "");
+      if (!/startsWith/.test(message) || !/(app-primary|imageAttachments)/i.test(`${message}\n${stack}`))
+        return;
+      reportRemoteImageDiagnostic("remote_image_attachment_render_failed", {
+        errorType: String(error?.name || "Error").slice(0, 120),
+        errorMessage: message.slice(0, 400),
+        stackPreview: stack.slice(0, 800),
+      });
+    };
+    window.addEventListener("error", onError);
+    window.__codexElvesRemoteImageErrorDiagnostics = {
+      dispose() {
+        window.removeEventListener("error", onError);
+        if (window.__codexElvesRemoteImageErrorDiagnostics?.dispose === this.dispose)
+          delete window.__codexElvesRemoteImageErrorDiagnostics;
+      },
+    };
+  }
+  installRemoteImageErrorDiagnostics();
   function resetStaleManager() {
     const existing = window.__codexElvesConversationStateManager;
     if (!manager || !manager.disposed && !(isManager(existing) && !existing.disposed && existing !== manager)) return;
@@ -1984,7 +2064,7 @@
       sourceManager = manager;
       await ensureGoalAbsent(id, sourceManager);
       const materialize = await nativeGoalMaterializer();
-      const imageAttachments = remoteImageAttachments(payload);
+      const imageAttachments = remoteImageAttachments(payload, "goal");
       const objective = payload.prompt.trim();
       if (!objective && !imageAttachments.length) throw failure(400, "目标不能为空");
       await skillInputs(payload, thread.cwd);
@@ -3503,7 +3583,7 @@
         prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
         retainedImageSources = payload.retainedImageSources == null
           ? null : validateQueuedImageSources(payload.retainedImageSources, "队列保留图片");
-        addedImages = payload.images == null ? null : remoteImageAttachments(payload);
+        addedImages = payload.images == null ? null : remoteImageAttachments(payload, "queue-edit");
       }
     } catch (error) {
       return queuedEditFailure(error, action === "commit" ? "保存队列消息失败" : "取消队列消息编辑失败");
@@ -3888,12 +3968,12 @@
   const remoteInputImageMaxBytes = 5 * 1024 * 1024;
   const remoteInputImageMaxSourceLength = Math.ceil(remoteInputImageMaxBytes / 3) * 4 + 64;
   const remoteImageDataPattern = /^data:image\/(?:png|jpeg|webp|gif);base64,(?=.+)(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-  function remoteImageAttachments(payload = {}) {
+  function remoteImageAttachments(payload = {}, phase = "unknown") {
     if (payload.images == null) return [];
     if (!Array.isArray(payload.images) || payload.images.length > 4)
       throw failure(400, "每条消息最多添加 4 张图片");
     let total = 0;
-    return payload.images.map(image => {
+    return payload.images.map((image, index) => {
       if (!image || typeof image.name !== "string" || !image.name.trim() || image.name.length > 255
           || !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(image.mime)
           || !Number.isSafeInteger(image.size) || image.size <= 0 || image.size > remoteInputImageMaxBytes
@@ -3903,14 +3983,27 @@
         throw failure(400, "图片附件参数无效");
       total += image.size;
       if (total > 12 * 1024 * 1024) throw failure(413, "图片总大小不能超过 12 MiB");
-      return {
+      const attachment = {
+        id: nativeImageAttachmentId(),
         src: image.dataUrl,
         filename: image.name.trim(),
         localPath: null
       };
+      if (phase !== "send-validation") {
+        reportRemoteImageDiagnostic("remote_image_attachment_normalized", {
+          phase,
+          index,
+          mime: image.mime,
+          sizeBytes: image.size,
+          sourceLength: image.dataUrl.length,
+          idPrefix: "remote-image",
+        });
+      }
+      return attachment;
     });
   }
   function remoteAttachmentContext(prompt, cwd, images) {
+    validateNativeImageAttachments(images, "attachment-context");
     return {
       prompt,
       addedFiles: [],
@@ -3998,7 +4091,7 @@
           throw failure(409, "会话连接已变化或会话已删除，请重新核对后发送");
       };
       const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
-      const imageAttachments = remoteImageAttachments(payload);
+      const imageAttachments = remoteImageAttachments(payload, "queue-send");
       if (!prompt && !imageAttachments.length) throw failure(400, "消息不能为空");
       const thread = await readThread(threadId);
       assertCurrent();
@@ -4374,7 +4467,7 @@
           const id = requiredId(payload.threadId);
           const loaded = await readThread(id);
           const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
-          const imageAttachments = remoteImageAttachments(payload);
+          const imageAttachments = remoteImageAttachments(payload, "send-validation");
           if (!prompt && !imageAttachments.length) throw failure(400, "消息不能为空");
           const conversation = manager.getConversation(id);
           const status = manager.getThreadRuntimeStatusEvidence?.(id)
@@ -4400,7 +4493,7 @@
             const materialize = goalMode ? await nativeGoalMaterializer() : null;
             const goalSettings = goalMode ? await goalThreadSettings(payload) : null;
             if (!goalMode) await validateReasoningEffort(payload.model, payload.reasoningEffort);
-            const imageAttachments = remoteImageAttachments(payload);
+            const imageAttachments = remoteImageAttachments(payload, "create");
             const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
             if (!prompt && !imageAttachments.length) throw failure(400, "消息不能为空");
             const module = await nativeCreationModule();
@@ -4614,7 +4707,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 76, call,
+    version: 77, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();
@@ -4661,6 +4754,7 @@
     cancelQueuedEdit: payload => call("cancelQueuedEdit", payload),
     queueMessage: (payload, allowImmediate = false) => call("send", { ...payload, queueOnly: !allowImmediate }),
     dispose() {
+      window.__codexElvesRemoteImageErrorDiagnostics?.dispose?.();
       for (const dispose of [...unsubscribe, ...sidebarUnsubscribe]) { try { dispose?.(); } catch {} }
       unsubscribe = []; sidebarUnsubscribe = []; sidebarListeners.clear();
       for (const watcher of sideScopeWatchers.values()) watcher.dispose?.();

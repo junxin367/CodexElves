@@ -562,6 +562,7 @@ final class BrowserSession {
     void detach(Listener owner) {
         if (listener != owner && context.getBaseContext() != owner) return;
         listener = null; attached = false; ++proxyGeneration;
+        flushCookies();
         view.onPause(); view.pauseTimers();
         proxy.setActive(false);
         if (view.getParent() instanceof ViewGroup parent) parent.removeView(view);
@@ -967,7 +968,7 @@ final class BrowserSession {
         Listener previous = listener;
         destroy();
         if (current == this) {
-            current = null; ++openGeneration; afterClear = null; clearProfile(authority);
+            current = null; ++openGeneration; afterClear = null;
         }
         if (previous != null) previous.invalidated(message);
     }
@@ -975,11 +976,20 @@ final class BrowserSession {
     private void destroy() {
         if (closed) return;
         closed = true; attached = false; listener = null; ++proxyGeneration;
+        flushCookies();
         MAIN.removeCallbacks(diagnosticRefresh);
         proxy.close();
         try { observer.close(); } catch (Exception ignored) { }
         if (view.getParent() instanceof ViewGroup parent) parent.removeView(view);
         view.stopLoading(); view.setWebChromeClient(null); view.setWebViewClient(null); view.destroy();
         context.setBaseContext(context.getApplicationContext());
+    }
+
+    private static void flushCookies() {
+        try {
+            CookieManager.getInstance().flush();
+        } catch (RuntimeException ignored) {
+            // Cookie persistence is best effort during Activity/process teardown.
+        }
     }
 }

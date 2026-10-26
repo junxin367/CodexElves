@@ -7,6 +7,7 @@ final class SessionStore {
     private static final String PREFERENCES = "codex_elves_android";
     private static final String ORIGIN = "origin";
     private static final String AUTHORIZED = "authorized";
+    private static final String DEVICE_COOKIE = "device_cookie";
 
     private final SharedPreferences preferences;
 
@@ -22,18 +23,34 @@ final class SessionStore {
         return preferences.getBoolean(AUTHORIZED, false);
     }
 
+    String getDeviceCookie() {
+        return preferences.getString(DEVICE_COOKIE, "");
+    }
+
     void saveOrigin(String origin) {
         preferences.edit().putString(ORIGIN, origin).apply();
     }
 
     void setAuthorized(boolean authorized) {
-        preferences.edit().putBoolean(AUTHORIZED, authorized).apply();
+        SharedPreferences.Editor update = preferences.edit().putBoolean(AUTHORIZED, authorized);
+        if (!authorized) {
+            update.remove(DEVICE_COOKIE);
+        }
+        update.commit();
     }
 
-    void saveAuthorizedConnection(String origin) {
+    void saveAuthorizedConnection(String origin, String deviceCookie) {
+        preferences.edit()
+            .putString(ORIGIN, origin)
+            .putString(DEVICE_COOKIE, deviceCookie)
+            .putBoolean(AUTHORIZED, true)
+            .commit();
+    }
+
+    void markAuthorized(String origin) {
         preferences.edit()
             .putString(ORIGIN, origin)
             .putBoolean(AUTHORIZED, true)
-            .apply();
+            .commit();
     }
 }

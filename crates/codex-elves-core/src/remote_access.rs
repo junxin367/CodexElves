@@ -1577,6 +1577,7 @@ fn web_assets() -> &'static HashMap<&'static str, StaticWebAsset> {
 struct AppResourcesManifest {
     schema_version: u32,
     min_shell_version: u32,
+    revision: u64,
     version: String,
     files: Vec<AppResourceFile>,
 }
@@ -1615,9 +1616,17 @@ fn build_app_resources_manifest(
     AppResourcesManifest {
         schema_version: 1,
         min_shell_version: 1,
+        revision: web_resource_revision(),
         version: format!("{:x}", version.finalize()),
         files,
     }
+}
+
+fn web_resource_revision() -> u64 {
+    include_str!("../../../assets/remote-access/resource-revision.txt")
+        .trim()
+        .parse()
+        .expect("web resource revision should be a positive integer")
 }
 
 fn update_manifest_version_field(hasher: &mut Sha256, value: &[u8]) {

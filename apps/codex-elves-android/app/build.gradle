@@ -96,6 +96,7 @@ android {
 
 def generatedWebAssets = layout.buildDirectory.dir("generated/webAssets")
 def remoteAssets = new File(repositoryRoot, "assets/remote-access")
+def resourceRevisionFile = new File(remoteAssets, "resource-revision.txt")
 
 def bundledWebResources = [
     [source: "index.html", path: "/", contentType: "text/html; charset=utf-8"],
@@ -145,6 +146,14 @@ tasks.register("prepareBundledWebAssets") {
     outputs.dir(generatedWebAssets)
 
     doLast {
+        if (!resourceRevisionFile.isFile()) {
+            throw new GradleException("缺少 Android 网页资源 revision：${resourceRevisionFile}")
+        }
+        def resourceRevisionText = resourceRevisionFile.getText("UTF-8").trim()
+        if (!(resourceRevisionText ==~ /[1-9][0-9]{0,18}/)) {
+            throw new GradleException("Android 网页资源 revision 无效：${resourceRevisionText}")
+        }
+        def resourceRevision = resourceRevisionText.toLong()
         def outputRoot = generatedWebAssets.get().asFile
         delete(outputRoot)
         def filesRoot = new File(outputRoot, "web/files")
@@ -179,6 +188,7 @@ tasks.register("prepareBundledWebAssets") {
         def manifest = [
             schemaVersion: 1,
             minShellVersion: 1,
+            revision: resourceRevision,
             version: versionDigest.digest().encodeHex().toString(),
             files: entries
         ]
