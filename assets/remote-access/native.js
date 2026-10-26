@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 77) return;
+  if (window.__codexElvesRemoteAccess?.version === 78) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -32,6 +32,7 @@
   const pendingThreadMetadataReads = new Map();
   const nativeCallbackFailureCounts = new Map();
   const remoteImageDiagnosticCounts = new Map();
+  const nativeCompatibilityDiagnosticCounts = new Map();
   const INITIAL_THREAD_METADATA_WINDOW_MS = 15_000;
   const INITIAL_THREAD_METADATA_RETRY_DELAYS = [100, 200, 400, 800, 1000];
   let goalMaterializer = null;
@@ -134,6 +135,49 @@
         detail: {
           ...detail,
           count,
+        },
+        helperBase: window.__CODEX_SESSION_DELETE_HELPER__ || "",
+        location: window.location?.href || "",
+        userAgent: navigator.userAgent || "",
+        timestamp: new Date().toISOString(),
+      };
+      const bridge = window.__codexSessionDeleteBridge;
+      const fallback = () => {
+        try {
+          fetch(`${payload.helperBase || "http://127.0.0.1:45221"}/diagnostics/log`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            keepalive: true,
+          }).catch(() => {});
+        } catch {}
+      };
+      if (typeof bridge === "function") {
+        try {
+          Promise.resolve(bridge("/diagnostics/log", payload)).catch(fallback);
+          return;
+        } catch {}
+      }
+      fallback();
+    } catch {}
+  }
+  function reportNativeCompatibilityDiagnostic(action, error, detail = {}) {
+    try {
+      const message = String(error?.message || error || "").slice(0, 1000);
+      if (!/当前 Codex 版本的原生|原生关联会话/.test(message)) return;
+      const name = String(action || "unknown").slice(0, 120);
+      const key = `${name}:${message}`;
+      const count = (nativeCompatibilityDiagnosticCounts.get(key) || 0) + 1;
+      nativeCompatibilityDiagnosticCounts.set(key, count);
+      if (count > 20 && count % 20 !== 0) return;
+      const payload = {
+        event: "renderer.remote_native_compatibility_failed",
+        detail: {
+          action: name,
+          ...detail,
+          count,
+          errorName: String(error?.name || "").slice(0, 120),
+          errorMessage: message,
         },
         helperBase: window.__CODEX_SESSION_DELETE_HELPER__ || "",
         location: window.location?.href || "",
@@ -1128,14 +1172,50 @@
     throw failure(403, "子代理会话仅支持只读查看");
   }
   async function nativeResource(name) {
-    if (!["initial", "primary"].includes(name))
-      throw failure(503, "原生关联会话模块名称无效");
-    const expression = new RegExp(`^app://-/assets/app-${name}-[A-Za-z0-9_-]+\\.js$`);
+    const rules = {
+      initial: {
+        expression: /^app:\/\/-\/assets\/app-initial-[A-Za-z0-9_-]+\.js$/,
+      },
+      primary: {
+        expression: /^app:\/\/-\/assets\/app-primary-[A-Za-z0-9_-]+\.js$/,
+      },
+      background: {
+        expression: /^app:\/\/-\/assets\/local-conversation-background-agents-signals-[A-Za-z0-9_-]+\.js$/,
+        matches: source => source.includes("getIndexedSubagentProgress:")
+          && source.includes("sourceLinkedThreadsDiscoveryComplete:"),
+      },
+      side: {
+        expression: /^app:\/\/-\/assets\/local-conversation-side-chat-(?!tab-)[A-Za-z0-9_-]+\.js$/,
+        matches: source => source.includes("Cannot create a side chat for an archived conversation")
+          && source.includes("sourceConversationId"),
+      },
+      sideTab: {
+        expression: /^app:\/\/-\/assets\/local-conversation-side-chat-tab-[A-Za-z0-9_-]+\.js$/,
+        matches: source => source.includes("LocalConversationSideChatTab"),
+      },
+    };
+    const rule = rules[name];
+    if (!rule) throw failure(503, "原生关联会话模块名称无效");
     const observed = [...document.querySelectorAll('link[rel="modulepreload"]')].map(link => link.href)
       .concat(performance.getEntriesByType("resource").map(entry => entry.name));
-    const resources = [...new Set(observed.filter(value => expression.test(value)))];
+    const resources = [...new Set(observed.filter(value => rule.expression.test(value)))];
     if (resources.length === 1) return resources[0];
     if (resources.length > 1) throw failure(503, `原生关联会话模块版本不唯一（${name}）`);
+    if (rule.matches) {
+      const candidates = [...new Set(observed.filter(value =>
+        /^app:\/\/-\/assets\/.+\.js$/.test(value)
+        && (value.includes("local-conversation") || value.includes("app-"))))];
+      const matches = [];
+      for (const resource of candidates) {
+        try {
+          const response = await fetch(resource);
+          if (!response.ok) continue;
+          if (rule.matches(await response.text())) matches.push(resource);
+        } catch {}
+      }
+      if (matches.length === 1) return matches[0];
+      if (matches.length > 1) throw failure(503, `原生关联会话模块版本不唯一（${name}）`);
+    }
     // 静态依赖不一定出现在 DOM 或当前 Resource Timing 中；只沿已观察到的可信 app-main 导入定位。
     if (name === "initial") {
       const mains = [...new Set(observed.filter(value =>
@@ -1147,7 +1227,7 @@
         const dependencies = [...new Set([...source.matchAll(
           /\b(?:from|import)\s*["'](\.\/app-initial-[A-Za-z0-9_-]+\.js)["']/g)]
           .map(match => new URL(match[1], mains[0]).href)
-          .filter(value => expression.test(value)))];
+          .filter(value => rule.expression.test(value)))];
         if (dependencies.length === 1) return dependencies[0];
       }
     }
@@ -1202,19 +1282,23 @@
         const [initial, primary] = await Promise.all([
           nativeModuleSnapshot("initial"), nativeModuleSnapshot("primary")
         ]);
+        const background = await nativeModuleSnapshot("background").catch(() => null);
         const rowsMarker = "sourceLinkedThreadsDiscoveryComplete:";
-        const beforeRows = primary.source.slice(0, primary.source.lastIndexOf(rowsMarker));
+        const rowsSnapshot = [background, primary].find(snapshot =>
+          snapshot?.source.includes(rowsMarker) && snapshot.source.includes("getIndexedSubagentProgress:"));
+        if (!rowsSnapshot) throw failure(503, "当前 Codex 版本的原生子代理列表无法识别");
+        const beforeRows = rowsSnapshot.source.slice(0, rowsSnapshot.source.lastIndexOf(rowsMarker));
         const initializer = [...beforeRows.matchAll(/function\s+([\w$]+)\(\)\{return\(\1=/g)].at(-1);
         if (!initializer || !beforeRows.slice(initializer.index).includes("getIndexedSubagentProgress:"))
           throw failure(503, "当前 Codex 版本的原生子代理列表无法识别");
         // 打包器首次执行后会改写初始化函数，必须从静态源码识别导出，不能检查当前函数体。
-        const initializeRows = nativeExport(primary, initializer[1]);
+        const initializeRows = nativeExport(rowsSnapshot, initializer[1]);
         if (typeof initializeRows !== "function") throw failure(503, "原生子代理列表初始化接口无效");
-        const rowsSymbol = nativeFamilyBefore(primary.source, rowsMarker);
+        const rowsSymbol = nativeFamilyBefore(rowsSnapshot.source, rowsMarker);
         initializeRows();
-        const rowsFamily = nativeExport(primary, rowsSymbol);
+        const rowsFamily = nativeExport(rowsSnapshot, rowsSymbol);
         if (typeof rowsFamily?.read !== "function") throw failure(503, "原生子代理列表状态无效");
-        const sortRows = nativeFunction(primary.module, source => source.length < 240
+        const sortRows = nativeFunction(rowsSnapshot.module, source => source.length < 240
           && source.includes(".sort(") && source.includes("recencyAtMs"), "子代理排序");
         const formatAgentPath = nativeFunction(initial.module, source => source.length < 500
           && source.includes(".split(`/`)") && source.includes("`root`")
@@ -1229,19 +1313,23 @@
     if (!nativeSideBindings) {
       nativeSideBindings = (async () => {
         const initial = await nativeModuleSnapshot("initial");
-        const marker = initial.source.indexOf("`sidechat-loading:`");
-        const initializer = [...initial.source.slice(0, marker).matchAll(
+        const side = await nativeModuleSnapshot("side").catch(() => null);
+        const sideSnapshot = side?.source.includes("`sidechat-loading:`") ? side : initial;
+        const marker = sideSnapshot.source.indexOf("`sidechat-loading:`");
+        const initializer = [...sideSnapshot.source.slice(0, marker).matchAll(
           /function\s+([\w$]+)\(\)\{return\(\1=/g)].at(-1);
         if (marker < 0 || !initializer) throw failure(503, "当前 Codex 版本的原生侧边会话入口无法识别");
-        nativeExport(initial, initializer[1])();
-        const open = nativeFunction(initial.module, source =>
+        nativeExport(sideSnapshot, initializer[1])();
+        const open = nativeFunction(sideSnapshot.module, source =>
           source.includes("Cannot create a side chat for an archived conversation")
           && source.includes("sourceConversationId"), "侧边会话创建");
         const featureSymbol = open.toString().match(/if\(![\w$]+\.get\(([\w$]+)\)\)return null/)?.[1];
         const threadSymbol = initial.source.match(/([\w$]+)=[\w$]+\(`ThreadScope`,/)?.[1];
         const routeSymbol = initial.source.match(/([\w$]+)=[\w$]+\(`RouteScope`,/)?.[1];
-        const componentPath = initial.source.match(
-          /let\{LocalConversationSideChatTab:[\w$]+\}=await import\([`"'](\.\/[\w-]+\.js)[`"']\)/)?.[1];
+        const sideTab = await nativeModuleSnapshot("sideTab").catch(() => null);
+        const componentPath = sideTab?.source.match(
+          /import\([`"'](\.\/[\w-]+\.js)[`"']\)/)?.[1] || initial.source.match(
+            /let\{LocalConversationSideChatTab:[\w$]+\}=await import\([`"'](\.\/[\w-]+\.js)[`"']\)/)?.[1];
         const sharedPaths = [...new Set([...initial.source.matchAll(
           /\bfrom["'](\.\/app-shared-[\w-]+\.js)["']/g)].map(match => match[1]))];
         if (!componentPath || sharedPaths.length !== 1)
@@ -1253,8 +1341,12 @@
           && /return [\w$]+===`bottom`\?[\w$]+:[\w$]+/.test(source), "侧边面板");
         const allTabs = nativeFunction(initial.module, source => source.length < 600
           && source.includes("excludeTab:") && source.includes(".tabs$"), "侧边标签");
+        let feature = null;
+        if (featureSymbol) {
+          try { feature = nativeExport(initial, featureSymbol); } catch {}
+        }
         return { open, lookupScope, panel, allTabs,
-          feature: nativeExport(initial, featureSymbol),
+          feature,
           threadScope: nativeExport(initial, threadSymbol),
           routeScope: nativeExport(initial, routeSymbol),
           componentUrl: new URL(componentPath, initial.resource).href };
@@ -1262,6 +1354,11 @@
       nativeSideBindings.catch(() => { nativeSideBindings = null; });
     }
     return await nativeSideBindings;
+  }
+  function nativeSideFeatureEnabled(native, scope) {
+    if (!scope) return !!nativeNavigate;
+    if (!native.feature) return true;
+    try { return scope.get(native.feature) === true; } catch { return false; }
   }
   function nativeSideScopes(native) {
     const root = appScope?.chain?.get(native.threadScope.parent.id);
@@ -1423,7 +1520,7 @@
     return { ok: true, threadId, subagents, completedSubagents,
       completedSubagentCount: completedSubagents.length,
       subagentsComplete: snapshot.isComplete === true, sideThreads,
-      canCreateSideThread: (sideScope ? sideScope.get(sideNative.feature) === true : !!nativeNavigate)
+      canCreateSideThread: nativeSideFeatureEnabled(sideNative, sideScope)
         && typeof nativeIntl?.formatMessage === "function"
         && !subagentIdentity(parent) && parent.ephemeral !== true
         && !entries.some(entry => entry.threadId === threadId) };
@@ -1436,7 +1533,7 @@
       throw failure(409, "请从主会话创建侧边会话");
     const native = await nativeSideState();
     const scope = await nativeSideScope(parentThreadId, native);
-    if (typeof nativeIntl?.formatMessage !== "function" || scope.get(native.feature) !== true)
+    if (typeof nativeIntl?.formatMessage !== "function" || !nativeSideFeatureEnabled(native, scope))
       throw failure(503, "当前 Codex 页面尚未提供原生侧边会话入口");
     const { LocalConversationSideChatTab } = await import(native.componentUrl);
     if (typeof LocalConversationSideChatTab !== "function")
@@ -4694,6 +4791,7 @@
         default: throw failure(404, "不支持的原生会话操作");
       }
     } catch (error) {
+      reportNativeCompatibilityDiagnostic(action, error);
       if (action === "setGoal" || action === "create" && payload?.goalMode === true) {
         return goalSubmissionFailure(goalSubmission(action,
           typeof payload?.threadId === "string" ? payload.threadId : null), error);
@@ -4707,7 +4805,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 77, call,
+    version: 78, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();
