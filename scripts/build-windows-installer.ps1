@@ -119,7 +119,8 @@ if ($env:CARGO_TARGET_DIR) {
 else {
     $CargoTargetDir = Join-Path $RepoRoot "target"
 }
-$ReleaseDir = Join-Path $CargoTargetDir "release"
+$ReleaseDir = Join-Path $CargoTargetDir "release-fast"
+$ReleaseMirrorDir = Join-Path $CargoTargetDir "release"
 
 $NpmPath = Resolve-ToolPath -Name "npm.cmd" -ExplicitPath "" -FallbackPaths @()
 $NsisPath = Resolve-ToolPath `
@@ -141,6 +142,7 @@ Write-Output "[INFO] Cargo target: $CargoTargetDir"
 Invoke-Checked -FilePath $NpmPath -Arguments @("run", "build") -WorkingDirectory $ManagerDir
 
 New-Item -ItemType Directory -Path $DistAppDir -Force | Out-Null
+New-Item -ItemType Directory -Path $ReleaseMirrorDir -Force | Out-Null
 $LauncherExe = Join-Path $ReleaseDir "codex-elves.exe"
 $ManagerExe = Join-Path $ReleaseDir "codex-elves-manager.exe"
 $TaskBoardExe = Join-Path $ReleaseDir "codex-elves-task-board.exe"
@@ -149,6 +151,10 @@ foreach ($artifact in @($LauncherExe, $ManagerExe, $TaskBoardExe)) {
     if (!(Test-Path -LiteralPath $artifact)) {
         throw "Expected release artifact not found: $artifact"
     }
+    # target/release 中的 exe 与 deps 产物是硬链接，需先删除再复制，避免改写 cargo 缓存
+    $mirrorPath = Join-Path $ReleaseMirrorDir (Split-Path -Leaf $artifact)
+    Remove-Item -LiteralPath $mirrorPath -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath $artifact -Destination $mirrorPath -Force
     Copy-Item -LiteralPath $artifact -Destination $DistAppDir -Force
 }
 

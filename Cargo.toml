@@ -39,3 +39,9 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 winresource = "0.1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# 本地打包专用的增量编译配置，正式发布仍使用 release
+[profile.release-fast]
+inherits = "release"
+incremental = true
+codegen-units = 256
