@@ -28,13 +28,16 @@ import android.view.View;
 import android.view.ViewGroup;
 import androidx.webkit.ProxyConfig;
 import androidx.webkit.ProxyController;
+import androidx.webkit.ScriptHandler;
 import androidx.webkit.UserAgentMetadata;
 import androidx.webkit.WebStorageCompat;
 import androidx.webkit.WebSettingsCompat;
+import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 import org.json.JSONObject;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.regex.Matcher;
@@ -75,6 +78,17 @@ final class BrowserSession {
     }
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final int DIAGNOSTIC_EVENT_LIMIT = 300;
+    // Desktop mode lays the page out at this width instead of the page's device-width viewport.
+    private static final int DESKTOP_VIEWPORT_WIDTH = 1280;
+    private static final String DESKTOP_VIEWPORT_SCRIPT = "(function(){if(window.top!==window)return;"
+        + "var content='width=" + DESKTOP_VIEWPORT_WIDTH + "';"
+        + "function apply(){var metas=document.querySelectorAll('meta[name=viewport]');"
+        + "if(metas.length===0){if(!document.head)return;var meta=document.createElement('meta');"
+        + "meta.name='viewport';document.head.appendChild(meta);metas=[meta];}"
+        + "for(var i=0;i<metas.length;i++){if(metas[i].getAttribute('content')!==content)"
+        + "metas[i].setAttribute('content',content);}}"
+        + "apply();new MutationObserver(apply).observe(document,{childList:true,subtree:true,"
+        + "attributes:true,attributeFilter:['name','content']});})();";
     // One retained view; detach replaces its MutableContextWrapper base with the application.
     @SuppressLint("StaticFieldLeak")
     private static BrowserSession current;
@@ -102,7 +116,7 @@ final class BrowserSession {
     private String userAgentMode;
     private String pageTitle = "";
     private boolean desktopRootScrollLocked;
-    private boolean pageWidthFitApplied;
+    private ScriptHandler desktopViewportScript;
     private final ArrayDeque<DiagnosticEvent> diagnosticEvents = new ArrayDeque<>();
     private final Runnable desktopRootScrollPolicyRefresh = this::updateDesktopRootScrollPolicy;
     private final Runnable diagnosticRefresh = () -> {
@@ -374,9 +388,6 @@ final class BrowserSession {
                 if (!mainFrameStarted && !sameAddress(address, pendingNavigationUrl)) return;
                 mainFrameStarted = true;
                 mainFrameFinished = false;
-                if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
-                    pageWidthFitApplied = false;
-                }
                 pendingNavigationUrl = address;
                 ++pageGeneration;
                 recordDiagnosticEvent("page-start", "GET", address, "", "", true, "");
@@ -392,11 +403,6 @@ final class BrowserSession {
                 if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
                     webView.scrollTo(0, webView.getScrollY());
                     MAIN.postDelayed(desktopRootScrollPolicyRefresh, 120L);
-                    long fitGeneration = pageGeneration;
-                    MAIN.postDelayed(
-                        () -> requestPageWidthFit(webView, address, fitGeneration), 180L);
-                    MAIN.postDelayed(
-                        () -> requestPageWidthFit(webView, address, fitGeneration), 800L);
                 }
                 webView.setVisibility(View.VISIBLE);
                 recordDiagnosticEvent("page-finish", "GET", address, "", "page-loaded", true, "");
@@ -435,9 +441,6 @@ final class BrowserSession {
                 recordDiagnosticEvent("failure", request.getMethod(), target, "", detail,
                     mainFrame, "");
                 if (mainFrame) {
-                    if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
-                        pageWidthFitApplied = false;
-                    }
                     webView.setVisibility(View.VISIBLE);
                     diagnostic("native.browser.error", DiagnosticsPolicy.urlFields(
                         target, "phase", "failure",
@@ -523,6 +526,16 @@ final class BrowserSession {
             && leftPath.equals(rightPath)
             && java.util.Objects.equals(left.getQuery(), right.getQuery())
             && java.util.Objects.equals(left.getFragment(), right.getFragment());
+    }
+
+    private static boolean sameDocument(String loaded, String target) {
+        return loaded != null && !loaded.isEmpty()
+            && sameAddress(withoutFragment(loaded), withoutFragment(target));
+    }
+
+    private static String withoutFragment(String address) {
+        int fragment = address.indexOf('#');
+        return fragment < 0 ? address : address.substring(0, fragment);
     }
 
     void attach(Activity activity, Listener listener, Runnable ready) {
@@ -708,16 +721,22 @@ final class BrowserSession {
         diagnostic("native.browser.navigation", DiagnosticsPolicy.urlFields(target,
             "phase", "request", "routeName", "computer"));
         if (home) view.clearHistory();
+        boolean sameDocumentLoad = sameDocument(view.getUrl(), target);
         view.stopLoading();
-        view.setVisibility(View.INVISIBLE);
-        pendingNavigationUrl = target;
-        if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
-            pageWidthFitApplied = false;
+        if (sameDocumentLoad) {
+            // Fragment and same-URL loads fire no page callbacks, so the loaded document must stay visible.
+            view.setVisibility(View.VISIBLE);
+            mainFrameStarted = true;
+            mainFrameFinished = true;
+            progress = 100;
+        } else {
+            view.setVisibility(View.INVISIBLE);
+            mainFrameStarted = false;
+            mainFrameFinished = false;
+            pageTitle = "";
+            progress = 0;
         }
-        mainFrameStarted = false;
-        mainFrameFinished = false;
-        pageTitle = "";
-        progress = 0;
+        pendingNavigationUrl = target;
         home = false; error = ""; url = target; proxy.setActive(true); ++pageGeneration;
         view.onResume(); view.resumeTimers(); view.loadUrl(target); changed();
     }
@@ -726,9 +745,6 @@ final class BrowserSession {
         error = "";
         url = "";
         pendingNavigationUrl = "";
-        if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
-            pageWidthFitApplied = false;
-        }
         mainFrameStarted = false;
         mainFrameFinished = false;
         pageTitle = "";
@@ -748,14 +764,6 @@ final class BrowserSession {
             int previousIndex = history.getCurrentIndex() - 1;
             pendingNavigationUrl = previousIndex >= 0
                 ? history.getItemAtIndex(previousIndex).getUrl() : "";
-            if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
-                pageWidthFitApplied = false;
-            }
-            mainFrameStarted = false;
-            mainFrameFinished = false;
-            pageTitle = "";
-            progress = 0;
-            view.setVisibility(View.INVISIBLE);
             view.goBack();
             return true;
         }
@@ -765,10 +773,8 @@ final class BrowserSession {
     void reload() {
         if (!closed && attached && !home) {
             error = "";
-            pendingNavigationUrl = url;
-            if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
-                pageWidthFitApplied = false;
-            }
+            String currentUrl = view.getUrl();
+            pendingNavigationUrl = currentUrl == null || currentUrl.isEmpty() ? url : currentUrl;
             mainFrameStarted = false;
             mainFrameFinished = false;
             pageTitle = "";
@@ -850,11 +856,10 @@ final class BrowserSession {
             ? iphoneUserAgent : androidUserAgent;
         settings.setUserAgentString(userAgent);
         settings.setUseWideViewPort(true);
-        settings.setLoadWithOverviewMode(!desktop);
+        settings.setLoadWithOverviewMode(true);
         settings.setLayoutAlgorithm(desktop
             ? WebSettings.LayoutAlgorithm.NORMAL
             : WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING);
-        view.setInitialScale(100);
         // Desktop UA must retain pinch zoom as well. The UA changes layout and
         // server-side content selection; it must not remove the browser's zoom
         // gesture or prevent users from fitting more of a page on screen.
@@ -865,62 +870,27 @@ final class BrowserSession {
         view.setOverScrollMode(View.OVER_SCROLL_NEVER);
         view.setNestedScrollingEnabled(false);
         applyUserAgentMetadata(settings);
+        applyDesktopViewport(desktop);
         diagnostic("native.browser.display", DiagnosticsPolicy.fields(
             "phase", "success", "reason", "success"));
     }
-    private void requestPageWidthFit(WebView webView, String address, long generation) {
-        if (closed || !attached || home
-            || !BrowserPreferences.UA_DESKTOP.equals(userAgentMode)
-            || pageWidthFitApplied || generation != pageGeneration
-            || webView.getWidth() <= 0 || webView.getHeight() <= 0) {
+    private void applyDesktopViewport(boolean desktop) {
+        if (!desktop) {
+            if (desktopViewportScript != null) desktopViewportScript.remove();
+            desktopViewportScript = null;
             return;
         }
-        webView.evaluateJavascript(
-            "(function(){var d=document.documentElement,b=document.body;"
-                + "var w=Math.max(d?d.scrollWidth:0,d?d.offsetWidth:0,d?d.clientWidth:0,"
-                + "b?b.scrollWidth:0,b?b.offsetWidth:0,b?b.clientWidth:0);"
-                + "var h=Math.max(d?d.scrollHeight:0,d?d.offsetHeight:0,d?d.clientHeight:0,"
-                + "b?b.scrollHeight:0,b?b.offsetHeight:0,b?b.clientHeight:0);"
-                + "return Math.round(w)+','+Math.round(h);})()",
-            value -> {
-                if (closed || !attached || home
-                    || !BrowserPreferences.UA_DESKTOP.equals(userAgentMode)
-                    || generation != pageGeneration
-                    || pageWidthFitApplied || !sameAddress(address, url)) {
-                    return;
-                }
-                int[] dimensions = pageDimensions(value);
-                if (dimensions == null) return;
-                float currentScale = webView.getScale();
-                int scalePercent = BrowserScalePolicy.widthFitScalePercent(
-                    webView.getWidth(), dimensions[0], currentScale);
-                diagnostic("native.browser.scale", DiagnosticsPolicy.fields(
-                    "phase", "measure", "reason", "page-width-fit",
-                    "contentWidth", dimensions[0], "contentHeight", dimensions[1],
-                    "viewportWidth", webView.getWidth(), "viewportHeight", webView.getHeight(),
-                    "currentScale", currentScale, "scalePercent", scalePercent,
-                    "generation", generation));
-                float zoomFactor = BrowserScalePolicy.widthFitZoomFactor(
-                    webView.getWidth(), dimensions[0], currentScale);
-                pageWidthFitApplied = true;
-                if (zoomFactor < 0.999f) webView.zoomBy(zoomFactor);
-            });
-    }
-    private static int[] pageDimensions(String value) {
-        if (value == null || value.isEmpty()) return null;
-        String decoded = value;
-        try {
-            Object parsed = new org.json.JSONTokener(value).nextValue();
-            if (parsed != null) decoded = parsed.toString();
-        } catch (Exception ignored) { }
-        String[] parts = decoded.split(",");
-        if (parts.length < 2) return null;
-        try {
-            int width = Integer.parseInt(parts[0].trim());
-            int height = Integer.parseInt(parts[1].trim());
-            return width > 0 && height > 0 ? new int[] { width, height } : null;
-        } catch (NumberFormatException ignored) {
-            return null;
+        if (desktopViewportScript == null
+            && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            // The override is optional; a rejected script must not stop the browser from opening.
+            try {
+                desktopViewportScript = WebViewCompat.addDocumentStartJavaScript(
+                    view, DESKTOP_VIEWPORT_SCRIPT, Collections.singleton("*"));
+            } catch (RuntimeException unavailable) {
+                diagnostic("native.browser.display", DiagnosticsPolicy.fields(
+                    "phase", "failure", "errorType", DiagnosticsPolicy.errorType(unavailable),
+                    "reason", "unsupported"));
+            }
         }
     }
     private void updateDesktopRootScrollPolicy() {
