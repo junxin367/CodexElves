@@ -3938,6 +3938,71 @@ fn injection_script_times_out_backend_bridge_calls_and_falls_back_to_helper() {
 }
 
 #[test]
+fn backend_status_bridge_failures_report_reason_in_menu_message() {
+    let script = assets::renderer_features_script();
+    let start = script
+        .find("  async function waitForCodexSessionDeleteBridgeReady() {")
+        .expect("bridge readiness wait");
+    let end = script[start..]
+        .find("\n  function normalizeCodexTokenUsage(value) {")
+        .map(|offset| start + offset)
+        .expect("token usage normalizer after postJson");
+    let helper = &script[start..end];
+    let node_script = format!(
+        "const source = {};\n",
+        serde_json::to_string(helper).unwrap()
+    ) + r#"
+const assert = require("node:assert/strict");
+const events = [];
+const window = { __codexElvesScriptLoadedAt: Date.now() - 60000 };
+const { postJson } = new Function(
+  "window",
+  "location",
+  "helperBase",
+  "fetch",
+  "sendCodexElvesDiagnostic",
+  "codexBackendBridgeReadyTimeoutMs",
+  "codexBackendBridgeTimeoutMs",
+  `${source}\nreturn { postJson };`
+)(
+  window,
+  { protocol: "app:" },
+  "http://127.0.0.1:45221",
+  async () => { throw new Error("offline"); },
+  (event, detail) => events.push({ event, detail }),
+  5,
+  10
+);
+(async () => {
+  assert.deepEqual(await postJson("/backend/status", {}), {
+    status: "failed",
+    message: "桥接不可用，桥接函数未注入",
+    bridgeMissing: true,
+  });
+  window.__codexSessionDeleteBridge = () => { throw new Error("binding gone"); };
+  assert.equal((await postJson("/backend/status", {})).message, "桥接不可用，桥接调用异常：binding gone");
+  window.__codexSessionDeleteBridge = async () => ({ status: "failed", message: "CodexElves Bridge 已重启，请重试" });
+  assert.equal((await postJson("/backend/status", {})).message, "桥接不可用，桥接返回失败：CodexElves Bridge 已重启，请重试");
+  window.__codexSessionDeleteBridge = () => new Promise(() => {});
+  assert.equal((await postJson("/backend/status", {})).message, "桥接不可用，桥接调用超时");
+  assert.ok(events.some(({ event, detail }) => event === "backend_status_bridge_and_http_failed" && detail.errorMessage === "桥接调用超时"));
+  window.__codexSessionDeleteBridge = async () => ({ status: "ok", message: "后端已连接" });
+  assert.deepEqual(await postJson("/backend/status", {}), { status: "ok", message: "后端已连接" });
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"#;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(node_script)
+        .output()
+        .expect("node should be available");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn injection_script_explains_plugin_patch_is_unneeded_in_relay_mode() {
     let script = assets::injection_script(45221);
 

@@ -2416,7 +2416,7 @@
       .codex-elves-form-message[data-status="failed"] { color: #f87171; }
       .codex-elves-form-message[data-status="loading"] { color: #fbbf24; }
       .codex-elves-backend-status { display: grid; gap: 4px; min-width: 132px; justify-items: end; }
-      .codex-elves-backend-label { color: #a1a1aa; font-size: 12px; }
+      .codex-elves-backend-label { color: #a1a1aa; font-size: 12px; max-width: 220px; overflow-wrap: anywhere; text-align: right; }
       .codex-elves-backend-label[data-status="ok"] { color: #34d399; }
       .codex-elves-backend-label[data-status="failed"] { color: #f87171; }
       .codex-elves-backend-repair { border: 1px solid rgba(255,255,255,.18); border-radius: 7px; background: #3f3f46; color: #f3f4f6; font: 12px system-ui, sans-serif; padding: 6px 8px; }
@@ -7046,17 +7046,24 @@
   }
 
   async function repairBackend() {
+    const previousMessage = codexElvesBackendStatus.message || "";
     codexElvesBackendStatus = { status: "checking", message: "正在修复后端…" };
     renderBackendStatus();
     try {
       const recoveredStatus = await waitForBackendBridgeRecovery();
       if (!recoveredStatus) {
+        sendCodexElvesDiagnostic("backend_repair_timeout", { previousMessage });
         codexElvesBackendStatus = { status: "failed", message: "自动修复超时，请重启启动器" };
         renderBackendStatus();
         return;
       }
       codexElvesBackendStatus = recoveredStatus;
     } catch (error) {
+      sendCodexElvesDiagnostic("backend_repair_failed", {
+        previousMessage,
+        errorName: error?.name || "",
+        errorMessage: error?.message || String(error),
+      });
       codexElvesBackendStatus = { status: "failed", message: "后端修复失败" };
     }
     renderBackendStatus();
@@ -8603,6 +8610,10 @@
     return typeof window.__codexSessionDeleteBridge === "function";
   }
 
+  function bridgeUnavailableStatus(reason) {
+    return { status: "failed", message: `桥接不可用，${reason}`, bridgeMissing: true };
+  }
+
   async function postJson(path, payload) {
     if (!window.__codexSessionDeleteBridge) {
       // 启动早期存在“CDP 注入已成功但渲染端 bridge binding 尚未就绪”的瞬态窗口。
@@ -8612,7 +8623,7 @@
       if (!bridgeReady) {
         if (path === "/backend/status" || path === "/backend/repair") {
           if (location.protocol === "app:") {
-            return { status: "failed", message: "桥接不可用，等待自动修复", bridgeMissing: true };
+            return bridgeUnavailableStatus("桥接函数未注入");
           }
           try {
             const response = await fetch(`${helperBase}${path}`, {
@@ -8635,9 +8646,9 @@
         new Promise((resolve) => setTimeout(() => resolve({ status: "failed", message: "后端检查超时", timeout: true }), codexBackendBridgeTimeoutMs)),
       ]);
     }
-    async function fetchBackendStatusFromHelper(path, payload) {
+    async function fetchBackendStatusFromHelper(path, payload, reason) {
       if (location.protocol === "app:") {
-        return { status: "failed", message: "桥接不可用，等待自动修复", bridgeMissing: true };
+        return bridgeUnavailableStatus(reason);
       }
       try {
         const response = await fetch(`${helperBase}${path}`, {
@@ -8655,7 +8666,8 @@
         const result = await bridgeWithBackendTimeout(path, payload);
         if (result?.status === "ok") return result;
         if (result?.timeout) sendCodexElvesDiagnostic("backend_bridge_timeout", { path });
-        const fallback = await fetchBackendStatusFromHelper(path, payload);
+        const reason = result?.timeout ? "桥接调用超时" : `桥接返回失败：${result?.message || "无效响应"}`;
+        const fallback = await fetchBackendStatusFromHelper(path, payload, reason);
         if (fallback?.status === "ok") {
           sendCodexElvesDiagnostic("backend_status_bridge_failed_http_fallback_ok", {
             path,
@@ -8667,7 +8679,7 @@
         sendCodexElvesDiagnostic("backend_status_bridge_and_http_failed", {
           path,
           errorName: "",
-          errorMessage: "",
+          errorMessage: reason,
         });
         return fallback;
       }
@@ -8679,7 +8691,7 @@
         errorMessage: error?.message || String(error),
       });
       if (path === "/backend/status" || path === "/backend/repair") {
-        const fallback = await fetchBackendStatusFromHelper(path, payload);
+        const fallback = await fetchBackendStatusFromHelper(path, payload, `桥接调用异常：${error?.message || String(error)}`);
         if (fallback?.status === "ok") {
           sendCodexElvesDiagnostic("backend_status_bridge_failed_http_fallback_ok", {
             path,
