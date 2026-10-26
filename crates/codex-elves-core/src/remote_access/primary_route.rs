@@ -216,7 +216,9 @@ impl Drop for Trial<'_> {
 impl RemoteAccessController {
     pub(super) fn primary_status(&self, live: &LiveService) -> Value {
         let saved = frp_tunnel::Saved::load(&self.state_dir, false).unwrap_or_default();
+        let active = frp_tunnel::Saved::load(&self.state_dir, true).unwrap_or_default();
         let mut frp = saved.public();
+        frp["configMatchesActive"] = json!(saved == active);
         let download = self.primary.frp_download.status();
         for field in [
             "version",
@@ -305,7 +307,8 @@ impl RemoteAccessController {
                     live.frp = None;
                     self.primary.set_ingress(None);
                     live.frp_error = Some("FRP 连接已结束，等待自动重试".into());
-                    live.frp_retry_at = now_ms() + 30_000;
+                    // A failed replacement must not silently restore the old FRP mapping.
+                    live.frp_retry_at = u64::MAX;
                 }
                 if live
                     .frp_start
@@ -455,12 +458,6 @@ impl RemoteAccessController {
             settings.enabled && self.running.load(Ordering::SeqCst),
             "请先启用远程会话网页"
         );
-        if apply {
-            anyhow::ensure!(
-                self.native_connected.load(Ordering::SeqCst),
-                super::DESKTOP_START_GUIDANCE
-            );
-        }
         let original = self.primary.provider();
         let generation = self.primary.generation.load(Ordering::SeqCst);
         self.primary.busy.store(true, Ordering::SeqCst);
@@ -482,6 +479,13 @@ impl RemoteAccessController {
                 .await;
         }
         if let Err(error) = &result {
+            if original == Provider::Frp && provider == Provider::Frp {
+                let mut live = self.live.lock().await;
+                if live.frp.is_none() && live.frp_start.is_none() {
+                    live.frp_error = Some(error.to_string());
+                    live.frp_retry_at = now_ms() + 30_000;
+                }
+            }
             *self
                 .primary
                 .last_error
@@ -500,28 +504,31 @@ impl RemoteAccessController {
         settings: &RemoteAccessSettings,
     ) -> anyhow::Result<Value> {
         let mut candidate = None;
+        let mut replaced_active_frp = false;
         let (origin, ingress, https) = match provider {
             Provider::Frp => {
                 let saved = frp_tunnel::Saved::load(&self.state_dir, false)?;
                 saved.config.validate()?;
                 let https = saved.https_configured();
                 let mut live = self.live.lock().await;
-                if original == Provider::Frp {
-                    let running = live
-                        .frp
-                        .as_mut()
-                        .context("FRP 主入口未运行，请等待重连后测试")?;
-                    anyhow::ensure!(
-                        running.saved == saved,
-                        "FRP 候选配置已改变；请先切回 zrok，再测试并应用新配置，以保留原入口"
-                    );
-                    anyhow::ensure!(running.alive(), "FRP 主入口已断开，请等待重连");
-                    (
-                        saved.config.public_origin.clone(),
-                        Some(running.id.clone()),
-                        https,
-                    )
+                let reused_id = if let Some(running) = live.frp.as_mut() {
+                    if running.saved == saved && running.alive() {
+                        Some(running.id.clone())
+                    } else {
+                        None
+                    }
                 } else {
+                    None
+                };
+                if let Some(id) = reused_id {
+                    (saved.config.public_origin.clone(), Some(id), https)
+                } else {
+                    if original == Provider::Frp {
+                        // Replacing the active FRP config cannot use the old tunnel.
+                        // Start the verified candidate instead and keep the new entry on success.
+                        self.stop_frp(&mut live).await;
+                        replaced_active_frp = true;
+                    }
                     drop(live);
                     let running = frp_tunnel::start(self, settings, saved, https).await?;
                     let origin = running.saved.config.public_origin.clone();
@@ -548,7 +555,7 @@ impl RemoteAccessController {
                 && self.primary.generation.load(Ordering::SeqCst) == generation,
             "验证期间远程配置已变化，未应用切换"
         );
-        if apply && provider != original {
+        if (apply && provider != original) || replaced_active_frp {
             let mut live = self.live.lock().await;
             anyhow::ensure!(
                 self.running.load(Ordering::SeqCst)
@@ -571,6 +578,7 @@ impl RemoteAccessController {
                 Provider::Frp => {
                     live.frp = candidate.take();
                     live.frp_error = None;
+                    live.frp_retry_at = 0;
                     live.zrok
                         .reconcile(false, &super::zrok_target(settings))
                         .await;
@@ -586,20 +594,27 @@ impl RemoteAccessController {
             drop(live);
             self.prune_stale_public_devices().await;
         }
-        let message = if apply {
+        let message = if replaced_active_frp && !apply {
+            if https {
+                "FRP 新配置验证通过并已替换当前主入口，请使用新的公网地址重新登录。"
+            } else {
+                "FRP 新配置验证通过并已替换当前主入口；公网传输不加密。"
+            }
+        } else if apply {
             if https {
                 "主链路已应用，请使用新的公网地址重新登录。"
             } else {
                 "frp HTTP 主链路已应用，请使用固定公网地址登录；公网传输不加密。"
             }
+        } else if https {
+            "公网 HTTPS、回源身份及未登录访问边界验证通过，当前主入口未改变。"
         } else {
-            if https {
-                "公网 HTTPS、回源身份及未登录访问边界验证通过，当前主入口未改变。"
-            } else {
-                "frp HTTP 入口、回源身份及未登录访问边界验证通过，可应用为主链路；公网传输不加密。"
-            }
+            "frp HTTP 入口、回源身份及未登录访问边界验证通过，可应用为主链路；公网传输不加密。"
         };
-        Ok(json!({"status":"ok","httpsReady":https,"publicUrl":origin,"message":message}))
+        Ok(json!({
+            "status":"ok","httpsReady":https,"publicUrl":origin,
+            "replacedActive":replaced_active_frp,"message":message
+        }))
     }
 }
 
@@ -928,6 +943,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn frp_status_reports_when_draft_differs_from_active() {
+        let directory = tempfile::tempdir().unwrap();
+        let controller =
+            RemoteAccessController::new(Arc::new(Bridge), directory.path().into()).unwrap();
+        let active = frp_tunnel::Saved {
+            config: frp_tunnel::Config {
+                server_addr: "relay.example.com".into(),
+                server_port: 7000,
+                remote_port: 39400,
+                public_origin: "http://entry.example.com:39400".into(),
+                ..Default::default()
+            },
+            token: "test-only".into(),
+            ..Default::default()
+        };
+        active.store(directory.path(), true).unwrap();
+        active.store(directory.path(), false).unwrap();
+        {
+            let live = controller.live.lock().await;
+            assert_eq!(
+                controller.primary_status(&live)["frp"]["configMatchesActive"],
+                true
+            );
+        }
+        let mut changed = active.clone();
+        changed.config.remote_port = 39401;
+        changed.config.public_origin = "http://entry.example.com:39401".into();
+        changed.store(directory.path(), false).unwrap();
+        let live = controller.live.lock().await;
+        assert_eq!(
+            controller.primary_status(&live)["frp"]["configMatchesActive"],
+            false
+        );
+    }
     #[tokio::test]
     async fn frp_http_login_media_and_logout_keep_authorization_and_ngrok_isolation() {
         let directory = tempfile::tempdir().unwrap();

@@ -7,6 +7,14 @@ import { defaultFrpConfig, frpPublicOrigin, normalizeFrpServerAddress, type FrpC
 
 type Result = { status: string; message?: string; httpsReady?: boolean };
 type Feedback = { text: string; kind: "success" | "warning" | "error" };
+function normalizeFrpConfig(config: FrpConfig): FrpConfig {
+  return {
+    ...config,
+    serverAddr: normalizeFrpServerAddress(config.serverAddr),
+    publicOrigin: frpPublicOrigin(config),
+    httpsMode: "provider",
+  };
+}
 export function PrimaryRouteTabs({ value, onChange, disabled }: {
   value: PrimaryProvider;
   onChange: (provider: PrimaryProvider) => void;
@@ -40,7 +48,7 @@ export function PrimaryRouteTabs({ value, onChange, disabled }: {
 }
 
 export function PrimaryRouteControls({
-  status, token, busy, enabled, editing, target, command, run, refresh, children,
+  status, token, busy, enabled, editing, target, command, run, refresh, prepare, children,
 }: {
   status: RemoteAccessStatus | null;
   token?: string;
@@ -51,10 +59,12 @@ export function PrimaryRouteControls({
   command: <T>(action: string, payload?: Record<string, unknown>) => Promise<T>;
   run: (operation: () => Promise<void>) => Promise<void>;
   refresh: () => Promise<void>;
+  prepare: (provider: PrimaryProvider) => Promise<void>;
   children: ReactNode;
 }) {
   const primary = status?.primary;
   const [config, setConfig] = useState<FrpConfig>({ ...defaultFrpConfig });
+  const [customPublicOrigin, setCustomPublicOrigin] = useState(false);
   const [frpToken, setFrpToken] = useState("");
   const [visible, setVisible] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
@@ -67,6 +77,9 @@ export function PrimaryRouteControls({
     if (!primary || initialized.current) return;
     initialized.current = true;
     setConfig({ ...defaultFrpConfig, ...primary.frp.config, httpsMode: "provider" });
+    const savedOrigin = primary.frp.config.publicOrigin.trim();
+    const automaticOrigin = frpPublicOrigin({ ...primary.frp.config, publicOrigin: "" });
+    setCustomPublicOrigin(Boolean(savedOrigin) && savedOrigin !== automaticOrigin);
   }, [primary]);
   useEffect(() => { setFeedback(null); }, [editing, enabled]);
   useEffect(() => {
@@ -81,6 +94,17 @@ export function PrimaryRouteControls({
     setFeedback(null);
   };
   const publicOrigin = frpPublicOrigin(config);
+  const normalizedConfig = normalizeFrpConfig(config);
+  const draftConfig = primary?.frp.config;
+  const localConfigChanged = draftConfig ? (
+    draftConfig.serverAddr !== normalizedConfig.serverAddr
+    || draftConfig.serverPort !== normalizedConfig.serverPort
+    || draftConfig.remotePort !== normalizedConfig.remotePort
+    || draftConfig.publicOrigin !== normalizedConfig.publicOrigin
+  ) : false;
+  const localTokenChanged = frpToken.trim() !== (loadedToken.current || "").trim();
+  const frpConfigChanged = editing === "frp"
+    && (primary?.frp.configMatchesActive === false || localConfigChanged || localTokenChanged);
   const downloading = primary?.frp.state === "downloading";
   const downloadTotal = primary?.frp.downloadTotalBytes || 0;
   const downloaded = primary?.frp.downloadedBytes || 0;
@@ -88,18 +112,17 @@ export function PrimaryRouteControls({
     ? Math.max(0, Math.min(100, Math.floor(downloaded / downloadTotal * 100))) : null;
   const downloadSize = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   const current = primary?.provider || "zrok";
+  const currentApplied = current === editing && !(editing === "frp" && frpConfigChanged);
   const pending = busy || Boolean(operation) || Boolean(primary?.switching) || downloading;
   const known = Boolean(primary);
-  const canUse = enabled && status?.running && status?.nativeConnected;
+  const serviceReady = !enabled || status?.running === true;
   const providerError = editing === "frp" ? primary?.frp.error
     : ["connecting", "retry_wait", "error"].includes(status?.zrok?.state || "") ? status?.zrok?.error : null;
   const actionFeedback: Feedback | null = feedback || (operation
     ? { text: operation === "apply" ? "正在验证并切换主链路…" : enabled ? "正在保存并测试入口…" : "正在保存配置…", kind: "success" }
     : providerError ? { text: providerError, kind: "error" } : null);
   const saveFrp = async () => {
-    const normalized: FrpConfig = {
-      ...config, serverAddr: normalizeFrpServerAddress(config.serverAddr), publicOrigin, httpsMode: "provider",
-    };
+    const normalized = normalizeFrpConfig(config);
     if (!normalized.serverAddr || !frpToken.trim()) throw new Error("请填写 FRP 服务器地址和 Token。");
     if (![normalized.serverPort, normalized.remotePort].every(value => Number.isInteger(value) && value >= 1 && value <= 65535))
       throw new Error("服务端口与公网映射端口必须在 1–65535 之间。");
@@ -120,6 +143,7 @@ export function PrimaryRouteControls({
     setFeedback(null);
     try {
       if (editing === "frp") await saveFrp();
+      else await prepare(editing);
       if (!enabled && action === "test") {
         setFeedback({ text: "FRP 候选配置已保存；启用远程会话网页后可测试入口。", kind: "success" });
         return;
@@ -156,7 +180,7 @@ export function PrimaryRouteControls({
       <div id="remote-primary-panel-frp" role="tabpanel" aria-labelledby="remote-primary-frp" hidden={editing !== "frp"}>
         <div className="remote-frp-fields">
           <div className="remote-frp-server"><Label htmlFor="remote-frp-server">服务器地址</Label><Input id="remote-frp-server" value={config.serverAddr} disabled={pending} spellCheck={false} placeholder="商家提供的 server_addr"
-            onChange={e => update({ serverAddr: e.target.value, publicOrigin: "" })}
+            onChange={e => update({ serverAddr: e.target.value, ...(customPublicOrigin ? {} : { publicOrigin: "" }) })}
             onBlur={() => update({ serverAddr: normalizeFrpServerAddress(config.serverAddr) })} /></div>
           <div className="remote-frp-token"><Label htmlFor="remote-frp-token">Token</Label>
             <div className="remote-access-key-input"><Input id="remote-frp-token" type={visible ? "text" : "password"} autoComplete="off" spellCheck={false} disabled={pending}
@@ -167,13 +191,18 @@ export function PrimaryRouteControls({
             </div>
           </div>
           <div className="remote-frp-port"><Label htmlFor="remote-frp-server-port">服务端口</Label><Input id="remote-frp-server-port" type="number" min={1} max={65535} disabled={pending} value={config.serverPort || ""} onChange={e => update({ serverPort: Number(e.target.value) })} /></div>
-          <div className="remote-frp-port"><Label htmlFor="remote-frp-remote-port">公网映射端口</Label><Input id="remote-frp-remote-port" type="number" min={1} max={65535} disabled={pending} value={config.remotePort || ""} onChange={e => update({ remotePort: Number(e.target.value), publicOrigin: "" })} /></div>
+          <div className="remote-frp-port"><Label htmlFor="remote-frp-remote-port">公网映射端口</Label><Input id="remote-frp-remote-port" type="number" min={1} max={65535} disabled={pending} value={config.remotePort || ""} onChange={e => update({ remotePort: Number(e.target.value), ...(customPublicOrigin ? {} : { publicOrigin: "" }) })} /></div>
           <div className="remote-access-wide"><Label htmlFor="remote-frp-url">固定公网地址</Label>
-            <div className="remote-access-key-input remote-access-public-input"><Input id="remote-frp-url" readOnly aria-describedby="remote-frp-url-hint" value={publicOrigin}
-              placeholder="填写服务器地址和公网映射端口后自动生成" />
+            <div className="remote-access-key-input remote-access-public-input"><Input id="remote-frp-url" disabled={pending} aria-describedby="remote-frp-url-hint" aria-invalid={(Boolean(config.publicOrigin.trim()) && !publicOrigin) || undefined} spellCheck={false} value={config.publicOrigin || publicOrigin}
+              placeholder="填写服务商提供的 HTTP/HTTPS 根地址；留空时自动生成"
+              onChange={event => {
+                const value = event.target.value;
+                setCustomPublicOrigin(Boolean(value.trim()));
+                update({ publicOrigin: value });
+              }} />
               <div className="remote-access-key-actions"><Button variant="ghost" size="sm" className="h-7 w-7 p-0" aria-label="复制固定公网地址" disabled={pending || !publicOrigin} onClick={() => void copy(publicOrigin)}><Copy className="h-4 w-4" /></Button></div>
             </div>
-            <small id="remote-frp-url-hint">由服务器地址和公网映射端口自动生成，无需重复填写。</small>
+            <small id="remote-frp-url-hint">可填写服务商提供的 HTTP/HTTPS 根地址；清空后按服务器地址和公网映射端口自动生成。</small>
           </div>
         </div>
       </div>
@@ -187,14 +216,16 @@ export function PrimaryRouteControls({
           </div>
         </div> : <p className={actionFeedback ? `remote-primary-feedback ${actionFeedback.kind}` : "remote-access-hint"} role="status" aria-live="polite" aria-atomic="true">
           {actionFeedback?.text || (editing === "frp" && publicOrigin.startsWith("http:") ? "HTTP 公网传输不加密；验证通过后可应用为主链路。"
-            : current === editing ? (editing === "frp" ? "修改正在使用的 frp 配置后，请先切回 zrok，再验证并应用新配置。" : "当前主链路的配置已保留，可查看另一份配置。")
+            : current === editing ? (editing === "frp"
+              ? frpConfigChanged ? "测试或应用新配置时会重启当前 FRP 连接；验证失败后旧入口不会继续使用。" : "当前主链路的配置已保留，可查看另一份配置。"
+              : "当前主链路的配置已保留，可查看另一份配置。")
             : "切换公网地址后，远程设备需用新地址重新登录。")}
         </p>}<div className="remote-primary-buttons">
           {editing === "frp" ? <Button type="button" variant="secondary" size="sm" disabled={openingDirectory}
             onClick={() => void openProgramDirectory()}><FolderOpen className="h-4 w-4" />{openingDirectory ? "正在打开…" : "打开程序目录"}</Button> : null}
           <Button variant="secondary" size="sm" disabled={pending || !enabled && editing !== "frp"} onClick={() => void execute("test")}>{downloading ? "下载中…" : operation === "test" ? "正在处理…" : enabled ? "保存并测试" : "保存配置"}</Button>
-          <Button size="sm" disabled={pending || enabled && !canUse || current === editing || editing === "frp" && !publicOrigin}
-            onClick={() => void execute("apply")}>{operation === "apply" ? "正在切换…" : current === editing ? "当前主链路" : enabled ? "应用为主链路" : "保存为主链路"}</Button>
+          <Button size="sm" disabled={pending || !serviceReady || currentApplied || (editing === "frp" && !publicOrigin)}
+            onClick={() => void execute("apply")}>{operation === "apply" ? "正在切换…" : currentApplied ? "当前主链路" : enabled ? "应用为主链路" : "保存为主链路"}</Button>
         </div></div>
       </> : null}
     </>

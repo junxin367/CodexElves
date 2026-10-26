@@ -39,6 +39,7 @@
 .remote-access-hint { font-size: 11px; line-height: 1.8; margin: 4px 0 12px; }
 .remote-access-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; margin-top: 14px; }
 .remote-access-fields-top { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 10px; }
+.remote-access-fields-flush { margin-top: 0; }
 .remote-access-fields > div { display: flex; flex-direction: column; gap: 6px; }
 .remote-access-fields label { font-size: 12px; font-weight: 600; }
 .remote-access-fields small { font-size: 11px; color: hsl(var(--muted-foreground)); line-height: 1.6; }

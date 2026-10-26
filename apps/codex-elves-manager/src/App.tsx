@@ -1072,6 +1072,7 @@ let browserPreviewFrpToken = "";
 let browserPreviewFrpCertificate = "";
 let browserPreviewFrpPrivateKey = "";
 let browserPreviewFrpActiveOrigin = "";
+let browserPreviewFrpConfigMatchesActive = false;
 let browserPreviewFrpInstalled = false;
 let browserPreviewFrpDownloadStartedAt = 0;
 const browserPreviewFrpDownloadBytes = 14_152_383;
@@ -2035,6 +2036,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         browserPreviewFrp.serverAddr = normalizeFrpServerAddress(browserPreviewFrp.serverAddr);
         browserPreviewFrp.publicOrigin = frpPublicOrigin(browserPreviewFrp);
         browserPreviewFrpToken = String(payload?.token || "");
+        browserPreviewFrpConfigMatchesActive = false;
         browserPreviewFrpCertificate = String(payload?.certificateName || browserPreviewFrpCertificate);
         browserPreviewFrpPrivateKey = String(payload?.privateKeyName || browserPreviewFrpPrivateKey);
         return Promise.resolve({ status: "ok", message: "浏览器预览：FRP 候选配置已保存。" } as T);
@@ -2057,14 +2059,19 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
             resolve(browserPreviewCommand<T>(command, args));
           }, 8000));
         }
-        if (action === "applyPrimaryRoute") {
+        const replacesActiveFrp = provider === "frp" && browserPreviewPrimary === "frp";
+        if (action === "applyPrimaryRoute" || replacesActiveFrp) {
           browserPreviewPrimary = provider;
           browserPreviewZrokRunning = provider === "zrok";
-          if (provider === "frp") browserPreviewFrpActiveOrigin = browserPreviewFrp.publicOrigin;
+          if (provider === "frp") {
+            browserPreviewFrpActiveOrigin = browserPreviewFrp.publicOrigin;
+            browserPreviewFrpConfigMatchesActive = true;
+          }
         }
         return Promise.resolve({
           status: "ok", httpsReady: provider === "zrok" || frpHttpsReady,
-          message: action === "applyPrimaryRoute" ? (running ? "浏览器预览：主链路已切换，请使用固定公网地址重新登录。" : "浏览器预览：主链路选择已保存，启用远程会话网页后启动。")
+          message: replacesActiveFrp && action === "testPrimaryRoute" ? "浏览器预览：FRP 新配置已验证并替换当前主入口。"
+            : action === "applyPrimaryRoute" ? (running ? "浏览器预览：主链路已切换，请使用固定公网地址重新登录。" : "浏览器预览：主链路选择已保存，启用远程会话网页后启动。")
               : provider === "frp" && !frpHttpsReady ? "浏览器预览：HTTP 入口验证通过，可应用为主链路；公网传输不加密。"
               : "浏览器预览：入口验证通过，当前主链路未改变。",
         } as T);
@@ -2131,6 +2138,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           provider: browserPreviewPrimary, publicUrl: browserPreviewPrimary === "frp" ? browserPreviewFrpActiveOrigin : publicUrl,
           switching: browserPreviewFrpDownloadStartedAt > 0, error: null,
           frp: { config: browserPreviewFrp, state: browserPreviewFrpDownloadStartedAt ? "downloading" : running && browserPreviewPrimary === "frp" ? "ready" : "stopped",
+            configMatchesActive: browserPreviewFrpConfigMatchesActive,
             downloadedBytes: browserPreviewFrpDownloadStartedAt ? Math.min(browserPreviewFrpDownloadBytes - 1, Math.floor((Date.now() - browserPreviewFrpDownloadStartedAt) / 8000 * browserPreviewFrpDownloadBytes)) : 0,
             downloadTotalBytes: browserPreviewFrpDownloadStartedAt ? browserPreviewFrpDownloadBytes : null,
             running: running && browserPreviewPrimary === "frp", tokenConfigured: Boolean(browserPreviewFrpToken),

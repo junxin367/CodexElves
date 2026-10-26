@@ -9,7 +9,7 @@ import { remoteAccessValidation, type PrimaryProvider, type RemoteAccessCredenti
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const FIXED_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$/;
-const DESKTOP_START_GUIDANCE = "请先点击管理器右上角「重启 Codex」，等待 Codex 主界面完全打开、能够正常查看会话后，再点击「启动公网」。";
+const DESKTOP_WAITING_GUIDANCE = "Codex 桌面当前未连接；公网入口仍可测试和切换，远程网页会等待桌面恢复后就绪。";
 
 export function RemoteAccessScreen({
   settings,
@@ -137,7 +137,7 @@ export function RemoteAccessScreen({
     ? "请先启用上方「远程会话网页」，再重启 Codex 并等待主界面就绪，最后启动公网。"
     : desktopReady
       ? "Codex 桌面已连接，可以启动公网。后续重启 Codex 时，请等待主界面恢复后再刷新远程网页。"
-      : DESKTOP_START_GUIDANCE;
+      : DESKTOP_WAITING_GUIDANCE;
   const publicUrl = zrok?.publicUrl || "";
   const zrokInput = zrokValue.trim();
   const zrokEmail = EMAIL_PATTERN.test(zrokInput);
@@ -159,7 +159,6 @@ export function RemoteAccessScreen({
   const zrokActionDisabled = busy
     || !zrok
     || zrokTransitioning
-    || (zrok.installed && !zrokEmail && !desktopReady)
     || (zrok.installed && zrokToken && (!settings.enabled || !fixedNameValid))
     || (zrok.installed && !zrokInput && (!settings.enabled || !zrok.bound || !zrok.fixedName || zrok.running));
   const runApply = (operation: () => Promise<void>) => run(async () => {
@@ -181,6 +180,26 @@ export function RemoteAccessScreen({
     }
   };
   const toggleWebService = () => runApply(() => applySettings({ ...settings, enabled: !settings.enabled }));
+  const preparePrimaryAction = async (provider: PrimaryProvider) => {
+    if (provider !== "zrok" || !zrok) return;
+    const setupChanged = zrokInput !== settings.zrokSetupValue.trim() || fixedNameDirtyRef.current;
+    if (!setupChanged) return;
+    if (zrokInput) await saveZrokSetupValue(zrokInput);
+    if (!settings.enabled) return;
+    if (zrokEmail) throw new Error("当前输入是注册邮箱，请先点击右侧「注册公网」，收到 token 后再测试主入口。");
+    if (!zrok.installed) throw new Error("请先下载 zrok 程序。");
+    if (!zrokToken) throw new Error("请输入 zrok token。");
+    if (!fixedNameValid) throw new Error("固定公网名称需为 3–63 位小写字母、数字或连字符，且首尾必须是字母或数字。");
+    const result = await command<RemoteAccessStatus>("startZrok", {
+      token: zrokInput,
+      fixedName: normalizedFixedName,
+    });
+    if (!mounted.current) return;
+    setStatus(result);
+    if (result.status !== "ok") throw new Error(result.message || "zrok 配置保存失败");
+    fixedNameDirtyRef.current = false;
+    setFixedNameValue(result.zrok?.fixedName || normalizedFixedName);
+  };
   const toggleNgrok = () => runApply(() => {
     const next = { ...latestSettings.current, ngrokEnabled: !latestSettings.current.ngrokEnabled };
     return applySettings(next, next.ngrokEnabled ? "ngrok 第二线路已启用。" : "ngrok 第二线路已停用，Token 已保留。");
@@ -221,7 +240,6 @@ export function RemoteAccessScreen({
       setStatus(latest);
       if (latest.status !== "ok") throw new Error(latest.message || "无法确认桌面连接，请稍后重试。");
       if (!latest.enabled || !latest.running) throw new Error("请先启用上方「远程会话网页」。");
-      if (!latest.nativeConnected) throw new Error(DESKTOP_START_GUIDANCE);
     }
     if (zrokInput) await saveZrokSetupValue(zrokInput);
     if (!zrok.installed) {
@@ -377,7 +395,7 @@ export function RemoteAccessScreen({
             <CardDescription>
               {editingPrimary === "zrok"
                 ? <>免费，但是稳定性欠佳，建议开启 <strong>ngrok 第二线路</strong></>
-                : <>自行搭建或者购买，速度快稳定性好，<strong className="text-red-600">frp程序会被误杀需要自行加白</strong></>}
+                : <>自行搭建或者购买，速度快稳定性好，<strong>frp程序会被误杀需要自行加白</strong></>}
             </CardDescription>
           </div>
           <div className="panel-head-actions flex items-center gap-3">
@@ -388,8 +406,8 @@ export function RemoteAccessScreen({
         </CardHeader>
         <CardContent>
           <PrimaryRouteControls status={status} token={credentials?.frpToken} busy={busy} enabled={settings.enabled}
-            editing={editingPrimary} target={`${settings.bindHost}:${settings.port}`} command={command} run={run} refresh={refresh}>
-          <div className="remote-access-fields">
+            editing={editingPrimary} target={`${settings.bindHost}:${settings.port}`} command={command} run={run} refresh={refresh} prepare={preparePrimaryAction}>
+          <div className="remote-access-fields remote-access-fields-flush">
             <div className="remote-access-wide">
               <div className="remote-access-field-heading">
                 <div className="flex shrink-0 items-center gap-2">
@@ -459,7 +477,6 @@ export function RemoteAccessScreen({
                   className="h-9"
                   disabled={zrokActionDisabled}
                   aria-describedby="remote-desktop-guidance"
-                  title={zrok?.installed && !zrokEmail && !desktopReady ? desktopGuidance : undefined}
                   onClick={() => void handleZrokAction()}
                 >
                   {busy ? "处理中…" : zrokActionLabel}

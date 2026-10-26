@@ -88,7 +88,6 @@ const WEB_ICON_512_PNG: &[u8] = include_bytes!("../../../assets/remote-access/ic
 const WEB_APPLE_TOUCH_ICON_PNG: &[u8] =
     include_bytes!("../../../assets/remote-access/icons/apple-touch-icon.png");
 const COOKIE_NAME: &str = "codex_elves_device";
-const DESKTOP_START_GUIDANCE: &str = "Codex 桌面尚未就绪。请在电脑端 CodexElves 管理器右上角点击「重启 Codex」，等待 Codex 主界面完全打开、能够正常查看会话后，再点击「启动公网」。";
 const DESKTOP_READ_GUIDANCE: &str = "暂时无法读取 Codex 桌面数据。若刚启动或重启 Codex，请等待主界面完全打开、能够正常查看会话后，再刷新远程网页；尚未启动时，请在电脑端 CodexElves 管理器右上角点击「重启 Codex」。";
 const MAX_DEVICES: usize = 32;
 const MAX_RECEIPTS: usize = 20_000;
@@ -1014,10 +1013,6 @@ impl RemoteAccessController {
                 anyhow::ensure!(
                     settings.enabled && self.running.load(Ordering::SeqCst),
                     "请先启用远程会话网页"
-                );
-                anyhow::ensure!(
-                    self.native_connected.load(Ordering::SeqCst),
-                    DESKTOP_START_GUIDANCE
                 );
                 let token = payload["token"].as_str();
                 let fixed_name = payload["fixedName"].as_str().context("缺少固定公网名称")?;

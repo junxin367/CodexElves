@@ -123,6 +123,7 @@ export function frpPublicOrigin(config: FrpConfig): string {
 export type FrpStatus = {
   config: FrpConfig;
   state: "stopped" | "downloading" | "starting" | "ready" | "error" | "https_required";
+  configMatchesActive: boolean;
   version?: string;
   downloadedBytes?: number;
   downloadTotalBytes?: number | null;
