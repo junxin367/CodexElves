@@ -2,10 +2,13 @@
 .remote-public-title-row { display: flex; align-items: center; gap: 20px; min-width: 0; }
 .remote-public-title-row > h3 { flex-shrink: 0; }
 .remote-primary-breadcrumbs { display: inline-flex; align-items: center; gap: 12px; }
-.remote-primary-crumb { display: inline-flex; align-items: flex-start; gap: 8px; }
+.remote-primary-crumb { display: inline-flex; align-items: center; gap: 4px; }
 .remote-primary-breadcrumbs > span, .remote-primary-crumb > span { color: hsl(var(--muted-foreground)); font-size: 12px; }
 .remote-primary-crumb > span[aria-hidden="true"] { align-self: center; }
-.remote-primary-crumb .remote-primary-label { align-self: flex-start; margin-top: 3px; color: hsl(var(--muted-foreground)); font-size: 10px; line-height: 1.2; white-space: nowrap; }
+.remote-primary-crumb button { display: inline-flex; align-items: center; gap: 4px; }
+.remote-primary-crumb .remote-primary-label { align-self: center; margin-top: 0; padding: 2px 6px; border: 1px solid transparent; border-radius: 9999px; font-size: 10px; font-weight: 600; line-height: 1.2; white-space: nowrap; }
+.remote-primary-label-zrok { border-color: rgba(22, 134, 83, 0.25); background: rgba(22, 134, 83, 0.1); color: #168653; }
+.remote-primary-label-frp { border-color: rgba(234, 154, 38, 0.3); background: rgba(234, 154, 38, 0.12); color: #b45309; }
 .remote-primary-crumb button { border: 0; border-bottom: 2px solid transparent; background: transparent; padding: 5px 1px 7px; color: hsl(var(--muted-foreground)); font-size: 14px; cursor: pointer; }
 .remote-primary-crumb button[aria-selected="true"] { color: hsl(var(--primary)); font-weight: 600; border-bottom-color: hsl(var(--primary)); }
 .remote-primary-crumb button:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 3px; }

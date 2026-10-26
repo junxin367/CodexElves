@@ -30,8 +30,10 @@ export function PrimaryRouteTabs({ value, onChange, disabled }: {
             const next = event.key === "Home" ? "zrok" : event.key === "End" ? "frp" : provider === "zrok" ? "frp" : "zrok";
             onChange(next);
             document.getElementById(`remote-primary-${next}`)?.focus();
-          }}>{provider}</button>
-        <span className="remote-primary-label">{labels[provider]}</span>
+          }}>
+          {provider}
+          <span className={`remote-primary-label remote-primary-label-${provider}`}>{labels[provider]}</span>
+        </button>
       </span>
     ))}
   </div>;
