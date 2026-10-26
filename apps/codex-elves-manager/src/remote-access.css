@@ -3,6 +3,7 @@
 .remote-public-title-row > h3 { flex-shrink: 0; }
 .remote-primary-breadcrumbs, .remote-primary-crumb { display: inline-flex; align-items: center; gap: 12px; }
 .remote-primary-breadcrumbs > span, .remote-primary-crumb > span { color: hsl(var(--muted-foreground)); font-size: 12px; }
+.remote-primary-crumb .remote-primary-label { color: hsl(var(--muted-foreground)); font-size: 11px; white-space: nowrap; }
 .remote-primary-crumb button { border: 0; border-bottom: 2px solid transparent; background: transparent; padding: 5px 1px 7px; color: hsl(var(--muted-foreground)); font-size: 14px; cursor: pointer; }
 .remote-primary-crumb button[aria-selected="true"] { color: hsl(var(--primary)); font-weight: 600; border-bottom-color: hsl(var(--primary)); }
 .remote-primary-crumb button:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 3px; }

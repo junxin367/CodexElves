@@ -12,6 +12,10 @@ export function PrimaryRouteTabs({ value, onChange, disabled }: {
   onChange: (provider: PrimaryProvider) => void;
   disabled: boolean;
 }) {
+  const labels: Record<PrimaryProvider, string> = {
+    zrok: "免费",
+    frp: "推荐速度快",
+  };
   return <div className="remote-primary-breadcrumbs" role="tablist" aria-label="主链路配置">
     {(["zrok", "frp"] as const).map((provider, index) => (
       <span className="remote-primary-crumb" key={provider}>
@@ -27,6 +31,7 @@ export function PrimaryRouteTabs({ value, onChange, disabled }: {
             onChange(next);
             document.getElementById(`remote-primary-${next}`)?.focus();
           }}>{provider}</button>
+        <span className="remote-primary-label">{labels[provider]}</span>
       </span>
     ))}
   </div>;

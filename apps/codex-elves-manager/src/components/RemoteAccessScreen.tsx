@@ -482,10 +482,10 @@ export function RemoteAccessScreen({
           {!status?.primary && ["connecting", "retry_wait", "error"].includes(zrok?.state || "") && zrok?.error ? <p className="remote-access-error" role="alert">{zrok.error}</p> : null}
           {zrok?.state === "retry_wait" && zrok.retryAtMs ? <p className="remote-access-hint">将在 {new Date(zrok.retryAtMs).toLocaleTimeString()} 自动重试。</p> : null}
           </PrimaryRouteControls>
-          <div className="remote-access-fields">
+          {editingPrimary === "zrok" ? <div className="remote-access-fields">
             <div className="remote-access-wide">
               <div className="remote-access-expiry-heading">
-                <span className="text-sm font-medium">ngrok 第二线路</span>
+                <span className="text-sm font-semibold">ngrok 第二线路</span>
                 <button
                   type="button"
                   role="switch"
@@ -530,7 +530,7 @@ export function RemoteAccessScreen({
                   : status?.ngrok?.error || "请保存并测试 Token，第二线路启用后安卓端会自动发现，无需填写第二个域名。"}</small>
               </> : null}
             </div>
-          </div>
+          </div> : null}
         </CardContent>
         <CardHeader className="panel-head border-t border-border pt-6 pb-[10px]">
           <div className="panel-head-copy">
