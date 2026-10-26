@@ -374,7 +374,11 @@ export function RemoteAccessScreen({
               <CardTitle>公网入口</CardTitle>
               <PrimaryRouteTabs value={editingPrimary} onChange={provider => { initializedPrimary.current = true; setEditingPrimary(provider); }} disabled={busy || Boolean(status?.primary?.switching)} />
             </div>
-            <CardDescription>选择一种主链路连接本机会话，配置会分别保留。</CardDescription>
+            <CardDescription>
+              {editingPrimary === "zrok"
+                ? <>免费，但是稳定性欠佳，建议开启 <strong>ngrok 第二线路</strong></>
+                : "自行搭建或者购买，速度快稳定性好，frp程序会被误杀需要自行加白"}
+            </CardDescription>
           </div>
           <div className="panel-head-actions flex items-center gap-3">
             {status?.primary?.provider === "frp"
