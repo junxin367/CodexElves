@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "codex-elves-core"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -529,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "codex-elves-data"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -546,7 +546,7 @@ dependencies = [
 
 [[package]]
 name = "codex-elves-launcher"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "codex-elves-manager"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "async-trait",

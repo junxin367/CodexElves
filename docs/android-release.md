@@ -1,6 +1,6 @@
 # CodexElves Android APK 构建与发布
 
-Android 使用 `apps/codex-elves-android/version.properties` 独立版本，与桌面管理器的 `Cargo.toml` 版本分开。当前为 `0.0.4`、`versionCode=6`；每次正式发布必须增加 `versionCode` 并沿用正式签名证书。
+Android 使用 `apps/codex-elves-android/version.properties` 独立版本，与桌面管理器的 `Cargo.toml` 版本分开。当前为 `0.0.5`、`versionCode=23`；每次正式发布必须增加 `versionCode` 并沿用正式签名证书。
 
 ## 自动运行与手动运行
 

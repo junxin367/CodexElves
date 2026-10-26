@@ -1948,32 +1948,32 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.5.4",
-        latestVersion: "0.5.4",
+        currentVersion: "0.5.5",
+        latestVersion: "0.5.5",
         releaseSummary: [
-          "CodexElves 0.5.4",
+          "CodexElves 0.5.5",
           "",
           "- 优化启动与托盘唤醒稳定性",
           "- 改进 GitHub Release 更新体验",
           "- 修复若干协议代理兼容性问题",
         ].join("\n"),
-        assetName: "CodexElves-0.5.4-windows-x64-setup.exe",
-        assetUrl: "https://example.test/CodexElves-0.5.4-windows-x64-setup.exe",
+        assetName: "CodexElves-0.5.5-windows-x64-setup.exe",
+        assetUrl: "https://example.test/CodexElves-0.5.5-windows-x64-setup.exe",
         updateAvailable: false,
       }, "发现可用更新。") as T);
     case "perform_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.5.4",
-        latestVersion: "0.5.4",
+        currentVersion: "0.5.5",
+        latestVersion: "0.5.5",
         releaseSummary: "浏览器预览不会下载真实安装包。",
-        installedPath: "C:\\Temp\\CodexElves-0.5.4-windows-x64-setup.exe",
+        installedPath: "C:\\Temp\\CodexElves-0.5.5-windows-x64-setup.exe",
         launched: true,
       }, "浏览器预览已模拟启动安装包。") as T);
     case "copy_diagnostics":
       return Promise.resolve(browserPreviewResult({
         report: [
           "CodexElves 诊断报告",
-          "版本: 0.5.4",
+          "版本: 0.5.5",
           "平台: windows-x64",
           "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
           "配置目录: C:\\Users\\junes\\.codex",
@@ -1994,7 +1994,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.5.4",
+        current_version: "0.5.5",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
