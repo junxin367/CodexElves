@@ -133,6 +133,8 @@ let skillLoading = null, creationProject = "", threadReadVersion = 0, tokenUsage
 let skillRenderVersion = 0, messageSkillLoadScope = "";
 let recentLimit = 40;
 let recentPriorityIds = null;
+// Opening an older thread can refresh its runtime state without starting work.
+const recentPrioritySelectionSuppressions = new Set();
 let recentPriorityKnownIds = new Set(), recentPriorityOpenedAt = 0;
 let editingMessage = null, editingQueuedMessage = null;
 const queuedEdits = new Map();
@@ -3810,6 +3812,7 @@ function applyThreadDeletion(id, deviceId = session?.device.id) {
   if (pending?.deviceId === deviceId && (pending.payload?.threadId === id
       || goalComposerAction(pending.action, pending.payload) && goalRecordThreadId(pending) === id)) savePending(null);
   recentPriorityIds?.delete(id); recentPriorityKnownIds.delete(id);
+  recentPrioritySelectionSuppressions.delete(id);
   filterDeletedSidebar(sidebar);
   if (sidebar) cacheDisplayData("sidebar", "main", sidebarSnapshot(sidebar));
   const hash = new URLSearchParams(location.hash.slice(1));
@@ -4909,7 +4912,8 @@ function showLogin() {
   sidebarLayoutCleanup?.(); sidebarLayoutCleanup = null; closeMobileSidebar = () => {};
   editingMessage = null; editingQueuedMessage = null;
   session = null;
-  sidebar = null; recentPriorityIds = null; selectedId = null; thread = null; creating = false;
+  sidebar = null; recentPriorityIds = null; recentPrioritySelectionSuppressions.clear();
+  selectedId = null; thread = null; creating = false;
   projectVisibleThreadCounts.clear(); collapsedSidebarSections.clear();
   historyCursor = null; historyInitialized = false; approvalSignature = null;
   turns.clear(); transcriptEvents.clear(); drafts.clear(); skillDrafts.clear(); attachmentDrafts.clear(); goalDrafts.clear();
@@ -5683,6 +5687,7 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
     sidebarFilterDeviceId = deviceId;
     sidebarFilters = { mode: null, chats: null, projects: null, pinned: null };
     recentPriorityIds = null;
+    recentPrioritySelectionSuppressions.clear();
     projectVisibleThreadCounts.clear(); collapsedSidebarSections.clear();
   }
   const request = { deviceId, cursor, nextCursor: cursor, again: false, resourcePriority,
@@ -5909,7 +5914,10 @@ function renderSidebar() {
     const eligible = item => item.priority?.eligible !== false;
     const needsPriority = item => eligible(item) && sidebarAttentionState(item) !== "idle";
     const attentionOrder = { waiting: 0, unread: 1, active: 2, idle: 3 };
-    const candidates = mergedRecent.filter(needsPriority).sort((left, right) =>
+    // Keep an already-promoted thread sticky, but do not promote the selected
+    // thread from a selection-only refresh until a real activity event arrives.
+    const candidates = mergedRecent.filter(item => needsPriority(item)
+      && !(item.id === selectedId && recentPrioritySelectionSuppressions.has(item.id))).sort((left, right) =>
       attentionOrder[sidebarAttentionState(left)] - attentionOrder[sidebarAttentionState(right)]
       || sidebarUpdatedAt(right) - sidebarUpdatedAt(left));
     if (recentPriorityIds === null) {
@@ -6142,6 +6150,7 @@ async function markVisibleThreadRead(id = selectedId, { opened = false } = {}) {
       if (Array.isArray(sidebar?.unreadSideThreads))
         sidebar.unreadSideThreads = sidebar.unreadSideThreads.filter(item => item.id !== id);
       syncSideThreadUnread();
+      recentPrioritySelectionSuppressions.add(id);
       await loadSidebar(null, { fresh: relatedSessionView?.kind === "side" });
     }
   })();
@@ -11331,6 +11340,14 @@ function receive(event) {
     return;
   }
   const eventThreadId = params.threadId ?? params.conversationId ?? params.thread?.id;
+  if (typeof eventThreadId === "string") {
+    const runtimeStatus = params.status?.status ?? params.status;
+    const runtimeType = typeof runtimeStatus === "string" ? runtimeStatus : runtimeStatus?.type;
+    if (["thread/started", "turn/started", "remote/requestsChanged"].includes(event.method)
+        || event.method === "thread/status/changed"
+          && ["active", "inProgress", "running", "pending"].includes(runtimeType))
+      recentPrioritySelectionSuppressions.delete(eventThreadId);
+  }
   if (event.method === "remote/relatedThreadsChanged") {
     void retireNativeSideThreads(Array.isArray(params.closedThreadIds) ? params.closedThreadIds : [])
       .catch(error => notice(error.message, true));
