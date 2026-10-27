@@ -3260,8 +3260,10 @@ impl WebSocketRequestLogger {
                 fallback_armed,
             )
         };
+        // 协议不匹配只是压缩路由选择，不代表压缩失败。
+        // HTTP 回退请求会记录最终结果，这条 WS 探测记录不能先写成
+        // `426 + error`，否则日志会出现“压缩失败 · WS”的误导性条目。
         record.response_body.clear();
-        append_websocket_proxy_log_record(&record);
         let _ = crate::diagnostic_log::append_diagnostic_log(
             "protocol_proxy.responses_websocket_compaction_http_fallback",
             serde_json::json!({

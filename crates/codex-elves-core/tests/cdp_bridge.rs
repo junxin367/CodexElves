@@ -138,6 +138,35 @@ fn remote_native_callbacks_are_isolated_from_codex_ui_errors() {
 }
 
 #[test]
+fn renderer_side_feature_failures_degrade_without_blocking_main_reads() {
+    let script = assets::renderer_features_script();
+
+    assert!(script.contains("function reportSideFeatureDegraded(action, error, detail = {})"));
+    assert!(script.contains("renderer.remote_side_feature_degraded"));
+    assert!(script.contains("function reportSidebarFeatureDegraded(action, error, detail = {})"));
+    assert!(script.contains("renderer.remote_sidebar_feature_degraded"));
+    assert!(script.contains("sidebar.side_threads"));
+    assert!(script.contains("state.${key}"));
+    assert!(script.contains("pinned_threads"));
+    assert!(script.contains("thread.side_identity"));
+    assert!(script.contains("const isSide = thread?.sideConversation === true"));
+    assert!(script.contains("sideEntries = []"));
+}
+
+#[test]
+fn remote_refresh_keeps_main_thread_refresh_independent_from_sidebar_failure() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("core crate should live under crates/codex-elves-core");
+    let script = std::fs::read_to_string(repo.join("assets/remote-access/app.js")).unwrap();
+    assert!(script.contains("const sidebarRead = loadSidebar(null, { fresh }).catch(() => null);"));
+    assert!(script.contains("await (id ? selectedId"));
+    assert!(script.contains("await sidebarRead;"));
+    assert!(!script.contains("await Promise.all([sidebarRead, id ? selectedId"));
+}
+
+#[test]
 fn renderer_features_delete_is_permanent_without_undo_ui() {
     let script = assets::renderer_features_script();
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -13692,6 +13721,13 @@ const bedrockFixture = {
   queueExplicit: queueExplicit.replace("t?.type===`chatgpt`?u.serviceTier", "t?.type===`chatgpt`||t?.type===`amazonBedrock`?u.serviceTier"),
   nativeBedrock: true,
 };
+const modernFixture = {
+  ui: bedrockFixture.ui,
+  request: bedrockFixture.request,
+  queueDefault: function Vin(e,{runtime:t},r,i){let a=null;return{async readServiceTier(i){for(;a!=null;)await a.catch(()=>void 0);return r(),zin(e.requestClient,e.logger,i,async()=>{if(e.getHostId()===`local`&&await t.isUsingCopilotInference())return!1;let r=await e.getAccount({priority:`critical`});return r.account?.type===`chatgpt`||r.account?.type===`amazonBedrock`})},async writeServiceTier(t,n){let o=a,s=(async()=>(await o?.catch(()=>void 0),r(),e.sendRequest(`config/batchWrite`,{edits:[{keyPath:n==null?`service_tier`:`profiles.${n}.service_tier`,value:t??`default`,mergeStrategy:`upsert`}],filePath:null,expectedVersion:null,reloadUserConfig:!0})))();a=s;try{return await s}finally{a===s&&(a=null,i())}},writeModel(t,n,r){return e.sendRequest(`config/batchWrite`,a1t(t,n,r))},readShellEnvironmentPolicy(e,t){return Promise.resolve(null)}}}.toString(),
+  queueExplicit: bedrockFixture.queueExplicit,
+  nativeBedrock: true,
+};
 
 // 原生 requirements 和 tier 解析函数也直接保留，验证补丁没有绕开它们。
 const access = function Uat(e){let t=e.requirements?.featureRequirements,n=t?.fast_mode!==!1;return{fast:n,ultrafast:(`supportsIndependentSpeedModes`in e&&e.supportsIndependentSpeedModes===!0||n)&&t?.ultrafast_mode!==!1}};
@@ -13761,6 +13797,7 @@ function environment(patch = true, fixtureSource = source) {
   const fns = context.fixtures;
   const queueRuntime = {
     isCopilotApiAvailable: async () => state.copilotAvailable,
+    isUsingCopilotInference: async () => state.copilotPreferred,
     accountId: () => "fixture", threadMode: () => "default",
   };
   const queue = () => fns.Vin(manager, { runtime: queueRuntime, storage: { readGlobalState: async () => state.copilotPreferred } }, () => {}, () => {});
@@ -13809,7 +13846,7 @@ async function runNativeFastFixture(fixture) {
     assert.equal(duplicate.diagnostics.reason, "ambiguous-gates");
     assert.equal(duplicate.patchedSource, duplicateSource);
   }
-  const alternateQueue = nativeBedrock ? legacyFixture.queueDefault : bedrockFixture.queueDefault;
+  const alternateQueue = fixture === legacyFixture ? bedrockFixture.queueDefault : legacyFixture.queueDefault;
   const mixedQueues = api.transform(`${source}\n${alternateQueue}`, url);
   assert.equal(mixedQueues.ok, false, "新旧队列结构同时出现时也必须拒绝歧义匹配");
   assert.equal(mixedQueues.diagnostics.reason, "ambiguous-gates");
@@ -13981,7 +14018,7 @@ async function runNativeFastFixture(fixture) {
 }
 
 async function runNativeFastTests() {
-  for (const fixture of [legacyFixture, bedrockFixture]) await runNativeFastFixture(fixture);
+  for (const fixture of [legacyFixture, bedrockFixture, modernFixture]) await runNativeFastFixture(fixture);
   await require("./native-fast-module.test.cjs")({ source, url });
   return "Native Fast legacy/current structures, native auth, requirements, local scope, opt-in, queue and module transport behavior passed";
 }

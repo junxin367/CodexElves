@@ -58,6 +58,13 @@
   ].join("");
   const queueCopilotCondition = `\\k<manager>\\.getHostId\\(\\)===${local}&&await \\k<storage>\\.readGlobalState\\(\`use-copilot-auth-if-available\`\\)===!0&&await \\k<runtime>\\.isCopilotApiAvailable\\(\\)`;
 
+  const queueDefaultPrefixModern = [
+    `function ${id}\\((?<manager>${id}),\\{runtime:(?<runtime>${id})\\},(?<before>${id}),${id}\\)\\{let (?<pending>${id})=null;`,
+    `return\\{async readServiceTier\\((?<model>${id})\\)\\{for\\(;\\k<pending>!=null;\\)await \\k<pending>\\.catch\\(\\(\\)=>void 0\\);`,
+    `return \\k<before>\\(\\),${id}\\(\\k<manager>\\.requestClient,\\k<manager>\\.logger,\\k<model>,async\\(\\)=>`,
+  ].join("");
+  const queueCopilotConditionModern = `\\k<manager>\\.getHostId\\(\\)===${local}&&await \\k<runtime>\\.isUsingCopilotInference\\(\\)`;
+
   // 同时核对四条身份路径及当前模型的 UI、请求调用点；不依赖压缩变量名。
   // 原生菜单也会只传 hostId 读取账号能力；有 model 字段时才校验模型，
   // ui-model 始终显式传入当前模型，因此空值和非 GPT 仍无法产生 Fast 选项。
@@ -98,6 +105,12 @@
         [
           queueDefaultPrefix,
           `\\{if\\(${queueCopilotCondition}\\)return!1;`,
+          `let (?<accountResult>${id})=await \\k<manager>\\.getAccount\\(\\{priority:${critical}\\}\\);`,
+          `return (?<gate>(?<account>\\k<accountResult>\\.account\\?\\.type)===${chatgpt}(?<bedrock>\\|\\|\\k<accountResult>\\.account\\?\\.type===${bedrock})?)\\}\\)\\},async writeServiceTier\\(`,
+        ].join(""),
+        [
+          queueDefaultPrefixModern,
+          `\\{if\\(${queueCopilotConditionModern}\\)return!1;`,
           `let (?<accountResult>${id})=await \\k<manager>\\.getAccount\\(\\{priority:${critical}\\}\\);`,
           `return (?<gate>(?<account>\\k<accountResult>\\.account\\?\\.type)===${chatgpt}(?<bedrock>\\|\\|\\k<accountResult>\\.account\\?\\.type===${bedrock})?)\\}\\)\\},async writeServiceTier\\(`,
         ].join(""),

@@ -1595,15 +1595,27 @@ function scheduleRelatedSessionCheck() {
       }
       if (threadResult?.thread?.id !== id) throw Object.assign(new Error("侧边会话读取结果不匹配"), { code: 409 });
     } catch (error) {
-      if (error.code === 404 && selectedId === id && version === selectionVersion
+      if (isSideThreadExpiredError(error) && selectedId === id && version === selectionVersion
           && normalizeRelatedView(relatedSessionView, id)?.kind === "side") {
-        await retireNativeSideThreads([id]).catch(expiredError => notice(expiredError.message, true));
+        await retireExpiredSideThread(id).catch(expiredError => notice(expiredError.message, true));
         return;
       }
     }
     if (scope === privateInputScope(session) && selectedId === id && version === selectionVersion)
       scheduleRelatedSessionCheck();
   }, 10000);
+}
+function isSideThreadExpiredError(error) {
+  if (Number(error?.code) === 410 || error?.reason === "side_thread_expired") return true;
+  const message = typeof error?.message === "string" ? error.message.toLowerCase() : "";
+  return message.includes("thread not loaded:")
+    || message.includes("unknown thread:")
+    || message.includes("no rollout found for thread id ");
+}
+async function retireExpiredSideThread(id) {
+  if (id !== selectedId || normalizeRelatedView(relatedSessionView, id)?.kind !== "side") return false;
+  await retireNativeSideThreads([id], { reason: "expired" });
+  return true;
 }
 function resetRelatedSessions({ persisted = false } = {}) {
   dismissSideCreation({ canceled: true });
@@ -1642,7 +1654,7 @@ function adoptRelatedMenu(result) {
   filterSideThreadSidebar(sidebar);
   renderSidebar();
 }
-async function retireNativeSideThreads(ids, { notify = true } = {}) {
+async function retireNativeSideThreads(ids, { notify = true, reason = "closed" } = {}) {
   const closed = new Set(ids.filter(validRelatedThreadId));
   const current = normalizeRelatedView(relatedSessionView, selectedId);
   for (const id of closed) {
@@ -1650,6 +1662,7 @@ async function retireNativeSideThreads(ids, { notify = true } = {}) {
     relatedThreadViews.delete(id);
     transcriptCache.remove(session?.device.id, id);
     threadDisplays.delete(threadDisplayKey(id));
+    discardPersistentThreadDisplay(id);
     if (readScope) void readCache.remove(readScope, "transcript", id).catch(() => {});
   }
   if (sidebar?.unreadSideThreads)
@@ -1659,7 +1672,7 @@ async function retireNativeSideThreads(ids, { notify = true } = {}) {
     if (thread?.id === current.threadId) thread = { ...thread, readOnly: true, sideThreadClosed: true };
     historyInitialized = false;
     updateComposer();
-    if (notify) notice("此侧边会话已在 Codex 关闭");
+    if (notify) notice(reason === "expired" ? "侧边会话已过期，已返回主会话" : "此侧边会话已在 Codex 关闭");
     await returnToParentSession();
   }
 }
@@ -2688,8 +2701,7 @@ async function loadModels(force = false) {
       throw new Error("模型列表返回格式无效");
     const nextModels = result.data.map(model => ({
       ...model,
-      supportedReasoningEfforts: (model.supportedReasoningEfforts || [])
-        .filter(effort => effort.reasoningEffort !== "ultra" || result.ultraReasoningEnabled === true)
+      supportedReasoningEfforts: model.supportedReasoningEfforts || []
     }));
     models = nextModels;
     modelDefaults = { model: result.defaultModel || "", reasoningEffort: result.defaultReasoningEffort || "" };
@@ -9233,8 +9245,8 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     if (historyInitialized) scheduleMessages();
   } catch (error) {
     if (!controller.signal.aborted && version === selectionVersion && selectedId === id
-        && relatedSessionView?.kind === "side" && error.code === 404) {
-      await retireNativeSideThreads([id]);
+        && relatedSessionView?.kind === "side" && isSideThreadExpiredError(error)) {
+      await retireExpiredSideThread(id);
       return;
     }
     if (!controller.signal.aborted && version === selectionVersion && selectedId === id) {
@@ -9404,8 +9416,8 @@ async function readHistoryPage(older, version, itemsTurnId) {
     rememberTranscript();
   } catch (error) {
     if (controller.signal.aborted || pageLeaving || version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
-    if (error.code === 404 && relatedSessionView?.kind === "side" && selectedId === id) {
-      await retireNativeSideThreads([id]).catch(expiredError => notice(expiredError.message, true));
+    if (isSideThreadExpiredError(error) && relatedSessionView?.kind === "side" && selectedId === id) {
+      await retireExpiredSideThread(id).catch(expiredError => notice(expiredError.message, true));
       return;
     }
     if (!itemsTurnId && error.code === 404) retireMissingEphemeralTranscript(id);
@@ -9628,9 +9640,10 @@ async function reloadThread() {
       let latest;
       try { ({ thread: latest } = await api("/api/read/thread", { threadId: id })); }
       catch (error) {
-        if (version === selectionVersion && relatedSessionView?.kind === "side" && error.code === 404) {
+        if (version === selectionVersion && relatedSessionView?.kind === "side"
+            && isSideThreadExpiredError(error)) {
           await historyRead.catch(() => {});
-          await retireNativeSideThreads([id]);
+          await retireExpiredSideThread(id);
           return;
         }
         if (version === selectionVersion && selectedId === id && error.code === 404)
@@ -11582,14 +11595,15 @@ async function refreshAll({ fresh = false } = {}) {
   const promise = (async () => {
     do {
       request.again = false;
-      const sidebarRead = loadSidebar(null, { fresh });
+      const sidebarRead = loadSidebar(null, { fresh }).catch(() => null);
       const id = selectedId || (!creating ? new URLSearchParams(location.hash.slice(1)).get("thread") : null);
       try {
-        await Promise.all([sidebarRead, id ? selectedId
+        await (id ? selectedId
           ? reloadThread() : selectThread(id, { closeSidebar: false }) : Promise.resolve()]);
       } catch (error) {
         if (!request.again || deviceId !== session?.device.id) throw error;
       }
+      await sidebarRead;
       fresh = true;
     } while (request.again && deviceId === session?.device.id);
   })();

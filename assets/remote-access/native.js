@@ -204,6 +204,55 @@
       fallback();
     } catch {}
   }
+  function reportOptionalFeatureDegraded(eventName, action, error, detail = {}) {
+    try {
+      const name = String(action || "unknown").slice(0, 120);
+      const message = String(error?.message || error || "").slice(0, 1000);
+      const key = `${eventName}:${name}:${message}`;
+      const count = (nativeCompatibilityDiagnosticCounts.get(key) || 0) + 1;
+      nativeCompatibilityDiagnosticCounts.set(key, count);
+      if (count > 20 && count % 20 !== 0) return;
+      const payload = {
+        event: eventName,
+        detail: {
+          action: name,
+          ...detail,
+          degraded: true,
+          count,
+          errorName: String(error?.name || "").slice(0, 120),
+          errorMessage: message,
+        },
+        helperBase: window.__CODEX_SESSION_DELETE_HELPER__ || "",
+        location: window.location?.href || "",
+        userAgent: navigator.userAgent || "",
+        timestamp: new Date().toISOString(),
+      };
+      const bridge = window.__codexSessionDeleteBridge;
+      const fallback = () => {
+        try {
+          fetch(`${payload.helperBase || "http://127.0.0.1:45221"}/diagnostics/log`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            keepalive: true,
+          }).catch(() => {});
+        } catch {}
+      };
+      if (typeof bridge === "function") {
+        try {
+          Promise.resolve(bridge("/diagnostics/log", payload)).catch(fallback);
+          return;
+        } catch {}
+      }
+      fallback();
+    } catch {}
+  }
+  function reportSideFeatureDegraded(action, error, detail = {}) {
+    reportOptionalFeatureDegraded("renderer.remote_side_feature_degraded", action, error, detail);
+  }
+  function reportSidebarFeatureDegraded(action, error, detail = {}) {
+    reportOptionalFeatureDegraded("renderer.remote_sidebar_feature_degraded", action, error, detail);
+  }
   function nativeImageAttachmentId() {
     return `remote-image:${crypto.randomUUID()}`;
   }
@@ -527,7 +576,9 @@
       }
     });
   }
-  function failure(code, message) { return Object.assign(new Error(message), { code, remoteValidationFailure: true }); }
+  function failure(code, message, details = {}) {
+    return Object.assign(new Error(message), { code, remoteValidationFailure: true, ...details });
+  }
   const EXECUTION_CONFIG_RETRY_DELAYS_MS = [100, 250, 500, 1000, 2000, 3000];
   function isExecutionConfigLoading(value) {
     if (value?.status === "not-ready" && value.reason === "execution-config-loading") return true;
@@ -689,26 +740,6 @@
   const HISTORY_TURN_READ_CONCURRENCY = 2;
   const transcriptEventTypes = new Set(["modelChanged", "modelRerouted", "contextCompaction"]);
   const normalizePath = path => String(path || "").replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
-  async function nativeUltraReasoningEnabled() {
-    try {
-      const resource = [...document.querySelectorAll('link[rel="modulepreload"]')].map(link => link.href)
-        .concat(performance.getEntriesByType("resource").map(entry => entry.name))
-        .find(name => /\/app-shared-[^/]+\.js$/.test(name));
-      if (!resource || !resource.startsWith("app://-/")) return false;
-      const values = Object.values(await import(resource));
-      const setting = values.find(value => value?.enabledReasoningEfforts?.key === "enabled-reasoning-efforts")
-        ?.enabledReasoningEfforts;
-      const readSetting = values.find(value => typeof value === "function"
-        && /get-setting/.test(Function.prototype.toString.call(value))
-        && /\.effective/.test(Function.prototype.toString.call(value)));
-      const statsig = window.__STATSIG__?.firstInstance ?? window.__STATSIG__?.instance?.();
-      return !!setting && !!readSetting
-        && statsig?.getFeatureGate?.("1186680773", { disableExposureLog: true })?.value === true
-        && array(await readSetting(setting)).includes("ultra");
-    } catch {
-      return false;
-    }
-  }
   async function nativeModelCatalog() {
     const data = [], cursors = new Set();
     let cursor = null;
@@ -719,11 +750,9 @@
       if (cursor && cursors.has(cursor)) throw failure(503, "原生模型列表分页无效");
       if (cursor) cursors.add(cursor);
     } while (cursor);
-    const ultraEnabled = await nativeUltraReasoningEnabled();
     return data.filter(model => !model.hidden).map(model => ({
       ...model,
       supportedReasoningEfforts: array(model.supportedReasoningEfforts)
-        .filter(effort => effort.reasoningEffort !== "ultra" || ultraEnabled)
     }));
   }
   async function validateReasoningEffort(model, effort) {
@@ -924,13 +953,24 @@
     const readGeneration = catalogGeneration;
     await prepareAsyncQuestionState().catch(() => {});
     const recentOnly = payload.recentOnly === true;
-    const sideEntries = recentOnly ? recentSideThreadEntries() : await sideThreadEntries();
+    let sideEntries = [];
+    try {
+      sideEntries = recentOnly ? recentSideThreadEntries() : await sideThreadEntries();
+    } catch (error) {
+      reportSideFeatureDegraded("sidebar.side_threads", error);
+    }
     const sideIds = new Set(sideEntries.map(entry => entry.threadId));
     for (const id of sideIds) nativeCatalog.delete(id);
     const keys = recentOnly ? ["local-projects", "thread-project-assignments", "projectless-thread-ids"]
       : ["local-projects", "pinned-project-ids", "project-order", "pinned-thread-ids",
         "sidebar-project-thread-orders", "thread-project-assignments", "projectless-thread-ids"];
-    const stored = Object.fromEntries(await Promise.all(keys.map(async key => [key, await state(key)])));
+    const stored = Object.fromEntries(await Promise.all(keys.map(async key => {
+      try { return [key, await state(key)]; }
+      catch (error) {
+        reportSidebarFeatureDegraded(`state.${key}`, error);
+        return [key, {}];
+      }
+    })));
     if (readGeneration !== catalogGeneration) throw failure(409, "会话列表读取已取消");
     const preferences = manager.storage.readValue("flat-project-sidebar-preferences-v1") || {};
     const sharedSort = manager.storage.readValue("codex-sidebar-sort-mode-v1");
@@ -995,9 +1035,16 @@
     }
     if (readGeneration !== catalogGeneration) throw failure(409, "会话列表读取已取消");
     observeThreads(manager.getRecentThreadSummaries());
-    const pins = await manager.runtime.pinnedThreads();
-    if (!pins) throw failure(503, "当前 Codex 版本的原生置顶服务不可用");
-    const pinnedState = await pins.list({ hostId: "local", useAppServerPins: true });
+    let pinnedState = { threadIds: [] };
+    try {
+      const pins = await manager.runtime.pinnedThreads();
+      if (!pins) throw failure(503, "当前 Codex 版本的原生置顶服务不可用");
+      pinnedState = await pins.list({ hostId: "local", useAppServerPins: true });
+      if (!pinnedState || typeof pinnedState !== "object")
+        throw failure(503, "原生置顶服务返回结果无效");
+    } catch (error) {
+      reportSidebarFeatureDegraded("pinned_threads", error);
+    }
     if (readGeneration !== catalogGeneration) throw failure(409, "会话列表读取已取消");
     const pinnedIds = array(pinnedState.threadIds);
     if (recentOnly) for (const id of nativeCatalog.keys()) {
@@ -1069,10 +1116,21 @@
   async function readThread(id) {
     id = requiredId(id);
     if (isDeletedThread(id)) throw failure(404, "会话已永久删除");
+    const knownSideThread = nativeSideThreads.get(id);
     let response;
     try { response = await readThreadMetadata(id); }
     catch (error) {
       if (isDeletedThread(id)) throw failure(404, "会话已永久删除");
+      if (knownSideThread && sideThreadLoadError(error)) {
+        const entries = await sideThreadEntries().catch(() => null);
+        if (entries && !entries.some(entry => entry.threadId === id)) {
+          throw failure(410, "侧边会话已过期或已关闭", {
+            reason: "side_thread_expired",
+            threadId: id,
+            parentThreadId: knownSideThread.parentThreadId
+          });
+        }
+      }
       if (missingThreadError(error)) throw failure(404, "会话已关闭或不存在");
       throw error;
     }
@@ -1130,6 +1188,12 @@
       && (error.message.includes("thread not found:")
         || error.message.includes("Client specified an invalid argument: unknown thread:")
         || error.message.includes("no rollout found for thread id "));
+  }
+  function sideThreadLoadError(error) {
+    const message = typeof error?.message === "string" ? error.message.toLowerCase() : "";
+    return message.includes("thread not loaded:")
+      || message.includes("unknown thread:")
+      || message.includes("no rollout found for thread id ");
   }
   function subagentIdentity(thread) {
     if (!thread || typeof thread !== "object") return null;
@@ -1455,7 +1519,16 @@
       return { ...identity, agentName: pathName || identity.agentName || "子代理",
         ephemeral: nativeThreadEphemeral(thread) };
     }
-    const side = nativeSideIdentity(thread, await sideThreadEntries());
+    let sideEntries = [];
+    try {
+      sideEntries = await sideThreadEntries();
+    } catch (error) {
+      const conversation = manager.getConversation(thread.id);
+      const isSide = thread?.sideConversation === true || conversation?.sideConversation === true;
+      if (isSide) throw error;
+      reportSideFeatureDegraded("thread.side_identity", error, { threadId: thread.id });
+    }
+    const side = nativeSideIdentity(thread, sideEntries);
     if (!side && thread.ephemeral === true) throw failure(404, "原生临时侧边会话已关闭");
     return side ?? { readOnly: false, viewKind: "main", parentThreadId: null };
   }
@@ -4467,7 +4540,7 @@
       if (["events", "notifications", "thread"].includes(action))
         await prepareAsyncQuestionState().catch(() => {});
       if (action === "events" || action === "notifications")
-        await sideThreadEntries().catch(() => {});
+        await sideThreadEntries().catch(error => reportSideFeatureDegraded("events.side_threads", error));
       const skipped = await guardThreadAction(action, payload);
       if (skipped) return skipped;
       switch (action) {
@@ -4801,7 +4874,14 @@
           ? "原生目标更新未确认完成，请检查会话，不要重复保存"
           : "原生操作未确认完成，请检查会话，不要重复发送或新建" };
       }
-      return { ok: false, code: error.code || 503, message: error.message || "原生会话操作失败" };
+      return {
+        ok: false,
+        code: error.code || 503,
+        message: error.message || "原生会话操作失败",
+        ...(error.reason ? { reason: error.reason } : {}),
+        ...(error.threadId ? { threadId: error.threadId } : {}),
+        ...(error.parentThreadId ? { parentThreadId: error.parentThreadId } : {})
+      };
     }
   }
   window.__codexElvesRemoteAccess = {

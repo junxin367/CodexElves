@@ -29,6 +29,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, broadcast};
 
+use crate::codex_service::CodexCliService;
 use crate::settings::{RemoteAccessSettings, SettingsStore};
 
 mod browser;
@@ -201,6 +202,156 @@ impl NativeCdpBridge {
             .cloned()
             .context("Codex 原生会话桥接未返回结果")
     }
+}
+
+pub struct ServiceFirstRemoteBridge {
+    service: Arc<CodexCliService>,
+    cdp: NativeCdpBridge,
+}
+
+impl ServiceFirstRemoteBridge {
+    pub fn new() -> Self {
+        Self {
+            service: Arc::new(CodexCliService::new()),
+            cdp: NativeCdpBridge,
+        }
+    }
+
+    async fn call_service_or_cdp(&self, action: &str, payload: Value) -> anyhow::Result<Value> {
+        if !service_action(action) {
+            return self.cdp.call(action, payload).await;
+        }
+        if action == "thread" {
+            return self.call_thread_service_first(payload).await;
+        }
+        match self.service.call(action, payload.clone()).await {
+            Ok(value) => Ok(value),
+            Err(service_error) => {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "remote_access.codex_service_fallback",
+                    json!({
+                        "action": action,
+                        "error": service_error.to_string().chars().take(1_000).collect::<String>()
+                    }),
+                );
+                self.cdp.call(action, payload).await
+            }
+        }
+    }
+
+    async fn call_thread_service_first(&self, payload: Value) -> anyhow::Result<Value> {
+        let service_value = match self.service.call("thread", payload.clone()).await {
+            Ok(value) => value,
+            Err(service_error) => {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "remote_access.codex_service_fallback",
+                    json!({
+                        "action": "thread",
+                        "error": service_error.to_string().chars().take(1_000).collect::<String>()
+                    }),
+                );
+                return self.cdp.call("thread", payload).await;
+            }
+        };
+        match self.cdp.call("thread", payload).await {
+            Ok(cdp_value) => Ok(merge_thread_service_metadata(cdp_value, service_value)),
+            Err(_) => Ok(service_value),
+        }
+    }
+}
+
+#[async_trait]
+impl NativeRemoteBridge for ServiceFirstRemoteBridge {
+    async fn call(&self, action: &str, payload: Value) -> anyhow::Result<Value> {
+        self.call_service_or_cdp(action, payload).await
+    }
+
+    async fn call_authorized(
+        &self,
+        action: &str,
+        payload: Value,
+        authorization: &RemoteAuthorization,
+    ) -> anyhow::Result<Value> {
+        if !service_action(action) {
+            return self
+                .cdp
+                .call_authorized(action, payload, authorization)
+                .await;
+        }
+        authorization.check().await?;
+        if action == "thread" {
+            let service_value = match self.service.call("thread", payload.clone()).await {
+                Ok(value) => value,
+                Err(service_error) => {
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "remote_access.codex_service_fallback",
+                        json!({
+                            "action": "thread",
+                            "error": service_error.to_string().chars().take(1_000).collect::<String>()
+                        }),
+                    );
+                    return self
+                        .cdp
+                        .call_authorized(action, payload, authorization)
+                        .await;
+                }
+            };
+            return match self
+                .cdp
+                .call_authorized(action, payload, authorization)
+                .await
+            {
+                Ok(cdp_value) => Ok(merge_thread_service_metadata(cdp_value, service_value)),
+                Err(_) => Ok(service_value),
+            };
+        }
+        match self.service.call(action, payload.clone()).await {
+            Ok(value) => Ok(value),
+            Err(service_error) => {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "remote_access.codex_service_fallback",
+                    json!({
+                        "action": action,
+                        "error": service_error.to_string().chars().take(1_000).collect::<String>()
+                    }),
+                );
+                self.cdp
+                    .call_authorized(action, payload, authorization)
+                    .await
+            }
+        }
+    }
+}
+
+fn service_action(action: &str) -> bool {
+    matches!(action, "models" | "skills" | "thread" | "workspaceContext")
+}
+
+fn merge_thread_service_metadata(mut cdp_value: Value, service_value: Value) -> Value {
+    let Some(service_thread) = service_value.get("thread") else {
+        return cdp_value;
+    };
+    let Some(cdp_thread) = cdp_value.get_mut("thread").and_then(Value::as_object_mut) else {
+        return cdp_value;
+    };
+    if service_thread.get("id") != cdp_thread.get("id") {
+        return cdp_value;
+    }
+    for key in [
+        "title",
+        "cwd",
+        "createdAt",
+        "updatedAt",
+        "recencyAt",
+        "model",
+        "reasoningEffort",
+        "goal",
+    ] {
+        if let Some(value) = service_thread.get(key).filter(|value| !value.is_null()) {
+            cdp_thread.insert(key.to_string(), value.clone());
+        }
+    }
+    cdp_value
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1264,7 +1415,7 @@ pub fn start_monitor() -> anyhow::Result<RemoteAccessMonitor> {
         Some(controller) => controller.clone(),
         None => {
             let controller = RemoteAccessController::new(
-                Arc::new(NativeCdpBridge),
+                Arc::new(ServiceFirstRemoteBridge::new()),
                 crate::paths::default_app_state_dir(),
             )
             .map_err(|error| {
@@ -2595,6 +2746,22 @@ async fn read(
             ApiError::new(503, DESKTOP_READ_GUIDANCE)
         })?;
     let mut value = native_result(value).map_err(|error| {
+        let error_message = error.message.to_ascii_lowercase();
+        if error.code == 410
+            || error_message.contains("thread not loaded:")
+            || error_message.contains("unknown thread:")
+            || error_message.contains("no rollout found for thread id ")
+        {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "remote_access.side_thread_expiration_detected",
+                json!({
+                    "action": action,
+                    "threadId": payload.get("threadId").and_then(Value::as_str),
+                    "code": error.code,
+                    "message": error.message.clone()
+                }),
+            );
+        }
         if action == "notifications" {
             ApiError::new(503, "通知元数据暂时不可用，请重试连接")
         } else {
@@ -4627,6 +4794,38 @@ mod tests {
         ] {
             assert_eq!(workspace_identity(&payload).unwrap_err().code, 400);
         }
+    }
+
+    #[test]
+    fn thread_service_metadata_merge_preserves_cdp_runtime_fields() {
+        let merged = merge_thread_service_metadata(
+            json!({
+                "ok": true,
+                "thread": {
+                    "id": "thread-1",
+                    "title": "桌面标题",
+                    "cwd": "C:/desktop",
+                    "status": "active",
+                    "queuedMessages": [{"id": "queue-1"}],
+                    "tokenUsage": {"total": 12}
+                }
+            }),
+            json!({
+                "ok": true,
+                "thread": {
+                    "id": "thread-1",
+                    "title": "service标题",
+                    "cwd": "C:/service",
+                    "goal": {"status": "active"}
+                }
+            }),
+        );
+        assert_eq!(merged["thread"]["title"], "service标题");
+        assert_eq!(merged["thread"]["cwd"], "C:/service");
+        assert_eq!(merged["thread"]["status"], "active");
+        assert_eq!(merged["thread"]["queuedMessages"][0]["id"], "queue-1");
+        assert_eq!(merged["thread"]["tokenUsage"]["total"], 12);
+        assert_eq!(merged["thread"]["goal"]["status"], "active");
     }
 
     #[tokio::test]

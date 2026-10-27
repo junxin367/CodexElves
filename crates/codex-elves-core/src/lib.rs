@@ -6,6 +6,7 @@ pub mod ccs_import;
 pub mod cdp;
 pub mod cli_wrapper;
 pub mod codex_home;
+pub mod codex_service;
 pub mod codex_sqlite;
 mod compaction_cache;
 mod computer_use_guard;
@@ -58,6 +59,16 @@ pub mod workspace_checkpoint;
 #[cfg(windows)]
 pub fn windows_create_no_window() -> u32 {
     windows_integration::CREATE_NO_WINDOW
+}
+
+#[cfg(windows)]
+pub fn windows_create_hidden_process() -> u32 {
+    windows_integration::HIDDEN_PROCESS_FLAGS
+}
+
+#[cfg(not(windows))]
+pub fn windows_create_hidden_process() -> u32 {
+    0
 }
 
 #[cfg(windows)]
