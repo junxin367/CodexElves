@@ -898,6 +898,7 @@ function skillVisibleName(skill) {
     .map(word => word[0].toLocaleUpperCase() + word.slice(1)).join(" ")).join(": ");
 }
 const goalPromptTokenKey = "composer-goal";
+const promptCanonicalText = new WeakMap();
 function promptTokenKey(node) {
   if (node.nodeType !== Node.ELEMENT_NODE) return null;
   if (node.classList.contains("inline-goal")) return goalPromptTokenKey;
@@ -915,8 +916,22 @@ function promptNodeText(node) {
   if (node.tagName === "BR") return "\n";
   return [...node.childNodes].map(promptNodeText).join("");
 }
-function promptPlainText(prompt = $("#prompt")) {
+function promptDomText(prompt) {
   return prompt ? [...prompt.childNodes].map(promptNodeText).join("") : "";
+}
+function promptPlainText(prompt = $("#prompt")) {
+  if (!prompt) return "";
+  return promptCanonicalText.has(prompt) ? promptCanonicalText.get(prompt) : promptDomText(prompt);
+}
+function forgetPromptCanonicalText(prompt = $("#prompt")) {
+  if (prompt) promptCanonicalText.delete(prompt);
+}
+function restorePromptCanonicalContent(prompt = $("#prompt")) {
+  const canonicalText = promptCanonicalText.get(prompt);
+  if (!prompt || canonicalText == null || promptDomText(prompt) === canonicalText) return;
+  const selection = promptSelection(prompt);
+  writePromptContent(prompt, canonicalText);
+  setPromptSelection(prompt, selection.start, selection.end, selection);
 }
 function syncPromptTrailingBreak(prompt) {
   if (prompt.childNodes.length === 1 && prompt.firstChild.nodeName === "BR"
@@ -1088,18 +1103,20 @@ function appendPromptText(nodes, text) {
   }
 }
 function writePromptContent(prompt, text, skills = selectedSkills, goalMode = !!selectedGoal) {
+  const canonicalText = String(text ?? "");
+  promptCanonicalText.set(prompt, canonicalText);
   const ordered = skills.map((skill, index) => ({
-    skill, index, offset: Math.min(text.length, Math.max(0, Number.isFinite(skill._offset) ? skill._offset : 0))
+    skill, index, offset: Math.min(canonicalText.length, Math.max(0, Number.isFinite(skill._offset) ? skill._offset : 0))
   })).sort((left, right) => left.offset - right.offset || left.index - right.index);
   const nodes = goalMode ? [goalToken()] : [];
   let cursor = 0;
   for (const entry of ordered) {
-    if (entry.offset > cursor) appendPromptText(nodes, text.slice(cursor, entry.offset));
+    if (entry.offset > cursor) appendPromptText(nodes, canonicalText.slice(cursor, entry.offset));
     entry.skill._offset = entry.offset;
     nodes.push(skillToken(entry.skill));
     cursor = entry.offset;
   }
-  if (cursor < text.length) appendPromptText(nodes, text.slice(cursor));
+  if (cursor < canonicalText.length) appendPromptText(nodes, canonicalText.slice(cursor));
   prompt.replaceChildren(...nodes);
   syncPromptTrailingBreak(prompt);
 }
@@ -3325,9 +3342,11 @@ function removeAdjacentPromptToken(prompt, direction) {
   rememberDraft(); updateComposer(); closeSkillMenu();
   return true;
 }
-function handlePromptInput(event) {
+function handlePromptInput(event, { preserveCanonical = false } = {}) {
+  if (!preserveCanonical) forgetPromptCanonicalText();
   rememberQueuedMessageEdit();
   if (event?.isComposing) { updateComposer(); closeSkillMenu(); return; }
+  if (preserveCanonical) restorePromptCanonicalContent();
   syncSelectedSkillsFromPrompt();
   syncPromptTrailingBreak($("#prompt"));
   rememberDraft();
@@ -5572,7 +5591,7 @@ function shell() {
     if (event.key === "Enter") {
       event.preventDefault();
       $("#prompt").setRangeText("\n", $("#prompt").selectionStart, $("#prompt").selectionEnd, "end");
-      handlePromptInput(event);
+      handlePromptInput(event, { preserveCanonical: true });
     }
   };
   $("#prompt").onbeforeinput = event => {
@@ -5584,7 +5603,7 @@ function shell() {
     if (!event.isComposing && ["insertParagraph", "insertLineBreak"].includes(event.inputType)) {
       event.preventDefault();
       $("#prompt").setRangeText("\n", $("#prompt").selectionStart, $("#prompt").selectionEnd, "end");
-      handlePromptInput(event);
+      handlePromptInput(event, { preserveCanonical: true });
     }
   };
   $("#prompt").onpaste = event => {
@@ -5593,7 +5612,7 @@ function shell() {
     event.preventDefault();
     const text = (event.clipboardData?.getData("text/plain") || "").replace(/\r\n?/g, "\n");
     $("#prompt").setRangeText(text, $("#prompt").selectionStart, $("#prompt").selectionEnd, "end");
-    handlePromptInput(event);
+    handlePromptInput(event, { preserveCanonical: true });
   };
   $("#prompt").oninput = handlePromptInput;
   $("#prompt").oncompositionend = event => handlePromptInput(event);
