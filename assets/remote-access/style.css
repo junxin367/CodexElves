@@ -855,6 +855,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-tools-detail{flex:1;min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;padding-bottom:20px;scrollbar-width:thin}
 .session-tools-detail:empty{display:none}
 .session-tools-detail-controls{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;flex-shrink:0;gap:8px 12px;padding:7px 14px;border-bottom:1px solid var(--line);font-size:.78571rem}
+.session-files-screen .session-tools-detail-controls{justify-content:flex-start}
 .session-tools-diff-stats{display:flex;gap:10px;font-variant-numeric:tabular-nums}
 .session-tools-additions{color:var(--green)}
 .session-tools-deletions{color:var(--danger)}
@@ -888,7 +889,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-related-menu-layer[hidden],.session-related-menu-context[hidden]{display:none}
 .session-related-menu-suspended{display:none!important;pointer-events:none!important}
 .session-related-menu-layer::backdrop{background:transparent}
-.session-related-menu{position:fixed;inset:auto;display:block;width:65vw;max-width:calc(100vw - 16px);max-height:var(--popup-max-height);min-width:0;margin:0;padding:5px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:var(--radius-popup,12px);box-shadow:0 8px 28px #0002;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;font-size:var(--font-size);line-height:1.5;text-align:left}
+.session-related-menu{position:fixed;inset:auto;display:block;width:300px;max-width:calc(100vw - 16px);max-height:var(--popup-max-height);min-width:0;margin:0;padding:5px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:var(--radius-popup,12px);box-shadow:0 8px 28px #0002;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;font-size:var(--font-size);line-height:1.5;text-align:left}
 .session-related-menu-group{min-width:0;margin:0;padding:0 0 5px}
 .session-related-menu-group+.session-related-menu-group{padding-top:5px;border-top:1px solid var(--line)}
 .session-related-menu-heading{flex:1;min-width:0;margin:0;color:var(--muted);font-size:calc(var(--font-size)*.75);font-weight:500;text-align:left}
@@ -958,6 +959,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-files-icon-component{color:#55a89b}
 .session-files-icon-data{color:#8e9fd2}
 .session-files-metadata{flex-shrink:0;max-width:7em;overflow:hidden;color:var(--muted);font-size:.71429rem;line-height:1;text-overflow:ellipsis;white-space:nowrap}
+.session-files-screen .session-files-metadata{margin-right:auto}
 .session-files-screen .session-tools-status{margin:0;padding:8px 16px;font-size:.85714rem;white-space:pre-wrap}
 .session-files-screen .session-tools-status>button{margin-left:10px}
 .session-files-content{overflow:auto;min-height:0;flex:1;padding:0}
@@ -966,6 +968,15 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-files-source-line{display:flex;min-height:1.6em}
 .session-files-source-line>.session-tools-line-number{flex:0 0 5ch;padding:0 1ch;text-align:right;user-select:none}
 .session-files-source-line>code{display:block;flex:1;white-space:pre;padding-right:16px}
+.session-files-token-keyword{color:light-dark(#7c3aed,#c4b5fd);font-weight:600}
+.session-files-token-type{color:light-dark(#0f766e,#5eead4)}
+.session-files-token-string{color:light-dark(#a15c00,#f5c46b)}
+.session-files-token-number{color:light-dark(#b42318,#ff9c97)}
+.session-files-token-literal{color:light-dark(#b42318,#ff9c97);font-weight:600}
+.session-files-token-comment{color:var(--muted);font-style:italic}
+.session-files-token-function{color:light-dark(#2563eb,#93c5fd)}
+.session-files-token-annotation{color:light-dark(#9f1239,#f9a8d4)}
+.session-files-token-operator{color:light-dark(#64748b,#cbd5e1)}
 .session-files-wrap .session-files-source{width:100%}
 .session-files-wrap .session-files-source-line>code{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .session-files-selected-line{background:color-mix(in srgb,#3b82f6 16%,var(--bg))}

@@ -93,17 +93,27 @@ impl Side {
     }
 
     fn public(&self, image: bool, path: &str) -> Value {
+        let svg = svg_preview_bytes(path, &self.bytes);
         let mime = raster_mime(&self.bytes)
             .or_else(|| raster_extension_mime(path))
+            .or_else(|| svg.map(|_| "image/svg+xml"))
             .unwrap_or(if !self.truncated && is_text(&self.bytes) {
                 "text/plain"
             } else {
                 "application/octet-stream"
             });
-        let data_url = (image && self.exists && !self.truncated && !self.unsupported)
-            .then(|| raster_mime(&self.bytes))
-            .flatten()
-            .map(|mime| format!("data:{mime};base64,{}", STANDARD.encode(&self.bytes)));
+        let data_url = if image && self.exists && !self.truncated && !self.unsupported {
+            if let Some(mime) = raster_mime(&self.bytes) {
+                Some(format!(
+                    "data:{mime};base64,{}",
+                    STANDARD.encode(&self.bytes)
+                ))
+            } else {
+                svg.map(|bytes| format!("data:image/svg+xml;base64,{}", STANDARD.encode(bytes)))
+            }
+        } else {
+            None
+        };
         json!({
             "exists": self.exists,
             "mime": self.exists.then_some(mime),
@@ -382,17 +392,11 @@ fn project_search(root: &Path, query: &str) -> Result<Value, ApiError> {
     let mut pending = vec![PathBuf::new()];
     let mut truncated = false;
     while let Some(relative) = pending.pop() {
-        let directory = if relative.as_os_str().is_empty() {
-            root.to_owned()
-        } else {
-            safe_local_path(root, &relative.to_string_lossy())?
-        };
+        let directory = root.join(&relative);
         let entries = std::fs::read_dir(directory)
             .map_err(|_| ApiError::new(404, "项目目录不存在或无法读取"))?;
         for entry in entries {
             let entry = entry.map_err(|_| ApiError::new(403, "无法读取项目目录"))?;
-            let metadata = std::fs::symlink_metadata(entry.path())
-                .map_err(|_| ApiError::new(409, "项目目录已更新，请重新搜索"))?;
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
@@ -404,28 +408,38 @@ fn project_search(root: &Path, query: &str) -> Result<Value, ApiError> {
             if !safe_relative_path(&child) {
                 continue;
             }
-            if is_link(&metadata) {
+            let file_type = entry
+                .file_type()
+                .map_err(|_| ApiError::new(409, "项目目录已更新，请重新搜索"))?;
+            if file_type.is_symlink() {
                 continue;
             }
-            if metadata.is_dir() {
+            if file_type.is_dir() {
+                if is_search_skipped_directory(&name) {
+                    continue;
+                }
                 pending.push(PathBuf::from(&child));
                 continue;
             }
-            if !metadata.is_file() {
+            if !file_type.is_file() {
                 continue;
             }
-            if !child.to_lowercase().contains(&query) {
+            if !child.to_ascii_lowercase().contains(&query) {
                 continue;
             }
             if files.len() == MAX_FILES {
                 truncated = true;
                 break;
             }
+            let size = entry
+                .metadata()
+                .map_err(|_| ApiError::new(409, "项目目录已更新，请重新搜索"))?
+                .len();
             files.push(json!({
                 "name": name,
                 "path": child,
                 "kind": "file",
-                "size": metadata.len()
+                "size": size
             }));
         }
         if truncated {
@@ -440,6 +454,21 @@ fn project_search(root: &Path, query: &str) -> Result<Value, ApiError> {
         "files": files,
         "truncated": truncated
     }))
+}
+
+fn is_search_skipped_directory(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        ".git"
+            | "node_modules"
+            | ".pnpm"
+            | "target"
+            | "dist"
+            | "build"
+            | "temp"
+            | "test-results"
+            | ".idea"
+    )
 }
 
 fn project_file_content(root: &Path, path: &str) -> Result<Value, ApiError> {
@@ -460,6 +489,15 @@ fn project_file_content(root: &Path, path: &str) -> Result<Value, ApiError> {
             "data:{mime};base64,{}",
             STANDARD.encode(&side.bytes)
         ));
+    } else if let Some(svg) = svg_preview_bytes(path, &side.bytes) {
+        result["kind"] = json!("image");
+        result["mime"] = json!("image/svg+xml");
+        result["dataUrl"] = json!(format!(
+            "data:image/svg+xml;base64,{}",
+            STANDARD.encode(svg)
+        ));
+    } else if is_svg_path(path) {
+        result["message"] = json!("SVG 包含不安全内容，暂不提供预览");
     } else if is_text(&side.bytes) {
         let text = std::str::from_utf8(&side.bytes).expect("validated UTF-8");
         let mut end = text.len().min(MAX_TEXT_BYTES);
@@ -849,17 +887,29 @@ impl Repository {
         let image = [(&before, old_path), (&after, entry.path.as_str())]
             .iter()
             .any(|(side, path)| raster_mime(&side.bytes).is_some() || raster_extension(path));
+        let svg = [(&before, old_path), (&after, entry.path.as_str())]
+            .iter()
+            .any(|(side, path)| svg_preview_bytes(path, &side.bytes).is_some());
+        let unsafe_svg = [(&before, old_path), (&after, entry.path.as_str())]
+            .iter()
+            .any(|(side, path)| {
+                is_svg_path(path)
+                    && side.exists
+                    && !side.truncated
+                    && !side.unsupported
+                    && svg_preview_bytes(path, &side.bytes).is_none()
+            });
         let mut truncated = before.truncated || after.truncated;
         let mut message: Option<&str> = None;
         let mut diff = String::new();
         let kind = if before.unsupported || after.unsupported {
             message = Some("符号链接、目录和子模块不提供内容预览，避免读取仓库之外的文件。");
             "unsupported"
-        } else if old_path.to_ascii_lowercase().ends_with(".svg")
-            || entry.path.to_ascii_lowercase().ends_with(".svg")
-        {
-            message = Some("SVG 暂不提供预览，避免执行图像中包含的活动内容。");
+        } else if unsafe_svg {
+            message = Some("SVG 包含不安全内容，暂不提供预览。");
             "unsupported"
+        } else if svg {
+            "image"
         } else if image {
             if truncated {
                 message = Some("图片超过每侧 4 MiB 的预览上限，仅显示类型和大小。");
@@ -1475,6 +1525,49 @@ fn raster_extension(path: &str) -> bool {
     raster_extension_mime(path).is_some()
 }
 
+fn is_svg_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+}
+
+fn svg_preview_bytes<'a>(path: &str, bytes: &'a [u8]) -> Option<&'a [u8]> {
+    if !is_svg_path(path) || bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    let lower = text.to_ascii_lowercase();
+    if !lower.contains("<svg")
+        || [
+            "<!doctype",
+            "<!entity",
+            "<script",
+            "<foreignobject",
+            "<iframe",
+            "<object",
+            "<embed",
+            "javascript:",
+            "onload=",
+            "onclick=",
+            "onerror=",
+            "onmouseover=",
+            "href=\"http",
+            "href='http",
+            "xlink:href=\"http",
+            "xlink:href='http",
+            "src=\"http",
+            "src='http",
+            "url(http",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return None;
+    }
+    Some(bytes)
+}
+
 fn raster_extension_mime(path: &str) -> Option<&'static str> {
     Path::new(path)
         .extension()
@@ -1821,6 +1914,20 @@ mod tests {
                 .unwrap()
                 .starts_with("data:image/png;base64,")
         );
+        std::fs::write(
+            root.join("design.svg"),
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="red"/></svg>"#,
+        )
+        .unwrap();
+        let svg = project_file_content(&root, "design.svg").unwrap();
+        assert_eq!(svg["kind"], "image");
+        assert_eq!(svg["mime"], "image/svg+xml");
+        assert!(
+            svg["dataUrl"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/svg+xml;base64,")
+        );
         let text = "中".repeat(MAX_TEXT_BYTES / 3 - 50);
         std::fs::write(root.join("large.txt"), text).unwrap();
         let large = project_file_content(&root, "large.txt").unwrap();
@@ -2139,10 +2246,28 @@ mod tests {
     }
 
     #[test]
-    fn workspace_raster_mime_never_accepts_svg_or_html() {
+    fn workspace_raster_mime_and_svg_preview_are_restricted() {
         assert_eq!(raster_mime(b"\x89PNG\r\n\x1a\nrest"), Some("image/png"));
         assert_eq!(raster_mime(b"<svg onload='alert(1)'>"), None);
         assert_eq!(raster_mime(b"<html>"), None);
+        assert!(
+            svg_preview_bytes(
+                "safe.svg",
+                br#"<svg viewBox="0 0 1 1"><path d="M0 0h1v1H0z"/></svg>"#
+            )
+            .is_some()
+        );
+        assert!(
+            svg_preview_bytes("unsafe.svg", br#"<svg><script>alert(1)</script></svg>"#).is_none()
+        );
+        assert!(
+            svg_preview_bytes(
+                "unsafe.svg",
+                br#"<svg><image href="https://example.com/a.png"/></svg>"#
+            )
+            .is_none()
+        );
+        assert!(svg_preview_bytes("safe.txt", br#"<svg></svg>"#).is_none());
         assert!(!is_text(b"a\0b"));
     }
 
@@ -2365,6 +2490,21 @@ mod tests {
         let staged_image = fixture_detail(&repo, "picture.png", "staged").await;
         assert_eq!(staged_image["before"]["exists"], false);
         assert_eq!(pixel(&staged_image["after"]), [0, 0, 255, 255]);
+
+        std::fs::write(
+            repo.root.join("design.svg"),
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="red"/></svg>"#,
+        )
+        .unwrap();
+        let svg = fixture_detail(&repo, "design.svg", "untracked").await;
+        assert_eq!(svg["kind"], "image");
+        assert_eq!(svg["after"]["mime"], "image/svg+xml");
+        assert!(
+            svg["after"]["dataUrl"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/svg+xml;base64,")
+        );
 
         let deleted = fixture_detail(&repo, "deleted.txt", "unstaged").await;
         assert_eq!(deleted["before"]["exists"], true);

@@ -144,6 +144,8 @@ Android APK 使用独立版本。设置弹窗底部左侧从原生外壳读取�
 
 ### 本机前端调试
 
+发布或修改远程网页资源后，先在 `apps/codex-elves-manager/` 执行 `npm run check`。该检查会按 ES module 语法解析 `assets/remote-access/` 下的 JavaScript，验证本地静态 `import` 目标存在，并核对开发入口和 Rust 远程服务是否都提供这些资源；`npm run build` 也会自动执行同一门禁。网页资源发生变化时同步递增 `assets/remote-access/resource-revision.txt`，让 Android/WebView 资源缓存识别新版本。
+
 需要保持现有 `codex-elves.exe` 和真实会话运行时，在仓库根目录启动独立调试入口：
 
 ```powershell

@@ -34,12 +34,19 @@ import androidx.webkit.WebStorageCompat;
 import androidx.webkit.WebSettingsCompat;
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
+import org.json.JSONException;
 import org.json.JSONObject;
+import org.json.JSONArray;
+import org.json.JSONTokener;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.concurrent.atomic.AtomicReference;
@@ -48,17 +55,27 @@ import java.util.function.Consumer;
 /** Main-thread-owned browser state; never retains a detached Activity. */
 final class BrowserSession {
     static final class DiagnosticEvent {
+        final long id;
         final long timeMs;
         final String phase;
         final String method;
         final String url;
-        final String status;
-        final String detail;
-        final String headers;
-        final boolean mainFrame;
+        String status;
+        String detail;
+        String headers;
+        boolean mainFrame;
+        String resourceType;
+        long durationMs;
+        long sizeBytes;
+        int statusCode;
+        boolean response;
+        boolean failure;
 
-        DiagnosticEvent(long timeMs, String phase, String method, String url,
-            String status, String detail, String headers, boolean mainFrame) {
+        DiagnosticEvent(long id, long timeMs, String phase, String method, String url,
+            String status, String detail, String headers, boolean mainFrame,
+            String resourceType, long durationMs, long sizeBytes, int statusCode,
+            boolean response, boolean failure) {
+            this.id = id;
             this.timeMs = timeMs;
             this.phase = phase;
             this.method = method;
@@ -67,6 +84,17 @@ final class BrowserSession {
             this.detail = detail;
             this.headers = headers;
             this.mainFrame = mainFrame;
+            this.resourceType = resourceType;
+            this.durationMs = durationMs;
+            this.sizeBytes = sizeBytes;
+            this.statusCode = statusCode;
+            this.response = response;
+            this.failure = failure;
+        }
+
+        DiagnosticEvent copy() {
+            return new DiagnosticEvent(id, timeMs, phase, method, url, status, detail, headers,
+                mainFrame, resourceType, durationMs, sizeBytes, statusCode, response, failure);
         }
     }
 
@@ -118,6 +146,9 @@ final class BrowserSession {
     private boolean desktopRootScrollLocked;
     private ScriptHandler desktopViewportScript;
     private final ArrayDeque<DiagnosticEvent> diagnosticEvents = new ArrayDeque<>();
+    private final Map<String, DiagnosticEvent> latestNetworkEvents = new HashMap<>();
+    private final Set<String> performanceResourceKeys = new HashSet<>();
+    private long nextDiagnosticId;
     private final Runnable desktopRootScrollPolicyRefresh = this::updateDesktopRootScrollPolicy;
     private final Runnable diagnosticRefresh = () -> {
         if (!closed && listener != null) listener.changed();
@@ -371,8 +402,8 @@ final class BrowserSession {
                 Uri resource = request.getUrl();
                 boolean network = "http".equalsIgnoreCase(resource.getScheme()) || "https".equalsIgnoreCase(resource.getScheme());
                 if (network) {
-                    recordDiagnosticEvent("request", request.getMethod(), resource.toString(), "",
-                        request.isRedirect() ? "redirect" : "", request.isForMainFrame(),
+                    recordNetworkRequest(request.getMethod(), resource.toString(),
+                        request.isForMainFrame(), request.isRedirect() ? "redirect" : "",
                         sanitizedHeaders(request.getRequestHeaders()));
                 }
                 if (network && !allowed(resource)) return new WebResourceResponse("text/plain", "UTF-8",
@@ -390,6 +421,7 @@ final class BrowserSession {
                 mainFrameFinished = false;
                 pendingNavigationUrl = address;
                 ++pageGeneration;
+                ensureNetworkRequest("GET", address, true, "document");
                 recordDiagnosticEvent("page-start", "GET", address, "", "", true, "");
                 diagnostic("native.browser.page", DiagnosticsPolicy.urlFields(address,
                     "phase", "start", "generation", pageGeneration));
@@ -405,6 +437,14 @@ final class BrowserSession {
                     MAIN.postDelayed(desktopRootScrollPolicyRefresh, 120L);
                 }
                 webView.setVisibility(View.VISIBLE);
+                completeNetworkRequest("GET", address, 200, "200", "document", 0L, true);
+                collectPerformanceSnapshot(webView);
+                MAIN.postDelayed(() -> {
+                    if (!closed && mainFrameFinished) {
+                        collectPerformanceSnapshot(view);
+                        finalizeNetworkEvents();
+                    }
+                }, 350L);
                 recordDiagnosticEvent("page-finish", "GET", address, "", "page-loaded", true, "");
                 diagnostic("native.browser.page", DiagnosticsPolicy.urlFields(address,
                     "phase", "complete", "generation", pageGeneration));
@@ -434,10 +474,12 @@ final class BrowserSession {
                 String detail = failure.getDescription() == null
                     ? "load-failed" : failure.getDescription().toString();
                 if (!mainFrame && ignorableResourceFailure(request.getUrl(), detail)) {
-                    recordDiagnosticEvent("request", request.getMethod(), target, "",
-                        "resource-cancelled", false, "");
+                    finishNetworkRequest(request.getMethod(), target, 0, "resource-cancelled",
+                        detail, false, inferResourceType(request.getUrl(), false), false);
                     return;
                 }
+                finishNetworkRequest(request.getMethod(), target, 0, "失败", detail,
+                    mainFrame, inferResourceType(request.getUrl(), mainFrame), true);
                 recordDiagnosticEvent("failure", request.getMethod(), target, "", detail,
                     mainFrame, "");
                 if (mainFrame) {
@@ -457,6 +499,9 @@ final class BrowserSession {
                 boolean mainFrame = request.isForMainFrame();
                 if (mainFrame && !mainFrameStarted) return;
                 int statusCode = response.getStatusCode();
+                finishNetworkRequest(request.getMethod(), target, statusCode,
+                    Integer.toString(statusCode), response.getReasonPhrase(), mainFrame,
+                    inferResourceType(request.getUrl(), mainFrame), statusCode >= 400);
                 recordDiagnosticEvent("http-error", request.getMethod(), target,
                     Integer.toString(statusCode), response.getReasonPhrase(), mainFrame,
                     sanitizedHeaders(response.getResponseHeaders()));
@@ -475,6 +520,9 @@ final class BrowserSession {
                 android.net.http.SslError failure) {
                 handler.cancel();
                 boolean mainFrame = mainFrameStarted;
+                finishNetworkRequest("GET", failure.getUrl(), 0, "SSL",
+                    "SSL " + failure.getPrimaryError(), mainFrame,
+                    inferResourceType(Uri.parse(failure.getUrl()), mainFrame), true);
                 recordDiagnosticEvent("ssl-error", "GET", failure.getUrl(), "",
                     "SSL " + failure.getPrimaryError(), mainFrame, "");
                 diagnostic("native.browser.ssl", DiagnosticsPolicy.urlFields(
@@ -645,6 +693,7 @@ final class BrowserSession {
     }
 
     long pageGeneration() { return pageGeneration; }
+    String diagnosticPageUrl() { return redactDiagnosticUrl(url); }
     List<BrowserPreferences.HistoryEntry> history() {
         return preferences.loadHistory(identity.origin());
     }
@@ -656,13 +705,17 @@ final class BrowserSession {
     }
     List<DiagnosticEvent> diagnosticEvents() {
         synchronized (diagnosticEvents) {
-            return new ArrayList<>(diagnosticEvents);
+            List<DiagnosticEvent> snapshot = new ArrayList<>();
+            for (DiagnosticEvent event : diagnosticEvents) snapshot.add(event.copy());
+            return snapshot;
         }
     }
     void clearDiagnosticEvents() {
         MAIN.removeCallbacks(diagnosticRefresh);
         synchronized (diagnosticEvents) {
             diagnosticEvents.clear();
+            latestNetworkEvents.clear();
+            performanceResourceKeys.clear();
         }
         changed();
     }
@@ -790,16 +843,234 @@ final class BrowserSession {
         String detail, boolean mainFrame, String headers) {
         String safeUrl = redactDiagnosticUrl(url);
         String safeDetail = detail == null ? "" : detail.length() > 1024 ? detail.substring(0, 1024) : detail;
-        DiagnosticEvent event = new DiagnosticEvent(System.currentTimeMillis(),
-            phase == null ? "" : phase, method == null ? "" : method,
-            safeUrl, status == null ? "" : status, safeDetail,
-            headers == null ? "" : headers, mainFrame);
         synchronized (diagnosticEvents) {
+            DiagnosticEvent event = new DiagnosticEvent(++nextDiagnosticId, System.currentTimeMillis(),
+                phase == null ? "" : phase, method == null ? "" : method,
+                safeUrl, status == null ? "" : status, safeDetail,
+                headers == null ? "" : headers, mainFrame, "", 0L, 0L,
+                parseStatusCode(status), phase != null && "http-error".equals(phase),
+                phase != null && ("failure".equals(phase) || "ssl-error".equals(phase)));
             diagnosticEvents.addLast(event);
-            while (diagnosticEvents.size() > DIAGNOSTIC_EVENT_LIMIT) diagnosticEvents.removeFirst();
+            trimDiagnosticEventsLocked();
         }
         MAIN.removeCallbacks(diagnosticRefresh);
         MAIN.postDelayed(diagnosticRefresh, 120L);
+    }
+
+    private void recordNetworkRequest(String method, String url, boolean mainFrame,
+        String detail, String headers) {
+        String safeUrl = redactDiagnosticUrl(url);
+        DiagnosticEvent event;
+        synchronized (diagnosticEvents) {
+            event = new DiagnosticEvent(++nextDiagnosticId, System.currentTimeMillis(),
+                "request", method == null ? "GET" : method, safeUrl, "", detail, headers,
+                mainFrame, inferResourceType(Uri.parse(url), mainFrame), 0L, 0L, 0, false, false);
+            diagnosticEvents.addLast(event);
+            latestNetworkEvents.put(networkKey(method, safeUrl), event);
+            trimDiagnosticEventsLocked();
+        }
+        scheduleDiagnosticRefresh();
+    }
+
+    private void ensureNetworkRequest(String method, String url, boolean mainFrame, String resourceType) {
+        String safeUrl = redactDiagnosticUrl(url);
+        synchronized (diagnosticEvents) {
+            DiagnosticEvent existing = latestNetworkEvents.get(networkKey(method, safeUrl));
+            if (existing != null && !existing.failure) return;
+            DiagnosticEvent event = new DiagnosticEvent(++nextDiagnosticId, System.currentTimeMillis(),
+                "request", method == null ? "GET" : method, safeUrl, "", "", "",
+                mainFrame, resourceType == null || resourceType.isEmpty()
+                    ? inferResourceType(Uri.parse(url), mainFrame) : resourceType,
+                0L, 0L, 0, false, false);
+            diagnosticEvents.addLast(event);
+            latestNetworkEvents.put(networkKey(method, safeUrl), event);
+            trimDiagnosticEventsLocked();
+        }
+        scheduleDiagnosticRefresh();
+    }
+
+    private void finishNetworkRequest(String method, String url, int statusCode, String status,
+        String detail, boolean mainFrame, String resourceType, boolean failure) {
+        String safeUrl = redactDiagnosticUrl(url);
+        synchronized (diagnosticEvents) {
+            DiagnosticEvent event = latestNetworkEvents.get(networkKey(method, safeUrl));
+            if (event == null) {
+                event = new DiagnosticEvent(++nextDiagnosticId, System.currentTimeMillis(),
+                    "request", method == null ? "GET" : method, safeUrl, "", "", "",
+                    mainFrame, resourceType == null ? "" : resourceType, 0L, 0L,
+                    0, false, false);
+                diagnosticEvents.addLast(event);
+                latestNetworkEvents.put(networkKey(method, safeUrl), event);
+            }
+            event.status = status == null ? "" : status;
+            event.detail = detail == null ? "" : detail;
+            event.mainFrame = mainFrame;
+            if (resourceType != null && !resourceType.isEmpty()) event.resourceType = resourceType;
+            event.statusCode = statusCode;
+            event.response = statusCode > 0 || "200".equals(status) || "完成".equals(status);
+            event.failure = failure;
+            event.durationMs = Math.max(0L, System.currentTimeMillis() - event.timeMs);
+            trimDiagnosticEventsLocked();
+        }
+        scheduleDiagnosticRefresh();
+    }
+
+    private void completeNetworkRequest(String method, String url, int statusCode, String status,
+        String resourceType, long sizeBytes, boolean response) {
+        String safeUrl = redactDiagnosticUrl(url);
+        synchronized (diagnosticEvents) {
+            DiagnosticEvent event = latestNetworkEvents.get(networkKey(method, safeUrl));
+            if (event == null) {
+                event = new DiagnosticEvent(++nextDiagnosticId, System.currentTimeMillis(),
+                    "request", method == null ? "GET" : method, safeUrl, "", "", "",
+                    true, resourceType == null ? "document" : resourceType, 0L, 0L,
+                    0, false, false);
+                diagnosticEvents.addLast(event);
+                latestNetworkEvents.put(networkKey(method, safeUrl), event);
+            }
+            event.status = status == null ? "" : status;
+            event.statusCode = statusCode;
+            event.resourceType = resourceType == null || resourceType.isEmpty()
+                ? event.resourceType : resourceType;
+            event.sizeBytes = Math.max(0L, sizeBytes);
+            event.response = response;
+            event.durationMs = Math.max(event.durationMs, System.currentTimeMillis() - event.timeMs);
+            trimDiagnosticEventsLocked();
+        }
+        scheduleDiagnosticRefresh();
+    }
+
+    private void collectPerformanceSnapshot(WebView webView) {
+        if (Build.VERSION.SDK_INT < 19 || webView == null) return;
+        String script = "(function(){try{var n=performance.getEntriesByType('navigation')[0];"
+            + "var r=performance.getEntriesByType('resource').map(function(e){return{"
+            + "name:e.name,initiatorType:e.initiatorType,duration:e.duration,"
+            + "transferSize:e.transferSize||0,encodedBodySize:e.encodedBodySize||0,"
+            + "startTime:e.startTime};});return JSON.stringify({navigation:n?{name:location.href,"
+            + "duration:n.duration,transferSize:n.transferSize||0}:null,resources:r});}"
+            + "catch(e){return JSON.stringify({resources:[]});}})()";
+        webView.evaluateJavascript(script, this::applyPerformanceSnapshot);
+    }
+
+    private void applyPerformanceSnapshot(String encoded) {
+        if (encoded == null || encoded.isEmpty()) return;
+        try {
+            Object value = new JSONTokener(encoded).nextValue();
+            if (!(value instanceof String)) return;
+            JSONObject root = new JSONObject((String) value);
+            JSONObject navigation = root.optJSONObject("navigation");
+            if (navigation != null) {
+                updatePerformanceEvent(navigation.optString("name", url), "document",
+                    navigation.optDouble("duration", 0d),
+                    navigation.optLong("transferSize", 0L));
+            }
+            JSONArray resources = root.optJSONArray("resources");
+            if (resources == null) return;
+            for (int index = 0; index < resources.length(); index++) {
+                JSONObject resource = resources.optJSONObject(index);
+                if (resource == null) continue;
+                String target = resource.optString("name", "");
+                if (target.isEmpty()) continue;
+                String key = redactDiagnosticUrl(target) + "|" + resource.optDouble("startTime", 0d);
+                synchronized (diagnosticEvents) {
+                    if (!performanceResourceKeys.add(key)) continue;
+                }
+                updatePerformanceEvent(target, resource.optString("initiatorType", ""),
+                    resource.optDouble("duration", 0d),
+                    Math.max(resource.optLong("transferSize", 0L),
+                        resource.optLong("encodedBodySize", 0L)));
+            }
+        } catch (JSONException ignored) {
+            // Performance entries are an optional enhancement and must not affect loading.
+        } catch (RuntimeException ignored) {
+            // Performance entries are an optional enhancement and must not affect loading.
+        }
+    }
+
+    private void updatePerformanceEvent(String url, String resourceType, double duration,
+        long sizeBytes) {
+        String safeUrl = redactDiagnosticUrl(url);
+        synchronized (diagnosticEvents) {
+            DiagnosticEvent event = latestNetworkEvents.get(networkKey("GET", safeUrl));
+            if (event == null) {
+                for (DiagnosticEvent candidate : diagnosticEvents) {
+                    if ("request".equals(candidate.phase) && safeUrl.equals(candidate.url)) {
+                        event = candidate;
+                    }
+                }
+            }
+            if (event == null) return;
+            event.resourceType = normalizeResourceType(resourceType, event.resourceType);
+            event.durationMs = Math.max(event.durationMs, Math.round(Math.max(0d, duration)));
+            event.sizeBytes = Math.max(event.sizeBytes, Math.max(0L, sizeBytes));
+            if (!event.failure && event.statusCode == 0) {
+                event.statusCode = 200;
+                event.status = "200";
+            }
+            event.response = true;
+        }
+        scheduleDiagnosticRefresh();
+    }
+
+    private void finalizeNetworkEvents() {
+        long now = System.currentTimeMillis();
+        synchronized (diagnosticEvents) {
+            for (DiagnosticEvent event : diagnosticEvents) {
+                if (!"request".equals(event.phase) || event.failure || event.response
+                    || "resource-cancelled".equals(event.status)) continue;
+                event.statusCode = 200;
+                event.status = "200";
+                event.response = true;
+                event.durationMs = Math.max(1L, now - event.timeMs);
+            }
+        }
+        scheduleDiagnosticRefresh();
+    }
+
+    private static String networkKey(String method, String url) {
+        return (method == null ? "GET" : method.toUpperCase(Locale.ROOT)) + "|" + (url == null ? "" : url);
+    }
+
+    private static int parseStatusCode(String status) {
+        if (status == null || status.isEmpty()) return 0;
+        try { return Integer.parseInt(status); }
+        catch (NumberFormatException ignored) { return 0; }
+    }
+
+    private void trimDiagnosticEventsLocked() {
+        while (diagnosticEvents.size() > DIAGNOSTIC_EVENT_LIMIT) {
+            DiagnosticEvent removed = diagnosticEvents.removeFirst();
+            if (removed != null) latestNetworkEvents.values().removeIf(value -> value == removed);
+        }
+    }
+
+    private void scheduleDiagnosticRefresh() {
+        MAIN.removeCallbacks(diagnosticRefresh);
+        MAIN.postDelayed(diagnosticRefresh, 120L);
+    }
+
+    private static String normalizeResourceType(String value, String fallback) {
+        if (value == null || value.isEmpty()) return fallback == null ? "other" : fallback;
+        if ("script".equalsIgnoreCase(value)) return "script";
+        if ("css".equalsIgnoreCase(value) || "stylesheet".equalsIgnoreCase(value)) return "stylesheets";
+        if ("img".equalsIgnoreCase(value) || "image".equalsIgnoreCase(value)) return "image";
+        if ("font".equalsIgnoreCase(value)) return "font";
+        if ("xmlhttprequest".equalsIgnoreCase(value) || "fetch".equalsIgnoreCase(value)) return "xhr";
+        if ("document".equalsIgnoreCase(value) || "navigation".equalsIgnoreCase(value)) return "document";
+        return value;
+    }
+
+    private static String inferResourceType(Uri target, boolean mainFrame) {
+        if (mainFrame) return "document";
+        if (target == null) return "other";
+        String path = target.getPath() == null ? "" : target.getPath().toLowerCase(Locale.ROOT);
+        if (path.endsWith(".js") || path.endsWith(".mjs")) return "script";
+        if (path.endsWith(".css")) return "stylesheets";
+        if (path.matches(".*\\.(png|jpe?g|gif|webp|svg|ico|avif)$")) return "image";
+        if (path.matches(".*\\.(woff2?|ttf|otf|eot)$")) return "font";
+        if (path.contains("/api/") || path.contains("/graphql") || path.contains("/ajax/")
+            || "POST".equalsIgnoreCase(target.getQueryParameter("method"))) return "xhr";
+        return "other";
     }
 
     private static String sanitizedHeaders(java.util.Map<String, String> values) {

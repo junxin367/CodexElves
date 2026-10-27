@@ -381,7 +381,12 @@ export function mountSessionMenu({
     }
     if (box.bottom <= view.top || box.top >= view.top + view.height
         || box.right <= view.left || box.left >= view.left + view.width) { close(); return; }
-    const width = Math.max(0, Math.min(view.width * .65, view.width - padding * 2));
+    // Keep the menu compact on desktop and tablet while retaining a viewport
+    // relative width on phones where a fixed 300px panel would not fit.
+    const phoneViewport = Math.min(view.width, view.height) < 600;
+    const width = phoneViewport
+      ? Math.max(0, Math.min(view.width * .65, view.width - padding * 2))
+      : Math.max(0, Math.min(300, view.width - padding * 2));
     const top = Math.max(view.top + padding, Math.min(box.bottom + 5, view.top + view.height - padding));
     menu.style.width = `${width}px`;
     menu.style.left = `${Math.max(view.left + padding, Math.min(box.right - width, view.left + view.width - width - padding))}px`;

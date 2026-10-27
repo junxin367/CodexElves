@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
-    "build": "npm run vite:build && cargo build --profile release-fast -p codex-elves-launcher -p codex-elves-manager --bins",
-    "check": "tsc --noEmit -p tsconfig.json",
+    "build": "npm run check:remote-access && npm run vite:build && cargo build --profile release-fast -p codex-elves-launcher -p codex-elves-manager --bins",
+    "check": "npm run check:remote-access && tsc --noEmit -p tsconfig.json",
+    "check:remote-access": "node ../../scripts/check-remote-access-assets.mjs",
     "vite:dev": "vite --host 127.0.0.1 --port 1420",
     "vite:build": "vite build"
   },

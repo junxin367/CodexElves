@@ -2327,7 +2327,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "101";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "103";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -4535,7 +4535,7 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("codex-open-in-menu"));
     assert!(script.contains(r#"const codexOpenInVersion = "11";"#));
     assert!(script.contains("window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion"));
-    assert!(script.contains(r#"const codexDeleteStyleVersion = "101";"#));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "103";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
     assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
     assert!(script.contains("width: 30px !important;"));
@@ -5022,18 +5022,22 @@ fn injection_script_uses_native_fast_without_custom_controls_or_request_override
 }
 
 #[test]
-fn injection_script_constrains_native_composer_measurement_without_clipping_surface() {
+fn injection_script_keeps_native_composer_measurement_available() {
     let script = assets::injection_script(45221);
 
     assert!(script.contains("codex-elves-service-tier-composer-surface"));
     assert!(script.contains(".composer-surface-chrome {"));
     assert!(script.contains("scrollbar-width: none !important;"));
     assert!(script.contains(".composer-surface-chrome::-webkit-scrollbar"));
-    assert!(script.contains("[class*=\"_WorkTriggerMeasurement_\"][aria-hidden=\"true\"]"));
-    assert!(script.contains("[class*=\"_ModelPickerTriggerMeasurement_\"][aria-hidden=\"true\"]"));
-    assert!(script.contains("block-size: 0 !important;"));
-    assert!(script.contains("max-block-size: 0 !important;"));
-    assert!(script.contains("overflow: clip !important;"));
+    assert!(script.contains(
+        r#"[role="dialog"]:has(input[placeholder="搜索项目"], input[placeholder="Search projects"]) [role="option"]"#
+    ));
+    assert!(script.contains("min-height: 28px !important;"));
+    assert!(script.contains("flex: 0 0 auto !important;"));
+    assert!(!script.contains("[class*=\"_WorkTriggerMeasurement_\"][aria-hidden=\"true\"]"));
+    assert!(!script.contains("[class*=\"_ModelPickerTriggerMeasurement_\"][aria-hidden=\"true\"]"));
+    assert!(!script.contains("block-size: 0 !important;"));
+    assert!(!script.contains("max-block-size: 0 !important;"));
     assert!(script.contains("cleanupLegacyCodexComposerOverflowGuards"));
     assert!(script.contains("cleanupLegacyCodexComposerOverflowGuards();"));
     assert!(!script.contains("codexComposerOverflowSurfaces"));

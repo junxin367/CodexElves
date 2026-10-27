@@ -19,7 +19,6 @@ import android.text.InputType;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.KeyEvent;
-import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -35,7 +34,6 @@ import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
-import android.widget.PopupMenu;
 import android.widget.PopupWindow;
 import android.widget.ScrollView;
 import android.widget.Space;
@@ -52,7 +50,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     private int background, foreground, muted, line, surface;
     private float fontSize;
     private enum InternalPage { NONE, HISTORY, BOOKMARKS, DIAGNOSTICS }
-    private LinearLayout root, footer;
+    private LinearLayout root, header, footer;
+    private View headerDivider, footerDivider;
     private FrameLayout content, webContainer;
     private View homePage, settingsPage, historyPage, bookmarksPage, diagnosticsPage;
     private TextView heading, failure;
@@ -74,7 +73,9 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     private String initialUrl = "";
     private boolean settings, resumed, ready, acquiring;
     private InternalPage internalPage = InternalPage.NONE;
+    private String diagnosticsCategory = "all";
     private String diagnosticsFilter = "all";
+    private long expandedDiagnosticId = -1L;
     private final HapticFeedbackController haptics = new HapticFeedbackController();
     private android.window.OnBackInvokedCallback backCallback;
     private AlertDialog authDialog;
@@ -143,7 +144,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         root = column(); root.setFitsSystemWindows(true); root.setBackgroundColor(background);
         root.setFocusableInTouchMode(true);
         setContentView(root);
-        LinearLayout header = row(); header.setPadding(dp(12), dp(6), dp(12), dp(6));
+        header = row(); header.setPadding(dp(12), dp(6), dp(12), dp(6));
         header.setMinimumHeight(dp(50));
         heading = text("浏览器", fontSize * 1.07143f, foreground);
         heading.setTypeface(null, Typeface.BOLD); heading.setSingleLine(true);
@@ -157,7 +158,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         });
         header.addView(returnButton);
         root.addView(header);
-        root.addView(divider(), new LinearLayout.LayoutParams(-1, dp(1)));
+        headerDivider = divider();
+        root.addView(headerDivider, new LinearLayout.LayoutParams(-1, dp(1)));
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setProgressTintList(ColorStateList.valueOf(Color.rgb(48, 118, 223)));
         root.addView(progress, new LinearLayout.LayoutParams(-1, dp(2)));
@@ -184,7 +186,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
             else acquireSession();
         });
         content.addView(failure, new FrameLayout.LayoutParams(-1, -1));
-        root.addView(divider(), new LinearLayout.LayoutParams(-1, dp(1)));
+        footerDivider = divider();
+        root.addView(footerDivider, new LinearLayout.LayoutParams(-1, dp(1)));
         footer = row(); footer.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
         footer.setPadding(dp(4), dp(5), dp(4), dp(7)); footer.setMinimumHeight(dp(58));
         back = icon(R.drawable.browser_back, "网页后退", () -> { if (ready) session.back(); });
@@ -403,147 +406,281 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     private void renderDiagnosticsPage() {
         if (session == null || diagnosticsPageBody == null) return;
         diagnosticsPageBody.removeAllViews();
-        List<BrowserSession.DiagnosticEvent> allEvents = session.diagnosticEvents();
-        TextView summary = text(
-            "页面：" + (session.url.isEmpty() ? "首页" : session.url)
-                + "\nUA：" + userAgentLabel(session.userAgentMode())
-                + "\n记录：" + allEvents.size(),
-            fontSize * .86f, muted);
-        summary.setPadding(dp(8), dp(4), dp(8), dp(12));
-        summary.setLineSpacing(dp(3), 1);
+        List<BrowserSession.DiagnosticEvent> allEvents = new ArrayList<>();
+        for (BrowserSession.DiagnosticEvent event : session.diagnosticEvents()) {
+            if ("request".equals(event.phase) && !"resource-cancelled".equals(event.status))
+                allEvents.add(event);
+        }
+
+        LinearLayout summary = column();
+        summary.setPadding(dp(14), dp(10), dp(14), dp(10));
+        summary.setBackground(rounded(Color.WHITE, line, 14));
+        LinearLayout pageRow = row();
+        String diagnosticPageUrl = session.diagnosticPageUrl();
+        pageRow.addView(text("页面", fontSize * .78f, muted),
+            new LinearLayout.LayoutParams(dp(42), -2));
+        TextView pageUrl = text(diagnosticPageUrl.isEmpty() ? "首页" : shortUrl(diagnosticPageUrl),
+            fontSize * .82f, foreground);
+        pageUrl.setSingleLine(true);
+        pageUrl.setEllipsize(TextUtils.TruncateAt.END);
+        pageRow.addView(pageUrl, new LinearLayout.LayoutParams(0, -2, 1));
+        Button copyButton = textButton("复制", () -> copyDiagnosticText(diagnosticPageUrl));
+        copyButton.setMinimumHeight(dp(30));
+        copyButton.setMinimumWidth(dp(48));
+        copyButton.setTextSize(fontSize * .72f);
+        pageRow.addView(copyButton, new LinearLayout.LayoutParams(dp(52), dp(32)));
+        summary.addView(pageRow, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout infoRow = row();
+        infoRow.addView(text("UA  " + userAgentLabel(session.userAgentMode()),
+            fontSize * .74f, muted), new LinearLayout.LayoutParams(0, -2, 1));
+        infoRow.addView(text("记录  " + allEvents.size() + " 条",
+            fontSize * .74f, muted), new LinearLayout.LayoutParams(-2, -2));
+        summary.addView(infoRow, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout liveRow = row();
+        TextView live = text("● 实时诊断", fontSize * .74f, Color.rgb(35, 160, 91));
+        live.setTypeface(null, Typeface.BOLD);
+        liveRow.addView(live, new LinearLayout.LayoutParams(0, -2, 1));
+        liveRow.addView(text("已捕获 " + allEvents.size() + " 条请求",
+            fontSize * .72f, muted), new LinearLayout.LayoutParams(-2, -2));
+        summary.addView(liveRow, new LinearLayout.LayoutParams(-1, -2));
         diagnosticsPageBody.addView(summary);
 
-        LinearLayout toolbar = row();
-        Button filterButton = textButton(diagnosticsFilterLabel(), () -> showDiagnosticsFilterMenu(toolbar));
-        toolbar.addView(filterButton, new LinearLayout.LayoutParams(-2, -2));
-        TextView filterCount = text(eventsCountLabel(allEvents), fontSize * .78f, muted);
-        filterCount.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
-        toolbar.addView(filterCount, new LinearLayout.LayoutParams(0, -2, 1));
-        diagnosticsPageBody.addView(toolbar, new LinearLayout.LayoutParams(-1, -2));
+        int requestCount = 0, responseCount = 0, errorCount = 0;
+        for (BrowserSession.DiagnosticEvent event : allEvents) {
+            if (event.failure) errorCount++;
+            else if (event.response) responseCount++;
+            else requestCount++;
+        }
+
+        LinearLayout categoryBar = row();
+        categoryBar.setPadding(dp(2), dp(10), dp(2), dp(6));
+        categoryBar.setBackground(rounded(Color.rgb(245, 247, 250), Color.TRANSPARENT, 18));
+        addDiagnosticsChip(categoryBar, "全部  " + allEvents.size(), "all");
+        addDiagnosticsChip(categoryBar, "请求  " + requestCount, "request");
+        addDiagnosticsChip(categoryBar, "响应  " + responseCount, "response");
+        addDiagnosticsChip(categoryBar, "错误  " + errorCount, "error");
+        diagnosticsPageBody.addView(categoryBar, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout filterBar = row();
+        filterBar.setPadding(0, 0, 0, dp(8));
+        addDiagnosticsFilterChip(filterBar, "全部", "all");
+        addDiagnosticsFilterChip(filterBar, "仅错误", "error");
+        addDiagnosticsFilterChip(filterBar, "耗时", "duration");
+        addDiagnosticsFilterChip(filterBar, "资源", "resource");
+        diagnosticsPageBody.addView(filterBar, new LinearLayout.LayoutParams(-1, -2));
 
         List<BrowserSession.DiagnosticEvent> events = new ArrayList<>();
+        long maxDuration = 1L;
         for (BrowserSession.DiagnosticEvent event : allEvents) {
-            if (diagnosticsFilterMatches(event)) events.add(event);
+            if (!diagnosticsMatches(event)) continue;
+            events.add(event);
+            maxDuration = Math.max(maxDuration, event.durationMs);
         }
         if (events.isEmpty()) {
             diagnosticsPageBody.addView(emptyState(
-                allEvents.isEmpty() ? "暂无网页请求或控制台记录" : "当前筛选没有记录"));
+                allEvents.isEmpty() ? "暂无网页请求" : "当前筛选没有记录"));
             return;
         }
-        SimpleDateFormat time = new SimpleDateFormat("HH:mm:ss", Locale.getDefault());
         for (int index = events.size() - 1; index >= 0; index--) {
-            BrowserSession.DiagnosticEvent event = events.get(index);
-            addDiagnosticsRow(event, time.format(event.timeMs));
+            addDiagnosticsCard(events.get(index), maxDuration);
         }
     }
 
-    private String eventsCountLabel(List<BrowserSession.DiagnosticEvent> events) {
-        int count = 0;
-        for (BrowserSession.DiagnosticEvent event : events) {
-            if (diagnosticsFilterMatches(event)) count++;
-        }
-        return count + " 条";
-    }
-
-    private void showDiagnosticsFilterMenu(View anchor) {
-        PopupMenu menu = new PopupMenu(this, anchor);
-        menu.getMenu().add("全部");
-        menu.getMenu().add("请求");
-        menu.getMenu().add("失败");
-        menu.getMenu().add("HTTP");
-        menu.getMenu().add("SSL");
-        menu.getMenu().add("Console");
-        menu.getMenu().add("页面");
-        String currentLabel = diagnosticsFilterLabel();
-        for (int index = 0; index < menu.getMenu().size(); index++) {
-            MenuItem item = menu.getMenu().getItem(index);
-            item.setCheckable(true);
-            item.setChecked(currentLabel.equals(item.getTitle().toString()));
-        }
-        menu.setOnMenuItemClickListener(item -> {
-            String label = item.getTitle().toString();
-            diagnosticsFilter = diagnosticsFilterForLabel(label);
-            haptics.perform(anchor, "haptic-click");
+    private void addDiagnosticsChip(LinearLayout container, String label, String category) {
+        boolean selected = diagnosticsCategory.equals(category);
+        Button chip = textButton(label, () -> {
+            diagnosticsCategory = category;
             renderDiagnosticsPage();
-            return true;
         });
-        menu.show();
+        chip.setTextSize(fontSize * .72f);
+        chip.setTextColor(selected ? Color.WHITE : foreground);
+        chip.setGravity(Gravity.CENTER);
+        chip.setMinHeight(0);
+        chip.setMinimumHeight(dp(34));
+        chip.setPadding(dp(5), 0, dp(5), 0);
+        chip.setBackground(rounded(selected ? Color.rgb(39, 139, 241) : Color.TRANSPARENT,
+            selected ? Color.rgb(39, 139, 241) : Color.TRANSPARENT, 18));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(34), 1);
+        params.leftMargin = dp(2);
+        params.rightMargin = dp(2);
+        container.addView(chip, params);
     }
 
-    private String diagnosticsFilterForLabel(String label) {
-        if ("请求".equals(label)) return "request";
-        if ("失败".equals(label)) return "failure";
-        if ("HTTP".equals(label)) return "http-error";
-        if ("SSL".equals(label)) return "ssl-error";
-        if ("Console".equals(label)) return "console";
-        if ("页面".equals(label)) return "page";
-        return "all";
+    private void addDiagnosticsFilterChip(LinearLayout container, String label, String filter) {
+        boolean selected = diagnosticsFilter.equals(filter);
+        Button chip = textButton(label + ("all".equals(filter) ? "⌄" : ""),
+            () -> { diagnosticsFilter = filter; renderDiagnosticsPage(); });
+        chip.setTextSize(fontSize * .70f);
+        chip.setTextColor(selected ? Color.rgb(39, 139, 241) : muted);
+        chip.setGravity(Gravity.CENTER);
+        chip.setMinHeight(0);
+        chip.setMinimumHeight(dp(32));
+        chip.setPadding(dp(4), 0, dp(4), 0);
+        chip.setBackground(rounded(selected ? Color.rgb(237, 245, 255) : Color.TRANSPARENT,
+            selected ? Color.rgb(39, 139, 241) : Color.TRANSPARENT, 16));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(32), 1);
+        params.leftMargin = dp(2);
+        params.rightMargin = dp(2);
+        container.addView(chip, params);
     }
 
-    private String diagnosticsFilterLabel() {
-        if ("request".equals(diagnosticsFilter)) return "请求";
-        if ("failure".equals(diagnosticsFilter)) return "失败";
-        if ("http-error".equals(diagnosticsFilter)) return "HTTP";
-        if ("ssl-error".equals(diagnosticsFilter)) return "SSL";
-        if ("console".equals(diagnosticsFilter)) return "Console";
-        if ("page".equals(diagnosticsFilter)) return "页面";
-        return "全部";
+    private boolean diagnosticsMatches(BrowserSession.DiagnosticEvent event) {
+        if ("error".equals(diagnosticsCategory) && !event.failure) return false;
+        if ("request".equals(diagnosticsCategory) && (event.response || event.failure)) return false;
+        if ("response".equals(diagnosticsCategory) && (!event.response || event.failure)) return false;
+        if ("error".equals(diagnosticsFilter) && !event.failure) return false;
+        if ("duration".equals(diagnosticsFilter) && event.durationMs <= 0) return false;
+        if ("resource".equals(diagnosticsFilter) && (event.resourceType == null
+            || event.resourceType.isEmpty() || "other".equals(event.resourceType))) return false;
+        return true;
     }
 
-    private boolean diagnosticsFilterMatches(BrowserSession.DiagnosticEvent event) {
-        if ("all".equals(diagnosticsFilter)) return true;
-        if ("page".equals(diagnosticsFilter)) {
-            return "page-start".equals(event.phase) || "page-finish".equals(event.phase);
-        }
-        if ("failure".equals(diagnosticsFilter)) {
-            return "failure".equals(event.phase) || "http-error".equals(event.phase)
-                || "ssl-error".equals(event.phase);
-        }
-        return diagnosticsFilter.equals(event.phase);
-    }
-
-    private String diagnosticsPhaseLabel(String phase) {
-        if ("request".equals(phase)) return "请求";
-        if ("page-start".equals(phase)) return "开始";
-        if ("page-finish".equals(phase)) return "完成";
-        if ("failure".equals(phase)) return "失败";
-        if ("http-error".equals(phase)) return "HTTP";
-        if ("ssl-error".equals(phase)) return "SSL";
-        if ("console".equals(phase)) return "Console";
-        return phase == null ? "" : phase;
-    }
-
-    private void addDiagnosticsRow(BrowserSession.DiagnosticEvent event, String time) {
-        LinearLayout row = row();
-        row.setMinimumHeight(dp(50));
-        row.setPadding(dp(8), dp(4), dp(8), dp(4));
-        row.setBackground(ripple());
-        row.setOnClickListener(ignored -> {
-            haptics.perform(row, "haptic-click");
-            showDiagnosticsEvent(event, time);
+    private void addDiagnosticsCard(BrowserSession.DiagnosticEvent event, long maxDuration) {
+        LinearLayout card = column();
+        card.setPadding(dp(10), dp(8), dp(10), dp(8));
+        card.setBackground(rounded(Color.WHITE, line, 12));
+        card.setOnClickListener(ignored -> {
+            haptics.perform(card, "haptic-click");
+            expandedDiagnosticId = expandedDiagnosticId == event.id ? -1L : event.id;
+            renderDiagnosticsPage();
         });
-        TextView phase = text(diagnosticsPhaseLabel(event.phase), fontSize * .75f, muted);
-        phase.setGravity(Gravity.CENTER);
-        phase.setMinWidth(dp(68));
-        row.addView(phase, new LinearLayout.LayoutParams(dp(68), -1));
-        LinearLayout details = column();
-        String title = event.method + " " + shortUrl(event.url);
-        TextView titleView = text(title, fontSize * .84f, foreground);
-        titleView.setSingleLine(true);
-        titleView.setEllipsize(TextUtils.TruncateAt.END);
-        String scope = "console".equals(event.phase)
-            ? "控制台" : event.mainFrame ? "主页面" : "子资源";
-        TextView subtitle = text(
-            (event.status.isEmpty() ? "" : event.status + " · ")
-                + scope + " · " + time,
-            fontSize * .72f, muted);
-        subtitle.setSingleLine(true);
-        details.addView(titleView, new LinearLayout.LayoutParams(0, -2, 1));
-        details.addView(subtitle, new LinearLayout.LayoutParams(0, -2, 1));
-        row.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
+
+        LinearLayout top = row();
+        TextView method = text(event.method == null || event.method.isEmpty() ? "GET" : event.method,
+            fontSize * .68f, Color.WHITE);
+        method.setGravity(Gravity.CENTER);
+        method.setTypeface(null, Typeface.BOLD);
+        method.setBackground(rounded("POST".equalsIgnoreCase(event.method)
+            ? Color.rgb(129, 81, 214) : Color.rgb(39, 139, 241),
+            Color.TRANSPARENT, 6));
+        top.addView(method, new LinearLayout.LayoutParams(dp(42), dp(26)));
+
+        LinearLayout address = column();
+        TextView url = text(shortUrl(event.url), fontSize * .78f, foreground);
+        url.setSingleLine(true);
+        url.setEllipsize(TextUtils.TruncateAt.END);
+        TextView type = text(resourceTypeLabel(event.resourceType), fontSize * .66f, muted);
+        address.addView(url, new LinearLayout.LayoutParams(-1, -2));
+        address.addView(type, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams addressParams = new LinearLayout.LayoutParams(0, -2, 1);
+        addressParams.leftMargin = dp(8);
+        top.addView(address, addressParams);
+
+        TextView status = text(diagnosticStatus(event), fontSize * .66f,
+            diagnosticStatusColor(event, true));
+        status.setGravity(Gravity.CENTER);
+        status.setPadding(dp(7), 0, dp(7), 0);
+        status.setBackground(rounded(diagnosticStatusColor(event, false),
+            diagnosticStatusColor(event, false), 10));
+        top.addView(status, new LinearLayout.LayoutParams(-2, dp(24)));
+        TextView duration = text(durationLabel(event.durationMs), fontSize * .62f, muted);
+        duration.setGravity(Gravity.CENTER);
+        duration.setSingleLine(true);
+        top.addView(duration, new LinearLayout.LayoutParams(-2, dp(26)));
+        TextView size = text(sizeLabel(event.sizeBytes), fontSize * .62f, muted);
+        size.setGravity(Gravity.CENTER);
+        size.setSingleLine(true);
+        top.addView(size, new LinearLayout.LayoutParams(-2, dp(26)));
+        TextView arrow = text(expandedDiagnosticId == event.id ? "⌃" : "⌄",
+            fontSize * .90f, muted);
+        arrow.setGravity(Gravity.CENTER);
+        top.addView(arrow, new LinearLayout.LayoutParams(dp(24), dp(26)));
+        card.addView(top, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout bar = row();
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setBackground(rounded(Color.rgb(231, 235, 241), Color.TRANSPARENT, 3));
+        float ratio = event.durationMs <= 0 ? .08f
+            : Math.max(.08f, Math.min(1f, event.durationMs / (float) Math.max(1L, maxDuration)));
+        View progress = new View(this);
+        progress.setBackground(rounded(diagnosticStatusColor(event, false),
+            Color.TRANSPARENT, 3));
+        bar.addView(progress, new LinearLayout.LayoutParams(0, dp(4), ratio));
+        View remaining = new View(this);
+        bar.addView(remaining, new LinearLayout.LayoutParams(0, dp(4), 1f - ratio));
+        LinearLayout.LayoutParams barParams = new LinearLayout.LayoutParams(-1, dp(4));
+        barParams.topMargin = dp(5);
+        card.addView(bar, barParams);
+
+        if (expandedDiagnosticId == event.id) {
+            LinearLayout details = column();
+            details.setPadding(dp(10), dp(8), dp(10), dp(8));
+            int detailBackground = event.failure ? Color.rgb(255, 240, 241)
+                : Color.rgb(245, 248, 252);
+            int detailLine = event.failure ? Color.rgb(255, 218, 220) : line;
+            details.setBackground(rounded(detailBackground, detailLine, 9));
+            TextView title = text(event.failure
+                ? "!  " + (event.detail.isEmpty() ? "请求失败" : event.detail)
+                : "请求详情", fontSize * .76f,
+                event.failure ? Color.rgb(216, 55, 65) : foreground);
+            title.setTypeface(null, Typeface.BOLD);
+            details.addView(title);
+            addDiagnosticDetail(details, "请求 URL", event.url);
+            addDiagnosticDetail(details, "请求方法", event.method);
+            addDiagnosticDetail(details, "资源类型", resourceTypeLabel(event.resourceType));
+            addDiagnosticDetail(details, "状态", diagnosticStatus(event));
+            if (event.failure) addDiagnosticDetail(details, "错误类型", event.status.isEmpty()
+                ? "network" : event.status);
+            addDiagnosticDetail(details, "发生时间",
+                new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+                    .format(event.timeMs));
+            if (event.failure) addDiagnosticDetail(details, "重试建议", "检查网络连接后重试");
+            if (!event.headers.isEmpty()) addDiagnosticDetail(details, "请求头", event.headers);
+            card.addView(details, new LinearLayout.LayoutParams(-1, -2));
+        }
+
         LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, -2);
-        layout.topMargin = dp(2);
-        diagnosticsPageBody.addView(row, layout);
+        layout.topMargin = dp(4);
+        diagnosticsPageBody.addView(card, layout);
+    }
+
+    private void addDiagnosticDetail(LinearLayout container, String label, String value) {
+        LinearLayout line = row();
+        line.addView(text(label, fontSize * .66f, muted),
+            new LinearLayout.LayoutParams(dp(72), -2));
+        TextView content = text(value == null ? "" : value, fontSize * .66f, foreground);
+        content.setSingleLine(true);
+        content.setEllipsize(TextUtils.TruncateAt.END);
+        line.addView(content, new LinearLayout.LayoutParams(0, -2, 1));
+        container.addView(line, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    private String diagnosticStatus(BrowserSession.DiagnosticEvent event) {
+        if (event.failure) return event.statusCode > 0 ? String.valueOf(event.statusCode) : "失败";
+        if (event.statusCode > 0) return String.valueOf(event.statusCode);
+        return event.response ? "完成" : "请求";
+    }
+
+    private int diagnosticStatusColor(BrowserSession.DiagnosticEvent event, boolean textColor) {
+        if (event.failure) return textColor ? Color.rgb(216, 55, 65) : Color.rgb(255, 210, 214);
+        if (event.statusCode >= 300 && event.statusCode < 400)
+            return textColor ? Color.rgb(111, 117, 128) : Color.rgb(235, 237, 241);
+        if (event.response) return textColor ? Color.rgb(35, 160, 91) : Color.rgb(205, 242, 216);
+        return textColor ? Color.rgb(39, 139, 241) : Color.rgb(224, 239, 255);
+    }
+
+    private String resourceTypeLabel(String value) {
+        if ("stylesheets".equals(value)) return "stylesheets";
+        if ("document".equals(value)) return "document";
+        if ("script".equals(value)) return "script";
+        if ("xhr".equals(value)) return "xhr";
+        if ("image".equals(value)) return "image";
+        if ("font".equals(value)) return "font";
+        return value == null || value.isEmpty() ? "resource" : value;
+    }
+
+    private String durationLabel(long durationMs) {
+        return durationMs <= 0 ? "--" : durationMs + "ms";
+    }
+
+    private String sizeLabel(long sizeBytes) {
+        if (sizeBytes <= 0) return "0 B";
+        if (sizeBytes < 1024) return sizeBytes + " B";
+        if (sizeBytes < 1024 * 1024) return String.format(Locale.getDefault(), "%.1f KB",
+            sizeBytes / 1024f);
+        return String.format(Locale.getDefault(), "%.1f MB", sizeBytes / (1024f * 1024f));
     }
 
     private String shortUrl(String value) {
@@ -551,32 +688,11 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         return value.length() > 100 ? value.substring(0, 97) + "..." : value;
     }
 
-    private void showDiagnosticsEvent(BrowserSession.DiagnosticEvent event, String time) {
-        StringBuilder content = new StringBuilder();
-        content.append("时间：").append(time)
-            .append("\n类型：").append(diagnosticsPhaseLabel(event.phase))
-            .append("\n方法：").append(event.method)
-            .append("\n状态：").append(event.status.isEmpty() ? "未返回" : event.status);
-        if ("console".equals(event.phase)) content.append("\n内容：").append(event.url);
-        else content.append("\n地址：").append(event.url);
-        if (!event.detail.isEmpty()) content.append("\n详情：").append(event.detail);
-        if (!event.headers.isEmpty()) content.append("\n请求头（已脱敏）：\n").append(event.headers);
-        TextView body = text(content.toString(), fontSize * .86f, foreground);
-        body.setTextIsSelectable(true);
-        body.setPadding(dp(8), dp(4), dp(8), dp(4));
-        new AlertDialog.Builder(this)
-            .setTitle("网页诊断详情")
-            .setView(body)
-            .setNeutralButton("复制", (dialog, which) -> {
-                ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-                if (clipboard != null) {
-                    clipboard.setPrimaryClip(ClipData.newPlainText(
-                        "网页诊断", event.url == null ? "" : event.url));
-                    Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show();
-                }
-            })
-            .setPositiveButton("关闭", null)
-            .show();
+    private void copyDiagnosticText(String value) {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard == null) return;
+        clipboard.setPrimaryClip(ClipData.newPlainText("网页诊断", value == null ? "" : value));
+        Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show();
     }
 
     private void renderSettings() {
@@ -760,7 +876,11 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         historyPage.setVisibility(!settings && internalPage == InternalPage.HISTORY ? View.VISIBLE : View.GONE);
         bookmarksPage.setVisibility(!settings && internalPage == InternalPage.BOOKMARKS ? View.VISIBLE : View.GONE);
         diagnosticsPage.setVisibility(!settings && internalPage == InternalPage.DIAGNOSTICS ? View.VISIBLE : View.GONE);
-        footer.setVisibility(settings ? View.GONE : View.VISIBLE);
+        boolean diagnostics = internalPage == InternalPage.DIAGNOSTICS;
+        header.setVisibility(diagnostics ? View.GONE : View.VISIBLE);
+        headerDivider.setVisibility(diagnostics ? View.GONE : View.VISIBLE);
+        footer.setVisibility(settings || diagnostics ? View.GONE : View.VISIBLE);
+        footerDivider.setVisibility(settings || diagnostics ? View.GONE : View.VISIBLE);
         back.setVisibility(showWeb ? View.VISIBLE : View.GONE);
         homeButton.setVisibility(showWeb || internal ? View.VISIBLE : View.GONE);
         reload.setVisibility(showWeb ? View.VISIBLE : View.GONE);
@@ -780,7 +900,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         userAgentRow.setEnabled(settingsReady);
         userAgentRow.setAlpha(settingsReady ? 1f : .55f);
         diagnosticsButton.setEnabled(settingsReady);
-        progress.setVisibility(ready && showWeb && session.progress < 100 ? View.VISIBLE : View.INVISIBLE);
+        progress.setVisibility(diagnostics ? View.GONE
+            : ready && showWeb && session.progress < 100 ? View.VISIBLE : View.INVISIBLE);
         if (session != null) {
             progress.setProgress(session.progress);
             if (showWeb && !addressInput.hasFocus()) addressInput.setText(displayAddress(session.url));

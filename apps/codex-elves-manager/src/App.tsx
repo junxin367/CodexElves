@@ -65,6 +65,7 @@ import {
   Palette,
   Wrench,
   X,
+  Zap,
   type LucideIcon,
 } from "lucide-react";
 import { ProviderPresetSelector } from "@/components/ProviderPresetSelector";
@@ -567,6 +568,14 @@ type RelayProfileTestResult = CommandResult<{
   endpoint: string;
   responsePreview: string;
 }>;
+
+type RelayProfileSpeedTestItem = {
+  model: string;
+  elapsedMs: number;
+  status: "ok" | "failed";
+  httpStatus: number | null;
+  message: string;
+};
 
 type RelayProfileModelsResult = CommandResult<{
   models: string[];
@@ -5705,12 +5714,16 @@ function RelayScreen({
   const [newProfileDraft, setNewProfileDraft] = useState<RelayProfile | null>(null);
   const [thirdPartyImportOpen, setThirdPartyImportOpen] = useState(false);
   const [testProfileId, setTestProfileId] = useState<string | null>(null);
+  const [speedTestProfileId, setSpeedTestProfileId] = useState<string | null>(null);
   const browserPreviewDetailInitializedRef = useRef(isBrowserPreview());
   const detailProfile = newProfileDraft || (detailProfileId
     ? normalized.relayProfiles.find((profile) => profile.id === detailProfileId) || null
     : null);
   const testProfile = testProfileId
     ? normalized.relayProfiles.find((profile) => profile.id === testProfileId) || null
+    : null;
+  const speedTestProfile = speedTestProfileId
+    ? normalized.relayProfiles.find((profile) => profile.id === speedTestProfileId) || null
     : null;
   const isNewProfile = !!newProfileDraft;
   const saveRelaySettings = async (next: BackendSettings) => {
@@ -5862,6 +5875,7 @@ function RelayScreen({
             onEdit={(profileId) => void editRelayProfile(profileId)}
             onFormChange={saveRelaySettings}
             onTest={(profileId) => setTestProfileId(profileId)}
+            onSpeedTest={(profileId) => setSpeedTestProfileId(profileId)}
             disabled={!normalized.relayProfilesEnabled || actions.relaySwitching}
             actions={actions}
           />
@@ -5872,6 +5886,14 @@ function RelayScreen({
           form={normalized}
           profile={testProfile}
           onClose={() => setTestProfileId(null)}
+          actions={actions}
+        />
+      ) : null}
+      {speedTestProfile ? (
+        <RelayProfileSpeedTestDialog
+          form={normalized}
+          profile={speedTestProfile}
+          onClose={() => setSpeedTestProfileId(null)}
           actions={actions}
         />
       ) : null}
@@ -5980,6 +6002,216 @@ function RelayProfileTestDialog({
               {sending ? "发送中" : "发送"}
             </Button>
             <Button disabled={sending} onClick={onClose} variant="secondary">关闭</Button>
+          </Toolbar>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function RelayProfileSpeedTestDialog({
+  profile,
+  form,
+  onClose,
+  actions,
+}: {
+  profile: RelayProfile;
+  form: BackendSettings;
+  onClose: () => void;
+  actions: Actions;
+}) {
+  const fallbackModel = relayProfileDefaultTestModel(profile, form);
+  const configuredModels = useMemo(
+    () => relayProfileKnownModels(profile, fallbackModel),
+    [
+      fallbackModel,
+      profile.id,
+      profile.testModel,
+      profile.model,
+      profile.modelMappings,
+      profile.responsesModelList,
+      profile.chatCompletionsModelList,
+      profile.anthropicModelList,
+      profile.modelList,
+    ],
+  );
+  const [mode, setMode] = useState<"configured" | "all">("configured");
+  const [availableModels, setAvailableModels] = useState<string[]>(configuredModels);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [runningModel, setRunningModel] = useState<string | null>(null);
+  const [results, setResults] = useState<RelayProfileSpeedTestItem[]>([]);
+
+  useEffect(() => {
+    setMode("configured");
+    setAvailableModels(configuredModels);
+    setResults([]);
+  }, [profile.id, fallbackModel]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadModels = async () => {
+      setFetchingModels(true);
+      try {
+        const fetched = await actions.fetchRelayProfileModels(profile, true);
+        if (!cancelled && fetched?.length) {
+          setAvailableModels(uniqueStrings([...configuredModels, ...fetched]));
+        }
+      } finally {
+        if (!cancelled) setFetchingModels(false);
+      }
+    };
+    void loadModels();
+    return () => {
+      cancelled = true;
+    };
+  }, [actions, configuredModels, profile.id, fallbackModel]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !running) onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose, running]);
+
+  const targetModels = mode === "all" ? availableModels : configuredModels;
+
+  const runSpeedTest = async () => {
+    if (running || !targetModels.length) return;
+    setRunning(true);
+    setResults([]);
+    for (const model of targetModels) {
+      setRunningModel(model);
+      const startedAt = performance.now();
+      try {
+        const result = await actions.testRelayProfile(profile, model);
+        const elapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
+        const item: RelayProfileSpeedTestItem = {
+          model,
+          elapsedMs,
+          status: result && isSuccessStatus(result.status) ? "ok" : "failed",
+          httpStatus: result?.httpStatus ?? null,
+          message: result?.message || "请求失败",
+        };
+        setResults((current) => [...current, item].sort((left, right) => left.elapsedMs - right.elapsedMs));
+      } catch (error) {
+        const elapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
+        const item: RelayProfileSpeedTestItem = {
+          model,
+          elapsedMs,
+          status: "failed",
+          httpStatus: null,
+          message: error instanceof Error ? error.message : "请求失败",
+        };
+        setResults((current) => [...current, item].sort((left, right) => left.elapsedMs - right.elapsedMs));
+      }
+    }
+    setRunningModel(null);
+    setRunning(false);
+  };
+
+  const fastest = results[0]?.elapsedMs ?? 0;
+  const average = results.length
+    ? Math.round(results.reduce((total, item) => total + item.elapsedMs, 0) / results.length)
+    : 0;
+
+  return createPortal(
+    <div
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="relay-speed-test-title"
+      onClick={running ? undefined : onClose}
+    >
+      <div className="modal-card relay-speed-test-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <h2 id="relay-speed-test-title">模型速度测试</h2>
+            <p>{profile.name || "未命名供应商"} · 依次发送 hi，按响应耗时从快到慢排序。</p>
+          </div>
+          <Button disabled={running} onClick={onClose} size="icon" title="关闭" variant="ghost">
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+
+        <div className="speed-test-mode-grid">
+          <button
+            className={`speed-test-mode-card ${mode === "configured" ? "active" : ""}`}
+            onClick={() => {
+              setMode("configured");
+              setResults([]);
+            }}
+            type="button"
+          >
+            <strong>模型列表</strong>
+            <span>测试当前供应商已配置的 {configuredModels.length} 个模型</span>
+          </button>
+          <button
+            className={`speed-test-mode-card ${mode === "all" ? "active" : ""}`}
+            onClick={() => {
+              setMode("all");
+              setResults([]);
+            }}
+            type="button"
+          >
+            <strong>全部模型</strong>
+            <span>{fetchingModels ? "正在获取供应商模型…" : `测试发现的 ${availableModels.length} 个模型`}</span>
+          </button>
+        </div>
+
+        {mode === "configured" ? (
+          <div className="speed-test-all-note">
+            <Zap className="h-4 w-4" />
+            <span>将对当前供应商模型列表中的 {configuredModels.length} 个模型发送 hi，完成后按耗时自动排序。</span>
+          </div>
+        ) : (
+          <div className="speed-test-all-note">
+            <Zap className="h-4 w-4" />
+            <span>将对当前供应商可发现的全部模型发送 hi。测试顺序按模型列表执行，结果按耗时自动排序。</span>
+          </div>
+        )}
+
+        {running ? (
+          <div className="speed-test-running">
+            <span className="speed-test-spinner" />
+            <span>正在测试 {runningModel || "模型"}… 已完成 {results.length}/{targetModels.length}</span>
+          </div>
+        ) : null}
+
+        {results.length ? (
+          <div className="speed-test-result-panel">
+            <div className="speed-test-result-summary">
+              <div><span>最快</span><strong>{fastest} ms</strong></div>
+              <div><span>平均</span><strong>{average} ms</strong></div>
+              <div><span>已完成</span><strong>{results.length}/{targetModels.length}</strong></div>
+            </div>
+            <div className="speed-test-result-list">
+              {results.map((item, index) => {
+                const barWidth = Math.max(8, Math.min(100, Math.round((item.elapsedMs / Math.max(fastest, item.elapsedMs)) * 100)));
+                return (
+                  <div className={`speed-test-result-row ${item.status === "failed" ? "failed" : ""}`} key={item.model}>
+                    <span className="speed-test-rank">{index + 1}</span>
+                    <span className="speed-test-result-model">{item.model}</span>
+                    <span className="speed-test-result-time">{item.elapsedMs} ms</span>
+                    <span className="speed-test-result-status">{item.status === "ok" ? "完成" : "失败"}</span>
+                    <span className="speed-test-result-bar"><i style={{ width: `${barWidth}%` }} /></span>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="speed-test-sort-note">测试结果已按响应耗时升序排列，最快模型位于顶部。</p>
+          </div>
+        ) : null}
+
+        <div className="relay-test-actions">
+          <Toolbar>
+            <Button disabled={running || !targetModels.length} onClick={() => void runSpeedTest()}>
+              <Zap className="h-4 w-4" />
+              {running ? "测速中…" : "开始测速"}
+            </Button>
+            <Button disabled={running} onClick={onClose} variant="secondary">关闭</Button>
           </Toolbar>
         </div>
       </div>
@@ -8038,6 +8270,7 @@ function RelayProfileList({
   onFormChange,
   onEdit,
   onTest,
+  onSpeedTest,
   disabled = false,
   actions,
 }: {
@@ -8045,6 +8278,7 @@ function RelayProfileList({
   onFormChange: (value: BackendSettings) => void;
   onEdit: (id: string) => void;
   onTest: (id: string) => void;
+  onSpeedTest: (id: string) => void;
   disabled?: boolean;
   actions: Actions;
 }) {
@@ -8074,6 +8308,7 @@ function RelayProfileList({
               onEdit={onEdit}
               onFormChange={onFormChange}
               onTest={onTest}
+              onSpeedTest={onSpeedTest}
               disabled={disabled}
               profile={profile}
             />
@@ -8090,6 +8325,7 @@ function SortableRelayProfileCard({
   onFormChange,
   onEdit,
   onTest,
+  onSpeedTest,
   disabled = false,
   actions,
 }: {
@@ -8098,6 +8334,7 @@ function SortableRelayProfileCard({
   onFormChange: (value: BackendSettings) => void;
   onEdit: (id: string) => void;
   onTest: (id: string) => void;
+  onSpeedTest: (id: string) => void;
   disabled?: boolean;
   actions: Actions;
 }) {
@@ -8168,6 +8405,19 @@ function SortableRelayProfileCard({
             variant="ghost"
           >
             <TestTube className="h-4 w-4" />
+          </Button>
+          <Button
+            disabled={isAggregateRelayProfile(profile)}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (isAggregateRelayProfile(profile)) return;
+              onSpeedTest(profile.id);
+            }}
+            size="icon"
+            title={isAggregateRelayProfile(profile) ? "聚合供应商不支持单独测速" : "模型速度测试"}
+            variant="ghost"
+          >
+            <Zap className="h-4 w-4" />
           </Button>
           <Button
             onClick={(event) => {

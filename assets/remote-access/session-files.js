@@ -15,7 +15,7 @@ const parentPath = path => path.includes("/") ? path.slice(0, path.lastIndexOf("
 const fileName = path => path.replaceAll("\\", "/").split("/").at(-1) || "文件";
 const revisionValid = value => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
 const imageValid = value => typeof value === "string"
-  && /^data:image\/(?:png|jpeg|gif|webp);base64,[a-zA-Z0-9+/=]+$/u.test(value);
+  && /^data:image\/(?:png|jpeg|gif|webp|svg\+xml);base64,[a-zA-Z0-9+/=]+$/u.test(value);
 const bytesLabel = size => size < 1024 ? `${size} B`
   : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KiB` : `${(size / 1024 / 1024).toFixed(1)} MiB`;
 const fileSort = (left, right) => {
@@ -51,6 +51,123 @@ const fileIconKind = path => {
   if (/\.(?:sql|graphql|gql|proto)$/u.test(lower)) return "data";
   return "file";
 };
+const syntaxKeywords = {
+  java: "abstract assert boolean break byte case catch char class const continue default do double else enum extends final finally float for goto if implements import instanceof int interface long native new package private protected public return short static strictfp super switch synchronized this throw throws transient try void volatile while record sealed permits var yield".split(" "),
+  javascript: "as async await break case catch class const continue debugger default delete do else export extends finally for from function get if implements import in instanceof interface let new of package private protected public return set static super switch this throw try typeof undefined var void while with yield".split(" "),
+  typescript: "as async await break case catch class const constructor continue debugger declare default delete do else enum export extends finally for from function get if implements import in infer instanceof interface keyof let module namespace never new of package private protected public readonly return satisfies set static super switch this throw try type typeof undefined var void while with yield".split(" "),
+  rust: "as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while async dyn".split(" "),
+  python: "and as assert async await break case class continue def del elif else except finally for from global if import in is lambda match nonlocal not or pass raise return try while with yield".split(" "),
+  json: "true false null".split(" "),
+  css: "and as calc case container else extends from if import important media not or supports".split(" "),
+  html: "async await checked class defer disabled enctype for hidden id is loading media method name rel required selected slot src style target title type value".split(" "),
+  sql: "all alter and as asc begin between by case commit create delete desc distinct drop else end exists from group having in insert into is join like not null on or order select set table then union update values when where".split(" "),
+  shell: "case do done elif else esac fi for function if in select then time until while".split(" ")
+};
+const syntaxTypes = {
+  java: "Boolean Byte Character Double Exception Float Integer Long Object RuntimeException Short String System Thread Void List Map Set Optional Override".split(" "),
+  javascript: "Array Boolean Date Error Function JSON Math Number Object Promise RegExp Set String Symbol TypeError URL WeakMap WeakSet".split(" "),
+  typescript: "Array Boolean Date Error Function JSON Math Number Object Promise RegExp Set String Symbol TypeError URL WeakMap WeakSet Record Partial Pick Omit".split(" "),
+  rust: "Arc Box Cell HashMap HashSet Option Rc Result String Vec".split(" "),
+  python: "Any Dict List Optional Set Tuple Type".split(" "),
+  css: "rgb rgba hsl hsla var".split(" "),
+  html: "html head body div span script style".split(" "),
+  sql: "bigint boolean date decimal integer text timestamp varchar".split(" ")
+};
+const syntaxLiterals = new Set([
+  "true", "false", "null", "undefined", "None", "True", "False", "nil", "Some", "Ok", "Err"
+]);
+const syntaxHashCommentLanguages = new Set(["python", "shell"]);
+function syntaxLanguage(path) {
+  const kind = fileIconKind(path);
+  return kind === "component" ? "javascript" : kind;
+}
+function syntaxSet(language, table) {
+  return new Set(table[language] || []);
+}
+function syntaxQuoteEnd(source, start, quote) {
+  for (let index = start; index < source.length; index++) {
+    if (source[index] === "\\") { index++; continue; }
+    if (source.startsWith(quote, index)) return index + quote.length;
+  }
+  return -1;
+}
+function highlightSourceLine(source, language, state) {
+  const fragment = document.createDocumentFragment();
+  const keywords = syntaxSet(language, syntaxKeywords);
+  const types = syntaxSet(language, syntaxTypes);
+  let plain = "";
+  let index = 0;
+  const flushPlain = () => {
+    if (!plain) return;
+    fragment.append(document.createTextNode(plain));
+    plain = "";
+  };
+  const appendToken = (className, value) => {
+    if (!value) return;
+    flushPlain();
+    const token = node("span", `session-files-token-${className}`, value);
+    fragment.append(token);
+  };
+  while (index < source.length) {
+    if (state.blockComment) {
+      const end = source.indexOf("*/", index);
+      if (end < 0) { appendToken("comment", source.slice(index)); return fragment; }
+      appendToken("comment", source.slice(index, end + 2));
+      state.blockComment = false; index = end + 2; continue;
+    }
+    if (state.quote) {
+      const end = syntaxQuoteEnd(source, index, state.quote);
+      if (end < 0) { appendToken("string", source.slice(index)); return fragment; }
+      appendToken("string", source.slice(index, end));
+      state.quote = ""; index = end; continue;
+    }
+    if (source.startsWith("/*", index)) {
+      const end = source.indexOf("*/", index + 2);
+      if (end < 0) {
+        state.blockComment = true; appendToken("comment", source.slice(index)); return fragment;
+      }
+      appendToken("comment", source.slice(index, end + 2)); index = end + 2; continue;
+    }
+    if (source.startsWith("//", index)
+        || source.startsWith("<!--", index)
+        || (syntaxHashCommentLanguages.has(language) && source[index] === "#")) {
+      appendToken("comment", source.slice(index)); return fragment;
+    }
+    if (source[index] === "@" && /[A-Za-z_$]/u.test(source[index + 1] || "")) {
+      const annotation = source.slice(index).match(/^@[A-Za-z_$][\w$.-]*/u)?.[0];
+      if (annotation) {
+        appendToken("annotation", annotation); index += annotation.length; continue;
+      }
+    }
+    if (source.startsWith('"""', index) || source.startsWith("'''", index)
+        || source[index] === "\"" || source[index] === "'" || source[index] === "`") {
+      const quote = source.startsWith('"""', index) || source.startsWith("'''", index)
+        ? source.slice(index, index + 3) : source[index];
+      const end = syntaxQuoteEnd(source, index + quote.length, quote);
+      if (end < 0) state.quote = quote;
+      appendToken("string", source.slice(index, end < 0 ? source.length : end));
+      if (end < 0) return fragment;
+      index = end; continue;
+    }
+    const number = source.slice(index).match(/^(?:0[xX][\da-fA-F]+|0[bB][01]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?[fFdDlL]?)/u)?.[0];
+    if (number) { appendToken("number", number); index += number.length; continue; }
+    const word = source.slice(index).match(/^[A-Za-z_$][\w$]*/u)?.[0];
+    if (word) {
+      const after = source.slice(index + word.length).match(/^\s*\(/u);
+      const className = syntaxLiterals.has(word) ? "literal"
+        : keywords.has(word) ? "keyword"
+        : types.has(word) || /^[A-Z][A-Za-z\d_$]*$/u.test(word) ? "type"
+        : after ? "function" : "";
+      if (className) appendToken(className, word); else plain += word;
+      index += word.length; continue;
+    }
+    const operator = source.slice(index).match(/^(?:===|!==|==|!=|=>|<=|>=|&&|\|\||\+\+|--|::|->|<<|>>|[+\-*%=!<>/&|^~?:])/u)?.[0];
+    if (operator) { appendToken("operator", operator); index += operator.length; continue; }
+    plain += source[index++];
+  }
+  flushPlain();
+  return fragment;
+}
 const fileIconPaths = {
   folder: '<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h4.5A1.5 1.5 0 0 1 17 8.5v7A1.5 1.5 0 0 1 15.5 17h-11A1.5 1.5 0 0 1 3 15.5Z"/>',
   document: '<path d="M5 2.5h6l4 4v11H5z"/><path d="M11 2.5v4h4M7.5 11h5M7.5 14h4"/>',
@@ -344,6 +461,13 @@ export function mountSessionFiles({
     const normalized = query.trim();
     if (!normalized) { searchMatches = null; renderDirectory(); return; }
     const epoch = ++searchEpoch; searchController?.abort(); searchController = new AbortController();
+    const cached = responses.get(`files::${normalized}`);
+    if (cached?.root === listResponse?.root) {
+      searchMatches = cached.files || [];
+      renderDirectory();
+      message(listStatus, cached.truncated
+        ? "搜索结果较多，仅显示前 2000 项。" : `${searchMatches.length} 个匹配文件`);
+    }
     message(listStatus, "正在搜索项目文件…");
     try {
       const value = await read("", "files", searchController, normalized);
@@ -425,11 +549,15 @@ export function mountSessionFiles({
       const code = node("div", "session-files-source");
       code.tabIndex = 0; code.setAttribute("aria-label", "文件源码，可横向滚动");
       const fragment = document.createDocumentFragment();
+      const state = { blockComment: false, quote: "" };
+      const language = syntaxLanguage(value.path);
       value.text.split("\n").forEach((line, index) => {
         const row = node("div", "session-files-source-line");
         row.dataset.line = index + 1;
         row.classList.toggle("session-files-selected-line", route?.line === index + 1);
-        row.append(node("span", "session-tools-line-number", String(index + 1)), node("code", "", line || "\u200b"));
+        const source = node("code", "");
+        source.append(line ? highlightSourceLine(line, language, state) : "\u200b");
+        row.append(node("span", "session-tools-line-number", String(index + 1)), source);
         fragment.append(row);
       });
       code.append(fragment); body.append(code);

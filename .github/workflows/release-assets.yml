@@ -93,7 +93,7 @@ jobs:
 
       - name: Build frontend
         working-directory: apps/codex-elves-manager
-        run: npm run vite:build
+        run: npm run check && npm run vite:build
 
       - name: Build binaries
         run: cargo build --release
@@ -167,7 +167,7 @@ jobs:
 
       - name: Build frontend
         working-directory: apps/codex-elves-manager
-        run: npm run vite:build
+        run: npm run check && npm run vite:build
 
       - name: Build binaries
         run: cargo build --release --target ${{ matrix.target }}

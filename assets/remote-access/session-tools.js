@@ -10,7 +10,7 @@ const statusLabels = {
   copied: "复制", conflicted: "冲突", untracked: "新增"
 };
 const imageSource = value => typeof value === "string"
-  && /^data:image\/(?:png|jpe?g|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon);base64,[a-zA-Z0-9+/=\s]+$/.test(value);
+  && /^data:image\/(?:png|jpe?g|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon|svg\+xml);base64,[a-zA-Z0-9+/=\s]+$/.test(value);
 
 function node(tag, className = "", text = "") {
   const result = document.createElement(tag);

@@ -1,6 +1,6 @@
 import { markdown, prepareMessageImage, renderMermaidBlocks, settleMessageImage, withStableMessageLayout } from "./markdown.js";
 import { createRemoteEventStream, sharedEventsAvailable } from "./events-client.js";
-import { configureAndroidDiagnostics, exportAndroidDiagnostics, receiveDiagnosticRequest, sendAndroidDiagnostics } from "./diagnostics.js";
+import { configureAndroidDiagnostics, exportAndroidDiagnostics, receiveDiagnosticRequest, recordDiagnostic, sendAndroidDiagnostics } from "./diagnostics.js";
 import { activateRemoteChannels, clearRemoteChannels, handleRemoteChannelEvent, observeChannelConfiguration, prepareRemoteTunnelAccess, raceRemoteRead, remoteChannelRoutes, remoteMediaUrl, requestRemote, setRemoteChannelMeasurements, validateRemoteReceipt } from "./channels.js";
 import { renderMessageActions } from "./message-actions.js";
 import { mountSessionTools } from "./session-tools.js";
@@ -95,6 +95,7 @@ let readingPositionRevision = 0;
 const draftWrites = new Map(), failedInputRecoveries = new Map();
 let recoveryScope = null, recoveryGeneration = 0, draftStorageError = "", connecting = null;
 let initialAuthenticationRequired = false, appReadySent = false, transcriptChecking = false;
+let suppressAutomaticNewChat = false;
 try { initialAuthenticationRequired = sessionStorage.getItem("codex-elves-auth-required") === "1"; } catch {}
 function setAuthenticationRequired(required) {
   initialAuthenticationRequired = required;
@@ -135,6 +136,8 @@ let recentLimit = 40;
 let recentPriorityIds = null;
 // Opening an older thread can refresh its runtime state without starting work.
 const recentPrioritySelectionSuppressions = new Set();
+// Marking a thread read must not turn a selection-only refresh into a list reorder.
+const sidebarReadRefreshSuppressions = new Set();
 let recentPriorityKnownIds = new Set(), recentPriorityOpenedAt = 0;
 let editingMessage = null, editingQueuedMessage = null;
 const queuedEdits = new Map();
@@ -180,6 +183,7 @@ let queueVersion = 0, notifiedQueue = null, notifiedQueueEdits = null, queueRequ
 let queueSnapshotVersion = null;
 const retiredQueueEpochs = new Set();
 let queueDrag = null, queueReorder = null;
+let pendingSteer = null;
 let sidebarRequest = null, refreshRequest = null, threadRequest = null, historyRequest = null;
 let desktopSidebarOpen = true, sidebarLayoutCleanup = null, closeMobileSidebar = () => {};
 let sessionTools = null;
@@ -1612,7 +1616,7 @@ function scheduleRelatedSessionCheck() {
       }
       if (threadResult?.thread?.id !== id) throw Object.assign(new Error("侧边会话读取结果不匹配"), { code: 409 });
     } catch (error) {
-      if (isSideThreadExpiredError(error) && selectedId === id && version === selectionVersion
+      if (isMissingThreadError(error) && selectedId === id && version === selectionVersion
           && normalizeRelatedView(relatedSessionView, id)?.kind === "side") {
         await retireExpiredSideThread(id).catch(expiredError => notice(expiredError.message, true));
         return;
@@ -1622,7 +1626,7 @@ function scheduleRelatedSessionCheck() {
       scheduleRelatedSessionCheck();
   }, 10000);
 }
-function isSideThreadExpiredError(error) {
+function isMissingThreadError(error) {
   if (Number(error?.code) === 410 || error?.reason === "side_thread_expired") return true;
   const message = typeof error?.message === "string" ? error.message.toLowerCase() : "";
   return message.includes("thread not loaded:")
@@ -1632,6 +1636,20 @@ function isSideThreadExpiredError(error) {
 async function retireExpiredSideThread(id) {
   if (id !== selectedId || normalizeRelatedView(relatedSessionView, id)?.kind !== "side") return false;
   await retireNativeSideThreads([id], { reason: "expired" });
+  return true;
+}
+async function clearMissingThreadSelection(id) {
+  if (id !== selectedId || !session) return false;
+  if (normalizeRelatedView(relatedSessionView, id)?.kind === "side")
+    return retireExpiredSideThread(id);
+  suppressAutomaticNewChat = true;
+  resetRelatedSessions();
+  showWelcome({ startNew: false, clearHash: true });
+  transcriptCache.remove(session.device.id, id);
+  threadDisplays.delete(threadDisplayKey(id));
+  discardPersistentThreadDisplay(id);
+  notice("当前会话已不存在，已返回会话列表，请重新选择会话。", true);
+  retryConnectionRecovery();
   return true;
 }
 function resetRelatedSessions({ persisted = false } = {}) {
@@ -4943,7 +4961,9 @@ function showLogin() {
   sidebarLayoutCleanup?.(); sidebarLayoutCleanup = null; closeMobileSidebar = () => {};
   editingMessage = null; editingQueuedMessage = null;
   session = null;
+  suppressAutomaticNewChat = false;
   sidebar = null; recentPriorityIds = null; recentPrioritySelectionSuppressions.clear();
+  sidebarReadRefreshSuppressions.clear();
   selectedId = null; thread = null; creating = false;
   projectVisibleThreadCounts.clear(); collapsedSidebarSections.clear();
   historyCursor = null; historyInitialized = false; approvalSignature = null;
@@ -5677,6 +5697,7 @@ function selectedThreadProjectId() {
 }
 async function startNewChat(projectId, { focus = true } = {}) {
   if (relatedSessionView) return;
+  suppressAutomaticNewChat = false;
   cancelMessageEdit({ focus: false });
   if (!session || session.readOnly) return;
   if (projectId === undefined && selectedId && !sidebar) {
@@ -5719,6 +5740,7 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
     sidebarFilters = { mode: null, chats: null, projects: null, pinned: null };
     recentPriorityIds = null;
     recentPrioritySelectionSuppressions.clear();
+    sidebarReadRefreshSuppressions.clear();
     projectVisibleThreadCounts.clear(); collapsedSidebarSections.clear();
   }
   const request = { deviceId, cursor, nextCursor: cursor, again: false, resourcePriority,
@@ -5760,6 +5782,21 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
 }
 function sidebarUpdatedAt(item) {
   return item.updatedAt || item.recencyAt || item.createdAt || 0;
+}
+function markSidebarThreadReadLocally(id) {
+  if (!sidebar || typeof id !== "string" || !id) return;
+  const update = item => {
+    if (!item || item.id !== id) return;
+    item.hasUnreadTurn = false;
+    if (item.priority?.attentionState === "unread") {
+      item.priority = { ...item.priority, attentionState: item.priority.active === true ? "active" : "idle" };
+    }
+  };
+  sidebar.recent.forEach(update);
+  sidebar.pinnedThreads.forEach(update);
+  sidebar.projects.forEach(project => project.threads.forEach(update));
+  if (Array.isArray(sidebar.unreadSideThreads))
+    sidebar.unreadSideThreads = sidebar.unreadSideThreads.filter(item => item.id !== id);
 }
 function sidebarAttentionState(item) {
   const side = item.sideThreadAttention;
@@ -6174,15 +6211,21 @@ async function markVisibleThreadRead(id = selectedId, { opened = false } = {}) {
       || threadDeletionLocked(id) || threadDeleted(id) || document.hidden || !opened && !followMessages) return;
   if (readMarkRequests.has(id)) return readMarkRequests.get(id);
   const deviceId = session.device.id;
+  sidebarReadRefreshSuppressions.add(id);
+  setTimeout(() => sidebarReadRefreshSuppressions.delete(id), 5_000);
   const request = (async () => {
-    await mutate("markRead", { threadId: id });
+    try {
+      await mutate("markRead", { threadId: id });
+    } catch (error) {
+      sidebarReadRefreshSuppressions.delete(id);
+      throw error;
+    }
     if (session?.device.id === deviceId) {
       sessionMenu?.markSideThreadRead(id);
-      if (Array.isArray(sidebar?.unreadSideThreads))
-        sidebar.unreadSideThreads = sidebar.unreadSideThreads.filter(item => item.id !== id);
+      markSidebarThreadReadLocally(id);
       syncSideThreadUnread();
       recentPrioritySelectionSuppressions.add(id);
-      await loadSidebar(null, { fresh: relatedSessionView?.kind === "side" });
+      renderSidebar();
     }
   })();
   readMarkRequests.set(id, request);
@@ -8330,6 +8373,22 @@ function applyQueuedSendResult(id, result, readVersion) {
 function queueMessageText(message) {
   return message?.text ?? message?.context?.prompt ?? message?.prompt ?? message?.message?.prompt ?? "";
 }
+function pendingSteerTurn() {
+  const pending = pendingSteer;
+  if (!pending || pending.threadId !== selectedId || !pending.text) return null;
+  const pendingItem = {
+      id: pending.itemId,
+      type: "userMessage",
+      ...(pending.clientId ? { clientId: pending.clientId } : {}),
+      content: [{ type: "text", text: pending.text }],
+      remotePendingInput: true
+  };
+  const current = pending.turnId ? turns.get(pending.turnId) : null;
+  if (!current) return { id: pending.localTurnId, status: "inProgress", items: [pendingItem] };
+  if (current.items?.some(item => item.type === "userMessage" && !item.remotePendingInput
+      && (!pending.clientId || item.clientId === pending.clientId))) return null;
+  return { ...current, items: [...(current.items || []), pendingItem] };
+}
 function renderQueuedMessages(messages, previous = null) {
   messages = queueDisplayMessages(messages);
   if (editingQueuedMessage?.threadId === selectedId && editingQueuedMessage.state === "editing")
@@ -8635,22 +8694,68 @@ async function steerQueuedMessage(threadId, messageId) {
   if (!threadId || !messageId || threadReadOnly(threadId) || !connected || compactionLocked(threadId)) return;
   const key = `${threadId}:${messageId}`;
   if (queuedActionBusy.has(key)) return;
+  const queuedMessage = thread?.id === threadId
+    ? thread.queuedMessages?.find(message => message?.id === messageId) : null;
+  const pending = {
+    threadId,
+    messageId,
+    localTurnId: `pending-steer-${messageId}`,
+    itemId: `pending-steer-message-${messageId}`,
+    clientId: queuedMessage?.clientUserMessageId
+      ?? queuedMessage?.submissionOptions?.clientUserMessageId
+      ?? null,
+    text: queueMessageText(queuedMessage)
+  };
   queuedActionBusy.add(key);
+  pendingSteer = pending;
+  recordDiagnostic("remote.steer", { phase: "request" });
+  renderMessages();
   if (selectedId === threadId) renderQueueArea();
   const readVersion = queueVersion;
+  const startedAt = performance.now();
   try {
     const result = await mutate("steerQueued", { threadId, messageId });
+    pendingSteer = pendingSteer === pending
+      ? { ...pending, turnId: typeof result?.turnId === "string" ? result.turnId : null } : pendingSteer;
     if (selectedId === threadId && thread?.id === threadId) {
       if (readVersion === queueVersion || queueSnapshotIsVersioned(result))
         applyQueueSnapshot(threadId, Array.isArray(result?.queuedMessages)
           ? result.queuedMessages
           : (thread.queuedMessages || []).filter(message => message?.id !== messageId), result?.queuedEdits, result);
-      await reloadThread();
+      renderMessages();
+      const reloadStartedAt = performance.now();
+      void reloadThread().then(() => {
+        recordDiagnostic("remote.steer.reload", {
+          phase: "complete", durationMs: performance.now() - reloadStartedAt
+        });
+        if (pendingSteer === pending) {
+          pendingSteer = null;
+          renderMessages();
+        }
+      }).catch(error => {
+        recordDiagnostic("remote.steer.reload", {
+          phase: "failure", durationMs: performance.now() - reloadStartedAt,
+          errorType: error?.name || "Error", reason: "network-error"
+        });
+        notice(error.message, true);
+      });
     }
+    recordDiagnostic("remote.steer", {
+      phase: "complete", durationMs: performance.now() - startedAt
+    });
     notice("已引导原队列消息");
   } catch (error) {
+    if (pendingSteer === pending) {
+      pendingSteer = null;
+      renderMessages();
+    }
+    recordDiagnostic("remote.steer", {
+      phase: "failure", durationMs: performance.now() - startedAt,
+      errorType: error?.name || "Error", reason: "network-error"
+    });
     notice(error.message, true);
   } finally {
+    if (pendingSteer === pending && selectedId !== threadId) pendingSteer = null;
     queuedActionBusy.delete(key);
     if (selectedId === threadId) renderQueueArea();
   }
@@ -8888,7 +8993,21 @@ function renderMessages(keepScroll = true) {
   const anchor = !keepScroll || !bottom ? visibleMessageAnchor(root) : null;
   const children = [], itemKeys = new Set(), turnKeys = new Set(), activityKeys = new Set();
   const relatedViewKind = relatedSessionView?.kind || "";
+  if (pendingSteer?.threadId === selectedId && pendingSteer.turnId) {
+    const delivered = turns.get(pendingSteer.turnId)?.items?.some(item =>
+      item.type === "userMessage" && !item.remotePendingInput
+      && (!pendingSteer.clientId || item.clientId === pendingSteer.clientId));
+    if (delivered) pendingSteer = null;
+  }
   const sorted = [...turns.values()];
+  const pendingTurn = pendingSteerTurn();
+  if (pendingTurn) {
+    const existingIndex = sorted.findIndex(turn => turn.id === pendingTurn.id);
+    if (existingIndex >= 0) sorted[existingIndex] = pendingTurn;
+    else sorted.push(pendingTurn);
+  }
+  const lastRealTurn = pendingTurn
+    ? [...sorted].reverse().find(turn => turn.id !== pendingTurn.id) : sorted.at(-1);
   loadMessageSkillChoices(sorted.flatMap(turn => turn.items || []));
   if (historyError && sorted.length)
     children.push(historyLoadButton("最新记录加载失败，重试", () => void loadHistory()));
@@ -8909,7 +9028,8 @@ function renderMessages(keepScroll = true) {
       historyLoad.dataset.historyPage = "older";
     }
     const turnItems = turn.items || [], finalIndex = finalMessageIndex(turn),
-      turnRunning = turn === sorted.at(-1) && turn.status === "inProgress" && (thread == null || isActiveThread());
+      turnRunning = turn === lastRealTurn && turn.status === "inProgress"
+        && (thread == null || isActiveThread());
     for (const item of turnItems) itemKeys.add(`${turn.id}:${item.id}`);
     const renderMessage = (item, inActivity = false) => {
       const key = `${turn.id}:${item.id}`, cached = renderedItems.get(key);
@@ -9121,6 +9241,7 @@ function restoreTranscript(id) {
 async function selectThread(id, { closeSidebar = true, force = false, relatedView = undefined, replaceHistory = false,
   initialThread = null, preparedView = false, onViewReady = null } = {}) {
   if (!validRelatedThreadId(id) || !session) return;
+  suppressAutomaticNewChat = false;
   const navigationVersion = ++relatedSelectionVersion;
   const nextRelatedView = relatedView === undefined ? relatedViewForThread(id) : normalizeRelatedView(relatedView, id);
   const currentRelatedView = normalizeRelatedView(relatedSessionView, selectedId);
@@ -9160,6 +9281,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   if (!returningToParent && nextRelatedView?.kind !== "side") sessionMenu?.close();
   clearTimeout(relatedMenuTimer); relatedMenuTimer = null;
   resetMessages();
+  pendingSteer = null;
   editingQueuedMessage = null;
   const version = ++selectionVersion;
   selectionToken = randomId();
@@ -9264,8 +9386,8 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     if (historyInitialized) scheduleMessages();
   } catch (error) {
     if (!controller.signal.aborted && version === selectionVersion && selectedId === id
-        && relatedSessionView?.kind === "side" && isSideThreadExpiredError(error)) {
-      await retireExpiredSideThread(id);
+        && isMissingThreadError(error)) {
+      await clearMissingThreadSelection(id);
       return;
     }
     if (!controller.signal.aborted && version === selectionVersion && selectedId === id) {
@@ -9310,19 +9432,29 @@ function welcomeNode() {
   node.append(element("h1", "", "继续本机的工作"), element("p", "", "选择左侧会话，发送会话。"), element("small", "", "消息、审批和执行状态与 Codex 桌面共享。"));
   return node;
 }
-function showWelcome() {
+function showWelcome({ startNew = true, clearHash = false } = {}) {
   ++relatedSelectionVersion;
   finishRelatedSessionExit();
   relatedSessionView = null; relatedReturnTranscript = null; sessionMenu?.close(); syncRelatedSessionLayout();
-  if (session && !session.readOnly) {
+  pendingSteer = null;
+  if (session && !session.readOnly && startNew) {
+    suppressAutomaticNewChat = false;
     void startNewChat("", { focus: false });
     return;
   }
   cancelMessageEdit({ focus: false });
-  rememberDraft(); rememberTranscript({ retainView: true }); resetMessages();
+  if (!clearHash) { rememberDraft(); rememberTranscript({ retainView: true }); }
+  resetMessages();
   editingQueuedMessage = null;
   ++selectionVersion; ++threadReadVersion; selectionToken = randomId();
   selectedId = null; thread = null; creating = false; historyCursor = null; historyInitialized = false; turns.clear(); transcriptEvents.clear(); notifiedTokenUsage = null;
+  if (clearHash) {
+    const hash = new URLSearchParams(location.hash.slice(1));
+    if (hash.has("thread")) {
+      hash.delete("thread");
+      history.replaceState(null, "", `${location.pathname}${location.search}${hash.size ? `#${hash}` : ""}`);
+    }
+  }
   sessionTools?.updateContext();
   $("#prompt").value = ""; selectedSkills = []; selectedGoal = null; clearComposerAttachments(); resetComposerOptions();
   $("#thread-title").textContent = "远程会话"; $("#thread-path").textContent = "";
@@ -9363,6 +9495,8 @@ async function readHistoryPage(older, version, itemsTurnId) {
   const id = selectedId, readVersion = messageVersion, checkingCached = transcriptChecking && latestPage;
   const initialIds = new Set(turns.keys());
   const controller = new AbortController();
+  const historyStartedAt = performance.now();
+  recordDiagnostic("remote.history", { phase: "request" });
   historyController = controller;
   const cursorAnchor = itemTurn?.itemsCursorAnchor || itemTurn?.items?.[0]?.id;
   try {
@@ -9432,11 +9566,19 @@ async function readHistoryPage(older, version, itemsTurnId) {
     if (latestPage) transcriptChecking = false;
     syncEditableMessageMetadata();
     renderMessages(!older);
+    recordDiagnostic("remote.history", {
+      phase: "complete", durationMs: performance.now() - historyStartedAt
+    });
     rememberTranscript();
   } catch (error) {
+    recordDiagnostic("remote.history", {
+      phase: "failure", durationMs: performance.now() - historyStartedAt,
+      errorType: error?.name || "Error",
+      reason: Number.isFinite(error?.code) ? "http-error" : "network-error"
+    });
     if (controller.signal.aborted || pageLeaving || version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
-    if (isSideThreadExpiredError(error) && relatedSessionView?.kind === "side" && selectedId === id) {
-      await retireExpiredSideThread(id).catch(expiredError => notice(expiredError.message, true));
+    if (isMissingThreadError(error) && selectedId === id) {
+      await clearMissingThreadSelection(id).catch(expiredError => notice(expiredError.message, true));
       return;
     }
     if (!itemsTurnId && error.code === 404) retireMissingEphemeralTranscript(id);
@@ -9659,10 +9801,9 @@ async function reloadThread() {
       let latest;
       try { ({ thread: latest } = await api("/api/read/thread", { threadId: id })); }
       catch (error) {
-        if (version === selectionVersion && relatedSessionView?.kind === "side"
-            && isSideThreadExpiredError(error)) {
+        if (version === selectionVersion && selectedId === id && isMissingThreadError(error)) {
           await historyRead.catch(() => {});
-          await retireExpiredSideThread(id);
+          await clearMissingThreadSelection(id);
           return;
         }
         if (version === selectionVersion && selectedId === id && error.code === 404)
@@ -11372,6 +11513,8 @@ function receive(event) {
     return;
   }
   const eventThreadId = params.threadId ?? params.conversationId ?? params.thread?.id;
+  const suppressSidebarRefresh = event.method === "remote/sidebarChanged"
+    && typeof eventThreadId === "string" && sidebarReadRefreshSuppressions.delete(eventThreadId);
   if (typeof eventThreadId === "string") {
     const runtimeStatus = params.status?.status ?? params.status;
     const runtimeType = typeof runtimeStatus === "string" ? runtimeStatus : runtimeStatus?.type;
@@ -11574,7 +11717,7 @@ function receive(event) {
   if (event.method === "skills/changed") {
     void refreshSkillCatalog().catch(() => {});
   }
-  if (["thread/started", "turn/started", "turn/completed", "remote/sidebarChanged", "thread/name/updated", "thread/status/changed",
+  if (!suppressSidebarRefresh && ["thread/started", "turn/started", "turn/completed", "remote/sidebarChanged", "thread/name/updated", "thread/status/changed",
     "remote/requestsChanged", "serverRequest/resolved"].includes(event.method)) {
     scheduleSidebarRefresh();
   }
@@ -11594,6 +11737,7 @@ function disconnect() {
   refreshTimer = null;
   clearTimeout(streamRetry); streamRetry = null;
   ++selectionVersion; ++sidebarVersion; connected = false;
+  sidebarReadRefreshSuppressions.clear();
   resetMessages();
 }
 async function reconnectChangedAuthorization() {
@@ -11618,7 +11762,7 @@ async function refreshAll({ fresh = false } = {}) {
       const id = selectedId || (!creating ? new URLSearchParams(location.hash.slice(1)).get("thread") : null);
       try {
         await (id ? selectedId
-          ? reloadThread() : selectThread(id, { closeSidebar: false }) : Promise.resolve()]);
+          ? reloadThread() : selectThread(id, { closeSidebar: false }) : Promise.resolve());
       } catch (error) {
         if (!request.again || deviceId !== session?.device.id) throw error;
       }
@@ -11794,7 +11938,10 @@ async function connectPage(signal) {
   try { await refreshAll(); }
   catch (error) { if (session?.device.id === deviceId) notice(error.message, true); }
   if (session?.device.id === deviceId && !selectedId && !creating
-      && !new URLSearchParams(location.hash.slice(1)).get("thread")) showWelcome();
+      && !new URLSearchParams(location.hash.slice(1)).get("thread")) {
+    const startNew = !suppressAutomaticNewChat;
+    showWelcome({ startNew });
+  }
   updateComposer(); void resolvePending(); drainPendingNotificationOpen();
 }
 function retryConnectionRecovery() {

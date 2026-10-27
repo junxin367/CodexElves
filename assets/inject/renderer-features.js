@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "101";
+  const codexDeleteStyleVersion = "103";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -2368,13 +2368,9 @@
         height: 0 !important;
         display: none !important;
       }
-      .composer-surface-chrome [class*="_WorkTriggerMeasurement_"][aria-hidden="true"],
-      [class*="_multilineSurface_"] [class*="_WorkTriggerMeasurement_"][aria-hidden="true"],
-      .composer-surface-chrome [class*="_ModelPickerTriggerMeasurement_"][aria-hidden="true"],
-      [class*="_multilineSurface_"] [class*="_ModelPickerTriggerMeasurement_"][aria-hidden="true"] {
-        block-size: 0 !important;
-        max-block-size: 0 !important;
-        overflow: clip !important;
+      [role="dialog"]:has(input[placeholder="搜索项目"], input[placeholder="Search projects"]) [role="option"] {
+        min-height: 28px !important;
+        flex: 0 0 auto !important;
       }
       .codex-elves-about { color: #a1a1aa; line-height: 1.5; }
       .codex-elves-tabs { display: flex; gap: 8px; padding: 0 20px 6px; flex: 0 0 auto; }

@@ -2064,7 +2064,7 @@
     if (typeof manager.markConversationAsRead !== "function") throw failure(503, "当前 Codex 版本的原生已读服务不可用");
     await manager.markConversationAsRead(id);
     catalogLoaded = false;
-    emit({ method: "remote/sidebarChanged" });
+    emit({ method: "remote/sidebarChanged", params: { threadId: id, reason: "read" } });
     return { ok: true, threadId: id };
   }
   function runtimeGoal(goal) {
