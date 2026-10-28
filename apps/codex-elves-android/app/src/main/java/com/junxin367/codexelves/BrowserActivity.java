@@ -189,7 +189,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         footerDivider = divider();
         root.addView(footerDivider, new LinearLayout.LayoutParams(-1, dp(1)));
         footer = row(); footer.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
-        footer.setPadding(dp(4), dp(5), dp(4), dp(7)); footer.setMinimumHeight(dp(72));
+        footer.setPadding(dp(4), dp(5), dp(4), dp(7)); footer.setMinimumHeight(dp(58));
         back = footerAction(R.drawable.browser_back, "后退", "网页后退", () -> { if (ready) session.back(); });
         homeButton = footerAction(R.drawable.browser_home, "首页", "浏览器首页", () -> {
             if (!ready) return;
@@ -1250,15 +1250,16 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         Button view = textButton(label, action);
         view.setTextSize(fontSize * .70f);
         view.setSingleLine(true);
+        view.setIncludeFontPadding(false);
         view.setGravity(Gravity.CENTER);
         view.setMinWidth(0); view.setMinimumWidth(0);
         view.setMinHeight(0); view.setMinimumHeight(0);
-        view.setPadding(dp(2), dp(5), dp(2), dp(4));
+        view.setPadding(dp(2), dp(2), dp(2), dp(1));
         view.setCompoundDrawablesWithIntrinsicBounds(0, resource, 0, 0);
-        view.setCompoundDrawablePadding(dp(2));
+        view.setCompoundDrawablePadding(0);
         view.setCompoundDrawableTintList(ColorStateList.valueOf(foreground));
         view.setContentDescription(description);
-        view.setLayoutParams(new LinearLayout.LayoutParams(dp(44), dp(58)));
+        view.setLayoutParams(new LinearLayout.LayoutParams(dp(44), dp(44)));
         return view;
     }
     private ImageButton icon(int resource, String description, Runnable action) {
