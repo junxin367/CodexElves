@@ -13,6 +13,7 @@ import android.os.Looper;
 import android.webkit.CookieManager;
 import android.webkit.ConsoleMessage;
 import android.webkit.HttpAuthHandler;
+import android.webkit.JavascriptInterface;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
@@ -117,6 +118,74 @@ final class BrowserSession {
         + "metas[i].setAttribute('content',content);}}"
         + "apply();new MutationObserver(apply).observe(document,{childList:true,subtree:true,"
         + "attributes:true,attributeFilter:['name','content']});})();";
+    private static final String CREDENTIAL_BRIDGE_NAME = "__codexElvesCredentialRecorder";
+    private static final String CREDENTIAL_COLLECTOR_SCRIPT = """
+(function(){
+  if (window.__codexElvesCredentialCollectorInstalled) return;
+  window.__codexElvesCredentialCollectorInstalled = true;
+  function meta(input) {
+    return [input.name, input.id, input.autocomplete, input.placeholder,
+      input.getAttribute('aria-label')].join(' ').toLowerCase();
+  }
+  function value(input, limit) {
+    return String(input && input.value || '').slice(0, limit);
+  }
+  function textInputs(scope) {
+    return Array.from(scope.querySelectorAll('input,select')).filter(function(input) {
+      return !input.disabled && input.getClientRects().length > 0
+        && !['password', 'hidden', 'checkbox', 'radio', 'submit', 'button'].includes(input.type);
+    });
+  }
+  function subaccountField(input) {
+    return /sub.?account|tenant|organiz|organis|workspace|team|company|domain|子账号|租户|组织|团队|企业|空间/.test(meta(input));
+  }
+  function usernameField(input) {
+    return /user.?name|email|e-mail|login|account|手机号|邮箱|账号|用户名/.test(meta(input));
+  }
+  function capture() {
+    if (!/^https?:$/.test(location.protocol)) return;
+    var recorder = window.__codexElvesCredentialRecorder;
+    if (!recorder || typeof recorder.record !== 'function') return;
+    var passwords = Array.from(document.querySelectorAll('input[type=password]')).filter(function(input) {
+      return !input.disabled && input.value && input.getClientRects().length > 0;
+    });
+    if (!passwords.length) return;
+    var password = passwords[0], scope = password.closest('form') || document;
+    var inputs = textInputs(scope), username = '', subaccount = '';
+    var namedUser = inputs.find(function(input) {
+      return input.autocomplete === 'username' && value(input, 512).trim();
+    });
+    if (namedUser) username = value(namedUser, 512).trim();
+    for (var index = 0; index < inputs.length; index++) {
+      var input = inputs[index], current = value(input, 512).trim();
+      if (!current) continue;
+      if (!subaccount && subaccountField(input)) subaccount = current;
+      else if (!username && usernameField(input)) username = current;
+    }
+    if (!username) {
+      var fallback = inputs.find(function(input) {
+        return !subaccountField(input) && value(input, 512).trim();
+      });
+      if (fallback) username = value(fallback, 512).trim();
+    }
+    if (!username && !subaccount) return;
+    recorder.record(JSON.stringify({ origin: location.origin, username: username,
+      password: value(password, 4096), subaccount: subaccount }));
+  }
+  document.addEventListener('submit', function() { setTimeout(capture, 0); }, true);
+  document.addEventListener('click', function(event) {
+    var target = event.target && event.target.closest ? event.target.closest('button,input') : null;
+    if (!target) return;
+    var type = String(target.getAttribute('type') || '').toLowerCase();
+    var label = [target.value, target.innerText, target.getAttribute('aria-label')].join(' ');
+    if (type === 'submit' || target.tagName === 'BUTTON' && !type
+        || /登录|登入|sign.?in|log.?in|submit|继续|next/i.test(label)) setTimeout(capture, 0);
+  }, true);
+  document.addEventListener('keydown', function(event) {
+    if (event.key === 'Enter' && event.target && event.target.tagName === 'INPUT') setTimeout(capture, 0);
+  }, true);
+})();
+""";
     // One retained view; detach replaces its MutableContextWrapper base with the application.
     @SuppressLint("StaticFieldLeak")
     private static BrowserSession current;
@@ -130,6 +199,8 @@ final class BrowserSession {
     private final MutableContextWrapper context;
     private final AutoCloseable observer;
     private final BrowserProxy proxy;
+    private final BrowserCredentialStore credentialStore;
+    private boolean credentialRecordingEnabled;
     private Listener listener;
     private boolean closed, attached, routeReady;
     private long proxyGeneration;
@@ -320,6 +391,10 @@ final class BrowserSession {
             }
         });
         view.setSaveEnabled(false);
+        credentialStore = new BrowserCredentialStore(context.getApplicationContext());
+        credentialRecordingEnabled = credentialStore.isRecordingEnabled(identity.origin());
+        if (credentialRecordingEnabled)
+            view.addJavascriptInterface(new CredentialRecorderBridge(), CREDENTIAL_BRIDGE_NAME);
         WebSettings settings = view.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -441,6 +516,7 @@ final class BrowserSession {
                 webView.setVisibility(View.VISIBLE);
                 completeNetworkRequest("GET", address, 200, "200", "document", 0L, true);
                 collectPerformanceSnapshot(webView);
+                installCredentialCollector(webView);
                 MAIN.postDelayed(() -> {
                     if (!closed && mainFrameFinished) {
                         collectPerformanceSnapshot(view);
@@ -725,6 +801,34 @@ final class BrowserSession {
         return !home && preferences.isBookmarked(identity.origin(), url);
     }
     String userAgentMode() { return userAgentMode; }
+    boolean credentialRecordingEnabled() { return credentialRecordingEnabled; }
+    void setCredentialRecordingEnabled(boolean enabled) {
+        if (closed) return;
+        credentialStore.setRecordingEnabled(identity.origin(), enabled);
+        credentialRecordingEnabled = enabled;
+        if (enabled) {
+            view.addJavascriptInterface(new CredentialRecorderBridge(), CREDENTIAL_BRIDGE_NAME);
+            installCredentialCollector(view);
+        } else view.removeJavascriptInterface(CREDENTIAL_BRIDGE_NAME);
+        changed();
+    }
+    List<BrowserCredentialStore.Entry> credentials() {
+        return credentialStore.list(identity.origin());
+    }
+    void deleteCredential(String id) {
+        credentialStore.delete(identity.origin(), id); changed();
+    }
+    void clearCredentials() {
+        credentialStore.clear(identity.origin()); changed();
+    }
+    void recordHttpCredentials(String username, String password) {
+        if (!credentialRecordingEnabled) return;
+        String origin = webOrigin(view.getUrl());
+        try {
+            if (!origin.isEmpty()) credentialStore.record(identity.origin(), origin, username, password, "");
+        } catch (RuntimeException ignored) { }
+        changed();
+    }
     void toggleBookmark() {
         if (closed || home || !allowed(Uri.parse(url))) return;
         preferences.toggleBookmark(identity.origin(), url, view.getTitle(), System.currentTimeMillis());
@@ -1080,6 +1184,7 @@ final class BrowserSession {
         if (path.endsWith(".js") || path.endsWith(".mjs")) return "script";
         if (path.endsWith(".css")) return "stylesheets";
         if (path.matches(".*\\.(png|jpe?g|gif|webp|svg|ico|avif)$")) return "image";
+        if (path.matches(".*\\.(mp4|webm|mov|m3u8|mpd|mp3|wav|ogg|m4a|aac|flac)$")) return "media";
         if (path.matches(".*\\.(woff2?|ttf|otf|eot)$")) return "font";
         if (path.contains("/api/") || path.contains("/graphql") || path.contains("/ajax/")
             || "POST".equalsIgnoreCase(target.getQueryParameter("method"))) return "xhr";
@@ -1242,6 +1347,39 @@ final class BrowserSession {
         Matcher matcher = Pattern.compile(expression).matcher(source);
         return matcher.find() ? matcher.group(1) : fallback;
     }
+    private void installCredentialCollector(WebView webView) {
+        if (credentialRecordingEnabled && webView != null)
+            webView.evaluateJavascript(CREDENTIAL_COLLECTOR_SCRIPT, null);
+    }
+    private static String webOrigin(String value) {
+        try {
+            Uri target = Uri.parse(value == null ? "" : value);
+            String scheme = target.getScheme(), host = target.getHost();
+            if (!("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))
+                || host == null || host.isEmpty()) return "";
+            int port = target.getPort();
+            return scheme.toLowerCase(Locale.ROOT) + "://" + host.toLowerCase(Locale.ROOT)
+                + (port > 0 ? ":" + port : "");
+        } catch (RuntimeException invalid) { return ""; }
+    }
+    private final class CredentialRecorderBridge {
+        @JavascriptInterface public void record(String payload) {
+            if (payload == null || payload.length() > 16_384) return;
+            MAIN.post(() -> {
+                if (closed || !attached || !credentialRecordingEnabled) return;
+                try {
+                    JSONObject value = new JSONObject(payload);
+                    String origin = webOrigin(value.optString("origin", ""));
+                    if (origin.isEmpty() || !origin.equals(webOrigin(view.getUrl()))) return;
+                    credentialStore.record(identity.origin(), origin, value.optString("username", ""),
+                        value.optString("password", ""), value.optString("subaccount", ""));
+                    changed();
+                } catch (JSONException | RuntimeException ignored) {
+                    // Invalid or unavailable records never affect the loaded page.
+                }
+            });
+        }
+    }
     private void changed() { if (!closed && listener != null) listener.changed(); }
     private void diagnostic(String name, JSONObject fields) {
         BrowserAuthority.recordDiagnostic(authority, name, fields);
@@ -1265,7 +1403,8 @@ final class BrowserSession {
         proxy.close();
         try { observer.close(); } catch (Exception ignored) { }
         if (view.getParent() instanceof ViewGroup parent) parent.removeView(view);
-        view.stopLoading(); view.setWebChromeClient(null); view.setWebViewClient(null); view.destroy();
+        view.stopLoading(); view.setWebChromeClient(null); view.setWebViewClient(null);
+        view.removeJavascriptInterface(CREDENTIAL_BRIDGE_NAME); view.destroy();
         context.setBaseContext(context.getApplicationContext());
     }
 

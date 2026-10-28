@@ -37,23 +37,30 @@ import android.widget.ProgressBar;
 import android.widget.PopupWindow;
 import android.widget.ScrollView;
 import android.widget.Space;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.Locale;
 import java.text.SimpleDateFormat;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 
-/** Browser chrome is native; third-party pages never receive a native message bridge. */
+/** Browser chrome is native; pages receive no native bridge unless recording is explicitly enabled. */
 public final class BrowserActivity extends Activity implements BrowserSession.Listener {
     private int background, foreground, muted, line, surface;
     private float fontSize;
-    private enum InternalPage { NONE, HISTORY, BOOKMARKS, DIAGNOSTICS }
+    private enum InternalPage { NONE, HISTORY, BOOKMARKS, DIAGNOSTICS, CREDENTIALS }
     private LinearLayout root, header, footer;
     private View headerDivider, footerDivider;
     private FrameLayout content, webContainer;
-    private View homePage, settingsPage, historyPage, bookmarksPage, diagnosticsPage;
+    private View homePage, settingsPage, historyPage, bookmarksPage, diagnosticsPage, credentialsPage;
     private TextView heading, failure;
     private EditText homeInput, addressInput;
     private LinearLayout userAgentRow;
@@ -63,9 +70,13 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     private Button back, homeButton, reload, settingsButton, bookmarkButton;
     private Button historyButton, bookmarksButton;
     private Button clearPageButton;
-    private Button diagnosticsButton;
+    private Button networkButton, headerNetworkButton;
+    private Button credentialsButton;
+    private Switch credentialRecordingSwitch;
+    private boolean credentialSwitchSyncing;
+    private final Set<String> revealedCredentialIds = new HashSet<>();
     private ScrollView homeScroll;
-    private LinearLayout homeBody, recentPanel, historyPageBody, bookmarksPageBody, diagnosticsPageBody;
+    private LinearLayout homeBody, recentPanel, historyPageBody, bookmarksPageBody, diagnosticsPageBody, credentialsPageBody;
     private Space homeTopSpacer, homeBottomSpacer;
     private ProgressBar progress;
     private BrowserSession session;
@@ -151,6 +162,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         header.addView(heading, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         clearPageButton = textButton("清空", this::clearCurrentPage);
         header.addView(clearPageButton);
+        headerNetworkButton = textButton("网络", this::openDiagnosticsPage);
+        header.addView(headerNetworkButton);
         Button returnButton = textButton("返回", () -> {
             if (settings) { settings = false; hideKeyboard(); render(); }
             else if (internalPage != InternalPage.NONE) { internalPage = InternalPage.NONE; render(); }
@@ -177,6 +190,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         content.addView(bookmarksPage, new FrameLayout.LayoutParams(-1, -1));
         diagnosticsPage = buildDiagnosticsPage();
         content.addView(diagnosticsPage, new FrameLayout.LayoutParams(-1, -1));
+        credentialsPage = buildCredentialsPage();
+        content.addView(credentialsPage, new FrameLayout.LayoutParams(-1, -1));
         failure = text("正在准备浏览器…", fontSize, muted);
         failure.setGravity(Gravity.CENTER); failure.setPadding(dp(24), dp(24), dp(24), dp(24));
         failure.setBackgroundColor(background);
@@ -197,6 +212,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
             session.showHome();
         });
         reload = footerAction(R.drawable.browser_reload, "刷新", "刷新网页", () -> { if (ready) session.reload(); });
+        networkButton = footerAction(R.drawable.browser_network, "网络", "打开网络诊断", this::openDiagnosticsPage);
         settingsButton = footerAction(R.drawable.browser_settings, "设置", "浏览器设置", () -> {
             if (!ready) return;
             settings = true; hideKeyboard(); renderSettings(); render();
@@ -222,7 +238,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         footer.addView(back); footer.addView(homeButton);
         footer.addView(addressInput, new LinearLayout.LayoutParams(0, dp(44), 1));
         footer.addView(bookmarksButton); footer.addView(historyButton);
-        footer.addView(bookmarkButton); footer.addView(reload); footer.addView(settingsButton);
+        footer.addView(bookmarkButton); footer.addView(reload);
+        footer.addView(networkButton); footer.addView(settingsButton);
         root.addView(footer);
         root.requestFocus();
         render();
@@ -315,10 +332,31 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         LinearLayout.LayoutParams modeRowLayout = new LinearLayout.LayoutParams(-1, dp(52));
         modeRowLayout.topMargin = dp(12);
         body.addView(userAgentRow, modeRowLayout);
-        diagnosticsButton = textButton("网页诊断", this::openDiagnosticsPage);
-        LinearLayout.LayoutParams diagnosticsLayout = new LinearLayout.LayoutParams(-1, -2);
-        diagnosticsLayout.topMargin = dp(16);
-        body.addView(diagnosticsButton, diagnosticsLayout);
+        addSettingsDivider(body);
+        TextView browserTitle = text("浏览器", fontSize * 1.12f, foreground);
+        browserTitle.setTypeface(null, Typeface.BOLD); body.addView(browserTitle);
+        credentialRecordingSwitch = new Switch(this);
+        credentialRecordingSwitch.setText("记录账号密码");
+        credentialRecordingSwitch.setTextSize(fontSize * .95f);
+        credentialRecordingSwitch.setTextColor(foreground);
+        credentialRecordingSwitch.setGravity(Gravity.CENTER_VERTICAL);
+        credentialRecordingSwitch.setPadding(dp(14), dp(6), dp(14), dp(6));
+        credentialRecordingSwitch.setBackground(rounded(surface, line, 10));
+        credentialRecordingSwitch.setOnCheckedChangeListener((view, checked) -> {
+            if (credentialSwitchSyncing || !ready || session == null) return;
+            try { session.setCredentialRecordingEnabled(checked); }
+            catch (RuntimeException failure) {
+                Toast.makeText(this, failure.getMessage(), Toast.LENGTH_SHORT).show();
+            }
+            renderSettings();
+        });
+        LinearLayout.LayoutParams recordingLayout = new LinearLayout.LayoutParams(-1, dp(52));
+        recordingLayout.topMargin = dp(12);
+        body.addView(credentialRecordingSwitch, recordingLayout);
+        credentialsButton = textButton("账号密码记录", this::openCredentialsPage);
+        LinearLayout.LayoutParams credentialsLayout = new LinearLayout.LayoutParams(-1, -2);
+        credentialsLayout.topMargin = dp(12);
+        body.addView(credentialsButton, credentialsLayout);
         return scroll;
     }
 
@@ -352,6 +390,20 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         return scroll;
     }
 
+    private View buildCredentialsPage() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true); scroll.setBackgroundColor(background);
+        credentialsPageBody = column();
+        credentialsPageBody.setPadding(dp(16), dp(10), dp(16), dp(20));
+        scroll.addView(credentialsPageBody);
+        return scroll;
+    }
+    private void openCredentialsPage() {
+        if (!ready || session == null) return;
+        settings = false; internalPage = InternalPage.CREDENTIALS;
+        revealedCredentialIds.clear(); hideKeyboard();
+        renderCredentialsPage(); render();
+    }
     private void openHistoryPage() {
         if (!ready || session == null) return;
         settings = false;
@@ -386,10 +438,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         if (history.isEmpty()) {
             historyPageBody.addView(emptyState("还没有访问记录"));
         } else {
-            for (BrowserPreferences.HistoryEntry entry : history)
-                addRecordRow(historyPageBody, entry.title, entry.url,
-                    () -> navigateSaved(entry.url),
-                    () -> session.removeHistory(entry.url));
+            addHistoryRows(history);
         }
 
         bookmarksPageBody.removeAllViews();
@@ -403,8 +452,77 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
                     () -> session.removeBookmark(entry.url));
         }
         if (internalPage == InternalPage.DIAGNOSTICS) renderDiagnosticsPage();
+        if (internalPage == InternalPage.CREDENTIALS) renderCredentialsPage();
     }
 
+    private void addHistoryRows(List<BrowserPreferences.HistoryEntry> entries) {
+        LocalDate today = LocalDate.now(), currentDate = null;
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy年M月d日", Locale.getDefault());
+        for (BrowserPreferences.HistoryEntry entry : entries) {
+            LocalDate visitedDate = Instant.ofEpochMilli(entry.visitedAtMs)
+                .atZone(ZoneId.systemDefault()).toLocalDate();
+            if (!visitedDate.equals(currentDate)) {
+                currentDate = visitedDate;
+                String title = visitedDate.equals(today) ? "今天"
+                    : visitedDate.equals(today.minusDays(1)) ? "昨天" : visitedDate.format(formatter);
+                TextView heading = text(title, fontSize * .82f, muted);
+                heading.setTypeface(null, Typeface.BOLD);
+                heading.setPadding(dp(8), dp(12), dp(8), dp(2));
+                historyPageBody.addView(heading);
+            }
+            addRecordRow(historyPageBody, entry.title, entry.url,
+                () -> navigateSaved(entry.url), () -> session.removeHistory(entry.url), 12);
+        }
+    }
+    private void renderCredentialsPage() {
+        if (session == null || credentialsPageBody == null) return;
+        credentialsPageBody.removeAllViews();
+        List<BrowserCredentialStore.Entry> entries;
+        try { entries = session.credentials(); }
+        catch (RuntimeException failure) {
+            credentialsPageBody.addView(emptyState(failure.getMessage())); return;
+        }
+        if (entries.isEmpty()) { credentialsPageBody.addView(emptyState("暂无账号密码记录")); return; }
+        for (BrowserCredentialStore.Entry entry : entries) addCredentialCard(entry);
+    }
+    private void addCredentialCard(BrowserCredentialStore.Entry entry) {
+        LinearLayout card = column();
+        card.setPadding(dp(12), dp(10), dp(12), dp(10));
+        card.setBackground(rounded(surface, line, 10));
+        TextView origin = text(displayAddress(entry.origin), fontSize * .92f, foreground);
+        origin.setTypeface(null, Typeface.BOLD); origin.setSingleLine(true);
+        origin.setEllipsize(TextUtils.TruncateAt.END); card.addView(origin);
+        TextView account = text("账号：" + (entry.username.isEmpty() ? "—" : entry.username),
+            fontSize * .82f, foreground);
+        account.setSingleLine(true); account.setEllipsize(TextUtils.TruncateAt.END);
+        card.addView(account);
+        if (!entry.subaccount.isEmpty()) {
+            TextView subaccount = text("子账号：" + entry.subaccount, fontSize * .82f, foreground);
+            subaccount.setSingleLine(true); subaccount.setEllipsize(TextUtils.TruncateAt.END);
+            card.addView(subaccount);
+        }
+        boolean revealed = revealedCredentialIds.contains(entry.id);
+        LinearLayout passwordRow = row();
+        TextView password = text("密码：" + (revealed ? entry.password : "••••••••"),
+            fontSize * .82f, revealed ? foreground : muted);
+        password.setSingleLine(true); password.setEllipsize(TextUtils.TruncateAt.END);
+        passwordRow.addView(password, new LinearLayout.LayoutParams(0, -2, 1));
+        Button reveal = textButton(revealed ? "隐藏" : "显示", () -> {
+            if (revealed) revealedCredentialIds.remove(entry.id);
+            else revealedCredentialIds.add(entry.id);
+            renderCredentialsPage();
+        });
+        reveal.setMinimumWidth(0); reveal.setMinimumHeight(dp(36));
+        passwordRow.addView(reveal, new LinearLayout.LayoutParams(-2, dp(40)));
+        ImageButton delete = icon(R.drawable.browser_delete, "删除账号密码记录", () -> {
+            session.deleteCredential(entry.id); revealedCredentialIds.remove(entry.id);
+            renderCredentialsPage();
+        });
+        passwordRow.addView(delete, new LinearLayout.LayoutParams(dp(40), dp(40)));
+        card.addView(passwordRow);
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, -2);
+        layout.topMargin = dp(8); credentialsPageBody.addView(card, layout);
+    }
     private void renderDiagnosticsPage() {
         if (session == null || diagnosticsPageBody == null) return;
         diagnosticsPageBody.removeAllViews();
@@ -416,7 +534,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
 
         LinearLayout summary = column();
         summary.setPadding(dp(14), dp(10), dp(14), dp(10));
-        summary.setBackground(rounded(Color.WHITE, line, 14));
+        summary.setBackground(rounded(surface, line, 14));
         LinearLayout pageRow = row();
         String diagnosticPageUrl = session.diagnosticPageUrl();
         pageRow.addView(text("页面", fontSize * .78f, muted),
@@ -441,7 +559,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         summary.addView(infoRow, new LinearLayout.LayoutParams(-1, -2));
 
         LinearLayout liveRow = row();
-        TextView live = text("● 实时诊断", fontSize * .74f, Color.rgb(35, 160, 91));
+        TextView live = text("● 实时诊断", fontSize * .74f,
+            darkTheme() ? Color.rgb(80, 210, 140) : Color.rgb(35, 160, 91));
         live.setTypeface(null, Typeface.BOLD);
         liveRow.addView(live, new LinearLayout.LayoutParams(0, -2, 1));
         liveRow.addView(text("已捕获 " + allEvents.size() + " 条请求",
@@ -458,7 +577,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
 
         LinearLayout categoryBar = row();
         categoryBar.setPadding(dp(2), dp(4), dp(2), dp(4));
-        categoryBar.setBackground(rounded(Color.rgb(245, 247, 250), Color.TRANSPARENT, 12));
+        categoryBar.setBackground(rounded(surface, Color.TRANSPARENT, 12));
         addDiagnosticsChip(categoryBar, "全部  " + allEvents.size(), "all");
         addDiagnosticsChip(categoryBar, "请求  " + requestCount, "request");
         addDiagnosticsChip(categoryBar, "响应  " + responseCount, "response");
@@ -468,9 +587,10 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         LinearLayout filterBar = row();
         filterBar.setPadding(0, 0, 0, dp(4));
         addDiagnosticsFilterChip(filterBar, "全部", "all");
-        addDiagnosticsFilterChip(filterBar, "仅错误", "error");
-        addDiagnosticsFilterChip(filterBar, "耗时", "duration");
-        addDiagnosticsFilterChip(filterBar, "资源", "resource");
+        addDiagnosticsFilterChip(filterBar, "Fetch/XHR", "xhr");
+        addDiagnosticsFilterChip(filterBar, "CSS", "css");
+        addDiagnosticsFilterChip(filterBar, "JS", "js");
+        addDiagnosticsFilterChip(filterBar, "媒体", "media");
         diagnosticsPageBody.addView(filterBar, new LinearLayout.LayoutParams(-1, -2));
 
         List<BrowserSession.DiagnosticEvent> events = new ArrayList<>();
@@ -515,19 +635,14 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         Button chip = textButton(label,
             () -> { diagnosticsFilter = filter; renderDiagnosticsPage(); });
         chip.setTextSize(fontSize * .70f);
-        chip.setTextColor(selected ? Color.rgb(39, 139, 241) : muted);
+        chip.setTextColor(selected ? darkTheme() ? Color.rgb(100, 180, 255) : Color.rgb(39, 139, 241) : muted);
         chip.setGravity(Gravity.CENTER);
         chip.setMinHeight(0);
         chip.setMinimumHeight(dp(28));
         chip.setPadding(dp(4), 0, dp(4), 0);
-        chip.setBackground(rounded(selected ? Color.rgb(237, 245, 255) : Color.TRANSPARENT,
+        chip.setBackground(rounded(selected
+            ? darkTheme() ? Color.argb(45, 39, 139, 241) : Color.rgb(237, 245, 255) : Color.TRANSPARENT,
             selected ? Color.rgb(39, 139, 241) : Color.TRANSPARENT, 10));
-        if ("all".equals(filter)) {
-            chip.setCompoundDrawablesWithIntrinsicBounds(0, 0, R.drawable.ic_chevron_down, 0);
-            chip.setCompoundDrawablePadding(dp(2));
-            chip.setCompoundDrawableTintList(ColorStateList.valueOf(
-                selected ? Color.rgb(39, 139, 241) : muted));
-        }
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(28), 1);
         params.leftMargin = dp(1);
         params.rightMargin = dp(1);
@@ -538,17 +653,23 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         if ("error".equals(diagnosticsCategory) && !event.failure) return false;
         if ("request".equals(diagnosticsCategory) && (event.response || event.failure)) return false;
         if ("response".equals(diagnosticsCategory) && (!event.response || event.failure)) return false;
-        if ("error".equals(diagnosticsFilter) && !event.failure) return false;
-        if ("duration".equals(diagnosticsFilter) && event.durationMs <= 0) return false;
-        if ("resource".equals(diagnosticsFilter) && (event.resourceType == null
-            || event.resourceType.isEmpty() || "other".equals(event.resourceType))) return false;
+        String type = event.resourceType == null ? "" : event.resourceType.toLowerCase(Locale.ROOT);
+        if ("xhr".equals(diagnosticsFilter)
+            && !("xhr".equals(type) || "fetch".equals(type) || "xmlhttprequest".equals(type))) return false;
+        if ("css".equals(diagnosticsFilter)
+            && !("css".equals(type) || "stylesheet".equals(type) || "stylesheets".equals(type))) return false;
+        if ("js".equals(diagnosticsFilter)
+            && !("script".equals(type) || "javascript".equals(type) || "js".equals(type))) return false;
+        if ("media".equals(diagnosticsFilter)
+            && !("image".equals(type) || "img".equals(type) || "media".equals(type)
+                || "audio".equals(type) || "video".equals(type) || "font".equals(type))) return false;
         return true;
     }
 
     private void addDiagnosticsCard(BrowserSession.DiagnosticEvent event, long maxDuration) {
         LinearLayout card = column();
         card.setPadding(dp(10), dp(8), dp(10), dp(8));
-        card.setBackground(rounded(Color.WHITE, line, 12));
+        card.setBackground(rounded(surface, line, 12));
         card.setOnClickListener(ignored -> {
             haptics.perform(card, "haptic-click");
             expandedDiagnosticId = expandedDiagnosticId == event.id ? -1L : event.id;
@@ -602,7 +723,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
 
         LinearLayout bar = row();
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setBackground(rounded(Color.rgb(231, 235, 241), Color.TRANSPARENT, 3));
+        bar.setBackground(rounded(line, Color.TRANSPARENT, 3));
         float ratio = event.durationMs <= 0 ? .08f
             : Math.max(.08f, Math.min(1f, event.durationMs / (float) Math.max(1L, maxDuration)));
         View progress = new View(this);
@@ -618,14 +739,15 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         if (expandedDiagnosticId == event.id) {
             LinearLayout details = column();
             details.setPadding(dp(10), dp(8), dp(10), dp(8));
-            int detailBackground = event.failure ? Color.rgb(255, 240, 241)
-                : Color.rgb(245, 248, 252);
-            int detailLine = event.failure ? Color.rgb(255, 218, 220) : line;
+            int detailBackground = event.failure
+                ? darkTheme() ? Color.argb(32, 216, 55, 65) : Color.rgb(255, 240, 241) : surface;
+            int detailLine = event.failure
+                ? darkTheme() ? Color.argb(100, 216, 55, 65) : Color.rgb(255, 218, 220) : line;
             details.setBackground(rounded(detailBackground, detailLine, 9));
             TextView title = text(event.failure
                 ? "!  " + (event.detail.isEmpty() ? "请求失败" : event.detail)
                 : "请求详情", fontSize * .76f,
-                event.failure ? Color.rgb(216, 55, 65) : foreground);
+                event.failure ? diagnosticStatusColor(event, true) : foreground);
             title.setTypeface(null, Typeface.BOLD);
             details.addView(title);
             addDiagnosticDetail(details, "请求 URL", event.url);
@@ -665,11 +787,17 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     }
 
     private int diagnosticStatusColor(BrowserSession.DiagnosticEvent event, boolean textColor) {
-        if (event.failure) return textColor ? Color.rgb(216, 55, 65) : Color.rgb(255, 210, 214);
+        if (event.failure) return textColor
+            ? darkTheme() ? Color.rgb(255, 125, 130) : Color.rgb(216, 55, 65)
+            : darkTheme() ? Color.argb(55, 216, 55, 65) : Color.rgb(255, 210, 214);
         if (event.statusCode >= 300 && event.statusCode < 400)
-            return textColor ? Color.rgb(111, 117, 128) : Color.rgb(235, 237, 241);
-        if (event.response) return textColor ? Color.rgb(35, 160, 91) : Color.rgb(205, 242, 216);
-        return textColor ? Color.rgb(39, 139, 241) : Color.rgb(224, 239, 255);
+            return textColor ? muted : darkTheme() ? Color.argb(60, 113, 113, 113) : Color.rgb(235, 237, 241);
+        if (event.response) return textColor
+            ? darkTheme() ? Color.rgb(80, 210, 140) : Color.rgb(35, 160, 91)
+            : darkTheme() ? Color.argb(55, 35, 160, 91) : Color.rgb(205, 242, 216);
+        return textColor
+            ? darkTheme() ? Color.rgb(100, 180, 255) : Color.rgb(39, 139, 241)
+            : darkTheme() ? Color.argb(55, 39, 139, 241) : Color.rgb(224, 239, 255);
     }
 
     private String resourceTypeLabel(String value) {
@@ -714,7 +842,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     private void copyDiagnosticText(String value) {
         ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
         if (clipboard == null) return;
-        clipboard.setPrimaryClip(ClipData.newPlainText("网页诊断", value == null ? "" : value));
+        clipboard.setPrimaryClip(ClipData.newPlainText("网络", value == null ? "" : value));
         Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show();
     }
 
@@ -723,6 +851,11 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         String selectedUserAgent = userAgentLabel(session.userAgentMode());
         userAgentValue.setText(selectedUserAgent);
         userAgentRow.setContentDescription("浏览器标识（UA），当前为" + selectedUserAgent);
+        credentialSwitchSyncing = true;
+        credentialRecordingSwitch.setChecked(session.credentialRecordingEnabled());
+        credentialSwitchSyncing = false;
+        try { credentialsButton.setText("账号密码记录（" + session.credentials().size() + "）"); }
+        catch (RuntimeException failure) { credentialsButton.setText("账号密码记录"); }
     }
 
     private void showUserAgentMenu() {
@@ -809,13 +942,31 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     private void clearCurrentPage() {
         if (internalPage == InternalPage.HISTORY) confirmClearHistory();
         else if (internalPage == InternalPage.BOOKMARKS) confirmClearBookmarks();
+        else if (internalPage == InternalPage.CREDENTIALS) confirmClearCredentials();
         else if (internalPage == InternalPage.DIAGNOSTICS && session != null) {
             session.clearDiagnosticEvents();
             renderDiagnosticsPage();
-            Toast.makeText(this, "网页诊断记录已清空", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "网络记录已清空", Toast.LENGTH_SHORT).show();
         }
     }
 
+    private void confirmClearCredentials() {
+        if (!ready || session == null) return;
+        new AlertDialog.Builder(this)
+            .setTitle("清空账号密码记录")
+            .setMessage("确定删除当前来源的全部账号密码记录吗？此操作不可恢复。")
+            .setNegativeButton("暂不清空", null)
+            .setPositiveButton("清空", (dialog, which) -> {
+                try {
+                    session.clearCredentials(); revealedCredentialIds.clear();
+                    Toast.makeText(this, "账号密码记录已清空", Toast.LENGTH_SHORT).show();
+                } catch (RuntimeException failure) {
+                    Toast.makeText(this, failure.getMessage(), Toast.LENGTH_SHORT).show();
+                }
+                renderCredentialsPage();
+            })
+            .show();
+    }
     private void confirmClearHistory() {
         if (!ready || session == null) return;
         new AlertDialog.Builder(this)
@@ -892,13 +1043,15 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         heading.setText(settings ? "浏览器设置"
             : internalPage == InternalPage.HISTORY ? "访问历史"
             : internalPage == InternalPage.BOOKMARKS ? "书签"
-            : internalPage == InternalPage.DIAGNOSTICS ? "网页诊断" : "浏览器");
+            : internalPage == InternalPage.DIAGNOSTICS ? "网络"
+            : internalPage == InternalPage.CREDENTIALS ? "账号密码" : "浏览器");
         homePage.setVisibility(showHome ? View.VISIBLE : View.GONE);
         webContainer.setVisibility(showWeb ? View.VISIBLE : View.GONE);
         settingsPage.setVisibility(settings ? View.VISIBLE : View.GONE);
         historyPage.setVisibility(!settings && internalPage == InternalPage.HISTORY ? View.VISIBLE : View.GONE);
         bookmarksPage.setVisibility(!settings && internalPage == InternalPage.BOOKMARKS ? View.VISIBLE : View.GONE);
         diagnosticsPage.setVisibility(!settings && internalPage == InternalPage.DIAGNOSTICS ? View.VISIBLE : View.GONE);
+        credentialsPage.setVisibility(!settings && internalPage == InternalPage.CREDENTIALS ? View.VISIBLE : View.GONE);
         boolean diagnostics = internalPage == InternalPage.DIAGNOSTICS;
         header.setVisibility(View.VISIBLE);
         headerDivider.setVisibility(View.VISIBLE);
@@ -914,15 +1067,17 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
             || internalPage == InternalPage.HISTORY || internalPage == InternalPage.BOOKMARKS) ? View.VISIBLE : View.GONE);
         addressInput.setVisibility(showWeb ? View.VISIBLE : View.GONE);
         settingsButton.setVisibility(settings ? View.GONE : View.VISIBLE);
+        networkButton.setVisibility(showHome ? View.VISIBLE : View.GONE);
+        headerNetworkButton.setVisibility(showWeb ? View.VISIBLE : View.GONE);
         clearPageButton.setVisibility(internal ? View.VISIBLE : View.GONE);
         clearPageButton.setEnabled(ready && internal);
         settingsButton.setEnabled(ready);
+        credentialsButton.setEnabled(ready); credentialRecordingSwitch.setEnabled(ready);
         homeInput.setEnabled(ready && showHome);
         addressInput.setEnabled(ready && showWeb);
         boolean settingsReady = ready && settings;
         userAgentRow.setEnabled(settingsReady);
         userAgentRow.setAlpha(settingsReady ? 1f : .55f);
-        diagnosticsButton.setEnabled(settingsReady);
         progress.setVisibility(diagnostics ? View.GONE
             : ready && showWeb && session.progress < 100 ? View.VISIBLE : View.INVISIBLE);
         if (session != null) {
@@ -967,9 +1122,13 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
 
     private void addRecordRow(LinearLayout container, String title, String target,
         Runnable open, Runnable remove) {
+        addRecordRow(container, title, target, open, remove, 0);
+    }
+    private void addRecordRow(LinearLayout container, String title, String target,
+        Runnable open, Runnable remove, int indentationDp) {
         LinearLayout row = row();
         row.setMinimumHeight(dp(40));
-        row.setPadding(dp(8), dp(1), dp(2), dp(1));
+        row.setPadding(dp(8 + indentationDp), dp(1), dp(2), dp(1));
         row.setBackground(ripple());
         row.setOnClickListener(ignored -> {
             haptics.perform(row, "haptic-click");
@@ -1061,7 +1220,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         failure.setText(message); failure.setVisibility(View.VISIBLE);
         settingsButton.setEnabled(false); homeInput.setEnabled(false); addressInput.setEnabled(false);
         bookmarkButton.setEnabled(false); userAgentRow.setEnabled(false);
-        diagnosticsButton.setEnabled(false);
+        credentialsButton.setEnabled(false); credentialRecordingSwitch.setEnabled(false);
         bookmarksButton.setEnabled(false); historyButton.setEnabled(false);
         clearPageButton.setEnabled(false);
         progress.setVisibility(View.INVISIBLE);
@@ -1075,8 +1234,11 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         password.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         fields.addView(username); fields.addView(password);
         authDialog = new AlertDialog.Builder(this).setTitle(host + " 需要登录").setView(fields)
-            .setPositiveButton("登录", (dialog, which) ->
-                handler.proceed(username.getText().toString(), password.getText().toString()))
+            .setPositiveButton("登录", (dialog, which) -> {
+                String user = username.getText().toString(), secret = password.getText().toString();
+                if (session != null) session.recordHttpCredentials(user, secret);
+                handler.proceed(user, secret);
+            })
             .setNegativeButton("取消", (dialog, which) -> handler.cancel())
             .setOnCancelListener(dialog -> handler.cancel()).create();
         authDialog.show();
@@ -1271,6 +1433,10 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
             haptics.perform(view, "haptic-click");
             action.run();
         }); return view;
+    }
+    private boolean darkTheme() {
+        return Color.red(background) * 299 + Color.green(background) * 587
+            + Color.blue(background) * 114 <= 128000;
     }
     private RippleDrawable ripple() {
         return new RippleDrawable(ColorStateList.valueOf((foreground & 0x00ffffff) | 0x22000000),

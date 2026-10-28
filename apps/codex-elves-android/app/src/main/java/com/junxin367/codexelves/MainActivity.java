@@ -114,6 +114,10 @@ public final class MainActivity extends Activity {
     private int nextFileChooserRequestCode = FILE_CHOOSER_REQUEST;
     private long lastUpdateCheckAt;
     private BrowserAuthority browserAuthority;
+    private AmbientLightController ambientLight;
+    private int ambientLightSubscriptions;
+    private String ambientLightOrigin;
+    private long ambientLightGeneration;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -134,6 +138,7 @@ public final class MainActivity extends Activity {
         setContentView(root);
         appUpdates = new AppUpdateController(this);
         notifications = new NotificationController(this, this::handleNotificationAuthorizationLost);
+        ambientLight = new AmbientLightController(this, this::publishAmbientLight);
         if (Build.VERSION.SDK_INT >= 33) {
             nativeBackCallback = this::onBackPressed;
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
@@ -875,6 +880,16 @@ public final class MainActivity extends Activity {
                 openPendingNotification();
                 break;
             }
+            case "ambient-light-subscribe":
+                if (ambientLightSubscriptions == 0) {
+                    ambientLightOrigin = origin; ambientLightGeneration = generation;
+                } else if (!origin.equals(ambientLightOrigin) || generation != ambientLightGeneration) return;
+                ambientLightSubscriptions = ambientLight.subscribe();
+                break;
+            case "ambient-light-unsubscribe":
+                ambientLightSubscriptions = ambientLight.unsubscribe();
+                if (ambientLightSubscriptions == 0) ambientLightOrigin = null;
+                break;
             case "auth-required":
             case "logged-out":
                 clearAuthorization(origin);
@@ -885,6 +900,18 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void publishAmbientLight(boolean supported, Float lux) {
+        WebView view = webView;
+        if (ambientLightSubscriptions <= 0 || ambientLightOrigin == null || view == null
+            || ambientLightGeneration != connectionGeneration.get()) return;
+        try {
+            JSONObject detail = new JSONObject().put("type", "ambient-light").put("supported", supported);
+            if (supported && lux != null) detail.put("lux", lux.doubleValue());
+            String script = "window.dispatchEvent(new CustomEvent('codex-elves-ambient-light',{detail:"
+                + detail.toString() + "}))";
+            view.evaluateJavascript(script, null);
+        } catch (JSONException | RuntimeException ignored) { }
+    }
     private WebResourceResponse interceptResource(
         WebResourceRequest request,
         String origin,
@@ -1112,6 +1139,7 @@ public final class MainActivity extends Activity {
         haptics.setForeground(true);
         appUpdates.onResume();
         notifications.onResume();
+        ambientLight.onResume();
         openPendingNotification();
         if ((pageReady || webView != null)
             && currentOrigin != null
@@ -1134,6 +1162,7 @@ public final class MainActivity extends Activity {
         haptics.setForeground(false);
         appUpdates.onPause();
         notifications.onPause();
+        ambientLight.onPause();
         super.onPause();
     }
 
@@ -1429,6 +1458,8 @@ public final class MainActivity extends Activity {
     }
 
     private void destroyWebView() {
+        ambientLightSubscriptions = 0; ambientLightOrigin = null;
+        ambientLight.clear();
         cancelFileChooser();
         WebView previous = webView;
         webView = null;

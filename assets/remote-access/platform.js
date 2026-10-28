@@ -1,9 +1,12 @@
-const messageTypes = new Set(["ready", "authenticated", "auth-required", "logged-out", "app-info", "check-app-update"]);
+const messageTypes = new Set(["ready", "authenticated", "auth-required", "logged-out", "app-info", "check-app-update",
+  "ambient-light-subscribe", "ambient-light-unsubscribe"]);
 const appInfoTimeoutMs = 3000;
 let androidAppInfo = null;
 let androidAppInfoPending = null;
 let browserOpenPending = null;
 let browserRequestSequence = 0;
+const ambientLightListeners = new Set();
+let ambientLightListenerInstalled = false;
 const notificationRequestTypes = new Set([
   "notification-settings-get",
   "notification-settings-set",
@@ -274,6 +277,45 @@ export function postPlatformMessage(type) {
   }
 }
 
+function onAmbientLight(event) {
+  const detail = event?.detail;
+  if (!isPlainObject(detail) || detail.type !== "ambient-light" || typeof detail.supported !== "boolean") return;
+  const lux = detail.supported && Number.isFinite(detail.lux) && detail.lux >= 0 ? detail.lux : null;
+  if (detail.supported && lux === null) return;
+  const status = Object.freeze({ supported: detail.supported, lux });
+  for (const listener of ambientLightListeners) {
+    try { listener(status); } catch {}
+  }
+}
+export function subscribeAndroidAmbientLight(listener) {
+  if (typeof listener !== "function") throw new TypeError("listener 必须是函数。");
+  if (!isAndroidContainer()) return () => {};
+  ambientLightListeners.add(listener);
+  if (!ambientLightListenerInstalled) {
+    globalThis.addEventListener("codex-elves-ambient-light", onAmbientLight);
+    ambientLightListenerInstalled = true;
+  }
+  if (!postPlatformMessage("ambient-light-subscribe")) {
+    ambientLightListeners.delete(listener);
+    if (!ambientLightListeners.size && ambientLightListenerInstalled) {
+      globalThis.removeEventListener("codex-elves-ambient-light", onAmbientLight);
+      ambientLightListenerInstalled = false;
+    }
+    return () => {};
+  }
+  let subscribed = true;
+  return () => {
+    if (!subscribed) return;
+    subscribed = false;
+    ambientLightListeners.delete(listener);
+    if (ambientLightListeners.size) return;
+    if (ambientLightListenerInstalled) {
+      globalThis.removeEventListener("codex-elves-ambient-light", onAmbientLight);
+      ambientLightListenerInstalled = false;
+    }
+    postPlatformMessage("ambient-light-unsubscribe");
+  };
+}
 export function getAndroidAppInfo() {
   if (!isAndroidContainer()) return Promise.resolve(null);
   if (androidAppInfo) return Promise.resolve(androidAppInfo);

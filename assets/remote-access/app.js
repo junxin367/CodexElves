@@ -17,6 +17,7 @@ import {
   postPlatformMessage,
   requestAndroidNotificationPermission,
   setAndroidNotificationSettings,
+  subscribeAndroidAmbientLight,
   subscribeAndroidNotificationSettings
 } from "./platform.js";
 import { createReadCache, createRecoveryStore, createTranscriptCache, recoveryStorageMessage } from "./recovery-store.js";
@@ -335,7 +336,8 @@ const appearancePresets = {
 };
 const projectThreadLimits = [5, 10, 20, 50];
 function defaultAppearance(theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") {
-  return { theme, fontSize: 13, projectThreadLimit: 5, colors: { light: { ...appearancePresets.light }, dark: { ...appearancePresets.dark } } };
+  return { theme, themeMode: "manual", fontSize: 13, projectThreadLimit: 5, backgroundOpacity: 35, backgroundFit: "cover",
+    colors: { light: { ...appearancePresets.light }, dark: { ...appearancePresets.dark } } };
 }
 function readAppearance() {
   const value = defaultAppearance();
@@ -343,6 +345,9 @@ function readAppearance() {
     const saved = JSON.parse(localStorage.getItem("codex-elves-web-appearance") || "null");
     if (!saved || typeof saved !== "object") return value;
     if (["light", "dark"].includes(saved.theme)) value.theme = saved.theme;
+    if (["auto", "manual"].includes(saved.themeMode)) value.themeMode = saved.themeMode;
+    if (Number.isInteger(saved.backgroundOpacity)) value.backgroundOpacity = Math.min(100, Math.max(1, saved.backgroundOpacity));
+    if (["cover", "contain"].includes(saved.backgroundFit)) value.backgroundFit = saved.backgroundFit;
     if (Number.isInteger(saved.fontSize)) value.fontSize = Math.min(20, Math.max(10, saved.fontSize));
     if (projectThreadLimits.includes(saved.projectThreadLimit)) value.projectThreadLimit = saved.projectThreadLimit;
     for (const theme of ["light", "dark"]) for (const name of ["background", "foreground", "accent"]) {
@@ -351,7 +356,105 @@ function readAppearance() {
   } catch {}
   return value;
 }
+let ambientLightStatus = { supported: false, lux: null };
+let syncAppearanceThemeControls = null;
 let appearance = readAppearance();
+const remoteBackgroundKey = "remote-session";
+const remoteBackgroundMimes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const remoteBackgroundDataPattern = /^data:image\/(?:png|jpeg|webp|gif);base64,[a-z0-9+/=]+$/i;
+let remoteBackground = { dataUrl: "", name: "" };
+let remoteBackgroundOperation = 0;
+let remoteBackgroundBusy = false;
+let remoteBackgroundError = "";
+function openRemoteBackgroundDatabase() {
+  return new Promise((resolve, reject) => {
+    if (!globalThis.indexedDB) { reject(new Error("当前浏览器无法保存背景图片。")); return; }
+    const request = indexedDB.open("codex-elves-appearance-v1", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("images");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("无法打开背景图片存储。"));
+    request.onblocked = () => reject(new Error("背景图片存储被其他页面占用，请关闭旧页面后重试。"));
+  });
+}
+async function remoteBackgroundStore(mode, operation) {
+  const database = await openRemoteBackgroundDatabase();
+  try {
+    return await new Promise((resolve, reject) => {
+      const transaction = database.transaction("images", mode);
+      const request = operation(transaction.objectStore("images"));
+      let result;
+      request.onsuccess = () => { result = request.result; };
+      request.onerror = () => reject(request.error || new Error("背景图片存储操作失败。"));
+      transaction.oncomplete = () => resolve(result);
+      transaction.onerror = () => reject(transaction.error || new Error("背景图片存储操作失败。"));
+      transaction.onabort = () => reject(transaction.error || new Error("背景图片存储操作已取消。"));
+    });
+  } finally { database.close(); }
+}
+function readRemoteBackground() {
+  return remoteBackgroundStore("readonly", store => store.get(remoteBackgroundKey));
+}
+function writeRemoteBackground(record) {
+  return remoteBackgroundStore("readwrite", store => store.put(record, remoteBackgroundKey));
+}
+function deleteRemoteBackground() {
+  return remoteBackgroundStore("readwrite", store => store.delete(remoteBackgroundKey));
+}
+function syncRemoteBackground() {
+  const image = $("#remote-background");
+  if (!image) return;
+  image.hidden = !remoteBackground.dataUrl;
+  image.style.opacity = String(appearance.backgroundOpacity / 100);
+  image.style.objectFit = appearance.backgroundFit;
+  if (remoteBackground.dataUrl) {
+    if (image.getAttribute("src") !== remoteBackground.dataUrl) image.src = remoteBackground.dataUrl;
+  } else image.removeAttribute("src");
+}
+function readRemoteBackgroundFile(file) {
+  if (!remoteBackgroundMimes.has(file.type)) return Promise.reject(new Error("请选择 PNG、JPG、WebP 或 GIF 图片。"));
+  if (!file.size || file.size > 15 * 1024 * 1024) return Promise.reject(new Error("背景图片不能超过 15 MB。"));
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("无法读取所选图片。"));
+    reader.onload = () => {
+      const dataUrl = String(reader.result || "");
+      if (!remoteBackgroundDataPattern.test(dataUrl)) { reject(new Error("图片内容无法识别。")); return; }
+      const image = new Image();
+      image.onerror = () => reject(new Error("图片内容损坏或无法解码。"));
+      image.onload = () => {
+        if (!image.naturalWidth || !image.naturalHeight || image.naturalWidth * image.naturalHeight > 100_000_000) {
+          reject(new Error("图片尺寸无效或超过 1 亿像素。"));
+        } else resolve(dataUrl);
+      };
+      image.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+function automaticAppearanceTheme(date = new Date()) {
+  const hour = date.getHours();
+  if (hour < 6 || hour >= 18) {
+    if (!ambientLightStatus.supported || ambientLightStatus.lux === null) return "dark";
+    return ambientLightStatus.lux < 30 ? "dark" : "light";
+  }
+  return "light";
+}
+function applyAutomaticAppearance(save = false) {
+  if (appearance.themeMode !== "auto") return false;
+  const next = automaticAppearanceTheme();
+  if (next === appearance.theme) return false;
+  appearance.theme = next;
+  applyAppearance(save);
+  syncAppearanceThemeControls?.();
+  return true;
+}
+function setAppearanceThemeMode(mode) {
+  if (!["auto", "manual"].includes(mode)) return;
+  appearance.themeMode = mode;
+  if (mode === "auto") appearance.theme = automaticAppearanceTheme();
+  applyAppearance(true);
+  syncAppearanceThemeControls?.();
+}
 function mixColor(left, right, weight) {
   return "#" + [1, 3, 5].map(index => Math.round(
     parseInt(left.slice(index, index + 2), 16) * (1 - weight) + parseInt(right.slice(index, index + 2), 16) * weight
@@ -373,6 +476,7 @@ function applyAppearance(save = false) {
   };
   for (const [name, value] of Object.entries(values)) root.style.setProperty(`--${name}`, value);
   $('meta[name="theme-color"]')?.setAttribute("content", background);
+  syncRemoteBackground();
   if (save) {
     try { localStorage.setItem("codex-elves-web-appearance", JSON.stringify(appearance)); }
     catch { notice("外观已应用，但浏览器不允许保存；重新打开页面后将恢复默认。", true); }
@@ -382,7 +486,28 @@ function applyAppearance(save = false) {
   refitComposerMenus();
   if ($("#messages")) scheduleMermaidBlocks();
 }
+applyAutomaticAppearance();
 applyAppearance();
+const initialRemoteBackgroundOperation = ++remoteBackgroundOperation;
+void readRemoteBackground().then(record => {
+  if (initialRemoteBackgroundOperation !== remoteBackgroundOperation) return;
+  if (record && typeof record.dataUrl === "string" && remoteBackgroundDataPattern.test(record.dataUrl))
+    remoteBackground = { dataUrl: record.dataUrl, name: String(record.name || "背景图片") };
+  syncRemoteBackground();
+  syncAppearanceThemeControls?.();
+}).catch(() => {
+  if (initialRemoteBackgroundOperation !== remoteBackgroundOperation) return;
+  remoteBackgroundError = "无法读取已保存的背景图片。";
+  syncAppearanceThemeControls?.();
+});
+setInterval(() => applyAutomaticAppearance(true), 60_000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) applyAutomaticAppearance(true);
+});
+subscribeAndroidAmbientLight(status => {
+  ambientLightStatus = status;
+  applyAutomaticAppearance(true);
+});
 function currentFileBrowserThreadId() {
   const parentThreadId = relatedSessionView?.kind === "side"
     ? relatedSessionView.openedFromThreadId || relatedSessionView.parentThreadId : null;
@@ -444,6 +569,11 @@ function openAppearance() {
     <h3 class="appearance-panel-title">通用设置</h3>
     <div class="appearance-field"><span id="appearance-theme-label">主题</span><div id="appearance-theme-slot" class="appearance-theme-options" role="group" aria-labelledby="appearance-theme-label"></div></div>
     <div class="appearance-field appearance-thread-limit-field"><span>每个项目显示会话数</span><div id="appearance-project-thread-limit-slot"></div></div>
+    <div class="appearance-field appearance-background-field"><span>背景图片</span><div class="appearance-background-actions"><input id="appearance-background-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden><button type="button" id="appearance-background-upload"></button><button type="button" id="appearance-background-remove"></button></div></div>
+    <div id="appearance-background-preview" class="appearance-background-preview" hidden><img id="appearance-background-thumbnail" alt=""><span id="appearance-background-name"></span></div>
+    <label class="appearance-field"><span>背景透明度</span><span class="appearance-font"><input id="appearance-background-opacity" type="range" min="1" max="100" step="1" aria-label="背景透明度"><output id="appearance-background-opacity-value"></output></span></label>
+    <div class="appearance-field"><span>图片铺法</span><div id="appearance-background-fit-slot"></div></div>
+    <p id="appearance-background-status" class="appearance-background-status" role="status" hidden></p>
     <div id="appearance-cache-state" class="appearance-field" role="status"></div>
     </section>
     <section id="appearance-customization-page" class="appearance-body appearance-settings-page" hidden>
@@ -858,13 +988,29 @@ function openAppearance() {
     if (dialog.isConnected && dialog.open && !versionButton.disabled) postPlatformMessage("check-app-update");
   };
   const themeButton = button("", "切换主题", () => {
+    if (appearance.themeMode === "auto") return;
     appearance.theme = appearance.theme === "light" ? "dark" : "light";
     applyAppearance(true);
     sync();
   }, "appearance-theme-button");
-  $("#appearance-theme-slot").append(themeButton);
+  const modeGroup = element("div", "appearance-theme-mode");
+  modeGroup.setAttribute("role", "group"); modeGroup.setAttribute("aria-label", "主题模式");
+  const modeButtons = new Map();
+  for (const [mode, label] of [["auto", "自动"], ["manual", "手动"]]) {
+    const modeButton = button(label, label, () => setAppearanceThemeMode(mode), "appearance-theme-mode-button");
+    modeButton.dataset.themeMode = mode;
+    modeButtons.set(mode, modeButton); modeGroup.append(modeButton);
+  }
+  $("#appearance-theme-slot").append(themeButton, modeGroup);
   $("#appearance-project-thread-limit-slot").append(selectControl("appearance-project-thread-limit", "每个项目显示会话数",
     projectThreadLimits.map(value => ({ value: String(value), label: `${value}个` })), String(appearance.projectThreadLimit)));
+  const backgroundUpload = $("#appearance-background-upload");
+  backgroundUpload.append(icon("image"), element("span", "", "上传图片"));
+  const backgroundRemove = $("#appearance-background-remove");
+  backgroundRemove.append(icon("trash"), element("span", "", "移除"));
+  $("#appearance-background-fit-slot").append(selectControl("appearance-background-fit", "图片铺法", [
+    { value: "cover", label: "铺满裁切" }, { value: "contain", label: "完整不裁" }
+  ], appearance.backgroundFit));
   const colorFields = [["accent", "强调色"], ["background", "背景色"], ["foreground", "前景色"]];
   const colorPresets = ["#171717", "#3f3f46", "#71717a", "#d4d4d8", "#f4f4f5", "#ffffff", "#2563eb", "#7c3aed", "#db2777", "#dc2626", "#ea580c", "#16a34a"];
   const setColor = (name, color) => { appearance.colors[appearance.theme][name] = color; applyAppearance(true); sync(); };
@@ -902,13 +1048,33 @@ function openAppearance() {
   }
   const sync = () => {
     const isLightTheme = appearance.theme === "light";
-    const themeLabel = isLightTheme
-      ? "当前为浅色主题，切换到深色主题"
-      : "当前为深色主题，切换到浅色主题";
+    const automatic = appearance.themeMode === "auto";
+    const themeLabel = automatic
+      ? `自动主题，当前为${isLightTheme ? "浅色" : "深色"}主题`
+      : isLightTheme ? "当前为浅色主题，切换到深色主题" : "当前为深色主题，切换到浅色主题";
     themeButton.title = themeLabel;
     themeButton.setAttribute("aria-label", themeLabel);
     themeButton.replaceChildren(icon(isLightTheme ? "sun" : "moon"));
+    themeButton.disabled = automatic;
+    for (const [mode, control] of modeButtons) control.setAttribute("aria-pressed", String(mode === appearance.themeMode));
     setSelectValue($("#appearance-project-thread-limit"), String(appearance.projectThreadLimit));
+    const hasBackground = !!remoteBackground.dataUrl;
+    backgroundUpload.disabled = remoteBackgroundBusy;
+    backgroundRemove.disabled = remoteBackgroundBusy || !hasBackground;
+    resetButton.disabled = remoteBackgroundBusy;
+    $("#appearance-background-preview").hidden = !hasBackground;
+    $("#appearance-background-name").textContent = remoteBackground.name;
+    if (hasBackground && $("#appearance-background-thumbnail").getAttribute("src") !== remoteBackground.dataUrl)
+      $("#appearance-background-thumbnail").src = remoteBackground.dataUrl;
+    if (!hasBackground) $("#appearance-background-thumbnail").removeAttribute("src");
+    $("#appearance-background-opacity").disabled = remoteBackgroundBusy || !hasBackground;
+    $("#appearance-background-opacity").value = appearance.backgroundOpacity;
+    $("#appearance-background-opacity").style.setProperty("--range-fill", `${appearance.backgroundOpacity - 1}%`);
+    $("#appearance-background-opacity-value").textContent = `${appearance.backgroundOpacity}%`;
+    $("#appearance-background-fit").disabled = remoteBackgroundBusy || !hasBackground;
+    setSelectValue($("#appearance-background-fit"), appearance.backgroundFit);
+    $("#appearance-background-status").hidden = !remoteBackgroundError;
+    $("#appearance-background-status").textContent = remoteBackgroundError;
     for (const [name] of colorFields) {
       const color = appearance.colors[appearance.theme][name];
       const hex = $(`#appearance-${name}-hex`);
@@ -920,6 +1086,7 @@ function openAppearance() {
     $("#appearance-font").style.setProperty("--range-fill", `${(appearance.fontSize - 10) * 10}%`);
     $("#appearance-font-value").textContent = `${appearance.fontSize}px`;
   };
+  syncAppearanceThemeControls = sync;
   sync();
   $("#appearance-project-thread-limit").onchange = event => {
     appearance.projectThreadLimit = Number(event.target.value);
@@ -928,14 +1095,77 @@ function openAppearance() {
     renderSidebar();
     sync();
   };
+  backgroundUpload.onclick = () => $("#appearance-background-input").click();
+  $("#appearance-background-input").onchange = async event => {
+    const file = event.target.files?.[0]; event.target.value = "";
+    if (!file || remoteBackgroundBusy) return;
+    const operation = ++remoteBackgroundOperation;
+    remoteBackgroundBusy = true; remoteBackgroundError = "";
+    syncAppearanceThemeControls?.();
+    try {
+      const dataUrl = await readRemoteBackgroundFile(file);
+      const record = { dataUrl, name: file.name || "背景图片" };
+      await writeRemoteBackground(record);
+      if (operation !== remoteBackgroundOperation) return;
+      remoteBackground = record;
+      syncRemoteBackground();
+    } catch (error) {
+      if (operation === remoteBackgroundOperation) remoteBackgroundError = error.message || "背景图片保存失败。";
+    } finally {
+      if (operation === remoteBackgroundOperation) {
+        remoteBackgroundBusy = false;
+        syncAppearanceThemeControls?.();
+      }
+    }
+  };
+  backgroundRemove.onclick = async () => {
+    if (remoteBackgroundBusy || !remoteBackground.dataUrl) return;
+    const operation = ++remoteBackgroundOperation;
+    remoteBackgroundBusy = true; remoteBackgroundError = "";
+    syncAppearanceThemeControls?.();
+    try {
+      await deleteRemoteBackground();
+      if (operation !== remoteBackgroundOperation) return;
+      remoteBackground = { dataUrl: "", name: "" };
+      syncRemoteBackground();
+    } catch (error) {
+      if (operation === remoteBackgroundOperation) remoteBackgroundError = error.message || "背景图片移除失败。";
+    } finally {
+      if (operation === remoteBackgroundOperation) {
+        remoteBackgroundBusy = false;
+        syncAppearanceThemeControls?.();
+      }
+    }
+  };
+  $("#appearance-background-opacity").oninput = event => {
+    appearance.backgroundOpacity = Number(event.target.value);
+    applyAppearance(true); sync();
+  };
+  $("#appearance-background-fit").onchange = event => {
+    appearance.backgroundFit = event.target.value;
+    applyAppearance(true); sync();
+  };
   $("#appearance-font").oninput = event => { appearance.fontSize = Number(event.target.value); applyAppearance(true); sync(); };
-  $("#appearance-reset").onclick = () => {
-    if (subpageEntry) return;
-    appearance = defaultAppearance(appearance.theme);
-    applyAppearance(true);
-    projectVisibleThreadCounts.clear();
-    renderSidebar();
-    sync();
+  $("#appearance-reset").onclick = async () => {
+    if (subpageEntry || remoteBackgroundBusy) return;
+    const operation = ++remoteBackgroundOperation;
+    remoteBackgroundBusy = true; remoteBackgroundError = ""; sync();
+    try {
+      await deleteRemoteBackground();
+      if (operation !== remoteBackgroundOperation) return;
+      remoteBackground = { dataUrl: "", name: "" };
+      appearance = defaultAppearance(appearance.theme);
+      applyAppearance(true);
+      projectVisibleThreadCounts.clear();
+      renderSidebar();
+    } catch (error) {
+      if (operation === remoteBackgroundOperation) remoteBackgroundError = error.message || "恢复默认设置失败。";
+    } finally {
+      if (operation === remoteBackgroundOperation) {
+        remoteBackgroundBusy = false;
+        syncAppearanceThemeControls?.();
+      }
+    }
   };
   $("#appearance-close").onclick = () => closeAppearance();
   headingButton.onclick = () => {
@@ -965,6 +1195,7 @@ function openAppearance() {
     else closeAppearance();
   };
   dialog.onclose = () => {
+    if (syncAppearanceThemeControls === sync) syncAppearanceThemeControls = null;
     dialog.classList.remove("appearance-screen-visible");
     dialog.classList.remove("appearance-subpage-open");
     notificationPageRevision++;
@@ -1012,14 +1243,29 @@ function promptNodeLength(node) {
   if (node.tagName === "BR") return 1;
   return [...node.childNodes].reduce((total, child) => total + promptNodeLength(child), 0);
 }
-function promptNodeText(node) {
-  if (node.nodeType === Node.TEXT_NODE) return node.data;
-  if (node.nodeType !== Node.ELEMENT_NODE || promptTokenKey(node) || node.hasAttribute("data-prompt-tail")) return "";
-  if (node.tagName === "BR") return "\n";
-  return [...node.childNodes].map(promptNodeText).join("");
-}
+const promptLineBlocks = new Set(["DIV", "P"]);
 function promptDomText(prompt) {
-  return prompt ? [...prompt.childNodes].map(promptNodeText).join("") : "";
+  if (!prompt) return "";
+  let text = "", pendingBlockBreak = false;
+  const appendBlockBreak = () => {
+    if (text && !text.endsWith("\n")) text += "\n";
+    pendingBlockBreak = false;
+  };
+  const visit = node => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (pendingBlockBreak) appendBlockBreak();
+      text += node.data;
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE || promptTokenKey(node) || node.hasAttribute("data-prompt-tail")) return;
+    if (node.tagName === "BR") { pendingBlockBreak = false; text += "\n"; return; }
+    const block = promptLineBlocks.has(node.tagName);
+    if (block && text) appendBlockBreak();
+    for (const child of node.childNodes) visit(child);
+    if (block) pendingBlockBreak = true;
+  };
+  for (const child of prompt.childNodes) visit(child);
+  return text;
 }
 function promptPlainText(prompt = $("#prompt")) {
   if (!prompt) return "";
@@ -1049,25 +1295,10 @@ function syncPromptTrailingBreak(prompt) {
     && !promptPlainText(prompt) && !prompt.querySelector(".inline-skill"));
 }
 function promptBoundaryOffset(prompt, container, boundary) {
-  let total = 0, found = false;
-  const visit = node => {
-    if (found) return;
-    if (node === container) {
-      if (node.nodeType === Node.TEXT_NODE) total += Math.min(Math.max(0, boundary), node.data.length);
-      else for (let index = 0; index < Math.min(Math.max(0, boundary), node.childNodes.length); index++)
-        total += promptNodeLength(node.childNodes[index]);
-      found = true;
-      return;
-    }
-    if (node.nodeType === Node.TEXT_NODE || node.nodeType !== Node.ELEMENT_NODE
-        || promptTokenKey(node) || node.tagName === "BR") {
-      total += promptNodeLength(node);
-      return;
-    }
-    for (const child of node.childNodes) visit(child);
-  };
-  visit(prompt);
-  return total;
+  const range = document.createRange();
+  range.selectNodeContents(prompt);
+  range.setEnd(container, boundary);
+  return promptDomText(range.cloneContents()).length;
 }
 function promptSelection(prompt = $("#prompt")) {
   const length = promptPlainText(prompt).length, selection = window.getSelection();
@@ -1753,7 +1984,7 @@ async function retireExpiredSideThread(id) {
     thread = { ...thread, readOnly: true, sideThreadExpired: true, sideThreadClosed: false };
   } else {
     thread = {
-      id, title: current.name || "Side chat", viewKind: "side", readOnly: true,
+      id, title: current.name || "新建侧边会话", viewKind: "side", readOnly: true,
       sideThreadExpired: true, parentThreadId: current.parentThreadId || current.openedFromThreadId
     };
   }
@@ -1996,7 +2227,7 @@ async function finishRelatedOperation(record, result, { allowSelection = false }
   relatedThreadOperations.delete(relatedOperationKey(record)); persistRelatedOperations();
   if (record.action === "createSideThread") {
     sessionMenu?.updateSideThread(record.parentThreadId, { id: result.threadId,
-      title: result.thread?.title || "Side chat", hasUnreadTurn: false });
+      title: result.thread?.title || "新建侧边会话", hasUnreadTurn: false });
     rememberRelatedView(result.threadId, "side", record.parentThreadId);
     filterSideThreadSidebar(sidebar);
     renderSidebar();
@@ -2007,7 +2238,7 @@ async function finishRelatedOperation(record, result, { allowSelection = false }
         const state = { ...history.state }; delete state[sideCreationHistoryKey];
         history.replaceState(state, "", location.href);
       }
-      await openRelatedThread({ id: result.threadId, title: result.thread?.title || "Side chat" }, "side",
+      await openRelatedThread({ id: result.threadId, title: result.thread?.title || "新建侧边会话" }, "side",
         record.parentThreadId, { initialThread: record.state === "submitting"
             && result.synchronization?.status !== "failed" ? result.thread : null,
           replaceHistory: prepared, preparedView: prepared,
@@ -3489,6 +3720,14 @@ function removeAdjacentPromptToken(prompt, direction) {
 }
 function handlePromptInput(event, { preserveCanonical = false } = {}) {
   if (!preserveCanonical) forgetPromptCanonicalText();
+  if (!preserveCanonical) {
+    const prompt = $("#prompt");
+    if (prompt?.querySelector("div,p")) {
+      const selection = promptSelection(prompt), text = promptDomText(prompt);
+      writePromptContent(prompt, text);
+      setPromptSelection(prompt, selection.start, selection.end, selection);
+    }
+  }
   rememberQueuedMessageEdit();
   if (event?.isComposing) { updateComposer(); closeSkillMenu(); return; }
   if (preserveCanonical) restorePromptCanonicalContent();
@@ -5743,6 +5982,16 @@ function shell() {
   };
   $("#prompt").onbeforeinput = event => {
     if (threadReadOnly()) { event.preventDefault(); return; }
+    const multilineInput = ["insertText", "insertFromPaste", "insertFromDrop"].includes(event.inputType);
+    const insertedText = typeof event.data === "string" ? event.data
+      : event.dataTransfer?.getData("text/plain") || "";
+    if (!event.isComposing && multilineInput && /[\r\n]/.test(insertedText)) {
+      event.preventDefault();
+      const text = insertedText.replace(/\r\n?/g, "\n");
+      $("#prompt").setRangeText(text, $("#prompt").selectionStart, $("#prompt").selectionEnd, "end");
+      handlePromptInput(event, { preserveCanonical: true });
+      return;
+    }
     if (!event.isComposing && ["deleteContentBackward", "deleteContentForward"].includes(event.inputType)
         && removeAdjacentPromptToken($("#prompt"), event.inputType === "deleteContentBackward" ? -1 : 1)) {
       event.preventDefault(); return;

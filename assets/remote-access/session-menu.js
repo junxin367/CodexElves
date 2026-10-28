@@ -339,7 +339,7 @@ export function mountSessionMenu({
     create.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
     const sides = section("侧边会话", create);
     for (const item of data?.sideThreads || []) {
-      const button = itemButton(nonempty(item.title) ? item.title : "Side chat", openSideThread, [item], "", item, { keepMenu: true });
+      const button = itemButton(nonempty(item.title) ? item.title : "新建侧边会话", openSideThread, [item], "", item, { keepMenu: true });
       button.classList.add("session-related-menu-thread");
       if (item.running === true) {
         const running = element("span", "spinner session-related-menu-running");

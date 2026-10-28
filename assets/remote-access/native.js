@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 78) return;
+  if (window.__codexElvesRemoteAccess?.version === 79) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -41,6 +41,7 @@
   let nativeSideBindings = null;
   let sideThreadsManager = null;
   const nativeSideThreads = new Map();
+  const sideThreadTitleWrites = new Map();
   const sideScopeWatchers = new Map();
   const goalSubmissions = new Map();
   const isDeletedThread = id => typeof id === "string" && deletedThreadIds.has(id.toLowerCase());
@@ -302,6 +303,7 @@
     unsubscribe = []; sidebarUnsubscribe = [];
     for (const watcher of sideScopeWatchers.values()) watcher.dispose?.();
     sideScopeWatchers.clear(); nativeSideThreads.clear(); pendingThreadMetadataReads.clear();
+    sideThreadTitleWrites.clear();
     manager = null; appScope = null; nativeNavigate = null; nativeIntl = null;
     nativeCatalog.clear(); sidebarSignatures.clear(); catalogLoaded = false;
     catalogLoading = null; catalogGeneration++;
@@ -368,11 +370,11 @@
     }
   };
   const emitUnsafe = event => {
-    if (["remote/sidebarChanged", "thread/started", "thread/status/changed", "thread/name/updated",
+    if (["remote/sidebarChanged", "remote/requestsChanged", "thread/started", "thread/status/changed", "thread/name/updated",
       "thread/archived", "thread/unarchived", "thread/deleted", "turn/started", "turn/completed",
       "remote/asyncQuestionsChanged"].includes(event.method)) {
       for (const listener of sidebarListeners) {
-        try { listener({ method: event.method, threadId: event.params?.threadId }); } catch {}
+        try { listener({ method: event.method, threadId: event.params?.threadId, status: event.params?.status }); } catch {}
       }
     }
     observeNotificationEvent(event);
@@ -477,6 +479,7 @@
       sideScopeWatchers.clear();
       sideThreadsManager = manager;
       nativeSideThreads.clear();
+      sideThreadTitleWrites.clear();
     }
     if (notificationManager !== manager) {
       if (notificationManager) {
@@ -875,12 +878,51 @@
         && current.threadStartKind !== "aeon" && current.threadSource !== "aeon"
     };
   }
+  const DEFAULT_SIDE_THREAD_TITLE = "新建侧边会话";
+  function isDefaultSideThreadTitle(value) {
+    const title = cleanThreadTitle(value).toLowerCase();
+    return !title || title === "side chat" || title === DEFAULT_SIDE_THREAD_TITLE || isGenericMainThreadTitle(title);
+  }
   function sideThreadTitle(conversation, fallback = "") {
     if (conversation?.sideConversation !== true || subagentIdentity(conversation)) return null;
-    const candidate = [fallback, conversation?.title, conversation?.name]
+    const candidate = [conversation?.title, conversation?.name, fallback]
       .map(cleanThreadTitle)
-      .find(value => value && !isGenericMainThreadTitle(value));
-    return candidate || "Side chat";
+      .find(value => value && !isDefaultSideThreadTitle(value));
+    return candidate || DEFAULT_SIDE_THREAD_TITLE;
+  }
+  function firstSideThreadMessageTitle(conversation) {
+    for (const turn of nativeConversationTurns(conversation)) {
+      for (const source of array(turn?.items)) {
+        const item = nativeDisplayMessageItem(source);
+        if (item?.type !== "userMessage" || item.remotePendingInput || item.remoteCompactionInput) continue;
+        const text = array(item.content).filter(part => part?.type === "text" && typeof part.text === "string")
+          .map(part => part.text).join(" ").replace(/\s+/g, " ").trim();
+        if (text) return Array.from(text).slice(0, 10).join("");
+      }
+    }
+    return "";
+  }
+  function maybeNameSideThreadFromFirstMessage(id, conversation) {
+    if (conversation?.sideConversation !== true || subagentIdentity(conversation) || sideThreadTitleWrites.has(id)) return;
+    const entry = nativeSideThreads.get(id);
+    if (!isDefaultSideThreadTitle(sideThreadTitle(conversation, entry?.title))) return;
+    const title = firstSideThreadMessageTitle(conversation);
+    if (!title) return;
+    const sourceManager = manager;
+    const write = (async () => {
+      await sourceManager.setThreadTitle(id, title);
+      if (manager !== sourceManager || sourceManager.disposed) return;
+      const currentEntry = nativeSideThreads.get(id);
+      if (currentEntry) nativeSideThreads.set(id, { ...currentEntry, title });
+      const parentThreadId = conversation.forkedFromId || currentEntry?.parentThreadId;
+      if (parentThreadId) emit({ method: "remote/relatedThreadsChanged", params: { threadId: parentThreadId } });
+      syncSidebarConversationState(id, sourceManager.getConversation(id) || conversation);
+    })().catch(error => {
+      reportSideFeatureDegraded("side_thread_first_message_title", error, { threadId: id });
+    }).finally(() => {
+      if (sideThreadTitleWrites.get(id) === write) sideThreadTitleWrites.delete(id);
+    });
+    sideThreadTitleWrites.set(id, write);
   }
   function summary(thread, activityTimes) {
     const id = thread.conversationId || thread.id;
@@ -917,6 +959,7 @@
       return;
     }
     const side = conversation.sideConversation === true || nativeSideThreads.has(id);
+    if (conversation.sideConversation === true) maybeNameSideThreadFromFirstMessage(id, conversation);
     if (!side && !nativeCatalog.has(id)) return;
     const previous = sidebarSignatures.get(id);
     const item = summary(conversation);
@@ -1644,6 +1687,10 @@
         throw new Error("原生侧边会话身份尚未确认");
       const view = nativeSideIdentity(thread, entries);
       if (!view) throw new Error("原生侧边标签尚未确认");
+      await sourceManager.setThreadTitle(threadId, DEFAULT_SIDE_THREAD_TITLE);
+      const entry = nativeSideThreads.get(threadId);
+      if (entry) nativeSideThreads.set(threadId, { ...entry, title: DEFAULT_SIDE_THREAD_TITLE });
+      view.title = DEFAULT_SIDE_THREAD_TITLE;
       return { ok: true, threadId, parentThreadId,
         thread: { ...summary(thread), ...runtimeThread(threadId, thread, view), ...view } };
     } catch (error) {
@@ -4900,7 +4947,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 78, call,
+    version: 80, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();
@@ -4952,6 +4999,7 @@
       unsubscribe = []; sidebarUnsubscribe = []; sidebarListeners.clear();
       for (const watcher of sideScopeWatchers.values()) watcher.dispose?.();
       sideScopeWatchers.clear(); pendingThreadMetadataReads.clear();
+      sideThreadTitleWrites.clear();
       if (window.__codexElvesRemoteAccess?.epoch === epoch) delete window.__codexElvesRemoteAccess;
     },
     epoch

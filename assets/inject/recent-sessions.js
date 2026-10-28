@@ -1,5 +1,5 @@
 (() => {
-  const version = 13;
+  const version = 14;
   if (window.__codexElvesRecentSessions?.version === version) return;
   window.__codexElvesRecentSessions?.dispose?.();
 
@@ -23,6 +23,7 @@
   let entryObserver = null, entryObserverRoots = [], entryObserverSubtree = false, entrySyncTask = null;
   const deletedIds = new Set();
   let priorityIds = null, priorityOpenedAt = 0, priorityKnownIds = new Set();
+  const prioritySelectionSuppressions = new Set();
   const collapsed = new Set(), busy = new Set(), uncertainDeletions = new Set();
   const updatedAt = item => item.updatedAt || item.recencyAt || item.createdAt || 0;
   const normalizedId = id => String(id || "").replace(/^local:/, "").toLowerCase();
@@ -124,6 +125,7 @@
     snapshot = compactSnapshot(snapshot);
     signature = JSON.stringify(snapshot);
     priorityIds?.delete(id); priorityKnownIds.delete(id);
+    prioritySelectionSuppressions.delete(id);
     // 删除回执已确认，即使列表目前关闭，也立即更新之前的成功快照。
     const wasCached = cachedSnapshot; cachedSnapshot = false;
     rememberSnapshot(true, true); cachedSnapshot = wasCached;
@@ -154,7 +156,8 @@
   }
   function updatePriority(items) {
     const order = { waiting: 0, unread: 1, active: 2, idle: 3 };
-    const candidates = items.filter(needsPriority).sort((left, right) =>
+    const candidates = items.filter(item => needsPriority(item)
+      && !(item.id === selectedId && prioritySelectionSuppressions.has(item.id))).sort((left, right) =>
       order[attention(left)] - order[attention(right)] || updatedAt(right) - updatedAt(left));
     if (priorityIds === null) {
       priorityOpenedAt = Date.now();
@@ -380,6 +383,19 @@
     entryObserverRoots = roots; entryObserverSubtree = subtree;
     for (const node of roots) entryObserver.observe(node, { childList: true, subtree });
   }
+  function onSidebarEvent(event) {
+    if (typeof event.threadId === "string") {
+      const runtimeStatus = event.status?.status ?? event.status;
+      const runtimeType = typeof runtimeStatus === "string" ? runtimeStatus : runtimeStatus?.type;
+      if (["thread/started", "turn/started", "remote/requestsChanged"].includes(event.method)
+          || event.method === "thread/status/changed"
+            && ["active", "inProgress", "running", "pending"].includes(runtimeType))
+        prioritySelectionSuppressions.delete(event.threadId);
+    }
+    if (["thread/deleted", "thread/archived"].includes(event.method)) removeThread(event.threadId);
+    if (event.method === "thread/unarchived") deletedIds.delete(normalizedId(event.threadId));
+    queueRefresh();
+  }
   async function adapter() {
     window.__codexElvesInstallRecentSessionsAdapter?.();
     const runtime = window.__codexElvesRemoteAccess;
@@ -388,11 +404,7 @@
     if (canRead() && subscribedAdapter !== runtime) {
       releaseAdapter();
       subscribedAdapter = runtime;
-      unsubscribeSidebar = runtime.subscribeSidebar?.(event => {
-        if (["thread/deleted", "thread/archived"].includes(event.method)) removeThread(event.threadId);
-        if (event.method === "thread/unarchived") deletedIds.delete(normalizedId(event.threadId));
-        queueRefresh();
-      }) || null;
+      unsubscribeSidebar = runtime.subscribeSidebar?.(onSidebarEvent) || null;
     }
     return runtime;
   }
@@ -524,12 +536,16 @@
       const native = await adapter();
       if (typeof native.openThread !== "function") throw new Error("原生会话导航尚未就绪，请重试");
       options.beforeNavigate?.();
+      prioritySelectionSuppressions.add(item.id);
       const result = await native.openThread(item.id);
       if (!result?.ok) throw new Error(result?.message || "无法打开此会话");
       selectedId = item.id;
       syncSelection(false);
       void refresh();
-    } catch (error) { report(error.message, true); }
+    } catch (error) {
+      prioritySelectionSuppressions.delete(item.id);
+      report(error.message, true);
+    }
   }
   function closeMenu(restoreFocus = false) {
     if (!menu) return;
@@ -798,7 +814,8 @@
         pauseReads();
         cacheScope = scope; cacheRestored = false; cachedSnapshot = false; snapshotComplete = false;
         snapshot = null; signature = ""; renderedDay = ""; lastCacheWriteAt = 0; snapshotSavedAt = 0;
-        priorityIds = null; priorityKnownIds = new Set(); deletedIds.clear(); uncertainDeletions.clear();
+        priorityIds = null; priorityKnownIds = new Set(); prioritySelectionSuppressions.clear();
+        deletedIds.clear(); uncertainDeletions.clear();
         if (active) {
           list?.replaceChildren();
           restoreSnapshot();
