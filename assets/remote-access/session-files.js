@@ -1,5 +1,5 @@
 import { requestRemote } from "./channels.js";
-import { markdown } from "./markdown.js";
+import { bindLocalFileReferences, markdown } from "./markdown.js";
 
 const node = (tag, className = "", text = "") => {
   const result = document.createElement(tag);
@@ -536,13 +536,17 @@ export function mountSessionFiles({
         if (copyText) copy.onclick = () => void copyText(copy.closest(".code-block").querySelector("code").textContent);
         else copy.remove();
       }
-      document.addEventListener("click", event => {
-        const link = event.target.closest("[data-local-file-path]");
-        if (!link) return;
-        event.preventDefault(); event.stopPropagation();
-        const path = resolveDocumentReference(link.dataset.localFilePath);
-        if (path) void openFile(path, Number(link.dataset.localFileLine) || null);
-        else message(fileStatus, "该路径超出了当前项目。", true);
+      bindLocalFileReferences(document, {
+        openFile: (reference, line) => {
+          const path = resolveDocumentReference(reference);
+          if (path) void openFile(path, line);
+          else message(fileStatus, "该路径超出了当前项目。", true);
+        },
+        openBrowser: (reference) => {
+          const path = resolveDocumentReference(reference);
+          if (path) window.dispatchEvent(new CustomEvent("codex-elves-open-local-file", { detail: { path } }));
+          else message(fileStatus, "该路径超出了当前项目。", true);
+        }
       });
       body.append(document);
     } else if (value.kind === "text") {

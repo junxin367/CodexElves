@@ -2038,6 +2038,10 @@ pub fn web_router(
         .route("/api/workspace/change", post(workspace::change))
         .route("/api/workspace/files", post(workspace::files))
         .route("/api/workspace/file", post(workspace::file))
+        .route(
+            "/api/workspace/view/{thread_id}/{*path}",
+            get(workspace::view),
+        )
         .route("/api/browser/tunnel", get(browser::tunnel))
         .route(
             "/api/action/{action}",

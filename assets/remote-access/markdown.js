@@ -246,6 +246,154 @@ export function settleMessageImage(image) {
   image.closest(".message-image-link")?.classList.remove("message-image-loading");
 }
 
+let localFileMenu = null;
+let localFileMenuLayer = null;
+let localFileMenuClose = null;
+
+function closeLocalFileMenu() {
+  localFileMenuClose?.();
+  localFileMenuClose = null;
+}
+
+function ensureLocalFileMenu() {
+  if (localFileMenu?.isConnected) return localFileMenu;
+  localFileMenuLayer = document.createElement("div");
+  localFileMenuLayer.className = "local-file-reference-menu-layer";
+  localFileMenuLayer.hidden = true;
+  localFileMenu = document.createElement("div");
+  localFileMenu.className = "local-file-reference-menu";
+  localFileMenu.setAttribute("role", "menu");
+  localFileMenu.setAttribute("aria-label", "文件引用操作");
+  localFileMenuLayer.append(localFileMenu);
+  document.body.append(localFileMenuLayer);
+  localFileMenuLayer.addEventListener("pointerdown", event => {
+    if (event.target !== localFileMenuLayer) return;
+    event.preventDefault();
+    closeLocalFileMenu();
+  });
+  localFileMenuLayer.addEventListener("click", event => {
+    if (event.target !== localFileMenuLayer) return;
+    event.preventDefault();
+    closeLocalFileMenu();
+  });
+  return localFileMenu;
+}
+
+function showLocalFileMenu(link, position, { openFile, openBrowser }) {
+  const menu = ensureLocalFileMenu();
+  closeLocalFileMenu();
+  menu.replaceChildren();
+  const path = link.dataset.localFilePath || "";
+  const line = Number(link.dataset.localFileLine) || null;
+  const addAction = (label, callback) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "local-file-reference-menu-item";
+    button.setAttribute("role", "menuitem");
+    button.textContent = label;
+    button.disabled = typeof callback !== "function";
+    button.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeLocalFileMenu();
+      if (button.disabled) return;
+      try { void callback(path, line); } catch {}
+    });
+    menu.append(button);
+    return button;
+  };
+  const file = addAction("文件", openFile);
+  addAction("浏览器", openBrowser);
+  localFileMenuLayer.hidden = false;
+  menu.style.left = "0px";
+  menu.style.top = "0px";
+  const margin = 8;
+  const rect = menu.getBoundingClientRect();
+  const maxLeft = Math.max(margin, innerWidth - rect.width - margin);
+  const maxTop = Math.max(margin, innerHeight - rect.height - margin);
+  const left = Math.min(Math.max(margin, Number(position?.x) || 0), maxLeft);
+  const top = Math.min(Math.max(margin, Number(position?.y) || 0), maxTop);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  localFileMenuClose = () => {
+    localFileMenuLayer.hidden = true;
+    menu.replaceChildren();
+    file.blur();
+  };
+  file.focus({ preventScroll: true });
+}
+
+export function bindLocalFileReferences(root, { openFile, openBrowser } = {}) {
+  if (!root?.querySelectorAll) return;
+  for (const link of root.querySelectorAll("a[data-local-file-path]")) {
+    if (link.dataset.localFileMenuBound === "true") continue;
+    link.dataset.localFileMenuBound = "true";
+    let press = null;
+    const cancel = suppress => {
+      if (!press) return;
+      clearTimeout(press.timer);
+      if (suppress || press.opened) link.dataset.localFileClickSuppressedUntil = String(Date.now() + 1200);
+      press = null;
+    };
+    link.addEventListener("pointerdown", event => {
+      if (event.isPrimary === false || event.button !== 0) return;
+      cancel(false);
+      const current = press = {
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        opened: false,
+        timer: setTimeout(() => {
+          if (press !== current || !link.isConnected) return;
+          current.opened = true;
+          link.dataset.localFileClickSuppressedUntil = String(Date.now() + 1200);
+          event.preventDefault();
+          showLocalFileMenu(link, { x: current.x, y: current.y }, { openFile, openBrowser });
+        }, 500)
+      };
+    });
+    link.addEventListener("pointermove", event => {
+      if (!press || event.pointerId !== press.pointerId) return;
+      if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > 10) cancel(true);
+    });
+    link.addEventListener("pointerup", event => {
+      if (!press || event.pointerId !== press.pointerId) return;
+      if (press.opened) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+      cancel(press.opened);
+    });
+    link.addEventListener("pointercancel", () => cancel(true));
+    link.addEventListener("contextmenu", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      cancel(true);
+      showLocalFileMenu(link, { x: event.clientX, y: event.clientY }, { openFile, openBrowser });
+    });
+    link.addEventListener("keydown", event => {
+      if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      cancel(true);
+      const rect = link.getBoundingClientRect();
+      showLocalFileMenu(link, { x: rect.left, y: rect.bottom + 6 }, { openFile, openBrowser });
+    });
+    link.addEventListener("click", event => {
+      const suppressedUntil = Number(link.dataset.localFileClickSuppressedUntil) || 0;
+      if (suppressedUntil > Date.now()) {
+        delete link.dataset.localFileClickSuppressedUntil;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      try { void openFile?.(link.dataset.localFilePath, Number(link.dataset.localFileLine) || null); } catch {}
+    });
+  }
+}
+
 document.addEventListener("click", event => {
   const target = event.target instanceof Element ? event.target.closest(".markdown-load-retry") : null;
   if (!target || !target.closest(".markdown-deferred")) return;
@@ -256,3 +404,13 @@ document.addEventListener("click", event => {
   }
   void loadRenderer({ retry: true });
 });
+
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && !localFileMenuLayer?.hidden) {
+    event.preventDefault();
+    closeLocalFileMenu();
+  }
+}, true);
+
+window.addEventListener("resize", closeLocalFileMenu);
+window.addEventListener("scroll", closeLocalFileMenu, true);

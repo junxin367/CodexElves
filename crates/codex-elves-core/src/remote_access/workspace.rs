@@ -9,8 +9,9 @@ use std::process::Stdio;
 use std::time::{Duration, SystemTime};
 
 use axum::Json;
-use axum::extract::State;
-use axum::http::{HeaderMap, header};
+use axum::body::Body;
+use axum::extract::{Path as AxumPath, State};
+use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -209,6 +210,107 @@ pub(super) async fn file(
     Json(payload): Json<Value>,
 ) -> Result<Response, ApiError> {
     browse_workspace(state, headers, payload, true).await
+}
+
+pub(super) async fn view(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    AxumPath((thread_id, requested)): AxumPath<(String, String)>,
+) -> Result<Response, ApiError> {
+    if !matches!(thread_id.len(), 1..=120)
+        || !thread_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(ApiError::new(400, "会话标识无效"));
+    }
+    if requested.is_empty() || requested.len() > 16 * 1024 {
+        return Err(ApiError::new(400, "文件路径无效"));
+    }
+    let device = super::authorized(&state, &headers).await?;
+    let authorization = state.controller.authorization(device, None);
+    authorization
+        .check()
+        .await
+        .map_err(super::authorization_error)?;
+    let payload = json!({"threadId": thread_id});
+    let cwd = super::workspace_context(&state, &payload, &authorization).await?;
+    let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
+        let git_root = git(
+            &cwd,
+            &["rev-parse", "--show-toplevel"],
+            32 * 1024,
+            &authorization,
+        )
+        .await?;
+        let root = if git_root.success && !git_root.truncated {
+            let value = String::from_utf8(git_root.bytes)
+                .map_err(|_| ApiError::new(422, "项目目录编码无法识别"))?;
+            PathBuf::from(value.trim_end_matches(['\r', '\n']))
+        } else {
+            cwd.clone()
+        };
+        let requested = requested.clone();
+        tokio::task::spawn_blocking(move || {
+            let root = std::fs::canonicalize(root)
+                .map_err(|_| ApiError::new(404, "当前项目目录已失效"))?;
+            if !cwd.starts_with(&root) || !super::canonical_path_is_local(&root) {
+                return Err(ApiError::new(403, "项目目录与当前会话不一致"));
+            }
+            let path = project_relative_path(&root, &requested, false)?;
+            let side = read_local(&root, &path)?;
+            if !side.exists {
+                return Err(ApiError::new(404, "文件不存在或已被删除"));
+            }
+            if side.unsupported {
+                return Err(ApiError::new(422, "符号链接和特殊文件不能在浏览器中打开"));
+            }
+            if side.truncated {
+                return Err(ApiError::new(413, "文件超过 4 MiB，暂不提供浏览器打开"));
+            }
+            Ok((path, side.bytes))
+        })
+        .await
+        .map_err(|_| ApiError::new(503, "读取项目文件失败"))?
+    })
+    .await
+    .map_err(|_| ApiError::new(504, "读取项目文件超时，请重试"))??;
+    authorization
+        .check()
+        .await
+        .map_err(super::authorization_error)?;
+    let (path, bytes) = result;
+    let (content_type, html) = browser_file_mime(&path, &bytes);
+    let mut response = Response::new(Body::from(bytes));
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("inline"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    if html {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                "sandbox allow-scripts; default-src 'self' data: blob:; \
+                 style-src 'self' 'unsafe-inline' data:; \
+                 script-src 'self' 'unsafe-inline' 'unsafe-eval'; \
+                 img-src 'self' data: blob:; font-src 'self' data:; \
+                 connect-src 'none'; frame-src 'none'; object-src 'none'; \
+                 base-uri 'none'; form-action 'none'",
+            ),
+        );
+    }
+    Ok(response)
 }
 
 async fn browse_workspace(
@@ -1581,6 +1683,28 @@ fn raster_extension_mime(path: &str) -> Option<&'static str> {
         })
 }
 
+fn browser_file_mime(path: &str, bytes: &[u8]) -> (&'static str, bool) {
+    if let Some(mime) = raster_mime(bytes) {
+        return (mime, false);
+    }
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    match extension.as_deref() {
+        Some("html" | "htm" | "xhtml") => ("text/html; charset=utf-8", true),
+        Some("css") => ("text/css; charset=utf-8", false),
+        Some("js" | "mjs" | "cjs") => ("application/javascript; charset=utf-8", false),
+        Some("json" | "jsonl" | "map") => ("application/json; charset=utf-8", false),
+        Some("svg") if svg_preview_bytes(path, bytes).is_some() => ("image/svg+xml", false),
+        Some("xml") => ("application/xml; charset=utf-8", false),
+        Some("pdf") => ("application/pdf", false),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp") => ("application/octet-stream", false),
+        _ if is_text(bytes) => ("text/plain; charset=utf-8", false),
+        _ => ("application/octet-stream", false),
+    }
+}
+
 fn is_text(bytes: &[u8]) -> bool {
     !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok()
 }
@@ -1796,6 +1920,49 @@ mod tests {
         )
         .await;
         assert_eq!(empty["text"], "");
+    }
+
+    #[tokio::test]
+    async fn project_file_browser_view_serves_sandboxed_html() {
+        let (_fixture, _state, repo) = fixture_repo().await;
+        std::fs::create_dir(repo.root.join("docs")).unwrap();
+        std::fs::write(
+            repo.root.join("docs/index.html"),
+            "<!doctype html><script>document.title='local'</script>",
+        )
+        .unwrap();
+        let (state, headers) = fixture_web_state(&repo);
+        let response = view(
+            State(state.clone()),
+            headers.clone(),
+            AxumPath(("thread-1".to_owned(), "docs/index.html".to_owned())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+        assert!(
+            response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .contains("sandbox allow-scripts")
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(bytes.starts_with(b"<!doctype html>"));
+        assert!(
+            view(
+                State(state),
+                headers,
+                AxumPath(("thread-1".to_owned(), "../secret.txt".to_owned())),
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[tokio::test]

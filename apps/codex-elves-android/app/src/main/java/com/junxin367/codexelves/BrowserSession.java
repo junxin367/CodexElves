@@ -135,6 +135,8 @@ final class BrowserSession {
     private long proxyGeneration;
     private long pageGeneration;
     private String pendingNavigationUrl = "";
+    private String localFileThreadId = "";
+    private String localFileOrigin = "";
     private boolean mainFrameStarted;
     private boolean mainFrameFinished;
     private String mobileUserAgent = "";
@@ -771,7 +773,18 @@ final class BrowserSession {
     void navigate(String input) {
         if (closed || !attached) return;
         if (!routeReady) throw new IllegalArgumentException("网络通道正在更新，请稍后再试");
-        String target = BrowserRoutePolicy.navigationUrl(input);
+        String target;
+        if (BrowserRoutePolicy.isWorkspaceViewUrl(input)) {
+            localFileThreadId = BrowserRoutePolicy.workspaceViewThread(input);
+            localFileOrigin = identity.origin();
+            target = input.trim();
+        } else if (BrowserRoutePolicy.isLocalFileInput(input)) {
+            if (localFileThreadId.isEmpty() || localFileOrigin.isEmpty())
+                throw new IllegalArgumentException("本地文件请从远程会话的文件链接打开");
+            target = BrowserRoutePolicy.workspaceViewUrl(localFileOrigin, localFileThreadId, input);
+        } else {
+            target = BrowserRoutePolicy.navigationUrl(input);
+        }
         diagnostic("native.browser.navigation", DiagnosticsPolicy.urlFields(target,
             "phase", "request", "routeName", "computer"));
         if (home) view.clearHistory();

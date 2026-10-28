@@ -1,5 +1,6 @@
 package com.junxin367.codexelves;
 
+import android.net.Uri;
 import java.net.IDN;
 import java.net.InetAddress;
 import java.net.URI;
@@ -99,6 +100,8 @@ final class BrowserRoutePolicy {
         String text = input.trim();
         if (text.isEmpty() || text.length() > 8192 || text.matches("(?s).*[\\x00-\\x1f\\x7f].*"))
             throw new IllegalArgumentException("网址或搜索内容无效");
+        if (isLocalFileInput(text))
+            throw new IllegalArgumentException("本地文件请从远程会话的文件链接打开");
         boolean explicit = text.matches("(?i)^https?://.*");
         boolean hostPort = text.matches("^[^/\\s:]+:[0-9]+(?:[/?#].*)?$");
         if (!explicit && text.matches("^[A-Za-z][A-Za-z0-9+.-]*:.*") && !hostPort)
@@ -148,6 +151,90 @@ final class BrowserRoutePolicy {
         } catch (Exception invalid) {
             if (invalid instanceof IllegalArgumentException) throw (IllegalArgumentException) invalid;
             throw new IllegalArgumentException("网址格式无效");
+        }
+    }
+
+    static boolean isLocalFileInput(String input) {
+        if (input == null) return false;
+        String text = input.trim();
+        return text.matches("(?i)^[a-z]:[\\\\/].*")
+            || text.startsWith("\\\\")
+            || text.matches("(?i)^file:(//)?[^\\s].*");
+    }
+
+    static String workspaceViewThread(String rawUrl) {
+        String[] parts = workspaceViewParts(rawUrl);
+        return parts == null ? "" : parts[0];
+    }
+
+    static String workspaceViewFile(String rawUrl) {
+        String[] parts = workspaceViewParts(rawUrl);
+        return parts == null ? "" : parts[1];
+    }
+
+    static boolean isWorkspaceViewUrl(String rawUrl) {
+        return workspaceViewParts(rawUrl) != null;
+    }
+
+    static String workspaceViewDisplay(String rawUrl) {
+        String file = workspaceViewFile(rawUrl);
+        return file.isEmpty() ? "" : file;
+    }
+
+    static String workspaceViewUrl(String origin, String threadId, String input) {
+        if (origin == null || threadId == null || threadId.isEmpty() || input == null)
+            throw new IllegalArgumentException("本地文件地址无效");
+        String path = input.trim().replace('\\', '/');
+        if (path.matches("(?i)^file:(//)?[^\\s].*")) {
+            Uri uri = Uri.parse(path);
+            if (uri.getHost() != null && !"localhost".equalsIgnoreCase(uri.getHost()))
+                throw new IllegalArgumentException("本地文件地址无效");
+            path = uri.getPath() == null ? "" : uri.getPath();
+        }
+        if (path.startsWith("/") && path.length() > 2 && path.charAt(2) == ':')
+            path = path.substring(1);
+        String[] segments = path.split("/");
+        if (segments.length == 0 || path.isEmpty()) throw new IllegalArgumentException("本地文件地址无效");
+        StringBuilder encoded = new StringBuilder(origin)
+            .append("/api/workspace/view/").append(encodeSegment(threadId));
+        boolean hasSegment = false;
+        for (String segment : segments) {
+            if (segment.isEmpty() || ".".equals(segment) || "..".equals(segment))
+                throw new IllegalArgumentException("本地文件地址无效");
+            encoded.append('/').append(encodeSegment(segment));
+            hasSegment = true;
+        }
+        if (!hasSegment) throw new IllegalArgumentException("本地文件地址无效");
+        return encoded.toString();
+    }
+
+    private static String[] workspaceViewParts(String rawUrl) {
+        if (rawUrl == null) return null;
+        Uri uri = Uri.parse(rawUrl);
+        if (!"http".equalsIgnoreCase(uri.getScheme()) && !"https".equalsIgnoreCase(uri.getScheme()))
+            return null;
+        if (uri.getQuery() != null || uri.getFragment() != null) return null;
+        String path = uri.getPath();
+        String prefix = "/api/workspace/view/";
+        if (path == null || !path.startsWith(prefix)) return null;
+        String rest = path.substring(prefix.length());
+        int separator = rest.indexOf('/');
+        if (separator <= 0 || separator == rest.length() - 1) return null;
+        String threadId = rest.substring(0, separator);
+        String file = rest.substring(separator + 1);
+        if (!threadId.matches("[A-Za-z0-9_-]{1,120}")
+            || file.isEmpty() || file.contains("\\")
+            || java.util.Arrays.stream(file.split("/"))
+                .anyMatch(part -> part.isEmpty() || ".".equals(part) || "..".equals(part))) return null;
+        return new String[]{threadId, file};
+    }
+
+    private static String encodeSegment(String value) {
+        try {
+            return URLEncoder.encode(value, StandardCharsets.UTF_8.name())
+                .replace("+", "%20");
+        } catch (java.io.UnsupportedEncodingException impossible) {
+            throw new AssertionError(impossible);
         }
     }
 }

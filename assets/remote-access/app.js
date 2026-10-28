@@ -1,4 +1,4 @@
-import { markdown, prepareMessageImage, renderMermaidBlocks, settleMessageImage, withStableMessageLayout } from "./markdown.js";
+import { bindLocalFileReferences, markdown, prepareMessageImage, renderMermaidBlocks, settleMessageImage, withStableMessageLayout } from "./markdown.js";
 import { createRemoteEventStream, sharedEventsAvailable } from "./events-client.js";
 import { configureAndroidDiagnostics, exportAndroidDiagnostics, receiveDiagnosticRequest, recordDiagnostic, sendAndroidDiagnostics } from "./diagnostics.js";
 import { activateRemoteChannels, clearRemoteChannels, handleRemoteChannelEvent, observeChannelConfiguration, prepareRemoteTunnelAccess, raceRemoteRead, remoteChannelRoutes, remoteMediaUrl, requestRemote, setRemoteChannelMeasurements, validateRemoteReceipt } from "./channels.js";
@@ -383,6 +383,44 @@ function applyAppearance(save = false) {
   if ($("#messages")) scheduleMermaidBlocks();
 }
 applyAppearance();
+function currentFileBrowserThreadId() {
+  const parentThreadId = relatedSessionView?.kind === "side"
+    ? relatedSessionView.openedFromThreadId || relatedSessionView.parentThreadId : null;
+  return !creating ? parentThreadId || selectedId : null;
+}
+function localFileBrowserUrl(path) {
+  const threadId = currentFileBrowserThreadId();
+  if (!threadId || typeof path !== "string" || !path.trim()) {
+    throw new Error("当前会话没有可用的工作区文件");
+  }
+  const normalized = path.trim().replaceAll("\\", "/");
+  const segments = normalized.split("/").filter(Boolean);
+  if (!segments.length || segments.some(segment => segment === "." || segment === "..")) {
+    throw new Error("文件路径无效");
+  }
+  const url = new URL(location.href);
+  url.pathname = `/api/workspace/view/${encodeURIComponent(threadId)}/${
+    segments.map(segment => encodeURIComponent(segment)).join("/")
+  }`;
+  url.search = "";
+  url.hash = "";
+  return url.href;
+}
+function openLocalFileInBrowser(path) {
+  try {
+    const url = localFileBrowserUrl(path);
+    if (isAndroidContainer()) {
+      return openAndroidBrowser(url).catch(error => notice(error.message || "无法打开浏览器", true));
+    }
+    const popup = window.open(url, "_blank", "noopener,noreferrer");
+    if (!popup) notice("浏览器窗口被阻止，请允许打开新窗口后重试。", true);
+  } catch (error) {
+    notice(error.message || "无法打开本地文件", true);
+  }
+}
+window.addEventListener("codex-elves-open-local-file", event => {
+  openLocalFileInBrowser(event.detail?.path);
+});
 function openAppearance() {
   closeComposerMenus(); closePopup();
   const trigger = document.activeElement;
@@ -390,30 +428,47 @@ function openAppearance() {
   const previousDialog = $("#appearance-dialog");
   if (previousDialog?.open) previousDialog.close();
   previousDialog?.remove();
-  const dialog = element("dialog", "appearance-dialog");
+  const dialog = element("dialog", "appearance-dialog appearance-screen");
   dialog.id = "appearance-dialog";
   dialog.setAttribute("aria-labelledby", "appearance-title");
   dialog.innerHTML = `<div class="appearance-heading"><h2 id="appearance-title">设置</h2><button type="button" class="icon-button" title="关闭设置" aria-label="关闭设置"></button></div>
-    <div class="appearance-body">
+    <div class="appearance-layout">
+    <nav class="appearance-nav" aria-label="设置导航">
+      <button type="button" id="appearance-general-entry" class="appearance-nav-item" aria-controls="appearance-general-page" aria-selected="true"><span class="appearance-nav-icon"></span><span>通用设置</span></button>
+      <button type="button" id="appearance-customization-entry" class="appearance-nav-item" title="打开外观主题" aria-label="打开外观主题" aria-controls="appearance-customization-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>外观主题</span></button>
+      <button type="button" id="appearance-notifications-entry" class="appearance-nav-item" title="打开通知事件" aria-label="打开通知事件" aria-controls="appearance-notifications-page" aria-selected="false" hidden><span class="appearance-nav-icon"></span><span>通知事件</span></button>
+      <button type="button" id="appearance-diagnostics-entry" class="appearance-nav-item" title="打开诊断日志" aria-label="打开诊断日志" aria-controls="appearance-diagnostics-page" aria-selected="false" hidden><span class="appearance-nav-icon"></span><span>诊断日志</span></button>
+    </nav>
+    <div class="appearance-panels">
+    <section id="appearance-general-page" class="appearance-body appearance-settings-page">
+    <h3 class="appearance-panel-title">通用设置</h3>
     <div class="appearance-field"><span id="appearance-theme-label">主题</span><div id="appearance-theme-slot" class="appearance-theme-options" role="group" aria-labelledby="appearance-theme-label"></div></div>
-    <div class="appearance-field"><button type="button" id="appearance-customization-entry" class="appearance-page-entry" title="打开外观设置" aria-label="打开外观设置" aria-controls="appearance-customization-page"><span>外观设置</span></button></div>
-    <div id="appearance-notifications-field" class="appearance-field" hidden><button type="button" id="appearance-notifications-entry" class="appearance-page-entry" title="打开通知事件设置" aria-label="打开通知事件设置" aria-controls="appearance-notifications-page"><span>通知事件</span></button></div>
     <div class="appearance-field appearance-thread-limit-field"><span>每个项目显示会话数</span><div id="appearance-project-thread-limit-slot"></div></div>
     <div id="appearance-cache-state" class="appearance-field" role="status"></div>
-    <div id="appearance-diagnostics-field" class="appearance-field" hidden><span>诊断日志</span><div class="appearance-action-buttons"><button type="button" id="appearance-diagnostics-export" disabled>导出</button><button type="button" id="appearance-diagnostics-send" disabled>发送到电脑</button></div></div>
-    <p id="appearance-diagnostics-status" class="appearance-notification-status" role="status" hidden></p></div>
-    <div id="appearance-customization-page" class="appearance-body appearance-subpage" hidden>
+    </section>
+    <section id="appearance-customization-page" class="appearance-body appearance-settings-page" hidden>
+    <h3 class="appearance-panel-title">外观主题</h3>
     <div id="appearance-colors"></div>
     <label class="appearance-field">字体大小<span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="字体大小"><output id="appearance-font-value"></output></span></label>
-    </div>
+    </section>
+    <section id="appearance-diagnostics-page" class="appearance-body appearance-settings-page" hidden>
+    <h3 class="appearance-panel-title">诊断日志</h3>
+    <div id="appearance-diagnostics-field" class="appearance-field" hidden><span>运行日志</span><div class="appearance-action-buttons"><button type="button" id="appearance-diagnostics-export" disabled>导出</button><button type="button" id="appearance-diagnostics-send" disabled>发送到电脑</button></div></div>
+    <p id="appearance-diagnostics-status" class="appearance-notification-status" role="status" hidden></p>
+    </section>
+    </div></div>
     <div class="appearance-actions"><button type="button" class="appearance-version" id="appearance-app-version" hidden disabled></button><div class="appearance-action-buttons"><button type="button" id="appearance-reset">恢复默认</button><button type="button" class="primary" id="appearance-close">完成</button></div></div>`;
   document.body.append(dialog);
   const title = $("#appearance-title", dialog);
   const headingButton = $(".appearance-heading button", dialog);
-  const primaryBody = $(".appearance-body", dialog);
+  const primaryBody = $("#appearance-general-page", dialog);
+  const panelHost = $(".appearance-panels", dialog);
+  const generalEntry = $("#appearance-general-entry", dialog);
   const customizationEntry = $("#appearance-customization-entry", dialog);
   const customizationPage = $("#appearance-customization-page", dialog);
   const entryButton = $("#appearance-notifications-entry", dialog);
+  const diagnosticsEntry = $("#appearance-diagnostics-entry", dialog);
+  const diagnosticsPage = $("#appearance-diagnostics-page", dialog);
   const resetButton = $("#appearance-reset", dialog);
   const notificationVersionButton = $("#appearance-app-version", dialog);
   if (androidContainer) {
@@ -456,10 +511,13 @@ function openAppearance() {
     sendButton.onclick = () => { void run(true); };
   }
   if (androidContainer) {
-    $("#appearance-notifications-field", dialog).hidden = false;
-    entryButton.append(icon("chevron"));
+    entryButton.hidden = false;
+    diagnosticsEntry.hidden = false;
   }
-  customizationEntry.append(icon("chevron"));
+  generalEntry.querySelector(".appearance-nav-icon").append(icon("settings"));
+  customizationEntry.querySelector(".appearance-nav-icon").append(icon("sun"));
+  entryButton.querySelector(".appearance-nav-icon").append(icon("globe"));
+  diagnosticsEntry.querySelector(".appearance-nav-icon").append(icon("tools"));
   headingButton.append(icon("close"));
   renderPwaCacheState();
   const versionButton = notificationVersionButton;
@@ -493,11 +551,21 @@ function openAppearance() {
   const notificationPageIsCurrent = (page, revision) => androidContainer && notificationPageVisible
     && notificationPage === page && notificationPageRevision === revision && page.isConnected
     && dialog.isConnected && dialog.open;
+  const setSettingsNav = entry => {
+    for (const item of dialog.querySelectorAll(".appearance-nav-item"))
+      item.setAttribute("aria-selected", String(item === entry));
+  };
+  const selectSettingsPage = (page, entry, { focus = false } = {}) => {
+    if (!page?.isConnected) return;
+    for (const panel of panelHost.querySelectorAll(".appearance-settings-page"))
+      panel.hidden = panel !== page;
+    setSettingsNav(entry);
+    page.scrollTop = 0;
+    if (focus) entry?.focus({ preventScroll: true });
+  };
   const showAppearancePage = (page, pageTitle, entry) => {
     subpageEntry = entry;
-    primaryBody.hidden = true;
-    page.hidden = false;
-    page.scrollTop = 0;
+    selectSettingsPage(page, entry);
     title.textContent = pageTitle;
     headingButton.title = "返回设置";
     headingButton.setAttribute("aria-label", "返回设置");
@@ -519,9 +587,8 @@ function openAppearance() {
     activeNotificationPage = null;
     notificationPage?.remove();
     notificationPage = null;
-    customizationPage.hidden = true;
+    selectSettingsPage(primaryBody, generalEntry);
     dialog.classList.remove("appearance-subpage-open");
-    primaryBody.hidden = false;
     title.textContent = "设置";
     headingButton.title = "关闭设置";
     headingButton.setAttribute("aria-label", "关闭设置");
@@ -532,14 +599,31 @@ function openAppearance() {
     returnEntry.focus({ preventScroll: true });
   };
   customizationEntry.onclick = () => {
-    if (!dialog.isConnected || !dialog.open || subpageEntry) return;
+    if (!dialog.isConnected || !dialog.open) return;
     showAppearancePage(customizationPage, "外观设置", customizationEntry);
   };
+  generalEntry.onclick = () => {
+    if (!dialog.isConnected || !dialog.open) return;
+    if (subpageEntry) restoreAppearanceRoot();
+    else selectSettingsPage(primaryBody, generalEntry, { focus: true });
+  };
+  diagnosticsEntry.onclick = () => {
+    if (!dialog.isConnected || !dialog.open || diagnosticsEntry.hidden) return;
+    showAppearancePage(diagnosticsPage, "诊断日志", diagnosticsEntry);
+  };
   if (androidContainer) entryButton.onclick = () => {
-    if (!dialog.isConnected || !dialog.open || subpageEntry) return;
+    if (!dialog.isConnected || !dialog.open) return;
+    notificationPageVisible = false;
+    notificationPageRevision++;
+    notificationPageUnsubscribe?.();
+    notificationPageUnsubscribe = null;
+    activeNotificationPage?.systemSettingsButton.remove();
+    activeNotificationPage = null;
+    notificationPage?.remove();
+    notificationPage = null;
     notificationPageVisible = true;
     const revision = ++notificationPageRevision;
-    const page = element("div", "appearance-body appearance-subpage appearance-notifications-page");
+    const page = element("div", "appearance-body appearance-settings-page appearance-subpage appearance-notifications-page");
     page.id = "appearance-notifications-page";
     page.hidden = true;
     notificationPage = page;
@@ -590,9 +674,8 @@ function openAppearance() {
       }
     }, "appearance-notification-action");
     systemSettingsButton.hidden = true;
-    page.append(status, rows);
-    $("#appearance-close", dialog).before(systemSettingsButton);
-    dialog.insertBefore(page, $(".appearance-actions", dialog));
+    page.append(status, rows, systemSettingsButton);
+    panelHost.append(page);
     showAppearancePage(page, "通知事件", notificationEntry);
     let state = null;
     const setBusy = busy => {
@@ -732,11 +815,21 @@ function openAppearance() {
     void readSettings();
     updateNotificationOperationState();
   };
+  let closing = false;
+  const closeAppearance = returnValue => {
+    if (!dialog.open || closing) return;
+    closing = true;
+    dialog.classList.remove("appearance-screen-visible");
+    setTimeout(() => {
+      if (dialog.open) dialog.close(returnValue);
+      closing = false;
+    }, 220);
+  };
   const onNativeBack = event => {
     if (!dialog.open || !dialog.isConnected || document.querySelector("dialog[open]") !== dialog) return;
     event.preventDefault();
     if (subpageEntry) restoreAppearanceRoot();
-    else dialog.close();
+    else closeAppearance();
   };
   const onAppearanceEscape = event => {
     if (event.key !== "Escape" || event.isComposing || !dialog.open || !subpageEntry) return;
@@ -844,10 +937,10 @@ function openAppearance() {
     renderSidebar();
     sync();
   };
-  $("#appearance-close").onclick = () => dialog.close();
+  $("#appearance-close").onclick = () => closeAppearance();
   headingButton.onclick = () => {
     if (subpageEntry) restoreAppearanceRoot();
-    else dialog.close();
+    else closeAppearance();
   };
   let backdropPressed = false;
   const onBackdrop = event => {
@@ -864,14 +957,16 @@ function openAppearance() {
     // 触摸在 pointerup 后仍会派发点击，等它命中遮罩后再关闭，避免落到背景元素。
     event.preventDefault();
     event.stopPropagation();
-    dialog.close();
+    closeAppearance();
   };
   dialog.oncancel = event => {
     event.preventDefault();
     if (subpageEntry) restoreAppearanceRoot();
-    else dialog.close();
+    else closeAppearance();
   };
   dialog.onclose = () => {
+    dialog.classList.remove("appearance-screen-visible");
+    dialog.classList.remove("appearance-subpage-open");
     notificationPageRevision++;
     notificationPageVisible = false;
     subpageEntry = null;
@@ -889,6 +984,9 @@ function openAppearance() {
   };
   document.body.classList.add("modal-open");
   dialog.showModal();
+  requestAnimationFrame(() => {
+    if (dialog.isConnected && dialog.open) dialog.classList.add("appearance-screen-visible");
+  });
 }
 const effortLabels = { none: "无", minimal: "最低", low: "轻度", medium: "中", high: "高", xhigh: "极高", max: "Max", ultra: "Ultra" };
 const skillIdentity = skill => `${skill.name}\0${skill.path}`;
@@ -6662,10 +6760,10 @@ function setMarkdown(node, text, remoteImages = [], options) {
   }
   node.markdownHtml = html;
   for (const copy of node.querySelectorAll(".copy-code")) copy.onclick = () => copyText(copy.closest(".code-block").querySelector("code").textContent);
-  for (const reference of node.querySelectorAll("a[data-local-file-path]")) reference.onclick = event => {
-    event.preventDefault(); event.stopPropagation();
-    void sessionTools?.openFile(reference.dataset.localFilePath, Number(reference.dataset.localFileLine) || null);
-  };
+  bindLocalFileReferences(node, {
+    openFile: (path, line) => sessionTools?.openFile(path, line),
+    openBrowser: (path, line) => openLocalFileInBrowser(path, line)
+  });
   bindMessageImages(node);
   bindMessageVideos(node, prepareRemoteTunnelAccess);
 }

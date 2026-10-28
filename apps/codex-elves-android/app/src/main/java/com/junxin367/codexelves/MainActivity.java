@@ -1591,7 +1591,8 @@ public final class MainActivity extends Activity {
     }
 
     private static boolean validBrowserOpen(JSONObject payload) {
-        if (payload.length() != 4 || !payload.optString("requestId").matches("[A-Za-z0-9_-]{1,80}")
+        if ((payload.length() != 4 && payload.length() != 5)
+            || !payload.optString("requestId").matches("[A-Za-z0-9_-]{1,80}")
             || !(payload.opt("fontSize") instanceof Number)) return false;
         double size = payload.optDouble("fontSize", 0);
         if (!Double.isFinite(size) || size < 12 || size > 24) return false;
@@ -1599,6 +1600,21 @@ public final class MainActivity extends Activity {
         if (colors == null || colors.length() != 5) return false;
         for (String name : new String[]{"background", "foreground", "muted", "line", "surface"})
             if (!colors.optString(name).matches("#[0-9a-fA-F]{6}")) return false;
+        if (payload.has("initialUrl")) {
+            String initialUrl = payload.optString("initialUrl", "");
+            if (initialUrl.length() > 32768
+                || initialUrl.matches("(?s).*[\\x00-\\x1f\\x7f].*")
+                || !(initialUrl.startsWith("http://") || initialUrl.startsWith("https://"))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean safeWorkspaceViewPath(String path) {
+        if (path == null || !path.startsWith("/api/workspace/view/")) return false;
+        for (String segment : path.split("/"))
+            if (".".equals(segment) || "..".equals(segment)) return false;
         return true;
     }
 
@@ -1631,6 +1647,18 @@ public final class MainActivity extends Activity {
             JSONObject colors = payload.getJSONObject("colors");
             for (String name : new String[]{"background", "foreground", "muted", "line", "surface"})
                 parameters.putInt(name, android.graphics.Color.parseColor(colors.getString(name)));
+            String initialUrl = payload.optString("initialUrl", "");
+            if (!initialUrl.isEmpty()) {
+                Uri target = Uri.parse(initialUrl);
+                String path = target.getPath();
+                if (!ServiceOrigin.matches(currentOrigin, target)
+                    || !safeWorkspaceViewPath(path)
+                    || target.getQuery() != null
+                    || target.getUserInfo() != null) {
+                    throw new IllegalStateException("本地文件地址无效");
+                }
+                parameters.putString("initialUrl", target.toString());
+            }
             Intent browser = new Intent(this, BrowserActivity.class).putExtras(parameters);
             startActivity(browser);
             overridePendingTransition(R.anim.browser_enter, R.anim.browser_hold);

@@ -213,7 +213,9 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         addressInput.setPadding(dp(12), 0, dp(12), 0);
         addressInput.setOnFocusChangeListener((view, focused) -> {
             if (session == null) return;
-            addressInput.setText(focused ? session.url : displayAddress(session.url));
+            String localFile = BrowserRoutePolicy.workspaceViewDisplay(session.url);
+            addressInput.setText(focused && localFile.isEmpty()
+                ? session.url : localFile.isEmpty() ? displayAddress(session.url) : localFile);
             if (focused) addressInput.selectAll();
         });
         submitOnEnter(addressInput);
@@ -1003,6 +1005,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
 
     private String displayAddress(String address) {
         if (address.isEmpty()) return "";
+        String localFile = BrowserRoutePolicy.workspaceViewDisplay(address);
+        if (!localFile.isEmpty()) return localFile;
         Uri uri = Uri.parse(address);
         if ("www.baidu.com".equals(uri.getHost()) && "/s".equals(uri.getPath())
             && uri.getQueryParameter("wd") != null) return uri.getQueryParameter("wd");

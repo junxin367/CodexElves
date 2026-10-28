@@ -347,12 +347,26 @@ function browserAppearance() {
   return { colors, fontSize: Math.max(12, Math.min(24, parseFloat(style?.fontSize) || 14)) };
 }
 
-export function openAndroidBrowser() {
+export function openAndroidBrowser(initialUrl = "") {
   if (!isAndroidContainer()) return Promise.reject(new Error("请在 Android App 中使用浏览器。"));
   if (browserOpenPending) return browserOpenPending;
   const pending = (async () => {
     const info = await getAndroidAppInfo();
     if (info?.browserVersion !== 1) throw new Error("当前 App 不支持浏览器，请更新 Android App 后重试。");
+    let targetUrl = "";
+    if (initialUrl) {
+      try {
+        const parsed = new URL(initialUrl, location.href);
+        if (parsed.origin !== location.origin || !parsed.pathname.startsWith("/api/workspace/view/")
+            || parsed.pathname.split("/").some(part => part === "." || part === "..")
+            || parsed.search || parsed.username || parsed.password) {
+          throw new Error("本地文件地址无效");
+        }
+        targetUrl = parsed.href;
+      } catch (error) {
+        throw error instanceof Error ? error : new Error("本地文件地址无效");
+      }
+    }
     const bridge = globalThis.CodexElvesAndroid;
     if (typeof bridge?.addEventListener !== "function" || typeof bridge?.removeEventListener !== "function")
       throw new Error("无法连接 Android 浏览器，请重新打开 App。");
@@ -378,7 +392,9 @@ export function openAndroidBrowser() {
       const timer = setTimeout(() => finish(new Error("Android 浏览器未响应，请更新 App 后重试。")), 10000);
       try {
         bridge.addEventListener("message", receive);
-        if (bridge.postMessage(JSON.stringify({ type: "browser-open", requestId, ...browserAppearance() })) === false)
+        const message = { type: "browser-open", requestId, ...browserAppearance(),
+          ...(targetUrl ? { initialUrl: targetUrl } : {}) };
+        if (bridge.postMessage(JSON.stringify(message)) === false)
           finish(new Error("当前 Android App 无法打开浏览器，请更新后重试。"));
       } catch { finish(new Error("无法打开 Android 浏览器，请重试。")); }
     });
