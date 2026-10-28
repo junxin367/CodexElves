@@ -60,8 +60,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     private TextView userAgentValue;
     private ImageView userAgentArrow;
     private PopupWindow userAgentPopup;
-    private ImageButton back, homeButton, reload, settingsButton, bookmarkButton;
-    private ImageButton historyButton, bookmarksButton;
+    private Button back, homeButton, reload, settingsButton, bookmarkButton;
+    private Button historyButton, bookmarksButton;
     private Button clearPageButton;
     private Button diagnosticsButton;
     private ScrollView homeScroll;
@@ -189,25 +189,25 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         footerDivider = divider();
         root.addView(footerDivider, new LinearLayout.LayoutParams(-1, dp(1)));
         footer = row(); footer.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
-        footer.setPadding(dp(4), dp(5), dp(4), dp(7)); footer.setMinimumHeight(dp(58));
-        back = icon(R.drawable.browser_back, "网页后退", () -> { if (ready) session.back(); });
-        homeButton = icon(R.drawable.browser_home, "浏览器首页", () -> {
+        footer.setPadding(dp(4), dp(5), dp(4), dp(7)); footer.setMinimumHeight(dp(72));
+        back = footerAction(R.drawable.browser_back, "后退", "网页后退", () -> { if (ready) session.back(); });
+        homeButton = footerAction(R.drawable.browser_home, "首页", "浏览器首页", () -> {
             if (!ready) return;
             internalPage = InternalPage.NONE;
             session.showHome();
         });
-        reload = icon(R.drawable.browser_reload, "刷新网页", () -> { if (ready) session.reload(); });
-        settingsButton = icon(R.drawable.browser_settings, "浏览器设置", () -> {
+        reload = footerAction(R.drawable.browser_reload, "刷新", "刷新网页", () -> { if (ready) session.reload(); });
+        settingsButton = footerAction(R.drawable.browser_settings, "设置", "浏览器设置", () -> {
             if (!ready) return;
             settings = true; hideKeyboard(); renderSettings(); render();
         });
-        bookmarkButton = icon(R.drawable.browser_bookmark, "添加或取消当前页书签", () -> {
+        bookmarkButton = footerAction(R.drawable.browser_bookmark, "收藏", "添加或取消当前页书签", () -> {
             if (!ready || session == null) return;
             if (session.home || internalPage != InternalPage.NONE) openBookmarksPage();
             else session.toggleBookmark();
         });
-        historyButton = icon(R.drawable.browser_history, "打开访问历史", this::openHistoryPage);
-        bookmarksButton = icon(R.drawable.browser_bookmark, "打开书签", this::openBookmarksPage);
+        historyButton = footerAction(R.drawable.browser_history, "历史", "打开访问历史", this::openHistoryPage);
+        bookmarksButton = footerAction(R.drawable.browser_bookmark, "书签", "打开书签", this::openBookmarksPage);
         addressInput = input("网址或搜索", fontSize * .92f);
         addressInput.setBackground(rounded(surface, line, 16));
         addressInput.setPadding(dp(12), 0, dp(12), 0);
@@ -457,8 +457,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         }
 
         LinearLayout categoryBar = row();
-        categoryBar.setPadding(dp(2), dp(10), dp(2), dp(6));
-        categoryBar.setBackground(rounded(Color.rgb(245, 247, 250), Color.TRANSPARENT, 18));
+        categoryBar.setPadding(dp(2), dp(4), dp(2), dp(4));
+        categoryBar.setBackground(rounded(Color.rgb(245, 247, 250), Color.TRANSPARENT, 12));
         addDiagnosticsChip(categoryBar, "全部  " + allEvents.size(), "all");
         addDiagnosticsChip(categoryBar, "请求  " + requestCount, "request");
         addDiagnosticsChip(categoryBar, "响应  " + responseCount, "response");
@@ -466,7 +466,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         diagnosticsPageBody.addView(categoryBar, new LinearLayout.LayoutParams(-1, -2));
 
         LinearLayout filterBar = row();
-        filterBar.setPadding(0, 0, 0, dp(8));
+        filterBar.setPadding(0, 0, 0, dp(4));
         addDiagnosticsFilterChip(filterBar, "全部", "all");
         addDiagnosticsFilterChip(filterBar, "仅错误", "error");
         addDiagnosticsFilterChip(filterBar, "耗时", "duration");
@@ -500,31 +500,37 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         chip.setTextColor(selected ? Color.WHITE : foreground);
         chip.setGravity(Gravity.CENTER);
         chip.setMinHeight(0);
-        chip.setMinimumHeight(dp(34));
+        chip.setMinimumHeight(dp(30));
         chip.setPadding(dp(5), 0, dp(5), 0);
         chip.setBackground(rounded(selected ? Color.rgb(39, 139, 241) : Color.TRANSPARENT,
-            selected ? Color.rgb(39, 139, 241) : Color.TRANSPARENT, 18));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(34), 1);
-        params.leftMargin = dp(2);
-        params.rightMargin = dp(2);
+            selected ? Color.rgb(39, 139, 241) : Color.TRANSPARENT, 12));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(30), 1);
+        params.leftMargin = dp(1);
+        params.rightMargin = dp(1);
         container.addView(chip, params);
     }
 
     private void addDiagnosticsFilterChip(LinearLayout container, String label, String filter) {
         boolean selected = diagnosticsFilter.equals(filter);
-        Button chip = textButton(label + ("all".equals(filter) ? "⌄" : ""),
+        Button chip = textButton(label,
             () -> { diagnosticsFilter = filter; renderDiagnosticsPage(); });
         chip.setTextSize(fontSize * .70f);
         chip.setTextColor(selected ? Color.rgb(39, 139, 241) : muted);
         chip.setGravity(Gravity.CENTER);
         chip.setMinHeight(0);
-        chip.setMinimumHeight(dp(32));
+        chip.setMinimumHeight(dp(28));
         chip.setPadding(dp(4), 0, dp(4), 0);
         chip.setBackground(rounded(selected ? Color.rgb(237, 245, 255) : Color.TRANSPARENT,
-            selected ? Color.rgb(39, 139, 241) : Color.TRANSPARENT, 16));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(32), 1);
-        params.leftMargin = dp(2);
-        params.rightMargin = dp(2);
+            selected ? Color.rgb(39, 139, 241) : Color.TRANSPARENT, 10));
+        if ("all".equals(filter)) {
+            chip.setCompoundDrawablesWithIntrinsicBounds(0, 0, R.drawable.ic_chevron_down, 0);
+            chip.setCompoundDrawablePadding(dp(2));
+            chip.setCompoundDrawableTintList(ColorStateList.valueOf(
+                selected ? Color.rgb(39, 139, 241) : muted));
+        }
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(28), 1);
+        params.leftMargin = dp(1);
+        params.rightMargin = dp(1);
         container.addView(chip, params);
     }
 
@@ -573,21 +579,24 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         TextView status = text(diagnosticStatus(event), fontSize * .66f,
             diagnosticStatusColor(event, true));
         status.setGravity(Gravity.CENTER);
-        status.setPadding(dp(7), 0, dp(7), 0);
+        status.setPadding(0, 0, 0, 0);
         status.setBackground(rounded(diagnosticStatusColor(event, false),
             diagnosticStatusColor(event, false), 10));
-        top.addView(status, new LinearLayout.LayoutParams(-2, dp(24)));
+        top.addView(status, new LinearLayout.LayoutParams(dp(48), dp(24)));
         TextView duration = text(durationLabel(event.durationMs), fontSize * .62f, muted);
         duration.setGravity(Gravity.CENTER);
         duration.setSingleLine(true);
-        top.addView(duration, new LinearLayout.LayoutParams(-2, dp(26)));
+        top.addView(duration, new LinearLayout.LayoutParams(dp(56), dp(26)));
         TextView size = text(sizeLabel(event.sizeBytes), fontSize * .62f, muted);
         size.setGravity(Gravity.CENTER);
         size.setSingleLine(true);
-        top.addView(size, new LinearLayout.LayoutParams(-2, dp(26)));
-        TextView arrow = text(expandedDiagnosticId == event.id ? "⌃" : "⌄",
-            fontSize * .90f, muted);
-        arrow.setGravity(Gravity.CENTER);
+        top.addView(size, new LinearLayout.LayoutParams(dp(48), dp(26)));
+        ImageView arrow = new ImageView(this);
+        arrow.setImageResource(R.drawable.ic_chevron_down);
+        arrow.setImageTintList(ColorStateList.valueOf(muted));
+        arrow.setRotation(expandedDiagnosticId == event.id ? 180f : 0f);
+        arrow.setScaleType(ImageView.ScaleType.CENTER);
+        arrow.setContentDescription(expandedDiagnosticId == event.id ? "收起请求详情" : "展开请求详情");
         top.addView(arrow, new LinearLayout.LayoutParams(dp(24), dp(26)));
         card.addView(top, new LinearLayout.LayoutParams(-1, -2));
 
@@ -674,7 +683,19 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     }
 
     private String durationLabel(long durationMs) {
-        return durationMs <= 0 ? "--" : durationMs + "ms";
+        if (durationMs <= 0) return "--";
+        if (durationMs < 1000) return durationMs + "ms";
+        if (durationMs < 60_000) return compactDecimal(durationMs / 1000d) + "s";
+        if (durationMs < 3_600_000) return compactDecimal(durationMs / 60_000d) + "m";
+        return compactDecimal(durationMs / 3_600_000d) + "h";
+    }
+
+    private String compactDecimal(double value) {
+        if (value >= 100) return String.format(Locale.ROOT, "%.0f", value);
+        if (value >= 10) return String.format(Locale.ROOT, "%.1f", value)
+            .replaceAll("\\.0$", "");
+        return String.format(Locale.ROOT, "%.1f", value)
+            .replaceAll("\\.0$", "");
     }
 
     private String sizeLabel(long sizeBytes) {
@@ -879,10 +900,10 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         bookmarksPage.setVisibility(!settings && internalPage == InternalPage.BOOKMARKS ? View.VISIBLE : View.GONE);
         diagnosticsPage.setVisibility(!settings && internalPage == InternalPage.DIAGNOSTICS ? View.VISIBLE : View.GONE);
         boolean diagnostics = internalPage == InternalPage.DIAGNOSTICS;
-        header.setVisibility(diagnostics ? View.GONE : View.VISIBLE);
-        headerDivider.setVisibility(diagnostics ? View.GONE : View.VISIBLE);
-        footer.setVisibility(settings || diagnostics ? View.GONE : View.VISIBLE);
-        footerDivider.setVisibility(settings || diagnostics ? View.GONE : View.VISIBLE);
+        header.setVisibility(View.VISIBLE);
+        headerDivider.setVisibility(View.VISIBLE);
+        footer.setVisibility(settings ? View.GONE : View.VISIBLE);
+        footerDivider.setVisibility(settings ? View.GONE : View.VISIBLE);
         back.setVisibility(showWeb ? View.VISIBLE : View.GONE);
         homeButton.setVisibility(showWeb || internal ? View.VISIBLE : View.GONE);
         reload.setVisibility(showWeb ? View.VISIBLE : View.GONE);
@@ -907,7 +928,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         if (session != null) {
             progress.setProgress(session.progress);
             if (showWeb && !addressInput.hasFocus()) addressInput.setText(displayAddress(session.url));
-            bookmarkButton.setImageTintList(ColorStateList.valueOf(
+            bookmarkButton.setCompoundDrawableTintList(ColorStateList.valueOf(
                 session.bookmarked() ? Color.rgb(48, 118, 223) : foreground));
             bookmarkButton.setContentDescription(session.bookmarked() ? "取消当前页书签" : "添加当前页书签");
             if (!session.error.isEmpty() && showWeb) {
@@ -1223,6 +1244,21 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         view.setTextColor(background);
         view.setMinimumHeight(dp(48));
         view.setBackground(rounded(foreground, foreground, 10));
+        return view;
+    }
+    private Button footerAction(int resource, String label, String description, Runnable action) {
+        Button view = textButton(label, action);
+        view.setTextSize(fontSize * .70f);
+        view.setSingleLine(true);
+        view.setGravity(Gravity.CENTER);
+        view.setMinWidth(0); view.setMinimumWidth(0);
+        view.setMinHeight(0); view.setMinimumHeight(0);
+        view.setPadding(dp(2), dp(5), dp(2), dp(4));
+        view.setCompoundDrawablesWithIntrinsicBounds(0, resource, 0, 0);
+        view.setCompoundDrawablePadding(dp(2));
+        view.setCompoundDrawableTintList(ColorStateList.valueOf(foreground));
+        view.setContentDescription(description);
+        view.setLayoutParams(new LinearLayout.LayoutParams(dp(44), dp(58)));
         return view;
     }
     private ImageButton icon(int resource, String description, Runnable action) {

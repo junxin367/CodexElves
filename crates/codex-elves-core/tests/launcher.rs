@@ -1376,6 +1376,7 @@ async fn helper_retries_same_responses_request_when_model_is_overloaded() {
     let _lock = launcher_settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let _proxy_log_guard = LauncherProxyLogPathGuard::set(temp.path().join("proxy-requests.jsonl"));
     let overloaded = r#"event: error
 data: {"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later.","param":null},"sequence_number":2}
 
@@ -1443,6 +1444,35 @@ data: [DONE]
     );
     assert!(body.contains("resp_recovered"));
     assert!(!body.contains("server_is_overloaded"));
+
+    let summaries = codex_elves_core::proxy_log::read_summaries(10).unwrap();
+    assert_eq!(summaries.len(), 1);
+    let audit = &summaries[0].audit;
+    assert_eq!(audit.upstream_attempts.len(), 2);
+    assert_eq!(audit.upstream_attempts[0].status_code, Some(200));
+    assert_eq!(
+        audit.upstream_attempts[0].outcome,
+        Some(codex_elves_core::proxy_log::ProxyRequestOutcome::Failed)
+    );
+    assert_eq!(
+        audit.upstream_attempts[0].error_code.as_deref(),
+        Some("server_is_overloaded")
+    );
+    assert!(
+        audit.upstream_attempts[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("currently overloaded"))
+    );
+    assert_eq!(audit.upstream_attempts[1].status_code, Some(200));
+    assert_eq!(
+        audit.upstream_attempts[1].outcome,
+        Some(codex_elves_core::proxy_log::ProxyRequestOutcome::Succeeded)
+    );
+    assert_eq!(
+        audit.outcome,
+        Some(codex_elves_core::proxy_log::ProxyRequestOutcome::Succeeded)
+    );
 }
 
 #[tokio::test]
@@ -1450,6 +1480,7 @@ async fn helper_retries_after_http_503_capacity_body() {
     let _lock = launcher_settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let _proxy_log_guard = LauncherProxyLogPathGuard::set(temp.path().join("proxy-requests.jsonl"));
     let overloaded = r#"event: response.failed
 data: {"type":"response.failed","response":{"id":"resp_overloaded","object":"response","status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}
 
@@ -1514,6 +1545,36 @@ data: [DONE]
     assert_eq!(requests[1].body, requests[2].body);
     assert!(body.contains("resp_recovered_after_503"));
     assert!(!body.contains("Selected model is at capacity"));
+
+    let summaries = codex_elves_core::proxy_log::read_summaries(10).unwrap();
+    assert_eq!(summaries.len(), 1);
+    let attempts = &summaries[0].audit.upstream_attempts;
+    assert_eq!(attempts.len(), 3);
+    assert_eq!(attempts[0].status_code, Some(200));
+    assert_eq!(
+        attempts[0].error_code.as_deref(),
+        Some("server_is_overloaded")
+    );
+    assert_eq!(attempts[1].status_code, Some(503));
+    assert_eq!(
+        attempts[1].outcome,
+        Some(codex_elves_core::proxy_log::ProxyRequestOutcome::Failed)
+    );
+    assert_eq!(
+        attempts[1].error_code.as_deref(),
+        Some("server_is_overloaded")
+    );
+    assert!(
+        attempts[1]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Selected model is at capacity"))
+    );
+    assert_eq!(attempts[2].status_code, Some(200));
+    assert_eq!(
+        attempts[2].outcome,
+        Some(codex_elves_core::proxy_log::ProxyRequestOutcome::Succeeded)
+    );
 }
 
 #[tokio::test]

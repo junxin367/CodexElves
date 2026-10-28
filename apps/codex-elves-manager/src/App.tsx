@@ -19,6 +19,8 @@ import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
+  ArrowDownWideNarrow,
+  ArrowUpNarrowWide,
   Calendar,
   Bell,
   Check,
@@ -567,11 +569,13 @@ type RelayProfileTestResult = CommandResult<{
   httpStatus: number;
   endpoint: string;
   responsePreview: string;
+  firstTokenMs?: number | null;
 }>;
 
 type RelayProfileSpeedTestItem = {
   model: string;
   elapsedMs: number;
+  firstTokenMs: number | null;
   status: "ok" | "failed";
   httpStatus: number | null;
   message: string;
@@ -2529,6 +2533,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           httpStatus: 200,
           endpoint: `${profile?.baseUrl || active.baseUrl || active.upstreamBaseUrl}/responses`,
           responsePreview: `hi from ${model}`,
+          firstTokenMs: 1,
         }, `已向「${profile?.name || active.name}」用模型「${model}」发送 hi，HTTP 200。`) as T,
       );
     }
@@ -3904,8 +3909,8 @@ export function App() {
     return normalizeSettings(saveResult.settings);
   };
 
-  const testRelayProfile = async (profile: RelayProfile, model?: string) => {
-    return run(() => call<RelayProfileTestResult>("test_relay_profile", { profile, model }));
+  const testRelayProfile = async (profile: RelayProfile, model?: string, inputTokens?: number) => {
+    return run(() => call<RelayProfileTestResult>("test_relay_profile", { profile, model, inputTokens }));
   };
 
   const fetchRelayProfileModels = async (profile: RelayProfile, silent = false) => {
@@ -4770,7 +4775,7 @@ type Actions = {
     tomlBody: string,
   ) => Promise<BackendSettings | null>;
   deleteContextEntry: (settings: BackendSettings, kind: ContextKind, id: string) => Promise<BackendSettings | null>;
-  testRelayProfile: (profile: RelayProfile, model?: string) => Promise<RelayProfileTestResult | null>;
+  testRelayProfile: (profile: RelayProfile, model?: string, inputTokens?: number) => Promise<RelayProfileTestResult | null>;
   fetchRelayProfileModels: (profile: RelayProfile, silent?: boolean) => Promise<string[] | null>;
   probeRelayProfileResponsesWebsocket: (profile: RelayProfile) => Promise<ResponsesWebsocketCapability | null>;
   switchRelayProfile: (settings: BackendSettings, previousActiveRelayId?: string) => Promise<void>;
@@ -5891,7 +5896,6 @@ function RelayScreen({
       ) : null}
       {speedTestProfile ? (
         <RelayProfileSpeedTestDialog
-          form={normalized}
           profile={speedTestProfile}
           onClose={() => setSpeedTestProfileId(null)}
           actions={actions}
@@ -6010,25 +6014,43 @@ function RelayProfileTestDialog({
   );
 }
 
+const SPEED_TEST_INPUT_TOKENS = 50_000;
+const SPEED_TEST_CONCURRENCY = 5;
+
+function formatSpeedTestDurationMs(value: number): string {
+  if (!Number.isFinite(value)) return "-";
+  const elapsedMs = Math.max(0, value);
+  if (elapsedMs < 1000) return `${Math.round(elapsedMs)} ms`;
+  const seconds = elapsedMs / 1000;
+  const digits = seconds < 10 ? 2 : 1;
+  return `${seconds.toFixed(digits).replace(/\.?0+$/, "")} s`;
+}
+
+function formatOptionalSpeedTestDurationMs(value?: number | null): string {
+  return typeof value === "number" ? formatSpeedTestDurationMs(value) : "-";
+}
+
+function formatSpeedTestTokenRate(elapsedMs: number): string {
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return "-";
+  const rate = SPEED_TEST_INPUT_TOKENS * 1000 / elapsedMs;
+  if (rate < 1000) return `${Math.round(rate)} tk/s`;
+  const digits = rate >= 10_000 ? 1 : 2;
+  return `${(rate / 1000).toFixed(digits).replace(/\.?0+$/, "")}k tk/s`;
+}
+
 function RelayProfileSpeedTestDialog({
   profile,
-  form,
   onClose,
   actions,
 }: {
   profile: RelayProfile;
-  form: BackendSettings;
   onClose: () => void;
   actions: Actions;
 }) {
-  const fallbackModel = relayProfileDefaultTestModel(profile, form);
   const configuredModels = useMemo(
-    () => relayProfileKnownModels(profile, fallbackModel),
+    () => relayProfileConfiguredModels(profile),
     [
-      fallbackModel,
       profile.id,
-      profile.testModel,
-      profile.model,
       profile.modelMappings,
       profile.responsesModelList,
       profile.chatCompletionsModelList,
@@ -6040,14 +6062,20 @@ function RelayProfileSpeedTestDialog({
   const [availableModels, setAvailableModels] = useState<string[]>(configuredModels);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [running, setRunning] = useState(false);
-  const [runningModel, setRunningModel] = useState<string | null>(null);
-  const [results, setResults] = useState<RelayProfileSpeedTestItem[]>([]);
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
+  const [resultsByMode, setResultsByMode] = useState<Record<"configured" | "all", RelayProfileSpeedTestItem[]>>({
+    configured: [],
+    all: [],
+  });
+  const results = resultsByMode[mode];
+  const configuredModelsKey = configuredModels.join("\n");
 
   useEffect(() => {
     setMode("configured");
     setAvailableModels(configuredModels);
-    setResults([]);
-  }, [profile.id, fallbackModel]);
+    setSortDirection("asc");
+    setResultsByMode({ configured: [], all: [] });
+  }, [profile.id, configuredModelsKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -6066,8 +6094,7 @@ function RelayProfileSpeedTestDialog({
     return () => {
       cancelled = true;
     };
-  }, [actions, configuredModels, profile.id, fallbackModel]);
-
+  }, [actions, configuredModelsKey, profile.id]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !running) onClose();
@@ -6080,42 +6107,62 @@ function RelayProfileSpeedTestDialog({
 
   const runSpeedTest = async () => {
     if (running || !targetModels.length) return;
+    const testMode = mode;
     setRunning(true);
-    setResults([]);
-    for (const model of targetModels) {
-      setRunningModel(model);
-      const startedAt = performance.now();
-      try {
-        const result = await actions.testRelayProfile(profile, model);
-        const elapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
-        const item: RelayProfileSpeedTestItem = {
-          model,
-          elapsedMs,
-          status: result && isSuccessStatus(result.status) ? "ok" : "failed",
-          httpStatus: result?.httpStatus ?? null,
-          message: result?.message || "请求失败",
-        };
-        setResults((current) => [...current, item].sort((left, right) => left.elapsedMs - right.elapsedMs));
-      } catch (error) {
-        const elapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
-        const item: RelayProfileSpeedTestItem = {
-          model,
-          elapsedMs,
-          status: "failed",
-          httpStatus: null,
-          message: error instanceof Error ? error.message : "请求失败",
-        };
-        setResults((current) => [...current, item].sort((left, right) => left.elapsedMs - right.elapsedMs));
-      }
+    setResultsByMode((current) => ({ ...current, [testMode]: [] }));
+    try {
+      let nextIndex = 0;
+      const testNext = async () => {
+        while (nextIndex < targetModels.length) {
+          const model = targetModels[nextIndex];
+          nextIndex += 1;
+          const startedAt = performance.now();
+          let item: RelayProfileSpeedTestItem;
+          try {
+            const result = await actions.testRelayProfile(profile, model, SPEED_TEST_INPUT_TOKENS);
+            item = {
+              model,
+              elapsedMs: Math.max(1, Math.round(performance.now() - startedAt)),
+              firstTokenMs: result?.firstTokenMs ?? null,
+              status: result && isSuccessStatus(result.status) ? "ok" : "failed",
+              httpStatus: result?.httpStatus ?? null,
+              message: result?.message || "请求失败",
+            };
+          } catch (error) {
+            item = {
+              model,
+              elapsedMs: Math.max(1, Math.round(performance.now() - startedAt)),
+              firstTokenMs: null,
+              status: "failed",
+              httpStatus: null,
+              message: error instanceof Error ? error.message : "请求失败",
+            };
+          }
+          setResultsByMode((current) => ({
+            ...current,
+            [testMode]: [...current[testMode], item],
+          }));
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(SPEED_TEST_CONCURRENCY, targetModels.length) }, () => testNext()),
+      );
+    } finally {
+      setRunning(false);
     }
-    setRunningModel(null);
-    setRunning(false);
   };
 
-  const fastest = results[0]?.elapsedMs ?? 0;
+  const fastest = results.length ? Math.min(...results.map((item) => item.elapsedMs)) : 0;
+  const slowest = results.length ? Math.max(...results.map((item) => item.elapsedMs)) : 0;
   const average = results.length
     ? Math.round(results.reduce((total, item) => total + item.elapsedMs, 0) / results.length)
     : 0;
+  const sortedResults = useMemo(
+    () => [...results].sort((left, right) => (
+      sortDirection === "asc" ? left.elapsedMs - right.elapsedMs : right.elapsedMs - left.elapsedMs
+    )),
+    [results, sortDirection],
+  );
 
   return createPortal(
     <div
@@ -6125,11 +6172,14 @@ function RelayProfileSpeedTestDialog({
       aria-labelledby="relay-speed-test-title"
       onClick={running ? undefined : onClose}
     >
-      <div className="modal-card relay-speed-test-modal" onClick={(event) => event.stopPropagation()}>
+      <div
+        className={`modal-card relay-speed-test-modal ${running || results.length ? "has-results" : ""}`}
+        onClick={(event) => event.stopPropagation()}
+      >
         <div className="modal-head">
           <div>
             <h2 id="relay-speed-test-title">模型速度测试</h2>
-            <p>{profile.name || "未命名供应商"} · 依次发送 hi，按响应耗时从快到慢排序。</p>
+            <p>{profile.name || "未命名供应商"} · 每个模型约 5 万 token 输入，最多 5 个并行测速。</p>
           </div>
           <Button disabled={running} onClick={onClose} size="icon" title="关闭" variant="ghost">
             <X className="h-4 w-4" />
@@ -6139,9 +6189,9 @@ function RelayProfileSpeedTestDialog({
         <div className="speed-test-mode-grid">
           <button
             className={`speed-test-mode-card ${mode === "configured" ? "active" : ""}`}
+            disabled={running}
             onClick={() => {
               setMode("configured");
-              setResults([]);
             }}
             type="button"
           >
@@ -6150,9 +6200,9 @@ function RelayProfileSpeedTestDialog({
           </button>
           <button
             className={`speed-test-mode-card ${mode === "all" ? "active" : ""}`}
+            disabled={running}
             onClick={() => {
               setMode("all");
-              setResults([]);
             }}
             type="button"
           >
@@ -6161,47 +6211,61 @@ function RelayProfileSpeedTestDialog({
           </button>
         </div>
 
-        {mode === "configured" ? (
-          <div className="speed-test-all-note">
-            <Zap className="h-4 w-4" />
-            <span>将对当前供应商模型列表中的 {configuredModels.length} 个模型发送 hi，完成后按耗时自动排序。</span>
-          </div>
-        ) : (
-          <div className="speed-test-all-note">
-            <Zap className="h-4 w-4" />
-            <span>将对当前供应商可发现的全部模型发送 hi。测试顺序按模型列表执行，结果按耗时自动排序。</span>
-          </div>
-        )}
-
         {running ? (
           <div className="speed-test-running">
             <span className="speed-test-spinner" />
-            <span>正在测试 {runningModel || "模型"}… 已完成 {results.length}/{targetModels.length}</span>
+            <span>正在测速（最多 5 个并行）… 已完成 {results.length}/{targetModels.length}</span>
           </div>
         ) : null}
 
         {results.length ? (
           <div className="speed-test-result-panel">
-            <div className="speed-test-result-summary">
-              <div><span>最快</span><strong>{fastest} ms</strong></div>
-              <div><span>平均</span><strong>{average} ms</strong></div>
-              <div><span>已完成</span><strong>{results.length}/{targetModels.length}</strong></div>
+            <div className="speed-test-result-toolbar">
+              <div className="speed-test-result-summary" aria-label="测速统计">
+                <span>最快 <strong>{formatSpeedTestDurationMs(fastest)}</strong></span>
+                <span>最慢 <strong>{formatSpeedTestDurationMs(slowest)}</strong></span>
+                <span>平均 <strong>{formatSpeedTestDurationMs(average)}</strong></span>
+                <span>已完成 <strong>{results.length}/{targetModels.length}</strong></span>
+              </div>
+              <div className="speed-test-sort-controls" role="group" aria-label="测速结果排序">
+                <button
+                  aria-pressed={sortDirection === "asc"}
+                  className={sortDirection === "asc" ? "active" : ""}
+                  onClick={() => setSortDirection("asc")}
+                  type="button"
+                >
+                  <ArrowDownWideNarrow className="h-3.5 w-3.5" />
+                  耗时升序
+                </button>
+                <button
+                  aria-pressed={sortDirection === "desc"}
+                  className={sortDirection === "desc" ? "active" : ""}
+                  onClick={() => setSortDirection("desc")}
+                  type="button"
+                >
+                  <ArrowUpNarrowWide className="h-3.5 w-3.5" />
+                  耗时降序
+                </button>
+              </div>
             </div>
             <div className="speed-test-result-list">
-              {results.map((item, index) => {
+              {sortedResults.map((item, index) => {
                 const barWidth = Math.max(8, Math.min(100, Math.round((item.elapsedMs / Math.max(fastest, item.elapsedMs)) * 100)));
                 return (
                   <div className={`speed-test-result-row ${item.status === "failed" ? "failed" : ""}`} key={item.model}>
                     <span className="speed-test-rank">{index + 1}</span>
                     <span className="speed-test-result-model">{item.model}</span>
-                    <span className="speed-test-result-time">{item.elapsedMs} ms</span>
+                    <span className="speed-test-result-time">
+                      <span>首字 {formatOptionalSpeedTestDurationMs(item.firstTokenMs)}</span>
+                      <span>耗时 {formatSpeedTestDurationMs(item.elapsedMs)}</span>
+                      <span title="按约 5 万输入 token ÷ 完整耗时计算">{formatSpeedTestTokenRate(item.elapsedMs)}</span>
+                    </span>
                     <span className="speed-test-result-status">{item.status === "ok" ? "完成" : "失败"}</span>
                     <span className="speed-test-result-bar"><i style={{ width: `${barWidth}%` }} /></span>
                   </div>
                 );
               })}
             </div>
-            <p className="speed-test-sort-note">测试结果已按响应耗时升序排列，最快模型位于顶部。</p>
           </div>
         ) : null}
 
@@ -13038,6 +13102,15 @@ function relayProfileKnownModels(profile: RelayProfile, fallbackModel = ""): str
     requestModel(fallbackModel),
     requestModel(profile.testModel),
     requestModel(profile.model),
+    ...relayProfileConfiguredModels(profile),
+  ];
+  return uniqueStrings(values.map((value) => value.trim()).filter(Boolean)).sort((left, right) =>
+    left.localeCompare(right),
+  );
+}
+
+function relayProfileConfiguredModels(profile: RelayProfile): string[] {
+  const values = [
     ...normalizeRelayModelMappings(profile.modelMappings).map((mapping) => mapping.requestModel),
     ...profile.responsesModelList.split(/\r?\n/),
     ...profile.chatCompletionsModelList.split(/\r?\n/),

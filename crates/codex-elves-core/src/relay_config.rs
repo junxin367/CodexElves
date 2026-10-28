@@ -1,10 +1,11 @@
 use anyhow::Context;
+use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
 
 use crate::responses_websocket::{
@@ -79,6 +80,7 @@ pub struct RelayProfileTestResult {
     pub http_status: u16,
     pub endpoint: String,
     pub response_preview: String,
+    pub first_token_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -971,6 +973,14 @@ pub async fn test_relay_profile(
     profile: &RelayProfile,
     model: &str,
 ) -> anyhow::Result<RelayProfileTestResult> {
+    test_relay_profile_with_input_tokens(profile, model, None).await
+}
+
+pub async fn test_relay_profile_with_input_tokens(
+    profile: &RelayProfile,
+    model: &str,
+    input_tokens: Option<u32>,
+) -> anyhow::Result<RelayProfileTestResult> {
     let base_url = relay_profile_base_url(profile);
     let base_url = base_url.trim().trim_end_matches('/');
     if base_url.is_empty() {
@@ -991,10 +1001,20 @@ pub async fn test_relay_profile(
     let test_model = profile.request_model_for_catalog_model(catalog_model);
     let client = crate::http_client::proxied_client("CodexElves/RelayTest")?;
     let mut failures = Vec::new();
+    let test_prompt = relay_profile_test_prompt(input_tokens);
+    let measure_first_token = input_tokens.is_some_and(|tokens| tokens > 0);
 
     for (index, protocol) in protocols.iter().copied().enumerate() {
-        match send_relay_profile_test_attempt(&client, base_url, api_key, &test_model, protocol)
-            .await
+        match send_relay_profile_test_attempt(
+            &client,
+            base_url,
+            api_key,
+            &test_model,
+            protocol,
+            &test_prompt,
+            measure_first_token,
+        )
+        .await
         {
             Ok(mut result) if result.http_status < 400 => {
                 if !failures.is_empty() {
@@ -1065,13 +1085,17 @@ async fn send_relay_profile_test_attempt(
     api_key: &str,
     test_model: &str,
     protocol: RelayProtocol,
+    test_prompt: &str,
+    measure_first_token: bool,
 ) -> anyhow::Result<RelayProfileTestResult> {
     let endpoint = match protocol {
         RelayProtocol::Responses => format!("{base_url}/responses"),
         RelayProtocol::ChatCompletions => format!("{base_url}/chat/completions"),
         RelayProtocol::Anthropic => format!("{base_url}/messages"),
     };
-    let payload = relay_profile_test_payload(protocol, test_model);
+    let payload =
+        relay_profile_test_payload(protocol, test_model, test_prompt, measure_first_token);
+    let started_at = Instant::now();
     let response = relay_profile_test_request(client.post(&endpoint), protocol, api_key)
         .json(&payload)
         .send()
@@ -1094,10 +1118,17 @@ async fn send_relay_profile_test_attempt(
             .await?;
         let v1_status = v1_response.status().as_u16();
         if v1_status < 400 {
-            let response_text = v1_response.text().await.unwrap_or_default();
+            let (response_text, first_token_ms) = read_relay_profile_test_response(
+                v1_response,
+                protocol,
+                measure_first_token,
+                started_at,
+            )
+            .await;
             return Ok(RelayProfileTestResult {
                 http_status: v1_status,
                 endpoint: v1_endpoint,
+                first_token_ms,
                 response_preview: format!(
                     "（Base URL 建议加上 /v1 前缀）{}",
                     response_text.chars().take(280).collect::<String>()
@@ -1106,14 +1137,121 @@ async fn send_relay_profile_test_attempt(
         }
     }
 
-    let response_text = response.text().await.unwrap_or_default();
+    let (response_text, first_token_ms) =
+        read_relay_profile_test_response(response, protocol, measure_first_token, started_at).await;
     Ok(RelayProfileTestResult {
         http_status,
         endpoint,
+        first_token_ms,
         response_preview: response_text.chars().take(320).collect(),
     })
 }
 
+async fn read_relay_profile_test_response(
+    response: reqwest::Response,
+    protocol: RelayProtocol,
+    measure_first_token: bool,
+    started_at: Instant,
+) -> (String, Option<u64>) {
+    if !measure_first_token {
+        return (response.text().await.unwrap_or_default(), None);
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    let mut pending = String::new();
+    let mut first_token_ms = None;
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else { break };
+        body.extend_from_slice(&chunk);
+        if first_token_ms.is_some() {
+            continue;
+        }
+        pending.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(line_end) = pending.find('\n') {
+            let line = pending[..line_end].trim_end_matches('\r').to_string();
+            pending.drain(..=line_end);
+            if relay_profile_test_data_has_content(protocol, &line) {
+                first_token_ms = Some(started_at.elapsed().as_millis() as u64);
+                break;
+            }
+        }
+    }
+    if first_token_ms.is_none()
+        && (relay_profile_test_data_has_content(protocol, pending.trim())
+            || relay_profile_test_data_has_content(protocol, &String::from_utf8_lossy(&body)))
+    {
+        first_token_ms = Some(started_at.elapsed().as_millis() as u64);
+    }
+    (String::from_utf8_lossy(&body).into_owned(), first_token_ms)
+}
+
+fn relay_profile_test_data_has_content(protocol: RelayProtocol, text: &str) -> bool {
+    let data = text
+        .strip_prefix("data:")
+        .map(str::trim_start)
+        .unwrap_or(text)
+        .trim();
+    if data.is_empty() || data == "[DONE]" {
+        return false;
+    }
+    serde_json::from_str::<Value>(data)
+        .ok()
+        .is_some_and(|value| relay_profile_test_value_has_content(protocol, &value))
+}
+
+fn relay_profile_test_value_has_content(protocol: RelayProtocol, value: &Value) -> bool {
+    fn non_empty_text(value: Option<&Value>) -> bool {
+        value
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+    }
+    fn responses_output_has_content(value: &Value) -> bool {
+        non_empty_text(value.get("output_text"))
+            || value
+                .get("output")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item.get("content")
+                            .and_then(Value::as_array)
+                            .is_some_and(|content| {
+                                content.iter().any(|part| non_empty_text(part.get("text")))
+                            })
+                    })
+                })
+    }
+
+    match protocol {
+        RelayProtocol::Responses => {
+            (value.get("type").and_then(Value::as_str) == Some("response.output_text.delta")
+                && non_empty_text(value.get("delta")))
+                || responses_output_has_content(value)
+                || value
+                    .get("response")
+                    .is_some_and(responses_output_has_content)
+        }
+        RelayProtocol::ChatCompletions => value
+            .get("choices")
+            .and_then(Value::as_array)
+            .is_some_and(|choices| {
+                choices.iter().any(|choice| {
+                    non_empty_text(choice.pointer("/delta/content"))
+                        || non_empty_text(choice.pointer("/message/content"))
+                })
+            }),
+        RelayProtocol::Anthropic => {
+            non_empty_text(value.pointer("/delta/text"))
+                || value
+                    .get("content")
+                    .or_else(|| value.pointer("/message/content"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|content| {
+                        content.iter().any(|part| non_empty_text(part.get("text")))
+                    })
+        }
+    }
+}
 fn relay_profile_test_protocol_label(protocol: RelayProtocol) -> &'static str {
     match protocol {
         RelayProtocol::Responses => "Responses API",
@@ -1122,26 +1260,48 @@ fn relay_profile_test_protocol_label(protocol: RelayProtocol) -> &'static str {
     }
 }
 
-fn relay_profile_test_payload(protocol: RelayProtocol, model: &str) -> Value {
+fn relay_profile_test_prompt(input_tokens: Option<u32>) -> String {
+    let Some(input_tokens) = input_tokens.filter(|tokens| *tokens > 0) else {
+        return "hi".to_string();
+    };
+    let instruction =
+        "This is a model speed test. Read the following input and reply only with OK.\n\n";
+    let mut prompt = String::with_capacity(instruction.len() + input_tokens as usize * 6);
+    prompt.push_str(instruction);
+    for _ in 0..input_tokens {
+        prompt.push_str(" token");
+    }
+    prompt
+}
+
+fn relay_profile_test_payload(
+    protocol: RelayProtocol,
+    model: &str,
+    test_prompt: &str,
+    stream: bool,
+) -> Value {
     match protocol {
         RelayProtocol::Responses => serde_json::json!({
             "model": model,
-            "input": "hi",
+            "input": test_prompt,
             "max_output_tokens": 16
+            ,"stream": stream
         }),
         RelayProtocol::ChatCompletions => serde_json::json!({
             "model": model,
             "messages": [
-                { "role": "user", "content": "hi" }
+                { "role": "user", "content": test_prompt }
             ],
             "max_tokens": 16
+            ,"stream": stream
         }),
         RelayProtocol::Anthropic => serde_json::json!({
             "model": model,
             "messages": [
-                { "role": "user", "content": "hi" }
+                { "role": "user", "content": test_prompt }
             ],
             "max_tokens": 16
+            ,"stream": stream
         }),
     }
 }
@@ -4559,6 +4719,107 @@ base_url = "http://127.0.0.1:45221/v1"
             relay_profile_test_protocols(&chat_profile, "deepseek-v3").unwrap(),
             vec![RelayProtocol::Anthropic, RelayProtocol::ChatCompletions]
         );
+    }
+
+    #[test]
+    fn relay_profile_speed_test_prompt_targets_input_tokens_for_every_protocol() {
+        let prompt = relay_profile_test_prompt(Some(50_000));
+        assert_eq!(prompt.matches(" token").count(), 50_000);
+        for protocol in [
+            RelayProtocol::Responses,
+            RelayProtocol::ChatCompletions,
+            RelayProtocol::Anthropic,
+        ] {
+            let payload = relay_profile_test_payload(protocol, "gpt-test", &prompt, true);
+            assert_eq!(payload["stream"], true);
+            let content = match protocol {
+                RelayProtocol::Responses => payload["input"].as_str().unwrap(),
+                RelayProtocol::ChatCompletions | RelayProtocol::Anthropic => {
+                    payload["messages"][0]["content"].as_str().unwrap()
+                }
+            };
+            assert_eq!(content, prompt);
+            let output_limit = match protocol {
+                RelayProtocol::Responses => payload["max_output_tokens"].as_u64().unwrap(),
+                RelayProtocol::ChatCompletions | RelayProtocol::Anthropic => {
+                    payload["max_tokens"].as_u64().unwrap()
+                }
+            };
+            assert_eq!(output_limit, 16);
+        }
+        assert_eq!(relay_profile_test_prompt(None), "hi");
+        assert_eq!(relay_profile_test_prompt(Some(0)), "hi");
+    }
+
+    #[test]
+    fn relay_profile_first_token_detection_requires_output_content() {
+        assert!(relay_profile_test_data_has_content(
+            RelayProtocol::Responses,
+            r#"data: {"type":"response.output_text.delta","delta":"O"}"#
+        ));
+        assert!(!relay_profile_test_data_has_content(
+            RelayProtocol::Responses,
+            r#"data: {"type":"response.created","response":{"id":"resp_1"}}"#
+        ));
+        assert!(relay_profile_test_data_has_content(
+            RelayProtocol::ChatCompletions,
+            r#"data: {"choices":[{"delta":{"content":"O"}}]}"#
+        ));
+        assert!(relay_profile_test_data_has_content(
+            RelayProtocol::Anthropic,
+            r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"O"}}"#
+        ));
+        assert!(!relay_profile_test_data_has_content(
+            RelayProtocol::ChatCompletions,
+            "data: [DONE]"
+        ));
+    }
+
+    #[tokio::test]
+    async fn relay_profile_speed_test_measures_first_output_token() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_test_http_request(&mut stream);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            stream
+                .write_all(
+                    b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n",
+                )
+                .unwrap();
+            stream.flush().unwrap();
+            thread::sleep(Duration::from_millis(30));
+            stream
+                .write_all(
+                    b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: [DONE]\n\n"
+                )
+                .unwrap();
+            request
+        });
+        let profile = RelayProfile {
+            base_url: format!("http://{address}/v1"),
+            api_key: "sk-test".to_string(),
+            protocol: RelayProtocol::Responses,
+            ..RelayProfile::default()
+        };
+
+        let result = test_relay_profile_with_input_tokens(&profile, "gpt-5.4", Some(50))
+            .await
+            .unwrap();
+        let request = server.join().unwrap();
+        let body = request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or_default();
+        let request_json: Value = serde_json::from_str(body).unwrap();
+
+        assert_eq!(request_json["stream"], true);
+        assert!(result.first_token_ms.is_some_and(|elapsed| elapsed >= 20));
     }
 
     #[tokio::test]

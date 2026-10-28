@@ -222,6 +222,7 @@ pub struct RelayProfileTestPayload {
     pub http_status: u16,
     pub endpoint: String,
     pub response_preview: String,
+    pub first_token_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3036,6 +3037,7 @@ pub fn delete_context_entry(request: ContextDeleteRequest) -> CommandResult<Cont
 pub async fn test_relay_profile(
     profile: RelayProfile,
     model: Option<String>,
+    input_tokens: Option<u32>,
 ) -> CommandResult<RelayProfileTestPayload> {
     let profile_name = if profile.name.trim().is_empty() {
         "未命名供应商"
@@ -3059,7 +3061,13 @@ pub async fn test_relay_profile(
             from_profile
         }
     };
-    match codex_elves_core::relay_config::test_relay_profile(&profile, &test_model).await {
+    match codex_elves_core::relay_config::test_relay_profile_with_input_tokens(
+        &profile,
+        &test_model,
+        input_tokens,
+    )
+    .await
+    {
         Ok(result) => {
             let status = if result.http_status < 400 {
                 "ok"
@@ -3068,14 +3076,23 @@ pub async fn test_relay_profile(
             };
             CommandResult {
                 status: status.to_string(),
-                message: format!(
-                    "已向「{profile_name}」用模型「{test_model}」发送 hi，HTTP {}。",
-                    result.http_status
-                ),
+                message: if input_tokens.is_some_and(|tokens| tokens > 0) {
+                    format!(
+                        "已向「{profile_name}」用模型「{test_model}」发送约 {} token 测速输入，HTTP {}。",
+                        input_tokens.unwrap_or_default(),
+                        result.http_status
+                    )
+                } else {
+                    format!(
+                        "已向「{profile_name}」用模型「{test_model}」发送 hi，HTTP {}。",
+                        result.http_status
+                    )
+                },
                 payload: RelayProfileTestPayload {
                     http_status: result.http_status,
                     endpoint: result.endpoint,
                     response_preview: result.response_preview,
+                    first_token_ms: result.first_token_ms,
                 },
             }
         }
@@ -3085,6 +3102,7 @@ pub async fn test_relay_profile(
                 http_status: 0,
                 endpoint: String::new(),
                 response_preview: String::new(),
+                first_token_ms: None,
             },
         ),
     }

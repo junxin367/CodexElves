@@ -512,8 +512,38 @@ function detectImageMime(bytes) {
   return "";
 }
 
-export function safeInlineImageSource(source) {
+function safeInlineSvgSource(source) {
+  if (typeof source !== "string" || source.length > Math.ceil(4 * 1024 * 1024 / 3) * 4 + 64) return null;
+  const header = /^data:image\/svg\+xml;base64,/iu.exec(source);
+  if (!header) return null;
+  const encoded = source.slice(header[0].length);
+  if (!encoded.length || encoded.length % 4 || !/^[A-Za-z0-9+/]+={0,2}$/u.test(encoded)) return null;
+  const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+  if (encoded.length / 4 * 3 - padding > 4 * 1024 * 1024) return null;
+  try {
+    const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const lower = text.toLowerCase();
+    if (!/<svg(?:\s|>)/u.test(lower)
+        || /<!doctype|<!entity|<script(?:\s|>)/u.test(lower)
+        || /<(?:foreignobject|iframe|object|embed|animate|animatemotion|animatetransform|set)(?:\s|>)/u.test(lower)
+        || /(?:javascript|vbscript):/u.test(lower)
+        || /\bon[a-z][\w:-]*\s*=/u.test(lower)
+        || /\b(?:href|xlink:href|src)\s*=\s*["']?\s*(?:https?:|\/\/|data:(?!image\/(?:png|jpeg|gif|webp);base64,))/u.test(lower)
+        || /\burl\(\s*(?:https?:|\/\/|data:)/u.test(lower)
+        || /@import\b/u.test(lower)) return null;
+    return source;
+  } catch {
+    return null;
+  }
+}
+
+export function safeInlineImageSource(source, { allowSvg = false } = {}) {
   if (typeof source !== "string" || source.length > Math.ceil(25 * 1024 * 1024 / 3) * 4 + 64) return null;
+  if (allowSvg) {
+    const svg = safeInlineSvgSource(source);
+    if (svg) return svg;
+  }
   const header = /^data:(image\/(?:png|jpeg|webp|gif));base64,/iu.exec(source);
   if (!header) return null;
   const encoded = source.slice(header[0].length);

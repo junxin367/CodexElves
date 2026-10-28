@@ -1846,9 +1846,52 @@ impl std::fmt::Display for UpstreamFailureContext {
 impl std::error::Error for UpstreamFailureContext {}
 
 pub fn upstream_failure_context(error: &anyhow::Error) -> Option<&UpstreamFailureContext> {
+    error.downcast_ref::<UpstreamFailureContext>()
+}
+
+pub fn upstream_error_chain(error: &anyhow::Error) -> String {
     error
         .chain()
-        .find_map(|cause| cause.downcast_ref::<UpstreamFailureContext>())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" <- ")
+}
+
+pub fn upstream_error_kind(error: &anyhow::Error) -> &'static str {
+    if upstream_error_is_timeout(error) {
+        return "timeout";
+    }
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_connect)
+    }) {
+        return "connect";
+    }
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_request)
+    }) {
+        return "request";
+    }
+    "unknown"
+}
+
+pub fn upstream_error_message(error: &anyhow::Error) -> String {
+    let mut message = error
+        .chain()
+        .skip(usize::from(upstream_failure_context(error).is_some()))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("：");
+    if message.is_empty() {
+        message = "上游请求失败".to_string();
+    }
+    if let Some(context) = upstream_failure_context(error) {
+        message.push_str(&format!("（诊断 ID：{}）", context.diagnostic_id));
+    }
+    message
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -3553,7 +3596,7 @@ async fn open_responses_proxy_request_once(
                         .and_then(Value::as_str)
                         .unwrap_or_default(),
                     None,
-                    Some(error.to_string()),
+                    Some(upstream_error_chain(&error)),
                 );
                 let _ = crate::diagnostic_log::append_diagnostic_log(
                     "protocol_proxy.upstream_request_failed",
@@ -3569,7 +3612,9 @@ async fn open_responses_proxy_request_once(
                         "candidateCount": relay_count,
                         "headerTimeoutSeconds": header_timeout.map(|timeout| timeout.as_secs()),
                         "willFailover": has_more_candidates,
-                        "error": error.to_string()
+                        "error": upstream_error_chain(&error),
+                        "errorKind": upstream_error_kind(&error),
+                        "errorChain": upstream_error_chain(&error)
                     }),
                 );
                 crate::relay_rotation::record_relay_request_failure(&settings);
@@ -4360,7 +4405,7 @@ pub async fn open_chat_completions_proxy_request(
         let upstream = match upstream {
             Ok(response) => response,
             Err(error) => {
-                let error_message = error.to_string();
+                let error_message = upstream_error_chain(&error);
                 audit.record_attempt(
                     request_json
                         .get("model")
@@ -4817,11 +4862,36 @@ fn buffered_upstream_response_as_responses_sse(
     })
 }
 
+fn observe_model_capacity_attempt(
+    audit: &mut crate::proxy_log::ProxyRequestAudit,
+    body: &[u8],
+    protocol: UpstreamResponseProtocol,
+) {
+    let mut observer = crate::proxy_log::UpstreamResponseModelObserver::default();
+    observer.observe_json(body, protocol);
+    observer.observe_sse_chunk(body, protocol);
+    observer.finish_sse(protocol);
+    let response_model = observer.model();
+    let attempt = audit
+        .upstream_attempts
+        .last_mut()
+        .expect("capacity retry attempt");
+    if response_model.is_some() {
+        attempt.upstream_response_model = response_model;
+    }
+    attempt.outcome = observer.outcome.or(attempt.outcome);
+    attempt.error_code = observer.error_code.or_else(|| attempt.error_code.clone());
+    attempt.error = observer.error.or_else(|| attempt.error.clone());
+    audit.outcome = attempt.outcome;
+    audit.error_code = attempt.error_code.clone();
+}
+
 async fn retry_model_capacity_responses_stream(
     original_request: &Value,
     settings: &crate::settings::BackendSettings,
     request_context: &RequestContext,
     first_round_sse_text: String,
+    audit: &mut crate::proxy_log::ProxyRequestAudit,
 ) -> String {
     let model = original_request
         .get("model")
@@ -4836,6 +4906,14 @@ async fn retry_model_capacity_responses_stream(
     let Ok(request_body) = serde_json::to_string(original_request) else {
         return first_round_sse_text;
     };
+    if audit.upstream_attempts.is_empty() {
+        audit.record_attempt(model, None, None);
+    }
+    observe_model_capacity_attempt(
+        audit,
+        first_round_sse_text.as_bytes(),
+        UpstreamResponseProtocol::Responses,
+    );
     let mut current_sse_text = first_round_sse_text;
     let stream_idle_timeout = stream_idle_timeout_for_request(Some(original_request));
 
@@ -4862,12 +4940,22 @@ async fn retry_model_capacity_responses_stream(
         .await
         {
             Ok(upstream) => upstream,
-            Err(_) => break,
+            Err(error) => {
+                audit.record_attempt(model, None, Some(error.to_string()));
+                audit.outcome = Some(crate::proxy_log::ProxyRequestOutcome::Failed);
+                audit.error_code = None;
+                break;
+            }
         };
         let status_code = upstream.status_code;
         let is_success = upstream.is_success();
         let is_stream = upstream.is_stream;
         let response_protocol = upstream.response_protocol;
+        audit.record_attempt(
+            model,
+            Some(status_code),
+            (!is_success).then(|| format!("上游返回 HTTP {status_code}")),
+        );
 
         let body = match upstream
             .into_body_bytes_with_idle_timeout(stream_idle_timeout)
@@ -4875,6 +4963,13 @@ async fn retry_model_capacity_responses_stream(
         {
             Ok(body) => body,
             Err(error) => {
+                let attempt = audit
+                    .upstream_attempts
+                    .last_mut()
+                    .expect("capacity retry attempt");
+                attempt.outcome = Some(crate::proxy_log::ProxyRequestOutcome::Failed);
+                attempt.error = Some(error.to_string());
+                audit.outcome = Some(crate::proxy_log::ProxyRequestOutcome::Failed);
                 let _ = crate::diagnostic_log::append_diagnostic_log(
                     "protocol_proxy.model_capacity_retry_stream_failed",
                     json!({
@@ -4887,6 +4982,7 @@ async fn retry_model_capacity_responses_stream(
             }
         };
 
+        observe_model_capacity_attempt(audit, &body, response_protocol);
         let is_capacity_error =
             upstream_response_has_retryable_model_capacity_error(status_code, &body);
         if is_capacity_error {
@@ -4925,6 +5021,13 @@ async fn retry_model_capacity_responses_stream(
         ) {
             Ok(converted) => return converted,
             Err(error) => {
+                let attempt = audit
+                    .upstream_attempts
+                    .last_mut()
+                    .expect("capacity retry attempt");
+                attempt.outcome = Some(crate::proxy_log::ProxyRequestOutcome::Failed);
+                attempt.error = Some(error.to_string());
+                audit.outcome = Some(crate::proxy_log::ProxyRequestOutcome::Failed);
                 let _ = crate::diagnostic_log::append_diagnostic_log(
                     "protocol_proxy.model_capacity_retry_conversion_failed",
                     json!({"model":model,"error":error.to_string()}),
@@ -4969,11 +5072,30 @@ pub async fn apply_continue_thinking_to_responses_stream_with_request_context(
     request_context: &RequestContext,
     first_round_sse_text: String,
 ) -> ContinueThinkingResult {
+    let mut audit = crate::proxy_log::ProxyRequestAudit::default();
+    apply_continue_thinking_to_responses_stream_with_request_context_and_audit(
+        original_request,
+        settings,
+        request_context,
+        first_round_sse_text,
+        &mut audit,
+    )
+    .await
+}
+
+pub(crate) async fn apply_continue_thinking_to_responses_stream_with_request_context_and_audit(
+    original_request: &Value,
+    settings: crate::settings::BackendSettings,
+    request_context: &RequestContext,
+    first_round_sse_text: String,
+    audit: &mut crate::proxy_log::ProxyRequestAudit,
+) -> ContinueThinkingResult {
     let first_round_sse_text = retry_model_capacity_responses_stream(
         original_request,
         &settings,
         request_context,
         first_round_sse_text,
+        audit,
     )
     .await;
     let model = original_request
@@ -16184,6 +16306,52 @@ mod compaction_model_override_tests {
             response["output"][0]["content"][0]["text"],
             "<summary>kept</summary>"
         );
+    }
+}
+
+#[cfg(test)]
+mod upstream_error_reporting_tests {
+    use super::*;
+
+    #[test]
+    fn message_preserves_supplier_root_cause_and_diagnostic_id() {
+        let source = std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset by peer",
+        );
+        let error = anyhow::Error::new(source)
+            .context("上游请求失败")
+            .context("供应商「CPA」请求上游失败，endpoint: https://example.test/v1/messages")
+            .context(UpstreamFailureContext {
+                audit: Default::default(),
+                diagnostic_id: "ppx-test-177".to_string(),
+                relay_id: Some("relay-cpa".to_string()),
+                relay_name: Some("CPA".to_string()),
+                endpoint: Some("https://example.test/v1/messages".to_string()),
+                response_protocol: Some(UpstreamResponseProtocol::Anthropic),
+                bridge_remote_compaction_v2: false,
+            });
+
+        let message = upstream_error_message(&error);
+        assert!(upstream_failure_context(&error).is_some());
+        assert!(message.starts_with("供应商「CPA」"));
+        assert!(message.contains("上游请求失败"));
+        assert!(message.contains("connection reset by peer"));
+        assert!(message.ends_with("（诊断 ID：ppx-test-177）"));
+        assert!(!message.starts_with("upstream failure context"));
+
+        let chain = upstream_error_chain(&error);
+        assert!(chain.contains("upstream failure context ppx-test-177"));
+        assert!(chain.contains("connection reset by peer"));
+        assert_eq!(upstream_error_kind(&error), "unknown");
+    }
+
+    #[tokio::test]
+    async fn timeout_kind_is_preserved_from_elapsed_error() {
+        let elapsed = tokio::time::timeout(Duration::ZERO, std::future::pending::<()>())
+            .await
+            .unwrap_err();
+        assert_eq!(upstream_error_kind(&anyhow::Error::new(elapsed)), "timeout");
     }
 }
 

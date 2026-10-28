@@ -819,8 +819,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .appearance-screen .appearance-heading{min-height:56px;padding:10px 16px;border-bottom:1px solid var(--line)}
 .appearance-screen .appearance-heading h2{font-size:1.07143rem;font-weight:600}
 .appearance-layout{display:flex;flex:1;min-width:0;min-height:0}
-.appearance-nav{display:flex;flex:0 0 220px;flex-direction:column;gap:3px;min-width:0;padding:16px 10px;border-right:1px solid var(--line);background:var(--side);overflow:auto}
-.appearance-nav-item{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;padding:8px 12px;border:0;border-radius:var(--radius-control);background:transparent;color:var(--muted);font:inherit;text-align:left}
+.appearance-nav{display:flex;flex:0 0 max-content;width:max-content;min-width:116px;flex-direction:column;gap:3px;padding:16px 10px;border-right:1px solid var(--line);background:var(--side);overflow:auto}
+.appearance-nav-item{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;padding:8px 12px;border:0;border-radius:var(--radius-control);background:transparent;color:var(--muted);font:inherit;text-align:left;white-space:nowrap}
 .appearance-nav-item:hover,.appearance-nav-item:focus-visible{background:var(--hover);color:var(--text)}
 .appearance-nav-item[aria-selected=true]{background:color-mix(in srgb,var(--accent) 11%,var(--side));box-shadow:inset 3px 0 var(--accent);color:var(--text);font-weight:600}
 .appearance-nav-item[hidden]{display:none}
@@ -909,8 +909,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 }
 @media(prefers-reduced-motion:reduce){.session-tools-screen{transition-duration:1ms}}
 @media(max-width:760px){
-  .appearance-nav{flex-basis:132px;padding:12px 8px}
-  .appearance-nav-item{min-height:44px;gap:7px;padding:8px 9px;font-size:.85714rem}
+  .appearance-nav{flex-basis:max-content;min-width:116px;padding:12px 8px}
+  .appearance-nav-item{min-height:44px;gap:8px;padding:8px;font-size:.85714rem}
   .appearance-nav-icon{flex-basis:18px;width:18px;height:18px}
   .appearance-nav-icon>.ui-icon{width:17px;height:17px}
   .appearance-panels>.appearance-settings-page{padding:20px 16px}
@@ -1019,3 +1019,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 @media(pointer:coarse),(max-width:760px){
   .session-files-list .session-tools-file{min-height:30px;height:30px}
 }
+
+.side-thread-expired-banner{display:flex;flex-direction:column;gap:4px;margin:0 0 18px;padding:12px 14px;border:1px solid color-mix(in srgb,var(--danger) 28%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--danger) 7%,var(--side));color:var(--text);line-height:1.6}
+.side-thread-expired-banner strong{font-size:.85714rem;color:var(--danger);font-weight:600}
+.side-thread-expired-banner span{font-size:.78571rem;color:var(--muted)}

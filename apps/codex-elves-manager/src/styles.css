@@ -4417,6 +4417,16 @@ body {
   overflow-y: auto;
 }
 
+.relay-speed-test-modal.has-results {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.relay-speed-test-modal.has-results > * {
+  flex-shrink: 0;
+}
+
 .speed-test-mode-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4453,6 +4463,11 @@ body {
   box-shadow: inset 0 0 0 1px hsl(var(--primary) / 0.16);
 }
 
+.speed-test-mode-card:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
 .speed-test-mode-card strong {
   font-size: 13px;
 }
@@ -4463,7 +4478,6 @@ body {
   line-height: 1.45;
 }
 
-.speed-test-all-note,
 .speed-test-running {
   display: flex;
   align-items: center;
@@ -4476,11 +4490,6 @@ body {
   font-size: 12px;
   line-height: 1.5;
   padding: 9px 10px;
-}
-
-.speed-test-all-note svg {
-  flex: 0 0 auto;
-  color: hsl(var(--primary));
 }
 
 .speed-test-running {
@@ -4509,28 +4518,33 @@ body {
   margin-top: 14px;
 }
 
-.speed-test-result-summary {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+.relay-speed-test-modal.has-results .speed-test-result-panel {
+  flex: 1;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
 }
 
-.speed-test-result-summary > div {
-  display: grid;
-  gap: 2px;
-  border: 1px solid hsl(var(--border));
-  border-radius: 8px;
-  background: hsl(var(--surface-sunken));
-  padding: 8px 10px;
+.speed-test-result-summary {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  min-width: 0;
 }
 
 .speed-test-result-summary span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  white-space: nowrap;
   color: hsl(var(--muted-foreground));
   font-size: 11px;
 }
 
 .speed-test-result-summary strong {
-  font-size: 15px;
+  color: hsl(var(--foreground));
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .speed-test-result-list {
@@ -4538,6 +4552,12 @@ body {
   gap: 6px;
   max-height: 240px;
   overflow: auto;
+}
+
+.relay-speed-test-modal.has-results .speed-test-result-list {
+  align-content: start;
+  max-height: none;
+  min-height: 0;
 }
 
 .speed-test-result-row {
@@ -4581,6 +4601,11 @@ body {
 }
 
 .speed-test-result-time {
+  display: inline-flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  white-space: nowrap;
   color: hsl(var(--foreground));
   font-family: Consolas, "SFMono-Regular", monospace;
   font-size: 12px;
@@ -4617,10 +4642,51 @@ body {
   background: hsl(var(--destructive));
 }
 
-.speed-test-sort-note {
-  margin: 0;
+.speed-test-result-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+}
+
+.speed-test-result-toolbar .speed-test-sort-controls {
+  flex-shrink: 0;
+}
+
+.speed-test-sort-controls {
+  display: inline-flex;
+  gap: 2px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 7px;
+  background: hsl(var(--surface-sunken));
+  padding: 2px;
+}
+
+.speed-test-sort-controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 28px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
   color: hsl(var(--muted-foreground));
+  cursor: pointer;
   font-size: 11px;
+  padding: 4px 8px;
+}
+
+.speed-test-sort-controls button:hover,
+.speed-test-sort-controls button:focus-visible {
+  color: hsl(var(--foreground));
+  outline: none;
+}
+
+.speed-test-sort-controls button.active {
+  background: hsl(var(--background));
+  box-shadow: 0 1px 2px hsl(var(--foreground) / 0.08);
+  color: hsl(var(--foreground));
 }
 
 .relay-test-result {
@@ -7180,9 +7246,6 @@ body {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .speed-test-result-summary {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 420px) {

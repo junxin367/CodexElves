@@ -1,5 +1,6 @@
 import { requestRemote } from "./channels.js";
 import { mountSessionFiles } from "./session-files.js";
+import { safeInlineImageSource } from "./attachments.js";
 
 const sections = [
   ["staged", "已暂存"], ["unstaged", "未暂存"], ["untracked", "未跟踪"]
@@ -808,14 +809,15 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     const comparison = node("div", "session-tools-image-comparison");
     for (const [side, label] of [["before", "修改前"], ["after", "修改后"]]) {
       const value = result[side];
+      const source = safeInlineImageSource(value?.dataUrl, { allowSvg: true });
       const figure = node("figure");
       figure.append(node("figcaption", "", label));
       if (value?.exists === false) figure.append(node("p", "session-tools-empty", "此侧不存在文件"));
-      else if (imageSource(value?.dataUrl)) {
+      else if (imageSource(value?.dataUrl) && source) {
         const link = node("a", "session-tools-image-link");
-        link.href = value.dataUrl;
+        link.href = source;
         const image = node("img");
-        image.alt = `${file.path} · ${label}`; image.src = value.dataUrl;
+        image.alt = `${file.path} · ${label}`; image.src = source;
         link.append(image);
         link.addEventListener("click", event => {
           event.preventDefault(); event.stopPropagation();

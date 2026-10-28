@@ -1487,6 +1487,7 @@ function normalizeRelatedView(value, id = value?.threadId) {
       ...(source != null ? { openedFromThreadId: source } : {}), kind: value.kind,
       ...(typeof value.name === "string" ? { name: value.name } : {}),
       ...(typeof value.ephemeral === "boolean" ? { ephemeral: value.ephemeral } : {}),
+      ...(value.expired === true ? { expired: true } : {}),
       ...(value.returnToParent === true ? { returnToParent: true } : {}),
       ...(value.owner === relatedNavigationOwner ? { owner: value.owner } : {}) } : null;
 }
@@ -1695,12 +1696,12 @@ function scheduleRelatedSessionCheck() {
   clearTimeout(relatedSessionCheckTimer);
   relatedSessionCheckTimer = null;
   const view = normalizeRelatedView(relatedSessionView, selectedId);
-  if (!view || view.kind !== "side" || !selectedId || !session || !connected) return;
+  if (!view || view.kind !== "side" || !selectedId || !session || sideThreadExpired(selectedId) || !connected) return;
   const id = selectedId, scope = privateInputScope(session), version = selectionVersion;
   relatedSessionCheckTimer = setTimeout(async () => {
     relatedSessionCheckTimer = null;
     if (scope !== privateInputScope(session) || selectedId !== id || version !== selectionVersion
-        || !normalizeRelatedView(relatedSessionView, id) || !connected) return;
+        || !normalizeRelatedView(relatedSessionView, id) || sideThreadExpired(id) || !connected) return;
     try {
       const currentView = normalizeRelatedView(relatedSessionView, id);
       const parentThreadId = currentView?.parentThreadId || currentView?.openedFromThreadId;
@@ -1731,9 +1732,37 @@ function isMissingThreadError(error) {
     || message.includes("unknown thread:")
     || message.includes("no rollout found for thread id ");
 }
+function sideThreadExpired(id = selectedId) {
+  const view = normalizeRelatedView(relatedSessionView, id)
+    || normalizeRelatedView(relatedThreadViews.get(id), id);
+  return view?.kind === "side" && (view.expired === true || thread?.id === id && thread.sideThreadExpired === true);
+}
 async function retireExpiredSideThread(id) {
-  if (id !== selectedId || normalizeRelatedView(relatedSessionView, id)?.kind !== "side") return false;
-  await retireNativeSideThreads([id], { reason: "expired" });
+  const current = normalizeRelatedView(relatedSessionView, id);
+  if (id !== selectedId || current?.kind !== "side") return false;
+  const expired = { ...current, expired: true };
+  relatedSessionView = expired;
+  relatedThreadViews.set(id, expired);
+  sessionMenu?.markSideThreadRead(id);
+  sessionMenu?.removeThread(id);
+  if (sidebar) {
+    markSidebarThreadReadLocally(id);
+    sidebar.unreadSideThreads = (sidebar.unreadSideThreads || []).filter(item => item.id !== id);
+  }
+  if (thread?.id === id) {
+    thread = { ...thread, readOnly: true, sideThreadExpired: true, sideThreadClosed: false };
+  } else {
+    thread = {
+      id, title: current.name || "Side chat", viewKind: "side", readOnly: true,
+      sideThreadExpired: true, parentThreadId: current.parentThreadId || current.openedFromThreadId
+    };
+  }
+  historyInitialized = true;
+  transcriptChecking = false;
+  historyError = "";
+  renderMessages();
+  syncRelatedSessionLayout();
+  renderSidebar();
   return true;
 }
 async function clearMissingThreadSelection(id) {
@@ -1967,7 +1996,7 @@ async function finishRelatedOperation(record, result, { allowSelection = false }
   relatedThreadOperations.delete(relatedOperationKey(record)); persistRelatedOperations();
   if (record.action === "createSideThread") {
     sessionMenu?.updateSideThread(record.parentThreadId, { id: result.threadId,
-      title: result.thread?.title || "新建侧边会话", hasUnreadTurn: false });
+      title: result.thread?.title || "Side chat", hasUnreadTurn: false });
     rememberRelatedView(result.threadId, "side", record.parentThreadId);
     filterSideThreadSidebar(sidebar);
     renderSidebar();
@@ -1978,7 +2007,7 @@ async function finishRelatedOperation(record, result, { allowSelection = false }
         const state = { ...history.state }; delete state[sideCreationHistoryKey];
         history.replaceState(state, "", location.href);
       }
-      await openRelatedThread({ id: result.threadId, title: result.thread?.title || "新建侧边会话" }, "side",
+      await openRelatedThread({ id: result.threadId, title: result.thread?.title || "Side chat" }, "side",
         record.parentThreadId, { initialThread: record.state === "submitting"
             && result.synchronization?.status !== "failed" ? result.thread : null,
           replaceHistory: prepared, preparedView: prepared,
@@ -5732,7 +5761,9 @@ function shell() {
     $("#prompt").setRangeText(text, $("#prompt").selectionStart, $("#prompt").selectionEnd, "end");
     handlePromptInput(event, { preserveCanonical: true });
   };
-  $("#prompt").oninput = handlePromptInput;
+  $("#prompt").oninput = event => handlePromptInput(event, {
+    preserveCanonical: ["insertParagraph", "insertLineBreak"].includes(event.inputType)
+  });
   $("#prompt").oncompositionend = event => handlePromptInput(event);
   $("#prompt").onkeyup = event => {
     if (!event.isComposing && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) void updateSkillMenu();
@@ -6551,7 +6582,9 @@ function enableImagePreviewZoom(viewport, image) {
 }
 function openImagePreview(link, image) {
   const source = link.getAttribute("href") || image.originalImageSource || image.getAttribute("src") || "";
-  if (!/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(source) && !safeInlineImageSource(source)) return;
+  const remoteSource = /^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(source);
+  const inlineSource = safeInlineImageSource(source, { allowSvg: true });
+  if (!remoteSource && !inlineSource) return;
   $("#image-preview-dialog")?.close();
   rememberTransientHistory();
   const trigger = link;
@@ -6609,8 +6642,8 @@ function openImagePreview(link, image) {
     finishLoading();
   };
   preview.onload = present;
-  if (/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(source)) preview.crossOrigin = "anonymous";
-  preview.alt = image.alt || "图片预览"; preview.src = remoteMediaUrl(source);
+  if (remoteSource) preview.crossOrigin = "anonymous";
+  preview.alt = image.alt || "图片预览"; preview.src = remoteMediaUrl(remoteSource ? source : inlineSource);
   preview.onerror = () => {
     disposeZoom?.();
     viewport.textContent = "图片不可用，请关闭后重试";
@@ -9107,6 +9140,15 @@ function renderMessages(keepScroll = true) {
   const lastRealTurn = pendingTurn
     ? [...sorted].reverse().find(turn => turn.id !== pendingTurn.id) : sorted.at(-1);
   loadMessageSkillChoices(sorted.flatMap(turn => turn.items || []));
+  if (sideThreadExpired()) {
+    const banner = element("div", "side-thread-expired-banner");
+    banner.setAttribute("role", "status");
+    banner.append(
+      element("strong", "", "侧边会话已过期"),
+      element("span", "", "该会话已结束，当前仅可查看已保留的消息。")
+    );
+    children.push(banner);
+  }
   if (historyError && sorted.length)
     children.push(historyLoadButton("最新记录加载失败，重试", () => void loadHistory()));
   if (historyCursor) {
@@ -9582,6 +9624,7 @@ async function loadHistory(older = false, version = selectionVersion, itemsTurnI
 }
 async function readHistoryPage(older, version, itemsTurnId) {
   if (pageLeaving || version !== selectionVersion || !selectedId || threadDeleted(selectedId)) return;
+  if (sideThreadExpired(selectedId)) return;
   const itemTurn = itemsTurnId ? turns.get(itemsTurnId) : null;
   if ((itemsTurnId && !itemTurn?.itemsNextCursor) || (older && !itemsTurnId && !historyCursor)) return;
   historyLoading = true; historyLoadingVersion = version;

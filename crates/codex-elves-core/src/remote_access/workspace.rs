@@ -1531,7 +1531,21 @@ fn verify_open_file(file: &File, _: &Path, root: &Path) -> Result<(), ApiError> 
         return Err(ApiError::new(403, "无法确认文件实际路径"));
     }
     let actual = PathBuf::from(OsString::from_wide(&buffer[..length]));
-    if !actual.starts_with(root) {
+    // GetFinalPathNameByHandleW returns a verbatim path (for example
+    // `\\?\E:\repo\file`) while `canonicalize` commonly returns the
+    // regular drive path (`E:\repo`). Compare the same namespace so
+    // every ordinary local file is not rejected as outside the workspace.
+    let actual = actual
+        .to_string_lossy()
+        .strip_prefix(r"\\?\")
+        .map(PathBuf::from)
+        .unwrap_or(actual);
+    let root = root
+        .to_string_lossy()
+        .strip_prefix(r"\\?\")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.to_owned());
+    if !actual.starts_with(&root) {
         return Err(ApiError::new(403, "文件实际路径已越出当前 Git 仓库"));
     }
     Ok(())

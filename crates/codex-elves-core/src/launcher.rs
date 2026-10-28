@@ -2197,7 +2197,7 @@ async fn handle_protocol_proxy_connection_inner(
                 );
                 progress.audit = context.audit.clone();
             }
-            let error_message = error.to_string();
+            let error_message = crate::protocol_proxy::upstream_error_message(&error);
             let upstream_timed_out = crate::protocol_proxy::upstream_error_is_timeout(&error);
             let bridge_remote_compaction_v2 = failure_context.as_ref().map_or_else(
                 || {
@@ -2681,11 +2681,12 @@ async fn handle_protocol_proxy_connection_inner(
                         .expect("只有可解析的上游请求才会进入自动续思考");
                     let settings = SettingsStore::default().load().unwrap_or_default();
                     let result =
-                        crate::protocol_proxy::apply_continue_thinking_to_responses_stream_with_request_context(
+                        crate::protocol_proxy::apply_continue_thinking_to_responses_stream_with_request_context_and_audit(
                             request,
                             settings,
                             request_context,
                             first_round_sse_text,
+                            &mut request_metadata.audit,
                         )
                         .await;
                     continue_thinking_log = LocalContinueThinkingLog {
@@ -3225,7 +3226,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 );
                 progress.audit = context.audit.clone();
             }
-            let error_message = error.to_string();
+            let error_message = crate::protocol_proxy::upstream_error_message(&error);
             let failed = if request_json.as_ref().is_some_and(|request| {
                 crate::layered_compaction::is_remote_compaction_v2_request(Some(request))
             }) {
@@ -4138,7 +4139,7 @@ async fn handle_chat_completions_proxy_connection(
                     &context.audit,
                 );
             }
-            let error_message = error.to_string();
+            let error_message = crate::protocol_proxy::upstream_error_message(&error);
             let body = serde_json::to_vec(&serde_json::json!({
                 "status": "failed",
                 "message": error_message

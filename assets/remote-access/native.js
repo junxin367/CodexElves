@@ -612,14 +612,29 @@
   }
   const state = async key => await manager.storage.readGlobalState(key);
   const array = value => Array.isArray(value) ? value : [];
+  const GENERIC_MAIN_THREAD_TITLES = new Set(["新会话", "new chat", "new conversation"]);
+  function cleanThreadTitle(value) {
+    const title = String(value || "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").trim();
+    return Array.from(title).slice(0, 160).join("");
+  }
+  function isGenericMainThreadTitle(value) {
+    return GENERIC_MAIN_THREAD_TITLES.has(String(value || "").trim().toLowerCase());
+  }
+  function mainThreadTitle(...sources) {
+    const titles = sources.map(cleanThreadTitle).filter(Boolean);
+    return titles.find(title => !isGenericMainThreadTitle(title)) || titles[0] || "新会话";
+  }
   function notificationThread(id, conversation = manager.getConversation(id)) {
     if (typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,120}$/.test(id) || isDeletedThread(id)) return null;
     const current = manager.getThreadListSummary?.(id);
+    const cached = nativeCatalog.get(id);
     const sources = [conversation, current, nativeCatalog.get(id)].filter(Boolean);
     if (!sources.length || sources.some(thread => thread.threadSource === "subagent"
         || thread.source === "subagent" || thread.source?.subAgent || thread.source?.subagent)) return null;
-    const title = Array.from(String(sideThreadTitle(conversation) || current?.title || conversation?.title || conversation?.name || "新会话")
-      .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")).slice(0, 160).join("") || "新会话";
+    const title = conversation?.sideConversation === true
+      ? sideThreadTitle(conversation, current?.title || current?.name || cached?.title)
+      : mainThreadTitle(current?.title, current?.name, cached?.title, cached?.name,
+        conversation?.title, conversation?.name);
     return { threadId: id, title };
   }
   function appendNotification(action, kind, thread, notificationId = null) {
@@ -860,32 +875,32 @@
         && current.threadStartKind !== "aeon" && current.threadSource !== "aeon"
     };
   }
-  function sideThreadTitle(conversation) {
+  function sideThreadTitle(conversation, fallback = "") {
     if (conversation?.sideConversation !== true || subagentIdentity(conversation)) return null;
-    for (const turn of nativeConversationTurns(conversation)) {
-      if (turn.pendingUserMessageAdmission) continue;
-      const message = array(turn.items).find(item =>
-        (item?.type === "userMessage" || item?.type === "steeringUserMessage" && item.status === "accepted")
-        && !item.remotePendingInput && !item.remoteCompactionInput);
-      if (!message) continue;
-      const input = message.type === "userMessage" ? message.content : message.input;
-      const text = array(input).filter(part => part?.type === "text" && typeof part.text === "string")
-        .map(part => part.text).join(" ").replace(/\s+/g, " ").trim();
-      return Array.from(text).slice(0, 10).join("") || "新建侧边会话";
-    }
-    return "新建侧边会话";
+    const candidate = [fallback, conversation?.title, conversation?.name]
+      .map(cleanThreadTitle)
+      .find(value => value && !isGenericMainThreadTitle(value));
+    return candidate || "Side chat";
   }
   function summary(thread, activityTimes) {
     const id = thread.conversationId || thread.id;
     const current = nativeListSummary(id) || thread;
+    const cached = nativeCatalog.get(id);
+    const conversation = manager.getConversation(id);
     // 目录读取可能比桌面缓存新；随后采用旧摘要时不能把更新时间回退。
     const updatedAt = Math.max(timestamp(current.updatedAt), timestamp(thread.updatedAt),
-      nativeCatalog.get(id)?.updatedAt || 0);
+      cached?.updatedAt || 0);
     const unread = nativeUnreadState(thread, id);
     const { status, ...priority } = sidebarPriority(id, current, unread, activityTimes);
+    const side = conversation?.sideConversation === true || thread?.sideConversation === true;
+    const title = side
+      ? sideThreadTitle(conversation || thread, current.title || current.name || cached?.title
+        || thread.title || thread.name)
+      : mainThreadTitle(current.title, current.name, thread.name, thread.title, thread.preview,
+        cached?.title, cached?.name, conversation?.title, conversation?.name);
     const result = {
-      id, title: sideThreadTitle(manager.getConversation(id) || thread)
-        || current.title || thread.title || thread.name || thread.preview || "新会话", cwd: current.cwd || thread.cwd || "",
+      id, title,
+      cwd: current.cwd || thread.cwd || "",
       createdAt: timestamp(current.createdAt ?? thread.createdAt), updatedAt,
       recencyAt: timestamp(current.recencyAt ?? current.updatedAt ?? thread.recencyAt ?? thread.updatedAt), hasUnreadTurn: unread,
       status, priority,
@@ -1450,7 +1465,7 @@
           const conversation = id && sourceManager.getConversation(id);
           if (tab.tabType?.kind !== "local-side-chat" || !conversation?.sideConversation
               || conversation.forkedFromId !== parentThreadId || subagentIdentity(conversation)) continue;
-          next.set(id, { threadId: id, parentThreadId, title: sideThreadTitle(conversation),
+          next.set(id, { threadId: id, parentThreadId, title: sideThreadTitle(conversation, tab.title),
             createdAtMs: timestamp(conversation.createdAt), closed: false, scope, controller, tab });
         }
       }

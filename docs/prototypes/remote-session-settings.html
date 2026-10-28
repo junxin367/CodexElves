@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>远程会话设置页</title>
+  <link rel="stylesheet" href="../../assets/remote-access/style.css">
+  <style>
+    :root{--settings-nav:176px}
+    body{margin:0;background:#e9edf3;color:var(--text)}
+    .demo{position:relative;min-height:100dvh;max-width:900px;margin:0 auto;overflow:hidden;background:var(--bg);box-shadow:0 0 36px #1720331a}
+    .session{display:flex;min-height:100dvh;flex-direction:column}
+    .session .conversation-header{min-height:58px;padding:8px 18px}
+    .demo-messages{display:grid;align-content:start;gap:12px;flex:1;padding:20px 18px;background:var(--side)}
+    .demo-card{padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--bg);line-height:1.6}
+    .demo-card strong{display:block;margin-bottom:4px}
+    .demo-card small{display:block;color:var(--muted);margin-top:4px}
+    .demo-actions{position:absolute;right:18px;bottom:18px;display:flex;gap:8px;padding:8px;border:1px solid var(--line);border-radius:14px;background:var(--bg);box-shadow:0 8px 24px #17203318}
+    .settings{position:absolute;inset:0;z-index:10;display:grid;grid-template-columns:var(--settings-nav) minmax(0,1fr);background:var(--bg);transform:translateX(100%);pointer-events:none;transition:transform .22s ease-out}
+    .settings.open{transform:translateX(0);pointer-events:auto}
+    .settings-nav{display:flex;min-width:0;flex-direction:column;padding:16px 10px;border-right:1px solid var(--line);background:var(--side)}
+    .settings-nav h1{margin:0 4px 4px;font-size:1.2rem}
+    .settings-nav p{margin:0 4px 18px;color:var(--muted);font-size:.72rem}
+    .settings-nav-list{display:grid;gap:4px}
+    .settings-nav-item{display:flex;align-items:center;gap:9px;width:100%;min-height:40px;padding:8px 10px;border:0;border-radius:9px;background:transparent;color:var(--muted);text-align:left}
+    .settings-nav-item:hover,.settings-nav-item:focus-visible{background:var(--hover)}
+    .settings-nav-item[aria-current=page]{background:color-mix(in srgb,var(--skill) 16%,transparent);color:var(--accent);font-weight:600}
+    .settings-nav-icon{display:grid;width:22px;place-items:center;font-size:20px;line-height:1}
+    .settings-version{margin-top:auto;color:var(--muted);font-size:.72rem;text-align:center}
+    .settings-main{display:flex;min-width:0;min-height:0;flex-direction:column}
+    .settings-header{display:flex;align-items:center;gap:5px;min-height:58px;padding:8px 12px;border-bottom:1px solid var(--line)}
+    .settings-title{display:flex;min-width:0;flex:1;flex-direction:column;gap:2px}
+    .settings-title strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .settings-title span{color:var(--muted);font-size:.72rem}
+    .settings-body{min-width:0;flex:1;overflow:auto;padding:22px 24px}
+    .settings-panel{display:none;max-width:620px}
+    .settings-panel.active{display:block;animation:panel-in .16s ease-out}
+    @keyframes panel-in{from{opacity:0;transform:translateX(8px)}to{opacity:1;transform:translateX(0)}}
+    .settings-panel h2{margin:0 0 5px;font-size:1.25rem}
+    .settings-panel>p{margin:0 0 20px;color:var(--muted);line-height:1.6}
+    .settings-label{margin:18px 0 8px;color:var(--muted);font-size:.78rem;font-weight:600}
+    .settings-card{margin-bottom:12px;padding:13px;border:1px solid var(--line);border-radius:12px;background:var(--bg)}
+    .settings-card.status{border-color:color-mix(in srgb,var(--green) 28%,var(--line));background:color-mix(in srgb,var(--green) 6%,var(--bg))}
+    .settings-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:44px}
+    .settings-row+.settings-row{margin-top:9px;padding-top:9px;border-top:1px solid var(--line)}
+    .settings-copy{display:flex;min-width:0;flex:1;flex-direction:column;gap:3px}
+    .settings-copy strong{font-size:.88rem}
+    .settings-copy span{color:var(--muted);font-size:.76rem;line-height:1.5}
+    .online{display:inline-flex;align-items:center;gap:5px;color:var(--green);font-size:.76rem;font-weight:600}
+    .online:before{width:7px;height:7px;border-radius:50%;background:currentColor;content:""}
+    .settings-select{min-width:120px;padding:8px 10px;font-size:.78rem}
+    .settings-switch{display:inline-flex;width:40px;height:23px;align-items:center;padding:0;border:0;border-radius:999px;background:var(--line)}
+    .settings-switch:after{width:17px;height:17px;margin-left:3px;border-radius:50%;background:var(--bg);box-shadow:0 1px 3px #17203330;content:"";transition:transform .15s}
+    .settings-switch[aria-checked=true]{background:var(--skill)}
+    .settings-switch[aria-checked=true]:after{transform:translateX(17px)}
+    .settings-buttons{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+    .settings-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:28px;padding-top:14px;border-top:1px solid var(--line)}
+    .settings-footer .version{color:var(--skill);font-size:.78rem;font-weight:600}
+    .settings-footer-actions{display:flex;gap:7px}
+    .settings-footer-actions button{min-height:36px;padding:8px 13px}
+    @media(max-width:620px){
+      :root{--settings-nav:92px}
+      .settings-nav{padding:12px 7px}
+      .settings-nav h1{font-size:1rem}
+      .settings-nav p{font-size:.62rem}
+      .settings-nav-item{display:grid;justify-items:center;gap:3px;min-height:58px;padding:6px 2px;font-size:.66rem;text-align:center}
+      .settings-nav-icon{width:auto}
+      .settings-body{padding:16px 12px}
+      .settings-select{min-width:104px}
+      .settings-footer-actions button{padding-inline:9px}
+    }
+    @media(prefers-reduced-motion:reduce){.settings,.settings-panel{transition:none;animation:none}}
+  </style>
+</head>
+<body>
+  <main class="demo">
+    <section class="session" aria-label="远程会话背景">
+      <header class="conversation-header">
+        <div class="thread-heading">
+          <strong>✦ CodexElves</strong>
+          <span>远程会话 · 当前连接在线</span>
+        </div>
+        <button class="icon-button" type="button" data-open aria-label="打开设置">⚙</button>
+      </header>
+      <div class="demo-messages">
+        <article class="demo-card"><strong>远程会话已连接</strong><span>网页资源、会话列表和部署状态均可读取。</span><small>刚刚同步 · resource revision 2026102704</small></article>
+        <article class="demo-card"><strong>当前效果</strong><span>设置页从右侧滑入，主会话保留在背景中。</span></article>
+        <article class="demo-card"><strong>最近操作</strong><span>查看网页诊断、检查部署状态。</span></article>
+      </div>
+      <div class="demo-actions">
+        <button class="icon-button" type="button" data-open aria-label="打开设置">⚙</button>
+        <button class="icon-button" type="button" aria-label="更多操作">⋯</button>
+      </div>
+    </section>
+
+    <section class="settings" id="settings" aria-label="设置页" aria-hidden="false">
+      <aside class="settings-nav">
+        <h1>设置</h1>
+        <p>远程会话</p>
+        <nav class="settings-nav-list" aria-label="设置导航">
+          <button class="settings-nav-item" type="button" data-section="deploy" aria-current="page"><span class="settings-nav-icon">☁</span><span>远程部署</span></button>
+          <button class="settings-nav-item" type="button" data-section="general"><span class="settings-nav-icon">⚙</span><span>通用设置</span></button>
+          <button class="settings-nav-item" type="button" data-section="appearance"><span class="settings-nav-icon">☼</span><span>外观主题</span></button>
+          <button class="settings-nav-item" type="button" data-section="notifications"><span class="settings-nav-icon">♧</span><span>通知事件</span></button>
+          <button class="settings-nav-item" type="button" data-section="session"><span class="settings-nav-icon">☷</span><span>会话显示</span></button>
+          <button class="settings-nav-item" type="button" data-section="diagnostics"><span class="settings-nav-icon">⌁</span><span>诊断日志</span></button>
+        </nav>
+        <span class="settings-version">v0.0.5</span>
+      </aside>
+      <section class="settings-main">
+        <header class="settings-header">
+          <button class="icon-button" type="button" data-close aria-label="关闭设置">‹</button>
+          <div class="settings-title"><strong id="section-title">远程部署</strong><span>设置页从右侧滑入</span></div>
+          <button class="icon-button" type="button" data-close aria-label="关闭设置">×</button>
+        </header>
+        <div class="settings-body">
+          <section class="settings-panel active" data-panel="deploy">
+            <h2>远程部署</h2><p>查看当前效果、连接状态和部署配置。</p>
+            <div class="settings-label">当前效果</div>
+            <div class="settings-card status">
+              <div class="settings-row"><div class="settings-copy"><strong>远程会话已连接</strong><span>网页资源和会话状态均可读取。</span></div><span class="online">在线</span></div>
+              <div class="settings-row"><div class="settings-copy"><strong>资源 revision</strong><span>2026102704 · 刚刚同步</span></div><button class="text-button" type="button">查看效果</button></div>
+            </div>
+            <div class="settings-label">部署配置</div>
+            <div class="settings-card">
+              <div class="settings-row"><div class="settings-copy"><strong>部署目标</strong><span>当前远程会话设备</span></div><select class="settings-select"><option>当前设备</option><option>测试设备</option></select></div>
+              <div class="settings-row"><div class="settings-copy"><strong>自动同步</strong><span>资源更新后自动部署</span></div><button class="settings-switch" type="button" role="switch" aria-checked="true" aria-label="自动同步"></button></div>
+            </div>
+            <div class="settings-buttons"><button class="primary" type="button">重新部署</button><button class="text-button" type="button">查看部署日志</button></div>
+          </section>
+          <section class="settings-panel" data-panel="general"><h2>通用设置</h2><p>管理远程会话的基础行为。</p><div class="settings-card"><div class="settings-row"><div class="settings-copy"><strong>操作确认</strong><span>危险操作执行前显示确认提示</span></div><button class="settings-switch" type="button" role="switch" aria-checked="true" aria-label="操作确认"></button></div><div class="settings-row"><div class="settings-copy"><strong>默认打开设置页</strong><span>恢复上次设置页位置</span></div><button class="settings-switch" type="button" role="switch" aria-checked="false" aria-label="默认打开设置页"></button></div></div></section>
+          <section class="settings-panel" data-panel="appearance"><h2>外观主题</h2><p>调整远程会话的主题和界面密度。</p><div class="settings-card"><div class="settings-row"><div class="settings-copy"><strong>主题</strong><span>跟随系统深浅色模式</span></div><select class="settings-select"><option>跟随系统</option><option>浅色</option><option>深色</option></select></div><div class="settings-row"><div class="settings-copy"><strong>界面密度</strong><span>控制列表与设置项间距</span></div><select class="settings-select"><option>标准</option><option>紧凑</option></select></div></div></section>
+          <section class="settings-panel" data-panel="notifications"><h2>通知事件</h2><p>选择需要提示的远程会话事件。</p><div class="settings-card"><div class="settings-row"><div class="settings-copy"><strong>任务完成</strong><span>远程任务结束时提示</span></div><button class="settings-switch" type="button" role="switch" aria-checked="true" aria-label="任务完成"></button></div><div class="settings-row"><div class="settings-copy"><strong>连接断开</strong><span>连接异常时提示</span></div><button class="settings-switch" type="button" role="switch" aria-checked="true" aria-label="连接断开"></button></div></div></section>
+          <section class="settings-panel" data-panel="session"><h2>会话显示</h2><p>调整会话列表和消息的显示方式。</p><div class="settings-card"><div class="settings-row"><div class="settings-copy"><strong>每个项目显示会话数</strong><span>控制左侧会话列表的数量</span></div><select class="settings-select"><option>5 个</option><option>10 个</option><option>全部</option></select></div><div class="settings-row"><div class="settings-copy"><strong>显示诊断状态</strong><span>在会话标题旁显示连接状态</span></div><button class="settings-switch" type="button" role="switch" aria-checked="true" aria-label="显示诊断状态"></button></div></div></section>
+          <section class="settings-panel" data-panel="diagnostics"><h2>诊断日志</h2><p>记录运行日志，便于排查远程会话问题。</p><div class="settings-card"><div class="settings-row"><div class="settings-copy"><strong>诊断日志</strong><span>最近记录 181 条</span></div><button class="text-button" type="button">导出</button></div><div class="settings-row"><div class="settings-copy"><strong>发送到电脑</strong><span>发送诊断包到已连接电脑</span></div><button class="text-button" type="button">发送</button></div></div></section>
+          <footer class="settings-footer"><span class="version">v0.0.5</span><div class="settings-footer-actions"><button class="text-button" type="button">恢复默认</button><button class="primary" type="button" data-close>完成</button></div></footer>
+        </div>
+      </section>
+    </section>
+  </main>
+  <script>
+    const settings = document.querySelector("#settings");
+    const title = document.querySelector("#section-title");
+    const navItems = [...document.querySelectorAll("[data-section]")];
+    const panels = [...document.querySelectorAll("[data-panel]")];
+    const labels = Object.fromEntries(navItems.map(item => [item.dataset.section, item.textContent.trim()]));
+    const setOpen = open => {
+      settings.classList.toggle("open", open);
+      settings.setAttribute("aria-hidden", String(!open));
+    };
+    navItems.forEach(item => item.addEventListener("click", () => {
+      navItems.forEach(node => node.setAttribute("aria-current", node === item ? "page" : "false"));
+      panels.forEach(panel => panel.classList.toggle("active", panel.dataset.panel === item.dataset.section));
+      title.textContent = labels[item.dataset.section];
+    }));
+    document.querySelectorAll("[data-open]").forEach(button => button.addEventListener("click", () => setOpen(true)));
+    document.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", () => setOpen(false)));
+    document.querySelectorAll(".settings-switch").forEach(button => button.addEventListener("click", () => {
+      button.setAttribute("aria-checked", String(button.getAttribute("aria-checked") !== "true"));
+    }));
+  </script>
+</body>
+</html>

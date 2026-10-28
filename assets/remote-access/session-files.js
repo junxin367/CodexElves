@@ -1,5 +1,6 @@
 import { requestRemote } from "./channels.js";
 import { bindLocalFileReferences, markdown } from "./markdown.js";
+import { safeInlineImageSource } from "./attachments.js";
 
 const node = (tag, className = "", text = "") => {
   const result = document.createElement(tag);
@@ -566,8 +567,13 @@ export function mountSessionFiles({
       });
       code.append(fragment); body.append(code);
     } else if (value.kind === "image") {
-      const link = node("a", "session-files-image"); link.href = value.dataUrl;
-      const image = node("img"); image.src = value.dataUrl; image.alt = fileName(value.path);
+      const source = safeInlineImageSource(value.dataUrl, { allowSvg: true });
+      if (!source) {
+        message(fileStatus, "图片预览数据无效，请刷新后重试。", true);
+        return;
+      }
+      const link = node("a", "session-files-image"); link.href = source;
+      const image = node("img"); image.src = source; image.alt = fileName(value.path);
       link.append(image); link.onclick = event => { event.preventDefault(); openImagePreview?.(link, image); };
       body.append(link);
     }
