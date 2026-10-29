@@ -636,7 +636,8 @@
     if (!sources.length || sources.some(thread => thread.threadSource === "subagent"
         || thread.source === "subagent" || thread.source?.subAgent || thread.source?.subagent)) return null;
     const title = conversation?.sideConversation === true
-      ? sideThreadTitle(conversation, current?.title || current?.name || cached?.title)
+      ? sideThreadTitle(conversation, nativeSideThreads.get(id)?.title
+        || current?.title || current?.name || cached?.title)
       : mainThreadTitle(current?.title, current?.name, cached?.title, cached?.name,
         conversation?.title, conversation?.name);
     return { threadId: id, title };
@@ -892,6 +893,14 @@
       .find(value => value && !isDefaultSideThreadTitle(value));
     return candidate || DEFAULT_SIDE_THREAD_TITLE;
   }
+  function syncNativeSideThreadTitle(id, conversation, fallback = "") {
+    const entry = nativeSideThreads.get(id);
+    if (!entry) return false;
+    const title = sideThreadTitle(conversation, fallback || entry.title);
+    if (!title || title === entry.title) return false;
+    nativeSideThreads.set(id, { ...entry, title });
+    return true;
+  }
   function firstSideThreadMessageTitle(conversation) {
     for (const turn of nativeConversationTurns(conversation)) {
       for (const source of array(turn?.items)) {
@@ -962,14 +971,19 @@
     }
     const side = conversation.sideConversation === true || nativeSideThreads.has(id);
     if (conversation.sideConversation === true) maybeNameSideThreadFromFirstMessage(id, conversation);
+    const titleChanged = side && syncNativeSideThreadTitle(id, conversation);
     if (!side && !nativeCatalog.has(id)) return;
     const previous = sidebarSignatures.get(id);
     const item = summary(conversation);
     if (side) nativeCatalog.delete(id);
     else nativeCatalog.set(id, item);
-    if (previous !== sidebarSignatures.get(id)) emit({ method: "remote/sidebarChanged",
+    if (previous !== sidebarSignatures.get(id) || titleChanged) emit({ method: "remote/sidebarChanged",
       params: { threadId: id, ...(side ? { title: item.title } : {}), parentThreadId: side
         ? conversation.forkedFromId ?? nativeSideThreads.get(id)?.parentThreadId : undefined } });
+    if (titleChanged) {
+      const parentThreadId = conversation.forkedFromId || nativeSideThreads.get(id)?.parentThreadId;
+      if (parentThreadId) emit({ method: "remote/relatedThreadsChanged", params: { threadId: parentThreadId } });
+    }
   }
   function completedSideThreadUnread(thread, item = summary(thread)) {
     const status = typeof item.status === "string" ? item.status : item.status?.type;
@@ -1518,7 +1532,9 @@
           const conversation = id && sourceManager.getConversation(id);
           if (tab.tabType?.kind !== "local-side-chat" || !conversation?.sideConversation
               || conversation.forkedFromId !== parentThreadId || subagentIdentity(conversation)) continue;
-          next.set(id, { threadId: id, parentThreadId, title: sideThreadTitle(conversation, tab.title),
+          const previous = nativeSideThreads.get(id);
+          const title = sideThreadTitle(conversation, previous?.title || tab.title);
+          next.set(id, { threadId: id, parentThreadId, title,
             createdAtMs: timestamp(conversation.createdAt), closed: false, scope, controller, tab });
         }
       }

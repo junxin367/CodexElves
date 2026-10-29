@@ -2060,7 +2060,11 @@ async function loadRelatedThreads(parentThreadId) {
   if (scope !== privateInputScope(session)) throw new Error("当前授权已变化");
   if (result?.threadId !== parentThreadId || !Array.isArray(result.subagents) || !Array.isArray(result.sideThreads))
     throw new Error("关联会话返回内容无效");
-  return result;
+  return {
+    ...result,
+    sideThreads: result.sideThreads.map(item => sidebarReadRefreshSuppressions.has(item.id)
+      ? { ...item, hasUnreadTurn: false } : item)
+  };
 }
 function adoptRelatedMenu(result) {
   const parentThreadId = result.threadId;
@@ -2100,13 +2104,14 @@ async function retireNativeSideThreads(ids, { notify = true, reason = "closed" }
     await returnToParentSession();
   }
 }
-function scheduleRelatedMenuRefresh(event) {
+function scheduleRelatedMenuRefresh(event, { suppressReadRefresh = false } = {}) {
   const params = event.params || {}, id = params.threadId ?? params.conversationId ?? params.thread?.id;
   if (!["thread/started", "thread/deleted", "turn/started", "turn/completed",
     "thread/status/changed", "thread/name/updated", "remote/sidebarChanged", "remote/relatedThreadsChanged",
     "remote/resync", "remote/reconnected",
     "item/started", "item/completed"].includes(event.method)
     || event.method.startsWith("item/") && !isSubagentItem(params.item || {})) return;
+  if (suppressReadRefresh && event.method === "remote/sidebarChanged") return;
   const relevant = sessionMenu?.invalidate(event.method === "thread/deleted" ? null : id, params.parentThreadId);
   if (!relevant || relatedSessionView || !selectedId || !connected || relatedMenuTimer) return;
   const scope = privateInputScope(session), parent = selectedId;
@@ -6185,10 +6190,20 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
       }
       catch (error) { if (request.again && deviceId === session?.device.id) continue; throw error; }
       if (version !== sidebarVersion || !session || deviceId !== session.device.id) return;
+      const applyReadSuppressions = items => (items || []).map(item => {
+        if (!sidebarReadRefreshSuppressions.has(item.id)) return item;
+        const priority = item.priority?.attentionState === "unread"
+          ? { ...item.priority, attentionState: item.priority.active === true ? "active" : "idle" }
+          : item.priority;
+        return { ...item, hasUnreadTurn: false, ...(priority ? { priority } : {}) };
+      });
       const isMainThread = item => item.threadSource !== "subagent" && !item.source?.subAgent && !item.source?.subagent;
-      result.recent = result.recent.filter(isMainThread);
-      result.pinnedThreads = result.pinnedThreads.filter(isMainThread);
-      for (const project of result.projects) project.threads = project.threads.filter(isMainThread);
+      result.recent = applyReadSuppressions(result.recent.filter(isMainThread));
+      result.pinnedThreads = applyReadSuppressions(result.pinnedThreads.filter(isMainThread));
+      for (const project of result.projects)
+        project.threads = applyReadSuppressions(project.threads.filter(isMainThread));
+      result.unreadSideThreads = (result.unreadSideThreads || [])
+        .filter(item => !sidebarReadRefreshSuppressions.has(item.id));
       filterDeletedSidebar(result, deviceId);
       filterSideThreadSidebar(result);
       if (JSON.stringify(sidebar) !== JSON.stringify(result)) {
@@ -11920,7 +11935,12 @@ function scheduleSidebarRefresh() {
 }
 function receive(event) {
   if (handleRemoteChannelEvent(event)) return;
-  scheduleRelatedMenuRefresh(event);
+  const rawParams = event.params || {};
+  const eventThreadId = rawParams.threadId ?? rawParams.conversationId ?? rawParams.thread?.id;
+  const suppressSidebarRefresh = event.method === "remote/sidebarChanged"
+    && rawParams.reason === "read"
+    && typeof eventThreadId === "string" && sidebarReadRefreshSuppressions.has(eventThreadId);
+  scheduleRelatedMenuRefresh(event, { suppressReadRefresh: suppressSidebarRefresh });
   if (event.method === "remote/notification") return;
   if (event.method === "remote/unauthorized") { requireAuthentication(); return; }
   if (["remote/disconnected", "remote/reconnected"].includes(event.method)) {
@@ -11951,10 +11971,9 @@ function receive(event) {
     receiveDiagnosticRequest(params);
     return;
   }
-  const eventThreadId = params.threadId ?? params.conversationId ?? params.thread?.id;
-  const suppressSidebarRefresh = event.method === "remote/sidebarChanged"
-    && typeof eventThreadId === "string" && sidebarReadRefreshSuppressions.delete(eventThreadId);
   if (typeof eventThreadId === "string") {
+    if (["thread/started", "turn/started", "turn/completed"].includes(event.method))
+      sidebarReadRefreshSuppressions.delete(eventThreadId);
     const runtimeStatus = params.status?.status ?? params.status;
     const runtimeType = typeof runtimeStatus === "string" ? runtimeStatus : runtimeStatus?.type;
     if (["thread/started", "turn/started", "remote/requestsChanged"].includes(event.method)
