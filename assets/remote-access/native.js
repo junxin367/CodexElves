@@ -370,7 +370,8 @@
     }
   };
   const emitUnsafe = event => {
-    if (["remote/sidebarChanged", "remote/requestsChanged", "thread/started", "thread/status/changed", "thread/name/updated",
+    if (["remote/sidebarChanged", "remote/requestsChanged", "remote/relatedThreadsChanged", "remote/resync",
+      "remote/reconnected", "thread/started", "thread/status/changed", "thread/name/updated",
       "thread/archived", "thread/unarchived", "thread/deleted", "turn/started", "turn/completed",
       "remote/asyncQuestionsChanged"].includes(event.method)) {
       for (const listener of sidebarListeners) {
@@ -855,10 +856,11 @@
     const view = conversation && manager.threadStore?.stateReaders?.getListState?.(conversation);
     const status = manager.getThreadRuntimeStatusEvidence?.(id)
       || conversation?.threadRuntimeStatus || current.threadRuntimeStatus || current.status || { type: "idle" };
-    const type = typeof status === "string" ? status : status.type;
+    const runtime = status?.status ?? status;
+    const type = typeof runtime === "string" ? runtime : runtime?.type;
     const waiting = !!view?.pendingRequest
       || asyncQuestionRequests(id, conversation).length > 0
-      || array(status.activeFlags).some(flag => flag === "waitingOnApproval" || flag === "waitingOnUserInput");
+      || array(runtime?.activeFlags).some(flag => flag === "waitingOnApproval" || flag === "waitingOnUserInput");
     const active = type === "active" || type === "inProgress"
       || type !== "systemError" && view?.resumeState !== "needs_resume"
         && (view?.isResponseInProgress === true || view?.isConversationInProgress === true);
@@ -977,9 +979,17 @@
   function recentSideThreadEntries() {
     // 原生关闭侧边标签时会丢弃内存会话，直接读取内存即可覆盖生命周期，
     // 不让最近列表首屏依赖侧边面板模块的动态加载。
-    const conversations = manager.threadStore?.getCachedConversations?.()
-      || [...nativeSideThreads.keys()].map(id => manager.getConversation(id)).filter(Boolean);
-    return array(conversations).flatMap(conversation => {
+    const conversations = new Map();
+    for (const entry of array(manager.threadStore?.getCachedConversations?.())) {
+      const conversation = Array.isArray(entry) && entry.length === 2 ? entry[1] : entry;
+      const id = conversation?.conversationId || conversation?.id;
+      if (typeof id === "string" && id) conversations.set(id, conversation);
+    }
+    for (const id of nativeSideThreads.keys()) {
+      const conversation = manager.getConversation(id);
+      if (conversation) conversations.set(id, conversation);
+    }
+    return [...conversations.values()].flatMap(conversation => {
       const threadId = conversation.conversationId || conversation.id;
       const parentThreadId = conversation.forkedFromId;
       if (conversation.sideConversation !== true || !threadId || typeof parentThreadId !== "string"

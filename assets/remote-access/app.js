@@ -6157,6 +6157,8 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
     if (fresh || cursor !== sidebarRequest.cursor) {
       sidebarRequest.again = true;
       sidebarRequest.nextCursor = fresh ? null : cursor;
+    } else if (cursor === null) {
+      sidebarRequest.again = true;
     }
     return sidebarRequest.promise;
   }
@@ -6262,16 +6264,17 @@ function renderSidebar() {
     viewToggle.dataset.mode = preferences.mode;
     viewToggle.replaceChildren(icon(preferences.mode === "project" ? "recent" : "folderClosed"));
   }
+  const pinnedIds = new Set(sidebar.pinnedThreads.map(item => item.id));
+  const projectNames = new Map(sidebar.projects.map(project => [project.id, project.name]));
   const domId = (type, id) => `${type}-${encodeURIComponent(id)}`;
   const normalizedSearch = search.replace(/[\\/]+/g, " ");
-  const matches = item => !search || `${item.title || ""} ${item.name || ""} ${item.cwd || ""} ${(item.roots || []).join(" ")}`
+  const matches = item => !search || `${item.title || ""} ${item.name || ""} ${projectNames.get(item.projectId) || ""}
+    ${item.cwd || ""} ${(item.roots || []).join(" ")}`
     .toLowerCase().replace(/[\\/]+/g, " ").includes(normalizedSearch);
   const sortThreads = (items, mode) => mode === "updated_at"
     ? [...items].sort((left, right) => sidebarUpdatedAt(right) - sidebarUpdatedAt(left)
       || (right.createdAt || 0) - (left.createdAt || 0) || left.id.localeCompare(right.id))
     : [...items];
-  const pinnedIds = new Set(sidebar.pinnedThreads.map(item => item.id));
-  const projectNames = new Map(sidebar.projects.map(project => [project.id, project.name]));
   const allowedProjectThreadLimits = new Set([5, 10, 20, 50]);
   const projectThreadLimit = allowedProjectThreadLimits.has(appearance.projectThreadLimit)
     ? appearance.projectThreadLimit : 5;
@@ -6469,7 +6472,8 @@ function renderSidebar() {
   if (preferences.mode === "project" && sidebar.nextCursor) root.append(button("加载更多会话", "加载更多会话", () => {
     void loadSidebar(sidebar.nextCursor).catch(error => notice(error.message, true));
   }, "load-more"));
-  if (search && !root.querySelector(".thread-row, .project-group")) root.append(element("p", "empty-project", "没有匹配的会话或项目"));
+  if (!root.querySelector(".thread-row, .project-group"))
+    root.append(element("p", "empty-project", search ? "没有匹配的会话或项目" : "暂无最近会话"));
   setSelectOptions($("#project-select"), newChatProjectOptions(sidebar.projects));
   changeCreationProject();
   root.scrollTop = scrollTop;
@@ -6637,6 +6641,7 @@ async function markVisibleThreadRead(id = selectedId, { opened = false } = {}) {
       || threadDeletionLocked(id) || threadDeleted(id) || document.hidden || !opened && !followMessages) return;
   if (readMarkRequests.has(id)) return readMarkRequests.get(id);
   const deviceId = session.device.id;
+  recentPrioritySelectionSuppressions.add(id);
   sidebarReadRefreshSuppressions.add(id);
   setTimeout(() => sidebarReadRefreshSuppressions.delete(id), 5_000);
   const request = (async () => {
@@ -6644,15 +6649,17 @@ async function markVisibleThreadRead(id = selectedId, { opened = false } = {}) {
       await mutate("markRead", { threadId: id });
     } catch (error) {
       sidebarReadRefreshSuppressions.delete(id);
+      recentPrioritySelectionSuppressions.delete(id);
       throw error;
     }
-    if (session?.device.id === deviceId) {
-      sessionMenu?.markSideThreadRead(id);
-      markSidebarThreadReadLocally(id);
-      syncSideThreadUnread();
-      recentPrioritySelectionSuppressions.add(id);
-      renderSidebar();
+    if (session?.device.id !== deviceId) {
+      recentPrioritySelectionSuppressions.delete(id);
+      return;
     }
+    sessionMenu?.markSideThreadRead(id);
+    markSidebarThreadReadLocally(id);
+    syncSideThreadUnread();
+    renderSidebar();
   })();
   readMarkRequests.set(id, request);
   try { await request; }
@@ -11905,7 +11912,7 @@ function receiveCompactionLifecycle(event, params) {
 }
 function scheduleSidebarRefresh() {
   clearTimeout(sidebarTimer);
-  sidebarTimer = setTimeout(() => void loadSidebar().catch(() => {}), 1200);
+  sidebarTimer = setTimeout(() => void loadSidebar(null, { fresh: true }).catch(() => {}), 1200);
 }
 function receive(event) {
   if (handleRemoteChannelEvent(event)) return;
