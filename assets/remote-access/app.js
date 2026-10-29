@@ -11651,7 +11651,6 @@ async function sendMessage() {
     const queued = !wasCreating && applyQueuedSendResult(id, result, queueReadVersion);
     clearSubmittedDraft(payload, selectionVersion === version);
     if (queued) {
-      if (version !== selectionVersion) notice("消息已加入原会话的队列，当前会话未被切换。");
       return;
     }
     sending.phase = "syncing"; updateComposer();
