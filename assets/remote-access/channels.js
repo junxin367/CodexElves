@@ -377,7 +377,7 @@ export async function raceRemoteRead(path, options, consume, onLatency = null) {
     return requestRemote(path, options, consume);
   if (options.signal?.aborted) throw options.signal.reason || new DOMException("连接已取消", "AbortError");
   if (globalThis.document?.hidden || globalThis.navigator?.onLine === false)
-    throw new DOMException("当前不启动连接测速", "AbortError");
+    return requestRemote(path, options, consume);
   const available = routes();
   const active = orderedRoutes(available)[0];
   const now = Date.now();

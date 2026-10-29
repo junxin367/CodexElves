@@ -1051,8 +1051,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
   .session-files-list .session-tools-file{min-height:30px;height:30px}
 }
 
-.composer-area{--composer-form-height:166px}
-.composer-anchor>.composer,.composer-anchor>.side-thread-expired-banner{min-height:var(--composer-form-height)}
+.composer-anchor>.side-thread-expired-banner{min-height:166px}
 .side-thread-expired-banner{display:flex;flex-direction:column;gap:4px;margin:0;padding:12px 14px;border:1px solid color-mix(in srgb,var(--danger) 28%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--danger) 7%,var(--side));color:var(--text);line-height:1.6}
 .side-thread-expired-banner strong{font-size:.85714rem;color:var(--danger);font-weight:600}
 .side-thread-expired-banner span{font-size:.78571rem;color:var(--muted)}

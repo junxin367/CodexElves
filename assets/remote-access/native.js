@@ -4310,6 +4310,7 @@
     let queueAddStarted = false;
     let localQueueStarted = false;
     let queuedSubmission = null;
+    let sendNow = false;
     try {
       validateCompactionQueueSendPayload("send", payload);
       const sourceManager = messageActionManager();
@@ -4333,6 +4334,10 @@
         throw failure(503, "当前 Codex 版本不支持原生队列发送");
       await loadNativeQueue(coordinator, threadId);
       assertCurrent();
+      const streamRole = sourceManager.getStreamRole?.(threadId)
+        ?? coordinator.getStreamRole?.(threadId)
+        ?? coordinator.options?.getStreamRole?.(threadId);
+      sendNow = allowImmediate && streamRole?.role !== "follower";
       const cwd = manager.getConversationCwd(threadId) || thread.cwd || "/";
       const message = {
         id: payload.clientUserMessageId == null ? crypto.randomUUID() : requiredId(payload.clientUserMessageId),
@@ -4355,7 +4360,7 @@
           message: "原生队列加入结果未确认，请检查会话，不要重复操作"
         };
       }
-      let useServerQueue = !allowImmediate && typeof serverQueue?.isEnabled === "function"
+      let useServerQueue = !sendNow && typeof serverQueue?.isEnabled === "function"
         && await serverQueue.isEnabled(threadId)
         && typeof serverQueue.read === "function"
         && !hasNativeLocalQueuedMessages(coordinator, serverQueue, threadId)
@@ -4399,7 +4404,9 @@
         if (typeof coordinator.sendMessage !== "function" || typeof coordinator.loadMessages !== "function")
           throw failure(503, "当前 Codex 版本不支持原生本地消息队列");
         const request = {
-          conversationId: threadId, message, queueModeOverride: "queue", acceptLocally: true,
+          conversationId: threadId, message,
+          queueModeOverride: sendNow ? "send-now" : "queue",
+          acceptLocally: !sendNow,
           // 本地队列重载会重新准备消息，额外输入必须随原生重放上下文保存。
           editPosition: {
             serverSubmission: { id: message.id, clientUserMessageId, input },
@@ -4414,24 +4421,24 @@
           const conversation = sourceManager.getConversation(threadId);
           if (!conversation)
             throw failure(409, "会话状态已变化，暂不能提交排队消息");
-          if (sendOnly) {
-            const status = sourceManager.getThreadRuntimeStatusEvidence?.(threadId)
-              || conversation.threadRuntimeStatus || thread.status;
-            const runtime = status?.status ?? status;
-            const statusType = typeof runtime === "string" ? runtime : runtime?.type;
-            const queued = coordinator.readMessages(threadId);
-            if (runtimeCompaction(threadId, conversation).state !== "idle"
-                || ["active", "inProgress", "running", "pending"].includes(statusType)
-                || nativeConversationTurns(conversation).some(turn => nativeTurnStatus(turn) === "inProgress")
-                || array(queued?.messages || queued).length)
-              throw failure(409, "此类会话只支持空闲时直接发送，请等待当前回复或压缩完成后重试");
-          }
+          const status = sourceManager.getThreadRuntimeStatusEvidence?.(threadId)
+            || conversation.threadRuntimeStatus || thread.status;
+          const runtime = status?.status ?? status;
+          const statusType = typeof runtime === "string" ? runtime : runtime?.type;
+          const queued = coordinator.readMessages(threadId);
+          const active = runtimeCompaction(threadId, conversation).state !== "idle"
+            || ["active", "inProgress", "running", "pending"].includes(statusType)
+            || nativeConversationTurns(conversation).some(turn => nativeTurnStatus(turn) === "inProgress")
+            || array(queued?.messages || queued).length;
+          if (sendOnly && active)
+            throw failure(409, "此类会话只支持空闲时直接发送，请等待当前回复或压缩完成后重试");
+          if (sendNow && active)
+            throw Object.assign(failure(409, "会话状态已变化，消息需要进入原生队列"), { queueRequired: true });
         };
         if (sendOnly) {
-          if (!allowImmediate)
+          if (!sendNow)
             throw failure(409, "此类会话不支持排队发送，请等待当前回复完成后重试");
           assertAdmission();
-          request.acceptLocally = false;
         }
         queueAddStarted = true;
         localQueueStarted = request.acceptLocally;
@@ -4449,7 +4456,7 @@
           if (current?.status !== "ready" || current.submission?.conversationId !== threadId)
             throw failure(503, "原生队列消息准备失败");
           return current.submission;
-        }, undefined, sendOnly ? assertAdmission : undefined, assertAdmission);
+        }, undefined, sendNow ? assertAdmission : undefined, assertAdmission);
         if (!["queued", "sent"].includes(result?.status)
             || typeof result.messageId !== "string"
             || result.messageId !== clientUserMessageId && result.serverAccepted !== true)
@@ -4486,6 +4493,8 @@
         ...queueSnapshotFields(threadId, queued)
       };
     } catch (error) {
+      if (error.queueRequired && sendNow)
+        return await submitQueuedMessage(payload, false);
       if (queuedSubmission) {
         return {
           ok: true,

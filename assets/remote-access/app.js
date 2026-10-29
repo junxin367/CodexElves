@@ -2129,7 +2129,7 @@ async function openRelatedThread(item, kind, parentThreadId = selectedId, {
   closePopup(); closeComposerMenus();
   await selectThread(item.id, { closeSidebar: false, relatedView: { ...view, owner, returnToParent: true },
     initialThread, replaceHistory, preparedView, onViewReady });
-  if (kind === "side" && selectedId === item.id && (item.hasUnreadTurn === true || thread?.hasUnreadTurn === true))
+  if (kind === "side" && selectedId === item.id)
     await markVisibleThreadRead(item.id, { opened: true });
 }
 async function returnToParentSession() {
@@ -2275,14 +2275,12 @@ async function finishRelatedOperation(record, result, { allowSelection = false }
           onViewReady: prepared ? () => dismissSideCreation() : null });
     } else {
       if (sideCreationView?.record === record) requestSideCreationBack();
-      notice("侧边会话已创建，可从主会话菜单打开");
     }
     if (record.scope === privateInputScope(session) && typeof result.warning === "string" && result.warning.trim())
       notice(`侧边会话已创建。${result.warning.trim()}`, true);
   } else {
     sessionMenu?.updateSideThread(record.parentThreadId, { id: result.threadId }, { remove: true });
     await retireNativeSideThreads([result.threadId], { notify: false });
-    notice("侧边会话已关闭");
   }
   updateComposer();
   if (sessionMenuIsOpen()) void Promise.resolve(sessionMenu.refresh()).catch(() => {});
@@ -2898,14 +2896,14 @@ async function activatePromptOptimization() {
   closePopup(); closeComposerMenus();
   const scope = promptOptimizationScope(), current = promptOptimizations.get(scope), prompt = $("#prompt");
   if (current?.state === "pending") {
-    cancelPromptOptimization(current); updatePromptOptimization(); notice("已取消提示词优化"); return;
+    cancelPromptOptimization(current); updatePromptOptimization(); return;
   }
   if (current?.state === "optimized" && current.signature === promptOptimizationSignature()) {
     selectedSkills = current.originalSkills.map(skill => ({ ...skill }));
     writePromptContent(prompt, current.originalText);
     promptOptimizations.delete(scope);
     rememberDraft(); updateComposer(); prompt.focus({ preventScroll: true });
-    setPromptSelection(prompt, prompt.value.length); notice("已恢复原提示词"); return;
+    setPromptSelection(prompt, prompt.value.length); return;
   }
   const originalText = prompt.value;
   if (!originalText.trim()) { notice("请先输入要优化的提示词"); return; }
@@ -2937,7 +2935,7 @@ async function activatePromptOptimization() {
       if (isCurrent()) result = await api("/api/read/promptOptimization", { requestId: record.id });
     }
     if (!isCurrent()) return;
-    if (result?.state === "cancelled") { record.state = "cancelled"; notice("已取消提示词优化"); return; }
+    if (result?.state === "cancelled") { record.state = "cancelled"; return; }
     if (result?.state !== "completed" || !result.text?.trim())
       throw new Error(result?.message || "提示词优化失败，原输入未改动");
     writePromptContent(prompt, result.text);
@@ -9173,7 +9171,6 @@ async function steerQueuedMessage(threadId, messageId) {
     recordDiagnostic("remote.steer", {
       phase: "complete", durationMs: performance.now() - startedAt
     });
-    notice("已引导原队列消息");
   } catch (error) {
     if (pendingSteer === pending) {
       pendingSteer = null;
@@ -11658,7 +11655,7 @@ async function sendMessage() {
         else await selectThread(result.threadId);
       }
       else await reloadThread();
-    } else notice(wasCreating ? "会话已创建，当前页面未被切换。" : "消息已发送到原会话，当前会话未被切换。");
+    }
   } catch (error) {
     if (goalMode) {
       const record = pending?.id === goalRecord.id ? pending : goalRecord;
@@ -12380,11 +12377,11 @@ async function connectPage(signal) {
   }
   updateComposer(); void resolvePending(); drainPendingNotificationOpen();
 }
-function retryConnectionRecovery() {
+function retryConnectionRecovery({ suppressStreamErrors = false } = {}) {
   if (pageLeaving || document.hidden || navigator.onLine === false || initialAuthenticationRequired || connecting) return;
   if (!session) { void connect().catch(handleInitialConnectionError); return; }
   refreshCachedCatalogs();
-  ensureStream();
+  ensureStream({ suppressErrors: suppressStreamErrors });
   void Promise.all([syncConnectionState(), refreshAll({ fresh: true })]).catch(() => {});
 }
 async function copyText(text) {
@@ -12460,7 +12457,7 @@ document.addEventListener("visibilitychange", () => {
   syncActivityTimer();
   syncGoalLiveTimer();
   if (session) startConnectionPoll(session.device.id);
-  retryConnectionRecovery();
+  retryConnectionRecovery({ suppressStreamErrors: true });
 });
 window.addEventListener("pagehide", suspendPage);
 window.addEventListener("blur", () => finishQueueDrag());
