@@ -12206,7 +12206,7 @@ async function refreshAll({ fresh = false } = {}) {
   try { await promise; }
   finally { if (refreshRequest?.promise === promise) refreshRequest = null; }
 }
-function openStream() {
+function openStream({ suppressErrors = false } = {}) {
   if (pageLeaving || !session || (document.hidden && !sharedEventsAvailable())) return;
   stream?.close();
   const current = createRemoteEventStream();
@@ -12225,7 +12225,7 @@ function openStream() {
         syncConnectionState(current).then(applied => { if (applied) void resolvePending(); }),
         refreshAll({ fresh: true })
       ]);
-    } catch (error) { if (isCurrent()) notice(error.message, true); }
+    } catch (error) { if (isCurrent() && !suppressErrors) notice(error.message, true); }
   };
   current.onmessage = event => { if (isCurrent()) { try { receive(JSON.parse(event.data)); } catch {} } };
   current.onerror = () => {
@@ -12237,19 +12237,23 @@ function openStream() {
     reconnectStream(delay);
   };
 }
-function reconnectStream(delay = streamBackoff) {
+function reconnectStream(delay = streamBackoff, options = {}) {
   if (pageLeaving || (document.hidden && !sharedEventsAvailable())) return;
   clearTimeout(streamRetry);
   streamRetry = setTimeout(() => {
     streamRetry = null;
     if (!session || pageLeaving || (document.hidden && !sharedEventsAvailable())) return;
-    try { openStream(); }
-    catch { if (session && !pageLeaving) reconnectStream(streamBackoff = Math.min(streamBackoff * 2, 30000)); }
+    try { openStream(options); }
+    catch {
+      if (session && !pageLeaving)
+        reconnectStream(streamBackoff = Math.min(streamBackoff * 2, 30000), options);
+    }
   }, delay);
 }
-function ensureStream() {
+function ensureStream(options = {}) {
   if (pageLeaving || (document.hidden && !sharedEventsAvailable())) return;
-  if (session && !streamRetry && (!stream || stream.readyState === EventSource.CLOSED)) reconnectStream(0);
+  if (session && !streamRetry && (!stream || stream.readyState === EventSource.CLOSED))
+    reconnectStream(0, options);
 }
 function stopConnectionPoll() {
   ++connectionPollVersion;
@@ -12310,7 +12314,7 @@ function resumePage() {
   syncGoalLiveTimer();
   startConnectionPoll(session.device.id);
   scheduleRelatedOperationCheck();
-  ensureStream();
+  ensureStream({ suppressErrors: wasLeaving });
   void Promise.all([syncConnectionState(), refreshAll({ fresh: true })])
     .catch(() => {}).finally(drainPendingNotificationOpen);
 }
