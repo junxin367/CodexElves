@@ -72,6 +72,7 @@ let connectionLatencyVersion = 0, connectionLatencyFloor = 0, connectionRouteSig
 const channelRtts = new Map();
 const connectionRttDescription = "点击刷新会话。网页到接入服务的 /api/session HTTP 完整往返时长；存在两条已授权线路时分别测量，不代表模型响应耗时或端到端原生执行延迟。消息使用此处可用线路中延迟最低的一路发送，发出后不自动换路重发。";
 let pageLeaving = false;
+let recoveryErrorSilenceDepth = 0;
 const projectVisibleThreadCounts = new Map();
 const collapsedSidebarSections = new Set();
 const drafts = new Map();
@@ -9826,7 +9827,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     }
     if (!controller.signal.aborted && version === selectionVersion && selectedId === id) {
       if (error.code === 404) retireMissingEphemeralTranscript(id);
-      if (error.code === 404 || !currentThreadDisplay())
+      if (!recoveryErrorSilenceDepth && (error.code === 404 || !currentThreadDisplay()))
         notice(`会话设置读取失败，可点击刷新重试：${error.message}`, true);
     }
   } finally {
@@ -10017,6 +10018,10 @@ async function readHistoryPage(older, version, itemsTurnId) {
       return;
     }
     if (!itemsTurnId && error.code === 404) retireMissingEphemeralTranscript(id);
+    if (recoveryErrorSilenceDepth) {
+      historyAutoFailed = false;
+      return;
+    }
     historyAutoFailed = true;
     if (!historyInitialized) {
       historyError = `最新消息加载失败：${error.message}`;
@@ -11925,12 +11930,13 @@ function receive(event) {
     setConnection(available && stream?.readyState === EventSource.OPEN);
     if (available) {
       void syncConnectionState().catch(() => {});
-      void refreshAll({ fresh: true }).catch(error => notice(error.message, true));
+      void withRecoveryErrorSilence(() => refreshAll({ fresh: true })).catch(() => {});
     }
     return;
   }
   if (event.method === "remote/resync") {
-    void Promise.all([syncConnectionState(), refreshAll({ fresh: true })]).catch(error => notice(error.message, true));
+    void withRecoveryErrorSilence(() =>
+      Promise.all([syncConnectionState(), refreshAll({ fresh: true })])).catch(() => {});
     return;
   }
   const params = { ...event.params || {} };
@@ -12180,6 +12186,10 @@ async function reconnectChangedAuthorization() {
   turns.clear(); transcriptEvents.clear();
   await connect();
 }
+function withRecoveryErrorSilence(task) {
+  recoveryErrorSilenceDepth++;
+  return Promise.resolve().then(task).finally(() => { recoveryErrorSilenceDepth--; });
+}
 async function refreshAll({ fresh = false } = {}) {
   if (!session) return;
   if (refreshRequest?.deviceId === session.device.id) {
@@ -12222,10 +12232,11 @@ function openStream({ suppressErrors = false } = {}) {
     if (!isCurrent()) return;
     streamBackoff = 1000;
     try {
-      await Promise.all([
+      const refresh = () => Promise.all([
         syncConnectionState(current).then(applied => { if (applied) void resolvePending(); }),
         refreshAll({ fresh: true })
       ]);
+      await (suppressErrors ? withRecoveryErrorSilence(refresh) : refresh());
     } catch (error) { if (isCurrent() && !suppressErrors) notice(error.message, true); }
   };
   current.onmessage = event => { if (isCurrent()) { try { receive(JSON.parse(event.data)); } catch {} } };
@@ -12316,7 +12327,7 @@ function resumePage() {
   startConnectionPoll(session.device.id);
   scheduleRelatedOperationCheck();
   ensureStream({ suppressErrors: wasLeaving });
-  void Promise.all([syncConnectionState(), refreshAll({ fresh: true })])
+  void withRecoveryErrorSilence(() => Promise.all([syncConnectionState(), refreshAll({ fresh: true })]))
     .catch(() => {}).finally(drainPendingNotificationOpen);
 }
 async function connect(signal) {
@@ -12386,7 +12397,8 @@ function retryConnectionRecovery({ suppressStreamErrors = false } = {}) {
   if (!session) { void connect().catch(handleInitialConnectionError); return; }
   refreshCachedCatalogs();
   ensureStream({ suppressErrors: suppressStreamErrors });
-  void Promise.all([syncConnectionState(), refreshAll({ fresh: true })]).catch(() => {});
+  void withRecoveryErrorSilence(() => Promise.all([syncConnectionState(), refreshAll({ fresh: true })]))
+    .catch(() => {});
 }
 async function copyText(text) {
   try {
