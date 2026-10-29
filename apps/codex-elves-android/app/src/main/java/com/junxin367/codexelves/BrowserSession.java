@@ -27,9 +27,11 @@ import android.webkit.WebViewClient;
 import android.webkit.ValueCallback;
 import android.view.View;
 import android.view.ViewGroup;
+import androidx.webkit.JavaScriptReplyProxy;
 import androidx.webkit.ProxyConfig;
 import androidx.webkit.ProxyController;
 import androidx.webkit.ScriptHandler;
+import androidx.webkit.WebMessageCompat;
 import androidx.webkit.UserAgentMetadata;
 import androidx.webkit.WebStorageCompat;
 import androidx.webkit.WebSettingsCompat;
@@ -64,6 +66,13 @@ final class BrowserSession {
         String status;
         String detail;
         String headers;
+        String requestBody = "";
+        String responseBody = "";
+        String responseMime = "";
+        String requestId = "";
+        long generation;
+        boolean generationPending;
+        boolean nativeObserved;
         boolean mainFrame;
         String resourceType;
         long durationMs;
@@ -94,8 +103,14 @@ final class BrowserSession {
         }
 
         DiagnosticEvent copy() {
-            return new DiagnosticEvent(id, timeMs, phase, method, url, status, detail, headers,
+            DiagnosticEvent copy = new DiagnosticEvent(id, timeMs, phase, method, url, status, detail, headers,
                 mainFrame, resourceType, durationMs, sizeBytes, statusCode, response, failure);
+            copy.requestBody = requestBody;
+            copy.responseBody = responseBody;
+            copy.responseMime = responseMime;
+            copy.requestId = requestId;
+            copy.generation = generation;
+            return copy;
         }
     }
 
@@ -119,71 +134,373 @@ final class BrowserSession {
         + "apply();new MutationObserver(apply).observe(document,{childList:true,subtree:true,"
         + "attributes:true,attributeFilter:['name','content']});})();";
     private static final String CREDENTIAL_BRIDGE_NAME = "__codexElvesCredentialRecorder";
+    private static final String NETWORK_BRIDGE_NAME = "__codexElvesNetworkRecorder";
     private static final String CREDENTIAL_COLLECTOR_SCRIPT = """
 (function(){
-  if (window.__codexElvesCredentialCollectorInstalled) return;
-  window.__codexElvesCredentialCollectorInstalled = true;
-  function meta(input) {
-    return [input.name, input.id, input.autocomplete, input.placeholder,
-      input.getAttribute('aria-label')].join(' ').toLowerCase();
+  if (window.__codexElvesCredentialCollectorInstalled
+      || window.__codexElvesCredentialCollectorWaiting) return;
+  function status(phase, reason) {
+    try {
+      var recorder = window.__codexElvesCredentialRecorder;
+      if (!recorder || typeof recorder.postMessage !== 'function') return;
+      recorder.postMessage(JSON.stringify({ kind: 'status', origin: location.origin,
+        generation: Number(window.__codexElvesCredentialPageGeneration) || 0,
+        phase: phase, reason: reason }));
+    } catch (error) {}
   }
-  function value(input, limit) {
-    return String(input && input.value || '').slice(0, limit);
+  function install() {
+    window.__codexElvesCredentialCollectorWaiting = false;
+    if (window.__codexElvesCredentialCollectorInstalled) return;
+    try {
+      if (!document.documentElement) { status('failure', 'dom-not-ready'); return; }
+      function meta(input) {
+        return [input.name, input.id, input.autocomplete, input.placeholder,
+          input.getAttribute('aria-label')].join(' ').toLowerCase();
+      }
+      function value(input, limit) {
+        return String(input && input.value || '').slice(0, limit);
+      }
+      function textInputs(scope) {
+        return Array.from(scope.querySelectorAll('input,select')).filter(function(input) {
+          return !input.disabled && input.getClientRects().length > 0
+            && !['password', 'hidden', 'checkbox', 'radio', 'submit', 'button'].includes(input.type);
+        });
+      }
+      function subaccountField(input) {
+        return /sub.?account|sacct|employee|staff|member|tenant|organiz|organis|workspace|team|company|domain|子账号|成员|租户|组织|团队|企业|空间/.test(meta(input));
+      }
+      function usernameField(input) {
+        return /user.?name|email|e-mail|login|account|手机号|邮箱|账号|用户名/.test(meta(input));
+      }
+      var savedRecords = [], chooserHost = null, chooserList = null, chooserInput = null;
+      function fillField(input, next) {
+        if (!input) return;
+        var prototype = input.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+        var descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+        if (descriptor && descriptor.set) descriptor.set.call(input, next); else input.value = next;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      function loginContext(input) {
+        var scope = input && input.closest ? input.closest('form') || document : document;
+        var passwords = Array.from(scope.querySelectorAll('input[type=password]')).filter(function(field) {
+          return !field.disabled && field.getClientRects().length > 0;
+        });
+        if (passwords.length !== 1) return null;
+        var inputs = textInputs(scope);
+        var subaccount = inputs.find(subaccountField);
+        var username = inputs.find(function(field) { return field.autocomplete === 'username'; })
+          || inputs.find(function(field) { return !subaccountField(field) && usernameField(field); })
+          || inputs.find(function(field) { return !subaccountField(field); });
+        if (!username && !subaccount) return null;
+        return { password: passwords[0], username: username, subaccount: subaccount };
+      }
+      function canChooseCredentials(input) {
+        if (!input || input.tagName !== 'INPUT' || input.disabled) return false;
+        return input.type === 'password' || input.autocomplete === 'username'
+          || usernameField(input) || subaccountField(input);
+      }
+      function hideCredentialChooser() {
+        if (chooserHost) chooserHost.remove();
+        chooserHost = null; chooserList = null; chooserInput = null;
+      }
+      function ensureCredentialChooser() {
+        if (chooserHost) return;
+        chooserHost = document.createElement('div');
+        chooserHost.setAttribute('aria-label', '选择已保存的账号');
+        chooserHost.style.cssText = 'all:initial;position:fixed;z-index:2147483647;display:block;';
+        var shadow = chooserHost.attachShadow({ mode: 'open' });
+        var style = document.createElement('style');
+        style.textContent = '.panel{font:14px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;' +
+          'color:#202124;background:#fff;border:1px solid #dadce0;border-radius:8px;' +
+          'box-shadow:0 4px 18px rgba(0,0,0,.2);overflow:auto;max-height:inherit;}' +
+          'button{display:block;width:100%;box-sizing:border-box;padding:10px 12px;border:0;' +
+          'border-bottom:1px solid #e8eaed;background:transparent;color:inherit;font:inherit;' +
+          'text-align:left;cursor:pointer;}button:last-child{border-bottom:0}' +
+          'button:hover,button:focus{background:#f1f3f4;outline:none}.primary,.secondary{' +
+          'display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+          '.primary{font-weight:500}.secondary{font-size:12px;color:#5f6368;margin-top:2px}' +
+          '@media(prefers-color-scheme:dark){.panel{color:#e8eaed;background:#2d2e30;' +
+          'border-color:#5f6368}button{border-color:#5f6368}button:hover,button:focus{' +
+          'background:#3c4043}.secondary{color:#bdc1c6}}';
+        chooserList = document.createElement('div');
+        chooserList.className = 'panel'; chooserList.setAttribute('role', 'listbox');
+        shadow.appendChild(style); shadow.appendChild(chooserList);
+      }
+      function matchingRecords(context, input) {
+        var currentUsername = value(context.username, 512).trim();
+        var currentSubaccount = value(context.subaccount, 512).trim();
+        return savedRecords.filter(function(record) {
+          if (!record || record.username && !context.username
+              || record.subaccount && !context.subaccount) return false;
+          if (input === context.subaccount) {
+            return !currentUsername || currentUsername === record.username;
+          }
+          if (currentSubaccount && currentSubaccount !== record.subaccount) return false;
+          return input !== context.password || !currentUsername || currentUsername === record.username;
+        });
+      }
+      function positionCredentialChooser() {
+        if (!chooserHost || !chooserInput || !chooserInput.isConnected) return;
+        var rect = chooserInput.getBoundingClientRect(), viewportWidth = window.innerWidth;
+        var viewportHeight = window.innerHeight, below = viewportHeight - rect.bottom - 8;
+        var above = rect.top - 8, width = Math.min(Math.max(220, rect.width), viewportWidth - 8);
+        chooserHost.style.width = width + 'px';
+        chooserHost.style.left = Math.max(4, Math.min(rect.left, viewportWidth - width - 4)) + 'px';
+        chooserHost.style.maxHeight = Math.max(80, Math.min(264, Math.max(above, below))) + 'px';
+        var height = chooserHost.offsetHeight, top = rect.bottom + 4;
+        if (height > below && above > below) top = Math.max(4, rect.top - height - 4);
+        chooserHost.style.top = Math.max(4, Math.min(top, viewportHeight - height - 4)) + 'px';
+      }
+      function chooseCredential(context, record) {
+        fillField(context.username, String(record.username || ''));
+        fillField(context.subaccount, String(record.subaccount || ''));
+        fillField(context.password, String(record.password || ''));
+        try { context.password.focus({ preventScroll: true }); } catch (error) { context.password.focus(); }
+        hideCredentialChooser();
+      }
+      function showCredentialChooser(input) {
+        var context = loginContext(input);
+        if (!context || !savedRecords.length) { hideCredentialChooser(); return; }
+        var records = matchingRecords(context, input);
+        if (!records.length) { hideCredentialChooser(); return; }
+        hideCredentialChooser(); chooserInput = input; ensureCredentialChooser();
+        records.forEach(function(record) {
+          var button = document.createElement('button');
+          button.type = 'button'; button.setAttribute('role', 'option');
+          var primary = document.createElement('span');
+          primary.className = 'primary';
+          primary.textContent = String(record.username || record.subaccount || '');
+          button.appendChild(primary);
+          if (record.username && record.subaccount) {
+            var secondary = document.createElement('span');
+            secondary.className = 'secondary';
+            secondary.textContent = '子账号：' + String(record.subaccount);
+            button.appendChild(secondary);
+          }
+          button.addEventListener('mousedown', function(event) { event.preventDefault(); });
+          button.addEventListener('click', function() { chooseCredential(context, record); });
+          chooserList.appendChild(button);
+        });
+        document.documentElement.appendChild(chooserHost); positionCredentialChooser();
+      }
+      window.__codexElvesSetCredentialRecords = function(records) {
+        savedRecords = Array.isArray(records) ? records.filter(function(record) {
+          return record && typeof record === 'object' && record.password;
+        }) : [];
+        hideCredentialChooser();
+      };
+      document.addEventListener('focusin', function(event) {
+        if (canChooseCredentials(event.target)) showCredentialChooser(event.target);
+      }, true);
+      document.addEventListener('click', function(event) {
+        if (canChooseCredentials(event.target)) showCredentialChooser(event.target);
+        else if (!chooserHost || !event.composedPath().includes(chooserHost)) hideCredentialChooser();
+      }, true);
+      document.addEventListener('scroll', hideCredentialChooser, true);
+      window.addEventListener('resize', hideCredentialChooser);
+      function capture() {
+        if (!/^https?:$/.test(location.protocol)) return;
+        var recorder = window.__codexElvesCredentialRecorder;
+        if (!recorder || typeof recorder.postMessage !== 'function') return;
+        status('capture', 'attempt');
+        var passwords = Array.from(document.querySelectorAll('input[type=password]')).filter(function(input) {
+          return !input.disabled && input.value && input.getClientRects().length > 0;
+        });
+        if (!passwords.length) { status('failure', 'missing-password'); return; }
+        var password = passwords[0], scope = password.closest('form') || document;
+        var scopePasswords = Array.from(scope.querySelectorAll('input[type=password]')).filter(function(input) {
+          return !input.disabled && input.value && input.getClientRects().length > 0;
+        });
+        if (scopePasswords.length !== 1) { status('failure', 'ambiguous-password'); return; }
+        password = scopePasswords[0];
+        var inputs = textInputs(scope), username = '', subaccount = '';
+        var namedUser = inputs.find(function(input) {
+          return input.autocomplete === 'username' && value(input, 512).trim();
+        });
+        if (namedUser) username = value(namedUser, 512).trim();
+        for (var index = 0; index < inputs.length; index++) {
+          var input = inputs[index], current = value(input, 512).trim();
+          if (!current) continue;
+          if (!subaccount && subaccountField(input)) subaccount = current;
+          else if (!username && usernameField(input)) username = current;
+        }
+        if (!username) {
+          var fallback = inputs.find(function(input) {
+            return !subaccountField(input) && value(input, 512).trim();
+          });
+          if (fallback) username = value(fallback, 512).trim();
+        }
+        if (!username && !subaccount) { status('failure', 'missing-fields'); return; }
+        recorder.postMessage(JSON.stringify({ kind: 'record', origin: location.origin,
+          generation: Number(window.__codexElvesCredentialPageGeneration) || 0,
+          username: username, password: value(password, 4096), subaccount: subaccount }));
+      }
+      document.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape') hideCredentialChooser();
+      }, true);
+      document.addEventListener('submit', capture, true);
+      document.addEventListener('click', function(event) {
+        var target = event.target && event.target.closest
+          ? event.target.closest('button,input,a,[role=button],[onclick]') : null;
+        if (!target) return;
+        var type = String(target.getAttribute('type') || '').toLowerCase();
+        var label = [target.value, target.innerText, target.getAttribute('aria-label')].join(' ');
+        if (type === 'submit' || target.tagName === 'BUTTON' && !type
+            || /登\\s*录|登\\s*入|sign.?in|log.?in|submit|提交|继续|next/i.test(label)) capture();
+      }, true);
+      document.addEventListener('keydown', function(event) {
+        if (event.key === 'Enter' && event.target && event.target.tagName === 'INPUT') capture();
+      }, true);
+      window.__codexElvesCredentialCollectorInstalled = true;
+      status('install', 'ready');
+    } catch (error) { status('failure', 'install'); }
   }
-  function textInputs(scope) {
-    return Array.from(scope.querySelectorAll('input,select')).filter(function(input) {
-      return !input.disabled && input.getClientRects().length > 0
-        && !['password', 'hidden', 'checkbox', 'radio', 'submit', 'button'].includes(input.type);
-    });
+  if (document.documentElement) install();
+  else {
+    window.__codexElvesCredentialCollectorWaiting = true;
+    document.addEventListener('DOMContentLoaded', install, { once: true });
+    status('install', 'waiting-dom');
   }
-  function subaccountField(input) {
-    return /sub.?account|tenant|organiz|organis|workspace|team|company|domain|子账号|租户|组织|团队|企业|空间/.test(meta(input));
+})();
+""";
+    private static final String NETWORK_COLLECTOR_SCRIPT = """
+(function(){
+  if (window.__codexElvesNetworkCollectorInstalled) return;
+  window.__codexElvesNetworkCollectorInstalled = true;
+  var REQUEST_LIMIT = 32768, RESPONSE_LIMIT = 65536, nextRequestId = 0;
+  function newRequestId() {
+    return Date.now().toString(36) + '-' + (++nextRequestId) + '-' + Math.random().toString(36).slice(2, 10);
   }
-  function usernameField(input) {
-    return /user.?name|email|e-mail|login|account|手机号|邮箱|账号|用户名/.test(meta(input));
+  function currentGeneration() { return Number(window.__codexElvesNetworkPageGeneration) || 0; }
+  function sensitiveKey(key) {
+    return /pass(?:word|code)?|pwd|token|secret|authorization|cookie|credential|api[_-]?key|account|username|cacct|sacct/i.test(String(key || ''));
   }
-  function capture() {
-    if (!/^https?:$/.test(location.protocol)) return;
-    var recorder = window.__codexElvesCredentialRecorder;
-    if (!recorder || typeof recorder.record !== 'function') return;
-    var passwords = Array.from(document.querySelectorAll('input[type=password]')).filter(function(input) {
-      return !input.disabled && input.value && input.getClientRects().length > 0;
-    });
-    if (!passwords.length) return;
-    var password = passwords[0], scope = password.closest('form') || document;
-    var inputs = textInputs(scope), username = '', subaccount = '';
-    var namedUser = inputs.find(function(input) {
-      return input.autocomplete === 'username' && value(input, 512).trim();
-    });
-    if (namedUser) username = value(namedUser, 512).trim();
-    for (var index = 0; index < inputs.length; index++) {
-      var input = inputs[index], current = value(input, 512).trim();
-      if (!current) continue;
-      if (!subaccount && subaccountField(input)) subaccount = current;
-      else if (!username && usernameField(input)) username = current;
-    }
-    if (!username) {
-      var fallback = inputs.find(function(input) {
-        return !subaccountField(input) && value(input, 512).trim();
+  function redactJson(value) {
+    if (Array.isArray(value)) return value.map(redactJson);
+    if (value && typeof value === 'object') {
+      var result = {};
+      Object.keys(value).forEach(function(key) {
+        result[key] = sensitiveKey(key) ? '<redacted>' : redactJson(value[key]);
       });
-      if (fallback) username = value(fallback, 512).trim();
+      return result;
     }
-    if (!username && !subaccount) return;
-    recorder.record(JSON.stringify({ origin: location.origin, username: username,
-      password: value(password, 4096), subaccount: subaccount }));
+    return value;
   }
-  document.addEventListener('submit', function() { setTimeout(capture, 0); }, true);
-  document.addEventListener('click', function(event) {
-    var target = event.target && event.target.closest ? event.target.closest('button,input') : null;
-    if (!target) return;
-    var type = String(target.getAttribute('type') || '').toLowerCase();
-    var label = [target.value, target.innerText, target.getAttribute('aria-label')].join(' ');
-    if (type === 'submit' || target.tagName === 'BUTTON' && !type
-        || /登录|登入|sign.?in|log.?in|submit|继续|next/i.test(label)) setTimeout(capture, 0);
-  }, true);
-  document.addEventListener('keydown', function(event) {
-    if (event.key === 'Enter' && event.target && event.target.tagName === 'INPUT') setTimeout(capture, 0);
-  }, true);
+  function redactText(value) {
+    var trimmed = value.trim();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try { return JSON.stringify(redactJson(JSON.parse(value))); } catch (error) {}
+    }
+    return value.replace(/((?:^|[?&;\\s])[^?=&;\\s]*(?:pass(?:word|code)?|pwd|token|secret|authorization|cookie|credential|api[_-]?key|account|username|cacct|sacct)[^=&;\\s]*=)[^&;\\s]*/gi, '$1<redacted>');
+  }
+  function limited(value, limit) {
+    value = redactText(String(value == null ? '' : value));
+    return value.length > limit ? value.slice(0, limit) + '\\n…[内容已截断]' : value;
+  }
+  function body(value, limit) {
+    if (value == null) return '';
+    if (typeof value === 'string') return limited(value, limit);
+    if (typeof URLSearchParams !== 'undefined' && value instanceof URLSearchParams)
+      return limited(value.toString(), limit);
+    if (typeof FormData !== 'undefined' && value instanceof FormData) {
+      var entries = [];
+      value.forEach(function(item, key) {
+        entries.push({ name: key, value: sensitiveKey(key) ? '<redacted>'
+          : typeof item === 'string' ? item : '[File ' + String(item && item.name || 'unnamed') + ']' });
+      });
+      return limited(JSON.stringify(entries), limit);
+    }
+    if (typeof Blob !== 'undefined' && value instanceof Blob)
+      return '[Blob ' + value.type + ' ' + value.size + ' bytes]';
+    if (typeof ArrayBuffer !== 'undefined' && value instanceof ArrayBuffer)
+      return '[ArrayBuffer ' + value.byteLength + ' bytes]';
+    if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView && ArrayBuffer.isView(value))
+      return '[' + value.constructor.name + ' ' + value.byteLength + ' bytes]';
+    if (typeof ReadableStream !== 'undefined' && value instanceof ReadableStream) return '[ReadableStream]';
+    try { return limited(JSON.stringify(value), limit); }
+    catch (error) { return limited(String(value), limit); }
+  }
+  function textual(mime) {
+    return !mime || /^text[/]/i.test(mime) || /json|xml|javascript|ecmascript|x-www-form-urlencoded/i.test(mime);
+  }
+  function binary(mime, size) {
+    return '[非文本响应' + (mime ? ' ' + mime : '') + (Number(size) > 0 ? ' ' + Number(size) + ' bytes' : '') + ']';
+  }
+  function report(kind, info, requestBody, responseBody, status, mime, failure, detail) {
+    try {
+      var recorder = window.__codexElvesNetworkRecorder;
+      if (!recorder || typeof recorder.record !== 'function') return;
+      var url = new URL(info.target, location.href).href;
+      if (!/^https?:$/.test(new URL(url).protocol)) return;
+      var payload = { kind: kind, requestId: info.id, resourceType: info.resourceType,
+        origin: location.origin, generation: currentGeneration(), method: info.method, url: url,
+        status: Number(status) || 0, mime: String(mime || '') };
+      if (requestBody !== undefined) payload.requestBody = requestBody;
+      if (responseBody !== undefined) payload.responseBody = responseBody;
+      if (failure === true) payload.failure = true;
+      if (detail) payload.detail = String(detail).slice(0, 128);
+      recorder.record(JSON.stringify(payload));
+    } catch (error) {}
+  }
+  if (typeof window.fetch === 'function') {
+    var originalFetch = window.fetch;
+    window.fetch = function(input, init) {
+      var request = typeof Request !== 'undefined' && input instanceof Request ? input : null;
+      var info = { id: newRequestId(), resourceType: 'fetch',
+        method: String(init && init.method || request && request.method || 'GET').toUpperCase(),
+        target: String(request ? request.url : input) };
+      var args = arguments;
+      report('start', info);
+      if (init && init.body != null) report('requestBody', info, body(init.body, REQUEST_LIMIT));
+      else if (request && !/^(?:GET|HEAD)$/.test(info.method)) {
+        request.clone().text().then(function(text) {
+          report('requestBody', info, limited(text, REQUEST_LIMIT));
+        }).catch(function() {});
+      }
+      return originalFetch.apply(this, args).then(function(response) {
+        var mime = response.headers.get('content-type') || '';
+        if (textual(mime)) response.clone().text().then(function(text) {
+          report('response', info, undefined, limited(text, RESPONSE_LIMIT), response.status, mime, false);
+        }).catch(function() {});
+        else report('response', info, undefined, binary(mime, response.headers.get('content-length')),
+          response.status, mime, false);
+        return response;
+      }, function(error) {
+        report('response', info, undefined, undefined, 0, '', true, error && error.name || 'FetchError');
+        throw error;
+      });
+    };
+  }
+  if (typeof XMLHttpRequest !== 'undefined') {
+    var open = XMLHttpRequest.prototype.open, send = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, target) {
+      this.__codexElvesNetwork = { id: newRequestId(), resourceType: 'xhr',
+        method: String(method || 'GET').toUpperCase(), target: String(target) };
+      return open.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function(value) {
+      var info = this.__codexElvesNetwork;
+      if (info) {
+        report('start', info);
+        report('requestBody', info, body(value, REQUEST_LIMIT));
+        this.addEventListener('loadend', function() {
+          var response = '', type = this.responseType;
+          if (type === 'json') {
+            try { response = JSON.stringify(this.response); } catch (error) {}
+          } else if (type === '' || type === 'text') response = this.responseText;
+          else if (type === 'document' && this.response && typeof XMLSerializer !== 'undefined')
+            response = new XMLSerializer().serializeToString(this.response);
+          else if (type === 'blob' && this.response) response = '[Blob ' + this.response.type + ' ' + this.response.size + ' bytes]';
+          else if (type === 'arraybuffer' && this.response) response = '[ArrayBuffer ' + this.response.byteLength + ' bytes]';
+          else if (this.response) response = '[' + type + ' response]';
+          report('response', info, undefined, limited(response, RESPONSE_LIMIT),
+            this.status, this.getResponseHeader('content-type') || '', this.status === 0, this.status === 0 ? 'NetworkError' : '');
+        });
+      }
+      return send.apply(this, arguments);
+    };
+  }
 })();
 """;
     // One retained view; detach replaces its MutableContextWrapper base with the application.
@@ -200,11 +517,16 @@ final class BrowserSession {
     private final AutoCloseable observer;
     private final BrowserProxy proxy;
     private final BrowserCredentialStore credentialStore;
-    private boolean credentialRecordingEnabled;
+    private boolean credentialRecordingEnabled, credentialMessageSupported;
+    private String credentialError = "";
+    private String credentialPageOrigin = "", credentialPreviousPageOrigin = "";
+    private long credentialPageGeneration, credentialPreviousPageGeneration;
     private Listener listener;
     private boolean closed, attached, routeReady;
     private long proxyGeneration;
     private long pageGeneration;
+    private String networkPageOrigin = "";
+    private boolean networkDocumentStartAvailable, networkFallbackReloaded;
     private String pendingNavigationUrl = "";
     private String localFileThreadId = "";
     private String localFileOrigin = "";
@@ -218,8 +540,12 @@ final class BrowserSession {
     private String pageTitle = "";
     private boolean desktopRootScrollLocked;
     private ScriptHandler desktopViewportScript;
+    private ScriptHandler networkCollectorScript;
+    private ScriptHandler credentialCollectorScript;
     private final ArrayDeque<DiagnosticEvent> diagnosticEvents = new ArrayDeque<>();
     private final Map<String, DiagnosticEvent> latestNetworkEvents = new HashMap<>();
+    private final Map<String, DiagnosticEvent> networkEventsByRequestId = new HashMap<>();
+    private final Map<String, ArrayDeque<DiagnosticEvent>> pendingNetworkEvents = new HashMap<>();
     private final Set<String> performanceResourceKeys = new HashSet<>();
     private long nextDiagnosticId;
     private final Runnable desktopRootScrollPolicyRefresh = this::updateDesktopRootScrollPolicy;
@@ -392,9 +718,19 @@ final class BrowserSession {
         });
         view.setSaveEnabled(false);
         credentialStore = new BrowserCredentialStore(context.getApplicationContext());
-        credentialRecordingEnabled = credentialStore.isRecordingEnabled(identity.origin());
-        if (credentialRecordingEnabled)
-            view.addJavascriptInterface(new CredentialRecorderBridge(), CREDENTIAL_BRIDGE_NAME);
+        credentialRecordingEnabled = credentialStore.isRecordingEnabled(identity.owner());
+        networkDocumentStartAvailable = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT);
+        credentialMessageSupported = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER);
+        if (credentialMessageSupported) {
+            try { registerCredentialBridge(); }
+            catch (RuntimeException unavailable) {
+                credentialMessageSupported = false;
+                diagnostic("native.browser.credentials", DiagnosticsPolicy.fields(
+                    "phase", "failure", "errorType", DiagnosticsPolicy.errorType(unavailable),
+                    "reason", "bridge-unsupported"));
+            }
+        }
+        view.addJavascriptInterface(new NetworkRecorderBridge(), NETWORK_BRIDGE_NAME);
         WebSettings settings = view.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -429,6 +765,8 @@ final class BrowserSession {
         try {
             CookieManager.getInstance().setAcceptCookie(true);
             CookieManager.getInstance().setAcceptThirdPartyCookies(view, false);
+            installNetworkCollector(view);
+            installCredentialCollector(view);
         } catch (RuntimeException unavailable) {
             // Cookie policy must not prevent the browser surface from opening.
             diagnostic("native.browser.cookies", DiagnosticsPolicy.fields(
@@ -472,6 +810,7 @@ final class BrowserSession {
                     if (request.isForMainFrame()) { error = "仅支持 HTTP 和 HTTPS 网页"; changed(); }
                     return true;
                 }
+                if (request.isForMainFrame()) networkPageOrigin = webOrigin(target.toString());
                 return false;
             }
             @Override public WebResourceResponse shouldInterceptRequest(WebView webView, WebResourceRequest request) {
@@ -498,7 +837,23 @@ final class BrowserSession {
                 mainFrameFinished = false;
                 pendingNavigationUrl = address;
                 ++pageGeneration;
-                ensureNetworkRequest("GET", address, true, "document");
+                credentialPreviousPageOrigin = credentialPageOrigin;
+                credentialPreviousPageGeneration = credentialPageGeneration;
+                credentialPageOrigin = webOrigin(address);
+                credentialPageGeneration = pageGeneration;
+                webView.evaluateJavascript(
+                    "window.__codexElvesCredentialPageGeneration=" + pageGeneration + ";", null);
+                networkPageOrigin = webOrigin(address);
+                for (DiagnosticEvent event : networkEventsByRequestId.values()) {
+                    if (event.generationPending && networkPageOrigin.equals(webOrigin(event.url))) {
+                        event.generation = pageGeneration;
+                        event.generationPending = false;
+                    }
+                }
+                webView.evaluateJavascript(
+                    "window.__codexElvesNetworkPageGeneration=" + pageGeneration + ";", null);
+                installNetworkCollector(webView);
+                recordNetworkRequest("GET", address, true, "", "");
                 recordDiagnosticEvent("page-start", "GET", address, "", "", true, "");
                 diagnostic("native.browser.page", DiagnosticsPolicy.urlFields(address,
                     "phase", "start", "generation", pageGeneration));
@@ -517,6 +872,7 @@ final class BrowserSession {
                 completeNetworkRequest("GET", address, 200, "200", "document", 0L, true);
                 collectPerformanceSnapshot(webView);
                 installCredentialCollector(webView);
+                installNetworkCollector(webView);
                 MAIN.postDelayed(() -> {
                     if (!closed && mainFrameFinished) {
                         collectPerformanceSnapshot(view);
@@ -533,6 +889,10 @@ final class BrowserSession {
                 }
                 mainFrameFinished = true;
                 changed();
+                if (!networkDocumentStartAvailable && !networkFallbackReloaded) {
+                    networkFallbackReloaded = true;
+                    reload();
+                }
             }
             @Override public void onScaleChanged(WebView webView, float oldScale, float newScale) {
                 if (BrowserPreferences.UA_DESKTOP.equals(userAgentMode)) {
@@ -793,6 +1153,8 @@ final class BrowserSession {
         synchronized (diagnosticEvents) {
             diagnosticEvents.clear();
             latestNetworkEvents.clear();
+            networkEventsByRequestId.clear();
+            pendingNetworkEvents.clear();
             performanceResourceKeys.clear();
         }
         changed();
@@ -804,30 +1166,42 @@ final class BrowserSession {
     boolean credentialRecordingEnabled() { return credentialRecordingEnabled; }
     void setCredentialRecordingEnabled(boolean enabled) {
         if (closed) return;
-        credentialStore.setRecordingEnabled(identity.origin(), enabled);
+        credentialStore.setRecordingEnabled(identity.owner(), enabled);
         credentialRecordingEnabled = enabled;
+        credentialError = "";
         if (enabled) {
-            view.addJavascriptInterface(new CredentialRecorderBridge(), CREDENTIAL_BRIDGE_NAME);
             installCredentialCollector(view);
-        } else view.removeJavascriptInterface(CREDENTIAL_BRIDGE_NAME);
+        } else view.evaluateJavascript(
+            "window.__codexElvesSetCredentialRecords&&window.__codexElvesSetCredentialRecords([]);", null);
         changed();
     }
     List<BrowserCredentialStore.Entry> credentials() {
-        return credentialStore.list(identity.origin());
+        return credentialStore.list(identity.owner());
     }
+    String credentialError() { return credentialError; }
     void deleteCredential(String id) {
-        credentialStore.delete(identity.origin(), id); changed();
+        credentialStore.delete(identity.owner(), id); pushCredentialRecords(view); changed();
     }
     void clearCredentials() {
-        credentialStore.clear(identity.origin()); changed();
+        credentialStore.clear(identity.owner()); pushCredentialRecords(view); changed();
     }
     void recordHttpCredentials(String username, String password) {
         if (!credentialRecordingEnabled) return;
         String origin = webOrigin(view.getUrl());
         try {
-            if (!origin.isEmpty()) credentialStore.record(identity.origin(), origin, username, password, "");
-        } catch (RuntimeException ignored) { }
-        changed();
+            if (origin.isEmpty()) {
+                credentialFailure("页面地址已变化，请返回登录页后重试", "origin-mismatch", null); return;
+            }
+            if (!credentialStore.record(identity.owner(), origin, username, password, "")) {
+                credentialFailure("未识别到账号或密码，请使用账号密码登录后重试", "missing-fields", null); return;
+            }
+            credentialError = "";
+            diagnostic("native.browser.credentials", DiagnosticsPolicy.fields(
+                "phase", "success", "reason", "http-auth", "generation", credentialPageGeneration));
+            changed();
+        } catch (RuntimeException failure) {
+            credentialFailure("账号密码保存失败，请检查系统密钥状态后重试", "failed", failure);
+        }
     }
     void toggleBookmark() {
         if (closed || home || !allowed(Uri.parse(url))) return;
@@ -909,6 +1283,9 @@ final class BrowserSession {
         }
         pendingNavigationUrl = target;
         home = false; error = ""; url = target; proxy.setActive(true); ++pageGeneration;
+        networkPageOrigin = webOrigin(target);
+        view.evaluateJavascript(
+            "window.__codexElvesNetworkPageGeneration=" + pageGeneration + ";", null);
         view.onResume(); view.resumeTimers(); view.loadUrl(target); changed();
     }
     void showHome() {
@@ -974,33 +1351,71 @@ final class BrowserSession {
         MAIN.postDelayed(diagnosticRefresh, 120L);
     }
 
+    private DiagnosticEvent createNetworkEventLocked(String method, String safeUrl, boolean mainFrame,
+        String resourceType, String requestId, long generation) {
+        DiagnosticEvent event = new DiagnosticEvent(++nextDiagnosticId, System.currentTimeMillis(),
+            "request", method == null ? "GET" : method, safeUrl, "", "", "",
+            mainFrame, resourceType == null ? "" : resourceType, 0L, 0L, 0, false, false);
+        event.requestId = requestId == null ? "" : requestId;
+        event.generation = generation;
+        diagnosticEvents.addLast(event);
+        String key = networkKey(method, safeUrl);
+        latestNetworkEvents.put(key, event);
+        pendingNetworkEvents.computeIfAbsent(key, ignored -> new ArrayDeque<>()).addLast(event);
+        if (!event.requestId.isEmpty()) networkEventsByRequestId.put(event.requestId, event);
+        return event;
+    }
+
+    private DiagnosticEvent pendingNativeStartLocked(String key) {
+        ArrayDeque<DiagnosticEvent> queue = pendingNetworkEvents.get(key);
+        if (queue == null) return null;
+        for (DiagnosticEvent event : queue) if (!event.nativeObserved) return event;
+        return null;
+    }
+
+    private DiagnosticEvent pendingScriptEventLocked(String key) {
+        ArrayDeque<DiagnosticEvent> queue = pendingNetworkEvents.get(key);
+        if (queue == null) return null;
+        for (DiagnosticEvent event : queue) if (event.requestId.isEmpty() && !event.response) return event;
+        return null;
+    }
+
+    private DiagnosticEvent pendingNetworkEventLocked(String key) {
+        ArrayDeque<DiagnosticEvent> queue = pendingNetworkEvents.get(key);
+        return queue == null ? null : queue.peekFirst();
+    }
+
+    private void removePendingNetworkEventLocked(DiagnosticEvent event) {
+        if (event == null) return;
+        String key = networkKey(event.method, event.url);
+        ArrayDeque<DiagnosticEvent> queue = pendingNetworkEvents.get(key);
+        if (queue == null) return;
+        queue.remove(event);
+        if (queue.isEmpty()) pendingNetworkEvents.remove(key);
+    }
+
+    private static boolean scriptResourceType(String value) {
+        return "xhr".equals(value) || "fetch".equals(value) || "xmlhttprequest".equals(value);
+    }
+
+    private static String mergeResourceType(String current, String next) {
+        if (scriptResourceType(current)) return current;
+        return next == null || next.isEmpty() ? current : next;
+    }
+
     private void recordNetworkRequest(String method, String url, boolean mainFrame,
         String detail, String headers) {
         String safeUrl = redactDiagnosticUrl(url);
-        DiagnosticEvent event;
+        String key = networkKey(method, safeUrl);
         synchronized (diagnosticEvents) {
-            event = new DiagnosticEvent(++nextDiagnosticId, System.currentTimeMillis(),
-                "request", method == null ? "GET" : method, safeUrl, "", detail, headers,
-                mainFrame, inferResourceType(Uri.parse(url), mainFrame), 0L, 0L, 0, false, false);
-            diagnosticEvents.addLast(event);
-            latestNetworkEvents.put(networkKey(method, safeUrl), event);
-            trimDiagnosticEventsLocked();
-        }
-        scheduleDiagnosticRefresh();
-    }
-
-    private void ensureNetworkRequest(String method, String url, boolean mainFrame, String resourceType) {
-        String safeUrl = redactDiagnosticUrl(url);
-        synchronized (diagnosticEvents) {
-            DiagnosticEvent existing = latestNetworkEvents.get(networkKey(method, safeUrl));
-            if (existing != null && !existing.failure) return;
-            DiagnosticEvent event = new DiagnosticEvent(++nextDiagnosticId, System.currentTimeMillis(),
-                "request", method == null ? "GET" : method, safeUrl, "", "", "",
-                mainFrame, resourceType == null || resourceType.isEmpty()
-                    ? inferResourceType(Uri.parse(url), mainFrame) : resourceType,
-                0L, 0L, 0, false, false);
-            diagnosticEvents.addLast(event);
-            latestNetworkEvents.put(networkKey(method, safeUrl), event);
+            DiagnosticEvent event = pendingNativeStartLocked(key);
+            if (event == null) event = createNetworkEventLocked(method, safeUrl, mainFrame,
+                inferResourceType(Uri.parse(url), mainFrame), "", 0L);
+            event.nativeObserved = true;
+            if (detail != null && !detail.isEmpty()) event.detail = detail;
+            if (headers != null && !headers.isEmpty()) event.headers = headers;
+            event.mainFrame = event.mainFrame || mainFrame;
+            event.resourceType = mergeResourceType(event.resourceType, inferResourceType(Uri.parse(url), mainFrame));
             trimDiagnosticEventsLocked();
         }
         scheduleDiagnosticRefresh();
@@ -1010,23 +1425,20 @@ final class BrowserSession {
         String detail, boolean mainFrame, String resourceType, boolean failure) {
         String safeUrl = redactDiagnosticUrl(url);
         synchronized (diagnosticEvents) {
-            DiagnosticEvent event = latestNetworkEvents.get(networkKey(method, safeUrl));
-            if (event == null) {
-                event = new DiagnosticEvent(++nextDiagnosticId, System.currentTimeMillis(),
-                    "request", method == null ? "GET" : method, safeUrl, "", "", "",
-                    mainFrame, resourceType == null ? "" : resourceType, 0L, 0L,
-                    0, false, false);
-                diagnosticEvents.addLast(event);
-                latestNetworkEvents.put(networkKey(method, safeUrl), event);
-            }
+            String key = networkKey(method, safeUrl);
+            DiagnosticEvent event = pendingNetworkEventLocked(key);
+            if (event == null) event = latestNetworkEvents.get(key);
+            if (event == null) event = createNetworkEventLocked(method, safeUrl, mainFrame, resourceType, "", 0L);
             event.status = status == null ? "" : status;
             event.detail = detail == null ? "" : detail;
             event.mainFrame = mainFrame;
-            if (resourceType != null && !resourceType.isEmpty()) event.resourceType = resourceType;
+            event.nativeObserved = true;
+            event.resourceType = mergeResourceType(event.resourceType, resourceType);
             event.statusCode = statusCode;
-            event.response = statusCode > 0 || "200".equals(status) || "完成".equals(status);
+            event.response = !failure && (statusCode > 0 || "200".equals(status) || "完成".equals(status));
             event.failure = failure;
             event.durationMs = Math.max(0L, System.currentTimeMillis() - event.timeMs);
+            removePendingNetworkEventLocked(event);
             trimDiagnosticEventsLocked();
         }
         scheduleDiagnosticRefresh();
@@ -1036,22 +1448,18 @@ final class BrowserSession {
         String resourceType, long sizeBytes, boolean response) {
         String safeUrl = redactDiagnosticUrl(url);
         synchronized (diagnosticEvents) {
-            DiagnosticEvent event = latestNetworkEvents.get(networkKey(method, safeUrl));
-            if (event == null) {
-                event = new DiagnosticEvent(++nextDiagnosticId, System.currentTimeMillis(),
-                    "request", method == null ? "GET" : method, safeUrl, "", "", "",
-                    true, resourceType == null ? "document" : resourceType, 0L, 0L,
-                    0, false, false);
-                diagnosticEvents.addLast(event);
-                latestNetworkEvents.put(networkKey(method, safeUrl), event);
-            }
+            String key = networkKey(method, safeUrl);
+            DiagnosticEvent event = pendingNetworkEventLocked(key);
+            if (event == null) event = latestNetworkEvents.get(key);
+            if (event == null) event = createNetworkEventLocked(method, safeUrl, true,
+                resourceType == null ? "document" : resourceType, "", 0L);
             event.status = status == null ? "" : status;
             event.statusCode = statusCode;
-            event.resourceType = resourceType == null || resourceType.isEmpty()
-                ? event.resourceType : resourceType;
+            event.resourceType = mergeResourceType(event.resourceType, resourceType);
             event.sizeBytes = Math.max(0L, sizeBytes);
             event.response = response;
             event.durationMs = Math.max(event.durationMs, System.currentTimeMillis() - event.timeMs);
+            removePendingNetworkEventLocked(event);
             trimDiagnosticEventsLocked();
         }
         scheduleDiagnosticRefresh();
@@ -1117,7 +1525,8 @@ final class BrowserSession {
                 }
             }
             if (event == null) return;
-            event.resourceType = normalizeResourceType(resourceType, event.resourceType);
+            event.resourceType = mergeResourceType(event.resourceType,
+                normalizeResourceType(resourceType, event.resourceType));
             event.durationMs = Math.max(event.durationMs, Math.round(Math.max(0d, duration)));
             event.sizeBytes = Math.max(event.sizeBytes, Math.max(0L, sizeBytes));
             if (!event.failure && event.statusCode == 0) {
@@ -1125,6 +1534,7 @@ final class BrowserSession {
                 event.status = "200";
             }
             event.response = true;
+            removePendingNetworkEventLocked(event);
         }
         scheduleDiagnosticRefresh();
     }
@@ -1134,18 +1544,23 @@ final class BrowserSession {
         synchronized (diagnosticEvents) {
             for (DiagnosticEvent event : diagnosticEvents) {
                 if (!"request".equals(event.phase) || event.failure || event.response
-                    || "resource-cancelled".equals(event.status)) continue;
+                    || "resource-cancelled".equals(event.status) || !event.requestId.isEmpty()
+                    || scriptResourceType(event.resourceType)) continue;
                 event.statusCode = 200;
                 event.status = "200";
                 event.response = true;
                 event.durationMs = Math.max(1L, now - event.timeMs);
+                removePendingNetworkEventLocked(event);
             }
         }
         scheduleDiagnosticRefresh();
     }
 
     private static String networkKey(String method, String url) {
-        return (method == null ? "GET" : method.toUpperCase(Locale.ROOT)) + "|" + (url == null ? "" : url);
+        String normalized = url == null ? "" : url;
+        int fragment = normalized.indexOf('#');
+        if (fragment >= 0) normalized = normalized.substring(0, fragment);
+        return (method == null ? "GET" : method.toUpperCase(Locale.ROOT)) + "|" + normalized;
     }
 
     private static int parseStatusCode(String status) {
@@ -1157,7 +1572,11 @@ final class BrowserSession {
     private void trimDiagnosticEventsLocked() {
         while (diagnosticEvents.size() > DIAGNOSTIC_EVENT_LIMIT) {
             DiagnosticEvent removed = diagnosticEvents.removeFirst();
-            if (removed != null) latestNetworkEvents.values().removeIf(value -> value == removed);
+            if (removed != null) {
+                latestNetworkEvents.values().removeIf(value -> value == removed);
+                if (!removed.requestId.isEmpty()) networkEventsByRequestId.remove(removed.requestId, removed);
+                removePendingNetworkEventLocked(removed);
+            }
         }
     }
 
@@ -1348,8 +1767,58 @@ final class BrowserSession {
         return matcher.find() ? matcher.group(1) : fallback;
     }
     private void installCredentialCollector(WebView webView) {
-        if (credentialRecordingEnabled && webView != null)
-            webView.evaluateJavascript(CREDENTIAL_COLLECTOR_SCRIPT, null);
+        if (!credentialRecordingEnabled || webView == null) return;
+        if (!credentialMessageSupported) {
+            credentialFailure("当前 WebView 不支持安全凭据记录，请更新 Android System WebView", "bridge-unsupported", null);
+            return;
+        }
+        if (credentialCollectorScript == null
+            && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            try {
+                credentialCollectorScript = WebViewCompat.addDocumentStartJavaScript(
+                    webView, CREDENTIAL_COLLECTOR_SCRIPT, Collections.singleton("*"));
+            } catch (RuntimeException unavailable) {
+                diagnostic("native.browser.credentials", DiagnosticsPolicy.fields(
+                    "phase", "failure", "errorType", DiagnosticsPolicy.errorType(unavailable),
+                    "reason", "unsupported"));
+            }
+        }
+        webView.evaluateJavascript(CREDENTIAL_COLLECTOR_SCRIPT, null);
+        pushCredentialRecords(webView);
+    }
+    private void pushCredentialRecords(WebView webView) {
+        if (!credentialRecordingEnabled || webView == null) return;
+        String origin = webOrigin(webView.getUrl());
+        if (origin.isEmpty()) return;
+        try {
+            JSONArray records = new JSONArray();
+            for (BrowserCredentialStore.Entry entry : credentialStore.forOrigin(identity.owner(), origin)) {
+                JSONObject record = new JSONObject();
+                record.put("username", entry.username);
+                record.put("password", entry.password);
+                record.put("subaccount", entry.subaccount);
+                records.put(record);
+            }
+            webView.evaluateJavascript("window.__codexElvesSetCredentialRecords&&"
+                + "window.__codexElvesSetCredentialRecords(" + records + ");", null);
+        } catch (JSONException | RuntimeException ignored) {
+            // Unavailable records never block navigation or the loaded page.
+        }
+    }
+    private void installNetworkCollector(WebView webView) {
+        if (webView == null) return;
+        if (networkCollectorScript == null && networkDocumentStartAvailable) {
+            try {
+                networkCollectorScript = WebViewCompat.addDocumentStartJavaScript(
+                    webView, NETWORK_COLLECTOR_SCRIPT, Collections.singleton("*"));
+            } catch (RuntimeException unavailable) {
+                networkDocumentStartAvailable = false;
+                diagnostic("native.browser.network", DiagnosticsPolicy.fields(
+                    "phase", "failure", "errorType", DiagnosticsPolicy.errorType(unavailable),
+                    "reason", "unsupported"));
+            }
+        }
+        webView.evaluateJavascript(NETWORK_COLLECTOR_SCRIPT, null);
     }
     private static String webOrigin(String value) {
         try {
@@ -1362,23 +1831,177 @@ final class BrowserSession {
                 + (port > 0 ? ":" + port : "");
         } catch (RuntimeException invalid) { return ""; }
     }
-    private final class CredentialRecorderBridge {
+    private boolean currentNetworkMessage(String origin, long generation) {
+        return !origin.isEmpty() && origin.equals(networkPageOrigin)
+            && (generation == pageGeneration || generation == 0L);
+    }
+    private void startNetworkFromScript(String requestId, String method, String target, String resourceType,
+        boolean generationPending) {
+        synchronized (diagnosticEvents) {
+            DiagnosticEvent event = networkEventsByRequestId.get(requestId);
+            if (event != null && event.generation != pageGeneration && !event.generationPending) {
+                diagnostic("native.browser.network", DiagnosticsPolicy.fields(
+                    "phase", "failure", "reason", "stale-callback"));
+                return;
+            }
+            String key = networkKey(method, target);
+            if (event == null) event = pendingScriptEventLocked(key);
+            if (event == null) event = createNetworkEventLocked(method, target, false, resourceType,
+                requestId, pageGeneration);
+            else if (event.requestId.isEmpty()) {
+                event.requestId = requestId;
+                event.generation = pageGeneration;
+                networkEventsByRequestId.put(requestId, event);
+            }
+            event.resourceType = resourceType;
+            event.generationPending = generationPending;
+            latestNetworkEvents.put(key, event);
+            trimDiagnosticEventsLocked();
+        }
+    }
+    private void updateNetworkFromScript(String kind, JSONObject value) {
+        synchronized (diagnosticEvents) {
+            DiagnosticEvent event = networkEventsByRequestId.get(value.optString("requestId", ""));
+            if (event == null || event.generation != pageGeneration && !event.generationPending) {
+                diagnostic("native.browser.network", DiagnosticsPolicy.fields(
+                    "phase", "failure", "reason", "stale-callback"));
+                return;
+            }
+            event.resourceType = mergeResourceType(event.resourceType, value.optString("resourceType", "xhr"));
+            if (value.has("requestBody")) event.requestBody = value.optString("requestBody", "");
+            if (value.has("responseBody")) event.responseBody = value.optString("responseBody", "");
+            String mime = value.optString("mime", "");
+            if (!mime.isEmpty()) event.responseMime = mime;
+            if ("response".equals(kind)) {
+                int statusCode = value.optInt("status", 0);
+                boolean failure = value.optBoolean("failure", false);
+                event.statusCode = statusCode;
+                event.status = statusCode > 0 ? Integer.toString(statusCode) : failure ? "失败" : event.status;
+                event.detail = value.optString("detail", event.detail);
+                event.response = !failure;
+                event.failure = failure;
+                event.durationMs = Math.max(event.durationMs, System.currentTimeMillis() - event.timeMs);
+                removePendingNetworkEventLocked(event);
+            }
+            trimDiagnosticEventsLocked();
+        }
+        if (value.has("requestBody")) diagnostic("native.browser.network", DiagnosticsPolicy.fields(
+            "phase", "body", "reason", "request"));
+        if (value.has("responseBody")) diagnostic("native.browser.network", DiagnosticsPolicy.fields(
+            "phase", "body", "reason", "response"));
+    }
+    private final class NetworkRecorderBridge {
         @JavascriptInterface public void record(String payload) {
-            if (payload == null || payload.length() > 16_384) return;
+            if (payload == null || payload.length() > 220_000) return;
             MAIN.post(() -> {
-                if (closed || !attached || !credentialRecordingEnabled) return;
+                if (closed || !attached) return;
                 try {
                     JSONObject value = new JSONObject(payload);
+                    String kind = value.optString("kind", "");
+                    String requestId = value.optString("requestId", "");
+                    if (!requestId.matches("[A-Za-z0-9-]{1,120}")) return;
                     String origin = webOrigin(value.optString("origin", ""));
-                    if (origin.isEmpty() || !origin.equals(webOrigin(view.getUrl()))) return;
-                    credentialStore.record(identity.origin(), origin, value.optString("username", ""),
-                        value.optString("password", ""), value.optString("subaccount", ""));
-                    changed();
+                    long generation = value.optLong("generation", -1L);
+                    if (!currentNetworkMessage(origin, generation)) {
+                        diagnostic("native.browser.network", DiagnosticsPolicy.fields(
+                            "phase", "failure", "reason", "stale-callback"));
+                        return;
+                    }
+                    String method = value.optString("method", "GET").toUpperCase(Locale.ROOT);
+                    String target = redactDiagnosticUrl(value.optString("url", ""));
+                    if (target.isEmpty() || !allowed(Uri.parse(target))) return;
+                    String resourceType = value.optString("resourceType", "xhr");
+                    if ("start".equals(kind)) startNetworkFromScript(requestId, method, target, resourceType,
+                        generation == 0L);
+                    else if ("requestBody".equals(kind) || "response".equals(kind)) {
+                        updateNetworkFromScript(kind, value);
+                    } else return;
+                    scheduleDiagnosticRefresh();
                 } catch (JSONException | RuntimeException ignored) {
-                    // Invalid or unavailable records never affect the loaded page.
+                    diagnostic("native.browser.network", DiagnosticsPolicy.fields(
+                        "phase", "failure", "errorType", DiagnosticsPolicy.errorType(ignored), "reason", "failed"));
                 }
             });
         }
+    }
+    @SuppressLint("RequiresFeature")
+    private void registerCredentialBridge() {
+        WebViewCompat.addWebMessageListener(view, CREDENTIAL_BRIDGE_NAME, Collections.singleton("*"),
+            (WebView sourceView, WebMessageCompat message, Uri sourceOrigin, boolean isMainFrame,
+                JavaScriptReplyProxy replyProxy) -> {
+                if (sourceView != view || !isMainFrame) return;
+                String payload = message.getData();
+                if (payload == null || payload.length() > 16_384) {
+                    MAIN.post(() -> credentialFailure("凭据消息无效，请刷新网页后重试", "invalid-payload", null));
+                    return;
+                }
+                String origin = webOrigin(sourceOrigin == null ? "" : sourceOrigin.toString());
+                MAIN.post(() -> handleCredentialMessage(payload, origin));
+            });
+    }
+    @SuppressLint("RequiresFeature")
+    private void unregisterCredentialBridge() {
+        WebViewCompat.removeWebMessageListener(view, CREDENTIAL_BRIDGE_NAME);
+    }
+    private boolean credentialPageMatches(String origin, long generation) {
+        if (origin.isEmpty() || generation <= 0L) return false;
+        return generation == credentialPageGeneration && origin.equals(credentialPageOrigin)
+            || generation == credentialPreviousPageGeneration && origin.equals(credentialPreviousPageOrigin);
+    }
+    private void handleCredentialStatus(JSONObject value) {
+        String phase = value.optString("phase", ""), reason = value.optString("reason", "");
+        diagnostic("native.browser.credentials", DiagnosticsPolicy.fields(
+            "phase", phase, "reason", reason, "generation", value.optLong("generation", 0L)));
+        if ("install".equals(phase) && "ready".equals(reason)) {
+            credentialError = ""; changed(); return;
+        }
+        if (!"failure".equals(phase)) return;
+        credentialError = switch (reason) {
+            case "missing-password", "missing-fields" -> "未识别到账号或密码，请使用账号密码登录后重试";
+            case "ambiguous-password" -> "检测到多个密码输入框，请在登录页只保留一个密码框后重试";
+            default -> "账号密码采集器初始化失败，请刷新网页后重试";
+        };
+        changed();
+    }
+    private void handleCredentialMessage(String payload, String sourceOrigin) {
+        if (closed || !attached || !credentialRecordingEnabled) return;
+        try {
+            JSONObject value = new JSONObject(payload);
+            String origin = webOrigin(value.optString("origin", ""));
+            if (sourceOrigin.isEmpty() || !sourceOrigin.equals(origin)) {
+                credentialFailure("页面地址已变化，请返回登录页后重试", "origin-mismatch", null); return;
+            }
+            if ("status".equals(value.optString("kind", "record"))) {
+                handleCredentialStatus(value); return;
+            }
+            if (!credentialPageMatches(origin, value.optLong("generation", -1L))) {
+                credentialFailure("页面地址已变化，请返回登录页后重试", "generation-mismatch", null); return;
+            }
+            String username = value.optString("username", ""), password = value.optString("password", "");
+            String subaccount = value.optString("subaccount", "");
+            if (password.isEmpty() || username.trim().isEmpty() && subaccount.trim().isEmpty()) {
+                credentialFailure("未识别到账号或密码，请使用账号密码登录后重试", "missing-fields", null); return;
+            }
+            boolean recorded = credentialStore.record(identity.owner(), origin, username, password, subaccount);
+            if (!recorded) {
+                credentialFailure("未识别到账号或密码，请使用账号密码登录后重试", "missing-fields", null); return;
+            }
+            credentialError = "";
+            diagnostic("native.browser.credentials", DiagnosticsPolicy.fields(
+                "phase", "success", "reason", "success", "generation", value.optLong("generation", 0L)));
+            pushCredentialRecords(view);
+            changed();
+        } catch (JSONException | RuntimeException failure) {
+            credentialFailure("账号密码保存失败，请检查系统密钥状态后重试", "failed", failure);
+        }
+    }
+    private void credentialFailure(String message, String reason, Throwable error) {
+        credentialError = message;
+        if (error == null) diagnostic("native.browser.credentials", DiagnosticsPolicy.fields(
+            "phase", "failure", "reason", reason));
+        else diagnostic("native.browser.credentials", DiagnosticsPolicy.fields(
+            "phase", "failure", "errorType", DiagnosticsPolicy.errorType(error), "reason", reason));
+        changed();
     }
     private void changed() { if (!closed && listener != null) listener.changed(); }
     private void diagnostic(String name, JSONObject fields) {
@@ -1404,7 +2027,8 @@ final class BrowserSession {
         try { observer.close(); } catch (Exception ignored) { }
         if (view.getParent() instanceof ViewGroup parent) parent.removeView(view);
         view.stopLoading(); view.setWebChromeClient(null); view.setWebViewClient(null);
-        view.removeJavascriptInterface(CREDENTIAL_BRIDGE_NAME); view.destroy();
+        if (credentialMessageSupported) unregisterCredentialBridge();
+        view.removeJavascriptInterface(NETWORK_BRIDGE_NAME); view.destroy();
         context.setBaseContext(context.getApplicationContext());
     }
 

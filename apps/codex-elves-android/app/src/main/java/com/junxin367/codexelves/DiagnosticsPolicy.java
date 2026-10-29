@@ -35,7 +35,8 @@ final class DiagnosticsPolicy {
         "manual", "remote", "hidden", "visible", "event", "request", "response", "api",
         "image", "reload", "offline", "online", "reconnect", "auth-lost", "success",
         "timeout", "response-read-failed", "visibility", "pagehide", "upload-failed",
-        "native-failed", "cors-blocked", "corp-blocked", "net-failed", "console-error"
+        "native-failed", "cors-blocked", "corp-blocked", "net-failed", "console-error",
+        "origin-mismatch", "missing-fields"
     );
     private static final Set<String> ERROR_TYPES = set(
         "unknown", "network", "timeout", "http", "ssl", "renderer", "resource", "parse",

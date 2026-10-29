@@ -372,19 +372,28 @@ export function getAndroidNotificationSettings() {
   return requestAndroidNotificationBridge("notification-settings-get");
 }
 
+function browserHexColor(value) {
+  let color = String(value || "").trim();
+  if (/^#[0-9a-f]{3}$/i.test(color)) color = "#" + [...color.slice(1)].map(x => x + x).join("");
+  const rgb = color.match(/^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*[\d.]+%?)?\s*\)$/i);
+  if (rgb) color = "#" + rgb.slice(1, 4).map(channel => Math.max(0, Math.min(255, Math.round(Number(channel))))
+    .toString(16).padStart(2, "0")).join("");
+  return /^#[0-9a-f]{6}$/i.test(color) ? color : "";
+}
+
 function browserAppearance() {
   const defaults = {
-    background: "#ffffff", foreground: "#1f1f1f", muted: "#717171", line: "#e8e8e8", surface: "#f9f9f9"
+    background: "#ffffff", foreground: "#1f1f1f", muted: "#717171", line: "#e8e8e8", surface: "#f9f9f9",
+    accent: "#171717"
   };
   const style = typeof document !== "undefined" && typeof getComputedStyle === "function"
     ? getComputedStyle(document.body || document.documentElement) : null;
   const colors = {};
   for (const [name, property] of Object.entries({
-    background: "--bg", foreground: "--text", muted: "--muted", line: "--line", surface: "--side"
+    background: "--bg", foreground: "--text", muted: "--muted", line: "--line", surface: "--side",
+    accent: "--accent"
   })) {
-    let value = style?.getPropertyValue(property)?.trim() || defaults[name];
-    if (/^#[0-9a-f]{3}$/i.test(value)) value = "#" + [...value.slice(1)].map(x => x + x).join("");
-    colors[name] = /^#[0-9a-f]{6}$/i.test(value) ? value : defaults[name];
+    colors[name] = browserHexColor(style?.getPropertyValue(property)) || defaults[name];
   }
   return { colors, fontSize: Math.max(12, Math.min(24, parseFloat(style?.fontSize) || 14)) };
 }

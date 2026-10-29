@@ -17,7 +17,7 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
-/** Origin-scoped credential records encrypted with a non-exportable Android Keystore key. */
+/** Remote-owner and site-origin scoped records encrypted with a non-exportable Android Keystore key. */
 final class BrowserCredentialStore {
     static final int RECORD_LIMIT = 100;
     static final class Entry {
@@ -48,21 +48,21 @@ final class BrowserCredentialStore {
             "codex_elves_browser_credentials", Context.MODE_PRIVATE);
     }
 
-    synchronized boolean isRecordingEnabled(String origin) {
-        return store.getBoolean(ENABLED_PREFIX + origin, false);
+    synchronized boolean isRecordingEnabled(String owner) {
+        return store.getBoolean(ENABLED_PREFIX + owner, false);
     }
 
-    synchronized void setRecordingEnabled(String origin, boolean enabled) {
-        if (!store.edit().putBoolean(ENABLED_PREFIX + origin, enabled).commit())
+    synchronized void setRecordingEnabled(String owner, boolean enabled) {
+        if (!store.edit().putBoolean(ENABLED_PREFIX + owner, enabled).commit())
             throw new IllegalStateException("账号密码记录设置保存失败，请重试");
     }
 
-    synchronized List<Entry> list(String origin) {
-        String encrypted = store.getString(RECORD_PREFIX + origin, "");
+    synchronized List<Entry> list(String owner) {
+        String encrypted = store.getString(RECORD_PREFIX + owner, "");
         List<Entry> result = new ArrayList<>();
         if (encrypted == null || encrypted.isEmpty()) return result;
         try {
-            JSONArray values = new JSONArray(decrypt(origin, encrypted));
+            JSONArray values = new JSONArray(decrypt(owner, encrypted));
             for (int index = 0; index < values.length(); index++) {
                 JSONObject value = values.optJSONObject(index);
                 if (value == null) continue;
@@ -81,20 +81,33 @@ final class BrowserCredentialStore {
         return result;
     }
 
-    synchronized void record(String owner, String origin, String username, String password, String subaccount) {
+    synchronized List<Entry> forOrigin(String owner, String origin) {
+        List<Entry> result = new ArrayList<>();
+        if (origin == null || origin.isEmpty()) return result;
+        for (Entry entry : list(owner)) {
+            if (entry.origin.equals(origin)) result.add(entry);
+        }
+        result.sort((left, right) -> Long.compare(right.updatedAtMs, left.updatedAtMs));
+        return result;
+    }
+
+    synchronized boolean record(String owner, String origin, String username, String password, String subaccount) {
         String cleanUsername = limited(username == null ? "" : username.trim(), 512);
         String cleanSubaccount = limited(subaccount == null ? "" : subaccount.trim(), 512);
         String cleanPassword = limited(password == null ? "" : password, 4096);
         if (owner == null || owner.isEmpty() || origin == null || origin.isEmpty()
-            || cleanPassword.isEmpty() || cleanUsername.isEmpty() && cleanSubaccount.isEmpty()) return;
+            || cleanPassword.isEmpty() || cleanUsername.isEmpty() && cleanSubaccount.isEmpty()) return false;
         List<Entry> values = list(owner);
         long now = System.currentTimeMillis();
+        // A new login for the same account replaces its old password, including a previously
+        // saved failed attempt. Distinct usernames/subaccounts remain independent records.
         values.removeIf(entry -> entry.origin.equals(origin) && entry.username.equals(cleanUsername)
-            && entry.subaccount.equals(cleanSubaccount) && entry.password.equals(cleanPassword));
+            && entry.subaccount.equals(cleanSubaccount));
         values.add(0, new Entry(UUID.randomUUID().toString(), origin, cleanUsername, cleanPassword,
             cleanSubaccount, now));
         if (values.size() > RECORD_LIMIT) values = new ArrayList<>(values.subList(0, RECORD_LIMIT));
         write(owner, values);
+        return true;
     }
 
     synchronized void delete(String owner, String id) {
@@ -145,10 +158,10 @@ final class BrowserCredentialStore {
         return generator.generateKey();
     }
 
-    private static String encrypt(String origin, String value) throws Exception {
+    private static String encrypt(String owner, String value) throws Exception {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.ENCRYPT_MODE, key());
-        cipher.updateAAD(origin.getBytes(StandardCharsets.UTF_8));
+        cipher.updateAAD(owner.getBytes(StandardCharsets.UTF_8));
         byte[] iv = cipher.getIV(), encrypted = cipher.doFinal(value.getBytes(StandardCharsets.UTF_8));
         byte[] combined = new byte[iv.length + encrypted.length];
         System.arraycopy(iv, 0, combined, 0, iv.length);
@@ -156,7 +169,7 @@ final class BrowserCredentialStore {
         return Base64.encodeToString(combined, Base64.NO_WRAP);
     }
 
-    private static String decrypt(String origin, String value) throws Exception {
+    private static String decrypt(String owner, String value) throws Exception {
         byte[] combined = Base64.decode(value, Base64.NO_WRAP);
         if (combined.length <= 12) throw new IllegalArgumentException("Invalid credential payload");
         byte[] iv = new byte[12], encrypted = new byte[combined.length - 12];
@@ -164,7 +177,7 @@ final class BrowserCredentialStore {
         System.arraycopy(combined, iv.length, encrypted, 0, encrypted.length);
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.DECRYPT_MODE, key(), new GCMParameterSpec(128, iv));
-        cipher.updateAAD(origin.getBytes(StandardCharsets.UTF_8));
+        cipher.updateAAD(owner.getBytes(StandardCharsets.UTF_8));
         return new String(cipher.doFinal(encrypted), StandardCharsets.UTF_8);
     }
 

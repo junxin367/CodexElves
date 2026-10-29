@@ -1,9 +1,9 @@
 package com.junxin367.codexelves;
 
+import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
-import android.content.ClipboardManager;
 import android.content.ClipData;
 import android.content.Intent;
 import android.content.res.ColorStateList;
@@ -30,6 +30,7 @@ import android.webkit.WebChromeClient;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -41,9 +42,14 @@ import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 import org.json.JSONObject;
+import org.json.JSONArray;
+import org.json.JSONTokener;
+import org.json.JSONException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.HashSet;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.Locale;
 import java.text.SimpleDateFormat;
@@ -54,7 +60,7 @@ import java.time.format.DateTimeFormatter;
 
 /** Browser chrome is native; pages receive no native bridge unless recording is explicitly enabled. */
 public final class BrowserActivity extends Activity implements BrowserSession.Listener {
-    private int background, foreground, muted, line, surface;
+    private int background, foreground, muted, line, surface, accent;
     private float fontSize;
     private enum InternalPage { NONE, HISTORY, BOOKMARKS, DIAGNOSTICS, CREDENTIALS }
     private LinearLayout root, header, footer;
@@ -64,7 +70,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     private TextView heading, failure;
     private EditText homeInput, addressInput;
     private LinearLayout userAgentRow;
-    private TextView userAgentValue;
+    private TextView userAgentValue, credentialErrorValue;
     private ImageView userAgentArrow;
     private PopupWindow userAgentPopup;
     private Button back, homeButton, reload, settingsButton, bookmarkButton;
@@ -75,6 +81,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     private Switch credentialRecordingSwitch;
     private boolean credentialSwitchSyncing;
     private final Set<String> revealedCredentialIds = new HashSet<>();
+    private final Map<Long, Integer> diagnosticBodyPages = new HashMap<>();
     private ScrollView homeScroll;
     private LinearLayout homeBody, recentPanel, historyPageBody, bookmarksPageBody, diagnosticsPageBody, credentialsPageBody;
     private Space homeTopSpacer, homeBottomSpacer;
@@ -104,6 +111,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         muted = getIntent().getIntExtra("muted", Color.rgb(113, 113, 113));
         line = getIntent().getIntExtra("line", Color.rgb(232, 232, 232));
         surface = getIntent().getIntExtra("surface", Color.rgb(249, 249, 249));
+        accent = getIntent().getIntExtra("accent", Color.rgb(23, 23, 23));
         fontSize = Math.max(12, Math.min(24, getIntent().getFloatExtra("fontSize", 14)));
         authority = getIntent().getExtras() == null ? null
             : getIntent().getExtras().getBinder(BrowserAuthority.EXTRA);
@@ -174,7 +182,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         headerDivider = divider();
         root.addView(headerDivider, new LinearLayout.LayoutParams(-1, dp(1)));
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        progress.setProgressTintList(ColorStateList.valueOf(Color.rgb(48, 118, 223)));
+        progress.setProgressTintList(ColorStateList.valueOf(accent));
         root.addView(progress, new LinearLayout.LayoutParams(-1, dp(2)));
         content = new FrameLayout(this);
         root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -339,6 +347,10 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         credentialRecordingSwitch.setText("记录账号密码");
         credentialRecordingSwitch.setTextSize(fontSize * .95f);
         credentialRecordingSwitch.setTextColor(foreground);
+        credentialRecordingSwitch.setThumbTintList(new ColorStateList(
+            new int[][]{{android.R.attr.state_checked}, {}}, new int[]{accent, muted}));
+        credentialRecordingSwitch.setTrackTintList(new ColorStateList(
+            new int[][]{{android.R.attr.state_checked}, {}}, new int[]{accentWithAlpha(80), line}));
         credentialRecordingSwitch.setGravity(Gravity.CENTER_VERTICAL);
         credentialRecordingSwitch.setPadding(dp(14), dp(6), dp(14), dp(6));
         credentialRecordingSwitch.setBackground(rounded(surface, line, 10));
@@ -357,6 +369,11 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         LinearLayout.LayoutParams credentialsLayout = new LinearLayout.LayoutParams(-1, -2);
         credentialsLayout.topMargin = dp(12);
         body.addView(credentialsButton, credentialsLayout);
+        credentialErrorValue = text("", fontSize * .78f,
+            darkTheme() ? Color.rgb(255, 125, 130) : Color.rgb(216, 55, 65));
+        credentialErrorValue.setPadding(dp(4), dp(6), dp(4), 0);
+        credentialErrorValue.setVisibility(View.GONE);
+        body.addView(credentialErrorValue, new LinearLayout.LayoutParams(-1, -2));
         return scroll;
     }
 
@@ -477,12 +494,22 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     private void renderCredentialsPage() {
         if (session == null || credentialsPageBody == null) return;
         credentialsPageBody.removeAllViews();
+        String credentialError = session.credentialError();
+        if (!credentialError.isEmpty()) {
+            TextView warning = text(credentialError, fontSize * .82f,
+                darkTheme() ? Color.rgb(255, 125, 130) : Color.rgb(216, 55, 65));
+            warning.setPadding(0, 0, 0, dp(10));
+            credentialsPageBody.addView(warning);
+        }
         List<BrowserCredentialStore.Entry> entries;
         try { entries = session.credentials(); }
         catch (RuntimeException failure) {
             credentialsPageBody.addView(emptyState(failure.getMessage())); return;
         }
-        if (entries.isEmpty()) { credentialsPageBody.addView(emptyState("暂无账号密码记录")); return; }
+        if (entries.isEmpty()) {
+            if (credentialError.isEmpty()) credentialsPageBody.addView(emptyState("暂无账号密码记录"));
+            return;
+        }
         for (BrowserCredentialStore.Entry entry : entries) addCredentialCard(entry);
     }
     private void addCredentialCard(BrowserCredentialStore.Entry entry) {
@@ -532,42 +559,6 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
                 allEvents.add(event);
         }
 
-        LinearLayout summary = column();
-        summary.setPadding(dp(14), dp(10), dp(14), dp(10));
-        summary.setBackground(rounded(surface, line, 14));
-        LinearLayout pageRow = row();
-        String diagnosticPageUrl = session.diagnosticPageUrl();
-        pageRow.addView(text("页面", fontSize * .78f, muted),
-            new LinearLayout.LayoutParams(dp(42), -2));
-        TextView pageUrl = text(diagnosticPageUrl.isEmpty() ? "首页" : shortUrl(diagnosticPageUrl),
-            fontSize * .82f, foreground);
-        pageUrl.setSingleLine(true);
-        pageUrl.setEllipsize(TextUtils.TruncateAt.END);
-        pageRow.addView(pageUrl, new LinearLayout.LayoutParams(0, -2, 1));
-        Button copyButton = textButton("复制", () -> copyDiagnosticText(diagnosticPageUrl));
-        copyButton.setMinimumHeight(dp(30));
-        copyButton.setMinimumWidth(dp(48));
-        copyButton.setTextSize(fontSize * .72f);
-        pageRow.addView(copyButton, new LinearLayout.LayoutParams(dp(52), dp(32)));
-        summary.addView(pageRow, new LinearLayout.LayoutParams(-1, -2));
-
-        LinearLayout infoRow = row();
-        infoRow.addView(text("UA  " + userAgentLabel(session.userAgentMode()),
-            fontSize * .74f, muted), new LinearLayout.LayoutParams(0, -2, 1));
-        infoRow.addView(text("记录  " + allEvents.size() + " 条",
-            fontSize * .74f, muted), new LinearLayout.LayoutParams(-2, -2));
-        summary.addView(infoRow, new LinearLayout.LayoutParams(-1, -2));
-
-        LinearLayout liveRow = row();
-        TextView live = text("● 实时诊断", fontSize * .74f,
-            darkTheme() ? Color.rgb(80, 210, 140) : Color.rgb(35, 160, 91));
-        live.setTypeface(null, Typeface.BOLD);
-        liveRow.addView(live, new LinearLayout.LayoutParams(0, -2, 1));
-        liveRow.addView(text("已捕获 " + allEvents.size() + " 条请求",
-            fontSize * .72f, muted), new LinearLayout.LayoutParams(-2, -2));
-        summary.addView(liveRow, new LinearLayout.LayoutParams(-1, -2));
-        diagnosticsPageBody.addView(summary);
-
         int requestCount = 0, responseCount = 0, errorCount = 0;
         for (BrowserSession.DiagnosticEvent event : allEvents) {
             if (event.failure) errorCount++;
@@ -577,7 +568,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
 
         LinearLayout categoryBar = row();
         categoryBar.setPadding(dp(2), dp(4), dp(2), dp(4));
-        categoryBar.setBackground(rounded(surface, Color.TRANSPARENT, 12));
+        categoryBar.setBackground(rounded(surface, Color.TRANSPARENT, 6));
         addDiagnosticsChip(categoryBar, "全部  " + allEvents.size(), "all");
         addDiagnosticsChip(categoryBar, "请求  " + requestCount, "request");
         addDiagnosticsChip(categoryBar, "响应  " + responseCount, "response");
@@ -591,7 +582,9 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         addDiagnosticsFilterChip(filterBar, "CSS", "css");
         addDiagnosticsFilterChip(filterBar, "JS", "js");
         addDiagnosticsFilterChip(filterBar, "媒体", "media");
-        diagnosticsPageBody.addView(filterBar, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams filterBarParams = new LinearLayout.LayoutParams(-1, -2);
+        filterBarParams.topMargin = dp(8);
+        diagnosticsPageBody.addView(filterBar, filterBarParams);
 
         List<BrowserSession.DiagnosticEvent> events = new ArrayList<>();
         long maxDuration = 1L;
@@ -617,13 +610,13 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
             renderDiagnosticsPage();
         });
         chip.setTextSize(fontSize * .72f);
-        chip.setTextColor(selected ? Color.WHITE : foreground);
+        chip.setTextColor(selected ? onAccent() : foreground);
         chip.setGravity(Gravity.CENTER);
         chip.setMinHeight(0);
         chip.setMinimumHeight(dp(30));
         chip.setPadding(dp(5), 0, dp(5), 0);
-        chip.setBackground(rounded(selected ? Color.rgb(39, 139, 241) : Color.TRANSPARENT,
-            selected ? Color.rgb(39, 139, 241) : Color.TRANSPARENT, 12));
+        chip.setBackground(rounded(selected ? accent : Color.TRANSPARENT,
+            selected ? accent : Color.TRANSPARENT, 6));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(30), 1);
         params.leftMargin = dp(1);
         params.rightMargin = dp(1);
@@ -635,14 +628,13 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         Button chip = textButton(label,
             () -> { diagnosticsFilter = filter; renderDiagnosticsPage(); });
         chip.setTextSize(fontSize * .70f);
-        chip.setTextColor(selected ? darkTheme() ? Color.rgb(100, 180, 255) : Color.rgb(39, 139, 241) : muted);
+        chip.setTextColor(selected ? accent : muted);
         chip.setGravity(Gravity.CENTER);
         chip.setMinHeight(0);
         chip.setMinimumHeight(dp(28));
         chip.setPadding(dp(4), 0, dp(4), 0);
-        chip.setBackground(rounded(selected
-            ? darkTheme() ? Color.argb(45, 39, 139, 241) : Color.rgb(237, 245, 255) : Color.TRANSPARENT,
-            selected ? Color.rgb(39, 139, 241) : Color.TRANSPARENT, 10));
+        chip.setBackground(rounded(selected ? accentWithAlpha(darkTheme() ? 45 : 20) : Color.TRANSPARENT,
+            selected ? accent : Color.TRANSPARENT, 6));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(28), 1);
         params.leftMargin = dp(1);
         params.rightMargin = dp(1);
@@ -654,8 +646,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         if ("request".equals(diagnosticsCategory) && (event.response || event.failure)) return false;
         if ("response".equals(diagnosticsCategory) && (!event.response || event.failure)) return false;
         String type = event.resourceType == null ? "" : event.resourceType.toLowerCase(Locale.ROOT);
-        if ("xhr".equals(diagnosticsFilter)
-            && !("xhr".equals(type) || "fetch".equals(type) || "xmlhttprequest".equals(type))) return false;
+        if ("xhr".equals(diagnosticsFilter) && !supportsDiagnosticBodies(event)) return false;
         if ("css".equals(diagnosticsFilter)
             && !("css".equals(type) || "stylesheet".equals(type) || "stylesheets".equals(type))) return false;
         if ("js".equals(diagnosticsFilter)
@@ -678,12 +669,10 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
 
         LinearLayout top = row();
         TextView method = text(event.method == null || event.method.isEmpty() ? "GET" : event.method,
-            fontSize * .68f, Color.WHITE);
+            fontSize * .68f, onAccent());
         method.setGravity(Gravity.CENTER);
         method.setTypeface(null, Typeface.BOLD);
-        method.setBackground(rounded("POST".equalsIgnoreCase(event.method)
-            ? Color.rgb(129, 81, 214) : Color.rgb(39, 139, 241),
-            Color.TRANSPARENT, 6));
+        method.setBackground(rounded(accent, Color.TRANSPARENT, 6));
         top.addView(method, new LinearLayout.LayoutParams(dp(42), dp(26)));
 
         LinearLayout address = column();
@@ -761,6 +750,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
                     .format(event.timeMs));
             if (event.failure) addDiagnosticDetail(details, "重试建议", "检查网络连接后重试");
             if (!event.headers.isEmpty()) addDiagnosticDetail(details, "请求头", event.headers);
+            if (supportsDiagnosticBodies(event)) addDiagnosticBodyPager(details, event);
             card.addView(details, new LinearLayout.LayoutParams(-1, -2));
         }
 
@@ -780,6 +770,143 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         container.addView(line, new LinearLayout.LayoutParams(-1, -2));
     }
 
+    private void addDiagnosticBodyPager(LinearLayout container, BrowserSession.DiagnosticEvent event) {
+        HorizontalScrollView requestPage = diagnosticBodyPage(event.requestBody, "", "暂无请求数据");
+        HorizontalScrollView responsePage = diagnosticBodyPage(event.responseBody, event.responseMime, "暂无接收数据");
+        LinearLayout body = column();
+        body.addView(requestPage, new LinearLayout.LayoutParams(-1, -2));
+        body.addView(responsePage, new LinearLayout.LayoutParams(-1, -2));
+
+        TextView requestLabel = diagnosticBodyLabel("请求数据");
+        TextView responseLabel = diagnosticBodyLabel("接收数据");
+        View requestIndicator = new View(this), responseIndicator = new View(this);
+        LinearLayout requestTab = diagnosticBodyTab(requestLabel, requestIndicator, () ->
+            selectDiagnosticBody(body, requestPage, responsePage, requestLabel, responseLabel,
+                requestIndicator, responseIndicator, event.id, false, true));
+        LinearLayout responseTab = diagnosticBodyTab(responseLabel, responseIndicator, () ->
+            selectDiagnosticBody(body, requestPage, responsePage, requestLabel, responseLabel,
+                requestIndicator, responseIndicator, event.id, true, true));
+        LinearLayout tabs = row();
+        tabs.addView(requestTab);
+        LinearLayout.LayoutParams responseTabParams = new LinearLayout.LayoutParams(-2, -2);
+        responseTabParams.leftMargin = dp(16);
+        tabs.addView(responseTab, responseTabParams);
+        LinearLayout.LayoutParams tabsParams = new LinearLayout.LayoutParams(-1, -2);
+        tabsParams.topMargin = dp(6);
+        container.addView(tabs, tabsParams);
+        LinearLayout.LayoutParams bodyParams = new LinearLayout.LayoutParams(-1, -2);
+        bodyParams.topMargin = dp(4);
+        container.addView(body, bodyParams);
+        selectDiagnosticBody(body, requestPage, responsePage, requestLabel, responseLabel,
+            requestIndicator, responseIndicator, event.id, diagnosticBodyPages.getOrDefault(event.id, 0) == 1, false);
+    }
+
+    private void selectDiagnosticBody(LinearLayout body, HorizontalScrollView requestPage,
+        HorizontalScrollView responsePage, TextView requestLabel, TextView responseLabel,
+        View requestIndicator, View responseIndicator, long eventId, boolean response, boolean animate) {
+        diagnosticBodyPages.put(eventId, response ? 1 : 0);
+        requestLabel.setTextColor(response ? muted : accent);
+        responseLabel.setTextColor(response ? accent : muted);
+        requestIndicator.setBackgroundColor(response ? Color.TRANSPARENT : accent);
+        responseIndicator.setBackgroundColor(response ? accent : Color.TRANSPARENT);
+        HorizontalScrollView showing = response ? responsePage : requestPage;
+        HorizontalScrollView hiding = response ? requestPage : responsePage;
+        if (showing.getVisibility() == View.VISIBLE && hiding.getVisibility() == View.GONE) return;
+        if (body.getTag() instanceof ValueAnimator previous) previous.cancel();
+        int start = body.getHeight(), width = body.getWidth();
+        requestPage.setVisibility(response ? View.GONE : View.VISIBLE);
+        responsePage.setVisibility(response ? View.VISIBLE : View.GONE);
+        if (!animate || !ValueAnimator.areAnimatorsEnabled() || width <= 0) {
+            ViewGroup.LayoutParams current = body.getLayoutParams();
+            current.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+            body.setLayoutParams(current);
+            return;
+        }
+        showing.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        int target = showing.getMeasuredHeight();
+        ViewGroup.LayoutParams params = body.getLayoutParams();
+        params.height = Math.max(0, start);
+        body.setLayoutParams(params);
+        ValueAnimator animator = ValueAnimator.ofInt(Math.max(0, start), target);
+        animator.setDuration(240L);
+        animator.addUpdateListener(animation -> {
+            params.height = (Integer) animation.getAnimatedValue();
+            body.setLayoutParams(params);
+        });
+        animator.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(android.animation.Animator animation) {
+                if (body.getTag() != animator) return;
+                body.setTag(null);
+                params.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+                body.setLayoutParams(params);
+            }
+        });
+        body.setTag(animator);
+        animator.start();
+    }
+
+    private TextView diagnosticBodyLabel(String label) {
+        TextView view = text(label, fontSize * .68f, muted);
+        view.setGravity(Gravity.CENTER);
+        view.setMinHeight(dp(28));
+        view.setPadding(dp(8), dp(2), dp(8), dp(2));
+        return view;
+    }
+
+    private LinearLayout diagnosticBodyTab(TextView label, View indicator, Runnable action) {
+        LinearLayout tab = column();
+        tab.addView(label, new LinearLayout.LayoutParams(-2, -2));
+        tab.addView(indicator, new LinearLayout.LayoutParams(-1, dp(2)));
+        tab.setOnClickListener(ignored -> {
+            haptics.perform(tab, "haptic-click");
+            action.run();
+        });
+        return tab;
+    }
+
+    private boolean supportsDiagnosticBodies(BrowserSession.DiagnosticEvent event) {
+        String type = event.resourceType == null ? "" : event.resourceType.toLowerCase(Locale.ROOT);
+        return "xhr".equals(type) || "fetch".equals(type) || "xmlhttprequest".equals(type)
+            || !event.requestBody.isEmpty() || !event.responseBody.isEmpty();
+    }
+
+    private HorizontalScrollView diagnosticBodyPage(String value, String mime, String empty) {
+        String text = value == null || value.isEmpty() ? empty : formatDiagnosticBody(value, mime);
+        HorizontalScrollView scroll = new HorizontalScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setHorizontalScrollBarEnabled(true);
+        scroll.setVerticalScrollBarEnabled(false);
+        TextView content = text(text, fontSize * .68f, value == null || value.isEmpty() ? muted : foreground);
+        content.setTypeface(Typeface.MONOSPACE);
+        content.setTextIsSelectable(true);
+        content.setSingleLine(false);
+        content.setHorizontallyScrolling(true);
+        content.setMaxLines(Integer.MAX_VALUE);
+        content.setEllipsize(null);
+        content.setIncludeFontPadding(false);
+        content.setMinimumHeight(dp(72));
+        content.setPadding(dp(8), dp(8), dp(8), dp(8));
+        content.setBackground(rounded(background, line, 6));
+        scroll.addView(content, new HorizontalScrollView.LayoutParams(-2, -2));
+        return scroll;
+    }
+
+    private String formatDiagnosticBody(String value, String mime) {
+        if (value == null) return "";
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) return "";
+        boolean json = mime != null && mime.toLowerCase(Locale.ROOT).contains("json")
+            || trimmed.startsWith("{") || trimmed.startsWith("[");
+        if (!json) return value;
+        try {
+            Object parsed = new JSONTokener(trimmed).nextValue();
+            if (parsed instanceof JSONObject) return ((JSONObject) parsed).toString(2);
+            if (parsed instanceof JSONArray) return ((JSONArray) parsed).toString(2);
+        } catch (JSONException | RuntimeException ignored) { }
+        return value;
+    }
+
     private String diagnosticStatus(BrowserSession.DiagnosticEvent event) {
         if (event.failure) return event.statusCode > 0 ? String.valueOf(event.statusCode) : "失败";
         if (event.statusCode > 0) return String.valueOf(event.statusCode);
@@ -795,9 +922,16 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         if (event.response) return textColor
             ? darkTheme() ? Color.rgb(80, 210, 140) : Color.rgb(35, 160, 91)
             : darkTheme() ? Color.argb(55, 35, 160, 91) : Color.rgb(205, 242, 216);
-        return textColor
-            ? darkTheme() ? Color.rgb(100, 180, 255) : Color.rgb(39, 139, 241)
-            : darkTheme() ? Color.argb(55, 39, 139, 241) : Color.rgb(224, 239, 255);
+        return textColor ? accent : accentWithAlpha(darkTheme() ? 55 : 32);
+    }
+
+    private int accentWithAlpha(int alpha) {
+        return Color.argb(alpha, Color.red(accent), Color.green(accent), Color.blue(accent));
+    }
+
+    private int onAccent() {
+        double brightness = Color.red(accent) * .299 + Color.green(accent) * .587 + Color.blue(accent) * .114;
+        return brightness > 150 ? Color.rgb(23, 23, 23) : Color.WHITE;
     }
 
     private String resourceTypeLabel(String value) {
@@ -839,13 +973,6 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         return value.length() > 100 ? value.substring(0, 97) + "..." : value;
     }
 
-    private void copyDiagnosticText(String value) {
-        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-        if (clipboard == null) return;
-        clipboard.setPrimaryClip(ClipData.newPlainText("网络", value == null ? "" : value));
-        Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show();
-    }
-
     private void renderSettings() {
         if (session == null) return;
         String selectedUserAgent = userAgentLabel(session.userAgentMode());
@@ -855,7 +982,10 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         credentialRecordingSwitch.setChecked(session.credentialRecordingEnabled());
         credentialSwitchSyncing = false;
         try { credentialsButton.setText("账号密码记录（" + session.credentials().size() + "）"); }
-        catch (RuntimeException failure) { credentialsButton.setText("账号密码记录"); }
+        catch (RuntimeException failure) { credentialsButton.setText("账号密码记录（读取失败）"); }
+        String credentialError = session.credentialError();
+        credentialErrorValue.setText(credentialError);
+        credentialErrorValue.setVisibility(credentialError.isEmpty() ? View.GONE : View.VISIBLE);
     }
 
     private void showUserAgentMenu() {
@@ -901,11 +1031,11 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         item.addView(labelView, new LinearLayout.LayoutParams(0, -1, 1));
 
         TextView indicator = text(mode.equals(current) ? "✓" : "", fontSize * 1.05f,
-            mode.equals(current) ? background : muted);
+            mode.equals(current) ? onAccent() : muted);
         indicator.setGravity(Gravity.CENTER);
         indicator.setTypeface(null, Typeface.BOLD);
-        indicator.setBackground(rounded(mode.equals(current) ? foreground : Color.TRANSPARENT,
-            mode.equals(current) ? foreground : muted, 3));
+        indicator.setBackground(rounded(mode.equals(current) ? accent : Color.TRANSPARENT,
+            mode.equals(current) ? accent : muted, 3));
         item.addView(indicator, new LinearLayout.LayoutParams(dp(24), dp(24)));
         menuBody.addView(item, new LinearLayout.LayoutParams(-1, dp(42)));
     }
@@ -944,6 +1074,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         else if (internalPage == InternalPage.BOOKMARKS) confirmClearBookmarks();
         else if (internalPage == InternalPage.CREDENTIALS) confirmClearCredentials();
         else if (internalPage == InternalPage.DIAGNOSTICS && session != null) {
+            diagnosticBodyPages.clear();
             session.clearDiagnosticEvents();
             renderDiagnosticsPage();
             Toast.makeText(this, "网络记录已清空", Toast.LENGTH_SHORT).show();
@@ -952,7 +1083,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
 
     private void confirmClearCredentials() {
         if (!ready || session == null) return;
-        new AlertDialog.Builder(this)
+        AlertDialog alert = new AlertDialog.Builder(this)
             .setTitle("清空账号密码记录")
             .setMessage("确定删除当前来源的全部账号密码记录吗？此操作不可恢复。")
             .setNegativeButton("暂不清空", null)
@@ -965,11 +1096,12 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
                 }
                 renderCredentialsPage();
             })
-            .show();
+            .create();
+        showDialog(alert);
     }
     private void confirmClearHistory() {
         if (!ready || session == null) return;
-        new AlertDialog.Builder(this)
+        AlertDialog alert = new AlertDialog.Builder(this)
             .setTitle("清空访问历史")
             .setMessage("确定删除当前来源的全部访问历史吗？")
             .setNegativeButton("暂不清空", null)
@@ -983,12 +1115,13 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
                 renderInternalPages();
                 renderHomeSections();
             })
-            .show();
+            .create();
+        showDialog(alert);
     }
 
     private void confirmClearBookmarks() {
         if (!ready || session == null) return;
-        new AlertDialog.Builder(this)
+        AlertDialog alert = new AlertDialog.Builder(this)
             .setTitle("清空全部书签")
             .setMessage("确定删除当前来源的全部书签吗？")
             .setNegativeButton("暂不清空", null)
@@ -1002,7 +1135,8 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
                 renderInternalPages();
                 renderHomeSections();
             })
-            .show();
+            .create();
+        showDialog(alert);
     }
 
     private void navigate(EditText input) {
@@ -1084,7 +1218,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
             progress.setProgress(session.progress);
             if (showWeb && !addressInput.hasFocus()) addressInput.setText(displayAddress(session.url));
             bookmarkButton.setCompoundDrawableTintList(ColorStateList.valueOf(
-                session.bookmarked() ? Color.rgb(48, 118, 223) : foreground));
+                session.bookmarked() ? accent : foreground));
             bookmarkButton.setContentDescription(session.bookmarked() ? "取消当前页书签" : "添加当前页书签");
             if (!session.error.isEmpty() && showWeb) {
                 failure.setText(getString(R.string.browser_retry_message, session.error)); failure.setVisibility(View.VISIBLE);
@@ -1241,7 +1375,7 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
             })
             .setNegativeButton("取消", (dialog, which) -> handler.cancel())
             .setOnCancelListener(dialog -> handler.cancel()).create();
-        authDialog.show();
+        showDialog(authDialog);
     }
 
     @Override public void chooseFiles(ValueCallback<Uri[]> callback, WebChromeClient.FileChooserParams parameters) {
@@ -1390,6 +1524,14 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
         view.setImeOptions(EditorInfo.IME_ACTION_GO); view.setSaveEnabled(false);
         view.setSelectAllOnFocus(true); return view;
     }
+    private void showDialog(AlertDialog dialog) {
+        dialog.show();
+        Button positive = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+        if (positive != null) positive.setTextColor(accent);
+        Button negative = dialog.getButton(AlertDialog.BUTTON_NEGATIVE);
+        if (negative != null) negative.setTextColor(foreground);
+    }
+
     private Button textButton(String label, Runnable action) {
         Button view = new Button(this); view.setText(label); view.setAllCaps(false);
         view.setTextSize(fontSize * .85714f); view.setTextColor(foreground);
@@ -1403,9 +1545,9 @@ public final class BrowserActivity extends Activity implements BrowserSession.Li
     private Button primaryButton(String label, Runnable action) {
         Button view = textButton(label, action);
         view.setTextSize(fontSize * .95f);
-        view.setTextColor(background);
+        view.setTextColor(onAccent());
         view.setMinimumHeight(dp(48));
-        view.setBackground(rounded(foreground, foreground, 10));
+        view.setBackground(rounded(accent, accent, 10));
         return view;
     }
     private Button footerAction(int resource, String label, String description, Runnable action) {

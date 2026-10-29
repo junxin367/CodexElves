@@ -6,18 +6,21 @@ const handledRequests = new Set();
 const requestPattern = /^[A-Za-z0-9_-]{1,80}$/;
 const tokenPattern = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const numericFields = new Set(["status", "durationMs", "bytes", "sdk", "generation", "readyState",
-  "expectedBytes", "loadedBytes", "line", "width", "height"]);
-const tokenFields = new Set(["method", "errorType", "reason", "routeName", "phase", "imageKind", "network"]);
+  "expectedBytes", "loadedBytes", "line", "width", "height", "lux", "stableMs"]);
+const tokenFields = new Set(["method", "errorType", "reason", "routeName", "phase", "imageKind", "network", "theme", "decision"]);
 const errorTypes = new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError",
   "URIError", "EvalError", "DOMException", "AbortError", "TimeoutError", "NetworkError", "SecurityError"]);
 const fieldTokens = {
   method: new Set(["GET", "POST", "HEAD", "OPTIONS", "PUT", "PATCH", "DELETE"]),
   reason: new Set(["success", "cancelled", "timeout", "response-read-failed", "http-error", "network-error",
-    "manual", "visibility", "online", "offline", "pagehide", "upload-failed", "unsupported", "native-failed"]),
+    "manual", "visibility", "online", "offline", "pagehide", "upload-failed", "unsupported", "native-failed",
+    "sensor", "timer", "startup"]),
   phase: new Set(["request", "body", "complete", "ready", "failure", "pending"]),
   imageKind: new Set(["preview", "thumbnail", "image"]),
   routeName: new Set(["zrok", "ngrok"]),
-  network: new Set(["wifi", "cellular", "ethernet", "vpn", "other", "none", "unknown"])
+  network: new Set(["wifi", "cellular", "ethernet", "vpn", "other", "none", "unknown"]),
+  theme: new Set(["light", "dark"]),
+  decision: new Set(["pending", "cancelled", "applied"])
 };
 const knownMimes = new Set(["application/json", "application/javascript", "application/octet-stream",
   "application/manifest+json", "text/javascript", "text/html", "text/css", "text/plain", "text/event-stream",
@@ -64,7 +67,7 @@ function safeFields(value) {
     if (key === "errorCode" && Number.isSafeInteger(field) && field >= -1000 && field <= 1000) result[key] = field;
     else if (numericFields.has(key) && Number.isFinite(field) && field >= 0)
       result[key] = Math.min(Number.MAX_SAFE_INTEGER, Math.round(field));
-    else if (["visible", "online"].includes(key) && typeof field === "boolean") result[key] = field;
+    else if (["visible", "online", "supported"].includes(key) && typeof field === "boolean") result[key] = field;
     else if (key === "errorType" && typeof field === "string") result[key] = errorTypes.has(field) ? field : "unknown";
     else if (tokenFields.has(key) && typeof field === "string" && fieldTokens[key]?.has(field)) result[key] = field;
     else if (key === "mime" && typeof field === "string" && /^[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+$/.test(field))

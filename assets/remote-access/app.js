@@ -359,6 +359,7 @@ function readAppearance() {
 let ambientLightStatus = { supported: false, lux: null };
 let syncAppearanceThemeControls = null;
 let appearance = readAppearance();
+let appearanceTransitionTimer = null;
 const remoteBackgroundKey = "remote-session";
 const remoteBackgroundMimes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const remoteBackgroundDataPattern = /^data:image\/(?:png|jpeg|webp|gif);base64,[a-z0-9+/=]+$/i;
@@ -431,25 +432,43 @@ function readRemoteBackgroundFile(file) {
     reader.readAsDataURL(file);
   });
 }
-function automaticAppearanceTheme(date = new Date()) {
+const automaticThemeStableMs = 5000;
+let automaticThemeCandidate = null;
+function automaticAppearanceTheme(date = new Date(), currentTheme = appearance.theme) {
   const hour = date.getHours();
   if (hour < 6 || hour >= 18) {
     if (!ambientLightStatus.supported || ambientLightStatus.lux === null) return "dark";
-    return ambientLightStatus.lux < 30 ? "dark" : "light";
-  }
-  return "light";
+    if (ambientLightStatus.lux <= 20) return "dark";
+    if (ambientLightStatus.lux >= 45) return "light";
+  } else return "light";
+  return currentTheme;
 }
-function applyAutomaticAppearance(save = false) {
-  if (appearance.themeMode !== "auto") return false;
+function applyAutomaticAppearance(save = false, { immediate = false, reason = "timer", now = Date.now() } = {}) {
+  if (appearance.themeMode !== "auto") { automaticThemeCandidate = null; return false; }
   const next = automaticAppearanceTheme();
-  if (next === appearance.theme) return false;
+  if (next === appearance.theme) {
+    if (automaticThemeCandidate) recordDiagnostic("theme.decision", { theme: next, decision: "cancelled", reason });
+    automaticThemeCandidate = null;
+    return false;
+  }
+  if (!immediate) {
+    if (automaticThemeCandidate?.theme !== next) {
+      automaticThemeCandidate = { theme: next, since: now, reason };
+      recordDiagnostic("theme.decision", { theme: next, decision: "pending", reason });
+      return false;
+    }
+    if (now - automaticThemeCandidate.since < automaticThemeStableMs) return false;
+  }
+  automaticThemeCandidate = null;
   appearance.theme = next;
   applyAppearance(save);
   syncAppearanceThemeControls?.();
+  recordDiagnostic("theme.decision", { theme: next, decision: "applied", reason, stableMs: automaticThemeStableMs });
   return true;
 }
 function setAppearanceThemeMode(mode) {
   if (!["auto", "manual"].includes(mode)) return;
+  automaticThemeCandidate = null;
   appearance.themeMode = mode;
   if (mode === "auto") appearance.theme = automaticAppearanceTheme();
   applyAppearance(true);
@@ -462,6 +481,8 @@ function mixColor(left, right, weight) {
 }
 function applyAppearance(save = false) {
   const root = document.documentElement;
+  const themeChanged = root.dataset.theme && root.dataset.theme !== appearance.theme;
+  if (themeChanged) root.classList.add("theme-transition");
   const { background, foreground, accent } = appearance.colors[appearance.theme];
   root.dataset.theme = appearance.theme;
   root.style.colorScheme = appearance.theme;
@@ -475,6 +496,10 @@ function applyAppearance(save = false) {
     danger: appearance.theme === "dark" ? "#ff9c97" : "#b42318", green: appearance.theme === "dark" ? "#77c7a0" : "#168350"
   };
   for (const [name, value] of Object.entries(values)) root.style.setProperty(`--${name}`, value);
+  if (themeChanged) {
+    clearTimeout(appearanceTransitionTimer);
+    appearanceTransitionTimer = setTimeout(() => root.classList.remove("theme-transition"), 300);
+  }
   $('meta[name="theme-color"]')?.setAttribute("content", background);
   syncRemoteBackground();
   if (save) {
@@ -486,7 +511,7 @@ function applyAppearance(save = false) {
   refitComposerMenus();
   if ($("#messages")) scheduleMermaidBlocks();
 }
-applyAutomaticAppearance();
+applyAutomaticAppearance(false, { immediate: true, reason: "startup" });
 applyAppearance();
 const initialRemoteBackgroundOperation = ++remoteBackgroundOperation;
 void readRemoteBackground().then(record => {
@@ -502,11 +527,12 @@ void readRemoteBackground().then(record => {
 });
 setInterval(() => applyAutomaticAppearance(true), 60_000);
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) applyAutomaticAppearance(true);
+  if (!document.hidden) applyAutomaticAppearance(true, { reason: "visibility" });
 });
 subscribeAndroidAmbientLight(status => {
   ambientLightStatus = status;
-  applyAutomaticAppearance(true);
+  recordDiagnostic("theme.ambient", { supported: status.supported, lux: status.lux ?? -1 });
+  applyAutomaticAppearance(true, { reason: "sensor" });
 });
 function currentFileBrowserThreadId() {
   const parentThreadId = relatedSessionView?.kind === "side"
@@ -569,7 +595,7 @@ function openAppearance() {
     <h3 class="appearance-panel-title">通用设置</h3>
     <div class="appearance-field"><span id="appearance-theme-label">主题</span><div id="appearance-theme-slot" class="appearance-theme-options" role="group" aria-labelledby="appearance-theme-label"></div></div>
     <div class="appearance-field appearance-thread-limit-field"><span>每个项目显示会话数</span><div id="appearance-project-thread-limit-slot"></div></div>
-    <div class="appearance-field appearance-background-field"><span>背景图片</span><div class="appearance-background-actions"><input id="appearance-background-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden><button type="button" id="appearance-background-upload"></button><button type="button" id="appearance-background-remove"></button></div></div>
+    <div class="appearance-field appearance-background-field"><span>背景图片</span><div class="appearance-background-actions"><input id="appearance-background-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden><button type="button" id="appearance-background-action"></button></div></div>
     <div id="appearance-background-preview" class="appearance-background-preview" hidden><img id="appearance-background-thumbnail" alt=""><span id="appearance-background-name"></span></div>
     <label class="appearance-field"><span>背景透明度</span><span class="appearance-font"><input id="appearance-background-opacity" type="range" min="1" max="100" step="1" aria-label="背景透明度"><output id="appearance-background-opacity-value"></output></span></label>
     <div class="appearance-field"><span>图片铺法</span><div id="appearance-background-fit-slot"></div></div>
@@ -1004,10 +1030,7 @@ function openAppearance() {
   $("#appearance-theme-slot").append(themeButton, modeGroup);
   $("#appearance-project-thread-limit-slot").append(selectControl("appearance-project-thread-limit", "每个项目显示会话数",
     projectThreadLimits.map(value => ({ value: String(value), label: `${value}个` })), String(appearance.projectThreadLimit)));
-  const backgroundUpload = $("#appearance-background-upload");
-  backgroundUpload.append(icon("image"), element("span", "", "上传图片"));
-  const backgroundRemove = $("#appearance-background-remove");
-  backgroundRemove.append(icon("trash"), element("span", "", "移除"));
+  const backgroundAction = $("#appearance-background-action");
   $("#appearance-background-fit-slot").append(selectControl("appearance-background-fit", "图片铺法", [
     { value: "cover", label: "铺满裁切" }, { value: "contain", label: "完整不裁" }
   ], appearance.backgroundFit));
@@ -1059,8 +1082,9 @@ function openAppearance() {
     for (const [mode, control] of modeButtons) control.setAttribute("aria-pressed", String(mode === appearance.themeMode));
     setSelectValue($("#appearance-project-thread-limit"), String(appearance.projectThreadLimit));
     const hasBackground = !!remoteBackground.dataUrl;
-    backgroundUpload.disabled = remoteBackgroundBusy;
-    backgroundRemove.disabled = remoteBackgroundBusy || !hasBackground;
+    backgroundAction.disabled = remoteBackgroundBusy;
+    backgroundAction.replaceChildren(icon(hasBackground ? "trash" : "image"),
+      element("span", "", hasBackground ? "移除" : "上传"));
     resetButton.disabled = remoteBackgroundBusy;
     $("#appearance-background-preview").hidden = !hasBackground;
     $("#appearance-background-name").textContent = remoteBackground.name;
@@ -1095,7 +1119,6 @@ function openAppearance() {
     renderSidebar();
     sync();
   };
-  backgroundUpload.onclick = () => $("#appearance-background-input").click();
   $("#appearance-background-input").onchange = async event => {
     const file = event.target.files?.[0]; event.target.value = "";
     if (!file || remoteBackgroundBusy) return;
@@ -1118,8 +1141,9 @@ function openAppearance() {
       }
     }
   };
-  backgroundRemove.onclick = async () => {
-    if (remoteBackgroundBusy || !remoteBackground.dataUrl) return;
+  backgroundAction.onclick = async () => {
+    if (remoteBackgroundBusy) return;
+    if (!remoteBackground.dataUrl) { $("#appearance-background-input").click(); return; }
     const operation = ++remoteBackgroundOperation;
     remoteBackgroundBusy = true; remoteBackgroundError = "";
     syncAppearanceThemeControls?.();
@@ -1764,8 +1788,12 @@ function syncRelatedSessionLayout() {
   if (sessionMenuTrigger) sessionMenuTrigger.hidden = false;
   const back = $("#related-session-back");
   if (back) { back.hidden = !view; back.disabled = relatedBackPending; }
+  syncRelatedModelDisplay();
+  const expired = sideThreadExpired();
   const composer = $("#composer");
-  if (composer) composer.hidden = view?.kind === "subagent";
+  if (composer) composer.hidden = view?.kind === "subagent" || expired;
+  const expiredBanner = $("#side-thread-expired");
+  if (expiredBanner) expiredBanner.hidden = !expired;
   const pendingArea = $("#pending-area");
   if (pendingArea) pendingArea.hidden = view?.kind === "subagent";
   syncSideThreadUnread();
@@ -2406,6 +2434,25 @@ function currentThreadDisplay() {
   if (!selectedId) return null;
   return thread?.id === selectedId ? thread : threadDisplays.get(threadDisplayKey(selectedId)) || null;
 }
+function syncRelatedModelDisplay(value = currentThreadDisplay()) {
+  const node = $("#related-session-model");
+  if (!node) return;
+  const view = normalizeRelatedView(relatedSessionView, selectedId);
+  const subagent = view?.kind === "subagent" || value?.viewKind === "subagent";
+  const model = subagent && typeof value?.model === "string" ? value.model.trim() : "";
+  const effort = subagent && typeof value?.reasoningEffort === "string" ? value.reasoningEffort.trim() : "";
+  node.hidden = !model;
+  if (!model) {
+    node.replaceChildren(); node.removeAttribute("title"); node.removeAttribute("aria-label");
+    return;
+  }
+  const name = transcriptModelName(model), effortLabel = effortLabels[effort] || effort;
+  node.replaceChildren(element("span", "related-session-model-name", name));
+  if (effortLabel) node.append(element("span", "related-session-model-effort", effortLabel));
+  const description = `模型：${model}${name === model ? "" : `（${name}）`}`
+    + `${effortLabel ? ` · 推理等级：${effortLabel}` : ""}`;
+  node.title = description; node.setAttribute("aria-label", description);
+}
 function rememberThreadDisplay(value = thread, { persist = true } = {}) {
   if (!session || !validRelatedThreadId(value?.id) || threadDeleted(value.id) || value.sideThreadClosed
       || value.model != null && typeof value.model !== "string"
@@ -2422,6 +2469,7 @@ function rememberThreadDisplay(value = thread, { persist = true } = {}) {
   const key = threadDisplayKey(value.id);
   threadDisplays.delete(key); threadDisplays.set(key, display);
   while (threadDisplays.size > 32) threadDisplays.delete(threadDisplays.keys().next().value);
+  if (value.id === selectedId) syncRelatedModelDisplay(display);
   if (persist) cacheDisplayData("thread", value.id, display);
   return display;
 }
@@ -5684,10 +5732,10 @@ function shell() {
       <div class="sidebar-footer"><div class="footer-actions"><button id="appearance-button" class="footer-button" type="button" aria-label="设置"></button><button id="logout" class="footer-button" type="button"></button></div></div>
     </aside>
     <main class="conversation">
-      <header class="conversation-header"><button id="open-sidebar" class="icon-button" type="button" aria-label="打开侧边栏" aria-controls="session-sidebar"></button><div class="thread-heading"><strong id="thread-title">远程会话</strong><span id="thread-path" class="muted"></span></div><button id="connection-state" class="connection-state pending" type="button" aria-live="polite" title="${connectionRttDescription}" aria-label="连接中…。${connectionRttDescription}">连接中…</button><button id="open-session-tools" class="icon-button session-tools-trigger" type="button" title="会话菜单" aria-label="会话菜单" aria-haspopup="menu" aria-expanded="false"></button><button id="related-session-back" class="text-button" type="button" aria-label="返回主会话" hidden>返回</button></header>
+      <header class="conversation-header"><button id="open-sidebar" class="icon-button" type="button" aria-label="打开侧边栏" aria-controls="session-sidebar"></button><div class="thread-heading"><strong id="thread-title">远程会话</strong><span id="thread-path" class="muted"></span></div><button id="connection-state" class="connection-state pending" type="button" aria-live="polite" title="${connectionRttDescription}" aria-label="连接中…。${connectionRttDescription}">连接中…</button><button id="open-session-tools" class="icon-button session-tools-trigger" type="button" title="会话菜单" aria-label="会话菜单" aria-haspopup="menu" aria-expanded="false"></button><span id="related-session-model" class="related-session-model muted" hidden></span><button id="related-session-back" class="text-button" type="button" aria-label="返回主会话" hidden>返回</button></header>
       <div id="desktop-connection-guidance" class="desktop-connection-guidance" role="status" aria-live="polite" hidden>Codex 桌面尚未连接或正在重启。请在电脑端 CodexElves 管理器右上角点击「重启 Codex」；若已点击，请等待 Codex 主界面完全打开、能够正常查看会话后，再刷新远程网页。</div>
       <div class="messages-shell"><div id="messages" class="messages" role="log" aria-label="会话消息"></div><button id="scroll-to-bottom" class="scroll-to-bottom" type="button" aria-label="跳转到最新消息" hidden></button></div>
-      <div class="composer-area"><div class="composer-context"><div id="queued-area" hidden></div><div id="goal-area" hidden></div></div><div id="pending-area"></div><div id="project-select-slot" hidden></div><div class="composer-anchor"><div id="approval-area" class="approval-area" aria-live="polite"></div><form id="composer" class="composer">
+      <div class="composer-area"><div class="composer-context"><div id="queued-area" hidden></div><div id="goal-area" hidden></div></div><div id="pending-area"></div><div id="project-select-slot" hidden></div><div class="composer-anchor"><div id="approval-area" class="approval-area" aria-live="polite"></div><div id="side-thread-expired" class="side-thread-expired-banner" role="status" hidden><strong>侧边会话已过期</strong><span>该会话已结束，当前仅可查看已保留的消息。</span></div><form id="composer" class="composer">
         <div class="composer-input"><div class="composer-input-content"><div id="edit-message-area" hidden></div>
         <div id="prompt" class="prompt-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="给 Codex 发送消息，输入 / 选择命令或 Skill…" aria-label="消息输入" aria-autocomplete="list" aria-controls="skill-menu" aria-expanded="false" spellcheck="true"></div>
         </div></div>
@@ -9389,15 +9437,6 @@ function renderMessages(keepScroll = true) {
   const lastRealTurn = pendingTurn
     ? [...sorted].reverse().find(turn => turn.id !== pendingTurn.id) : sorted.at(-1);
   loadMessageSkillChoices(sorted.flatMap(turn => turn.items || []));
-  if (sideThreadExpired()) {
-    const banner = element("div", "side-thread-expired-banner");
-    banner.setAttribute("role", "status");
-    banner.append(
-      element("strong", "", "侧边会话已过期"),
-      element("span", "", "该会话已结束，当前仅可查看已保留的消息。")
-    );
-    children.push(banner);
-  }
   if (historyError && sorted.length)
     children.push(historyLoadButton("最新记录加载失败，重试", () => void loadHistory()));
   if (historyCursor) {
@@ -11458,6 +11497,7 @@ function updateComposer() {
   $("#model-button").replaceChildren(element("span", "model-name", name));
   if (effort) $("#model-button").append(document.createTextNode(" "), element("span", "model-effort", effortLabels[effort] || effort));
   $("#model-button").title = `模型：${name}${effort ? ` · 思考深度：${effortLabels[effort] || effort}` : ""}`;
+  syncRelatedModelDisplay();
   updateContextUsage();
   if ($("#skill-menu") && !$("#skill-menu").hidden) renderSkillMenu();
   if (threadReadOnly()) closeComposerMenus({ keepContextUsage: true });

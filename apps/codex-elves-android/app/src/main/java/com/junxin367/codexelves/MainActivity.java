@@ -1408,6 +1408,27 @@ public final class MainActivity extends Activity {
     }
 
     private void openBrowserLink(Uri uri) {
+        WebView current = webView;
+        int fallback = getColor(R.color.login_accent);
+        if (current == null) { openBrowserLink(uri, fallback); return; }
+        try {
+            current.evaluateJavascript("(function(){var v=getComputedStyle(document.documentElement)"
+                + ".getPropertyValue('--accent').trim();var m=v.match(/^rgba?\\(\\s*([\\d.]+)[,\\s]+([\\d.]+)[,\\s]+([\\d.]+)(?:\\s*[,/]\\s*[\\d.]+%?)?\\s*\\)$/i);"
+                + "if(m)v='#'+m.slice(1,4).map(function(x){return Math.max(0,Math.min(255,Math.round(Number(x)))).toString(16).padStart(2,'0');}).join('');"
+                + "return /^#[0-9a-fA-F]{6}$/.test(v)?v:'';})()", value -> {
+                int accent = fallback;
+                try {
+                    if (value != null && value.matches("\\\"#[0-9a-fA-F]{6}\\\""))
+                        accent = android.graphics.Color.parseColor(value.substring(1, 8));
+                } catch (RuntimeException ignored) { }
+                if (current == webView) openBrowserLink(uri, accent);
+            });
+        } catch (RuntimeException unavailable) {
+            if (current == webView) openBrowserLink(uri, fallback);
+        }
+    }
+
+    private void openBrowserLink(Uri uri, int accent) {
         String message = null;
         try {
             if (!pageAuthenticated || currentOrigin == null)
@@ -1437,6 +1458,7 @@ public final class MainActivity extends Activity {
             parameters.putInt("muted", getColor(R.color.login_muted));
             parameters.putInt("line", getColor(R.color.login_line));
             parameters.putInt("surface", getColor(R.color.login_background));
+            parameters.putInt("accent", accent);
             parameters.putString("initialUrl", uri.toString());
             Intent browser = new Intent(this, BrowserActivity.class).putExtras(parameters);
             startActivity(browser);
@@ -1628,8 +1650,8 @@ public final class MainActivity extends Activity {
         double size = payload.optDouble("fontSize", 0);
         if (!Double.isFinite(size) || size < 12 || size > 24) return false;
         JSONObject colors = payload.optJSONObject("colors");
-        if (colors == null || colors.length() != 5) return false;
-        for (String name : new String[]{"background", "foreground", "muted", "line", "surface"})
+        if (colors == null || colors.length() != 6) return false;
+        for (String name : new String[]{"background", "foreground", "muted", "line", "surface", "accent"})
             if (!colors.optString(name).matches("#[0-9a-fA-F]{6}")) return false;
         if (payload.has("initialUrl")) {
             String initialUrl = payload.optString("initialUrl", "");
@@ -1676,7 +1698,7 @@ public final class MainActivity extends Activity {
             parameters.putBinder(BrowserAuthority.EXTRA, browserAuthority);
             parameters.putFloat("fontSize", (float) payload.getDouble("fontSize"));
             JSONObject colors = payload.getJSONObject("colors");
-            for (String name : new String[]{"background", "foreground", "muted", "line", "surface"})
+            for (String name : new String[]{"background", "foreground", "muted", "line", "surface", "accent"})
                 parameters.putInt(name, android.graphics.Color.parseColor(colors.getString(name)));
             String initialUrl = payload.optString("initialUrl", "");
             if (!initialUrl.isEmpty()) {
