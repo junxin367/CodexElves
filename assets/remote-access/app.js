@@ -11712,9 +11712,7 @@ async function applyCompactionReceipt(id, receiptId, receipt) {
   }
   const acknowledged = setCompactionState(id, { ...current, acknowledged: true });
   if (receipt.result?.compaction) reconcileCompaction(id, receipt.result.compaction);
-  if (compactions.get(id)?.receiptId === receiptId && compactionLocked(id)) {
-    notice("压缩请求已提交，正在等待原生压缩完成。");
-  } else {
+  if (!(compactions.get(id)?.receiptId === receiptId && compactionLocked(id))) {
     notice("上下文压缩已完成。");
   }
   updateComposer();
