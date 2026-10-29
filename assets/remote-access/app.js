@@ -433,13 +433,15 @@ function readRemoteBackgroundFile(file) {
   });
 }
 const automaticThemeStableMs = 5000;
+const automaticThemeDarkLux = 10;
+const automaticThemeLightLux = 45;
 let automaticThemeCandidate = null;
 function automaticAppearanceTheme(date = new Date(), currentTheme = appearance.theme) {
   const hour = date.getHours();
-  if (hour < 6 || hour >= 18) {
+  if (hour < 6 || hour >= 21) {
     if (!ambientLightStatus.supported || ambientLightStatus.lux === null) return "dark";
-    if (ambientLightStatus.lux <= 20) return "dark";
-    if (ambientLightStatus.lux >= 45) return "light";
+    if (ambientLightStatus.lux <= automaticThemeDarkLux) return "dark";
+    if (ambientLightStatus.lux >= automaticThemeLightLux) return "light";
   } else return "light";
   return currentTheme;
 }

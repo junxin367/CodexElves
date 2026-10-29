@@ -8,6 +8,7 @@ dist/
 target/
 node_modules/
 temp/
+jdk-17.0.20.1+1/
 apps/codex-elves-manager/src-tauri/gen/
 
 .codex_asar_extract/

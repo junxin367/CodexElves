@@ -2236,6 +2236,7 @@ struct WebSocketRequestLogState {
     connection_generation: u64,
     connected_at: Instant,
     application_request_count: usize,
+    has_received_application_response: bool,
     interrupted_before_response: bool,
     requests: HashMap<String, TrackedWebSocketRequest>,
     active_order: VecDeque<String>,
@@ -2319,6 +2320,7 @@ impl WebSocketRequestLogger {
                     .fetch_add(1, Ordering::Relaxed),
                 connected_at,
                 application_request_count: 0,
+                has_received_application_response: false,
                 interrupted_before_response: false,
                 requests: HashMap::new(),
                 active_order: VecDeque::new(),
@@ -2551,6 +2553,9 @@ impl WebSocketRequestLogger {
         let Ok(state) = self.state.lock() else {
             return Some("request_state_unavailable");
         };
+        if state.requests.is_empty() && state.has_received_application_response {
+            return Some("completed_response_requires_context_recovery");
+        }
         for tracked in state.requests.values() {
             // 包括已交付给 Codex 的事件，以及压缩/续接正在缓冲的事件。
             // 这些请求都不能从初始 response.create 无条件重放。
@@ -2884,6 +2889,7 @@ impl WebSocketRequestLogger {
             return;
         };
         if let Some(response_id) = response_id.as_deref() {
+            state.has_received_application_response = true;
             state
                 .response_ids
                 .insert(response_id.to_string(), log_id.clone());
@@ -2940,6 +2946,7 @@ impl WebSocketRequestLogger {
             return;
         };
         if let Some(response_id) = response_id.as_deref() {
+            state.has_received_application_response = true;
             state
                 .response_ids
                 .insert(response_id.to_string(), log_id.clone());
@@ -5760,7 +5767,10 @@ mod tests {
             r#"{"type":"response.completed","response":{"id":"resp_first"}}"#.into(),
         ));
         assert!(!logger.has_pending_requests());
-        assert_eq!(logger.upstream_replay_block_reason(), None);
+        assert_eq!(
+            logger.upstream_replay_block_reason(),
+            Some("completed_response_requires_context_recovery")
+        );
 
         // 上一轮收到过响应，不影响下一轮尚未收到响应的完整请求恢复。
         logger

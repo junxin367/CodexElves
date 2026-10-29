@@ -1687,10 +1687,6 @@
         throw new Error("原生侧边会话身份尚未确认");
       const view = nativeSideIdentity(thread, entries);
       if (!view) throw new Error("原生侧边标签尚未确认");
-      await sourceManager.setThreadTitle(threadId, DEFAULT_SIDE_THREAD_TITLE);
-      const entry = nativeSideThreads.get(threadId);
-      if (entry) nativeSideThreads.set(threadId, { ...entry, title: DEFAULT_SIDE_THREAD_TITLE });
-      view.title = DEFAULT_SIDE_THREAD_TITLE;
       return { ok: true, threadId, parentThreadId,
         thread: { ...summary(thread), ...runtimeThread(threadId, thread, view), ...view } };
     } catch (error) {
