@@ -81,6 +81,8 @@ pub struct RelayProfileTestResult {
     pub endpoint: String,
     pub response_preview: String,
     pub first_token_ms: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1118,7 +1120,7 @@ async fn send_relay_profile_test_attempt(
             .await?;
         let v1_status = v1_response.status().as_u16();
         if v1_status < 400 {
-            let (response_text, first_token_ms) = read_relay_profile_test_response(
+            let (response_text, first_token_ms, output_tokens) = read_relay_profile_test_response(
                 v1_response,
                 protocol,
                 measure_first_token,
@@ -1129,6 +1131,8 @@ async fn send_relay_profile_test_attempt(
                 http_status: v1_status,
                 endpoint: v1_endpoint,
                 first_token_ms,
+                output_tokens,
+                duration_ms: Some(started_at.elapsed().as_millis() as u64),
                 response_preview: format!(
                     "（Base URL 建议加上 /v1 前缀）{}",
                     response_text.chars().take(280).collect::<String>()
@@ -1137,12 +1141,14 @@ async fn send_relay_profile_test_attempt(
         }
     }
 
-    let (response_text, first_token_ms) =
+    let (response_text, first_token_ms, output_tokens) =
         read_relay_profile_test_response(response, protocol, measure_first_token, started_at).await;
     Ok(RelayProfileTestResult {
         http_status,
         endpoint,
         first_token_ms,
+        output_tokens,
+        duration_ms: Some(started_at.elapsed().as_millis() as u64),
         response_preview: response_text.chars().take(320).collect(),
     })
 }
@@ -1152,9 +1158,12 @@ async fn read_relay_profile_test_response(
     protocol: RelayProtocol,
     measure_first_token: bool,
     started_at: Instant,
-) -> (String, Option<u64>) {
+) -> (String, Option<u64>, Option<u64>) {
     if !measure_first_token {
-        return (response.text().await.unwrap_or_default(), None);
+        let text = response.text().await.unwrap_or_default();
+        let output_tokens =
+            crate::proxy_log::extract_output_tokens_from_response_body(text.as_bytes());
+        return (text, None, output_tokens);
     }
 
     let mut stream = response.bytes_stream();
@@ -1183,7 +1192,12 @@ async fn read_relay_profile_test_response(
     {
         first_token_ms = Some(started_at.elapsed().as_millis() as u64);
     }
-    (String::from_utf8_lossy(&body).into_owned(), first_token_ms)
+    let output_tokens = crate::proxy_log::extract_output_tokens_from_response_body(&body);
+    (
+        String::from_utf8_lossy(&body).into_owned(),
+        first_token_ms,
+        output_tokens,
+    )
 }
 
 fn relay_profile_test_data_has_content(protocol: RelayProtocol, text: &str) -> bool {
@@ -4796,7 +4810,9 @@ base_url = "http://127.0.0.1:45221/v1"
             thread::sleep(Duration::from_millis(30));
             stream
                 .write_all(
-                    b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: [DONE]\n\n"
+                    b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\n\
+                      data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"output_tokens\":8}}}\n\n\
+                      data: [DONE]\n\n"
                 )
                 .unwrap();
             request
@@ -4820,6 +4836,12 @@ base_url = "http://127.0.0.1:45221/v1"
 
         assert_eq!(request_json["stream"], true);
         assert!(result.first_token_ms.is_some_and(|elapsed| elapsed >= 20));
+        assert_eq!(result.output_tokens, Some(8));
+        assert!(
+            result
+                .duration_ms
+                .is_some_and(|elapsed| { elapsed >= result.first_token_ms.unwrap_or_default() })
+        );
     }
 
     #[tokio::test]

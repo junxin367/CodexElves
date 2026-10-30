@@ -923,7 +923,7 @@ pub fn extract_reasoning_tokens_from_response_body(body: &[u8]) -> Option<u64> {
         .or(exact_tokens)
 }
 
-fn extract_output_tokens_from_response_body(body: &[u8]) -> Option<u64> {
+pub(crate) fn extract_output_tokens_from_response_body(body: &[u8]) -> Option<u64> {
     let text = String::from_utf8_lossy(body);
     if let Ok(value) = serde_json::from_str::<Value>(&text) {
         return output_tokens_from_usage(&value);

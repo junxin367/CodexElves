@@ -223,6 +223,8 @@ pub struct RelayProfileTestPayload {
     pub endpoint: String,
     pub response_preview: String,
     pub first_token_ms: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3093,6 +3095,8 @@ pub async fn test_relay_profile(
                     endpoint: result.endpoint,
                     response_preview: result.response_preview,
                     first_token_ms: result.first_token_ms,
+                    output_tokens: result.output_tokens,
+                    duration_ms: result.duration_ms,
                 },
             }
         }
@@ -3103,6 +3107,8 @@ pub async fn test_relay_profile(
                 endpoint: String::new(),
                 response_preview: String::new(),
                 first_token_ms: None,
+                output_tokens: None,
+                duration_ms: None,
             },
         ),
     }
