@@ -570,15 +570,23 @@ type RelayProfileTestResult = CommandResult<{
   endpoint: string;
   responsePreview: string;
   firstTokenMs?: number | null;
+  outputTokens?: number | null;
+  durationMs?: number | null;
+  requestBody?: string | null;
+  responseBody?: string | null;
 }>;
 
 type RelayProfileSpeedTestItem = {
   model: string;
   elapsedMs: number;
   firstTokenMs: number | null;
+  outputTokens: number | null;
   status: "ok" | "failed";
   httpStatus: number | null;
   message: string;
+  endpoint?: string | null;
+  requestBody?: string | null;
+  responseBody?: string | null;
 };
 
 type RelayProfileModelsResult = CommandResult<{
@@ -2533,7 +2541,9 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           httpStatus: 200,
           endpoint: `${profile?.baseUrl || active.baseUrl || active.upstreamBaseUrl}/responses`,
           responsePreview: `hi from ${model}`,
-          firstTokenMs: 1,
+          firstTokenMs: 180,
+          outputTokens: 16,
+          durationMs: 920,
         }, `已向「${profile?.name || active.name}」用模型「${model}」发送 hi，HTTP 200。`) as T,
       );
     }
@@ -6030,12 +6040,79 @@ function formatOptionalSpeedTestDurationMs(value?: number | null): string {
   return typeof value === "number" ? formatSpeedTestDurationMs(value) : "-";
 }
 
-function formatSpeedTestTokenRate(elapsedMs: number): string {
-  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return "-";
-  const rate = SPEED_TEST_INPUT_TOKENS * 1000 / elapsedMs;
-  if (rate < 1000) return `${Math.round(rate)} tk/s`;
-  const digits = rate >= 10_000 ? 1 : 2;
-  return `${(rate / 1000).toFixed(digits).replace(/\.?0+$/, "")}k tk/s`;
+function speedTestTokenRate(outputTokens: number | null | undefined, elapsedMs: number | null | undefined): number {
+  if (
+    typeof outputTokens !== "number"
+    || !Number.isFinite(outputTokens)
+    || outputTokens <= 0
+    || typeof elapsedMs !== "number"
+    || !Number.isFinite(elapsedMs)
+    || elapsedMs <= 0
+  ) return Number.NaN;
+  return outputTokens * 1000 / elapsedMs;
+}
+
+function formatSpeedTestTokenRate(outputTokens: number | null | undefined, elapsedMs: number | null | undefined): string {
+  const rate = speedTestTokenRate(outputTokens, elapsedMs);
+  return formatProxyTokenRate(rate);
+}
+
+function speedTestItemToProxyLogDetail(
+  profile: RelayProfile,
+  item: RelayProfileSpeedTestItem,
+): LocalProxyLogDetail {
+  const requestBodyStr = item.requestBody || "";
+  const responseBodyStr = item.responseBody || "";
+  const reqBytes = new TextEncoder().encode(requestBodyStr).length;
+  const resBytes = new TextEncoder().encode(responseBodyStr).length;
+  const protocol = profile.protocol || "chat_completions";
+  const protocolLabel =
+    protocol === "responses"
+      ? "Responses API"
+      : protocol === "anthropic"
+        ? "Anthropic"
+        : "Chat Completions";
+  const defaultPath =
+    protocol === "responses"
+      ? "/responses"
+      : protocol === "anthropic"
+        ? "/messages"
+        : "/chat/completions";
+  let pathname = defaultPath;
+  if (item.endpoint) {
+    try {
+      pathname = new URL(item.endpoint).pathname;
+    } catch {
+      pathname = item.endpoint;
+    }
+  }
+  return {
+    id: `speed-test-${item.model}-${item.elapsedMs}`,
+    transport: "http",
+    timestampMs: Date.now(),
+    method: "POST",
+    path: pathname,
+    remoteAddr: "127.0.0.1",
+    model: item.model,
+    upstreamRequestModel: item.model,
+    upstreamResponseModel: item.model,
+    outputTokens: item.outputTokens,
+    relayId: profile.id,
+    relayName: profile.name || "当前供应商",
+    endpoint: item.endpoint || profile.baseUrl,
+    responseProtocol: protocolLabel,
+    statusCode: item.httpStatus,
+    firstTokenMs: item.firstTokenMs,
+    durationMs: item.elapsedMs,
+    stream: true,
+    requestBytes: reqBytes,
+    responseBytes: resBytes,
+    responseCapturedBytes: resBytes,
+    responseTruncated: false,
+    error: item.status === "failed" ? item.message : null,
+    requestBody: requestBodyStr,
+    responseBody: responseBodyStr,
+  };
 }
 
 function RelayProfileSpeedTestDialog({
@@ -6062,7 +6139,8 @@ function RelayProfileSpeedTestDialog({
   const [availableModels, setAvailableModels] = useState<string[]>(configuredModels);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [running, setRunning] = useState(false);
-  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
+  const [selectedDetailItem, setSelectedDetailItem] = useState<RelayProfileSpeedTestItem | null>(null);
   const [resultsByMode, setResultsByMode] = useState<Record<"configured" | "all", RelayProfileSpeedTestItem[]>>({
     configured: [],
     all: [],
@@ -6073,8 +6151,9 @@ function RelayProfileSpeedTestDialog({
   useEffect(() => {
     setMode("configured");
     setAvailableModels(configuredModels);
-    setSortDirection("asc");
+    setSortDirection("desc");
     setResultsByMode({ configured: [], all: [] });
+    setSelectedDetailItem(null);
   }, [profile.id, configuredModelsKey]);
 
   useEffect(() => {
@@ -6097,11 +6176,17 @@ function RelayProfileSpeedTestDialog({
   }, [actions, configuredModelsKey, profile.id]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !running) onClose();
+      if (event.key === "Escape" && !running) {
+        if (selectedDetailItem) {
+          setSelectedDetailItem(null);
+        } else {
+          onClose();
+        }
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose, running]);
+  }, [onClose, running, selectedDetailItem]);
 
   const targetModels = mode === "all" ? availableModels : configuredModels;
 
@@ -6120,22 +6205,33 @@ function RelayProfileSpeedTestDialog({
           let item: RelayProfileSpeedTestItem;
           try {
             const result = await actions.testRelayProfile(profile, model, SPEED_TEST_INPUT_TOKENS);
+            const measuredElapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
             item = {
               model,
-              elapsedMs: Math.max(1, Math.round(performance.now() - startedAt)),
+              elapsedMs: typeof result?.durationMs === "number" && result.durationMs > 0
+                ? result.durationMs
+                : measuredElapsedMs,
               firstTokenMs: result?.firstTokenMs ?? null,
+              outputTokens: result?.outputTokens ?? null,
               status: result && isSuccessStatus(result.status) ? "ok" : "failed",
               httpStatus: result?.httpStatus ?? null,
               message: result?.message || "请求失败",
+              endpoint: result?.endpoint ?? null,
+              requestBody: result?.requestBody ?? null,
+              responseBody: result?.responseBody ?? null,
             };
           } catch (error) {
             item = {
               model,
               elapsedMs: Math.max(1, Math.round(performance.now() - startedAt)),
               firstTokenMs: null,
+              outputTokens: null,
               status: "failed",
               httpStatus: null,
               message: error instanceof Error ? error.message : "请求失败",
+              endpoint: null,
+              requestBody: null,
+              responseBody: null,
             };
           }
           setResultsByMode((current) => ({
@@ -6158,9 +6254,17 @@ function RelayProfileSpeedTestDialog({
     ? Math.round(results.reduce((total, item) => total + item.elapsedMs, 0) / results.length)
     : 0;
   const sortedResults = useMemo(
-    () => [...results].sort((left, right) => (
-      sortDirection === "asc" ? left.elapsedMs - right.elapsedMs : right.elapsedMs - left.elapsedMs
-    )),
+    () => [...results].sort((left, right) => {
+      const leftRate = speedTestTokenRate(left.status === "ok" ? left.outputTokens : null, left.elapsedMs);
+      const rightRate = speedTestTokenRate(right.status === "ok" ? right.outputTokens : null, right.elapsedMs);
+      const leftMissing = !Number.isFinite(leftRate);
+      const rightMissing = !Number.isFinite(rightRate);
+      if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
+      if (!leftMissing && !rightMissing && leftRate !== rightRate) {
+        return sortDirection === "asc" ? leftRate - rightRate : rightRate - leftRate;
+      }
+      return left.elapsedMs - right.elapsedMs;
+    }),
     [results, sortDirection],
   );
 
@@ -6179,7 +6283,7 @@ function RelayProfileSpeedTestDialog({
         <div className="modal-head">
           <div>
             <h2 id="relay-speed-test-title">模型速度测试</h2>
-            <p>{profile.name || "未命名供应商"} · 每个模型约 5 万 token 输入，最多 5 个并行测速。</p>
+            <p>{profile.name || "未命名供应商"} · 每个模型发送约 5 万 token 输入，按实际输出 token / 完整请求耗时计算 tok/s，最多 5 个并行测速。</p>
           </div>
           <Button disabled={running} onClick={onClose} size="icon" title="关闭" variant="ghost">
             <X className="h-4 w-4" />
@@ -6235,7 +6339,7 @@ function RelayProfileSpeedTestDialog({
                   type="button"
                 >
                   <ArrowDownWideNarrow className="h-3.5 w-3.5" />
-                  耗时升序
+                  tk/s 升序
                 </button>
                 <button
                   aria-pressed={sortDirection === "desc"}
@@ -6244,24 +6348,48 @@ function RelayProfileSpeedTestDialog({
                   type="button"
                 >
                   <ArrowUpNarrowWide className="h-3.5 w-3.5" />
-                  耗时降序
+                  tk/s 降序
                 </button>
               </div>
             </div>
             <div className="speed-test-result-list">
               {sortedResults.map((item, index) => {
-                const barWidth = Math.max(8, Math.min(100, Math.round((item.elapsedMs / Math.max(fastest, item.elapsedMs)) * 100)));
                 return (
-                  <div className={`speed-test-result-row ${item.status === "failed" ? "failed" : ""}`} key={item.model}>
+                  <div
+                    className={`speed-test-result-row ${item.status === "failed" ? "failed" : ""}`}
+                    key={item.model}
+                    onClick={() => setSelectedDetailItem(item)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setSelectedDetailItem(item);
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    title="点击查看请求详情"
+                  >
                     <span className="speed-test-rank">{index + 1}</span>
                     <span className="speed-test-result-model">{item.model}</span>
-                    <span className="speed-test-result-time">
-                      <span>首字 {formatOptionalSpeedTestDurationMs(item.firstTokenMs)}</span>
-                      <span>耗时 {formatSpeedTestDurationMs(item.elapsedMs)}</span>
-                      <span title="按约 5 万输入 token ÷ 完整耗时计算">{formatSpeedTestTokenRate(item.elapsedMs)}</span>
+                    <span className="speed-test-result-metric">
+                      <span>{formatOptionalSpeedTestDurationMs(item.firstTokenMs)}</span>
+                      <span className="speed-test-result-metric-label">首字</span>
+                    </span>
+                    <span className="speed-test-result-metric">
+                      <span>{formatSpeedTestDurationMs(item.elapsedMs)}</span>
+                      <span className="speed-test-result-metric-label">耗时</span>
+                    </span>
+                    <span
+                      className="speed-test-result-metric speed-test-result-token-rate"
+                      title="按上游 usage.output_tokens ÷ 完整请求耗时计算，与本地代理模型速率一致"
+                    >
+                      <span>{formatSpeedTestTokenRate(
+                        item.status === "ok" ? item.outputTokens : null,
+                        item.elapsedMs,
+                      )}</span>
+                      <span className="speed-test-result-metric-label">tk/s</span>
                     </span>
                     <span className="speed-test-result-status">{item.status === "ok" ? "完成" : "失败"}</span>
-                    <span className="speed-test-result-bar"><i style={{ width: `${barWidth}%` }} /></span>
                   </div>
                 );
               })}
@@ -6279,6 +6407,14 @@ function RelayProfileSpeedTestDialog({
           </Toolbar>
         </div>
       </div>
+      {selectedDetailItem ? (
+        <LocalProxyLogDetailDialog
+          entry={speedTestItemToProxyLogDetail(profile, selectedDetailItem)}
+          onClose={() => setSelectedDetailItem(null)}
+          onCopyRequest={(text) => actions.copyLocalProxyRequest(text || selectedDetailItem.requestBody || "")}
+          onCopyResponse={(text) => actions.copyLocalProxyResponse(text || selectedDetailItem.responseBody || "")}
+        />
+      ) : null}
     </div>,
     document.body,
   );
