@@ -222,6 +222,32 @@ impl ServiceFirstRemoteBridge {
         if !service_action(action) {
             return self.cdp.call(action, payload).await;
         }
+        if !service_first_action(action) {
+            return match self.cdp.call(action, payload.clone()).await {
+                Ok(value) if native_read_result_is_usable(&value) => Ok(value),
+                Ok(value) => {
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "remote_access.codex_service_fallback",
+                        json!({
+                            "action": action,
+                            "error": value.get("message").and_then(Value::as_str)
+                                .unwrap_or("Codex 原生读取返回失败")
+                        }),
+                    );
+                    self.service.call(action, payload).await
+                }
+                Err(cdp_error) => {
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "remote_access.codex_service_fallback",
+                        json!({
+                            "action": action,
+                            "error": cdp_error.to_string().chars().take(1_000).collect::<String>()
+                        }),
+                    );
+                    self.service.call(action, payload).await
+                }
+            };
+        }
         if action == "thread" {
             return self.call_thread_service_first(payload).await;
         }
@@ -280,6 +306,36 @@ impl NativeRemoteBridge for ServiceFirstRemoteBridge {
                 .await;
         }
         authorization.check().await?;
+        if !service_first_action(action) {
+            return match self
+                .cdp
+                .call_authorized(action, payload.clone(), authorization)
+                .await
+            {
+                Ok(value) if native_read_result_is_usable(&value) => Ok(value),
+                Ok(value) => {
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "remote_access.codex_service_fallback",
+                        json!({
+                            "action": action,
+                            "error": value.get("message").and_then(Value::as_str)
+                                .unwrap_or("Codex 原生读取返回失败")
+                        }),
+                    );
+                    self.service.call(action, payload).await
+                }
+                Err(cdp_error) => {
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "remote_access.codex_service_fallback",
+                        json!({
+                            "action": action,
+                            "error": cdp_error.to_string().chars().take(1_000).collect::<String>()
+                        }),
+                    );
+                    self.service.call(action, payload).await
+                }
+            };
+        }
         if action == "thread" {
             let service_value = match self.service.call("thread", payload.clone()).await {
                 Ok(value) => value,
@@ -325,7 +381,28 @@ impl NativeRemoteBridge for ServiceFirstRemoteBridge {
 }
 
 fn service_action(action: &str) -> bool {
-    matches!(action, "models" | "skills" | "thread" | "workspaceContext")
+    matches!(
+        action,
+        "events"
+            | "notifications"
+            | "sidebar"
+            | "history"
+            | "models"
+            | "skills"
+            | "thread"
+            | "workspaceContext"
+    )
+}
+
+fn service_first_action(action: &str) -> bool {
+    matches!(
+        action,
+        "sidebar" | "history" | "models" | "skills" | "thread" | "workspaceContext"
+    )
+}
+
+fn native_read_result_is_usable(value: &Value) -> bool {
+    value.get("ok").and_then(Value::as_bool) == Some(true)
 }
 
 fn merge_thread_service_metadata(mut cdp_value: Value, service_value: Value) -> Value {
@@ -624,6 +701,7 @@ pub struct RemoteAccessController {
     live: Mutex<LiveService>,
     running: AtomicBool,
     native_connected: AtomicBool,
+    native_write_available: AtomicBool,
     events: broadcast::Sender<Value>,
     key_checks: Arc<tokio::sync::Semaphore>,
     public_origin: Arc<RwLock<Option<String>>>,
@@ -701,6 +779,7 @@ impl RemoteAccessController {
             }),
             running: AtomicBool::new(false),
             native_connected: AtomicBool::new(false),
+            native_write_available: AtomicBool::new(false),
             events,
             key_checks: Arc::new(tokio::sync::Semaphore::new(4)),
             public_origin,
@@ -1008,6 +1087,7 @@ impl RemoteAccessController {
         self.primary.generation.fetch_add(1, Ordering::SeqCst);
         self.stop_frp(&mut live).await;
         self.native_connected.store(false, Ordering::SeqCst);
+        self.native_write_available.store(false, Ordering::SeqCst);
         self.publish_event(json!({"method":"remote/disconnected"}));
         if let Some(handle) = live.handle.take() {
             handle.shutdown();
@@ -1090,8 +1170,19 @@ impl RemoteAccessController {
                 match &result {
                     Ok(response) if response["ok"] == true => {
                         failure_since = None;
+                        let write_available = response
+                            .get("nativeBridge")
+                            .and_then(Value::as_str)
+                            .is_none();
+                        let write_changed = controller
+                            .native_write_available
+                            .swap(write_available, Ordering::SeqCst)
+                            != write_available;
                         if !controller.native_connected.swap(true, Ordering::SeqCst) {
                             controller.publish_event(json!({"method":"remote/reconnected"}));
+                        }
+                        if write_changed {
+                            controller.publish_event(json!({"method":"remote/resync"}));
                         }
                         epoch = response["epoch"].as_str().unwrap_or("").to_string();
                         cursor = response["cursor"].as_u64().unwrap_or(0);
@@ -1109,6 +1200,9 @@ impl RemoteAccessController {
                         if started.elapsed() >= NATIVE_EVENT_FAILURE_GRACE
                             && controller.native_connected.swap(false, Ordering::SeqCst)
                         {
+                            controller
+                                .native_write_available
+                                .store(false, Ordering::SeqCst);
                             let error_message = match &result {
                                 Ok(response) => response["message"]
                                     .as_str()
@@ -2580,9 +2674,15 @@ async fn session(
         .read()
         .unwrap_or_else(|error| error.into_inner());
     let diagnostics_request = state.controller.diagnostics.pending_for(&device.id).await;
+    let native_write_available = state
+        .controller
+        .native_write_available
+        .load(Ordering::SeqCst);
     Ok(Json(
         json!({"ok":true,"device":device.public(),"nativeConnected":state.controller.native_connected.load(Ordering::SeqCst),
-        "readOnly":policy.read_only,"allowApprovals":policy.allow_approvals,
+        "readOnly":policy.read_only || !native_write_available,
+        "allowApprovals":policy.allow_approvals && native_write_available,
+        "nativeWriteAvailable":native_write_available,
         "diagnosticsRequest":diagnostics_request,
         "capabilities":{"imageInput":true,"queuedImageRemoval":true,"queuedImageEditing":true,"queueEditRecovery":true,"queueSendRecovery":true,"projectlessCreation":true,"promptOptimization":true,"messageEditModelSettings":true,"goalComposer":true,"compactionQueueSend":true}}),
     ))
@@ -4596,6 +4696,28 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_read_actions_are_available_without_native_injection() {
+        for action in [
+            "events",
+            "notifications",
+            "sidebar",
+            "history",
+            "thread",
+            "models",
+        ] {
+            assert!(service_action(action));
+        }
+        for action in ["sidebar", "history", "thread", "models"] {
+            assert!(service_first_action(action));
+        }
+        assert!(!service_first_action("events"));
+        assert!(native_read_result_is_usable(&json!({"ok": true})));
+        assert!(!native_read_result_is_usable(
+            &json!({"ok": false, "message": "注入不可用"})
+        ));
+    }
 
     #[test]
     fn related_threads_payload_rejects_extra_fields_and_parent_self_close() {

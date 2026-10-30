@@ -14,6 +14,9 @@ use tokio::sync::Mutex;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_MODEL_PAGES: usize = 128;
 const SERVICE_FAILURE_COOLDOWN: Duration = Duration::from_secs(30);
+const SERVICE_LIST_PAGE_LIMIT: usize = 100;
+const SERVICE_HISTORY_TURN_LIMIT: usize = 3;
+const SERVICE_HISTORY_ITEM_LIMIT: usize = 40;
 
 #[derive(Debug)]
 struct RpcFailure {
@@ -65,12 +68,203 @@ impl CodexCliService {
 
     pub async fn call(&self, action: &str, payload: Value) -> anyhow::Result<Value> {
         match action {
+            "sidebar" => self.sidebar(payload).await,
+            "history" => self.history(payload).await,
+            "events" => Ok(service_events(payload)),
+            "notifications" => Ok(service_notifications(payload)),
             "models" => self.models().await,
             "skills" => self.skills(payload).await,
             "thread" => self.thread(payload).await,
             "workspaceContext" => self.workspace_context(payload).await,
             _ => bail!("Codex CLI service 暂不支持远程操作 {action}"),
         }
+    }
+
+    async fn sidebar(&self, _payload: Value) -> anyhow::Result<Value> {
+        let mut cursor = None;
+        let mut cursors = std::collections::HashSet::new();
+        let mut recent = Vec::new();
+        loop {
+            let page = self
+                .request(
+                    "thread/list",
+                    json!({
+                        "cursor": cursor,
+                        "limit": SERVICE_LIST_PAGE_LIMIT,
+                        "sortKey": "updated_at",
+                        "archived": false
+                    }),
+                )
+                .await?;
+            for thread in page
+                .get("data")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Ok(normalized) = normalize_thread(thread) {
+                    recent.push(normalized);
+                }
+            }
+            let next = page
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            let Some(next) = next else { break };
+            if !cursors.insert(next.clone()) {
+                bail!("Codex CLI service 会话列表分页游标重复");
+            }
+            cursor = Some(next);
+        }
+        Ok(json!({
+            "ok": true,
+            "complete": true,
+            "projects": [],
+            "recent": recent,
+            "pinnedThreads": [],
+            "nextCursor": null,
+            "sideThreadIds": [],
+            "unreadSideThreads": [],
+            "creationAvailable": false,
+            "preferences": {
+                "mode": "list",
+                "chats": "updated_at",
+                "projects": "updated_at",
+                "pinned": "updated_at"
+            }
+        }))
+    }
+
+    async fn history(&self, payload: Value) -> anyhow::Result<Value> {
+        let thread_id = payload
+            .get("threadId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .context("缺少会话 ID")?;
+        if let Some(turn_id) = payload
+            .get("turnId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            let (items, next_cursor) = self.history_items(thread_id, turn_id, None).await?;
+            return Ok(json!({
+                "ok": true,
+                "scope": "items",
+                "threadId": thread_id,
+                "turnId": turn_id,
+                "data": items,
+                "itemOrder": "asc",
+                "itemDirection": "older",
+                "itemsPageComplete": true,
+                "itemsComplete": next_cursor.is_none(),
+                "itemsNextCursor": next_cursor,
+                "newestSnapshotItemId": null,
+                "pageLimit": SERVICE_HISTORY_ITEM_LIMIT,
+                "transcriptEvents": []
+            }));
+        }
+
+        let cursor = payload.get("cursor").cloned().unwrap_or(Value::Null);
+        let page = self
+            .request(
+                "thread/turns/list",
+                json!({
+                    "threadId": thread_id,
+                    "cursor": cursor,
+                    "limit": SERVICE_HISTORY_TURN_LIMIT,
+                    "itemsView": "notLoaded",
+                    "sortDirection": "desc"
+                }),
+            )
+            .await?;
+        let mut data = Vec::new();
+        let mut items_pagination = serde_json::Map::new();
+        for raw_turn in page
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(turn_id) = raw_turn
+                .get("id")
+                .or_else(|| raw_turn.get("turnId"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let (items, next_item_cursor) = self.history_items(thread_id, turn_id, None).await?;
+            let mut turn = raw_turn.clone();
+            if let Some(object) = turn.as_object_mut() {
+                object.insert("id".to_string(), Value::String(turn_id.to_owned()));
+                object.insert("items".to_string(), Value::Array(items));
+            }
+            items_pagination.insert(
+                turn_id.to_owned(),
+                json!({
+                    "nextCursor": next_item_cursor,
+                    "hasMore": next_item_cursor.is_some(),
+                    "complete": next_item_cursor.is_none(),
+                    "pageComplete": true,
+                    "direction": "older",
+                    "order": "asc",
+                    "newestSnapshotItemId": null,
+                    "pageLimit": SERVICE_HISTORY_ITEM_LIMIT
+                }),
+            );
+            data.push(turn);
+        }
+        let next_cursor = page
+            .get("nextCursor")
+            .cloned()
+            .filter(|value| !value.is_null());
+        Ok(json!({
+            "ok": true,
+            "scope": "turns",
+            "threadId": thread_id,
+            "data": data,
+            "nextCursor": next_cursor,
+            "backwardsCursor": page.get("backwardsCursor").cloned().unwrap_or(Value::Null),
+            "turnOrder": "desc",
+            "itemOrder": "asc",
+            "turnsPageComplete": true,
+            "turnsComplete": next_cursor.is_none(),
+            "itemsPaginationByTurnId": items_pagination,
+            "transcriptEvents": []
+        }))
+    }
+
+    async fn history_items(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        cursor: Option<&str>,
+    ) -> anyhow::Result<(Vec<Value>, Option<String>)> {
+        let page = self
+            .request(
+                "thread/items/list",
+                json!({
+                    "threadId": thread_id,
+                    "turnId": turn_id,
+                    "cursor": cursor,
+                    "limit": SERVICE_HISTORY_ITEM_LIMIT,
+                    "sortDirection": "desc"
+                }),
+            )
+            .await?;
+        let items = page
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|entry| entry.get("item").cloned().unwrap_or_else(|| entry.clone()))
+            .collect::<Vec<_>>();
+        let next_cursor = page
+            .get("nextCursor")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        Ok((items, next_cursor))
     }
 
     async fn models(&self) -> anyhow::Result<Value> {
@@ -748,7 +942,7 @@ fn normalize_thread(thread: &Value) -> anyhow::Result<Value> {
             "eligible": true
         },
         "hasUnreadTurn": false,
-        "readOnly": false,
+        "readOnly": true,
         "viewKind": "main",
         "parentThreadId": Value::Null,
         "ephemeral": false,
@@ -757,6 +951,33 @@ fn normalize_thread(thread: &Value) -> anyhow::Result<Value> {
         "queuedEdits": [],
         "transcriptEvents": []
     }))
+}
+
+fn service_events(payload: Value) -> Value {
+    const EPOCH: &str = "codex-cli-service";
+    json!({
+        "ok": true,
+        "epoch": EPOCH,
+        "cursor": 0,
+        "reset": payload.get("epoch").and_then(Value::as_str) != Some(EPOCH),
+        "nativeBridge": "service",
+        "events": []
+    })
+}
+
+fn service_notifications(payload: Value) -> Value {
+    const EPOCH: &str = "codex-cli-service";
+    json!({
+        "ok": true,
+        "schemaVersion": 1,
+        "notificationEpoch": EPOCH,
+        "notificationCursor": 0,
+        "reset": payload.get("epoch").and_then(Value::as_str) != Some(EPOCH),
+        "truncated": false,
+        "nativeBridge": "service",
+        "pending": [],
+        "events": []
+    })
 }
 
 fn truncate_error(value: &str) -> String {
@@ -824,6 +1045,16 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn service_only_reads_are_explicitly_degraded() {
+        let events = service_events(json!({}));
+        let notifications = service_notifications(json!({}));
+        assert_eq!(events["nativeBridge"], "service");
+        assert_eq!(events["events"], json!([]));
+        assert_eq!(notifications["nativeBridge"], "service");
+        assert_eq!(notifications["pending"], json!([]));
     }
 
     #[test]
