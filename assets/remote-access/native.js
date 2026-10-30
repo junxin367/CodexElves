@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 82) return;
+  if (window.__codexElvesRemoteAccess?.version === 83) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -1236,6 +1236,7 @@
       && completedSideThreadUnread(manager.getConversation(entry.threadId) || { id: entry.threadId }))
       .map(entry => ({ id: entry.threadId, parentThreadId: entry.parentThreadId }));
     return { ok: true, projects, pinnedThreads, recent, nextCursor: null, sideThreadIds: [...sideIds], unreadSideThreads,
+      ...(manager.__codexElvesRequestClientManager ? { nativeBridge: "read_only" } : {}),
       creationAvailable: !!appScope,
       preferences: { mode: preferences.mode === "list" ? "list" : "project", chats: chatSort, projects: projectSort, pinned: pinnedSort } };
   }
@@ -1643,7 +1644,7 @@
   }
   async function threadViewIdentity(thread) {
     if (manager.__codexElvesRequestClientManager) {
-      return { readOnly: true, viewKind: "main", parentThreadId: null, nativeBridgeUnavailable: true };
+      return { readOnly: false, viewKind: "main", parentThreadId: null, nativeBridgeUnavailable: true };
     }
     const identity = subagentIdentity(thread) || subagentIdentity(manager.getConversation(thread.id));
     if (identity) {
@@ -4682,7 +4683,7 @@
           && (!unsubscribe.length || !appScope || !nativeNavigate
             || typeof nativeIntl?.formatMessage !== "function")) discover(sidebarOnly);
       if (manager.__codexElvesRequestClientManager && !requestClientReadActions.has(action))
-        throw failure(503, "当前 Codex 尚未完成原生注入，远程会话暂只支持只读查看");
+        throw failure(503, "当前 Codex 尚未完成原生注入，原生写入功能不可用");
       if (["events", "notifications", "thread"].includes(action))
         await prepareAsyncQuestionState().catch(() => {});
       if (action === "events" || action === "notifications")
@@ -4752,7 +4753,7 @@
         case "thread": {
           const thread = await readThread(payload.threadId);
           const view = await threadViewIdentity(thread);
-          if (!view.readOnly && (!manager.getConversation(thread.id)
+          if (!manager.__codexElvesRequestClientManager && !view.readOnly && (!manager.getConversation(thread.id)
               || manager.getConversation(thread.id).resumeState === "needs_resume")) {
             await manager.resumeConversation({
               conversationId: thread.id, model: null, reasoningEffort: null,
@@ -5032,7 +5033,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 82, call,
+    version: 83, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();

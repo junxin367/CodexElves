@@ -15,6 +15,7 @@ apps/codex-elves-manager/src-tauri/gen/
 .codex_asar_extract_latest/
 .superpowers/
 .claude/
+.playwright-cli/
 docs/superpowers/
 
 *.log

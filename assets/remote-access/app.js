@@ -1749,12 +1749,18 @@ function normalizeRelatedView(value, id = value?.threadId) {
       ...(value.returnToParent === true ? { returnToParent: true } : {}),
       ...(value.owner === relatedNavigationOwner ? { owner: value.owner } : {}) } : null;
 }
-function threadReadOnly(id = selectedId) {
+function threadViewReadOnly(id = selectedId) {
   return !!session?.readOnly || !!id && (
     thread?.id === id && (thread.readOnly === true || thread.viewKind === "subagent")
     || normalizeRelatedView(relatedThreadViews.get(id), id)?.kind === "subagent"
     || relatedSessionView?.threadId === id && relatedSessionView.kind === "subagent"
   );
+}
+function threadReadOnly(id = selectedId, action = "native") {
+  if (threadViewReadOnly(id)) return true;
+  if (action === "send") return session?.capabilities?.sendText !== true;
+  if (action === "create") return session?.capabilities?.createText !== true;
+  return session?.nativeWriteAvailable !== true;
 }
 function threadSentMessageEditAllowed(id = selectedId) {
   if (!id) return false;
@@ -2984,7 +2990,7 @@ function newChatProjectOptions(projects = []) {
 function syncNewChatProjectPicker() {
   const select = $("#project-select");
   if (!select || !sidebar) return;
-  select.disabled = !!session?.readOnly;
+  select.disabled = threadReadOnly(null, "create");
   const control = select.closest(".new-chat-project-control"), clear = $("#clear-new-chat-project");
   if (control) control.dataset.selected = String(!!select.value);
   if (clear) { clear.hidden = !select.value; clear.disabled = select.disabled; }
@@ -4378,7 +4384,7 @@ async function changeSidebarView(mode) {
     sidebarViewSave.mode = mode;
     return sidebarViewSave.promise;
   }
-  if (session.readOnly || !connected) return;
+  if (session.readOnly || session.nativeWriteAvailable !== true || !connected) return;
   const request = { deviceId, generation, mode, promise: null };
   sidebarViewSave = request;
   const isCurrent = () => sidebarViewSave === request && session?.device.id === deviceId
@@ -4425,8 +4431,8 @@ async function changeSidebar(payload) {
   if (validFilter) {
     sidebarFilters[filterKey] = filterValue;
     renderSidebar();
-    if (session.readOnly || !connected) return;
-  } else if (session.readOnly || !connected) return;
+    if (session.readOnly || session.nativeWriteAvailable !== true || !connected) return;
+  } else if (session.readOnly || session.nativeWriteAvailable !== true || !connected) return;
   sidebarBusy = true; renderSidebar();
   try { await mutate(payload.threadId ? "pinThread" : payload.projectId ? "pinProject" : "sort", payload); await loadSidebar(); }
   catch (error) {
@@ -4489,7 +4495,8 @@ function notice(message, error = false) {
   }, 6500);
 }
 async function api(path, body, id, signal, { resourcePriority = "foreground", onChannelLatency = null } = {}) {
-  if (path.startsWith("/api/action/") && body?.threadId && threadReadOnly(body.threadId))
+  if (path.startsWith("/api/action/") && body?.threadId
+      && threadReadOnly(body.threadId, path === "/api/action/send" ? "send" : "native"))
     throw Object.assign(new Error("此会话仅供查看，不能提交操作。"), { code: 403, notSubmitted: true });
   if (path.startsWith("/api/action/") && path !== "/api/action/deleteThread" && body?.threadId
       && (threadDeletionLocked(body.threadId) || threadDeleted(body.threadId)))
@@ -5051,7 +5058,7 @@ function refreshTranscriptEvents() {
   for (const [id, turn] of turns) turns.set(id, enrichTurnTranscriptEvents(turn));
 }
 async function mutate(action, payload, { reliable = false, receiptId = null } = {}) {
-  if (payload?.threadId && threadReadOnly(payload.threadId))
+  if (payload?.threadId && threadReadOnly(payload.threadId, action === "send" ? "send" : "native"))
     throw Object.assign(new Error("此会话仅供查看，不能提交操作。"), { code: 403, notSubmitted: true });
   const trackedOperation = ["deleteThread", "createSideThread", "closeSideThread"].includes(action);
   const version = selectionVersion;
@@ -6004,7 +6011,7 @@ function shell() {
   });
   $("#composer").onsubmit = async event => {
     event.preventDefault();
-    if (threadReadOnly()) return;
+    if (threadReadOnly(undefined, $("#send").dataset.action === "stop" ? "native" : creating ? "create" : "send")) return;
     if ($("#send").dataset.action === "stop") await stopGeneration();
     else await sendMessage();
   };
@@ -6014,7 +6021,7 @@ function shell() {
       event.preventDefault();
   };
   $("#prompt").onkeydown = event => {
-    if (threadReadOnly()) { event.preventDefault(); return; }
+    if (threadViewReadOnly()) { event.preventDefault(); return; }
     if (event.isComposing) return;
     if (!$("#skill-menu").hidden && ["ArrowDown", "ArrowUp", "Enter", "Tab"].includes(event.key) && !event.ctrlKey && !event.metaKey) {
       const entries = slashMenuEntries();
@@ -6046,7 +6053,7 @@ function shell() {
     }
   };
   $("#prompt").onbeforeinput = event => {
-    if (threadReadOnly()) { event.preventDefault(); return; }
+    if (threadViewReadOnly()) { event.preventDefault(); return; }
     const multilineInput = ["insertText", "insertFromPaste", "insertFromDrop"].includes(event.inputType);
     const insertedText = typeof event.data === "string" ? event.data
       : event.dataTransfer?.getData("text/plain") || "";
@@ -6068,7 +6075,7 @@ function shell() {
     }
   };
   $("#prompt").onpaste = event => {
-    if (threadReadOnly()) { event.preventDefault(); return; }
+    if (threadViewReadOnly()) { event.preventDefault(); return; }
     if (handleComposerImagePaste(event)) return;
     event.preventDefault();
     const text = (event.clipboardData?.getData("text/plain") || "").replace(/\r\n?/g, "\n");
@@ -6142,12 +6149,12 @@ async function startNewChat(projectId, { focus = true } = {}) {
   if (relatedSessionView) return;
   suppressAutomaticNewChat = false;
   cancelMessageEdit({ focus: false });
-  if (!session || session.readOnly) return;
+  if (!session || threadReadOnly(null, "create")) return;
   if (projectId === undefined && selectedId && !sidebar) {
     const version = selectionVersion, id = selectedId, deviceId = session.device.id;
     try { await loadSidebar(); } catch {}
     if (version !== selectionVersion || selectedId !== id || session?.device.id !== deviceId
-        || session.readOnly || !connected) return;
+        || threadReadOnly(null, "create") || !connected) return;
   }
   const project = projectId === undefined ? selectedThreadProjectId() : projectId;
   closePopup();
@@ -6342,7 +6349,7 @@ function renderSidebar() {
       state.setAttribute("role", "img"); state.setAttribute("aria-label", state.title);
       container.append(state);
     }
-    if (!session.readOnly) {
+    if (!threadReadOnly()) {
       const pinned = pinnedIds.has(item.id) || item.pinned;
       const deletion = threadDeletions.get(threadDeletionKey(item.id));
       const deleting = deletion && deletion.state !== "confirming";
@@ -6402,7 +6409,7 @@ function renderSidebar() {
     projectTitle.append(icon(projectExpanded ? "folder" : "folderClosed"), element("span", "project-label", project.name));
     projectTitle.title = project.cwd || project.name;
     header.append(projectTitle);
-    if (!session.readOnly) header.append(rowMenu(domId("project-menu", project.id), `${project.name} 的项目菜单`, [
+    if (!threadReadOnly()) header.append(rowMenu(domId("project-menu", project.id), `${project.name} 的项目菜单`, [
       { label: "在此项目新建会话", icon: "plus", action: () => startNewChat(project.id) },
       { label: project.pinned ? "取消置顶项目" : "置顶项目", icon: "pin", action: () => changeSidebar({ projectId: project.id, pinned: !project.pinned }) }
     ]));
@@ -9898,7 +9905,7 @@ function showWelcome({ startNew = true, clearHash = false } = {}) {
   finishRelatedSessionExit();
   relatedSessionView = null; relatedReturnTranscript = null; sessionMenu?.close(); syncRelatedSessionLayout();
   pendingSteer = null;
-  if (session && !session.readOnly && startNew) {
+  if (session && !threadReadOnly(null, "create") && startNew) {
     suppressAutomaticNewChat = false;
     void startNewChat("", { focus: false });
     return;
@@ -11511,21 +11518,25 @@ function updateComposer() {
   if (unsupportedImages) send.title = "当前服务版本尚不支持图片发送，请先更新程序";
   if (unsupportedProjectless) send.title = "当前服务版本尚不支持无项目会话，请先更新程序或选择已有项目";
   send.setAttribute("aria-busy", String(busy || stopping));
-  send.disabled = deleting || busy || stopping || compacting && editing || !!compactionSendReason || !connected || threadReadOnly() || unsupportedImages || unsupportedProjectless || !!goalReason || composerAttachmentsLoading()
+  send.disabled = deleting || busy || stopping || compacting && editing || !!compactionSendReason || !connected
+    || threadReadOnly(undefined, action === "stop" ? "native" : creating ? "create" : goalMode ? "native" : "send")
+    || unsupportedImages || unsupportedProjectless || !!goalReason || composerAttachmentsLoading()
     || (action !== "stop" && (!!pending || !prompt && !hasAttachments))
     || (!creating && (!selectedId || thread?.id !== selectedId));
   if (editingMessage || editingQueuedMessage?.state === "starting") send.disabled = true;
-  $("#prompt").disabled = threadReadOnly() || deleting || compacting && editing || !!editingMessage || editing && (busy || !!pending)
+  $("#prompt").disabled = threadViewReadOnly() || deleting || compacting && editing || !!editingMessage || editing && (busy || !!pending)
     || editingQueuedMessage?.state === "starting" || (!creating && !selectedId);
-  $("#new-chat").disabled = threadReadOnly() || !connected;
-  $("#model-button").disabled = threadReadOnly() || deleting || !!editingQueuedMessage
+  $("#new-chat").disabled = threadReadOnly(null, "create") || !connected;
+  $("#model-button").disabled = threadReadOnly(undefined, creating ? "create" : "send") || deleting || !!editingQueuedMessage
     || !!editingMessage && (busy || stopping || !!pending || !connected);
   $("#sidebar-view-toggle").disabled = !sidebar;
   syncNewChatProjectPicker();
   updatePromptOptimization();
   for (const control of document.querySelectorAll(".row-menu-button")) control.disabled = threadReadOnly() || sidebarBusy || !connected;
   fitPopup();
-  $("#prompt").placeholder = threadReadOnly() ? "当前设备为只读模式" : compacting && !editing && !goalMode
+  $("#prompt").placeholder = threadViewReadOnly() ? "当前设备为只读模式"
+    : threadReadOnly(undefined, creating ? "create" : goalMode ? "native" : "send") ? "当前写入功能不可用，可查看会话并保留草稿"
+    : compacting && !editing && !goalMode
     ? queueOnly ? "继续输入，发送后会排队等待压缩完成…" : "可继续编辑草稿，压缩期间暂不能发送…"
     : editingQueuedMessage ? "修改排队消息…" : goalMode ? goalComposerPlaceholder : active ? "补充要求，会使用原生消息队列…" : "给 Codex 发送消息，输入 / 选择命令或 Skill…";
   const model = currentModel(), effort = currentEffort();
@@ -11537,7 +11548,7 @@ function updateComposer() {
   syncRelatedModelDisplay();
   updateContextUsage();
   if ($("#skill-menu") && !$("#skill-menu").hidden) renderSkillMenu();
-  if (threadReadOnly()) closeComposerMenus({ keepContextUsage: true });
+  if (threadViewReadOnly()) closeComposerMenus({ keepContextUsage: true });
   refitComposerMenus();
   $("#pending-area").replaceChildren();
   const deletion = threadDeletions.get(threadDeletionKey(selectedId));
@@ -11615,7 +11626,7 @@ async function sendMessage() {
   if (threadDeletionLocked() || threadDeleted(selectedId)) return;
   if (editingQueuedMessage) return submitQueuedMessageEdit();
   if (editingMessage) return;
-  if (busy || stopping || pending || threadReadOnly() || !connected) return;
+  if (busy || stopping || pending || threadReadOnly(undefined, creating ? "create" : "send") || !connected) return;
   if (composerAttachmentsLoading()) { notice("图片正在读取，请稍后发送"); return; }
   let draft = snapshotDraft();
   const prefix = goalPrefix(draft.text, draft.skills);

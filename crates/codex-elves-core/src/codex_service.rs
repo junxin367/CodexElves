@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -85,6 +85,8 @@ impl CodexCliService {
             "skills" => self.skills(payload).await,
             "thread" => self.thread(payload).await,
             "workspaceContext" => self.workspace_context(payload).await,
+            "send" => self.send(payload).await,
+            "create" => self.create(payload).await,
             _ => bail!("Codex CLI service 暂不支持远程操作 {action}"),
         }
     }
@@ -129,19 +131,86 @@ impl CodexCliService {
         Ok(json!({
             "ok": true,
             "complete": true,
-            "projects": [],
+            "projects": service_projects(&mut recent),
             "recent": recent,
             "pinnedThreads": [],
             "nextCursor": null,
             "sideThreadIds": [],
             "unreadSideThreads": [],
-            "creationAvailable": false,
+            "creationAvailable": true,
             "preferences": {
                 "mode": "list",
                 "chats": "updated_at",
                 "projects": "updated_at",
                 "pinned": "updated_at"
             }
+        }))
+    }
+
+    async fn send(&self, payload: Value) -> anyhow::Result<Value> {
+        let thread_id = required_service_thread_id(&payload)?;
+        let params = service_turn_start_params(&payload, thread_id)?;
+        let response = match self.request("turn/start", params).await {
+            Ok(response) => response,
+            Err(error) => return Ok(service_write_error(thread_id, error, Value::Null)),
+        };
+        let turn = response
+            .get("turn")
+            .context("Codex CLI service 未返回轮次信息")?;
+        Ok(json!({
+            "ok": true,
+            "threadId": thread_id,
+            "turnId": turn.get("id").cloned().unwrap_or(Value::Null),
+            "status": turn.get("status").cloned().unwrap_or(Value::Null),
+            "deliveryState": "accepted"
+        }))
+    }
+
+    async fn create(&self, payload: Value) -> anyhow::Result<Value> {
+        let mut turn_params = service_turn_start_params(&payload, "")?;
+        let cwd = payload
+            .get("projectId")
+            .and_then(Value::as_str)
+            .and_then(service_project_cwd)
+            .context("CLI 兜底新建会话需要选择按目录分组的项目")?;
+        let mut start = json!({ "cwd": cwd });
+        for (source, target) in [("model", "model"), ("reasoningEffort", "effort")] {
+            if let Some(value) = payload
+                .get(source)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                start[target] = json!(value);
+            }
+        }
+        let response = match self.request("thread/start", start).await {
+            Ok(response) => response,
+            Err(error) => return Ok(service_write_error("", error, Value::Null)),
+        };
+        let thread = response
+            .get("thread")
+            .context("Codex CLI service 未返回新建会话")?;
+        let thread_id = thread
+            .get("id")
+            .and_then(Value::as_str)
+            .context("Codex CLI service 新建会话缺少 ID")?;
+        let normalized = normalize_thread(thread)?;
+        turn_params["threadId"] = json!(thread_id);
+        let turn = match self.request("turn/start", turn_params).await {
+            Ok(response) => response,
+            Err(error) => return Ok(service_write_error(thread_id, error, normalized)),
+        };
+        Ok(json!({
+            "ok": true,
+            "threadId": thread_id,
+            "thread": normalized,
+            "turnId": turn
+                .get("turn")
+                .and_then(|value| value.get("id"))
+                .cloned()
+                .unwrap_or(Value::Null),
+            "created": true,
+            "deliveryState": "accepted"
         }))
     }
 
@@ -926,6 +995,132 @@ fn normalize_model(model: &Value) -> Option<Value> {
     }))
 }
 
+fn required_service_thread_id(payload: &Value) -> anyhow::Result<&str> {
+    payload
+        .get("threadId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .context("缺少会话 ID")
+}
+
+fn service_turn_start_params(payload: &Value, thread_id: &str) -> anyhow::Result<Value> {
+    let prompt = payload
+        .get("prompt")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .context("消息不能为空")?;
+    if payload.get("queueOnly").and_then(Value::as_bool) == Some(true) {
+        bail!("CLI 兜底暂不支持原生队列写入");
+    }
+    if payload
+        .get("images")
+        .and_then(Value::as_array)
+        .is_some_and(|images| !images.is_empty())
+    {
+        bail!("CLI 兜底暂不支持图片消息");
+    }
+    let mut params = json!({
+        "threadId": thread_id,
+        "input": [{"type": "text", "text": prompt}]
+    });
+    for (source, target) in [("model", "model"), ("reasoningEffort", "effort")] {
+        if let Some(value) = payload
+            .get(source)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            params[target] = json!(value);
+        }
+    }
+    Ok(params)
+}
+
+fn service_write_error(thread_id: &str, error: anyhow::Error, thread: Value) -> Value {
+    let rpc_error = error.downcast_ref::<RpcFailure>();
+    json!({
+        "ok": false,
+        "threadId": thread_id,
+        "thread": thread,
+        "notSent": rpc_error.is_some(),
+        "outcomeUnknown": rpc_error.is_none(),
+        "code": 503,
+        "message": error.to_string()
+    })
+}
+
+fn service_project_cwd(project_id: &str) -> Option<&str> {
+    project_id
+        .strip_prefix("cwd:")
+        .filter(|value| !value.is_empty())
+}
+
+fn service_projects(recent: &mut [Value]) -> Vec<Value> {
+    let mut projects: HashMap<String, (String, Vec<Value>)> = HashMap::new();
+    for thread in recent.iter_mut() {
+        let Some(cwd) = thread
+            .get("cwd")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let normalized = cwd.trim_end_matches(['/', '\\']);
+        let key = if cfg!(windows) {
+            normalized.to_ascii_lowercase()
+        } else {
+            normalized.to_owned()
+        };
+        if key.is_empty() {
+            continue;
+        }
+        let project_id = format!("cwd:{key}");
+        thread["projectId"] = json!(project_id);
+        let entry = projects
+            .entry(project_id)
+            .or_insert_with(|| (cwd.clone(), Vec::new()));
+        entry.1.push(thread.clone());
+    }
+    let mut projects = projects
+        .into_iter()
+        .map(|(id, (cwd, threads))| {
+            let recency = threads
+                .iter()
+                .filter_map(|thread| thread.get("recencyAt").and_then(Value::as_u64))
+                .max()
+                .unwrap_or(0);
+            let name = std::path::Path::new(&cwd)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.is_empty())
+                .unwrap_or(cwd.as_str())
+                .to_owned();
+            json!({
+                "id": id,
+                "name": name,
+                "cwd": cwd,
+                "roots": [cwd],
+                "pinned": false,
+                "recencyAt": recency,
+                "threads": threads
+            })
+        })
+        .collect::<Vec<_>>();
+    projects.sort_by(|left, right| {
+        right["recencyAt"]
+            .as_u64()
+            .unwrap_or(0)
+            .cmp(&left["recencyAt"].as_u64().unwrap_or(0))
+            .then_with(|| {
+                left["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(right["name"].as_str().unwrap_or(""))
+            })
+    });
+    projects
+}
+
 fn normalize_thread(thread: &Value) -> anyhow::Result<Value> {
     let id = thread
         .get("id")
@@ -982,7 +1177,7 @@ fn normalize_thread(thread: &Value) -> anyhow::Result<Value> {
             "eligible": true
         },
         "hasUnreadTurn": false,
-        "readOnly": true,
+        "readOnly": false,
         "viewKind": "main",
         "parentThreadId": Value::Null,
         "ephemeral": false,
@@ -1137,6 +1332,59 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("历史分页游标未前进"));
+    }
+
+    #[test]
+    fn service_projects_group_real_threads_by_working_directory() {
+        let mut recent = vec![
+            json!({"id":"thread-1","cwd":"C:/work/alpha","recencyAt":10}),
+            json!({"id":"thread-2","cwd":"C:/work/alpha/","recencyAt":20}),
+            json!({"id":"thread-3","cwd":"C:/work/beta","recencyAt":15}),
+        ];
+        let projects = service_projects(&mut recent);
+        assert_eq!(projects.len(), 2);
+        assert_eq!(projects[0]["name"], "alpha");
+        assert_eq!(projects[0]["threads"].as_array().unwrap().len(), 2);
+        assert_eq!(projects[0]["recencyAt"], 20);
+        assert_eq!(projects[1]["name"], "beta");
+        assert_eq!(recent[0]["projectId"], projects[0]["id"]);
+        assert!(service_project_cwd(projects[0]["id"].as_str().unwrap()).is_some());
+    }
+
+    #[test]
+    fn service_turn_start_preserves_text_model_and_effort() {
+        let params = service_turn_start_params(
+            &json!({"prompt":"hello","model":"gpt-test","reasoningEffort":"high"}),
+            "thread-1",
+        )
+        .unwrap();
+        assert_eq!(params["threadId"], "thread-1");
+        assert_eq!(params["input"][0]["text"], "hello");
+        assert_eq!(params["model"], "gpt-test");
+        assert_eq!(params["effort"], "high");
+        assert!(
+            service_turn_start_params(&json!({"prompt":"hello","images":[{}]}), "thread-1",)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn service_write_errors_distinguish_rejection_from_unknown_delivery() {
+        let rejected = service_write_error(
+            "thread-1",
+            anyhow::Error::new(RpcFailure {
+                method: "turn/start".into(),
+                code: -32600,
+                message: "active thread".into(),
+            }),
+            Value::Null,
+        );
+        assert_eq!(rejected["notSent"], true);
+        assert_eq!(rejected["outcomeUnknown"], false);
+        let unknown =
+            service_write_error("thread-1", anyhow::anyhow!("connection lost"), Value::Null);
+        assert_eq!(unknown["notSent"], false);
+        assert_eq!(unknown["outcomeUnknown"], true);
     }
 
     #[test]

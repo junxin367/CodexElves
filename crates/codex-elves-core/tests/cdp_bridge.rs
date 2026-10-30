@@ -3936,8 +3936,9 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = assets::renderer_features_script();
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 82"));
-    assert!(script.contains("version: 82"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 83"));
+    assert!(script.contains("version: 83"));
+    assert!(script.contains("return { readOnly: false, viewKind: \"main\", parentThreadId: null, nativeBridgeUnavailable: true };"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));
@@ -3951,13 +3952,13 @@ fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
 }
 
 #[test]
-fn remote_native_script_wraps_new_request_client_as_read_only_manager() {
+fn remote_native_script_limits_new_request_client_to_read_actions() {
     let script = assets::renderer_features_script();
 
     assert!(script.contains("const isRequestClient = value =>"));
     assert!(script.contains("function requestClientManager(requestClient)"));
     assert!(script.contains("nativeBridge: \"read_only\""));
-    assert!(script.contains("当前 Codex 尚未完成原生注入，远程会话暂只支持只读查看"));
+    assert!(script.contains("当前 Codex 尚未完成原生注入，原生写入功能不可用"));
     assert!(script.contains("const requestClientReadActions = new Set"));
     assert!(
         script.contains("\"sidebar\", \"thread\", \"models\", \"skills\", \"workspaceContext\"")

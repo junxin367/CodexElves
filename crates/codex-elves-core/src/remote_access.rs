@@ -222,67 +222,22 @@ impl ServiceFirstRemoteBridge {
         if !service_action(action) {
             return self.cdp.call(action, payload).await;
         }
-        if !service_first_action(action) {
-            return match self.cdp.call(action, payload.clone()).await {
-                Ok(value) if native_read_result_is_usable(&value) => Ok(value),
-                Ok(value) => {
-                    let _ = crate::diagnostic_log::append_diagnostic_log(
-                        "remote_access.codex_service_fallback",
-                        json!({
-                            "action": action,
-                            "error": value.get("message").and_then(Value::as_str)
-                                .unwrap_or("Codex 原生读取返回失败")
-                        }),
-                    );
-                    self.service.call(action, payload).await
-                }
-                Err(cdp_error) => {
-                    let _ = crate::diagnostic_log::append_diagnostic_log(
-                        "remote_access.codex_service_fallback",
-                        json!({
-                            "action": action,
-                            "error": cdp_error.to_string().chars().take(1_000).collect::<String>()
-                        }),
-                    );
-                    self.service.call(action, payload).await
-                }
-            };
-        }
-        if action == "thread" {
-            return self.call_thread_service_first(payload).await;
-        }
-        match self.service.call(action, payload.clone()).await {
-            Ok(value) => Ok(value),
-            Err(service_error) => {
-                let _ = crate::diagnostic_log::append_diagnostic_log(
-                    "remote_access.codex_service_fallback",
-                    json!({
-                        "action": action,
-                        "error": service_error.to_string().chars().take(1_000).collect::<String>()
-                    }),
+        match self.cdp.call(action, payload.clone()).await {
+            Ok(value) if native_read_result_is_usable(action, &value) => Ok(value),
+            Ok(value) => {
+                log_service_fallback(
+                    action,
+                    value
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Codex 原生读取返回失败"),
                 );
-                self.cdp.call(action, payload).await
+                self.service.call(action, payload).await
             }
-        }
-    }
-
-    async fn call_thread_service_first(&self, payload: Value) -> anyhow::Result<Value> {
-        let service_value = match self.service.call("thread", payload.clone()).await {
-            Ok(value) => value,
-            Err(service_error) => {
-                let _ = crate::diagnostic_log::append_diagnostic_log(
-                    "remote_access.codex_service_fallback",
-                    json!({
-                        "action": "thread",
-                        "error": service_error.to_string().chars().take(1_000).collect::<String>()
-                    }),
-                );
-                return self.cdp.call("thread", payload).await;
+            Err(error) => {
+                log_service_fallback(action, &error.to_string());
+                self.service.call(action, payload).await
             }
-        };
-        match self.cdp.call("thread", payload).await {
-            Ok(cdp_value) => Ok(merge_thread_service_metadata(cdp_value, service_value)),
-            Err(_) => Ok(service_value),
         }
     }
 }
@@ -306,75 +261,33 @@ impl NativeRemoteBridge for ServiceFirstRemoteBridge {
                 .await;
         }
         authorization.check().await?;
-        if !service_first_action(action) {
-            return match self
-                .cdp
-                .call_authorized(action, payload.clone(), authorization)
-                .await
-            {
-                Ok(value) if native_read_result_is_usable(&value) => Ok(value),
-                Ok(value) => {
-                    let _ = crate::diagnostic_log::append_diagnostic_log(
-                        "remote_access.codex_service_fallback",
-                        json!({
-                            "action": action,
-                            "error": value.get("message").and_then(Value::as_str)
-                                .unwrap_or("Codex 原生读取返回失败")
-                        }),
-                    );
-                    self.service.call(action, payload).await
-                }
-                Err(cdp_error) => {
-                    let _ = crate::diagnostic_log::append_diagnostic_log(
-                        "remote_access.codex_service_fallback",
-                        json!({
-                            "action": action,
-                            "error": cdp_error.to_string().chars().take(1_000).collect::<String>()
-                        }),
-                    );
-                    self.service.call(action, payload).await
-                }
-            };
-        }
-        if action == "thread" {
-            let service_value = match self.service.call("thread", payload.clone()).await {
-                Ok(value) => value,
-                Err(service_error) => {
-                    let _ = crate::diagnostic_log::append_diagnostic_log(
-                        "remote_access.codex_service_fallback",
-                        json!({
-                            "action": "thread",
-                            "error": service_error.to_string().chars().take(1_000).collect::<String>()
-                        }),
-                    );
-                    return self
-                        .cdp
-                        .call_authorized(action, payload, authorization)
-                        .await;
-                }
-            };
-            return match self
-                .cdp
-                .call_authorized(action, payload, authorization)
-                .await
-            {
-                Ok(cdp_value) => Ok(merge_thread_service_metadata(cdp_value, service_value)),
-                Err(_) => Ok(service_value),
-            };
-        }
-        match self.service.call(action, payload.clone()).await {
-            Ok(value) => Ok(value),
-            Err(service_error) => {
-                let _ = crate::diagnostic_log::append_diagnostic_log(
-                    "remote_access.codex_service_fallback",
-                    json!({
-                        "action": action,
-                        "error": service_error.to_string().chars().take(1_000).collect::<String>()
-                    }),
+        match self
+            .cdp
+            .call_authorized(action, payload.clone(), authorization)
+            .await
+        {
+            Ok(value) if native_read_result_is_usable(action, &value) => Ok(value),
+            Ok(value) if service_write_action(action) && !native_write_fallback_allowed(&value) => {
+                Ok(value)
+            }
+            Ok(value) => {
+                log_service_fallback(
+                    action,
+                    value
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Codex 原生调用返回失败"),
                 );
-                self.cdp
-                    .call_authorized(action, payload, authorization)
-                    .await
+                self.service.call(action, payload).await
+            }
+            Err(error)
+                if service_write_action(action) && !native_write_error_fallback_allowed(&error) =>
+            {
+                Err(error)
+            }
+            Err(error) => {
+                log_service_fallback(action, &error.to_string());
+                self.service.call(action, payload).await
             }
         }
     }
@@ -391,42 +304,50 @@ fn service_action(action: &str) -> bool {
             | "skills"
             | "thread"
             | "workspaceContext"
+            | "send"
+            | "create"
     )
 }
 
-fn service_first_action(action: &str) -> bool {
-    matches!(action, "models" | "skills" | "thread" | "workspaceContext")
+fn service_write_action(action: &str) -> bool {
+    matches!(action, "send" | "create")
 }
 
-fn native_read_result_is_usable(value: &Value) -> bool {
+fn native_read_result_is_usable(action: &str, value: &Value) -> bool {
     value.get("ok").and_then(Value::as_bool) == Some(true)
+        && (action != "sidebar"
+            || value.get("nativeBridge").and_then(Value::as_str) != Some("read_only"))
 }
 
-fn merge_thread_service_metadata(mut cdp_value: Value, service_value: Value) -> Value {
-    let Some(service_thread) = service_value.get("thread") else {
-        return cdp_value;
-    };
-    let Some(cdp_thread) = cdp_value.get_mut("thread").and_then(Value::as_object_mut) else {
-        return cdp_value;
-    };
-    if service_thread.get("id") != cdp_thread.get("id") {
-        return cdp_value;
-    }
-    for key in [
-        "title",
-        "cwd",
-        "createdAt",
-        "updatedAt",
-        "recencyAt",
-        "model",
-        "reasoningEffort",
-        "goal",
-    ] {
-        if let Some(value) = service_thread.get(key).filter(|value| !value.is_null()) {
-            cdp_thread.insert(key.to_string(), value.clone());
-        }
-    }
-    cdp_value
+fn native_write_fallback_allowed(value: &Value) -> bool {
+    value.get("ok").and_then(Value::as_bool) == Some(false)
+        && value.get("code").and_then(Value::as_i64) == Some(503)
+        && value
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(native_capability_message)
+}
+
+fn native_write_error_fallback_allowed(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ApiError>()
+        .is_some_and(|error| error.code == 503 && native_capability_message(&error.message))
+        || error.to_string().contains("当前 Codex 尚未完成原生注入")
+        || error.to_string().contains("未发现本机原生会话管理器")
+        || error.to_string().contains("Codex 桌面连接不可用")
+}
+
+fn native_capability_message(message: &str) -> bool {
+    message.contains("当前 Codex 尚未完成原生注入")
+        || message.contains("未发现本机原生会话管理器")
+        || message.contains("Codex 桌面连接不可用")
+}
+
+fn log_service_fallback(action: &str, error: &str) {
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "remote_access.codex_service_fallback",
+        json!({"action": action, "error": error.chars().take(1_000).collect::<String>()}),
+    );
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -558,7 +479,10 @@ impl crate::bridge::CdpDispatchPermit for RemoteDispatchPermit {
             if policy.read_only {
                 return Err(ApiError::new(403, "当前为只读访问").into());
             }
-            if !controller.native_write_available.load(Ordering::SeqCst) {
+            if !controller.native_write_available.load(Ordering::SeqCst)
+                && !service_action(action)
+                && action != "browserTunnel"
+            {
                 return Err(ApiError::new(503, "原生写入不可用，请等待 Codex 注入恢复").into());
             }
             if matches!(action.as_str(), "approve" | "answer") && !policy.allow_approvals {
@@ -2706,14 +2630,21 @@ async fn session(
         .controller
         .native_write_available
         .load(Ordering::SeqCst);
+    let service_connected = state.controller.service_connected.load(Ordering::SeqCst);
     Ok(Json(
         json!({"ok":true,"device":device.public(),"nativeConnected":state.controller.native_connected.load(Ordering::SeqCst),
         "serviceConnected":state.controller.service_connected.load(Ordering::SeqCst),
-        "readOnly":policy.read_only || !native_write_available,
+        "readOnly":policy.read_only,
         "allowApprovals":policy.allow_approvals && native_write_available,
         "nativeWriteAvailable":native_write_available,
         "diagnosticsRequest":diagnostics_request,
-        "capabilities":{"imageInput":true,"queuedImageRemoval":true,"queuedImageEditing":true,"queueEditRecovery":true,"queueSendRecovery":true,"projectlessCreation":true,"promptOptimization":true,"messageEditModelSettings":true,"goalComposer":true,"compactionQueueSend":true}}),
+        "capabilities":{"imageInput":native_write_available,"queuedImageRemoval":native_write_available,
+        "queuedImageEditing":native_write_available,"queueEditRecovery":native_write_available,
+        "queueSendRecovery":native_write_available,"projectlessCreation":native_write_available,
+        "promptOptimization":native_write_available,"messageEditModelSettings":native_write_available,
+        "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
+        "sendText":native_write_available || service_connected,
+        "createText":native_write_available || service_connected}}),
     ))
 }
 
@@ -4735,19 +4666,26 @@ mod tests {
             "history",
             "thread",
             "models",
+            "send",
+            "create",
         ] {
             assert!(service_action(action));
         }
-        for action in ["thread", "models"] {
-            assert!(service_first_action(action));
-        }
-        for action in ["sidebar", "history"] {
-            assert!(service_action(action));
-            assert!(!service_first_action(action));
-        }
-        assert!(!service_first_action("events"));
-        assert!(native_read_result_is_usable(&json!({"ok": true})));
+        assert!(service_write_action("send"));
+        assert!(service_write_action("create"));
+        assert!(!service_write_action("createSideThread"));
+        assert!(!service_action("createSideThread"));
+        assert!(native_read_result_is_usable("thread", &json!({"ok": true})));
         assert!(!native_read_result_is_usable(
+            "sidebar",
+            &json!({"ok": true, "nativeBridge": "read_only"})
+        ));
+        assert!(native_read_result_is_usable(
+            "sidebar",
+            &json!({"ok": true})
+        ));
+        assert!(!native_read_result_is_usable(
+            "thread",
             &json!({"ok": false, "message": "注入不可用"})
         ));
     }
@@ -4979,35 +4917,22 @@ mod tests {
     }
 
     #[test]
-    fn thread_service_metadata_merge_preserves_cdp_runtime_fields() {
-        let merged = merge_thread_service_metadata(
-            json!({
-                "ok": true,
-                "thread": {
-                    "id": "thread-1",
-                    "title": "桌面标题",
-                    "cwd": "C:/desktop",
-                    "status": "active",
-                    "queuedMessages": [{"id": "queue-1"}],
-                    "tokenUsage": {"total": 12}
-                }
-            }),
-            json!({
-                "ok": true,
-                "thread": {
-                    "id": "thread-1",
-                    "title": "service标题",
-                    "cwd": "C:/service",
-                    "goal": {"status": "active"}
-                }
-            }),
-        );
-        assert_eq!(merged["thread"]["title"], "service标题");
-        assert_eq!(merged["thread"]["cwd"], "C:/service");
-        assert_eq!(merged["thread"]["status"], "active");
-        assert_eq!(merged["thread"]["queuedMessages"][0]["id"], "queue-1");
-        assert_eq!(merged["thread"]["tokenUsage"]["total"], 12);
-        assert_eq!(merged["thread"]["goal"]["status"], "active");
+    fn native_write_fallback_is_limited_to_capability_failures() {
+        assert!(native_write_fallback_allowed(&json!({
+            "ok": false,
+            "code": 503,
+            "message": "当前 Codex 尚未完成原生注入，远程会话暂只支持只读查看"
+        })));
+        assert!(!native_write_fallback_allowed(&json!({
+            "ok": false,
+            "code": 409,
+            "message": "会话状态已变化"
+        })));
+        assert!(!native_write_fallback_allowed(&json!({
+            "ok": false,
+            "code": 503,
+            "message": "原生队列消息准备失败"
+        })));
     }
 
     #[tokio::test]
@@ -6901,7 +6826,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_only_connection_keeps_session_read_only_and_online() {
+    async fn service_only_connection_keeps_session_writable_and_online() {
         let directory = tempfile::Builder::new()
             .prefix("remote-service-only-")
             .tempdir_in(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp"))
@@ -6961,7 +6886,10 @@ mod tests {
         assert_eq!(session["nativeConnected"], false);
         assert_eq!(session["serviceConnected"], true);
         assert_eq!(session["nativeWriteAvailable"], false);
-        assert_eq!(session["readOnly"], true);
+        assert_eq!(session["readOnly"], false);
+        assert_eq!(session["capabilities"]["sendText"], true);
+        assert_eq!(session["capabilities"]["createText"], true);
+        assert_eq!(session["capabilities"]["imageInput"], false);
         assert_eq!(session["allowApprovals"], false);
         let device_id = session["device"]["id"].as_str().unwrap();
         let device = controller
@@ -6977,7 +6905,7 @@ mod tests {
             .execute(
                 device,
                 "service-only-write".into(),
-                "send".into(),
+                "createSideThread".into(),
                 json!({}),
             )
             .await
