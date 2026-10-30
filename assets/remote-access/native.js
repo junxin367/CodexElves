@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 82) return;
+  if (window.__codexElvesRemoteAccess?.version === 83) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -76,9 +76,75 @@
     && (value.__codexElvesRequestClientManager === true
       || typeof value.sendFollowUpMessage === "function"
         && typeof value.listThreadTurns === "function" && value.storage?.readGlobalState);
+  let requestClientSidebarSnapshot = null;
+  const requestClientSnapshotThreadId = (value, snapshot = requestClientSidebarSnapshot) => {
+    if (value && typeof value === "object") {
+      const id = value.conversationId ?? value.threadId ?? value.id;
+      if (typeof id === "string" && id) return id;
+    }
+    if (typeof value !== "string" || !value) return null;
+    const candidates = [value];
+    if (value.includes(":")) candidates.push(value.slice(value.lastIndexOf(":") + 1));
+    if (value.startsWith("local-")) candidates.push(value.slice("local-".length));
+    for (const candidate of candidates)
+      if (snapshot?.conversationByKey instanceof Map && snapshot.conversationByKey.has(candidate))
+        return candidate;
+    return candidates.find(candidate => /^[a-zA-Z0-9_-]{1,120}$/.test(candidate)) || null;
+  };
+  const requestClientSnapshotConversations = (snapshot = requestClientSidebarSnapshot) => {
+    if (!(snapshot?.conversationByKey instanceof Map)) return [];
+    const rows = [];
+    for (const [key, value] of snapshot.conversationByKey) {
+      const id = requestClientSnapshotThreadId(value, snapshot) || requestClientSnapshotThreadId(key, snapshot);
+      if (!id || !value || typeof value !== "object") continue;
+      rows.push({ ...value, id: value.id || id, conversationId: value.conversationId || id });
+    }
+    return rows;
+  };
+  const requestClientSnapshotVisibleIds = (name, snapshot = requestClientSidebarSnapshot) => {
+    const source = snapshot?.visibleThreadLists instanceof Map ? snapshot.visibleThreadLists.get(name) : null;
+    let values = [];
+    try { values = typeof source === "function" ? source() : source; } catch {}
+    return array(values).map(value => requestClientSnapshotThreadId(value, snapshot)).filter(Boolean);
+  };
+  const requestClientSnapshotState = (key, snapshot = requestClientSidebarSnapshot) => {
+    if (key === "local-projects") {
+      const result = {};
+      for (const [projectKey, value] of snapshot?.projectByKey instanceof Map ? snapshot.projectByKey : []) {
+        const group = value?.group || value;
+        const id = group?.projectId || projectKey;
+        if (!id || group?.projectKind && group.projectKind !== "local") continue;
+        result[id] = {
+          name: group.label || group.name || group.path?.split(/[\\/]/).at(-1) || id,
+          rootPaths: array(group.rootPaths || (group.path ? [group.path] : [])),
+          threadKeys: array(group.threadKeys)
+        };
+      }
+      return result;
+    }
+    if (key === "thread-project-assignments") {
+      const assignments = {};
+      for (const [projectKey, value] of snapshot?.projectByKey instanceof Map ? snapshot.projectByKey : []) {
+        const group = value?.group || value;
+        const projectId = group?.projectId || projectKey;
+        if (!projectId || group?.projectKind && group.projectKind !== "local") continue;
+        for (const thread of array(group.threadKeys)) {
+          const id = requestClientSnapshotThreadId(thread, snapshot);
+          if (id) assignments[id] = projectId;
+        }
+      }
+      return assignments;
+    }
+    if (key === "pinned-thread-ids") return requestClientSnapshotVisibleIds("pinned", snapshot);
+    if (key === "projectless-thread-ids") {
+      const assigned = new Set(Object.keys(requestClientSnapshotState("thread-project-assignments", snapshot)));
+      return requestClientSnapshotVisibleIds("chats", snapshot).filter(id => !assigned.has(id));
+    }
+    return {};
+  };
   function minimalManagerStorage() {
     return {
-      async readGlobalState() { return {}; },
+      async readGlobalState(key) { return requestClientSnapshotState(key); },
       readValue() { return null; },
       writeValue() { return false; },
       readQueuedFollowUps() { return null; }
@@ -91,14 +157,34 @@
       hostId: "local",
       requestClient,
       storage,
-      runtime: null,
+      runtime: {
+        pinnedThreads: async () => ({
+          list: async () => ({ threadIds: requestClientSnapshotState("pinned-thread-ids") })
+        })
+      },
       disposed: false,
-      getConversation() { return null; },
-      getCachedConversations() { return []; },
-      getRecentThreadSummaries() { return []; },
-      getThreadListSummary() { return null; },
-      getThreadRuntimeStatusEvidence() { return null; },
-      getConversationCwd() { return null; },
+      getConversation(threadId) {
+        return requestClientSnapshotConversations().find(thread =>
+          (thread.conversationId || thread.id) === threadId) || null;
+      },
+      getCachedConversations() { return requestClientSnapshotConversations(); },
+      getRecentThreadSummaries() {
+        const ids = requestClientSnapshotVisibleIds("chats");
+        return requestClientSnapshotConversations().filter(thread =>
+          ids.includes(thread.conversationId || thread.id));
+      },
+      getThreadListSummary(threadId) {
+        return requestClientSnapshotConversations().find(thread =>
+          (thread.conversationId || thread.id) === threadId) || null;
+      },
+      getThreadRuntimeStatusEvidence(threadId) {
+        const thread = this.getConversation(threadId);
+        return thread?.threadRuntimeStatus || thread?.status || null;
+      },
+      getConversationCwd(threadId) {
+        const thread = this.getConversation(threadId);
+        return thread?.cwd || thread?.workingDirectory || null;
+      },
       async readThread(threadId, options = {}) {
         return await requestClient.sendRequest("thread/read", {
           threadId,
@@ -498,6 +584,10 @@
           if (value.node?.familyBindings instanceof Map && typeof value.get === "function") appScope = value;
           if (isManager(value) && !value.disposed) manager = value;
           if (!requestClient && isRequestClient(value)) requestClient = value;
+          if (value.projectByKey instanceof Map
+              && value.conversationByKey instanceof Map
+              && value.visibleThreadLists instanceof Map)
+            requestClientSidebarSnapshot = value;
           if (depth > 7 || value instanceof Node || value === window || value === document) continue;
           if (value instanceof Map) {
             for (const entry of value.values()) queue.push([entry, depth + 1]);
@@ -1354,7 +1444,7 @@
     "workspaceContext", "relatedThreads"]);
   const requestClientReadActions = new Set([
     "events", "notifications", "sidebar", "history", "thread", "models", "skills", "workspaceContext",
-    "relatedThreads"
+    "relatedThreads", "queue", "send", "sendState"
   ]);
   async function guardThreadAction(action, payload) {
     if (payload?.threadId == null || nativeReadActions.has(action) || action === "dispose") return null;
@@ -1671,10 +1761,31 @@
     const threadId = requiredId(payload.threadId);
     const parent = await readThread(threadId);
     if (manager.__codexElvesRequestClientManager) {
+      let sideThreads = [];
+      let canCreateSideThread = false;
+      try {
+        const entries = await sideThreadEntries();
+        sideThreads = entries.filter(entry => entry.parentThreadId === threadId).flatMap(entry => {
+          const thread = manager.getConversation(entry.threadId);
+          if (!thread) return [];
+          const item = summary(thread);
+          return [{ id: entry.threadId, title: entry.title, createdAtMs: entry.createdAtMs,
+            running: item.priority.active && item.priority.attentionState !== "waiting",
+            hasUnreadTurn: completedSideThreadUnread(thread, item) }];
+        });
+        const native = await nativeSideState();
+        const scope = nativeSideScopes(native).find(entry => entry.value.conversationId === threadId);
+        canCreateSideThread = nativeSideFeatureEnabled(native, scope)
+          && typeof nativeIntl?.formatMessage === "function"
+          && !parent.ephemeral && !subagentIdentity(parent)
+          && !sideThreads.some(entry => entry.id === threadId);
+      } catch (error) {
+        reportSideFeatureDegraded("related_threads.request_client", error, { threadId });
+      }
       return {
         ok: true, threadId, subagents: [], completedSubagents: [],
-        completedSubagentCount: 0, subagentsComplete: true, sideThreads: [],
-        canCreateSideThread: false
+        completedSubagentCount: 0, subagentsComplete: true, sideThreads,
+        canCreateSideThread
       };
     }
     const native = await nativeRelatedState();
@@ -3186,6 +3297,14 @@
   }
   async function queueSnapshot(id) {
     id = requiredId(id);
+    if (manager?.__codexElvesRequestClientManager) {
+      const queued = { messages: await readServerQueuedSubmissions(id) };
+      return {
+        ok: true,
+        threadId: id,
+        ...queueSnapshotFields(id, queued)
+      };
+    }
     if (typeof manager.getTurnCoordinator !== "function")
       throw failure(503, "当前 Codex 版本的原生队列服务不可用");
     const coordinator = await manager.getTurnCoordinator();
@@ -3223,6 +3342,36 @@
   }
   async function readQueuedSendState(payload) {
     const threadId = requiredId(payload.threadId), clientUserMessageId = requiredId(payload.clientUserMessageId);
+    if (manager?.__codexElvesRequestClientManager) {
+      try {
+        const response = await manager.requestClient.sendRequest("thread/read", {
+          threadId, includeTurns: true
+        });
+        const turns = array(response?.thread?.turns || response?.turns);
+        for (const turn of turns) {
+          const item = array(turn?.items).find(item =>
+            (item?.type === "userMessage" || item?.type === "steeringUserMessage"
+              && item?.status === "accepted")
+            && (item.clientUserMessageId === clientUserMessageId || item.clientId === clientUserMessageId));
+          if (!item) continue;
+          return {
+            ok: true, confirmed: true, deliveryState: "accepted", threadId, clientUserMessageId,
+            messageId: item.id, turnId: nativeTurnId(turn)
+          };
+        }
+      } catch {}
+      try {
+        const submissions = await readServerQueuedSubmissions(threadId);
+        const queued = submissions.find(value => value?.clientUserMessageId === clientUserMessageId);
+        if (queued) {
+          return {
+            ok: true, confirmed: true, deliveryState: "queued", threadId, clientUserMessageId,
+            messageId: queued.id, queueSyncPending: true
+          };
+        }
+      } catch {}
+      return { ok: true, confirmed: false, deliveryState: "unknown", threadId, clientUserMessageId };
+    }
     const accepted = acceptedQueuedSend(threadId, clientUserMessageId);
     if (accepted) return accepted;
     const coordinator = await manager.getTurnCoordinator?.();
@@ -4388,6 +4537,87 @@
       return { ok: false, code: error.code || 503, message: error.message || "加入原生队列失败" };
     }
   }
+  function requestClientTurnItem(turn, clientUserMessageId) {
+    return array(turn?.items).find(item =>
+      (item?.type === "userMessage" || item?.type === "steeringUserMessage"
+        && item?.status === "accepted")
+      && (item.clientUserMessageId === clientUserMessageId || item.clientId === clientUserMessageId));
+  }
+  async function submitRequestClientTurn(payload = {}, allowImmediate = false) {
+    const sourceManager = messageActionManager();
+    const threadId = requiredId(payload.threadId);
+    const clientUserMessageId = payload.clientUserMessageId == null
+      ? crypto.randomUUID() : requiredId(payload.clientUserMessageId);
+    const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
+    const imageAttachments = remoteImageAttachments(payload, "request-client-send");
+    if (!prompt && !imageAttachments.length) throw failure(400, "消息不能为空");
+    const assertCurrent = () => {
+      if (manager !== sourceManager || sourceManager.disposed || isDeletedThread(threadId))
+        throw failure(409, "会话连接已变化或会话已删除，请重新核对后发送");
+    };
+    const previous = await readQueuedSendState({ threadId, clientUserMessageId });
+    assertCurrent();
+    if (previous.confirmed) return previous;
+    const thread = await sourceManager.readThread(threadId, { includeTurns: true });
+    assertCurrent();
+    const cwd = typeof thread.cwd === "string" && thread.cwd ? thread.cwd : null;
+    const input = [
+      ...(prompt ? [{ type: "text", text: prompt, text_elements: [] }] : []),
+      ...remoteImageInputs(imageAttachments),
+      ...await skillInputs({ ...payload, threadId }, cwd)
+    ];
+    const settings = await requestedThreadModelSettings(payload, thread, null);
+    const activeTurn = array(thread.turns).slice().reverse().find(turn =>
+      ["active", "inProgress", "running", "pending"].includes(nativeTurnStatus(turn)));
+    const useSteer = !allowImmediate && typeof activeTurn?.id === "string" && activeTurn.id;
+    const request = {
+      threadId, input, clientUserMessageId,
+      ...(useSteer ? { expectedTurnId: activeTurn.id } : {}),
+      ...(!useSteer ? {
+        ...(cwd ? { cwd } : {}),
+        ...(settings?.model != null ? { model: settings.model } : {}),
+        ...(settings?.effort != null ? { effort: settings.effort } : {})
+      } : {})
+    };
+    const method = useSteer ? "turn/steer" : "turn/start";
+    let requestStarted = false;
+    try {
+      assertCurrent();
+      requestStarted = true;
+      const result = await sourceManager.requestClient.sendRequest(method, request);
+      assertCurrent();
+      if (method === "turn/steer") {
+        if (typeof result?.turnId !== "string" || result.turnId !== activeTurn.id)
+          throw new Error("原生转向回执格式无效");
+        return {
+          ok: true, threadId, clientUserMessageId, deliveryState: "accepted",
+          messageId: clientUserMessageId, turnId: result.turnId
+        };
+      }
+      const turn = result?.turn;
+      if (!turn || typeof turn.id !== "string" || typeof turn.status !== "string")
+        throw new Error("原生轮次回执格式无效");
+      const item = requestClientTurnItem(turn, clientUserMessageId);
+      return {
+        ok: true, threadId, clientUserMessageId, deliveryState: "accepted",
+        messageId: item?.id || clientUserMessageId, turnId: turn.id, turn
+      };
+    } catch (error) {
+      try {
+        const confirmed = await readQueuedSendState({ threadId, clientUserMessageId });
+        if (confirmed.confirmed) return confirmed;
+      } catch {}
+      const definiteRejection = Number.isInteger(error?.code)
+        && error.code >= 400 && error.code < 500 && error.code !== 408;
+      if (requestStarted && !definiteRejection) {
+        return {
+          ok: false, outcomeUnknown: true, code: 503, threadId, clientUserMessageId,
+          message: "原生消息回执未确认，请检查会话，不要重复发送"
+        };
+      }
+      return { ok: false, code: error?.code || 503, message: error?.message || "原生消息发送失败" };
+    }
+  }
   async function submitQueuedMessage(payload = {}, allowImmediate = false) {
     let threadId = null;
     let clientUserMessageId = null;
@@ -4408,6 +4638,8 @@
       if (!prompt && !imageAttachments.length) throw failure(400, "消息不能为空");
       const thread = await readThread(threadId);
       assertCurrent();
+      if (manager.__codexElvesRequestClientManager)
+        return await submitRequestClientTurn(payload, allowImmediate);
       if (typeof manager.getTurnCoordinator !== "function"
           || typeof manager.requestClient?.sendRequest !== "function")
         throw failure(503, "当前 Codex 版本的原生队列服务不可用");
@@ -5041,7 +5273,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 82, call,
+    version: 83, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();

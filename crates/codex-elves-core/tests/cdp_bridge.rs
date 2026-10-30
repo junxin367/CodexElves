@@ -161,9 +161,10 @@ fn request_client_related_threads_degrade_without_blocking_main_reads() {
         .expect("core crate should live under crates/codex-elves-core");
     let script = std::fs::read_to_string(repo.join("assets/remote-access/native.js")).unwrap();
 
-    assert!(script.contains("\"relatedThreads\"\n  ]"));
-    assert!(script.contains("completedSubagentCount: 0, subagentsComplete: true, sideThreads: []"));
-    assert!(script.contains("canCreateSideThread: false"));
+    assert!(script.contains("\"relatedThreads\", \"queue\", \"send\", \"sendState\""));
+    assert!(script.contains("let canCreateSideThread = false"));
+    assert!(script.contains("completedSubagentCount: 0, subagentsComplete: true, sideThreads,"));
+    assert!(script.contains("canCreateSideThread"));
     assert!(script.contains("if (!manager.__codexElvesRequestClientManager && !view.readOnly"));
 }
 
@@ -3930,8 +3931,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = assets::renderer_features_script();
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 82"));
-    assert!(script.contains("version: 82"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 83"));
+    assert!(script.contains("version: 83"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));
