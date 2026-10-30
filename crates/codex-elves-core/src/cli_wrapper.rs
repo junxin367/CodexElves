@@ -1,5 +1,8 @@
+use std::cmp::Ordering;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 
@@ -8,6 +11,21 @@ use crate::settings::BackendSettings;
 pub const WRAPPER_EXE: &str = "codex-wrapper.exe";
 pub const WRAPPER_SOURCE: &str = "codex-wrapper.cs";
 const CLI_HOME_DIR: &str = ".codex-elves-cli";
+const MAX_VERSION_BYTES: usize = 16 * 1024;
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodexCliVersion {
+    core: Vec<u64>,
+    prerelease: Option<Vec<VersionIdentifier>>,
+    pub(crate) raw: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VersionIdentifier {
+    Numeric(u64),
+    Text(String),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WrapperInstall {
@@ -96,53 +114,362 @@ pub fn install_cli_wrapper_to(
 }
 
 pub fn resolve_real_codex() -> Option<PathBuf> {
-    let app_dir = crate::app_paths::resolve_codex_app_dir(None);
-    resolve_real_codex_from_candidates(app_dir.as_deref(), &default_user_runtime_candidates())
+    resolve_real_codex_from_candidates(None, &default_user_runtime_candidates())
 }
 
-pub fn resolve_real_codex_for_settings(settings: &BackendSettings) -> Option<PathBuf> {
-    let app_dir = crate::app_paths::resolve_codex_app_dir_with_saved(
-        None,
-        Some(settings.codex_app_path.as_str()),
-    );
-    resolve_real_codex_from_candidates(app_dir.as_deref(), &default_user_runtime_candidates())
+pub fn resolve_real_codex_for_settings(_settings: &BackendSettings) -> Option<PathBuf> {
+    resolve_real_codex_from_candidates(None, &default_user_runtime_candidates())
 }
 
 pub fn resolve_real_codex_from_candidates(
-    app_dir: Option<&Path>,
+    _app_dir: Option<&Path>,
     user_runtime_candidates: &[PathBuf],
 ) -> Option<PathBuf> {
-    user_runtime_candidates
+    let mut candidates = user_runtime_candidates
         .iter()
-        .chain(packaged_codex_candidates(app_dir).iter())
-        .find(|path| path.is_file())
+        .filter(|path| path.is_file() && !is_desktop_codex_path(path))
         .cloned()
+        .collect::<Vec<_>>();
+    sort_codex_paths(&mut candidates);
+    candidates.into_iter().next()
 }
 
 pub fn default_user_runtime_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if cfg!(windows) {
         if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
-            candidates.push(
-                local_app_data
-                    .join("OpenAI")
-                    .join("Codex")
-                    .join("bin")
-                    .join("codex.exe"),
-            );
+            candidates.extend(codex_runtime_candidates_from_bin(
+                &local_app_data.join("OpenAI").join("Codex").join("bin"),
+            ));
         }
     }
+    candidates.retain(|path| !is_desktop_codex_path(path));
+    sort_codex_paths(&mut candidates);
     candidates
 }
 
-pub fn packaged_codex_candidates(app_dir: Option<&Path>) -> Vec<PathBuf> {
-    let Some(app_dir) = app_dir else {
-        return Vec::new();
+pub(crate) fn codex_runtime_candidates_from_bin(bin: &Path) -> Vec<PathBuf> {
+    let executable_name = if cfg!(windows) { "codex.exe" } else { "codex" };
+    let mut candidates = vec![bin.join(executable_name)];
+    let Ok(entries) = std::fs::read_dir(bin) else {
+        return candidates;
     };
-    vec![
-        app_dir.join("resources").join("codex.exe"),
-        app_dir.join("resources").join("codex"),
-    ]
+    let mut nested = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .map(|path| path.join(executable_name))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    nested.sort_by(|left, right| {
+        file_modified_time(right)
+            .cmp(&file_modified_time(left))
+            .then_with(|| left.cmp(right))
+    });
+    candidates.extend(nested);
+    candidates
+}
+
+pub(crate) fn is_desktop_codex_path(path: &Path) -> bool {
+    let normalized = path
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    normalized.contains("\\windowsapps\\openai.codex_")
+        || normalized.contains("\\windowsapps\\openai.codexbeta_")
+        || normalized.contains("\\app\\resources\\codex.exe")
+        || normalized.contains("\\app\\resources\\codex")
+}
+
+pub(crate) fn probe_codex_cli_version(executable: &Path) -> Option<CodexCliVersion> {
+    probe_codex_cli_version_with_timeout(executable, VERSION_PROBE_TIMEOUT)
+}
+
+fn probe_codex_cli_version_with_timeout(
+    executable: &Path,
+    timeout: Duration,
+) -> Option<CodexCliVersion> {
+    let extension = executable.extension().and_then(|extension| {
+        extension
+            .to_str()
+            .map(|extension| extension.to_ascii_lowercase())
+    });
+    let mut command = match (cfg!(windows), extension.as_deref()) {
+        (true, Some("cmd" | "bat")) => {
+            let command_line = format!("\"{}\" --version", executable.display());
+            let mut command = Command::new("cmd.exe");
+            command.args(["/d", "/s", "/c", &command_line]);
+            command
+        }
+        (true, Some("ps1")) => {
+            let mut command = Command::new("powershell.exe");
+            command.args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ]);
+            command.arg(executable).arg("--version");
+            command
+        }
+        _ => {
+            let mut command = Command::new(executable);
+            command.arg("--version");
+            command
+        }
+    };
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+    let mut stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                timed_out = true;
+                let _ = child.kill();
+                break child.wait().ok()?;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let stdout = stdout_reader.join().ok()?.ok()?;
+    let stderr = stderr_reader.join().ok()?.ok()?;
+    let output = std::process::Output {
+        status,
+        stdout,
+        stderr,
+    };
+    if timed_out {
+        return None;
+    }
+    if !output.status.success()
+        || output.stdout.len().saturating_add(output.stderr.len()) > MAX_VERSION_BYTES
+    {
+        return None;
+    }
+    let mut version_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if version_text.is_empty() {
+        version_text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    }
+    parse_codex_cli_version(&version_text)
+}
+
+pub(crate) fn parse_codex_cli_version(output: &str) -> Option<CodexCliVersion> {
+    let raw = output.split_whitespace().find_map(|token| {
+        let token = token
+            .strip_prefix('v')
+            .or_else(|| token.strip_prefix('V'))
+            .unwrap_or(token);
+        token
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+            .then_some(token)
+    })?;
+    let (core, prerelease) = raw
+        .split_once('-')
+        .map_or((raw, None), |(core, suffix)| (core, Some(suffix)));
+    let core = core
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if core.is_empty() {
+        return None;
+    }
+    let prerelease = prerelease.map(|suffix| {
+        suffix
+            .split('.')
+            .map(|part| {
+                part.parse::<u64>()
+                    .map(VersionIdentifier::Numeric)
+                    .unwrap_or_else(|_| VersionIdentifier::Text(part.to_ascii_lowercase()))
+            })
+            .collect::<Vec<_>>()
+    });
+    Some(CodexCliVersion {
+        core,
+        prerelease,
+        raw: raw.to_string(),
+    })
+}
+
+pub(crate) fn compare_codex_versions(left: &CodexCliVersion, right: &CodexCliVersion) -> Ordering {
+    compare_numeric_components(&left.core, &right.core)
+        .then_with(|| compare_prerelease(&left.prerelease, &right.prerelease))
+}
+
+fn compare_numeric_components(left: &[u64], right: &[u64]) -> Ordering {
+    let length = left.len().max(right.len());
+    (0..length)
+        .map(|index| {
+            left.get(index)
+                .copied()
+                .unwrap_or_default()
+                .cmp(&right.get(index).copied().unwrap_or_default())
+        })
+        .find(|ordering| *ordering != Ordering::Equal)
+        .unwrap_or(Ordering::Equal)
+}
+
+fn compare_prerelease(
+    left: &Option<Vec<VersionIdentifier>>,
+    right: &Option<Vec<VersionIdentifier>>,
+) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(left), Some(right)) => {
+            let length = left.len().max(right.len());
+            for index in 0..length {
+                match (left.get(index), right.get(index)) {
+                    (Some(left), Some(right)) => {
+                        let ordering = compare_version_identifiers(left, right);
+                        if ordering != Ordering::Equal {
+                            return ordering;
+                        }
+                    }
+                    (Some(_), None) => return Ordering::Greater,
+                    (None, Some(_)) => return Ordering::Less,
+                    (None, None) => break,
+                }
+            }
+            Ordering::Equal
+        }
+    }
+}
+
+fn compare_version_identifiers(left: &VersionIdentifier, right: &VersionIdentifier) -> Ordering {
+    match (left, right) {
+        (VersionIdentifier::Numeric(left), VersionIdentifier::Numeric(right)) => left.cmp(right),
+        (VersionIdentifier::Numeric(_), VersionIdentifier::Text(_)) => Ordering::Less,
+        (VersionIdentifier::Text(_), VersionIdentifier::Numeric(_)) => Ordering::Greater,
+        (VersionIdentifier::Text(left), VersionIdentifier::Text(right)) => left.cmp(right),
+    }
+}
+
+fn sort_codex_paths(paths: &mut Vec<PathBuf>) {
+    let mut ranked = paths
+        .drain(..)
+        .enumerate()
+        .map(|(ordinal, path)| {
+            let version = probe_codex_cli_version(&path);
+            (path, version, ordinal)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        match (&left.1, &right.1) {
+            (Some(left), Some(right)) => compare_codex_versions(right, left),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => left.2.cmp(&right.2),
+        }
+        .then_with(|| {
+            file_modified_time(&right.0)
+                .cmp(&file_modified_time(&left.0))
+                .then_with(|| left.0.cmp(&right.0))
+        })
+    });
+    paths.extend(ranked.into_iter().map(|(path, _, _)| path));
+}
+
+fn file_modified_time(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_cli_versions_sort_newest_first() {
+        let old = parse_codex_cli_version("codex-cli 0.130.0-alpha.5").unwrap();
+        let current = parse_codex_cli_version("codex-cli 0.166.0-alpha.5.1").unwrap();
+        let stable = parse_codex_cli_version("codex-cli 0.166.0").unwrap();
+
+        assert_eq!(compare_codex_versions(&current, &old), Ordering::Greater);
+        assert_eq!(compare_codex_versions(&stable, &current), Ordering::Greater);
+    }
+
+    #[test]
+    fn codex_cli_versions_accept_v_prefix_and_reject_invalid_output() {
+        assert_eq!(
+            parse_codex_cli_version("codex-cli v0.166.0-alpha.5.1")
+                .unwrap()
+                .raw,
+            "0.166.0-alpha.5.1"
+        );
+        assert!(parse_codex_cli_version("not a version").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_cli_version_probe_has_a_bounded_wait() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("slow-version.ps1");
+        std::fs::write(
+            &script,
+            "Start-Sleep -Seconds 30\nWrite-Output 'codex-cli 0.166.0'\n",
+        )
+        .unwrap();
+        let started = Instant::now();
+        assert!(probe_codex_cli_version_with_timeout(&script, Duration::from_millis(50)).is_none());
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn desktop_codex_paths_are_excluded() {
+        assert!(is_desktop_codex_path(Path::new(
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__abc\app\Codex.exe"
+        )));
+        assert!(is_desktop_codex_path(Path::new(
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__abc\app\resources\codex.exe"
+        )));
+        assert!(!is_desktop_codex_path(Path::new(
+            r"C:\Users\me\AppData\Local\OpenAI\Codex\bin\current\codex.exe"
+        )));
+    }
 }
 
 pub fn wrapper_dir() -> PathBuf {

@@ -167,6 +167,26 @@ fn remote_refresh_keeps_main_thread_refresh_independent_from_sidebar_failure() {
 }
 
 #[test]
+fn service_only_remote_ui_stays_online_and_disables_native_related_threads() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("core crate should live under crates/codex-elves-core");
+    let app = std::fs::read_to_string(repo.join("assets/remote-access/app.js")).unwrap();
+    let menu = std::fs::read_to_string(repo.join("assets/remote-access/session-menu.js")).unwrap();
+    assert!(app.contains("function remoteConnectionReady(value = session, source = stream)"));
+    assert!(app.contains("return value?.serviceConnected === true"));
+    assert!(
+        app.contains("value?.nativeConnected === true && source?.readyState === EventSource.OPEN")
+    );
+    assert!(app.contains("connected: connected && session?.nativeConnected === true"));
+    assert!(app.contains("原生注入不可用，侧边会话暂不可用"));
+    assert!(app.contains("if (session?.nativeConnected !== true)"));
+    assert!(menu.contains("status = context.unavailableMessage"));
+    assert!(menu.contains("button.disabled = !context.connected"));
+}
+
+#[test]
 fn renderer_features_delete_is_permanent_without_undo_ui() {
     let script = assets::renderer_features_script();
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3916,8 +3936,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = assets::renderer_features_script();
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 81"));
-    assert!(script.contains("version: 81"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 82"));
+    assert!(script.contains("version: 82"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));
@@ -3939,6 +3959,9 @@ fn remote_native_script_wraps_new_request_client_as_read_only_manager() {
     assert!(script.contains("nativeBridge: \"read_only\""));
     assert!(script.contains("当前 Codex 尚未完成原生注入，远程会话暂只支持只读查看"));
     assert!(script.contains("const requestClientReadActions = new Set"));
+    assert!(
+        script.contains("\"sidebar\", \"thread\", \"models\", \"skills\", \"workspaceContext\"")
+    );
 }
 
 #[test]
@@ -12628,6 +12651,8 @@ fn bridge_health_check_script_uses_real_backend_round_trip() {
     assert!(script.contains("app://-/index.html"));
     assert!(script.contains("window.location"));
     assert!(script.contains("avatar-overlay"));
+    assert!(!script.contains("__codexElvesNativeFastSettings"));
+    assert!(!script.contains("__codexElvesNativeFastCompiled"));
 }
 
 #[test]
@@ -13743,6 +13768,13 @@ const modernFixture = {
   queueExplicit: bedrockFixture.queueExplicit,
   nativeBedrock: true,
 };
+ const driftedFixture = {
+   ...modernFixture,
+   queueExplicit: modernFixture.queueExplicit.replace(
+     "let[y,b]=await Promise.all",
+     `${Array.from({length: 2000}, () => "void 0;").join("")}let[y,b]=await Promise.all`,
+   ),
+ };
 
 // 原生 requirements 和 tier 解析函数也直接保留，验证补丁没有绕开它们。
 const access = function Uat(e){let t=e.requirements?.featureRequirements,n=t?.fast_mode!==!1;return{fast:n,ultrafast:(`supportsIndependentSpeedModes`in e&&e.supportsIndependentSpeedModes===!0||n)&&t?.ultrafast_mode!==!1}};
@@ -14033,7 +14065,7 @@ async function runNativeFastFixture(fixture) {
 }
 
 async function runNativeFastTests() {
-  for (const fixture of [legacyFixture, bedrockFixture, modernFixture]) await runNativeFastFixture(fixture);
+   for (const fixture of [legacyFixture, bedrockFixture, modernFixture, driftedFixture]) await runNativeFastFixture(fixture);
   await require("./native-fast-module.test.cjs")({ source, url });
   return "Native Fast legacy/current structures, native auth, requirements, local scope, opt-in, queue and module transport behavior passed";
 }
@@ -14159,6 +14191,15 @@ async function runNativeFastModuleTests({ source, url }) {
     source,
   ].join("\n");
   const env = browser();
+ const dependencies = env.api.moduleDependencies(
+   'import "./static.js"; export * from "../export.js"; const dynamic = import("./dynamic.js");',
+   url,
+ );
+ assert.deepEqual(Array.from(dependencies), [
+   "app://-/assets/static.js",
+   "app://-/export.js",
+   "app://-/assets/dynamic.js",
+ ]);
   const prepared = env.api.prepareModule(fixture, url);
   assert.equal(prepared.ok, true, JSON.stringify(prepared.diagnostics));
   assert.equal(prepared.diagnostics.staticImports, 4);

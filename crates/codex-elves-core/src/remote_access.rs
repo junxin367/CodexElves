@@ -395,10 +395,7 @@ fn service_action(action: &str) -> bool {
 }
 
 fn service_first_action(action: &str) -> bool {
-    matches!(
-        action,
-        "sidebar" | "history" | "models" | "skills" | "thread" | "workspaceContext"
-    )
+    matches!(action, "models" | "skills" | "thread" | "workspaceContext")
 }
 
 fn native_read_result_is_usable(value: &Value) -> bool {
@@ -561,6 +558,9 @@ impl crate::bridge::CdpDispatchPermit for RemoteDispatchPermit {
             if policy.read_only {
                 return Err(ApiError::new(403, "当前为只读访问").into());
             }
+            if !controller.native_write_available.load(Ordering::SeqCst) {
+                return Err(ApiError::new(503, "原生写入不可用，请等待 Codex 注入恢复").into());
+            }
             if matches!(action.as_str(), "approve" | "answer") && !policy.allow_approvals {
                 return Err(ApiError::new(403, "远程审批与询问回答已关闭，请在桌面处理").into());
             }
@@ -701,6 +701,7 @@ pub struct RemoteAccessController {
     live: Mutex<LiveService>,
     running: AtomicBool,
     native_connected: AtomicBool,
+    service_connected: AtomicBool,
     native_write_available: AtomicBool,
     events: broadcast::Sender<Value>,
     key_checks: Arc<tokio::sync::Semaphore>,
@@ -779,6 +780,7 @@ impl RemoteAccessController {
             }),
             running: AtomicBool::new(false),
             native_connected: AtomicBool::new(false),
+            service_connected: AtomicBool::new(false),
             native_write_available: AtomicBool::new(false),
             events,
             key_checks: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -1087,6 +1089,7 @@ impl RemoteAccessController {
         self.primary.generation.fetch_add(1, Ordering::SeqCst);
         self.stop_frp(&mut live).await;
         self.native_connected.store(false, Ordering::SeqCst);
+        self.service_connected.store(false, Ordering::SeqCst);
         self.native_write_available.store(false, Ordering::SeqCst);
         self.publish_event(json!({"method":"remote/disconnected"}));
         if let Some(handle) = live.handle.take() {
@@ -1167,21 +1170,38 @@ impl RemoteAccessController {
                     .native
                     .call("events", json!({"cursor":cursor, "epoch":epoch}))
                     .await;
+                let service_response = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|response| response.get("nativeBridge"))
+                    .and_then(Value::as_str)
+                    == Some("service");
                 match &result {
                     Ok(response) if response["ok"] == true => {
                         failure_since = None;
-                        let write_available = response
-                            .get("nativeBridge")
-                            .and_then(Value::as_str)
-                            .is_none();
+                        let write_available = !service_response
+                            && response
+                                .get("nativeBridge")
+                                .and_then(Value::as_str)
+                                .is_none();
+                        let was_read_connected = controller.native_connected.load(Ordering::SeqCst)
+                            || controller.service_connected.load(Ordering::SeqCst);
+                        let native_changed = controller
+                            .native_connected
+                            .swap(!service_response, Ordering::SeqCst)
+                            != !service_response;
+                        let service_changed = controller
+                            .service_connected
+                            .swap(service_response, Ordering::SeqCst)
+                            != service_response;
                         let write_changed = controller
                             .native_write_available
                             .swap(write_available, Ordering::SeqCst)
                             != write_available;
-                        if !controller.native_connected.swap(true, Ordering::SeqCst) {
+                        if !was_read_connected {
                             controller.publish_event(json!({"method":"remote/reconnected"}));
                         }
-                        if write_changed {
+                        if native_changed || service_changed || write_changed {
                             controller.publish_event(json!({"method":"remote/resync"}));
                         }
                         epoch = response["epoch"].as_str().unwrap_or("").to_string();
@@ -1197,9 +1217,10 @@ impl RemoteAccessController {
                     }
                     _ => {
                         let started = *failure_since.get_or_insert_with(Instant::now);
-                        if started.elapsed() >= NATIVE_EVENT_FAILURE_GRACE
-                            && controller.native_connected.swap(false, Ordering::SeqCst)
-                        {
+                        let read_disconnected = started.elapsed() >= NATIVE_EVENT_FAILURE_GRACE
+                            && (controller.native_connected.swap(false, Ordering::SeqCst)
+                                | controller.service_connected.swap(false, Ordering::SeqCst));
+                        if read_disconnected {
                             controller
                                 .native_write_available
                                 .store(false, Ordering::SeqCst);
@@ -1221,7 +1242,12 @@ impl RemoteAccessController {
                         }
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(650)).await;
+                tokio::time::sleep(if service_response {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_millis(650)
+                })
+                .await;
             }
         });
         Ok((handle, server, pump))
@@ -1239,6 +1265,8 @@ impl RemoteAccessController {
             "status":"ok", "enabled":settings.enabled,
             "running":self.running.load(Ordering::SeqCst),
             "nativeConnected":self.native_connected.load(Ordering::SeqCst),
+            "serviceConnected":self.service_connected.load(Ordering::SeqCst),
+            "nativeWriteAvailable":self.native_write_available.load(Ordering::SeqCst),
             "error":error, "addresses":access_addresses(settings),
             "devices":auth.devices.iter().filter(|device|device.expires_at_ms>now_ms())
                 .filter(|device|auth.access_key.as_ref().is_some_and(|key|device.key_id==key.id))
@@ -2680,6 +2708,7 @@ async fn session(
         .load(Ordering::SeqCst);
     Ok(Json(
         json!({"ok":true,"device":device.public(),"nativeConnected":state.controller.native_connected.load(Ordering::SeqCst),
+        "serviceConnected":state.controller.service_connected.load(Ordering::SeqCst),
         "readOnly":policy.read_only || !native_write_available,
         "allowApprovals":policy.allow_approvals && native_write_available,
         "nativeWriteAvailable":native_write_available,
@@ -4709,8 +4738,12 @@ mod tests {
         ] {
             assert!(service_action(action));
         }
-        for action in ["sidebar", "history", "thread", "models"] {
+        for action in ["thread", "models"] {
             assert!(service_first_action(action));
+        }
+        for action in ["sidebar", "history"] {
+            assert!(service_action(action));
+            assert!(!service_first_action(action));
         }
         assert!(!service_first_action("events"));
         assert!(native_read_result_is_usable(&json!({"ok": true})));
@@ -4785,6 +4818,9 @@ mod tests {
             ..RemoteAccessSettings::default()
         });
         controller.running.store(true, Ordering::SeqCst);
+        controller
+            .native_write_available
+            .store(true, Ordering::SeqCst);
         {
             let mut auth = controller.auth.lock().await;
             let key_id = auth.access_key.as_ref().unwrap().id.clone();
@@ -5418,6 +5454,9 @@ mod tests {
             ..RemoteAccessSettings::default()
         });
         controller.running.store(true, Ordering::SeqCst);
+        controller
+            .native_write_available
+            .store(true, Ordering::SeqCst);
         {
             let mut auth = controller.auth.lock().await;
             let key_id = auth.access_key.as_ref().unwrap().id.clone();
@@ -5646,6 +5685,9 @@ mod tests {
             ..RemoteAccessSettings::default()
         });
         controller.running.store(true, Ordering::SeqCst);
+        controller
+            .native_write_available
+            .store(true, Ordering::SeqCst);
         {
             let mut auth = controller.auth.lock().await;
             let key_id = auth.access_key.as_ref().unwrap().id.clone();
@@ -6776,13 +6818,21 @@ mod tests {
 
     struct RestartingNativeBridge {
         online: AtomicBool,
+        service_only: AtomicBool,
+        read_only: bool,
     }
 
     #[async_trait::async_trait]
     impl NativeRemoteBridge for RestartingNativeBridge {
         async fn call(&self, _action: &str, _payload: Value) -> anyhow::Result<Value> {
             anyhow::ensure!(self.online.load(Ordering::SeqCst), "native restarting");
-            Ok(json!({"ok":true,"epoch":"test","cursor":0,"events":[]}))
+            let mut response = json!({"ok":true,"epoch":"test","cursor":0,"events":[]});
+            if self.service_only.load(Ordering::SeqCst) {
+                response["nativeBridge"] = json!("service");
+            } else if self.read_only {
+                response["nativeBridge"] = json!("read_only");
+            }
+            Ok(response)
         }
     }
 
@@ -6851,6 +6901,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_only_connection_keeps_session_read_only_and_online() {
+        let directory = tempfile::Builder::new()
+            .prefix("remote-service-only-")
+            .tempdir_in(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp"))
+            .unwrap();
+        configure_access_key(directory.path(), "service-only-key").unwrap();
+        let native = Arc::new(RestartingNativeBridge {
+            online: AtomicBool::new(true),
+            service_only: AtomicBool::new(true),
+            read_only: false,
+        });
+        let controller =
+            RemoteAccessController::new(native, directory.path().to_path_buf()).unwrap();
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        controller
+            .reconcile(RemoteAccessSettings {
+                enabled: true,
+                port,
+                ..RemoteAccessSettings::default()
+            })
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !controller.service_connected.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let login = client
+            .post(format!("{base_url}/api/connect"))
+            .header(reqwest::header::ORIGIN, &base_url)
+            .json(&json!({"key":"service-only-key"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(login.status(), reqwest::StatusCode::OK);
+        let cookie = login.headers()[reqwest::header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let response = client
+            .get(format!("{base_url}/api/session"))
+            .header(reqwest::header::COOKIE, &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let session: Value = response.json().await.unwrap();
+        assert_eq!(session["nativeConnected"], false);
+        assert_eq!(session["serviceConnected"], true);
+        assert_eq!(session["nativeWriteAvailable"], false);
+        assert_eq!(session["readOnly"], true);
+        assert_eq!(session["allowApprovals"], false);
+        let device_id = session["device"]["id"].as_str().unwrap();
+        let device = controller
+            .auth
+            .lock()
+            .await
+            .devices
+            .iter()
+            .find(|device| device.id == device_id)
+            .cloned()
+            .unwrap();
+        let error = controller
+            .execute(
+                device,
+                "service-only-write".into(),
+                "send".into(),
+                json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, 503);
+        assert!(controller.auth.lock().await.receipts.is_empty());
+        controller.reconcile(RemoteAccessSettings::default()).await;
+    }
+
+    #[tokio::test]
+    async fn native_service_mode_change_publishes_resync_without_reconnect() {
+        let directory = tempfile::Builder::new()
+            .prefix("remote-service-transition-")
+            .tempdir_in(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp"))
+            .unwrap();
+        configure_access_key(directory.path(), "transition-key").unwrap();
+        let native = Arc::new(RestartingNativeBridge {
+            online: AtomicBool::new(true),
+            service_only: AtomicBool::new(false),
+            read_only: true,
+        });
+        let controller =
+            RemoteAccessController::new(native.clone(), directory.path().to_path_buf()).unwrap();
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut events = controller.events.subscribe();
+        controller
+            .reconcile(RemoteAccessSettings {
+                enabled: true,
+                port,
+                ..RemoteAccessSettings::default()
+            })
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !controller.native_connected.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!controller.native_write_available.load(Ordering::SeqCst));
+        while events.try_recv().is_ok() {}
+        native.service_only.store(true, Ordering::SeqCst);
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event["method"], "remote/resync");
+        assert!(!controller.native_connected.load(Ordering::SeqCst));
+        assert!(controller.service_connected.load(Ordering::SeqCst));
+        assert!(!controller.native_write_available.load(Ordering::SeqCst));
+        controller.reconcile(RemoteAccessSettings::default()).await;
+    }
+
+    #[tokio::test]
     async fn native_restart_preserves_web_listener_and_device_authorization() {
         let directory = tempfile::Builder::new()
             .prefix("remote-native-restart-")
@@ -6859,6 +7044,8 @@ mod tests {
         configure_access_key(directory.path(), "restart-key").unwrap();
         let native = Arc::new(RestartingNativeBridge {
             online: AtomicBool::new(true),
+            service_only: AtomicBool::new(false),
+            read_only: false,
         });
         let controller =
             RemoteAccessController::new(native.clone(), directory.path().to_path_buf()).unwrap();

@@ -79,7 +79,9 @@ export function mountSessionMenu({
     return { deviceId, cacheScope, threadId, readOnly: value.readOnly === true,
       createPending: value.createPending === true,
       authorization: JSON.stringify([deviceId, cacheScope]),
-      connected: value.connected === true, owner: JSON.stringify([deviceId, cacheScope, threadId]) };
+      connected: value.connected === true,
+      unavailableMessage: nonempty(value.unavailableMessage) ? value.unavailableMessage : "",
+      owner: JSON.stringify([deviceId, cacheScope, threadId]) };
   }
   function syncContext() {
     if (suspended) return context;
@@ -212,6 +214,8 @@ export function mountSessionMenu({
     });
   }
   function updatePermissions() {
+    for (const button of menu.querySelectorAll(".session-related-menu-thread"))
+      button.disabled = !context.connected;
     for (const [button, kind] of mutationButtons) {
       button.disabled = !canMutate(context) || (kind === "create"
         && (context.createPending || cached?.data.canCreateSideThread === false || typeof createSideThread !== "function"));
@@ -354,7 +358,8 @@ export function mountSessionMenu({
     }
     let status = message;
     if (!canRead(context)) status = context?.threadId ? "当前授权不可用" : "请选择会话后查看相关会话";
-    else if (!context.connected) status = data ? "当前离线，显示上次记录" : "当前离线，连接后读取相关会话";
+    else if (!context.connected) status = context.unavailableMessage
+      || (data ? "当前离线，显示上次记录" : "当前离线，连接后读取相关会话");
     if (status) {
       const note = element("p", "session-related-menu-status", status);
       note.setAttribute("role", "status"); menu.append(note);

@@ -58,7 +58,7 @@ fn resolves_user_runtime_before_packaged_resources_codex() {
 }
 
 #[test]
-fn resolves_packaged_resources_when_user_runtime_is_missing() {
+fn rejects_packaged_desktop_resources_when_user_runtime_is_missing() {
     let temp = tempfile::tempdir().unwrap();
     let app_dir = temp
         .path()
@@ -69,10 +69,10 @@ fn resolves_packaged_resources_when_user_runtime_is_missing() {
     std::fs::create_dir_all(packaged.parent().unwrap()).unwrap();
     std::fs::write(&packaged, "").unwrap();
 
-    let resolved = resolve_real_codex_from_candidates(Some(&app_dir), &[])
-        .expect("packaged codex should be used as fallback");
-
-    assert_eq!(resolved, packaged);
+    assert_eq!(
+        resolve_real_codex_from_candidates(Some(&app_dir), &[packaged]),
+        None
+    );
 }
 
 #[test]

@@ -1958,12 +1958,14 @@ function scheduleRelatedSessionCheck() {
   clearTimeout(relatedSessionCheckTimer);
   relatedSessionCheckTimer = null;
   const view = normalizeRelatedView(relatedSessionView, selectedId);
-  if (!view || view.kind !== "side" || !selectedId || !session || sideThreadExpired(selectedId) || !connected) return;
+  if (!view || view.kind !== "side" || !selectedId || !session || session.nativeConnected !== true
+      || sideThreadExpired(selectedId) || !connected) return;
   const id = selectedId, scope = privateInputScope(session), version = selectionVersion;
   relatedSessionCheckTimer = setTimeout(async () => {
     relatedSessionCheckTimer = null;
     if (scope !== privateInputScope(session) || selectedId !== id || version !== selectionVersion
-        || !normalizeRelatedView(relatedSessionView, id) || sideThreadExpired(id) || !connected) return;
+        || session.nativeConnected !== true || !normalizeRelatedView(relatedSessionView, id)
+        || sideThreadExpired(id) || !connected) return;
     try {
       const currentView = normalizeRelatedView(relatedSessionView, id);
       const parentThreadId = currentView?.parentThreadId || currentView?.openedFromThreadId;
@@ -2055,6 +2057,8 @@ function resetRelatedSessions({ persisted = false } = {}) {
 async function loadRelatedThreads(parentThreadId) {
   if (!session || !validRelatedThreadId(parentThreadId))
     throw new Error("请先选择主会话");
+  if (session.nativeConnected !== true)
+    throw new Error("原生注入不可用，侧边会话暂不可用");
   const scope = privateInputScope(session);
   const result = await api("/api/read/relatedThreads", { threadId: parentThreadId });
   if (scope !== privateInputScope(session)) throw new Error("当前授权已变化");
@@ -2125,6 +2129,10 @@ async function openRelatedThread(item, kind, parentThreadId = selectedId, {
   owner = relatedNavigationOwner, initialThread = null, replaceHistory = false,
   preparedView = false, onViewReady = null
 } = {}) {
+  if (session?.nativeConnected !== true) {
+    notice("原生注入不可用，子智能体与侧边会话暂不可用", true);
+    return;
+  }
   if (relatedSessionView || !validRelatedThreadId(item?.id) || parentThreadId !== selectedId) return;
   const view = rememberRelatedView(item.id, kind, null, item.name || item.title || "",
     { openedFromThreadId: parentThreadId, ephemeral: item.ephemeral });
@@ -4612,7 +4620,7 @@ function readConnectionSession(signal, recoveryObservation = undefined, { resour
         connectionRtt = { deviceId: latest.device.id, nativeVersion, connectionVersion, milliseconds: elapsed };
       }
       const result = session && session.device.id === deviceId && nativeVersion !== nativeConnectionVersion
-        ? { ...latest, nativeConnected: session.nativeConnected } : latest;
+        ? { ...latest, nativeConnected: session.nativeConnected, serviceConnected: session.serviceConnected } : latest;
       sessionRecoveryReads.set(result, { expected, requestGeneration: request.recoveryGeneration });
       return result;
     })()
@@ -4651,7 +4659,7 @@ async function syncConnectionState(source = stream) {
     return false;
   }
   session = latest;
-  setConnection(latest.nativeConnected && source?.readyState === EventSource.OPEN);
+  setConnection(remoteConnectionReady(latest, source));
   renderApprovals();
   return true;
 }
@@ -5958,7 +5966,10 @@ function shell() {
       const parentThreadId = relatedSessionView?.kind === "side"
         ? relatedSessionView.openedFromThreadId || relatedSessionView.parentThreadId : null;
       return { deviceId: session?.device.id, cacheScope: privateInputScope(session),
-        threadId: !creating ? parentThreadId || selectedId : null, readOnly: threadReadOnly(), connected,
+        threadId: !creating ? parentThreadId || selectedId : null, readOnly: threadReadOnly(),
+        connected: connected && session?.nativeConnected === true,
+        unavailableMessage: connected && session?.nativeConnected !== true
+          ? "原生注入不可用，侧边会话暂不可用" : "",
         createPending: [...relatedThreadOperations.values()].some(record => ownsRelatedOperation(record)
           && record.parentThreadId === (parentThreadId || selectedId) && record.action === "createSideThread") };
     },
@@ -11801,6 +11812,13 @@ async function compactContext() {
     }
   } finally { updateComposer(); }
 }
+function remoteReadConnected(value = session) {
+  return value?.nativeConnected === true || value?.serviceConnected === true;
+}
+function remoteConnectionReady(value = session, source = stream) {
+  return value?.serviceConnected === true
+    || value?.nativeConnected === true && source?.readyState === EventSource.OPEN;
+}
 function setConnection(value) {
   const restored = !connected && value;
   if (connected && !value) ++connectionCycleVersion;
@@ -11816,7 +11834,7 @@ function setConnection(value) {
       || connectionRtt.nativeVersion !== nativeConnectionVersion
       || connectionRtt.connectionVersion !== connectionCycleVersion)) connectionRtt = null;
   const guidance = $("#desktop-connection-guidance");
-  if (guidance) guidance.hidden = session?.nativeConnected !== false;
+  if (guidance) guidance.hidden = remoteReadConnected();
   renderConnectionIndicator();
   updateComposer();
   if (thread?.requests?.some(request => request.method === "remote/requestUserInputAsync")) renderApprovals();
@@ -11946,12 +11964,13 @@ function receive(event) {
   if (["remote/disconnected", "remote/reconnected"].includes(event.method)) {
     const available = event.method === "remote/reconnected";
     ++nativeConnectionVersion;
-    if (session) session.nativeConnected = available;
-    setConnection(available && stream?.readyState === EventSource.OPEN);
-    if (available) {
-      void syncConnectionState().catch(() => {});
-      void withRecoveryErrorSilence(() => refreshAll({ fresh: true })).catch(() => {});
+    if (!available) {
+      if (session) { session.nativeConnected = false; session.serviceConnected = false; }
+      setConnection(false);
+      return;
     }
+    void syncConnectionState().catch(() => {});
+    void withRecoveryErrorSilence(() => refreshAll({ fresh: true })).catch(() => {});
     return;
   }
   if (event.method === "remote/resync") {
@@ -12261,7 +12280,7 @@ function openStream({ suppressErrors = false } = {}) {
   current.onmessage = event => { if (isCurrent()) { try { receive(JSON.parse(event.data)); } catch {} } };
   current.onerror = () => {
     if (!isCurrent()) return;
-    setConnection(false);
+    setConnection(session?.serviceConnected === true);
     if (streamRetry !== null) return;
     const delay = streamBackoff;
     streamBackoff = Math.min(streamBackoff * 2, 30000);
@@ -12315,7 +12334,7 @@ function startConnectionPoll(deviceId) {
       }
       if (!isCurrent()) return;
       if (privateInputScope(current) !== privateInputScope(session)) { await reconnectChangedAuthorization(); return; }
-      session = current; setConnection(current.nativeConnected && stream?.readyState === EventSource.OPEN); renderApprovals();
+      session = current; setConnection(remoteConnectionReady(current)); renderApprovals();
       void loadSidebar(null, { resourcePriority: "background" }).catch(() => {});
     }
     finally { if (connectionPollPending === request) connectionPollPending = null; }

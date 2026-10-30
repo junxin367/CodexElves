@@ -49,6 +49,8 @@ struct RunningService {
 struct Candidate {
     path: PathBuf,
     shell: bool,
+    version: Option<crate::cli_wrapper::CodexCliVersion>,
+    ordinal: usize,
 }
 
 pub struct CodexCliService {
@@ -70,7 +72,14 @@ impl CodexCliService {
         match action {
             "sidebar" => self.sidebar(payload).await,
             "history" => self.history(payload).await,
-            "events" => Ok(service_events(payload)),
+            "events" => {
+                self.request(
+                    "thread/list",
+                    json!({"cursor": null, "limit": 1, "sortKey": "updated_at", "archived": false}),
+                )
+                .await?;
+                Ok(service_events(payload))
+            }
             "notifications" => Ok(service_notifications(payload)),
             "models" => self.models().await,
             "skills" => self.skills(payload).await,
@@ -147,7 +156,17 @@ impl CodexCliService {
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
         {
-            let (items, next_cursor) = self.history_items(thread_id, turn_id, None).await?;
+            let item_cursor = match payload.get("itemCursor") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(value)) => Some(value.as_str()),
+                Some(_) => anyhow::bail!("历史分页游标无效"),
+            };
+            let (items, next_cursor) = self.history_items(thread_id, turn_id, item_cursor).await?;
+            let newest_item_id = items
+                .last()
+                .and_then(|item| item.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             return Ok(json!({
                 "ok": true,
                 "scope": "items",
@@ -159,7 +178,7 @@ impl CodexCliService {
                 "itemsPageComplete": true,
                 "itemsComplete": next_cursor.is_none(),
                 "itemsNextCursor": next_cursor,
-                "newestSnapshotItemId": null,
+                "newestSnapshotItemId": newest_item_id,
                 "pageLimit": SERVICE_HISTORY_ITEM_LIMIT,
                 "transcriptEvents": []
             }));
@@ -194,6 +213,11 @@ impl CodexCliService {
                 continue;
             };
             let (items, next_item_cursor) = self.history_items(thread_id, turn_id, None).await?;
+            let newest_item_id = items
+                .last()
+                .and_then(|item| item.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             let mut turn = raw_turn.clone();
             if let Some(object) = turn.as_object_mut() {
                 object.insert("id".to_string(), Value::String(turn_id.to_owned()));
@@ -208,7 +232,7 @@ impl CodexCliService {
                     "pageComplete": true,
                     "direction": "older",
                     "order": "asc",
-                    "newestSnapshotItemId": null,
+                    "newestSnapshotItemId": newest_item_id,
                     "pageLimit": SERVICE_HISTORY_ITEM_LIMIT
                 }),
             );
@@ -218,6 +242,10 @@ impl CodexCliService {
             .get("nextCursor")
             .cloned()
             .filter(|value| !value.is_null());
+        anyhow::ensure!(
+            cursor.is_null() || next_cursor.as_ref() != Some(&cursor),
+            "历史分页游标未前进"
+        );
         Ok(json!({
             "ok": true,
             "scope": "turns",
@@ -252,19 +280,7 @@ impl CodexCliService {
                 }),
             )
             .await?;
-        let items = page
-            .get("data")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(|entry| entry.get("item").cloned().unwrap_or_else(|| entry.clone()))
-            .collect::<Vec<_>>();
-        let next_cursor = page
-            .get("nextCursor")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
-        Ok((items, next_cursor))
+        normalize_history_items_page(&page, cursor)
     }
 
     async fn models(&self) -> anyhow::Result<Value> {
@@ -717,9 +733,18 @@ async fn discover_candidates() -> Vec<Candidate> {
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
     let mut add = |path: PathBuf, shell: bool| {
+        if crate::cli_wrapper::is_desktop_codex_path(&path) {
+            return;
+        }
         let key = format!("{}:{shell}", path.to_string_lossy().to_ascii_lowercase());
         if seen.insert(key) {
-            candidates.push(Candidate { path, shell });
+            let ordinal = candidates.len();
+            candidates.push(Candidate {
+                path,
+                shell,
+                version: None,
+                ordinal,
+            });
         }
     };
 
@@ -755,7 +780,22 @@ async fn discover_candidates() -> Vec<Candidate> {
         }
     }
     add(PathBuf::from("codex"), true);
+    for candidate in &mut candidates {
+        candidate.version = crate::cli_wrapper::probe_codex_cli_version(&candidate.path);
+    }
+    candidates.sort_by(compare_candidates);
     candidates
+}
+
+fn compare_candidates(left: &Candidate, right: &Candidate) -> std::cmp::Ordering {
+    match (&left.version, &right.version) {
+        (Some(left), Some(right)) => crate::cli_wrapper::compare_codex_versions(right, left),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => left.ordinal.cmp(&right.ordinal),
+    }
+    .then_with(|| left.shell.cmp(&right.shell))
+    .then_with(|| left.path.cmp(&right.path))
 }
 
 async fn send_notification(
@@ -953,6 +993,30 @@ fn normalize_thread(thread: &Value) -> anyhow::Result<Value> {
     }))
 }
 
+fn normalize_history_items_page(
+    page: &Value,
+    previous_cursor: Option<&str>,
+) -> anyhow::Result<(Vec<Value>, Option<String>)> {
+    let mut items = page
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|entry| entry.get("item").cloned().unwrap_or_else(|| entry.clone()))
+        .collect::<Vec<_>>();
+    items.reverse();
+    let next_cursor = page
+        .get("nextCursor")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    anyhow::ensure!(
+        previous_cursor.is_none() || next_cursor.as_deref() != previous_cursor,
+        "历史分页游标未前进"
+    );
+    Ok((items, next_cursor))
+}
+
 fn service_events(payload: Value) -> Value {
     const EPOCH: &str = "codex-cli-service";
     json!({
@@ -1048,6 +1112,34 @@ mod tests {
     }
 
     #[test]
+    fn service_history_items_are_chronological_and_keep_the_native_cursor() {
+        let (items, cursor) = normalize_history_items_page(
+            &json!({
+                "data": [
+                    {"item": {"id": "newest", "type": "agentMessage"}},
+                    {"item": {"id": "older", "type": "agentMessage"}}
+                ],
+                "nextCursor": "native-item-cursor"
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(items[0]["id"], "older");
+        assert_eq!(items[1]["id"], "newest");
+        assert_eq!(cursor.as_deref(), Some("native-item-cursor"));
+    }
+
+    #[test]
+    fn service_history_rejects_a_repeated_item_cursor() {
+        let error = normalize_history_items_page(
+            &json!({"data": [], "nextCursor": "same-cursor"}),
+            Some("same-cursor"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("历史分页游标未前进"));
+    }
+
+    #[test]
     fn service_only_reads_are_explicitly_degraded() {
         let events = service_events(json!({}));
         let notifications = service_notifications(json!({}));
@@ -1097,6 +1189,26 @@ mod tests {
             message: "method not found".to_string(),
         });
         assert!(!is_nonfatal_optional_rpc_failure("model/list", &error));
+    }
+
+    #[test]
+    fn service_candidates_prefer_newest_cli_runtime() {
+        let mut candidates = vec![
+            Candidate {
+                path: PathBuf::from("codex-old.exe"),
+                shell: false,
+                version: crate::cli_wrapper::parse_codex_cli_version("codex-cli 0.130.0-alpha.5"),
+                ordinal: 0,
+            },
+            Candidate {
+                path: PathBuf::from("codex-current.exe"),
+                shell: false,
+                version: crate::cli_wrapper::parse_codex_cli_version("codex-cli 0.166.0-alpha.5.1"),
+                ordinal: 1,
+            },
+        ];
+        candidates.sort_by(compare_candidates);
+        assert_eq!(candidates[0].path, PathBuf::from("codex-current.exe"));
     }
 
     #[test]

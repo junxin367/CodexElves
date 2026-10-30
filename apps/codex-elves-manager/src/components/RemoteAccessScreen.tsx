@@ -132,11 +132,13 @@ export function RemoteAccessScreen({
     catch { setMessage("复制失败，请手动选择文本复制"); }
   };
   const zrok = status?.zrok;
-  const desktopReady = status?.status === "ok" && status.nativeConnected === true;
+  const desktopReady = status?.status === "ok" && (status.nativeConnected === true || status.serviceConnected === true);
   const desktopGuidance = !settings.enabled
     ? "请先启用上方「远程会话网页」，再重启 Codex 并等待主界面就绪，最后启动公网。"
     : desktopReady
-      ? "Codex 桌面已连接，可以启动公网。后续重启 Codex 时，请等待主界面恢复后再刷新远程网页。"
+      ? status.nativeConnected === true
+        ? "Codex 桌面已连接，可以启动公网。后续重启 Codex 时，请等待主界面恢复后再刷新远程网页。"
+        : "Codex 只读服务已连接，可以启动公网；发送、审批和侧边会话等原生写入功能将在注入恢复后可用。"
       : DESKTOP_WAITING_GUIDANCE;
   const publicUrl = zrok?.publicUrl || "";
   const zrokInput = zrokValue.trim();

@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 81) return;
+  if (window.__codexElvesRemoteAccess?.version === 82) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -1353,7 +1353,7 @@
     "models", "skills", "queue", "queueEdit", "sendState", "promptOptimization",
     "workspaceContext", "relatedThreads"]);
   const requestClientReadActions = new Set([
-    "events", "notifications", "sidebar", "history", "thread", "models", "skills", "workspaceContext"
+    "sidebar", "thread", "models", "skills", "workspaceContext"
   ]);
   async function guardThreadAction(action, payload) {
     if (payload?.threadId == null || nativeReadActions.has(action) || action === "dispose") return null;
@@ -5032,7 +5032,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 81, call,
+    version: 82, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();

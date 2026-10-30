@@ -15,7 +15,7 @@ const RECENT_SESSIONS_SCRIPT: &str = include_str!("../../../assets/inject/recent
 const RECENT_SESSIONS_NATIVE_SCRIPT: &str = include_str!("../../../assets/remote-access/native.js");
 const NATIVE_FAST_UNLOCK_SCRIPT: &str =
     include_str!("../../../assets/inject/native-fast-unlock.js");
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261021-native-fast-compat";
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261030-native-fast-graph-compat";
 
 pub fn renderer_script() -> &'static str {
     RENDERER_FEATURES_SCRIPT
