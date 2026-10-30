@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 83) return;
+  if (window.__codexElvesRemoteAccess?.version === 92) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -77,15 +77,44 @@
       || typeof value.sendFollowUpMessage === "function"
         && typeof value.listThreadTurns === "function" && value.storage?.readGlobalState);
   let requestClientSidebarSnapshot = null;
+  const requestClientSnapshotArray = value => {
+    if (Array.isArray(value)) return value;
+    if (value instanceof Set) return [...value];
+    if (value && typeof value !== "string" && typeof value[Symbol.iterator] === "function") {
+      try { return [...value]; } catch {}
+    }
+    return [];
+  };
+  const mergeRequestClientSnapshotMap = (previous, next) => {
+    if (!(next instanceof Map)) return previous;
+    const merged = new Map(previous instanceof Map ? previous : []);
+    for (const [key, value] of next) {
+      const current = merged.get(key);
+      if (typeof current === "function" && typeof value === "function") {
+        try {
+          if (array(current()).length >= array(value()).length) continue;
+        } catch {}
+      }
+      merged.set(key, value);
+    }
+    return merged;
+  };
   const requestClientSnapshotThreadId = (value, snapshot = requestClientSidebarSnapshot) => {
     if (value && typeof value === "object") {
       const id = value.conversationId ?? value.threadId ?? value.id;
       if (typeof id === "string" && id) return id;
     }
     if (typeof value !== "string" || !value) return null;
-    const candidates = [value];
-    if (value.includes(":")) candidates.push(value.slice(value.lastIndexOf(":") + 1));
-    if (value.startsWith("local-")) candidates.push(value.slice("local-".length));
+    if (value.startsWith("codex:thread:local:")) return value.slice("codex:thread:local:".length);
+    if (value.startsWith("local:")) return value.slice("local:".length);
+    const candidates = [];
+    const addCandidate = candidate => {
+      if (typeof candidate !== "string" || !candidate || candidates.includes(candidate)) return;
+      candidates.push(candidate);
+      if (candidate.startsWith("local-")) addCandidate(candidate.slice("local-".length));
+    };
+    addCandidate(value);
+    if (value.includes(":")) addCandidate(value.slice(value.lastIndexOf(":") + 1));
     for (const candidate of candidates)
       if (snapshot?.conversationByKey instanceof Map && snapshot.conversationByKey.has(candidate))
         return candidate;
@@ -102,22 +131,31 @@
     return rows;
   };
   const requestClientSnapshotVisibleIds = (name, snapshot = requestClientSidebarSnapshot) => {
-    const source = snapshot?.visibleThreadLists instanceof Map ? snapshot.visibleThreadLists.get(name) : null;
-    let values = [];
-    try { values = typeof source === "function" ? source() : source; } catch {}
-    return array(values).map(value => requestClientSnapshotThreadId(value, snapshot)).filter(Boolean);
+    const lists = snapshot?.visibleThreadLists instanceof Map ? snapshot.visibleThreadLists : new Map();
+    const read = source => {
+      try { return typeof source === "function" ? source() : source; } catch { return []; }
+    };
+    let values = read(lists.get(name));
+    if (!requestClientSnapshotArray(values).length && name === "pinned") {
+      values = [...lists.entries()]
+        .filter(([key]) => String(key).startsWith("codex:pinned:"))
+        .flatMap(([, source]) => requestClientSnapshotArray(read(source)));
+    }
+    return requestClientSnapshotArray(values).filter(value => !(typeof value === "string"
+      && (value.startsWith("codex:project:") || value.startsWith("codex:unified-project:"))))
+      .map(value => requestClientSnapshotThreadId(value, snapshot)).filter(Boolean);
   };
   const requestClientSnapshotState = (key, snapshot = requestClientSidebarSnapshot) => {
     if (key === "local-projects") {
       const result = {};
       for (const [projectKey, value] of snapshot?.projectByKey instanceof Map ? snapshot.projectByKey : []) {
         const group = value?.group || value;
-        const id = group?.projectId || projectKey;
+        const id = group?.projectId || String(projectKey).slice(String(projectKey).lastIndexOf(":") + 1);
         if (!id || group?.projectKind && group.projectKind !== "local") continue;
         result[id] = {
           name: group.label || group.name || group.path?.split(/[\\/]/).at(-1) || id,
-          rootPaths: array(group.rootPaths || (group.path ? [group.path] : [])),
-          threadKeys: array(group.threadKeys)
+          rootPaths: requestClientSnapshotArray(group.rootPaths || (group.path ? [group.path] : [])),
+          threadKeys: requestClientSnapshotArray(group.threadKeys)
         };
       }
       return result;
@@ -126,9 +164,9 @@
       const assignments = {};
       for (const [projectKey, value] of snapshot?.projectByKey instanceof Map ? snapshot.projectByKey : []) {
         const group = value?.group || value;
-        const projectId = group?.projectId || projectKey;
+        const projectId = group?.projectId || String(projectKey).slice(String(projectKey).lastIndexOf(":") + 1);
         if (!projectId || group?.projectKind && group.projectKind !== "local") continue;
-        for (const thread of array(group.threadKeys)) {
+        for (const thread of requestClientSnapshotArray(group.threadKeys)) {
           const id = requestClientSnapshotThreadId(thread, snapshot);
           if (id) assignments[id] = projectId;
         }
@@ -585,9 +623,24 @@
           if (isManager(value) && !value.disposed) manager = value;
           if (!requestClient && isRequestClient(value)) requestClient = value;
           if (value.projectByKey instanceof Map
-              && value.conversationByKey instanceof Map
-              && value.visibleThreadLists instanceof Map)
-            requestClientSidebarSnapshot = value;
+              || value.conversationByKey instanceof Map
+              || value.visibleThreadLists instanceof Map) {
+            requestClientSidebarSnapshot = {
+              ...(requestClientSidebarSnapshot || {}),
+              ...(value.projectByKey instanceof Map ? {
+                projectByKey: mergeRequestClientSnapshotMap(
+                  requestClientSidebarSnapshot?.projectByKey, value.projectByKey)
+              } : {}),
+              ...(value.conversationByKey instanceof Map ? {
+                conversationByKey: mergeRequestClientSnapshotMap(
+                  requestClientSidebarSnapshot?.conversationByKey, value.conversationByKey)
+              } : {}),
+              ...(value.visibleThreadLists instanceof Map ? {
+                visibleThreadLists: mergeRequestClientSnapshotMap(
+                  requestClientSidebarSnapshot?.visibleThreadLists, value.visibleThreadLists)
+              } : {})
+            };
+          }
           if (depth > 7 || value instanceof Node || value === window || value === document) continue;
           if (value instanceof Map) {
             for (const entry of value.values()) queue.push([entry, depth + 1]);
@@ -1252,14 +1305,18 @@
     if (readGeneration !== catalogGeneration) throw failure(409, "会话列表读取已取消");
     observeThreads(manager.getRecentThreadSummaries());
     let pinnedState = { threadIds: [] };
-    try {
-      const pins = await manager.runtime.pinnedThreads();
-      if (!pins) throw failure(503, "当前 Codex 版本的原生置顶服务不可用");
-      pinnedState = await pins.list({ hostId: "local", useAppServerPins: true });
-      if (!pinnedState || typeof pinnedState !== "object")
-        throw failure(503, "原生置顶服务返回结果无效");
-    } catch (error) {
-      reportSidebarFeatureDegraded("pinned_threads", error);
+    if (manager.__codexElvesRequestClientManager) {
+      pinnedState = { threadIds: requestClientSnapshotState("pinned-thread-ids") };
+    } else {
+      try {
+        const pins = await manager.runtime.pinnedThreads();
+        if (!pins) throw failure(503, "当前 Codex 版本的原生置顶服务不可用");
+        pinnedState = await pins.list({ hostId: "local", useAppServerPins: true });
+        if (!pinnedState || typeof pinnedState !== "object")
+          throw failure(503, "原生置顶服务返回结果无效");
+      } catch (error) {
+        reportSidebarFeatureDegraded("pinned_threads", error);
+      }
     }
     if (readGeneration !== catalogGeneration) throw failure(409, "会话列表读取已取消");
     const pinnedIds = array(pinnedState.threadIds);
@@ -1444,7 +1501,7 @@
     "workspaceContext", "relatedThreads"]);
   const requestClientReadActions = new Set([
     "events", "notifications", "sidebar", "history", "thread", "models", "skills", "workspaceContext",
-    "relatedThreads", "queue", "send", "sendState"
+    "relatedThreads", "createSideThread", "closeSideThread", "queue", "send", "sendState"
   ]);
   async function guardThreadAction(action, payload) {
     if (payload?.threadId == null || nativeReadActions.has(action) || action === "dispose") return null;
@@ -1500,20 +1557,24 @@
       if (matches.length === 1) return matches[0];
       if (matches.length > 1) throw failure(503, `原生关联会话模块版本不唯一（${name}）`);
     }
-    // 静态依赖不一定出现在 DOM 或当前 Resource Timing 中；只沿已观察到的可信 app-main 导入定位。
+    // 静态依赖不一定出现在 DOM 或当前 Resource Timing 中；沿已观察到的可信入口模块导入定位。
     if (name === "initial") {
       const mains = [...new Set(observed.filter(value =>
-        /^app:\/\/-\/assets\/app-main-[A-Za-z0-9_-]+\.js$/.test(value)))];
-      if (mains.length === 1) {
-        const response = await fetch(mains[0]);
-        if (!response.ok) throw failure(503, "无法读取原生入口模块");
-        const source = await response.text();
-        const dependencies = [...new Set([...source.matchAll(
-          /\b(?:from|import)\s*["'](\.\/app-initial-[A-Za-z0-9_-]+\.js)["']/g)]
-          .map(match => new URL(match[1], mains[0]).href)
-          .filter(value => rule.expression.test(value)))];
-        if (dependencies.length === 1) return dependencies[0];
+        /^app:\/\/-\/assets\/(?:app-main|app-primary|app-route-components|primary-app-route-components)[A-Za-z0-9_.-]*\.js$/.test(value)))];
+      const dependencies = [];
+      for (const main of mains) {
+        try {
+          const response = await fetch(main);
+          if (!response.ok) continue;
+          const source = await response.text();
+          dependencies.push(...[...source.matchAll(
+            /\b(?:from|import)\s*["'](\.\/app-initial-[A-Za-z0-9_-]+\.js)["']/g)]
+            .map(match => new URL(match[1], main).href)
+            .filter(value => rule.expression.test(value)));
+        } catch {}
       }
+      const uniqueDependencies = [...new Set(dependencies)];
+      if (uniqueDependencies.length === 1) return uniqueDependencies[0];
     }
     throw failure(503, `当前 Codex 版本的原生关联会话模块不可用（${name}）`);
   }
@@ -1777,7 +1838,7 @@
         const scope = nativeSideScopes(native).find(entry => entry.value.conversationId === threadId);
         canCreateSideThread = nativeSideFeatureEnabled(native, scope)
           && typeof nativeIntl?.formatMessage === "function"
-          && !parent.ephemeral && !subagentIdentity(parent)
+          && !parent.ephemeral && parent.sideConversation !== true && !subagentIdentity(parent)
           && !sideThreads.some(entry => entry.id === threadId);
       } catch (error) {
         reportSideFeatureDegraded("related_threads.request_client", error, { threadId });
@@ -4543,6 +4604,37 @@
         && item?.status === "accepted")
       && (item.clientUserMessageId === clientUserMessageId || item.clientId === clientUserMessageId));
   }
+  function requestClientTurnSettings(thread, settings) {
+    const result = {};
+    const fields = [
+      "approvalPolicy", "approvalsReviewer", "sandboxPolicy", "permissions",
+      "runtimeWorkspaceRoots", "serviceTier", "personality", "summary",
+      "collaborationMode", "multiAgentMode"
+    ];
+    for (const field of fields) {
+      if (thread && Object.hasOwn(thread, field) && thread[field] != null)
+        result[field] = thread[field];
+    }
+    if (settings?.model != null) result.model = settings.model;
+    if (settings?.effort != null) result.effort = settings.effort;
+    return result;
+  }
+  async function ensureRequestClientThreadLoaded(sourceManager, thread) {
+    const status = thread?.status?.type ?? thread?.status;
+    if (status !== "notLoaded" && status !== "not_loaded") return thread;
+    try {
+      const resumed = await sourceManager.requestClient.sendRequest("thread/resume", {
+        threadId: requiredId(thread.id)
+      });
+      return resumed?.thread || resumed || thread;
+    } catch (error) {
+      const message = String(error?.message || error).toLowerCase();
+      if (message.includes("already has an active writer")
+          || message.includes("already loaded")
+          || message.includes("overrides ignored")) return thread;
+      throw error;
+    }
+  }
   async function submitRequestClientTurn(payload = {}, allowImmediate = false) {
     const sourceManager = messageActionManager();
     const threadId = requiredId(payload.threadId);
@@ -4558,7 +4650,9 @@
     const previous = await readQueuedSendState({ threadId, clientUserMessageId });
     assertCurrent();
     if (previous.confirmed) return previous;
-    const thread = await sourceManager.readThread(threadId, { includeTurns: true });
+    let thread = await sourceManager.readThread(threadId, { includeTurns: true });
+    assertCurrent();
+    thread = await ensureRequestClientThreadLoaded(sourceManager, thread);
     assertCurrent();
     const cwd = typeof thread.cwd === "string" && thread.cwd ? thread.cwd : null;
     const input = [
@@ -4573,11 +4667,8 @@
     const request = {
       threadId, input, clientUserMessageId,
       ...(useSteer ? { expectedTurnId: activeTurn.id } : {}),
-      ...(!useSteer ? {
-        ...(cwd ? { cwd } : {}),
-        ...(settings?.model != null ? { model: settings.model } : {}),
-        ...(settings?.effort != null ? { effort: settings.effort } : {})
-      } : {})
+      ...(cwd ? { cwd } : {}),
+      ...requestClientTurnSettings(thread, settings)
     };
     const method = useSteer ? "turn/steer" : "turn/start";
     let requestStarted = false;
@@ -5273,7 +5364,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 83, call,
+    version: 92, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();
