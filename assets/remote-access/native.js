@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 81) return;
+  if (window.__codexElvesRemoteAccess?.version === 82) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -1353,7 +1353,8 @@
     "models", "skills", "queue", "queueEdit", "sendState", "promptOptimization",
     "workspaceContext", "relatedThreads"]);
   const requestClientReadActions = new Set([
-    "events", "notifications", "sidebar", "history", "thread", "models", "skills", "workspaceContext"
+    "events", "notifications", "sidebar", "history", "thread", "models", "skills", "workspaceContext",
+    "relatedThreads"
   ]);
   async function guardThreadAction(action, payload) {
     if (payload?.threadId == null || nativeReadActions.has(action) || action === "dispose") return null;
@@ -1669,6 +1670,13 @@
   async function relatedThreads(payload) {
     const threadId = requiredId(payload.threadId);
     const parent = await readThread(threadId);
+    if (manager.__codexElvesRequestClientManager) {
+      return {
+        ok: true, threadId, subagents: [], completedSubagents: [],
+        completedSubagentCount: 0, subagentsComplete: true, sideThreads: [],
+        canCreateSideThread: false
+      };
+    }
     const native = await nativeRelatedState();
     if (typeof manager.discoverSubagentDescendantSnapshot !== "function")
       throw failure(503, "当前 Codex 版本不支持原生子代理关系读取");
@@ -4752,14 +4760,15 @@
         case "thread": {
           const thread = await readThread(payload.threadId);
           const view = await threadViewIdentity(thread);
-          if (!view.readOnly && (!manager.getConversation(thread.id)
+          if (!manager.__codexElvesRequestClientManager && !view.readOnly
+              && (!manager.getConversation(thread.id)
               || manager.getConversation(thread.id).resumeState === "needs_resume")) {
             await manager.resumeConversation({
               conversationId: thread.id, model: null, reasoningEffort: null,
               workspaceRoots: [thread.cwd], collaborationMode: null
             });
           }
-          if (!view.readOnly) {
+          if (!manager.__codexElvesRequestClientManager && !view.readOnly) {
             const coordinator = await manager.getTurnCoordinator?.();
             if (typeof coordinator?.loadMessages === "function") await coordinator.loadMessages(thread.id);
           }
@@ -5032,7 +5041,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 81, call,
+    version: 82, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();
