@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 79) return;
+  if (window.__codexElvesRemoteAccess?.version === 81) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -68,8 +68,45 @@
     "thread/tokenUsage/updated", "thread/settings/updated", "thread/goal/updated", "thread/goal/cleared",
     "skills/changed", "serverRequest/resolved"
   ];
-  const isManager = value => value?.hostId === "local" && typeof value.sendFollowUpMessage === "function"
-    && typeof value.listThreadTurns === "function" && value.storage?.readGlobalState;
+  const isRequestClient = value => value?.hostId === "local"
+    && typeof value.sendRequest === "function"
+    && typeof value.sendAppServerExtensionRequest === "function"
+    && typeof value.prewarmThreadStart === "function";
+  const isManager = value => value?.hostId === "local"
+    && (value.__codexElvesRequestClientManager === true
+      || typeof value.sendFollowUpMessage === "function"
+        && typeof value.listThreadTurns === "function" && value.storage?.readGlobalState);
+  function minimalManagerStorage() {
+    return {
+      async readGlobalState() { return {}; },
+      readValue() { return null; },
+      writeValue() { return false; },
+      readQueuedFollowUps() { return null; }
+    };
+  }
+  function requestClientManager(requestClient) {
+    const storage = minimalManagerStorage();
+    return {
+      __codexElvesRequestClientManager: true,
+      hostId: "local",
+      requestClient,
+      storage,
+      runtime: null,
+      disposed: false,
+      getConversation() { return null; },
+      getCachedConversations() { return []; },
+      getRecentThreadSummaries() { return []; },
+      getThreadListSummary() { return null; },
+      getThreadRuntimeStatusEvidence() { return null; },
+      getConversationCwd() { return null; },
+      async readThread(threadId, options = {}) {
+        return await requestClient.sendRequest("thread/read", {
+          threadId,
+          includeTurns: options.includeTurns === true
+        });
+      }
+    };
+  }
   function reportNativeCallbackFailure(callbackName, error) {
     try {
       const name = String(callbackName || "unknown").slice(0, 120);
@@ -416,6 +453,8 @@
     } else if (!(sidebarOnly && quick && isManager(manager) && !manager.disposed)) {
       const scopes = new Set(), fibers = new Set(), values = new WeakSet();
       const queue = [];
+      let requestClient = manager?.requestClient && isRequestClient(manager.requestClient)
+        ? manager.requestClient : null;
       const scan = elements => {
         for (const element of elements) {
           const key = Object.keys(element).find(key => key.startsWith("__reactFiber$") || key.startsWith("__reactContainer$"));
@@ -444,6 +483,7 @@
                     try {
                       const candidate = signal.store.get(signal.atom);
                       if (isManager(candidate) && !candidate.disposed) manager = candidate;
+                      if (!requestClient && isRequestClient(candidate)) requestClient = candidate;
                     } catch {}
                   }
                 }
@@ -457,6 +497,7 @@
           values.add(value);
           if (value.node?.familyBindings instanceof Map && typeof value.get === "function") appScope = value;
           if (isManager(value) && !value.disposed) manager = value;
+          if (!requestClient && isRequestClient(value)) requestClient = value;
           if (depth > 7 || value instanceof Node || value === window || value === document) continue;
           if (value instanceof Map) {
             for (const entry of value.values()) queue.push([entry, depth + 1]);
@@ -472,8 +513,10 @@
       ));
       if (!sidebarOnly || !manager || !appScope || !nativeNavigate)
         scan(document.querySelectorAll("#root, #root *"));
+      if (!manager && requestClient) manager = requestClientManager(requestClient);
       if (!manager) throw failure(503, "未发现本机原生会话管理器，请检查 CodexElves 注入连接");
-      window.__codexElvesNativeConversationContext = { manager, appScope, nativeIntl, nativeNavigate };
+      if (!manager.__codexElvesRequestClientManager)
+        window.__codexElvesNativeConversationContext = { manager, appScope, nativeIntl, nativeNavigate };
     }
     if (sideThreadsManager !== manager) {
       for (const watcher of sideScopeWatchers.values()) watcher.dispose?.();
@@ -492,7 +535,8 @@
       }
       notificationManager = manager;
     }
-    if (sidebarOnly && !unsubscribe.length && !sidebarUnsubscribe.length) {
+    if (sidebarOnly && !manager.__codexElvesRequestClientManager
+        && !unsubscribe.length && !sidebarUnsubscribe.length) {
       sidebarUnsubscribe.push(manager.addNotificationCallback([
         "thread/started", "thread/status/changed", "thread/name/updated",
         "thread/archived", "thread/unarchived", "thread/deleted", "turn/started", "turn/completed"
@@ -508,7 +552,7 @@
           safeNativeCallback("sidebar_conversation_state", syncSidebarConversationState)
         ));
     }
-    if (!sidebarOnly && !unsubscribe.length) {
+    if (!sidebarOnly && !manager.__codexElvesRequestClientManager && !unsubscribe.length) {
       for (const dispose of sidebarUnsubscribe) { try { dispose?.(); } catch {} }
       sidebarUnsubscribe = [];
       unsubscribe.push(manager.addNotificationCallback(
@@ -1308,6 +1352,9 @@
   const nativeReadActions = new Set(["events", "notifications", "sidebar", "history", "thread",
     "models", "skills", "queue", "queueEdit", "sendState", "promptOptimization",
     "workspaceContext", "relatedThreads"]);
+  const requestClientReadActions = new Set([
+    "events", "notifications", "sidebar", "history", "thread", "models", "skills", "workspaceContext"
+  ]);
   async function guardThreadAction(action, payload) {
     if (payload?.threadId == null || nativeReadActions.has(action) || action === "dispose") return null;
     const id = requiredId(payload.threadId);
@@ -1595,6 +1642,9 @@
       sideThreadClosed: false, sideHistoryVersion: 1, inheritedTurnIds: [] };
   }
   async function threadViewIdentity(thread) {
+    if (manager.__codexElvesRequestClientManager) {
+      return { readOnly: false, viewKind: "main", parentThreadId: null, nativeBridgeUnavailable: true };
+    }
     const identity = subagentIdentity(thread) || subagentIdentity(manager.getConversation(thread.id));
     if (identity) {
       const native = await nativeRelatedState();
@@ -4628,8 +4678,11 @@
       if (action === "dispose") { window.__codexElvesRemoteAccess.dispose(); return { ok: true }; }
       if (["send", "create", "setGoal"].includes(action)) validateGoalComposerPayload(action, payload);
       resetStaleManager();
-      if (!manager || !sidebarOnly && (!unsubscribe.length || !appScope || !nativeNavigate
-          || typeof nativeIntl?.formatMessage !== "function")) discover(sidebarOnly);
+      if (!manager || !sidebarOnly && !manager.__codexElvesRequestClientManager
+          && (!unsubscribe.length || !appScope || !nativeNavigate
+            || typeof nativeIntl?.formatMessage !== "function")) discover(sidebarOnly);
+      if (manager.__codexElvesRequestClientManager && !requestClientReadActions.has(action))
+        throw failure(503, "当前 Codex 尚未完成原生注入，远程会话暂只支持只读查看");
       if (["events", "notifications", "thread"].includes(action))
         await prepareAsyncQuestionState().catch(() => {});
       if (action === "events" || action === "notifications")
@@ -4651,6 +4704,7 @@
           refreshPendingNotifications();
           const reset = payload.epoch !== epoch || payload.cursor < (notifications[0]?.sequence || 1) - 1;
           return { ok: true, epoch, cursor: eventSequence, reset,
+            ...(manager.__codexElvesRequestClientManager ? { nativeBridge: "read_only" } : {}),
             events: notifications.filter(event => event.sequence > (payload.cursor || 0)).flatMap(({ event }) => {
               const { threadId, turnId = event.params?.turn?.id } = event.params || {};
               if (event.params?.item?.type !== "contextCompaction"
@@ -4978,7 +5032,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 80, call,
+    version: 81, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();

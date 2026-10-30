@@ -3916,8 +3916,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = assets::renderer_features_script();
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 78"));
-    assert!(script.contains("version: 78"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 81"));
+    assert!(script.contains("version: 81"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));
@@ -3928,6 +3928,18 @@ fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     assert!(script.contains("local-conversation-background-agents-signals"));
     assert!(script.contains("local-conversation-side-chat-tab"));
     assert!(script.contains("remote_native_compatibility_failed"));
+}
+
+#[test]
+fn remote_native_script_recognizes_current_request_client_without_global_manager() {
+    let script = assets::renderer_features_script();
+
+    assert!(script.contains("const isRequestClient = value =>"));
+    assert!(script.contains("function requestClientManager(requestClient)"));
+    assert!(script.contains("const requestClientReadActions = new Set"));
+    assert!(script.contains(
+        "return { readOnly: false, viewKind: \"main\", parentThreadId: null, nativeBridgeUnavailable: true };"
+    ));
 }
 
 #[test]
