@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 92) return;
+  if (window.__codexElvesRemoteAccess?.version === 100) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -1531,8 +1531,8 @@
           && source.includes("sourceConversationId"),
       },
       sideTab: {
-        expression: /^app:\/\/-\/assets\/local-conversation-side-chat-tab-[A-Za-z0-9_-]+\.js$/,
-        matches: source => source.includes("LocalConversationSideChatTab"),
+        expression: /^app:\/\/-\/assets\/local-conversation-side-chat(?:-tab)?-[A-Za-z0-9_-]+\.js$/,
+        matches: source => source.includes("LocalConversationSideChatTab") && source.includes("import("),
       },
     };
     const rule = rules[name];
@@ -1557,25 +1557,41 @@
       if (matches.length === 1) return matches[0];
       if (matches.length > 1) throw failure(503, `原生关联会话模块版本不唯一（${name}）`);
     }
-    // 静态依赖不一定出现在 DOM 或当前 Resource Timing 中；沿已观察到的可信入口模块导入定位。
-    if (name === "initial") {
-      const mains = [...new Set(observed.filter(value =>
-        /^app:\/\/-\/assets\/(?:app-main|app-primary|app-route-components|primary-app-route-components)[A-Za-z0-9_.-]*\.js$/.test(value)))];
-      const dependencies = [];
-      for (const main of mains) {
-        try {
-          const response = await fetch(main);
-          if (!response.ok) continue;
-          const source = await response.text();
-          dependencies.push(...[...source.matchAll(
-            /\b(?:from|import)\s*["'](\.\/app-initial-[A-Za-z0-9_-]+\.js)["']/g)]
-            .map(match => new URL(match[1], main).href)
-            .filter(value => rule.expression.test(value)));
-        } catch {}
+    // 静态依赖不一定出现在 DOM 或当前 Resource Timing 中；沿可信入口递归解析
+    // app-primary -> app-initial -> local-conversation-*，兼容新版懒加载模块。
+    const roots = [...new Set(observed.filter(value =>
+      /^app:\/\/-\/assets\/(?:app-main|app-primary|app-route-components|primary-app-route-components|app-initial|local-conversation)[A-Za-z0-9_.-]*\.js$/.test(value)))];
+    const importPattern = /(?:from|import)\s*(?:\(\s*)?[`"'](\.\/[^`"']+\.js)[`"']/g;
+    const visited = new Set();
+    const queue = roots.map(resource => ({ resource, depth: 0 }));
+    const resolved = [];
+    while (queue.length && resolved.length < 2) {
+      const { resource, depth } = queue.shift();
+      if (visited.has(resource) || depth > 5) continue;
+      visited.add(resource);
+      let source;
+      try {
+        const response = await fetch(resource);
+        if (!response.ok) continue;
+        source = await response.text();
+      } catch {
+        continue;
       }
-      const uniqueDependencies = [...new Set(dependencies)];
-      if (uniqueDependencies.length === 1) return uniqueDependencies[0];
+      if ((!rule.matches || rule.matches(source)) && rule.expression.test(resource)) {
+        resolved.push(resource);
+        continue;
+      }
+      for (const match of source.matchAll(importPattern)) {
+        const dependency = new URL(match[1], resource).href;
+        if (rule.expression.test(dependency)) queue.push({ resource: dependency, depth: depth + 1 });
+        else if (depth < 5 && /(?:app-(?:main|primary|initial)|local-conversation)/.test(dependency))
+          queue.push({ resource: dependency, depth: depth + 1 });
+      }
     }
+    const uniqueResolved = [...new Set(resolved)];
+    if (uniqueResolved.length === 1) return uniqueResolved[0];
+    if (uniqueResolved.length > 1)
+      throw failure(503, `原生关联会话模块版本不唯一（${name}）`);
     throw failure(503, `当前 Codex 版本的原生关联会话模块不可用（${name}）`);
   }
   async function nativeModuleSnapshot(name) {
@@ -1835,8 +1851,10 @@
             hasUnreadTurn: completedSideThreadUnread(thread, item) }];
         });
         const native = await nativeSideState();
-        const scope = nativeSideScopes(native).find(entry => entry.value.conversationId === threadId);
-        canCreateSideThread = nativeSideFeatureEnabled(native, scope)
+        const scopes = nativeSideScopes(native);
+        const scope = scopes.find(entry => entry.value.conversationId === threadId);
+        const featureEnabled = nativeSideFeatureEnabled(native, scope);
+        canCreateSideThread = featureEnabled
           && typeof nativeIntl?.formatMessage === "function"
           && !parent.ephemeral && parent.sideConversation !== true && !subagentIdentity(parent)
           && !sideThreads.some(entry => entry.id === threadId);
@@ -5364,7 +5382,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 92, call,
+    version: 100, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();
