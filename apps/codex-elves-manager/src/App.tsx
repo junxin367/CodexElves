@@ -6030,9 +6030,14 @@ function formatOptionalSpeedTestDurationMs(value?: number | null): string {
   return typeof value === "number" ? formatSpeedTestDurationMs(value) : "-";
 }
 
+function speedTestTokenRate(elapsedMs: number): number {
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return Number.NaN;
+  return SPEED_TEST_INPUT_TOKENS * 1000 / elapsedMs;
+}
+
 function formatSpeedTestTokenRate(elapsedMs: number): string {
-  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return "-";
-  const rate = SPEED_TEST_INPUT_TOKENS * 1000 / elapsedMs;
+  const rate = speedTestTokenRate(elapsedMs);
+  if (!Number.isFinite(rate)) return "-";
   if (rate < 1000) return `${Math.round(rate)} tk/s`;
   const digits = rate >= 10_000 ? 1 : 2;
   return `${(rate / 1000).toFixed(digits).replace(/\.?0+$/, "")}k tk/s`;
@@ -6062,7 +6067,7 @@ function RelayProfileSpeedTestDialog({
   const [availableModels, setAvailableModels] = useState<string[]>(configuredModels);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [running, setRunning] = useState(false);
-  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [resultsByMode, setResultsByMode] = useState<Record<"configured" | "all", RelayProfileSpeedTestItem[]>>({
     configured: [],
     all: [],
@@ -6073,7 +6078,7 @@ function RelayProfileSpeedTestDialog({
   useEffect(() => {
     setMode("configured");
     setAvailableModels(configuredModels);
-    setSortDirection("asc");
+    setSortDirection("desc");
     setResultsByMode({ configured: [], all: [] });
   }, [profile.id, configuredModelsKey]);
 
@@ -6158,9 +6163,15 @@ function RelayProfileSpeedTestDialog({
     ? Math.round(results.reduce((total, item) => total + item.elapsedMs, 0) / results.length)
     : 0;
   const sortedResults = useMemo(
-    () => [...results].sort((left, right) => (
-      sortDirection === "asc" ? left.elapsedMs - right.elapsedMs : right.elapsedMs - left.elapsedMs
-    )),
+    () => [...results].sort((left, right) => {
+      const leftRate = speedTestTokenRate(left.elapsedMs);
+      const rightRate = speedTestTokenRate(right.elapsedMs);
+      const rateComparison = leftRate - rightRate;
+      if (rateComparison !== 0) {
+        return sortDirection === "asc" ? rateComparison : -rateComparison;
+      }
+      return left.elapsedMs - right.elapsedMs;
+    }),
     [results, sortDirection],
   );
 
@@ -6235,7 +6246,7 @@ function RelayProfileSpeedTestDialog({
                   type="button"
                 >
                   <ArrowDownWideNarrow className="h-3.5 w-3.5" />
-                  耗时升序
+                  tk/s 升序
                 </button>
                 <button
                   aria-pressed={sortDirection === "desc"}
@@ -6244,24 +6255,32 @@ function RelayProfileSpeedTestDialog({
                   type="button"
                 >
                   <ArrowUpNarrowWide className="h-3.5 w-3.5" />
-                  耗时降序
+                  tk/s 降序
                 </button>
               </div>
             </div>
             <div className="speed-test-result-list">
               {sortedResults.map((item, index) => {
-                const barWidth = Math.max(8, Math.min(100, Math.round((item.elapsedMs / Math.max(fastest, item.elapsedMs)) * 100)));
                 return (
                   <div className={`speed-test-result-row ${item.status === "failed" ? "failed" : ""}`} key={item.model}>
                     <span className="speed-test-rank">{index + 1}</span>
                     <span className="speed-test-result-model">{item.model}</span>
-                    <span className="speed-test-result-time">
-                      <span>首字 {formatOptionalSpeedTestDurationMs(item.firstTokenMs)}</span>
-                      <span>耗时 {formatSpeedTestDurationMs(item.elapsedMs)}</span>
-                      <span title="按约 5 万输入 token ÷ 完整耗时计算">{formatSpeedTestTokenRate(item.elapsedMs)}</span>
+                    <span className="speed-test-result-metric">
+                      <span className="speed-test-result-metric-label">首字</span>
+                      <span>{formatOptionalSpeedTestDurationMs(item.firstTokenMs)}</span>
+                    </span>
+                    <span className="speed-test-result-metric">
+                      <span className="speed-test-result-metric-label">耗时</span>
+                      <span>{formatSpeedTestDurationMs(item.elapsedMs)}</span>
+                    </span>
+                    <span
+                      className="speed-test-result-metric speed-test-result-token-rate"
+                      title="按约 5 万输入 token ÷ 完整耗时计算"
+                    >
+                      <span className="speed-test-result-metric-label">tk/s</span>
+                      <span>{formatSpeedTestTokenRate(item.elapsedMs)}</span>
                     </span>
                     <span className="speed-test-result-status">{item.status === "ok" ? "完成" : "失败"}</span>
-                    <span className="speed-test-result-bar"><i style={{ width: `${barWidth}%` }} /></span>
                   </div>
                 );
               })}

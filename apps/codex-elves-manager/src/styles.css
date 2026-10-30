@@ -4562,16 +4562,14 @@ body {
 
 .speed-test-result-row {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto auto;
-  gap: 8px;
+  grid-template-columns: 24px minmax(0, 1fr) 78px 78px 88px 40px;
+  gap: 10px;
   align-items: center;
-  position: relative;
-  overflow: hidden;
   min-height: 46px;
   border: 1px solid hsl(var(--border));
   border-radius: 8px;
   background: hsl(var(--background));
-  padding: 9px 10px 18px;
+  padding: 9px 10px;
 }
 
 .speed-test-result-row.failed {
@@ -4600,10 +4598,11 @@ body {
   font-size: 12px;
 }
 
-.speed-test-result-time {
-  display: inline-flex;
-  gap: 10px;
-  flex-wrap: wrap;
+.speed-test-result-metric {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px;
   justify-content: flex-end;
   white-space: nowrap;
   color: hsl(var(--foreground));
@@ -4612,7 +4611,19 @@ body {
   font-weight: 650;
 }
 
+.speed-test-result-metric-label {
+  color: hsl(var(--muted-foreground));
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.speed-test-result-token-rate {
+  min-width: 0;
+}
+
 .speed-test-result-status {
+  justify-self: end;
   color: hsl(var(--brand-accent));
   font-size: 11px;
   font-weight: 650;
@@ -4620,26 +4631,6 @@ body {
 
 .speed-test-result-row.failed .speed-test-result-status {
   color: hsl(var(--destructive));
-}
-
-.speed-test-result-bar {
-  position: absolute;
-  inset: auto 10px 7px 40px;
-  height: 3px;
-  overflow: hidden;
-  border-radius: 99px;
-  background: hsl(var(--secondary));
-}
-
-.speed-test-result-bar i {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: hsl(var(--brand-accent));
-}
-
-.speed-test-result-row.failed .speed-test-result-bar i {
-  background: hsl(var(--destructive));
 }
 
 .speed-test-result-toolbar {
