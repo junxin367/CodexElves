@@ -4562,7 +4562,7 @@ body {
 
 .speed-test-result-row {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) 78px 78px 88px 40px;
+  grid-template-columns: 24px minmax(0, 1fr) 88px 88px 88px 40px;
   gap: 10px;
   align-items: center;
   min-height: 46px;
@@ -4570,11 +4570,29 @@ body {
   border-radius: 8px;
   background: hsl(var(--background));
   padding: 9px 10px;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease);
+}
+
+.speed-test-result-row:hover,
+.speed-test-result-row:focus-visible {
+  border-color: hsl(var(--brand-accent) / 0.54);
+  background: hsl(var(--brand-accent) / 0.05);
+  outline: none;
 }
 
 .speed-test-result-row.failed {
   border-color: hsl(var(--destructive) / 0.35);
   background: hsl(var(--destructive) / 0.05);
+}
+
+.speed-test-result-row.failed:hover,
+.speed-test-result-row.failed:focus-visible {
+  border-color: hsl(var(--destructive) / 0.54);
+  background: hsl(var(--destructive) / 0.08);
 }
 
 .speed-test-rank {
@@ -4599,14 +4617,12 @@ body {
 }
 
 .speed-test-result-metric {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  display: flex;
   align-items: baseline;
-  gap: 4px;
   justify-content: flex-end;
+  gap: 4px;
   white-space: nowrap;
   color: hsl(var(--foreground));
-  font-family: Consolas, "SFMono-Regular", monospace;
   font-size: 12px;
   font-weight: 650;
 }

@@ -83,6 +83,8 @@ pub struct RelayProfileTestResult {
     pub first_token_ms: Option<u64>,
     pub output_tokens: Option<u64>,
     pub duration_ms: Option<u64>,
+    pub request_body: Option<String>,
+    pub response_body: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1097,6 +1099,8 @@ async fn send_relay_profile_test_attempt(
     };
     let payload =
         relay_profile_test_payload(protocol, test_model, test_prompt, measure_first_token);
+    let request_body =
+        serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
     let started_at = Instant::now();
     let response = relay_profile_test_request(client.post(&endpoint), protocol, api_key)
         .json(&payload)
@@ -1137,6 +1141,8 @@ async fn send_relay_profile_test_attempt(
                     "（Base URL 建议加上 /v1 前缀）{}",
                     response_text.chars().take(280).collect::<String>()
                 ),
+                request_body: Some(request_body),
+                response_body: Some(response_text),
             });
         }
     }
@@ -1150,6 +1156,8 @@ async fn send_relay_profile_test_attempt(
         output_tokens,
         duration_ms: Some(started_at.elapsed().as_millis() as u64),
         response_preview: response_text.chars().take(320).collect(),
+        request_body: Some(request_body),
+        response_body: Some(response_text),
     })
 }
 
@@ -1240,6 +1248,9 @@ fn relay_profile_test_value_has_content(protocol: RelayProtocol, value: &Value) 
         RelayProtocol::Responses => {
             (value.get("type").and_then(Value::as_str) == Some("response.output_text.delta")
                 && non_empty_text(value.get("delta")))
+                || (value.get("type").and_then(Value::as_str)
+                    == Some("response.reasoning_text.delta")
+                    && non_empty_text(value.get("delta")))
                 || responses_output_has_content(value)
                 || value
                     .get("response")
@@ -1251,11 +1262,27 @@ fn relay_profile_test_value_has_content(protocol: RelayProtocol, value: &Value) 
             .is_some_and(|choices| {
                 choices.iter().any(|choice| {
                     non_empty_text(choice.pointer("/delta/content"))
+                        || non_empty_text(choice.pointer("/delta/reasoning_content"))
+                        || non_empty_text(choice.pointer("/delta/reasoning"))
+                        || non_empty_text(choice.pointer("/delta/thought"))
                         || non_empty_text(choice.pointer("/message/content"))
+                        || non_empty_text(choice.pointer("/message/reasoning_content"))
+                        || non_empty_text(choice.pointer("/message/reasoning"))
+                        || non_empty_text(choice.pointer("/message/thought"))
+                        || non_empty_text(choice.pointer("/text"))
+                        || choice
+                            .pointer("/delta/content")
+                            .or_else(|| choice.pointer("/message/content"))
+                            .and_then(Value::as_array)
+                            .is_some_and(|parts| {
+                                parts.iter().any(|part| non_empty_text(part.get("text")))
+                            })
                 })
             }),
         RelayProtocol::Anthropic => {
             non_empty_text(value.pointer("/delta/text"))
+                || non_empty_text(value.pointer("/delta/thinking"))
+                || non_empty_text(value.pointer("/thinking"))
                 || value
                     .get("content")
                     .or_else(|| value.pointer("/message/content"))
