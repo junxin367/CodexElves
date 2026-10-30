@@ -120,15 +120,25 @@
     },
     {
       kind: "queue-explicit-access",
-      pattern: [
-        `function ${id}\\((?<manager>${id}),\\{settings:(?<settings>${id}),storage:(?<storage>${id}),filesystem:${id},runtime:(?<runtime>${id})\\},(?<readDefault>${id}),${id},${id}\\)\\{`,
-        `return async\\(${id},(?<message>${id})\\)=>\\{let (?<options>${id})=\\k<message>\\.submissionOptions,${id}=\\k<message>\\.context\\.workPermissions,${id}=${id}!=null,`,
-        `(?<host>${id})=\\k<options>\\?\\.executionHostId\\?\\?\\k<manager>\\.getHostId\\(\\);`,
-        `[\\s\\S]{0,400}?let (?<conversation>${id})=\\k<manager>\\.getConversation\\(${id}\\),${id}=${id}\\([^;]{0,200}\\),(?<collaboration>${id})=\\k<options>\\?\\.collaborationMode\\?\\?null;`,
-        `[\\s\\S]{0,1800}?let\\[${id},${id}\\]=await Promise\\.all\\(\\[\\(async\\(\\)=>\\{if\\(\\k<options>==null\\)return \\k<readDefault>\\(${id}\\?\\.latestModel\\|\\|null\\);`,
-        `if\\(\\k<options>\\.serviceTier==null\\)return null;let\\{account:(?<account>${id})\\}=await \\k<manager>\\.getAccount\\(\\{priority:${critical}\\}\\);`,
-        `return (?<gate>\\k<account>\\?\\.type===${chatgpt}(?:\\|\\|\\k<account>\\?\\.type===${bedrock})?)\\?\\k<options>\\.serviceTier:null\\}\\)\\(\\),\\k<options>\\?\\.usePermissionSelection\\?\\?\\k<settings>\\.readPermissionRefreshEnabled\\(\\)\\]\\)`,
-      ].join(""),
+      patterns: [
+        [
+          `function ${id}\\((?<manager>${id}),\\{settings:(?<settings>${id}),storage:(?<storage>${id}),filesystem:${id},runtime:(?<runtime>${id})\\},(?<readDefault>${id}),${id},${id}\\)\\{`,
+          `return async\\(${id},(?<message>${id})\\)=>\\{let (?<options>${id})=\\k<message>\\.submissionOptions,${id}=\\k<message>\\.context\\.workPermissions,${id}=${id}!=null,`,
+          `(?<host>${id})=\\k<options>\\?\\.executionHostId\\?\\?\\k<manager>\\.getHostId\\(\\);`,
+          `[\\s\\S]{0,400}?let (?<conversation>${id})=\\k<manager>\\.getConversation\\(${id}\\),${id}=${id}\\([^;]{0,200}\\),(?<collaboration>${id})=\\k<options>\\?\\.collaborationMode\\?\\?null;`,
+          `[\\s\\S]{0,1800}?let\\[${id},${id}\\]=await Promise\\.all\\(\\[\\(async\\(\\)=>\\{if\\(\\k<options>==null\\)return \\k<readDefault>\\(${id}\\?\\.latestModel\\|\\|null\\);`,
+          `if\\(\\k<options>\\.serviceTier==null\\)return null;let\\{account:(?<account>${id})\\}=await \\k<manager>\\.getAccount\\(\\{priority:${critical}\\}\\);`,
+          `return (?<gate>\\k<account>\\?\\.type===${chatgpt}(?:\\|\\|\\k<account>\\?\\.type===${bedrock})?)\\?\\k<options>\\.serviceTier:null\\}\\)\\(\\),\\k<options>\\?\\.usePermissionSelection\\?\\?\\k<settings>\\.readPermissionRefreshEnabled\\(\\)\\]\\)`,
+        ].join(""),
+        [
+          `function ${id}\\((?<manager>${id}),\\{settings:(?<settings>${id}),storage:(?<storage>${id}),filesystem:${id},runtime:(?<runtime>${id})\\},(?<readDefault>${id}),${id},${id}\\)\\{`,
+          `return async\\(${id},(?<message>${id})\\)=>\\{let (?<options>${id})=\\k<message>\\.submissionOptions,${id}=\\k<message>\\.context\\.workPermissions,${id}=${id}!=null,`,
+          `(?<host>${id})=\\k<options>\\?\\.executionHostId\\?\\?\\k<manager>\\.getHostId\\(\\);`,
+          `[\\s\\S]*?let (?<conversation>${id})=\\k<manager>\\.getConversation\\(${id}\\),`,
+          `[\\s\\S]*?(?<collaboration>${id})=\\k<options>\\?\\.collaborationMode\\?\\?null;`,
+          `[\\s\\S]*?let\\[${id},${id}\\]=await Promise\\.all\\(\\[\\(async\\(\\)=>\\{if\\(\\k<options>==null\\)return \\k<readDefault>\\(${id}\\?\\.latestModel\\|\\|null\\);if\\(\\k<options>\\.serviceTier==null\\)return null;let\\{account:(?<account>${id})\\}=await \\k<manager>\\.getAccount\\(\\{priority:${critical}\\}\\);return (?<gate>\\k<account>\\?\\.type===${chatgpt}(?:\\|\\|\\k<account>\\?\\.type===${bedrock})?)\\?\\k<options>\\.serviceTier:null\\}\\)\\(\\),`,
+        ].join(""),
+      ],
       // manager 和实际执行端都必须是本机；所选 Copilot 不能借底层 API 身份放行。
       replacement: (groups) => `(${gpt(`${groups.collaboration}?.settings?.model??${groups.conversation}?.latestModel`)}&&(${groups.gate}||${groups.host}===${local}&&${allow(`${groups.manager}.getHostId()`, `${groups.account}?.type`)}&&!(await ${groups.storage}.readGlobalState(\`use-copilot-auth-if-available\`)===!0&&await ${groups.runtime}.isCopilotApiAvailable())))`,
     },
@@ -160,8 +170,20 @@
     }
     const replacements = [];
     for (const definition of gates) {
-      const matches = (definition.patterns ?? [definition.pattern])
+      const rawMatches = (definition.patterns ?? [definition.pattern])
         .flatMap((pattern) => [...source.matchAll(new RegExp(pattern, "g"))]);
+      const matches = [];
+      const locations = new Set();
+      for (const match of rawMatches) {
+        const gate = match.groups?.gate;
+        const offset = typeof gate === "string" ? match[0].indexOf(gate) : -1;
+        const key = offset >= 0
+          ? `${match.index + offset}:${match.index + offset + gate.length}`
+          : `${match.index}:${match[0]}`;
+        if (locations.has(key)) continue;
+        locations.add(key);
+        matches.push(match);
+      }
       diagnostics.matches[definition.kind] = matches.length;
       if (matches.length !== 1) continue;
       const match = matches[0];
@@ -375,6 +397,7 @@
     const iterator = moduleTokens(source);
     const buffered = [];
     const edits = [];
+    const dependencies = [];
     const counts = { staticImports: 0, dynamicImports: 0, importMetaUrls: 0 };
     let previous = null;
     const peek = (offset = 0) => {
@@ -389,7 +412,9 @@
       const specifier = stringValue(token);
       counts[kind]++;
       if (specifier.startsWith(".") || specifier.startsWith("/")) {
-        edits.push({ start: token.start, end: token.end, text: JSON.stringify(new URL(specifier, url).href) });
+        const resolved = new URL(specifier, url).href;
+        dependencies.push(resolved);
+        edits.push({ start: token.start, end: token.end, text: JSON.stringify(resolved) });
       }
     };
     for (;;) {
@@ -456,7 +481,11 @@
       offset = edit.end;
     }
     chunks.push(source.slice(offset));
-    return { source: chunks.join(""), counts };
+    return { source: chunks.join(""), counts, dependencies };
+  }
+
+  function moduleDependencies(source, url) {
+    return rewriteModuleBase(source, url).dependencies;
   }
 
   function prepareModule(source, url) {
@@ -558,7 +587,7 @@
     }
   }
 
-  const api = { plan, transform, prepareModule, installModule, runtime };
+  const api = { plan, transform, prepareModule, installModule, moduleDependencies, runtime };
   if (typeof module === "object" && module.exports) module.exports = api;
   if (typeof window === "object") window.__codexElvesNativeFastUnlock = api;
 })();

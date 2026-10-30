@@ -42,27 +42,53 @@ pub(super) async fn install(
     )
     .await?;
     // app:// 不经过 Chromium Fetch 拦截器。在下一文档解析前通过 import map
-    // 复用同一模块的补丁副本；后台重注入只注册，不刷新正在使用的页面。
+    // 复用同一模块的补丁副本；先沿入口脚本的真实模块图查找目标模块，
+    // 这样 Codex 重排入口或改成动态 import 后仍能自动适配。
     let prepared = evaluate(
         session,
         r#"(async()=>{
-          if(location.protocol!=='app:'||location.host!=='-')return {ok:false};
-          const urls=new Set();
-          const entries=[...document.scripts].map(s=>s.src).filter(s=>{
-            try{const u=new URL(s);return u.origin===location.origin&&/^\/assets\/index-[\w-]+\.js$/.test(u.pathname)}catch{return false}
-          });
-          for(const entry of entries.slice(0,4)){
-            const response=await fetch(entry);if(!response.ok)continue;
-            const source=await response.text();if(source.length>24*1024*1024)return {ok:false};
-            for(const match of source.matchAll(/["'`]\.\/app-initial-([\w-]+)\.js["'`]/g)){
-              urls.add(new URL('./app-initial-'+match[1]+'.js',entry).href);
-            }
+          if(location.protocol!=='app:'||location.host!=='-')return {ok:false,reason:'unsupported-page'};
+          const isAssetModule=url=>{
+            try{
+              const parsed=new URL(url);
+              return parsed.origin===location.origin
+                && parsed.pathname.startsWith('/assets/')
+                && parsed.pathname.endsWith('.js');
+            }catch{return false}
+          };
+          const entries=[...document.scripts].map(s=>s.src).filter(isAssetModule);
+          const queue=entries.map(url=>({url}));
+          const queued=new Set(entries);
+          const scanned=[];
+          const scanLimit=128;
+          while(queue.length&&scanned.length<scanLimit){
+            const item=queue.shift();
+            if(!item||!isAssetModule(item.url))continue;
+            let response;
+            try{response=await fetch(item.url)}catch{continue}
+            if(!response.ok)continue;
+            const source=await response.text();
+            if(source.length>24*1024*1024)continue;
+            scanned.push(item.url);
+            const result=window.__codexElvesNativeFastUnlock.prepareModule(source,item.url);
+            if(result.ok)return{ok:true,url:item.url,patchedSource:result.patchedSource,scanned};
+            let dependencies=[];
+            try{dependencies=window.__codexElvesNativeFastUnlock.moduleDependencies(source,item.url)}catch{}
+            dependencies
+              .filter(isAssetModule)
+              .sort((left,right)=>{
+                const score=url=>/\/assets\/(?:app-(?:main|initial)-|index-)/.test(url)?0:1;
+                return score(left)-score(right);
+              })
+              .forEach(url=>{
+                if(!queued.has(url)){queued.add(url);queue.push({url})}
+              });
           }
-          if(urls.size!==1)return {ok:false};
-          const url=[...urls][0],response=await fetch(url);if(!response.ok)return {ok:false};
-          const source=await response.text();if(source.length>24*1024*1024)return {ok:false};
-          const result=window.__codexElvesNativeFastUnlock.prepareModule(source,url);
-          return result.ok?{ok:true,url,patchedSource:result.patchedSource}:{ok:false};
+          return{
+            ok:false,
+            reason:scanned.length>=scanLimit?'module-scan-limit':'module-not-found',
+            scanned
+          };
         })()"#,
     )
     .await?;
@@ -71,7 +97,8 @@ pub(super) async fn install(
         .context("原生 Fast 模块适配未返回结果")?;
     anyhow::ensure!(
         prepared["ok"] == true,
-        "当前 Codex 资产不支持原生 Fast 模块适配"
+        "当前 Codex 资产不支持原生 Fast 模块适配（{}）",
+        prepared["reason"].as_str().unwrap_or("unknown")
     );
     let url = prepared["url"]
         .as_str()
@@ -138,7 +165,7 @@ mod tests {
                     let result = match request["method"].as_str().unwrap() {
                         "Runtime.evaluate" => {
                             let expression = request["params"]["expression"].as_str().unwrap();
-                            let value = if expression.contains("prepareModule(source,url)") {
+                            let value = if expression.contains("prepareModule(source,item.url)") {
                                 if supported {
                                     json!({
                                         "ok": true,
