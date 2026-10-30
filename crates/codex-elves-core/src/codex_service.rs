@@ -253,6 +253,16 @@ impl CodexCliService {
         action: &str,
         error: &anyhow::Error,
     ) {
+        if is_nonfatal_missing_thread_failure(action, error) {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "remote_access.codex_service_thread_missing",
+                json!({
+                    "action": action,
+                    "error": truncate_error(&error.to_string())
+                }),
+            );
+            return;
+        }
         if is_nonfatal_optional_rpc_failure(action, error) {
             let _ = crate::diagnostic_log::append_diagnostic_log(
                 "remote_access.codex_service_optional_unavailable",
@@ -632,6 +642,17 @@ fn is_nonfatal_optional_rpc_failure(method: &str, error: &anyhow::Error) -> bool
     method == "thread/goal/get" && matches!(failure.code, -32600 | -32601)
 }
 
+fn is_nonfatal_missing_thread_failure(method: &str, error: &anyhow::Error) -> bool {
+    let Some(failure) = rpc_failure(error) else {
+        return false;
+    };
+    method == "thread/read"
+        && failure.method == "thread/read"
+        && (failure.message.contains("thread not loaded:")
+            || failure.message.contains("unknown thread:")
+            || failure.message.contains("no rollout found for thread id "))
+}
+
 fn is_configuration_failure(error: &anyhow::Error) -> bool {
     let text = error
         .chain()
@@ -814,6 +835,27 @@ mod tests {
         });
         assert!(is_nonfatal_optional_rpc_failure("thread/goal/get", &error));
         assert!(!is_nonfatal_optional_rpc_failure("thread/read", &error));
+    }
+
+    #[test]
+    fn missing_thread_read_keeps_service_available() {
+        let error = anyhow::Error::new(RpcFailure {
+            method: "thread/read".to_string(),
+            code: -32600,
+            message: "thread not loaded: side-thread".to_string(),
+        });
+        assert!(is_nonfatal_missing_thread_failure("thread/read", &error));
+        assert!(!is_nonfatal_missing_thread_failure("skills/list", &error));
+    }
+
+    #[test]
+    fn unrelated_thread_read_failure_still_restarts_service() {
+        let error = anyhow::Error::new(RpcFailure {
+            method: "thread/read".to_string(),
+            code: -32603,
+            message: "failed to reload config: C:/Users/test/.codex/config.toml".to_string(),
+        });
+        assert!(!is_nonfatal_missing_thread_failure("thread/read", &error));
     }
 
     #[test]

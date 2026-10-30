@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::path::{Component, Path as FsPath, PathBuf, Prefix};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -101,6 +101,7 @@ const MAX_INPUT_IMAGE_COUNT: usize = 4;
 const MAX_INPUT_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 const MAX_INPUT_IMAGES_TOTAL_BYTES: usize = 12 * 1024 * 1024;
 const MAX_ACTION_BODY_BYTES: usize = 18 * 1024 * 1024;
+const NATIVE_EVENT_FAILURE_GRACE: Duration = Duration::from_secs(3);
 static CONTROLLER: OnceLock<Arc<RemoteAccessController>> = OnceLock::new();
 static STARTUP_ERROR: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
 static WEB_ASSETS: OnceLock<HashMap<&'static str, StaticWebAsset>> = OnceLock::new();
@@ -1080,13 +1081,15 @@ impl RemoteAccessController {
         let pump = tokio::spawn(async move {
             let mut cursor = 0;
             let mut epoch = String::new();
+            let mut failure_since = None;
             loop {
-                match controller
+                let result = controller
                     .native
                     .call("events", json!({"cursor":cursor, "epoch":epoch}))
-                    .await
-                {
+                    .await;
+                match &result {
                     Ok(response) if response["ok"] == true => {
+                        failure_since = None;
                         if !controller.native_connected.swap(true, Ordering::SeqCst) {
                             controller.publish_event(json!({"method":"remote/reconnected"}));
                         }
@@ -1102,7 +1105,24 @@ impl RemoteAccessController {
                         }
                     }
                     _ => {
-                        if controller.native_connected.swap(false, Ordering::SeqCst) {
+                        let started = *failure_since.get_or_insert_with(Instant::now);
+                        if started.elapsed() >= NATIVE_EVENT_FAILURE_GRACE
+                            && controller.native_connected.swap(false, Ordering::SeqCst)
+                        {
+                            let error_message = match &result {
+                                Ok(response) => response["message"]
+                                    .as_str()
+                                    .unwrap_or("原生事件读取返回失败")
+                                    .to_owned(),
+                                Err(error) => error.to_string(),
+                            };
+                            let _ = crate::diagnostic_log::append_diagnostic_log(
+                                "remote_access.native_events_unavailable",
+                                json!({
+                                    "error": error_message,
+                                    "failureDurationMs": started.elapsed().as_millis()
+                                }),
+                            );
                             controller.publish_event(json!({"method":"remote/disconnected"}));
                         }
                     }
@@ -6751,7 +6771,7 @@ mod tests {
             .to_string();
         for online in [true, false, true] {
             native.online.store(online, Ordering::SeqCst);
-            tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::time::timeout(Duration::from_secs(5), async {
                 while controller.native_connected.load(Ordering::SeqCst) != online {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
