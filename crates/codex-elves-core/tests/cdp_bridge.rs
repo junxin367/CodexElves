@@ -3953,10 +3953,14 @@ fn remote_native_script_recognizes_current_request_client_without_global_manager
 
     assert!(script.contains("const isRequestClient = value =>"));
     assert!(script.contains("function requestClientManager(requestClient)"));
+    assert!(script.contains("return response?.thread || response;"));
     assert!(script.contains("const requestClientReadActions = new Set"));
-    assert!(script.contains(
-        "return { readOnly: false, viewKind: \"main\", parentThreadId: null, nativeBridgeUnavailable: true };"
-    ));
+    assert!(script.contains("\"markRead\""));
+    assert!(
+        script.contains("return { readOnly: false, viewKind: \"main\", parentThreadId: null };")
+    );
+    assert!(!script.contains("nativeBridgeUnavailable"));
+    assert!(!script.contains("nativeBridge: \"read_only\""));
 }
 
 #[test]

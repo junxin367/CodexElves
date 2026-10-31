@@ -224,10 +224,11 @@
         return thread?.cwd || thread?.workingDirectory || null;
       },
       async readThread(threadId, options = {}) {
-        return await requestClient.sendRequest("thread/read", {
+        const response = await requestClient.sendRequest("thread/read", {
           threadId,
           includeTurns: options.includeTurns === true
         });
+        return response?.thread || response;
       }
     };
   }
@@ -1501,7 +1502,7 @@
     "workspaceContext", "relatedThreads"]);
   const requestClientReadActions = new Set([
     "events", "notifications", "sidebar", "history", "thread", "models", "skills", "workspaceContext",
-    "relatedThreads", "createSideThread", "closeSideThread", "queue", "send", "sendState"
+    "relatedThreads", "createSideThread", "closeSideThread", "queue", "send", "sendState", "markRead"
   ]);
   async function guardThreadAction(action, payload) {
     if (payload?.threadId == null || nativeReadActions.has(action) || action === "dispose") return null;
@@ -1811,7 +1812,7 @@
   }
   async function threadViewIdentity(thread) {
     if (manager.__codexElvesRequestClientManager) {
-      return { readOnly: false, viewKind: "main", parentThreadId: null, nativeBridgeUnavailable: true };
+      return { readOnly: false, viewKind: "main", parentThreadId: null };
     }
     const identity = subagentIdentity(thread) || subagentIdentity(manager.getConversation(thread.id));
     if (identity) {
@@ -2393,6 +2394,8 @@
   async function markThreadRead(id) {
     id = requiredId(id);
     await readThread(id);
+    if (manager.__codexElvesRequestClientManager)
+      return { ok: true, threadId: id, skipped: true };
     if (typeof manager.markConversationAsRead !== "function") throw failure(503, "当前 Codex 版本的原生已读服务不可用");
     await manager.markConversationAsRead(id);
     catalogLoaded = false;
@@ -5053,7 +5056,6 @@
           refreshPendingNotifications();
           const reset = payload.epoch !== epoch || payload.cursor < (notifications[0]?.sequence || 1) - 1;
           return { ok: true, epoch, cursor: eventSequence, reset,
-            ...(manager.__codexElvesRequestClientManager ? { nativeBridge: "read_only" } : {}),
             events: notifications.filter(event => event.sequence > (payload.cursor || 0)).flatMap(({ event }) => {
               const { threadId, turnId = event.params?.turn?.id } = event.params || {};
               if (event.params?.item?.type !== "contextCompaction"
