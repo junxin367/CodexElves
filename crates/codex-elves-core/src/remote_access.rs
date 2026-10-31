@@ -225,17 +225,38 @@ impl ServiceFirstRemoteBridge {
         if action == "thread" {
             return self.call_thread_service_first(payload).await;
         }
-        match self.service.call(action, payload.clone()).await {
-            Ok(value) => Ok(value),
-            Err(service_error) => {
-                let _ = crate::diagnostic_log::append_diagnostic_log(
-                    "remote_access.codex_service_fallback",
-                    json!({
-                        "action": action,
-                        "error": service_error.to_string().chars().take(1_000).collect::<String>()
-                    }),
+        if service_first_action(action) {
+            return match self.service.call(action, payload.clone()).await {
+                Ok(value) => Ok(value),
+                Err(service_error) => {
+                    log_service_fallback(action, &service_error.to_string());
+                    self.cdp.call(action, payload).await
+                }
+            };
+        }
+        match self.cdp.call(action, payload.clone()).await {
+            Ok(value) if native_read_result_is_usable(action, &value) => Ok(value),
+            Ok(value) if service_write_action(action) && !native_write_fallback_allowed(&value) => {
+                Ok(value)
+            }
+            Ok(value) => {
+                log_service_fallback(
+                    action,
+                    value
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Codex 原生调用返回失败"),
                 );
-                self.cdp.call(action, payload).await
+                self.service.call(action, payload).await
+            }
+            Err(error)
+                if service_write_action(action) && !native_write_error_fallback_allowed(&error) =>
+            {
+                Err(error)
+            }
+            Err(error) => {
+                log_service_fallback(action, &error.to_string());
+                self.service.call(action, payload).await
             }
         }
     }
@@ -306,26 +327,107 @@ impl NativeRemoteBridge for ServiceFirstRemoteBridge {
                 Err(_) => Ok(service_value),
             };
         }
-        match self.service.call(action, payload.clone()).await {
-            Ok(value) => Ok(value),
-            Err(service_error) => {
-                let _ = crate::diagnostic_log::append_diagnostic_log(
-                    "remote_access.codex_service_fallback",
-                    json!({
-                        "action": action,
-                        "error": service_error.to_string().chars().take(1_000).collect::<String>()
-                    }),
+        if service_first_action(action) {
+            return match self.service.call(action, payload.clone()).await {
+                Ok(value) => Ok(value),
+                Err(service_error) => {
+                    log_service_fallback(action, &service_error.to_string());
+                    self.cdp
+                        .call_authorized(action, payload, authorization)
+                        .await
+                }
+            };
+        }
+        match self
+            .cdp
+            .call_authorized(action, payload.clone(), authorization)
+            .await
+        {
+            Ok(value) if native_read_result_is_usable(action, &value) => Ok(value),
+            Ok(value) if service_write_action(action) && !native_write_fallback_allowed(&value) => {
+                Ok(value)
+            }
+            Ok(value) => {
+                log_service_fallback(
+                    action,
+                    value
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Codex 原生调用返回失败"),
                 );
-                self.cdp
-                    .call_authorized(action, payload, authorization)
-                    .await
+                self.service.call(action, payload).await
+            }
+            Err(error)
+                if service_write_action(action) && !native_write_error_fallback_allowed(&error) =>
+            {
+                Err(error)
+            }
+            Err(error) => {
+                log_service_fallback(action, &error.to_string());
+                self.service.call(action, payload).await
             }
         }
     }
 }
 
 fn service_action(action: &str) -> bool {
+    matches!(
+        action,
+        "events"
+            | "notifications"
+            | "sidebar"
+            | "history"
+            | "models"
+            | "skills"
+            | "thread"
+            | "workspaceContext"
+            | "send"
+    )
+}
+
+fn service_first_action(action: &str) -> bool {
     matches!(action, "models" | "skills" | "thread" | "workspaceContext")
+}
+
+fn service_write_action(action: &str) -> bool {
+    action == "send"
+}
+
+fn native_read_result_is_usable(action: &str, value: &Value) -> bool {
+    value.get("ok").and_then(Value::as_bool) == Some(true)
+        && (action != "sidebar"
+            || value.get("nativeBridge").and_then(Value::as_str) != Some("read_only"))
+}
+
+fn native_write_fallback_allowed(value: &Value) -> bool {
+    value.get("ok").and_then(Value::as_bool) == Some(false)
+        && value.get("code").and_then(Value::as_i64) == Some(503)
+        && value
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(native_capability_message)
+}
+
+fn native_write_error_fallback_allowed(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ApiError>()
+        .is_some_and(|error| error.code == 503 && native_capability_message(&error.message))
+        || error.to_string().contains("当前 Codex 尚未完成原生注入")
+        || error.to_string().contains("未发现本机原生会话管理器")
+        || error.to_string().contains("Codex 桌面连接不可用")
+}
+
+fn native_capability_message(message: &str) -> bool {
+    message.contains("当前 Codex 尚未完成原生注入")
+        || message.contains("未发现本机原生会话管理器")
+        || message.contains("Codex 桌面连接不可用")
+}
+
+fn log_service_fallback(action: &str, error: &str) {
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "remote_access.codex_service_fallback",
+        json!({"action": action, "error": error.chars().take(1_000).collect::<String>()}),
+    );
 }
 
 fn merge_thread_service_metadata(mut cdp_value: Value, service_value: Value) -> Value {
@@ -624,6 +726,8 @@ pub struct RemoteAccessController {
     live: Mutex<LiveService>,
     running: AtomicBool,
     native_connected: AtomicBool,
+    service_connected: AtomicBool,
+    native_write_available: AtomicBool,
     events: broadcast::Sender<Value>,
     key_checks: Arc<tokio::sync::Semaphore>,
     public_origin: Arc<RwLock<Option<String>>>,
@@ -701,6 +805,8 @@ impl RemoteAccessController {
             }),
             running: AtomicBool::new(false),
             native_connected: AtomicBool::new(false),
+            service_connected: AtomicBool::new(false),
+            native_write_available: AtomicBool::new(false),
             events,
             key_checks: Arc::new(tokio::sync::Semaphore::new(4)),
             public_origin,
@@ -1008,6 +1114,8 @@ impl RemoteAccessController {
         self.primary.generation.fetch_add(1, Ordering::SeqCst);
         self.stop_frp(&mut live).await;
         self.native_connected.store(false, Ordering::SeqCst);
+        self.service_connected.store(false, Ordering::SeqCst);
+        self.native_write_available.store(false, Ordering::SeqCst);
         self.publish_event(json!({"method":"remote/disconnected"}));
         if let Some(handle) = live.handle.take() {
             handle.shutdown();
@@ -1087,11 +1195,39 @@ impl RemoteAccessController {
                     .native
                     .call("events", json!({"cursor":cursor, "epoch":epoch}))
                     .await;
+                let mut service_mode = false;
                 match &result {
                     Ok(response) if response["ok"] == true => {
                         failure_since = None;
-                        if !controller.native_connected.swap(true, Ordering::SeqCst) {
-                            controller.publish_event(json!({"method":"remote/reconnected"}));
+                        let service_response =
+                            response.get("nativeBridge").and_then(Value::as_str) == Some("service");
+                        service_mode = service_response;
+                        let was_connected = controller.native_connected.load(Ordering::SeqCst)
+                            || controller.service_connected.load(Ordering::SeqCst);
+                        let native_changed = controller
+                            .native_connected
+                            .swap(!service_response, Ordering::SeqCst)
+                            != !service_response;
+                        let service_changed = controller
+                            .service_connected
+                            .swap(service_response, Ordering::SeqCst)
+                            != service_response;
+                        let write_available = !service_response;
+                        let write_changed = controller
+                            .native_write_available
+                            .swap(write_available, Ordering::SeqCst)
+                            != write_available;
+                        if !was_connected {
+                            controller.publish_event(json!({
+                                "method":"remote/reconnected",
+                                "params":{
+                                    "nativeConnected":!service_response,
+                                    "serviceConnected":service_response
+                                }
+                            }));
+                        }
+                        if native_changed || service_changed || write_changed {
+                            controller.publish_event(json!({"method":"remote/resync"}));
                         }
                         epoch = response["epoch"].as_str().unwrap_or("").to_string();
                         cursor = response["cursor"].as_u64().unwrap_or(0);
@@ -1106,28 +1242,39 @@ impl RemoteAccessController {
                     }
                     _ => {
                         let started = *failure_since.get_or_insert_with(Instant::now);
-                        if started.elapsed() >= NATIVE_EVENT_FAILURE_GRACE
-                            && controller.native_connected.swap(false, Ordering::SeqCst)
-                        {
-                            let error_message = match &result {
-                                Ok(response) => response["message"]
-                                    .as_str()
-                                    .unwrap_or("原生事件读取返回失败")
-                                    .to_owned(),
-                                Err(error) => error.to_string(),
-                            };
-                            let _ = crate::diagnostic_log::append_diagnostic_log(
-                                "remote_access.native_events_unavailable",
-                                json!({
-                                    "error": error_message,
-                                    "failureDurationMs": started.elapsed().as_millis()
-                                }),
-                            );
-                            controller.publish_event(json!({"method":"remote/disconnected"}));
+                        if started.elapsed() >= NATIVE_EVENT_FAILURE_GRACE {
+                            let disconnected =
+                                controller.native_connected.swap(false, Ordering::SeqCst)
+                                    || controller.service_connected.swap(false, Ordering::SeqCst);
+                            controller
+                                .native_write_available
+                                .store(false, Ordering::SeqCst);
+                            if disconnected {
+                                let error_message = match &result {
+                                    Ok(response) => response["message"]
+                                        .as_str()
+                                        .unwrap_or("原生事件读取返回失败")
+                                        .to_owned(),
+                                    Err(error) => error.to_string(),
+                                };
+                                let _ = crate::diagnostic_log::append_diagnostic_log(
+                                    "remote_access.native_events_unavailable",
+                                    json!({
+                                        "error": error_message,
+                                        "failureDurationMs": started.elapsed().as_millis()
+                                    }),
+                                );
+                                controller.publish_event(json!({"method":"remote/disconnected"}));
+                            }
                         }
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(650)).await;
+                tokio::time::sleep(if service_mode {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_millis(650)
+                })
+                .await;
             }
         });
         Ok((handle, server, pump))
@@ -1145,6 +1292,8 @@ impl RemoteAccessController {
             "status":"ok", "enabled":settings.enabled,
             "running":self.running.load(Ordering::SeqCst),
             "nativeConnected":self.native_connected.load(Ordering::SeqCst),
+            "serviceConnected":self.service_connected.load(Ordering::SeqCst),
+            "nativeWriteAvailable":self.native_write_available.load(Ordering::SeqCst),
             "error":error, "addresses":access_addresses(settings),
             "devices":auth.devices.iter().filter(|device|device.expires_at_ms>now_ms())
                 .filter(|device|auth.access_key.as_ref().is_some_and(|key|device.key_id==key.id))
@@ -2580,11 +2729,23 @@ async fn session(
         .read()
         .unwrap_or_else(|error| error.into_inner());
     let diagnostics_request = state.controller.diagnostics.pending_for(&device.id).await;
+    let native_connected = state.controller.native_connected.load(Ordering::SeqCst);
+    let service_connected = state.controller.service_connected.load(Ordering::SeqCst);
+    let native_write_available = state
+        .controller
+        .native_write_available
+        .load(Ordering::SeqCst);
     Ok(Json(
-        json!({"ok":true,"device":device.public(),"nativeConnected":state.controller.native_connected.load(Ordering::SeqCst),
-        "readOnly":policy.read_only,"allowApprovals":policy.allow_approvals,
+        json!({"ok":true,"device":device.public(),"nativeConnected":native_connected,
+        "serviceConnected":service_connected,"nativeWriteAvailable":native_write_available,
+        "readOnly":policy.read_only,"allowApprovals":policy.allow_approvals && native_write_available,
         "diagnosticsRequest":diagnostics_request,
-        "capabilities":{"imageInput":true,"queuedImageRemoval":true,"queuedImageEditing":true,"queueEditRecovery":true,"queueSendRecovery":true,"projectlessCreation":true,"promptOptimization":true,"messageEditModelSettings":true,"goalComposer":true,"compactionQueueSend":true}}),
+        "capabilities":{"imageInput":native_write_available,"queuedImageRemoval":native_write_available,
+        "queuedImageEditing":native_write_available,"queueEditRecovery":native_write_available,
+        "queueSendRecovery":native_write_available,"projectlessCreation":native_write_available,
+        "promptOptimization":native_write_available,"messageEditModelSettings":native_write_available,
+        "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
+        "sendText":native_write_available || service_connected}}),
     ))
 }
 
@@ -4598,6 +4759,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn service_fallback_routes_main_session_capabilities_only() {
+        for action in [
+            "events",
+            "sidebar",
+            "history",
+            "thread",
+            "models",
+            "skills",
+            "workspaceContext",
+            "send",
+        ] {
+            assert!(service_action(action), "service action: {action}");
+        }
+        assert!(service_first_action("thread"));
+        assert!(service_first_action("models"));
+        assert!(!service_first_action("sidebar"));
+        assert!(service_write_action("send"));
+        assert!(!service_action("relatedThreads"));
+        assert!(!service_action("createSideThread"));
+        assert!(native_read_result_is_usable("sidebar", &json!({"ok":true})));
+        assert!(!native_read_result_is_usable(
+            "sidebar",
+            &json!({"ok":true,"nativeBridge":"read_only"})
+        ));
+        assert!(native_write_fallback_allowed(&json!({
+            "ok":false,"code":503,"message":"当前 Codex 尚未完成原生注入，远程会话暂只支持只读查看"
+        })));
+    }
+
+    #[test]
     fn related_threads_payload_rejects_extra_fields_and_parent_self_close() {
         for action in ["relatedThreads", "createSideThread"] {
             assert!(
@@ -5524,6 +5715,9 @@ mod tests {
             ..RemoteAccessSettings::default()
         });
         controller.running.store(true, Ordering::SeqCst);
+        controller
+            .native_write_available
+            .store(true, Ordering::SeqCst);
         {
             let mut auth = controller.auth.lock().await;
             let key_id = auth.access_key.as_ref().unwrap().id.clone();

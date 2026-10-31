@@ -133,10 +133,14 @@ export function RemoteAccessScreen({
   };
   const zrok = status?.zrok;
   const desktopReady = status?.status === "ok" && status.nativeConnected === true;
+  const serviceReady = status?.status === "ok" && status.serviceConnected === true;
+  const remoteReady = desktopReady || serviceReady;
   const desktopGuidance = !settings.enabled
     ? "请先启用上方「远程会话网页」，再重启 Codex 并等待主界面就绪，最后启动公网。"
     : desktopReady
       ? "Codex 桌面已连接，可以启动公网。后续重启 Codex 时，请等待主界面恢复后再刷新远程网页。"
+      : serviceReady
+        ? "Codex CLI service 已连接，主会话列表和文本消息可用；侧边会话、审批和其他原生能力需等待桌面注入恢复。"
       : DESKTOP_WAITING_GUIDANCE;
   const publicUrl = zrok?.publicUrl || "";
   const zrokInput = zrokValue.trim();
@@ -207,7 +211,7 @@ export function RemoteAccessScreen({
   const renderZrokBadge = () => {
     switch (zrok?.state) {
       case "ready":
-        return desktopReady
+        return remoteReady
           ? <span className="zrok-status-badge connected"><span className="zrok-status-dot" />可访问</span>
           : <span className="zrok-status-badge connecting" title="公网已连通，等待 Codex 桌面连接后才能读取会话。"><span className="zrok-status-dot" />等待 Codex 就绪</span>;
       case "checking":

@@ -47,6 +47,8 @@ export type RemoteAccessStatus = {
   enabled: boolean;
   running: boolean;
   nativeConnected: boolean;
+  serviceConnected?: boolean;
+  nativeWriteAvailable?: boolean;
   error?: string | null;
   addresses: string[];
   devices: RemoteAccessDevice[];

@@ -4612,7 +4612,7 @@ function readConnectionSession(signal, recoveryObservation = undefined, { resour
         connectionRtt = { deviceId: latest.device.id, nativeVersion, connectionVersion, milliseconds: elapsed };
       }
       const result = session && session.device.id === deviceId && nativeVersion !== nativeConnectionVersion
-        ? { ...latest, nativeConnected: session.nativeConnected } : latest;
+        ? { ...latest, nativeConnected: session.nativeConnected, serviceConnected: session.serviceConnected } : latest;
       sessionRecoveryReads.set(result, { expected, requestGeneration: request.recoveryGeneration });
       return result;
     })()
@@ -4651,7 +4651,7 @@ async function syncConnectionState(source = stream) {
     return false;
   }
   session = latest;
-  setConnection(latest.nativeConnected && source?.readyState === EventSource.OPEN);
+  setConnection((latest.nativeConnected || latest.serviceConnected) && source?.readyState === EventSource.OPEN);
   renderApprovals();
   return true;
 }
@@ -11816,7 +11816,7 @@ function setConnection(value) {
       || connectionRtt.nativeVersion !== nativeConnectionVersion
       || connectionRtt.connectionVersion !== connectionCycleVersion)) connectionRtt = null;
   const guidance = $("#desktop-connection-guidance");
-  if (guidance) guidance.hidden = session?.nativeConnected !== false;
+  if (guidance) guidance.hidden = session?.nativeConnected !== false || session?.serviceConnected === true;
   renderConnectionIndicator();
   updateComposer();
   if (thread?.requests?.some(request => request.method === "remote/requestUserInputAsync")) renderApprovals();
@@ -11945,9 +11945,14 @@ function receive(event) {
   if (event.method === "remote/unauthorized") { requireAuthentication(); return; }
   if (["remote/disconnected", "remote/reconnected"].includes(event.method)) {
     const available = event.method === "remote/reconnected";
+    const nativeAvailable = event.params?.nativeConnected ?? available;
+    const serviceAvailable = event.params?.serviceConnected ?? false;
     ++nativeConnectionVersion;
-    if (session) session.nativeConnected = available;
-    setConnection(available && stream?.readyState === EventSource.OPEN);
+    if (session) {
+      session.nativeConnected = nativeAvailable;
+      session.serviceConnected = serviceAvailable;
+    }
+    setConnection((nativeAvailable || serviceAvailable) && stream?.readyState === EventSource.OPEN);
     if (available) {
       void syncConnectionState().catch(() => {});
       void withRecoveryErrorSilence(() => refreshAll({ fresh: true })).catch(() => {});
@@ -12315,7 +12320,9 @@ function startConnectionPoll(deviceId) {
       }
       if (!isCurrent()) return;
       if (privateInputScope(current) !== privateInputScope(session)) { await reconnectChangedAuthorization(); return; }
-      session = current; setConnection(current.nativeConnected && stream?.readyState === EventSource.OPEN); renderApprovals();
+      session = current;
+      setConnection((current.nativeConnected || current.serviceConnected) && stream?.readyState === EventSource.OPEN);
+      renderApprovals();
       void loadSidebar(null, { resourcePriority: "background" }).catch(() => {});
     }
     finally { if (connectionPollPending === request) connectionPollPending = null; }
