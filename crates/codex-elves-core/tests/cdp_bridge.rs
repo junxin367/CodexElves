@@ -171,6 +171,27 @@ fn request_client_related_threads_degrade_without_blocking_main_reads() {
 }
 
 #[test]
+fn request_client_side_creation_accepts_native_id_before_dom_tab() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("core crate should live under crates/codex-elves-core");
+    let script = std::fs::read_to_string(repo.join("assets/remote-access/native.js")).unwrap();
+    assert!(script.contains("function rememberRequestClientSideThread(threadId, parentThreadId"));
+    assert!(script.contains("function requestClientSideView(threadId, parentThreadId"));
+    assert!(
+        script
+            .contains("const confirmed = requestClientSideView(threadId, parentThreadId, title);")
+    );
+    assert!(script.contains("request-client 的 thread/list 和 DOM 标签可能晚于原生 open 返回"));
+    assert!(
+        script.contains("const recentRequestClientSide = manager.__codexElvesRequestClientManager")
+    );
+    assert!(script.contains("missingThreadError(error) || sideThreadLoadError(error)"));
+    assert!(script.contains("create_side_thread.refresh"));
+}
+
+#[test]
 fn remote_refresh_keeps_main_thread_refresh_independent_from_sidebar_failure() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

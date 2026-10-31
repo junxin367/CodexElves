@@ -1439,7 +1439,8 @@
   }
   async function readThreadMetadata(id) {
     const sourceManager = manager;
-    const createdAt = timestamp(sourceManager.getConversation(id)?.createdAt);
+    const createdAt = timestamp(sourceManager.getConversation(id)?.createdAt
+      ?? requestClientSideThreads.get(id)?.createdAtMs);
     const now = Date.now(), expiresAt = createdAt + INITIAL_THREAD_METADATA_WINDOW_MS;
     if (!Number.isFinite(createdAt) || createdAt <= 0 || createdAt > now || now >= expiresAt)
       return sourceManager.readThread(id, { includeTurns: false });
@@ -1454,7 +1455,11 @@
         try { return await sourceManager.readThread(id, { includeTurns: false }); }
         catch (error) {
           const delay = INITIAL_THREAD_METADATA_RETRY_DELAYS[attempt];
-          if (delay == null || !initialThreadMetadataError(error, id) || !active()
+          const recentRequestClientSide = manager.__codexElvesRequestClientManager
+            && requestClientSideThreads.has(id);
+          const retryable = initialThreadMetadataError(error, id)
+            || recentRequestClientSide && (missingThreadError(error) || sideThreadLoadError(error));
+          if (delay == null || !retryable || !active()
               || Date.now() + delay >= expiresAt) throw error;
           await new Promise(resolve => setTimeout(resolve, delay));
           if (!active() || Date.now() >= expiresAt) throw error;
@@ -1781,6 +1786,27 @@
     }
     return entries;
   }
+  function rememberRequestClientSideThread(threadId, parentThreadId, title = "侧边聊天") {
+    if (!manager?.__codexElvesRequestClientManager || typeof threadId !== "string"
+        || typeof parentThreadId !== "string" || !threadId || !parentThreadId
+        || threadId === parentThreadId) return null;
+    const current = requestClientSideThreads.get(threadId);
+    if (current?.parentThreadId && current.parentThreadId !== parentThreadId) return null;
+    const entry = {
+      threadId, parentThreadId,
+      title: typeof title === "string" && title.trim() ? title.trim() : current?.title || "侧边聊天",
+      createdAtMs: current?.createdAtMs || Date.now()
+    };
+    requestClientSideThreads.set(threadId, entry);
+    return entry;
+  }
+  function requestClientSideView(threadId, parentThreadId, title = "侧边聊天") {
+    const entry = rememberRequestClientSideThread(threadId, parentThreadId, title);
+    if (!entry) return null;
+    return { readOnly: false, viewKind: "side", parentThreadId: entry.parentThreadId,
+      title: entry.title, ephemeral: true, sideThreadClosed: false,
+      sideHistoryVersion: 1, inheritedTurnIds: [] };
+  }
   function syncNativeSideThreads(native) {
     const sourceManager = manager, scopes = nativeSideScopes(native), next = new Map(), nodes = new Set();
     for (const scope of scopes) {
@@ -2021,6 +2047,31 @@
       });
       if (id == null) throw failure(409, "Codex 已取消侧边会话创建，请重新打开菜单");
       threadId = requiredId(id);
+      if (manager.__codexElvesRequestClientManager) {
+        let thread = sourceManager.getConversation(threadId);
+        if (!thread) {
+          try { thread = await readThread(threadId); }
+          catch (error) {
+            // request-client 的 thread/list 和 DOM 标签可能晚于原生 open 返回；
+            // 原生 open 已返回稳定线程 ID时，不能把这个异步窗口误报为创建未知。
+            reportSideFeatureDegraded("create_side_thread.read", error, { threadId, parentThreadId });
+          }
+        }
+        const title = thread?.title || thread?.name || "侧边聊天";
+        const confirmed = requestClientSideView(threadId, parentThreadId, title);
+        if (!confirmed) throw new Error("原生侧边会话父子关系无法确认");
+        // 标签和 request-client 快照随后会异步出现，后台补齐标题及菜单数据。
+        queueMicrotask(() => {
+          void sideThreadEntries().then(() => {
+            emit({ method: "remote/relatedThreadsChanged", params: { threadId: parentThreadId } });
+            emit({ method: "remote/sidebarChanged", params: { threadId, parentThreadId } });
+          }).catch(error => reportSideFeatureDegraded(
+            "create_side_thread.refresh", error, { threadId, parentThreadId }));
+        });
+        return { ok: true, threadId, parentThreadId,
+          thread: { ...(thread ? summary(thread) : { id: threadId, title: confirmed.title }),
+            ...(thread ? runtimeThread(threadId, thread, confirmed) : {}), ...confirmed } };
+      }
       const entries = await sideThreadEntries();
       const domEntries = domSideThreadEntries(parentThreadId);
       for (const entry of domEntries) {
@@ -2028,13 +2079,6 @@
       }
       const thread = sourceManager.getConversation(threadId)
         || await readThread(threadId).catch(() => null);
-      if (manager.__codexElvesRequestClientManager) {
-        const view = nativeSideIdentity(thread || { id: threadId }, entries);
-        if (!view) throw new Error("原生侧边标签尚未确认");
-        return { ok: true, threadId, parentThreadId,
-          thread: { ...(thread ? summary(thread) : { id: threadId, title: view.title }),
-            ...(thread ? runtimeThread(threadId, thread, view) : {}), ...view } };
-      }
       if (manager !== sourceManager || sourceManager.disposed || !thread || thread.forkedFromId !== parentThreadId
           || thread.sideConversation !== true || subagentIdentity(thread))
         throw new Error("原生侧边会话身份尚未确认");
