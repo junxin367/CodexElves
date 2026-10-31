@@ -43,6 +43,7 @@
   const nativeSideThreads = new Map();
   const sideThreadTitleWrites = new Map();
   const sideScopeWatchers = new Map();
+  const requestClientSideThreads = new Map();
   const goalSubmissions = new Map();
   const isDeletedThread = id => typeof id === "string" && deletedThreadIds.has(id.toLowerCase());
   const questionReplyStore = (() => {
@@ -181,10 +182,17 @@
     return {};
   };
   function minimalManagerStorage() {
+    const existing = window.__codexElvesRemoteRequestClientStorage;
+    const values = existing instanceof Map ? existing : new Map();
+    window.__codexElvesRemoteRequestClientStorage = values;
     return {
       async readGlobalState(key) { return requestClientSnapshotState(key); },
-      readValue() { return null; },
-      writeValue() { return false; },
+      readValue(key) { return values.has(key) ? values.get(key) : null; },
+      writeValue(key, value) {
+        if (value === undefined) values.delete(key);
+        else values.set(key, value);
+        return true;
+      },
       readQueuedFollowUps() { return null; }
     };
   }
@@ -224,11 +232,24 @@
         return thread?.cwd || thread?.workingDirectory || null;
       },
       async readThread(threadId, options = {}) {
-        const response = await requestClient.sendRequest("thread/read", {
-          threadId,
-          includeTurns: options.includeTurns === true
-        });
-        return response?.thread || response;
+        const includeTurns = options.includeTurns === true;
+        try {
+          const response = await requestClient.sendRequest("thread/read", { threadId, includeTurns });
+          return response?.thread || response;
+        } catch (error) {
+          if (!includeTurns || !String(error?.message || "").includes("ephemeral threads do not support includeTurns"))
+            throw error;
+          const response = await requestClient.sendRequest("thread/read", { threadId, includeTurns: false });
+          const thread = response?.thread || response;
+          try {
+            const turns = await requestClient.sendRequest("thread/turns/list", {
+              threadId, cursor: null, limit: 100, itemsView: "full", sortDirection: "asc"
+            });
+            return { ...thread, turns: array(turns?.data).map(item => item?.turn || item) };
+          } catch {
+            return thread;
+          }
+        }
       }
     };
   }
@@ -1502,7 +1523,7 @@
     "workspaceContext", "relatedThreads"]);
   const requestClientReadActions = new Set([
     "events", "notifications", "sidebar", "history", "thread", "models", "skills", "workspaceContext",
-    "relatedThreads", "createSideThread", "closeSideThread", "queue", "send", "sendState", "markRead"
+    "relatedThreads", "createSideThread", "closeSideThread", "queue", "send", "sendState", "markRead", "sort"
   ]);
   async function guardThreadAction(action, payload) {
     if (payload?.threadId == null || nativeReadActions.has(action) || action === "dispose") return null;
@@ -1736,6 +1757,30 @@
     }
     return scopes;
   }
+  function domSideThreadEntries(parentThreadId = null) {
+    const entries = [];
+    for (const element of document.querySelectorAll(
+      '[data-app-shell-tab-controller][data-tab-id^="sidechat:"]'
+    )) {
+      const tabId = element.getAttribute("data-tab-id") || "";
+      const threadId = tabId.slice("sidechat:".length);
+      if (!/^[a-zA-Z0-9_-]{1,120}$/.test(threadId)) continue;
+      const known = nativeSideThreads.get(threadId) || requestClientSideThreads.get(threadId);
+      const parentId = known?.parentThreadId || parentThreadId;
+      if (!parentId || parentId === threadId) continue;
+      const title = element.textContent?.replace(/\s+/g, " ").trim();
+      const entry = {
+        threadId, parentThreadId: parentId,
+        title: title || known?.title || "侧边聊天",
+        createdAtMs: known?.createdAtMs || Date.now()
+      };
+      if (manager.__codexElvesRequestClientManager)
+        requestClientSideThreads.set(threadId, entry);
+      else if (!known) nativeSideThreads.set(threadId, entry);
+      entries.push(entry);
+    }
+    return entries;
+  }
   function syncNativeSideThreads(native) {
     const sourceManager = manager, scopes = nativeSideScopes(native), next = new Map(), nodes = new Set();
     for (const scope of scopes) {
@@ -1783,7 +1828,14 @@
     return [...next.values()];
   }
   async function sideThreadEntries() {
-    return syncNativeSideThreads(await nativeSideState());
+    const entries = syncNativeSideThreads(await nativeSideState());
+    if (manager.__codexElvesRequestClientManager) {
+      const known = new Set(entries.map(entry => entry.threadId));
+      for (const entry of domSideThreadEntries()) {
+        if (!known.has(entry.threadId)) entries.push(entry);
+      }
+    }
+    return entries;
   }
   async function nativeSideScope(parentThreadId, native) {
     const find = () => nativeSideScopes(native).find(scope => scope.value.conversationId === parentThreadId);
@@ -1800,6 +1852,11 @@
   function nativeSideIdentity(thread, entries) {
     const entry = entries.find(entry => entry.threadId === thread.id);
     if (!entry) return null;
+    if (manager.__codexElvesRequestClientManager) {
+      return { readOnly: false, viewKind: "side", parentThreadId: entry.parentThreadId,
+        title: entry.title, ephemeral: true, sideThreadClosed: false,
+        sideHistoryVersion: 1, inheritedTurnIds: [] };
+    }
     const conversation = manager.getConversation(thread.id);
     if (!conversation) return null;
     // 临时会话的 thread/read 不返回 fork 来源；父关系由原生内存会话和侧边标签共同确认。
@@ -1812,6 +1869,9 @@
   }
   async function threadViewIdentity(thread) {
     if (manager.__codexElvesRequestClientManager) {
+      const entries = [...await sideThreadEntries(), ...domSideThreadEntries()];
+      const side = nativeSideIdentity(thread, entries);
+      if (side) return side;
       return { readOnly: false, viewKind: "main", parentThreadId: null };
     }
     const identity = subagentIdentity(thread) || subagentIdentity(manager.getConversation(thread.id));
@@ -1843,14 +1903,19 @@
       let canCreateSideThread = false;
       try {
         const entries = await sideThreadEntries();
-        sideThreads = entries.filter(entry => entry.parentThreadId === threadId).flatMap(entry => {
-          const thread = manager.getConversation(entry.threadId);
-          if (!thread) return [];
+        for (const entry of domSideThreadEntries(threadId)) {
+          if (!entries.some(current => current.threadId === entry.threadId))
+            entries.push(entry);
+        }
+        for (const entry of entries.filter(entry => entry.parentThreadId === threadId)) {
+          const thread = manager.getConversation(entry.threadId)
+            || await readThread(entry.threadId).catch(() => null);
+          if (!thread) continue;
           const item = summary(thread);
-          return [{ id: entry.threadId, title: entry.title, createdAtMs: entry.createdAtMs,
+          sideThreads.push({ id: entry.threadId, title: entry.title, createdAtMs: entry.createdAtMs,
             running: item.priority.active && item.priority.attentionState !== "waiting",
-            hasUnreadTurn: completedSideThreadUnread(thread, item) }];
-        });
+            hasUnreadTurn: completedSideThreadUnread(thread, item) });
+        }
         const native = await nativeSideState();
         const scopes = nativeSideScopes(native);
         const scope = scopes.find(entry => entry.value.conversationId === threadId);
@@ -1956,7 +2021,20 @@
       });
       if (id == null) throw failure(409, "Codex 已取消侧边会话创建，请重新打开菜单");
       threadId = requiredId(id);
-      const entries = await sideThreadEntries(), thread = sourceManager.getConversation(threadId);
+      const entries = await sideThreadEntries();
+      const domEntries = domSideThreadEntries(parentThreadId);
+      for (const entry of domEntries) {
+        if (!entries.some(current => current.threadId === entry.threadId)) entries.push(entry);
+      }
+      const thread = sourceManager.getConversation(threadId)
+        || await readThread(threadId).catch(() => null);
+      if (manager.__codexElvesRequestClientManager) {
+        const view = nativeSideIdentity(thread || { id: threadId }, entries);
+        if (!view) throw new Error("原生侧边标签尚未确认");
+        return { ok: true, threadId, parentThreadId,
+          thread: { ...(thread ? summary(thread) : { id: threadId, title: view.title }),
+            ...(thread ? runtimeThread(threadId, thread, view) : {}), ...view } };
+      }
       if (manager !== sourceManager || sourceManager.disposed || !thread || thread.forkedFromId !== parentThreadId
           || thread.sideConversation !== true || subagentIdentity(thread))
         throw new Error("原生侧边会话身份尚未确认");

@@ -3953,9 +3953,13 @@ fn remote_native_script_recognizes_current_request_client_without_global_manager
 
     assert!(script.contains("const isRequestClient = value =>"));
     assert!(script.contains("function requestClientManager(requestClient)"));
+    assert!(script.contains("window.__codexElvesRemoteRequestClientStorage"));
+    assert!(script.contains("data-app-shell-tab-controller"));
     assert!(script.contains("return response?.thread || response;"));
+    assert!(script.contains("ephemeral threads do not support includeTurns"));
     assert!(script.contains("const requestClientReadActions = new Set"));
     assert!(script.contains("\"markRead\""));
+    assert!(script.contains("\"sort\""));
     assert!(
         script.contains("return { readOnly: false, viewKind: \"main\", parentThreadId: null };")
     );
