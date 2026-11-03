@@ -109,7 +109,14 @@ jobs:
         run: npm run vite:build
 
       - name: Rust tests
-        run: cargo test --workspace
+        run: cargo test --workspace -- --skip remote_access::tests::
+
+      - name: 远程访问集成测试（串行）
+        # 多个测试使用不同密钥，共享进程内单项 KDF 缓存；串行避免缓存抖动耗尽临时授权时间。
+        run: cargo test -p codex-elves-core --lib remote_access::tests:: -- --test-threads=1
+
+      - name: 远程会话回归证据校验测试
+        run: node --test scripts/remote-access-e2e-evidence.test.mjs scripts/remote-access-e2e-environment.test.mjs scripts/remote-access-e2e-receipt-driver.test.mjs scripts/remote-access-ui-state.test.mjs
 
       - name: Build release binaries
         run: cargo build --release

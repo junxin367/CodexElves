@@ -11,6 +11,7 @@ pub mod codex_sqlite;
 mod compaction_cache;
 mod computer_use_guard;
 pub mod continue_thinking;
+mod desktop_owner_ipc;
 pub mod diagnostic_log;
 pub mod env_conflicts;
 pub mod http_client;

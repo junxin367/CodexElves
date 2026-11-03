@@ -46,8 +46,9 @@ use windows::core::{Interface, PCWSTR, PWSTR};
 
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x08000000;
-pub const DETACHED_PROCESS: u32 = 0x00000008;
-pub const HIDDEN_PROCESS_FLAGS: u32 = CREATE_NO_WINDOW | DETACHED_PROCESS;
+// DETACHED_PROCESS makes Windows ignore CREATE_NO_WINDOW. A detached shell can
+// then create a visible console when it starts the actual CLI process.
+pub const HIDDEN_PROCESS_FLAGS: u32 = CREATE_NO_WINDOW;
 
 #[cfg(windows)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -572,7 +573,65 @@ impl Drop for RegistryKeyGuard {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn hidden_background_processes_keep_descendants_hidden_and_preserve_stdio() {
+        const STAGE: &str = "CODEX_ELVES_HIDDEN_PROCESS_TEST_STAGE";
+        const TEST: &str = "windows_integration::tests::hidden_background_processes_keep_descendants_hidden_and_preserve_stdio";
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetConsoleWindow() -> HWND;
+        }
+
+        let stage = std::env::var(STAGE).unwrap_or_default();
+        if stage == "leaf" {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input).unwrap();
+            assert!(unsafe { GetConsoleWindow() }.is_invalid());
+            println!("hidden-stdout:{input}");
+            eprintln!("hidden-stderr");
+            std::process::exit(23);
+        }
+
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", TEST, "--nocapture"])
+            .env(STAGE, if stage == "relay" { "leaf" } else { "relay" })
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // The CLI wrapper's child uses the default creation flags. It must
+        // inherit the parent's windowless console rather than allocate one.
+        if stage != "relay" {
+            command.creation_flags(HIDDEN_PROCESS_FLAGS);
+        }
+        let mut child = command.spawn().unwrap();
+        let mut input = String::from("hidden-stdin");
+        if stage == "relay" {
+            input.clear();
+            std::io::stdin().read_to_string(&mut input).unwrap();
+        }
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        if stage == "relay" {
+            std::io::stdout().write_all(&output.stdout).unwrap();
+            std::io::stderr().write_all(&output.stderr).unwrap();
+            std::process::exit(output.status.code().unwrap_or(1));
+        }
+        assert_eq!(output.status.code(), Some(23));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("hidden-stdout:hidden-stdin"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("hidden-stderr"));
+    }
 
     #[test]
     fn activating_existing_process_restores_its_minimized_window() {

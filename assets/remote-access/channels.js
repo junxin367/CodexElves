@@ -281,12 +281,19 @@ export async function requestRemote(path, options, consume, measurements = chann
       const cancelled = attemptOptions.signal?.aborted && attemptOptions.signal.reason?.name !== "TimeoutError";
       const attemptTimedOut = controller?.signal.aborted && controller.signal.reason?.name === "TimeoutError";
       const transportFailure = !receivedResponse || error.responseReadFailed || attemptTimedOut;
+      // 某项原生能力不可用，不代表接入服务或其它功能的线路故障。
+      // 仍保留网络/网关错误、服务级测速失败与 Retry-After 的退避。
+      const featureReadFailure = read && (pathname.startsWith("/api/read/") || pathname.startsWith("/api/workspace/"))
+        && !transportFailure && error.code === 503 && error.remoteApplicationError === true
+        && !response?.headers.get("Retry-After")?.trim();
       let currentFailure = true;
-      if (!cancelled && observedGeneration === generation && (transportFailure || [429, 502, 503, 504].includes(error.code)))
+      // 功能错误对线路健康保持中性，不能清除并发测速/网关失败建立的退避。
+      if (!featureReadFailure && !cancelled && observedGeneration === generation
+          && (transportFailure || [429, 502, 503, 504].includes(error.code)))
         currentFailure = failedRoute(route, response, requestSequence);
       if (!cancelled && currentFailure && (transportFailure || route.token && error.code === 401))
         onUnavailable?.(route.origin);
-      if (!read || cancelled || options.signal?.aborted || observedGeneration !== generation || error.outcomeUnknown
+      if (!read || featureReadFailure || cancelled || options.signal?.aborted || observedGeneration !== generation || error.outcomeUnknown
           || receivedResponse && !attemptTimedOut && !error.responseReadFailed && ![429, 502, 503, 504].includes(error.code)) throw error;
     } finally {
       clearTimeout(timer);

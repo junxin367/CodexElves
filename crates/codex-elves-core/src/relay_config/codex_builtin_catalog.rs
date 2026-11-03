@@ -267,6 +267,8 @@ fn file_modified_time(path: &Path) -> Option<SystemTime> {
 
 async fn probe_codex_cli_version(executable: &Path) -> Option<CodexCliVersion> {
     let mut command = Command::new(executable);
+    #[cfg(windows)]
+    command.creation_flags(crate::windows_integration::CREATE_NO_WINDOW);
     command
         .arg("--version")
         .kill_on_drop(true)
@@ -417,6 +419,8 @@ fn compare_version_identifiers(left: &VersionIdentifier, right: &VersionIdentifi
 
 async fn export_bundled_catalog_from(executable: &Path) -> anyhow::Result<Value> {
     let mut command = Command::new(executable);
+    #[cfg(windows)]
+    command.creation_flags(crate::windows_integration::CREATE_NO_WINDOW);
     command
         .args(["debug", "models", "--bundled"])
         .kill_on_drop(true)

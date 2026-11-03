@@ -50,6 +50,8 @@ pub fn find_latest_codex_app_dir_default() -> Option<PathBuf> {
 
 #[cfg(windows)]
 fn find_latest_codex_app_dir_from_appx_package() -> Option<PathBuf> {
+    use std::os::windows::process::CommandExt;
+
     let output = Command::new("powershell")
         .args([
             "-NoProfile",
@@ -58,6 +60,7 @@ fn find_latest_codex_app_dir_from_appx_package() -> Option<PathBuf> {
             "-Command",
             "Get-AppxPackage -Name OpenAI.Codex* | Where-Object { @('OpenAI.Codex','OpenAI.CodexBeta') -contains $_.Name } | Sort-Object Version -Descending | Select-Object -First 1 -ExpandProperty InstallLocation",
         ])
+        .creation_flags(crate::windows_integration::CREATE_NO_WINDOW)
         .output()
         .ok()?;
     if !output.status.success() {

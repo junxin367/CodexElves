@@ -72,7 +72,7 @@
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
   const codexOpenInButtonAttribute = "data-codex-open-in-button";
-  const codexOpenInVersion = "11";
+  const codexOpenInVersion = "13";
   const codexOpenInGroupClass = "codex-open-in-group";
   const codexOpenInMenuClass = "codex-open-in-menu";
   const codexOpenInTargetsCacheLimit = 12;
@@ -80,7 +80,7 @@
   const codexOpenInActivationDebounceMs = 500;
   const codexOpenInServiceDiscoveryCooldownMs = 30000;
   const codexOpenInContextMissingCooldownMs = 5000;
-  const codexPromptOptimizeVersion = "18";
+  const codexPromptOptimizeVersion = "19";
   const codexPromptOptimizeButtonAttribute = "data-codex-prompt-optimize-button";
   const codexPromptOptimizePortalClass = "codex-prompt-optimize-portal";
   const codexPromptOptimizeSettingsOverlayClass = "codex-prompt-optimize-settings-overlay";
@@ -6903,6 +6903,11 @@
         throw new Error("invalid backend settings response");
       }
       void applyLoadedBackendSettings(settings, "settings-loaded");
+      void promptOptimizeLoadBackendSettings().catch((error) => {
+        sendCodexElvesDiagnostic("prompt_optimize_settings_sync_failed", {
+          message: String(error?.message || error),
+        });
+      });
       return true;
     } catch (_) {
       refreshCodexElvesBackendToggles();
@@ -14276,6 +14281,35 @@
   let promptOptimizeComposerKeySequence = 0;
   let promptOptimizeSettingsOverlay = null;
   let promptOptimizeTestDom = null;
+  let promptOptimizeSettingsSync = Promise.resolve();
+  let promptOptimizeBackendSettingsLoaded = false;
+
+  function promptOptimizePersistSettings(settings) {
+    const snapshot = JSON.parse(JSON.stringify(settings));
+    const sync = promptOptimizeSettingsSync.catch(() => {}).then(async () => {
+      const result = await postJson("/prompt-optimize/settings", { settings: snapshot });
+      if (result?.status !== "ok") throw new Error(result?.message || "提示词优化设置同步失败");
+    });
+    promptOptimizeSettingsSync = sync;
+    void sync.catch(() => {});
+    return sync;
+  }
+
+  async function promptOptimizeLoadBackendSettings() {
+    if (promptOptimizeBackendSettingsLoaded) return;
+    const stored = localStorage.getItem(codexPromptOptimizeSettingsKey);
+    if (stored) {
+      await promptOptimizePersistSettings(promptOptimizeReadSettings());
+    } else {
+      const result = await postJson("/prompt-optimize/settings", {});
+      if (result?.status !== "ok") throw new Error(result?.message || "提示词优化设置读取失败");
+      // 等待读取时用户可能已经保存新设置，不覆盖这次编辑。
+      if (!localStorage.getItem(codexPromptOptimizeSettingsKey)) {
+        localStorage.setItem(codexPromptOptimizeSettingsKey, JSON.stringify(result.settings));
+      }
+    }
+    promptOptimizeBackendSettingsLoaded = true;
+  }
 
   function promptOptimizeDefaultSettings() {
     return {
@@ -14355,6 +14389,7 @@
       ),
     };
     localStorage.setItem(codexPromptOptimizeSettingsKey, JSON.stringify(next));
+    void promptOptimizePersistSettings(next);
     return next;
   }
 
@@ -14867,7 +14902,7 @@
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
       selectModelOption(target?.closest?.("[data-codex-prompt-optimize-model-option]"));
     });
-    overlay.addEventListener("click", (event) => {
+    overlay.addEventListener("click", async (event) => {
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
       if (!target?.closest?.(".codex-prompt-optimize-model-combobox")) {
         setModelMenuOpen(false);
@@ -14919,6 +14954,11 @@
           includeRecentContext: contextCheckbox?.checked === true,
           prompts,
         });
+        try { await promptOptimizeSettingsSync; }
+        catch (error) {
+          showToast(`设置已保存在本页，远程同步失败：${error.message}`);
+          return;
+        }
         promptOptimizeCloseSettings();
         promptOptimizeRefreshButtonState();
         showToast("提示词优化设置已保存");
@@ -25390,11 +25430,20 @@
       || null;
   }
 
+  function codexOpenInTargetPath(context) {
+    const path = context.cwd;
+    if (context.hostId !== "local" || typeof path !== "string") return path;
+    // Windows 文件系统接受扩展路径，系统 Shell 的打开入口需要普通盘符或 UNC 路径。
+    if (/^\\\\\?\\UNC\\/i.test(path)) return `\\\\${path.slice(8)}`;
+    if (/^\\\\\?\\[a-z]:[\\/]/i.test(path)) return path.slice(4);
+    return path;
+  }
+
   async function openCodexOpenInTarget(context, target) {
     if (codexOpenInTestApi?.open) return await codexOpenInTestApi.open({ context, target });
     const service = await loadCodexOpenInService();
     return await service.open({
-      path: context.cwd,
+      path: codexOpenInTargetPath(context),
       cwd: context.cwd,
       hostId: context.hostId,
       target: target.target,
@@ -25502,12 +25551,22 @@
   }
 
   function codexOpenInAnchor() {
-    const surface = document.querySelector(selectors.headerContextMenuSurface);
-    const group = Array.from(surface?.querySelectorAll("div") || []).find((node) => {
-      const className = String(node.className || "");
-      return className.includes("ms-auto") && className.includes("items-center");
-    });
-    if (group) {
+    const surface = Array.from(document.querySelectorAll(selectors.headerContextMenuSurface))
+      .find((node) => !node.closest('[aria-hidden="true"], [inert]'));
+    const titlebar = surface?.closest("[data-app-shell-titlebar]");
+    // 完整视图将操作区移到同一标题栏的 end slot，context surface 内只保留聊天选项卡。
+    const roots = [
+      surface,
+      ...Array.from(titlebar?.querySelectorAll('[data-app-shell-header-slot="end"]') || [])
+        .filter((node) => node.closest("[data-app-shell-titlebar]") === titlebar),
+    ].filter(Boolean);
+    for (const root of roots) {
+      const group = Array.from(root.querySelectorAll("div")).find((node) => {
+        if (node.closest('[aria-hidden="true"], [inert], [role="tab"], [role="tablist"], [data-tab-id]')) return false;
+        const className = String(node.className || "");
+        return className.includes("ms-auto") && className.includes("items-center");
+      });
+      if (!group) continue;
       const before = Array.from(group.childNodes || []).find((node) => (
         node.nodeType !== 1 || node.getAttribute?.(codexOpenInButtonAttribute) !== "true"
       )) || null;

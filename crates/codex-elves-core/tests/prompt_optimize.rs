@@ -10,6 +10,30 @@ use codex_elves_core::settings::{
 };
 use serde_json::{Value, json};
 
+#[test]
+fn saved_optimizer_preferences_control_remote_payload_without_desktop_state() {
+    use codex_elves_core::prompt_optimize::{load_preferences, save_preferences};
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp");
+    std::fs::create_dir_all(&root).unwrap();
+    let directory = tempfile::Builder::new()
+        .prefix("optimizer-settings-")
+        .tempdir_in(root)
+        .unwrap();
+    let mut preferences = load_preferences(directory.path()).unwrap();
+    assert_eq!(preferences["style"], "concise");
+    assert_eq!(preferences["includeRecentContext"], false);
+    preferences["model"] = json!("gpt-preference");
+    preferences["reasoningEffort"] = json!("high");
+    preferences["style"] = json!("coding");
+    preferences["prompts"]["coding"] = json!("保留自定义优化模板");
+    save_preferences(directory.path(), &preferences).unwrap();
+    assert_eq!(load_preferences(directory.path()).unwrap(), preferences);
+    let mut invalid = preferences.clone();
+    invalid["prompts"]["coding"] = json!("");
+    assert!(save_preferences(directory.path(), &invalid).is_err());
+    assert_eq!(load_preferences(directory.path()).unwrap(), preferences);
+}
+
 struct TestServer {
     base_url: String,
     handle: thread::JoinHandle<TestRequest>,
