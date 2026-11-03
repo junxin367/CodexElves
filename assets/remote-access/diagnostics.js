@@ -6,6 +6,7 @@ const handledRequests = new Set();
 const requestPattern = /^[A-Za-z0-9_-]{1,80}$/;
 const threadPattern = /^[A-Za-z0-9_-]{1,120}(?![\s\S])/;
 const tokenPattern = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
+// 用户要求上传日志后能追踪前后台断连；字段须与 Android DiagnosticsPolicy 和电脑端 diagnostics.rs 同步。
 const numericFields = new Set(["status", "durationMs", "bytes", "sdk", "generation", "readyState",
   "expectedBytes", "loadedBytes", "line", "width", "height", "lux", "stableMs"]);
 const tokenFields = new Set(["method", "errorType", "reason", "routeName", "phase", "imageKind", "network", "theme", "decision", "blockedBy"]);
@@ -15,8 +16,11 @@ const fieldTokens = {
   method: new Set(["GET", "POST", "HEAD", "OPTIONS", "PUT", "PATCH", "DELETE"]),
   reason: new Set(["success", "cancelled", "timeout", "response-read-failed", "http-error", "network-error",
     "manual", "visibility", "online", "offline", "pagehide", "upload-failed", "unsupported", "native-failed",
-    "sensor", "timer", "startup"]),
-  phase: new Set(["request", "body", "complete", "ready", "failure", "pending"]),
+    "sensor", "timer", "startup", "stream-open", "stream-error", "poll", "replace", "heartbeat",
+    "worker-timeout", "worker-response-timeout", "all-channels-disconnected", "route-change",
+    "socket-open-timeout", "socket-idle-timeout", "handshake-invalid", "page-resume"]),
+  phase: new Set(["request", "body", "complete", "ready", "failure", "pending",
+    "create", "start", "resume", "stop", "open", "close", "retry"]),
   imageKind: new Set(["preview", "thumbnail", "image"]),
   routeName: new Set(["zrok", "ngrok"]),
   network: new Set(["wifi", "cellular", "ethernet", "vpn", "other", "none", "unknown"]),
@@ -38,6 +42,7 @@ const staticPaths = new Set(["/", "/app-resources.json", "/app.js", "/channels.j
   "/vendor/dompurify.esm.js", "/vendor/mermaid.esm.js"]);
 let supported = null;
 let sequence = 0;
+let diagnosticSink = null;
 let listening = false;
 let getSession = () => null;
 let upload = null;
@@ -70,10 +75,15 @@ function safeFields(value) {
   const result = {};
   for (const [key, field] of Object.entries(value || {})) {
     if (key === "errorCode" && Number.isSafeInteger(field) && field >= -1000 && field <= 1000) result[key] = field;
+    else if (["closeCode", "delayMs", "backgroundMs", "attempt"].includes(key)) {
+      const maximum = { closeCode: 65535, delayMs: 86400000, backgroundMs: Number.MAX_SAFE_INTEGER, attempt: 10000 }[key];
+      if (Number.isSafeInteger(field) && field >= 0 && field <= maximum) result[key] = field;
+    }
     else if (["draftChars", "attachmentCount"].includes(key) && Number.isSafeInteger(field) && field >= 0) result[key] = field;
     else if (numericFields.has(key) && Number.isFinite(field) && field >= 0)
-      result[key] = Math.min(Number.MAX_SAFE_INTEGER, Math.round(field));
-    else if (["visible", "online", "supported", "pageLeaving", "connected"].includes(key) && typeof field === "boolean") result[key] = field;
+      result[key] = Math.min(key === "durationMs" ? 86400000 : Number.MAX_SAFE_INTEGER, Math.round(field));
+    else if (["visible", "online", "supported", "pageLeaving", "connected", "wasClean", "isTrusted"].includes(key)
+        && typeof field === "boolean") result[key] = field;
     else if (key === "errorType" && typeof field === "string") result[key] = errorTypes.has(field) ? field : "unknown";
     else if (tokenFields.has(key) && typeof field === "string" && fieldTokens[key]?.has(field)) result[key] = field;
     else if (key === "mime" && typeof field === "string" && /^[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+$/.test(field))
@@ -98,20 +108,41 @@ function postEvent(event) {
 
 export function recordDiagnostic(name, fields = {}) {
   try {
-    if (!isAndroidContainer() || supported === false || !tokenPattern.test(name)) return;
+    if (!tokenPattern.test(name)) return;
+    if (diagnosticSink) { diagnosticSink({ name, fields: safeFields(fields) }); return; }
+    if (!isAndroidContainer() || supported === false) return;
     const event = { name, fields: safeFields(fields) };
     if (supported) postEvent(event);
     else if (earlyEvents.length < 32) earlyEvents.push(event);
   } catch {}
 }
 
+// SharedWorker 没有 Android bridge，只将清洗后的连接事件转交订阅页面。
+export function setDiagnosticSink(sink) {
+  diagnosticSink = typeof sink === "function" ? sink : null;
+}
+
+export function newDiagnosticRequestId(prefix) {
+  try {
+    const id = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${++sequence}`;
+    return `${prefix}-${id}`;
+  } catch { return null; }
+}
+
 export function traceDiagnosticRequest(path, options, origin) {
   const started = globalThis.performance?.now?.() ?? Date.now();
-  const fields = { ...diagnosticLocation(new URL(path, origin).href), method: options.method || "GET" };
+  const url = new URL(path, origin);
+  const method = options.method || "GET";
+  const requestId = newDiagnosticRequestId("http");
+  const fields = { ...diagnosticLocation(url.href), method, requestId };
+  // 用户要求核对请求是否抵达电脑；只关联连接探测，query 不增加预检请求，也不触碰业务幂等标识。
+  if (requestId && isAndroidContainer() && method === "GET"
+      && ["/api/session", "/api/channels"].includes(url.pathname)) url.searchParams.set("diag", requestId);
   let status;
   let phase = "request";
   recordDiagnostic("http.start", fields);
   return {
+    path: `${url.pathname}${url.search}`,
     response(response) {
       status = response.status;
       phase = "body";
@@ -233,12 +264,19 @@ export function configureAndroidDiagnostics(options) {
   upload = options.upload;
   if (!isAndroidContainer()) return;
   recordDiagnostic("page.started", { visible: !document.hidden, online: navigator.onLine !== false });
-  const lifecycle = reason => recordDiagnostic("page.lifecycle", {
-    reason, visible: !document.hidden, online: navigator.onLine !== false
-  });
-  document.addEventListener("visibilitychange", () => lifecycle("visibility"));
-  globalThis.addEventListener("online", () => lifecycle("online"));
-  globalThis.addEventListener("offline", () => lifecycle("offline"));
+  let backgroundAt = document.hidden ? Date.now() : null;
+  const lifecycle = (reason, event) => {
+    const now = Date.now();
+    if (reason === "visibility" && document.hidden) backgroundAt = now;
+    const backgroundMs = !document.hidden && backgroundAt !== null ? Math.max(0, now - backgroundAt) : undefined;
+    recordDiagnostic("page.lifecycle", {
+      reason, visible: !document.hidden, online: navigator.onLine !== false, isTrusted: event?.isTrusted, backgroundMs
+    });
+    if (reason === "visibility" && !document.hidden) backgroundAt = null;
+  };
+  document.addEventListener("visibilitychange", event => lifecycle("visibility", event));
+  globalThis.addEventListener("online", event => lifecycle("online", event));
+  globalThis.addEventListener("offline", event => lifecycle("offline", event));
   globalThis.addEventListener("pagehide", () => {
     lifecycle("pagehide");
     for (const requestId of pending.keys())

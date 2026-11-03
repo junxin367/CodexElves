@@ -2381,7 +2381,157 @@ impl IntoResponse for ApiError {
     }
 }
 
-async fn access_boundary(
+async fn access_boundary(state: State<WebState>, mut request: Request, next: Next) -> Response {
+    // 用户要求将手机恢复日志与电脑接收记录对应；仅观测带合法 diag 的连接路由，鉴权和返回保持原样。
+    let mut diagnostic = ConnectionRequestDiagnostic::start(request.method(), request.uri());
+    if let Some(diagnostic) = &diagnostic {
+        request.extensions_mut().insert(diagnostic.context.clone());
+    }
+    let response = access_boundary_response(state, request, next).await;
+    if let Some(diagnostic) = &mut diagnostic {
+        // 响应头已生成不代表手机已经收全；诊断不得把这一步写成客户端成功。
+        diagnostic.response_headers_ready(response.status());
+    }
+    response
+}
+
+#[derive(Clone)]
+struct ConnectionDiagnosticContext {
+    request_id: String,
+    path: &'static str,
+}
+
+impl ConnectionDiagnosticContext {
+    fn from_request(method: &axum::http::Method, uri: &Uri) -> Option<Self> {
+        if method != axum::http::Method::GET {
+            return None;
+        }
+        let path = match uri.path() {
+            "/api/session" => "/api/session",
+            "/api/channels" => "/api/channels",
+            "/api/events/ws" => "/api/events/ws",
+            _ => return None,
+        };
+        let mut values = uri
+            .query()?
+            .split('&')
+            .map(|item| item.split_once('=').unwrap_or((item, "")))
+            .filter_map(|(name, value)| (name == "diag").then_some(value));
+        let request_id = values.next()?;
+        if values.next().is_some()
+            || !(1..=80).contains(&request_id.len())
+            || !request_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return None;
+        }
+        Some(Self {
+            request_id: request_id.to_owned(),
+            path,
+        })
+    }
+
+    fn record(
+        &self,
+        phase: &'static str,
+        started: Instant,
+        status: Option<u16>,
+        close: Option<(&'static str, Option<u16>)>,
+    ) {
+        let mut detail = json!({
+            "requestId": self.request_id,
+            "path": self.path,
+            "method": "GET",
+            "phase": phase,
+            "status": status,
+            "durationMs": started.elapsed().as_millis() as u64
+        });
+        if let Some((reason, code)) = close {
+            detail["closeReason"] = json!(reason);
+            detail["closeCode"] = json!(code);
+        }
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "remote_access.connection_request",
+            detail,
+        );
+    }
+}
+
+struct ConnectionRequestDiagnostic {
+    context: ConnectionDiagnosticContext,
+    started: Instant,
+    response_ready: bool,
+}
+
+impl ConnectionRequestDiagnostic {
+    fn start(method: &axum::http::Method, uri: &Uri) -> Option<Self> {
+        let context = ConnectionDiagnosticContext::from_request(method, uri)?;
+        let diagnostic = Self {
+            context,
+            started: Instant::now(),
+            response_ready: false,
+        };
+        diagnostic
+            .context
+            .record("received", diagnostic.started, None, None);
+        Some(diagnostic)
+    }
+
+    fn response_headers_ready(&mut self, status: StatusCode) {
+        self.response_ready = true;
+        self.context.record(
+            "response_headers_ready",
+            self.started,
+            Some(status.as_u16()),
+            None,
+        );
+    }
+}
+
+impl Drop for ConnectionRequestDiagnostic {
+    fn drop(&mut self) {
+        if !self.response_ready {
+            self.context
+                .record("request_cancelled", self.started, None, None);
+        }
+    }
+}
+
+struct WebSocketConnectionDiagnostic {
+    context: ConnectionDiagnosticContext,
+    started: Instant,
+    close_reason: &'static str,
+    close_code: Option<u16>,
+}
+
+impl WebSocketConnectionDiagnostic {
+    fn start(context: ConnectionDiagnosticContext) -> Self {
+        let diagnostic = Self {
+            context,
+            started: Instant::now(),
+            close_reason: "task_cancelled",
+            close_code: None,
+        };
+        diagnostic
+            .context
+            .record("websocket_opened", diagnostic.started, Some(101), None);
+        diagnostic
+    }
+}
+
+impl Drop for WebSocketConnectionDiagnostic {
+    fn drop(&mut self) {
+        self.context.record(
+            "websocket_handler_ended",
+            self.started,
+            Some(101),
+            Some((self.close_reason, self.close_code)),
+        );
+    }
+}
+
+async fn access_boundary_response(
     State(state): State<WebState>,
     mut request: Request,
     next: Next,
@@ -4140,6 +4290,7 @@ fn notification_stream_event(event: &Value) -> Option<Value> {
 async fn events_ws(
     ws: WebSocketUpgrade,
     State(state): State<WebState>,
+    diagnostic: Option<Extension<ConnectionDiagnosticContext>>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response, ApiError> {
@@ -4148,7 +4299,15 @@ async fn events_ws(
     let id = device.id;
     Ok(ws
         .protocols(["codex-elves-channel-v1"])
-        .on_upgrade(move |socket| stream_websocket_events(socket, controller, id, uri))
+        .on_upgrade(move |socket| {
+            stream_websocket_events(
+                socket,
+                controller,
+                id,
+                uri,
+                diagnostic.map(|Extension(context)| context),
+            )
+        })
         .into_response())
 }
 
@@ -4157,10 +4316,19 @@ async fn stream_websocket_events(
     controller: Arc<RemoteAccessController>,
     id: String,
     uri: Uri,
+    diagnostic: Option<ConnectionDiagnosticContext>,
 ) {
+    let mut diagnostic = diagnostic.map(WebSocketConnectionDiagnostic::start);
+    let mut close = |reason, code| {
+        if let Some(diagnostic) = &mut diagnostic {
+            diagnostic.close_reason = reason;
+            diagnostic.close_code = code;
+        }
+    };
     let mut receiver = controller.events.subscribe();
     let ready = channels::replay(&controller, &uri);
     if !controller.device_active(&id).await || !controller.accepting_requests() {
+        close("inactive_at_upgrade", None);
         let _ = socket.close().await;
         return;
     }
@@ -4169,6 +4337,7 @@ async fn stream_websocket_events(
         .await
         .is_err()
     {
+        close("initial_send_failed", None);
         return;
     }
     let heartbeat = tokio::time::sleep(Duration::from_secs(15));
@@ -4182,17 +4351,26 @@ async fn stream_websocket_events(
             tokio::select! {
                 incoming = socket.recv() => {
                     match incoming {
-                        Some(Ok(WebSocketMessage::Close(_))) => {
+                        Some(Ok(WebSocketMessage::Close(frame))) => {
+                            close("peer_close", frame.map(|frame| frame.code));
                             let _ = socket.close().await;
                             break;
                         }
                         Some(Ok(WebSocketMessage::Ping(_))) => {
                             if socket.flush().await.is_err() {
+                                close("flush_failed", None);
                                 break;
                             }
                         }
                         Some(Ok(_)) => {}
-                        Some(Err(_)) | None => break,
+                        Some(Err(_)) => {
+                            close("receive_failed", None);
+                            break;
+                        }
+                        None => {
+                            close("peer_eof", None);
+                            break;
+                        }
                     }
                     continue;
                 }
@@ -4201,7 +4379,10 @@ async fn stream_websocket_events(
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         json!({"method":"remote/resync"})
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        close("event_channel_closed", None);
+                        break;
+                    }
                 },
                 _ = &mut heartbeat => {
                     heartbeat.as_mut().reset(
@@ -4219,6 +4400,7 @@ async fn stream_websocket_events(
             event = json!({"method":"remote/disconnected"});
         }
         let Ok(text) = serde_json::to_string(&event) else {
+            close("serialization_failed", None);
             break;
         };
         if socket
@@ -4226,9 +4408,18 @@ async fn stream_websocket_events(
             .await
             .is_err()
         {
+            close("send_failed", None);
             break;
         }
         if done {
+            close(
+                if authorized {
+                    "server_stopped"
+                } else {
+                    "authorization_inactive"
+                },
+                None,
+            );
             let _ = socket.close().await;
             break;
         }
@@ -4872,6 +5063,233 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_diagnostics_accept_only_scoped_get_requests_and_bounded_ids() {
+        let accepted = format!("/api/session?diag={}&ignored=secret", "a".repeat(80));
+        let context = ConnectionDiagnosticContext::from_request(
+            &axum::http::Method::GET,
+            &accepted.parse().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(context.request_id.len(), 80);
+        assert_eq!(context.path, "/api/session");
+        for path in ["/api/session", "/api/channels", "/api/events/ws"] {
+            let uri = format!("{path}?diag=http-Ab_12").parse().unwrap();
+            assert!(
+                ConnectionDiagnosticContext::from_request(&axum::http::Method::GET, &uri).is_some()
+            );
+            assert!(
+                ConnectionDiagnosticContext::from_request(&axum::http::Method::HEAD, &uri)
+                    .is_none()
+            );
+            assert!(
+                ConnectionDiagnosticContext::from_request(&axum::http::Method::POST, &uri)
+                    .is_none()
+            );
+        }
+        for uri in [
+            "/api/session".to_owned(),
+            "/api/session?diag=".to_owned(),
+            "/api/session?diag".to_owned(),
+            "/api/session?diag=http-ok&diag=http-duplicate".to_owned(),
+            "/api/session?diag=http-ok&diag".to_owned(),
+            "/api/session?diag=bad%0Aid".to_owned(),
+            "/api/session?diag=bad/id".to_owned(),
+            "/api/login-status?diag=http-unscoped".to_owned(),
+            format!("/api/session?diag={}", "a".repeat(81)),
+        ] {
+            assert!(
+                ConnectionDiagnosticContext::from_request(
+                    &axum::http::Method::GET,
+                    &uri.parse().unwrap()
+                )
+                .is_none(),
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_diagnostics_cover_http_boundaries_websocket_and_cancellation() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        struct ResetDiagnosticLog;
+        impl Drop for ResetDiagnosticLog {
+            fn drop(&mut self) {
+                crate::diagnostic_log::set_diagnostic_log_path_for_tests(None);
+            }
+        }
+        let (directory, state) = login_lock_test_state();
+        let log_path = directory.path().join("connection-diagnostics.jsonl");
+        crate::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+        let _reset_log = ResetDiagnosticLog;
+        {
+            let mut auth = state.controller.auth.lock().await;
+            let key_id = auth.access_key.as_ref().unwrap().id.clone();
+            auth.devices.push(Device {
+                id: "diagnostic-fixture".into(),
+                name: "diagnostic-fixture".into(),
+                token_hash: hash("private-fixture-cookie"),
+                key_id,
+                created_at_ms: now_ms(),
+                last_seen_at_ms: now_ms(),
+                expires_at_ms: now_ms() + 120_000,
+                public_origin: None,
+            });
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = web_router(
+            state.controller,
+            RemoteAccessSettings {
+                enabled: true,
+                port: address.port(),
+                ..RemoteAccessSettings::default()
+            },
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let cookie = format!("{COOKIE_NAME}=private-fixture-cookie");
+        for (path, authenticated, host, expected) in [
+            (
+                "/api/session?diag=http-ready&ignored=private-query-value",
+                true,
+                None,
+                200,
+            ),
+            ("/api/channels?diag=http-unauthorized", false, None, 401),
+            (
+                "/api/session?diag=http-host-rejected",
+                true,
+                Some("private-rejected-host.example"),
+                403,
+            ),
+            ("/api/events/ws?diag=ws-bad-handshake", true, None, 400),
+            ("/api/session", true, None, 200),
+            ("/api/session?diag=bad%0Aid", true, None, 200),
+            ("/api/login-status?diag=http-unscoped", false, None, 200),
+        ] {
+            let mut request = client.get(format!("http://{address}{path}"));
+            if authenticated {
+                request = request.header("Cookie", &cookie);
+            }
+            if let Some(host) = host {
+                request = request.header("Host", host);
+            }
+            assert_eq!(request.send().await.unwrap().status().as_u16(), expected);
+        }
+        let mut request = format!("ws://{address}/api/events/ws?diag=ws-ready")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("cookie", cookie.parse().unwrap());
+        let (mut socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+        assert_eq!(response.status().as_u16(), 101);
+        let ready: Value =
+            serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(ready["method"], "remote/streamReady");
+        socket
+            .close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                reason: "private-client-close-reason".into(),
+            }))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let text = std::fs::read_to_string(&log_path).unwrap();
+                if text.contains("\"phase\":\"websocket_handler_ended\"") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let task_entered = entered.clone();
+        let task = tokio::spawn(async move {
+            let _diagnostic = ConnectionRequestDiagnostic::start(
+                &axum::http::Method::GET,
+                &"/api/session?diag=http-cancelled".parse().unwrap(),
+            );
+            task_entered.notify_one();
+            std::future::pending::<()>().await;
+        });
+        entered.notified().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        let text = std::fs::read_to_string(&log_path).unwrap();
+        for secret in [
+            "private-fixture-cookie",
+            "private-query-value",
+            "private-rejected-host",
+            "private-client-close-reason",
+            "127.0.0.1",
+        ] {
+            assert!(!text.contains(secret), "diagnostics leaked {secret}");
+        }
+        let records: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|record| record["event"] == "remote_access.connection_request")
+            .map(|record| record["detail"].clone())
+            .collect();
+        assert_eq!(records.len(), 14);
+        for (request_id, status) in [
+            ("http-ready", 200),
+            ("http-unauthorized", 401),
+            ("http-host-rejected", 403),
+            ("ws-bad-handshake", 400),
+            ("ws-ready", 101),
+        ] {
+            let phases: Vec<_> = records
+                .iter()
+                .filter(|record| record["requestId"] == request_id)
+                .collect();
+            assert_eq!(phases[0]["phase"], "received");
+            let response = phases
+                .iter()
+                .find(|record| record["phase"] == "response_headers_ready")
+                .unwrap();
+            assert_eq!(response["status"], status);
+            assert_eq!(response["method"], "GET");
+            assert!(response["durationMs"].as_u64().is_some());
+        }
+        let closed = records
+            .iter()
+            .find(|record| record["phase"] == "websocket_handler_ended")
+            .unwrap();
+        assert_eq!(closed["requestId"], "ws-ready");
+        assert_eq!(closed["closeReason"], "peer_close");
+        assert_eq!(closed["closeCode"], 1000);
+        let cancelled = records
+            .iter()
+            .find(|record| record["phase"] == "request_cancelled")
+            .unwrap();
+        assert_eq!(cancelled["requestId"], "http-cancelled");
+        assert!(cancelled["status"].is_null());
+
+        // An unusable log destination must not change the HTTP response.
+        crate::diagnostic_log::set_diagnostic_log_path_for_tests(Some(directory.path().into()));
+        assert_eq!(
+            client
+                .get(format!("http://{address}/api/session?diag=http-log-failed"))
+                .header("Cookie", &cookie)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16(),
+            200
+        );
+        server.abort();
+        let _ = server.await;
+    }
 
     #[test]
     fn service_fallback_routes_main_session_capabilities_only() {

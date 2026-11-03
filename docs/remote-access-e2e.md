@@ -1,10 +1,12 @@
 # 远程会话真实 E2E 回归
 
+**2026-11-04 用户纠正侧边命名规则：** 原文档中“不从首条消息正文改名”是错误规则；同日用户将自动命名上限从 10 个字符调整为 15 个字符。默认名可由首条有效用户文字在合并空白后取前 15 个 Unicode 码点自动生成，写入并确认同一原生标签后同步远程；已有自定义名不得被自动命名或后续消息覆盖。完整规则见 [侧边会话需求](remote-session-tools.md#侧边会话)。以下早期撤销十字符断言或待裁定的记录只描述当时验收状态，不能再作为当前产品规则；本次文档更正不增加任何验收通过结果。
+
 2026-11-02用户明确：本轮只恢复原有远程能力。文件审批记为能力缺失，排除主动开发及必做验收；`scenario.approval`继续验证已有命令审批，不据案例名称扩展文件审批。已撤回本轮新增的文件审批展示及专用测试。
 
 `scripts/remote-access-e2e.mjs` 是用户要求保留的长期回归资产。当前 2.5.9 包含 **73 个已列案例和处理器**；处理器与 73 条业务基线不是一一对应，数量相同不代表完整覆盖。功能覆盖与预期以 `docs/validation/remote-acceptance-cases-20261101.md` 为基线，子智能体等新补业务用例尚需逐项接入并真实执行。导入模块不启动环境、不认领浏览器、不发送消息；模块只接受调用方已经通过 `chrome@openai-bundled` 明确绑定的真实 `tab`。
 
-用户在 2026-11-03 至 11-04 凌晨的手动反馈及精确复现顺序见[手动反馈与防回归清单](validation/remote-user-feedback-20261103-20261104.md)：包含手机目标交互、旧消息/发送禁用恢复、侧栏异步关闭、提示时机、队列耗时和侧边模型往返。后续相关修改按清单选择对应子场景，区分代码、真实验证、部署和真机状态；`UF-*` 仅为反馈索引，不代表新增处理器或整套 E2E 已通过。
+用户在 2026-11-03 至 11-04 的手动反馈及精确复现顺序见[手动反馈与防回归清单](validation/remote-user-feedback-20261103-20261104.md)：包含手机目标交互、旧消息/发送禁用恢复、侧栏异步关闭、提示时机、队列耗时、侧边模型往返和前后台连接诊断。后续相关修改按清单选择对应子场景，区分代码、真实验证、部署和真机状态；`UF-*` 仅为反馈索引，不代表新增处理器或整套 E2E 已通过。
 
 案例实现、源码测试、语法检查和模块导入，只证明回归资产可用。没有本轮 Chrome、Codex 桌面、故障环境或 Android 设备的原始证据时，相应案例必须是 `blocked` 或 `not_run`，不能宣传完整 E2E 通过。旧 1.0 报告不能继承为 2.0 的通过结果。
 
@@ -33,7 +35,7 @@
 | 队列常规 | `queue.automatic`、`queue.edit_cancel`、`queue.edit_save`、`queue.reorder`、`queue.remove`、`queue.steer` | 两条消息按 FIFO 自然承接；A/B/C 原队列对象的编辑取消、保存、键盘排序、删除及引导；刷新后状态与单次消费一致 |
 | 队列边界 | `queue.after_stop`、`queue.after_failure`、`queue.approval_wait`、`queue.compaction` | 停止/真实上游失败后保留原队列，明确引导恢复；审批/压缩期间不抢先消费，结束后只消费一次 |
 | 队列并发与恢复 | `queue.dequeue_edit_race`、`queue.dequeue_remove_race`、`queue.cross_session` | 等到真实原生出队窗口再操作；接受明确过期拒绝，不接受未知结果；原对象只能删除或消费一次；跨会话刷新保持同 ID |
-| 侧边命名六项 | `side.default_name`、`side.first_message_name`、`side.same_id_name`、`side.desktop_created`、`side.desktop_rename`、`side.custom_name_refresh` | 首条消息前、首条消息后均以同一真实 thread ID 的原生 `tab.title` 为名称权威，不限定语言、编号、长度或正文截断算法；等待原生名称稳定后逐字核对 Codex 可见标签、远程列表和详情、整页刷新；两次连续改名分别留证，后续消息继续保留原生自定义名 |
+| 侧边命名六项 | `side.default_name`、`side.first_message_name`、`side.same_id_name`、`side.desktop_created`、`side.desktop_rename`、`side.custom_name_refresh` | 首条消息前按同一真实 thread ID 核对原生默认标签，不写死默认语言或编号；默认名且首次出现有效用户文字时，按合并空白后的前 15 个 Unicode 码点计算期望，必须同时核对原生 tab 写入和远程列表、详情及刷新；已有自定义名不套用十五字符限制，两次连续改名分别留证并验证后续消息保持 |
 | 侧边基础 | `lifecycle.side_create`、`lifecycle.side_switch`、`lifecycle.side_refresh`、`side.multiple` | 真实创建并首次发送标记；主侧往返；侧边刷新；两个不同侧边按 ID 独立切换且父子关系一致 |
 | 侧边生命周期 | `side.late_creation`、`side.close_running`、`side.delete_parent`、`lifecycle.side_close` | 延迟实际创建响应后不抢占控制会话；运行中关闭经预览批准且终止执行；删除单独新建父会话后无孤立/活动侧边；普通关闭刷新后保持消失 |
 | 已读 | `read.main_read_state`、`read.side_read_state`、`read.side_aggregate`、`read.cross_client` | 两轮真实新回复经历未读→阅读→刷新保持→再次未读；多侧边逐个清除聚合；Codex 阅读同步远程，下一轮再次未读 |
@@ -50,13 +52,15 @@
 
 13 个 suite 均可单独选择。单独执行不会自动创建前置对象或扩大授权。顺序见导出的 `REMOTE_ACCESS_E2E_CASES`：侧边默认名在首次发送前检查，关闭在已读/草稿案例后，control 永久删除在全部依赖案例后。
 
-临时侧边的权威名称来自同一 thread ID 对应的原生 `tab.title`，证据字段为 `nativeTabThreadId/nativeTabTitle`。`getConversation.title`、thread.name 可以为 null，不能强制通过不支持临时会话的元数据 RPC 改名，也不能只看远程乐观状态。`side.first_message_name` 不发送新消息，使用 `lifecycle.side_create` 已确认的首条消息动作及其准确会话中的完成回复作为起点；不要求名称必须改变，也不从首条正文计算名称。`rename-side-tab` 驱动使用真实原生标签的命名能力；普通主会话改名使用 `rename-thread`。
+覆盖边界：当前矩阵没有子智能体列表/只读详情或变更/文件页面的专用处理器，不能用侧边案例或菜单入口存在替代。`session.model` 也不替代 UF-09 的“侧边成功发送新模型后往返、刷新及不重选续发”。已有目标的暂停/开始/删除按 UF-03 另核，不能从 `scenario.goal` 等待完成推导已验。浏览器入口需要 FRP 线路及受支持的 Android 原生能力，普通 Chrome 页面不提供该原生能力；App 缓存是客户端恢复机制，不是单独的工具菜单页。现行功能与权限边界见 [远程会话工具](remote-session-tools.md) 和 [远程访问](remote-access.md)，本段不增加执行或通过状态。
+
+临时侧边的权威名称来自同一 thread ID 对应的原生 `tab.title`，证据字段为 `nativeTabThreadId/nativeTabTitle`。`getConversation.title`、thread.name 可以为 null，不能强制通过不支持临时会话的元数据 RPC 改名，也不能只看远程乐观状态。`side.first_message_name` 不发送新消息，使用 `lifecycle.side_create` 已确认的首条消息动作及其准确会话中的完成回复作为起点；若发送前仍为默认名且该消息含有效文字，须独立按产品规则计算前 15 个 Unicode 码点，并核对其已写入同一原生标签。发送前已有自定义名时，验证原名保持；纯图片、空文字、待提交或压缩输入不产生自动名。仅证明远程与原生同名不足以证明自动命名规则正确。`rename-side-tab` 驱动使用真实原生标签的命名能力；普通主会话改名使用 `rename-thread`。
 
 每个命名阶段执行两次独立的 `desktop/observe-thread`，原始 `capturedAt` 至少间隔 1000 毫秒且 `nativeTabTitle` 相同后才继续。这个间隔是验收采样窗口，不是产品命名规则。每条原始观察必须同时包含 `threadId/parentThreadId/nativeTabThreadId/nativeTabTitle/visibleThreadId/visibleTitle/surface/capturedAt`，其中 `threadId/nativeTabThreadId/visibleThreadId` 均指向当前准确侧边，`parentThreadId` 指向其真实父会话，`visibleTitle` 与同条记录的 `nativeTabTitle` 一致。字段仍使用已有原始 JSON Pointer，不新增由驱动自报的 `stable` 或 `passed` 字段；标题必须来自实际原生 tab，不能从 `request.expectations` 或远程标题复制生成。
 
 runner 将详情、父会话菜单中的唯一同 ID 行、整页刷新后详情分别保存为 DOM、截图及带哈希的 `files.observation` 原始只读观察 JSON，随后再做一次新的原生标签读取。`side-name` 阶段记录关联这三份原生读取和前后界面文件；默认名另须证明首次发送前没有 turn。离线门禁从文件重新读取，核对 ID、标题、读取身份、消息完成起点与时间顺序，并确认每份采样关联本阶段的真实 driver 步骤。同名其他 ID、旧读取复用、缺少刷新证据、刷新后回到旧名均失败。自定义名必须与对应原生改名动作的原始结果一致，后续消息不能覆盖；连续两次改名的阶段不得交叉复用。
 
-`scripts/remote-access-e2e-evidence.test.mjs` 保留长期正反例：原生长摘要、其他语言及首条后名称未改变可以通过；错误 ID、旧时间、重复 read ID、不同阶段拼接、报告伪改及只报 `passed` 不能通过。这些是离线契约回归，不能替代真实命名 E2E。2.3.0 及更早的命名通过结果不能继承到 2.4.0。
+`scripts/remote-access-e2e-evidence.test.mjs` 的既有正反例允许原生长摘要、其他语言及首条后名称未改变，仅能证明名称同步门禁，不能直接作为默认名自动生成场景的合格判据。自定义名场景不受自动命名的十五字符上限限制；自动命名场景须另行核对默认名前提、有效文字、前十五字符算法及真实原生写入。错误 ID、旧时间、重复 read ID、不同阶段拼接、报告伪改及只报 `passed` 仍不能通过。既有执行器和门禁的算法断言需另行补齐，本次仅修正文档，不改测试代码或通过状态；离线契约回归不能替代真实命名 E2E。2.3.0 及更早的命名通过结果不能继承到 2.4.0。
 
 ## 真实 Chrome 起步
 
@@ -356,3 +360,22 @@ remote_access 的授权夹具有 60/120 秒有效期，随机密钥共享单项 
 - `Fetch.requestPaused` 可先于对应 `Network.requestWillBeSent`，也可跨读取批次到达。元数据缺失表示尚不能判断，不能直接当作旧文档读取取消。驱动保留暂停，等待准确的 networkId、URL、method、frame、loader 和新 Document 身份，再处理同一请求；始终缺少关联证据则受阻。
 - 不强制 `loadingFinished.timestamp >= responseReceived.timestamp`。Chromium 响应事件使用派发时刻，完成事件可使用传入的底层完成时刻。本轮前者比后者早 1.917ms；仍核对同一请求、两者均不早于请求起点，并用较晚时刻确认解锁之前完成。不以样本误差设置容差，也不删除 HTTP 200、正文和完成事件检查。原始数据及源码语义取证在 `R3-original-question-recovery/timing-contract-source.json`。
 - 本轮分段真实操作完成了既有原题的刷新恢复，原始文件另经只读审核；这不把此前中断的自动处理器改成通过。完整套件及其他失败/恢复分支仍分别登记。
+
+## 前后台连接诊断
+
+手机继续使用现有“发送日志”入口。电脑端接收报告位于状态目录的 `remote-client-diagnostics/`；同一状态目录的 `codex-elves.log` 记录服务端连接阶段。采集前核对两端资源版本和日志时间范围，保留“源码、安装包、已安装运行、真机验收”的区别。
+
+- `page.lifecycle`：可见性、当前在线状态、浏览器事件来源 `isTrusted`、本次后台时长 `backgroundMs`。
+- `connection.state`、`stream.*`：连接状态变化、事件流建立/错误和实际重试等待。
+- `socket.*`、`worker.*`：握手、关闭码 `closeCode`、是否正常关闭 `wasClean`、重试与超时。只记录连接转换；不采集消息帧或逐个心跳。worker 转交的诊断消息不刷新业务心跳时间。
+- `http.*`：每次请求的独立诊断 `requestId`。Android 的 `/api/session`、`/api/channels` 探测与 WS 握手在 `diag` 参数携带该标识；业务写入的幂等 ID、请求正文和请求次数保持原样。
+- 服务端 `remote_access.connection_request`：同一 `requestId` 的 `received`、`response_headers_ready`、`request_cancelled`，以及 `websocket_opened`、`websocket_handler_ended`。只保留固定路径、状态、耗时和固定关闭原因，不记录原始查询、headers、IP 或关闭文案。
+
+| 手机与电脑的对应记录 | 可支持的判断 |
+| --- | --- |
+| 手机开始请求，电脑没有同 ID 的 `received` | 在确认服务日志覆盖完整、没有丢弃/轮转后，优先调查请求到达前的链路；缺一条日志不能直接证明网络断开 |
+| 电脑有 `received`，没有响应头就绪 | 检查处理是否仍等待、被取消或进程退出；不要直接归为 WebView 故障 |
+| 电脑响应头就绪，手机没有 `http.headers` | 服务端已经生成响应；继续核对返回线路与客户端接收，不能据此宣称手机收到了响应体 |
+| 两端同一 WS ID 有握手/关闭记录 | 结合关闭码、固定关闭原因、后台时长和重试记录定位阶段；单个关闭码不能证明具体设备或公网节点故障 |
+
+日志仍采用原有有界队列、清洗和手动上传机制。JS、Android、Rust 的字段白名单须同步回归；诊断失败不得改变业务返回，也不得借补日志改变超时、自动重发或权限策略。

@@ -1,6 +1,6 @@
 # CodexElves Android APK 构建与发布
 
-Android 使用 `apps/codex-elves-android/version.properties` 独立版本，与桌面管理器的 `Cargo.toml` 版本分开。当前为 `0.1.0`、`versionCode=24`；每次正式发布必须增加 `versionCode` 并沿用正式签名证书。
+Android 使用 `apps/codex-elves-android/version.properties` 独立版本，与桌面管理器的 `Cargo.toml` 版本分开。当前为 `versionName=0.1.0`、`versionCode=24`。日常构建不递增版本；首次准备正式 Android 发布时，将 `versionName` 修订号加 1，并把 `versionCode` 设为当前配置值与已公开 Android 版本最大值中的较大值再加 1。失败重试沿用已确定的目标版本，不再次递增。正式 APK 必须使用现有发布签名证书。
 
 ## 自动运行与手动运行
 
@@ -15,12 +15,18 @@ Android 使用 `apps/codex-elves-android/version.properties` 独立版本，与�
 
 Android 相关文件包括 Android 项目、内置 `assets/remote-access` 网页资源、Android 专用 PowerShell 脚本、根构建入口及对应工作流；构建目录、Gradle 缓存和本机配置不参与自动路径判断。PR 检查使用普通 `pull_request` 事件，不向 fork PR 提供签名材料。
 
+桌面版 `v<version>` 标签只触发桌面发布，不触发 Android 独立发布。Android 自动发布只由 `android-v<versionName>` 标签触发；手动运行 Android APK 工作流时，Release 的 `tag` 留空只构建并上传 Actions Artifacts。
+
+只编译 Windows 管理端安装包时执行 `.\scripts\build-windows-installer.ps1`。根目录 `.\build.ps1` 是组合入口：它先生成 Windows 安装包，再根据 Android 输入摘要决定是否同步构建 Android Release。明确要求构建 Android 时可运行 `.\scripts\build-android.ps1 -Configuration Release`。这些构建入口都不会自行递增 Android 版本或发布 GitHub Release。
+
+准备桌面管理端发版时，应从上一个已公开桌面 Release 对应标签比较到本次目标提交，并核对 Android 源码、APK 内置 `assets/remote-access` 网页资源、Android 构建与签名配置、共享脚本和工作流。另须以上一个 APK 和更新清单均校验有效的已公开 Android Release 为基线。若本次影响 Android，或基线缺失、仍有未交付的 Android 改动，则按独立版本规则构建并发布 Android；若可确认没有 Android 变更且现有 Android Release 与附件有效，才跳过并记录比较基线与依据。
+
 在仓库的 **Actions → Android APK → Run workflow** 中选择：
 
 - `configuration = Debug`：仅生成测试 APK。
-- `configuration = Release`：仅使用正式签名。`tag` 留空时仅生成产物；填写时必须与独立版本对应，例如 `versionName=0.0.1` 使用 `android-v0.0.1`。
+- `configuration = Release`：仅使用正式签名。`tag` 留空时仅生成产物；填写时必须与独立版本对应，例如当前 `versionName=0.1.0` 使用 `android-v0.1.0`。
 
-Release 模式要求仓库预先配置以下 Actions secrets：
+Release 模式要求仓库已配置以下 Actions secrets：
 
 | Secret | 内容 |
 | --- | --- |

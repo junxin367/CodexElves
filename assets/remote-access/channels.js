@@ -1,5 +1,5 @@
 import { getAndroidAppInfo, isAndroidContainer } from "./platform.js";
-import { diagnosticLocation, recordDiagnostic, traceDiagnosticRequest } from "./diagnostics.js";
+import { diagnosticLocation, newDiagnosticRequestId, recordDiagnostic, traceDiagnosticRequest } from "./diagnostics.js";
 
 let deviceId = null;
 let generation = 0;
@@ -258,7 +258,7 @@ export async function requestRemote(path, options, consume, measurements = chann
     let response;
     const trace = traceDiagnosticRequest(path, attemptOptions, route.origin);
     try {
-      response = await fetch(new URL(path, route.origin), {
+      response = await fetch(new URL(trace.path || path, route.origin), {
         ...attemptOptions, headers: attemptHeaders, credentials: route.token ? "omit" : options.credentials, redirect: "error"
       });
       receivedResponse = true;
@@ -338,7 +338,7 @@ function connectionProbe(route, options) {
   connectionProbes.set(key, entry);
   entry.promise = (async () => {
     try {
-      const response = await fetch(new URL("/api/session", route.origin), {
+      const response = await fetch(new URL(trace.path || "/api/session", route.origin), {
         ...options, headers, credentials: route.token ? "omit" : options.credentials,
         redirect: "error", signal: controller.signal
       });
@@ -636,6 +636,12 @@ export function createChannelEventStream() {
   const retries = new Map();
   let closed = false, gapTimer = null, routeRetry = null, recovering = false, recoveryController = null;
   let readyState = 0;
+  // 用户需要看到断开与恢复经过；只记连接转换，不记录帧正文或每次心跳，不改变原有重试间隔。
+  const diagnostic = (name, entry, fields = {}) => recordDiagnostic(name, {
+    ...diagnosticLocation(new URL("/api/events/ws", entry.origin).href),
+    requestId: entry.requestId, readyState, online: globalThis.navigator?.onLine !== false,
+    visible: !globalThis.document?.hidden, ...fields
+  });
   const merger = new ChannelEventMerger(
     event => {
       handleRemoteChannelEvent(event);
@@ -682,15 +688,19 @@ export function createChannelEventStream() {
         gapTimer = setTimeout(() => { gapTimer = null; void recover(); }, 1000);
     }
   }
-  function dispose(entry) {
+  function dispose(entry, reason = "cancelled") {
     clearTimeout(entry.retry); clearInterval(entry.watch);
     entry.active = false;
     if (entry.socket) {
+      diagnostic("socket.dispose", entry, { reason, phase: "close" });
       entry.socket.onopen = entry.socket.onmessage = entry.socket.onerror = entry.socket.onclose = null;
       try { entry.socket.close(); } catch {}
     }
   }
   function connected(entry, route) {
+    if (!entry.active) diagnostic("socket.ready", entry, {
+      phase: "ready", durationMs: Math.max(0, Date.now() - entry.startedAt)
+    });
     entry.active = true;
     if (route) healthyRoute(route, entry.sequence);
     retries.delete(entry.origin);
@@ -703,9 +713,26 @@ export function createChannelEventStream() {
     const expectedServer = route.token ? configuration.serverId : null;
     const url = new URL(`/api/events/ws${merger.query()}`, entry.origin);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    entry.requestId = newDiagnosticRequestId("ws");
+    entry.startedAt = Date.now();
+    if (entry.requestId) url.searchParams.set("diag", entry.requestId);
+    diagnostic("socket.connect", entry, {
+      phase: "request", attempt: Math.min(10000, (retries.get(entry.origin)?.failures || 0) + 1)
+    });
     let socket;
     try { socket = route.token ? new WebSocket(url, ["codex-elves-channel-v1", `codex-channel.${route.token}`]) : new WebSocket(url); }
-    catch { fail(entry); return; }
+    catch (error) {
+      diagnostic("socket.error", entry, { phase: "failure", errorType: error?.name, reason: "network-error" });
+      fail(entry); return;
+    }
+    const socketDiagnostic = { origin: entry.origin, requestId: entry.requestId };
+    const socketStartedAt = entry.startedAt;
+    const closedSocket = event => diagnostic("socket.closed", socketDiagnostic, {
+      phase: "close", closeCode: event.code, wasClean: event.wasClean,
+      durationMs: Math.max(0, Date.now() - socketStartedAt)
+    });
+    // fail() 会移除业务回调；保留一次性关闭观察才能拿到 error 之后的实际 close code。
+    socket.addEventListener?.("close", closedSocket, { once: true });
     entry.socket = socket; entry.active = false; entry.verified = !route.token;
     entry.sequence = ++routeRequestSequence;
     entry.openedAt = null;
@@ -715,11 +742,16 @@ export function createChannelEventStream() {
       const now = Date.now();
       if (now - entry.lastWatch > 30000) entry.graceUntil = now + 20000;
       entry.lastWatch = now;
-      if (now >= entry.graceUntil && now - entry.activity > (entry.active ? 75000 : 45000)) fail(entry);
+      if (now >= entry.graceUntil && now - entry.activity > (entry.active ? 75000 : 45000)) {
+        const reason = entry.active ? "socket-idle-timeout" : "socket-open-timeout";
+        diagnostic("socket.timeout", entry, { reason, phase: "failure", durationMs: now - entry.activity });
+        fail(entry, reason);
+      }
     }, 5000);
     socket.onopen = () => {
       if (closed || entry.socket !== socket) return;
       entry.openedAt = entry.activity = Date.now();
+      diagnostic("socket.open", entry, { phase: "open", durationMs: Math.max(0, Date.now() - entry.startedAt) });
       if (entry.verified) connected(entry, route);
     };
     socket.onmessage = message => {
@@ -730,7 +762,8 @@ export function createChannelEventStream() {
         if (route.token && (!entry.verified || event?.method === "remote/streamReady")) {
           if (event?.method !== "remote/streamReady" || event.channelEpoch !== expectedServer
               || !Number.isSafeInteger(event.cursor) || event.cursor < 0) {
-            fail(entry);
+            diagnostic("socket.error", entry, { phase: "failure", reason: "handshake-invalid" });
+            fail(entry, "handshake-invalid");
             return;
           }
           entry.verified = true;
@@ -739,21 +772,31 @@ export function createChannelEventStream() {
         merger.accept(event);
       } catch {}
     };
-    socket.onerror = socket.onclose = () => { if (entry.socket === socket) fail(entry); };
+    socket.onerror = () => {
+      if (entry.socket !== socket) return;
+      diagnostic("socket.error", entry, { phase: "failure", reason: "network-error" });
+      fail(entry);
+    };
+    socket.onclose = event => {
+      if (!socket.addEventListener) closedSocket(event);
+      if (entry.socket === socket) fail(entry);
+    };
   }
-  function fail(entry) {
+  function fail(entry, reason = "network-error") {
     if (entry.openedAt !== null && Date.now() - entry.openedAt >= 30000) entry.failures = 0;
     entry.openedAt = null;
-    dispose(entry); entry.socket = null; entry.active = false;
+    dispose(entry, reason); entry.socket = null; entry.active = false;
     const failures = (retries.get(entry.origin)?.failures || 0) + 1;
-    retries.set(entry.origin, { failures, at: Date.now() + Math.min(10000, 500 * 2 ** Math.min(failures - 1, 5)) });
+    const delayMs = Math.min(10000, 500 * 2 ** Math.min(failures - 1, 5));
+    retries.set(entry.origin, { failures, at: Date.now() + delayMs });
+    diagnostic("socket.retry", entry, { phase: "retry", reason, delayMs, attempt: Math.min(10000, failures) });
     if (!closed && ![...sockets.values()].some(entry => entry.active)) {
       readyState = 0; stream.onerror?.({ reason: "all-channels-disconnected" });
     }
     update();
   }
   function offline() {
-    for (const entry of sockets.values()) { dispose(entry); entry.socket = null; entry.active = false; }
+    for (const entry of sockets.values()) { dispose(entry, "offline"); entry.socket = null; entry.active = false; }
     readyState = 0; stream.onerror?.({ reason: "offline" });
   }
   function resume() {
@@ -762,7 +805,10 @@ export function createChannelEventStream() {
       for (const entry of sockets.values()) clearTimeout(entry.retry);
       return;
     }
-    for (const entry of sockets.values()) entry.graceUntil = Date.now() + 20000;
+    for (const entry of sockets.values()) {
+      entry.graceUntil = Date.now() + 20000;
+      diagnostic("socket.resume", entry, { phase: "resume", reason: "visibility", delayMs: 20000 });
+    }
     update();
   }
   function update() {
@@ -782,7 +828,7 @@ export function createChannelEventStream() {
     }
     const available = selected ? [selected] : [];
     for (const [origin, entry] of sockets) if (!available.some(route => route.origin === origin)) {
-      dispose(entry); sockets.delete(origin);
+      dispose(entry, "route-change"); sockets.delete(origin);
     }
     if (readyState === 1 && ![...sockets.values()].some(entry => entry.active)) {
       readyState = 0;

@@ -12217,9 +12217,11 @@ async function compactContext() {
   } finally { updateComposer(); }
 }
 function setConnection(value) {
+  const changed = connected !== value;
   const restored = !connected && value;
   if (connected && !value) ++connectionCycleVersion;
   connected = value;
+  if (changed) recordRuntimeDiagnostic("connection.state");
   if (!value) stopRelatedSessionTimers();
   else scheduleRelatedOperationCheck();
   if (restored && messageSkillLoadScope && skillScope !== messageSkillLoadScope && !skillLoading) {
@@ -12670,10 +12672,12 @@ function openStream({ suppressErrors = false } = {}) {
     return;
   }
   stream = current;
+  recordRuntimeDiagnostic("stream.create", { phase: "create" });
   const deviceId = session.device.id;
   const isCurrent = () => stream === current && session?.device.id === deviceId;
   current.onopen = async () => {
     if (!isCurrent()) return;
+    recordRuntimeDiagnostic("stream.open", { phase: "open" });
     streamBackoff = 1000;
     try {
       const refresh = async () => {
@@ -12685,8 +12689,9 @@ function openStream({ suppressErrors = false } = {}) {
     } catch (error) { if (isCurrent() && !suppressErrors) notice(error.message, true); }
   };
   current.onmessage = event => { if (isCurrent()) { try { receive(JSON.parse(event.data)); } catch {} } };
-  current.onerror = () => {
+  current.onerror = event => {
     if (!isCurrent()) return;
+    recordRuntimeDiagnostic("stream.error", { phase: "failure", reason: event?.reason, errorType: event?.name });
     setConnection(false);
     if (streamRetry !== null) return;
     const delay = streamBackoff;
@@ -12697,9 +12702,11 @@ function openStream({ suppressErrors = false } = {}) {
 function reconnectStream(delay = streamBackoff, options = {}) {
   if (pageLeaving || (document.hidden && !sharedEventsAvailable())) return;
   clearTimeout(streamRetry);
+  recordRuntimeDiagnostic("stream.retry", { phase: "retry", delayMs: delay });
   streamRetry = setTimeout(() => {
     streamRetry = null;
     if (!session || pageLeaving || (document.hidden && !sharedEventsAvailable())) return;
+    recordRuntimeDiagnostic("stream.retry", { phase: "start" });
     try { openStream(options); }
     catch {
       if (session && !pageLeaving)

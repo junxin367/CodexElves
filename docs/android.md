@@ -2,23 +2,25 @@
 
 Android 客户端位于 `apps/codex-elves-android`，使用 Java 17、Android Gradle Plugin 8.9.2、Gradle 8.11.1、`compileSdk 35`、`minSdk 26` 和 AndroidX WebKit 1.17.1。
 
-应用版本独立维护于 `apps/codex-elves-android/version.properties`，当前 `versionName=0.1.0`、`versionCode=24`，不随桌面管理器版本变化。旧正式包为 `versionName=0.5.0`、`versionCode=1`；Android 按递增的 `versionCode` 判断覆盖升级，因此新的显示版本仍能升级旧包。每次正式发布必须递增 `versionCode` 并沿用现有签名。原生 Shell 协议版本仍为 `1`，不等同于应用版本。
+应用版本独立维护于 `apps/codex-elves-android/version.properties`，当前 `versionName=0.1.0`、`versionCode=24`，不随桌面管理器版本变化。日常构建不递增 Android 版本；准备正式 Android 发布时，按发布规则递增修订版本和 `versionCode`，并沿用现有签名。原生 Shell 协议版本仍为 `1`，不等同于应用版本。
 
 版本文件必须包含唯一的 `versionName` 和 `versionCode`：前者为 `主版本.次版本.修订版本` 三段数字，后者为 `2` 到 `2100000000` 的整数；缺失或无效时构建失败。
 
-## Windows 与 Android 同步构建
+## Windows 与 Android 构建入口
 
-日常“编译”或“编译安装包”执行根入口：
+日常只编译 Windows 管理端安装包时使用专用入口：
 
 ```powershell
-.\build.ps1
+.\scripts\build-windows-installer.ps1
 ```
 
-Windows 安装包完成后，入口自动比较 Android 内容与上一次成功正式构建的摘要。范围包括 Android 源码、资源、版本与 Gradle 配置、`scripts/*android*.ps1`、根 `build.ps1` 和内置 `assets/remote-access` 网页文件；排除构建目录、缓存、IDE 状态、本机 `local.properties`、签名文件和工具链。已提交、未提交、新增和删除的文件均参与判断。
+该脚本构建管理器前端、Windows 二进制并生成安装包，不执行 Android 构建。
 
-相关内容发生变化、首次没有成功基线、APK 或更新清单缺失及摘要不匹配时，自动执行 Release 和 lint；否则输出跳过原因。成功基线保存在已忽略的 `dist/android/build-state.json`，只在签名、lint、APK 元信息及清单摘要校验成功后更新；构建过程中输入发生变化也不会记录成功。
+根目录 `build.ps1` 保留 Windows 与 Android 的组合入口：先构建 Windows 安装包，再调用 `scripts/sync-android-build.ps1` 检查 Android。它会比较 Android 源码、资源、版本和 Gradle 配置、`scripts/*android*.ps1`、根 `build.ps1` 以及内置 `assets/remote-access` 文件，与上一次成功正式构建的摘要；排除构建目录、缓存、IDE 状态、本机 `local.properties`、签名文件和工具链。已提交、未提交、新增和删除的文件均参与判断。
 
-只读检查或单独同步 Android，无需再次构建 Windows：
+只有相关内容变化、首次缺少成功基线、APK 或更新清单缺失、摘要不匹配时，组合入口才执行 Android Release 和 lint；否则报告跳过原因。成功基线保存在已忽略的 `dist/android/build-state.json`，只在签名、lint、APK 元信息及清单摘要校验成功后更新。普通 Windows 构建请用上面的专用入口；显式需要 Android 时再使用 Android 构建或同步入口。
+
+只读检查 Android 输入，或单独按摘要条件同步 Android，不必重建 Windows：
 
 ```powershell
 .\scripts\sync-android-build.ps1 -CheckOnly |
@@ -26,7 +28,13 @@ Windows 安装包完成后，入口自动比较 Android 内容与上一次成功
 .\scripts\sync-android-build.ps1
 ```
 
-也可向根入口传入隔离工具链：
+明确要求构建 Android Release 时，直接调用：
+
+```powershell
+.\scripts\build-android.ps1 -Configuration Release
+```
+
+也可向根组合入口传入隔离 Android 工具链：
 
 ```powershell
 .\build.ps1 `
@@ -114,9 +122,10 @@ Debug APK 仅用于本地验收和 PR 检查，不更新正式成功基线。应
 
 - 服务链接支持显式 `http://` 或 `https://` 根 Origin，可保留自定义端口；省略协议时默认 HTTPS。使用 frp 时，填写管理器中已应用为主链路的固定公网地址及其映射端口。地址不能包含 userinfo、路径、query 或 fragment。
 - 原生登录只向当前 Origin 的 `/api/connect` 提交访问密钥；成功后立即清空输入，密钥输入框禁用 View 状态保存，不随 Activity 状态持久化明文密钥。
-- 设备会话使用服务返回的 `codex_elves_device` HttpOnly Cookie；原生登录后写入主 WebView，打开独立浏览器入口时再同步到浏览器 WebView 的 CookieManager。
+- 设备会话使用服务返回的 `codex_elves_device` HttpOnly Cookie；原生会话状态保存当前 Origin 和 Cookie，并将 Cookie 写入主 WebView。
+- 内置浏览器运行在独立的 `:browser` Android 进程，WebView 数据目录后缀为 `codex-elves-browser`；它与主会话 WebView 不共享完整 Cookie、网页存储或缓存。打开浏览器时，主进程通过仅限同 UID 的 Binder 交付当前 Origin 和设备 Cookie；浏览器 CookieManager 将该 Cookie 写入对应 Origin，设置为 HttpOnly、`SameSite=Strict`，HTTPS 下附加 `Secure`，随后 flush 并回读确认。第三方 Cookie 保持关闭；授权身份变化会使旧浏览器授权失效。
 - 对严格匹配 `*.shares.zrok.io` 的 HTTPS Origin，原生层会在首次加载页面前写入仅限当前主机、有效期 7 天的 `zrok_interstitial=1` Cookie，并在应用回到前台时刷新；其他域名不会写入该 Cookie。
-- WebView 地址保持用户填写的 HTTP/HTTPS 服务 Origin。只有已校验清单内的静态路径从本地资源返回，`/api/` 和 WebSocket 始终访问真实同源服务；HTTP 主地址使用 `ws://`，HTTPS 主地址使用 `wss://`。
+- WebView 地址保持用户填写的 HTTP/HTTPS 服务 Origin。只有同源 GET 请求中、已校验清单列出的静态路径从本地资源返回；`/api/` 和 WebSocket 不从 APK 静态资源响应，继续走远程服务和已授权的通道规则。所选通道为 HTTP 时使用 `ws://`，为 HTTPS 时使用 `wss://`。
 - `CodexElvesAndroid` 消息桥只允许当前 Origin 的主 frame 发送受支持的消息；应用版本及更新消息为 `app-info`、`check-app-update`，网页不能指定 APK 下载地址或签名。
 - 跨源重定向、证书错误和资源目录穿越均被拒绝。HTTP 主地址允许明文连接，HTTPS 第二通道仍按既有域名及授权规则校验。
 - 无法连接远程服务时，网页提供「重新连接」与「退出」。确认退出后取消重连、清理本地草稿和会话缓存，并通知 Android 清除本地授权、返回原生连接页面；远程退出请求最多等待 2 秒，失败不阻止本地退出。普通浏览器在远端撤销未确认时提示可在电脑端撤销设备，本页刷新仍要求重新输入访问密钥。

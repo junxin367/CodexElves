@@ -65,6 +65,172 @@ test("存储事件只匹配当前授权范围", () => {
 
 const app = await readFile(new URL("../assets/remote-access/app.js", import.meta.url), "utf8");
 const channels = await readFile(new URL("../assets/remote-access/channels.js", import.meta.url), "utf8");
+const diagnostics = await readFile(new URL("../assets/remote-access/diagnostics.js", import.meta.url), "utf8");
+const eventsClient = await readFile(new URL("../assets/remote-access/events-client.js", import.meta.url), "utf8");
+
+async function connectionDiagnosticsHarness({ android = true } = {}) {
+  const logs = [], documentListeners = new Map(), windowListeners = new Map(), timers = new Map();
+  let now = 1000, nextTimer = 0;
+  const context = {
+    URL, Headers, Response, AbortController, DOMException, TextEncoder, queueMicrotask,
+    Date: class extends Date { static now() { return now; } },
+    performance: { now: () => now },
+    location: new URL("https://diagnostics.example/"),
+    navigator: { onLine: true },
+    document: {
+      hidden: false, cookie: "",
+      addEventListener: (type, callback) => documentListeners.set(type, callback),
+      removeEventListener: type => documentListeners.delete(type)
+    },
+    addEventListener: (type, callback) => windowListeners.set(type, callback),
+    removeEventListener: type => windowListeners.delete(type),
+    setTimeout: (callback, delay) => {
+      timers.set(++nextTimer, { callback, delay, interval: false }); return nextTimer;
+    },
+    setInterval: (callback, delay) => {
+      timers.set(++nextTimer, { callback, delay, interval: true }); return nextTimer;
+    },
+    clearTimeout: id => timers.delete(id), clearInterval: id => timers.delete(id),
+    isAndroidContainer: () => android,
+    getAndroidAppInfo: async () => ({ diagnosticsVersion: 1, requestRoutingVersion: 2 }),
+    CodexElvesAndroid: { postMessage: text => {
+      const message = JSON.parse(text);
+      if (message.type === "diagnostics-log") logs.push(message.event);
+    } }
+  };
+  context.window = context;
+  vm.createContext(context);
+  const load = source => vm.runInContext(source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""), context);
+  load(diagnostics);
+  await Promise.resolve();
+  return { context, logs, timers, documentListeners, windowListeners, load,
+    advance: milliseconds => { now += milliseconds; } };
+}
+
+test("连接诊断关联标识只附加到状态探测，保留业务请求和既有查询参数", async () => {
+  const h = await connectionDiagnosticsHarness(), origin = h.context.location.origin;
+  const options = { method: "GET" };
+  const trace = h.context.traceDiagnosticRequest("/api/session?existing=1", options, origin);
+  const url = new URL(trace.path, origin);
+  const requestId = url.searchParams.get("diag");
+  assert.match(requestId, /^http-[A-Za-z0-9_-]+$/);
+  assert.equal(url.searchParams.get("existing"), "1");
+  trace.response(jsonResponse({ ok: true }));
+  trace.finish();
+  assert.deepEqual(h.logs.map(event => event.fields.requestId), [requestId, requestId, requestId]);
+  assert.equal(h.logs[0].fields.path, "/api/session");
+  assert.equal(JSON.stringify(h.logs).includes("existing"), false);
+  const action = h.context.traceDiagnosticRequest("/api/action/send", { method: "POST" }, origin);
+  assert.equal(action.path, "/api/action/send");
+  assert.deepEqual(options, { method: "GET" });
+  const browser = await connectionDiagnosticsHarness({ android: false });
+  assert.equal(browser.context.traceDiagnosticRequest("/api/session", options, origin).path, "/api/session");
+});
+
+test("连接诊断保留关闭码与恢复状态，剔除消息凭证、原始关闭文本和越界字段", async () => {
+  const h = await connectionDiagnosticsHarness();
+  h.context.recordDiagnostic("socket.closed", {
+    path: "/api/events/ws?channel_token=secret", requestId: "ws-test", closeCode: 1006, wasClean: false,
+    isTrusted: true, delayMs: 500, backgroundMs: 4 * 60 * 60 * 1000, attempt: 2,
+    prompt: "private-message", token: "secret", cookie: "secret", closeReason: "private-server-text",
+    reason: "private-server-text"
+  });
+  assert.deepEqual(h.logs[0].fields, {
+    path: "/api/events/ws", requestId: "ws-test", closeCode: 1006, wasClean: false,
+    isTrusted: true, delayMs: 500, backgroundMs: 14400000, attempt: 2
+  });
+  h.context.recordDiagnostic("socket.closed", {
+    closeCode: 65536, wasClean: "false", isTrusted: 1, delayMs: 86400001, backgroundMs: -1, attempt: 1.5
+  });
+  assert.deepEqual(h.logs[1].fields, {});
+  h.context.setDiagnosticSink(() => { throw new Error("diagnostic failure"); });
+  assert.doesNotThrow(() => h.context.recordDiagnostic("socket.error", { reason: "network-error" }));
+});
+
+test("前后台日志保留后台时长及网络事件来源，online值仍反映当前浏览器状态", async () => {
+  const h = await connectionDiagnosticsHarness();
+  h.context.configureAndroidDiagnostics({ getSession: () => null, upload: async () => {} });
+  h.context.document.hidden = true;
+  h.documentListeners.get("visibilitychange")({ isTrusted: true });
+  h.advance(14400000);
+  h.context.document.hidden = false;
+  h.documentListeners.get("visibilitychange")({ isTrusted: true });
+  h.windowListeners.get("offline")({ isTrusted: true });
+  const events = h.logs.filter(event => event.name === "page.lifecycle");
+  assert.equal(events[1].fields.backgroundMs, 14400000);
+  assert.equal(events[1].fields.isTrusted, true);
+  assert.deepEqual(events[2].fields, { reason: "offline", visible: true, online: true, isTrusted: true });
+});
+
+test("WebSocket异常关闭及重试记录同一握手标识，诊断不修改原有500毫秒退避", async () => {
+  const h = await connectionDiagnosticsHarness(), sockets = [];
+  class Socket {
+    constructor(url) { this.url = new URL(url); this.listeners = new Map(); sockets.push(this); }
+    addEventListener(type, callback) { this.listeners.set(type, callback); }
+    close() { this.closed = true; }
+  }
+  h.context.WebSocket = Socket;
+  h.load(channels);
+  const stream = h.context.createChannelEventStream();
+  let errors = 0;
+  stream.onerror = () => { errors++; };
+  await Promise.resolve();
+  const socket = sockets[0], requestId = socket.url.searchParams.get("diag");
+  assert.match(requestId, /^ws-[A-Za-z0-9_-]+$/);
+  socket.onopen();
+  assert.equal(stream.readyState, 1);
+  const logsBeforeMessage = h.logs.length;
+  socket.onmessage({ data: JSON.stringify({ method: "remote/heartbeat" }) });
+  assert.equal(h.logs.length, logsBeforeMessage, "每条消息及心跳不刷诊断日志");
+  socket.onerror();
+  socket.listeners.get("close")({ code: 1006, wasClean: false, reason: "private text" });
+  assert.equal(errors, 1);
+  assert.equal(stream.readyState, 0);
+  const close = h.logs.find(event => event.name === "socket.closed");
+  assert.equal(close.fields.requestId, requestId);
+  assert.equal(close.fields.closeCode, 1006);
+  assert.equal(close.fields.wasClean, false);
+  assert.equal(JSON.stringify(h.logs).includes("private text"), false);
+  assert.equal(h.logs.find(event => event.name === "socket.retry").fields.delayMs, 500);
+  const retry = [...h.timers.values()].find(timer => !timer.interval && timer.delay === 500);
+  assert.ok(retry);
+  h.advance(500); retry.callback();
+  assert.equal(sockets.length, 2);
+  assert.notEqual(sockets[1].url.searchParams.get("diag"), requestId);
+  stream.close();
+});
+
+test("SharedWorker转交日志不算作心跳，也不推迟原有失联降级", async () => {
+  const h = await connectionDiagnosticsHarness();
+  let worker, fallbacks = 0;
+  h.context.SharedWorker = class {
+    constructor() {
+      worker = this;
+      this.port = { postMessage() {}, start() {}, close() {} };
+    }
+  };
+  h.context.observeChannelConfiguration = () => () => {};
+  h.context.createChannelEventStream = () => {
+    fallbacks++;
+    return { readyState: 0, close() {} };
+  };
+  h.load(eventsClient);
+  const stream = h.context.createRemoteEventStream();
+  worker.port.onmessage({ data: { type: "ready" } });
+  for (let tick = 1; tick <= 18; tick++) {
+    h.advance(5000);
+    worker.port.onmessage({ data: {
+      type: "diagnostic", event: { name: "socket.retry", fields: { requestId: "ws-test", delayMs: 500 } }
+    } });
+    const watcher = [...h.timers.entries()].find(([, timer]) => timer.delay === 5000);
+    assert.ok(watcher);
+    h.timers.delete(watcher[0]); watcher[1].callback();
+  }
+  assert.equal(fallbacks, 1);
+  assert.equal(stream.transport, "fallback");
+  assert.ok(h.logs.some(event => event.name === "worker.timeout" && event.fields.reason === "worker-response-timeout"));
+  stream.close();
+});
 
 function goalControlHarness({ status = "active", readOnly = false } = {}) {
   const disk = storage(), calls = [], notices = [];

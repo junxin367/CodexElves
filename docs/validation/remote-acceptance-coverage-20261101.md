@@ -1,5 +1,7 @@
 # 远程会话 73 条产品基线与当前处理器覆盖映射
 
+**2026-11-04 用户纠正侧边命名规则：** 原文档中“不从首条消息正文改名”是错误规则；同日用户将自动命名上限从 10 个字符调整为 15 个字符。默认名可由首条有效用户文字在合并空白后取前 15 个 Unicode 码点自动生成，写入并确认同一原生标签后同步远程；已有自定义名不得被自动命名或后续消息覆盖。完整规则见 [侧边会话需求](../remote-session-tools.md#侧边会话)。以下早期撤销十字符断言或待裁定的记录只描述当时验收状态，不能再作为当前产品规则；本次文档更正不增加任何验收通过结果。
+
 **最新验收分工（用户于2026-11-02确认）：** Android真机操作与Windows闪窗视觉验收由用户在安装后执行，列为“待用户验收”，不再阻塞本方修复和交付。本方的其他源码、浏览器及原生验证范围不缩减；原始报告中的未执行项不改为passed。步骤见 `remote-user-acceptance-20261102.md`。
 
 日期：2026-11-01，Asia/Shanghai。**来源冻结截点：04:44:34 开始读取的基线、进度与脚本，R1 原始证据截至 04:39:53。** 本文件只做独立覆盖核对，没有执行浏览器或原生业务写操作，也不替主代理改变测试对象或进度。
@@ -30,7 +32,7 @@
 | `R1/reload-runtime.json` | 04:38:43 的真实 `Script` 响应，同一 `/app.js` 摘要，`matchesInitial=true` | 证明这次刷新未切换网页代码；不证明 Android 或正式安装资源一致 |
 | 本轮前段只读/偏好证据 | `dist/validation/remote-acceptance-20261101/` 下对应文件，见 E10/E11 | 属于本目标的局部证据，逐项注明不同源码/fixture；不能拼成 R1/R2/R3 三轮完整通过 |
 
-表中处理器名字均指上述冻结的 `scripts/remote-access-e2e.mjs`。`H` 表示至少实施该基线一个具体用户步骤并有相应断言，**仅部分映射**；`G` 表示只有相关处理器，未实施关键前提、动作或结果断言；`N` 表示无对应处理器。辅助函数、自由描述的 `requirement`、单元测试或 driver 操作声明本身不算真实执行。
+表中处理器名字均指上述冻结的 `scripts/remote-access-e2e.mjs`；后续追加节也只描述各自记录时的实现和证据。2026-11-04 的现行工具、生命周期、缓存与权限边界见 [远程会话工具](../remote-session-tools.md) 和 [远程访问](../remote-access.md)，当前处理器入口见 [E2E 文档](../remote-access-e2e.md)；例如早期“已发送编辑尚未恢复”、仅等待目标完成及旧浏览器说明不能直接当作当前能力结论。`H` 表示至少实施该基线一个具体用户步骤并有相应断言，**仅部分映射**；`G` 表示只有相关处理器，未实施关键前提、动作或结果断言；`N` 表示无对应处理器。辅助函数、自由描述的 `requirement`、单元测试或 driver 操作声明本身不算真实执行。
 
 证据状态按子场景记录为 `局部已证 / failed / 受阻 / not_run`。`—` 表示本截点没有可归属该场景的本轮真实证据。表中“补”是下一步应增加或实际执行的内容，不是本子任务已执行的操作。没有把旧 2026-10-31 R2/R3 报告、源码测试通过数或新处理器的存在回填为真实通过。
 
@@ -90,7 +92,7 @@ E05/E06 本次复算的三图 SHA-256 顺序为 `f4555c6dc13ccd3872aac9c37ba45b8
 | R1-26 上下文口径 | H：`context.switch_update`、`context.zero_missing` | 原始 used/window 算术、跨会话回切、新轮、真实零/缺失夹具 | 容量/用量确为 last 而非累计的原始字段、降低值、fallback 精确来源、事件竞态 | 原始 R1 有 token 字段，但未操作圆环/逐项对照；not_run | 跑原生 last 字段对照与降低值；缺真实零/缺失夹具就保留受阻 |
 | R1-27 项目/会话置顶 | H：`project.pin_unpin`、`lifecycle.pin` | 项目 pin/unpin 及刷新；会话 pin 及刷新 | 会话 unpin、跨端显示、无关对象不变、失败/unknown 恢复 | —，not_run | 只用本轮 P/M，记录置顶服务原始 ID 和另一端读取 |
 | R1-28 子代理列表/只读 | N：无子代理处理器 | 72 项表中仍没有列表/详情/只读子代理执行器 | 当前原生状态分类、顺序/完成分组、主父/孙链、各写入口拒绝、加载/失败不装完整 | E11：13 完成记录及一个详情刷新只读局部已证 | 固化真实只读流程与原生行对照；补 active/waiting/不完整/异常，禁止发测试消息验只读 |
-| R1-29 侧边新建/双向 | H：`lifecycle.side_create`、`side.default_name`、`side.desktop_created`、`side.multiple` 等 | 远程/桌面创建、准确父子、空白后发送、标签、多个侧边切换 | 实际临时内存分页、失败/unknown、新建中导航；十字符规则仍有基线审计冲突 | 本轮无 S1/S2 创建证据；not_run | 用本轮专用父双向新建，原生 tab 标题为准；先解决固定十字符预期 |
+| R1-29 侧边新建/双向 | H：`lifecycle.side_create`、`side.default_name`、`side.desktop_created`、`side.multiple` 等 | 远程/桌面创建、准确父子、空白后发送、标签、多个侧边切换 | 实际临时内存分页、失败/unknown、新建中导航；2026-11-04 确认的首条十五字符规则需补算法断言 | 本轮无 S1/S2 创建证据；not_run | 用本轮专用父双向新建，按默认名前提核对十五字符算法与原生标签写入 |
 | R1-30 变更/文件/浏览器 | N：无工具页面处理器 | — | 当前 worktree、列表/详情、筛选/滚动/字体、安全边界、非 Git/超限/缓存失败；Android 浏览器入口 | E11 菜单出现入口不代表页面验收；not_run | 新增只读工具页操作；Android 浏览器需真机能力声明 |
 | R1-31 设置/搜索/菜单 | H：`project.search_preferences` | 专用项目名搜索、清空、project/list 两模式刷新保持 | 标题/路径搜索、折叠恢复、键盘菜单、主题/字号、长内容、存储失败/草稿不变 | E10 只证旧摘要下视图子场景；其余 not_run | 按客户端真实 UI 覆盖全部显示设置，单列保存失败与大字布局 |
 | R1-32 删除预览取消 | H：`lifecycle.delete_preview` | 准确对象确认框/风险截图，取消后原会话仍在 | 0 次删除的网络/服务计数、独立草稿/完整历史不变、身份变化阻断 | —，not_run | 在本轮可丢弃 C 做预览/取消并对照服务 0 次写 |
@@ -102,7 +104,7 @@ E05/E06 本次复算的三图 SHA-256 顺序为 `f4555c6dc13ccd3872aac9c37ba45b8
 | R2-01 缓存/慢读取 | H：`read.select_refresh`、`context.switch_update` | M→C→M、刷新、实际内容与上下文不串值 | 缓存先显后静默、慢读/旧响应反转、模型/滚动、失败保旧及重试、不提前启写 | E07 同一 Q 刷新不等于跨会话慢读；not_run | 增加受限慢读与选择代次时序，真实对照当前 ID |
 | R2-02 复合草稿恢复 | H：`recovery.draft`、`composer.multiline` | 主/控制/侧边文字刷新；main 单图草稿跨切换刷新 | Skill 位置、两图顺序、目标模式、项目/无项目草稿、重开和旧回执不清新稿 | E07 独立文字稿刷新局部已证；其他 not_run | 补复合草稿与项目键，记录恢复前后逐项身份 |
 | R2-03 侧边返回/刷新 | H：`lifecycle.side_switch`、`lifecycle.side_refresh`、`recovery.draft` | 主侧往返、侧页刷新身份/消息/模型、文字草稿分离 | 阅读位置/缓存先显、系统后退、旧 history owner、正在查看被关闭、缺父关系恢复 | —，not_run | 本轮新建侧边，分别测页面返回/浏览器后退与关闭同步 |
-| R2-04 侧边命名 | H：`side.desktop_rename`、`side.custom_name_refresh`、`side.same_id_name`、`side.first_message_name` | 连续两次改名、准确 tab 标题、刷新/后续消息保自定义名 | 迟到旧名、名称能力失败；首条十字符仍是待裁定旧预期，不能先算有效覆盖 | —；历史命名报告不继承，not_run | 以当前原生 tab 为权威重测，再确定是否保留固定算法例 |
+| R2-04 侧边命名 | H：`side.desktop_rename`、`side.custom_name_refresh`、`side.same_id_name`、`side.first_message_name` | 连续两次改名、准确 tab 标题、刷新/后续消息保自定义名 | 迟到旧名、名称能力失败；首条十五字符规则于2026-11-04确认，现有同步证据不能替代算法验证 | —；历史命名报告不继承，not_run | 保留已有同步证据，另补默认名首条文字算法、原生写入及自定义名保护断言 |
 | R2-05 迟到创建/关闭 | H：`side.late_creation`、`lifecycle.side_close`、`side.close_running` | 延迟真实创建响应不抢 control；批准后关闭/刷新；运行中关闭 | 原生标签/内存终态的准确 raw 证明、未知/明确失败关闭、其他 S 保持、创建失败 | —，not_run | 准备专用父/侧及隔离延迟租约，关闭只用获准对象 |
 | R2-06 子代理跨父/孙级 | N：无子代理处理器 | — | 两父/孙链、运行→完成、原生排序刷新、不完整/失败 watcher 恢复、跨父旧读隔离 | E11 单父完成列表/单详情局部证据，未覆盖本条核心跨父/孙级 | 新增只读多父与孙级 case；不以固定 13 条做永久断言 |
 | R2-07 主会话两轮已读 | H：`read.main_read_state` | 两轮真实 unread→打开 read→刷新 read；原始 turn/read 状态 | 不在底部/不可见不主动已读、读失败、迟到旧读与新轮 | —，not_run | 在本轮对象跑完整两轮，逐阶段独立原始文件 |
@@ -160,7 +162,7 @@ E05/E06 本次复算的三图 SHA-256 顺序为 `f4555c6dc13ccd3872aac9c37ba45b8
 - `sameQuestionAsPrevious:true` 目前是 driver 的请求 payload；固定 facts 主要是种类、原轮状态和 pending/提交状态。需要原始记录中的精确 sourceTurnId/itemId/questionIds/entityKey 及跨阶段对照，不能把 payload 自述当作“同一题”已经证明。
 - 公共 `userTurn/replied/finalReply`（约 608—620 行）只在含原提问 `spec.marker` 的 turn 中寻找期望回复；`questionScenario` 回答后仍执行 `finalReply(ctx,spec)`（约 2692 行）。**若 completed 原轮的回答由原生新建另一轮承接，当前等待可能只盯已结束的原轮。** 这是静态定位出的待验证风险，不是本文件已执行复现的结论。下一次真实回答应关联原题、answer 回执和接收后的实际 turn；不能为了满足原轮断言把正确跨轮行为改错，也不能省略最终原生接受/完成证据。
 
-旧 `scenario.goal` 的整段 fill 删除 token 与错误 `completed` 枚举已在冻结脚本中修正；`project.search_sort` 也已替换为本客户端 `project.search_preferences`。这三项不再继续报告为当前脚本未修，但新处理器仍未覆盖基线中全部目标和偏好分支。固定十字符 `side.first_message_name` 仍存在，需先消解产品依据冲突。
+旧 `scenario.goal` 的整段 fill 删除 token 与错误 `completed` 枚举已在冻结脚本中修正；`project.search_sort` 也已替换为本客户端 `project.search_preferences`。这三项不再继续报告为当前脚本未修，但新处理器仍未覆盖基线中全部目标和偏好分支。首条十五字符自动命名的产品依据已由用户于2026-11-04确认；现有处理器和证据门禁须同时核对算法与原生写入，不将规则澄清直接计为补测通过。
 
 ## 7. 排程、优先缺口与完成边界
 

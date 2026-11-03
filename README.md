@@ -127,7 +127,9 @@ Chrome 插件调用兼容与图片结果显示兼容是不同路径。这里介�
 
 ### 手机继续电脑上的会话
 
-手机端的界面演示、首次连接步骤、PWA 与 Android 的区别，以及连接问题处理，单独整理在 **[远程会话移动端指南](docs/remote-access-mobile.md)**。其中提供约 15 秒 GIF 和静态图片，便于查看操作过程。
+手机网页、PWA 与 Android 可阅读和继续电脑上的会话；桌面原生能力优先，部分读取和受限主会话文本发送可由 service 兜底。会话菜单提供变更、文件、浏览器、子智能体和侧边会话，其中工作区工具只读，浏览器需 FRP 与 Android 原生支持。原生注入失败按功能限制，发送结果未知时只核对原回执，不自动重发。
+
+界面演示、首次连接、访问方式及排查步骤见 **[远程会话移动端指南](docs/remote-access-mobile.md)**；当前路由、权限和交互限制见 [会话工具说明](docs/remote-session-tools.md)。
 
 ## 数据与运行方式
 
@@ -155,7 +157,7 @@ CodexElves 通过独立 launcher 启动桌面应用并注入增强脚本。桌�
 
 ### 手机上能打开网页，却看不到会话
 
-电脑需保持开机，负责远程访问的 CodexElves 进程和 Codex 桌面应用需保持运行。网页可打开只说明入口可达；还需保存访问密钥、完成手机授权，并等待桌面连接就绪。完整步骤见 [移动端连接与排查](docs/remote-access-mobile.md#连接问题)。
+电脑需保持开机，负责远程访问的 CodexElves 后台需保持运行。网页可打开只说明入口可达；还需保存访问密钥并完成手机授权。完整原生交互需要桌面就绪，service 兜底只覆盖部分读取和受限文本发送。完整步骤见 [移动端连接与排查](docs/remote-access-mobile.md#连接问题)。
 
 ### 更新、退出与平台说明
 
@@ -164,12 +166,13 @@ CodexElves 通过独立 launcher 启动桌面应用并注入增强脚本。桌�
 ## 更多文档
 
 - [远程会话移动端指南](docs/remote-access-mobile.md)：面向使用者的连接步骤、GIF 与手机界面说明。
-- [远程会话技术说明](docs/remote-access.md)：权限、协议、状态恢复和开发验证记录。
+- [远程会话技术说明](docs/remote-access.md)：公网入口、权限、协议、状态恢复与本机调试。
+- [会话工具说明](docs/remote-session-tools.md)：当前菜单、工作区读取、侧边会话和原生/service 路由边界。
 - [Android 构建与运行](docs/android.md)、[Android 与 PWA 发布说明](docs/android-release.md)：移动应用构建、资源更新和发布规则。
 
 ## 开发
 
-前端开发需要 Node.js 和 npm，Rust 构建需要相应工具链。Windows 的完整安装包通过仓库根目录的 `build.ps1` 构建。
+前端开发需要 Node.js 和 npm，Rust 构建需要相应工具链。普通 Windows 安装包使用 `scripts/build-windows-installer.ps1`；根目录 `build.ps1` 是可选的 Windows 构建加 Android 同步构建组合入口，仅需 Windows 时使用专用脚本。
 
 ```powershell
 # 管理工具前端检查
@@ -184,7 +187,7 @@ cargo fmt --check
 cargo check --workspace
 
 # Windows 安装包
-.\build.ps1
+.\scripts\build-windows-installer.ps1
 ```
 
 主要目录：

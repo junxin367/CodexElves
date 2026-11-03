@@ -439,12 +439,14 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .tool-body>.text-button{display:block;margin:0 14px 10px;font-size:.78571rem}
 .tool-state{width:12px;flex-shrink:0}
 .spinner{display:inline-block;width:12px;height:12px;border:1.5px solid var(--line);border-top-color:var(--muted);border-right-color:var(--muted);border-radius:50%;animation:thread-spin 1s linear infinite;flex-shrink:0}
-.working-label{background:linear-gradient(100deg,var(--muted) 25%,var(--text) 50%,var(--muted) 75%);background-size:240% 100%;background-clip:text;-webkit-background-clip:text;color:transparent;animation:working-shimmer 2s linear infinite}
+/* 用户要求文字左侧不闪烁：禁用高亮平铺并保留底色，循环首尾均让高亮带处于文字外。 */
+.working-label{background:linear-gradient(100deg,var(--muted) 25%,var(--text) 50%,var(--muted) 75%) var(--muted) no-repeat;background-size:240% 100%;background-position:150% 0;background-clip:text;-webkit-background-clip:text;color:transparent;animation:working-shimmer 2s linear infinite}
 .turn-plan{list-style:none;margin:10px 0;padding:0;font-size:.85714rem;color:var(--muted);line-height:1.8}
 .turn-plan>.inProgress{color:var(--text)}
 .turn-plan>.completed{text-decoration:line-through}
 .send-button[data-action=stop] .ui-icon{width:18px;height:18px}
-@keyframes working-shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
+/* 240% 背景从 150% 移至 -50%，亮带仍从左向右扫过，重置时两端都是 muted 底色。 */
+@keyframes working-shimmer{from{background-position:150% 0}to{background-position:-50% 0}}
 @media(prefers-reduced-motion:reduce){.working-label{background:none;color:var(--muted)}}
 .command-group{min-width:0;margin:2px 0 8px;color:var(--muted)}
 .command-group-summary{position:relative;display:grid;grid-template-columns:16px minmax(0,1fr) 12px;align-items:center;gap:6px;width:fit-content;max-width:100%;min-width:0;min-height:26px;padding:3px 0;overflow:hidden;border-radius:6px;cursor:pointer;list-style:none;isolation:isolate;touch-action:manipulation}

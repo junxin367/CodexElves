@@ -415,11 +415,28 @@ fn string_field(key: &str, value: &str) -> Option<String> {
                 | "corp-blocked"
                 | "net-failed"
                 | "console-error"
+                | "stream-open"
+                | "stream-error"
+                | "poll"
+                | "replace"
+                | "heartbeat"
+                | "worker-timeout"
+                | "worker-response-timeout"
+                | "all-channels-disconnected"
+                | "route-change"
+                | "socket-open-timeout"
+                | "socket-idle-timeout"
+                | "handshake-invalid"
+                | "page-resume"
+                | "startup"
         ),
         "phase" => matches!(
             value,
             "create"
                 | "start"
+                | "open"
+                | "close"
+                | "retry"
                 | "resume"
                 | "pause"
                 | "stop"
@@ -469,6 +486,7 @@ fn string_field(key: &str, value: &str) -> Option<String> {
 }
 
 fn field(key: &str, value: &Value) -> Option<Value> {
+    // 用户上传的恢复诊断须跨三端完整保留；白名单与网页及 Android 同步，不接纳原始错误文案或凭证。
     match key {
         "errorCode" => value
             .as_i64()
@@ -488,9 +506,24 @@ fn field(key: &str, value: &Value) -> Option<Value> {
             .as_u64()
             .filter(|value| *value == 0 || (100..=599).contains(value))
             .map(Value::from),
+        "closeCode" => value
+            .as_u64()
+            .filter(|value| *value <= 65_535)
+            .map(Value::from),
+        "delayMs" => value
+            .as_u64()
+            .filter(|value| *value <= 86_400_000)
+            .map(Value::from),
+        "attempt" => value
+            .as_u64()
+            .filter(|value| *value <= 10_000)
+            .map(Value::from),
+        "backgroundMs" => integer(value),
         "bytes" | "sdk" | "generation" | "expectedBytes" | "loadedBytes" | "versionCode"
         | "line" | "width" | "height" | "draftChars" | "attachmentCount" => integer(value),
-        "visible" | "online" | "pageLeaving" | "connected" => value.as_bool().map(Value::Bool),
+        "visible" | "online" | "pageLeaving" | "connected" | "wasClean" | "isTrusted" => {
+            value.as_bool().map(Value::Bool)
+        }
         _ => value
             .as_str()
             .and_then(|value| string_field(key, value))
@@ -569,6 +602,12 @@ fn sanitize_bundle(value: &Value) -> Result<Value, ApiError> {
                             | "online"
                             | "pageLeaving"
                             | "connected"
+                            | "wasClean"
+                            | "isTrusted"
+                            | "closeCode"
+                            | "delayMs"
+                            | "backgroundMs"
+                            | "attempt"
                             | "draftChars"
                             | "attachmentCount"
                             | "version"
@@ -855,7 +894,7 @@ mod tests {
     }
 
     fn bundle() -> Value {
-        json!({
+        let mut bundle = json!({
             "schemaVersion":1,"capturedAtMs":123,
             "app":{"versionName":"0.0.10","versionCode":10,"sdk":35,
                 "webViewVersion":"131.0.0","resourceVersion":"abc123",
@@ -873,7 +912,15 @@ mod tests {
                     "threadId":"thread_123-abc","blockedBy":"pending-receipt",
                     "pageLeaving":false,"connected":true,"draftChars":18,"attachmentCount":2,
                     "readyState":1}}]
-        })
+        });
+        let fields = &mut bundle["events"][0]["fields"];
+        fields["wasClean"] = json!(true);
+        fields["isTrusted"] = json!(false);
+        fields["closeCode"] = json!(1006);
+        fields["delayMs"] = json!(250);
+        fields["backgroundMs"] = json!(MAX_JSON_INTEGER);
+        fields["attempt"] = json!(3);
+        bundle
     }
 
     fn test_state() -> (tempfile::TempDir, WebState, HeaderMap, HeaderMap) {
@@ -941,6 +988,8 @@ mod tests {
             "blockedBy",
             "pageLeaving",
             "connected",
+            "wasClean",
+            "isTrusted",
             "draftChars",
             "attachmentCount",
             "readyState",
@@ -1016,6 +1065,14 @@ mod tests {
                 assert!(field(key, &invalid).is_none());
             }
         }
+        for key in ["wasClean", "isTrusted"] {
+            for valid in [true, false] {
+                assert_eq!(field(key, &json!(valid)), Some(json!(valid)));
+            }
+            for invalid in [json!("true"), json!(0), Value::Null, json!({})] {
+                assert!(field(key, &invalid).is_none());
+            }
+        }
         for key in ["draftChars", "attachmentCount"] {
             for valid in [0, 1, MAX_JSON_INTEGER] {
                 assert_eq!(field(key, &json!(valid)), Some(json!(valid)));
@@ -1030,6 +1087,57 @@ mod tests {
             ] {
                 assert!(field(key, &invalid).is_none());
             }
+        }
+        for (key, maximum) in [
+            ("closeCode", 65_535),
+            ("delayMs", 86_400_000),
+            ("backgroundMs", MAX_JSON_INTEGER),
+            ("attempt", 10_000),
+        ] {
+            for valid in [0, 1, maximum] {
+                assert_eq!(field(key, &json!(valid)), Some(json!(valid)));
+            }
+            for invalid in [
+                json!(-1),
+                json!(maximum + 1),
+                json!(0.5),
+                json!("12"),
+                json!(true),
+                Value::Null,
+            ] {
+                assert!(field(key, &invalid).is_none(), "非法 {key}: {invalid}");
+            }
+        }
+        for reason in [
+            "stream-open",
+            "stream-error",
+            "poll",
+            "replace",
+            "heartbeat",
+            "worker-timeout",
+            "worker-response-timeout",
+            "all-channels-disconnected",
+            "route-change",
+            "socket-open-timeout",
+            "socket-idle-timeout",
+            "handshake-invalid",
+            "page-resume",
+            "startup",
+        ] {
+            assert_eq!(field("reason", &json!(reason)), Some(json!(reason)));
+        }
+        for phase in ["open", "close", "retry"] {
+            assert_eq!(field("phase", &json!(phase)), Some(json!(phase)));
+        }
+        for event_name in ["ws.open", "worker.reconnect"] {
+            let mut stream_event = bundle();
+            stream_event["events"][0]["name"] = json!(event_name);
+            stream_event["events"][0]["fields"]["reason"] = json!("stream-error");
+            stream_event["events"][0]["fields"]["phase"] = json!("retry");
+            let clean = sanitize_bundle(&stream_event).unwrap();
+            assert_eq!(clean["events"][0]["name"], event_name);
+            assert_eq!(clean["events"][0]["fields"]["reason"], "stream-error");
+            assert_eq!(clean["events"][0]["fields"]["phase"], "retry");
         }
         for ready_state in [
             json!(0),
@@ -1080,23 +1188,34 @@ mod tests {
         invalid["events"][0]["name"] = json!("bad event");
         assert_eq!(sanitize_bundle(&invalid).unwrap_err().code, 400);
         invalid = bundle();
-        invalid["events"] = json!(vec![invalid["events"][0].clone(); MAX_EVENTS + 1]);
+        let mut small_event = invalid["events"][0].clone();
+        small_event["fields"] = json!({});
+        invalid["events"] = json!(vec![small_event; MAX_EVENTS + 1]);
         assert_eq!(sanitize_bundle(&invalid).unwrap_err().code, 400);
         invalid = bundle();
         invalid["unknown"] = json!("x".repeat(MAX_BUNDLE_BYTES));
         assert_eq!(sanitize_bundle(&invalid).unwrap_err().code, 413);
         invalid = bundle();
         invalid["events"][0]["fields"]["reason"] = json!("raw_error_with_secret");
+        invalid["events"][0]["fields"]["errorType"] = json!("IOException: password=secret");
         invalid["events"][0]["fields"]["path"] = json!("C:\\private\\image.png");
         invalid["events"][0]["fields"]["bytes"] = json!(-1);
         invalid["events"][0]["fields"]["threadId"] = json!("private?token=secret");
         invalid["events"][0]["fields"]["blockedBy"] = json!("raw_error_with_secret");
         invalid["events"][0]["fields"]["pageLeaving"] = json!("false");
         invalid["events"][0]["fields"]["connected"] = json!(1);
+        invalid["events"][0]["fields"]["wasClean"] = json!("true");
+        invalid["events"][0]["fields"]["isTrusted"] = json!(1);
+        invalid["events"][0]["fields"]["closeCode"] = json!(65_536);
+        invalid["events"][0]["fields"]["delayMs"] = json!(86_400_001);
+        invalid["events"][0]["fields"]["backgroundMs"] = json!(MAX_JSON_INTEGER + 1);
+        invalid["events"][0]["fields"]["attempt"] = json!(10_001);
+        invalid["events"][0]["fields"]["phase"] = json!("arbitrary-private-phase");
         invalid["events"][0]["fields"]["draftChars"] = json!(0.5);
         invalid["events"][0]["fields"]["attachmentCount"] = json!(MAX_JSON_INTEGER + 1);
         let clean = sanitize_bundle(&invalid).unwrap();
         assert!(clean["events"][0]["fields"].get("reason").is_none());
+        assert!(clean["events"][0]["fields"].get("errorType").is_none());
         assert!(clean["events"][0]["fields"].get("path").is_none());
         assert!(clean["events"][0]["fields"].get("bytes").is_none());
         for key in [
@@ -1104,6 +1223,13 @@ mod tests {
             "blockedBy",
             "pageLeaving",
             "connected",
+            "wasClean",
+            "isTrusted",
+            "closeCode",
+            "delayMs",
+            "backgroundMs",
+            "attempt",
+            "phase",
             "draftChars",
             "attachmentCount",
         ] {
