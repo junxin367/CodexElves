@@ -1064,7 +1064,17 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
   .session-files-list .session-tools-file{min-height:30px;height:30px}
 }
 
-.composer-anchor>.side-thread-expired-banner{min-height:166px}
-.side-thread-expired-banner{display:flex;flex-direction:column;gap:4px;margin:0;padding:12px 14px;border:1px solid color-mix(in srgb,var(--danger) 28%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--danger) 7%,var(--side));color:var(--text);line-height:1.6}
-.side-thread-expired-banner strong{font-size:.85714rem;color:var(--danger);font-weight:600}
+/*
+ * 侧边会话过期后，此块替代整个输入框，保持“输入框已禁用”的尺寸和外观。
+ * 高度对齐无附件、无编辑提示且完全展开的空输入框：
+ * 桌面：100px 输入区 + 24px 上下内边距 + 2px 边框 + 6px 工具栏间距 + 工具栏高度，默认 164px。
+ * 手机：80px 输入区 + 同样的 32px 固定间距 + 工具栏高度，默认 148px。
+ * 调整 .composer、.prompt-editor、.composer-toolbar 或 --control-toolbar-size 时，
+ * 须同步核对本块及下方 760px 断点；圆角、边框、背景与输入框一致，文字保持禁用灰色。
+ * 使用 min-height，允许大字号或窄屏下的提示文字换行撑高，避免裁切。
+ */
+.composer-anchor>.side-thread-expired-banner{min-height:calc(132px + var(--control-toolbar-size))}
+.side-thread-expired-banner{display:flex;flex-direction:column;gap:4px;margin:0;padding:12px 15px;border:1px solid var(--line);border-radius:24px;background:var(--side);color:var(--muted);line-height:1.6;box-shadow:0 2px 8px #00000004}
+.side-thread-expired-banner strong{font-size:.85714rem;font-weight:600}
 .side-thread-expired-banner span{font-size:.78571rem;color:var(--muted)}
+@media(max-width:760px){.composer-anchor>.side-thread-expired-banner{min-height:calc(112px + var(--control-toolbar-size))}}
