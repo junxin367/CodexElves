@@ -73,6 +73,10 @@ let connectionLatencyVersion = 0, connectionLatencyFloor = 0, connectionRouteSig
 const channelRtts = new Map();
 const connectionRttDescription = "点击刷新会话。网页到接入服务的 /api/session HTTP 完整往返时长；存在两条已授权线路时分别测量，不代表模型响应耗时或端到端原生执行延迟。消息使用此处可用线路中延迟最低的一路发送，发出后不自动换路重发。";
 let pageLeaving = false;
+let goalEditorBaseViewport = {
+  width: window.innerWidth,
+  height: window.visualViewport?.height || window.innerHeight
+};
 let recoveryErrorSilenceDepth = 0;
 const projectVisibleThreadCounts = new Map();
 const collapsedSidebarSections = new Set();
@@ -10769,10 +10773,24 @@ async function submitGoalUpdate(payload) {
   }
 }
 function fitGoalEditor() {
+  const viewport = window.visualViewport;
+  const width = window.innerWidth, height = viewport?.height || window.innerHeight;
+  // 同一宽度下保留键盘收起时的高度；转屏后重新建立基准。
+  goalEditorBaseViewport = {
+    width,
+    height: width === goalEditorBaseViewport.width ? Math.max(goalEditorBaseViewport.height, height) : height
+  };
   const dialog = $("#goal-edit-dialog");
   if (!dialog?.open) return;
-  const viewport = window.visualViewport;
-  dialog.style.setProperty("--goal-edit-viewport-height", `${viewport?.height || window.innerHeight}px`);
+  if (width <= 760) {
+    if (dialog.goalEditorViewportWidth === width) return;
+    dialog.goalEditorViewportWidth = width;
+    // 打开时锁定尺寸，后续键盘引起的 visualViewport resize/scroll 不再改变弹窗。
+    dialog.style.setProperty("--goal-edit-viewport-height", `${goalEditorBaseViewport.height}px`);
+    return;
+  }
+  delete dialog.goalEditorViewportWidth;
+  dialog.style.setProperty("--goal-edit-viewport-height", `${height}px`);
   dialog.style.setProperty("--goal-edit-viewport-top", `${viewport?.offsetTop || 0}px`);
 }
 function renderGoalEditor(goal, pendingRecord) {
