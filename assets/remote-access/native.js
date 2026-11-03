@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 127) return;
+  if (window.__codexElvesRemoteAccess?.version === 128) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -1260,7 +1260,8 @@
         if (item?.type !== "userMessage" || item.remotePendingInput || item.remoteCompactionInput) continue;
         const text = array(item.content).filter(part => part?.type === "text" && typeof part.text === "string")
           .map(part => part.text).join(" ").replace(/\s+/g, " ").trim();
-        if (text) return Array.from(text).slice(0, 10).join("");
+        // 用户要求：默认侧边名由首条有效文字生成，最多 15 个 Unicode 字符；按码点截取以保留完整代理对。
+        if (text) return Array.from(text).slice(0, 15).join("");
       }
     }
     return "";
@@ -7219,7 +7220,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 127, call,
+    version: 128, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();

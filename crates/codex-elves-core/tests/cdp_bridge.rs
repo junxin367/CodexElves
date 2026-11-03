@@ -801,7 +801,14 @@ const id=h.add("side-a","parent-a",{title:"新建侧边会话",tabTitle:"新建�
   {type:"userMessage",remoteCompactionInput:true,content:[{type:"text",text:"压缩占位"}]},
   {type:"userMessage",content:[{type:"image",url:"image://one"},{type:"text",text:"  首条🙂消息   用于侧边命名不能截断表情  "}]}
 ]}]});
-const expected="首条🙂消息 用于侧边";
+const expected="首条🙂消息 用于侧边命名不能截";
+for(const [text,title] of [["短标题","短标题"],
+  ["12345678901234","12345678901234"],
+  ["123456789012345","123456789012345"],
+  ["1234567890123456","123456789012345"],
+  ["12345678901234🙂后续文字","12345678901234🙂"]])
+  assert.equal(h.api.first({turns:[{items:[{type:"userMessage",content:[{type:"text",text}]}]}]}),
+    title,"用户要求最多保留 15 个字符，短标题不补齐且边界不能截断代理对");
 h.setWriter(async(id,title,options)=>{
   entered.resolve();await gate.promise;
   h.states.set(id,{...h.states.get(id),title});
@@ -852,7 +859,7 @@ await h.settle();
 assert.equal(h.writes.length,0,"没有有效用户文本时不能制造侧边名称");
 const accepted={sideConversation:true,turns:[{items:[{type:"steeringUserMessage",id:"steer",
   status:"accepted",input:[{type:"text",text:"已接纳引导内容用于标题"}]}]}]};
-assert.equal(h.api.first(accepted),"已接纳引导内容用于标");
+assert.equal(h.api.first(accepted),"已接纳引导内容用于标题");
 const custom=h.add("custom","parent-b",{title:"用户自定义名称",
   turns:[{items:[{type:"userMessage",content:[{type:"text",text:"首条用户消息"}]}]}]});
 h.api.syncNative();h.api.sync(custom,h.env.manager.getConversation(custom));await h.settle();
@@ -976,7 +983,7 @@ for(const mode of ["false","throw"]){
   h.events.length=0;
   h.api.sync(id,h.env.manager.getConversation(id));await h.settle();
   assert.equal(h.writes.length,1,"拒绝或送达不明的自动命名不能静默重复提交");
-  assert.equal(h.events.some(event=>event.params?.title==="首条消息用于自动命"),false);
+  assert.equal(h.events.some(event=>event.params?.title==="首条消息用于自动命名"),false);
   const result=await h.call("rename",{threadId:id,title:"手动名称"});
   assert.equal(result.ok,false,"原生拒绝或持久化失败时手动改名不能伪报成功");
   assert.equal(h.env.nativeSideThreads.get(id).title,"新建侧边会话");
@@ -1091,14 +1098,14 @@ await h.api.refresh(id,{fresh:true});await h.settle();
 assert.equal(h.writes.length,0,"临时侧边不能调用必定拒绝的元数据更新 RPC");
 assert.equal(h.tabWrites.length,1,"必须更新实际原生标签");
 assert.equal(h.tabWrites[0].tabId,original.tabId);
-assert.equal(h.tab(id).title,"临时侧边首条消息回归");
+assert.equal(h.tab(id).title,"临时侧边首条消息回归验证");
 assert.equal(h.tab(id).contentInstance,original.contentInstance,"改名不能替换原生内容实例");
 assert.equal(h.tab(id).props,original.props,"改名不能重建侧边会话");
 assert.equal(h.states.get(id).title,null,"临时会话没有元数据标题，不能伪造一个");
 assert.equal(h.env.nativeSideThreads.get(id).title,h.tab(id).title);
-assert(h.tabReads.some(read=>read.title==="临时侧边首条消息回归"),"成功前必须读取原生标签确认");
+assert(h.tabReads.some(read=>read.title==="临时侧边首条消息回归验证"),"成功前必须读取原生标签确认");
 assert(h.events.some(event=>event.method==="remote/relatedThreadsChanged"&&event.params.threadId==="parent-a"));
-assert(h.events.some(event=>event.method==="remote/sidebarChanged"&&event.params.title==="临时侧边首条消息回归"));
+assert(h.events.some(event=>event.method==="remote/sidebarChanged"&&event.params.title==="临时侧边首条消息回归验证"));
 h.dispose();
 "#,
     );
@@ -1262,7 +1269,7 @@ assert.equal(h.env.sideThreadTitleWrites.has(id),false,"标签未就绪且尚未
 scope.tabs=[tab];h.applyTab(scope,tab.tabId,{});
 await h.settle();
 assert.equal(h.tabWrites.length,1,"真实原生标签到位事件必须补齐一次命名");
-assert.equal(h.tab(id).title,"标签稍后就绪的首条消");
+assert.equal(h.tab(id).title,"标签稍后就绪的首条消息");
 h.applyTab(scope,tab.tabId,{});await h.settle();
 assert.equal(h.tabWrites.length,1,"后续标签事件不能重复写入");
 assert.equal(h.writes.length,0);
@@ -10585,8 +10592,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = assets::renderer_features_script();
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 127"));
-    assert!(script.contains("version: 127"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 128"));
+    assert!(script.contains("version: 128"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));
