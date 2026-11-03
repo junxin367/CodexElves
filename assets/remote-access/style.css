@@ -995,6 +995,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-related-menu-status{padding-top:9px;border-top:1px solid var(--line)}
 .session-related-menu-context{z-index:1;padding:4px}
 .session-related-menu-danger{color:var(--danger)}
+@media(max-width:760px){.session-related-menu-item.session-related-menu-thread,.session-related-menu-item.session-related-menu-completed{font-size:calc(var(--font-size) - 1px)}}
 @media(pointer:coarse){.session-related-menu-item{min-height:44px}}
 /* /session-related-menu */
 .session-files-screen .session-tools-page{min-height:0}
