@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 125) return;
+  if (window.__codexElvesRemoteAccess?.version === 127) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -39,6 +39,7 @@
   const INITIAL_THREAD_METADATA_RETRY_DELAYS = [100, 200, 400, 800, 1000];
   let goalMaterializer = null;
   const nativeModuleSnapshots = new Map();
+  const nativeResourceSources = new Map();
   let relatedNativeState = null;
   let nativeSideBindings = null;
   let requestClientConversationReader = null;
@@ -1797,9 +1798,7 @@
       const matches = [];
       for (const resource of candidates) {
         try {
-          const response = await fetch(resource);
-          if (!response.ok) continue;
-          if (rule.matches(await response.text())) matches.push(resource);
+          if (rule.matches(await nativeResourceSource(resource))) matches.push(resource);
         } catch {}
       }
       if (matches.length === 1) return matches[0];
@@ -1819,9 +1818,7 @@
       visited.add(resource);
       let source;
       try {
-        const response = await fetch(resource);
-        if (!response.ok) continue;
-        source = await response.text();
+        source = await nativeResourceSource(resource);
       } catch {
         continue;
       }
@@ -1842,13 +1839,28 @@
       throw failure(503, `原生关联会话模块版本不唯一（${name}）`);
     throw failure(503, `当前 Codex 版本的原生关联会话模块不可用（${name}）`);
   }
+  async function nativeResourceSource(resource) {
+    // 打包资源按带哈希的 URL 复用源码；当前来源与版本歧义仍由 nativeResource 每次检查。
+    let pending = nativeResourceSources.get(resource);
+    if (!pending) {
+      pending = (async () => {
+        const response = await fetch(resource);
+        if (!response.ok) throw failure(503, "无法读取原生关联会话接口");
+        return await response.text();
+      })();
+      nativeResourceSources.set(resource, pending);
+      pending.catch(() => {
+        if (nativeResourceSources.get(resource) === pending) nativeResourceSources.delete(resource);
+      });
+    }
+    return await pending;
+  }
   async function nativeModuleSnapshot(name) {
     const resource = await nativeResource(name);
     if (!nativeModuleSnapshots.has(resource)) {
       const pending = (async () => {
-        const [module, response] = await Promise.all([import(resource), fetch(resource)]);
-        if (!response.ok) throw failure(503, "无法读取原生关联会话接口");
-        return { module, source: await response.text(), resource };
+        const [module, source] = await Promise.all([import(resource), nativeResourceSource(resource)]);
+        return { module, source, resource };
       })();
       nativeModuleSnapshots.set(resource, pending);
       pending.catch(() => { if (nativeModuleSnapshots.get(resource) === pending) nativeModuleSnapshots.delete(resource); });
@@ -3123,10 +3135,12 @@
       } finally { coordinator?.[Symbol.dispose]?.(); }
     };
     const prepare = async (id, message, phase, verifiedClientUserMessageId = null) => {
-      const initial = await nativeModuleSnapshot("initial");
-      requestClientQueuePrepare ||= nativeFunction(initial.module, source =>
-        source.includes("inheritNativeWorkspacePermissions")
-        && source.includes("allowStartAfterNoActiveTurn"), "队列消息准备");
+      if (!requestClientQueuePrepare) {
+        const initial = await nativeModuleSnapshot("initial");
+        requestClientQueuePrepare = nativeFunction(initial.module, source =>
+          source.includes("inheritNativeWorkspacePermissions")
+          && source.includes("allowStartAfterNoActiveTurn"), "队列消息准备");
+      }
       const rpc = await requestClientNativeRpc();
       const context = await rpc.getFollowUpContext(id, false);
       try {
@@ -4524,12 +4538,15 @@
       ? nativeSideThreads.get(id) : null;
     const sideContent = sideEntry && sideEntry.parentThreadId === parentThreadId
       ? readNativeSideTab(sideEntry, id)?.props?.content : null;
-    const lockedSettings = sideContent?.hostId === "local" ? sideContent.lockedCollaborationMode?.settings : null;
-    // 原生侧边输入器以当前标签的锁定配置执行；首轮前通用快照可能仍是全局默认值。
-    if (typeof lockedSettings?.model === "string" && lockedSettings.model.trim()) {
-      modelSettings.model = lockedSettings.model;
-      if (Object.hasOwn(lockedSettings, "reasoning_effort"))
-        modelSettings.effort = lockedSettings.reasoning_effort ?? null;
+    const sideSettings = sideContent?.hostId === "local"
+      ? conversation?.latestCollaborationMode?.settings
+        ?? conversation?.latestThreadSettings?.collaborationMode?.settings
+        ?? sideContent.lockedCollaborationMode?.settings : null;
+    // 发送准备使用当前会话协作配置；标签锁只在快照缺失时回退继承值。
+    if (typeof sideSettings?.model === "string" && sideSettings.model.trim()) {
+      modelSettings.model = sideSettings.model;
+      if (Object.hasOwn(sideSettings, "reasoning_effort"))
+        modelSettings.effort = sideSettings.reasoning_effort ?? null;
     }
     const asyncQuestions = readOnly ? [] : asyncQuestionRequests(id, conversation);
     if (!readOnly) asyncQuestionSignatures.set(id, JSON.stringify(asyncQuestions));
@@ -7202,7 +7219,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 125, call,
+    version: 127, call,
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();

@@ -335,6 +335,30 @@ fn string_field(key: &str, value: &str) -> Option<String> {
             valid_identifier(value, 160, true)
         }
         "requestId" => valid_identifier(value, 80, false),
+        "threadId" => valid_identifier(value, 120, false),
+        "blockedBy" => matches!(
+            value,
+            "ready"
+                | "delete"
+                | "busy"
+                | "stopping"
+                | "compaction-edit"
+                | "compaction-scope"
+                | "compaction-unknown"
+                | "compaction-pending"
+                | "compaction-unsupported"
+                | "offline"
+                | "read-only"
+                | "images-unsupported"
+                | "project-required"
+                | "goal"
+                | "images-loading"
+                | "pending-receipt"
+                | "empty"
+                | "thread-not-loaded"
+                | "message-edit"
+                | "queue-edit-loading"
+        ),
         "reason" => matches!(
             value,
             "success"
@@ -465,8 +489,8 @@ fn field(key: &str, value: &Value) -> Option<Value> {
             .filter(|value| *value == 0 || (100..=599).contains(value))
             .map(Value::from),
         "bytes" | "sdk" | "generation" | "expectedBytes" | "loadedBytes" | "versionCode"
-        | "line" | "width" | "height" => integer(value),
-        "visible" | "online" => value.as_bool().map(Value::Bool),
+        | "line" | "width" | "height" | "draftChars" | "attachmentCount" => integer(value),
+        "visible" | "online" | "pageLeaving" | "connected" => value.as_bool().map(Value::Bool),
         _ => value
             .as_str()
             .and_then(|value| string_field(key, value))
@@ -543,6 +567,10 @@ fn sanitize_bundle(value: &Value) -> Result<Value, ApiError> {
                             | "reason"
                             | "visible"
                             | "online"
+                            | "pageLeaving"
+                            | "connected"
+                            | "draftChars"
+                            | "attachmentCount"
                             | "version"
                             | "resourceVersion"
                             | "sdk"
@@ -555,6 +583,8 @@ fn sanitize_bundle(value: &Value) -> Result<Value, ApiError> {
                             | "phase"
                             | "imageKind"
                             | "requestId"
+                            | "threadId"
+                            | "blockedBy"
                             | "network"
                             | "line"
                             | "width"
@@ -839,7 +869,10 @@ mod tests {
                     "line":12,"width":50,"height":80,
                     "Cookie":"secret","token":"private","body":"private",
                     "message":"Error: secret","stack":"private",
-                    "phase":"complete","routeName":"zrok","online":true}}]
+                    "phase":"complete","routeName":"zrok","online":true,
+                    "threadId":"thread_123-abc","blockedBy":"pending-receipt",
+                    "pageLeaving":false,"connected":true,"draftChars":18,"attachmentCount":2,
+                    "readyState":1}}]
         })
     }
 
@@ -903,6 +936,124 @@ mod tests {
         assert_eq!(clean["events"][0]["fields"]["path"], "/api/read/history");
         assert_eq!(clean["events"][0]["fields"]["durationMs"], 1.25);
         assert_eq!(clean["events"][0]["fields"]["width"], 50);
+        for key in [
+            "threadId",
+            "blockedBy",
+            "pageLeaving",
+            "connected",
+            "draftChars",
+            "attachmentCount",
+            "readyState",
+        ] {
+            assert_eq!(
+                clean["events"][0]["fields"][key],
+                bundle()["events"][0]["fields"][key]
+            );
+        }
+        for thread_id in ["a".to_owned(), "A0_-".repeat(30)] {
+            assert_eq!(field("threadId", &json!(thread_id)), Some(json!(thread_id)));
+        }
+        for thread_id in [
+            json!(""),
+            json!("a".repeat(121)),
+            json!("thread.with.dot"),
+            json!("thread/private"),
+            json!("会话"),
+            json!("thread?token=private"),
+            json!("thread\nprivate"),
+            json!("thread\n"),
+            json!("thread\r"),
+            json!("thread\u{2028}"),
+            json!("thread\u{2029}"),
+            json!(false),
+            json!(123),
+            Value::Null,
+        ] {
+            assert!(field("threadId", &thread_id).is_none());
+        }
+        for blocked_by in [
+            "ready",
+            "delete",
+            "busy",
+            "stopping",
+            "compaction-edit",
+            "compaction-scope",
+            "compaction-unknown",
+            "compaction-pending",
+            "compaction-unsupported",
+            "offline",
+            "read-only",
+            "images-unsupported",
+            "project-required",
+            "goal",
+            "images-loading",
+            "pending-receipt",
+            "empty",
+            "thread-not-loaded",
+            "message-edit",
+            "queue-edit-loading",
+        ] {
+            assert_eq!(
+                field("blockedBy", &json!(blocked_by)),
+                Some(json!(blocked_by))
+            );
+        }
+        for invalid in [
+            json!(""),
+            json!("arbitrary-private-text"),
+            json!("ready?token=private"),
+            json!(false),
+            json!(0),
+            Value::Null,
+        ] {
+            assert!(field("blockedBy", &invalid).is_none());
+        }
+        for key in ["pageLeaving", "connected"] {
+            for valid in [true, false] {
+                assert_eq!(field(key, &json!(valid)), Some(json!(valid)));
+            }
+            for invalid in [json!("true"), json!(0), Value::Null, json!({})] {
+                assert!(field(key, &invalid).is_none());
+            }
+        }
+        for key in ["draftChars", "attachmentCount"] {
+            for valid in [0, 1, MAX_JSON_INTEGER] {
+                assert_eq!(field(key, &json!(valid)), Some(json!(valid)));
+            }
+            for invalid in [
+                json!(-1),
+                json!(0.5),
+                json!(MAX_JSON_INTEGER + 1),
+                json!("12"),
+                json!(true),
+                Value::Null,
+            ] {
+                assert!(field(key, &invalid).is_none());
+            }
+        }
+        for ready_state in [
+            json!(0),
+            json!(1),
+            json!(2),
+            json!(3),
+            json!(4),
+            json!("loading"),
+            json!("interactive"),
+            json!("complete"),
+        ] {
+            assert_eq!(field("readyState", &ready_state), Some(ready_state));
+        }
+        for invalid in [
+            json!(-1),
+            json!(5),
+            json!(1.5),
+            json!("1"),
+            json!("arbitrary-private-text"),
+            json!(true),
+            Value::Null,
+        ] {
+            assert!(field("readyState", &invalid).is_none());
+        }
         let mut stage = bundle();
         stage["events"][0]["fields"]["routeName"] = json!("session");
         assert_eq!(
@@ -938,10 +1089,26 @@ mod tests {
         invalid["events"][0]["fields"]["reason"] = json!("raw_error_with_secret");
         invalid["events"][0]["fields"]["path"] = json!("C:\\private\\image.png");
         invalid["events"][0]["fields"]["bytes"] = json!(-1);
+        invalid["events"][0]["fields"]["threadId"] = json!("private?token=secret");
+        invalid["events"][0]["fields"]["blockedBy"] = json!("raw_error_with_secret");
+        invalid["events"][0]["fields"]["pageLeaving"] = json!("false");
+        invalid["events"][0]["fields"]["connected"] = json!(1);
+        invalid["events"][0]["fields"]["draftChars"] = json!(0.5);
+        invalid["events"][0]["fields"]["attachmentCount"] = json!(MAX_JSON_INTEGER + 1);
         let clean = sanitize_bundle(&invalid).unwrap();
         assert!(clean["events"][0]["fields"].get("reason").is_none());
         assert!(clean["events"][0]["fields"].get("path").is_none());
         assert!(clean["events"][0]["fields"].get("bytes").is_none());
+        for key in [
+            "threadId",
+            "blockedBy",
+            "pageLeaving",
+            "connected",
+            "draftChars",
+            "attachmentCount",
+        ] {
+            assert!(clean["events"][0]["fields"].get(key).is_none());
+        }
         assert_eq!(
             path("/api/images/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/thumbnail?channel_token=secret"),
             Some("/api/images/:id/thumbnail".into())

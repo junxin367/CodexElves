@@ -447,6 +447,147 @@ test("队列编辑存储失败时保留最新草稿、提示一次并阻止提�
   assert.equal(context.queuedActionBusy.size, 0);
 });
 
+function queuedEditFeedbackHarness() {
+  const h = queuedEditPersistenceHarness(), { context } = h, response = deferred();
+  const element = (tag, className = "", text = "") => ({
+    tag, className, text, dataset: {}, attributes: {}, children: [], disabled: false,
+    get textContent() { return this.text + this.children.map(node => node.textContent).join(""); },
+    set textContent(value) { this.text = value; this.children = []; },
+    setAttribute(key, value) { this.attributes[key] = value; },
+    append(...children) { this.children.push(...children); },
+    replaceChildren(...children) { this.text = ""; this.children = children; },
+    querySelector(selector) {
+      for (const node of this.children) {
+        if (selector.startsWith(".") ? node.className.split(" ").includes(selector.slice(1)) : node.tag === selector)
+          return node;
+        const nested = node.querySelector?.(selector);
+        if (nested) return nested;
+      }
+      return null;
+    },
+  });
+  const area = element("div"), send = element("button"), status = element("span");
+  Object.assign(context, {
+    element, icon: name => element("svg", name), send,
+    button: (label, aria, action, className) => {
+      const node = element("button", className, label); node.setAttribute("aria-label", aria); node.action = action;
+      return node;
+    },
+    document: { createTextNode: text => element("#text", "", text) },
+    $: (selector, root) => root ? root.querySelector(selector)
+      : selector === "#edit-message-area" ? area : selector === "#send-status" ? status : h.prompt,
+    session: { device: { id: "device-a" }, capabilities: {} },
+    sending: null, compacting: false, goalMode: false, editing: true, editingMessage: null, active: false, hasAttachments: false,
+    unsupportedImages: false, unsupportedProjectless: false, goalReason: "", queueOnly: false,
+    compactionSendReason: "", compaction: { state: "idle" }, deleting: false, prompt: h.prompt.value,
+    pageLeaving: false, stream: null, composerDiagnosticState: "", creating: false,
+    privateInputScope: () => "device-a", recordRuntimeDiagnostic() {},
+    mutate: async (action, payload) => {
+      context.pending = { id: "edit-receipt", action, payload, deviceId: "device-a", time: Date.now() };
+      try {
+        const result = await response.promise;
+        if (result.outcomeUnknown) throw Object.assign(new Error("操作结果未确认"), { pendingFeedback: true });
+        context.pending = null;
+        return result;
+      } catch (error) {
+        if (!error.pendingFeedback) context.pending = null;
+        throw error;
+      }
+    },
+  });
+  h.edit.deviceId = "device-a";
+  vm.runInContext([
+    sourceSection("function queuedEditSubmittingAction(", "async function submitMessageEdit("),
+    sourceSection("function reportMutationError(", "function acceptedSendItem("),
+    sourceSection("const pendingFeedbackDelayMs =", "function clearPendingFeedbackTimer("),
+    `function renderSendFeedback(){${sourceSection("  const queuedEditAction = queuedEditSubmittingAction();",
+      '  $("#prompt").disabled =')}}`,
+  ].join("\n"), context);
+  context.updateComposer = () => { context.renderMessageEditBanner(); context.renderSendFeedback(); };
+  context.updateComposer();
+  return { ...h, response, area, send, status };
+}
+
+test("取消队列编辑立即显示取消中和spinner，明确失败后恢复原标签和可编辑状态", async () => {
+  const h = queuedEditFeedbackHarness(), operation = h.context.submitQueuedMessageEdit(true);
+  const cancel = h.area.querySelector("button");
+  assert.match(cancel.textContent, /取消中/);
+  assert.ok(cancel.querySelector(".spinner"));
+  assert.equal(cancel.disabled, true);
+  assert.equal(h.send.attributes["aria-label"], "取消中…");
+  assert.ok(h.send.querySelector(".spinner"));
+  assert.equal(h.send.disabled, true);
+  h.response.reject(new Error("取消操作明确失败"));
+  await operation;
+  const restored = h.area.querySelector("button");
+  assert.equal(restored.textContent, "取消编辑");
+  assert.equal(restored.disabled, false);
+  assert.equal(restored.querySelector(".spinner"), null);
+  assert.equal(h.send.attributes["aria-label"], "保存队列消息修改");
+  assert.equal(h.send.querySelector(".spinner"), null);
+  assert.equal(h.send.disabled, false);
+  assert.equal(h.status.textContent, "");
+  assert.deepEqual(h.notices, ["取消操作明确失败"]);
+});
+
+test("保存队列编辑立即显示保存中，成功结束编辑后恢复普通发送入口", async () => {
+  const h = queuedEditFeedbackHarness();
+  h.context.completeQueuedEditAction = () => {
+    h.context.editingQueuedMessage = null; h.context.editing = false;
+  };
+  const operation = h.context.submitQueuedMessageEdit();
+  assert.equal(h.status.textContent, "保存中…");
+  assert.equal(h.send.attributes["aria-label"], "保存中…");
+  assert.ok(h.send.querySelector(".spinner"));
+  assert.equal(h.send.disabled, true);
+  assert.equal(h.area.querySelector("button").textContent, "取消编辑");
+  h.response.resolve({});
+  await operation;
+  assert.equal(h.status.textContent, "");
+  assert.equal(h.area.hidden, true);
+  assert.equal(h.send.attributes["aria-label"], "发送消息");
+  assert.equal(h.send.querySelector(".spinner"), null);
+  assert.equal(h.send.disabled, false);
+});
+
+test("取消和保存未知回执停止在途spinner但保持锁定，五秒前无额外提示", async () => {
+  for (const cancel of [false, true]) {
+    const h = queuedEditFeedbackHarness(), operation = h.context.submitQueuedMessageEdit(cancel);
+    h.response.resolve({ outcomeUnknown: true });
+    await operation;
+    const record = h.context.pending;
+    assert.equal(h.context.busy, false);
+    assert.equal(h.area.querySelector("button").textContent, "取消编辑");
+    assert.equal(h.area.querySelector("button").disabled, true);
+    assert.equal(h.send.disabled, true);
+    assert.equal(h.area.querySelector(".spinner"), null);
+    assert.equal(h.send.querySelector(".spinner"), null);
+    assert.equal(h.context.pendingFeedbackReady(record), false);
+    record.time -= 5000;
+    assert.equal(h.context.pendingFeedbackReady(record), true);
+    assert.equal(h.context.pending, record);
+    assert.deepEqual(h.notices, []);
+  }
+});
+
+test("其他editId的提交不显示当前编辑的取消中或保存中，开始编辑仍只显示正在取回", () => {
+  const h = queuedEditFeedbackHarness();
+  h.context.busy = true;
+  h.context.queuedActionBusy.add(`${h.edit.threadId}:${h.edit.message.id}`);
+  h.context.pending = { action: "cancelQueuedEdit", deviceId: "device-a",
+    payload: { threadId: h.edit.threadId, editId: "other-edit" } };
+  h.context.updateComposer();
+  assert.equal(h.area.querySelector("button").textContent, "取消编辑");
+  assert.equal(h.area.querySelector(".spinner"), null);
+  assert.equal(h.send.querySelector(".spinner"), null);
+  h.edit.state = "starting";
+  h.context.pending.payload.editId = h.edit.editId;
+  h.context.updateComposer();
+  assert.match(h.area.textContent, /正在取回排队消息/);
+  assert.equal(h.area.querySelector("button").textContent, "重新取回");
+  assert.equal(h.area.querySelector(".spinner"), null);
+});
+
 function questionReceiptHarness(readReceipt) {
   const writes = [], calls = [], reloads = [];
   const key = JSON.stringify(["device-a", "thread-a", "question-a"]);
@@ -956,13 +1097,14 @@ function queuedReceiptHarness({ disk = storage(), refresh = async () => {} } = {
   };
   vm.createContext(context);
   vm.runInContext([
+    sourceSection("const pendingFeedbackDelayMs =", "function clearPendingFeedbackTimer("),
     sourceSection("function savePending(", "function updateGoalComposerPending("),
     sourceSection("function ordinaryInputRecord(", "function rememberDraft("),
     sourceSection("async function mutate(", "function acceptedSendItem("),
     sourceSection("async function resolvePending()", "let loginPageCleanup"),
     sourceSection("async function removeQueuedMessage(", "async function beginQueuedMessageEdit("),
     sourceSection("async function stopGeneration()", "async function applyCompactionReceipt("),
-    `function renderPending(){${sourceSection("  if (pending && (!sending || pending.payload !== sending.payload)) {",
+    `function renderPending(){${sourceSection("  if (pending && (!sending || pending.payload !== sending.payload)",
       "  renderFailedInputRecovery(")}}`,
   ].join("\n"), context);
   context.pending = vm.runInContext(`(()=>{${sourceSection("let pending = null;", "const goalComposerRecoveries")}
@@ -988,6 +1130,7 @@ test("队列引导和删除unknown保留原回执，刷新只读恢复且不清�
     assert.equal(first.context.pending.id, id);
     first.receipt(0, "unknown", { ok: false, outcomeUnknown: true });
     await operation;
+    assert.equal(first.notices.length, 0, "快速返回未确认时不得抢先弹出错误提示");
     assert.equal(first.requests[1].path, `/api/receipts/${id}`);
     await first.invoke(action);
     await first.invoke(action === "steerQueued" ? "removeQueued" : "steerQueued");
@@ -996,8 +1139,11 @@ test("队列引导和删除unknown保留原回执，刷新只读恢复且不清�
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(first.context.pending.id, id);
     first.context.renderPending();
+    assert.equal(first.area.children.length, 0, "正常等待的前五秒不额外显示回执横幅");
+    first.context.pending.time -= 5000;
+    first.context.renderPending();
     const banner = first.area.children[0];
-    assert.match(banner.text, /原回执已保留/);
+    assert.match(banner.text, /正在确认队列.*结果/);
     assert.deepEqual(banner.children.map(node => node.label), ["查回执"]);
     assert.match(banner.children[0].aria, /只查询原队列操作回执/);
     assert.deepEqual(first.draft, original);
@@ -1027,10 +1173,12 @@ test("队列写回包中断仍只查同一原回执，明确失败解锁且保�
     const operation = fixture.invoke(action), id = fixture.requests[0].requestId;
     fixture.requests[0].reject(new TypeError("response body interrupted"));
     await operation;
+    assert.equal(fixture.notices.length, 0, "传输中断不等于原生操作失败，等待原回执期间不立即弹红提示");
     assert.equal(fixture.context.pending.id, id);
     assert.equal(fixture.requests[1].path, `/api/receipts/${id}`);
     fixture.receipt(1, "failed", { ok: false, code: 409, message: "原队列已过期" });
     await new Promise(resolve => setImmediate(resolve));
+    assert.ok(fixture.notices.some(item => item.error === true && item.message === "原队列已过期"));
     assert.equal(fixture.context.pending, null);
     assert.deepEqual(fixture.draft, original);
     assert.deepEqual(fixture.clearedDrafts, []);
@@ -1192,6 +1340,7 @@ function lifecycle() {
   const pendingWrite = new AbortController();
   const context = {
     AbortController, DOMException, clearTimeout,
+    clearPendingFeedbackTimer() {},
     session: { device: { id: "device-a" } },
     selectedId: "thread-a", selectionVersion: 1, threadReadVersion: 0,
     foregroundReadGeneration: 0, pageLeaving: false, document: { hidden: false },
@@ -1663,7 +1812,7 @@ function sendRecoveryHarness() {
     composerPrompt: text => text, compactionLocked: () => false, rememberedNewChatModel: () => null,
     randomId: () => `send-${++nextId}`, goalComposerAction: () => false, updateComposer() {},
     recoveryStore: { activate: async () => {}, put: async () => {}, remove: async () => {}, clear: async () => {} },
-    savePending: value => { context.pending = value; },
+    savePending: value => { context.pending = value; }, clearPendingFeedbackTimer() {},
     api: async (path, payload, requestId) => {
       const result = deferred(); actions.push({ path, payload, requestId, ...result }); return result.promise;
     },
@@ -1853,7 +2002,7 @@ function connectionRecoveryHarness() {
   const snapshot = (overrides = {}) => ({
     device: { id: "device-a", createdAtMs: 1 }, nativeConnected: true, serviceConnected: false, ...overrides,
   });
-  const makeStream = () => ({ readyState: 1, transport: "shared", close() {} });
+  const makeStream = () => ({ readyState: 1, transport: "shared", close() { this.readyState = 2; } });
   let routeReady = false, intervalId = 0;
   const readThread = context.api, node = context.$;
   Object.assign(context, {
@@ -1895,6 +2044,11 @@ function connectionRecoveryHarness() {
     recoverQuestionReceipts: async () => {},
     refreshCachedCatalogs() {}, ensureStream() {}, stopCatalogRefresh() {}, showConnectionRecovery() {},
     syncGoalLiveTimer() {}, scheduleRelatedOperationCheck() {}, drainPendingNotificationOpen() {},
+    clearPendingFeedbackTimer() {},
+    syncActivityTimer() {}, stopActivityTimer() {}, stopGoalLiveTimer() {}, finishQueueDrag() {},
+    closeContextUsageTip() {}, rememberDraft() {}, rememberTranscript() {}, rememberReadingPosition() {},
+    stopRelatedSessionTimers() {}, sessionMenu: null, cancelConnectionProbe() {}, syncHistoryButtons() {},
+    sidebarRequest: null, sidebarTimer: null, historyController: null,
     handleRemoteChannelEvent: () => false, scheduleRelatedMenuRefresh() {},
     createRemoteEventStream: makeStream, sharedEventsAvailable: () => true,
     loadModels: async () => {}, refreshSkillCatalog: async () => {},
@@ -1905,17 +2059,21 @@ function connectionRecoveryHarness() {
     },
     clearInterval(id) { intervals.delete(id); },
   });
+  context.document.addEventListener = (name, callback) => listeners.set(name, callback);
   vm.runInContext([
     sourceSection("async function syncConnectionState(", "function savePending("),
     sourceSection("function withRecoveryErrorSilence(", "async function refreshAll("),
     sourceSection("async function refreshAll(", "function openStream("),
     sourceSection("function openStream(", "function reconnectStream("),
     sourceSection("function stopConnectionPoll(", "function retireForegroundReads("),
+    sourceSection("function retireForegroundReads(", "function resumePage()"),
     sourceSection("function resumePage()", "async function connect("),
     sourceSection("function retryConnectionRecovery(", "async function copyText("),
     `${sourceSection("function receive(event) {", "  const params = { ...event.params || {} };")}\n}`,
     sourceSection('  $("#connection-state").onclick =', "  const toolsTrigger ="),
     sourceSection('window.addEventListener("online",', 'document.addEventListener("visibilitychange", () => {\n  if (document.hidden) {\n    stopCatalogRefresh();'),
+    sourceSection('document.addEventListener("visibilitychange", () => {\n  if (document.hidden) {\n    stopCatalogRefresh();',
+      'window.addEventListener("popstate",'),
   ].join("\n"), context);
   const recover = source => {
     if (source === "open") { context.openStream(); return context.stream.onopen(); }
@@ -1931,7 +2089,7 @@ function connectionRecoveryHarness() {
   });
   return {
     context, probes, sidebarReads, frames, receiptChecks, writes, threadReads, historyReads, notices,
-    pendingWrite, question, snapshot, recover, completeRead,
+    pendingWrite, question, snapshot, recover, completeRead, listeners,
     poll: () => {
       const callback = intervals.get(context.connect.poll);
       assert.equal(typeof callback, "function");
@@ -1939,6 +2097,97 @@ function connectionRecoveryHarness() {
     },
   };
 }
+
+test("准备导航但仍停留原页面时，beforeunload 不关闭实时连接或连接轮询", () => {
+  const h = connectionRecoveryHarness(), original = h.context.stream;
+  h.context.connected = true;
+  h.context.startConnectionPoll("device-a");
+  const poll = h.context.connect.poll;
+  h.listeners.get("beforeunload")();
+  assert.equal(h.context.pageLeaving, false, "准备导航不等于原文档已经离开");
+  assert.equal(h.context.stream, original);
+  assert.equal(original.readyState, 1);
+  assert.equal(h.context.connect.poll, poll);
+  assert.equal(h.pendingWrite.signal.aborted, false);
+});
+
+test("发送状态诊断区分未读完整、回执和压缩锁定，只在状态变化时记录计数", () => {
+  const events = [], receipt = { id: "original-write" };
+  const context = {
+    editingMessage: null, editingQueuedMessage: null, editing: false,
+    deleting: false, busy: false, stopping: false, compacting: false,
+    compactionSendReason: "", compaction: { state: "idle" },
+    session: { device: { id: "device-a" } }, connected: true, pageLeaving: false,
+    stream: { readyState: 1 }, threadReadOnly: () => false,
+    unsupportedImages: false, unsupportedProjectless: false, goalReason: "",
+    composerAttachmentsLoading: () => false, action: "send", pending: null,
+    prompt: "不应进入日志的私人正文", hasAttachments: false, creating: false,
+    selectedId: "main", thread: null, send: {}, composerDiagnosticState: "",
+    privateInputScope: () => "device-a",
+    composerAttachmentSnapshot: () => [],
+    recordRuntimeDiagnostic: (name, fields) => events.push({ name, fields }),
+  };
+  vm.createContext(context);
+  const update = vm.runInContext(`() => {${sourceSection(
+    "  const blockedBy = editingMessage ?", '  $("#prompt").disabled =')}}`, context);
+  update();
+  assert.equal(context.send.disabled, true);
+  assert.equal(events.at(-1).fields.blockedBy, "thread-not-loaded");
+  context.thread = { id: "main" };
+  update();
+  assert.equal(context.send.disabled, false);
+  assert.equal(events.at(-1).fields.blockedBy, "ready");
+  context.prompt += "继续编辑";
+  update();
+  assert.equal(events.length, 2, "普通输入不得逐键刷日志");
+  context.pending = receipt;
+  update();
+  assert.equal(context.send.disabled, true);
+  assert.equal(events.at(-1).fields.blockedBy, "pending-receipt");
+  assert.equal(context.pending, receipt, "记录诊断不能解除未知回执锁");
+  context.pending = null;
+  context.compacting = true; context.compaction = { state: "unknown" };
+  context.compactionSendReason = "等待原压缩回执";
+  update();
+  assert.equal(context.send.disabled, true);
+  assert.equal(events.at(-1).fields.blockedBy, "compaction-unknown");
+  context.compaction = { state: "running", nativeConfirmed: true };
+  context.compactionSendReason = "";
+  update();
+  assert.equal(context.send.disabled, false, "已确认压缩且可排队时不能因诊断改动禁用发送");
+  assert.equal(events.at(-1).fields.blockedBy, "ready");
+  assert.equal(JSON.stringify(events).includes("私人正文"), false);
+  assert.ok(events.every(({ fields }) => Number.isInteger(fields.draftChars) && fields.attachmentCount === 0));
+});
+
+for (const source of ["visibility", "cancelled-navigation", "pagehide-visible", "pagehide-pageshow"])
+  test(`${source}通过实际生命周期事件恢复读取，保留草稿与未知回执`, async () => {
+    const h = connectionRecoveryHarness(), pending = h.context.pending;
+    h.context.connected = true;
+    h.context.startConnectionPoll("device-a");
+    if (source === "cancelled-navigation") h.listeners.get("beforeunload")();
+    if (source.startsWith("pagehide")) h.listeners.get("pagehide")();
+    h.context.document.hidden = true;
+    h.listeners.get("visibilitychange")();
+    h.context.document.hidden = false;
+    if (source === "pagehide-pageshow") h.listeners.get("pageshow")();
+    else h.listeners.get("visibilitychange")();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.context.pageLeaving, false);
+    assert.equal(h.probes.length, 1, "恢复后必须实际发起连接读取，不能只恢复界面可见性");
+    h.probes[0].resolve(h.snapshot());
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.threadReads.length, 1);
+    assert.equal(h.historyReads.length, 1);
+    h.completeRead(0);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.context.thread.requests[0].id, h.question.id);
+    assert.equal(h.context.pending, pending);
+    assert.equal(h.pendingWrite.signal.aborted, false);
+    assert.equal(h.context.drafts.get("main"), "保留普通草稿");
+    assert.equal(h.context.questionDrafts.get(h.question.id), "保留未提交回答");
+    assert.equal(h.writes.length, 0);
+  });
 
 for (const source of ["open", "resync", "reconnected", "resume", "online", "manual"])
   test(`${source}恢复先完成连接探测，再自动读出原问题，未决写和草稿保持`, async () => {
@@ -2692,6 +2941,7 @@ function cachedControlsHarness() {
     queuedActionBusy: new Set(), editingQueuedMessage: null, editingMessage: null, queueReorder: null,
     queueDrag: null, queuedEditCheckVersion: 0, compactionLocked: () => false,
     goalEditPending: null, goalEditDraft: null, renderGoalEditor() {}, updateGoalLiveView() {}, stopGoalLiveTimer() {},
+    syncPendingFeedbackTimer() {}, pendingFeedbackReady: () => true,
     editableGoalStatuses: ["active", "paused", "blocked", "budgetLimited", "usageLimited"],
     queueMessageText: message => message.text || message.context?.prompt || "",
   });
@@ -2784,6 +3034,214 @@ test("后台迟到的旧队列事件不能覆盖已清空的较新展示快照",
     });
   context.selectedId = "main";
   assert.equal(context.currentThreadDisplay().queuedMessages.length, 0);
+});
+
+// 操作反馈延迟：只验证 UI 提示时机，不调用真实会话或新增查询轮询。
+function delayFeedbackHarness() {
+  let now = 100000, nextTimer = 0;
+  const timers = new Map(), notices = [], disk = storage(), area = {
+    children: [], replaceChildren() { this.children = []; }, append(node) { this.children.push(node); },
+  };
+  disk.removeItem = key => disk.records.delete(key);
+  const element = (tag, className = "", text = "") => ({
+    tag, className, text, children: [], attributes: {},
+    get textContent() { return this.text; }, set textContent(value) { this.text = value; },
+    append(...nodes) { for (const node of nodes) { node.parent = this; this.children.push(node); } },
+    remove() { if (this.parent) this.parent.children = this.parent.children.filter(node => node !== this); },
+    setAttribute(key, value) { this.attributes[key] = value; },
+    querySelectorAll(selector) {
+      const matches = node => selector.startsWith(".") ? node.className?.split(" ").includes(selector.slice(1))
+        : selector.split(",").includes(node.tag);
+      return this.children.flatMap(node => [...(matches(node) ? [node] : []), ...(node.querySelectorAll?.(selector) || [])]);
+    },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
+  });
+  const context = {
+    Date: class extends Date { static now() { return now; } },
+    setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, { callback, at: now + delay }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    session: { device: { id: "device-a", createdAtMs: 1 }, capabilities: { compactionQueueSend: true }, allowApprovals: true },
+    selectedId: "main", selectionVersion: 1, pageLeaving: false, document: { hidden: false },
+    pending: null, pendingTimer: null, sending: null, connected: true, busy: false,
+    threadDeletions: new Map(), threadDeletionChecks: new Set(), goalEditPending: null, relatedThreadOperations: new Map(),
+    goalComposerRecoveries: new Map(), approvalReplies: new Map(), questionReplyReceipts: new Map(),
+    questionDrafts: new Map(), compactions: new Map(),
+    sideCreationView: null, relatedSessionView: null, unsupportedProjectless: false, goalMode: false, goalReason: "",
+    recoveryScope: null, sessionStorage: disk, approvalSignature: "previous",
+    queuedEditActions: new Set(["beginQueuedEdit", "editQueued", "cancelQueuedEdit", "dismissQueuedEdit"]),
+    privateInputScope: value => JSON.stringify([value?.device.id, value?.device.createdAtMs]),
+    threadDeletionKey: id => JSON.stringify(["device-a", id]),
+    currentCompaction: id => context.compactions.get(id || context.selectedId) || { state: "idle" },
+    compactionLocked: id => ["pending", "running", "unknown"].includes(context.currentCompaction(id).state),
+    ownsRelatedOperation: record => record.scope === context.privateInputScope(context.session),
+    goalRecordThreadId: record => record.payload.threadId,
+    goalComposerAction: (_action, payload) => payload?.goalMode === true,
+    goalComposerStorageRecord: record => record,
+    renderQueuedEditRecoveryControls: node => node.append({ label: "查回执" }),
+    compactionQueueSendReason: () => "", threadReadOnly: () => false,
+    element, button: (label, aria, action) => Object.assign(element("button", "", label), { label, aria, action }), $: () => area,
+    notice: (message, error = false) => notices.push({ message, error }),
+    renderApprovals() {}, reloadThread: async () => {}, reconcileCompaction() {},
+    resolvePending: () => assert.fail("显示提示不能查询回执"),
+    resolveRelatedOperation: () => assert.fail("显示提示不能查询侧边会话回执"),
+    resolveCompactionReceipt: () => assert.fail("显示提示不能查询压缩回执"),
+    setCompactionState: (id, value) => context.compactions.set(id, value),
+  };
+  vm.createContext(context);
+  vm.runInContext([
+    sourceSection("const pendingFeedbackDelayMs =", "function updateComposer("),
+    sourceSection("function savePending(", "function updateGoalComposerPending("),
+    sourceSection("function renderRelatedOperationStatus(", "function threadEphemeralState("),
+    sourceSection("function renderAsyncQuestion(", "function commandApprovalPresentation("),
+    sourceSection("function updateBlockingApprovalControls(", "function renderApprovals("),
+    sourceSection("function renderCompactionBanner(", "function dismissGoalComposerRecovery("),
+    sourceSection("async function applyCompactionReceipt(", "async function resolveCompactionReceipt("),
+    `function renderFeedback(){${sourceSection("  const deletion = threadDeletions.get(threadDeletionKey(selectedId));",
+      "  renderFailedInputRecovery(")}}`,
+  ].join("\n"), context);
+  context.updateComposer = () => {
+    area.replaceChildren();
+    context.renderFeedback();
+    context.renderRelatedOperationStatus(area);
+    context.renderCompactionBanner(area, context.selectedId, context.currentCompaction());
+    context.syncPendingFeedbackTimer();
+  };
+  const advance = async milliseconds => {
+    const target = now + milliseconds;
+    while (true) {
+      const next = [...timers].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next) break;
+      now = next[1].at; timers.delete(next[0]); next[1].callback();
+      await Promise.resolve();
+    }
+    now = target;
+  };
+  const pending = action => {
+    const record = { id: `receipt-${action}`, action, deviceId: "device-a", time: now,
+      payload: { threadId: "main", messageId: "q", editId: "edit", ...(action === "setGoal" ? { goalMode: true } : {}) },
+      draft: { text: "保留草稿" } };
+    context.savePending(record);
+    context.updateComposer();
+    return record;
+  };
+  return { context, timers, notices, area, advance, pending, now: () => now };
+}
+
+test("快速操作完成不出现额外回执提示，也不留下延时刷新", async () => {
+  const h = delayFeedbackHarness();
+  const record = h.pending("steerQueued");
+  assert.equal(h.area.children.length, 0);
+  assert.equal(h.timers.size, 1);
+  await h.advance(100);
+  h.context.savePending(null);
+  h.context.updateComposer();
+  assert.equal(h.timers.size, 0);
+  await h.advance(6000);
+  assert.equal(h.area.children.length, 0);
+  assert.equal(record.draft.text, "保留草稿");
+  assert.deepEqual(h.notices, []);
+});
+
+test("各类未确认操作到五秒才出现简短提示，原草稿与回执锁保持", async () => {
+  for (const action of ["send", "steerQueued", "removeQueued", "reorderQueued",
+    "beginQueuedEdit", "editQueued", "cancelQueuedEdit", "dismissQueuedEdit", "setGoal"]) {
+    const h = delayFeedbackHarness(), record = h.pending(action);
+    await h.advance(4999);
+    assert.equal(h.area.children.length, 0, action);
+    await h.advance(1);
+    assert.equal(h.area.children.length, 1, action);
+    assert.match(h.area.children[0].text, /^正在确认.+结果。$/);
+    assert.equal(h.context.pending, record, "延时反馈不能解除未知回执锁");
+    assert.equal(record.draft.text, "保留草稿");
+    assert.equal(h.timers.size, 0, "只重绘一次，没有新增轮询");
+    assert.deepEqual(h.notices, []);
+  }
+});
+
+test("侧边操作、删除和压缩复用同一个五秒 UI 提示定时器", async () => {
+  for (const kind of ["side-create", "side-close", "delete", "compact"]) {
+    const h = delayFeedbackHarness(), record = { id: kind, time: h.now(), state: "pending",
+      deviceId: "device-a", threadId: "main" };
+    if (kind.startsWith("side")) h.context.relatedThreadOperations.set(kind, {
+      ...record, parentThreadId: "main", scope: h.context.privateInputScope(h.context.session),
+      action: kind === "side-create" ? "createSideThread" : "closeSideThread",
+    });
+    else if (kind === "delete") h.context.threadDeletions.set(h.context.threadDeletionKey("main"), record);
+    else h.context.compactions.set("main", { ...record, receiptId: "compact-receipt" });
+    h.context.updateComposer();
+    assert.equal(h.area.children.length, 0, kind);
+    assert.equal(h.timers.size, 1, kind);
+    await h.advance(5000);
+    assert.equal(h.area.children.length, 1, kind);
+    assert.match(h.area.children[0].text, /^正在确认.+结果。$/);
+    assert.equal(h.timers.size, 0, kind);
+  }
+});
+
+test("切换、离开页面或更换授权后旧定时器不能显示迟到提示", async () => {
+  for (const change of ["selection", "authorization", "page", "hidden"]) {
+    const h = delayFeedbackHarness(), record = h.pending("steerQueued");
+    if (change === "selection") ++h.context.selectionVersion;
+    else if (change === "authorization") h.context.session.device.createdAtMs = 2;
+    else if (change === "page") h.context.pageLeaving = true;
+    else h.context.document.hidden = true;
+    await h.advance(5000);
+    assert.equal(h.area.children.length, 0, change);
+    assert.equal(h.timers.size, 0, change);
+    assert.equal(h.context.pending, record);
+  }
+});
+
+test("明确失败在五秒内立即提示，已确认压缩不继续显示未确认横幅", async () => {
+  const h = delayFeedbackHarness();
+  h.context.compactions.set("main", { state: "pending", receiptId: "compact-receipt", time: h.now() });
+  h.context.updateComposer();
+  await h.context.applyCompactionReceipt("main", "compact-receipt", {
+    state: "failed", result: { message: "压缩请求明确失败" },
+  });
+  assert.deepEqual(h.notices, [{ message: "压缩请求明确失败", error: true }]);
+  assert.equal(h.timers.size, 0);
+  h.context.compactions.set("main", { state: "pending", receiptId: "other", time: h.now(), acknowledged: true });
+  h.context.updateComposer();
+  await h.advance(5000);
+  assert.equal(h.area.children.length, 0);
+});
+
+test("问答先显示提交按钮状态，五秒后才增加中性说明且保留原回答回执", async () => {
+  for (const skip of [false, true]) {
+    const h = delayFeedbackHarness(), key = JSON.stringify(["device-a", "main", "question"]);
+    const request = { id: "question", params: { questions: [{ id: "field", question: "问题" }] } };
+    const record = { id: "answer-receipt", deviceId: "device-a", threadId: "main",
+      requestId: "question", state: "unknown", time: h.now(), skip };
+    h.context.questionReplyReceipts.set(key, record);
+    let card;
+    h.context.renderApprovals = () => {
+      card = h.context.element("section");
+      h.context.renderAsyncQuestion(card, request, "main");
+    };
+    h.context.renderApprovals(); h.context.updateComposer();
+    assert.equal(card.querySelector(".async-question-status").textContent, "");
+    assert.match(card.querySelectorAll("button").find(node => /中…$/.test(node.textContent)).textContent,
+      skip ? /^跳过中/ : /^提交中/);
+    await h.advance(5000);
+    assert.match(card.querySelector(".async-question-status").textContent, /^正在确认.+结果。$/);
+    assert.equal(h.context.questionReplyReceipts.get(key), record);
+  }
+});
+
+test("审批等待期间保留控件锁，五秒后增加核对入口，不解除原授权状态", async () => {
+  const h = delayFeedbackHarness(), key = "approval", card = h.context.element("section");
+  card.append(h.context.button("允许一次", "允许一次", () => assert.fail("不能重新提交")));
+  const record = { deviceId: "device-a", threadId: "main", state: "unknown", time: h.now() };
+  h.context.approvalReplies.set(key, record);
+  h.context.renderApprovals = () => h.context.updateBlockingApprovalControls(card, key);
+  h.context.renderApprovals(); h.context.updateComposer();
+  assert.equal(card.querySelector("button").disabled, true);
+  assert.equal(card.querySelector(".remote-approval-reply-status"), null);
+  await h.advance(5000);
+  assert.match(card.querySelector(".remote-approval-reply-status").children[0].textContent, /^正在确认操作结果。$/);
+  assert.equal(card.querySelector("button").disabled, true);
+  assert.equal(h.context.approvalReplies.get(key), record);
 });
 
 test("目标队列缓存按授权隔离，临时侧边仅留内存，缓存不携带审批和权限", () => {

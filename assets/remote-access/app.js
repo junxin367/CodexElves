@@ -54,6 +54,7 @@ let session = null, sidebar = null, selectedId = null, thread = null, historyCur
 let pendingNotificationOpen = null;
 let stream = null, connected = false, selectionVersion = 0, busy = false, creating = false, historyLoadingVersion = -1;
 let sending = null;
+let composerDiagnosticState = "";
 let turns = new Map(), collapsed = new Set(), search = "", sidebarTimer = null, refreshTimer = null;
 let historyInitialized = false;
 let historyError = "", historyController = null, selectionController = null, historyLoadingTurnId = null;
@@ -338,7 +339,8 @@ try {
       turnId: typeof value.turnId === "string" ? value.turnId : null,
       itemId: typeof value.itemId === "string" ? value.itemId : null,
       baselineTurnId: typeof value.baselineTurnId === "string" ? value.baselineTurnId : null,
-      baselineItemId: typeof value.baselineItemId === "string" ? value.baselineItemId : null
+      baselineItemId: typeof value.baselineItemId === "string" ? value.baselineItemId : null,
+      time: Number.isFinite(value.time) ? value.time : undefined
     });
   }
 } catch {}
@@ -2210,9 +2212,9 @@ function showSideCreation(record, { recordHistory = true } = {}) {
 }
 function updateSideCreationStatus(record) {
   if (sideCreationView?.record !== record) return;
-  const unknown = record.state === "unknown";
+  const unknown = record.state === "unknown" && pendingFeedbackReady(record);
   sideCreationView.status.querySelector("p").textContent = unknown
-    ? "创建结果暂未确认，可返回主会话查询原回执。" : "正在创建侧边会话…";
+    ? "正在确认创建结果，可返回主会话查看。" : "正在创建侧边会话…";
   sideCreationView.status.querySelector(".spinner").hidden = unknown;
 }
 function dismissSideCreation({ canceled = false, animate = false } = {}) {
@@ -2245,7 +2247,8 @@ function persistRelatedOperations(required = false) {
   try {
     const records = [...relatedThreadOperations.values()].map(record => ({
       id: record.id, action: record.action, scope: record.scope, parentThreadId: record.parentThreadId,
-      threadId: record.threadId, state: record.state, selectionToken: record.selectionToken, autoOpen: record.autoOpen
+      threadId: record.threadId, state: record.state, selectionToken: record.selectionToken, autoOpen: record.autoOpen,
+      time: record.time
     }));
     if (records.length) sessionStorage.setItem(relatedOperationStorageKey, JSON.stringify(records));
     else sessionStorage.removeItem(relatedOperationStorageKey);
@@ -2364,7 +2367,7 @@ async function runRelatedOperation(action, item = null) {
         || selectedId !== parentThreadId || scope !== privateInputScope(session) || relatedSessionView) return;
   }
   const record = { id: randomId(), action, scope, parentThreadId,
-    ...(item ? { threadId: item.id } : {}), state: "submitting", selectionToken,
+    ...(item ? { threadId: item.id } : {}), state: "submitting", selectionToken, time: Date.now(),
     autoOpen: action === "createSideThread" };
   const key = relatedOperationKey(record), existing = relatedThreadOperations.get(key);
   if (existing) {
@@ -2400,9 +2403,10 @@ async function runRelatedOperation(action, item = null) {
 function renderRelatedOperationStatus(root) {
   if (relatedSessionView) return;
   for (const record of relatedThreadOperations.values()) {
-    if (!ownsRelatedOperation(record) || record.parentThreadId !== selectedId) continue;
+    if (!ownsRelatedOperation(record) || record.parentThreadId !== selectedId
+        || sideCreationView?.record === record || !pendingFeedbackReady(record)) continue;
     const box = element("div", "pending-banner", record.action === "createSideThread"
-      ? "侧边会话正在创建或结果待确认，原请求标识已保留。" : "侧边会话关闭结果待确认，原请求标识已保留。");
+      ? "正在确认侧边会话创建结果。" : "正在确认侧边会话关闭结果。");
     const check = button("查回执", "查询原操作回执，不会重复创建或关闭",
       () => void resolveRelatedOperation(record, { allowSelection: true }), "text-button");
     check.disabled = !connected || !!record.request || record.state === "submitting";
@@ -2699,6 +2703,7 @@ async function restoreReadViews(value) {
   }
 }
 function clearPrivateInputs({ persisted = true } = {}) {
+  clearPendingFeedbackTimer();
   let previousScope = recoveryScope || privateInputScope(session);
   if (!previousScope) try { previousScope = sessionStorage.getItem("codex-elves-input-owner"); } catch {}
   ++recoveryGeneration; recoveryScope = null;
@@ -4278,6 +4283,7 @@ function threadDeletionLocked(id = selectedId) {
 }
 function setThreadDeletion(key, record, required = false) {
   const previous = threadDeletions.get(key);
+  if (record && !Number.isFinite(record.time)) record.time = Date.now();
   if (record) threadDeletions.set(key, record);
   else threadDeletions.delete(key);
   try {
@@ -4721,6 +4727,7 @@ async function refreshConnectedSession(source = stream) {
 }
 function savePending(value) {
   if (value) {
+    if (!Number.isFinite(value.time)) value.time = Date.now();
     try { sessionStorage.setItem("codex-elves-pending", JSON.stringify(goalComposerStorageRecord(value))); }
     catch (error) {
       if (!value.recoveryRef) throw new Error(recoveryStorageMessage(error, true));
@@ -4955,7 +4962,8 @@ function persistCompactions(required = false) {
     state: value.state, threadId: value.threadId, receiptId: value.receiptId || null,
     deviceId: value.deviceId || null, acknowledged: value.acknowledged === true,
     turnId: value.turnId || null, itemId: value.itemId || null,
-    baselineTurnId: value.baselineTurnId || null, baselineItemId: value.baselineItemId || null
+    baselineTurnId: value.baselineTurnId || null, baselineItemId: value.baselineItemId || null,
+    time: value.time
   }));
   try {
     if (stored.length) sessionStorage.setItem("codex-elves-compact-pending", JSON.stringify(stored));
@@ -4972,6 +4980,7 @@ function setCompactionState(id, value, { required = false } = {}) {
     deviceId: typeof value?.deviceId === "string" ? value.deviceId : null,
     acknowledged: value?.acknowledged === true,
     nativeConfirmed: value?.nativeConfirmed === true,
+    time: Number.isFinite(value?.time) ? value.time : Date.now(),
     baselineTurnId: typeof value?.baselineTurnId === "string" ? value.baselineTurnId : null,
     baselineItemId: typeof value?.baselineItemId === "string" ? value.baselineItemId : null
   };
@@ -5202,8 +5211,8 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
         await recoverFailedInput(pending);
         if (ownsPending()) savePending(null);
       } else {
-        notice(error.code === 401 && error.outcomeUnknown
-          ? error.message : "未收到回执，正在确认送达状态。请勿重复发送。", true);
+        if (ownsPending() && error.operationState !== "failed")
+          error.pendingFeedback = true;
         if (ownsPending()) void resolvePending();
         if (action === "send") error.deliveryPending = true;
       }
@@ -5229,6 +5238,7 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
     else {
       if (ownsPending()) void resolvePending();
       throw Object.assign(new Error("操作仍在处理，请稍后查看会话或回执"), { deliveryPending: action === "send",
+        pendingFeedback: ownsPending(),
         ...(trackedOperation ? { receiptId: id, operationState: "pending", outcomeUnknown: true } : {}),
         ...(["approve", "answer"].includes(action) ? { approvalState: "pending" } : {}) });
     }
@@ -5242,6 +5252,7 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
           || queuedEditActions.has(action) && session.capabilities?.queueEditRecovery === true))
         void resolvePending();
       throw Object.assign(new Error(result.result?.message || "送达状态未知，请在会话中确认，勿重复发送"), {
+        pendingFeedback: ownsPending(),
         ...(trackedOperation ? { receiptId: id, operationState: "unknown", outcomeUnknown: true } : {}),
         ...(["approve", "answer"].includes(action) ? { approvalState: "unknown" } : {}),
         deliveryPending: action === "send"
@@ -5262,6 +5273,10 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
     });
   }
   return result.result;
+}
+function reportMutationError(error) {
+  if (error.pendingFeedback) { updateComposer(); return; }
+  notice(error.message, true);
 }
 function acceptedSendItem(items, clientId) {
   return items.find(item => (item.type === "userMessage"
@@ -5358,12 +5373,7 @@ async function resolvePending() {
           const state = await checkQueuedMessageEdit(current.payload.threadId, current.payload.editId);
           if (stillCurrent() && state?.operationPending) retry(2000);
         } else notice("队列编辑结果尚未确认，请更新远程服务后核对；不会重复保存或恢复消息。", true);
-      } else if (queueAction) {
-        notice(current.action === "steerQueued"
-          ? "队列引导结果尚未确认，原回执已保留，不会重复引导。"
-          : "队列删除结果尚未确认，原回执已保留，不会重复删除。", true);
-        retry(5000);
-      } else notice("上一条消息送达状态未知。请查看会话，确认后再解除发送锁定。", true);
+      } else if (queueAction) retry(5000);
       updateComposer(); return;
     }
     if (receipt.state === "failed") {
@@ -6868,20 +6878,35 @@ function messageEditor() {
   updateMessageEditor();
   return edit.form;
 }
+function queuedEditSubmittingAction() {
+  const edit = editingQueuedMessage;
+  if (edit?.state !== "editing" || !busy || edit.threadId !== selectedId
+      || !queuedActionBusy.has(`${edit.threadId}:${edit.message.id}`)
+      || pending?.deviceId !== session?.device.id || pending?.payload?.threadId !== edit.threadId
+      || pending.payload.editId !== edit.editId) return "";
+  return ["cancelQueuedEdit", "editQueued"].includes(pending.action) ? pending.action : "";
+}
 function renderMessageEditBanner() {
   const area = $("#edit-message-area");
   if (!area) return;
   const kind = editingQueuedMessage ? editingQueuedMessage.state === "starting" ? "queued-starting" : "queued" : "";
+  const canceling = queuedEditSubmittingAction() === "cancelQueuedEdit";
   area.hidden = !kind;
-  if (area.dataset.editKind !== kind) {
+  if (area.dataset.editKind !== kind || area.dataset.canceling !== String(canceling)) {
     area.dataset.editKind = kind;
+    area.dataset.canceling = String(canceling);
     area.replaceChildren();
-    if (kind) area.append(element("span", "", kind === "queued-starting" ? "正在取回排队消息…" : "编辑排队消息"),
-      button(kind === "queued-starting" ? "重新取回" : "取消编辑",
-        kind === "queued-starting" ? "核对并取回此排队消息" : "取消编辑并恢复未发送草稿", () => {
+    if (kind) {
+      const cancel = button(canceling ? "" : kind === "queued-starting" ? "重新取回" : "取消编辑",
+        canceling ? "正在取消队列消息编辑"
+          : kind === "queued-starting" ? "核对并取回此排队消息" : "取消编辑并恢复未发送草稿", () => {
         if (editingQueuedMessage?.state === "starting") void requestQueuedMessageEdit(editingQueuedMessage);
         else if (editingQueuedMessage) void cancelQueuedMessageEdit();
-      }, "text-button"));
+      }, "text-button");
+      cancel.setAttribute("aria-busy", String(canceling));
+      if (canceling) cancel.append(element("span", "spinner"), document.createTextNode(" 取消中…"));
+      area.append(element("span", "", kind === "queued-starting" ? "正在取回排队消息…" : "编辑排队消息"), cancel);
+    }
   }
   if (kind) $("button", area).disabled = busy || !!editingQueuedMessage
     && (!!pending || !connected || threadReadOnly() || compactionLocked());
@@ -6921,8 +6946,8 @@ async function submitMessageEdit() {
       await selectThread(edit.threadId, { closeSidebar: false, force: true });
     await loadSidebar(null, { fresh: true });
   } catch (error) {
-    if (editingMessage === edit) edit.error = error.message;
-    notice(error.message, true);
+    if (editingMessage === edit && !error.pendingFeedback) edit.error = error.message;
+    reportMutationError(error);
   }
   finally { busy = false; updateComposer(); }
 }
@@ -7938,6 +7963,7 @@ function reconcileChildren(root, children) {
   while (cursor) { const next = cursor.nextSibling; cursor.remove(); cursor = next; }
 }
 function resetMessages() {
+  clearPendingFeedbackTimer();
   composerScroll?.expand();
   stopActivityTimer();
   finishQueueDrag({ render: false });
@@ -8740,7 +8766,7 @@ async function reorderQueuedMessages(threadId, expectedMessageIds, messageIds, f
     const result = await mutate("reorderQueued", payload, { reliable: true });
     if (session?.device.id === preview.deviceId) applyQueueReorderResult(threadId, result, readVersion);
   } catch (error) {
-    notice(error.message, true);
+    reportMutationError(error);
     if (!pending && selectedId === threadId) void reloadQueue().catch(error => notice(error.message, true));
   } finally {
     if (queueReorder === preview) queueReorder = null;
@@ -9026,11 +9052,13 @@ function renderQueuedMessages(messages, previous = null) {
       || !Array.isArray(thread.queuedMessages) || threadReadOnly(threadId) || !connected
       || busy || stopping || !!pending || queuedActionBusy.has(key) || compactionLocked(threadId)
       || !!message.submission?.status && message.submission.status !== "queued";
+    const steering = queuedActionBusy.has(key) && pending?.action === "steerQueued"
+      && pending.payload?.threadId === threadId && pending.payload?.messageId === messageId;
     const steer = button("", accepted ? "消息已发送，队列记录待同步"
-      : awaitingReceipt ? "队列消息结果待确认" : retryable ? "重试此队列消息" : "引导此队列消息",
+      : steering ? "正在引导此队列消息" : awaitingReceipt ? "队列消息结果待确认" : retryable ? "重试此队列消息" : "引导此队列消息",
       () => void steerQueuedMessage(threadId, messageId), "queued-steer-button");
-    steer.append(icon(retryable ? "retry" : "steer"),
-      element("span", "", accepted ? "已发送" : awaitingReceipt ? "待确认" : retryable ? "重试" : "引导"));
+    steer.append(steering ? element("span", "spinner") : icon(retryable ? "retry" : "steer"),
+      element("span", "", accepted ? "已发送" : steering ? "引导中" : awaitingReceipt ? "待确认" : retryable ? "重试" : "引导"));
     steer.disabled = accepted || awaitingReceipt || unavailable || message.canSendNow === false;
     const menu = button("", "排队消息操作", () => togglePopup(menu), "queued-menu-button");
     menu.id = `queued-menu-${messageId}`;
@@ -9098,7 +9126,7 @@ function renderQueueArea() {
   if (recovery) {
     const row = element("div", "queued-edit-recovery");
     const status = element("p", "queued-edit-recovery-text",
-      recovery.state === "editing" ? "有一条排队消息尚未编辑完成" : "队列编辑结果待确认，不会重复保存或恢复消息。");
+      recovery.state === "editing" ? "有一条排队消息尚未编辑完成" : "正在确认队列编辑结果。");
     row.append(status);
     if (recovery.state === "editing") {
       const resume = button("继续编辑", "取回尚未完成的队列编辑", () => resumeQueuedMessageEdit(recovery), "text-button");
@@ -9277,7 +9305,7 @@ async function removeQueuedMessage(threadId, messageId) {
     if (!applied || result?.queueSyncPending)
       void reloadQueue().catch(error => { if (currentAuthorization()) notice(error.message, true); });
   } catch (error) {
-    if (currentAuthorization()) notice(error.message, true);
+    if (currentAuthorization()) reportMutationError(error);
   } finally {
     queuedActionBusy.delete(key);
     if (currentAuthorization() && selectedId === threadId) updateComposer();
@@ -9354,7 +9382,7 @@ async function steerQueuedMessage(threadId, messageId) {
       phase: "failure", durationMs: performance.now() - startedAt,
       errorType: error?.name || "Error", reason: "network-error"
     });
-    notice(error.message, true);
+    reportMutationError(error);
   } finally {
     if (pendingSteer === preview && (!currentAuthorization() || selectedId !== threadId)) pendingSteer = null;
     queuedActionBusy.delete(key);
@@ -9414,7 +9442,7 @@ async function requestQueuedMessageEdit(edit) {
     completeQueuedEditAction("beginQueuedEdit", payload, result, readVersion);
   } catch (error) {
     if (!pending) finishQueuedMessageEdit(edit);
-    notice(error.message, true);
+    reportMutationError(error);
   } finally { busy = false; updateComposer(); }
   if (editingQueuedMessage === edit && edit.state === "editing") {
     $("#prompt").focus({ preventScroll: true });
@@ -9478,7 +9506,7 @@ async function submitQueuedMessageEdit(cancel = false) {
   const key = `${threadId}:${messageId}`, readVersion = queueVersion;
   if (queuedActionBusy.has(key)) return;
   queuedActionBusy.add(key);
-  busy = true; updateComposer();
+  busy = true;
   const action = cancel ? "cancelQueuedEdit" : "editQueued";
   const payload = {
     threadId,
@@ -9490,11 +9518,13 @@ async function submitQueuedMessageEdit(cancel = false) {
     } : {})
   };
   try {
-    const result = await mutate(action, payload, { reliable: true });
+    const request = mutate(action, payload, { reliable: true });
+    updateComposer();
+    const result = await request;
     completeQueuedEditAction(action, payload, result, readVersion);
     if (selectedId === threadId) $("#prompt").focus({ preventScroll: true });
   } catch (error) {
-    notice(error.message, true);
+    reportMutationError(error);
   } finally {
     queuedActionBusy.delete(key);
     busy = false; updateComposer();
@@ -10574,6 +10604,7 @@ let goalEditPending = (() => {
 })();
 let goalEditReceiptRequest = null, goalEditPollTimer = null, goalEditDraft = null;
 function setGoalEditPending(value, required = false) {
+  if (value && !Number.isFinite(value.time)) value.time = Date.now();
   try {
     if (value) sessionStorage.setItem(goalEditStorageKey, JSON.stringify(value));
     else sessionStorage.removeItem(goalEditStorageKey);
@@ -10621,7 +10652,6 @@ async function applyGoalEditReceipt(record, receipt) {
   if (receipt.state === "unknown") {
     setGoalEditPending({ ...record, state: "unknown" });
     renderGoalStatus();
-    notice(receipt.result?.message || "目标操作结果未知，不会重复提交。请查回执或在桌面核对。", true);
     return "unknown";
   }
   setGoalEditPending(null);
@@ -10878,15 +10908,15 @@ function renderGoalEditor(goal, pendingRecord) {
     count.textContent = `${bytes.toLocaleString("zh-CN")} / 16,384 B`;
     count.classList.toggle("error-text", bytes > 16 * 1024);
     const baselineChanged = !sameGoalEditBaseline(currentGoal, baseline);
+    const feedbackReady = !!record && pendingFeedbackReady(record);
     status.textContent = record ? unavailable ? "回执属于旧设备授权，已锁定重复提交"
-      : record.state === "unknown" ? "送达结果未知，已锁定重复提交"
-        : record.state === "submitting" ? "正在提交目标操作" : "正在确认目标操作回执"
+      : feedbackReady ? "正在确认目标操作结果。" : "正在处理目标操作…"
       : baselineChanged ? "原生目标已发生变化，当前草稿未丢失；请取消后重新打开编辑。" : "";
     status.hidden = !status.textContent;
-    status.classList.toggle("error-text", unavailable || record?.state === "unknown" || baselineChanged);
-    check.hidden = !record || unavailable;
+    status.classList.toggle("error-text", unavailable || baselineChanged && !record);
+    check.hidden = !record || unavailable || !feedbackReady;
     check.disabled = !connected || !!goalEditReceiptRequest;
-    unlock.hidden = !record;
+    unlock.hidden = !record || !unavailable && !feedbackReady;
     revert.hidden = !!controlPending;
     save.hidden = !!controlPending;
     revert.disabled = !!record;
@@ -10969,6 +10999,7 @@ function updateGoalLiveView(root, goal) {
   syncGoalLiveTimer();
 }
 function renderGoalStatus() {
+  syncPendingFeedbackTimer();
   const root = $("#goal-area");
   if (!root) { stopGoalLiveTimer(); return null; }
   const display = currentThreadDisplay(), goal = display?.goal;
@@ -10980,7 +11011,8 @@ function renderGoalStatus() {
   const editing = !!goalEditDraft && goalEditDraft.threadId === thread?.id;
   const signature = JSON.stringify([display?.id, objective, status, goal?.createdAt ?? null, ready,
     threadReadOnly(), connected, editing, !!goalEditPending, !!goalEditDraft,
-    pendingRecord ? [pendingRecord.id, pendingRecord.state, pendingRecord.deviceId === session?.device.id] : null]);
+    pendingRecord ? [pendingRecord.id, pendingRecord.state, pendingRecord.deviceId === session?.device.id,
+      pendingFeedbackReady(pendingRecord)] : null]);
   if (root.dataset.goalSignature === signature) {
     updateGoalLiveView(root, goal);
     renderGoalEditor(goal, pendingRecord);
@@ -10990,7 +11022,7 @@ function renderGoalStatus() {
   root.dataset.goalSignature = signature;
   root.dataset.goalThread = display?.id || "";
   root.replaceChildren();
-  root.hidden = !hasCurrentGoal && !pendingRecord;
+  root.hidden = !hasCurrentGoal && (!pendingRecord || !pendingFeedbackReady(pendingRecord));
   if (root.hidden) {
     stopGoalLiveTimer();
     renderGoalEditor(goal, pendingRecord);
@@ -10999,7 +11031,7 @@ function renderGoalStatus() {
   if (!hasCurrentGoal && pendingRecord) {
     stopGoalLiveTimer();
     const recovery = element("div", "goal-recovery-row");
-    recovery.append(icon("target"), element("span", "", "目标操作回执待确认"));
+    recovery.append(icon("target"), element("span", "", "正在确认目标操作结果。"));
     const recover = button("核对", "核对目标操作回执", () => beginGoalEdit(null), "text-button");
     recovery.append(recover);
     root.append(recovery);
@@ -11162,7 +11194,8 @@ async function submitBlockingRequest(requestThreadId, request, action, value, id
   const deviceId = session.device.id, key = approvalReplyKey(requestThreadId, request, deviceId);
   const state = blockingRequestState(requestThreadId), sourceVersion = state.sourceVersion, requestsReadVersion = state.generation;
   if (approvalReplies.has(key)) return;
-  const record = { deviceId, threadId: requestThreadId, requestId: request.id, method: request.method, state: "submitting" };
+  const record = { deviceId, threadId: requestThreadId, requestId: request.id, method: request.method,
+    state: "submitting", time: Date.now() };
   approvalReplies.set(key, record);
   approvalSignature = null; renderApprovals();
   try {
@@ -11198,6 +11231,7 @@ function replaceAsyncQuestions(target, requests) {
 }
 function setQuestionReceipt(key, record) {
   const previous = questionReplyReceipts.get(key);
+  if (record && !Number.isFinite(record.time)) record.time = Date.now();
   if (record) questionReplyReceipts.set(key, record);
   else questionReplyReceipts.delete(key);
   try { sessionStorage.setItem("codex-elves-question-receipts", JSON.stringify([...questionReplyReceipts.values()])); }
@@ -11345,9 +11379,10 @@ function renderAsyncQuestion(card, request, requestThreadId) {
       || fields.some(question => !draft.get(question.id)?.trim());
   };
   if (submissionState) {
-    status.textContent = submissionState === "unknown"
-      ? receipt?.skip ? "跳过状态待确认，不会自动重复操作。" : "回答送达状态待确认，不会自动重发。"
-      : receipt?.skip ? "正在跳过问题…" : "正在确认回答结果…";
+    if (pendingFeedbackReady(receipt))
+      status.textContent = receipt?.skip ? "正在确认问题跳过结果。" : "正在确认回答结果。";
+    if (receipt?.skip) skip.textContent = "跳过中…";
+    else submit.textContent = "提交中…";
   } else if (!allowed) status.textContent = threadReadOnly(requestThreadId) || !session.allowApprovals
     ? "此设备没有问答回复权限，请在 Codex 桌面处理。" : "连接恢复后可以提交回答。";
   form.onsubmit = event => {
@@ -11473,7 +11508,7 @@ function renderMcpToolApproval(card, view) {
 }
 function updateBlockingApprovalControls(card, key) {
   card.remoteReplyStatus?.remove(); card.remoteReplyStatus = null;
-  const replyState = approvalReplies.get(key)?.state;
+  const reply = approvalReplies.get(key), replyState = reply?.state;
   if (card.remoteLockedControls) {
     for (const [control, disabled] of card.remoteLockedControls) control.disabled = disabled;
     card.remoteLockedControls = null;
@@ -11482,9 +11517,9 @@ function updateBlockingApprovalControls(card, key) {
   card.remoteLockedControls = new Map([...card.querySelectorAll("button,input,select,textarea")]
     .map(control => [control, control.disabled]));
   for (const control of card.remoteLockedControls.keys()) control.disabled = true;
+  if (!pendingFeedbackReady(reply)) return;
   const status = element("div", "remote-approval-reply-status");
-  status.append(element("small", "muted", replyState === "submitting" ? "正在提交，请勿重复操作。"
-    : replyState === "pending" ? "已提交，等待原生待处理状态更新。" : "提交结果待确认，请核对状态，勿重复操作。"));
+  status.append(element("small", "muted", "正在确认操作结果。"));
   if (replyState !== "submitting") {
     const check = button("核对状态", "重新读取原生待处理状态",
       () => void reloadThread().catch(error => notice(error.message, true)), "text-button");
@@ -11493,14 +11528,15 @@ function updateBlockingApprovalControls(card, key) {
   card.remoteReplyStatus = status; card.append(status);
 }
 function renderApprovals() {
+  syncPendingFeedbackTimer();
   const root = $("#approval-area"); if (!root) return;
   const requests = thread?.requests || [];
   const signature = JSON.stringify([session?.device.id, thread?.id, requests, threadReadOnly(), session?.allowApprovals, connected,
     thread?.id ? [blockingRequestState(thread.id).epoch, blockingRequestState(thread.id).sourceVersion] : null,
     [...approvalReplies].filter(([, reply]) => reply.deviceId === session?.device.id && reply.threadId === thread?.id)
-      .map(([key, reply]) => [key, reply.state]),
+      .map(([key, reply]) => [key, reply.state, pendingFeedbackReady(reply)]),
     [...questionReplyReceipts].filter(([, reply]) => reply.deviceId === session?.device.id && reply.threadId === thread?.id)
-      .map(([key, reply]) => [key, reply.state])]);
+      .map(([key, reply]) => [key, reply.state, pendingFeedbackReady(reply)])]);
   if (signature === approvalSignature) return;
   approvalSignature = signature;
   approvalResizeObserver?.disconnect(); approvalResizeObserver = null;
@@ -11523,7 +11559,8 @@ function renderApprovals() {
     const questionKey = asyncQuestion ? JSON.stringify([session.device.id, requestThreadId, request.id]) : null;
     const requestSignature = JSON.stringify([blockingApprovalIdentity(requestThreadId, request),
       threadReadOnly(), session?.allowApprovals, connected,
-      asyncQuestion ? questionReplyReceipts.get(questionKey)?.state : null]);
+      asyncQuestion ? [questionReplyReceipts.get(questionKey)?.state,
+        pendingFeedbackReady(questionReplyReceipts.get(questionKey))] : null]);
     const previous = previousCards.get(requestSignature);
     if (previous) {
       if (!asyncQuestion) updateBlockingApprovalControls(previous, approvalReplyKey(requestThreadId, request));
@@ -11627,10 +11664,14 @@ function renderCompactionBanner(root, id, compaction) {
   const unavailable = compaction.deviceId && session?.device.id && compaction.deviceId !== session.device.id;
   const sendReason = compactionQueueSendReason(id);
   if (compaction.state === "running" && !unavailable && !sendReason) return;
+  const awaitingReceipt = compaction.state === "unknown"
+    || compaction.state === "pending" && !compaction.acknowledged && !compaction.nativeConfirmed;
+  if (!unavailable && awaitingReceipt && !pendingFeedbackReady(compaction)) return;
+  if (!unavailable && !awaitingReceipt && !sendReason) return;
   const messages = {
-    pending: sendReason || "压缩请求已由原生确认，可继续编辑并发送普通消息；消息会加入原生队列，在压缩完成后执行。",
+    pending: awaitingReceipt ? "正在确认压缩结果。" : sendReason,
     running: sendReason || "正在压缩此会话的上下文；可继续编辑并发送普通消息，消息会加入原生队列，在压缩完成后执行。",
-    unknown: sendReason
+    unknown: "正在确认压缩结果。"
   };
   const box = element("div", "pending-banner", unavailable
     ? `${sendReason}不会自动重发压缩请求。`
@@ -11671,10 +11712,12 @@ function renderGoalComposerRecovery(root) {
       value.deviceId === session?.device.id && `$new:${value.payload.projectId || ""}` === draftKey())
     : null);
   if (!record || record.deviceId !== session?.device.id || pending?.id === record.id) return;
+  if (record.recoveryState === "unknown" && !pendingFeedbackReady(record)) return;
   const recoveryThreadId = goalRecordThreadId(record);
   const box = element("div", "pending-banner goal-composer-recovery", unfinishedGoal()
     ? "此会话已有未完成目标，请从上方目标栏核对或编辑；本次目标草稿仍保留。"
-    : goalComposerReceiptMessage(record, record.recoveryState));
+    : record.recoveryState === "unknown" ? "正在确认目标设置结果。"
+      : goalComposerReceiptMessage(record, record.recoveryState));
   const dismiss = record.recoveryState === "failed"
     ? button("不再恢复", "仅关闭本次本地恢复提示，保留当前草稿和已保存目标",
       () => dismissGoalComposerRecovery(record), "text-button") : null;
@@ -11717,6 +11760,48 @@ function renderGoalComposerRecovery(root) {
   box.append(restore);
   if (dismiss) box.append(dismiss);
   root.append(box);
+}
+const pendingFeedbackDelayMs = 5000;
+let pendingFeedbackTimer = null;
+function pendingFeedbackReady(record) {
+  return !Number.isFinite(record?.time) || Date.now() - record.time >= pendingFeedbackDelayMs;
+}
+function clearPendingFeedbackTimer() {
+  clearTimeout(pendingFeedbackTimer);
+  pendingFeedbackTimer = null;
+}
+function syncPendingFeedbackTimer() {
+  clearPendingFeedbackTimer();
+  if (!session || pageLeaving || document.hidden) return;
+  const compaction = currentCompaction();
+  const awaitingCompaction = compaction.state === "unknown"
+    || compaction.state === "pending" && !compaction.acknowledged && !compaction.nativeConfirmed;
+  const records = [
+    pending, threadDeletions.get(threadDeletionKey(selectedId)),
+    goalEditPending?.payload.threadId === selectedId ? goalEditPending : null,
+    awaitingCompaction ? compaction : null,
+    ...[...relatedThreadOperations.values()].filter(record =>
+      ownsRelatedOperation(record) && record.parentThreadId === selectedId),
+    ...[...goalComposerRecoveries.values()].filter(record =>
+      record.recoveryState === "unknown" && (goalRecordThreadId(record) === selectedId
+        || creating && `$new:${record.payload.projectId || ""}` === draftKey())),
+    ...[...approvalReplies.values(), ...questionReplyReceipts.values()].filter(record =>
+      record.deviceId === session.device.id && record.threadId === selectedId)
+  ];
+  const remaining = records.filter(record => record && Number.isFinite(record.time)
+      && (!record.deviceId || record.deviceId === session.device.id)
+      && !["confirming", "deleted"].includes(record.state))
+    .map(record => record.time + pendingFeedbackDelayMs - Date.now()).filter(delay => delay > 0);
+  if (!remaining.length) return;
+  const version = selectionVersion, scope = privateInputScope(session);
+  pendingFeedbackTimer = setTimeout(() => {
+    pendingFeedbackTimer = null;
+    if (pageLeaving || document.hidden || version !== selectionVersion || scope !== privateInputScope(session)) return;
+    if (sideCreationView) updateSideCreationStatus(sideCreationView.record);
+    approvalSignature = null;
+    renderApprovals();
+    updateComposer();
+  }, Math.min(...remaining));
 }
 function updateComposer() {
   sessionTools?.updateContext();
@@ -11778,13 +11863,17 @@ function updateComposer() {
   ];
   add.disabled = add.menuOptions.every(option => option.disabled);
   if (activePopup?.trigger === add) renderPopup();
-  const sendingLabel = sending ? sending.phase === "syncing" ? "同步中…" : "发送中…" : "";
+  const queuedEditAction = queuedEditSubmittingAction();
+  const sendingLabel = sending ? sending.phase === "syncing" ? "同步中…" : "发送中…"
+    : queuedEditAction === "cancelQueuedEdit" ? "取消中…" : queuedEditAction === "editQueued" ? "保存中…" : "";
   if ($("#send-status").textContent !== sendingLabel) $("#send-status").textContent = sendingLabel;
   const action = sending ? "sending" : editingQueuedMessage ? "save"
     : !compacting && !goalMode && !editing && active && ((!prompt && !hasAttachments) || pending) && selectedId ? "stop" : "send";
-  if (send.dataset.action !== action) {
+  const sendLoading = action === "sending" || !!queuedEditAction;
+  if (send.dataset.action !== action || send.dataset.loading !== String(sendLoading)) {
     send.dataset.action = action;
-    const indicator = action === "sending" ? element("span", "spinner")
+    send.dataset.loading = String(sendLoading);
+    const indicator = sendLoading ? element("span", "spinner")
       : icon(action === "stop" ? "stop" : action === "save" ? "check" : "arrowUp");
     indicator.setAttribute("aria-hidden", "true");
     send.replaceChildren(indicator);
@@ -11794,10 +11883,22 @@ function updateComposer() {
   if (unsupportedImages) send.title = "当前服务版本尚不支持图片发送，请先更新程序";
   if (unsupportedProjectless) send.title = "当前服务版本尚不支持无项目会话，请先更新程序或选择已有项目";
   send.setAttribute("aria-busy", String(busy || stopping));
-  send.disabled = deleting || busy || stopping || compacting && editing || !!compactionSendReason || !connected || threadReadOnly() || unsupportedImages || unsupportedProjectless || !!goalReason || composerAttachmentsLoading()
-    || (action !== "stop" && (!!pending || !prompt && !hasAttachments))
-    || (!creating && (!selectedId || thread?.id !== selectedId));
-  if (editingMessage || editingQueuedMessage?.state === "starting") send.disabled = true;
+  const blockedBy = editingMessage ? "message-edit" : editingQueuedMessage?.state === "starting" ? "queue-edit-loading"
+    : deleting ? "delete" : busy ? "busy" : stopping ? "stopping" : compacting && editing ? "compaction-edit"
+    : compactionSendReason ? compaction.deviceId && compaction.deviceId !== session?.device.id ? "compaction-scope"
+      : compaction.state === "unknown" ? "compaction-unknown" : compaction.state === "pending" && !compaction.acknowledged && !compaction.nativeConfirmed
+        ? "compaction-pending" : "compaction-unsupported"
+    : !connected ? "offline" : threadReadOnly() ? "read-only" : unsupportedImages ? "images-unsupported"
+    : unsupportedProjectless ? "project-required" : goalReason ? "goal" : composerAttachmentsLoading() ? "images-loading"
+    : action !== "stop" && pending ? "pending-receipt" : action !== "stop" && !prompt && !hasAttachments ? "empty"
+    : !creating && (!selectedId || thread?.id !== selectedId) ? "thread-not-loaded" : "ready";
+  send.disabled = blockedBy !== "ready";
+  const diagnosticState = JSON.stringify([privateInputScope(session), selectedId, blockedBy, pageLeaving, connected, stream?.readyState]);
+  if (diagnosticState !== composerDiagnosticState) {
+    composerDiagnosticState = diagnosticState;
+    recordRuntimeDiagnostic("composer.state", { blockedBy, draftChars: prompt.length,
+      attachmentCount: composerAttachmentSnapshot().length });
+  }
   $("#prompt").disabled = threadReadOnly() || deleting || compacting && editing || !!editingMessage || editing && (busy || !!pending)
     || editingQueuedMessage?.state === "starting" || (!creating && !selectedId);
   $("#new-chat").disabled = threadReadOnly() || !connected;
@@ -11824,9 +11925,8 @@ function updateComposer() {
   refitComposerMenus();
   $("#pending-area").replaceChildren();
   const deletion = threadDeletions.get(threadDeletionKey(selectedId));
-  if (deletion && deletion.state !== "confirming") {
-    const box = element("div", "pending-banner", deletion.state === "submitting"
-      ? "正在删除会话，请等待回执。" : "删除结果待确认，会话记录与草稿暂时保留；不会自动重试删除。");
+  if (deletion && !["confirming", "deleted"].includes(deletion.state) && pendingFeedbackReady(deletion)) {
+    const box = element("div", "pending-banner", "正在确认会话删除结果。");
     if (deletion.state !== "submitting") {
       const check = button("核对删除结果", "只查询删除回执，不会再次删除会话",
         () => void checkThreadDeletion(deletion), "text-button");
@@ -11839,17 +11939,18 @@ function updateComposer() {
     "当前运行的服务尚不支持无项目会话；更新程序后可直接发送，或先选择已有项目。"));
   if (goalMode && goalReason && !busy && !pending && !threadReadOnly())
     $("#pending-area").append(element("div", "pending-banner goal-composer-note", goalReason));
-  if (pending && (!sending || pending.payload !== sending.payload)) {
+  if (pending && (!sending || pending.payload !== sending.payload)
+      && (pending.invalid || pending.deviceId && pending.deviceId !== session.device.id || pendingFeedbackReady(pending))) {
     const unavailable = pending.invalid || (pending.deviceId && pending.deviceId !== session.device.id);
     const pendingGoal = goalComposerAction(pending.action, pending.payload);
     const pendingQueueItem = ["steerQueued", "removeQueued"].includes(pending.action);
     const box = element("div", "pending-banner", unavailable ? "回执损坏或属于旧授权。请检查原生会话后人工解除锁定，不会自动重发。"
-      : pending.action === "reorderQueued" ? "正在确认队列排序结果，请勿重复调整。"
-      : pendingGoal ? goalComposerReceiptMessage(pending, pending.receiptState === "pending" ? "pending" : "unknown")
+      : pending.action === "reorderQueued" ? "正在确认队列排序结果。"
+      : pendingGoal ? "正在确认目标提交结果。"
       : pendingQueueItem ? pending.action === "steerQueued"
-        ? "队列引导结果待确认，原回执已保留，不会重复引导。"
-        : "队列删除结果待确认，原回执已保留，不会重复删除。"
-      : queuedEditActions.has(pending.action) ? "队列编辑结果待确认，修改已保留，不会重复保存或恢复消息。" : "消息正在确认送达，已锁定重复发送。");
+        ? "正在确认队列引导结果。"
+        : "正在确认队列删除结果。"
+      : queuedEditActions.has(pending.action) ? "正在确认队列编辑结果。" : "正在确认消息送达结果。");
     if (!unavailable && queuedEditActions.has(pending.action))
       renderQueuedEditRecoveryControls(box, pending.payload.threadId, pending.payload.editId);
     else if (!unavailable) box.append(button("查回执", pendingGoal ? "查询原目标提交回执，不会再次提交"
@@ -11873,6 +11974,7 @@ function updateComposer() {
   renderCompactionBanner($("#pending-area"), selectedId, compaction);
   if (historyInitialized && selectedId) scheduleMessages();
   updateMessageEditor();
+  syncPendingFeedbackTimer();
 }
 function renderFailedInputRecovery(root) {
   const key = draftKey(), scope = privateInputScope(session);
@@ -12002,7 +12104,8 @@ async function sendMessage() {
       }
       return;
     }
-    if (error.deliveryPending) notice("正在自动核对原生接收状态，不会重发消息。");
+    if (error.pendingFeedback) updateComposer();
+    else if (error.deliveryPending) notice("正在自动核对原生接收状态，不会重发消息。");
     else if (submission.phase === "syncing") recordDiagnostic("remote.send.reload", {
       phase: "failure", errorType: error?.name || "Error"
     });
@@ -12027,13 +12130,11 @@ async function applyCompactionReceipt(id, receiptId, receipt) {
   const current = compactions.get(id);
   if (!current || current.receiptId !== receiptId || current.state === "idle") return;
   if (receipt.state === "pending") {
-    notice("压缩请求仍在处理。不会自动重发；可稍后查回执或重新读取会话。", true);
     updateComposer();
     return;
   }
   if (receipt.state === "unknown") {
     setCompactionState(id, { ...current, state: "unknown" });
-    notice(receipt.result?.message || "压缩请求结果未知。不会自动重发，请查回执或在本机核对。", true);
     updateComposer();
     return;
   }
@@ -12501,6 +12602,7 @@ function receive(event) {
   }
 }
 function disconnect() {
+  clearPendingFeedbackTimer();
   $("#video-preview-dialog")?.close();
   clearRemoteChannels();
   resetRelatedSessions();
@@ -12659,6 +12761,7 @@ function selectedThreadReadIncomplete() {
       || !historyInitialized || transcriptChecking || !!historyError);
 }
 function retireForegroundReads(reason = "页面进入后台") {
+  clearPendingFeedbackTimer();
   ++foregroundReadGeneration;
   ++threadReadVersion;
   const controllers = [selectionController, historyController, threadRequest?.controller, sidebarRequest?.controller];
@@ -12677,7 +12780,7 @@ function suspendPage() {
   stopGoalLiveTimer();
   finishQueueDrag();
   sessionMenu?.close(); stopRelatedSessionTimers();
-  if (session && $("#prompt")) { rememberDraft(); rememberTranscript(); rememberReadingPosition(); }
+  rememberPageInputs();
   closeContextUsageTip();
   pageLeaving = true;
   retireForegroundReads();
@@ -12687,9 +12790,20 @@ function suspendPage() {
   cancelConnectionProbe();
   clearTimeout(streamRetry); streamRetry = null;
 }
+function rememberPageInputs() {
+  if (session && $("#prompt")) { rememberDraft(); rememberTranscript(); rememberReadingPosition(); }
+}
+function recordRuntimeDiagnostic(name, fields = {}) {
+  recordDiagnostic(name, {
+    threadId: selectedId, visible: !document.hidden, online: navigator.onLine !== false,
+    pageLeaving, connected, readyState: stream?.readyState ?? EventSource.CLOSED,
+    generation: foregroundReadGeneration, ...fields
+  });
+}
 function resumePage() {
   const wasLeaving = pageLeaving;
   pageLeaving = false;
+  recordRuntimeDiagnostic("page.resume");
   if (!session) { retryConnectionRecovery(); return; }
   if (!wasLeaving) return;
   refreshCachedCatalogs();
@@ -12844,6 +12958,8 @@ document.addEventListener("visibilitychange", () => {
     clearTimeout(streamRetry); streamRetry = null;
     return;
   }
+  recordRuntimeDiagnostic("page.visible");
+  if (pageLeaving) { resumePage(); return; }
   syncActivityTimer();
   syncGoalLiveTimer();
   if (session) startConnectionPoll(session.device.id);
@@ -12851,7 +12967,11 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("pagehide", suspendPage);
 window.addEventListener("blur", () => finishQueueDrag());
-window.addEventListener("beforeunload", suspendPage);
+window.addEventListener("beforeunload", () => {
+  recordRuntimeDiagnostic("page.beforeunload");
+  // 导航可能被取消或交给 App 内置浏览器；只有 pagehide 才表示当前文档真正离开。
+  rememberPageInputs();
+});
 window.addEventListener("pageshow", resumePage);
 window.addEventListener("popstate", event => {
   if (!session) return;

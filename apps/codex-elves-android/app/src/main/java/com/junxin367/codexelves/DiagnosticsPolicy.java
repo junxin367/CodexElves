@@ -53,6 +53,12 @@ final class DiagnosticsPolicy {
         "JSONException", "IllegalArgumentException", "IllegalStateException",
         "SecurityException", "RuntimeException", "CancelledException"
     );
+    private static final Set<String> BLOCKED_BY = set(
+        "ready", "delete", "busy", "stopping", "compaction-edit", "compaction-scope",
+        "compaction-unknown", "compaction-pending", "compaction-unsupported", "offline",
+        "read-only", "images-unsupported", "project-required", "goal", "images-loading",
+        "pending-receipt", "empty", "thread-not-loaded", "message-edit", "queue-edit-loading"
+    );
 
     private DiagnosticsPolicy() {}
 
@@ -127,11 +133,18 @@ final class DiagnosticsPolicy {
             return Double.isFinite(code) && code == Math.floor(code)
                 && code >= -1000 && code <= 1000;
         }
-        if ("visible".equals(key) || "online".equals(key)) {
+        if ("visible".equals(key) || "online".equals(key)
+            || "pageLeaving".equals(key) || "connected".equals(key)) {
             return value instanceof Boolean;
         }
+        if ("readyState".equals(key) && value instanceof Number) {
+            double state = ((Number) value).doubleValue();
+            return Double.isFinite(state) && state == Math.floor(state)
+                && state >= 0 && state <= 4;
+        }
         if (set("status", "durationMs", "bytes", "sdk", "generation", "expectedBytes",
-            "loadedBytes", "line", "width", "height", "count", "port", "closeCode").contains(key)) {
+            "loadedBytes", "line", "width", "height", "count", "port", "closeCode",
+            "draftChars", "attachmentCount").contains(key)) {
             if (!(value instanceof Number)) {
                 return false;
             }
@@ -192,6 +205,10 @@ final class DiagnosticsPolicy {
                     "unknown", "attachment").contains(text);
             case "requestId":
                 return validRequestId(text);
+            case "threadId":
+                return text.matches("[A-Za-z0-9_-]{1,120}");
+            case "blockedBy":
+                return BLOCKED_BY.contains(text);
             case "network":
                 return set("wifi", "cellular", "ethernet", "vpn", "other", "none",
                     "unknown").contains(text);

@@ -596,10 +596,10 @@ fn request_client_side_thread_snapshot_reads_locked_model_without_mutating_execu
     run_side_thread_title_contract(
         r#"
 const h=createTitleHarness();
-const defaults={mode:"default",settings:{model:"global-default",reasoning_effort:"high"}};
 const lock={mode:"default",settings:{model:"parent-model",reasoning_effort:"max"}};
 h.add("side-a","parent-a",{ephemeral:true,latestModel:"global-default",
-  latestReasoningEffort:"high",latestCollaborationMode:defaults});
+  latestReasoningEffort:"high",latestCollaborationMode:structuredClone(lock),
+  latestThreadSettings:{model:"global-default",effort:"high",collaborationMode:structuredClone(lock)}});
 h.tab("side-a").props.content={conversationId:"side-a",hostId:"local",
   kind:"side-conversation",lockedCollaborationMode:lock};
 h.api.syncNative();
@@ -614,15 +614,51 @@ assert.deepEqual(h.executionSettings(h.env.manager.getConversation("side-a"),nat
 assert.equal(JSON.stringify([...h.states]),before,"不得把标签配置写回原生会话");
 assert.equal(h.writes.length,0);
 assert.equal(h.tabWrites.length,0);
+const selected={mode:"default",settings:{model:"selected-model",reasoning_effort:"low"}};
+h.states.set("side-a",{...h.states.get("side-a"),latestModel:"selected-model",
+  latestReasoningEffort:null,latestCollaborationMode:structuredClone(selected),
+  latestThreadSettings:{model:"selected-model",effort:"low",collaborationMode:structuredClone(selected)}});
+h.snapshot();
+const selectedThread={id:"side-a",model:"selected-model",reasoningEffort:"low"};
+snapshot=h.runtime("side-a",selectedThread,view);
+assert.equal(snapshot.model,"selected-model","发送 B 后当前会话配置必须优先于创建时标签锁");
+assert.equal(snapshot.reasoningEffort,"low","便利字段 null 不能覆盖当前协作配置的实际 effort");
+assert.equal(h.tab("side-a").props.content.lockedCollaborationMode.settings.model,"parent-model");
+h.states.set("parent-a",{id:"parent-a",latestCollaborationMode:structuredClone(lock)});
+h.snapshot();
+assert.equal(h.runtime("parent-a",{model:"parent-model",reasoningEffort:"max"},
+  {viewKind:"main"}).model,"parent-model","返回父会话时不带入侧边 B");
+snapshot=h.runtime("side-a",selectedThread,view);
+assert.equal(snapshot.model,"selected-model","返回后重新读取侧边仍采用本次原生配置");
+assert.deepEqual(h.executionSettings(h.env.manager.getConversation("side-a"),selectedThread),
+  {model:"selected-model",effort:"low"},"只修显示，不改变已确认的实际发送配置");
 const entry=h.env.nativeSideThreads.get("side-a"),scope=h.scope("side-a");
 scope.tabs=scope.tabs.map(tab=>({...tab,props:{content:{...tab.props.content,
   lockedCollaborationMode:{mode:"default",settings:{model:"current-native-model",reasoning_effort:null}}}}}));
 assert.equal(entry.tab.props.content.lockedCollaborationMode.settings.model,"parent-model");
 snapshot=h.runtime("side-a",nativeThread,view);
-assert.equal(snapshot.model,"current-native-model","每次读取当前原生标签，不能另存一份模型缓存");
-assert.equal(snapshot.reasoningEffort,null,"原生显式 null 不能回退到全局思考深度");
+assert.equal(snapshot.model,"selected-model","标签配置变化也不能覆盖当前原生会话模型");
+assert.equal(snapshot.reasoningEffort,"low");
+const changed={mode:"default",settings:{model:"selected-again",reasoning_effort:null}};
+h.states.set("side-a",{...h.states.get("side-a"),latestCollaborationMode:changed});
+h.snapshot();
+snapshot=h.runtime("side-a",nativeThread,view);
+assert.equal(snapshot.model,"selected-again","每次读取当前会话配置，不另存模型缓存");
+assert.equal(snapshot.reasoningEffort,null,"当前协作配置的显式 null 必须保留");
+h.states.set("side-a",{...h.states.get("side-a"),latestCollaborationMode:null,
+  latestThreadSettings:{collaborationMode:changed}});
+h.snapshot();
+assert.equal(h.runtime("side-a",nativeThread,view).model,"selected-again",
+  "缺少便利协作字段时兼容完整 latestThreadSettings.collaborationMode");
+h.states.set("side-a",{...h.states.get("side-a"),latestCollaborationMode:null,latestThreadSettings:null});
+h.snapshot();
+snapshot=h.runtime("side-a",nativeThread,view);
+assert.equal(snapshot.model,"current-native-model","未取得当前协作配置时才回退到当前原生标签");
+assert.equal(snapshot.reasoningEffort,null);
 assert.equal(h.runtime("side-a",nativeThread,{viewKind:"main"}).model,"global-default");
 assert.equal(h.runtime("side-a",nativeThread,{...view,readOnly:true}).model,"global-default");
+assert.equal(h.writes.length,0);
+assert.equal(h.tabWrites.length,0,"读取配置不能回写创建时标签锁");
 h.dispose();
 "#,
     );
@@ -664,6 +700,19 @@ scope.value.conversationId="parent-a";
 tab.props.content.lockedCollaborationMode.settings={model:"model-a"};
 assert.equal(h.runtime("side-a",nativeThread,view).reasoningEffort,"high",
   "缺少原生 effort 字段时保留原读取结果");
+h.states.set("side-a",{...h.states.get("side-a"),latestCollaborationMode:{
+  mode:"default",settings:{model:"confirmed-side-model",reasoning_effort:null}}});
+h.snapshot();
+assert.equal(h.runtime("side-a",nativeThread,view).model,"confirmed-side-model");
+assert.equal(h.runtime("side-a",nativeThread,{...view,readOnly:true,viewKind:"subagent"}).model,
+  "global-default","只读子代理不能采用侧边协作配置");
+scope.tabs=[];
+assert.equal(h.runtime("side-a",nativeThread,view).model,"global-default",
+  "当前会话有 B 配置也不能跨过已关闭标签的身份检查");
+scope.tabs=[{...tab,props:{content:{...tab.props.content,hostId:"remote-host"}}}];
+assert.equal(h.runtime("side-a",nativeThread,view).model,"global-default");
+scope.tabs=[tab];
+assert.equal(h.runtime("side-a",nativeThread,{...view,parentThreadId:"parent-b"}).model,"global-default");
 h.env.manager={...h.env.manager,__codexElvesRequestClientManager:false,
   getTurnCoordinator:()=>({readMessages:()=>[]})};
 assert.equal(h.runtime("side-a",nativeThread,view).model,"global-default",
@@ -688,8 +737,7 @@ h.native.open=async(scope,component,options)=>{
   assert.equal(options.sourceConversationId,parent.id);
   assert.deepEqual(options.collaborationMode,parent.latestCollaborationMode);
   h.add("new-side",parent.id,{ephemeral:true,latestModel:"global-default",
-    latestReasoningEffort:"high",latestCollaborationMode:{mode:"default",
-      settings:{model:"global-default",reasoning_effort:"high"}}});
+    latestReasoningEffort:"high",latestCollaborationMode:structuredClone(options.collaborationMode)});
   h.tab("new-side").props.content={conversationId:"new-side",hostId:"local",
     kind:"side-conversation",lockedCollaborationMode:structuredClone(options.collaborationMode)};
   h.snapshot();
@@ -1805,7 +1853,7 @@ const baseline={
   targetTurnId:"active-turn",context:{prompt:"引导内容",imageAttachments:[{id:"image-one",src:image}],
     addedFiles:[],preserved:{owner:"original"}}
 };
-let scenario={},accepted=null,dispatches=0,preparations=[],queueRefreshes=0,queueSnapshots=0;
+let scenario={},accepted=null,dispatches=0,preparations=[],queueRefreshes=0,queueSnapshots=0,moduleReads=0;
 const nativePrepare=async options=>{
   preparations.push(options);
   if(scenario.prepareError) throw new Error("native context read failed");
@@ -1841,7 +1889,7 @@ const nativeCoordinator={
 const rpc={getTurnCoordinator:async()=>nativeCoordinator,
   getFollowUpContext:async()=>({cwd:"/test"})};
 const env={manager:null,appScope:{},requestClientQueuePrepare:null,
-  requestClientNativeRpc:async()=>rpc,nativeModuleSnapshot:async()=>({module:{}}),
+  requestClientNativeRpc:async()=>rpc,nativeModuleSnapshot:async()=>{moduleReads++;return{module:{}};},
   nativeFunction:()=>nativePrepare,readRequestClientQueue:async()=>{
     queueRefreshes++;
     if(scenario.queueRefreshError) throw new Error("fresh queue snapshot unavailable");
@@ -1936,10 +1984,14 @@ const steer=()=>api.steer({threadId:"thread",messageId:"server-queued"});
   assert.equal(dispatches,successful+1);
   assert.equal(queueRefreshes,0,"已确认 sent 不应再等待额外的完整队列读取");
   assert.equal(queueSnapshots,0,"同步尚未完成时不能生成旧队列快照");
+  delete baseline.cwd;
+  rpc.getFollowUpContext=async()=>({cwd:"/changed-follow-up-context"});
   scenario={ackLost:true};result=await steer();
   assert.equal(result.ok,false);
   assert.equal(result.outcomeUnknown,true,"真正发送后丢失回执仍须保留未知状态");
   assert.equal(dispatches,successful+2);
+  assert.equal(preparations.at(-1).cwd,"/changed-follow-up-context","复用准备函数仍须读取本次原生上下文");
+  assert.equal(moduleReads,1,"原生队列准备函数已解析后，不能为每次准备重新定位整个模块");
 })().catch(error=>{console.error(error);process.exitCode=1;});
 "#;
     let output = Command::new("node")
@@ -10533,8 +10585,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = assets::renderer_features_script();
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 125"));
-    assert!(script.contains("version: 125"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 127"));
+    assert!(script.contains("version: 127"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));
@@ -10593,8 +10645,9 @@ const preloads = [
   "app://-/assets/function-bind-context-fixture.js",
   "app://-/assets/app-shared-fixture.js"
 ];
-async function locate(scripts, ambiguous = false) {
-  const reads = [];
+function locate(scripts, ambiguous = false) {
+  const reads = [], failures = new Map(), blocked = new Map();
+  const links = preloads.slice(), resources = [];
   const modules = new Map([
     [entry, 'import{n as r}from"./rolldown-runtime-fixture.js";await preload(()=>import(`./app-main-fixture.js`),[],import.meta.url);'],
     [main, 'import{dZt as c}from"./app-initial-fixture.js";import{n}from"./app-shared-fixture.js";'
@@ -10604,33 +10657,87 @@ async function locate(scripts, ambiguous = false) {
   ]);
   const context = {
     URL,
+    nativeResourceSources: new Map(),
     document: {
       scripts: scripts.map(src => ({src})),
       querySelectorAll(selector) {
         assert.equal(selector, 'link[rel="modulepreload"]');
-        return preloads.map(href => ({href}));
+        return links.map(href => ({href}));
       }
     },
-    performance: {getEntriesByType(type) {assert.equal(type, "resource");return [];}},
+    performance: {getEntriesByType(type) {
+      assert.equal(type, "resource");return resources.map(name => ({name}));
+    }},
     fetch: async resource => {
       reads.push(resource);
       assert.ok(modules.has(resource), "只读取可信入口及其目标依赖："+resource);
-      return {ok: true, text: async () => modules.get(resource)};
+      if (blocked.has(resource)) await blocked.get(resource);
+      const failure = failures.get(resource);
+      if (failure === "network") throw new Error("fixture resource unavailable");
+      return {ok: failure !== "http", text: async () => {
+        if (failure === "text") throw new Error("fixture source unreadable");
+        return modules.get(resource);
+      }};
     },
     failure: (code, message) => Object.assign(new Error(message), {code})
   };
-  const result = vm.runInNewContext(source + '\nnativeResource("initial")', context);
-  return {result, reads};
+  vm.createContext(context);
+  vm.runInContext(source, context);
+  const lookup = (name = "initial") => vm.runInContext(`nativeResource(${JSON.stringify(name)})`, context);
+  return {lookup, reads, modules, failures, blocked, links, resources, scripts: context.document.scripts};
 }
 (async () => {
-  const found = await locate(["https://example.invalid/assets/index-external.js", entry, entry]);
-  assert.equal(await found.result, initial, "无 Timing 且未 preload 初始模块时应沿脚本入口定位");
+  const found = locate(["https://example.invalid/assets/index-external.js", entry, entry]);
+  assert.equal(await found.lookup(), initial, "无 Timing 且未 preload 初始模块时应沿脚本入口定位");
   assert.deepEqual(found.reads, [entry, main, initial], "重复入口只解析一次，index.client 不作为 index 入口");
-  const foreign = await locate(["https://example.invalid/assets/index-external.js"]);
-  await assert.rejects(foreign.result, error => error.code === 503);
+  assert.equal(await found.lookup(), initial);
+  assert.deepEqual(found.reads, [entry, main, initial], "同 URL 静态源码跨调用只读取一次");
+
+  const concurrent = locate([entry]);
+  let release;
+  concurrent.blocked.set(entry, new Promise(resolve => {release = resolve;}));
+  const pending = [concurrent.lookup(), concurrent.lookup()];
+  await new Promise(setImmediate);
+  assert.deepEqual(concurrent.reads, [entry], "并发定位应共享同 URL 的在途读取");
+  release();
+  assert.deepEqual(await Promise.all(pending), [initial, initial]);
+  assert.deepEqual(concurrent.reads, [entry, main, initial]);
+
+  const nextEntry = "app://-/assets/index-next.js";
+  const nextMain = "app://-/assets/app-main-next.js";
+  found.modules.set(nextEntry, 'import("./app-main-next.js");');
+  found.modules.set(nextMain, 'import{other}from"./app-initial-other.js";');
+  found.scripts.splice(0, found.scripts.length, {src: nextEntry});
+  assert.equal(await found.lookup(), otherInitial, "当前脚本入口变化后必须发现新 URL");
+  assert.deepEqual(found.reads, [entry, main, initial, nextEntry, nextMain, otherInitial],
+    "新 URL 必须重新读取源码，不能沿用旧入口结果");
+  found.links.push(initial);
+  found.resources.push(otherInitial);
+  await assert.rejects(found.lookup(), error => error.code === 503 && /版本不唯一/.test(error.message),
+    "已有源码缓存不能绕过本次 preload 与 Resource Timing 中的版本歧义");
+  found.links.pop();
+  found.resources.pop();
+  found.scripts.push({src: initial}, {src: otherInitial});
+  await assert.rejects(found.lookup(), error => error.code === 503 && /版本不唯一/.test(error.message),
+    "每次仍须检查当前 scripts 中的多版本来源");
+
+  for (const mode of ["network", "http", "text"]) {
+    const recovered = locate([entry]);
+    recovered.failures.set(main, mode);
+    await assert.rejects(recovered.lookup(), error => error.code === 503);
+    assert.deepEqual(recovered.reads, [entry, main]);
+    recovered.failures.delete(main);
+    assert.equal(await recovered.lookup(), initial, "失败读取不能永久留在缓存："+mode);
+    assert.deepEqual(recovered.reads, [entry, main, main, initial],
+      "只重试失败 URL，保留已成功读取的静态源码："+mode);
+    assert.equal(await recovered.lookup(), initial);
+    assert.deepEqual(recovered.reads, [entry, main, main, initial]);
+  }
+  const foreign = locate(["https://example.invalid/assets/index-external.js"]);
+  await assert.rejects(foreign.lookup(), error => error.code === 503);
   assert.deepEqual(foreign.reads, [], "外部脚本不能成为可信 app 入口");
-  const ambiguous = await locate([entry], true);
-  await assert.rejects(ambiguous.result, error => error.code === 503 && /版本不唯一/.test(error.message));
+  const ambiguous = locate([entry], true);
+  await assert.rejects(ambiguous.lookup(), error => error.code === 503 && /版本不唯一/.test(error.message));
 })().catch(error => {console.error(error);process.exitCode = 1;});
 "###
     .replace(

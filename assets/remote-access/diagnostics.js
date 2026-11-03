@@ -4,10 +4,11 @@ const pending = new Map();
 const earlyEvents = [];
 const handledRequests = new Set();
 const requestPattern = /^[A-Za-z0-9_-]{1,80}$/;
+const threadPattern = /^[A-Za-z0-9_-]{1,120}(?![\s\S])/;
 const tokenPattern = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const numericFields = new Set(["status", "durationMs", "bytes", "sdk", "generation", "readyState",
   "expectedBytes", "loadedBytes", "line", "width", "height", "lux", "stableMs"]);
-const tokenFields = new Set(["method", "errorType", "reason", "routeName", "phase", "imageKind", "network", "theme", "decision"]);
+const tokenFields = new Set(["method", "errorType", "reason", "routeName", "phase", "imageKind", "network", "theme", "decision", "blockedBy"]);
 const errorTypes = new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError",
   "URIError", "EvalError", "DOMException", "AbortError", "TimeoutError", "NetworkError", "SecurityError"]);
 const fieldTokens = {
@@ -20,7 +21,11 @@ const fieldTokens = {
   routeName: new Set(["zrok", "ngrok"]),
   network: new Set(["wifi", "cellular", "ethernet", "vpn", "other", "none", "unknown"]),
   theme: new Set(["light", "dark"]),
-  decision: new Set(["pending", "cancelled", "applied"])
+  decision: new Set(["pending", "cancelled", "applied"]),
+  blockedBy: new Set(["ready", "delete", "busy", "stopping", "compaction-edit", "compaction-scope",
+    "compaction-unknown", "compaction-pending", "compaction-unsupported", "offline", "read-only",
+    "images-unsupported", "project-required", "goal", "images-loading", "pending-receipt", "empty",
+    "thread-not-loaded", "message-edit", "queue-edit-loading"])
 };
 const knownMimes = new Set(["application/json", "application/javascript", "application/octet-stream",
   "application/manifest+json", "text/javascript", "text/html", "text/css", "text/plain", "text/event-stream",
@@ -65,9 +70,10 @@ function safeFields(value) {
   const result = {};
   for (const [key, field] of Object.entries(value || {})) {
     if (key === "errorCode" && Number.isSafeInteger(field) && field >= -1000 && field <= 1000) result[key] = field;
+    else if (["draftChars", "attachmentCount"].includes(key) && Number.isSafeInteger(field) && field >= 0) result[key] = field;
     else if (numericFields.has(key) && Number.isFinite(field) && field >= 0)
       result[key] = Math.min(Number.MAX_SAFE_INTEGER, Math.round(field));
-    else if (["visible", "online", "supported"].includes(key) && typeof field === "boolean") result[key] = field;
+    else if (["visible", "online", "supported", "pageLeaving", "connected"].includes(key) && typeof field === "boolean") result[key] = field;
     else if (key === "errorType" && typeof field === "string") result[key] = errorTypes.has(field) ? field : "unknown";
     else if (tokenFields.has(key) && typeof field === "string" && fieldTokens[key]?.has(field)) result[key] = field;
     else if (key === "mime" && typeof field === "string" && /^[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+$/.test(field))
@@ -78,6 +84,7 @@ function safeFields(value) {
         && /^[a-zA-Z0-9._-]{1,80}$/.test(field)) result[key] = field;
     else if (key === "resourceVersion" && typeof field === "string" && /^[a-f0-9]{64}$/.test(field)) result[key] = field;
     else if (key === "requestId" && typeof field === "string" && requestPattern.test(field)) result[key] = field;
+    else if (key === "threadId" && typeof field === "string" && threadPattern.test(field)) result[key] = field;
   }
   return result;
 }
