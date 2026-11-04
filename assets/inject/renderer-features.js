@@ -4983,10 +4983,13 @@
         invokeTurn: invokeCodexNativeTurn,
         sendRequest: (rpc, [method, params, options]) => {
           // 在普通适配对象上复用旧拦截，绝不向 RPC Stub 写入或删除属性。
-          const adapter = { hostId: "local", sendRequest: rpc.sendRequest.bind(rpc) };
+          // 用户要求注入后不阻断 Windows 沙盒检查；新版 RPC 的 bind/call 会被解析为远程路径，
+          // 必须用普通函数转发，让插件市场与 Checkpoint 两条分支只绑定本地函数。
+          const sendRequest = (...values) => rpc.sendRequest(...values);
+          const adapter = { hostId: "local", sendRequest };
           if (codexElvesSettings().pluginMarketplaceUnlock) patchPluginMarketplaceRequestClient(adapter);
           else adapter.sendRequest = (...values) =>
-            codexWorkspaceCheckpointSendRequest(rpc.sendRequest, adapter, ...values);
+            codexWorkspaceCheckpointSendRequest(sendRequest, adapter, ...values);
           return adapter.sendRequest(method, params, options);
         },
         prepareWorktree: (request) => applyUpstreamPendingWorktreeOverride({ request }).request,

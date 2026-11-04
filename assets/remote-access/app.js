@@ -5976,11 +5976,19 @@ function shell() {
   $("#appearance-button").title = "设置";
   const workspace = $(".workspace"), sidebarPanel = $("#session-sidebar");
   const compactSidebarMedia = matchMedia("(max-width: 760px)");
+  const sidebarBackdrop = $(".sidebar-backdrop");
+  // 用户要求避免手机侧栏刚展开即被遮罩误关：300ms = 200ms 滑入动画 + 100ms 触摸余量，
+  // 同步核对 style.css 的 --duration-popup；关闭只接受保护期后在遮罩开始并结束的独立手势。
+  const sidebarBackdropGuardMs = 300;
+  let sidebarBackdropReadyAt = 0, sidebarBackdropPress = null;
   const sidebarIsOpen = () => compactSidebarMedia.matches
     ? workspace.classList.contains("sidebar-open") : desktopSidebarOpen;
   const syncSidebarLayout = () => {
     const compact = compactSidebarMedia.matches;
     const open = !relatedSessionView && sidebarIsOpen();
+    if (!compact || !open) {
+      sidebarBackdropReadyAt = 0; sidebarBackdropPress = null;
+    }
     const toggle = $("#open-sidebar");
     workspace.classList.toggle("sidebar-collapsed", !compact && !open);
     if (!compact) workspace.classList.remove("sidebar-open");
@@ -5997,12 +6005,15 @@ function shell() {
   const setSidebarOpen = (open, { focus = true } = {}) => {
     if (relatedSessionView) return;
     closePopup(); closeComposerMenus();
-    if (open && !sidebarIsOpen()) {
+    const opening = open && !sidebarIsOpen();
+    if (opening) {
       renderSidebar();
     }
     if (compactSidebarMedia.matches) workspace.classList.toggle("sidebar-open", open);
     else desktopSidebarOpen = open;
     syncSidebarLayout();
+    sidebarBackdropPress = null;
+    if (opening && compactSidebarMedia.matches) sidebarBackdropReadyAt = performance.now() + sidebarBackdropGuardMs;
     if (focus) focusSidebarControl();
   };
   const closeSidebar = ({ focus = true } = {}) => setSidebarOpen(false, { focus });
@@ -6022,7 +6033,26 @@ function shell() {
   };
   syncSidebarLayout();
   $("#open-sidebar").onclick = () => setSidebarOpen(!sidebarIsOpen());
-  $(".sidebar-backdrop").onclick = closeSidebar;
+  sidebarBackdrop.onpointerdown = event => {
+    // 用事件发生时间判定，慢设备排队后才派发的早期触摸也不能越过保护期。
+    sidebarBackdropPress = compactSidebarMedia.matches && sidebarIsOpen()
+      && event.target === sidebarBackdrop && event.isPrimary !== false && event.button === 0
+      && event.timeStamp >= sidebarBackdropReadyAt
+      ? { pointerId: event.pointerId, released: false } : null;
+  };
+  sidebarBackdrop.onpointerup = event => {
+    if (!sidebarBackdropPress || sidebarBackdropPress.pointerId !== event.pointerId) return;
+    sidebarBackdropPress.released = event.target === sidebarBackdrop;
+  };
+  sidebarBackdrop.onpointercancel = () => { sidebarBackdropPress = null; };
+  sidebarBackdrop.onclick = event => {
+    const press = sidebarBackdropPress;
+    sidebarBackdropPress = null;
+    event.preventDefault(); event.stopPropagation();
+    if (!compactSidebarMedia.matches || !sidebarIsOpen() || event.target !== sidebarBackdrop
+        || !press?.released || (event.pointerId != null && event.pointerId !== press.pointerId)) return;
+    closeSidebar();
+  };
   const searchInput = $("#sidebar-search"), searchToggle = $("#sidebar-search-toggle");
   const setSidebarSearchOpen = open => {
     closePopup();

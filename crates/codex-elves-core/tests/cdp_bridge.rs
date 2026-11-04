@@ -21777,6 +21777,89 @@ function build(text, env, expression) {
   forwarded[Symbol.dispose]();
   assert.equal(String(forwarded), "disposed", "原型上的 RPC 生命周期方法必须使用原接收者");
 
+  // Windows 就绪检查与其他原生请求共用此入口；动态 RPC 属性必须按远程路径处理，
+  // 不能仅用带有本地 bind/call 的普通函数验证安装后的插件市场和 Checkpoint 包装。
+  for (const marketplace of [false,true]) for (const checkpoint of [false,true]) {
+    const requestCalls=[], checkpointCalls=[], failure=new Error("request denied");
+    function nativeRequest(...args) {
+      requestCalls.push(args);
+      if (args[0]==="diagnostic/failure") return Promise.reject(failure);
+      return Promise.resolve({status:"ready"});
+    }
+    function remoteMember(path=[]) {
+      return new Proxy(()=>{}, {
+        get(target,key) {
+          return typeof key==="string" ? remoteMember([...path,key]) : Reflect.get(target,key);
+        },
+        apply(target,receiver,args) {
+          if (path.join(".")!=="sendRequest") throw new TypeError(`'${path.join(".")}' is not a function.`);
+          return nativeRequest(...args);
+        },
+        set(){throw Error("RPC stubs are immutable");},
+        deleteProperty(){throw Error("RPC stubs are immutable");},
+        defineProperty(){throw Error("RPC stubs are immutable");},
+      });
+    }
+    const requestRuntime=createRuntime(), requestRpc=remoteMember();
+    const requestRegistry={forHost:()=>requestRpc};
+    const requestClient={hostId:"local",rpc:requestRpc};
+    const binding={status:"ready",client:requestClient};
+    const requestEnv={
+      window:{__codexElvesNativeRpcCompat:requestRuntime},
+      codexElvesBackendSettings:{enhancementsEnabled:true},
+      codexElvesSettings:()=>({pluginMarketplaceUnlock:marketplace,workspaceCheckpoint:checkpoint}),
+      prepareCodexNativeSubmission:async value=>value,
+      finishCodexNativeCheckpoint:async()=>{},
+      invokeCodexNativeTurn:()=>{throw Error("request must not become a turn");},
+      resolveCodexAppServices:async()=>({}),
+      findCodexLocalRuntimeInScopedSignals:predicate=>[requestRegistry,binding].find(predicate),
+      codexNativeScopeTokens:[],
+      codexPluginMarketplaceUnlockVersion:"test",
+      appServerRequestMethod:method=>method,
+      restorePluginMarketplaceRequestParams:params=>params,
+      unsupportedPluginMarketplaceKinds:()=>[],
+      patchPluginMarketplaceRequestParams:(method,params)=>params,
+      patchPluginMarketplaceResult:(method,result)=>result,
+      codexWorkspaceCheckpointRequestThreadId:params=>params?.threadId || "",
+      clearCodexWorkspaceCheckpointCompletionHint:()=>{},
+      installCodexWorkspaceCheckpointTurnCompletionListener:()=>{},
+      createCodexWorkspaceCheckpoint:async(client,params)=>{
+        checkpointCalls.push(params);
+        return {skipped:true};
+      },
+      sendCodexElvesDiagnostic:(name,value)=>{throw Error(`${name}: ${JSON.stringify(value)}`);},
+    };
+    const installed=build(
+      section("  function codexWorkspaceCheckpointActiveParams()", "\n  function patchCodexWorkspaceCheckpointRequestClientPrototype(")
+      + section("  function patchPluginMarketplaceRequestClient(", "\n  function patchPluginMarketplaceRequestMessage(")
+      + section("  let codexNativeRpcInstallPromise", "\n  async function findCodexServiceTierDispatcher("),
+      requestEnv,"installCodexNativeRpcCompat"
+    );
+    assert.equal(await installed(),true);
+    const installedManager=requestRegistry.forHost("local");
+    assert.equal(installedManager,requestClient.rpc);
+    const params={threadId:id}, options={timeoutMs:2000};
+    const methods=["windowsSandbox/readiness","config/read","mcpServerStatus/list","plugin/list","turn/start"];
+    for (const method of methods) {
+      const body=method==="windowsSandbox/readiness" ? undefined : params;
+      assert.deepEqual(await installedManager.sendRequest(method,body,options),{status:"ready"});
+      assert.deepEqual(requestCalls.at(-1),[method,body,options]);
+      assert.equal(requestCalls.at(-1)[1],body,"参数对象必须原样转发");
+      assert.equal(requestCalls.at(-1)[2],options,"超时选项必须原样转发");
+    }
+    assert.equal(requestCalls.length,methods.length,"每个请求只转发一次");
+    assert.equal(checkpointCalls.length,checkpoint ? 1 : 0);
+    await assert.rejects(installedManager.sendRequest("diagnostic/failure",params,options),error=>error===failure);
+    assert.deepEqual(await installedManager.sendRequest("config/read",params,options),{status:"ready"});
+    assert.equal(requestCalls.length,methods.length+2,"错误不得重发请求或阻断后续读取");
+    requestEnv.codexElvesBackendSettings.enhancementsEnabled=false;
+    assert.deepEqual(await installedManager.sendRequest("windowsSandbox/readiness"),{status:"ready"});
+    assert.equal(requestCalls.length,methods.length+3);
+    requestRuntime.dispose();
+    assert.equal(requestClient.rpc,requestRpc);
+    assert.equal(requestRegistry.forHost("local"),requestRpc);
+  }
+
   const nativeSource = section("  const codexNativeCheckpointOperations", "  let codexNativeRpcInstallPromise");
   const checkpoints=[], bindings=[], env = {
     window:{__codexElvesComposerFast:{patchTurnRequest:async p=>({...p,serviceTier:"priority"})}},
