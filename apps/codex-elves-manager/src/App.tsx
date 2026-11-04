@@ -74,6 +74,7 @@ import { ProviderPresetSelector } from "@/components/ProviderPresetSelector";
 import type { PresetPatch } from "@/components/ProviderPresetSelector";
 import type { RelayMode, RelayModelMapping, RelayProtocol } from "@/relay-types";
 import { readProxyRequestCacheTtl, readProxyTokenUsage } from "@/proxy-token-usage";
+import { formatProxyBody, readProxyResponseBody } from "@/proxy-response-body";
 import { JsonViewer } from "@/components/JsonViewer";
 import { RemoteAccessScreen } from "@/components/RemoteAccessScreen";
 import { defaultRemoteAccessSettings, defaultFrpConfig, frpPublicOrigin, normalizeFrpServerAddress, type FrpConfig, type PrimaryProvider, type RemoteAccessSettings } from "@/remote-access-types";
@@ -129,6 +130,11 @@ type OverviewResult = CommandResult<{
   update_status: string;
   settings_path: string;
   logs_path: string;
+}>;
+
+type CodexUpdatePolicyResult = CommandResult<{
+  disabled?: boolean;
+  requirementsPath?: string;
 }>;
 
 type PluginMarketplaceRepairResult = CommandResult<{
@@ -210,6 +216,7 @@ type BackendSettings = {
   codexAppPluginEntryUnlock: boolean;
   codexAppPluginMarketplaceUnlock: boolean;
   codexAppTaskBoard: boolean;
+  codexAppActivityViewCompact: boolean;
   codexAppSessionDelete: boolean;
   codexAppMarkdownExport: boolean;
   codexAppProjectMove: boolean;
@@ -278,7 +285,6 @@ type RelayProfile = {
   localProxyEnabled: boolean;
   relayMode: RelayMode;
   officialMixApiKey: boolean;
-  testModel: string;
   configContents: string;
   authContents: string;
   useCommonConfig: boolean;
@@ -1001,6 +1007,8 @@ const defaultSettings: BackendSettings = {
   codexAppPluginEntryUnlock: true,
   codexAppPluginMarketplaceUnlock: true,
   codexAppTaskBoard: true,
+  // 用户要求活动视图精简默认关闭，与后端缺省值及注入设置同步。
+  codexAppActivityViewCompact: false,
   codexAppSessionDelete: true,
   codexAppMarkdownExport: false,
   codexAppProjectMove: false,
@@ -1049,7 +1057,6 @@ const defaultSettings: BackendSettings = {
       localProxyEnabled: false,
       relayMode: "official",
       officialMixApiKey: false,
-      testModel: "",
       configContents: "",
       authContents: "",
       useCommonConfig: true,
@@ -1097,6 +1104,7 @@ let browserPreviewFrpConfigMatchesActive = false;
 let browserPreviewFrpInstalled = false;
 let browserPreviewFrpDownloadStartedAt = 0;
 const browserPreviewFrpDownloadBytes = 14_152_383;
+let browserPreviewCodexAutoUpdateDisabled = false;
 
 function isBrowserPreview(): boolean {
   return typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
@@ -1126,7 +1134,6 @@ function createBrowserPreviewSettings(): BackendSettings {
         localProxyEnabled: true,
         relayMode: "pureApi",
         officialMixApiKey: false,
-        testModel: "gpt-5.5",
         configContents: [
           'model = "gpt-5.5"',
           'model_provider = "custom"',
@@ -1965,36 +1972,45 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
   const settings = browserPreviewSettings();
   const active = activeRelayProfile(settings);
   switch (command) {
+    case "load_codex_update_policy":
+    case "set_codex_auto_update_disabled":
+      if (command === "set_codex_auto_update_disabled") {
+        browserPreviewCodexAutoUpdateDisabled = args?.disabled === true;
+      }
+      return Promise.resolve(browserPreviewResult({
+        disabled: browserPreviewCodexAutoUpdateDisabled,
+        requirementsPath: "浏览器预览（不会写入系统策略）",
+      }, "浏览器预览已模拟更新策略，未修改系统文件。") as T);
     case "startup_options":
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.6.0",
-        latestVersion: "0.6.0",
+        currentVersion: "0.6.1",
+        latestVersion: "0.6.1",
         releaseSummary: [
-          "CodexElves 0.6.0",
+          "CodexElves 0.6.1",
           "",
-          "- 优化启动与托盘唤醒稳定性",
-          "- 改进 GitHub Release 更新体验",
-          "- 修复若干协议代理兼容性问题",
+          "- 兼容新版 Codex，修复远程会话主流程与侧边会话",
+          "- 优化手机端前后台恢复、排队和目标交互",
+          "- 版本更新只作提醒，模型测速改用完整糖果题",
         ].join("\n"),
-        assetName: "CodexElves-0.6.0-windows-x64-setup.exe",
-        assetUrl: "https://example.test/CodexElves-0.6.0-windows-x64-setup.exe",
+        assetName: "CodexElves-0.6.1-windows-x64-setup.exe",
+        assetUrl: "https://example.test/CodexElves-0.6.1-windows-x64-setup.exe",
         updateAvailable: false,
       }, "发现可用更新。") as T);
     case "perform_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.6.0",
-        latestVersion: "0.6.0",
+        currentVersion: "0.6.1",
+        latestVersion: "0.6.1",
         releaseSummary: "浏览器预览不会下载真实安装包。",
-        installedPath: "C:\\Temp\\CodexElves-0.6.0-windows-x64-setup.exe",
+        installedPath: "C:\\Temp\\CodexElves-0.6.1-windows-x64-setup.exe",
         launched: true,
       }, "浏览器预览已模拟启动安装包。") as T);
     case "copy_diagnostics":
       return Promise.resolve(browserPreviewResult({
         report: [
           "CodexElves 诊断报告",
-          "版本: 0.6.0",
+          "版本: 0.6.1",
           "平台: windows-x64",
           "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
           "配置目录: C:\\Users\\junes\\.codex",
@@ -2015,7 +2031,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.6.0",
+        current_version: "0.6.1",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -2535,7 +2551,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       const profile = args?.profile as RelayProfile | undefined;
       const model = typeof args?.model === "string" && args.model.trim()
         ? args.model.trim()
-        : profile?.testModel || profile?.model || settings.relayTestModel;
+        : profile?.model || settings.relayTestModel;
       return Promise.resolve(
         browserPreviewResult({
           httpStatus: 200,
@@ -2585,6 +2601,9 @@ export function App() {
   const [route, setRoute] = useState<Route>(() => loadInitialRoute());
   const [notice, setNotice] = useState<{ title: string; message: string; status?: Status } | null>(null);
   const [overview, setOverview] = useState<OverviewResult | null>(null);
+  const [codexUpdatePolicy, setCodexUpdatePolicy] = useState<CodexUpdatePolicyResult | null>(null);
+  const [codexUpdatePolicyBusy, setCodexUpdatePolicyBusy] = useState(false);
+  const codexUpdatePolicyBusyRef = useRef(false);
   const [settings, setSettings] = useState<SettingsResult | null>(null);
   const [relayFiles, setRelayFiles] = useState<RelayFilesResult | null>(null);
   const [envConflicts, setEnvConflicts] = useState<EnvConflictsResult | null>(null);
@@ -2617,7 +2636,6 @@ export function App() {
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
   const [watcher, setWatcher] = useState<WatcherResult | null>(null);
   const [update, setUpdate] = useState<UpdateResult | null>(null);
-  const checkedUpdateRef = useRef<UpdateResult | null>(null);
   const [updatePrompt, setUpdatePrompt] = useState<UpdateResult | null>(null);
   const [updateInstallActive, setUpdateInstallActive] = useState(false);
   const [scriptMarket, setScriptMarket] = useState<ScriptMarketResult | null>(null);
@@ -2703,6 +2721,40 @@ export function App() {
       prevLaunchStatusRef.current = current ?? null;
       setOverview(result);
       if (!silent) showResultNotice("概览已检查", result, { silentSuccess: true });
+    }
+  };
+
+  const refreshCodexUpdatePolicy = async () => {
+    if (codexUpdatePolicyBusyRef.current) return;
+    codexUpdatePolicyBusyRef.current = true;
+    setCodexUpdatePolicyBusy(true);
+    try {
+      const result = await run(() => call<CodexUpdatePolicyResult>("load_codex_update_policy"));
+      setCodexUpdatePolicy(result);
+      if (result && !isSuccessStatus(result.status)) {
+        showResultNotice("Codex 自动更新", result);
+      }
+    } finally {
+      codexUpdatePolicyBusyRef.current = false;
+      setCodexUpdatePolicyBusy(false);
+    }
+  };
+
+  const toggleCodexAutoUpdate = async () => {
+    if (codexUpdatePolicyBusyRef.current || typeof codexUpdatePolicy?.disabled !== "boolean") return;
+    codexUpdatePolicyBusyRef.current = true;
+    setCodexUpdatePolicyBusy(true);
+    try {
+      const result = await run(() => call<CodexUpdatePolicyResult>("set_codex_auto_update_disabled", {
+        disabled: !codexUpdatePolicy.disabled,
+      }));
+      // 用户要求显示实际策略状态；保存失败不乐观翻转，回读文件确认当前值。
+      if (result) showResultNotice("Codex 自动更新", result);
+      const current = await run(() => call<CodexUpdatePolicyResult>("load_codex_update_policy"));
+      setCodexUpdatePolicy(current);
+    } finally {
+      codexUpdatePolicyBusyRef.current = false;
+      setCodexUpdatePolicyBusy(false);
     }
   };
 
@@ -3044,6 +3096,7 @@ export function App() {
     let deleted = 0;
     let partial = 0;
     let failed = 0;
+    const failureReasons = new Map<string, number>();
     let nextIndex = 0;
     // 限制原生删除的并发量，避免大量会话同时抢占 Codex 和 SQLite。
     const workerCount = Math.min(4, sessionsToDelete.length);
@@ -3065,6 +3118,9 @@ export function App() {
           partial += 1;
         } else {
           failed += 1;
+          // 用户要求修复批量删除失败；保留具体原因，避免原生接口异常只剩失败数量。
+          const reason = result?.message || "删除请求失败，请查看管理器日志";
+          failureReasons.set(reason, (failureReasons.get(reason) || 0) + 1);
         }
       }
     };
@@ -3073,9 +3129,11 @@ export function App() {
     const summary = [`已删除 ${deleted} 个`];
     if (partial) summary.push(`其中 ${partial} 个最近列表更新不完整`);
     if (failed) summary.push(`失败 ${failed} 个`);
+    const failureDetails = [...failureReasons].slice(0, 3)
+      .map(([reason, count]) => `${reason}（${count} 个）`).join("；");
     showNotice(
       "批量删除会话",
-      `${summary.join("，")}。`,
+      `${summary.join("，")}。${failureDetails ? `\n失败原因：${failureDetails}` : ""}`,
       failed ? "failed" : partial ? "partial" : "ok",
     );
   };
@@ -3304,15 +3362,7 @@ export function App() {
   };
 
   const restart = async () => {
-    const checkedUpdate = checkedUpdateRef.current;
-    if (checkedUpdate?.updateAvailable) {
-      showNotice(
-        "需要更新后才可使用",
-        `当前 CodexElves 版本 ${checkedUpdate.currentVersion} 落后于已检测到的远程版本 ${checkedUpdate.latestVersion}。请前往“关于”完成更新，并重新打开管理器后再重启 Codex。`,
-        "failed",
-      );
-      return;
-    }
+    // 用户要求版本更新只做提醒：检测到新版本也允许重启，不将更新状态作为重启条件。
     const result = await launchCommand("restart_codex_elves");
     if (result) {
       showNotice("重启 Codex", result.message, result.status);
@@ -3510,10 +3560,6 @@ export function App() {
   const checkUpdate = async (silent = false) => {
     const result = await run(() => call<UpdateResult>("check_update"));
     if (result) {
-      // 检查失败或启动安装包不能清除已检测到的版本信息。
-      if ((result.status === "ok" || result.status === "not_checked") && result.latestVersion) {
-        checkedUpdateRef.current = result;
-      }
       setUpdate(result);
       if (result.updateAvailable) {
         setUpdatePrompt(result);
@@ -3919,8 +3965,8 @@ export function App() {
     return normalizeSettings(saveResult.settings);
   };
 
-  const testRelayProfile = async (profile: RelayProfile, model?: string, inputTokens?: number) => {
-    return run(() => call<RelayProfileTestResult>("test_relay_profile", { profile, model, inputTokens }));
+  const testRelayProfile = async (profile: RelayProfile, model?: string, speedTest = false) => {
+    return run(() => call<RelayProfileTestResult>("test_relay_profile", { profile, model, speedTest }));
   };
 
   const fetchRelayProfileModels = async (profile: RelayProfile, silent = false) => {
@@ -4091,6 +4137,7 @@ export function App() {
 
   useEffect(() => {
     void (async () => {
+      void refreshCodexUpdatePolicy();
       const loadedSettings = await refreshSettings(true);
       if (loadedSettings?.githubReleaseUpdatePromptEnabled !== false) {
         void checkUpdate(true);
@@ -4112,6 +4159,12 @@ export function App() {
       await checkPluginMarketplacePrompt();
       await checkRemotePluginMarketplacePrompt();
     })();
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => void refreshCodexUpdatePolicy();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
   }, []);
 
   useEffect(() => {
@@ -4234,6 +4287,7 @@ export function App() {
   const actions = useMemo(
     () => ({
       refreshCurrent: async () => {
+        void refreshCodexUpdatePolicy();
         await navigate(route);
       },
       launch,
@@ -4514,6 +4568,31 @@ export function App() {
           </div>
           <div className="topbar-actions">
             <LocalProxyTopbarBadge status={localProxyStatus} onLaunch={actions.launch} />
+            {/* 用户要求交换重启与主题按钮，禁止自动更新开关必须紧邻重启按钮右侧。 */}
+            <div className="codex-topbar-controls">
+              <Button onClick={() => void actions.restart()} title="重启 Codex" variant="outline">
+                <Rocket className="h-4 w-4" />
+                重启 Codex
+              </Button>
+              <Button
+                aria-checked={codexUpdatePolicy?.disabled === true}
+                aria-busy={codexUpdatePolicyBusy}
+                aria-label="禁止 Codex 自动更新"
+                className={`codex-update-toggle ${codexUpdatePolicy?.disabled ? "active" : ""}`}
+                disabled={codexUpdatePolicyBusy || typeof codexUpdatePolicy?.disabled !== "boolean"}
+                onClick={() => void toggleCodexAutoUpdate()}
+                role="switch"
+                title={codexUpdatePolicy?.requirementsPath
+                  ? `仅控制 Codex 应用内更新，保存后需重启生效。策略文件：${codexUpdatePolicy.requirementsPath}`
+                  : codexUpdatePolicy?.message || "正在读取 Codex 更新策略"}
+                variant="outline"
+              >
+                <span>禁止 Codex 自动更新</span>
+                <span className="context-switch-track" aria-hidden="true">
+                  <span className="context-switch-thumb" />
+                </span>
+              </Button>
+            </div>
             <Button
               onClick={actions.toggleTheme}
               size="icon"
@@ -4521,10 +4600,6 @@ export function App() {
               variant="outline"
             >
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </Button>
-            <Button onClick={() => void actions.restart()} title="重启 Codex" variant="outline">
-              <Rocket className="h-4 w-4" />
-              重启 Codex
             </Button>
             <Button onClick={() => void actions.refreshCurrent()} size="icon" title="刷新当前页面" variant="outline">
               <RefreshCw className="h-4 w-4" />
@@ -4785,7 +4860,7 @@ type Actions = {
     tomlBody: string,
   ) => Promise<BackendSettings | null>;
   deleteContextEntry: (settings: BackendSettings, kind: ContextKind, id: string) => Promise<BackendSettings | null>;
-  testRelayProfile: (profile: RelayProfile, model?: string, inputTokens?: number) => Promise<RelayProfileTestResult | null>;
+  testRelayProfile: (profile: RelayProfile, model?: string, speedTest?: boolean) => Promise<RelayProfileTestResult | null>;
   fetchRelayProfileModels: (profile: RelayProfile, silent?: boolean) => Promise<string[] | null>;
   probeRelayProfileResponsesWebsocket: (profile: RelayProfile) => Promise<ResponsesWebsocketCapability | null>;
   switchRelayProfile: (settings: BackendSettings, previousActiveRelayId?: string) => Promise<void>;
@@ -5386,6 +5461,8 @@ function LocalProxyLogDetailDialog({
 }) {
   const [requestView, setRequestView] = useState<"full" | "continue">("full");
   const [responseView, setResponseView] = useState<"full" | "before" | "after" | "precompaction">("full");
+  const [responseFormat, setResponseFormat] = useState<"summary" | "raw">("summary");
+  useEffect(() => { setResponseFormat("summary"); }, [entry.id, responseView]);
   const continueRequestBody = entry.continueThinkingRequestBody?.trim() || "";
   const continueBeforeBody = entry.continueThinkingBeforeResponseBody?.trim() || "";
   const continueAfterBody = entry.continueThinkingAfterResponseBody?.trim() || "";
@@ -5403,7 +5480,12 @@ function LocalProxyLogDetailDialog({
           ? layeredCompactionBeforeBody
           : entry.responseBody;
   const formattedRequestViewBody = formatProxyBody(requestViewBody);
-  const formattedResponseViewBody = formatProxyResponseBody(responseViewBody);
+  const responseBodyView = useMemo(() => readProxyResponseBody(responseViewBody), [responseViewBody]);
+  // 统计始终读取原始事件的格式化结果，切换汇总和原始视图不能改变 token 数。
+  const formattedResponseViewBody = responseBodyView.formatted;
+  const displayedResponseBody = responseBodyView.summary
+    ? responseFormat === "raw" ? responseViewBody : responseBodyView.summary
+    : formattedResponseViewBody;
   const tokenUsage = useMemo(
     () => readProxyTokenUsage(formattedResponseViewBody),
     [formattedResponseViewBody],
@@ -5631,6 +5713,28 @@ function LocalProxyLogDetailDialog({
             <div className="proxy-detail-pane">
               <div className="proxy-detail-pane-head">
                 <span>完整返回</span>
+                {responseBodyView.summary ? (
+                  <span className="proxy-detail-response-tabs" role="group" aria-label="返回展示方式">
+                    <Button
+                      aria-pressed={responseFormat === "summary"}
+                      className={`proxy-detail-copy-button proxy-detail-view-button ${responseFormat === "summary" ? "active" : ""}`}
+                      onClick={() => setResponseFormat("summary")}
+                      size="sm"
+                      variant="secondary"
+                    >
+                      汇总
+                    </Button>
+                    <Button
+                      aria-pressed={responseFormat === "raw"}
+                      className={`proxy-detail-copy-button proxy-detail-view-button ${responseFormat === "raw" ? "active" : ""}`}
+                      onClick={() => setResponseFormat("raw")}
+                      size="sm"
+                      variant="secondary"
+                    >
+                      原始事件
+                    </Button>
+                  </span>
+                ) : null}
                 {hasContinueThinkingViews ? (
                   <span className="proxy-detail-response-tabs" aria-label="续接返回视图">
                     <Button
@@ -5691,13 +5795,13 @@ function LocalProxyLogDetailDialog({
                   size="sm"
                   title="复制返回"
                   variant="secondary"
-                  onClick={() => void onCopyResponse(formattedResponseViewBody)}
+                  onClick={() => void onCopyResponse(displayedResponseBody)}
                 >
                   <Copy className="h-4 w-4" />
                   复制
                 </Button>
               </div>
-              <JsonViewer text={formattedResponseViewBody} label="返回 JSON 查看器" onCopy={onCopyResponse} />
+              <JsonViewer text={displayedResponseBody} label="返回 JSON 查看器" onCopy={onCopyResponse} />
             </div>
           </div>
         </div>
@@ -5967,12 +6071,12 @@ function RelayProfileTestDialog({
   }, [actions, profile.id, fallbackModel]);
 
   const sendTest = async () => {
-    const testModel = model.trim();
+    const selectedModel = model.trim();
     if (sending) return;
     setSending(true);
     setResult(null);
     try {
-      const nextResult = await actions.testRelayProfile(profile, testModel || undefined);
+      const nextResult = await actions.testRelayProfile(profile, selectedModel || undefined);
       setResult(nextResult);
     } finally {
       setSending(false);
@@ -6024,7 +6128,6 @@ function RelayProfileTestDialog({
   );
 }
 
-const SPEED_TEST_INPUT_TOKENS = 50_000;
 const SPEED_TEST_CONCURRENCY = 5;
 
 function formatSpeedTestDurationMs(value: number): string {
@@ -6135,15 +6238,17 @@ function RelayProfileSpeedTestDialog({
       profile.modelList,
     ],
   );
-  const [mode, setMode] = useState<"configured" | "all">("configured");
+  const [mode, setMode] = useState<"configured" | "selected">("configured");
   const [availableModels, setAvailableModels] = useState<string[]>(configuredModels);
+  // 用户要求右侧按所选模型测速；未选择时保持为空，不能自动测试供应商的全部模型。
+  const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [running, setRunning] = useState(false);
-  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
+  const [sortBy, setSortBy] = useState<"firstToken" | "tokenRate">("tokenRate");
   const [selectedDetailItem, setSelectedDetailItem] = useState<RelayProfileSpeedTestItem | null>(null);
-  const [resultsByMode, setResultsByMode] = useState<Record<"configured" | "all", RelayProfileSpeedTestItem[]>>({
+  const [resultsByMode, setResultsByMode] = useState<Record<"configured" | "selected", RelayProfileSpeedTestItem[]>>({
     configured: [],
-    all: [],
+    selected: [],
   });
   const results = resultsByMode[mode];
   const configuredModelsKey = configuredModels.join("\n");
@@ -6151,8 +6256,9 @@ function RelayProfileSpeedTestDialog({
   useEffect(() => {
     setMode("configured");
     setAvailableModels(configuredModels);
-    setSortDirection("desc");
-    setResultsByMode({ configured: [], all: [] });
+    setSelectedModels([]);
+    setSortBy("tokenRate");
+    setResultsByMode({ configured: [], selected: [] });
     setSelectedDetailItem(null);
   }, [profile.id, configuredModelsKey]);
 
@@ -6188,7 +6294,7 @@ function RelayProfileSpeedTestDialog({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose, running, selectedDetailItem]);
 
-  const targetModels = mode === "all" ? availableModels : configuredModels;
+  const targetModels = mode === "selected" ? selectedModels : configuredModels;
 
   const runSpeedTest = async () => {
     if (running || !targetModels.length) return;
@@ -6204,7 +6310,8 @@ function RelayProfileSpeedTestDialog({
           const startedAt = performance.now();
           let item: RelayProfileSpeedTestItem;
           try {
-            const result = await actions.testRelayProfile(profile, model, SPEED_TEST_INPUT_TOKENS);
+            // 用户要求只发送完整糖果题，不再用重复内容补齐 5 万 token；普通连通性测试仍单独使用 hi。
+            const result = await actions.testRelayProfile(profile, model, true);
             const measuredElapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
             item = {
               model,
@@ -6255,17 +6362,23 @@ function RelayProfileSpeedTestDialog({
     : 0;
   const sortedResults = useMemo(
     () => [...results].sort((left, right) => {
-      const leftRate = speedTestTokenRate(left.status === "ok" ? left.outputTokens : null, left.elapsedMs);
-      const rightRate = speedTestTokenRate(right.status === "ok" ? right.outputTokens : null, right.elapsedMs);
-      const leftMissing = !Number.isFinite(leftRate);
-      const rightMissing = !Number.isFinite(rightRate);
+      // 用户要求以首字耗时降序替换 tk/s 升序：首字越慢越靠前，保留 tk/s 降序为默认；失败或缺失指标仍排末尾。
+      const metric = (item: RelayProfileSpeedTestItem) => item.status !== "ok"
+        ? Number.NaN
+        : sortBy === "firstToken"
+          ? item.firstTokenMs ?? Number.NaN
+          : speedTestTokenRate(item.outputTokens, item.elapsedMs);
+      const leftValue = metric(left);
+      const rightValue = metric(right);
+      const leftMissing = !Number.isFinite(leftValue);
+      const rightMissing = !Number.isFinite(rightValue);
       if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
-      if (!leftMissing && !rightMissing && leftRate !== rightRate) {
-        return sortDirection === "asc" ? leftRate - rightRate : rightRate - leftRate;
+      if (!leftMissing && !rightMissing && leftValue !== rightValue) {
+        return rightValue - leftValue;
       }
       return left.elapsedMs - right.elapsedMs;
     }),
-    [results, sortDirection],
+    [results, sortBy],
   );
 
   return createPortal(
@@ -6283,7 +6396,7 @@ function RelayProfileSpeedTestDialog({
         <div className="modal-head">
           <div>
             <h2 id="relay-speed-test-title">模型速度测试</h2>
-            <p>{profile.name || "未命名供应商"} · 每个模型发送约 5 万 token 输入，按实际输出 token / 完整请求耗时计算 tok/s，最多 5 个并行测速。</p>
+            <p>{profile.name || "未命名供应商"} · 每个模型回答同一道完整糖果题，按实际输出 token / 完整请求耗时计算 tok/s，最多 5 个并行测速。</p>
           </div>
           <Button disabled={running} onClick={onClose} size="icon" title="关闭" variant="ghost">
             <X className="h-4 w-4" />
@@ -6303,17 +6416,38 @@ function RelayProfileSpeedTestDialog({
             <span>测试当前供应商已配置的 {configuredModels.length} 个模型</span>
           </button>
           <button
-            className={`speed-test-mode-card ${mode === "all" ? "active" : ""}`}
+            className={`speed-test-mode-card ${mode === "selected" ? "active" : ""}`}
             disabled={running}
             onClick={() => {
-              setMode("all");
+              setMode("selected");
             }}
             type="button"
           >
-            <strong>全部模型</strong>
-            <span>{fetchingModels ? "正在获取供应商模型…" : `测试发现的 ${availableModels.length} 个模型`}</span>
+            <strong>选择模型</strong>
+            <span>{fetchingModels ? "正在获取供应商模型…" : `从 ${availableModels.length} 个可用模型中单选或多选测速`}</span>
           </button>
         </div>
+
+        {mode === "selected" ? (
+          <Field as="div" className="speed-test-model-picker" label="测速模型">
+            <SelectMenu
+              ariaLabel="选择测速模型"
+              disabled={running || !availableModels.length}
+              menuClassName="speed-test-model-menu"
+              multiple
+              onChange={(models) => {
+                setSelectedModels(models);
+                setResultsByMode((current) => ({ ...current, selected: [] }));
+                setSelectedDetailItem(null);
+              }}
+              options={availableModels.map((model) => ({ value: model, label: model }))}
+              placeholder={availableModels.length
+                ? "请选择一个或多个模型"
+                : fetchingModels ? "正在获取供应商模型…" : "暂无可选模型"}
+              value={selectedModels}
+            />
+          </Field>
+        ) : null}
 
         {running ? (
           <div className="speed-test-running">
@@ -6333,18 +6467,18 @@ function RelayProfileSpeedTestDialog({
               </div>
               <div className="speed-test-sort-controls" role="group" aria-label="测速结果排序">
                 <button
-                  aria-pressed={sortDirection === "asc"}
-                  className={sortDirection === "asc" ? "active" : ""}
-                  onClick={() => setSortDirection("asc")}
+                  aria-pressed={sortBy === "firstToken"}
+                  className={sortBy === "firstToken" ? "active" : ""}
+                  onClick={() => setSortBy("firstToken")}
                   type="button"
                 >
                   <ArrowDownWideNarrow className="h-3.5 w-3.5" />
-                  tk/s 升序
+                  首字降序
                 </button>
                 <button
-                  aria-pressed={sortDirection === "desc"}
-                  className={sortDirection === "desc" ? "active" : ""}
-                  onClick={() => setSortDirection("desc")}
+                  aria-pressed={sortBy === "tokenRate"}
+                  className={sortBy === "tokenRate" ? "active" : ""}
+                  onClick={() => setSortBy("tokenRate")}
                   type="button"
                 >
                   <ArrowUpNarrowWide className="h-3.5 w-3.5" />
@@ -6564,8 +6698,10 @@ function EnhanceScreen({
             <FeatureToggle title="插件市场解锁" detail="API Key 模式下扩展插件市场请求，尽量显示完整插件列表；官方/混合模式通常不需要。" checked={form.codexAppPluginMarketplaceUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginMarketplaceUnlock", value)} />
             <FeatureToggle title="强制解锁入口" detail="恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。" checked={form.codexAppPluginEntryUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginEntryUnlock", value)} />
             <FeatureToggle title="任务看板" detail="在 Codex 左侧导航的“插件”下方显示内置任务看板入口；关闭时退出看板并恢复原生页面。默认开启。" checked={form.codexAppTaskBoard} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppTaskBoard", value)} />
+            <FeatureToggle title="活动视图精简" detail="在 Codex 原生“查看活动”中仅显示会话名称和项目名称两行，隐藏消息摘要；关闭时恢复原生展示。默认关闭。" checked={form.codexAppActivityViewCompact} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppActivityViewCompact", value)} />
             <FeatureToggle title="快速打开工作区" detail="在 Codex 顶部工具栏最左侧显示 Open in 快捷按钮，用首选应用打开当前会话的工作目录。默认开启。" checked={form.codexAppOpenInQuickAccess} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppOpenInQuickAccess", value)} />
-            <FeatureToggle title="原生 Fast 入口" detail="仅为支持 Fast 的 GPT 模型恢复原生开关，非 GPT 模型不开放；保存后重新启动 Codex 生效，实际支持与计费由供应商决定。" checked={form.codexAppNativeFastUnlock} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeFastUnlock", value)} />
+            {/* 用户要求 Fast 通过输入框相邻控件定位，保留原配置键以兼容已有开关。 */}
+            <FeatureToggle title="Fast 快捷开关" detail="在输入框工具栏显示独立 Fast 开关，仅适用于支持 Fast 的 GPT 模型和本机 API 模式；设置即时生效，实际支持与计费由供应商决定。" checked={form.codexAppNativeFastUnlock} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeFastUnlock", value)} />
             <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮；删除后不可恢复。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />
@@ -9685,22 +9821,8 @@ type SelectMenuOption<T extends string> = {
   label: React.ReactNode;
 };
 
-function SelectMenu<T extends string>({
-  value,
-  options,
-  onChange,
-  disabled = false,
-  className,
-  menuClassName,
-  menuFitContent = false,
-  menuMaxWidth,
-  menuMinWidth,
-  ariaLabel,
-  placeholder,
-}: {
-  value: T;
+type SelectMenuProps<T extends string> = {
   options: SelectMenuOption<T>[];
-  onChange: (value: T) => void;
   disabled?: boolean;
   className?: string;
   menuClassName?: string;
@@ -9709,13 +9831,38 @@ function SelectMenu<T extends string>({
   menuMinWidth?: number;
   ariaLabel?: string;
   placeholder?: string;
-}) {
+} & ({
+  multiple?: false;
+  value: T;
+  onChange: (value: T) => void;
+} | {
+  multiple: true;
+  value: T[];
+  onChange: (value: T[]) => void;
+});
+
+function SelectMenu<T extends string>(props: SelectMenuProps<T>) {
+  const {
+    options,
+    disabled = false,
+    className,
+    menuClassName,
+    menuFitContent = false,
+    menuMaxWidth,
+    menuMinWidth,
+    ariaLabel,
+    placeholder,
+  } = props;
   const [open, setOpen] = useState(false);
   const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const selectedOption = options.find((option) => option.value === value);
+  const isSelected = (value: T) => props.multiple ? props.value.includes(value) : props.value === value;
+  const selectedOptions = options.filter((option) => isSelected(option.value));
+  const selectionLabel = props.multiple && selectedOptions.length > 1
+    ? `已选择 ${selectedOptions.length} 项`
+    : selectedOptions[0]?.label ?? placeholder ?? "";
 
   const updateMenuPosition = () => {
     const button = buttonRef.current;
@@ -9764,7 +9911,8 @@ function SelectMenu<T extends string>({
   useLayoutEffect(() => {
     if (!open) return;
     updateMenuPosition();
-  }, [open]);
+    // 多选变化会清空测速结果并使弹窗重新居中，下拉位置需随选择同步更新。
+  }, [open, props.value, options.length]);
 
   useEffect(() => {
     if (!open) return;
@@ -9784,13 +9932,18 @@ function SelectMenu<T extends string>({
     const optionEls = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>(".app-select-option") ?? []);
     if (!optionEls.length) return;
     const currentIndex = current ? optionEls.indexOf(current) : -1;
-    const fallbackIndex = Math.max(0, options.findIndex((option) => option.value === value));
+    const fallbackIndex = Math.max(0, options.findIndex((option) => isSelected(option.value)));
     const nextIndex = currentIndex < 0 ? fallbackIndex : (currentIndex + direction + optionEls.length) % optionEls.length;
     optionEls[nextIndex]?.focus();
   };
 
   const selectValue = (next: T) => {
-    onChange(next);
+    // 测速多选需连续勾选或取消，保留下拉框；现有单选仍在选中后关闭。
+    if (props.multiple) {
+      props.onChange(isSelected(next) ? props.value.filter((value) => value !== next) : [...props.value, next]);
+      return;
+    }
+    props.onChange(next);
     setOpen(false);
     buttonRef.current?.focus();
   };
@@ -9803,17 +9956,19 @@ function SelectMenu<T extends string>({
         setOpen(false);
       }}
       ref={menuRef}
+      aria-multiselectable={props.multiple || undefined}
       role="listbox"
       style={menuStyle ?? undefined}
     >
       {options.map((option) => (
         <button
-          aria-selected={option.value === value}
-          className="app-select-option"
+          aria-selected={isSelected(option.value)}
+          className={`app-select-option${props.multiple ? " app-select-option-multiple" : ""}`}
           key={option.value}
           onClick={() => selectValue(option.value)}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
+              if (props.multiple) event.stopPropagation();
               setOpen(false);
               buttonRef.current?.focus();
             }
@@ -9834,6 +9989,9 @@ function SelectMenu<T extends string>({
           role="option"
           type="button"
         >
+          {props.multiple ? (
+            <Check aria-hidden="true" className="h-4 w-4" visibility={isSelected(option.value) ? "visible" : "hidden"} />
+          ) : null}
           {option.label}
         </button>
       ))}
@@ -9858,6 +10016,7 @@ function SelectMenu<T extends string>({
         onClick={() => setOpen((current) => !current)}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
+            if (props.multiple && open) event.stopPropagation();
             setOpen(false);
             return;
           }
@@ -9875,7 +10034,7 @@ function SelectMenu<T extends string>({
         ref={buttonRef}
         type="button"
       >
-        <span>{selectedOption ? selectedOption.label : (placeholder ?? "")}</span>
+        <span>{selectionLabel}</span>
         <ChevronDown className="h-4 w-4" aria-hidden="true" />
       </button>
       {menu ? createPortal(menu, document.body) : null}
@@ -12569,82 +12728,6 @@ function localProxyTopbarTooltip(_status: LocalProxyStatusResult | null, _canLau
   return "启动条件：启用供应商功能并且当前供应商开启「启用本地代理」或当前供应商是聚合供应商。";
 }
 
-function formatProxyBody(text: string) {
-  const trimmed = text.trim();
-  if (!trimmed) return "";
-  try {
-    return JSON.stringify(JSON.parse(trimmed), null, 2);
-  } catch {
-    return text;
-  }
-}
-
-function formatProxyResponseBody(text: string) {
-  return formatProxyBody(extractProxySseJsonBody(text) ?? extractProxyJsonLinesBody(text) ?? text);
-}
-
-function extractProxySseJsonBody(text: string) {
-  const trimmed = text.trim();
-  if (!trimmed.includes("data:")) return null;
-
-  const events: unknown[] = [];
-  trimmed.split(/\n\s*\n/).forEach((block) => {
-    const dataLines = block
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.startsWith("data:"))
-      .map((line) => line.slice("data:".length).trim())
-      .filter((line) => line && line !== "[DONE]");
-    if (!dataLines.length) return;
-    const rawData = dataLines.join("\n");
-    try {
-      events.push(JSON.parse(rawData));
-    } catch {
-      events.push(rawData);
-    }
-  });
-
-  return serializeProxyEventBody(events);
-}
-
-function extractProxyJsonLinesBody(text: string) {
-  const lines = text
-    .trim()
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (lines.length < 2) return null;
-
-  const events: unknown[] = [];
-  for (const line of lines) {
-    try {
-      events.push(JSON.parse(line));
-    } catch {
-      return null;
-    }
-  }
-
-  return serializeProxyEventBody(events);
-}
-
-function serializeProxyEventBody(events: unknown[]) {
-  let terminalResponse: unknown = null;
-  events.forEach((event) => {
-    if (!event || typeof event !== "object" || Array.isArray(event)) return;
-    const parsed = event as { type?: unknown; response?: unknown };
-    if (
-      typeof parsed.type === "string" &&
-      ["response.completed", "response.incomplete", "response.failed"].includes(parsed.type) &&
-      parsed.response
-    ) {
-      terminalResponse = parsed.response;
-    }
-  });
-
-  const body = terminalResponse ?? (events.length === 1 ? events[0] : events.length ? events : null);
-  return body === null ? null : JSON.stringify(body, null, 2);
-}
-
 function calculateRequestRatio(entries: LocalProxyLogEntry[]) {
   let high = 0;
   let highTotal = 0;
@@ -12996,7 +13079,6 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
             localProxyEnabled: false,
             relayMode: "official" as RelayMode,
             officialMixApiKey: false,
-            testModel: "",
             configContents: "",
             authContents: "",
             useCommonConfig: true,
@@ -13027,6 +13109,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
     computerUseGuardEnabled: settings.computerUseGuardEnabled !== false,
     computerUseApiKeyBrowserCompatEnabled:
       settings.computerUseApiKeyBrowserCompatEnabled !== false,
+    codexAppActivityViewCompact: settings.codexAppActivityViewCompact === true,
     lanProxyEnabled: settings.lanProxyEnabled === true,
     remoteAccess: { ...defaultRemoteAccessSettings, ...settings.remoteAccess },
     codexAppImageOverlayOpacity: clampNumber(settings.codexAppImageOverlayOpacity || 35, 1, 100),
@@ -13085,6 +13168,9 @@ function inputToCodexExtraArgs(value: string) {
 }
 
 function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = emptyContextSelection()): RelayProfile {
+  // 用户要求废弃供应商级测试模型；旧导入数据也不能把该字段带回保存或测试候选。
+  const { testModel: _retiredTestModel, ...currentProfile } = profile as RelayProfile & { testModel?: unknown };
+  profile = currentProfile;
   const legacyMixedApi = profile.relayMode === "mixedApi";
   if (profile.relayMode === "aggregate" || profile.aggregate) {
     return normalizeAggregateRelayProfile(
@@ -13097,7 +13183,6 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
         protocol: "responses",
         relayMode: "aggregate",
         officialMixApiKey: false,
-        testModel: profile.testModel || "",
         configContents: "",
         authContents: "",
         useCommonConfig: profile.useCommonConfig !== false,
@@ -13135,7 +13220,6 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
     localProxyEnabled,
     relayMode,
     officialMixApiKey,
-    testModel: profile.testModel || "",
     configContents: relayMode === "official" && !officialMixApiKey ? "" : profile.configContents || "",
     authContents: relayMode === "official" && !officialMixApiKey ? buildOfficialRelayAuthJson(profile.authContents || "") : profile.authContents || "",
     useCommonConfig: profile.useCommonConfig !== false,
@@ -13229,14 +13313,14 @@ function uniqueStrings(values: string[]): string[] {
 }
 
 function relayProfileDefaultTestModel(profile: RelayProfile, form: BackendSettings): string {
-  return profile.testModel.trim() || profile.model.trim() || form.relayTestModel.trim() || defaultSettings.relayTestModel;
+  // 测试默认使用当前供应商模型；供应商未设置时才使用有明确设置入口的全局测试模型。
+  return profile.model.trim() || form.relayTestModel.trim() || defaultSettings.relayTestModel;
 }
 
 function relayProfileKnownModels(profile: RelayProfile, fallbackModel = ""): string[] {
   const requestModel = (model: string) => relayProfileRequestModelForCatalogModel(profile, model);
   const values = [
     requestModel(fallbackModel),
-    requestModel(profile.testModel),
     requestModel(profile.model),
     ...relayProfileConfiguredModels(profile),
   ];
@@ -14173,7 +14257,6 @@ function createRelayProfile(settings: BackendSettings): RelayProfile {
     localProxyEnabled: false,
     relayMode: "official" as RelayMode,
     officialMixApiKey: false,
-    testModel: "",
     configContents: "",
     authContents: "",
     useCommonConfig: true,
@@ -14210,7 +14293,6 @@ function createAggregateRelayProfile(settings: BackendSettings): RelayProfile {
       localProxyEnabled: false,
       relayMode: "aggregate",
       officialMixApiKey: false,
-      testModel: "",
       configContents: "",
       authContents: "",
       useCommonConfig: true,

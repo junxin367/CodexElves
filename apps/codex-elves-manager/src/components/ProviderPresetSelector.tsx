@@ -14,7 +14,6 @@ export type RelayProfile = {
   localProxyEnabled: boolean;
   relayMode: RelayMode;
   officialMixApiKey: boolean;
-  testModel: string;
   configContents: string;
   authContents: string;
   useCommonConfig: boolean;
@@ -56,8 +55,8 @@ export function createPresetPatch(preset: ProviderPreset): PresetPatch {
     upstreamBaseUrl: preset.baseUrl,
     protocol: preset.protocol,
     localProxyEnabled: preset.protocol === "chatCompletions",
+    // 用户要求不再保留独立测试模型；预设只填充供应商当前默认模型。
     model: preset.model,
-    testModel: preset.model,
     modelList,
     modelMappings,
     responsesModelList: preset.protocol === "responses" ? modelList : "",

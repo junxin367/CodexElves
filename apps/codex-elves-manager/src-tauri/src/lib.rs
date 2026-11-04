@@ -83,6 +83,8 @@ pub fn run() {
             commands::backend_version,
             commands::startup_options,
             commands::load_overview,
+            commands::load_codex_update_policy,
+            commands::set_codex_auto_update_disabled,
             commands::launch_codex_elves,
             commands::restart_codex_elves,
             commands::load_settings,

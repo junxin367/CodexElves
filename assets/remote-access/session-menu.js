@@ -23,6 +23,9 @@ function menuResponse(value, threadId) {
         || !value.completedSubagents.every(validItem)
         || value.completedSubagents.length !== value.completedSubagentCount)
       || !Array.isArray(value.sideThreads) || !value.sideThreads.every(validItem)
+      || value.subagentsComplete != null && typeof value.subagentsComplete !== "boolean"
+      || value.subagentsLoading != null && typeof value.subagentsLoading !== "boolean"
+      || value.subagentsError != null && typeof value.subagentsError !== "string"
       || !Number.isInteger(value.completedSubagentCount) || value.completedSubagentCount < 0) {
     throw new Error("会话菜单数据格式无效，请重试。");
   }
@@ -79,9 +82,7 @@ export function mountSessionMenu({
     return { deviceId, cacheScope, threadId, readOnly: value.readOnly === true,
       createPending: value.createPending === true,
       authorization: JSON.stringify([deviceId, cacheScope]),
-      connected: value.connected === true,
-      unavailableMessage: nonempty(value.unavailableMessage) ? value.unavailableMessage : "",
-      owner: JSON.stringify([deviceId, cacheScope, threadId]) };
+      connected: value.connected === true, owner: JSON.stringify([deviceId, cacheScope, threadId]) };
   }
   function syncContext() {
     if (suspended) return context;
@@ -107,7 +108,7 @@ export function mountSessionMenu({
     if (!canRead(value)) return null;
     let entry = entries.get(value.owner);
     if (!entry) entry = { context: value, snapshot: null, revision: 0, subagentsExpanded: true,
-      dirty: true, request: null, restoring: null, restored: false, again: false };
+      completedSubagentsExpanded: false, dirty: true, request: null, restoring: null, restored: false, again: false };
     entries.delete(value.owner); entries.set(value.owner, entry);
     while (entries.size > maxEntries) {
       const oldest = entries.keys().next().value;
@@ -127,11 +128,19 @@ export function mountSessionMenu({
       Promise.resolve(cache?.put?.(entry.context.cacheScope, entry.context.threadId,
         { version: 3, ...entry.snapshot,
           data: { ...data, subagents: data.subagents.filter(item => item.ephemeral === false),
-            completedSubagents, completedSubagentCount: completedSubagents.length, sideThreads: [] } })).catch(() => {});
+            completedSubagents, completedSubagentCount: completedSubagents.length, sideThreads: [],
+            subagentsComplete: false, subagentsLoading: false, subagentsError: null, subagentsStale: true } })).catch(() => {});
     } catch {}
   }
   function applySnapshot(entry, snapshot, persist = false) {
-    const previous = entry.snapshot, changed = !previous || menuSignature(previous.data) !== menuSignature(snapshot.data);
+    const previous = entry.snapshot;
+    if (snapshot.data.subagentsError && previous
+        && !snapshot.data.subagents.length && !snapshot.data.completedSubagentCount) {
+      snapshot = { ...snapshot, data: { ...snapshot.data,
+        subagents: previous.data.subagents, completedSubagents: previous.data.completedSubagents,
+        completedSubagentCount: previous.data.completedSubagentCount, subagentsStale: true } };
+    }
+    const changed = !previous || menuSignature(previous.data) !== menuSignature(snapshot.data);
     entry.snapshot = snapshot;
     if (persist) save(entry);
     if (!owns(entry.context.owner)) return;
@@ -214,8 +223,6 @@ export function mountSessionMenu({
     });
   }
   function updatePermissions() {
-    for (const button of menu.querySelectorAll(".session-related-menu-thread"))
-      button.disabled = !context.connected;
     for (const [button, kind] of mutationButtons) {
       button.disabled = !canMutate(context) || (kind === "create"
         && (context.createPending || cached?.data.canCreateSideThread === false || typeof createSideThread !== "function"));
@@ -321,7 +328,11 @@ export function mountSessionMenu({
       times.push({ node: time, item, loadedAtMs: cached.loadedAtMs });
     }
     if (data?.completedSubagentCount > 0) {
-      const completed = element("div", "session-related-menu-completed");
+      const completed = element("button", "session-related-menu-item session-related-menu-completed");
+      completed.type = "button"; completed.tabIndex = -1; completed.setAttribute("role", "menuitem");
+      completed.dataset.menuKey = "toggle-completed-subagents";
+      completed.setAttribute("aria-label", `${entry?.completedSubagentsExpanded ? "收起" : "展开"}已完成子智能体`);
+      completed.setAttribute("aria-expanded", String(entry?.completedSubagentsExpanded === true));
       const icons = element("span", "session-related-menu-completed-icons");
       icons.setAttribute("aria-hidden", "true");
       for (const item of data.completedSubagents.slice(0, 4)) {
@@ -335,6 +346,27 @@ export function mountSessionMenu({
       completed.append(icons, element("span", "session-related-menu-completed-count",
         `${data.completedSubagentCount} 完成`));
       subagentContents.append(completed);
+      completed.onclick = event => {
+        event.preventDefault(); event.stopPropagation();
+        if (!entry || !owns(expected)) return;
+        entry.completedSubagentsExpanded = !entry.completedSubagentsExpanded;
+        render();
+      };
+      if (entry?.completedSubagentsExpanded) for (const item of data.completedSubagents) {
+        const button = itemButton(nonempty(item.name) ? item.name : "子智能体", openSubagent, [item]);
+        button.classList.add("session-related-menu-thread");
+        button.dataset.menuKey = `subagent:${item.id}`;
+        button.append(element("span", "session-related-menu-time", "已完成"));
+        subagentContents.append(button);
+      }
+    }
+    if (data?.subagentsError || data?.subagentsStale || data?.subagentsLoading || data?.subagentsComplete === false) {
+      const status = element("div", "session-related-menu-status",
+        data.subagentsError ? `子智能体读取失败${data.subagentsStale ? "，当前显示上次结果" : ""}：${data.subagentsError}`
+          : data.subagentsStale ? "当前显示上次子智能体记录，等待同步…"
+          : data.subagentsLoading ? "正在读取子智能体…" : "子智能体列表尚未完整，正在同步…");
+      status.setAttribute("role", "status");
+      subagentContents.append(status);
     }
     const create = itemButton("新建侧边会话", createSideThread, [], "create", null, { keepMenu: true });
     create.dataset.menuKey = "create";
@@ -357,9 +389,9 @@ export function mountSessionMenu({
       button.dataset.menuKey = `side:${item.id}`; sides.append(button);
     }
     let status = message;
-    if (!canRead(context)) status = context?.threadId ? "当前授权不可用" : "请选择会话后查看相关会话";
-    else if (!context.connected) status = context.unavailableMessage
-      || (data ? "当前离线，显示上次记录" : "当前离线，连接后读取相关会话");
+    // 用户要求新建会话时不显示选会话提示；已有会话仍保留授权异常说明。
+    if (!canRead(context)) status = context?.threadId ? "当前授权不可用" : "";
+    else if (!context.connected) status = data ? "当前离线，显示上次记录" : "当前离线，连接后读取相关会话";
     if (status) {
       const note = element("p", "session-related-menu-status", status);
       note.setAttribute("role", "status"); menu.append(note);

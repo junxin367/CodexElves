@@ -241,16 +241,24 @@ final class BrowserSession {
         });
       }
       function positionCredentialChooser() {
-        if (!chooserHost || !chooserInput || !chooserInput.isConnected) return;
-        var rect = chooserInput.getBoundingClientRect(), viewportWidth = window.innerWidth;
-        var viewportHeight = window.innerHeight, below = viewportHeight - rect.bottom - 8;
-        var above = rect.top - 8, width = Math.min(Math.max(220, rect.width), viewportWidth - 8);
+        if (!chooserHost) return;
+        if (!chooserInput || !chooserInput.isConnected || !chooserInput.getClientRects().length) {
+          hideCredentialChooser(); return;
+        }
+        var rect = chooserInput.getBoundingClientRect(), viewport = window.visualViewport;
+        var viewportLeft = viewport ? viewport.offsetLeft : 0, viewportTop = viewport ? viewport.offsetTop : 0;
+        var viewportWidth = viewport ? viewport.width : window.innerWidth;
+        var viewportHeight = viewport ? viewport.height : window.innerHeight;
+        var below = viewportTop + viewportHeight - rect.bottom - 8;
+        var above = rect.top - viewportTop - 8, width = Math.min(Math.max(220, rect.width), viewportWidth - 8);
         chooserHost.style.width = width + 'px';
-        chooserHost.style.left = Math.max(4, Math.min(rect.left, viewportWidth - width - 4)) + 'px';
+        chooserHost.style.left = Math.max(viewportLeft + 4,
+          Math.min(rect.left, viewportLeft + viewportWidth - width - 4)) + 'px';
         chooserHost.style.maxHeight = Math.max(80, Math.min(264, Math.max(above, below))) + 'px';
         var height = chooserHost.offsetHeight, top = rect.bottom + 4;
-        if (height > below && above > below) top = Math.max(4, rect.top - height - 4);
-        chooserHost.style.top = Math.max(4, Math.min(top, viewportHeight - height - 4)) + 'px';
+        if (height > below && above > below) top = Math.max(viewportTop + 4, rect.top - height - 4);
+        chooserHost.style.top = Math.max(viewportTop + 4,
+          Math.min(top, viewportTop + viewportHeight - height - 4)) + 'px';
       }
       function chooseCredential(context, record) {
         fillField(context.username, String(record.username || ''));
@@ -285,10 +293,12 @@ final class BrowserSession {
         document.documentElement.appendChild(chooserHost); positionCredentialChooser();
       }
       window.__codexElvesSetCredentialRecords = function(records) {
+        var activeInput = chooserInput;
         savedRecords = Array.isArray(records) ? records.filter(function(record) {
           return record && typeof record === 'object' && record.password;
         }) : [];
-        hideCredentialChooser();
+        if (activeInput && document.activeElement === activeInput) showCredentialChooser(activeInput);
+        else hideCredentialChooser();
       };
       document.addEventListener('focusin', function(event) {
         if (canChooseCredentials(event.target)) showCredentialChooser(event.target);
@@ -297,8 +307,12 @@ final class BrowserSession {
         if (canChooseCredentials(event.target)) showCredentialChooser(event.target);
         else if (!chooserHost || !event.composedPath().includes(chooserHost)) hideCredentialChooser();
       }, true);
-      document.addEventListener('scroll', hideCredentialChooser, true);
-      window.addEventListener('resize', hideCredentialChooser);
+      document.addEventListener('scroll', positionCredentialChooser, true);
+      window.addEventListener('resize', positionCredentialChooser);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', positionCredentialChooser);
+        window.visualViewport.addEventListener('scroll', positionCredentialChooser);
+      }
       function capture() {
         if (!/^https?:$/.test(location.protocol)) return;
         var recorder = window.__codexElvesCredentialRecorder;
@@ -1789,7 +1803,7 @@ final class BrowserSession {
     private void pushCredentialRecords(WebView webView) {
         if (!credentialRecordingEnabled || webView == null) return;
         String origin = webOrigin(webView.getUrl());
-        if (origin.isEmpty()) return;
+        if (origin.isEmpty() || !origin.equals(credentialPageOrigin) || credentialPageGeneration <= 0L) return;
         try {
             JSONArray records = new JSONArray();
             for (BrowserCredentialStore.Entry entry : credentialStore.forOrigin(identity.owner(), origin)) {
@@ -1799,8 +1813,12 @@ final class BrowserSession {
                 record.put("subaccount", entry.subaccount);
                 records.put(record);
             }
-            webView.evaluateJavascript("window.__codexElvesSetCredentialRecords&&"
-                + "window.__codexElvesSetCredentialRecords(" + records + ");", null);
+            // onPageStarted can run before the new document's JavaScript context exists.
+            // Bind both the generation and records in the loaded document, scoped to its origin.
+            webView.evaluateJavascript("(function(){if(location.origin!==" + JSONObject.quote(origin)
+                + ")return;window.__codexElvesCredentialPageGeneration=" + credentialPageGeneration
+                + ";window.__codexElvesSetCredentialRecords&&window.__codexElvesSetCredentialRecords("
+                + records + ");})();", null);
         } catch (JSONException | RuntimeException ignored) {
             // Unavailable records never block navigation or the loaded page.
         }
@@ -1953,7 +1971,7 @@ final class BrowserSession {
         diagnostic("native.browser.credentials", DiagnosticsPolicy.fields(
             "phase", phase, "reason", reason, "generation", value.optLong("generation", 0L)));
         if ("install".equals(phase) && "ready".equals(reason)) {
-            credentialError = ""; changed(); return;
+            credentialError = ""; pushCredentialRecords(view); changed(); return;
         }
         if (!"failure".equals(phase)) return;
         credentialError = switch (reason) {

@@ -38,7 +38,7 @@ button,select{cursor:pointer}
 button{appearance:none;-webkit-appearance:none;border:1px solid var(--line);border-radius:8px;background:transparent;padding:8px 12px;touch-action:manipulation}
 /* 图标按钮保持透明，触屏不继承鼠标悬停底色。 */
 @media(hover:hover) and (pointer:fine){
-  :where(button:not(:disabled):not(.icon-button,.pair-key-toggle,.priority-clear-button,.row-menu-button,.context-info,.message-action-button,.command-shell-copy,.transcript-event-info,.goal-edit-button,.queued-menu-button,.queued-drag-handle,.new-chat-project-clear,.scroll-to-bottom,.image-preview-close,.composer-attachment-remove,.appearance-theme-button)):hover{background:var(--hover)}
+  :where(button:not(:disabled):not(.icon-button,.pair-key-toggle,.priority-clear-button,.row-menu-button,.context-info,.message-action-button,.command-shell-copy,.transcript-event-info,.goal-edit-button,.goal-action-button,.queued-menu-button,.queued-drag-handle,.new-chat-project-clear,.scroll-to-bottom,.image-preview-close,.composer-attachment-remove,.appearance-theme-button)):hover{background:var(--hover)}
 }
 button:disabled{opacity:.45;cursor:not-allowed}
 input,textarea,select{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 11px;min-width:0}
@@ -48,7 +48,7 @@ textarea{resize:none;line-height:1.7}.muted{color:var(--muted)}
 .primary:hover,.send-button:hover{opacity:.85;background:var(--accent)}
 .text-button,.icon-button{border:0;padding:6px 9px}
 .icon-button{display:inline-grid;place-items:center;flex-shrink:0;width:var(--control-icon-size);height:var(--control-icon-size);padding:0;font-size:20px;line-height:1}
-:is(.icon-button,.pair-key-toggle,.priority-clear-button,.row-menu-button,.context-info,.message-action-button,.command-shell-copy,.transcript-event-info,.goal-edit-button,.queued-menu-button,.new-chat-project-clear,.scroll-to-bottom,.image-preview-close,.composer-attachment-remove):active:not(:disabled){opacity:.65}
+:is(.icon-button,.pair-key-toggle,.priority-clear-button,.row-menu-button,.context-info,.message-action-button,.command-shell-copy,.transcript-event-info,.goal-edit-button,.goal-action-button,.queued-menu-button,.new-chat-project-clear,.scroll-to-bottom,.image-preview-close,.composer-attachment-remove):active:not(:disabled){opacity:.65}
 .error-text{color:var(--danger);white-space:pre-wrap}
 html{scrollbar-color:var(--muted) transparent}
 .initial-loading{display:grid;align-content:center;gap:12px;min-height:100dvh;max-width:480px;margin:0 auto;padding:24px;color:var(--muted);line-height:1.6}
@@ -153,6 +153,13 @@ html{scrollbar-color:var(--muted) transparent}
 .model-option-label>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .model-option-label small{font-size:calc(var(--font-size)*.75);line-height:1.6}
 .choice-check{flex-shrink:0;color:var(--accent);margin-left:8px}
+@media(max-width:760px),(pointer:coarse){
+  #model-settings .model-options{padding-bottom:3px}
+  #model-settings .effort-options{padding-top:3px}
+  #model-settings .model-option{min-height:28px;padding:4px 10px}
+  #model-settings .model-option-label{gap:2px}
+  #model-settings .choice-check{margin-left:0}
+}
 .popover-empty{padding:8px 10px;font-size:calc(var(--font-size)*.85);line-height:1.7}
 .skill-menu{display:flex;flex-direction:column;overflow:hidden}
 .skill-options{flex:1 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin}
@@ -376,7 +383,12 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
   .thread-row>.row-menu-button{visibility:hidden;pointer-events:none}
 }
 @media(hover:none),(max-width:760px){.select-trigger{min-height:36px}.load-more{min-height:40px}.priority-section-label{min-height:40px}}
-@media(max-width:760px){#project-select.new-chat-project-select{max-width:100%;min-height:36px}.project-picker-popup{max-width:calc(100vw - 16px)}.project-picker-popup .popup-option{min-height:var(--control-menu-height)}}
+@media(max-width:760px){
+  #project-select.new-chat-project-select{max-width:100%;min-height:36px}
+  .project-picker-popup{max-width:calc(100vw - 16px)}
+  /* 用户要求手机项目列表更紧凑：行高由 44px 降至 36px，上下内边距由 7px 降至 4px；底部选项同步，桌面仍保持 38px。 */
+  .project-picker-popup .popup-option{min-height:36px;padding:4px 9px}
+}
 .color-swatch{width:50px;height:34px;padding:3px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
 .color-swatch:hover{background:var(--bg)}
 .color-swatch::before{content:"";display:block;width:100%;height:100%;border-radius:5px;background:var(--swatch,transparent)}
@@ -432,12 +444,14 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .tool-body>.text-button{display:block;margin:0 14px 10px;font-size:.78571rem}
 .tool-state{width:12px;flex-shrink:0}
 .spinner{display:inline-block;width:12px;height:12px;border:1.5px solid var(--line);border-top-color:var(--muted);border-right-color:var(--muted);border-radius:50%;animation:thread-spin 1s linear infinite;flex-shrink:0}
-.working-label{background:linear-gradient(100deg,var(--muted) 25%,var(--text) 50%,var(--muted) 75%);background-size:240% 100%;background-clip:text;-webkit-background-clip:text;color:transparent;animation:working-shimmer 2s linear infinite}
+/* 用户要求文字左侧不闪烁：禁用高亮平铺并保留底色，循环首尾均让高亮带处于文字外。 */
+.working-label{background:linear-gradient(100deg,var(--muted) 25%,var(--text) 50%,var(--muted) 75%) var(--muted) no-repeat;background-size:240% 100%;background-position:150% 0;background-clip:text;-webkit-background-clip:text;color:transparent;animation:working-shimmer 2s linear infinite}
 .turn-plan{list-style:none;margin:10px 0;padding:0;font-size:.85714rem;color:var(--muted);line-height:1.8}
 .turn-plan>.inProgress{color:var(--text)}
 .turn-plan>.completed{text-decoration:line-through}
 .send-button[data-action=stop] .ui-icon{width:18px;height:18px}
-@keyframes working-shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
+/* 240% 背景从 150% 移至 -50%，亮带仍从左向右扫过，重置时两端都是 muted 底色。 */
+@keyframes working-shimmer{from{background-position:150% 0}to{background-position:-50% 0}}
 @media(prefers-reduced-motion:reduce){.working-label{background:none;color:var(--muted)}}
 .command-group{min-width:0;margin:2px 0 8px;color:var(--muted)}
 .command-group-summary{position:relative;display:grid;grid-template-columns:16px minmax(0,1fr) 12px;align-items:center;gap:6px;width:fit-content;max-width:100%;min-width:0;min-height:26px;padding:3px 0;overflow:hidden;border-radius:6px;cursor:pointer;list-style:none;isolation:isolate;touch-action:manipulation}
@@ -718,29 +732,34 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .goal-active .goal-heading>.ui-icon,.goal-complete .goal-heading>.ui-icon{color:var(--green)}
 .goal-paused .goal-heading>.ui-icon,.goal-budgetLimited .goal-heading>.ui-icon,.goal-usageLimited .goal-heading>.ui-icon{color:#b7791f}
 .goal-blocked .goal-heading>.ui-icon{color:var(--danger)}
-.goal-edit-button{display:grid;place-items:center;justify-self:center;width:var(--control-inline-size);height:var(--control-inline-size);margin:calc((var(--composer-context-row-height) - var(--control-inline-size))/2) 0 0;padding:0;border:0;border-radius:7px;color:var(--muted)}
-.goal-edit-button:not(:disabled):hover{color:var(--text)}
-.goal-edit-button>.ui-icon{width:16px;height:16px}
+.goal-controls{display:flex;flex-direction:column;align-items:center;gap:4px;margin-top:calc((var(--composer-context-row-height) - var(--control-inline-size))/2)}
+.goal-edit-button,.goal-action-button{display:grid;place-items:center;flex-shrink:0;width:var(--control-inline-size);height:var(--control-inline-size);margin:0;padding:0;border:0;border-radius:7px;color:var(--muted)}
+.goal-action-button{display:none}
+.goal-card[open]+.goal-controls .goal-action-button{display:grid}
+.goal-edit-button:not(:disabled):hover,.goal-action-button:not(:disabled):hover{color:var(--text)}
+.goal-delete-button:not(:disabled):hover{color:var(--danger)}
+.goal-edit-button>.ui-icon,.goal-action-button>.ui-icon{width:16px;height:16px}
 .goal-recovery-row{display:flex;align-items:center;gap:8px;min-height:34px;padding:3px 4px 3px 10px;color:var(--muted);font-size:.78571rem}
 .goal-recovery-row>.ui-icon{width:14px;height:14px}
 .goal-recovery-row>span:nth-child(2){flex:1}
-.goal-edit-dialog{width:min(680px,calc(100% - 32px));max-height:var(--popup-max-height);padding:0;overflow:hidden;border:1px solid var(--line);border-radius:var(--radius-popup);background:var(--bg);color:var(--text)}
+.goal-edit-dialog{width:min(600px,calc(100% - 32px));max-height:min(520px,var(--popup-max-height),calc(var(--goal-edit-viewport-height,100dvh) - 32px));padding:0;overflow:hidden;border:1px solid var(--line);border-radius:var(--radius-popup);background:var(--bg);color:var(--text)}
 .goal-edit-dialog::backdrop{background:#0008}
 .goal-edit-dialog[open]{display:flex;flex-direction:column}
 .goal-edit-heading{display:flex;align-items:center;justify-content:space-between;min-height:58px;flex-shrink:0;gap:16px;padding:12px 16px;border-bottom:1px solid var(--line)}
 .goal-edit-heading h2{margin:0;font-size:1.14286rem;line-height:1.4}
 .goal-edit-close{display:grid;width:var(--control-icon-size);height:var(--control-icon-size);flex-shrink:0;place-items:center;padding:0;line-height:1}
-.goal-edit-scroll{min-height:0;overflow:auto;overscroll-behavior:contain;padding:16px;scrollbar-width:thin}
-.goal-edit-field{position:relative;min-width:0}
-.goal-edit-input{display:block;width:100%;min-height:144px;padding:11px 12px 38px;overflow:hidden;resize:none;background:var(--bg);line-height:1.65}
+.goal-edit-scroll{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;overflow:auto;overscroll-behavior:contain;padding:16px;scrollbar-width:thin}
+.goal-edit-field{position:relative;display:flex;flex:1 1 auto;flex-direction:column;min-width:0;min-height:72px}
+.goal-edit-input{display:block;flex:1 1 auto;width:100%;height:240px;min-height:72px;padding:11px 12px 38px;overflow:auto;overscroll-behavior:contain;resize:none;background:var(--bg);line-height:1.65;scrollbar-width:thin}
 .goal-edit-count{position:absolute;right:11px;bottom:9px;max-width:calc(100% - 22px);padding-left:8px;background:var(--bg);font-size:calc(var(--font-size)*.72);font-variant-numeric:tabular-nums;line-height:1.5;pointer-events:none}
-.goal-edit-status{margin-top:10px;overflow-wrap:anywhere;font-size:calc(var(--font-size)*.78);line-height:1.5}
+.goal-edit-status{flex-shrink:0;margin-top:10px;overflow-wrap:anywhere;font-size:calc(var(--font-size)*.78);line-height:1.5}
 .goal-edit-actions{display:flex;align-items:center;justify-content:space-between;flex-shrink:0;gap:12px;padding:12px 16px;border-top:1px solid var(--line)}
 .goal-edit-receipt-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.goal-edit-receipt-actions:not(:has(>button:not([hidden]))){display:none}
 .goal-edit-primary-actions{display:grid;grid-template-columns:repeat(3,76px);align-items:center;gap:8px;margin-left:auto}
 .goal-edit-actions button{min-height:40px;padding:7px 14px;font-size:.85714rem}
 .goal-edit-primary-actions button{width:100%;height:40px;padding:7px 10px}
-@media(max-width:760px){.composer-context:has(>#queued-area:not([hidden]),>#goal-area:not([hidden])){margin-inline:8px}.goal-body{padding-left:12px;padding-right:12px}.goal-edit-dialog{width:calc(100% - 16px);max-height:var(--popup-max-height)}.goal-edit-heading{min-height:52px;padding:10px 12px}.goal-edit-scroll{padding:12px}.goal-edit-actions{flex-direction:column;align-items:stretch;padding:10px 12px}.goal-edit-receipt-actions{width:100%}.goal-edit-primary-actions{grid-template-columns:repeat(3,minmax(0,1fr));width:100%;margin-left:0}}
+@media(max-width:760px){.composer-context:has(>#queued-area:not([hidden]),>#goal-area:not([hidden])){margin-inline:8px}.goal-body{padding-left:12px;padding-right:12px}.goal-edit-dialog{position:fixed;inset:calc(var(--goal-edit-viewport-height,100lvh)*.06) 0 auto;width:calc(100% - 16px);height:calc(var(--goal-edit-viewport-height,100lvh)*.48);max-height:none;margin:0 auto}.goal-edit-heading{min-height:52px;padding:10px 12px}.goal-edit-scroll{padding:12px}.goal-edit-field{min-height:0}.goal-edit-input{height:100%;min-height:0}.goal-edit-actions{flex-direction:column;align-items:stretch;padding:10px 12px}.goal-edit-receipt-actions{width:100%}.goal-edit-primary-actions{grid-template-columns:repeat(3,minmax(0,1fr));width:100%;margin-left:0}}
 @media(max-width:390px){.goal-metrics{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:7px 10px}}
 @media(hover:none),(max-width:760px){.composer-context{--composer-context-row-height:max(36px,calc(1.4rem + 8px))}}
 .queued-messages{display:block;min-height:0;max-height:calc(4 * var(--composer-context-row-height));margin:0;padding:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;border:0;border-radius:0;background:transparent}
@@ -983,6 +1002,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-related-menu-status{padding-top:9px;border-top:1px solid var(--line)}
 .session-related-menu-context{z-index:1;padding:4px}
 .session-related-menu-danger{color:var(--danger)}
+@media(max-width:760px){.session-related-menu-item.session-related-menu-thread,.session-related-menu-item.session-related-menu-completed{font-size:calc(var(--font-size) - 1px)}}
 @media(pointer:coarse){.session-related-menu-item{min-height:44px}}
 /* /session-related-menu */
 .session-files-screen .session-tools-page{min-height:0}
@@ -1051,7 +1071,17 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
   .session-files-list .session-tools-file{min-height:30px;height:30px}
 }
 
-.composer-anchor>.side-thread-expired-banner{min-height:166px}
+/*
+ * 用户要求：侧边会话过期提示块仅调整高度，与整个输入框等高，保留原有提示样式。
+ * 高度对齐无附件、无编辑提示且完全展开的空输入框：
+ * 桌面：100px 输入区 + 24px 上下内边距 + 2px 边框 + 6px 工具栏间距 + 工具栏高度，默认 164px。
+ * 手机：80px 输入区 + 同样的 32px 固定间距 + 工具栏高度，默认 148px。
+ * 调整 .composer、.prompt-editor、.composer-toolbar 或 --control-toolbar-size 时，
+ * 须同步核对本块及下方 760px 断点；不要据此改动原有字体颜色、背景、边框、圆角或内边距。
+ * 使用 min-height，允许大字号或窄屏下的提示文字换行撑高，避免裁切。
+ */
+.composer-anchor>.side-thread-expired-banner{min-height:calc(132px + var(--control-toolbar-size))}
 .side-thread-expired-banner{display:flex;flex-direction:column;gap:4px;margin:0;padding:12px 14px;border:1px solid color-mix(in srgb,var(--danger) 28%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--danger) 7%,var(--side));color:var(--text);line-height:1.6}
 .side-thread-expired-banner strong{font-size:.85714rem;color:var(--danger);font-weight:600}
 .side-thread-expired-banner span{font-size:.78571rem;color:var(--muted)}
+@media(max-width:760px){.composer-anchor>.side-thread-expired-banner{min-height:calc(112px + var(--control-toolbar-size))}}

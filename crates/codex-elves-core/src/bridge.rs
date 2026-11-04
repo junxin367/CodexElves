@@ -21,6 +21,22 @@ const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_BRIDGE_REQUESTS: usize = 8;
 const MAX_QUEUED_BRIDGE_REQUESTS: usize = 64;
 
+#[derive(Debug)]
+pub(crate) struct CdpCommandNotDispatched;
+
+impl std::fmt::Display for CdpCommandNotDispatched {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CDP command was not dispatched")
+    }
+}
+
+impl std::error::Error for CdpCommandNotDispatched {}
+
+pub(crate) fn cdp_not_dispatched(error: anyhow::Error) -> anyhow::Error {
+    // Only callers that have not handed an action frame to the socket may add this proof.
+    error.context(CdpCommandNotDispatched)
+}
+
 pub type BridgeHandler = Arc<
     dyn Fn(String, Value) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>>
         + Send
@@ -156,7 +172,9 @@ pub async fn evaluate_script_value_with_timeout(
     script: &str,
     command_timeout: Duration,
 ) -> anyhow::Result<Value> {
-    let socket = connect_cdp_websocket(websocket_url).await?;
+    let socket = connect_cdp_websocket(websocket_url)
+        .await
+        .map_err(cdp_not_dispatched)?;
     let mut session = CdpSession::new(socket);
     let mut params = runtime_evaluate_params_with_await_promise(script, true);
     params["returnByValue"] = json!(true);
@@ -188,11 +206,14 @@ where
             .to_string()
             .into(),
     );
-    let socket = connect_cdp_websocket(websocket_url).await?;
+    let socket = connect_cdp_websocket(websocket_url)
+        .await
+        .map_err(cdp_not_dispatched)?;
     let mut session = CdpSession::new(socket);
     futures_util::future::poll_fn(|cx| Pin::new(&mut session.socket).poll_ready(cx))
         .await
-        .context("failed to prepare authorized CDP command")?;
+        .context("failed to prepare authorized CDP command")
+        .map_err(cdp_not_dispatched)?;
     let permit = authorize().await?;
     // The permit holds revocation/key-rotation locks through synchronous enqueue,
     // but never through flush or the potentially long native response.

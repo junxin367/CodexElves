@@ -1,6 +1,42 @@
 const IMAGE_LIMIT = 64 * 1024 * 1024;
 const imageReference = "__codexElvesRecoveryImage";
 
+// 仅保存当前客户端的界面选择，不写 Codex 桌面状态，也不提交会话操作。
+export function createSidebarPreferenceStore({ storage, prefix = "codex-elves-sidebar-preferences-v1:" } = {}) {
+  const normalize = value => {
+    const result = {};
+    if (!value || typeof value !== "object" || Array.isArray(value)) return result;
+    if (["project", "list"].includes(value.mode)) result.mode = value.mode;
+    for (const key of ["chats", "projects", "pinned"])
+      if (["manual", "updated_at"].includes(value[key])) result[key] = value[key];
+    return result;
+  };
+  const keyFor = scope => {
+    if (typeof scope !== "string" || !scope || scope.length > 1024)
+      throw new Error("侧栏偏好缺少有效的设备授权范围。");
+    return `${prefix}${encodeURIComponent(scope)}`;
+  };
+  const target = () => storage ?? globalThis.localStorage;
+  const read = scope => {
+    const text = target().getItem(keyFor(scope));
+    if (!text) return {};
+    let record;
+    try { record = JSON.parse(text); } catch { return {}; }
+    return record?.version === 1 ? normalize(record.preferences) : {};
+  };
+  return {
+    read,
+    write(scope, patch) {
+      const preferences = { ...read(scope), ...normalize(patch) };
+      target().setItem(keyFor(scope), JSON.stringify({ version: 1, preferences }));
+      return preferences;
+    },
+    ownsStorageEvent(scope, event) {
+      return !!scope && event?.key === keyFor(scope);
+    },
+  };
+}
+
 export function recoveryStorageMessage(error, submitting = false) {
   const prefix = submitting ? "草稿和回执保存失败，操作未提交。" : "草稿仅保留在本页，刷新可能丢失。";
   if (error?.name === "QuotaExceededError") return `${prefix}浏览器存储空间不足，请释放此站点的空间后重试。`;
@@ -274,7 +310,7 @@ const readCacheKinds = new Set(["sidebar", "view", "thread", "transcript", "mode
   "workspace-list", "workspace-detail", "session-menu"]);
 const readCacheDay = 24 * 60 * 60 * 1000;
 
-// 与输入恢复库独立：这里只保存已授权用户的只读展示数据，不保存 Cookie、审批或可执行队列。
+// 与输入恢复库独立：这里只保存已授权用户的展示数据，不保存 Cookie，也不据此恢复审批或队列执行权限。
 export function createReadCache({ indexedDB = globalThis.indexedDB,
   databaseName = "codex-elves-read-cache-v1", maxBytes = 32 * 1024 * 1024,
   maxRecordBytes = 6 * 1024 * 1024, maxEntries = 64, now = () => Date.now() } = {}) {

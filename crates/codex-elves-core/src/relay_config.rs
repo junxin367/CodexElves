@@ -977,13 +977,13 @@ pub async fn test_relay_profile(
     profile: &RelayProfile,
     model: &str,
 ) -> anyhow::Result<RelayProfileTestResult> {
-    test_relay_profile_with_input_tokens(profile, model, None).await
+    test_relay_profile_with_speed_test(profile, model, false).await
 }
 
-pub async fn test_relay_profile_with_input_tokens(
+pub async fn test_relay_profile_with_speed_test(
     profile: &RelayProfile,
     model: &str,
-    input_tokens: Option<u32>,
+    speed_test: bool,
 ) -> anyhow::Result<RelayProfileTestResult> {
     let base_url = relay_profile_base_url(profile);
     let base_url = base_url.trim().trim_end_matches('/');
@@ -1005,8 +1005,8 @@ pub async fn test_relay_profile_with_input_tokens(
     let test_model = profile.request_model_for_catalog_model(catalog_model);
     let client = crate::http_client::proxied_client("CodexElves/RelayTest")?;
     let mut failures = Vec::new();
-    let test_prompt = relay_profile_test_prompt(input_tokens);
-    let measure_first_token = input_tokens.is_some_and(|tokens| tokens > 0);
+    let test_prompt = relay_profile_test_prompt(speed_test);
+    let measure_first_token = speed_test;
 
     for (index, protocol) in protocols.iter().copied().enumerate() {
         match send_relay_profile_test_attempt(
@@ -1015,7 +1015,7 @@ pub async fn test_relay_profile_with_input_tokens(
             api_key,
             &test_model,
             protocol,
-            &test_prompt,
+            test_prompt,
             measure_first_token,
         )
         .await
@@ -1301,18 +1301,30 @@ fn relay_profile_test_protocol_label(protocol: RelayProtocol) -> &'static str {
     }
 }
 
-fn relay_profile_test_prompt(input_tokens: Option<u32>) -> String {
-    let Some(input_tokens) = input_tokens.filter(|tokens| *tokens > 0) else {
-        return "hi".to_string();
-    };
-    let instruction =
-        "This is a model speed test. Read the following input and reply only with OK.\n\n";
-    let mut prompt = String::with_capacity(instruction.len() + input_tokens as usize * 6);
-    prompt.push_str(instruction);
-    for _ in 0..input_tokens {
-        prompt.push_str(" token");
+// 用户要求测速只发送完整糖果题，取消 5 万 token 重复填充；三种协议使用同一题目，不附带答案。
+const RELAY_SPEED_TEST_PROMPT: &str = "\
+不使用外部工具，解答下面的糖果题。
+
+一个黑色不透明袋子中有苹果味、桃子味、西瓜味三种糖果，每种口味都有圆形和五角星形。
+可以凭手感辨别形状，但不能看见或尝出口味。各种糖果的数量如下：
+
+| 形状 | 苹果味 | 桃子味 | 西瓜味 |
+| --- | --- | --- | --- |
+| 圆形 | 7 | 9 | 8 |
+| 五角星形 | 7 | 6 | 4 |
+
+参赛者必须在摸取前决定取出的糖果总数，取出的糖果不放回。
+最少取出多少颗，才能保证手中有一颗苹果味和一颗桃子味的糖，而且这两颗的形状不同？
+圆形苹果味与五角星形桃子味，或圆形桃子味与五角星形苹果味，任意一种配对都算满足要求。
+
+给出最少数量和简要推导，说明取法、为什么一定能成功，以及为什么再少就不能保证。";
+
+fn relay_profile_test_prompt(speed_test: bool) -> &'static str {
+    if speed_test {
+        RELAY_SPEED_TEST_PROMPT
+    } else {
+        "hi"
     }
-    prompt
 }
 
 fn relay_profile_test_payload(
@@ -1321,11 +1333,13 @@ fn relay_profile_test_payload(
     test_prompt: &str,
     stream: bool,
 ) -> Value {
+    // 测速需要作答而非只回复 OK；8192 为包含推理 token 的输出留出空间，连通性测试仍保持 16。
+    let output_limit = if stream { 8192 } else { 16 };
     match protocol {
         RelayProtocol::Responses => serde_json::json!({
             "model": model,
             "input": test_prompt,
-            "max_output_tokens": 16
+            "max_output_tokens": output_limit
             ,"stream": stream
         }),
         RelayProtocol::ChatCompletions => serde_json::json!({
@@ -1333,7 +1347,7 @@ fn relay_profile_test_payload(
             "messages": [
                 { "role": "user", "content": test_prompt }
             ],
-            "max_tokens": 16
+            "max_tokens": output_limit
             ,"stream": stream
         }),
         RelayProtocol::Anthropic => serde_json::json!({
@@ -1341,7 +1355,7 @@ fn relay_profile_test_payload(
             "messages": [
                 { "role": "user", "content": test_prompt }
             ],
-            "max_tokens": 16
+            "max_tokens": output_limit
             ,"stream": stream
         }),
     }
@@ -4763,15 +4777,22 @@ base_url = "http://127.0.0.1:45221/v1"
     }
 
     #[test]
-    fn relay_profile_speed_test_prompt_targets_input_tokens_for_every_protocol() {
-        let prompt = relay_profile_test_prompt(Some(50_000));
-        assert_eq!(prompt.matches(" token").count(), 50_000);
+    fn relay_profile_speed_test_sends_complete_candy_problem_for_every_protocol() {
+        let prompt = relay_profile_test_prompt(true);
+        assert!(prompt.contains("| 圆形 | 7 | 9 | 8 |"));
+        assert!(prompt.contains("| 五角星形 | 7 | 6 | 4 |"));
+        assert!(prompt.contains("凭手感辨别形状"));
+        assert!(prompt.contains("在摸取前决定取出的糖果总数"));
+        assert!(prompt.contains("圆形苹果味与五角星形桃子味，或圆形桃子味与五角星形苹果味"));
+        assert!(!prompt.contains(" token"));
+        assert!(!prompt.contains("OK"));
+        assert!(prompt.chars().count() < 1000);
         for protocol in [
             RelayProtocol::Responses,
             RelayProtocol::ChatCompletions,
             RelayProtocol::Anthropic,
         ] {
-            let payload = relay_profile_test_payload(protocol, "gpt-test", &prompt, true);
+            let payload = relay_profile_test_payload(protocol, "gpt-test", prompt, true);
             assert_eq!(payload["stream"], true);
             let content = match protocol {
                 RelayProtocol::Responses => payload["input"].as_str().unwrap(),
@@ -4786,10 +4807,26 @@ base_url = "http://127.0.0.1:45221/v1"
                     payload["max_tokens"].as_u64().unwrap()
                 }
             };
-            assert_eq!(output_limit, 16);
+            assert_eq!(output_limit, 8192);
+            let connectivity = relay_profile_test_payload(
+                protocol,
+                "gpt-test",
+                relay_profile_test_prompt(false),
+                false,
+            );
+            assert_eq!(connectivity["stream"], false);
+            match protocol {
+                RelayProtocol::Responses => {
+                    assert_eq!(connectivity["input"], "hi");
+                    assert_eq!(connectivity["max_output_tokens"], 16);
+                }
+                RelayProtocol::ChatCompletions | RelayProtocol::Anthropic => {
+                    assert_eq!(connectivity["messages"][0]["content"], "hi");
+                    assert_eq!(connectivity["max_tokens"], 16);
+                }
+            }
         }
-        assert_eq!(relay_profile_test_prompt(None), "hi");
-        assert_eq!(relay_profile_test_prompt(Some(0)), "hi");
+        assert_eq!(relay_profile_test_prompt(false), "hi");
     }
 
     #[test]
@@ -4851,7 +4888,7 @@ base_url = "http://127.0.0.1:45221/v1"
             ..RelayProfile::default()
         };
 
-        let result = test_relay_profile_with_input_tokens(&profile, "gpt-5.4", Some(50))
+        let result = test_relay_profile_with_speed_test(&profile, "gpt-5.4", true)
             .await
             .unwrap();
         let request = server.join().unwrap();
@@ -4862,6 +4899,8 @@ base_url = "http://127.0.0.1:45221/v1"
         let request_json: Value = serde_json::from_str(body).unwrap();
 
         assert_eq!(request_json["stream"], true);
+        assert_eq!(request_json["input"], RELAY_SPEED_TEST_PROMPT);
+        assert_eq!(request_json["max_output_tokens"], 8192);
         assert!(result.first_token_ms.is_some_and(|elapsed| elapsed >= 20));
         assert_eq!(result.output_tokens, Some(8));
         assert!(

@@ -13,6 +13,7 @@ import java.util.Set;
 
 /** A separate, deliberately small contract for data that may leave the device. */
 final class DiagnosticsPolicy {
+    // 用户需要上传完整断连经过；新增字段须同步网页 diagnostics.js 与电脑 diagnostics.rs，仍拒绝原始正文和凭证。
     static final int MAX_EVENT_CHARS = 2048;
     private static final Set<String> STATIC_PATHS = set(
         "/", "/index.html", "/app-resources.json", "/app.js", "/diagnostics.js",
@@ -22,7 +23,7 @@ final class DiagnosticsPolicy {
         "/message-actions.js", "/platform.js", "/pwa.js", "/recovery-store.js", "/sw.js",
         "/style.css", "/manifest.webmanifest", "/icons/icon-192.png", "/icons/icon-512.png",
         "/icons/apple-touch-icon.png", "/api/connect", "/api/session", "/api/channels",
-        "/api/channel-events", "/api/events", "/api/logout", "/api/diagnostics",
+        "/api/channel-events", "/api/events", "/api/events/ws", "/api/logout", "/api/diagnostics",
         "/api/workspace/change", "/api/workspace/changes", "/api/receipts", "/other"
     );
     private static final Set<String> REASONS = set(
@@ -36,7 +37,10 @@ final class DiagnosticsPolicy {
         "image", "reload", "offline", "online", "reconnect", "auth-lost", "success",
         "timeout", "response-read-failed", "visibility", "pagehide", "upload-failed",
         "native-failed", "cors-blocked", "corp-blocked", "net-failed", "console-error",
-        "origin-mismatch", "missing-fields"
+        "origin-mismatch", "missing-fields", "stream-open", "stream-error", "poll",
+        "replace", "heartbeat", "worker-timeout", "worker-response-timeout",
+        "all-channels-disconnected", "route-change", "socket-open-timeout",
+        "socket-idle-timeout", "handshake-invalid", "page-resume", "startup"
     );
     private static final Set<String> ERROR_TYPES = set(
         "unknown", "network", "timeout", "http", "ssl", "renderer", "resource", "parse",
@@ -52,6 +56,12 @@ final class DiagnosticsPolicy {
         "NoSuchElementException", "ConcurrentModificationException",
         "JSONException", "IllegalArgumentException", "IllegalStateException",
         "SecurityException", "RuntimeException", "CancelledException"
+    );
+    private static final Set<String> BLOCKED_BY = set(
+        "ready", "delete", "busy", "stopping", "compaction-edit", "compaction-scope",
+        "compaction-unknown", "compaction-pending", "compaction-unsupported", "offline",
+        "read-only", "images-unsupported", "project-required", "goal", "images-loading",
+        "pending-receipt", "empty", "thread-not-loaded", "message-edit", "queue-edit-loading"
     );
 
     private DiagnosticsPolicy() {}
@@ -127,11 +137,20 @@ final class DiagnosticsPolicy {
             return Double.isFinite(code) && code == Math.floor(code)
                 && code >= -1000 && code <= 1000;
         }
-        if ("visible".equals(key) || "online".equals(key)) {
+        if ("visible".equals(key) || "online".equals(key)
+            || "pageLeaving".equals(key) || "connected".equals(key)
+            || "wasClean".equals(key) || "isTrusted".equals(key)) {
             return value instanceof Boolean;
         }
+        if ("readyState".equals(key) && value instanceof Number) {
+            double state = ((Number) value).doubleValue();
+            return Double.isFinite(state) && state == Math.floor(state)
+                && state >= 0 && state <= 4;
+        }
         if (set("status", "durationMs", "bytes", "sdk", "generation", "expectedBytes",
-            "loadedBytes", "line", "width", "height", "count", "port", "closeCode").contains(key)) {
+            "loadedBytes", "line", "width", "height", "count", "port", "closeCode",
+            "delayMs", "backgroundMs", "attempt",
+            "draftChars", "attachmentCount").contains(key)) {
             if (!(value instanceof Number)) {
                 return false;
             }
@@ -148,6 +167,8 @@ final class DiagnosticsPolicy {
             if ("port".equals(key)) return number >= 1 && number <= 65_535;
             if ("count".equals(key)) return number <= 10_000;
             if ("closeCode".equals(key)) return number <= 65_535;
+            if ("delayMs".equals(key)) return number <= 86_400_000;
+            if ("attempt".equals(key)) return number <= 10_000;
             return number <= 9_007_199_254_740_991d;
         }
         if (!(value instanceof String) || ((String) value).length() > 160) {
@@ -172,7 +193,7 @@ final class DiagnosticsPolicy {
             case "reason":
                 return REASONS.contains(text);
             case "phase":
-                return set("create", "start", "resume", "pause", "stop", "destroy", "login",
+                return set("create", "start", "open", "close", "retry", "resume", "pause", "stop", "destroy", "login",
                     "page", "ready", "authenticated", "check", "download", "select", "rollback",
                     "request", "response", "end", "failure", "success", "pending", "failed",
                     "complete", "before", "after", "body").contains(text);
@@ -192,6 +213,10 @@ final class DiagnosticsPolicy {
                     "unknown", "attachment").contains(text);
             case "requestId":
                 return validRequestId(text);
+            case "threadId":
+                return text.matches("[A-Za-z0-9_-]{1,120}");
+            case "blockedBy":
+                return BLOCKED_BY.contains(text);
             case "network":
                 return set("wifi", "cellular", "ethernet", "vpn", "other", "none",
                     "unknown").contains(text);

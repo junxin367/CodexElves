@@ -20,7 +20,7 @@ import {
   subscribeAndroidAmbientLight,
   subscribeAndroidNotificationSettings
 } from "./platform.js";
-import { createReadCache, createRecoveryStore, createTranscriptCache, recoveryStorageMessage } from "./recovery-store.js";
+import { createReadCache, createRecoveryStore, createSidebarPreferenceStore, createTranscriptCache, recoveryStorageMessage } from "./recovery-store.js";
 import { beginPwaForegroundWork, getPwaCacheState, retryPwaCache } from "./pwa.js";
 import {
   bindMessageVideos,
@@ -54,9 +54,11 @@ let session = null, sidebar = null, selectedId = null, thread = null, historyCur
 let pendingNotificationOpen = null;
 let stream = null, connected = false, selectionVersion = 0, busy = false, creating = false, historyLoadingVersion = -1;
 let sending = null;
+let composerDiagnosticState = "";
 let turns = new Map(), collapsed = new Set(), search = "", sidebarTimer = null, refreshTimer = null;
 let historyInitialized = false;
 let historyError = "", historyController = null, selectionController = null, historyLoadingTurnId = null;
+let threadReadFailed = false, latestHistoryReadFailed = false;
 let historyLoadingOlder = false;
 let historyLoadFrame = null, historyAutoFailed = false, historyScrollTop = 0, historyLoadVisibleItems = false;
 let sidebarVersion = 0, approvalSignature = null, pendingTimer = null, streamRetry = null, streamBackoff = 1000;
@@ -65,13 +67,18 @@ const blockingRequestStates = new Map();
 const approvalReplies = new Map();
 const approvalDrafts = new Map();
 let sessionRequest = null, connectionPollVersion = 0, connectionPollPending = null;
+let connectionRecoveryRequest = null;
 const sessionRecoveryReads = new WeakMap();
 let nativeConnectionVersion = 0;
 let connectionCycleVersion = 0, connectionRtt = null;
 let connectionLatencyVersion = 0, connectionLatencyFloor = 0, connectionRouteSignature = "", connectionLatencyRefresh = null;
 const channelRtts = new Map();
-const connectionRttDescription = "点击刷新会话。网页到接入服务的 /api/session HTTP 完整往返时长；存在两条已授权线路时分别测量，不代表模型响应耗时或端到端原生执行延迟。消息使用此处可用线路中延迟最低的一路发送，发出后不自动换路重发。";
+const connectionRttDescription = "点击探测连接并刷新会话。网页到接入服务的 /api/session HTTP 完整往返时长；存在两条已授权线路时分别测量，不代表模型响应耗时或端到端原生执行延迟。消息使用此处可用线路中延迟最低的一路发送，发出后不自动换路重发。";
 let pageLeaving = false;
+let goalEditorBaseViewport = {
+  width: window.innerWidth,
+  height: window.visualViewport?.height || window.innerHeight
+};
 let recoveryErrorSilenceDepth = 0;
 const projectVisibleThreadCounts = new Map();
 const collapsedSidebarSections = new Set();
@@ -162,7 +169,14 @@ try {
 } catch {}
 let sidebarFilterDeviceId = null;
 let sidebarFilters = { mode: null, chats: null, projects: null, pinned: null };
-let sidebarViewSave = null;
+const sidebarPreferenceStore = createSidebarPreferenceStore();
+let sidebarPreferenceScope = null;
+window.addEventListener("storage", event => {
+  if (!sidebarPreferenceStore.ownsStorageEvent(privateInputScope(session), event)) return;
+  sidebarPreferenceScope = null;
+  restoreSidebarPreferences();
+  renderSidebar();
+});
 let messageFrame = null, activityTimer = null, stopping = false, messageVersion = 0, statusVersion = 0, notifiedStatus = null;
 let followMessages = true;
 let messagesResizeObserver = null;
@@ -170,6 +184,7 @@ let composerScroll = null;
 const readMarkRequests = new Map();
 const questionDrafts = new Map();
 const questionReplyReceipts = new Map();
+const questionReceiptChecks = new Map();
 let questionVersion = 0, notifiedQuestions = null;
 try {
   const stored = JSON.parse(sessionStorage.getItem("codex-elves-question-receipts") || "[]");
@@ -187,6 +202,7 @@ const retiredQueueEpochs = new Set();
 let queueDrag = null, queueReorder = null;
 let pendingSteer = null;
 let sidebarRequest = null, refreshRequest = null, threadRequest = null, historyRequest = null;
+let foregroundReadGeneration = 0;
 let desktopSidebarOpen = true, sidebarLayoutCleanup = null, closeMobileSidebar = () => {};
 let sessionTools = null;
 let sessionMenu = null, relatedSessionView = null, relatedReturnTranscript = null, syncRelatedSidebarLayout = null;
@@ -272,6 +288,8 @@ try {
         && stored.payload.messageIds.every(id => typeof id === "string" && stored.payload.expectedMessageIds.includes(id))
       : queuedEditActions.has(stored.action)
       ? typeof stored.payload?.editId === "string" && typeof stored.payload?.threadId === "string"
+      : ["steerQueued", "removeQueued"].includes(stored.action)
+      ? typeof stored.payload?.threadId === "string" && typeof stored.payload?.messageId === "string"
       : ["send", "create", "editMessage", "setGoal"].includes(stored.action)
         && typeof stored.payload?.prompt === "string" && validSkillSelection(stored.payload.skills)
         && (stored.action !== "setGoal" || stored.payload.goalMode === true && typeof stored.payload.threadId === "string")
@@ -322,7 +340,8 @@ try {
       turnId: typeof value.turnId === "string" ? value.turnId : null,
       itemId: typeof value.itemId === "string" ? value.itemId : null,
       baselineTurnId: typeof value.baselineTurnId === "string" ? value.baselineTurnId : null,
-      baselineItemId: typeof value.baselineItemId === "string" ? value.baselineItemId : null
+      baselineItemId: typeof value.baselineItemId === "string" ? value.baselineItemId : null,
+      time: Number.isFinite(value.time) ? value.time : undefined
     });
   }
 } catch {}
@@ -439,7 +458,8 @@ const automaticThemeLightLux = 45;
 let automaticThemeCandidate = null;
 function automaticAppearanceTheme(date = new Date(), currentTheme = appearance.theme) {
   const hour = date.getHours();
-  if (hour < 6 || hour >= 21) {
+  // 用户要求夜间时段按设备本地时间从 21:00（含）到次日 08:00（不含），时段内保留原有光照判断。
+  if (hour < 8 || hour >= 21) {
     if (!ambientLightStatus.supported || ambientLightStatus.lux === null) return "dark";
     if (ambientLightStatus.lux <= automaticThemeDarkLux) return "dark";
     if (ambientLightStatus.lux >= automaticThemeLightLux) return "light";
@@ -1749,18 +1769,15 @@ function normalizeRelatedView(value, id = value?.threadId) {
       ...(value.returnToParent === true ? { returnToParent: true } : {}),
       ...(value.owner === relatedNavigationOwner ? { owner: value.owner } : {}) } : null;
 }
-function threadViewReadOnly(id = selectedId) {
+function threadReadOnly(id = selectedId) {
   return !!session?.readOnly || !!id && (
     thread?.id === id && (thread.readOnly === true || thread.viewKind === "subagent")
     || normalizeRelatedView(relatedThreadViews.get(id), id)?.kind === "subagent"
     || relatedSessionView?.threadId === id && relatedSessionView.kind === "subagent"
   );
 }
-function threadReadOnly(id = selectedId, action = "native") {
-  if (threadViewReadOnly(id)) return true;
-  if (action === "send") return session?.capabilities?.sendText !== true;
-  if (action === "create") return session?.capabilities?.createText !== true;
-  return session?.nativeWriteAvailable !== true;
+function threadReadOnlyMessage() {
+  return session?.readOnly ? "当前设备为只读模式" : "当前会话仅支持只读查看";
 }
 function threadSentMessageEditAllowed(id = selectedId) {
   if (!id) return false;
@@ -1964,14 +1981,12 @@ function scheduleRelatedSessionCheck() {
   clearTimeout(relatedSessionCheckTimer);
   relatedSessionCheckTimer = null;
   const view = normalizeRelatedView(relatedSessionView, selectedId);
-  if (!view || view.kind !== "side" || !selectedId || !session || session.nativeConnected !== true
-      || sideThreadExpired(selectedId) || !connected) return;
+  if (!view || view.kind !== "side" || !selectedId || !session || sideThreadExpired(selectedId) || !connected) return;
   const id = selectedId, scope = privateInputScope(session), version = selectionVersion;
   relatedSessionCheckTimer = setTimeout(async () => {
     relatedSessionCheckTimer = null;
     if (scope !== privateInputScope(session) || selectedId !== id || version !== selectionVersion
-        || session.nativeConnected !== true || !normalizeRelatedView(relatedSessionView, id)
-        || sideThreadExpired(id) || !connected) return;
+        || !normalizeRelatedView(relatedSessionView, id) || sideThreadExpired(id) || !connected) return;
     try {
       const currentView = normalizeRelatedView(relatedSessionView, id);
       const parentThreadId = currentView?.parentThreadId || currentView?.openedFromThreadId;
@@ -1985,7 +2000,8 @@ function scheduleRelatedSessionCheck() {
       }
       if (threadResult?.thread?.id !== id) throw Object.assign(new Error("侧边会话读取结果不匹配"), { code: 409 });
     } catch (error) {
-      if (isMissingThreadError(error) && selectedId === id && version === selectionVersion
+      if (scope === privateInputScope(session) && isMissingThreadError(error, id)
+          && selectedId === id && version === selectionVersion
           && normalizeRelatedView(relatedSessionView, id)?.kind === "side") {
         await retireExpiredSideThread(id).catch(expiredError => notice(expiredError.message, true));
         return;
@@ -1995,12 +2011,23 @@ function scheduleRelatedSessionCheck() {
       scheduleRelatedSessionCheck();
   }, 10000);
 }
-function isMissingThreadError(error) {
-  if (Number(error?.code) === 410 || error?.reason === "side_thread_expired") return true;
-  const message = typeof error?.message === "string" ? error.message.toLowerCase() : "";
-  return message.includes("thread not loaded:")
-    || message.includes("unknown thread:")
-    || message.includes("no rollout found for thread id ");
+function isMissingThreadError(error, id) {
+  const code = Number(error?.code);
+  if (!validRelatedThreadId(id) || [401, 403].includes(code) || code >= 500 && code !== 503
+      || typeof error?.readThreadId === "string" && error.readThreadId !== id
+      || typeof error?.readThreadScope === "string" && error.readThreadScope !== privateInputScope(session)) return false;
+  const message = typeof error?.message === "string" ? error.message : "";
+  const missing = [...message.matchAll(/(thread not loaded:|unknown thread:|no rollout found for thread id )\s*["']?([A-Za-z0-9_-]+)/gi)];
+  if (missing.length && !missing.some(match => match[2] === id)) return false;
+  if (error?.readThreadId !== id && !missing.some(match => match[2] === id)) return false;
+  const side = normalizeRelatedView(relatedSessionView, id)?.kind === "side";
+  // 原生 -32600 目前经服务层映射为 HTTP 503；仅准确侧边 ID 的缺失原因可作为过期证据。
+  if (code === 503) return side && missing.some(match => match[2] === id);
+  if (code === 410) return true;
+  if (error?.reason === "side_thread_expired") return side;
+  if (missing.some(match => !match[1].toLowerCase().startsWith("thread not loaded:"))) return true;
+  return side && (missing.some(match => match[2] === id)
+    || code === 404 && message.includes("会话已关闭或不存在"));
 }
 function sideThreadExpired(id = selectedId) {
   const view = normalizeRelatedView(relatedSessionView, id)
@@ -2063,8 +2090,6 @@ function resetRelatedSessions({ persisted = false } = {}) {
 async function loadRelatedThreads(parentThreadId) {
   if (!session || !validRelatedThreadId(parentThreadId))
     throw new Error("请先选择主会话");
-  if (session.nativeConnected !== true)
-    throw new Error("原生注入不可用，侧边会话暂不可用");
   const scope = privateInputScope(session);
   const result = await api("/api/read/relatedThreads", { threadId: parentThreadId });
   if (scope !== privateInputScope(session)) throw new Error("当前授权已变化");
@@ -2085,7 +2110,7 @@ function adoptRelatedMenu(result) {
     && !openSideIds.has(view.threadId)).map(view => view.threadId);
   if (closedIds.length) void retireNativeSideThreads(closedIds, { notify: false });
   for (const item of [...result.subagents, ...(result.completedSubagents || [])])
-    rememberRelatedView(item.id, "subagent", null, item.name,
+    rememberRelatedView(item.id, "subagent", item.parentThreadId ?? null, item.name,
       { openedFromThreadId: parentThreadId, ephemeral: item.ephemeral });
   for (const item of result.sideThreads) rememberRelatedView(item.id, "side", null, item.title,
     { openedFromThreadId: parentThreadId });
@@ -2135,10 +2160,6 @@ async function openRelatedThread(item, kind, parentThreadId = selectedId, {
   owner = relatedNavigationOwner, initialThread = null, replaceHistory = false,
   preparedView = false, onViewReady = null
 } = {}) {
-  if (session?.nativeConnected !== true) {
-    notice("原生注入不可用，子智能体与侧边会话暂不可用", true);
-    return;
-  }
   if (relatedSessionView || !validRelatedThreadId(item?.id) || parentThreadId !== selectedId) return;
   const view = rememberRelatedView(item.id, kind, null, item.name || item.title || "",
     { openedFromThreadId: parentThreadId, ephemeral: item.ephemeral });
@@ -2157,7 +2178,10 @@ async function returnToParentSession() {
   if (!view || relatedBackPending) return;
   const parentThreadId = view.openedFromThreadId || view.parentThreadId;
   if (!validRelatedThreadId(parentThreadId)) return;
-  if (normalizeRelatedView(history.state?.[relatedHistoryKey], selectedId)?.returnToParent && view.returnToParent) {
+  const historyView = normalizeRelatedView(history.state?.[relatedHistoryKey], selectedId);
+  // 重载后的 owner 已失效，旧历史上一项不一定是父会话；只有本页创建的路由才可直接后退。
+  if (historyView?.owner === relatedNavigationOwner && view.owner === relatedNavigationOwner
+      && historyView.returnToParent && view.returnToParent) {
     relatedBackPending = true; syncRelatedSessionLayout();
     history.back();
     return;
@@ -2190,9 +2214,9 @@ function showSideCreation(record, { recordHistory = true } = {}) {
 }
 function updateSideCreationStatus(record) {
   if (sideCreationView?.record !== record) return;
-  const unknown = record.state === "unknown";
+  const unknown = record.state === "unknown" && pendingFeedbackReady(record);
   sideCreationView.status.querySelector("p").textContent = unknown
-    ? "创建结果暂未确认，可返回主会话查询原回执。" : "正在创建侧边会话…";
+    ? "正在确认创建结果，可返回主会话查看。" : "正在创建侧边会话…";
   sideCreationView.status.querySelector(".spinner").hidden = unknown;
 }
 function dismissSideCreation({ canceled = false, animate = false } = {}) {
@@ -2225,7 +2249,8 @@ function persistRelatedOperations(required = false) {
   try {
     const records = [...relatedThreadOperations.values()].map(record => ({
       id: record.id, action: record.action, scope: record.scope, parentThreadId: record.parentThreadId,
-      threadId: record.threadId, state: record.state, selectionToken: record.selectionToken, autoOpen: record.autoOpen
+      threadId: record.threadId, state: record.state, selectionToken: record.selectionToken, autoOpen: record.autoOpen,
+      time: record.time
     }));
     if (records.length) sessionStorage.setItem(relatedOperationStorageKey, JSON.stringify(records));
     else sessionStorage.removeItem(relatedOperationStorageKey);
@@ -2344,7 +2369,7 @@ async function runRelatedOperation(action, item = null) {
         || selectedId !== parentThreadId || scope !== privateInputScope(session) || relatedSessionView) return;
   }
   const record = { id: randomId(), action, scope, parentThreadId,
-    ...(item ? { threadId: item.id } : {}), state: "submitting", selectionToken,
+    ...(item ? { threadId: item.id } : {}), state: "submitting", selectionToken, time: Date.now(),
     autoOpen: action === "createSideThread" };
   const key = relatedOperationKey(record), existing = relatedThreadOperations.get(key);
   if (existing) {
@@ -2380,9 +2405,10 @@ async function runRelatedOperation(action, item = null) {
 function renderRelatedOperationStatus(root) {
   if (relatedSessionView) return;
   for (const record of relatedThreadOperations.values()) {
-    if (!ownsRelatedOperation(record) || record.parentThreadId !== selectedId) continue;
+    if (!ownsRelatedOperation(record) || record.parentThreadId !== selectedId
+        || sideCreationView?.record === record || !pendingFeedbackReady(record)) continue;
     const box = element("div", "pending-banner", record.action === "createSideThread"
-      ? "侧边会话正在创建或结果待确认，原请求标识已保留。" : "侧边会话关闭结果待确认，原请求标识已保留。");
+      ? "正在确认侧边会话创建结果。" : "正在确认侧边会话关闭结果。");
     const check = button("查回执", "查询原操作回执，不会重复创建或关闭",
       () => void resolveRelatedOperation(record, { allowSelection: true }), "text-button");
     check.disabled = !connected || !!record.request || record.state === "submitting";
@@ -2409,10 +2435,11 @@ function discardPersistentThreadDisplay(id) {
         && position?.threadId === id) await readCache.remove(scope, "view", "last");
   })().catch(() => {});
 }
-function retireMissingEphemeralTranscript(id) {
+function retireMissingEphemeralTranscript(id, error) {
   if (id !== selectedId || threadEphemeralState(id) !== true
       || relatedSessionView?.kind === "side" || relatedThreadViews.get(id)?.kind === "side"
-      || thread?.id === id && thread.viewKind === "side") return;
+      || thread?.id === id && thread.viewKind === "side"
+      || /thread not loaded:/i.test(error?.message || "")) return;
   // 原生已确认不存在：使同轮回包失效，并允许重新选择同一 ID 核对原生状态。
   ++selectionVersion;
   resetMessages();
@@ -2452,7 +2479,8 @@ function threadDisplayKey(id) {
 }
 function currentThreadDisplay() {
   if (!selectedId) return null;
-  return thread?.id === selectedId ? thread : threadDisplays.get(threadDisplayKey(selectedId)) || null;
+  const cached = threadDisplays.get(threadDisplayKey(selectedId));
+  return thread?.id === selectedId ? { ...cached, ...thread } : cached || null;
 }
 function syncRelatedModelDisplay(value = currentThreadDisplay()) {
   const node = $("#related-session-model");
@@ -2477,21 +2505,42 @@ function rememberThreadDisplay(value = thread, { persist = true } = {}) {
   if (!session || !validRelatedThreadId(value?.id) || threadDeleted(value.id) || value.sideThreadClosed
       || value.model != null && typeof value.model !== "string"
       || value.reasoningEffort != null && typeof value.reasoningEffort !== "string") return null;
+  const key = threadDisplayKey(value.id);
+  value = { ...threadDisplays.get(key), ...value };
   const usage = contextUsage(value.tokenUsage), ephemeral = threadEphemeralState(value.id, value);
-  // 只缓存模型及用量展示，不把审批、队列、权限或运行状态作为实时会话恢复。
+  // 缓存目标和队列的展示数据；审批、权限及写操作仍使用重新读取的会话。
   const display = {
     id: value.id, model: value.model || "", reasoningEffort: value.reasoningEffort || "",
     tokenUsage: usage ? { modelContextWindow: usage.total,
       last: { totalTokens: value.tokenUsage.last.totalTokens } } : null,
+    ...(Object.hasOwn(value, "goal") ? { goal: value.goal } : {}),
+    ...(Array.isArray(value.queuedMessages) ? { queuedMessages: value.queuedMessages } : {}),
+    ...(Object.hasOwn(value, "queueSnapshotVersion") ? { queueSnapshotVersion: value.queueSnapshotVersion } : {}),
     ...(typeof ephemeral === "boolean" ? { ephemeral } : {}),
     ...(["side", "subagent"].includes(value.viewKind) ? { viewKind: value.viewKind } : {})
   };
-  const key = threadDisplayKey(value.id);
   threadDisplays.delete(key); threadDisplays.set(key, display);
   while (threadDisplays.size > 32) threadDisplays.delete(threadDisplays.keys().next().value);
   if (value.id === selectedId) syncRelatedModelDisplay(display);
   if (persist) cacheDisplayData("thread", value.id, display);
   return display;
+}
+function rememberBackgroundThreadDisplay(event, params) {
+  const queueChanged = event.method === "thread/queue/changed";
+  const goalChanged = ["thread/goal/updated", "thread/goal/cleared"].includes(event.method);
+  const id = params.threadId;
+  if ((!queueChanged && !goalChanged) || id === selectedId || !validRelatedThreadId(id)
+      || !threadDisplays.has(threadDisplayKey(id))) return;
+  if (queueChanged && Array.isArray(params.queuedMessages)) {
+    const previous = threadDisplays.get(threadDisplayKey(id)).queueSnapshotVersion;
+    const versioned = queueSnapshotIsVersioned(params);
+    if (previous && (!versioned || previous.queueEpoch === params.queueEpoch
+        && params.queueRevision <= previous.queueRevision)) return;
+    rememberThreadDisplay({ id, queuedMessages: params.queuedMessages,
+      queueSnapshotVersion: versioned ? { queueEpoch: params.queueEpoch, queueRevision: params.queueRevision } : null });
+  }
+  if (goalChanged)
+    rememberThreadDisplay({ id, goal: event.method === "thread/goal/cleared" ? null : params.goal });
 }
 function ownsWorkspaceCache(scope, kind) {
   return !!scope && scope === readScope && scope === privateInputScope(session)
@@ -2656,15 +2705,17 @@ async function restoreReadViews(value) {
   }
 }
 function clearPrivateInputs({ persisted = true } = {}) {
+  clearPendingFeedbackTimer();
   let previousScope = recoveryScope || privateInputScope(session);
   if (!previousScope) try { previousScope = sessionStorage.getItem("codex-elves-input-owner"); } catch {}
   ++recoveryGeneration; recoveryScope = null;
   resetRelatedSessions({ persisted: true });
   drafts.clear(); skillDrafts.clear(); attachmentDrafts.clear(); goalDrafts.clear();
   draftWrites.clear(); failedInputRecoveries.clear(); goalComposerRecoveries.clear();
-  queuedEdits.clear(); questionDrafts.clear(); questionReplyReceipts.clear(); compactions.clear();
+  queuedEdits.clear(); questionDrafts.clear(); questionReplyReceipts.clear(); questionReceiptChecks.clear(); compactions.clear();
   blockingRequestStates.clear(); approvalReplies.clear(); approvalDrafts.clear(); threadDeletions.clear();
   pending = null; pendingSendRequest = null; editingQueuedMessage = null; editingMessage = null;
+  if (sending) { sending = null; busy = false; }
   goalEditPending = null;
   selectedSkills = []; selectedGoal = null; transcriptCache.clear();
   void clearReadViews();
@@ -2779,14 +2830,19 @@ async function recoverFailedInput(record) {
   if (scope === recoveryScope) failedInputRecoveries.delete(record.id);
 }
 function rememberDraft() {
+  // 欢迎页/只读初始页没有激活的草稿，空编辑器不能覆盖已恢复的 $new 草稿。
+  if (!selectedId && !creating) return;
   if (editingQueuedMessage?.threadId === selectedId) { rememberQueuedMessageEdit(); return; }
   const key = draftKey(), draft = snapshotDraft(), previous = storedDraft(key);
-  if (selectedGoal && previous.goalMode === selectedGoal
-      && (draft.text !== previous.text || !sameSkills(draft.skills, previous.skills)
-        || draft.skills.some((skill, index) => (skill._offset ?? 0) !== (previous.skills[index]?._offset ?? 0))
-        || draft.attachments.length !== previous.attachments.length
-        || draft.attachments.some((image, index) => ["kind", "name", "mime", "size", "dataUrl", "source", "url"]
-          .some(name => image[name] !== previous.attachments[index]?.[name])))) {
+  const changed = draft.text !== previous.text || !sameSkills(draft.skills, previous.skills)
+    || draft.skills.some((skill, index) => (skill._offset ?? 0) !== (previous.skills[index]?._offset ?? 0))
+    || draft.attachments.length !== previous.attachments.length
+    || draft.attachments.some((image, index) => ["kind", "name", "mime", "size", "dataUrl", "source", "url"]
+      .some(name => image[name] !== previous.attachments[index]?.[name]))
+    || (draft.goalMode || null) !== (previous.goalMode || null);
+  // 切换或卸载时，未编辑的本页旧稿不能覆盖其他页面已经保存的新稿。
+  if (!changed) return;
+  if (selectedGoal && previous.goalMode === selectedGoal) {
     // 编辑后即使又改回相同文字，也属于新草稿，不能被旧回执清空。
     selectedGoal = randomId(); draft.goalMode = selectedGoal;
   }
@@ -2808,11 +2864,11 @@ function persistQueuedEdits(required = false) {
     notice("无法保存队列编辑草稿，请保持页面打开并完成保存或取消编辑。", true);
   }
 }
-function rememberQueuedMessageEdit() {
+function rememberQueuedMessageEdit(required = false) {
   if (editingQueuedMessage?.state !== "editing" || !$("#prompt")) return;
   editingQueuedMessage.text = $("#prompt").value;
   editingQueuedMessage.attachments = composerAttachmentSnapshot();
-  persistQueuedEdits();
+  persistQueuedEdits(required);
 }
 function restoreQueuedMessageEdit() {
   const edit = queuedEdits.get(selectedId);
@@ -2893,7 +2949,7 @@ function updatePromptOptimization() {
   const loading = record?.state === "pending", optimized = record?.state === "optimized";
   control.dataset.state = loading ? "loading" : optimized ? "optimized" : "idle";
   control.setAttribute("aria-busy", String(loading));
-  control.disabled = session?.capabilities?.promptOptimization !== true || !connected || threadReadOnly()
+  control.disabled = session?.capabilities?.promptOptimization !== true || threadReadOnly()
     || $("#prompt").disabled || busy || stopping || !!pending;
   const label = loading ? "取消提示词优化" : optimized ? "恢复原提示词" : "优化提示词";
   control.setAttribute("aria-label", label);
@@ -2990,7 +3046,7 @@ function newChatProjectOptions(projects = []) {
 function syncNewChatProjectPicker() {
   const select = $("#project-select");
   if (!select || !sidebar) return;
-  select.disabled = threadReadOnly(null, "create");
+  select.disabled = !!session?.readOnly;
   const control = select.closest(".new-chat-project-control"), clear = $("#clear-new-chat-project");
   if (control) control.dataset.selected = String(!!select.value);
   if (clear) { clear.hidden = !select.value; clear.disabled = select.disabled; }
@@ -3301,9 +3357,10 @@ function fitComposerMenu(menu) {
     const above = Math.max(0, box.top - top - gap - padding);
     const below = Math.max(0, top + height - box.bottom - gap - padding);
     const limit = Math.min(560, height * .8, Math.max(above, below));
+    const compact = width <= 760 || window.matchMedia("(pointer:coarse)").matches;
     menu.style.width = "max-content";
-    menu.style.minWidth = `${Math.min(300, width - padding * 2)}px`;
-    menu.style.maxWidth = `${Math.min(350, width - padding * 2)}px`;
+    menu.style.minWidth = `${Math.min(compact ? 220 : 300, width - padding * 2)}px`;
+    menu.style.maxWidth = `${Math.min(compact ? 280 : 350, width - padding * 2)}px`;
     menu.style.maxHeight = `${limit}px`;
     $(".effort-options", menu)?.style.setProperty("max-height", `${Math.max(0, (limit - 80) * .45)}px`);
     const upwards = below < menu.getBoundingClientRect().height && above > below;
@@ -3326,7 +3383,13 @@ function fitApprovalArea() {
   const viewport = window.visualViewport, padding = 8, gap = 8;
   const top = viewport?.offsetTop || 0, height = viewport?.height || window.innerHeight;
   const anchorBottom = anchor.getBoundingClientRect().top - gap;
-  const bottom = Math.min(anchorBottom, top + height - padding);
+  let contentBottom = anchorBottom;
+  for (let previous = anchor.previousElementSibling; previous; previous = previous.previousElementSibling) {
+    if (previous.hidden) continue;
+    const box = previous.getBoundingClientRect();
+    if (box.width > 0 && box.height > 0) contentBottom = Math.min(contentBottom, box.top - gap);
+  }
+  const bottom = Math.min(contentBottom, top + height - padding);
   root.style.setProperty("--approval-available-height", `${Math.max(0, bottom - top - padding)}px`);
   root.style.setProperty("--approval-lift", `${Math.max(0, anchorBottom - bottom)}px`);
 }
@@ -3334,6 +3397,7 @@ function refitComposerMenus() {
   fitPopup();
   fitContextUsageTip();
   fitApprovalArea();
+  fitGoalEditor();
   for (const id of ["model-settings", "skill-menu"]) {
     const menu = $(`#${id}`); if (menu && !menu.hidden) fitComposerMenu(menu);
   }
@@ -3377,7 +3441,7 @@ function unfinishedGoal(goal = thread?.goal) {
 }
 function goalComposerReason({ submitting = false } = {}) {
   if (!session || !creating && (!selectedId || thread?.id !== selectedId)) return "请先打开会话或新建会话";
-  if (threadReadOnly()) return "当前设备为只读模式";
+  if (threadReadOnly()) return threadReadOnlyMessage();
   if (session.capabilities?.goalComposer !== true) return "当前服务尚不支持创建目标，请更新远程服务；目标草稿会保留";
   if (editingMessage || editingQueuedMessage) return "请先完成消息或队列编辑";
   if (threadDeletionLocked() || threadDeleted(selectedId)) return "会话正在删除或已删除，请先核对删除结果";
@@ -3796,8 +3860,7 @@ function handlePromptInput(event, { preserveCanonical = false } = {}) {
       setPromptSelection(prompt, selection.start, selection.end, selection);
     }
   }
-  rememberQueuedMessageEdit();
-  if (event?.isComposing) { updateComposer(); closeSkillMenu(); return; }
+  if (event?.isComposing) { rememberQueuedMessageEdit(); updateComposer(); closeSkillMenu(); return; }
   if (preserveCanonical) restorePromptCanonicalContent();
   syncSelectedSkillsFromPrompt();
   syncPromptTrailingBreak($("#prompt"));
@@ -3926,12 +3989,15 @@ function icon(name) {
     warning: '<path d="m12 3 10 18H2Z"/><path d="M12 9v5m0 3h.01"/>',
     arrowUp: '<path d="M12 19V5m-6 6 6-6 6 6"/>',
     steer: '<path d="M4 5v5a4 4 0 0 0 4 4h12m-5-5 5 5-5 5"/>',
+    retry: '<path d="M3 10a9 9 0 1 1 2.4 8"/><path d="M3 4v6h6"/>',
     terminal: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3m6 0h4"/>',
     globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z"/>',
     tools: '<rect x="3" y="3" width="6" height="6" rx="2"/><rect x="15" y="3" width="6" height="6" rx="2"/><rect class="session-tools-lower-left" x="3" y="15" width="6" height="6" rx="2"/><rect x="15" y="15" width="6" height="6" rx="2"/><circle class="session-tools-unread-dot" cx="6" cy="18" r="3"/>',
     laptop: '<path d="M5 4h14v12H5ZM2 20h20l-3-4H5Z"/>',
     copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h3"/>',
     edit: '<path d="m16 3 5 5-12 12-6 1 1-6Z"/><path d="m13 6 5 5"/>',
+    pause: '<path d="M8 5v14M16 5v14" stroke-width="3"/>',
+    play: '<path d="m8 4 12 8-12 8Z"/>',
     wrench: '<path d="M14.7 6.3a4 4 0 0 0-5-5l2.1 2.1-2.4 2.4-2.1-2.1a4 4 0 0 0 5 5L4 17l3 3 8.3-8.3a4 4 0 0 0 5-5l-2.1 2.1-2.4-2.4 2.1-2.1Z"/>',
     fileChange: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6M8 14h8m-4-4v8"/>',
     stop: '<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/>',
@@ -4219,6 +4285,7 @@ function threadDeletionLocked(id = selectedId) {
 }
 function setThreadDeletion(key, record, required = false) {
   const previous = threadDeletions.get(key);
+  if (record && !Number.isFinite(record.time)) record.time = Date.now();
   if (record) threadDeletions.set(key, record);
   else threadDeletions.delete(key);
   try {
@@ -4334,7 +4401,7 @@ async function deleteSidebarThread(item) {
     if (session?.device.id === deviceId) {
       notice(result.status === "partial" ? result.message || "会话已永久删除，部分列表清理未完成。" : "会话已永久删除",
         result.status === "partial");
-      void loadSidebar().catch(() => {});
+      void loadSidebar(null, { fresh: true }).catch(() => {});
     }
   } catch (error) {
     if (!threadDeleted(item.id, deviceId)) {
@@ -4342,7 +4409,7 @@ async function deleteSidebarThread(item) {
         setThreadDeletion(key, { ...record, state: error.operationState === "pending" ? "pending" : "unknown" });
       else setThreadDeletion(key, null);
     }
-    if (session?.device.id === deviceId) notice(error.message, true);
+    if (session?.device.id === deviceId && !threadDeleted(item.id, deviceId)) notice(error.message, true);
   } finally {
     if (threadDeletions.get(key)?.state === "confirming") threadDeletions.delete(key);
     if (session?.device.id === deviceId) { renderSidebar(); updateComposer(); }
@@ -4375,73 +4442,51 @@ async function checkThreadDeletion(record) {
     if (session?.device.id === record.deviceId) { renderSidebar(); updateComposer(); }
   }
 }
-async function changeSidebarView(mode) {
-  if (!session || !sidebar || !["project", "list"].includes(mode)) return;
-  sidebarFilters.mode = mode;
-  renderSidebar();
-  const deviceId = session.device.id, generation = recoveryGeneration;
-  if (sidebarViewSave?.deviceId === deviceId && sidebarViewSave.generation === generation) {
-    sidebarViewSave.mode = mode;
-    return sidebarViewSave.promise;
+function restoreSidebarPreferences() {
+  const scope = privateInputScope(session);
+  if (scope === sidebarPreferenceScope) return;
+  sidebarPreferenceScope = scope;
+  sidebarFilters = { mode: null, chats: null, projects: null, pinned: null };
+  if (!scope) return;
+  try { Object.assign(sidebarFilters, sidebarPreferenceStore.read(scope)); }
+  catch { /* 存储不可读时仍显示可用的会话数据，用户修改时说明保存失败。 */ }
+}
+function saveSidebarPreferences(patch) {
+  const scope = privateInputScope(session);
+  if (!scope || !sidebar) return;
+  restoreSidebarPreferences();
+  Object.assign(sidebarFilters, patch);
+  try { Object.assign(sidebarFilters, sidebarPreferenceStore.write(scope, patch)); }
+  catch {
+    notice("侧栏偏好已在本页生效，但浏览器本地保存失败，刷新后可能丢失。", true);
   }
-  if (session.readOnly || session.nativeWriteAvailable !== true || !connected) return;
-  const request = { deviceId, generation, mode, promise: null };
-  sidebarViewSave = request;
-  const isCurrent = () => sidebarViewSave === request && session?.device.id === deviceId
-    && recoveryGeneration === generation;
-  request.promise = (async () => {
-    while (isCurrent() && !session.readOnly && connected) {
-      const mode = request.mode;
-      try {
-        await mutate("sort", { target: "grouping", mode: "updated_at", grouping: mode });
-      } catch (error) {
-        if (!isCurrent()) return;
-        if (request.mode !== mode) continue;
-        notice(`视图已切换，但偏好保存失败：${error.message}`, true);
-        return;
-      }
-      if (!isCurrent() || session.readOnly || !connected) return;
-      if (request.mode !== mode) continue;
-      try { await loadSidebar(null, { fresh: true }); }
-      catch (error) {
-        if (isCurrent() && request.mode === mode)
-          notice(`视图已切换，但侧栏刷新失败：${error.message}`, true);
-      }
-      if (!isCurrent()) return;
-      if (request.mode !== mode) continue;
-      if (sidebarFilters.mode === mode && sidebar.preferences.mode === mode) {
-        sidebarFilters.mode = null;
-        renderSidebar();
-      }
-      return;
-    }
-  })().finally(() => { if (sidebarViewSave === request) sidebarViewSave = null; });
-  return request.promise;
+  renderSidebar();
+}
+function changeSidebarView(mode) {
+  if (!["project", "list"].includes(mode)) return;
+  saveSidebarPreferences({ mode });
 }
 async function changeSidebar(payload) {
   if (payload.target === "grouping") return changeSidebarView(payload.grouping);
+  const filterKey = ["chats", "projects", "pinned"].includes(payload.target) ? payload.target : null;
+  if (filterKey) {
+    if (["manual", "updated_at"].includes(payload.mode))
+      saveSidebarPreferences({ [filterKey]: payload.mode });
+    return;
+  }
+  if (!payload.threadId && !payload.projectId) return;
   if (!session || sidebarBusy || payload.threadId && (threadDeletionLocked(payload.threadId) || threadDeleted(payload.threadId))) return;
   const deviceId = session.device.id;
   const focus = $("#sidebar-content").contains(document.activeElement) ? document.activeElement : null;
   const focusedThread = focus?.closest(".thread-row")?.dataset.threadId;
-  const filterKey = ["chats", "projects", "pinned"].includes(payload.target) ? payload.target : null;
-  const filterValue = payload.mode;
-  const validFilter = filterKey != null && ["manual", "updated_at"].includes(filterValue);
-  const previousFilter = validFilter ? sidebarFilters[filterKey] : null;
-  if (validFilter) {
-    sidebarFilters[filterKey] = filterValue;
-    renderSidebar();
-    if (session.readOnly || session.nativeWriteAvailable !== true || !connected) return;
-  } else if (session.readOnly || session.nativeWriteAvailable !== true || !connected) return;
+  if (session.readOnly || !connected) return;
   sidebarBusy = true; renderSidebar();
-  try { await mutate(payload.threadId ? "pinThread" : payload.projectId ? "pinProject" : "sort", payload); await loadSidebar(); }
+  try { await mutate(payload.threadId ? "pinThread" : "pinProject", payload); await loadSidebar(null, { fresh: true }); }
   catch (error) {
-    if (validFilter) sidebarFilters[filterKey] = previousFilter;
     notice(error.message, true);
   }
   finally {
     if (session?.device.id === deviceId) {
-      if (validFilter && sidebarFilters[filterKey] === filterValue) sidebarFilters[filterKey] = null;
       sidebarBusy = false; renderSidebar();
       if (focus && document.activeElement === document.body) {
         const restored = document.getElementById(focus.id) || [...$("#sidebar-content").querySelectorAll(".thread-row")]
@@ -4494,14 +4539,13 @@ function notice(message, error = false) {
     if (node.hasAttribute("popover") && node.matches(":popover-open")) node.hidePopover();
   }, 6500);
 }
-async function api(path, body, id, signal, { resourcePriority = "foreground", onChannelLatency = null } = {}) {
-  if (path.startsWith("/api/action/") && body?.threadId
-      && threadReadOnly(body.threadId, path === "/api/action/send" ? "send" : "native"))
+async function api(path, body, id, signal, { resourcePriority = "foreground", onChannelLatency = null, recoveryProbe = false } = {}) {
+  if (path.startsWith("/api/action/") && body?.threadId && threadReadOnly(body.threadId))
     throw Object.assign(new Error("此会话仅供查看，不能提交操作。"), { code: 403, notSubmitted: true });
   if (path.startsWith("/api/action/") && path !== "/api/action/deleteThread" && body?.threadId
       && (threadDeletionLocked(body.threadId) || threadDeleted(body.threadId)))
     throw Object.assign(new Error("此会话正在删除或已删除，请先核对删除结果。"), { code: 409 });
-  const deviceId = session?.device.id;
+  const deviceId = session?.device.id, deviceCreatedAtMs = session?.device.createdAtMs ?? null;
   const encodedBody = body === undefined ? undefined : JSON.stringify(body);
   // 16 KiB/s 包含 base64 上传；12 MiB 图片可等待约 18 分钟，仍有有限上限。
   const actionTimeout = path.startsWith("/api/action/")
@@ -4540,14 +4584,20 @@ async function api(path, body, id, signal, { resourcePriority = "foreground", on
     });
     if (!response.ok) {
       throw Object.assign(new Error(typeof result?.message === "string" && result.message || `HTTP ${response.status}`), {
-        code: response.status, ...(result?.outcomeUnknown === true ? { outcomeUnknown: true } : {})
+        code: response.status,
+        ...(["/api/read/thread", "/api/read/history"].includes(path) && typeof body?.threadId === "string"
+          ? { readThreadId: body.threadId,
+            readThreadScope: typeof deviceId === "string" ? JSON.stringify([deviceId, deviceCreatedAtMs]) : null } : {}),
+        remoteApplicationError: result?.ok === false && typeof result.message === "string"
+          && /(?:^|\/|\+)json(?:\s*;|$)/i.test(response.headers.get("Content-Type") || ""),
+        ...(result?.outcomeUnknown === true ? { outcomeUnknown: true } : {})
       });
     }
       if (path.startsWith("/api/receipts/"))
         return validateRemoteReceipt(result, path.slice("/api/receipts/".length));
       return result;
     }, connectionProbe ? onChannelLatency : measurements,
-    origin => markMessageChannelUnavailable(origin, measurements));
+    connectionProbe ? { recoveryProbe } : origin => markMessageChannelUnavailable(origin, measurements));
     if (path === "/api/session" && result?.device?.id) {
       activateRemoteChannels(result.device.id);
       // 冷启动会建立新的事件基线，尚未完成的采集请求由原有状态轮询补达。
@@ -4577,7 +4627,7 @@ function promoteReadPriority(request, resourcePriority) {
   request.resourcePriority = "foreground";
   if (request.apiStarted) request.releasePriority = beginPwaForegroundWork();
 }
-function readConnectionSession(signal, recoveryObservation = undefined, { resourcePriority = "foreground" } = {}) {
+function readConnectionSession(signal, recoveryObservation = undefined, { resourcePriority = "foreground", recoveryProbe = false } = {}) {
   const deviceId = session?.device.id;
   const source = stream;
   const nativeVersion = nativeConnectionVersion;
@@ -4608,6 +4658,7 @@ function readConnectionSession(signal, recoveryObservation = undefined, { resour
       const latest = await api("/api/session", undefined, undefined, controller.signal,
         {
           resourcePriority: request.resourcePriority,
+          recoveryProbe,
           onChannelLatency: measurement => {
             if (latencyVersion < connectionLatencyFloor || controller.signal.aborted || pageLeaving
                 || session?.device.id !== deviceId || stream !== source || pollVersion !== connectionPollVersion
@@ -4646,7 +4697,7 @@ function cancelConnectionProbe() {
   sessionRequest = null;
   connectionRtt = null;
 }
-async function syncConnectionState(source = stream) {
+async function syncConnectionState(source = stream, { recoveryProbe = false } = {}) {
   const deviceId = session?.device.id;
   const nativeVersion = nativeConnectionVersion, connectionVersion = connectionCycleVersion;
   const pollVersion = connectionPollVersion;
@@ -4655,9 +4706,11 @@ async function syncConnectionState(source = stream) {
     && pollVersion === connectionPollVersion;
   let latest;
   try {
-    latest = await readConnectionSession();
+    latest = await readConnectionSession(undefined, undefined, { recoveryProbe });
   } catch (error) {
-    if (isCurrent()) setConnection(false);
+    // 主动恢复已退役旧探测；其迟到错误不能再标记断线或让旧 onopen 弹出错误。
+    if (!isCurrent()) return false;
+    setConnection(false);
     throw error;
   }
   if (!isCurrent()) return false;
@@ -4666,12 +4719,20 @@ async function syncConnectionState(source = stream) {
     return false;
   }
   session = latest;
-  setConnection(remoteConnectionReady(latest, source));
+  setConnection((latest.nativeConnected || latest.serviceConnected) && source?.readyState === EventSource.OPEN);
   renderApprovals();
+  return true;
+}
+async function refreshConnectedSession(source = stream) {
+  // 事件通道可能先于网页请求线路恢复；等待测速清除旧退避后再补读。
+  const applied = await syncConnectionState(source);
+  if (!applied) return false;
+  await refreshAll({ fresh: true });
   return true;
 }
 function savePending(value) {
   if (value) {
+    if (!Number.isFinite(value.time)) value.time = Date.now();
     try { sessionStorage.setItem("codex-elves-pending", JSON.stringify(goalComposerStorageRecord(value))); }
     catch (error) {
       if (!value.recoveryRef) throw new Error(recoveryStorageMessage(error, true));
@@ -4839,7 +4900,7 @@ async function applyGoalComposerReceipt(record, receipt, { allowSelection = fals
     else await selectCreatedThread(threadId);
   }
   if (["succeeded", "failed"].includes(outcome))
-    void loadSidebar().catch(error => notice(`目标提交已处理，但会话列表更新失败：${error.message}`, true));
+    void loadSidebar(null, { fresh: true }).catch(error => notice(`目标提交已处理，但会话列表更新失败：${error.message}`, true));
   if (outcome === "succeeded" && selectedId === threadId)
     void reloadThread().catch(error => notice(`目标已创建，但会话同步失败：${error.message}`, true));
   notice(goalComposerReceiptMessage(updated, outcome), outcome !== "succeeded");
@@ -4906,7 +4967,8 @@ function persistCompactions(required = false) {
     state: value.state, threadId: value.threadId, receiptId: value.receiptId || null,
     deviceId: value.deviceId || null, acknowledged: value.acknowledged === true,
     turnId: value.turnId || null, itemId: value.itemId || null,
-    baselineTurnId: value.baselineTurnId || null, baselineItemId: value.baselineItemId || null
+    baselineTurnId: value.baselineTurnId || null, baselineItemId: value.baselineItemId || null,
+    time: value.time
   }));
   try {
     if (stored.length) sessionStorage.setItem("codex-elves-compact-pending", JSON.stringify(stored));
@@ -4923,6 +4985,7 @@ function setCompactionState(id, value, { required = false } = {}) {
     deviceId: typeof value?.deviceId === "string" ? value.deviceId : null,
     acknowledged: value?.acknowledged === true,
     nativeConfirmed: value?.nativeConfirmed === true,
+    time: Number.isFinite(value?.time) ? value.time : Date.now(),
     baselineTurnId: typeof value?.baselineTurnId === "string" ? value.baselineTurnId : null,
     baselineItemId: typeof value?.baselineItemId === "string" ? value.baselineItemId : null
   };
@@ -5058,11 +5121,17 @@ function refreshTranscriptEvents() {
   for (const [id, turn] of turns) turns.set(id, enrichTurnTranscriptEvents(turn));
 }
 async function mutate(action, payload, { reliable = false, receiptId = null } = {}) {
-  if (payload?.threadId && threadReadOnly(payload.threadId, action === "send" ? "send" : "native"))
+  if (payload?.threadId && threadReadOnly(payload.threadId))
     throw Object.assign(new Error("此会话仅供查看，不能提交操作。"), { code: 403, notSubmitted: true });
-  const trackedOperation = ["deleteThread", "createSideThread", "closeSideThread"].includes(action);
+  const queueAction = ["steerQueued", "removeQueued"].includes(action);
+  if (queueAction && pending)
+    throw Object.assign(new Error("队列操作仍待确认，请先查询原回执，不要重复引导或删除。"), { notSubmitted: true });
+  const trackedOperation = queueAction || ["deleteThread", "createSideThread", "closeSideThread"].includes(action);
   const version = selectionVersion;
   const deviceId = session?.device.id, generation = recoveryGeneration;
+  const operationScope = privateInputScope(session);
+  const currentAuthorization = () => generation === recoveryGeneration && deviceId === session?.device.id
+    && operationScope === privateInputScope(session);
   const id = receiptId || (reliable && pending ? pending.id : randomId());
   const goalAction = goalComposerAction(action, payload);
   if (reliable && !pending) {
@@ -5109,6 +5178,7 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
   let result;
   try { result = await api(`/api/action/${action}`, payload, id); }
   catch (error) {
+    if (!currentAuthorization()) throw error;
     if (error.notSubmitted) {
       if (goalAction) Object.assign(error, { receiptId: id, goalReceipt: {
         state: "failed", result: { ok: false, notSent: true, message: error.message }
@@ -5146,8 +5216,8 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
         await recoverFailedInput(pending);
         if (ownsPending()) savePending(null);
       } else {
-        notice(error.code === 401 && error.outcomeUnknown
-          ? error.message : "未收到回执，正在确认送达状态。请勿重复发送。", true);
+        if (ownsPending() && error.operationState !== "failed")
+          error.pendingFeedback = true;
         if (ownsPending()) void resolvePending();
         if (action === "send") error.deliveryPending = true;
       }
@@ -5173,6 +5243,7 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
     else {
       if (ownsPending()) void resolvePending();
       throw Object.assign(new Error("操作仍在处理，请稍后查看会话或回执"), { deliveryPending: action === "send",
+        pendingFeedback: ownsPending(),
         ...(trackedOperation ? { receiptId: id, operationState: "pending", outcomeUnknown: true } : {}),
         ...(["approve", "answer"].includes(action) ? { approvalState: "pending" } : {}) });
     }
@@ -5182,10 +5253,11 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
       ? await confirmPendingSend(pending, result.result).catch(() => null) : null;
     if (confirmed && ownsPending()) result = { state: "completed", result: confirmed };
     else {
-      if (ownsPending() && (action === "send"
+      if (ownsPending() && (queueAction || action === "send"
           || queuedEditActions.has(action) && session.capabilities?.queueEditRecovery === true))
         void resolvePending();
       throw Object.assign(new Error(result.result?.message || "送达状态未知，请在会话中确认，勿重复发送"), {
+        pendingFeedback: ownsPending(),
         ...(trackedOperation ? { receiptId: id, operationState: "unknown", outcomeUnknown: true } : {}),
         ...(["approve", "answer"].includes(action) ? { approvalState: "unknown" } : {}),
         deliveryPending: action === "send"
@@ -5206,6 +5278,10 @@ async function mutate(action, payload, { reliable = false, receiptId = null } = 
     });
   }
   return result.result;
+}
+function reportMutationError(error) {
+  if (error.pendingFeedback) { updateComposer(); return; }
+  notice(error.message, true);
 }
 function acceptedSendItem(items, clientId) {
   return items.find(item => (item.type === "userMessage"
@@ -5260,13 +5336,16 @@ async function resolvePending() {
   }
   const current = pending;
   const deviceId = session.device.id;
+  const queueAction = ["steerQueued", "removeQueued"].includes(current.action);
+  const operationScope = queueAction ? privateInputScope(session) : null, generation = recoveryGeneration;
   const version = selectionVersion;
   const queueReadVersion = queueVersion;
   if (current.invalid || (current.deviceId && current.deviceId !== deviceId)) {
     notice("回执记录损坏或属于旧设备授权。请先检查原生会话，再人工解除锁定；不会自动重发。", true);
     updateComposer(); return;
   }
-  const stillCurrent = () => pending === current && session?.device.id === deviceId;
+  const stillCurrent = () => pending === current && session?.device.id === deviceId
+    && (!queueAction || generation === recoveryGeneration && operationScope === privateInputScope(session));
   const retry = delay => {
     clearTimeout(pendingTimer);
     pendingTimer = setTimeout(() => { if (stillCurrent()) void resolvePending(); }, delay);
@@ -5299,7 +5378,7 @@ async function resolvePending() {
           const state = await checkQueuedMessageEdit(current.payload.threadId, current.payload.editId);
           if (stillCurrent() && state?.operationPending) retry(2000);
         } else notice("队列编辑结果尚未确认，请更新远程服务后核对；不会重复保存或恢复消息。", true);
-      } else notice("上一条消息送达状态未知。请查看会话，确认后再解除发送锁定。", true);
+      } else if (queueAction) retry(5000);
       updateComposer(); return;
     }
     if (receipt.state === "failed") {
@@ -5310,7 +5389,35 @@ async function resolvePending() {
       }
     }
     if (!stillCurrent()) return;
+    if (queueAction && receipt.state === "completed"
+        && (receipt.result?.threadId !== current.payload.threadId
+          || receipt.result?.messageId !== current.payload.messageId)) {
+      notice("队列操作回执的会话或消息不匹配，原请求标识已保留，请继续核对原回执。", true);
+      updateComposer(); return;
+    }
     savePending(null);
+    if (queueAction) {
+      const id = current.payload.threadId;
+      if (receipt.state === "completed") {
+        if (selectedId === id && thread?.id === id) {
+          const result = receipt.result;
+          if (current.selectionToken === selectionToken && queueReadVersion === queueVersion || queueSnapshotIsVersioned(result))
+            applyQueueSnapshot(id, Array.isArray(result.queuedMessages) ? result.queuedMessages
+              : (thread.queuedMessages || []).filter(message => message?.id !== current.payload.messageId),
+            result.queuedEdits, result);
+          if (pendingSteer?.threadId === id && pendingSteer.messageId === current.payload.messageId) {
+            pendingSteer = null; renderMessages();
+          }
+          const refresh = current.action === "steerQueued" ? reloadThread() : reloadQueue();
+          void refresh.catch(error => {
+            if (deviceId === session?.device.id && generation === recoveryGeneration
+                && operationScope === privateInputScope(session)) notice(error.message, true);
+          });
+        }
+        notice(current.action === "steerQueued" ? "队列引导结果已确认" : "队列删除结果已确认");
+      } else notice(receipt.result?.message || "队列操作未完成，请核对原消息", true);
+      updateComposer(); return;
+    }
     if (current.action === "reorderQueued") {
       if (receipt.state === "completed") {
         applyQueueReorderResult(current.payload.threadId, receipt.result,
@@ -5346,7 +5453,6 @@ async function resolvePending() {
         if (editingMessage?.threadId === current.payload.threadId) cancelMessageEdit({ focus: false });
       } else clearSubmittedDraft(current.payload,
         (selectedId === current.payload.threadId || (creating && current.action === "create")) && current.selectionToken === selectionToken);
-      notice("上一条消息已确认送达");
     } else notice(receipt.result?.message || "上一条消息未发送", true);
     if (current.action === "create" && receipt.result?.threadId && creating
         && current.selectionToken === selectionToken && version === selectionVersion) await selectCreatedThread(receipt.result.threadId);
@@ -5365,6 +5471,10 @@ async function resolvePending() {
         updateComposer();
         return;
       }
+      if (queueAction) {
+        notice("未找到原队列操作回执，原请求标识已保留；请继续核对，不要重复引导或删除。", true);
+        updateComposer(); return;
+      }
       if (queuedEditActions.has(current.action) && session.capabilities?.queueEditRecovery === true)
         await checkQueuedMessageEdit(current.payload.threadId, current.payload.editId);
       else if (current.action === "send" && current.payload?.clientUserMessageId) {
@@ -5377,7 +5487,6 @@ async function resolvePending() {
             selectedId === current.payload.threadId && current.selectionToken === selectionToken);
           updateComposer();
           if (selectedId === current.payload.threadId) await reloadThread();
-          notice("上一条消息已确认送达");
         } else if (stillCurrent()) retry(5000);
       }
       else notice("未找到上一条消息的回执。不会自动重发；请先检查会话。", true);
@@ -5409,7 +5518,7 @@ function showLogin() {
   modelDefaults = { model: "", reasoningEffort: "" };
   creationProject = ""; notifiedTokenUsage = null; ++threadReadVersion;
   sidebarBusy = false;
-  sidebarViewSave = null;
+  sidebarPreferenceScope = null;
   $("#confirmation-dialog")?.close("cancel");
   $("#appearance-dialog")?.close();
   app.replaceChildren();
@@ -5867,11 +5976,19 @@ function shell() {
   $("#appearance-button").title = "设置";
   const workspace = $(".workspace"), sidebarPanel = $("#session-sidebar");
   const compactSidebarMedia = matchMedia("(max-width: 760px)");
+  const sidebarBackdrop = $(".sidebar-backdrop");
+  // 用户要求避免手机侧栏刚展开即被遮罩误关：300ms = 200ms 滑入动画 + 100ms 触摸余量，
+  // 同步核对 style.css 的 --duration-popup；关闭只接受保护期后在遮罩开始并结束的独立手势。
+  const sidebarBackdropGuardMs = 300;
+  let sidebarBackdropReadyAt = 0, sidebarBackdropPress = null;
   const sidebarIsOpen = () => compactSidebarMedia.matches
     ? workspace.classList.contains("sidebar-open") : desktopSidebarOpen;
   const syncSidebarLayout = () => {
     const compact = compactSidebarMedia.matches;
     const open = !relatedSessionView && sidebarIsOpen();
+    if (!compact || !open) {
+      sidebarBackdropReadyAt = 0; sidebarBackdropPress = null;
+    }
     const toggle = $("#open-sidebar");
     workspace.classList.toggle("sidebar-collapsed", !compact && !open);
     if (!compact) workspace.classList.remove("sidebar-open");
@@ -5888,12 +6005,15 @@ function shell() {
   const setSidebarOpen = (open, { focus = true } = {}) => {
     if (relatedSessionView) return;
     closePopup(); closeComposerMenus();
-    if (open && !sidebarIsOpen()) {
+    const opening = open && !sidebarIsOpen();
+    if (opening) {
       renderSidebar();
     }
     if (compactSidebarMedia.matches) workspace.classList.toggle("sidebar-open", open);
     else desktopSidebarOpen = open;
     syncSidebarLayout();
+    sidebarBackdropPress = null;
+    if (opening && compactSidebarMedia.matches) sidebarBackdropReadyAt = performance.now() + sidebarBackdropGuardMs;
     if (focus) focusSidebarControl();
   };
   const closeSidebar = ({ focus = true } = {}) => setSidebarOpen(false, { focus });
@@ -5913,7 +6033,26 @@ function shell() {
   };
   syncSidebarLayout();
   $("#open-sidebar").onclick = () => setSidebarOpen(!sidebarIsOpen());
-  $(".sidebar-backdrop").onclick = closeSidebar;
+  sidebarBackdrop.onpointerdown = event => {
+    // 用事件发生时间判定，慢设备排队后才派发的早期触摸也不能越过保护期。
+    sidebarBackdropPress = compactSidebarMedia.matches && sidebarIsOpen()
+      && event.target === sidebarBackdrop && event.isPrimary !== false && event.button === 0
+      && event.timeStamp >= sidebarBackdropReadyAt
+      ? { pointerId: event.pointerId, released: false } : null;
+  };
+  sidebarBackdrop.onpointerup = event => {
+    if (!sidebarBackdropPress || sidebarBackdropPress.pointerId !== event.pointerId) return;
+    sidebarBackdropPress.released = event.target === sidebarBackdrop;
+  };
+  sidebarBackdrop.onpointercancel = () => { sidebarBackdropPress = null; };
+  sidebarBackdrop.onclick = event => {
+    const press = sidebarBackdropPress;
+    sidebarBackdropPress = null;
+    event.preventDefault(); event.stopPropagation();
+    if (!compactSidebarMedia.matches || !sidebarIsOpen() || event.target !== sidebarBackdrop
+        || !press?.released || (event.pointerId != null && event.pointerId !== press.pointerId)) return;
+    closeSidebar();
+  };
   const searchInput = $("#sidebar-search"), searchToggle = $("#sidebar-search-toggle");
   const setSidebarSearchOpen = open => {
     closePopup();
@@ -5949,9 +6088,7 @@ function shell() {
     }
     catch (error) { notice(error.message, true); if ($("#logout")) $("#logout").disabled = false; }
   };
-  $("#connection-state").onclick = () => void Promise.all([
-    syncConnectionState(), refreshAll({ fresh: true }), loadModels(true), refreshSkillCatalog()
-  ]).catch(error => notice(error.message, true));
+  $("#connection-state").onclick = refreshConnectionFromIndicator;
   const toolsTrigger = $("#open-session-tools");
   toolsTrigger.append(icon("tools"));
   sessionTools = mountSessionTools({
@@ -5973,10 +6110,7 @@ function shell() {
       const parentThreadId = relatedSessionView?.kind === "side"
         ? relatedSessionView.openedFromThreadId || relatedSessionView.parentThreadId : null;
       return { deviceId: session?.device.id, cacheScope: privateInputScope(session),
-        threadId: !creating ? parentThreadId || selectedId : null, readOnly: threadReadOnly(),
-        connected: connected && session?.nativeConnected === true,
-        unavailableMessage: connected && session?.nativeConnected !== true
-          ? "原生注入不可用，侧边会话暂不可用" : "",
+        threadId: !creating ? parentThreadId || selectedId : null, readOnly: threadReadOnly(), connected,
         createPending: [...relatedThreadOperations.values()].some(record => ownsRelatedOperation(record)
           && record.parentThreadId === (parentThreadId || selectedId) && record.action === "createSideThread") };
     },
@@ -6011,7 +6145,7 @@ function shell() {
   });
   $("#composer").onsubmit = async event => {
     event.preventDefault();
-    if (threadReadOnly(undefined, $("#send").dataset.action === "stop" ? "native" : creating ? "create" : "send")) return;
+    if (threadReadOnly()) return;
     if ($("#send").dataset.action === "stop") await stopGeneration();
     else await sendMessage();
   };
@@ -6021,7 +6155,7 @@ function shell() {
       event.preventDefault();
   };
   $("#prompt").onkeydown = event => {
-    if (threadViewReadOnly()) { event.preventDefault(); return; }
+    if (threadReadOnly()) { event.preventDefault(); return; }
     if (event.isComposing) return;
     if (!$("#skill-menu").hidden && ["ArrowDown", "ArrowUp", "Enter", "Tab"].includes(event.key) && !event.ctrlKey && !event.metaKey) {
       const entries = slashMenuEntries();
@@ -6053,7 +6187,7 @@ function shell() {
     }
   };
   $("#prompt").onbeforeinput = event => {
-    if (threadViewReadOnly()) { event.preventDefault(); return; }
+    if (threadReadOnly()) { event.preventDefault(); return; }
     const multilineInput = ["insertText", "insertFromPaste", "insertFromDrop"].includes(event.inputType);
     const insertedText = typeof event.data === "string" ? event.data
       : event.dataTransfer?.getData("text/plain") || "";
@@ -6075,7 +6209,7 @@ function shell() {
     }
   };
   $("#prompt").onpaste = event => {
-    if (threadViewReadOnly()) { event.preventDefault(); return; }
+    if (threadReadOnly()) { event.preventDefault(); return; }
     if (handleComposerImagePaste(event)) return;
     event.preventDefault();
     const text = (event.clipboardData?.getData("text/plain") || "").replace(/\r\n?/g, "\n");
@@ -6145,16 +6279,17 @@ function selectedThreadProjectId() {
     : projects.find(project => project.threads?.some(item => item.id === selectedId))?.id;
   return projects.some(project => project.id === projectId) ? projectId : "";
 }
-async function startNewChat(projectId, { focus = true } = {}) {
+async function startNewChat(projectId, { focus = true, closeSidebar = true } = {}) {
   if (relatedSessionView) return;
   suppressAutomaticNewChat = false;
   cancelMessageEdit({ focus: false });
-  if (!session || threadReadOnly(null, "create")) return;
+  if (!session || session.readOnly) return;
+  if (closeSidebar) closeMobileSidebar({ focus: false });
   if (projectId === undefined && selectedId && !sidebar) {
     const version = selectionVersion, id = selectedId, deviceId = session.device.id;
     try { await loadSidebar(); } catch {}
     if (version !== selectionVersion || selectedId !== id || session?.device.id !== deviceId
-        || threadReadOnly(null, "create") || !connected) return;
+        || session.readOnly || !connected) return;
   }
   const project = projectId === undefined ? selectedThreadProjectId() : projectId;
   closePopup();
@@ -6171,43 +6306,48 @@ async function startNewChat(projectId, { focus = true } = {}) {
   restoreDraft(draftKey()); resetComposerOptions(); renderApprovals();
   $("#thread-title").textContent = "新建会话"; $("#thread-path").textContent = "在本机创建会话";
   $("#project-select-slot").hidden = false;
-  renderSidebar(); updateComposer(); closeMobileSidebar({ focus: false });
+  renderSidebar(); updateComposer();
   rememberReadingPosition();
   if (focus) $("#prompt").focus();
 }
 async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "foreground" } = {}) {
-  if (sidebarRequest?.deviceId === session?.device.id) {
+  if (pageLeaving || document.hidden) return;
+  const generation = foregroundReadGeneration;
+  if (sidebarRequest?.deviceId === session?.device.id && sidebarRequest.generation === generation) {
     promoteReadPriority(sidebarRequest, resourcePriority);
     if (fresh || cursor !== sidebarRequest.cursor) {
       sidebarRequest.again = true;
       sidebarRequest.nextCursor = fresh ? null : cursor;
-    } else if (cursor === null) {
-      sidebarRequest.again = true;
     }
     return sidebarRequest.promise;
   }
   const version = ++sidebarVersion, deviceId = session?.device.id;
   if (sidebarFilterDeviceId !== deviceId) {
     sidebarFilterDeviceId = deviceId;
-    sidebarFilters = { mode: null, chats: null, projects: null, pinned: null };
+    restoreSidebarPreferences();
     recentPriorityIds = null;
     recentPrioritySelectionSuppressions.clear();
     sidebarReadRefreshSuppressions.clear();
     projectVisibleThreadCounts.clear(); collapsedSidebarSections.clear();
   }
-  const request = { deviceId, cursor, nextCursor: cursor, again: false, resourcePriority,
+  const request = { deviceId, generation, controller: new AbortController(), cursor, nextCursor: cursor, again: false, resourcePriority,
     apiStarted: false, releasePriority: null, promise: null };
   const promise = (async () => {
     do {
+      if (generation !== foregroundReadGeneration || request.controller.signal.aborted) return;
       request.again = false; request.cursor = request.nextCursor;
       let result;
       try {
         request.apiStarted = true;
-        result = await api("/api/read/sidebar", { cursor: request.cursor }, undefined, undefined,
+        result = await api("/api/read/sidebar", { cursor: request.cursor }, undefined, request.controller.signal,
           { resourcePriority: request.resourcePriority });
       }
-      catch (error) { if (request.again && deviceId === session?.device.id) continue; throw error; }
-      if (version !== sidebarVersion || !session || deviceId !== session.device.id) return;
+      catch (error) {
+        if (generation !== foregroundReadGeneration || request.controller.signal.aborted) return;
+        if (request.again && deviceId === session?.device.id) continue;
+        throw error;
+      }
+      if (generation !== foregroundReadGeneration || version !== sidebarVersion || !session || deviceId !== session.device.id) return;
       const applyReadSuppressions = items => (items || []).map(item => {
         if (!sidebarReadRefreshSuppressions.has(item.id)) return item;
         const priority = item.priority?.attentionState === "unread"
@@ -6274,6 +6414,7 @@ function renderSidebar() {
   syncSideThreadUnread();
   const root = $("#sidebar-content");
   if (!root || !sidebar) return;
+  restoreSidebarPreferences();
   filterDeletedSidebar(sidebar);
   filterSideThreadSidebar(sidebar);
   const scrollTop = root.scrollTop;
@@ -6349,7 +6490,7 @@ function renderSidebar() {
       state.setAttribute("role", "img"); state.setAttribute("aria-label", state.title);
       container.append(state);
     }
-    if (!threadReadOnly()) {
+    if (!session.readOnly) {
       const pinned = pinnedIds.has(item.id) || item.pinned;
       const deletion = threadDeletions.get(threadDeletionKey(item.id));
       const deleting = deletion && deletion.state !== "confirming";
@@ -6409,7 +6550,7 @@ function renderSidebar() {
     projectTitle.append(icon(projectExpanded ? "folder" : "folderClosed"), element("span", "project-label", project.name));
     projectTitle.title = project.cwd || project.name;
     header.append(projectTitle);
-    if (!threadReadOnly()) header.append(rowMenu(domId("project-menu", project.id), `${project.name} 的项目菜单`, [
+    if (!session.readOnly) header.append(rowMenu(domId("project-menu", project.id), `${project.name} 的项目菜单`, [
       { label: "在此项目新建会话", icon: "plus", action: () => startNewChat(project.id) },
       { label: project.pinned ? "取消置顶项目" : "置顶项目", icon: "pin", action: () => changeSidebar({ projectId: project.id, pinned: !project.pinned }) }
     ]));
@@ -6770,20 +6911,35 @@ function messageEditor() {
   updateMessageEditor();
   return edit.form;
 }
+function queuedEditSubmittingAction() {
+  const edit = editingQueuedMessage;
+  if (edit?.state !== "editing" || !busy || edit.threadId !== selectedId
+      || !queuedActionBusy.has(`${edit.threadId}:${edit.message.id}`)
+      || pending?.deviceId !== session?.device.id || pending?.payload?.threadId !== edit.threadId
+      || pending.payload.editId !== edit.editId) return "";
+  return ["cancelQueuedEdit", "editQueued"].includes(pending.action) ? pending.action : "";
+}
 function renderMessageEditBanner() {
   const area = $("#edit-message-area");
   if (!area) return;
   const kind = editingQueuedMessage ? editingQueuedMessage.state === "starting" ? "queued-starting" : "queued" : "";
+  const canceling = queuedEditSubmittingAction() === "cancelQueuedEdit";
   area.hidden = !kind;
-  if (area.dataset.editKind !== kind) {
+  if (area.dataset.editKind !== kind || area.dataset.canceling !== String(canceling)) {
     area.dataset.editKind = kind;
+    area.dataset.canceling = String(canceling);
     area.replaceChildren();
-    if (kind) area.append(element("span", "", kind === "queued-starting" ? "正在取回排队消息…" : "编辑排队消息"),
-      button(kind === "queued-starting" ? "重新取回" : "取消编辑",
-        kind === "queued-starting" ? "核对并取回此排队消息" : "取消编辑并恢复未发送草稿", () => {
+    if (kind) {
+      const cancel = button(canceling ? "" : kind === "queued-starting" ? "重新取回" : "取消编辑",
+        canceling ? "正在取消队列消息编辑"
+          : kind === "queued-starting" ? "核对并取回此排队消息" : "取消编辑并恢复未发送草稿", () => {
         if (editingQueuedMessage?.state === "starting") void requestQueuedMessageEdit(editingQueuedMessage);
         else if (editingQueuedMessage) void cancelQueuedMessageEdit();
-      }, "text-button"));
+      }, "text-button");
+      cancel.setAttribute("aria-busy", String(canceling));
+      if (canceling) cancel.append(element("span", "spinner"), document.createTextNode(" 取消中…"));
+      area.append(element("span", "", kind === "queued-starting" ? "正在取回排队消息…" : "编辑排队消息"), cancel);
+    }
   }
   if (kind) $("button", area).disabled = busy || !!editingQueuedMessage
     && (!!pending || !connected || threadReadOnly() || compactionLocked());
@@ -6821,10 +6977,10 @@ async function submitMessageEdit() {
     if (editingMessage === edit) cancelMessageEdit({ focus: false });
     if (version === selectionVersion && selectedId === edit.threadId)
       await selectThread(edit.threadId, { closeSidebar: false, force: true });
-    await loadSidebar();
+    await loadSidebar(null, { fresh: true });
   } catch (error) {
-    if (editingMessage === edit) edit.error = error.message;
-    notice(error.message, true);
+    if (editingMessage === edit && !error.pendingFeedback) edit.error = error.message;
+    reportMutationError(error);
   }
   finally { busy = false; updateComposer(); }
 }
@@ -7787,7 +7943,8 @@ function renderItem(item, previous, inActivity = false, running = false) {
     collabAgentToolCall: "协作任务", error: "执行出错"
   };
   const details = previous?.tagName === "DETAILS" ? previous : element("details");
-  const active = running;
+  const unknown = item.status === "unknown";
+  const active = running && !unknown;
   const genericTool = ["mcpToolCall", "dynamicToolCall"].includes(item.type);
   const failed = item.status === "failed" || genericTool && (item.success === false || !!item.error || item.result?.isError === true);
   const interrupted = ["interrupted", "cancelled", "canceled"].includes(item.status);
@@ -7799,7 +7956,7 @@ function renderItem(item, previous, inActivity = false, running = false) {
     : item.type === "fileChange" ? (item.changes || []).map(change => String(change.path || "").split(/[\\/]/).at(-1)).join("、") : "";
   if (genericTool) {
     const presentation = genericToolPresentation(item);
-    const state = failed ? "失败" : interrupted ? "已中断" : "";
+    const state = failed ? "失败" : interrupted ? "已中断" : unknown ? "状态未知" : "";
     const visual = icon(failed ? "warning" : interrupted ? "stop" : presentation.icon);
     const chevron = icon("chevron");
     chevron.classList.add("tool-chevron");
@@ -7810,13 +7967,14 @@ function renderItem(item, previous, inActivity = false, running = false) {
       : state ? `${presentation.description}，${state}` : presentation.description);
     details.setAttribute("aria-busy", String(active));
   } else {
-    const label = element("strong", "", item.type === "reasoning" ? active ? "正在思考" : "已完成思考"
-      : item.type === "commandExecution" ? active ? "正在运行" : "已运行" : titles[item.type] || item.type);
-    summary.append(!active && item.status !== "failed" && ["commandExecution", "fileChange"].includes(item.type)
+    const label = element("strong", "", item.type === "reasoning" ? active ? "正在思考" : unknown || failed || interrupted ? "思考" : "已完成思考"
+      : item.type === "commandExecution" ? active ? "正在运行" : unknown || failed || interrupted ? "执行命令" : "已运行" : titles[item.type] || item.type);
+    summary.append(!active && !failed && !interrupted && !unknown && ["commandExecution", "fileChange"].includes(item.type)
       ? icon(item.type === "commandExecution" ? "terminal" : "fileChange")
-      : element("span", `tool-state${active ? " spinner" : ""}`, active ? "" : item.status === "failed" ? "!" : "✓"),
+      : element("span", `tool-state${active ? " spinner" : ""}`, active ? "" : failed ? "!" : interrupted ? "■" : unknown ? "?" : "✓"),
       label, element("span", "tool-description", name),
-      element("small", "muted", active ? "进行中" : item.exitCode != null && item.exitCode !== 0 ? `退出码 ${item.exitCode}` : ""));
+      element("small", "muted", active ? "进行中" : item.exitCode != null && item.exitCode !== 0 ? `退出码 ${item.exitCode}`
+        : failed ? "失败" : interrupted ? "已中断" : unknown ? "状态未知" : ""));
     if (["commandExecution", "reasoning"].includes(item.type)) {
       summary.title = item.type === "reasoning" ? "查看思考内容" : name;
       const chevron = icon("chevron");
@@ -7838,6 +7996,7 @@ function reconcileChildren(root, children) {
   while (cursor) { const next = cursor.nextSibling; cursor.remove(); cursor = next; }
 }
 function resetMessages() {
+  clearPendingFeedbackTimer();
   composerScroll?.expand();
   stopActivityTimer();
   finishQueueDrag({ render: false });
@@ -7845,6 +8004,7 @@ function resetMessages() {
   historyRequest = null;
   selectionController?.abort(); selectionController = null;
   historyLoading = false; historyLoadingVersion = -1; historyLoadingTurnId = null; historyLoadingOlder = false; historyError = "";
+  threadReadFailed = false; latestHistoryReadFailed = false;
   cancelAnimationFrame(historyLoadFrame); historyLoadFrame = null; historyAutoFailed = false;
   historyScrollTop = 0; historyLoadVisibleItems = false;
   cancelAnimationFrame(messageFrame); messageFrame = null;
@@ -8600,7 +8760,8 @@ function queueReorderAvailable() {
     && !busy && !stopping && !pending && !compactionLocked() && !queuedActionBusy.size
     && editingQueuedMessage?.state !== "starting"
     && Array.isArray(messages) && messages.length > 1
-    && messages.every(message => message?.id && (!message.submission?.status || message.submission.status === "queued"));
+    && messages.every(message => message?.id && message.remoteDeliveryState !== "accepted"
+      && (!message.submission?.status || message.submission.status === "queued"));
 }
 function moveQueueItem(ids, messageId, index) {
   const order = ids.filter(id => id !== messageId);
@@ -8638,7 +8799,7 @@ async function reorderQueuedMessages(threadId, expectedMessageIds, messageIds, f
     const result = await mutate("reorderQueued", payload, { reliable: true });
     if (session?.device.id === preview.deviceId) applyQueueReorderResult(threadId, result, readVersion);
   } catch (error) {
-    notice(error.message, true);
+    reportMutationError(error);
     if (!pending && selectedId === threadId) void reloadQueue().catch(error => notice(error.message, true));
   } finally {
     if (queueReorder === preview) queueReorder = null;
@@ -8790,8 +8951,9 @@ function applyQueueSnapshot(id, messages, edits, snapshot = null, { authoritativ
   if (thread?.id === id) {
     thread.queuedMessages = messages;
     if (Array.isArray(edits)) thread.queuedEdits = edits;
-    renderQueueArea();
   }
+  rememberThreadDisplay({ id, queuedMessages: messages, queueSnapshotVersion });
+  renderQueueArea();
   if (removedMessage) scheduleReload();
   return true;
 }
@@ -8834,9 +8996,10 @@ function applyQueuedSendResult(id, result, readVersion) {
     if (!Array.isArray(result.queuedMessages)
         || readVersion !== queueVersion && !queueSnapshotIsVersioned(result)
         || !applyQueueSnapshot(id, result.queuedMessages, result.queuedEdits, result))
-      void reloadQueue().catch(error => notice(`消息已入队，队列同步失败：${error.message}`, true));
+      void reloadQueue().catch(error => recordDiagnostic("remote.send.queue", {
+        phase: "failure", errorType: error?.name || "Error"
+      }));
   }
-  if (result.queueSyncPending) notice("消息已加入原生队列，正在同步队列内容…");
   return true;
 }
 function queueMessageText(message) {
@@ -8867,14 +9030,23 @@ function renderQueuedMessages(messages, previous = null) {
   const previousAttachments = new Map([...previous?.querySelectorAll(".queued-message") || []]
     .map(row => [row.dataset.messageId, $(".queued-message-attachments", row)]));
   const queue = element("section", "queued-messages");
-  queue.setAttribute("aria-label", `原生消息队列，${messages.length} 条待执行`);
+  const acceptedCount = messages.filter(message => message?.remoteDeliveryState === "accepted").length;
+  queue.setAttribute("aria-label", `原生消息队列，${messages.length - acceptedCount} 条待执行`
+    + (acceptedCount ? `，${acceptedCount} 条已发送待同步` : ""));
   queue.setAttribute("role", "list");
   for (const message of messages) {
     const row = element("div", "queued-message");
     const messageId = message?.id;
+    const accepted = message?.remoteDeliveryState === "accepted";
     row.dataset.messageId = messageId || "";
     row.setAttribute("role", "listitem");
     const key = `${threadId}:${messageId}`;
+    const awaitingReceipt = message.submission?.status === "outcome-unknown"
+      || pending?.action === "steerQueued" && pending.payload?.threadId === threadId
+        && pending.payload?.messageId === messageId;
+    const retryable = !accepted && !awaitingReceipt
+      && typeof message.pausedReason === "string" && !!message.pausedReason.trim()
+      && (!message.submission?.status || message.submission.status === "queued");
     const queueIcon = button("", "拖动调整排队顺序", event => event.preventDefault(), "queued-message-icon queued-drag-handle");
     queueIcon.title = "拖动消息或左侧手柄排序；手机请长按手柄，也可使用上下方向键";
     queueIcon.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown");
@@ -8909,12 +9081,18 @@ function renderQueuedMessages(messages, previous = null) {
     if (attachments) attachments.remoteAttachmentSignature = attachmentSignature;
     row.append(queueIcon, ...(attachments ? [attachments] : []),
       element("p", "queued-message-text", queueMessageText(message) || "待执行消息"));
-    const unavailable = !threadId || !messageId || threadReadOnly(threadId) || !connected
+    const unavailable = !threadId || !messageId || thread?.id !== threadId
+      || !Array.isArray(thread.queuedMessages) || threadReadOnly(threadId) || !connected
       || busy || stopping || !!pending || queuedActionBusy.has(key) || compactionLocked(threadId)
       || !!message.submission?.status && message.submission.status !== "queued";
-    const steer = button("", "引导此队列消息", () => void steerQueuedMessage(threadId, messageId), "queued-steer-button");
-    steer.append(icon("steer"), element("span", "", "引导"));
-    steer.disabled = unavailable || message.canSendNow === false;
+    const steering = queuedActionBusy.has(key) && pending?.action === "steerQueued"
+      && pending.payload?.threadId === threadId && pending.payload?.messageId === messageId;
+    const steer = button("", accepted ? "消息已发送，队列记录待同步"
+      : steering ? "正在引导此队列消息" : awaitingReceipt ? "队列消息结果待确认" : retryable ? "重试此队列消息" : "引导此队列消息",
+      () => void steerQueuedMessage(threadId, messageId), "queued-steer-button");
+    steer.append(steering ? element("span", "spinner") : icon(retryable ? "retry" : "steer"),
+      element("span", "", accepted ? "已发送" : steering ? "引导中" : awaitingReceipt ? "待确认" : retryable ? "重试" : "引导"));
+    steer.disabled = accepted || awaitingReceipt || unavailable || message.canSendNow === false;
     const menu = button("", "排队消息操作", () => togglePopup(menu), "queued-menu-button");
     menu.id = `queued-menu-${messageId}`;
     menu.append(icon("more"));
@@ -8926,12 +9104,12 @@ function renderQueuedMessages(messages, previous = null) {
       {
         label: "编辑消息",
         icon: "edit",
-        disabled: !!editingQueuedMessage || !!editingMessage || busy || !!pending
+        disabled: accepted || !!editingQueuedMessage || !!editingMessage || busy || !!pending
           || typeof message?.clientUserMessageId !== "string" || !Number.isFinite(message?.createdAt),
         action: () => beginQueuedMessageEdit(threadId, message)
       },
       {
-        label: "删除排队消息",
+        label: accepted ? "移除已发送记录" : "删除排队消息",
         value: "remove",
         icon: "trash",
         action: () => void removeQueuedMessage(threadId, messageId)
@@ -8956,7 +9134,9 @@ function renderQueuedMessages(messages, previous = null) {
 function renderQueueArea() {
   const root = $("#queued-area");
   if (!root) return;
-  const signature = JSON.stringify([selectedId, thread?.queuedMessages, thread?.queuedEdits, session?.device.id, threadReadOnly(), connected,
+  const messages = currentThreadDisplay()?.queuedMessages;
+  const ready = thread?.id === selectedId && Array.isArray(thread.queuedMessages);
+  const signature = JSON.stringify([selectedId, messages, ready, thread?.queuedEdits, session?.device.id, threadReadOnly(), connected,
     compactionLocked(), [...queuedActionBusy], editingQueuedMessage?.message.id, editingQueuedMessage?.state,
     !!editingMessage, busy, stopping, pending?.id, queueReorder, queuedEditCheckVersion]);
   if (root.dataset.queueSignature === signature) return;
@@ -8965,21 +9145,21 @@ function renderQueueArea() {
   const scrollTop = previous?.scrollTop || 0;
   if (queueDrag) {
     const changed = queueDrag.threadId === selectedId
-      && !sameQueueOrder(queueDrag.ids, (thread?.queuedMessages || []).map(message => message.id));
+      && !sameQueueOrder(queueDrag.ids, (messages || []).map(message => message.id));
     finishQueueDrag({ render: false });
     if (changed) notice("队列已更新，拖动已取消，请重新调整顺序");
   }
   root.dataset.queueSignature = signature;
   root.dataset.queueThread = selectedId || "";
   root.dataset.queueDevice = session?.device.id || "";
-  const queue = renderQueuedMessages(thread?.queuedMessages, previous);
+  const queue = renderQueuedMessages(messages, previous);
   const recovery = !threadReadOnly() && !editingQueuedMessage && thread?.queuedEdits?.find(edit => typeof edit.editId === "string"
     && !(queuedEditActions.has(pending?.action) && pending.payload?.editId === edit.editId));
   const children = queue ? [queue] : [];
   if (recovery) {
     const row = element("div", "queued-edit-recovery");
     const status = element("p", "queued-edit-recovery-text",
-      recovery.state === "editing" ? "有一条排队消息尚未编辑完成" : "队列编辑结果待确认，不会重复保存或恢复消息。");
+      recovery.state === "editing" ? "有一条排队消息尚未编辑完成" : "正在确认队列编辑结果。");
     row.append(status);
     if (recovery.state === "editing") {
       const resume = button("继续编辑", "取回尚未完成的队列编辑", () => resumeQueuedMessageEdit(recovery), "text-button");
@@ -9138,34 +9318,42 @@ function resumeQueuedMessageEdit(summary) {
   closeComposerMenus(); updateComposer(); $("#prompt").focus({ preventScroll: true });
 }
 async function removeQueuedMessage(threadId, messageId) {
-  if (!threadId || !messageId || threadReadOnly(threadId) || !connected) return;
+  if (!threadId || !messageId || threadReadOnly(threadId) || !connected || busy || stopping || pending) return;
+  const operationScope = privateInputScope(session), generation = recoveryGeneration;
+  const currentAuthorization = () => operationScope === privateInputScope(session) && generation === recoveryGeneration;
   const key = `${threadId}:${messageId}`;
   if (queuedActionBusy.has(key)) return;
   queuedActionBusy.add(key);
   if (selectedId === threadId) renderQueueArea();
   const readVersion = queueVersion;
   try {
-    const result = await mutate("removeQueued", { threadId, messageId });
-    if (selectedId !== threadId || !thread) return;
-    if (readVersion !== queueVersion && !queueSnapshotIsVersioned(result)
-        || !applyQueueSnapshot(threadId, Array.isArray(result?.queuedMessages)
+    const request = mutate("removeQueued", { threadId, messageId }, { reliable: true });
+    updateComposer();
+    const result = await request;
+    if (!currentAuthorization() || selectedId !== threadId || !thread) return;
+    const applied = (readVersion === queueVersion || queueSnapshotIsVersioned(result))
+      && applyQueueSnapshot(threadId, Array.isArray(result?.queuedMessages)
           ? result.queuedMessages
-          : (thread.queuedMessages || []).filter(message => message?.id !== messageId), result?.queuedEdits, result))
-      void reloadQueue().catch(error => notice(error.message, true));
+          : (thread.queuedMessages || []).filter(message => message?.id !== messageId), result?.queuedEdits, result);
+    if (!applied || result?.queueSyncPending)
+      void reloadQueue().catch(error => { if (currentAuthorization()) notice(error.message, true); });
   } catch (error) {
-    notice(error.message, true);
+    if (currentAuthorization()) reportMutationError(error);
   } finally {
     queuedActionBusy.delete(key);
-    if (selectedId === threadId) renderQueueArea();
+    if (currentAuthorization() && selectedId === threadId) updateComposer();
   }
 }
 async function steerQueuedMessage(threadId, messageId) {
-  if (!threadId || !messageId || threadReadOnly(threadId) || !connected || compactionLocked(threadId)) return;
+  if (!threadId || !messageId || threadReadOnly(threadId) || !connected || busy || stopping || pending
+      || compactionLocked(threadId)) return;
+  const operationScope = privateInputScope(session), generation = recoveryGeneration;
+  const currentAuthorization = () => operationScope === privateInputScope(session) && generation === recoveryGeneration;
   const key = `${threadId}:${messageId}`;
   if (queuedActionBusy.has(key)) return;
   const queuedMessage = thread?.id === threadId
     ? thread.queuedMessages?.find(message => message?.id === messageId) : null;
-  const pending = {
+  const preview = {
     threadId,
     messageId,
     localTurnId: `pending-steer-${messageId}`,
@@ -9176,16 +9364,19 @@ async function steerQueuedMessage(threadId, messageId) {
     text: queueMessageText(queuedMessage)
   };
   queuedActionBusy.add(key);
-  pendingSteer = pending;
+  pendingSteer = preview;
   recordDiagnostic("remote.steer", { phase: "request" });
   renderMessages();
   if (selectedId === threadId) renderQueueArea();
   const readVersion = queueVersion;
   const startedAt = performance.now();
   try {
-    const result = await mutate("steerQueued", { threadId, messageId });
-    pendingSteer = pendingSteer === pending
-      ? { ...pending, turnId: typeof result?.turnId === "string" ? result.turnId : null } : pendingSteer;
+    const request = mutate("steerQueued", { threadId, messageId }, { reliable: true });
+    updateComposer();
+    const result = await request;
+    if (!currentAuthorization()) return;
+    pendingSteer = pendingSteer === preview
+      ? { ...preview, turnId: typeof result?.turnId === "string" ? result.turnId : null } : pendingSteer;
     if (selectedId === threadId && thread?.id === threadId) {
       if (readVersion === queueVersion || queueSnapshotIsVersioned(result))
         applyQueueSnapshot(threadId, Array.isArray(result?.queuedMessages)
@@ -9194,14 +9385,16 @@ async function steerQueuedMessage(threadId, messageId) {
       renderMessages();
       const reloadStartedAt = performance.now();
       void reloadThread().then(() => {
+        if (!currentAuthorization()) return;
         recordDiagnostic("remote.steer.reload", {
           phase: "complete", durationMs: performance.now() - reloadStartedAt
         });
-        if (pendingSteer === pending) {
+        if (pendingSteer === preview) {
           pendingSteer = null;
           renderMessages();
         }
       }).catch(error => {
+        if (!currentAuthorization()) return;
         recordDiagnostic("remote.steer.reload", {
           phase: "failure", durationMs: performance.now() - reloadStartedAt,
           errorType: error?.name || "Error", reason: "network-error"
@@ -9213,7 +9406,8 @@ async function steerQueuedMessage(threadId, messageId) {
       phase: "complete", durationMs: performance.now() - startedAt
     });
   } catch (error) {
-    if (pendingSteer === pending) {
+    if (!currentAuthorization()) return;
+    if (pendingSteer === preview) {
       pendingSteer = null;
       renderMessages();
     }
@@ -9221,11 +9415,11 @@ async function steerQueuedMessage(threadId, messageId) {
       phase: "failure", durationMs: performance.now() - startedAt,
       errorType: error?.name || "Error", reason: "network-error"
     });
-    notice(error.message, true);
+    reportMutationError(error);
   } finally {
-    if (pendingSteer === pending && selectedId !== threadId) pendingSteer = null;
+    if (pendingSteer === preview && (!currentAuthorization() || selectedId !== threadId)) pendingSteer = null;
     queuedActionBusy.delete(key);
-    if (selectedId === threadId) renderQueueArea();
+    if (currentAuthorization() && selectedId === threadId) updateComposer();
   }
 }
 async function beginQueuedMessageEdit(threadId, message) {
@@ -9281,7 +9475,7 @@ async function requestQueuedMessageEdit(edit) {
     completeQueuedEditAction("beginQueuedEdit", payload, result, readVersion);
   } catch (error) {
     if (!pending) finishQueuedMessageEdit(edit);
-    notice(error.message, true);
+    reportMutationError(error);
   } finally { busy = false; updateComposer(); }
   if (editingQueuedMessage === edit && edit.state === "editing") {
     $("#prompt").focus({ preventScroll: true });
@@ -9338,15 +9532,14 @@ async function submitQueuedMessageEdit(cancel = false) {
     return;
   }
   if (!cancel) {
-    rememberQueuedMessageEdit();
-    try { persistQueuedEdits(true); }
+    try { rememberQueuedMessageEdit(true); }
     catch (error) { notice(error.message, true); return; }
   }
   const { threadId, message } = edit, messageId = message.id;
   const key = `${threadId}:${messageId}`, readVersion = queueVersion;
   if (queuedActionBusy.has(key)) return;
   queuedActionBusy.add(key);
-  busy = true; updateComposer();
+  busy = true;
   const action = cancel ? "cancelQueuedEdit" : "editQueued";
   const payload = {
     threadId,
@@ -9358,11 +9551,13 @@ async function submitQueuedMessageEdit(cancel = false) {
     } : {})
   };
   try {
-    const result = await mutate(action, payload, { reliable: true });
+    const request = mutate(action, payload, { reliable: true });
+    updateComposer();
+    const result = await request;
     completeQueuedEditAction(action, payload, result, readVersion);
     if (selectedId === threadId) $("#prompt").focus({ preventScroll: true });
   } catch (error) {
-    notice(error.message, true);
+    reportMutationError(error);
   } finally {
     queuedActionBusy.delete(key);
     busy = false; updateComposer();
@@ -9724,6 +9919,15 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     if (!selectedId || selectedId === id) applyThreadDeletion(id);
     return;
   }
+  if (sideCreationView && !preparedView && id !== sideCreationView.record.parentThreadId) {
+    const view = sideCreationView;
+    dismissSideCreation({ canceled: true });
+    const route = history.state?.[sideCreationHistoryKey];
+    if (route?.owner === relatedNavigationOwner && route.requestId === view.record.id) {
+      const state = { ...history.state }; delete state[sideCreationHistoryKey];
+      history.replaceState(state, "", location.href);
+    }
+  }
   const exitTransition = normalizeRelatedView(relatedSessionView, selectedId) && id !== selectedId
     ? prepareRelatedSessionExit() : (finishRelatedSessionExit(), null);
   if (!force && selectedId === id && !creating
@@ -9733,6 +9937,8 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     syncRelatedSessionLayout(); syncThreadHash(id, { replace: replaceHistory });
     if (closeSidebar) { closePopup(); closeMobileSidebar(); }
     if (returningToParent && sessionMenu?.isSuspended()) sessionMenu.resume();
+    if (selectedThreadReadIncomplete() && !selectionController && !threadRequest && !historyRequest)
+      await reloadThread();
     return;
   }
   stopGoalLiveTimer();
@@ -9782,6 +9988,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   const readDisplay = !currentThreadDisplay() && nextRelatedView?.kind !== "side";
   const readTranscript = !force && !initialSide && !preparedView && !cached;
   updateComposer();
+  if (closeSidebar) closeMobileSidebar();
   if ((readDisplay || readTranscript) && readScope && threadEphemeralState(id) !== true) {
     const owner = readScope;
     const [display, snapshot] = await optionalCachedRead(Promise.all([
@@ -9791,7 +9998,10 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     if (version !== selectionVersion || selectedId !== id || owner !== readScope || threadDeleted(id)) return;
     if (display?.id === id && persistentThreadDisplayAllowed(id, display))
       rememberThreadDisplay({ ...display,
-        ...(usageVersion !== tokenUsageVersion ? { tokenUsage: notifiedTokenUsage } : {}) },
+        ...(usageVersion !== tokenUsageVersion ? { tokenUsage: notifiedTokenUsage } : {}),
+        ...(goalReadVersion !== goalVersion ? { goal: notifiedGoal } : {}),
+        ...(queueReadVersion !== queueVersion && Array.isArray(notifiedQueue)
+          ? { queuedMessages: notifiedQueue, queueSnapshotVersion } : {}) },
         { persist: usageVersion !== tokenUsageVersion });
     else if (display && !persistentThreadDisplayAllowed(id, display))
       discardPersistentThreadDisplay(id);
@@ -9807,7 +10017,6 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     ...(sidebar?.projects || []).flatMap(project => project.threads || [])].find(item => item.id === id);
   $("#thread-title").textContent = initialSide?.title || relatedSessionView?.name || summary?.title || cached?.title || "正在打开会话";
   $("#thread-path").textContent = initialSide?.cwd || summary?.cwd || cached?.cwd || "正在读取会话设置…";
-  if (closeSidebar) closeMobileSidebar();
   renderSidebar(); updateComposer();
   if (exitTransition) {
     const scope = privateInputScope(session);
@@ -9821,6 +10030,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     sessionMenu.resume();
   }
   if (initialSide) return;
+  if (pageLeaving || document.hidden) return;
   const latest = loadHistory(false, version);
   const controller = new AbortController();
   selectionController = controller;
@@ -9829,6 +10039,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     if (version !== selectionVersion || read !== threadReadVersion || selectedId !== id || threadDeleted(id)) return;
     thread = result.thread;
     if (thread?.id !== id) throw new Error("会话返回内容与当前会话不一致");
+    threadReadFailed = false;
     applyRelatedThreadMetadata(thread);
     mergeBlockingRequestsRead(id, thread, requestsReadVersion);
     if (questionReadVersion !== questionVersion && notifiedQuestions)
@@ -9854,12 +10065,13 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     if (historyInitialized) scheduleMessages();
   } catch (error) {
     if (!controller.signal.aborted && version === selectionVersion && selectedId === id
-        && isMissingThreadError(error)) {
+        && isMissingThreadError(error, id)) {
       await clearMissingThreadSelection(id);
       return;
     }
     if (!controller.signal.aborted && version === selectionVersion && selectedId === id) {
-      if (error.code === 404) retireMissingEphemeralTranscript(id);
+      threadReadFailed = true;
+      if (error.code === 404) retireMissingEphemeralTranscript(id, error);
       if (!recoveryErrorSilenceDepth && (error.code === 404 || !currentThreadDisplay()))
         notice(`会话设置读取失败，可点击刷新重试：${error.message}`, true);
     }
@@ -9905,9 +10117,9 @@ function showWelcome({ startNew = true, clearHash = false } = {}) {
   finishRelatedSessionExit();
   relatedSessionView = null; relatedReturnTranscript = null; sessionMenu?.close(); syncRelatedSessionLayout();
   pendingSteer = null;
-  if (session && !threadReadOnly(null, "create") && startNew) {
+  if (session && !session.readOnly && startNew) {
     suppressAutomaticNewChat = false;
-    void startNewChat("", { focus: false });
+    void startNewChat("", { focus: false, closeSidebar: false });
     return;
   }
   cancelMessageEdit({ focus: false });
@@ -9932,26 +10144,29 @@ function showWelcome({ startNew = true, clearHash = false } = {}) {
   rememberReadingPosition();
 }
 async function loadHistory(older = false, version = selectionVersion, itemsTurnId = null) {
-  if (version !== selectionVersion || !selectedId || threadDeleted(selectedId)) return;
+  if (pageLeaving || document.hidden || version !== selectionVersion || !selectedId || threadDeleted(selectedId)) return;
+  const generation = foregroundReadGeneration;
   if ((older || itemsTurnId) && transcriptChecking) return;
-  if (historyRequest?.version === version) {
+  if (historyRequest?.version === version && historyRequest.generation === generation) {
     if (!older) historyRequest.latestPending = true;
     return historyRequest.promise;
   }
-  const id = selectedId, request = { version, latestPending: false, promise: null };
+  const id = selectedId, request = { version, generation, latestPending: false, promise: null };
   request.promise = Promise.resolve().then(async () => {
     do {
+      if (generation !== foregroundReadGeneration) return;
       request.latestPending = false;
-      await readHistoryPage(older, version, itemsTurnId);
+      await readHistoryPage(older, version, itemsTurnId, generation);
       older = false; itemsTurnId = null;
-    } while (request.latestPending && version === selectionVersion && selectedId === id);
+    } while (request.latestPending && generation === foregroundReadGeneration && version === selectionVersion && selectedId === id);
   });
   historyRequest = request;
   try { await request.promise; }
   finally { if (historyRequest === request) historyRequest = null; }
 }
-async function readHistoryPage(older, version, itemsTurnId) {
-  if (pageLeaving || version !== selectionVersion || !selectedId || threadDeleted(selectedId)) return;
+async function readHistoryPage(older, version, itemsTurnId, generation = foregroundReadGeneration) {
+  if (pageLeaving || document.hidden || generation !== foregroundReadGeneration
+      || version !== selectionVersion || !selectedId || threadDeleted(selectedId)) return;
   if (sideThreadExpired(selectedId)) return;
   const itemTurn = itemsTurnId ? turns.get(itemsTurnId) : null;
   if ((itemsTurnId && !itemTurn?.itemsNextCursor) || (older && !itemsTurnId && !historyCursor)) return;
@@ -9984,7 +10199,8 @@ async function readHistoryPage(older, version, itemsTurnId) {
             || version !== selectionVersion || selectedId !== id || threadDeleted(id)) throw error;
       }
     }
-    if (controller.signal.aborted || pageLeaving || version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
+    if (controller.signal.aborted || generation !== foregroundReadGeneration
+        || pageLeaving || version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
     if (!Array.isArray(result?.data)) throw new Error("会话历史返回格式无效");
     if (itemsTurnId && (result.scope !== "items" || result.turnId !== itemsTurnId)) throw new Error("会话消息分页归属无效");
     if (result.ephemeral === true) {
@@ -10032,7 +10248,7 @@ async function readHistoryPage(older, version, itemsTurnId) {
       if (older || !historyInitialized) historyCursor = result.nextCursor;
     }
     historyInitialized = true;
-    if (latestPage) transcriptChecking = false;
+    if (latestPage) { transcriptChecking = false; latestHistoryReadFailed = false; }
     syncEditableMessageMetadata();
     renderMessages(!older);
     recordDiagnostic("remote.history", {
@@ -10040,17 +10256,19 @@ async function readHistoryPage(older, version, itemsTurnId) {
     });
     rememberTranscript();
   } catch (error) {
+    if (controller.signal.aborted || generation !== foregroundReadGeneration) return;
     recordDiagnostic("remote.history", {
       phase: "failure", durationMs: performance.now() - historyStartedAt,
       errorType: error?.name || "Error",
       reason: Number.isFinite(error?.code) ? "http-error" : "network-error"
     });
     if (controller.signal.aborted || pageLeaving || version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
-    if (isMissingThreadError(error) && selectedId === id) {
+    if (isMissingThreadError(error, id) && selectedId === id) {
       await clearMissingThreadSelection(id).catch(expiredError => notice(expiredError.message, true));
       return;
     }
-    if (!itemsTurnId && error.code === 404) retireMissingEphemeralTranscript(id);
+    if (!itemsTurnId && error.code === 404) retireMissingEphemeralTranscript(id, error);
+    if (latestPage) latestHistoryReadFailed = true;
     if (recoveryErrorSilenceDepth) {
       historyAutoFailed = false;
       return;
@@ -10259,12 +10477,17 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
   });
 }
 async function reloadThread() {
-  if (!selectedId || threadDeleted(selectedId)) return;
-  if (threadRequest?.version === selectionVersion) { threadRequest.again = true; return threadRequest.promise; }
+  if (pageLeaving || document.hidden || !selectedId || threadDeleted(selectedId)) return;
+  clearTimeout(refreshTimer); refreshTimer = null;
+  const generation = foregroundReadGeneration;
+  if (threadRequest?.version === selectionVersion && threadRequest.generation === generation) {
+    threadRequest.again = true; return threadRequest.promise;
+  }
   const id = selectedId, version = selectionVersion;
-  const request = { version, again: false, promise: null };
+  const request = { version, generation, controller: new AbortController(), again: false, promise: null };
   request.promise = (async () => {
     do {
+      if (generation !== foregroundReadGeneration || request.controller.signal.aborted) return;
       request.again = false;
       const read = ++threadReadVersion, usageVersion = tokenUsageVersion,
         questionReadVersion = questionVersion, requestsReadVersion = blockingRequestState(id).generation,
@@ -10272,19 +10495,28 @@ async function reloadThread() {
         queueReadVersion = queueVersion;
       const historyRead = loadHistory(false, version);
       let latest;
-      try { ({ thread: latest } = await api("/api/read/thread", { threadId: id })); }
+      try { ({ thread: latest } = await api("/api/read/thread", { threadId: id }, undefined, request.controller.signal)); }
       catch (error) {
-        if (version === selectionVersion && selectedId === id && isMissingThreadError(error)) {
+        if (generation !== foregroundReadGeneration || request.controller.signal.aborted) return;
+        if (version === selectionVersion && selectedId === id) threadReadFailed = true;
+        if (version === selectionVersion && selectedId === id && isMissingThreadError(error, id)) {
           await historyRead.catch(() => {});
+          if (generation !== foregroundReadGeneration || request.controller.signal.aborted
+              || version !== selectionVersion || selectedId !== id || !isMissingThreadError(error, id)) return;
           await clearMissingThreadSelection(id);
           return;
         }
         if (version === selectionVersion && selectedId === id && error.code === 404)
-          retireMissingEphemeralTranscript(id);
+          retireMissingEphemeralTranscript(id, error);
         if (request.again && version === selectionVersion) continue;
         throw error;
       }
-      if (version !== selectionVersion || read !== threadReadVersion || selectedId !== id || threadDeleted(id)) return;
+      if (generation !== foregroundReadGeneration || request.controller.signal.aborted
+          || version !== selectionVersion || read !== threadReadVersion || selectedId !== id || threadDeleted(id)) return;
+      if (questionReadVersion !== questionVersion && !notifiedQuestions) {
+        request.again = true;
+        continue;
+      }
       if (usageVersion !== tokenUsageVersion) latest.tokenUsage = notifiedTokenUsage;
       if (runtimeVersion !== statusVersion && notifiedStatus) latest.status = notifiedStatus;
       if (goalReadVersion !== goalVersion) latest.goal = notifiedGoal;
@@ -10295,6 +10527,7 @@ async function reloadThread() {
       }
       thread = latest;
       if (thread?.id !== id) throw new Error("会话返回内容与当前会话不一致");
+      threadReadFailed = false;
       rememberThreadDisplay();
       applyRelatedThreadMetadata(thread);
       mergeBlockingRequestsRead(id, thread, requestsReadVersion);
@@ -10310,7 +10543,7 @@ async function reloadThread() {
       $("#thread-path").textContent = thread.cwd || ""; syncThreadHash(id);
       updateComposer(); renderApprovals();
       await historyRead;
-    } while (request.again && version === selectionVersion && selectedId === id);
+    } while (request.again && generation === foregroundReadGeneration && version === selectionVersion && selectedId === id);
   })();
   threadRequest = request;
   try { await request.promise; }
@@ -10381,12 +10614,17 @@ const goalEditStorageKey = "codex-elves-goal-edit-pending";
 const editableGoalStatuses = ["active", "paused", "blocked", "budgetLimited", "usageLimited"];
 function validGoalEditPayload(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const operation = value.operation ?? "edit";
   const bytes = text => typeof text === "string" ? new TextEncoder().encode(text.trim()).byteLength : 0;
   return typeof value.threadId === "string" && /^[a-zA-Z0-9_-]{1,120}$/.test(value.threadId)
     && bytes(value.objective) > 0 && bytes(value.objective) <= 16 * 1024
     && Number.isSafeInteger(value.expectedCreatedAt) && value.expectedCreatedAt >= 0
     && bytes(value.expectedObjective) > 0 && bytes(value.expectedObjective) <= 16 * 1024
-    && editableGoalStatuses.includes(value.expectedStatus);
+    && editableGoalStatuses.includes(value.expectedStatus)
+    && ["edit", "pause", "resume", "delete"].includes(operation)
+    && (operation === "edit" || value.objective.trim() === value.expectedObjective.trim())
+    && (operation !== "pause" || value.expectedStatus === "active")
+    && (operation !== "resume" || ["paused", "blocked"].includes(value.expectedStatus));
 }
 let goalEditPending = (() => {
   try {
@@ -10399,12 +10637,13 @@ let goalEditPending = (() => {
 })();
 let goalEditReceiptRequest = null, goalEditPollTimer = null, goalEditDraft = null;
 function setGoalEditPending(value, required = false) {
+  if (value && !Number.isFinite(value.time)) value.time = Date.now();
   try {
     if (value) sessionStorage.setItem(goalEditStorageKey, JSON.stringify(value));
     else sessionStorage.removeItem(goalEditStorageKey);
   } catch {
-    if (required) throw new Error("无法保存目标编辑回执，目标未提交。请允许此网页使用浏览器会话存储。");
-    notice("无法保存目标编辑回执；请在本机核对目标状态。", true);
+    if (required) throw new Error("无法保存目标操作回执，操作未提交。请允许此网页使用浏览器会话存储。");
+    notice("无法保存目标操作回执；请在本机核对目标状态。", true);
   }
   clearTimeout(goalEditPollTimer);
   goalEditPollTimer = null;
@@ -10431,7 +10670,7 @@ function scheduleGoalEditReceipt() {
       if (current?.state !== "pending") return;
       setGoalEditPending({ ...current, state: "unknown" });
       renderGoalStatus();
-      notice(`查询目标编辑回执失败：${error.message}。已锁定重复保存，请稍后手动查回执。`, true);
+      notice(`查询目标操作回执失败：${error.message}。不会重复提交，请稍后手动查回执。`, true);
     });
   }, 2000);
 }
@@ -10446,7 +10685,6 @@ async function applyGoalEditReceipt(record, receipt) {
   if (receipt.state === "unknown") {
     setGoalEditPending({ ...record, state: "unknown" });
     renderGoalStatus();
-    notice(receipt.result?.message || "目标编辑结果未知，已锁定重复保存。请查回执或在桌面核对。", true);
     return "unknown";
   }
   setGoalEditPending(null);
@@ -10461,16 +10699,21 @@ async function applyGoalEditReceipt(record, receipt) {
   }
   if (receipt.state !== "completed") {
     renderGoalStatus();
-    throw new Error("目标编辑回执状态无效");
+    throw new Error("目标操作回执状态无效");
   }
+  const operation = record.payload.operation ?? "edit";
   const updated = receipt.result?.goal;
   const updatedBaseline = goalEditBaseline(updated);
-  if (!updatedBaseline || updatedBaseline.createdAt !== record.payload.expectedCreatedAt
-      || updatedBaseline.objective !== record.payload.objective
-      || updatedBaseline.status !== record.payload.expectedStatus) {
+  const expectedStatus = operation === "pause" ? "paused"
+    : operation === "resume" ? "active" : record.payload.expectedStatus;
+  if (receipt.result?.threadId !== record.payload.threadId
+      || (operation === "delete" ? updated !== null
+        : !updatedBaseline || updatedBaseline.createdAt !== record.payload.expectedCreatedAt
+          || updatedBaseline.objective !== record.payload.objective
+          || updatedBaseline.status !== expectedStatus)) {
     setGoalEditPending({ ...record, state: "unknown" });
     renderGoalStatus();
-    throw new Error("目标编辑回执内容无效。不会重复保存，请在桌面核对");
+    throw new Error("目标操作回执内容无效。不会重复提交，请在桌面核对");
   }
   if (selectedId === record.payload.threadId && thread?.id === record.payload.threadId
       && sameGoalEditBaseline(thread.goal, {
@@ -10481,9 +10724,9 @@ async function applyGoalEditReceipt(record, receipt) {
     ++goalVersion;
     thread.goal = updated;
   }
-  goalEditDraft = null;
+  if (goalEditDraft?.threadId === record.payload.threadId) goalEditDraft = null;
   renderGoalStatus();
-  notice("目标已更新");
+  if (operation === "edit") notice("目标已更新");
   return "completed";
 }
 async function resolveGoalEditReceipt() {
@@ -10491,7 +10734,7 @@ async function resolveGoalEditReceipt() {
   if (!record || !session || goalEditReceiptRequest) return goalEditReceiptRequest;
   if (record.deviceId !== session.device.id) {
     renderGoalStatus();
-    notice("目标编辑回执属于旧设备授权。请在桌面核对后解除锁定。", true);
+    notice("目标操作回执属于旧设备授权。请在桌面核对后解除锁定。", true);
     return null;
   }
   goalEditReceiptRequest = (async () => {
@@ -10502,7 +10745,7 @@ async function resolveGoalEditReceipt() {
       if (error.code === 404) {
         setGoalEditPending({ ...record, state: "unknown" });
         renderGoalStatus();
-        notice("未找到目标编辑回执。不会自动重试，请在桌面核对后解除锁定。", true);
+        notice("未找到目标操作回执。不会自动重试，请在桌面核对后解除锁定。", true);
       } else if (record.state === "pending") scheduleGoalEditReceipt();
       throw error;
     } finally { goalEditReceiptRequest = null; }
@@ -10510,7 +10753,7 @@ async function resolveGoalEditReceipt() {
   return goalEditReceiptRequest;
 }
 function beginGoalEdit(goal) {
-  if (threadReadOnly()) return;
+  if (threadReadOnly() || !selectedId || thread?.id !== selectedId) return;
   const pendingRecord = goalEditPending?.payload.threadId === thread?.id ? goalEditPending : null;
   const baseline = goalEditBaseline(goal) || (pendingRecord ? {
     objective: pendingRecord.payload.expectedObjective,
@@ -10558,6 +10801,27 @@ async function submitGoalEdit() {
     expectedObjective: draft.baseline.objective, expectedStatus: draft.baseline.status
   };
   if (!validGoalEditPayload(payload)) { notice("目标内容不能为空或超过 16 KiB", true); return; }
+  await submitGoalUpdate(payload);
+}
+async function changeGoalState(operation, goal) {
+  const id = selectedId, baseline = goalEditBaseline(goal);
+  if (!baseline || thread?.id !== id || goalEditPending || goalEditDraft
+      || threadReadOnly(id) || !connected) return;
+  const payload = { threadId: id, operation, objective: baseline.objective,
+    expectedCreatedAt: baseline.createdAt, expectedObjective: baseline.objective,
+    expectedStatus: baseline.status };
+  if (!validGoalEditPayload(payload)) return;
+  if (operation === "delete" && !await confirmAction("删除目标",
+    "删除当前目标？会话消息会保留。", "删除目标", true)) return;
+  if (selectedId !== id || thread?.id !== id || threadReadOnly(id) || !connected
+      || goalEditPending || goalEditDraft) return;
+  if (!sameGoalEditBaseline(thread.goal, baseline)) {
+    notice("目标已发生变化，请确认当前状态后再操作", true);
+    return;
+  }
+  await submitGoalUpdate(payload);
+}
+async function submitGoalUpdate(payload) {
   const record = { id: randomId(), deviceId: session.device.id, payload, state: "submitting" };
   try {
     setGoalEditPending(record, true);
@@ -10570,6 +10834,27 @@ async function submitGoalEdit() {
     renderGoalStatus();
     notice(error.message, true);
   }
+}
+function fitGoalEditor() {
+  const viewport = window.visualViewport;
+  const width = window.innerWidth, height = viewport?.height || window.innerHeight;
+  // 同一宽度下保留键盘收起时的高度；转屏后重新建立基准。
+  goalEditorBaseViewport = {
+    width,
+    height: width === goalEditorBaseViewport.width ? Math.max(goalEditorBaseViewport.height, height) : height
+  };
+  const dialog = $("#goal-edit-dialog");
+  if (!dialog?.open) return;
+  if (width <= 760) {
+    if (dialog.goalEditorViewportWidth === width) return;
+    dialog.goalEditorViewportWidth = width;
+    // 打开时锁定尺寸，后续键盘引起的 visualViewport resize/scroll 不再改变弹窗。
+    dialog.style.setProperty("--goal-edit-viewport-height", `${goalEditorBaseViewport.height}px`);
+    return;
+  }
+  delete dialog.goalEditorViewportWidth;
+  dialog.style.setProperty("--goal-edit-viewport-height", `${height}px`);
+  dialog.style.setProperty("--goal-edit-viewport-top", `${viewport?.offsetTop || 0}px`);
 }
 function renderGoalEditor(goal, pendingRecord) {
   const draft = goalEditDraft?.threadId === thread?.id ? goalEditDraft : null;
@@ -10595,7 +10880,8 @@ function renderGoalEditor(goal, pendingRecord) {
   dialog.dataset.threadId = draft.threadId;
   dialog.setAttribute("aria-labelledby", "goal-edit-title");
   const heading = element("div", "goal-edit-heading");
-  const title = element("h2", "", "编辑目标");
+  const controlPending = pendingRecord && (pendingRecord.payload.operation ?? "edit") !== "edit";
+  const title = element("h2", "", controlPending ? "核对目标操作" : "编辑目标");
   title.id = "goal-edit-title";
   const close = button("", "关闭目标编辑并取消草稿", cancelGoalEdit, "icon-button goal-edit-close");
   close.append(icon("close"));
@@ -10623,15 +10909,15 @@ function renderGoalEditor(goal, pendingRecord) {
     input.focus();
   });
   const cancel = button("取消", "取消目标编辑草稿", cancelGoalEdit);
-  const check = button("查回执", "只查询目标编辑回执，不会重复保存", () => {
+  const check = button("查回执", "只查询目标操作回执，不会重复提交", () => {
     check.disabled = true;
-    void resolveGoalEditReceipt().catch(error => notice(`查询目标编辑回执失败：${error.message}`, true))
+    void resolveGoalEditReceipt().catch(error => notice(`查询目标操作回执失败：${error.message}`, true))
       .finally(() => renderGoalStatus());
   });
-  const unlock = button("已在桌面核对", "确认在桌面核对后解除目标编辑锁定", async () => {
+  const unlock = button("已在桌面核对", "确认在桌面核对后解除目标操作锁定", async () => {
     const current = goalEditPending;
-    if (await confirmAction("解除目标编辑锁定",
-      "请先在 Codex 桌面核对目标内容。解除锁定不会再次保存；仅在已确认目标已更新或未执行后继续。",
+    if (await confirmAction("解除目标操作锁定",
+      "请先在 Codex 桌面核对目标状态。解除锁定不会再次提交；仅在已确认操作完成或未执行后继续。",
       "已核对，解除锁定", true) && goalEditPending === current) {
       setGoalEditPending(null);
       goalEditDraft = null;
@@ -10645,32 +10931,32 @@ function renderGoalEditor(goal, pendingRecord) {
   dialog.append(heading, scroll, actions);
   document.body.append(dialog);
 
-  const resizeInput = () => {
-    input.style.height = "auto";
-    input.style.height = `${Math.max(144, input.scrollHeight)}px`;
-  };
   const sync = (currentGoal = thread?.goal, currentRecord = goalEditPending?.payload.threadId === thread?.id ? goalEditPending : null) => {
     const bytes = new TextEncoder().encode(input.value.trim()).byteLength;
     const record = currentRecord;
+    const controlPending = record && (record.payload.operation ?? "edit") !== "edit";
+    title.textContent = controlPending ? "核对目标操作" : "编辑目标";
     const unavailable = !!record && record.deviceId !== session?.device.id;
     if (goalEditDraft?.threadId === thread?.id) goalEditDraft.objective = input.value;
     count.textContent = `${bytes.toLocaleString("zh-CN")} / 16,384 B`;
     count.classList.toggle("error-text", bytes > 16 * 1024);
     const baselineChanged = !sameGoalEditBaseline(currentGoal, baseline);
-    status.textContent = record ? unavailable ? "回执属于旧设备授权，已锁定重复保存"
-      : record.state === "unknown" ? "送达结果未知，已锁定重复保存"
-        : record.state === "submitting" ? "正在提交目标更新" : "正在确认目标更新回执"
+    const feedbackReady = !!record && pendingFeedbackReady(record);
+    status.textContent = record ? unavailable ? "回执属于旧设备授权，已锁定重复提交"
+      : feedbackReady ? "正在确认目标操作结果。" : "正在处理目标操作…"
       : baselineChanged ? "原生目标已发生变化，当前草稿未丢失；请取消后重新打开编辑。" : "";
     status.hidden = !status.textContent;
-    status.classList.toggle("error-text", unavailable || record?.state === "unknown" || baselineChanged);
-    check.hidden = !record || unavailable;
+    status.classList.toggle("error-text", unavailable || baselineChanged && !record);
+    check.hidden = !record || unavailable || !feedbackReady;
     check.disabled = !connected || !!goalEditReceiptRequest;
-    unlock.hidden = !record;
+    unlock.hidden = !record || !unavailable && !feedbackReady;
+    revert.hidden = !!controlPending;
+    save.hidden = !!controlPending;
     revert.disabled = !!record;
     input.disabled = !!record;
     save.disabled = !!record || threadReadOnly() || !connected || !input.value.trim()
       || bytes > 16 * 1024 || input.value.trim() === baseline.objective || baselineChanged;
-    resizeInput();
+    fitGoalEditor();
   };
   input.oninput = () => sync();
   input.onkeydown = event => {
@@ -10702,7 +10988,7 @@ function renderGoalEditor(goal, pendingRecord) {
   document.body.classList.add("modal-open");
   dialog.showModal();
   sync(goal, pendingRecord);
-  input.focus();
+  if (!input.disabled) input.focus();
 }
 function updateGoalDurationView(root, goal) {
   const duration = formatGoalDuration(goalDurationSeconds(goal));
@@ -10746,27 +11032,30 @@ function updateGoalLiveView(root, goal) {
   syncGoalLiveTimer();
 }
 function renderGoalStatus() {
+  syncPendingFeedbackTimer();
   const root = $("#goal-area");
   if (!root) { stopGoalLiveTimer(); return null; }
-  const goal = thread?.goal;
+  const display = currentThreadDisplay(), goal = display?.goal;
+  const ready = thread?.id === selectedId && Object.hasOwn(thread, "goal");
   const objective = typeof goal?.objective === "string" ? goal.objective.trim() : "";
   const status = typeof goal?.status === "string" ? goal.status : "";
   const hasCurrentGoal = !!objective && !!status && status !== "complete";
   const pendingRecord = goalEditPending?.payload.threadId === thread?.id ? goalEditPending : null;
-  const editing = goalEditDraft?.threadId === thread?.id;
-  const signature = JSON.stringify([thread?.id, objective, status, goal?.createdAt ?? null,
-    threadReadOnly(), connected, editing,
-    pendingRecord ? [pendingRecord.id, pendingRecord.state, pendingRecord.deviceId === session?.device.id] : null]);
+  const editing = !!goalEditDraft && goalEditDraft.threadId === thread?.id;
+  const signature = JSON.stringify([display?.id, objective, status, goal?.createdAt ?? null, ready,
+    threadReadOnly(), connected, editing, !!goalEditPending, !!goalEditDraft,
+    pendingRecord ? [pendingRecord.id, pendingRecord.state, pendingRecord.deviceId === session?.device.id,
+      pendingFeedbackReady(pendingRecord)] : null]);
   if (root.dataset.goalSignature === signature) {
     updateGoalLiveView(root, goal);
     renderGoalEditor(goal, pendingRecord);
     return root.firstElementChild;
   }
-  const expanded = root.dataset.goalThread === thread?.id && root.querySelector(".goal-card")?.open;
+  const expanded = root.dataset.goalThread === display?.id && root.querySelector(".goal-card")?.open;
   root.dataset.goalSignature = signature;
-  root.dataset.goalThread = thread?.id || "";
+  root.dataset.goalThread = display?.id || "";
   root.replaceChildren();
-  root.hidden = !hasCurrentGoal && !pendingRecord;
+  root.hidden = !hasCurrentGoal && (!pendingRecord || !pendingFeedbackReady(pendingRecord));
   if (root.hidden) {
     stopGoalLiveTimer();
     renderGoalEditor(goal, pendingRecord);
@@ -10775,8 +11064,8 @@ function renderGoalStatus() {
   if (!hasCurrentGoal && pendingRecord) {
     stopGoalLiveTimer();
     const recovery = element("div", "goal-recovery-row");
-    recovery.append(icon("target"), element("span", "", "目标编辑回执待确认"));
-    const recover = button("核对", "核对目标编辑回执", () => beginGoalEdit(null), "text-button");
+    recovery.append(icon("target"), element("span", "", "正在确认目标操作结果。"));
+    const recover = button("核对", "核对目标操作回执", () => beginGoalEdit(null), "text-button");
     recovery.append(recover);
     root.append(recovery);
     renderGoalEditor(goal, pendingRecord);
@@ -10809,18 +11098,33 @@ function renderGoalStatus() {
   addMetric("duration", "运行时间");
   body.append(metrics);
   card.append(summary, body);
-  const edit = button("", pendingRecord ? "核对目标编辑回执" : editing ? "继续编辑目标" : "编辑目标",
+  const controls = element("div", "goal-controls");
+  const edit = button("", pendingRecord ? "核对目标操作回执" : editing ? "继续编辑目标" : "编辑目标",
     () => beginGoalEdit(goal), "goal-edit-button");
   edit.replaceChildren(icon("edit"));
   edit.hidden = threadReadOnly();
   const editable = editableGoalStatuses.includes(status);
-  edit.disabled = !pendingRecord && (!editable || threadReadOnly() || !connected);
-  edit.title = pendingRecord ? "目标编辑待确认，点击核对回执"
+  edit.disabled = !ready || !pendingRecord && (!editable || threadReadOnly() || !connected);
+  edit.title = pendingRecord ? "目标操作待确认，点击核对回执"
     : editing ? "继续编辑目标"
     : !editable ? "已完成目标不能编辑"
       : threadReadOnly() ? "当前为只读访问"
         : !connected ? "本机连接中断" : "编辑目标";
-  shell.append(card, edit);
+  const running = status === "active";
+  const toggle = button("", running ? "暂停目标" : "开始目标",
+    () => void changeGoalState(running ? "pause" : "resume", goal), "goal-action-button");
+  toggle.append(icon(running ? "pause" : "play"));
+  const remove = button("", "删除目标", () => void changeGoalState("delete", goal),
+    "goal-action-button goal-delete-button");
+  remove.append(icon("trash"));
+  const locked = !ready || !!goalEditPending || !!goalEditDraft || !connected || threadReadOnly();
+  toggle.disabled = locked || !["active", "paused", "blocked"].includes(status);
+  remove.disabled = locked || !editable;
+  if (status === "budgetLimited" || status === "usageLimited")
+    toggle.title = status === "budgetLimited" ? "目标预算已用尽" : "当前用量受限";
+  controls.hidden = threadReadOnly();
+  controls.append(edit, toggle, remove);
+  shell.append(card, controls);
   root.append(shell);
   updateGoalLiveView(root, goal);
   renderGoalEditor(goal, pendingRecord);
@@ -10923,7 +11227,8 @@ async function submitBlockingRequest(requestThreadId, request, action, value, id
   const deviceId = session.device.id, key = approvalReplyKey(requestThreadId, request, deviceId);
   const state = blockingRequestState(requestThreadId), sourceVersion = state.sourceVersion, requestsReadVersion = state.generation;
   if (approvalReplies.has(key)) return;
-  const record = { deviceId, threadId: requestThreadId, requestId: request.id, method: request.method, state: "submitting" };
+  const record = { deviceId, threadId: requestThreadId, requestId: request.id, method: request.method,
+    state: "submitting", time: Date.now() };
   approvalReplies.set(key, record);
   approvalSignature = null; renderApprovals();
   try {
@@ -10959,6 +11264,7 @@ function replaceAsyncQuestions(target, requests) {
 }
 function setQuestionReceipt(key, record) {
   const previous = questionReplyReceipts.get(key);
+  if (record && !Number.isFinite(record.time)) record.time = Date.now();
   if (record) questionReplyReceipts.set(key, record);
   else questionReplyReceipts.delete(key);
   try { sessionStorage.setItem("codex-elves-question-receipts", JSON.stringify([...questionReplyReceipts.values()])); }
@@ -10970,23 +11276,57 @@ function setQuestionReceipt(key, record) {
 }
 async function applyQuestionReceipt(key, receipt) {
   const record = questionReplyReceipts.get(key);
-  if (!record) return;
-  if (receipt.state === "completed") {
+  if (!record || record.deviceId !== session?.device.id || receipt?.requestId !== record.id
+      || receipt.result?.threadId && receipt.result.threadId !== record.threadId
+      || receipt.result?.requestId && receipt.result.requestId !== record.requestId) return;
+  const outcomeUnknown = receipt.result?.outcomeUnknown === true;
+  if (receipt.state === "completed" && receipt.result?.ok === true && !outcomeUnknown) {
     setQuestionReceipt(key, null); questionDrafts.delete(key);
-    if (thread?.id === record.threadId) {
-      thread.requests = (thread.requests || []).filter(request =>
-        request.method !== "remote/requestUserInputAsync" || request.id !== record.requestId);
+    renderSidebar();
+    if (selectedId === record.threadId) {
+      const requests = thread?.id === record.threadId ? thread.requests : notifiedQuestions;
+      ++questionVersion;
+      notifiedQuestions = Array.isArray(requests) ? requests.filter(request =>
+        request.method === "remote/requestUserInputAsync" && request.id !== record.requestId) : null;
+      if (thread?.id === record.threadId) replaceAsyncQuestions(thread, notifiedQuestions || []);
       approvalSignature = null; renderApprovals();
       await reloadThread();
     }
-    notice(receipt.result?.skipped === true ? "问题已跳过" : "回答已提交");
-  } else if (receipt.state === "failed") {
+    if (receipt.result?.skipped === true) notice("问题已跳过");
+  } else if (receipt.state === "failed" && !outcomeUnknown) {
     setQuestionReceipt(key, null);
+    approvalSignature = null; renderApprovals(); renderSidebar();
     throw new Error(receipt.result?.message || "回答未提交，请核对问题后重试");
   } else {
-    setQuestionReceipt(key, { ...record, state: receipt.state === "pending" ? "pending" : "unknown" });
+    setQuestionReceipt(key, { ...record, state: receipt.state === "pending" && !outcomeUnknown ? "pending" : "unknown" });
     approvalSignature = null; renderApprovals();
   }
+}
+async function recoverQuestionReceipts() {
+  if (!session || pageLeaving || document.hidden || navigator.onLine === false) return;
+  const scope = privateInputScope(session), deviceId = session.device.id, checks = [];
+  for (const [key, record] of questionReplyReceipts) {
+    if (record.deviceId !== deviceId) continue;
+    const active = questionReceiptChecks.get(key);
+    if (active?.id === record.id) { checks.push(active.promise); continue; }
+    const checking = { id: record.id, promise: null };
+    questionReceiptChecks.set(key, checking);
+    checking.promise = (async () => {
+      try {
+        // 查询既有回执不依赖原生连接，也绝不重新提交回答或跳过操作。
+        const receipt = await api(`/api/receipts/${encodeURIComponent(record.id)}`, undefined, undefined, undefined,
+          { resourcePriority: "background" });
+        if (scope !== privateInputScope(session) || questionReplyReceipts.get(key)?.id !== record.id) return;
+        await applyQuestionReceipt(key, receipt);
+      } catch {
+        // 404、断网或本地存储失败均不能证明原回答未派发，保留原锁待下次核对。
+      } finally {
+        if (questionReceiptChecks.get(key) === checking) questionReceiptChecks.delete(key);
+      }
+    })();
+    checks.push(checking.promise);
+  }
+  await Promise.allSettled(checks);
 }
 async function submitAsyncQuestion(requestThreadId, request, answers, { skip = false } = {}) {
   if (!connected || threadReadOnly(requestThreadId) || !session.allowApprovals || thread?.id !== requestThreadId) return;
@@ -11012,7 +11352,10 @@ async function submitAsyncQuestion(requestThreadId, request, answers, { skip = f
     notice(error.message, true);
     if (error.code === 409 && selectedId === requestThreadId)
       void reloadThread().catch(() => {});
-  } finally { approvalSignature = null; renderApprovals(); }
+  } finally {
+    approvalSignature = null; renderApprovals();
+    void recoverQuestionReceipts();
+  }
 }
 function renderAsyncQuestion(card, request, requestThreadId) {
   const key = JSON.stringify([session.device.id, requestThreadId, request.id]);
@@ -11069,9 +11412,10 @@ function renderAsyncQuestion(card, request, requestThreadId) {
       || fields.some(question => !draft.get(question.id)?.trim());
   };
   if (submissionState) {
-    status.textContent = submissionState === "unknown"
-      ? receipt?.skip ? "跳过状态待确认，不会自动重复操作。" : "回答送达状态待确认，不会自动重发。"
-      : receipt?.skip ? "正在跳过问题…" : "回答已提交，正在确认结果…";
+    if (pendingFeedbackReady(receipt))
+      status.textContent = receipt?.skip ? "正在确认问题跳过结果。" : "正在确认回答结果。";
+    if (receipt?.skip) skip.textContent = "跳过中…";
+    else submit.textContent = "提交中…";
   } else if (!allowed) status.textContent = threadReadOnly(requestThreadId) || !session.allowApprovals
     ? "此设备没有问答回复权限，请在 Codex 桌面处理。" : "连接恢复后可以提交回答。";
   form.onsubmit = event => {
@@ -11197,7 +11541,7 @@ function renderMcpToolApproval(card, view) {
 }
 function updateBlockingApprovalControls(card, key) {
   card.remoteReplyStatus?.remove(); card.remoteReplyStatus = null;
-  const replyState = approvalReplies.get(key)?.state;
+  const reply = approvalReplies.get(key), replyState = reply?.state;
   if (card.remoteLockedControls) {
     for (const [control, disabled] of card.remoteLockedControls) control.disabled = disabled;
     card.remoteLockedControls = null;
@@ -11206,9 +11550,9 @@ function updateBlockingApprovalControls(card, key) {
   card.remoteLockedControls = new Map([...card.querySelectorAll("button,input,select,textarea")]
     .map(control => [control, control.disabled]));
   for (const control of card.remoteLockedControls.keys()) control.disabled = true;
+  if (!pendingFeedbackReady(reply)) return;
   const status = element("div", "remote-approval-reply-status");
-  status.append(element("small", "muted", replyState === "submitting" ? "正在提交，请勿重复操作。"
-    : replyState === "pending" ? "已提交，等待原生待处理状态更新。" : "提交结果待确认，请核对状态，勿重复操作。"));
+  status.append(element("small", "muted", "正在确认操作结果。"));
   if (replyState !== "submitting") {
     const check = button("核对状态", "重新读取原生待处理状态",
       () => void reloadThread().catch(error => notice(error.message, true)), "text-button");
@@ -11217,14 +11561,15 @@ function updateBlockingApprovalControls(card, key) {
   card.remoteReplyStatus = status; card.append(status);
 }
 function renderApprovals() {
+  syncPendingFeedbackTimer();
   const root = $("#approval-area"); if (!root) return;
   const requests = thread?.requests || [];
   const signature = JSON.stringify([session?.device.id, thread?.id, requests, threadReadOnly(), session?.allowApprovals, connected,
     thread?.id ? [blockingRequestState(thread.id).epoch, blockingRequestState(thread.id).sourceVersion] : null,
     [...approvalReplies].filter(([, reply]) => reply.deviceId === session?.device.id && reply.threadId === thread?.id)
-      .map(([key, reply]) => [key, reply.state]),
+      .map(([key, reply]) => [key, reply.state, pendingFeedbackReady(reply)]),
     [...questionReplyReceipts].filter(([, reply]) => reply.deviceId === session?.device.id && reply.threadId === thread?.id)
-      .map(([key, reply]) => [key, reply.state])]);
+      .map(([key, reply]) => [key, reply.state, pendingFeedbackReady(reply)])]);
   if (signature === approvalSignature) return;
   approvalSignature = signature;
   approvalResizeObserver?.disconnect(); approvalResizeObserver = null;
@@ -11247,7 +11592,8 @@ function renderApprovals() {
     const questionKey = asyncQuestion ? JSON.stringify([session.device.id, requestThreadId, request.id]) : null;
     const requestSignature = JSON.stringify([blockingApprovalIdentity(requestThreadId, request),
       threadReadOnly(), session?.allowApprovals, connected,
-      asyncQuestion ? questionReplyReceipts.get(questionKey)?.state : null]);
+      asyncQuestion ? [questionReplyReceipts.get(questionKey)?.state,
+        pendingFeedbackReady(questionReplyReceipts.get(questionKey))] : null]);
     const previous = previousCards.get(requestSignature);
     if (previous) {
       if (!asyncQuestion) updateBlockingApprovalControls(previous, approvalReplyKey(requestThreadId, request));
@@ -11351,10 +11697,14 @@ function renderCompactionBanner(root, id, compaction) {
   const unavailable = compaction.deviceId && session?.device.id && compaction.deviceId !== session.device.id;
   const sendReason = compactionQueueSendReason(id);
   if (compaction.state === "running" && !unavailable && !sendReason) return;
+  const awaitingReceipt = compaction.state === "unknown"
+    || compaction.state === "pending" && !compaction.acknowledged && !compaction.nativeConfirmed;
+  if (!unavailable && awaitingReceipt && !pendingFeedbackReady(compaction)) return;
+  if (!unavailable && !awaitingReceipt && !sendReason) return;
   const messages = {
-    pending: sendReason || "压缩请求已由原生确认，可继续编辑并发送普通消息；消息会加入原生队列，在压缩完成后执行。",
+    pending: awaitingReceipt ? "正在确认压缩结果。" : sendReason,
     running: sendReason || "正在压缩此会话的上下文；可继续编辑并发送普通消息，消息会加入原生队列，在压缩完成后执行。",
-    unknown: sendReason
+    unknown: "正在确认压缩结果。"
   };
   const box = element("div", "pending-banner", unavailable
     ? `${sendReason}不会自动重发压缩请求。`
@@ -11395,10 +11745,12 @@ function renderGoalComposerRecovery(root) {
       value.deviceId === session?.device.id && `$new:${value.payload.projectId || ""}` === draftKey())
     : null);
   if (!record || record.deviceId !== session?.device.id || pending?.id === record.id) return;
+  if (record.recoveryState === "unknown" && !pendingFeedbackReady(record)) return;
   const recoveryThreadId = goalRecordThreadId(record);
   const box = element("div", "pending-banner goal-composer-recovery", unfinishedGoal()
     ? "此会话已有未完成目标，请从上方目标栏核对或编辑；本次目标草稿仍保留。"
-    : goalComposerReceiptMessage(record, record.recoveryState));
+    : record.recoveryState === "unknown" ? "正在确认目标设置结果。"
+      : goalComposerReceiptMessage(record, record.recoveryState));
   const dismiss = record.recoveryState === "failed"
     ? button("不再恢复", "仅关闭本次本地恢复提示，保留当前草稿和已保存目标",
       () => dismissGoalComposerRecovery(record), "text-button") : null;
@@ -11441,6 +11793,53 @@ function renderGoalComposerRecovery(root) {
   box.append(restore);
   if (dismiss) box.append(dismiss);
   root.append(box);
+}
+const pendingFeedbackDelayMs = 5000;
+let pendingFeedbackTimer = null;
+function pendingFeedbackDelay(record) {
+  // 用户要求：队列操作未确认满 8 秒才补充等待提醒；其他操作仍为 5 秒，不改变真实失败提示或回执轮询。
+  return ["steerQueued", "removeQueued", "reorderQueued", "beginQueuedEdit", "editQueued", "cancelQueuedEdit", "dismissQueuedEdit"]
+    .includes(record?.action) ? 8000 : pendingFeedbackDelayMs;
+}
+function pendingFeedbackReady(record) {
+  return !Number.isFinite(record?.time) || Date.now() - record.time >= pendingFeedbackDelay(record);
+}
+function clearPendingFeedbackTimer() {
+  clearTimeout(pendingFeedbackTimer);
+  pendingFeedbackTimer = null;
+}
+function syncPendingFeedbackTimer() {
+  clearPendingFeedbackTimer();
+  if (!session || pageLeaving || document.hidden) return;
+  const compaction = currentCompaction();
+  const awaitingCompaction = compaction.state === "unknown"
+    || compaction.state === "pending" && !compaction.acknowledged && !compaction.nativeConfirmed;
+  const records = [
+    pending, threadDeletions.get(threadDeletionKey(selectedId)),
+    goalEditPending?.payload.threadId === selectedId ? goalEditPending : null,
+    awaitingCompaction ? compaction : null,
+    ...[...relatedThreadOperations.values()].filter(record =>
+      ownsRelatedOperation(record) && record.parentThreadId === selectedId),
+    ...[...goalComposerRecoveries.values()].filter(record =>
+      record.recoveryState === "unknown" && (goalRecordThreadId(record) === selectedId
+        || creating && `$new:${record.payload.projectId || ""}` === draftKey())),
+    ...[...approvalReplies.values(), ...questionReplyReceipts.values()].filter(record =>
+      record.deviceId === session.device.id && record.threadId === selectedId)
+  ];
+  const remaining = records.filter(record => record && Number.isFinite(record.time)
+      && (!record.deviceId || record.deviceId === session.device.id)
+      && !["confirming", "deleted"].includes(record.state))
+    .map(record => record.time + pendingFeedbackDelay(record) - Date.now()).filter(delay => delay > 0);
+  if (!remaining.length) return;
+  const version = selectionVersion, scope = privateInputScope(session);
+  pendingFeedbackTimer = setTimeout(() => {
+    pendingFeedbackTimer = null;
+    if (pageLeaving || document.hidden || version !== selectionVersion || scope !== privateInputScope(session)) return;
+    if (sideCreationView) updateSideCreationStatus(sideCreationView.record);
+    approvalSignature = null;
+    renderApprovals();
+    updateComposer();
+  }, Math.min(...remaining));
 }
 function updateComposer() {
   sessionTools?.updateContext();
@@ -11502,13 +11901,17 @@ function updateComposer() {
   ];
   add.disabled = add.menuOptions.every(option => option.disabled);
   if (activePopup?.trigger === add) renderPopup();
-  const sendingLabel = sending ? sending.phase === "syncing" ? "同步中…" : "发送中…" : "";
+  const queuedEditAction = queuedEditSubmittingAction();
+  const sendingLabel = sending ? sending.phase === "syncing" ? "同步中…" : "发送中…"
+    : queuedEditAction === "cancelQueuedEdit" ? "取消中…" : queuedEditAction === "editQueued" ? "保存中…" : "";
   if ($("#send-status").textContent !== sendingLabel) $("#send-status").textContent = sendingLabel;
   const action = sending ? "sending" : editingQueuedMessage ? "save"
     : !compacting && !goalMode && !editing && active && ((!prompt && !hasAttachments) || pending) && selectedId ? "stop" : "send";
-  if (send.dataset.action !== action) {
+  const sendLoading = action === "sending" || !!queuedEditAction;
+  if (send.dataset.action !== action || send.dataset.loading !== String(sendLoading)) {
     send.dataset.action = action;
-    const indicator = action === "sending" ? element("span", "spinner")
+    send.dataset.loading = String(sendLoading);
+    const indicator = sendLoading ? element("span", "spinner")
       : icon(action === "stop" ? "stop" : action === "save" ? "check" : "arrowUp");
     indicator.setAttribute("aria-hidden", "true");
     send.replaceChildren(indicator);
@@ -11518,25 +11921,33 @@ function updateComposer() {
   if (unsupportedImages) send.title = "当前服务版本尚不支持图片发送，请先更新程序";
   if (unsupportedProjectless) send.title = "当前服务版本尚不支持无项目会话，请先更新程序或选择已有项目";
   send.setAttribute("aria-busy", String(busy || stopping));
-  send.disabled = deleting || busy || stopping || compacting && editing || !!compactionSendReason || !connected
-    || threadReadOnly(undefined, action === "stop" ? "native" : creating ? "create" : goalMode ? "native" : "send")
-    || unsupportedImages || unsupportedProjectless || !!goalReason || composerAttachmentsLoading()
-    || (action !== "stop" && (!!pending || !prompt && !hasAttachments))
-    || (!creating && (!selectedId || thread?.id !== selectedId));
-  if (editingMessage || editingQueuedMessage?.state === "starting") send.disabled = true;
-  $("#prompt").disabled = threadViewReadOnly() || deleting || compacting && editing || !!editingMessage || editing && (busy || !!pending)
+  const blockedBy = editingMessage ? "message-edit" : editingQueuedMessage?.state === "starting" ? "queue-edit-loading"
+    : deleting ? "delete" : busy ? "busy" : stopping ? "stopping" : compacting && editing ? "compaction-edit"
+    : compactionSendReason ? compaction.deviceId && compaction.deviceId !== session?.device.id ? "compaction-scope"
+      : compaction.state === "unknown" ? "compaction-unknown" : compaction.state === "pending" && !compaction.acknowledged && !compaction.nativeConfirmed
+        ? "compaction-pending" : "compaction-unsupported"
+    : !connected ? "offline" : threadReadOnly() ? "read-only" : unsupportedImages ? "images-unsupported"
+    : unsupportedProjectless ? "project-required" : goalReason ? "goal" : composerAttachmentsLoading() ? "images-loading"
+    : action !== "stop" && pending ? "pending-receipt" : action !== "stop" && !prompt && !hasAttachments ? "empty"
+    : !creating && (!selectedId || thread?.id !== selectedId) ? "thread-not-loaded" : "ready";
+  send.disabled = blockedBy !== "ready";
+  const diagnosticState = JSON.stringify([privateInputScope(session), selectedId, blockedBy, pageLeaving, connected, stream?.readyState]);
+  if (diagnosticState !== composerDiagnosticState) {
+    composerDiagnosticState = diagnosticState;
+    recordRuntimeDiagnostic("composer.state", { blockedBy, draftChars: prompt.length,
+      attachmentCount: composerAttachmentSnapshot().length });
+  }
+  $("#prompt").disabled = threadReadOnly() || deleting || compacting && editing || !!editingMessage || editing && (busy || !!pending)
     || editingQueuedMessage?.state === "starting" || (!creating && !selectedId);
-  $("#new-chat").disabled = threadReadOnly(null, "create") || !connected;
-  $("#model-button").disabled = threadReadOnly(undefined, creating ? "create" : "send") || deleting || !!editingQueuedMessage
+  $("#new-chat").disabled = threadReadOnly() || !connected;
+  $("#model-button").disabled = threadReadOnly() || deleting || !!editingQueuedMessage
     || !!editingMessage && (busy || stopping || !!pending || !connected);
   $("#sidebar-view-toggle").disabled = !sidebar;
   syncNewChatProjectPicker();
   updatePromptOptimization();
   for (const control of document.querySelectorAll(".row-menu-button")) control.disabled = threadReadOnly() || sidebarBusy || !connected;
   fitPopup();
-  $("#prompt").placeholder = threadViewReadOnly() ? "当前设备为只读模式"
-    : threadReadOnly(undefined, creating ? "create" : goalMode ? "native" : "send") ? "当前写入功能不可用，可查看会话并保留草稿"
-    : compacting && !editing && !goalMode
+  $("#prompt").placeholder = threadReadOnly() ? threadReadOnlyMessage() : compacting && !editing && !goalMode
     ? queueOnly ? "继续输入，发送后会排队等待压缩完成…" : "可继续编辑草稿，压缩期间暂不能发送…"
     : editingQueuedMessage ? "修改排队消息…" : goalMode ? goalComposerPlaceholder : active ? "补充要求，会使用原生消息队列…" : "给 Codex 发送消息，输入 / 选择命令或 Skill…";
   const model = currentModel(), effort = currentEffort();
@@ -11548,13 +11959,12 @@ function updateComposer() {
   syncRelatedModelDisplay();
   updateContextUsage();
   if ($("#skill-menu") && !$("#skill-menu").hidden) renderSkillMenu();
-  if (threadViewReadOnly()) closeComposerMenus({ keepContextUsage: true });
+  if (threadReadOnly()) closeComposerMenus({ keepContextUsage: true });
   refitComposerMenus();
   $("#pending-area").replaceChildren();
   const deletion = threadDeletions.get(threadDeletionKey(selectedId));
-  if (deletion && deletion.state !== "confirming") {
-    const box = element("div", "pending-banner", deletion.state === "submitting"
-      ? "正在删除会话，请等待回执。" : "删除结果待确认，会话记录与草稿暂时保留；不会自动重试删除。");
+  if (deletion && !["confirming", "deleted"].includes(deletion.state) && pendingFeedbackReady(deletion)) {
+    const box = element("div", "pending-banner", "正在确认会话删除结果。");
     if (deletion.state !== "submitting") {
       const check = button("核对删除结果", "只查询删除回执，不会再次删除会话",
         () => void checkThreadDeletion(deletion), "text-button");
@@ -11567,23 +11977,29 @@ function updateComposer() {
     "当前运行的服务尚不支持无项目会话；更新程序后可直接发送，或先选择已有项目。"));
   if (goalMode && goalReason && !busy && !pending && !threadReadOnly())
     $("#pending-area").append(element("div", "pending-banner goal-composer-note", goalReason));
-  if (pending && (!sending || pending.payload !== sending.payload)) {
+  if (pending && (!sending || pending.payload !== sending.payload)
+      && (pending.invalid || pending.deviceId && pending.deviceId !== session.device.id || pendingFeedbackReady(pending))) {
     const unavailable = pending.invalid || (pending.deviceId && pending.deviceId !== session.device.id);
     const pendingGoal = goalComposerAction(pending.action, pending.payload);
+    const pendingQueueItem = ["steerQueued", "removeQueued"].includes(pending.action);
     const box = element("div", "pending-banner", unavailable ? "回执损坏或属于旧授权。请检查原生会话后人工解除锁定，不会自动重发。"
-      : pending.action === "reorderQueued" ? "正在确认队列排序结果，请勿重复调整。"
-      : pendingGoal ? goalComposerReceiptMessage(pending, pending.receiptState === "pending" ? "pending" : "unknown")
-      : queuedEditActions.has(pending.action) ? "队列编辑结果待确认，修改已保留，不会重复保存或恢复消息。" : "消息正在确认送达，已锁定重复发送。");
+      : pending.action === "reorderQueued" ? "正在确认队列排序结果。"
+      : pendingGoal ? "正在确认目标提交结果。"
+      : pendingQueueItem ? pending.action === "steerQueued"
+        ? "正在确认队列引导结果。"
+        : "正在确认队列删除结果。"
+      : queuedEditActions.has(pending.action) ? "正在确认队列编辑结果。" : "正在确认消息送达结果。");
     if (!unavailable && queuedEditActions.has(pending.action))
       renderQueuedEditRecoveryControls(box, pending.payload.threadId, pending.payload.editId);
-    else if (!unavailable) box.append(button("查回执", pendingGoal ? "查询原目标提交回执，不会再次提交" : "查询此消息的送达回执", () => void resolvePending(), "text-button"));
+    else if (!unavailable) box.append(button("查回执", pendingGoal ? "查询原目标提交回执，不会再次提交"
+      : pendingQueueItem ? "只查询原队列操作回执，不会重复引导或删除" : "查询此消息的送达回执", () => void resolvePending(), "text-button"));
     const createdGoalThreadId = pendingGoal && goalRecordThreadId(pending);
     if (!unavailable && createdGoalThreadId && selectedId !== createdGoalThreadId)
       box.append(button("打开已创建会话", "打开已创建的会话，只读取数据",
         () => void selectThread(createdGoalThreadId, { closeSidebar: false }), "text-button"));
     if (pendingGoal && !unavailable) box.append(button("已人工核对", "在本机核对后解除目标提交锁定",
       () => void manuallyResolveGoalComposer(pending), "text-button"));
-    else if (!queuedEditActions.has(pending.action)) box.append(button("已人工确认", "确认检查会话后解除锁定", async () => {
+    else if (!queuedEditActions.has(pending.action) && !pendingQueueItem) box.append(button("已人工确认", "确认检查会话后解除锁定", async () => {
       const current = pending;
       if (await confirmAction("解除发送锁定", "请先检查本机或网页会话。解除锁定不会重发，但再次发送可能重复执行；仅在已核对结果后继续。", "已核对，解除锁定", true)
           && pending === current) { savePending(null); updateComposer(); }
@@ -11596,6 +12012,7 @@ function updateComposer() {
   renderCompactionBanner($("#pending-area"), selectedId, compaction);
   if (historyInitialized && selectedId) scheduleMessages();
   updateMessageEditor();
+  syncPendingFeedbackTimer();
 }
 function renderFailedInputRecovery(root) {
   const key = draftKey(), scope = privateInputScope(session);
@@ -11626,7 +12043,7 @@ async function sendMessage() {
   if (threadDeletionLocked() || threadDeleted(selectedId)) return;
   if (editingQueuedMessage) return submitQueuedMessageEdit();
   if (editingMessage) return;
-  if (busy || stopping || pending || threadReadOnly(undefined, creating ? "create" : "send") || !connected) return;
+  if (busy || stopping || pending || threadReadOnly() || !connected) return;
   if (composerAttachmentsLoading()) { notice("图片正在读取，请稍后发送"); return; }
   let draft = snapshotDraft();
   const prefix = goalPrefix(draft.text, draft.skills);
@@ -11654,6 +12071,8 @@ async function sendMessage() {
   }
   const id = selectedId;
   const version = selectionVersion;
+  const scope = privateInputScope(session), generation = recoveryGeneration;
+  const currentAuthorization = () => scope === privateInputScope(session) && generation === recoveryGeneration;
   const wasCreating = creating;
   const queueReadVersion = queueVersion;
   const rememberedModel = creating && !selectedModel ? rememberedNewChatModel() : null;
@@ -11681,10 +12100,12 @@ async function sendMessage() {
     id: randomId(), action, payload, draft, goalReadVersion: goalVersion,
     deviceId: session.device.id, selectionToken, time: Date.now()
   } : null;
-  sending = { payload, phase: "sending" };
+  const submission = { payload, phase: "sending" };
+  sending = submission;
   busy = true; updateComposer();
   try {
     const result = await mutate(action, payload, { reliable: true, receiptId: goalRecord?.id });
+    if (!currentAuthorization()) return;
     if (goalMode) {
       await applyGoalComposerReceipt(pending?.id === goalRecord.id ? pending : goalRecord,
         { state: "completed", result }, { allowSelection: true });
@@ -11695,8 +12116,12 @@ async function sendMessage() {
     if (queued) {
       return;
     }
-    sending.phase = "syncing"; updateComposer();
-    void loadSidebar().catch(error => notice(`消息已发送，但会话列表更新失败：${error.message}`, true));
+    submission.phase = "syncing"; updateComposer();
+    void loadSidebar(null, { fresh: true }).catch(error => {
+      if (currentAuthorization()) recordDiagnostic("remote.send.sidebar", {
+        phase: "failure", errorType: error?.name || "Error"
+      });
+    });
     if (selectionVersion === version) {
       if (result.threadId && result.threadId !== selectedId) {
         if (wasCreating) await selectCreatedThread(result.threadId);
@@ -11705,6 +12130,7 @@ async function sendMessage() {
       else await reloadThread();
     }
   } catch (error) {
+    if (!currentAuthorization()) return;
     if (goalMode) {
       const record = pending?.id === goalRecord.id ? pending : goalRecord;
       const outcome = await applyGoalComposerReceipt(record, error.goalReceipt || {
@@ -11716,17 +12142,24 @@ async function sendMessage() {
       }
       return;
     }
-    if (error.deliveryPending) notice("正在自动核对原生接收状态，不会重发消息。");
-    else notice(sending?.phase === "syncing" ? `消息已发送，但会话同步失败：${error.message}` : error.message, true);
-  } finally { sending = null; busy = false; updateComposer(); }
+    if (error.pendingFeedback) updateComposer();
+    else if (error.deliveryPending) notice("正在自动核对原生接收状态，不会重发消息。");
+    else if (submission.phase === "syncing") recordDiagnostic("remote.send.reload", {
+      phase: "failure", errorType: error?.name || "Error"
+    });
+    else notice(error.message, true);
+  } finally {
+    if (sending === submission) { sending = null; busy = false; updateComposer(); }
+  }
 }
 async function stopGeneration() {
   if (stopping || compactionLocked() || busy || threadReadOnly() || !connected || !selectedId || !isActiveThread()) return;
   const id = selectedId, version = selectionVersion;
   stopping = true; updateComposer();
   try {
-    await mutate("stop", { threadId: id });
-    notice("已请求停止并清理此会话的后台终端");
+    const result = await mutate("stop", { threadId: id });
+    notice(result?.cleanupPending ? result.message || "会话已停止，后台终端清理尚未确认"
+      : "已请求停止并清理此会话的后台终端");
     if (version === selectionVersion && selectedId === id) await reloadThread();
   } catch (error) { notice(error.message, true); }
   finally { stopping = false; updateComposer(); }
@@ -11735,13 +12168,11 @@ async function applyCompactionReceipt(id, receiptId, receipt) {
   const current = compactions.get(id);
   if (!current || current.receiptId !== receiptId || current.state === "idle") return;
   if (receipt.state === "pending") {
-    notice("压缩请求仍在处理。不会自动重发；可稍后查回执或重新读取会话。", true);
     updateComposer();
     return;
   }
   if (receipt.state === "unknown") {
     setCompactionState(id, { ...current, state: "unknown" });
-    notice(receipt.result?.message || "压缩请求结果未知。不会自动重发，请查回执或在本机核对。", true);
     updateComposer();
     return;
   }
@@ -11823,17 +12254,12 @@ async function compactContext() {
     }
   } finally { updateComposer(); }
 }
-function remoteReadConnected(value = session) {
-  return value?.nativeConnected === true || value?.serviceConnected === true;
-}
-function remoteConnectionReady(value = session, source = stream) {
-  return value?.serviceConnected === true
-    || value?.nativeConnected === true && source?.readyState === EventSource.OPEN;
-}
 function setConnection(value) {
+  const changed = connected !== value;
   const restored = !connected && value;
   if (connected && !value) ++connectionCycleVersion;
   connected = value;
+  if (changed) recordRuntimeDiagnostic("connection.state");
   if (!value) stopRelatedSessionTimers();
   else scheduleRelatedOperationCheck();
   if (restored && messageSkillLoadScope && skillScope !== messageSkillLoadScope && !skillLoading) {
@@ -11845,7 +12271,7 @@ function setConnection(value) {
       || connectionRtt.nativeVersion !== nativeConnectionVersion
       || connectionRtt.connectionVersion !== connectionCycleVersion)) connectionRtt = null;
   const guidance = $("#desktop-connection-guidance");
-  if (guidance) guidance.hidden = remoteReadConnected();
+  if (guidance) guidance.hidden = session?.nativeConnected !== false || session?.serviceConnected === true;
   renderConnectionIndicator();
   updateComposer();
   if (thread?.requests?.some(request => request.method === "remote/requestUserInputAsync")) renderApprovals();
@@ -11887,15 +12313,18 @@ function renderConnectionIndicator() {
     const measurement = currentMeasurements.find(measurement => measurement.origin === route.origin);
     return { name: route.name, measurement: measurement?.status === "unknown" ? null : measurement };
   }) : [];
-  renderConnectionLatency(node, { connected, measured, measurements, dual });
+  const probing = connectionRecoveryRequest?.scope === privateInputScope(session);
+  node.disabled = probing;
+  node.setAttribute("aria-busy", String(probing));
+  renderConnectionLatency(node, { connected, measured, measurements, dual, probing });
 }
-function renderConnectionLatency(node, { connected, measured, measurements, dual }) {
+function renderConnectionLatency(node, { connected, measured, measurements, dual, probing = false }) {
   const ready = measurement => measurement?.status === "ready"
     && Number.isFinite(measurement.milliseconds) && measurement.milliseconds >= 0;
   if (dual) {
     const rows = measurements.map(({ name, measurement }) => {
       const row = document.createElement("span");
-      const status = !connected ? "连接中断" : ready(measurement) ? `${Math.round(measurement.milliseconds)} ms`
+      const status = !connected ? probing ? "正在探测…" : "连接中断" : ready(measurement) ? `${Math.round(measurement.milliseconds)} ms`
         : measurement?.status === "unavailable" ? "暂不可用" : "测量中…";
       row.className = `connection-route ${ready(measurement) ? "online" : measurement?.status === "unavailable" || !connected ? "unavailable" : "pending"}`;
       row.textContent = `${name} ${status}`;
@@ -11903,7 +12332,8 @@ function renderConnectionLatency(node, { connected, measured, measurements, dual
     });
     node.replaceChildren(...rows);
   } else {
-    node.textContent = !connected ? "连接中断 · 自动重连" : measured ? `${Math.round(measured.milliseconds)} ms` : "连接中…";
+    node.textContent = !connected ? probing ? "正在探测…" : "连接中断 · 自动重连"
+      : measured ? `${Math.round(measured.milliseconds)} ms` : "连接中…";
   }
   const online = dual ? connected && measurements.some(({ measurement }) => ready(measurement)) : !!measured;
   node.classList.toggle("dual-channel", dual);
@@ -11974,19 +12404,21 @@ function receive(event) {
   if (event.method === "remote/unauthorized") { requireAuthentication(); return; }
   if (["remote/disconnected", "remote/reconnected"].includes(event.method)) {
     const available = event.method === "remote/reconnected";
+    const nativeAvailable = event.params?.nativeConnected ?? available;
+    const serviceAvailable = event.params?.serviceConnected ?? false;
     ++nativeConnectionVersion;
-    if (!available) {
-      if (session) { session.nativeConnected = false; session.serviceConnected = false; }
-      setConnection(false);
-      return;
+    if (session) {
+      session.nativeConnected = nativeAvailable;
+      session.serviceConnected = serviceAvailable;
     }
-    void syncConnectionState().catch(() => {});
-    void withRecoveryErrorSilence(() => refreshAll({ fresh: true })).catch(() => {});
+    setConnection((nativeAvailable || serviceAvailable) && stream?.readyState === EventSource.OPEN);
+    if (available) {
+      void withRecoveryErrorSilence(() => refreshConnectedSession()).catch(() => {});
+    }
     return;
   }
   if (event.method === "remote/resync") {
-    void withRecoveryErrorSilence(() =>
-      Promise.all([syncConnectionState(), refreshAll({ fresh: true })])).catch(() => {});
+    void withRecoveryErrorSilence(() => refreshConnectedSession()).catch(() => {});
     return;
   }
   const params = { ...event.params || {} };
@@ -12024,10 +12456,11 @@ function receive(event) {
     scheduleReload();
   if (event.method === "thread/deleted" && typeof eventThreadId === "string") {
     applyThreadDeletion(eventThreadId);
-    void loadSidebar().catch(() => {});
+    void loadSidebar(null, { fresh: true }).catch(() => {});
     return;
   }
   if (typeof eventThreadId === "string" && threadDeleted(eventThreadId)) return;
+  rememberBackgroundThreadDisplay(event, params);
   if (event.method === "remote/requestsChanged" || event.method === "serverRequest/resolved") {
     const id = params.threadId ?? params.conversationId;
     let resolved = event.method === "serverRequest/resolved";
@@ -12095,7 +12528,9 @@ function receive(event) {
     if (event.method === "thread/goal/updated" || event.method === "thread/goal/cleared") {
       notifiedGoal = event.method === "thread/goal/updated" ? params.goal : null;
       ++goalVersion;
-      if (thread) { thread.goal = notifiedGoal; renderGoalStatus(); }
+      if (thread) thread.goal = notifiedGoal;
+      rememberThreadDisplay({ id: selectedId, goal: notifiedGoal });
+      renderGoalStatus();
     }
     if (event.method === "thread/tokenUsage/updated") {
       notifiedTokenUsage = params.tokenUsage; ++tokenUsageVersion;
@@ -12211,10 +12646,11 @@ function receive(event) {
   }
 }
 function disconnect() {
+  clearPendingFeedbackTimer();
   $("#video-preview-dialog")?.close();
   clearRemoteChannels();
   resetRelatedSessions();
-  sidebarViewSave = null;
+  sidebarPreferenceScope = null;
   stopCatalogRefresh();
   stopGoalLiveTimer();
   closeContextUsageTip();
@@ -12240,15 +12676,17 @@ function withRecoveryErrorSilence(task) {
   return Promise.resolve().then(task).finally(() => { recoveryErrorSilenceDepth--; });
 }
 async function refreshAll({ fresh = false } = {}) {
-  if (!session) return;
-  if (refreshRequest?.deviceId === session.device.id) {
+  if (!session || pageLeaving || document.hidden) return;
+  const generation = foregroundReadGeneration;
+  if (refreshRequest?.deviceId === session.device.id && refreshRequest.generation === generation) {
     if (fresh) refreshRequest.again = true;
     return refreshRequest.promise;
   }
   const deviceId = session?.device.id;
-  const request = { deviceId, again: false, promise: null };
+  const request = { deviceId, generation, again: false, promise: null };
   const promise = (async () => {
     do {
+      if (generation !== foregroundReadGeneration) return;
       request.again = false;
       const sidebarRead = loadSidebar(null, { fresh }).catch(() => null);
       const id = selectedId || (!creating ? new URLSearchParams(location.hash.slice(1)).get("thread") : null);
@@ -12256,11 +12694,12 @@ async function refreshAll({ fresh = false } = {}) {
         await (id ? selectedId
           ? reloadThread() : selectThread(id, { closeSidebar: false }) : Promise.resolve());
       } catch (error) {
+        if (generation !== foregroundReadGeneration) return;
         if (!request.again || deviceId !== session?.device.id) throw error;
       }
       await sidebarRead;
       fresh = true;
-    } while (request.again && deviceId === session?.device.id);
+    } while (request.again && generation === foregroundReadGeneration && deviceId === session?.device.id);
   })();
   request.promise = promise; refreshRequest = request;
   try { await promise; }
@@ -12275,23 +12714,29 @@ function openStream({ suppressErrors = false } = {}) {
     return;
   }
   stream = current;
+  recordRuntimeDiagnostic("stream.create", { phase: "create" });
   const deviceId = session.device.id;
   const isCurrent = () => stream === current && session?.device.id === deviceId;
   current.onopen = async () => {
     if (!isCurrent()) return;
+    // 内层线路已经恢复时，撤销外层旧重试，避免刚连上的 socket 又被计时器关闭。
+    clearTimeout(streamRetry); streamRetry = null;
+    recordRuntimeDiagnostic("stream.open", { phase: "open" });
     streamBackoff = 1000;
     try {
-      const refresh = () => Promise.all([
-        syncConnectionState(current).then(applied => { if (applied) void resolvePending(); }),
-        refreshAll({ fresh: true })
-      ]);
+      const refresh = async () => {
+        if (!await syncConnectionState(current)) return;
+        void resolvePending();
+        await refreshAll({ fresh: true });
+      };
       await (suppressErrors ? withRecoveryErrorSilence(refresh) : refresh());
     } catch (error) { if (isCurrent() && !suppressErrors) notice(error.message, true); }
   };
   current.onmessage = event => { if (isCurrent()) { try { receive(JSON.parse(event.data)); } catch {} } };
-  current.onerror = () => {
+  current.onerror = event => {
     if (!isCurrent()) return;
-    setConnection(session?.serviceConnected === true);
+    recordRuntimeDiagnostic("stream.error", { phase: "failure", reason: event?.reason, errorType: event?.name });
+    setConnection(false);
     if (streamRetry !== null) return;
     const delay = streamBackoff;
     streamBackoff = Math.min(streamBackoff * 2, 30000);
@@ -12301,9 +12746,11 @@ function openStream({ suppressErrors = false } = {}) {
 function reconnectStream(delay = streamBackoff, options = {}) {
   if (pageLeaving || (document.hidden && !sharedEventsAvailable())) return;
   clearTimeout(streamRetry);
+  recordRuntimeDiagnostic("stream.retry", { phase: "retry", delayMs: delay });
   streamRetry = setTimeout(() => {
     streamRetry = null;
     if (!session || pageLeaving || (document.hidden && !sharedEventsAvailable())) return;
+    recordRuntimeDiagnostic("stream.retry", { phase: "start" });
     try { openStream(options); }
     catch {
       if (session && !pageLeaving)
@@ -12345,11 +12792,38 @@ function startConnectionPoll(deviceId) {
       }
       if (!isCurrent()) return;
       if (privateInputScope(current) !== privateInputScope(session)) { await reconnectChangedAuthorization(); return; }
-      session = current; setConnection(remoteConnectionReady(current)); renderApprovals();
+      const wasConnected = connected;
+      session = current;
+      setConnection((current.nativeConnected || current.serviceConnected) && stream?.readyState === EventSource.OPEN);
+      // 连接在线不等于当前会话已读完；只补失败或未完成的读取，成功后停止补读。
+      if (connected && (!wasConnected || selectedThreadReadIncomplete()
+          && !selectionController && !threadRequest && !historyRequest))
+        void withRecoveryErrorSilence(() => refreshAll({ fresh: true })).catch(() => {});
+      void recoverQuestionReceipts();
+      renderApprovals();
       void loadSidebar(null, { resourcePriority: "background" }).catch(() => {});
     }
     finally { if (connectionPollPending === request) connectionPollPending = null; }
   }, 15000);
+}
+function selectedThreadReadIncomplete() {
+  return !!selectedId && !creating && !threadDeleted(selectedId) && !sideThreadExpired(selectedId)
+    && (thread?.id !== selectedId || threadReadFailed || latestHistoryReadFailed
+      || !historyInitialized || transcriptChecking || !!historyError);
+}
+function retireForegroundReads(reason = "页面进入后台") {
+  clearPendingFeedbackTimer();
+  ++foregroundReadGeneration;
+  ++threadReadVersion;
+  const controllers = [selectionController, historyController, threadRequest?.controller, sidebarRequest?.controller];
+  selectionController = null; historyController = null;
+  threadRequest = null; historyRequest = null; refreshRequest = null; sidebarRequest = null;
+  historyLoading = false; historyLoadingTurnId = null; historyLoadingOlder = false;
+  for (const controller of controllers) controller?.abort(new DOMException(reason, "AbortError"));
+  // 仅退役显示读取；保留草稿、当前内容、写请求及未知回执，不把取消当作读取失败。
+  clearTimeout(refreshTimer); refreshTimer = null;
+  clearTimeout(sidebarTimer); sidebarTimer = null;
+  syncHistoryButtons();
 }
 function suspendPage() {
   if (pageLeaving) return;
@@ -12357,18 +12831,30 @@ function suspendPage() {
   stopGoalLiveTimer();
   finishQueueDrag();
   sessionMenu?.close(); stopRelatedSessionTimers();
-  if (session && $("#prompt")) { rememberDraft(); rememberTranscript(); rememberReadingPosition(); }
+  rememberPageInputs();
   closeContextUsageTip();
   pageLeaving = true;
+  retireForegroundReads();
   stopCatalogRefresh();
   stream?.close(); stream = null;
   stopConnectionPoll();
   cancelConnectionProbe();
   clearTimeout(streamRetry); streamRetry = null;
 }
+function rememberPageInputs() {
+  if (session && $("#prompt")) { rememberDraft(); rememberTranscript(); rememberReadingPosition(); }
+}
+function recordRuntimeDiagnostic(name, fields = {}) {
+  recordDiagnostic(name, {
+    threadId: selectedId, visible: !document.hidden, online: navigator.onLine !== false,
+    pageLeaving, connected, readyState: stream?.readyState ?? EventSource.CLOSED,
+    generation: foregroundReadGeneration, ...fields
+  });
+}
 function resumePage() {
   const wasLeaving = pageLeaving;
   pageLeaving = false;
+  recordRuntimeDiagnostic("page.resume");
   if (!session) { retryConnectionRecovery(); return; }
   if (!wasLeaving) return;
   refreshCachedCatalogs();
@@ -12376,7 +12862,7 @@ function resumePage() {
   startConnectionPoll(session.device.id);
   scheduleRelatedOperationCheck();
   ensureStream({ suppressErrors: wasLeaving });
-  void withRecoveryErrorSilence(() => Promise.all([syncConnectionState(), refreshAll({ fresh: true })]))
+  void withRecoveryErrorSilence(() => refreshConnectedSession())
     .catch(() => {}).finally(drainPendingNotificationOpen);
 }
 async function connect(signal) {
@@ -12432,6 +12918,7 @@ async function connectPage(signal) {
   openStream();
   const deviceId = session.device.id;
   startConnectionPoll(deviceId);
+  void recoverQuestionReceipts();
   try { await refreshAll(); }
   catch (error) { if (session?.device.id === deviceId) notice(error.message, true); }
   if (session?.device.id === deviceId && !selectedId && !creating
@@ -12441,12 +12928,57 @@ async function connectPage(signal) {
   }
   updateComposer(); void resolvePending(); drainPendingNotificationOpen();
 }
-function retryConnectionRecovery({ suppressStreamErrors = false } = {}) {
+function probeConnectionRecovery() {
+  if (!session || pageLeaving || document.hidden || initialAuthenticationRequired)
+    return Promise.resolve(false);
+  const scope = privateInputScope(session);
+  if (connectionRecoveryRequest?.scope === scope) return connectionRecoveryRequest.promise;
+  const request = { scope, promise: null };
+  connectionRecoveryRequest = request;
+  // 用户要求点击“连接中断”和网络恢复都主动探测；复用同一请求，保留草稿和未知写回执。
+  // 更换轮询代次后仅取消旧连接探测，防止旧网络的迟到结果覆盖新连接状态。
+  request.promise = withRecoveryErrorSilence(async () => {
+    if (pageLeaving || document.hidden || scope !== privateInputScope(session)) return false;
+    startConnectionPoll(session.device.id);
+    cancelConnectionProbe();
+    ensureStream({ suppressErrors: true });
+    const applied = await syncConnectionState(stream, { recoveryProbe: true });
+    if (applied && !pageLeaving && !document.hidden && scope === privateInputScope(session)) {
+      refreshCachedCatalogs();
+      void recoverQuestionReceipts();
+      void withRecoveryErrorSilence(() => refreshAll({ fresh: true })).catch(() => {});
+    }
+    return applied;
+  }).finally(() => {
+    if (connectionRecoveryRequest !== request) return;
+    connectionRecoveryRequest = null;
+    renderConnectionIndicator();
+  });
+  renderConnectionIndicator();
+  return request.promise;
+}
+async function refreshConnectionFromIndicator() {
+  const scope = privateInputScope(session);
+  try {
+    const applied = await probeConnectionRecovery();
+    if (applied && !pageLeaving && !document.hidden && scope === privateInputScope(session))
+      await Promise.all([loadModels(true), refreshSkillCatalog()]);
+  } catch (error) {
+    if (!pageLeaving && !document.hidden && scope === privateInputScope(session))
+      notice(connectionErrorMessage(error), true);
+  }
+}
+function retryConnectionRecovery({ suppressStreamErrors = false, recoveryProbe = false } = {}) {
   if (pageLeaving || document.hidden || navigator.onLine === false || initialAuthenticationRequired || connecting) return;
   if (!session) { void connect().catch(handleInitialConnectionError); return; }
+  if (recoveryProbe) {
+    void probeConnectionRecovery().catch(() => {});
+    return;
+  }
+  void recoverQuestionReceipts();
   refreshCachedCatalogs();
   ensureStream({ suppressErrors: suppressStreamErrors });
-  void withRecoveryErrorSilence(() => Promise.all([syncConnectionState(), refreshAll({ fresh: true })]))
+  void withRecoveryErrorSilence(() => refreshConnectedSession())
     .catch(() => {});
 }
 async function copyText(text) {
@@ -12499,10 +13031,11 @@ if (isAndroidContainer()) {
   });
 }
 window.addEventListener("online", () => {
-  retryConnectionRecovery();
+  retryConnectionRecovery({ recoveryProbe: true });
 });
 window.addEventListener("offline", () => {
   stopCatalogRefresh();
+  retireForegroundReads("网络已离线");
   if (session) setConnection(false);
   else if (!initialAuthenticationRequired) showConnectionRecovery(new TypeError("网络已离线"));
 });
@@ -12510,6 +13043,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     stopCatalogRefresh();
     if (session) { rememberTranscript(); rememberReadingPosition(); }
+    retireForegroundReads();
     stopActivityTimer();
     stopGoalLiveTimer();
     finishQueueDrag();
@@ -12519,6 +13053,8 @@ document.addEventListener("visibilitychange", () => {
     clearTimeout(streamRetry); streamRetry = null;
     return;
   }
+  recordRuntimeDiagnostic("page.visible");
+  if (pageLeaving) { resumePage(); return; }
   syncActivityTimer();
   syncGoalLiveTimer();
   if (session) startConnectionPoll(session.device.id);
@@ -12526,7 +13062,11 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("pagehide", suspendPage);
 window.addEventListener("blur", () => finishQueueDrag());
-window.addEventListener("beforeunload", suspendPage);
+window.addEventListener("beforeunload", () => {
+  recordRuntimeDiagnostic("page.beforeunload");
+  // 导航可能被取消或交给 App 内置浏览器；只有 pagehide 才表示当前文档真正离开。
+  rememberPageInputs();
+});
 window.addEventListener("pageshow", resumePage);
 window.addEventListener("popstate", event => {
   if (!session) return;

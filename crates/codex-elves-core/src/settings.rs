@@ -140,8 +140,6 @@ pub struct RelayProfile {
     pub relay_mode: RelayMode,
     #[serde(rename = "officialMixApiKey", default)]
     pub official_mix_api_key: bool,
-    #[serde(rename = "testModel", default)]
-    pub test_model: String,
     #[serde(rename = "configContents", default)]
     pub config_contents: String,
     #[serde(rename = "authContents", default)]
@@ -233,7 +231,6 @@ impl Default for RelayProfile {
             local_proxy_enabled: None,
             relay_mode: RelayMode::Official,
             official_mix_api_key: false,
-            test_model: String::new(),
             config_contents: String::new(),
             auth_contents: String::new(),
             use_common_config: true,
@@ -821,6 +818,9 @@ pub struct BackendSettings {
     pub codex_app_plugin_marketplace_unlock: bool,
     #[serde(rename = "codexAppTaskBoard", default = "default_true")]
     pub codex_app_task_board: bool,
+    // 用户要求“活动视图精简”独立控制、默认关闭；旧配置缺少此字段时也保持原生展示。
+    #[serde(rename = "codexAppActivityViewCompact", default)]
+    pub codex_app_activity_view_compact: bool,
     #[serde(rename = "codexAppSessionDelete", default = "default_true")]
     pub codex_app_session_delete: bool,
     #[serde(rename = "codexAppMarkdownExport", default)]
@@ -960,6 +960,7 @@ impl Default for BackendSettings {
             codex_app_plugin_entry_unlock: true,
             codex_app_plugin_marketplace_unlock: true,
             codex_app_task_board: true,
+            codex_app_activity_view_compact: false,
             codex_app_session_delete: true,
             codex_app_markdown_export: false,
             codex_app_project_move: false,
@@ -1061,7 +1062,6 @@ impl BackendSettings {
                 local_proxy_enabled: Some(false),
                 relay_mode: RelayMode::MixedApi,
                 official_mix_api_key: true,
-                test_model: String::new(),
                 config_contents: String::new(),
                 auth_contents: String::new(),
                 use_common_config: true,
@@ -1113,7 +1113,6 @@ impl BackendSettings {
             local_proxy_enabled: Some(false),
             relay_mode: RelayMode::Official,
             official_mix_api_key: false,
-            test_model: String::new(),
             config_contents: String::new(),
             auth_contents: String::new(),
             use_common_config: true,
@@ -1366,6 +1365,14 @@ impl SettingsStore {
         migrate_native_fast_setting(&mut raw);
         raw.remove("wsFailureFallbackToHttp");
         merge_known_setting_fields(&mut raw, &payload)?;
+        // 用户要求废弃供应商隐藏测试模型；局部保存时也清除旧字段，保留其他未知配置。
+        if let Some(profiles) = raw.get_mut("relayProfiles").and_then(Value::as_array_mut) {
+            for profile in profiles {
+                if let Some(profile) = profile.as_object_mut() {
+                    profile.remove("testModel");
+                }
+            }
+        }
         let settings = normalize_settings_config_sections(
             serde_json::from_value(Value::Object(raw.clone()))
                 .context("更新后的设置格式无效，未写入配置文件")?,
@@ -1483,6 +1490,7 @@ fn merge_known_setting_fields(
     merge_bool_setting(target, source, "codexAppPluginEntryUnlock");
     merge_bool_setting(target, source, "codexAppPluginMarketplaceUnlock");
     merge_bool_setting(target, source, "codexAppTaskBoard");
+    merge_bool_setting(target, source, "codexAppActivityViewCompact");
     merge_bool_setting(target, source, "codexAppSessionDelete");
     merge_bool_setting(target, source, "codexAppMarkdownExport");
     merge_bool_setting(target, source, "codexAppProjectMove");
@@ -1946,6 +1954,7 @@ mod tests {
         assert!(settings.codex_app_plugin_entry_unlock);
         assert!(settings.codex_app_plugin_marketplace_unlock);
         assert!(settings.codex_app_task_board);
+        assert!(!settings.codex_app_activity_view_compact);
         assert!(settings.codex_app_session_delete);
         assert!(!settings.codex_app_markdown_export);
         assert!(!settings.codex_app_project_move);
@@ -2118,11 +2127,12 @@ mod tests {
     }
 
     #[test]
-    fn settings_missing_workspace_checkpoint_defaults_disabled() {
+    fn settings_missing_optional_ui_enhancements_default_disabled() {
         let settings: BackendSettings = serde_json::from_str("{}").unwrap();
         let serialized = serde_json::to_value(settings).unwrap();
 
         assert_eq!(serialized["codexAppWorkspaceCheckpoint"], json!(false));
+        assert_eq!(serialized["codexAppActivityViewCompact"], json!(false));
     }
 
     #[test]
@@ -2194,12 +2204,15 @@ mod tests {
     }
 
     #[test]
-    fn settings_store_update_persists_open_in_quick_access() {
+    fn settings_store_update_persists_page_enhancements() {
         let temp = tempfile::tempdir().unwrap();
         let store = SettingsStore::new(temp.path().join("settings.json"));
 
         let updated = store
-            .update(json!({ "codexAppOpenInQuickAccess": false }))
+            .update(json!({
+                "codexAppOpenInQuickAccess": false,
+                "codexAppActivityViewCompact": true
+            }))
             .unwrap();
         let loaded = store.load().unwrap();
 
@@ -2211,6 +2224,11 @@ mod tests {
             serde_json::to_value(loaded).unwrap()["codexAppOpenInQuickAccess"],
             json!(false)
         );
+        assert!(store.load().unwrap().codex_app_activity_view_compact);
+        store
+            .update(json!({ "codexAppActivityViewCompact": false }))
+            .unwrap();
+        assert!(!store.load().unwrap().codex_app_activity_view_compact);
     }
 
     #[test]
@@ -2374,13 +2392,20 @@ mod tests {
 
     #[test]
     fn relay_profile_official_mix_api_key_defaults_to_false() {
-        let profile: RelayProfile =
-            serde_json::from_str(r#"{"id":"official","name":"官方","relayMode":"official"}"#)
-                .unwrap();
+        let profile: RelayProfile = serde_json::from_str(
+            r#"{"id":"official","name":"官方","relayMode":"official","testModel":"retired-model"}"#,
+        )
+        .unwrap();
 
         assert_eq!(profile.relay_mode, RelayMode::Official);
         assert!(!profile.official_mix_api_key);
-        assert!(profile.test_model.is_empty());
+        assert!(
+            serde_json::to_value(profile)
+                .unwrap()
+                .get("testModel")
+                .is_none(),
+            "旧供应商测试模型应忽略且不再序列化"
+        );
     }
 
     #[test]
@@ -3962,7 +3987,7 @@ experimental_bearer_token = "sk-existing""#
         let store = SettingsStore::new(path.clone());
         std::fs::write(
             &path,
-            r#"{"providerSyncEnabled":false,"customField":{"nested":true}}"#,
+            r#"{"providerSyncEnabled":false,"customField":{"nested":true},"relayProfiles":[{"id":"legacy","name":"旧供应商","testModel":"retired-model","customProviderField":true}]}"#,
         )
         .unwrap();
 
@@ -3977,6 +4002,11 @@ experimental_bearer_token = "sk-existing""#
         assert_eq!(saved["providerSyncEnabled"], json!(true));
         assert_eq!(saved["codexExtraArgs"], Value::Null);
         assert_eq!(saved["customField"], json!({"nested": true}));
+        assert!(saved["relayProfiles"][0].get("testModel").is_none());
+        assert_eq!(
+            saved["relayProfiles"][0]["customProviderField"],
+            json!(true)
+        );
     }
 
     #[test]

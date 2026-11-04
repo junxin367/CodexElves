@@ -688,6 +688,7 @@ fn archived_lookup_workspace_move_and_sort_keys_match_expected_shape() {
             "db_path": db_path.to_string_lossy().to_string(),
             "rollout_path": rollout_path.to_string_lossy().to_string(),
             "history": [],
+            "contextUsage": null,
             "summary": {
                 "totalUsage": {
                     "inputTokens": 0,
@@ -783,6 +784,11 @@ fn thread_usage_history_reads_rollout_token_count_events() {
             "thread_updated_at_ms": 100000,
             "db_path": db_path.to_string_lossy().to_string(),
             "rollout_path": rollout_path.to_string_lossy().to_string(),
+            "contextUsage": {
+                "usedTokens": 2250,
+                "contextWindow": 258400,
+                "observedAt": "2026-06-02T05:01:00Z"
+            },
             "history": [
                 {
                     "source": "rollout-history",
@@ -866,6 +872,23 @@ fn thread_usage_summary_omits_history_and_preserves_totals() {
     assert!(value.get("history").is_none());
     assert_eq!(value["summary"]["totalUsage"]["totalTokens"], 5500);
     assert_eq!(value["summary"]["lastTurnUsage"]["totalTokens"], 1320);
+    assert_eq!(value["contextUsage"]["usedTokens"], 1320);
+    assert_eq!(value["contextUsage"]["contextWindow"], 258400);
+    assert_eq!(
+        value["contextUsage"]["observedAt"],
+        "2026-06-02T05:00:00Z"
+    );
+    // 上下文快照先于累计用量去重更新：零占用有效，限流通知不能覆盖最近一次有效占用。
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new().append(true).open(&rollout_path).unwrap();
+    writeln!(file, r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":5000,"cached_input_tokens":1500,"output_tokens":500,"total_tokens":5500}},"last_token_usage":{{"total_tokens":0}},"model_context_window":258400}}}}}}"#).unwrap();
+    writeln!(file, r#"{{"type":"event_msg","payload":{{"type":"token_count","info":null}}}}"#).unwrap();
+    let cleared = adapter.codex_thread_usage_summary(&session("local:t1", "Codex Thread"));
+    assert_eq!(cleared["contextUsage"]["usedTokens"], 0);
+    assert_eq!(cleared["contextUsage"]["contextWindow"], 258400);
+    writeln!(file, r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"total_tokens":10}},"model_context_window":0}}}}}}"#).unwrap();
+    let unknown = adapter.codex_thread_usage_summary(&session("local:t1", "Codex Thread"));
+    assert!(unknown["contextUsage"].is_null());
 }
 
 // Codex 升级后换了 SQLite schema（threads 表不存在）时，token 统计应回退到

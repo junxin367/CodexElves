@@ -60,7 +60,8 @@ final class BrowserRoutePolicy {
     static boolean reservedProxyHost(String host) {
         try {
             String normalized = normalizeHost(host);
-            return PROXY_HOST.equals(normalized) || PROXY_FALLBACK_HOST.equals(normalized);
+            // 127.0.0.1 作为网页目标时指向电脑，不能因手机代理也可监听它而禁止访问。
+            return PROXY_HOST.equals(normalized);
         } catch (IllegalArgumentException invalid) {
             return false;
         }
@@ -138,7 +139,8 @@ final class BrowserRoutePolicy {
             String host = normalizeHost(rawHost);
             if (port == 0 || port > 65535 || port < -1)
                 throw new IllegalArgumentException("端口必须为 1 到 65535");
-            if (reservedProxyHost(host)) throw new IllegalArgumentException("该地址由浏览器内部代理使用");
+            // 无提示地拦截内部代理地址；setError(null) 同时清除地址栏错误图标。
+            if (reservedProxyHost(host)) throw new IllegalArgumentException();
             String scheme = explicit ? parsed.getScheme().toLowerCase(Locale.ROOT)
                 : usesComputer(host) || hostPort || port >= 0 ? "http" : "https";
             String targetHost = host.contains(":") ? "[" + host + "]" : host;

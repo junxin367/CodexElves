@@ -103,7 +103,8 @@ final class BrowserProxy implements AutoCloseable {
     String host() { return host; }
     String password() { return password; }
     boolean matchesChallenge(String host, String challengeRealm) {
-        try { return !closed && realm.equals(challengeRealm) && BrowserRoutePolicy.reservedProxyHost(host); }
+        try { return !closed && realm.equals(challengeRealm)
+            && this.host.equals(BrowserRoutePolicy.normalizeHost(host)); }
         catch (IllegalArgumentException invalid) { return false; }
     }
 

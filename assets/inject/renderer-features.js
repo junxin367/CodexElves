@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "103";
+  const codexDeleteStyleVersion = "109";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -43,7 +43,7 @@
   let codexElvesVersion = window.__CODEX_ELVES_VERSION__ || "unknown";
   const codexElvesBuild = window.__CODEX_ELVES_BUILD__ || "unknown";
   const codexElvesSettingsKey = "codexElvesSettings";
-  const codexAppServerManagerDiscoveryVersion = "11";
+  const codexAppServerManagerDiscoveryVersion = "12";
   const codexAppServerRestartErrorText = "failed to start turn: internal error; agent loop died unexpectedly";
   const codexAppServerRestartRecoveryDelaysMs = [120, 280, 520, 900, 1500, 2400];
   const codexStatsigModelVisibilityConfigId = "107580212";
@@ -72,7 +72,7 @@
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
   const codexOpenInButtonAttribute = "data-codex-open-in-button";
-  const codexOpenInVersion = "11";
+  const codexOpenInVersion = "14";
   const codexOpenInGroupClass = "codex-open-in-group";
   const codexOpenInMenuClass = "codex-open-in-menu";
   const codexOpenInTargetsCacheLimit = 12;
@@ -80,7 +80,7 @@
   const codexOpenInActivationDebounceMs = 500;
   const codexOpenInServiceDiscoveryCooldownMs = 30000;
   const codexOpenInContextMissingCooldownMs = 5000;
-  const codexPromptOptimizeVersion = "18";
+  const codexPromptOptimizeVersion = "20";
   const codexPromptOptimizeButtonAttribute = "data-codex-prompt-optimize-button";
   const codexPromptOptimizePortalClass = "codex-prompt-optimize-portal";
   const codexPromptOptimizeSettingsOverlayClass = "codex-prompt-optimize-settings-overlay";
@@ -94,7 +94,7 @@
   const codexPromptOptimizeCompactCollisionMaxWidth = 140;
   const codexPromptOptimizeCompactCollisionMaxHeight = 84;
   const codexPromptOptimizeMaxRecentContextChars = 100000;
-  const codexWorkspaceCheckpointVersion = "8";
+  const codexWorkspaceCheckpointVersion = "9";
   const codexWorkspaceCheckpointButtonAttribute = "data-codex-workspace-checkpoint-button";
   const codexWorkspaceCheckpointButtonGap = 6;
   const codexWorkspaceCheckpointDialogClass = "codex-workspace-checkpoint-dialog";
@@ -331,6 +331,7 @@
     window.__codexElvesRefreshRuntime();
     return;
   }
+  window.__codexComposerContextUsageCleanup?.();
   try {
     window.__codexElvesPromptOptimizeCleanup?.();
   } catch (_) {}
@@ -389,6 +390,17 @@
     codexElvesAppearanceRegistryPromise = (async () => {
       if (location.protocol !== "app:") {
         throw new Error("当前页面不是 Codex App");
+      }
+      const services = await resolveCodexAppServices();
+      if (services) {
+        if (!services.appActions) throw new Error("当前 Codex 未提供外观动作服务");
+        return new Map([["app.appearance.set_mode", async (action) => {
+          const result = await services.appActions.runInPrimaryWindow({ action });
+          if (result?.ok === false || result?.success === false) {
+            throw new Error(result.message || "Codex 外观切换失败");
+          }
+          return result;
+        }]]);
       }
       let entryUrl = "";
       for (let attempt = 0; attempt < 20 && !entryUrl; attempt += 1) {
@@ -620,6 +632,11 @@
   }
 
   cleanupRemovedConversationHelpers();
+  // 用户要求移除独立最近列表；重新注入时停止旧实例的轮询并恢复被覆盖的原生侧栏。
+  window.__codexElvesRecentSessions?.dispose?.();
+  delete window.__codexElvesRecentSessions;
+  delete window.__codexElvesInstallRecentSessionsAdapter;
+  delete window.__codexElvesRecentSessionsSnapshotCache;
   const selectors = {
     sidebarThread: "[data-app-action-sidebar-thread-id]",
     threadTitle: "[data-thread-title]",
@@ -629,7 +646,7 @@
     nativeMenuBar: "[class*=\"ms-auto\"][class*=\"flex\"][class*=\"items-center\"]",
     headerContextMenuSurface: '[data-testid="app-shell-header-context-menu-surface"]',
     pinnedSummaryPanel: '[data-pip-obstacle="thread-summary-panel"]',
-    pinnedSummaryToggle: 'button[aria-label="切换置顶摘要"], button[title="切换置顶摘要"], button[aria-label="Toggle Pinned Summary"], button[title="Toggle Pinned Summary"]',
+    pinnedSummaryToggle: '[data-thread-summary-panel-toggle], button[aria-label="切换摘要面板固定状态"], button[aria-label="切换置顶摘要"], button[title="切换置顶摘要"], button[aria-label="Toggle Pinned Summary"], button[title="Toggle Pinned Summary"]',
     archiveNav: 'button[aria-label="已归档对话"], button[aria-label="Archived conversations"]',
     pluginSvgPath: 'svg path[d^="M7.94562 14.0277"]',
   };
@@ -653,6 +670,19 @@
     style.id = styleId;
     style.dataset.codexDeleteStyleVersion = codexDeleteStyleVersion;
     style.textContent = `
+      /* 用户要求切换会话时宽度保持稳定：新节点和隐藏标签页从首次布局就使用设置值，
+         不等待路由计时器/RAF 再从原生 768px 放大；右侧会话及其它焦点区域保持原生布局。 */
+      html[data-codex-conversation-view="true"] :is(
+        [data-thread-user-message-navigation-content],
+        [data-pip-obstacle="thread-footer"],
+        [data-codex-conversation-view-target="true"]
+      ):not([data-app-shell-focus-area]:not([data-app-shell-focus-area="main"]),
+        [data-app-shell-focus-area]:not([data-app-shell-focus-area="main"]) *) {
+        box-sizing: border-box !important;
+        width: 100% !important;
+        max-width: var(--codex-conversation-view-max-width) !important;
+        margin-inline: auto !important;
+      }
       :root {
         --codex-elves-modal-overlay-background: rgba(0,0,0,.45);
         --codex-elves-modal-surface: var(
@@ -670,6 +700,52 @@
         --codex-elves-modal-width-standard: 600px;
         --codex-elves-modal-width-large: 640px;
         --codex-elves-modal-viewport-gap: 48px;
+      }
+      /* 用户要求：仅在原生“查看活动”中按会话名、项目名显示两行，不重排原生节点或接管状态。
+         沿用原最近列表的 13/11px 字号、20/16px 行高；上下各 6px，共至少 48px。 */
+      [data-codex-activity-session-layout="true"] [data-app-action-sidebar-thread-row] {
+        min-height: 48px !important;
+        padding-block: 6px !important;
+      }
+      [data-codex-activity-session-layout="true"] [data-thread-title-trigger] {
+        gap: 0 !important;
+      }
+      [data-codex-activity-session-layout="true"] [data-thread-title-trigger] > div:has([data-thread-title]) {
+        align-items: flex-start !important;
+      }
+      [data-codex-activity-session-layout="true"] [data-thread-title-trigger] > div > span:has(> [data-thread-title]) {
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 0 !important;
+      }
+      [data-codex-activity-session-layout="true"] [data-thread-title] {
+        width: 100% !important;
+        font-size: 13px !important;
+        line-height: 20px !important;
+      }
+      /* 用户要求：活动视图精简下，会话标题滚动或 hover 时仍显示第二行项目名称。
+         原生标题滚动时会以 .group:hover [data-marquee-animatable] + .inlineTitleSuffix-* 设置 visibility: hidden，需用 visibility: visible !important 覆盖；
+         内层 span 的原生 group-hover:hidden 由下方 > span 规则的 display: block !important 覆盖。以上声明不可删除；类名为 inlineTitleSuffix-<hash>，不可改回 _inlineTitleSuffix_。 */
+      [data-codex-activity-session-layout="true"] [class*="inlineTitleSuffix"] {
+        display: block !important;
+        visibility: visible !important;
+        min-width: 0;
+        max-width: 100%;
+        flex: 0 1 auto !important;
+        overflow: hidden;
+        font-size: 11px;
+        line-height: 16px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      [data-codex-activity-session-layout="true"] [class*="inlineTitleSuffix"] > span {
+        display: block !important;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      [data-codex-activity-session-layout="true"] [data-thread-title-trigger] > div:has(> [data-thread-secondary-title]) {
+        display: none !important;
       }
       .${actionGroupClass} {
         position: absolute;
@@ -4275,6 +4351,7 @@
       pluginEntryUnlock: true,
       pluginMarketplaceUnlock: true,
       taskBoard: true,
+      activityViewCompact: false,
       sessionDelete: true,
       markdownExport: true,
       projectMove: true,
@@ -4293,6 +4370,7 @@
     pluginEntryUnlock: "codexAppPluginEntryUnlock",
     pluginMarketplaceUnlock: "codexAppPluginMarketplaceUnlock",
     taskBoard: "codexAppTaskBoard",
+    activityViewCompact: "codexAppActivityViewCompact",
     sessionDelete: "codexAppSessionDelete",
     markdownExport: "codexAppMarkdownExport",
     projectMove: "codexAppProjectMove",
@@ -4324,6 +4402,7 @@
       pluginEntryUnlock: false,
       pluginMarketplaceUnlock: false,
       taskBoard: false,
+      activityViewCompact: false,
       sessionDelete: false,
       markdownExport: false,
       projectMove: false,
@@ -4400,7 +4479,7 @@
       dirty.plugins = true;
       return dirty;
     }
-    if (key === "taskBoard") {
+    if (key === "taskBoard" || key === "activityViewCompact") {
       dirty.sidebar = true;
       return dirty;
     }
@@ -4481,6 +4560,7 @@
     launchMode: "patch",
     codexAppVersion: "",
     codexAppWorkspaceCheckpoint: false,
+    codexAppActivityViewCompact: false,
   };
   const codexPluginLegacyEntryUnlockBeforeVersion = "26.601.2237";
 
@@ -4606,6 +4686,8 @@
     codexServiceTierModernModulePart,
   ];
   let codexServiceTierDispatcher = null;
+  let codexFastAppServices = null;
+  let codexFastAppServicesFound = false;
   function codexServiceTierRequestClientClassFromModule(module) {
     if (!module || typeof module !== "object") return null;
     for (const value of Object.values(module)) {
@@ -4624,6 +4706,8 @@
   }
 
   function codexServiceTierRequestClientClassFromConversationManager() {
+    const scopedClient = findCodexAppServerRequestClientInScopedSignals();
+    if (scopedClient) return scopedClient.constructor;
     let manager = window.__codexElvesConversationStateManager || null;
     if (!manager) {
       try {
@@ -4671,7 +4755,282 @@
     return null;
   }
 
+  async function codexLoadedAppModuleExports() {
+    const modules = [];
+    for (const script of Array.from(document.scripts || [])) {
+      if (!script.src?.startsWith(`${location.origin}/assets/`)) continue;
+      try {
+        const entry = await import(script.src);
+        const cache = entry.__webpack_require__?.c;
+        if (cache) modules.push(...Object.values(cache).map((module) => module?.exports).filter(Boolean));
+      } catch {
+      }
+    }
+    return modules;
+  }
+
+  let codexAppServicesModule = null;
+  let codexNativeScopeTokens = [];
+  async function resolveCodexAppServices() {
+    if (codexAppServicesModule?.appServices) return codexAppServicesModule.appServices;
+    const loaded = await codexLoadedAppModuleExports();
+    codexNativeScopeTokens = [...new Set(loaded.flatMap((module) => Object.values(module))
+      .filter((value) => value?.cache === "signal" && typeof value.resolve === "function"))];
+    const modules = loaded
+      .filter((module) => Object.hasOwn(module, "appServices") && module.appServices);
+    const services = new Set(modules.map((module) => module.appServices));
+    if (services.size > 1) throw new Error("无法唯一识别 Codex 原生服务");
+    if (!modules.length) return null;
+    // 用户要求统一补齐新版兼容；保持对 live export 的引用，避免模块 ID/hash 和 RPC 重建失效。
+    codexAppServicesModule = modules[0];
+    return codexAppServicesModule.appServices;
+  }
+
+  const codexNativeCheckpointOperations = new Map();
+  function copyCodexNativeValue(value, changes) {
+    // 原生准备结果携带不可枚举的 dispose；复制时保留 RPC 资源释放语义。
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    for (const [key, next] of Object.entries(changes)) {
+      descriptors[key] = { value: next, writable: true, enumerable: true, configurable: true };
+    }
+    return Object.defineProperties({}, descriptors);
+  }
+
+  async function patchCodexNativeTurnParams(params) {
+    return await window.__codexElvesComposerFast?.patchTurnRequest?.(params) || params;
+  }
+
+  async function beginCodexNativeCheckpoint(operation, params) {
+    if (!codexWorkspaceCheckpointFeatureEnabled()) return;
+    if (operation.creation) return await operation.creation;
+    const threadId = codexWorkspaceCheckpointRequestThreadId(params);
+    if (!threadId) throw new Error("未识别到原生发送的会话 ID");
+    operation.threadId = threadId;
+    operation.params = params;
+    operation.done = new Promise((resolve) => { operation.resolve = resolve; });
+    const pending = codexNativeCheckpointOperations.get(threadId) || new Set();
+    pending.add(operation.done);
+    codexNativeCheckpointOperations.set(threadId, pending);
+    operation.timeout = setTimeout(() => { void finishCodexNativeCheckpoint(operation, null); }, 60000);
+    operation.timeout?.unref?.();
+    operation.creation = (async () => {
+      clearCodexWorkspaceCheckpointCompletionHint(threadId);
+      installCodexWorkspaceCheckpointTurnCompletionListener();
+      try {
+        operation.created = await createCodexWorkspaceCheckpoint({ hostId: "local" }, params);
+      } catch (error) {
+        if (!["checkpoint_bridge_unavailable", "checkpoint_request_timeout"].includes(error?.code)) {
+          showToast(`${error?.message || "创建 Checkpoint 失败"}；本轮发送已取消`);
+          throw error;
+        }
+        operation.created = { skipped: true };
+        showToast("Checkpoint 暂不可用，本轮未保存快照，继续发送");
+      }
+    })();
+    return await operation.creation;
+  }
+
+  async function finishCodexNativeCheckpoint(operation, result) {
+    if (!operation.creation || operation.finished) return;
+    // 新建会话可能先返回 outcome-unknown，最终回执由 onSettled 提供，不能提前绑定。
+    if (result?.status === "outcome-unknown" || result?.firstTurn?.status === "outcome-unknown") return;
+    operation.finished = true;
+    clearTimeout(operation.timeout);
+    try {
+      await operation.creation;
+      let turnId = codexWorkspaceCheckpointTurnId(result?.firstTurn || result);
+      if (!turnId && result != null && operation.params?.clientUserMessageId) {
+        const rpc = findCodexAppServerManagerRpcInScopedSignals();
+        const history = await rpc?.getLoadedConversationHistory(operation.threadId);
+        const matches = history?.turns?.filter((turn) =>
+          turn.params?.clientUserMessageId === operation.params.clientUserMessageId && turn.turnId
+        ) || [];
+        if (matches.length === 1) turnId = matches[0].turnId;
+      }
+      if (turnId && !operation.created?.skipped) {
+        await trackCodexWorkspaceCheckpointBinding(operation.created, { turnId },
+          bindCodexWorkspaceCheckpoint(operation.created, { turnId }));
+      }
+    } catch (error) {
+      // 原生回执已经成功，绑定失败不能让用户误以为消息未发送而重复提交。
+      sendCodexElvesDiagnostic("workspace_checkpoint_native_bind_failed", {
+        errorMessage: error?.message || String(error),
+      });
+    } finally {
+      operation.resolve?.();
+      const pending = codexNativeCheckpointOperations.get(operation.threadId);
+      pending?.delete(operation.done);
+      if (!pending?.size) codexNativeCheckpointOperations.delete(operation.threadId);
+    }
+  }
+
+  async function prepareCodexNativeSubmission(submission, operation) {
+    if (submission?.executionHostId !== "local" || !submission.start?.request) return submission;
+    const start = submission.start;
+    const request = await patchCodexNativeTurnParams(start.request);
+    const context = {
+      ...start.context,
+      beforeSendRequest: async (...args) => {
+        await start.context?.beforeSendRequest?.(...args);
+        await beginCodexNativeCheckpoint(operation, request);
+      },
+    };
+    const nextStart = copyCodexNativeValue(start, { request, context });
+    return copyCodexNativeValue(submission, {
+      start: nextStart,
+      resume: submission.resume ? { ...submission.resume, serviceTier: request.serviceTier } : submission.resume,
+      steer: submission.steer ? {
+        ...submission.steer,
+        ...(submission.steer.userMessageAdmissionStart === start ? { userMessageAdmissionStart: nextStart } : {}),
+      } : submission.steer,
+    });
+  }
+
+  async function invokeCodexNativeTurn(rpc, method, args) {
+    const next = [...args];
+    const operation = {};
+    try {
+      if (method === "startConversation") {
+        next[0] = await patchCodexNativeTurnParams(args[0]);
+        const options = args[1] || {};
+        next[1] = {
+          ...options,
+          beforeFirstTurn: async (context) => {
+            await options.beforeFirstTurn?.(context);
+            await beginCodexNativeCheckpoint(operation, { ...next[0], threadId: context.conversationId });
+          },
+          onSettled: async (result) => {
+            await finishCodexNativeCheckpoint(operation, result);
+            return await options.onSettled?.(result);
+          },
+        };
+      } else if (method === "startTurn" || method === "startTurnWithOutcome") {
+        const start = args[1];
+        if (!start?.request) return await rpc[method](...args);
+        const prepared = await prepareCodexNativeSubmission({
+          executionHostId: "local", start,
+        }, operation);
+        next[1] = prepared.start;
+        // startTurn 的第四个参数优先于 context 中的回调。
+        if (typeof args[3] === "function") {
+          next[3] = async (...values) => {
+            await args[3](...values);
+            await beginCodexNativeCheckpoint(operation, prepared.start.request);
+          };
+        }
+      } else if (method === "editLastUserTurn") {
+        const history = codexWorkspaceCheckpointFeatureEnabled()
+          ? await rpc.getLoadedConversationHistory(args[0]) : null;
+        const intent = codexWorkspaceCheckpointIntentForRequest({ threadId: args[0] });
+        if (intent && codexWorkspaceCheckpointFeatureEnabled()) {
+          const turnId = args[1]?.turnId;
+          if (!turnId) throw new Error("未识别到待编辑轮次，文件未改变");
+          const turn = history?.turns?.find((item) => item.turnId === turnId);
+          const laterTurns = history?.turns?.slice(history.turns.indexOf(turn) + 1) || [];
+          if (!turn || history.turns.some((item) => item.status === "inProgress")
+            || (!args[1]?.allowEarlierMessages && laterTurns.some((item) => item.params?.input?.length))) {
+            throw new Error("无法确认待编辑轮次或会话仍在运行，文件未改变");
+          }
+          intent.phase = "restoring";
+          try {
+            await restoreCodexWorkspaceCheckpointForNativeRevert({ hostId: "local" }, "thread/revert",
+              { threadId: args[0], beforeTurnId: turnId }, intent);
+          } finally {
+            clearCodexWorkspaceCheckpointRestoreIntent(intent);
+          }
+        }
+        next[1] = await patchCodexNativeTurnParams(args[1] || {});
+        if (history) {
+          operation.previousTurnIds = new Set(history.turns.map((turn) => turn.turnId).filter(Boolean));
+          await beginCodexNativeCheckpoint(operation, {
+            threadId: args[0], cwd: history.cwd, input: [{ type: "text", text: args[1]?.message || "" }],
+          });
+        }
+      } else {
+        // 空轮次/后续消息的原生返回值不保证有 turnId，保留原流程及参数契约。
+        next[1] = await patchCodexNativeTurnParams(args[1] || {});
+      }
+      const result = await rpc[method](...next);
+      let checkpointResult = result;
+      if (operation.previousTurnIds) {
+        // 原生编辑返回 void；只在前后历史中恰好新增一个轮次时绑定，不能猜“最后一轮”。
+        try {
+          const history = await rpc.getLoadedConversationHistory(args[0]);
+          const added = history?.turns?.filter((turn) => turn.turnId && !operation.previousTurnIds.has(turn.turnId)) || [];
+          if (added.length === 1) checkpointResult = { turnId: added[0].turnId };
+        } catch (error) {
+          sendCodexElvesDiagnostic("workspace_checkpoint_native_history_failed", { errorMessage: error?.message || String(error) });
+        }
+      }
+      await finishCodexNativeCheckpoint(operation, checkpointResult);
+      return result;
+    } catch (error) {
+      await finishCodexNativeCheckpoint(operation, null);
+      throw error;
+    }
+  }
+
+  let codexNativeRpcInstallPromise = null;
+  async function installCodexNativeRpcCompat() {
+    if (codexNativeRpcInstallPromise) return await codexNativeRpcInstallPromise;
+    codexNativeRpcInstallPromise = (async () => {
+      const runtime = window.__codexElvesNativeRpcCompat;
+      if (!runtime) return false;
+      runtime.configure({
+        enabled: () => codexElvesBackendSettings.enhancementsEnabled === true,
+        prepareSubmission: prepareCodexNativeSubmission,
+        finishSubmission: finishCodexNativeCheckpoint,
+        invokeTurn: invokeCodexNativeTurn,
+        sendRequest: (rpc, [method, params, options]) => {
+          // 在普通适配对象上复用旧拦截，绝不向 RPC Stub 写入或删除属性。
+          // 用户要求注入后不阻断 Windows 沙盒检查；新版 RPC 的 bind/call 会被解析为远程路径，
+          // 必须用普通函数转发，让插件市场与 Checkpoint 两条分支只绑定本地函数。
+          const sendRequest = (...values) => rpc.sendRequest(...values);
+          const adapter = { hostId: "local", sendRequest };
+          if (codexElvesSettings().pluginMarketplaceUnlock) patchPluginMarketplaceRequestClient(adapter);
+          else adapter.sendRequest = (...values) =>
+            codexWorkspaceCheckpointSendRequest(sendRequest, adapter, ...values);
+          return adapter.sendRequest(method, params, options);
+        },
+        prepareWorktree: (request) => applyUpstreamPendingWorktreeOverride({ request }).request,
+      });
+      const services = await resolveCodexAppServices();
+      if (!services) return false;
+      runtime.patchProvider(services);
+      const registry = findCodexLocalRuntimeInScopedSignals((value) =>
+        typeof Object.getOwnPropertyDescriptor(value || {}, "forHost")?.value === "function"
+      , codexNativeScopeTokens);
+      const registryPatched = runtime.patchRegistry(registry);
+      const binding = findCodexLocalRuntimeInScopedSignals((value) =>
+        value?.status === "ready" && value.client?.hostId === "local" && value.client.rpc
+      );
+      const clientPatched = runtime.patchClient(binding?.client);
+      runtime.patchWorktrees(services);
+      return registryPatched || clientPatched;
+    })().catch((error) => {
+      sendCodexElvesDiagnostic("native_rpc_compat_install_failed", { errorMessage: error?.message || String(error) });
+      return false;
+    }).finally(() => { codexNativeRpcInstallPromise = null; });
+    return await codexNativeRpcInstallPromise;
+  }
+
   async function findCodexServiceTierDispatcher() {
+    // 新版 Codex 使用 Rspack 数字 chunk；只检查已执行模块的实际导出能力，
+    // 不依赖文件名、模块 ID 或原生 Fast 组件，亦不执行缓存外的模块工厂。
+    let found = null;
+    for (const module of await codexLoadedAppModuleExports()) {
+      if (Object.hasOwn(module, "appServices")) {
+        codexFastAppServices = module.appServices;
+        codexFastAppServicesFound = true;
+      }
+      for (const value of Object.values(module)) {
+        if (!value || typeof value !== "object") continue;
+        const handlers = Object.getOwnPropertyDescriptor(value, "handlers")?.value;
+        if (handlers instanceof Map && typeof value.dispatchMessage === "function"
+          && typeof value.handleMessage === "function") found = value;
+      }
+    }
+    if (found) return found;
     let lastError = null;
     for (const namePart of codexServiceTierDispatcherModuleParts) {
       let module;
@@ -4742,9 +5101,8 @@
 
   // 从 composer footer 读取用户当前实际选中的模型，并匹配到 catalog 的 slug。
   // 解决：fast 能力判断不应使用后端配置的默认模型，而应使用会话里实际选中的模型。
-  function codexServiceTierComposerSelectedModel() {
+  function codexServiceTierComposerSelectedModel(entries = codexServiceTierCatalogEntries()) {
     try {
-      const entries = codexServiceTierCatalogEntries();
       if (!entries.length) return "";
       if (typeof codexServiceTierBestComposerFooter !== "function") return "";
       const footer = codexServiceTierBestComposerFooter();
@@ -5013,6 +5371,28 @@
       ["inprogress", "in_progress", "running", "active"]
         .includes(String(turn?.status || "").toLowerCase())
     );
+  }
+
+  async function codexWorkspaceCheckpointConversationBusyAsync(threadId) {
+    if (codexWorkspaceCheckpointConversation(threadId)) {
+      return codexWorkspaceCheckpointConversationBusy(threadId);
+    }
+    // 新版 manager 在宿主端：恢复文件前读取真实执行状态，不能把“未发现 manager”
+    // 当作空闲。查询失败或状态未知时保持恢复入口不执行。
+    const rpc = findCodexAppServerManagerRpcInScopedSignals();
+    if (!rpc) return null;
+    let timer;
+    try {
+      const state = await Promise.race([
+        rpc.getThreadExecutionState(threadId),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(null), 2000); }),
+      ]);
+      return typeof state?.inProgress === "boolean" ? state.inProgress : null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   function codexWorkspaceCheckpointClientHostId(client) {
@@ -5690,12 +6070,46 @@
   function codexWorkspaceCheckpointConversationManager() {
     const activeManager = window.__codexElvesConversationStateManager || null;
     if (typeof activeManager?.addNotificationCallback === "function") return activeManager;
-    try {
-      const manager = findCodexConversationManagerInReactTree()?.manager || null;
-      return typeof manager?.addNotificationCallback === "function" ? manager : null;
-    } catch {
+    const rpc = findCodexAppServerManagerRpcInScopedSignals();
+    if (!rpc) {
+      try {
+        const manager = findCodexConversationManagerInReactTree()?.manager || null;
+        if (typeof manager?.addNotificationCallback === "function") return manager;
+      } catch {
+      }
       return null;
     }
+    const cached = window.__codexWorkspaceCheckpointRpcAdapter;
+    if (cached?.rpc === rpc) return cached;
+    // 新版会话 manager 已迁到宿主 RPC，完成通知通过它订阅；不能只挂在 renderer 的
+    // mcp-notification 上，否则原生聊天结束时不会封存 Checkpoint。
+    const adapter = {
+      rpc,
+      hostId: "local",
+      addNotificationCallback(method, callback) {
+        let disposed = false;
+        let subscription = null;
+        const pending = rpc.subscribe({
+          type: "notification", key: { hostId: "local" }, methods: [method],
+          listener: (notification) => { if (!disposed) return callback(notification); },
+        });
+        pending.then((value) => {
+          if (disposed) value?.[Symbol.dispose]?.();
+          else subscription = value;
+        }, (error) => {
+          if (!disposed) sendCodexElvesDiagnostic("workspace_checkpoint_completion_listener_failed", {
+            errorMessage: error?.message || String(error),
+          });
+        });
+        return () => {
+          disposed = true;
+          subscription?.[Symbol.dispose]?.();
+          pending?.[Symbol.dispose]?.();
+        };
+      },
+    };
+    window.__codexWorkspaceCheckpointRpcAdapter = adapter;
+    return adapter;
   }
 
   function refreshOpenCodexWorkspaceCheckpointDialog(threadId) {
@@ -5718,6 +6132,7 @@
     if (!context.local || (hostId && hostId !== "local")) return false;
     if (!cwd) throw new Error("未识别到已完成轮次的工作目录");
 
+    await Promise.all([...(codexNativeCheckpointOperations.get(completion.threadId) || [])]);
     await waitForCodexWorkspaceCheckpointBinding(
       completion.threadId,
       completion.turnId
@@ -6015,10 +6430,16 @@
     if (now < nextAttemptAt) return Promise.resolve(false);
     const patch = async () => {
       try {
-        let requestClientClass = null;
-        let requestClientSource = "";
+        if (await installCodexNativeRpcCompat()) {
+          window.__codexWorkspaceCheckpointRequestClientPatchInstalled = codexWorkspaceCheckpointVersion;
+          clearCodexWorkspaceCheckpointPatchRetry(true);
+          return true;
+        }
+        let requestClientClass = findCodexAppServerRequestClientInScopedSignals()?.constructor || null;
+        let requestClientSource = requestClientClass ? "local_scoped_client" : "";
         let lastError = null;
         for (const namePart of codexServiceTierRequestClientModuleParts) {
+          if (requestClientClass) break;
           try {
             const module = await loadCodexAppModule(namePart);
             requestClientClass = codexServiceTierRequestClientClassFromModule(module);
@@ -6640,8 +7061,11 @@
     if (!checkpointId) return;
     const safety = button.getAttribute("data-codex-workspace-checkpoint-kind") === "restoreSafety";
     const restoreLabel = codexWorkspaceCheckpointRestoreLabel({ kind: safety ? "restoreSafety" : "turnStart" });
-    if (codexWorkspaceCheckpointConversationBusy(context.threadId)) {
-      showToast("AI 正在运行，结束后才能恢复 Checkpoint");
+    const busy = codexWorkspaceCheckpointConversation(context.threadId)
+      ? codexWorkspaceCheckpointConversationBusy(context.threadId)
+      : await codexWorkspaceCheckpointConversationBusyAsync(context.threadId);
+    if (busy !== false) {
+      showToast(busy ? "AI 正在运行，结束后才能恢复 Checkpoint" : "暂时无法确认会话状态，请稍后恢复 Checkpoint");
       return;
     }
     const confirmed = await confirmCodexElvesAction({
@@ -6702,8 +7126,11 @@
       showToast("未识别到当前会话工作目录或 thread");
       return;
     }
-    if (codexWorkspaceCheckpointConversationBusy(context.threadId)) {
-      showToast("AI 正在运行，结束后才能撤销文件修改");
+    const busy = codexWorkspaceCheckpointConversation(context.threadId)
+      ? codexWorkspaceCheckpointConversationBusy(context.threadId)
+      : await codexWorkspaceCheckpointConversationBusyAsync(context.threadId);
+    if (busy !== false) {
+      showToast(busy ? "AI 正在运行，结束后才能撤销文件修改" : "暂时无法确认会话状态，请稍后撤销文件修改");
       return;
     }
     const confirmed = await confirmCodexElvesAction({
@@ -6891,6 +7318,7 @@
     refreshCodexNativeFastUnlockState();
     refreshCodexTokenUsageFeatureState();
     refreshCodexWorkspaceCheckpointFeatureState();
+    refreshCodexActivitySessionLayout();
     refreshUpstreamBranchDropdownAdapter();
     syncChatsSortVisibilityListener();
     if (!codexElvesSettings().projectMove) stopChatsSortRuntime();
@@ -6903,6 +7331,11 @@
         throw new Error("invalid backend settings response");
       }
       void applyLoadedBackendSettings(settings, "settings-loaded");
+      void promptOptimizeLoadBackendSettings().catch((error) => {
+        sendCodexElvesDiagnostic("prompt_optimize_settings_sync_failed", {
+          message: String(error?.message || error),
+        });
+      });
       return true;
     } catch (_) {
       refreshCodexElvesBackendToggles();
@@ -6955,9 +7388,35 @@
 
   function refreshCodexNativeFastUnlockState() {
     if (!codexElvesBackendSettingsLoaded) return;
+    void installCodexNativeRpcCompat();
     window.__codexElvesNativeFastUnlock?.runtime?.update?.({
       enhancementsEnabled: codexElvesBackendSettings.enhancementsEnabled === true,
       codexAppNativeFastUnlock: codexElvesBackendSettings.codexAppNativeFastUnlock === true,
+    });
+    void window.__codexElvesComposerFast?.configure({
+      enabled: codexElvesBackendSettings.enhancementsEnabled === true
+        && codexElvesBackendSettings.codexAppNativeFastUnlock === true,
+      getAnchor: codexFastComposerPlacement,
+      // 直接使用 app-server 的模型目录，不等待管理器后端目录加载或导出的内部组件。
+      getModel: (models) => codexServiceTierComposerSelectedModel(models?.map((entry) => ({
+        slug: entry.model || entry.id,
+        displayName: entry.displayName || "",
+      }))),
+      isGptModel: (model) => window.__codexElvesNativeFastUnlock?.runtime?.isGptModel(model) === true,
+      getDispatcher: async () => codexServiceTierDispatcher ||= await findCodexServiceTierDispatcher(),
+      isCopilotActive: async () => {
+        // 热注入会更换此闭包，独立请求包装仍可保留；先恢复本轮的服务发现再判断认证。
+        codexServiceTierDispatcher ||= await findCodexServiceTierDispatcher();
+        if (codexFastAppServicesFound) {
+          // Copilot 使用自己的推理服务，即使底层 account/read 仍是 API Key 也不能混入 Fast。
+          const copilot = codexFastAppServices?.copilot;
+          if (!copilot) return false;
+          const preferences = await copilot.getPreferences();
+          return preferences?.useForInference !== false;
+        }
+        return await getCodexGlobalState("use-copilot-auth-if-available") === true;
+      },
+      notify: showToast,
     });
   }
 
@@ -7187,11 +7646,15 @@
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="taskBoard"><span></span></button>
             </div>
             <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">活动视图精简</div><div class="codex-elves-row-description">在原生“查看活动”中仅显示会话名称和项目名称两行，隐藏消息摘要；关闭时恢复原生展示。默认关闭。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="activityViewCompact"><span></span></button>
+            </div>
+            <div class="codex-elves-row">
               <div><div class="codex-elves-row-title">快速打开工作区</div><div class="codex-elves-row-description">在顶部工具栏最左侧显示 Open in 快捷按钮，用首选应用一键打开当前会话目录；默认开启。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="openInQuickAccess"><span></span></button>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">原生 Fast 入口</div><div class="codex-elves-row-description">仅为支持 Fast 的 GPT 模型恢复原生开关，非 GPT 模型不开放；保存后重新启动 Codex 生效，实际支持与计费由供应商决定。</div></div>
+              <div><div class="codex-elves-row-title">Fast 快捷开关</div><div class="codex-elves-row-description">在输入框工具栏显示独立 Fast 开关，仅适用于支持 Fast 的 GPT 模型和本机 API 模式；设置即时生效，实际支持与计费由供应商决定。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="nativeFastUnlock"><span></span></button>
             </div>
             <div class="codex-elves-row">
@@ -8068,6 +8531,10 @@
     if (!codexElvesSettings().pluginMarketplaceUnlock) return;
     const patch = async () => {
       try {
+        if (await installCodexNativeRpcCompat()) {
+          window.__codexPluginMarketplaceUnlockInstalled = codexPluginMarketplaceUnlockVersion;
+          return;
+        }
         let patchedCount = 0;
         let manager = codexSessionPrewarmManager || window.__codexElvesSessionPrewarmManager || null;
         if (!manager) {
@@ -8430,8 +8897,11 @@
   // composer 上方节点携带 Codex 分配的真实 conversation id，
   // 用它校正临时 id，避免后端按临时 id 查不到会话。
   function activeConversationIdFromDom() {
-    const raw = document
-      .querySelector("[data-above-composer-conversation-id]")
+    // 新版保留多个隐藏聊天页面；只能使用可见主页面的标记，防止 Token、Open in、
+    // Checkpoint 读取到另一个聊天的数据或操作另一个工作区。
+    const raw = Array.from(document.querySelectorAll("[data-above-composer-conversation-id]"))
+      .filter(codexServiceTierIsMainComposerElement)
+      .find(codexServiceTierBadgeVisibleElement)
       ?.getAttribute("data-above-composer-conversation-id");
     const id = String(raw || "").trim();
     if (!id || isTemporaryThreadId(id)) return "";
@@ -8450,12 +8920,15 @@
   // 这种情况下 composer 上方节点通常仍在，因此作为独立主来源使用。
   function currentSessionRefFromDom() {
     const rows = sessionRows();
+    const conversationId = activeConversationIdFromDom();
+    if (conversationId) {
+      const row = rows.find((candidate) => sessionRefFromRow(candidate).session_id === conversationId);
+      return { session_id: conversationId, title: row ? sessionRefFromRow(row).title : "" };
+    }
     for (const row of rows) {
       const ref = sessionRefFromRow(row);
       if (ref.session_id && isCurrentSessionRow(row, ref)) return resolveTemporarySessionRef(ref);
     }
-    const conversationId = activeConversationIdFromDom();
-    if (conversationId) return { session_id: conversationId, title: "" };
     return resolveTemporarySessionRef({ session_id: locationThreadId(), title: "" });
   }
 
@@ -8909,10 +9382,17 @@
     `;
   }
 
+  function codexPinnedSummaryToggle() {
+    return Array.from(document.querySelectorAll(selectors.pinnedSummaryToggle))
+      .find(codexServiceTierBadgeVisibleElement) || null;
+  }
+
   function codexPinnedSummaryMount() {
-    const toggle = document.querySelector(selectors.pinnedSummaryToggle);
+    const toggle = codexPinnedSummaryToggle();
     if (toggle && toggle.getAttribute("aria-pressed") !== "true") return null;
-    const obstacle = document.querySelector(selectors.pinnedSummaryPanel);
+    // obstacle 自身有 aria-hidden，因为它只参与避让计算；按几何可见性选当前页即可。
+    const obstacle = Array.from(document.querySelectorAll(selectors.pinnedSummaryPanel))
+      .find(codexServiceTierBadgeVisibleElement);
     if (!obstacle?.parentElement) return null;
     const host = obstacle.parentElement;
     const panel = Array.from(host.children).find((node) =>
@@ -9202,7 +9682,7 @@
     clearTimeout(window.__codexTokenUsageRefreshTimer);
     window.__codexTokenUsageRefreshTimer = null;
     if (!codexElvesSettings().tokenUsage) return;
-    const toggle = document.querySelector(selectors.pinnedSummaryToggle);
+    const toggle = codexPinnedSummaryToggle();
     if (!toggle || toggle.getAttribute("aria-pressed") !== "true") return;
     window.__codexTokenUsageRefreshTimer = setTimeout(() => {
       window.__codexTokenUsageRefreshTimer = null;
@@ -9212,7 +9692,7 @@
 
   function syncCodexTokenUsageWithPinnedSummaryState() {
     if (!codexElvesSettings().tokenUsage) return true;
-    const toggle = document.querySelector(selectors.pinnedSummaryToggle);
+    const toggle = codexPinnedSummaryToggle();
     if (!toggle || toggle.getAttribute("aria-pressed") !== "true") {
       pauseCodexTokenUsageForHiddenPinnedSummary();
       return true;
@@ -9230,7 +9710,7 @@
     const syncBeforePaint = () => {
       window.__codexTokenUsagePinnedSummarySyncRafId = 0;
       if (!codexElvesSettings().tokenUsage) return;
-      const toggle = document.querySelector(selectors.pinnedSummaryToggle);
+      const toggle = codexPinnedSummaryToggle();
       const currentPressed = toggle?.getAttribute("aria-pressed") || "";
       if (currentPressed !== previousPressed) {
         if (!syncCodexTokenUsageWithPinnedSummaryState()) {
@@ -9270,7 +9750,7 @@
     const observer = new MutationObserver(() => {
       if (!codexElvesSettings().tokenUsage) return;
       const observedToggle = window.__codexTokenUsagePinnedSummaryObserverTarget;
-      if (window.__codexTokenUsagePinnedSummaryObserverTarget?.isConnected) {
+      if (observedToggle && observedToggle === codexPinnedSummaryToggle()) {
         if (observedToggle.getAttribute("aria-pressed") !== "true") return;
         const card = document.querySelector(`.${codexTokenUsageCardClass}`);
         if (card && !card.hidden) return;
@@ -9295,7 +9775,7 @@
       return false;
     }
     installCodexTokenUsagePinnedSummaryLifecycleObserver();
-    const toggle = document.querySelector(selectors.pinnedSummaryToggle);
+    const toggle = codexPinnedSummaryToggle();
     if (window.__codexTokenUsagePinnedSummaryObserverTarget === toggle) {
       if (toggle && !syncCodexTokenUsageWithPinnedSummaryState()) {
         scheduleCodexTokenUsagePinnedSummarySync();
@@ -9529,11 +10009,31 @@
   }
 
   async function codexStateCall(method, params) {
+    const services = await resolveCodexAppServices();
+    if (services) {
+      const state = services.applicationState;
+      if (!state) throw new Error("Codex 状态服务不可用");
+      const payload = params?.params || {};
+      if (method === "get-global-state") return await state.read(payload.key);
+      if (method === "set-global-state") {
+        const result = await state.write(payload.key, payload.value);
+        if (result?.success !== true) throw new Error("Codex 状态保存未确认");
+        return result;
+      }
+      throw new Error(`不支持的 Codex 状态操作：${method}`);
+    }
     const call = await codexStateApi();
     return await call(method, params);
   }
 
   async function getCodexGlobalState(key) {
+    if (key === "projectless-thread-ids" || key === "thread-project-assignments") {
+      const services = await resolveCodexAppServices();
+      if (services?.threadProjectAssignments) {
+        const result = await services.threadProjectAssignments.readMemberships();
+        return key === "projectless-thread-ids" ? result.projectlessThreadIds : result.assignments;
+      }
+    }
     const result = await codexStateCall("get-global-state", { params: { key } });
     return result && Object.prototype.hasOwnProperty.call(result, "value") ? result.value : result;
   }
@@ -9691,9 +10191,14 @@
   }
 
   function codexSessionPrewarmReactObjectRoots() {
+    const composer = taskBoardNativeComposer();
     const nodes = [
+      // manager 与编辑器 controller 都在当前 composer 的 React scope 上；
+      // 从可见输入区起步，避免隐藏聊天或最外层 main 尚未绑定会话状态。
+      composer?.parentElement,
+      composer?.parentElement?.parentElement,
       document.querySelector("aside"),
-      document.querySelector("main"),
+      Array.from(document.querySelectorAll("main")).find(codexServiceTierBadgeVisibleElement),
       document.body?.firstElementChild || null,
     ].filter(Boolean);
     if (!nodes.some((node) => reactFiberKeys(node).length > 0)) {
@@ -9761,7 +10266,7 @@
       && !!candidate.threadStore;
   }
 
-  function findCodexConversationManagerInScopedSignals() {
+  function findCodexLocalRuntimeInScopedSignals(matches, tokens = []) {
     // 新版客户端类不再导出；已创建的 manager 存在上层 React scope 的
     // signal-family binding 中，其值由 store 持有，普通属性遍历无法读到。
     const visitedFibers = new Set();
@@ -9783,6 +10288,17 @@
             for (let count = 0; scope && count < 16; count += 1, scope = scope.parent) {
               if (visitedScopes.has(scope)) break;
               visitedScopes.add(scope);
+              // 新版 registry 在非 family 的已绑定 atom 中。只读 WeakMap 中已有 atom，
+              // 不调用 token.resolve 或 scope.get，避免创建原生客户端或执行未知工厂。
+              for (const token of tokens) {
+                const atom = scope.signalBindings?.get?.(token);
+                if (typeof atom?.read !== "function" || typeof atom?.write !== "function") continue;
+                try {
+                  const candidate = scope.store?.get?.(atom);
+                  if (candidate && matches(candidate)) return candidate;
+                } catch {
+                }
+              }
               if (!(scope.familyBindings instanceof Map)) continue;
               // 只读已经绑定的 local 实例，不调用 family.resolve/get 创建新客户端，
               // 也不读取远程 host 或无关 family 参数的状态。
@@ -9792,7 +10308,7 @@
                 if (!signal?.atom || typeof signal.store?.get !== "function") continue;
                 try {
                   const candidate = signal.store.get(signal.atom);
-                  if (isCodexConversationManager(candidate)) return candidate;
+                  if (matches(candidate)) return candidate;
                 } catch {
                 }
               }
@@ -9804,6 +10320,29 @@
     return null;
   }
 
+  function findCodexConversationManagerInScopedSignals() {
+    return findCodexLocalRuntimeInScopedSignals(isCodexConversationManager);
+  }
+
+  function findCodexAppServerRequestClientInScopedSignals() {
+    // 新版 manager 只暴露 facade，真实请求客户端仍由 local scope 持有；
+    // 按能力发现既有实例，不依赖压缩类名、模块名或不存在的 prewarmThreadStart。
+    return findCodexLocalRuntimeInScopedSignals((candidate) =>
+      candidate?.hostId === "local"
+      && typeof candidate.sendRequest === "function"
+      && typeof candidate.createRequest === "function"
+      && typeof candidate.enqueueRequest === "function"
+    );
+  }
+
+  function findCodexAppServerManagerRpcInScopedSignals() {
+    const binding = findCodexLocalRuntimeInScopedSignals((candidate) =>
+      candidate?.status === "ready"
+      && candidate.client?.hostId === "local"
+      && String(candidate.client?.rpc) === "[object RpcStub]"
+    );
+    return binding?.client?.rpc || null;
+  }
   function findCodexConversationManagerInObjectGraph(roots, maxNodes = 30000) {
     const priorityQueue = [];
     const queue = [];
@@ -10361,6 +10900,40 @@
     setCodexAppServerRestartButtonBusy(button, true);
     let recovered = false;
     try {
+      const rpc = findCodexAppServerManagerRpcInScopedSignals();
+      if (rpc) {
+        const services = await resolveCodexAppServices();
+        if (!services?.appServerLifecycle) throw new Error("Codex 原生重启服务不可用");
+        const work = await rpc.getWorkInProgress();
+        if (!Array.isArray(work) || work.some((item) => typeof item?.kind !== "string")) {
+          await showCodexAppServerRestartNotice("暂时无法重启", "无法确认当前是否还有执行中的会话，请稍后重试。");
+          return;
+        }
+        if (work.length) {
+          const conversations = [...new Map(work.map((item) => [
+            item.conversationId || `pending:${item.kind}`,
+            { id: item.conversationId || "", title: item.conversationId || "待处理操作" },
+          ])).values()];
+          await showCodexAppServerRestartBlockedDialog(conversations.length);
+          return;
+        }
+        // 新版由宿主维护所有会话；先核对原生忙碌状态，再重启并通过只读请求确认恢复。
+        await services.appServerLifecycle.restart("local");
+        for (const delay of codexAppServerRestartRecoveryDelaysMs) {
+          await waitForCodexAppServerRestartDelay(delay);
+          const current = findCodexAppServerManagerRpcInScopedSignals();
+          if (!current) continue;
+          try {
+            await current.sendRequest("config/read", { includeLayers: false, cwd: null }, { timeoutMs: 2000 });
+            recovered = true;
+            break;
+          } catch {
+          }
+        }
+        if (!recovered) throw new Error("app-server 已请求重启，但连接尚未恢复，请稍后检查");
+        showCodexAppServerRestartToast("app-server 已重启，可以重新发送消息");
+        return;
+      }
       const discovery = findCodexConversationManagerInReactTree(true);
       const manager = discovery.manager;
       const running = codexAppServerRunningConversations(manager, conversationId);
@@ -10933,6 +11506,21 @@
     return projectRow.closest?.('[role="listitem"][aria-label]') || projectRow.closest?.('[role="listitem"]') || projectRow;
   }
 
+  let codexNativeProjectTargetsCache = [];
+  async function loadCodexNativeProjectTargets() {
+    const services = await resolveCodexAppServices();
+    if (!services) return;
+    if (!services.projectCatalog) throw new Error("Codex 项目目录服务不可用");
+    const projects = await services.projectCatalog.readLocalProjects();
+    codexNativeProjectTargetsCache = Object.values(projects || {}).flatMap((project) =>
+      (Array.isArray(project?.rootPaths) ? project.rootPaths : []).filter((path) => typeof path === "string" && path.trim())
+        .map((path) => ({
+          kind: "project", projectId: project.id, label: project.name || displayProjectName(path),
+          description: path, path, normalizedPath: normalizeWorkspacePath(path),
+        }))
+    );
+  }
+
   function nativeProjectTargets() {
     const section = projectsSection();
     const seen = new Set();
@@ -10946,6 +11534,11 @@
       seen.add(normalizedPath);
       targets.push({ kind: "project", label: String(label || displayProjectName(path)), description: path, path, normalizedPath, row, listItem: projectRowListItem(row) });
     });
+    for (const target of codexNativeProjectTargetsCache) {
+      const existing = targets.find((item) => sameWorkspacePath(item.path, target.path));
+      if (existing) existing.projectId ||= target.projectId;
+      else targets.push(target);
+    }
     return targets;
   }
 
@@ -11792,7 +12385,9 @@
   }
 
   function taskBoardNativeComposer() {
-    return document.querySelector('[data-codex-composer][contenteditable="true"][role="textbox"]');
+    return Array.from(document.querySelectorAll('[data-codex-composer][contenteditable="true"][role="textbox"]'))
+      .filter(codexServiceTierIsMainComposerElement)
+      .find(codexServiceTierBadgeVisibleElement) || null;
   }
 
   function taskBoardNativeComposerController(composer) {
@@ -11839,8 +12434,11 @@
   }
 
   function taskBoardNativeSessionSignalId() {
+    // 新版保留隐藏标签页；看板创建后的会话归属必须取当前可见主输入区的标记。
     return String(
-      document.querySelector("[data-above-composer-conversation-id]")
+      Array.from(document.querySelectorAll("[data-above-composer-conversation-id]"))
+        .filter(codexServiceTierIsMainComposerElement)
+        .find(codexServiceTierBadgeVisibleElement)
         ?.getAttribute?.("data-above-composer-conversation-id") ||
       "",
     ).trim();
@@ -12779,9 +13377,10 @@
   }
 
   function taskBoardMainHost() {
-    return document.querySelector("main[data-app-shell-main-surface]") ||
-      document.querySelector("main") ||
-      document.querySelector("[role='main']");
+    // 看板只挂到当前可见主页面，不能因 DOM 顺序把入口挂入隐藏聊天。
+    return ["main[data-app-shell-main-surface]", "main", "[role='main']"]
+      .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+      .find(conversationViewElementIsActive) || null;
   }
 
   function taskBoardEntryButtons() {
@@ -14276,6 +14875,35 @@
   let promptOptimizeComposerKeySequence = 0;
   let promptOptimizeSettingsOverlay = null;
   let promptOptimizeTestDom = null;
+  let promptOptimizeSettingsSync = Promise.resolve();
+  let promptOptimizeBackendSettingsLoaded = false;
+
+  function promptOptimizePersistSettings(settings) {
+    const snapshot = JSON.parse(JSON.stringify(settings));
+    const sync = promptOptimizeSettingsSync.catch(() => {}).then(async () => {
+      const result = await postJson("/prompt-optimize/settings", { settings: snapshot });
+      if (result?.status !== "ok") throw new Error(result?.message || "提示词优化设置同步失败");
+    });
+    promptOptimizeSettingsSync = sync;
+    void sync.catch(() => {});
+    return sync;
+  }
+
+  async function promptOptimizeLoadBackendSettings() {
+    if (promptOptimizeBackendSettingsLoaded) return;
+    const stored = localStorage.getItem(codexPromptOptimizeSettingsKey);
+    if (stored) {
+      await promptOptimizePersistSettings(promptOptimizeReadSettings());
+    } else {
+      const result = await postJson("/prompt-optimize/settings", {});
+      if (result?.status !== "ok") throw new Error(result?.message || "提示词优化设置读取失败");
+      // 等待读取时用户可能已经保存新设置，不覆盖这次编辑。
+      if (!localStorage.getItem(codexPromptOptimizeSettingsKey)) {
+        localStorage.setItem(codexPromptOptimizeSettingsKey, JSON.stringify(result.settings));
+      }
+    }
+    promptOptimizeBackendSettingsLoaded = true;
+  }
 
   function promptOptimizeDefaultSettings() {
     return {
@@ -14355,6 +14983,7 @@
       ),
     };
     localStorage.setItem(codexPromptOptimizeSettingsKey, JSON.stringify(next));
+    void promptOptimizePersistSettings(next);
     return next;
   }
 
@@ -14867,7 +15496,7 @@
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
       selectModelOption(target?.closest?.("[data-codex-prompt-optimize-model-option]"));
     });
-    overlay.addEventListener("click", (event) => {
+    overlay.addEventListener("click", async (event) => {
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
       if (!target?.closest?.(".codex-prompt-optimize-model-combobox")) {
         setModelMenuOpen(false);
@@ -14919,6 +15548,11 @@
           includeRecentContext: contextCheckbox?.checked === true,
           prompts,
         });
+        try { await promptOptimizeSettingsSync; }
+        catch (error) {
+          showToast(`设置已保存在本页，远程同步失败：${error.message}`);
+          return;
+        }
         promptOptimizeCloseSettings();
         promptOptimizeRefreshButtonState();
         showToast("提示词优化设置已保存");
@@ -15056,8 +15690,12 @@
   }
 
   function promptOptimizeRecentContextTurnCandidates() {
+    const main = promptOptimizeCurrentComposer()?.closest?.("main, [role='main']");
+    if (!main) return [];
+    // 用户要求最近上下文仅来自当前聊天；不可把后台标签页或右侧会话当成最近一轮。
+    // 不按 viewport 坐标过滤，保留当前聊天中滚动到屏幕外的完整轮次。
     const candidates = Array.from(
-      document.querySelectorAll?.(
+      main.querySelectorAll?.(
         '[data-content-search-turn-key], [data-testid="conversation-turn"]',
       ) || [],
     );
@@ -15065,7 +15703,16 @@
       turn &&
       candidates.indexOf(turn) === index &&
       turn.isConnected !== false &&
-      !turn.closest?.('[hidden], [aria-hidden="true"], [inert]')
+      codexServiceTierIsMainComposerElement(turn) &&
+      !turn.closest?.('[hidden], [aria-hidden="true"], [inert]') &&
+      !(() => {
+        for (let node = turn; node; node = node.parentElement) {
+          const style = getComputedStyle(node);
+          if (style.display === "none" || style.visibility === "hidden") return true;
+          if (node === main) break;
+        }
+        return false;
+      })()
     ));
   }
 
@@ -21037,7 +21684,6 @@
       if (!taskBoardState.active) return;
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
       if (!target || target.closest?.(`[${taskBoardEntryAttribute}="true"]`)) return;
-      if (target.closest("[data-codex-recent-sessions-entry], [data-codex-recent-sessions-root], .codex-recent-menu")) return;
       const nativeNavigationTarget = taskBoardNativeNavigationControl(target);
       if (!nativeNavigationTarget) return;
       const releaseId = ++taskBoardState.navigationReleaseId;
@@ -21884,7 +22530,7 @@
   }
 
   function serializableProjectTarget(target) {
-    return { kind: target.kind, label: target.label, description: target.description, path: target.path, normalizedPath: target.normalizedPath || normalizeWorkspacePath(target.path) };
+    return { kind: target.kind, projectId: target.projectId, label: target.label, description: target.description, path: target.path, normalizedPath: target.normalizedPath || normalizeWorkspacePath(target.path) };
   }
 
   function projectMoveTargets() {
@@ -22397,8 +23043,14 @@
 
   async function refreshRecentConversationsForHost() {
     try {
-      const signals = await import("./assets/app-server-manager-signals-C1h8B-R-.js");
-      if (typeof signals.rn === "function") await signals.rn("refresh-recent-conversations-for-host", { hostId: "local", sortKey: "updated_at" });
+      const rpc = findCodexAppServerManagerRpcInScopedSignals();
+      if (rpc) {
+        await rpc.refreshRecentConversations({ mode: "expanded" });
+        return;
+      }
+      const signals = await loadCodexAppModule("app-server-manager-signals-");
+      if (typeof signals.rn !== "function") throw new Error("Codex 最近会话刷新接口不可用");
+      await signals.rn("refresh-recent-conversations-for-host", { hostId: "local", sortKey: "updated_at" });
     } catch (error) {
       appendCodexElvesFailure("__codexProjectMoveRefreshFailures", error);
     }
@@ -22589,7 +23241,15 @@
   async function setProjectlessThreadIds(ref, mode) {
     const variants = threadIdVariants(ref.session_id);
     if (variants.length === 0) throw new Error("未找到会话 ID");
-    const existingIds = await getCodexGlobalState("projectless-thread-ids").catch(() => []);
+    const services = await resolveCodexAppServices();
+    if (services?.threadProjectAssignments) {
+      await services.threadProjectAssignments.setProjectless({
+        threadId: projectMoveSessionKey(ref.session_id), projectless: mode === "add",
+      });
+      return;
+    }
+    // 读取失败时停止，不能用空列表覆盖其他会话的真实归属。
+    const existingIds = await getCodexGlobalState("projectless-thread-ids");
     const ids = Array.isArray(existingIds) ? existingIds : [];
     const variantSet = new Set(variants);
     const nextIds = mode === "add" ? uniqueValues([...ids, ...variants]) : ids.filter((id) => !variantSet.has(id));
@@ -22599,7 +23259,7 @@
   async function clearThreadWorkspaceHints(ref) {
     const variants = threadIdVariants(ref.session_id);
     if (variants.length === 0) return;
-    const hints = objectGlobalState(await getCodexGlobalState("thread-workspace-root-hints").catch(() => ({})));
+    const hints = objectGlobalState(await getCodexGlobalState("thread-workspace-root-hints"));
     const hintKeys = variants.filter((id) => Object.prototype.hasOwnProperty.call(hints, id));
     if (hintKeys.length > 0) {
       hintKeys.forEach((id) => delete hints[id]);
@@ -22610,7 +23270,7 @@
   async function clearThreadWritableRoots(ref) {
     const variants = threadIdVariants(ref.session_id);
     if (variants.length === 0) return;
-    const roots = objectGlobalState(await getCodexGlobalState("thread-writable-roots").catch(() => ({})));
+    const roots = objectGlobalState(await getCodexGlobalState("thread-writable-roots"));
     const rootKeys = variants.filter((id) => Object.prototype.hasOwnProperty.call(roots, id));
     if (rootKeys.length > 0) {
       rootKeys.forEach((id) => delete roots[id]);
@@ -22621,7 +23281,7 @@
   async function clearThreadProjectlessOutputDirectories(ref) {
     const variants = threadIdVariants(ref.session_id);
     if (variants.length === 0) return;
-    const dirs = objectGlobalState(await getCodexGlobalState("thread-projectless-output-directories").catch(() => ({})));
+    const dirs = objectGlobalState(await getCodexGlobalState("thread-projectless-output-directories"));
     const dirKeys = variants.filter((id) => Object.prototype.hasOwnProperty.call(dirs, id));
     if (dirKeys.length > 0) {
       dirKeys.forEach((id) => delete dirs[id]);
@@ -22631,7 +23291,16 @@
 
   async function moveSessionToProjectless(ref) {
     if (!ref.session_id) throw new Error("未找到会话 ID");
-    await setProjectlessThreadIds(ref, "add");
+    const services = await resolveCodexAppServices();
+    if (services) {
+      if (!services.threadProjectAssignments) throw new Error("Codex 会话归属服务不可用");
+      // 新版原生服务原子维护 assignment 与 projectless 标记，不能只写旧全局列表。
+      await services.threadProjectAssignments.setMembership({
+        threadId: projectMoveSessionKey(ref.session_id), assignment: null, projectless: true, hostId: "local",
+      });
+    } else {
+      await setProjectlessThreadIds(ref, "add");
+    }
     await clearThreadWorkspaceHints(ref);
     await clearThreadWritableRoots(ref);
     await clearThreadProjectlessOutputDirectories(ref);
@@ -22646,10 +23315,30 @@
   async function moveSessionToProject(ref, target) {
     if (!ref.session_id) throw new Error("未找到会话 ID");
     if (!target?.path) throw new Error("目标项目路径为空");
-    if (!isNativeProjectTarget(target)) throw new Error("目标项目不在 Codex 项目列表中");
+    const services = await resolveCodexAppServices();
+    let projectId = null;
+    if (services) {
+      await loadCodexNativeProjectTargets();
+      const matches = codexNativeProjectTargetsCache.filter((entry) => sameWorkspacePath(entry.path, target.path)
+        && (!target.projectId || target.projectId === entry.projectId));
+      const ids = new Set(matches.map((entry) => entry.projectId).filter(Boolean));
+      if (ids.size !== 1 || !services.threadProjectAssignments) throw new Error("无法唯一确认目标原生项目");
+      projectId = [...ids][0];
+    } else if (!isNativeProjectTarget(target)) throw new Error("目标项目不在 Codex 项目列表中");
     const result = await postJson("/move-thread-workspace", { ...ref, target_cwd: target.path });
     if (result.status !== "moved") throw new Error(result.message || "移动项目失败");
-    await setProjectlessThreadIds(ref, "remove");
+    if (services) {
+      try {
+        await services.threadProjectAssignments.setMembership({
+          threadId: projectMoveSessionKey(ref.session_id),
+          assignment: { projectKind: "local", projectId }, projectless: false, hostId: "local",
+        });
+      } catch (error) {
+        throw new Error(`工作目录已更新，但原生项目归属未确认：${error?.message || error}`);
+      }
+    } else {
+      await setProjectlessThreadIds(ref, "remove");
+    }
     await clearThreadWorkspaceHints(ref);
     return result;
   }
@@ -23311,7 +24000,7 @@
     if (!selection || !request || request.launchMode !== "start-conversation") return false;
     const sourceRoot = request.sourceWorkspaceRoot || "";
     if (selection.repoPath && sourceRoot) return sameWorkspacePath(sourceRoot, selection.repoPath);
-    if (selection.projectId) return true;
+    if (selection.projectId) return request.projectId === selection.projectId;
     return !selection.repoPath || sameWorkspacePath(sourceRoot, selection.repoPath);
   }
 
@@ -23337,10 +24026,19 @@
   }
 
   function installUpstreamPendingWorktreeDispatcherPatch() {
-    const patchVersion = "1";
+    const patchVersion = "2";
     if (window.__codexUpstreamPendingWorktreeDispatcherPatch === patchVersion) return;
     const patch = async () => {
       try {
+        const services = await resolveCodexAppServices();
+        if (services) {
+          await installCodexNativeRpcCompat();
+          if (!window.__codexElvesNativeRpcCompat?.patchWorktrees(services)) {
+            throw new Error("Codex 原生 worktree 服务不可用");
+          }
+          window.__codexUpstreamPendingWorktreeDispatcherPatch = patchVersion;
+          return;
+        }
         const module = await loadCodexAppModule("setting-storage-");
         const dispatcherClass = typeof module.v === "function" && String(module.v).includes("dispatchMessage") ? module.v : null;
         const dispatcher = dispatcherClass?.getInstance?.();
@@ -23860,6 +24558,21 @@
     if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(threadId)) {
       throw new Error("会话尚未创建完成，不能永久删除");
     }
+    const rpc = findCodexAppServerManagerRpcInScopedSignals();
+    if (rpc) {
+      // 用户要求新版删除恢复可用：复用原生完整生命周期，包含归属和关联会话清理。
+      // 请求已交给 RPC 后不切到旧管理器重发；只保留明确缺失同一 rollout 的专用恢复。
+      try {
+        await rpc.deleteConversation(threadId);
+      } catch (error) {
+        const missingId = String(error?.message || error).match(/no rollout found for thread id ([0-9a-f-]{36})$/i)?.[1];
+        const client = findCodexAppServerRequestClientInScopedSignals();
+        if (missingId?.toLowerCase() !== threadId.toLowerCase()
+          || typeof client?.sendAppServerExtensionRequest !== "function") throw error;
+        await client.sendAppServerExtensionRequest("thread/delete", { threadId, missingRolloutRecovery: true });
+      }
+      return { status: "local_deleted", session_id: threadId, message: "会话已永久删除" };
+    }
     const manager = isCodexConversationManager(window.__codexElvesConversationStateManager)
       ? window.__codexElvesConversationStateManager
       : findCodexConversationManagerInReactTree()?.manager;
@@ -24024,6 +24737,7 @@
     }, true);
     document.body.appendChild(overlay);
     try {
+      await loadCodexNativeProjectTargets();
       const targets = projectMoveTargets();
       const list = overlay.querySelector(".codex-project-move-list");
       if (!list) return;
@@ -24664,12 +25378,14 @@
   }
 
   function conversationViewFindByClasses(classes) {
-    const matches = Array.from(document.querySelectorAll("div")).filter((el) => conversationViewHasAllClasses(el, classes));
+    const matches = Array.from(document.querySelectorAll("div"))
+      .filter(codexServiceTierIsMainComposerElement)
+      .filter((el) => conversationViewHasAllClasses(el, classes));
     return matches.find(conversationViewElementIsActive) || matches.find((el) => el?.isConnected) || null;
   }
 
   function conversationViewFindBySelector(selector) {
-    const matches = Array.from(document.querySelectorAll(selector));
+    const matches = Array.from(document.querySelectorAll(selector)).filter(codexServiceTierIsMainComposerElement);
     return matches.find(conversationViewElementIsActive) || matches.find((el) => el?.isConnected) || null;
   }
 
@@ -24716,7 +25432,8 @@
   function codexServiceTierFooterHasNearbyComposerInput(footer) {
     if (!(footer instanceof HTMLElement)) return false;
     const footerRect = footer.getBoundingClientRect();
-    for (let node = footer.parentElement, depth = 0; node instanceof HTMLElement && depth < 7; depth += 1, node = node.parentElement) {
+    // 语义按钮外可能有多层 tooltip/响应式包装，最多检查 10 层并以输入框几何关系确认。
+    for (let node = footer.parentElement, depth = 0; node instanceof HTMLElement && depth < 10; depth += 1, node = node.parentElement) {
       const inputs = codexServiceTierComposerInputs(node);
       if (!inputs.length) continue;
       if (!inputs.some((input) => {
@@ -24752,6 +25469,35 @@
   }
 
   const codexServiceTierComposerFooterSelector = '.composer-footer, [class*="_footer_"], [class*="ComposerLayoutFooter"]';
+
+  function codexFastComposerAnchor() {
+    // 用户要求依靠附近元素安放 Fast，不再寻找原生 Fast 的位置或压缩类名。
+    // 优先推理/模型按钮，其次权限按钮；必须与可见主输入框处于同一工具栏。
+    const selectors = [
+      '[data-composer-navigation-target="reasoning"]',
+      '[data-composer-navigation-target="model"]',
+      '[data-composer-navigation-target="permissions"]',
+    ];
+    for (const selector of selectors) {
+      const candidates = Array.from(document.querySelectorAll(selector))
+        .filter(codexServiceTierIsMainComposerElement)
+        .filter(codexServiceTierBadgeVisibleElement);
+      const anchor = candidates.find((button) => codexServiceTierFooterHasNearbyComposerInput(button));
+      if (anchor) return anchor;
+    }
+    return null;
+  }
+
+  function codexFastComposerPlacement() {
+    const anchor = codexFastComposerAnchor();
+    // tooltip 外层可能是普通 block，直接插入会让 Fast 换行；找到最近的横向 flex 子项。
+    // 最多跨过 4 层局部包装，不移动到整个输入区或发送按钮外侧。
+    for (let node = anchor, depth = 0; node?.parentElement && depth < 4; node = node.parentElement, depth++) {
+      const style = getComputedStyle(node.parentElement);
+      if (["flex", "inline-flex"].includes(style.display) && style.flexDirection === "row") return node;
+    }
+    return null;
+  }
 
   function codexServiceTierIsComposerFooter(element) {
     return element instanceof HTMLElement && element.matches?.(codexServiceTierComposerFooterSelector);
@@ -24826,15 +25572,210 @@
   }
 
   function codexServiceTierBestComposerFooter(root = document) {
-    return codexServiceTierVisibleComposerFooters(root)
+    const known = codexServiceTierVisibleComposerFooters(root)
       .map((footer, index) => ({ footer, index, score: codexServiceTierComposerScore(footer) }))
       .sort((left, right) => (right.score - left.score) || (left.index - right.index))[0]?.footer || null;
+    if (known) return known;
+    // 工具栏 CSS 类名变化时，从语义按钮向上找到包含输入框的最小容器。
+    // 模型识别与 Fast 安放共用此入口，避免按钮存在却无法确认当前模型。
+    const anchor = codexFastComposerAnchor();
+    if (!anchor || (root !== document && !root.contains?.(anchor))) return null;
+    for (let node = anchor.parentElement, depth = 0; node && depth < 7; node = node.parentElement, depth++) {
+      if (codexServiceTierComposerInputs(node).length) return node;
+    }
+    return null;
   }
 
   function codexServiceTierFindComposerEl() {
     return codexServiceTierComposerCandidates()
       .map((composer, index) => ({ composer, index, score: codexServiceTierComposerScore(composer) }))
       .sort((left, right) => (right.score - left.score) || (left.index - right.index))[0]?.composer || null;
+  }
+
+  const codexContextUsageAttribute = "data-codex-context-usage";
+  const codexContextUsageRecovery = {
+    id: "", usage: null, at: 0, pending: null, timer: null,
+    settingsService: null, allowed: false, legacyCache: null, disposed: false,
+  };
+
+  function removeCodexRecoveredContextUsage() {
+    document.querySelectorAll(`[${codexContextUsageAttribute}]`).forEach((node) => node.remove());
+  }
+
+  function cleanupCodexComposerContextUsage() {
+    codexContextUsageRecovery.disposed = true;
+    clearTimeout(codexContextUsageRecovery.timer);
+    document.removeEventListener("visibilitychange", refreshCodexContextUsageAfterVisibility);
+    removeCodexRecoveredContextUsage();
+  }
+
+  function refreshCodexContextUsageAfterVisibility() {
+    if (document.visibilityState === "visible") requestAnimationFrame(refreshCodexComposerContextUsage);
+  }
+
+  function codexContextUsageNativeVisible(footer) {
+    return Array.from(footer?.querySelectorAll('[role="img"][aria-label]') || [])
+      .some((node) => !node.hasAttribute(codexContextUsageAttribute)
+        && (/上下文用量|context usage/i.test(node.getAttribute("aria-label") || "")
+          || !!node.querySelector('circle[pathLength="100"]')));
+  }
+
+  function codexContextUsageNativeAllowsRecovery(anchor) {
+    // 原生在听写、窄浮动输入框、后台任务和云模式下有意隐藏圆环；补读不能绕过这些条件。
+    // 只读取既有 React props 的语义字段，不修改原生状态或依赖压缩组件名。
+    for (let node = anchor, depth = 0; node && depth < 4; node = node.parentElement, depth++) {
+      for (const key of reactFiberKeys(node)) {
+        for (let fiber = node[key], count = 0; fiber && count < 80; fiber = fiber.return, count++) {
+          const props = fiber.memoizedProps;
+          if (!props || !Object.hasOwn(props, "isNarrowFloatingComposer")
+            || !Object.hasOwn(props, "isAeonActive") || !Object.hasOwn(props, "composerMode")) continue;
+          return props.composerMode === "local" && !props.isDictating
+            && !props.isAeonActive && !props.isNarrowFloatingComposer;
+        }
+      }
+    }
+    return false;
+  }
+
+  function codexContextUsageMeasurement(value) {
+    const used = value?.usedTokens;
+    const capacity = value?.contextWindow;
+    if (!Number.isSafeInteger(used) || used < 0
+      || !Number.isSafeInteger(capacity) || capacity <= 0) return null;
+    return { usedTokens: used, contextWindow: capacity, observedAt: value.observedAt || "" };
+  }
+
+  async function readCodexContextUsageEnabled() {
+    const state = codexContextUsageRecovery;
+    if (!state.settingsService) {
+      const module = (await codexLoadedAppModuleExports())
+        .find((module) => Object.hasOwn(module, "appServices") && module.appServices?.settings);
+      state.settingsService = module?.appServices.settings || null;
+    }
+    if (!state.settingsService) return false;
+    const result = await state.settingsService.read("show-context-window-usage");
+    return result?.effective === true;
+  }
+
+  function codexContextUsageResponseMatches(result, id) {
+    return result?.status === "ok" && projectMoveSessionKey(result.session_id) === id
+      && (!result.matched_by || ["id", "rollout_file"].includes(result.matched_by));
+  }
+
+  async function readCodexContextUsageMeasurement(id) {
+    const payload = { session_id: id, title: "" };
+    const result = await postJson("/thread-usage-summary", payload);
+    if (!codexContextUsageResponseMatches(result, id)) return null;
+    if (Object.hasOwn(result, "contextUsage")) return codexContextUsageMeasurement(result.contextUsage);
+    // 兼容尚未重启的旧 helper：只在缺少新字段时读取历史，同一记录时间复用结果。
+    // contextUsed 是旧接口累计口径，不能作为上下文占用；必须取最后一次请求的 totalTokens。
+    const observed = result.summary?.observedAt || "";
+    const state = codexContextUsageRecovery;
+    if (state.legacyCache?.id === id && state.legacyCache.observed === observed) return state.legacyCache.usage;
+    const history = await postJson("/thread-usage-history", payload);
+    if (!codexContextUsageResponseMatches(history, id)) return null;
+    const last = (history.history || [])
+      .filter((entry) => projectMoveSessionKey(entry.conversation_id) === id).at(-1);
+    const usage = codexContextUsageMeasurement({
+      usedTokens: last?.usage?.totalTokens,
+      contextWindow: last?.usage?.contextLimit,
+      observedAt: last?.observed_at,
+    });
+    if (state.id === id) state.legacyCache = { id, observed, usage };
+    return usage;
+  }
+
+  function renderCodexRecoveredContextUsage(id, usage) {
+    if (activeConversationIdFromDom() !== id) return;
+    const footer = codexServiceTierBestComposerFooter();
+    const anchor = codexFastComposerAnchor();
+    const placement = codexFastComposerPlacement();
+    if (!usage || !anchor || !placement || codexContextUsageNativeVisible(footer)
+      || !codexContextUsageNativeAllowsRecovery(anchor)) {
+      removeCodexRecoveredContextUsage();
+      return;
+    }
+    let badge = document.querySelector(`[${codexContextUsageAttribute}]`);
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.setAttribute(codexContextUsageAttribute, "true");
+      badge.setAttribute("role", "img");
+      badge.tabIndex = 0;
+      // 用户要求恢复上下文入口：保持原生 16px 容器、12px 圆环和 5px 半径，
+      // 使用同一排的普通布局；放在 Fast/模型左侧，提示词优化与 Checkpoint 随容器避让。
+      badge.style.cssText = "display:inline-flex;align-items:center;justify-content:center;flex:0 0 16px;width:16px;height:16px;color:var(--color-text-tertiary,currentColor);cursor:help";
+      badge.innerHTML = '<svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="2" fill="none" opacity=".16"/><circle data-context-progress cx="6" cy="6" r="5" stroke="currentColor" stroke-width="2" fill="none" pathLength="100" stroke-dasharray="100" transform="rotate(-90 6 6)"/></svg>';
+    }
+    const percent = Math.max(0, Math.min(100, usage.usedTokens / usage.contextWindow * 100));
+    const rounded = Math.round(percent);
+    badge.setAttribute("aria-label", `上下文用量：${rounded}%（上次请求记录）`);
+    badge.title = `上下文窗口\n${rounded}% 已使用（${100 - rounded}% 剩余）\n${usage.usedTokens.toLocaleString()} / ${usage.contextWindow.toLocaleString()} tokens\n上次请求记录；原生数据恢复后自动切回`;
+    badge.querySelector("[data-context-progress]").setAttribute("stroke-dashoffset", String(100 - percent));
+    const fast = placement.parentElement?.querySelector("[data-codex-elves-fast]");
+    const before = fast?.parentElement === placement.parentElement ? fast : placement;
+    if (before.previousElementSibling !== badge) before.before(badge);
+  }
+
+  function refreshCodexComposerContextUsage() {
+    const state = codexContextUsageRecovery;
+    clearTimeout(state.timer);
+    state.timer = null;
+    const id = activeConversationIdFromDom();
+    const footer = codexServiceTierBestComposerFooter();
+    const anchor = codexFastComposerAnchor();
+    if (state.disposed || document.visibilityState === "hidden"
+      || codexElvesBackendSettings.enhancementsEnabled !== true
+      || !id || !anchor || codexContextUsageNativeVisible(footer)
+      || !codexContextUsageNativeAllowsRecovery(anchor)) {
+      // 离开聊天或关闭开关后使旧读取失效，返回时重新确认原生显示设置。
+      state.pending = null;
+      state.at = 0;
+      removeCodexRecoveredContextUsage();
+      return;
+    }
+    if (state.id !== id) {
+      state.id = id;
+      state.usage = null;
+      state.at = 0;
+      state.legacyCache = null;
+      removeCodexRecoveredContextUsage();
+    }
+    const schedule = () => {
+      if (!state.disposed && activeConversationIdFromDom() === id) {
+        clearTimeout(state.timer);
+        state.timer = setTimeout(refreshCodexComposerContextUsage, 5000);
+      }
+    };
+    if (state.at && Date.now() - state.at < 5000) {
+      renderCodexRecoveredContextUsage(id, state.allowed ? state.usage : null);
+      schedule();
+      return;
+    }
+    if (state.pending?.id === id) return;
+    const pending = { id };
+    state.pending = pending;
+    void (async () => {
+      try {
+        const allowed = await readCodexContextUsageEnabled();
+        const usage = allowed ? await readCodexContextUsageMeasurement(id) : null;
+        if (state.disposed || state.pending !== pending || activeConversationIdFromDom() !== id) return;
+        state.allowed = allowed;
+        state.usage = usage;
+        state.at = Date.now();
+        if (codexElvesBackendSettings.enhancementsEnabled === true) renderCodexRecoveredContextUsage(id, usage);
+      } catch {
+        if (state.pending === pending) {
+          state.at = Date.now();
+          state.usage = null;
+          removeCodexRecoveredContextUsage();
+        }
+      } finally {
+        if (state.pending === pending) {
+          state.pending = null;
+          schedule();
+        }
+      }
+    })();
   }
 
   function conversationViewRememberOriginals(el) {
@@ -24860,6 +25801,7 @@
 
   function conversationViewRestoreElement(el) {
     if (!el) return;
+    el.removeAttribute("data-codex-conversation-view-target");
     if ("codexElvesConversationViewOriginalWidth" in el.dataset) {
       el.style.width = el.dataset.codexElvesConversationViewOriginalWidth;
       delete el.dataset.codexElvesConversationViewOriginalWidth;
@@ -24923,6 +25865,8 @@
 
   function conversationViewApplyNativeWidth(el) {
     conversationViewRememberOriginals(el);
+    if (el.getAttribute("data-codex-conversation-view-target") !== "true")
+      el.setAttribute("data-codex-conversation-view-target", "true");
     const maxWidth = `${conversationViewWidth()}px`;
     if (el.style.boxSizing !== "border-box") el.style.boxSizing = "border-box";
     if (el.style.width !== "100%") el.style.width = "100%";
@@ -24948,7 +25892,7 @@
   }
 
   function conversationViewAlignElement(el) {
-    if (!conversationViewElementIsActive(el)) return;
+    if (!codexServiceTierIsMainComposerElement(el) || !conversationViewElementIsActive(el)) return;
     conversationViewApplyNativeWidth(el);
     const nativeRect = conversationViewNativeRect(el);
     const bounds = conversationViewSessionRectFor(el);
@@ -24978,8 +25922,12 @@
   }
 
   function conversationViewResolveTargets() {
-    if (!conversationViewElementIsActive(conversationViewState.contentEl)) conversationViewState.contentEl = conversationViewFindContentEl();
-    if (!conversationViewElementIsActive(conversationViewState.composerEl)) conversationViewState.composerEl = conversationViewFindComposerEl();
+    if (!conversationViewElementIsActive(conversationViewState.contentEl)
+      || !codexServiceTierIsMainComposerElement(conversationViewState.contentEl))
+      conversationViewState.contentEl = conversationViewFindContentEl();
+    if (!conversationViewElementIsActive(conversationViewState.composerEl)
+      || !codexServiceTierIsMainComposerElement(conversationViewState.composerEl))
+      conversationViewState.composerEl = conversationViewFindComposerEl();
     [
       document.documentElement,
       document.body,
@@ -24993,18 +25941,47 @@
   }
 
   function conversationViewObserverRoot() {
-    const content = conversationViewElementIsActive(conversationViewState.contentEl) ? conversationViewState.contentEl : conversationViewFindContentEl();
-    const composer = conversationViewElementIsActive(conversationViewState.composerEl) ? conversationViewState.composerEl : conversationViewFindComposerEl();
-    const contentRoot = content?.parentElement?.parentElement || content?.parentElement || content;
-    const composerRoot = composer?.parentElement?.parentElement || composer?.parentElement || composer;
-    return document.querySelector("main, [role='main']") || contentRoot?.parentElement || composerRoot?.parentElement || contentRoot || composerRoot || null;
+    // 新版保留并替换多个 main；监听稳定祖先，再筛选布局节点，避免绑在已隐藏的会话上。
+    return document.body || document.documentElement;
+  }
+
+  function conversationViewMutationRelevant(mutation) {
+    const selector = `${conversationViewContentSelector}, ${conversationViewComposerShellSelector}, [class~="max-w-(--thread-content-max-width)"]`;
+    const containsTarget = (node) => node?.nodeType === 1
+      && (node.matches?.(selector) || node.querySelector?.(selector));
+    if (mutation.type === "attributes") {
+      // 自己写入的定位样式不再触发定位，避免 transform 恢复过程形成观察器循环。
+      if (mutation.attributeName === "style"
+        && mutation.target?.hasAttribute?.("data-codex-conversation-view-target")) return false;
+      return containsTarget(mutation.target);
+    }
+    return [...Array.from(mutation.addedNodes || []), ...Array.from(mutation.removedNodes || [])]
+      .some(containsTarget);
+  }
+
+  function syncConversationViewWidthStyle() {
+    const root = document.documentElement;
+    const maxWidth = `${conversationViewWidth()}px`;
+    if (root.style.getPropertyValue("--codex-conversation-view-max-width") !== maxWidth)
+      root.style.setProperty("--codex-conversation-view-max-width", maxWidth);
+    if (root.getAttribute("data-codex-conversation-view") !== "true")
+      root.setAttribute("data-codex-conversation-view", "true");
   }
 
   function conversationViewAlignNow() {
     if (!codexElvesSettings().conversationView) return;
     conversationViewResolveTargets();
-    conversationViewAlignElement(conversationViewState.contentEl);
-    conversationViewAlignElement(conversationViewState.composerEl);
+    // 切换期间新旧视图可短暂同时可见，二者都在绘制前对齐；隐藏视图只由 CSS 保持宽度。
+    const targets = new Set([
+      conversationViewState.contentEl, conversationViewState.composerEl,
+      ...document.querySelectorAll(`${conversationViewContentSelector}, ${conversationViewComposerShellSelector}`),
+    ]);
+    for (const target of targets) {
+      if (!codexServiceTierIsMainComposerElement(target)) continue;
+      conversationViewObserveIfNeeded(target);
+      conversationViewObserveIfNeeded(target?.parentElement);
+      conversationViewAlignElement(target);
+    }
   }
 
   function scheduleConversationViewAlign(frames = 16) {
@@ -25028,13 +26005,15 @@
 
   function startConversationViewSettleWindow() {
     if (conversationViewState.settleTimer) clearTimeout(conversationViewState.settleTimer);
-    scheduleConversationViewAlign(180);
-    conversationViewState.settleTimer = window.setTimeout(() => {
-      conversationViewState.settleTimer = 0;
-    }, 3000);
+    conversationViewState.settleTimer = 0;
+    // 首次同步对齐，随后两帧承接原生布局提交；后续尺寸变化由 ResizeObserver 接管。
+    conversationViewAlignNow();
+    scheduleConversationViewAlign(2);
   }
 
   function cleanupConversationView() {
+    document.documentElement.removeAttribute("data-codex-conversation-view");
+    document.documentElement.style.removeProperty("--codex-conversation-view-max-width");
     if (conversationViewState.rafId) cancelAnimationFrame(conversationViewState.rafId);
     if (conversationViewState.settleTimer) clearTimeout(conversationViewState.settleTimer);
     conversationViewState.rafId = 0;
@@ -25055,7 +26034,12 @@
 
   function ensureConversationViewRuntime() {
     conversationViewState.ro = conversationViewState.ro || new ResizeObserver(() => scheduleConversationViewAlign());
-    conversationViewState.mo = conversationViewState.mo || new MutationObserver(() => scheduleConversationViewAlign());
+    conversationViewState.mo = conversationViewState.mo || new MutationObserver((mutations) => {
+      if (!mutations.some(conversationViewMutationRelevant)) return;
+      conversationViewForgetTargets();
+      conversationViewAlignNow();
+      scheduleConversationViewAlign(2);
+    });
     const root = conversationViewObserverRoot();
     if (root && conversationViewState.observedRoot !== root) {
       conversationViewState.mo.disconnect();
@@ -25063,7 +26047,7 @@
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ["class", "hidden", "data-state", "aria-hidden"],
+        attributeFilter: ["class", "hidden", "inert", "style", "data-state", "aria-hidden"],
       });
       conversationViewState.observedRoot = root;
     }
@@ -25074,6 +26058,7 @@
       cleanupConversationView();
       return;
     }
+    syncConversationViewWidthStyle();
     if (forceResolve) {
       conversationViewForgetTargets();
       conversationViewState.observedRoot = null;
@@ -25140,12 +26125,17 @@
         scheduleCodexTokenUsagePinnedSummarySync(
           toggle.getAttribute("aria-pressed") || ""
         );
-      } else if (event.target?.closest?.(selectors.sidebarThread)) scheduleCodexRouteFeatureRefresh();
+      } else if (event.target?.closest?.(`${selectors.sidebarThread}, [role="tab"]`)) scheduleCodexRouteFeatureRefresh();
       else if (shouldRefreshConversationViewForControl(event)) scheduleConversationViewRouteRefresh();
     };
     const keyboardHandler = (event) => {
+      const tab = event.target?.closest?.('[role="tab"]');
+      if (tab && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+        scheduleCodexRouteFeatureRefresh();
+        return;
+      }
       if (event.key !== "Enter" && event.key !== " ") return;
-      if (event.target?.closest?.(selectors.sidebarThread)) scheduleCodexRouteFeatureRefresh();
+      if (event.target?.closest?.(`${selectors.sidebarThread}, [role="tab"]`)) scheduleCodexRouteFeatureRefresh();
       else if (shouldRefreshConversationViewForControl(event)) scheduleConversationViewRouteRefresh();
     };
     window.__codexRouteFeaturePointerHandler = null;
@@ -25232,6 +26222,12 @@
     if (codexOpenInServicePromise) return await codexOpenInServicePromise;
     codexOpenInServicePromise = (async () => {
       let fallbackService = null;
+      // 新版数字 chunk 中的 appServices.openIn 保持原服务契约；复用已加载实例。
+      for (const module of await codexLoadedAppModuleExports()) {
+        if (!Object.hasOwn(module, "appServices")) continue;
+        const service = module.appServices?.openIn;
+        if (isCodexOpenInService(service) && String(service) === "[object RpcStub]") return service;
+      }
       // 26.928 起原生服务迁移到 app-shared，旧版仍从 app-initial 导出。
       for (const namePart of ["app-shared-", "app-initial-"]) {
         const url = codexAppAssetUrl(namePart) || await codexOpenInAppModuleUrlFromScripts(namePart);
@@ -25390,11 +26386,20 @@
       || null;
   }
 
+  function codexOpenInTargetPath(context) {
+    const path = context.cwd;
+    if (context.hostId !== "local" || typeof path !== "string") return path;
+    // Windows 文件系统接受扩展路径，系统 Shell 的打开入口需要普通盘符或 UNC 路径。
+    if (/^\\\\\?\\UNC\\/i.test(path)) return `\\\\${path.slice(8)}`;
+    if (/^\\\\\?\\[a-z]:[\\/]/i.test(path)) return path.slice(4);
+    return path;
+  }
+
   async function openCodexOpenInTarget(context, target) {
     if (codexOpenInTestApi?.open) return await codexOpenInTestApi.open({ context, target });
     const service = await loadCodexOpenInService();
     return await service.open({
-      path: context.cwd,
+      path: codexOpenInTargetPath(context),
       cwd: context.cwd,
       hostId: context.hostId,
       target: target.target,
@@ -25489,7 +26494,9 @@
   }
 
   function codexOpenInNativeButtonExists() {
-    const surface = document.querySelector(selectors.headerContextMenuSurface) || document.querySelector("header");
+    const surface = codexPinnedSummaryToggle()?.closest("[data-app-shell-header-toolbar]")
+      || Array.from(document.querySelectorAll(selectors.headerContextMenuSurface)).find(conversationViewElementIsActive)
+      || Array.from(document.querySelectorAll("header")).find(conversationViewElementIsActive);
     if (!surface) return false;
     return Array.from(surface.querySelectorAll("button")).some((button) => {
       if (button.closest(`.${codexOpenInGroupClass}`)) return false;
@@ -25502,12 +26509,38 @@
   }
 
   function codexOpenInAnchor() {
-    const surface = document.querySelector(selectors.headerContextMenuSurface);
-    const group = Array.from(surface?.querySelectorAll("div") || []).find((node) => {
-      const className = String(node.className || "");
-      return className.includes("ms-auto") && className.includes("items-center");
-    });
-    if (group) {
+    const toggle = codexPinnedSummaryToggle();
+    const toolbar = toggle?.closest("[data-app-shell-header-toolbar]");
+    if (toolbar) {
+      // 用户要求 Open in 保留在顶部工具栏最左侧；从当前摘要按钮找到同排操作容器，
+      // 跳过 display:contents 包装，不依赖 Header/Toolbar 的哈希类名。
+      for (let group = toggle.parentElement; group && group !== toolbar; group = group.parentElement) {
+        const style = getComputedStyle(group);
+        if (style.display !== "flex" || style.flexDirection !== "row") continue;
+        return {
+          parent: group,
+          before: Array.from(group.children).find((node) => !node.hasAttribute(codexOpenInButtonAttribute)) || null,
+          nativeClass: toggle.className || headerIconTextButtonClass,
+          anchorType: "toolbar",
+        };
+      }
+    }
+    const surface = Array.from(document.querySelectorAll(selectors.headerContextMenuSurface))
+      .find(conversationViewElementIsActive);
+    const titlebar = surface?.closest("[data-app-shell-titlebar]");
+    // 完整视图将操作区移到同一标题栏的 end slot，context surface 内只保留聊天选项卡。
+    const roots = [
+      surface,
+      ...Array.from(titlebar?.querySelectorAll('[data-app-shell-header-slot="end"]') || [])
+        .filter((node) => node.closest("[data-app-shell-titlebar]") === titlebar),
+    ].filter(Boolean);
+    for (const root of roots) {
+      const group = Array.from(root.querySelectorAll("div")).find((node) => {
+        if (node.closest('[aria-hidden="true"], [inert], [role="tab"], [role="tablist"], [data-tab-id]')) return false;
+        const className = String(node.className || "");
+        return className.includes("ms-auto") && className.includes("items-center");
+      });
+      if (!group) continue;
       const before = Array.from(group.childNodes || []).find((node) => (
         node.nodeType !== 1 || node.getAttribute?.(codexOpenInButtonAttribute) !== "true"
       )) || null;
@@ -25949,8 +26982,9 @@
 
   function installCodexElvesRuntimeOnce() {
     installStyle();
-    refreshRecentSessionsRuntime();
+    refreshCodexActivitySessionLayout();
     installPromptOptimizeFeature();
+    void installCodexNativeRpcCompat();
     if (window.__codexElvesRuntimeOnceInstalled === codexElvesBuild) return;
     cleanupLegacyCodexComposerOverflowGuards();
     void loadCodexModelCatalog();
@@ -25972,7 +27006,7 @@
     const headerDirty = !!dirty.header || shellDirty;
     const pluginsDirty = !!dirty.plugins || shellDirty;
 
-    if (shellDirty || sidebarDirty || headerDirty) refreshRecentSessionsRuntime();
+    if (shellDirty || sidebarDirty || headerDirty) refreshCodexActivitySessionLayout();
     if (shellDirty) cleanupDisconnectedSessionArtifacts();
     if (pluginsDirty) {
       if (pluginPatchDisabledInRelayMode()) {
@@ -26016,6 +27050,8 @@
     }
     if (conversationDirty) {
       refreshConversationView();
+      void window.__codexElvesComposerFast?.refresh();
+      refreshCodexComposerContextUsage();
       installCodexAppServerRestartButtons();
       installCodexWorkspaceCheckpointTurnCompletionListener();
       installCodexWorkspaceCheckpointEditButtons();
@@ -26128,18 +27164,23 @@
     requestAnimationFrame(() => runScanStep(() => scanDeferred(dirty)));
   }
 
-  function refreshRecentSessionsRuntime() {
-    window.__codexElvesRecentSessions?.configure({
-      enabled: codexElvesBackendSettings.enhancementsEnabled !== false,
-      beforeNavigate: () => deactivateTaskBoard(),
-      currentSessionId: () => activeConversationIdFromDom() || currentSessionRefFromDom()?.session_id,
-      confirmDelete,
-      notify: showToast,
+  function refreshCodexActivitySessionLayout() {
+    const activity = [...document.querySelectorAll('button[aria-pressed="true"]')].find(node =>
+      /^(?:查看活动|打开活动视图|关闭活动视图|View activity|Open activity view|Close activity view)(?:[，,].*)?$/i
+        .test(node.getAttribute("aria-label") || node.title || ""));
+    // 用户要求独立开关默认关闭；关闭时只撤销样式标记，原生行、摘要及状态保持原样。
+    const navigation = codexElvesSettings().activityViewCompact === true
+      ? activity?.closest("nav, [role='navigation'], [data-sidebar-navigation-root]") : null;
+    document.querySelectorAll('[data-codex-activity-session-layout="true"]').forEach(node => {
+      if (node !== navigation) node.removeAttribute("data-codex-activity-session-layout");
     });
+    if (navigation && navigation.getAttribute("data-codex-activity-session-layout") !== "true")
+      navigation.setAttribute("data-codex-activity-session-layout", "true");
   }
 
   function isExtensionUiNode(node) {
-    if (node?.closest?.("[data-codex-recent-sessions-root], [data-codex-recent-sessions-entry], .codex-recent-menu")) return true;
+    if (node?.closest?.("[data-codex-context-usage]")) return true;
+    if (node?.closest?.("[data-codex-elves-fast]")) return true;
     return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-elves-modal-overlay, .codex-workspace-checkpoint-overlay, [${codexWorkspaceCheckpointEditButtonAttribute}="true"], [${codexWorkspaceCheckpointButtonAttribute}="true"], .${projectMoveOverlayClass}, .codex-conversation-timeline, .${codexTokenUsageCardClass}, .${codexAppServerRestartButtonClass}, .${codexAppServerRestartDialogClass}, .${taskBoardMainHostClass}, .${taskBoardEntryContextMenuClass}, [${taskBoardEntryAttribute}="true"], .${codexOpenInMenuClass}, [${codexOpenInButtonAttribute}="true"], .${codexPromptOptimizePortalClass}, .${codexPromptOptimizeSettingsOverlayClass}, [${codexPromptOptimizeButtonAttribute}="true"], #codex-elves-menu`);
   }
 
@@ -26159,6 +27200,7 @@
     if (domain === "header") {
       return [
         selectors.applicationMenuTopBar,
+        "[data-app-shell-header-toolbar]",
         selectors.appHeader,
         selectors.pinnedSummaryPanel,
         selectors.pinnedSummaryToggle,
@@ -26175,6 +27217,8 @@
         '[class*="UserMessage"]',
         ".composer-footer",
         '[class*="_footer_"]',
+        '[data-composer-navigation-target]',
+        '[data-composer-footer-responsive]',
         ".ProseMirror",
         selectors.pinnedSummaryPanel,
         selectors.pinnedSummaryToggle,
@@ -26270,6 +27314,11 @@
       document.querySelector(selectors.appHeader)?.closest?.("header, [role='banner']") ||
       document.querySelector("header, [role='banner']");
     const scopedRootsReady = !!sidebarRoot && !!conversationRoot && !!headerRoot;
+    // 多聊天标签页不会更改 app:// URL；同时观察当前工具栏的选中状态和内容。
+    push("header", codexPinnedSummaryToggle()?.closest("[data-app-shell-header-toolbar]"), {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ["aria-pressed", "aria-selected"],
+    });
     push("shell", document.body || document.documentElement, {
       childList: true,
       subtree: !scopedRootsReady,
@@ -26391,7 +27440,7 @@
   installScanObservers();
   window.__codexElvesRefreshRuntime = () => {
     installStyle();
-    refreshRecentSessionsRuntime();
+    refreshCodexActivitySessionLayout();
     cleanupLegacyForcePluginInstallRuntime();
     void loadBackendSettingsForStartup();
     installCodexElvesImageOverlay();
@@ -26408,6 +27457,8 @@
     installCodexAppServerRestartPositionTracking();
   };
   window.__codexElvesRuntimeBuild = codexElvesBuild;
+  window.__codexComposerContextUsageCleanup = cleanupCodexComposerContextUsage;
+  document.addEventListener("visibilitychange", refreshCodexContextUsageAfterVisibility);
   installCodexTransportBadges();
   window.__codexElvesRuntimeHelperBase = helperBase;
   window.__codexElvesRuntimeStyleVersion = codexDeleteStyleVersion;

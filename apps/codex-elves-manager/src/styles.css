@@ -342,6 +342,8 @@ body {
   z-index: var(--z-topbar);
   flex: 0 0 auto;
   display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
   align-items: center;
   justify-content: space-between;
   min-height: 72px;
@@ -364,8 +366,30 @@ body {
 
 .topbar-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  margin-left: auto;
+}
+
+/* 用户要求开关紧邻重启按钮；窗口变窄时两者整体换行，保持相对位置。 */
+.codex-topbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.codex-update-toggle {
+  padding-inline: 10px;
+  font-size: 12px;
+}
+
+.codex-update-toggle.active .context-switch-track {
+  background: hsl(var(--primary));
+}
+
+.codex-update-toggle.active .context-switch-thumb {
+  transform: translateX(12px);
 }
 
 .proxy-topbar-badge {
@@ -1942,6 +1966,16 @@ body {
   background: hsl(var(--accent));
   color: hsl(var(--accent-foreground));
   outline: none;
+}
+
+.app-select-option-multiple {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-select-option-multiple svg {
+  flex-shrink: 0;
 }
 
 .remote-context-option-label {
@@ -4476,6 +4510,15 @@ body {
   color: hsl(var(--muted-foreground));
   font-size: 12px;
   line-height: 1.45;
+}
+
+.speed-test-model-picker {
+  margin-bottom: 14px;
+}
+
+/* 测速模型下拉通过 portal 挂在 body，必须高于弹窗遮罩才能勾选。 */
+.speed-test-model-menu {
+  z-index: calc(var(--z-modal) + 10);
 }
 
 .speed-test-running {

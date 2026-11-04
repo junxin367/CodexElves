@@ -349,6 +349,16 @@ pub async fn handle_bridge_request(
         crate::prompt_optimize::PROMPT_OPTIMIZE_CANCEL_PATH => {
             crate::prompt_optimize::service().cancel(&payload)
         }
+        crate::prompt_optimize::PROMPT_OPTIMIZE_SETTINGS_PATH => (|| {
+            let directory = crate::paths::default_app_state_dir();
+            if let Some(settings) = payload.get("settings") {
+                crate::prompt_optimize::save_preferences(&directory, settings)?;
+            }
+            Ok(json!({
+                "status": "ok",
+                "settings": crate::prompt_optimize::load_preferences(&directory)?
+            }))
+        })(),
         "/diagnostics/log" => diagnostic_log_value(payload.clone()),
         "/upstream-worktree/status" => ctx.runtime.upstream_worktree_status().await,
         "/upstream-worktree/defaults" => {

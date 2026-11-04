@@ -1,4 +1,5 @@
 import { applyChannelConfiguration, createChannelEventStream } from "./channels.js";
+import { setDiagnosticSink } from "./diagnostics.js";
 
 const subscribers = new Map();
 let stream = null;
@@ -9,6 +10,8 @@ function broadcast(message) {
     catch { unsubscribe(port); }
   }
 }
+
+setDiagnosticSink(event => broadcast({ type: "diagnostic", event }));
 
 function update() {
   if (![...subscribers.values()].some(Boolean)) {

@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use codex_elves_core::install::SILENT_BINARY;
 use codex_elves_core::models::{DeleteResult, DeleteStatus};
+use codex_elves_core::remote_access::NativeCdpBridge;
 use codex_elves_core::script_market::{self, MarketScript, ScriptMarketManifest};
 use codex_elves_core::settings::{
     BackendSettings, RelayProfile, ResponsesWebsocketCapability, SettingsStore,
@@ -487,6 +488,33 @@ pub async fn load_overview() -> CommandResult<OverviewPayload> {
                 .to_string(),
         },
     )
+}
+
+#[tauri::command]
+pub fn load_codex_update_policy() -> CommandResult<Value> {
+    let result = codex_elves_core::codex_update_policy::system_requirements_path()
+        .and_then(|path| codex_elves_core::codex_update_policy::read(&path));
+    match result {
+        Ok(policy) => ok("已读取本机 Codex 更新策略。", json!(policy)),
+        Err(error) => failed(&format!("读取 Codex 更新策略失败：{error:#}"), json!({})),
+    }
+}
+
+#[tauri::command]
+pub fn set_codex_auto_update_disabled(disabled: bool) -> CommandResult<Value> {
+    let result = codex_elves_core::codex_update_policy::system_requirements_path()
+        .and_then(|path| codex_elves_core::codex_update_policy::set_disabled(&path, disabled));
+    match result {
+        Ok(policy) => ok(
+            if disabled {
+                "已保存禁止自动更新策略。请重启 Codex，并在设置 → 通用 → In-app updates 确认出现 Managed。此开关仅控制应用内更新，不影响 Microsoft Store 等外部更新。"
+            } else {
+                "已移除本机禁止自动更新策略，请重启 Codex 生效；若仍显示 Managed，请检查组织或其他系统策略。"
+            },
+            json!(policy),
+        ),
+        Err(error) => failed(&format!("保存 Codex 更新策略失败：{error:#}"), json!({})),
+    }
 }
 
 #[tauri::command]
@@ -1089,41 +1117,46 @@ pub async fn delete_local_session(
 }
 
 async fn delete_local_session_in_codex(session_id: &str) -> anyhow::Result<DeleteResult> {
-    let debug_port = user_script_reload_debug_port(StatusStore::default().load_latest()?)?;
-    let targets = codex_elves_core::cdp::list_targets(debug_port).await?;
-    let target = codex_elves_core::cdp::pick_injectable_codex_page_target(&targets)?;
-    let websocket_url = target
-        .web_socket_debugger_url
-        .as_deref()
-        .context("Codex 页面缺少调试连接")?;
-    let encoded_id = serde_json::to_string(session_id)?;
-    let encoded_ref =
-        serde_json::to_string(&json!({ "session_id": format!("local:{session_id}") }))?;
-    let expression = format!(
-        r#"(async () => {{
-          if (typeof window.__codexElvesNativeDeleteThread !== "function") {{
-            return {{ status: "failed", session_id: {encoded_id}, message: "请先启动 CodexElves 并启用会话删除增强" }};
-          }}
-          try {{
-            return await window.__codexElvesNativeDeleteThread({encoded_ref});
-          }} catch (error) {{
-            return {{ status: "failed", session_id: {encoded_id}, message: String(error?.message || error) }};
-          }}
-        }})()"#
-    );
-    let response = codex_elves_core::bridge::evaluate_script_value_with_timeout(
-        websocket_url,
-        &expression,
-        Duration::from_secs(60),
-    )
-    .await?;
-    if let Some(exception) = response.pointer("/result/exceptionDetails/text") {
-        anyhow::bail!("Codex 页面执行删除失败：{exception}");
+    // 用户要求新版 Codex 也能从管理器永久删除：复用已适配原生 RPC 的删除入口，
+    // 保留派生会话清理和缺失 rollout 恢复，不再单独依赖旧 manager.requestClient。
+    let response = NativeCdpBridge::delete_local_thread(session_id).await?;
+    delete_result_from_native(session_id, &response)
+}
+
+fn delete_result_from_native(session_id: &str, response: &Value) -> anyhow::Result<DeleteResult> {
+    if response["ok"] != true {
+        anyhow::bail!(
+            "{}",
+            response["message"]
+                .as_str()
+                .unwrap_or("Codex 原生删除未确认完成，请核对会话后再操作")
+        );
     }
-    let value = response
-        .pointer("/result/result/value")
-        .context("Codex 页面未返回删除结果")?;
-    serde_json::from_value(value.clone()).context("Codex 页面返回了无效删除结果")
+    let matching_id = response["threadId"]
+        .as_str()
+        .is_some_and(|id| id.eq_ignore_ascii_case(session_id));
+    anyhow::ensure!(
+        matching_id && response["deleted"] == true,
+        "Codex 原生删除回执与所选会话不匹配，请核对会话后再操作"
+    );
+    let status = match response["status"].as_str() {
+        Some("local_deleted") => DeleteStatus::LocalDeleted,
+        Some("partial") => DeleteStatus::Partial,
+        _ => anyhow::bail!("Codex 页面返回了无效删除状态，请核对会话后再操作"),
+    };
+    let default_message = if matches!(status, DeleteStatus::Partial) {
+        "会话已永久删除，但最近列表更新失败"
+    } else {
+        "会话已永久删除"
+    };
+    Ok(DeleteResult {
+        status,
+        session_id: session_id.to_string(),
+        message: response["message"]
+            .as_str()
+            .unwrap_or(default_message)
+            .to_string(),
+    })
 }
 
 fn local_session_adapter(db_path: &Path) -> codex_elves_data::SQLiteStorageAdapter {
@@ -3041,8 +3074,9 @@ pub fn delete_context_entry(request: ContextDeleteRequest) -> CommandResult<Cont
 pub async fn test_relay_profile(
     profile: RelayProfile,
     model: Option<String>,
-    input_tokens: Option<u32>,
+    speed_test: Option<bool>,
 ) -> CommandResult<RelayProfileTestPayload> {
+    let speed_test = speed_test.unwrap_or(false);
     let profile_name = if profile.name.trim().is_empty() {
         "未命名供应商"
     } else {
@@ -3052,23 +3086,20 @@ pub async fn test_relay_profile(
     let requested_model = model.as_deref().unwrap_or("").trim();
     let test_model: String = if !requested_model.is_empty() {
         requested_model.to_string()
-    } else if !profile.test_model.trim().is_empty() {
-        // 1. 使用者在該供應商明確填的測試模型
-        profile.test_model.trim().to_string()
     } else {
-        // 2. 該供應商自己 config.toml 裡的 model（避免串味）
+        // 用户要求废弃供应商隐藏测试模型；留空使用当前供应商 config.toml 中的模型。
         let from_profile = codex_elves_core::relay_config::relay_profile_model(&profile);
         if from_profile.trim().is_empty() {
-            // 3. 最後才用全域預設
+            // 供应商没有默认模型时，才使用有明确设置入口的全局测试模型。
             settings.relay_test_model.trim().to_string()
         } else {
             from_profile
         }
     };
-    match codex_elves_core::relay_config::test_relay_profile_with_input_tokens(
+    match codex_elves_core::relay_config::test_relay_profile_with_speed_test(
         &profile,
         &test_model,
-        input_tokens,
+        speed_test,
     )
     .await
     {
@@ -3080,10 +3111,9 @@ pub async fn test_relay_profile(
             };
             CommandResult {
                 status: status.to_string(),
-                message: if input_tokens.is_some_and(|tokens| tokens > 0) {
+                message: if speed_test {
                     format!(
-                        "已向「{profile_name}」用模型「{test_model}」发送约 {} token 测速输入，HTTP {}。",
-                        input_tokens.unwrap_or_default(),
+                        "已向「{profile_name}」用模型「{test_model}」发送完整糖果题进行测速，HTTP {}。",
                         result.http_status
                     )
                 } else {
@@ -5170,6 +5200,36 @@ base_url = "https://manual.example/v1"
             1
         );
         assert!(rollout_path.is_file());
+    }
+
+    #[test]
+    fn delete_result_from_native_requires_confirmed_matching_receipts() {
+        let id = "01a0bcd2-2190-70b1-bb66-94cac705d622";
+        let receipt = json!({
+            "ok": true, "threadId": id, "deleted": true, "status": "local_deleted"
+        });
+        let result = delete_result_from_native(id, &receipt).unwrap();
+        assert_eq!(result.status, DeleteStatus::LocalDeleted);
+        assert_eq!(result.session_id, id);
+        assert_eq!(result.message, "会话已永久删除");
+
+        let partial = json!({
+            "ok": true, "threadId": id, "deleted": true, "status": "partial",
+            "message": "会话已永久删除，但最近列表更新失败：storage unavailable"
+        });
+        let result = delete_result_from_native(id, &partial).unwrap();
+        assert_eq!(result.status, DeleteStatus::Partial);
+        assert!(result.message.contains("storage unavailable"));
+
+        for unconfirmed in [
+            json!({"ok": false, "outcomeUnknown": true, "message": "永久删除结果未确认"}),
+            json!({"ok": false, "message": "当前 Codex 版本的原生永久删除服务不可用"}),
+            json!({"ok": true, "threadId": "other", "deleted": true, "status": "local_deleted"}),
+            json!({"ok": true, "threadId": id, "deleted": false, "status": "local_deleted"}),
+            json!({"ok": true, "threadId": id, "deleted": true, "status": "failed"}),
+        ] {
+            assert!(delete_result_from_native(id, &unconfirmed).is_err());
+        }
     }
 
     #[test]

@@ -16,7 +16,7 @@
   <img alt="Tauri" src="https://img.shields.io/badge/tauri-2.x-24C8DB">
 </p>
 
-CodexElves is an external enhancement launcher and manager for the Codex workspace in the new ChatGPT desktop app, while remaining compatible with the legacy Codex App. It does not modify the original installation. Instead, it launches ChatGPT/Codex externally and injects enhancements through the Chromium DevTools Protocol.
+CodexElves is an enhancement launcher and manager for the Codex workspace in the new ChatGPT desktop app, while remaining compatible with the legacy Codex App. It launches ChatGPT/Codex externally and injects interface enhancements through the Chromium DevTools Protocol. Some compatibility features also update runtime files: on supported Windows versions, API Key browser compatibility backs up and adapts the browser service script.
 
 Desktop rename compatibility:
 
@@ -44,20 +44,31 @@ The Windows installer creates desktop and Start Menu shortcuts. The macOS DMG in
 
 - Rust backend and silent launcher with no extra runtime requirement.
 - Tauri + React manager with dark/light theme support.
-- External CDP injection. No `app.asar` patching and no DLL writes into the ChatGPT/Codex installation.
+- External CDP injection for interface enhancements, with separate runtime compatibility handling where required.
 - Relay injection mode with multiple relay profiles, `CodexElves` provider configuration, and a one-click switch back to official ChatGPT login mode.
 - Traditional enhancement mode with plugin entry unlock, forced plugin install, session delete, Markdown export, project move, and more.
 - Workspace Checkpoints: save an external shadow-Git snapshot before each AI turn, undo the latest file changes, restore the matching state when editing an earlier message, or restore any checkpoint. It honors `.gitignore` and never writes to the project's Git history or index.
 - Independent user script management with startup injection.
 - Provider Sync to keep historical sessions visible after switching providers.
+- Remote sessions through a browser, PWA, or Android app, with native desktop operations preferred and limited service fallback for reads and main-session text sends.
 - Upstream worktree creation: create new worktrees from `upstream/<base-branch>` after fetching the remote branch, reducing conflicts caused by stale local HEAD state.
 - GitHub Release updates. Both the manager and silent launcher can detect available updates.
 - Windows single instance, no console window, administrator manifest, and system Desktop path detection.
 - Separate macOS x64 and arm64 DMGs. The silent launcher hides its Dock icon.
 
+## Remote Sessions
+
+Enable remote sessions in CodexElves Manager, save an access key, and connect through the configured zrok or FRP address. The computer and remote backend must remain online; full native interaction also requires the desktop app to be ready.
+
+The session menu lists Changes, Files, and Browser, followed by Subagents and Side Chats. Workspace views are read-only and scoped to the selected session or local project. Browser requires an authorized FRP route and a compatible Android native bridge. Subagents are read-only; side chats use their own native model settings and lifecycle.
+
+Native injection failure limits individual capabilities. Supported reads and restricted text sends to an idle, persistent local main session can use the service fallback. Creation, images, goals, stop, approvals, questions, editing, queues, and side-chat management still require their native capabilities. A send can fall back only when native dispatch is proven not to have occurred. After dispatch, an unknown outcome is checked through the original receipt and is never automatically resent.
+
+See the [mobile guide](docs/remote-access-mobile.md), [remote access guide](docs/remote-access.md), and [current session tools and routing](docs/remote-session-tools.md) for connection steps and capability limits. These guides are in Simplified Chinese.
+
 ## Screenshots
 
-## Full Feature Set
+### Full Feature Set
 ![Full feature set](image.png)
 
 ### Local Proxy
@@ -203,4 +214,4 @@ scripts/installer/
 
 ## Notes
 
-CodexElves is an external enhancement tool and does not modify original ChatGPT/Codex desktop app files. If a future desktop app update changes the page structure, the injection script may need updates.
+Desktop updates can change page structure and runtime contracts, requiring updates to injection or compatibility handling. Runtime compatibility changes use their own backup and validation path; see the manager settings and diagnostics for the enabled features.

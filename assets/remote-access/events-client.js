@@ -1,4 +1,5 @@
 import { createChannelEventStream, observeChannelConfiguration } from "./channels.js";
+import { newDiagnosticRequestId, recordDiagnostic } from "./diagnostics.js";
 
 let sharedWorkerFailed = false;
 
@@ -35,6 +36,11 @@ function sharedStream() {
   let graceUntil = 0;
   let online = navigator.onLine !== false;
   let errorReported = false;
+  const requestId = newDiagnosticRequestId("worker");
+  const diagnostic = (name, fields = {}) => recordDiagnostic(name, {
+    requestId, readyState, visible: !document.hidden, online: navigator.onLine !== false, ...fields
+  });
+  diagnostic("worker.create", { phase: "create" });
   const stream = {
     get transport() { return fallback ? "fallback" : "shared-worker"; },
     onopen: null,
@@ -45,6 +51,7 @@ function sharedStream() {
       if (closed) return;
       closed = true;
       readyState = READY_STATE.CLOSED;
+      diagnostic("worker.close", { phase: "close", reason: "cancelled" });
       detachWorker();
       fallback?.close();
     }
@@ -66,10 +73,12 @@ function sharedStream() {
   const reportError = event => {
     if (closed || errorReported) return;
     errorReported = true;
+    diagnostic("worker.error", { phase: "failure", reason: event?.reason, errorType: event?.name });
     stream.onerror?.(event);
   };
   const fail = event => {
     if (closed || fallback) return;
+    diagnostic("worker.fallback", { phase: "failure", reason: event?.reason, errorType: event?.name });
     sharedWorkerFailed = true;
     detachWorker();
     fallback = createChannelEventStream();
@@ -94,6 +103,10 @@ function sharedStream() {
     lastWatchAt = now;
     const deadline = workerReady ? lastActivityAt + WORKER_RESPONSE_TIMEOUT : startedAt + WORKER_START_TIMEOUT;
     if (now >= deadline && now >= graceUntil) {
+      diagnostic("worker.timeout", {
+        phase: "failure", reason: workerReady ? "worker-response-timeout" : "worker-timeout",
+        durationMs: now - (workerReady ? lastActivityAt : startedAt)
+      });
       fail({ type: "error", reason: workerReady ? "worker-response-timeout" : "worker-timeout" });
       return;
     }
@@ -116,6 +129,7 @@ function sharedStream() {
     online = navigator.onLine !== false;
     const now = Date.now();
     graceUntil = now + RESUME_GRACE;
+    diagnostic("worker.resume", { phase: "resume", reason: "page-resume", delayMs: RESUME_GRACE });
     startedAt = lastWatchAt = now;
     post({ type: "resume", online });
     if (!closed && !fallback && !document.hidden && online && watchTimer === null) watchTimer = setTimeout(watch, WATCH_INTERVAL);
@@ -130,12 +144,18 @@ function sharedStream() {
   port.onmessageerror = fail;
   port.onmessage = event => {
     if (closed || fallback) return;
+    if (event.data?.type === "diagnostic") {
+      // 观测消息不计作 worker 心跳，不改变失联超时判定。
+      recordDiagnostic(event.data.event?.name, event.data.event?.fields);
+      return;
+    }
     workerReady = true;
     lastActivityAt = Date.now();
     if (event.data?.type === "open") {
       if (!online || readyState === READY_STATE.OPEN) return;
       readyState = READY_STATE.OPEN;
       errorReported = false;
+      diagnostic("worker.open", { phase: "open" });
       stream.onopen?.(event);
     } else if (event.data?.type === "event") {
       if (!online) return;
