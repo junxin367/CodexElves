@@ -2539,7 +2539,6 @@ async fn launch_keeps_protocol_proxy_running_until_helper_stops() {
             local_proxy_enabled: Some(true),
             relay_mode: codex_elves_core::settings::RelayMode::MixedApi,
             official_mix_api_key: false,
-            test_model: String::new(),
             config_contents: String::new(),
             auth_contents: String::new(),
             use_common_config: true,

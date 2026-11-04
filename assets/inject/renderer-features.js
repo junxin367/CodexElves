@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "103";
+  const codexDeleteStyleVersion = "105";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -620,6 +620,11 @@
   }
 
   cleanupRemovedConversationHelpers();
+  // 用户要求移除独立最近列表；重新注入时停止旧实例的轮询并恢复被覆盖的原生侧栏。
+  window.__codexElvesRecentSessions?.dispose?.();
+  delete window.__codexElvesRecentSessions;
+  delete window.__codexElvesInstallRecentSessionsAdapter;
+  delete window.__codexElvesRecentSessionsSnapshotCache;
   const selectors = {
     sidebarThread: "[data-app-action-sidebar-thread-id]",
     threadTitle: "[data-thread-title]",
@@ -670,6 +675,48 @@
         --codex-elves-modal-width-standard: 600px;
         --codex-elves-modal-width-large: 640px;
         --codex-elves-modal-viewport-gap: 48px;
+      }
+      /* 用户要求：仅在原生“查看活动”中按会话名、项目名显示两行，不重排原生节点或接管状态。
+         沿用原最近列表的 13/11px 字号、20/16px 行高；上下各 6px，共至少 48px。 */
+      [data-codex-activity-session-layout="true"] [data-app-action-sidebar-thread-row] {
+        min-height: 48px !important;
+        padding-block: 6px !important;
+      }
+      [data-codex-activity-session-layout="true"] [data-thread-title-trigger] {
+        gap: 0 !important;
+      }
+      [data-codex-activity-session-layout="true"] [data-thread-title-trigger] > div:has([data-thread-title]) {
+        align-items: flex-start !important;
+      }
+      [data-codex-activity-session-layout="true"] [data-thread-title-trigger] > div > span:has(> [data-thread-title]) {
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 0 !important;
+      }
+      [data-codex-activity-session-layout="true"] [data-thread-title] {
+        width: 100% !important;
+        font-size: 13px !important;
+        line-height: 20px !important;
+      }
+      [data-codex-activity-session-layout="true"] [class*="_inlineTitleSuffix_"] {
+        display: block !important;
+        min-width: 0;
+        max-width: 100%;
+        flex: 0 1 auto !important;
+        overflow: hidden;
+        font-size: 11px;
+        line-height: 16px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      [data-codex-activity-session-layout="true"] [class*="_inlineTitleSuffix_"] > span {
+        display: block !important;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      [data-codex-activity-session-layout="true"] [data-thread-title-trigger] > div:has(> [data-thread-secondary-title]) {
+        display: none !important;
       }
       .${actionGroupClass} {
         position: absolute;
@@ -4275,6 +4322,7 @@
       pluginEntryUnlock: true,
       pluginMarketplaceUnlock: true,
       taskBoard: true,
+      activityViewCompact: false,
       sessionDelete: true,
       markdownExport: true,
       projectMove: true,
@@ -4293,6 +4341,7 @@
     pluginEntryUnlock: "codexAppPluginEntryUnlock",
     pluginMarketplaceUnlock: "codexAppPluginMarketplaceUnlock",
     taskBoard: "codexAppTaskBoard",
+    activityViewCompact: "codexAppActivityViewCompact",
     sessionDelete: "codexAppSessionDelete",
     markdownExport: "codexAppMarkdownExport",
     projectMove: "codexAppProjectMove",
@@ -4324,6 +4373,7 @@
       pluginEntryUnlock: false,
       pluginMarketplaceUnlock: false,
       taskBoard: false,
+      activityViewCompact: false,
       sessionDelete: false,
       markdownExport: false,
       projectMove: false,
@@ -4400,7 +4450,7 @@
       dirty.plugins = true;
       return dirty;
     }
-    if (key === "taskBoard") {
+    if (key === "taskBoard" || key === "activityViewCompact") {
       dirty.sidebar = true;
       return dirty;
     }
@@ -4481,6 +4531,7 @@
     launchMode: "patch",
     codexAppVersion: "",
     codexAppWorkspaceCheckpoint: false,
+    codexAppActivityViewCompact: false,
   };
   const codexPluginLegacyEntryUnlockBeforeVersion = "26.601.2237";
 
@@ -6891,6 +6942,7 @@
     refreshCodexNativeFastUnlockState();
     refreshCodexTokenUsageFeatureState();
     refreshCodexWorkspaceCheckpointFeatureState();
+    refreshCodexActivitySessionLayout();
     refreshUpstreamBranchDropdownAdapter();
     syncChatsSortVisibilityListener();
     if (!codexElvesSettings().projectMove) stopChatsSortRuntime();
@@ -7190,6 +7242,10 @@
             <div class="codex-elves-row">
               <div><div class="codex-elves-row-title">任务看板</div><div class="codex-elves-row-description">在左侧导航的“插件”下方显示内置任务看板入口；关闭时退出看板并恢复原生页面。默认开启。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="taskBoard"><span></span></button>
+            </div>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">活动视图精简</div><div class="codex-elves-row-description">在原生“查看活动”中仅显示会话名称和项目名称两行，隐藏消息摘要；关闭时恢复原生展示。默认关闭。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="activityViewCompact"><span></span></button>
             </div>
             <div class="codex-elves-row">
               <div><div class="codex-elves-row-title">快速打开工作区</div><div class="codex-elves-row-description">在顶部工具栏最左侧显示 Open in 快捷按钮，用首选应用一键打开当前会话目录；默认开启。</div></div>
@@ -21077,7 +21133,6 @@
       if (!taskBoardState.active) return;
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
       if (!target || target.closest?.(`[${taskBoardEntryAttribute}="true"]`)) return;
-      if (target.closest("[data-codex-recent-sessions-entry], [data-codex-recent-sessions-root], .codex-recent-menu")) return;
       const nativeNavigationTarget = taskBoardNativeNavigationControl(target);
       if (!nativeNavigationTarget) return;
       const releaseId = ++taskBoardState.navigationReleaseId;
@@ -26008,7 +26063,7 @@
 
   function installCodexElvesRuntimeOnce() {
     installStyle();
-    refreshRecentSessionsRuntime();
+    refreshCodexActivitySessionLayout();
     installPromptOptimizeFeature();
     if (window.__codexElvesRuntimeOnceInstalled === codexElvesBuild) return;
     cleanupLegacyCodexComposerOverflowGuards();
@@ -26031,7 +26086,7 @@
     const headerDirty = !!dirty.header || shellDirty;
     const pluginsDirty = !!dirty.plugins || shellDirty;
 
-    if (shellDirty || sidebarDirty || headerDirty) refreshRecentSessionsRuntime();
+    if (shellDirty || sidebarDirty || headerDirty) refreshCodexActivitySessionLayout();
     if (shellDirty) cleanupDisconnectedSessionArtifacts();
     if (pluginsDirty) {
       if (pluginPatchDisabledInRelayMode()) {
@@ -26187,18 +26242,21 @@
     requestAnimationFrame(() => runScanStep(() => scanDeferred(dirty)));
   }
 
-  function refreshRecentSessionsRuntime() {
-    window.__codexElvesRecentSessions?.configure({
-      enabled: codexElvesBackendSettings.enhancementsEnabled !== false,
-      beforeNavigate: () => deactivateTaskBoard(),
-      currentSessionId: () => activeConversationIdFromDom() || currentSessionRefFromDom()?.session_id,
-      confirmDelete,
-      notify: showToast,
+  function refreshCodexActivitySessionLayout() {
+    const activity = [...document.querySelectorAll('button[aria-pressed="true"]')].find(node =>
+      /^(?:查看活动|打开活动视图|关闭活动视图|View activity|Open activity view|Close activity view)(?:[，,].*)?$/i
+        .test(node.getAttribute("aria-label") || node.title || ""));
+    // 用户要求独立开关默认关闭；关闭时只撤销样式标记，原生行、摘要及状态保持原样。
+    const navigation = codexElvesSettings().activityViewCompact === true
+      ? activity?.closest("nav, [role='navigation'], [data-sidebar-navigation-root]") : null;
+    document.querySelectorAll('[data-codex-activity-session-layout="true"]').forEach(node => {
+      if (node !== navigation) node.removeAttribute("data-codex-activity-session-layout");
     });
+    if (navigation && navigation.getAttribute("data-codex-activity-session-layout") !== "true")
+      navigation.setAttribute("data-codex-activity-session-layout", "true");
   }
 
   function isExtensionUiNode(node) {
-    if (node?.closest?.("[data-codex-recent-sessions-root], [data-codex-recent-sessions-entry], .codex-recent-menu")) return true;
     return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-elves-modal-overlay, .codex-workspace-checkpoint-overlay, [${codexWorkspaceCheckpointEditButtonAttribute}="true"], [${codexWorkspaceCheckpointButtonAttribute}="true"], .${projectMoveOverlayClass}, .codex-conversation-timeline, .${codexTokenUsageCardClass}, .${codexAppServerRestartButtonClass}, .${codexAppServerRestartDialogClass}, .${taskBoardMainHostClass}, .${taskBoardEntryContextMenuClass}, [${taskBoardEntryAttribute}="true"], .${codexOpenInMenuClass}, [${codexOpenInButtonAttribute}="true"], .${codexPromptOptimizePortalClass}, .${codexPromptOptimizeSettingsOverlayClass}, [${codexPromptOptimizeButtonAttribute}="true"], #codex-elves-menu`);
   }
 
@@ -26450,7 +26508,7 @@
   installScanObservers();
   window.__codexElvesRefreshRuntime = () => {
     installStyle();
-    refreshRecentSessionsRuntime();
+    refreshCodexActivitySessionLayout();
     cleanupLegacyForcePluginInstallRuntime();
     void loadBackendSettingsForStartup();
     installCodexElvesImageOverlay();

@@ -158,6 +158,15 @@ impl NativeRemoteBridge for NativeCdpBridge {
 }
 
 impl NativeCdpBridge {
+    pub async fn delete_local_thread(thread_id: &str) -> anyhow::Result<Value> {
+        Self::call_with_status(
+            crate::status::StatusStore::default().load_latest()?,
+            "deleteLocalThread",
+            json!({ "threadId": thread_id }),
+        )
+        .await
+    }
+
     async fn call_with_status(
         status: Option<crate::status::LaunchStatus>,
         action: &str,
@@ -206,6 +215,20 @@ impl NativeCdpBridge {
             .web_socket_debugger_url
             .context("Codex 桌面连接不可用")
             .map_err(crate::bridge::cdp_not_dispatched)?;
+        // 管理器本地删除复用原生删除生命周期，但不能套用远程子智能体只读等交互限制。
+        // deleteLocalThread 不在远程 HTTP action 白名单中，仅供本机管理器调用。
+        let invocation = if action == "deleteLocalThread" {
+            format!(
+                "window.__codexElvesRemoteAccess.deleteLocalThread({})",
+                serde_json::to_string(&payload)?
+            )
+        } else {
+            format!(
+                "window.__codexElvesRemoteAccess.call({}, {})",
+                serde_json::to_string(action)?,
+                serde_json::to_string(&payload)?
+            )
+        };
         let expression = format!(
             r#"(async () => {{
 try {{
@@ -220,10 +243,8 @@ if (typeof window.__codexElvesRemoteAccess?.call !== "function")
     message: String(error?.message || error || "Codex 原生注入失败")
   }};
 }}
-return window.__codexElvesRemoteAccess.call({}, {});
-}})()"#,
-            serde_json::to_string(action)?,
-            serde_json::to_string(&payload)?
+return {invocation};
+}})()"#
         );
         let response = if let Some(authorization) = authorization {
             crate::bridge::evaluate_script_value_with_authorization(
@@ -7429,6 +7450,20 @@ call("send",{threadId:"isolated-thread",prompt:"隔离发送"})
                 .unwrap_err()
                 .code,
             400
+        );
+        assert!(native.calls.lock().await.is_empty());
+        assert_eq!(
+            action(
+                State(state.clone()),
+                Path("deleteLocalThread".to_string()),
+                headers.clone(),
+                Json(payload.clone()),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            404,
+            "本机管理器的删除入口不能通过远程 HTTP 调用"
         );
         assert!(native.calls.lock().await.is_empty());
         let first = invoke(state.clone(), headers.clone(), payload.clone())

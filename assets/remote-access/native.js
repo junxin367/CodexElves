@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 128) return;
+  if (window.__codexElvesRemoteAccess?.version === 129) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -7220,7 +7220,17 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 128, call,
+    version: 129, call,
+    async deleteLocalThread(payload) {
+      // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
+      try {
+        resetStaleManager();
+        if (!manager || !appScope) discover(true);
+        return await deleteThread(payload);
+      } catch (error) {
+        return { ok: false, code: error.code || 503, message: error.message || "原生会话删除失败" };
+      }
+    },
     async recentSidebar(payload = {}) {
       try {
         resetStaleManager();

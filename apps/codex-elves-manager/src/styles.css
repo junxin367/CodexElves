@@ -1944,6 +1944,16 @@ body {
   outline: none;
 }
 
+.app-select-option-multiple {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-select-option-multiple svg {
+  flex-shrink: 0;
+}
+
 .remote-context-option-label {
   display: grid;
   gap: 1px;
@@ -4476,6 +4486,15 @@ body {
   color: hsl(var(--muted-foreground));
   font-size: 12px;
   line-height: 1.45;
+}
+
+.speed-test-model-picker {
+  margin-bottom: 14px;
+}
+
+/* 测速模型下拉通过 portal 挂在 body，必须高于弹窗遮罩才能勾选。 */
+.speed-test-model-menu {
+  z-index: calc(var(--z-modal) + 10);
 }
 
 .speed-test-running {

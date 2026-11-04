@@ -70,33 +70,6 @@ fn injection_script_prefixes_helper_url_and_version() {
     assert!(script.contains("window.__CODEX_ELVES_VERSION__"));
     assert!(script.contains(codex_elves_core::version::VERSION));
     assert!(script.contains("window.__CODEX_ELVES_LAUNCH_CYCLE__"));
-    let cache_scope = |source: &str| {
-        source
-            .lines()
-            .find(|line| line.starts_with("window.__CODEX_ELVES_SESSION_CACHE_SCOPE__ = "))
-            .unwrap()
-            .to_string()
-    };
-    assert_eq!(
-        cache_scope(&script),
-        cache_scope(&assets::injection_script(45222))
-    );
-    let different_home = codex_elves_core::settings::BackendSettings {
-        codex_home_path: tempfile::tempdir()
-            .unwrap()
-            .path()
-            .join("other-home")
-            .to_string_lossy()
-            .to_string(),
-        ..Default::default()
-    };
-    assert_ne!(
-        cache_scope(&script),
-        cache_scope(&assets::injection_script_with_settings(
-            45221,
-            &different_home
-        ))
-    );
 }
 
 #[test]
@@ -125,7 +98,7 @@ fn renderer_features_diagnostics_prefer_bridge_before_http_fallback() {
 
 #[test]
 fn remote_native_callbacks_are_isolated_from_codex_ui_errors() {
-    let script = assets::renderer_features_script();
+    let script = include_str!("../../../assets/remote-access/native.js");
 
     assert!(script.contains("function safeNativeCallback(callbackName, callback)"));
     assert!(script.contains("renderer.remote_native_callback_failed"));
@@ -134,12 +107,14 @@ fn remote_native_callbacks_are_isolated_from_codex_ui_errors() {
     assert!(script.contains("const emitUnsafe = event =>"));
     assert!(script.contains("const pushNotificationUnsafe = event =>"));
     assert!(script.contains("request_notification_microtask"));
-    assert!(script.contains("workspace_checkpoint_complete_turn_failed"));
+    assert!(
+        assets::renderer_features_script().contains("workspace_checkpoint_complete_turn_failed")
+    );
 }
 
 #[test]
 fn renderer_side_feature_failures_degrade_without_blocking_main_reads() {
-    let script = assets::renderer_features_script();
+    let script = include_str!("../../../assets/remote-access/native.js");
 
     assert!(script.contains("function reportSideFeatureDegraded(action, error, detail = {})"));
     assert!(script.contains("renderer.remote_side_feature_degraded"));
@@ -6989,6 +6964,108 @@ function create(manager) {
 }
 
 #[test]
+fn local_manager_delete_uses_native_lifecycle_without_remote_view_restrictions() {
+    let source = include_str!("../../../assets/remote-access/native.js");
+    let start = source
+        .find("  async function deleteRequestClientThread(")
+        .unwrap();
+    let end = source[start..]
+        .find("\n  function optionalCursor(")
+        .unwrap()
+        + start;
+    let export_start = source
+        .find("    async deleteLocalThread(payload) {")
+        .unwrap();
+    let export_end = source[export_start..]
+        .find("\n    async recentSidebar(")
+        .unwrap()
+        + export_start;
+    let script = format!(
+        "const helpers = {};\nconst localDelete = {};\n",
+        serde_json::to_string(&source[start..end]).unwrap(),
+        serde_json::to_string(&source[export_start..export_end]).unwrap()
+    ) + r#"
+const assert = require("node:assert/strict");
+const id = "01a0bcd2-2190-70b1-bb66-94cac705d622";
+function fixture(error = null) {
+  const calls = [], deleted = new Set();
+  const client = {
+    sendRequest() { throw Error("新版不得调用旧 requestClient 删除入口"); },
+    async sendAppServerExtensionRequest(method, params) { calls.push([method, params]); },
+  };
+  const rpc = { async deleteConversation(threadId) {
+    calls.push(["native-delete", threadId]);
+    if (error) throw error;
+  } };
+  const sourceManager = { __codexElvesRequestClientManager: true, hostId: "local", requestClient: client };
+  const api = new Function("sourceManager", "rpc", "calls", "deleted", `
+    let manager = null, appScope = null;
+    const window = {};
+    const failure = (code, message) => Object.assign(Error(message), { code });
+    const resetStaleManager = () => {};
+    const discover = () => { calls.push(["discover"]); manager = sourceManager; appScope = {}; };
+    const requestClientNativeRpc = async () => rpc;
+    const isDeletedThread = id => deleted.has(id);
+    const emit = event => {
+      calls.push(["event", event.method, event.params.threadId]);
+      if (event.method === "thread/deleted") deleted.add(event.params.threadId);
+    };
+    ${helpers}
+    return ({${localDelete}});
+  `)(sourceManager, rpc, calls, deleted);
+  return { api, calls };
+}
+(async () => {
+  const normal = fixture();
+  const result = await normal.api.deleteLocalThread({ threadId: id });
+  assert.equal(result.ok, true);
+  assert.equal(result.deleted, true);
+  assert.equal(result.threadId, id);
+  assert.equal(result.status, "local_deleted");
+  assert.deepEqual(normal.calls, [
+    ["discover"], ["native-delete", id], ["event", "thread/deleted", id],
+    ["event", "remote/sidebarChanged", id],
+  ]);
+  await normal.api.deleteLocalThread({ threadId: id });
+  assert.equal(normal.calls.filter(call => call[0] === "native-delete").length, 1);
+
+  const recovered = fixture(Error(`no rollout found for thread id ${id}`));
+  assert.equal((await recovered.api.deleteLocalThread({ threadId: id })).deleted, true);
+  assert.deepEqual(recovered.calls.find(call => call[0] === "thread/delete"),
+    ["thread/delete", { threadId: id, missingRolloutRecovery: true }]);
+
+  const denied = fixture(Object.assign(Error("permission denied"), { delivery: { stage: "not-sent" } }));
+  const denial = await denied.api.deleteLocalThread({ threadId: id });
+  assert.equal(denial.ok, false);
+  assert.match(denial.message, /permission denied/);
+  assert.equal(denied.calls.filter(call => call[0] === "event").length, 0);
+  assert.equal(denied.calls.filter(call => call[0] === "thread/delete").length, 0);
+
+  const unknown = fixture(Error("connection closed"));
+  assert.equal((await unknown.api.deleteLocalThread({ threadId: id })).outcomeUnknown, true);
+  assert.equal(unknown.calls.filter(call => call[0] === "native-delete").length, 1);
+  assert.equal(unknown.calls.filter(call => call[0] === "event").length, 0);
+  assert.equal(unknown.calls.filter(call => call[0] === "thread/delete").length, 0);
+
+  for (const payload of [{ threadId: "client-new-thread:pending" }, { threadId: id, hostId: "remote" }]) {
+    const invalid = fixture();
+    const rejected = await invalid.api.deleteLocalThread(payload);
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.code, 400);
+    assert.match(rejected.message, /本机会话 ID/);
+    assert.equal(invalid.calls.filter(call => call[0] === "native-delete").length, 0);
+  }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"#;
+    let output = Command::new("node").arg("-e").arg(script).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn renderer_delete_resolves_temporary_row_from_its_own_conversation_entry() {
     let script = assets::renderer_features_script();
     let start = script
@@ -9003,7 +9080,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "103";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "105";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -10590,10 +10667,10 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 
 #[test]
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
-    let script = assets::renderer_features_script();
+    let script = include_str!("../../../assets/remote-access/native.js");
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 128"));
-    assert!(script.contains("version: 128"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 129"));
+    assert!(script.contains("version: 129"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));
@@ -10608,7 +10685,7 @@ fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
 
 #[test]
 fn remote_native_script_recognizes_current_request_client_without_global_manager() {
-    let script = assets::renderer_features_script();
+    let script = include_str!("../../../assets/remote-access/native.js");
 
     assert!(script.contains("const isRequestClient = value =>"));
     assert!(script.contains("function requestClientManager(requestClient)"));
@@ -10628,7 +10705,7 @@ fn remote_native_script_recognizes_current_request_client_without_global_manager
 
 #[test]
 fn remote_native_resource_follows_script_entry_without_timing_or_initial_preload() {
-    let script = assets::renderer_features_script();
+    let script = include_str!("../../../assets/remote-access/native.js");
     let start = script
         .find("async function nativeResource(name) {")
         .expect("原生模块查找函数应存在");
@@ -11369,7 +11446,7 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("codex-open-in-menu"));
     assert!(script.contains(r#"const codexOpenInVersion = "13";"#));
     assert!(script.contains("window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion"));
-    assert!(script.contains(r#"const codexDeleteStyleVersion = "103";"#));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "105";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
     assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
     assert!(script.contains("width: 30px !important;"));
