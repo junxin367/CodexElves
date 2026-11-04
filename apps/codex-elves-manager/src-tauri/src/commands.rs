@@ -3041,8 +3041,9 @@ pub fn delete_context_entry(request: ContextDeleteRequest) -> CommandResult<Cont
 pub async fn test_relay_profile(
     profile: RelayProfile,
     model: Option<String>,
-    input_tokens: Option<u32>,
+    speed_test: Option<bool>,
 ) -> CommandResult<RelayProfileTestPayload> {
+    let speed_test = speed_test.unwrap_or(false);
     let profile_name = if profile.name.trim().is_empty() {
         "未命名供应商"
     } else {
@@ -3065,10 +3066,10 @@ pub async fn test_relay_profile(
             from_profile
         }
     };
-    match codex_elves_core::relay_config::test_relay_profile_with_input_tokens(
+    match codex_elves_core::relay_config::test_relay_profile_with_speed_test(
         &profile,
         &test_model,
-        input_tokens,
+        speed_test,
     )
     .await
     {
@@ -3080,10 +3081,9 @@ pub async fn test_relay_profile(
             };
             CommandResult {
                 status: status.to_string(),
-                message: if input_tokens.is_some_and(|tokens| tokens > 0) {
+                message: if speed_test {
                     format!(
-                        "已向「{profile_name}」用模型「{test_model}」发送约 {} token 测速输入，HTTP {}。",
-                        input_tokens.unwrap_or_default(),
+                        "已向「{profile_name}」用模型「{test_model}」发送完整糖果题进行测速，HTTP {}。",
                         result.http_status
                     )
                 } else {

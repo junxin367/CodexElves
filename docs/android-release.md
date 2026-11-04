@@ -1,6 +1,6 @@
 # CodexElves Android APK 构建与发布
 
-Android 使用 `apps/codex-elves-android/version.properties` 独立版本，与桌面管理器的 `Cargo.toml` 版本分开。当前为 `versionName=0.1.0`、`versionCode=24`。日常构建不递增版本；首次准备正式 Android 发布时，将 `versionName` 修订号加 1，并把 `versionCode` 设为当前配置值与已公开 Android 版本最大值中的较大值再加 1。失败重试沿用已确定的目标版本，不再次递增。正式 APK 必须使用现有发布签名证书。
+Android 使用 `apps/codex-elves-android/version.properties` 独立版本，与桌面管理器的 `Cargo.toml` 版本分开。当前为 `versionName=0.1.1`、`versionCode=25`。日常构建不递增版本；首次准备正式 Android 发布时，将 `versionName` 修订号加 1，并把 `versionCode` 设为当前配置值与已公开 Android 版本最大值中的较大值再加 1。失败重试沿用已确定的目标版本，不再次递增。正式 APK 必须使用现有发布签名证书。
 
 ## 自动运行与手动运行
 
@@ -24,7 +24,7 @@ Android 相关文件包括 Android 项目、内置 `assets/remote-access` 网页
 在仓库的 **Actions → Android APK → Run workflow** 中选择：
 
 - `configuration = Debug`：仅生成测试 APK。
-- `configuration = Release`：仅使用正式签名。`tag` 留空时仅生成产物；填写时必须与独立版本对应，例如当前 `versionName=0.1.0` 使用 `android-v0.1.0`。
+- `configuration = Release`：仅使用正式签名。`tag` 留空时仅生成产物；填写时必须与独立版本对应，例如当前 `versionName=0.1.1` 使用 `android-v0.1.1`。
 
 Release 模式要求仓库已配置以下 Actions secrets：
 

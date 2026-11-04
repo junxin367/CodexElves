@@ -1969,32 +1969,32 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.6.0",
-        latestVersion: "0.6.0",
+        currentVersion: "0.6.1",
+        latestVersion: "0.6.1",
         releaseSummary: [
-          "CodexElves 0.6.0",
+          "CodexElves 0.6.1",
           "",
-          "- 优化启动与托盘唤醒稳定性",
-          "- 改进 GitHub Release 更新体验",
-          "- 修复若干协议代理兼容性问题",
+          "- 兼容新版 Codex，修复远程会话主流程与侧边会话",
+          "- 优化手机端前后台恢复、排队和目标交互",
+          "- 版本更新只作提醒，模型测速改用完整糖果题",
         ].join("\n"),
-        assetName: "CodexElves-0.6.0-windows-x64-setup.exe",
-        assetUrl: "https://example.test/CodexElves-0.6.0-windows-x64-setup.exe",
+        assetName: "CodexElves-0.6.1-windows-x64-setup.exe",
+        assetUrl: "https://example.test/CodexElves-0.6.1-windows-x64-setup.exe",
         updateAvailable: false,
       }, "发现可用更新。") as T);
     case "perform_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.6.0",
-        latestVersion: "0.6.0",
+        currentVersion: "0.6.1",
+        latestVersion: "0.6.1",
         releaseSummary: "浏览器预览不会下载真实安装包。",
-        installedPath: "C:\\Temp\\CodexElves-0.6.0-windows-x64-setup.exe",
+        installedPath: "C:\\Temp\\CodexElves-0.6.1-windows-x64-setup.exe",
         launched: true,
       }, "浏览器预览已模拟启动安装包。") as T);
     case "copy_diagnostics":
       return Promise.resolve(browserPreviewResult({
         report: [
           "CodexElves 诊断报告",
-          "版本: 0.6.0",
+          "版本: 0.6.1",
           "平台: windows-x64",
           "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
           "配置目录: C:\\Users\\junes\\.codex",
@@ -2015,7 +2015,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.6.0",
+        current_version: "0.6.1",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -2617,7 +2617,6 @@ export function App() {
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
   const [watcher, setWatcher] = useState<WatcherResult | null>(null);
   const [update, setUpdate] = useState<UpdateResult | null>(null);
-  const checkedUpdateRef = useRef<UpdateResult | null>(null);
   const [updatePrompt, setUpdatePrompt] = useState<UpdateResult | null>(null);
   const [updateInstallActive, setUpdateInstallActive] = useState(false);
   const [scriptMarket, setScriptMarket] = useState<ScriptMarketResult | null>(null);
@@ -3304,15 +3303,7 @@ export function App() {
   };
 
   const restart = async () => {
-    const checkedUpdate = checkedUpdateRef.current;
-    if (checkedUpdate?.updateAvailable) {
-      showNotice(
-        "需要更新后才可使用",
-        `当前 CodexElves 版本 ${checkedUpdate.currentVersion} 落后于已检测到的远程版本 ${checkedUpdate.latestVersion}。请前往“关于”完成更新，并重新打开管理器后再重启 Codex。`,
-        "failed",
-      );
-      return;
-    }
+    // 用户要求版本更新只做提醒：检测到新版本也允许重启，不将更新状态作为重启条件。
     const result = await launchCommand("restart_codex_elves");
     if (result) {
       showNotice("重启 Codex", result.message, result.status);
@@ -3510,10 +3501,6 @@ export function App() {
   const checkUpdate = async (silent = false) => {
     const result = await run(() => call<UpdateResult>("check_update"));
     if (result) {
-      // 检查失败或启动安装包不能清除已检测到的版本信息。
-      if ((result.status === "ok" || result.status === "not_checked") && result.latestVersion) {
-        checkedUpdateRef.current = result;
-      }
       setUpdate(result);
       if (result.updateAvailable) {
         setUpdatePrompt(result);
@@ -3919,8 +3906,8 @@ export function App() {
     return normalizeSettings(saveResult.settings);
   };
 
-  const testRelayProfile = async (profile: RelayProfile, model?: string, inputTokens?: number) => {
-    return run(() => call<RelayProfileTestResult>("test_relay_profile", { profile, model, inputTokens }));
+  const testRelayProfile = async (profile: RelayProfile, model?: string, speedTest = false) => {
+    return run(() => call<RelayProfileTestResult>("test_relay_profile", { profile, model, speedTest }));
   };
 
   const fetchRelayProfileModels = async (profile: RelayProfile, silent = false) => {
@@ -4785,7 +4772,7 @@ type Actions = {
     tomlBody: string,
   ) => Promise<BackendSettings | null>;
   deleteContextEntry: (settings: BackendSettings, kind: ContextKind, id: string) => Promise<BackendSettings | null>;
-  testRelayProfile: (profile: RelayProfile, model?: string, inputTokens?: number) => Promise<RelayProfileTestResult | null>;
+  testRelayProfile: (profile: RelayProfile, model?: string, speedTest?: boolean) => Promise<RelayProfileTestResult | null>;
   fetchRelayProfileModels: (profile: RelayProfile, silent?: boolean) => Promise<string[] | null>;
   probeRelayProfileResponsesWebsocket: (profile: RelayProfile) => Promise<ResponsesWebsocketCapability | null>;
   switchRelayProfile: (settings: BackendSettings, previousActiveRelayId?: string) => Promise<void>;
@@ -6024,7 +6011,6 @@ function RelayProfileTestDialog({
   );
 }
 
-const SPEED_TEST_INPUT_TOKENS = 50_000;
 const SPEED_TEST_CONCURRENCY = 5;
 
 function formatSpeedTestDurationMs(value: number): string {
@@ -6204,7 +6190,8 @@ function RelayProfileSpeedTestDialog({
           const startedAt = performance.now();
           let item: RelayProfileSpeedTestItem;
           try {
-            const result = await actions.testRelayProfile(profile, model, SPEED_TEST_INPUT_TOKENS);
+            // 用户要求只发送完整糖果题，不再用重复内容补齐 5 万 token；普通连通性测试仍单独使用 hi。
+            const result = await actions.testRelayProfile(profile, model, true);
             const measuredElapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
             item = {
               model,
@@ -6283,7 +6270,7 @@ function RelayProfileSpeedTestDialog({
         <div className="modal-head">
           <div>
             <h2 id="relay-speed-test-title">模型速度测试</h2>
-            <p>{profile.name || "未命名供应商"} · 每个模型发送约 5 万 token 输入，按实际输出 token / 完整请求耗时计算 tok/s，最多 5 个并行测速。</p>
+            <p>{profile.name || "未命名供应商"} · 每个模型回答同一道完整糖果题，按实际输出 token / 完整请求耗时计算 tok/s，最多 5 个并行测速。</p>
           </div>
           <Button disabled={running} onClick={onClose} size="icon" title="关闭" variant="ghost">
             <X className="h-4 w-4" />

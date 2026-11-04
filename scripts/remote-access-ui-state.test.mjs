@@ -716,7 +716,7 @@ test("保存队列编辑立即显示保存中，成功结束编辑后恢复普�
   assert.equal(h.send.disabled, false);
 });
 
-test("取消和保存未知回执停止在途spinner但保持锁定，五秒前无额外提示", async () => {
+test("取消和保存未知回执停止在途spinner但保持锁定，八秒前无额外提示", async () => {
   for (const cancel of [false, true]) {
     const h = queuedEditFeedbackHarness(), operation = h.context.submitQueuedMessageEdit(cancel);
     h.response.resolve({ outcomeUnknown: true });
@@ -730,6 +730,8 @@ test("取消和保存未知回执停止在途spinner但保持锁定，五秒前�
     assert.equal(h.send.querySelector(".spinner"), null);
     assert.equal(h.context.pendingFeedbackReady(record), false);
     record.time -= 5000;
+    assert.equal(h.context.pendingFeedbackReady(record), false);
+    record.time -= 3000;
     assert.equal(h.context.pendingFeedbackReady(record), true);
     assert.equal(h.context.pending, record);
     assert.deepEqual(h.notices, []);
@@ -1305,8 +1307,11 @@ test("队列引导和删除unknown保留原回执，刷新只读恢复且不清�
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(first.context.pending.id, id);
     first.context.renderPending();
-    assert.equal(first.area.children.length, 0, "正常等待的前五秒不额外显示回执横幅");
+    assert.equal(first.area.children.length, 0, "正常等待的前八秒不额外显示回执横幅");
     first.context.pending.time -= 5000;
+    first.context.renderPending();
+    assert.equal(first.area.children.length, 0, "队列操作等待五秒时仍不显示回执横幅");
+    first.context.pending.time -= 3000;
     first.context.renderPending();
     const banner = first.area.children[0];
     assert.match(banner.text, /正在确认队列.*结果/);
@@ -3302,19 +3307,28 @@ test("快速操作完成不出现额外回执提示，也不留下延时刷新",
   h.context.savePending(null);
   h.context.updateComposer();
   assert.equal(h.timers.size, 0);
-  await h.advance(6000);
+  await h.advance(9000);
   assert.equal(h.area.children.length, 0);
   assert.equal(record.draft.text, "保留草稿");
   assert.deepEqual(h.notices, []);
 });
 
-test("各类未确认操作到五秒才出现简短提示，原草稿与回执锁保持", async () => {
-  for (const action of ["send", "steerQueued", "removeQueued", "reorderQueued",
-    "beginQueuedEdit", "editQueued", "cancelQueuedEdit", "dismissQueuedEdit", "setGoal"]) {
+test("队列未确认操作到八秒才提示，普通发送和目标仍为五秒，原草稿与回执锁保持", async () => {
+  for (const [action, delayMs] of [
+    ["send", 5000], ["setGoal", 5000],
+    ["steerQueued", 8000], ["removeQueued", 8000], ["reorderQueued", 8000],
+    ["beginQueuedEdit", 8000], ["editQueued", 8000], ["cancelQueuedEdit", 8000], ["dismissQueuedEdit", 8000],
+  ]) {
     const h = delayFeedbackHarness(), record = h.pending(action);
     await h.advance(4999);
     assert.equal(h.area.children.length, 0, action);
     await h.advance(1);
+    if (delayMs === 8000) {
+      assert.equal(h.area.children.length, 0, `${action} 五秒时不显示提示`);
+      await h.advance(2999);
+      assert.equal(h.area.children.length, 0, `${action} 八秒前不显示提示`);
+      await h.advance(1);
+    }
     assert.equal(h.area.children.length, 1, action);
     assert.match(h.area.children[0].text, /^正在确认.+结果。$/);
     assert.equal(h.context.pending, record, "延时反馈不能解除未知回执锁");
@@ -3351,7 +3365,7 @@ test("切换、离开页面或更换授权后旧定时器不能显示迟到提�
     else if (change === "authorization") h.context.session.device.createdAtMs = 2;
     else if (change === "page") h.context.pageLeaving = true;
     else h.context.document.hidden = true;
-    await h.advance(5000);
+    await h.advance(8000);
     assert.equal(h.area.children.length, 0, change);
     assert.equal(h.timers.size, 0, change);
     assert.equal(h.context.pending, record);

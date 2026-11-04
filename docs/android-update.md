@@ -1,6 +1,6 @@
 # Android 版本与应用更新
 
-Android 使用独立的 `apps/codex-elves-android/version.properties`。当前为 `versionName=0.1.0`、`versionCode=24`；桌面管理器版本来自根 `Cargo.toml`。普通编译不递增 Android 版本。准备正式 Android 发布时，按发布规则将 `versionName` 修订号加 1，并使 `versionCode` 大于当前值和已公开 Android 版本中的最大值。
+Android 使用独立的 `apps/codex-elves-android/version.properties`。当前为 `versionName=0.1.1`、`versionCode=25`；桌面管理器版本来自根 `Cargo.toml`。普通编译不递增 Android 版本。准备正式 Android 发布时，按发布规则将 `versionName` 修订号加 1，并使 `versionCode` 大于当前值和已公开 Android 版本中的最大值。
 
 ## 设置页与原生桥
 
@@ -17,8 +17,8 @@ Release APK 的原生回复包含以下字段：
 ```json
 {
   "type": "app-info",
-  "versionName": "0.1.0",
-  "versionCode": 24,
+  "versionName": "0.1.1",
+  "versionCode": 25,
   "updateSupported": true,
   "requestRoutingVersion": 2,
   "diagnosticsVersion": 1,
@@ -43,11 +43,11 @@ Debug APK 的 `updateSupported` 为 `false`。旧 APK 没有回复时，网页�
 {
   "schemaVersion": 1,
   "applicationId": "com.junxin367.codexelves",
-  "versionName": "0.1.0",
-  "versionCode": 24,
+  "versionName": "0.1.1",
+  "versionCode": 25,
   "minSdk": 26,
   "apk": {
-    "name": "CodexElves-0.1.0-android.apk",
+    "name": "CodexElves-0.1.1-android.apk",
     "size": 1024,
     "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
   }

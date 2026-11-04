@@ -457,7 +457,8 @@ const automaticThemeLightLux = 45;
 let automaticThemeCandidate = null;
 function automaticAppearanceTheme(date = new Date(), currentTheme = appearance.theme) {
   const hour = date.getHours();
-  if (hour < 6 || hour >= 21) {
+  // 用户要求夜间时段按设备本地时间从 21:00（含）到次日 08:00（不含），时段内保留原有光照判断。
+  if (hour < 8 || hour >= 21) {
     if (!ambientLightStatus.supported || ambientLightStatus.lux === null) return "dark";
     if (ambientLightStatus.lux <= automaticThemeDarkLux) return "dark";
     if (ambientLightStatus.lux >= automaticThemeLightLux) return "light";
@@ -11763,8 +11764,13 @@ function renderGoalComposerRecovery(root) {
 }
 const pendingFeedbackDelayMs = 5000;
 let pendingFeedbackTimer = null;
+function pendingFeedbackDelay(record) {
+  // 用户要求：队列操作未确认满 8 秒才补充等待提醒；其他操作仍为 5 秒，不改变真实失败提示或回执轮询。
+  return ["steerQueued", "removeQueued", "reorderQueued", "beginQueuedEdit", "editQueued", "cancelQueuedEdit", "dismissQueuedEdit"]
+    .includes(record?.action) ? 8000 : pendingFeedbackDelayMs;
+}
 function pendingFeedbackReady(record) {
-  return !Number.isFinite(record?.time) || Date.now() - record.time >= pendingFeedbackDelayMs;
+  return !Number.isFinite(record?.time) || Date.now() - record.time >= pendingFeedbackDelay(record);
 }
 function clearPendingFeedbackTimer() {
   clearTimeout(pendingFeedbackTimer);
@@ -11791,7 +11797,7 @@ function syncPendingFeedbackTimer() {
   const remaining = records.filter(record => record && Number.isFinite(record.time)
       && (!record.deviceId || record.deviceId === session.device.id)
       && !["confirming", "deleted"].includes(record.state))
-    .map(record => record.time + pendingFeedbackDelayMs - Date.now()).filter(delay => delay > 0);
+    .map(record => record.time + pendingFeedbackDelay(record) - Date.now()).filter(delay => delay > 0);
   if (!remaining.length) return;
   const version = selectionVersion, scope = privateInputScope(session);
   pendingFeedbackTimer = setTimeout(() => {
