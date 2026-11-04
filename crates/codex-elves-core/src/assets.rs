@@ -14,7 +14,7 @@ const NATIVE_FAST_UNLOCK_SCRIPT: &str =
     include_str!("../../../assets/inject/native-fast-unlock.js");
 const COMPOSER_FAST_SCRIPT: &str = include_str!("../../../assets/inject/composer-fast.js");
 const NATIVE_RPC_COMPAT_SCRIPT: &str = include_str!("../../../assets/inject/native-rpc-compat.js");
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261104-native-rpc-compat";
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261104-stable-conversation-width";
 
 pub fn renderer_script() -> &'static str {
     RENDERER_FEATURES_SCRIPT

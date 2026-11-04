@@ -67,7 +67,7 @@ export function clearRemoteChannels() {
 const routeKey = route => JSON.stringify([generation, route.origin, route.token]);
 function health(route) {
   if (!routeHealth.has(route.origin)) routeHealth.set(route.origin, {
-    failures: 0, retryAt: 0, retryAfterUntil: 0, probeAt: 0, measurement: null, version: 0
+    failures: 0, retryAt: 0, retryAfterUntil: 0, probeAt: 0, measurement: null, version: 0, recoveryVersion: 0
   });
   return routeHealth.get(route.origin);
 }
@@ -309,11 +309,14 @@ export async function requestRemote(path, options, consume, measurements = chann
 
 export const sendRemoteMessage = requestRemote;
 
-function connectionProbe(route, options) {
+function connectionProbe(route, options, recoveryProbe = false) {
   const observedGeneration = generation;
   const key = routeKey(route);
   const pending = connectionProbes.get(key);
-  if (pending && !pending.controller.signal.aborted) return pending;
+  if (pending && !pending.controller.signal.aborted) {
+    pending.recoveryProbe ||= recoveryProbe;
+    return pending;
+  }
   const controller = new AbortController();
   const abort = () => controller.abort(new DOMException("连接测速已取消", "AbortError"));
   const timer = setTimeout(() => controller.abort(new DOMException("连接测速超时", "TimeoutError")), 15000);
@@ -332,7 +335,7 @@ function connectionProbe(route, options) {
   const takeoverTimer = setTimeout(checkTakeover, readRouteTimeout);
   listeners.add(checkTakeover);
   health(route).probeAt = Date.now();
-  const entry = { controller, users: new Set(), promise: null, sequence: ++routeRequestSequence };
+  const entry = { controller, users: new Set(), promise: null, sequence: ++routeRequestSequence, recoveryProbe };
   const trace = traceDiagnosticRequest("/api/session", { ...options, signal: controller.signal }, route.origin);
   latencyObservations.add(abort);
   connectionProbes.set(key, entry);
@@ -353,6 +356,7 @@ function connectionProbe(route, options) {
         const state = health(route);
         if (response.ok) {
           if (healthyRoute(route, entry.sequence)) {
+            if (entry.recoveryProbe) state.recoveryVersion = entry.sequence;
             state.measurement = state.retryAt > Date.now() ? { status: "unavailable" }
               : { status: "ready", milliseconds: result.milliseconds };
             changed();
@@ -378,12 +382,13 @@ function connectionProbe(route, options) {
   return entry;
 }
 
-export async function raceRemoteRead(path, options, consume, onLatency = null) {
+export async function raceRemoteRead(path, options, consume, onLatency = null, { recoveryProbe = false } = {}) {
   prepareRemoteTunnelAccess();
   if (path !== "/api/session" || options.method !== "GET" || typeof onLatency !== "function")
     return requestRemote(path, options, consume);
   if (options.signal?.aborted) throw options.signal.reason || new DOMException("连接已取消", "AbortError");
-  if (globalThis.document?.hidden || globalThis.navigator?.onLine === false)
+  // 显式点击仍发起只读探测，不把可能滞后的浏览器 online 标记当成服务不可达的结论。
+  if (globalThis.document?.hidden || globalThis.navigator?.onLine === false && !recoveryProbe)
     return requestRemote(path, options, consume);
   const available = routes();
   const active = orderedRoutes(available)[0];
@@ -393,6 +398,9 @@ export async function raceRemoteRead(path, options, consume, onLatency = null) {
     const pending = connectionProbes.get(routeKey(route));
     if (pending && !pending.controller.signal.aborted) return true;
     const due = state.retryAt <= now && (!state.measurement || now - state.probeAt >= probeInterval);
+    // 用户要求网络恢复和手动点击立即探测：仅 GET /api/session 可越过网络故障退避，
+    // 不提前把线路标为健康，也不越过 429/Retry-After；成功后沿用 healthyRoute 恢复线路。
+    if (recoveryProbe && state.retryAfterUntil <= now) return true;
     // 活动线路读取当前会话状态；备用线路只在到期时补测，不复用旧业务响应。
     if (due || active?.origin === route.origin) return true;
     if (state.measurement) onLatency({
@@ -401,11 +409,17 @@ export async function raceRemoteRead(path, options, consume, onLatency = null) {
     });
     return false;
   });
-  if (!candidates.length) throw Object.assign(new Error("线路正在等待重试，请稍后再试。"), { notSubmitted: true });
+  if (!candidates.length) {
+    const retryAfterMs = recoveryProbe
+      ? Math.max(0, Math.min(...available.map(route => health(route).retryAfterUntil)) - now) : 0;
+    throw Object.assign(new Error(retryAfterMs > 0
+      ? `服务暂时限制请求，请在 ${Math.ceil(retryAfterMs / 1000)} 秒后重试。`
+      : "线路正在等待重试，请稍后再试。"), { notSubmitted: true });
+  }
   const observedGeneration = generation;
   const names = remoteChannelRoutes();
   const attemptRoute = async route => {
-    const entry = connectionProbe(route, options);
+    const entry = connectionProbe(route, options, recoveryProbe);
     const user = {};
     entry.users.add(user);
     let abort;
@@ -719,6 +733,7 @@ export function createChannelEventStream() {
     diagnostic("socket.connect", entry, {
       phase: "request", attempt: Math.min(10000, (retries.get(entry.origin)?.failures || 0) + 1)
     });
+    entry.sequence = ++routeRequestSequence;
     let socket;
     try { socket = route.token ? new WebSocket(url, ["codex-elves-channel-v1", `codex-channel.${route.token}`]) : new WebSocket(url); }
     catch (error) {
@@ -734,7 +749,6 @@ export function createChannelEventStream() {
     // fail() 会移除业务回调；保留一次性关闭观察才能拿到 error 之后的实际 close code。
     socket.addEventListener?.("close", closedSocket, { once: true });
     entry.socket = socket; entry.active = false; entry.verified = !route.token;
-    entry.sequence = ++routeRequestSequence;
     entry.openedAt = null;
     entry.activity = entry.lastWatch = Date.now(); entry.graceUntil = 0;
     entry.watch = setInterval(() => {
@@ -788,7 +802,7 @@ export function createChannelEventStream() {
     dispose(entry, reason); entry.socket = null; entry.active = false;
     const failures = (retries.get(entry.origin)?.failures || 0) + 1;
     const delayMs = Math.min(10000, 500 * 2 ** Math.min(failures - 1, 5));
-    retries.set(entry.origin, { failures, at: Date.now() + delayMs });
+    retries.set(entry.origin, { failures, at: Date.now() + delayMs, sequence: entry.sequence || 0 });
     diagnostic("socket.retry", entry, { phase: "retry", reason, delayMs, attempt: Math.min(10000, failures) });
     if (!closed && ![...sockets.values()].some(entry => entry.active)) {
       readyState = 0; stream.onerror?.({ reason: "all-channels-disconnected" });
@@ -815,6 +829,13 @@ export function createChannelEventStream() {
     if (closed) return;
     clearTimeout(routeRetry);
     const now = Date.now();
+    // 用户要求探测成功即可恢复连接：新于失败握手的成功请求解除旧 socket 退避；
+    // 只读探测仍须先通过 HTTP 身份/响应检查，服务端 Retry-After 继续生效。
+    for (const route of routes()) {
+      const retry = retries.get(route.origin), state = health(route);
+      if (retry && state.recoveryVersion > retry.sequence && state.failures === 0 && state.retryAt <= now)
+        retries.delete(route.origin);
+    }
     const candidates = orderedRoutes(
       routes().filter(route => supportsRequest(route, "/api/events/ws", "GET")),
       channelMeasurements, { allowCooldownProbe: true })
@@ -838,6 +859,11 @@ export function createChannelEventStream() {
     for (const route of available) {
       if (!sockets.has(route.origin)) sockets.set(route.origin, { origin: route.origin, failures: 0 });
       const entry = sockets.get(route.origin);
+      const state = health(route);
+      if (entry.socket && !entry.active && state.recoveryVersion > entry.sequence && state.failures === 0 && state.retryAt <= now) {
+        // 保留已打开的连接，只退役被新探测证实已经过时的握手；不用再等 45 秒看门狗。
+        dispose(entry, "replace"); entry.socket = null;
+      }
       if (!entry.socket) { clearTimeout(entry.retry); open(entry); }
     }
     const waiting = [

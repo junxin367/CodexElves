@@ -67,12 +67,13 @@ const blockingRequestStates = new Map();
 const approvalReplies = new Map();
 const approvalDrafts = new Map();
 let sessionRequest = null, connectionPollVersion = 0, connectionPollPending = null;
+let connectionRecoveryRequest = null;
 const sessionRecoveryReads = new WeakMap();
 let nativeConnectionVersion = 0;
 let connectionCycleVersion = 0, connectionRtt = null;
 let connectionLatencyVersion = 0, connectionLatencyFloor = 0, connectionRouteSignature = "", connectionLatencyRefresh = null;
 const channelRtts = new Map();
-const connectionRttDescription = "点击刷新会话。网页到接入服务的 /api/session HTTP 完整往返时长；存在两条已授权线路时分别测量，不代表模型响应耗时或端到端原生执行延迟。消息使用此处可用线路中延迟最低的一路发送，发出后不自动换路重发。";
+const connectionRttDescription = "点击探测连接并刷新会话。网页到接入服务的 /api/session HTTP 完整往返时长；存在两条已授权线路时分别测量，不代表模型响应耗时或端到端原生执行延迟。消息使用此处可用线路中延迟最低的一路发送，发出后不自动换路重发。";
 let pageLeaving = false;
 let goalEditorBaseViewport = {
   width: window.innerWidth,
@@ -4538,7 +4539,7 @@ function notice(message, error = false) {
     if (node.hasAttribute("popover") && node.matches(":popover-open")) node.hidePopover();
   }, 6500);
 }
-async function api(path, body, id, signal, { resourcePriority = "foreground", onChannelLatency = null } = {}) {
+async function api(path, body, id, signal, { resourcePriority = "foreground", onChannelLatency = null, recoveryProbe = false } = {}) {
   if (path.startsWith("/api/action/") && body?.threadId && threadReadOnly(body.threadId))
     throw Object.assign(new Error("此会话仅供查看，不能提交操作。"), { code: 403, notSubmitted: true });
   if (path.startsWith("/api/action/") && path !== "/api/action/deleteThread" && body?.threadId
@@ -4596,7 +4597,7 @@ async function api(path, body, id, signal, { resourcePriority = "foreground", on
         return validateRemoteReceipt(result, path.slice("/api/receipts/".length));
       return result;
     }, connectionProbe ? onChannelLatency : measurements,
-    origin => markMessageChannelUnavailable(origin, measurements));
+    connectionProbe ? { recoveryProbe } : origin => markMessageChannelUnavailable(origin, measurements));
     if (path === "/api/session" && result?.device?.id) {
       activateRemoteChannels(result.device.id);
       // 冷启动会建立新的事件基线，尚未完成的采集请求由原有状态轮询补达。
@@ -4626,7 +4627,7 @@ function promoteReadPriority(request, resourcePriority) {
   request.resourcePriority = "foreground";
   if (request.apiStarted) request.releasePriority = beginPwaForegroundWork();
 }
-function readConnectionSession(signal, recoveryObservation = undefined, { resourcePriority = "foreground" } = {}) {
+function readConnectionSession(signal, recoveryObservation = undefined, { resourcePriority = "foreground", recoveryProbe = false } = {}) {
   const deviceId = session?.device.id;
   const source = stream;
   const nativeVersion = nativeConnectionVersion;
@@ -4657,6 +4658,7 @@ function readConnectionSession(signal, recoveryObservation = undefined, { resour
       const latest = await api("/api/session", undefined, undefined, controller.signal,
         {
           resourcePriority: request.resourcePriority,
+          recoveryProbe,
           onChannelLatency: measurement => {
             if (latencyVersion < connectionLatencyFloor || controller.signal.aborted || pageLeaving
                 || session?.device.id !== deviceId || stream !== source || pollVersion !== connectionPollVersion
@@ -4695,7 +4697,7 @@ function cancelConnectionProbe() {
   sessionRequest = null;
   connectionRtt = null;
 }
-async function syncConnectionState(source = stream) {
+async function syncConnectionState(source = stream, { recoveryProbe = false } = {}) {
   const deviceId = session?.device.id;
   const nativeVersion = nativeConnectionVersion, connectionVersion = connectionCycleVersion;
   const pollVersion = connectionPollVersion;
@@ -4704,9 +4706,11 @@ async function syncConnectionState(source = stream) {
     && pollVersion === connectionPollVersion;
   let latest;
   try {
-    latest = await readConnectionSession();
+    latest = await readConnectionSession(undefined, undefined, { recoveryProbe });
   } catch (error) {
-    if (isCurrent()) setConnection(false);
+    // 主动恢复已退役旧探测；其迟到错误不能再标记断线或让旧 onopen 弹出错误。
+    if (!isCurrent()) return false;
+    setConnection(false);
     throw error;
   }
   if (!isCurrent()) return false;
@@ -6054,9 +6058,7 @@ function shell() {
     }
     catch (error) { notice(error.message, true); if ($("#logout")) $("#logout").disabled = false; }
   };
-  $("#connection-state").onclick = () => void Promise.all([
-    refreshConnectedSession(), loadModels(true), refreshSkillCatalog()
-  ]).catch(error => notice(error.message, true));
+  $("#connection-state").onclick = refreshConnectionFromIndicator;
   const toolsTrigger = $("#open-session-tools");
   toolsTrigger.append(icon("tools"));
   sessionTools = mountSessionTools({
@@ -12281,15 +12283,18 @@ function renderConnectionIndicator() {
     const measurement = currentMeasurements.find(measurement => measurement.origin === route.origin);
     return { name: route.name, measurement: measurement?.status === "unknown" ? null : measurement };
   }) : [];
-  renderConnectionLatency(node, { connected, measured, measurements, dual });
+  const probing = connectionRecoveryRequest?.scope === privateInputScope(session);
+  node.disabled = probing;
+  node.setAttribute("aria-busy", String(probing));
+  renderConnectionLatency(node, { connected, measured, measurements, dual, probing });
 }
-function renderConnectionLatency(node, { connected, measured, measurements, dual }) {
+function renderConnectionLatency(node, { connected, measured, measurements, dual, probing = false }) {
   const ready = measurement => measurement?.status === "ready"
     && Number.isFinite(measurement.milliseconds) && measurement.milliseconds >= 0;
   if (dual) {
     const rows = measurements.map(({ name, measurement }) => {
       const row = document.createElement("span");
-      const status = !connected ? "连接中断" : ready(measurement) ? `${Math.round(measurement.milliseconds)} ms`
+      const status = !connected ? probing ? "正在探测…" : "连接中断" : ready(measurement) ? `${Math.round(measurement.milliseconds)} ms`
         : measurement?.status === "unavailable" ? "暂不可用" : "测量中…";
       row.className = `connection-route ${ready(measurement) ? "online" : measurement?.status === "unavailable" || !connected ? "unavailable" : "pending"}`;
       row.textContent = `${name} ${status}`;
@@ -12297,7 +12302,8 @@ function renderConnectionLatency(node, { connected, measured, measurements, dual
     });
     node.replaceChildren(...rows);
   } else {
-    node.textContent = !connected ? "连接中断 · 自动重连" : measured ? `${Math.round(measured.milliseconds)} ms` : "连接中…";
+    node.textContent = !connected ? probing ? "正在探测…" : "连接中断 · 自动重连"
+      : measured ? `${Math.round(measured.milliseconds)} ms` : "连接中…";
   }
   const online = dual ? connected && measurements.some(({ measurement }) => ready(measurement)) : !!measured;
   node.classList.toggle("dual-channel", dual);
@@ -12683,6 +12689,8 @@ function openStream({ suppressErrors = false } = {}) {
   const isCurrent = () => stream === current && session?.device.id === deviceId;
   current.onopen = async () => {
     if (!isCurrent()) return;
+    // 内层线路已经恢复时，撤销外层旧重试，避免刚连上的 socket 又被计时器关闭。
+    clearTimeout(streamRetry); streamRetry = null;
     recordRuntimeDiagnostic("stream.open", { phase: "open" });
     streamBackoff = 1000;
     try {
@@ -12890,9 +12898,53 @@ async function connectPage(signal) {
   }
   updateComposer(); void resolvePending(); drainPendingNotificationOpen();
 }
-function retryConnectionRecovery({ suppressStreamErrors = false } = {}) {
+function probeConnectionRecovery() {
+  if (!session || pageLeaving || document.hidden || initialAuthenticationRequired)
+    return Promise.resolve(false);
+  const scope = privateInputScope(session);
+  if (connectionRecoveryRequest?.scope === scope) return connectionRecoveryRequest.promise;
+  const request = { scope, promise: null };
+  connectionRecoveryRequest = request;
+  // 用户要求点击“连接中断”和网络恢复都主动探测；复用同一请求，保留草稿和未知写回执。
+  // 更换轮询代次后仅取消旧连接探测，防止旧网络的迟到结果覆盖新连接状态。
+  request.promise = withRecoveryErrorSilence(async () => {
+    if (pageLeaving || document.hidden || scope !== privateInputScope(session)) return false;
+    startConnectionPoll(session.device.id);
+    cancelConnectionProbe();
+    ensureStream({ suppressErrors: true });
+    const applied = await syncConnectionState(stream, { recoveryProbe: true });
+    if (applied && !pageLeaving && !document.hidden && scope === privateInputScope(session)) {
+      refreshCachedCatalogs();
+      void recoverQuestionReceipts();
+      void withRecoveryErrorSilence(() => refreshAll({ fresh: true })).catch(() => {});
+    }
+    return applied;
+  }).finally(() => {
+    if (connectionRecoveryRequest !== request) return;
+    connectionRecoveryRequest = null;
+    renderConnectionIndicator();
+  });
+  renderConnectionIndicator();
+  return request.promise;
+}
+async function refreshConnectionFromIndicator() {
+  const scope = privateInputScope(session);
+  try {
+    const applied = await probeConnectionRecovery();
+    if (applied && !pageLeaving && !document.hidden && scope === privateInputScope(session))
+      await Promise.all([loadModels(true), refreshSkillCatalog()]);
+  } catch (error) {
+    if (!pageLeaving && !document.hidden && scope === privateInputScope(session))
+      notice(connectionErrorMessage(error), true);
+  }
+}
+function retryConnectionRecovery({ suppressStreamErrors = false, recoveryProbe = false } = {}) {
   if (pageLeaving || document.hidden || navigator.onLine === false || initialAuthenticationRequired || connecting) return;
   if (!session) { void connect().catch(handleInitialConnectionError); return; }
+  if (recoveryProbe) {
+    void probeConnectionRecovery().catch(() => {});
+    return;
+  }
   void recoverQuestionReceipts();
   refreshCachedCatalogs();
   ensureStream({ suppressErrors: suppressStreamErrors });
@@ -12949,7 +13001,7 @@ if (isAndroidContainer()) {
   });
 }
 window.addEventListener("online", () => {
-  retryConnectionRecovery();
+  retryConnectionRecovery({ recoveryProbe: true });
 });
 window.addEventListener("offline", () => {
   stopCatalogRefresh();

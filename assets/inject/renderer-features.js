@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "108";
+  const codexDeleteStyleVersion = "109";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -670,6 +670,19 @@
     style.id = styleId;
     style.dataset.codexDeleteStyleVersion = codexDeleteStyleVersion;
     style.textContent = `
+      /* 用户要求切换会话时宽度保持稳定：新节点和隐藏标签页从首次布局就使用设置值，
+         不等待路由计时器/RAF 再从原生 768px 放大；右侧会话及其它焦点区域保持原生布局。 */
+      html[data-codex-conversation-view="true"] :is(
+        [data-thread-user-message-navigation-content],
+        [data-pip-obstacle="thread-footer"],
+        [data-codex-conversation-view-target="true"]
+      ):not([data-app-shell-focus-area]:not([data-app-shell-focus-area="main"]),
+        [data-app-shell-focus-area]:not([data-app-shell-focus-area="main"]) *) {
+        box-sizing: border-box !important;
+        width: 100% !important;
+        max-width: var(--codex-conversation-view-max-width) !important;
+        margin-inline: auto !important;
+      }
       :root {
         --codex-elves-modal-overlay-background: rgba(0,0,0,.45);
         --codex-elves-modal-surface: var(
@@ -25362,12 +25375,14 @@
   }
 
   function conversationViewFindByClasses(classes) {
-    const matches = Array.from(document.querySelectorAll("div")).filter((el) => conversationViewHasAllClasses(el, classes));
+    const matches = Array.from(document.querySelectorAll("div"))
+      .filter(codexServiceTierIsMainComposerElement)
+      .filter((el) => conversationViewHasAllClasses(el, classes));
     return matches.find(conversationViewElementIsActive) || matches.find((el) => el?.isConnected) || null;
   }
 
   function conversationViewFindBySelector(selector) {
-    const matches = Array.from(document.querySelectorAll(selector));
+    const matches = Array.from(document.querySelectorAll(selector)).filter(codexServiceTierIsMainComposerElement);
     return matches.find(conversationViewElementIsActive) || matches.find((el) => el?.isConnected) || null;
   }
 
@@ -25783,6 +25798,7 @@
 
   function conversationViewRestoreElement(el) {
     if (!el) return;
+    el.removeAttribute("data-codex-conversation-view-target");
     if ("codexElvesConversationViewOriginalWidth" in el.dataset) {
       el.style.width = el.dataset.codexElvesConversationViewOriginalWidth;
       delete el.dataset.codexElvesConversationViewOriginalWidth;
@@ -25846,6 +25862,8 @@
 
   function conversationViewApplyNativeWidth(el) {
     conversationViewRememberOriginals(el);
+    if (el.getAttribute("data-codex-conversation-view-target") !== "true")
+      el.setAttribute("data-codex-conversation-view-target", "true");
     const maxWidth = `${conversationViewWidth()}px`;
     if (el.style.boxSizing !== "border-box") el.style.boxSizing = "border-box";
     if (el.style.width !== "100%") el.style.width = "100%";
@@ -25871,7 +25889,7 @@
   }
 
   function conversationViewAlignElement(el) {
-    if (!conversationViewElementIsActive(el)) return;
+    if (!codexServiceTierIsMainComposerElement(el) || !conversationViewElementIsActive(el)) return;
     conversationViewApplyNativeWidth(el);
     const nativeRect = conversationViewNativeRect(el);
     const bounds = conversationViewSessionRectFor(el);
@@ -25901,8 +25919,12 @@
   }
 
   function conversationViewResolveTargets() {
-    if (!conversationViewElementIsActive(conversationViewState.contentEl)) conversationViewState.contentEl = conversationViewFindContentEl();
-    if (!conversationViewElementIsActive(conversationViewState.composerEl)) conversationViewState.composerEl = conversationViewFindComposerEl();
+    if (!conversationViewElementIsActive(conversationViewState.contentEl)
+      || !codexServiceTierIsMainComposerElement(conversationViewState.contentEl))
+      conversationViewState.contentEl = conversationViewFindContentEl();
+    if (!conversationViewElementIsActive(conversationViewState.composerEl)
+      || !codexServiceTierIsMainComposerElement(conversationViewState.composerEl))
+      conversationViewState.composerEl = conversationViewFindComposerEl();
     [
       document.documentElement,
       document.body,
@@ -25916,18 +25938,47 @@
   }
 
   function conversationViewObserverRoot() {
-    const content = conversationViewElementIsActive(conversationViewState.contentEl) ? conversationViewState.contentEl : conversationViewFindContentEl();
-    const composer = conversationViewElementIsActive(conversationViewState.composerEl) ? conversationViewState.composerEl : conversationViewFindComposerEl();
-    const contentRoot = content?.parentElement?.parentElement || content?.parentElement || content;
-    const composerRoot = composer?.parentElement?.parentElement || composer?.parentElement || composer;
-    return document.querySelector("main, [role='main']") || contentRoot?.parentElement || composerRoot?.parentElement || contentRoot || composerRoot || null;
+    // 新版保留并替换多个 main；监听稳定祖先，再筛选布局节点，避免绑在已隐藏的会话上。
+    return document.body || document.documentElement;
+  }
+
+  function conversationViewMutationRelevant(mutation) {
+    const selector = `${conversationViewContentSelector}, ${conversationViewComposerShellSelector}, [class~="max-w-(--thread-content-max-width)"]`;
+    const containsTarget = (node) => node?.nodeType === 1
+      && (node.matches?.(selector) || node.querySelector?.(selector));
+    if (mutation.type === "attributes") {
+      // 自己写入的定位样式不再触发定位，避免 transform 恢复过程形成观察器循环。
+      if (mutation.attributeName === "style"
+        && mutation.target?.hasAttribute?.("data-codex-conversation-view-target")) return false;
+      return containsTarget(mutation.target);
+    }
+    return [...Array.from(mutation.addedNodes || []), ...Array.from(mutation.removedNodes || [])]
+      .some(containsTarget);
+  }
+
+  function syncConversationViewWidthStyle() {
+    const root = document.documentElement;
+    const maxWidth = `${conversationViewWidth()}px`;
+    if (root.style.getPropertyValue("--codex-conversation-view-max-width") !== maxWidth)
+      root.style.setProperty("--codex-conversation-view-max-width", maxWidth);
+    if (root.getAttribute("data-codex-conversation-view") !== "true")
+      root.setAttribute("data-codex-conversation-view", "true");
   }
 
   function conversationViewAlignNow() {
     if (!codexElvesSettings().conversationView) return;
     conversationViewResolveTargets();
-    conversationViewAlignElement(conversationViewState.contentEl);
-    conversationViewAlignElement(conversationViewState.composerEl);
+    // 切换期间新旧视图可短暂同时可见，二者都在绘制前对齐；隐藏视图只由 CSS 保持宽度。
+    const targets = new Set([
+      conversationViewState.contentEl, conversationViewState.composerEl,
+      ...document.querySelectorAll(`${conversationViewContentSelector}, ${conversationViewComposerShellSelector}`),
+    ]);
+    for (const target of targets) {
+      if (!codexServiceTierIsMainComposerElement(target)) continue;
+      conversationViewObserveIfNeeded(target);
+      conversationViewObserveIfNeeded(target?.parentElement);
+      conversationViewAlignElement(target);
+    }
   }
 
   function scheduleConversationViewAlign(frames = 16) {
@@ -25951,13 +26002,15 @@
 
   function startConversationViewSettleWindow() {
     if (conversationViewState.settleTimer) clearTimeout(conversationViewState.settleTimer);
-    scheduleConversationViewAlign(180);
-    conversationViewState.settleTimer = window.setTimeout(() => {
-      conversationViewState.settleTimer = 0;
-    }, 3000);
+    conversationViewState.settleTimer = 0;
+    // 首次同步对齐，随后两帧承接原生布局提交；后续尺寸变化由 ResizeObserver 接管。
+    conversationViewAlignNow();
+    scheduleConversationViewAlign(2);
   }
 
   function cleanupConversationView() {
+    document.documentElement.removeAttribute("data-codex-conversation-view");
+    document.documentElement.style.removeProperty("--codex-conversation-view-max-width");
     if (conversationViewState.rafId) cancelAnimationFrame(conversationViewState.rafId);
     if (conversationViewState.settleTimer) clearTimeout(conversationViewState.settleTimer);
     conversationViewState.rafId = 0;
@@ -25978,7 +26031,12 @@
 
   function ensureConversationViewRuntime() {
     conversationViewState.ro = conversationViewState.ro || new ResizeObserver(() => scheduleConversationViewAlign());
-    conversationViewState.mo = conversationViewState.mo || new MutationObserver(() => scheduleConversationViewAlign());
+    conversationViewState.mo = conversationViewState.mo || new MutationObserver((mutations) => {
+      if (!mutations.some(conversationViewMutationRelevant)) return;
+      conversationViewForgetTargets();
+      conversationViewAlignNow();
+      scheduleConversationViewAlign(2);
+    });
     const root = conversationViewObserverRoot();
     if (root && conversationViewState.observedRoot !== root) {
       conversationViewState.mo.disconnect();
@@ -25986,7 +26044,7 @@
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ["class", "hidden", "data-state", "aria-hidden"],
+        attributeFilter: ["class", "hidden", "inert", "style", "data-state", "aria-hidden"],
       });
       conversationViewState.observedRoot = root;
     }
@@ -25997,6 +26055,7 @@
       cleanupConversationView();
       return;
     }
+    syncConversationViewWidthStyle();
     if (forceResolve) {
       conversationViewForgetTargets();
       conversationViewState.observedRoot = null;

@@ -2132,6 +2132,8 @@ test("实际offline再online回调立即退役旧显示读取并启动新读，�
     stream: null, connected: false,
     stopCatalogRefresh() {}, setConnection: value => { context.connected = value; },
     recoverQuestionReceipts() {}, refreshCachedCatalogs() {}, ensureStream() {},
+    connectionRecoveryRequest: null, privateInputScope: value => value?.device?.id,
+    startConnectionPoll() {}, cancelConnectionProbe() {}, renderConnectionIndicator() {},
     syncConnectionState: async source => {
       assert.equal(source, context.stream);
       context.connected = true;
@@ -2143,7 +2145,7 @@ test("实际offline再online回调立即退役旧显示读取并启动新读，�
   vm.runInContext([
     sourceSection("async function refreshConnectedSession(", "function savePending("),
     sourceSection("function withRecoveryErrorSilence(", "async function refreshAll("),
-    sourceSection("function retryConnectionRecovery(", "async function copyText("),
+    sourceSection("function probeConnectionRecovery(", "async function copyText("),
     sourceSection('window.addEventListener("online",', 'document.addEventListener("visibilitychange", () => {\n  if (document.hidden) {\n    stopCatalogRefresh();'),
   ].join("\n"), context);
   const oldRefresh = context.refreshAll();
@@ -2186,7 +2188,8 @@ function connectionRecoveryHarness() {
     selectionController: null, historyRequest: null, sideThreadExpired: () => false,
     isMissingThreadError: () => false,
     nativeConnectionVersion: 0, connectionCycleVersion: 0, connectionPollVersion: 0,
-    connectionPollPending: null, recoveryErrorSilenceDepth: 0,
+    connectionPollPending: null, recoveryErrorSilenceDepth: 0, connectionRecoveryRequest: null,
+    renderConnectionIndicator() {},
     navigator: { onLine: true }, initialAuthenticationRequired: false, connecting: null,
     pending: { id: "original-write", state: "unknown", controller: pendingWrite },
     drafts: new Map([["main", "保留普通草稿"]]),
@@ -2194,8 +2197,8 @@ function connectionRecoveryHarness() {
     window: { addEventListener: (name, callback) => listeners.set(name, callback) },
     $: selector => selector === "#connection-state" ? connectionIndicator : node(selector),
     setConnection: value => { context.connected = value; },
-    readConnectionSession: async () => {
-      const probe = deferred(); probes.push(probe);
+    readConnectionSession: async (_signal, _observation, options) => {
+      const probe = { ...deferred(), options }; probes.push(probe);
       const latest = await probe.promise;
       routeReady = true;
       return latest;
@@ -2232,14 +2235,15 @@ function connectionRecoveryHarness() {
   });
   context.document.addEventListener = (name, callback) => listeners.set(name, callback);
   vm.runInContext([
+    sourceSection("function connectionErrorMessage(", "function showConnectionRecovery("),
     sourceSection("async function syncConnectionState(", "function savePending("),
     sourceSection("function withRecoveryErrorSilence(", "async function refreshAll("),
     sourceSection("async function refreshAll(", "function openStream("),
-    sourceSection("function openStream(", "function reconnectStream("),
+    sourceSection("function openStream(", "function stopConnectionPoll("),
     sourceSection("function stopConnectionPoll(", "function retireForegroundReads("),
     sourceSection("function retireForegroundReads(", "function resumePage()"),
     sourceSection("function resumePage()", "async function connect("),
-    sourceSection("function retryConnectionRecovery(", "async function copyText("),
+    sourceSection("function probeConnectionRecovery(", "async function copyText("),
     `${sourceSection("function receive(event) {", "  const params = { ...event.params || {} };")}\n}`,
     sourceSection('  $("#connection-state").onclick =', "  const toolsTrigger ="),
     sourceSection('window.addEventListener("online",', 'document.addEventListener("visibilitychange", () => {\n  if (document.hidden) {\n    stopCatalogRefresh();'),
@@ -2268,6 +2272,263 @@ function connectionRecoveryHarness() {
     },
   };
 }
+
+function transportRecoveryHarness() {
+  const h = connectionRecoveryHarness(), context = h.context;
+  const calls = [], sockets = [], pending = [], catalogReads = [], refreshes = [], timers = new Map();
+  const listeners = new Map([...h.listeners].map(([name, callback]) => [name, new Set([callback])]));
+  let now = 1000, sequence = 0, networkReady = false, sessionReply = null;
+  const node = () => ({
+    textContent: "", children: [], disabled: false, attributes: new Map(), classes: new Map(),
+    setAttribute(key, value) { this.attributes.set(key, value); },
+    replaceChildren(...children) { this.children = children; },
+    classList: { toggle() {} },
+  });
+  const indicator = node();
+  indicator.onclick = context.refreshConnectionFromIndicator;
+  const timer = (callback, delay, interval = false) => {
+    timers.set(++sequence, { callback, at: now + delay, delay, interval });
+    return sequence;
+  };
+  const json = value => jsonResponse(value);
+  Object.assign(context, {
+    URL, Headers, Response, TextEncoder, queueMicrotask,
+    Date: class extends Date { static now() { return now; } },
+    performance: { now: () => now },
+    location: new URL("http://recovery.example:39399/"),
+    setTimeout: (callback, delay) => timer(callback, delay),
+    clearTimeout: id => timers.delete(id),
+    setInterval: (callback, delay) => timer(callback, delay, true),
+    clearInterval: id => timers.delete(id),
+    addEventListener(name, callback) {
+      if (!listeners.has(name)) listeners.set(name, new Set());
+      listeners.get(name).add(callback);
+    },
+    removeEventListener(name, callback) { listeners.get(name)?.delete(callback); },
+    isAndroidContainer: () => false, getAndroidAppInfo: async () => ({}),
+    diagnosticLocation: () => ({}), newDiagnosticRequestId: () => `test-${++sequence}`,
+    recordDiagnostic() {}, traceDiagnosticRequest: () => ({ response() {}, finish() {} }),
+    beginPwaForegroundWork: () => () => {}, requireAuthentication() { assert.fail("网络恢复不能清除授权"); },
+    threadDeletionLocked: () => false, threadDeleted: () => false,
+    recoveryStore: { observe: async () => ({}) }, sessionRecoveryReads: new WeakMap(),
+    sessionRequest: null, connectionRtt: null, connectionLatencyVersion: 0, connectionLatencyFloor: 0,
+    channelRtts: new Map(), connectionRttDescription: "点击探测连接并刷新会话",
+    $: selector => selector === "#connection-state" ? indicator : null,
+    refreshAll: async () => { refreshes.push("read"); },
+    loadSidebar: async () => {},
+    loadModels: async () => { catalogReads.push("models"); },
+    refreshSkillCatalog: async () => { catalogReads.push("skills"); },
+    fetch(url, options) {
+      const path = new URL(url).pathname;
+      calls.push({ path, time: now, method: options.method });
+      assert.equal(options.method, "GET", "恢复探测不能发送写请求");
+      if (networkReady) {
+        if (path === "/api/session") return sessionReply ? sessionReply.promise : Promise.resolve(json(h.snapshot()));
+        return Promise.resolve(json({
+          ok: true, schemaVersion: 1, deviceId: "device-a",
+          serverId: "12345678-1234-1234-1234-123456789abc", token: "a".repeat(64),
+          expiresAtMs: now + 3600000, origins: [context.location.origin],
+        }));
+      }
+      const result = deferred(); pending.push({ path, ...result });
+      options.signal?.addEventListener("abort", () => result.reject(options.signal.reason), { once: true });
+      return result.promise;
+    },
+    WebSocket: class {
+      constructor() { sockets.push({ socket: this, time: now }); }
+      addEventListener() {}
+      close() {}
+    },
+  });
+  context.window = context;
+  context.document.createElement = node;
+  context.document.addEventListener = () => {};
+  context.document.removeEventListener = () => {};
+  vm.runInContext(channels.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""), context);
+  vm.runInContext([
+    sourceSection("async function api(", "async function refreshConnectedSession("),
+    sourceSection("function currentChannelMeasurements(", "function scheduleReload("),
+  ].join("\n"), context);
+  context.createRemoteEventStream = () => context.createChannelEventStream();
+  context.sharedEventsAvailable = () => false;
+  context.ensureStream = () => {};
+  const flush = async () => { for (let turn = 0; turn < 30; turn++) await Promise.resolve(); };
+  const advance = async target => {
+    for (;;) {
+      const next = [...timers].filter(([, item]) => item.at <= target).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next) break;
+      const [id, item] = next;
+      now = item.at; timers.delete(id);
+      if (item.interval) timers.set(id, { ...item, at: now + item.delay });
+      item.callback(); await flush();
+    }
+    now = target; await flush();
+  };
+  const establishCooldown = async () => {
+    context.openStream(); await flush();
+    const probe = context.readConnectionSession().catch(error => error);
+    await flush();
+    await advance(11000);
+    const discovery = context.api("/api/channels").catch(error => error);
+    await flush();
+    await advance(16000); await probe;
+    await advance(17000);
+    pending.find(item => item.path === "/api/channels").reject(new TypeError("network unavailable"));
+    await discovery; await flush();
+    assert.equal(sockets.length, 1);
+    networkReady = true;
+  };
+  return { ...h, context, indicator, calls, sockets, catalogReads, refreshes, flush, advance, establishCooldown,
+    fire: name => { for (const callback of [...listeners.get(name) || []]) callback({ isTrusted: true }); },
+    setNetworkReady: () => { networkReady = true; },
+    holdSession: () => (sessionReply = deferred()),
+    json,
+    dispose: () => { context.stream?.close(); context.stopConnectionPoll(); context.clearRemoteChannels(); timers.clear(); },
+  };
+}
+
+for (const source of ["online", "manual"])
+  test(`${source}通过真实HTTP和事件线路绕过30秒网络退避，成功前仍禁止普通请求`, async () => {
+    const h = transportRecoveryHarness(), pending = h.context.pending;
+    try {
+      await h.establishCooldown();
+      const before = h.calls.length, reply = h.holdSession();
+      if (source === "online") h.fire("online");
+      else void h.indicator.onclick();
+      await h.flush();
+      assert.equal(h.calls.length, before + 1);
+      assert.equal(h.calls.at(-1).path, "/api/session");
+      assert.equal(h.calls.at(-1).time, 17000, "不能等到47000毫秒的旧退避截止时间");
+      assert.equal(h.indicator.textContent, "正在探测…");
+      assert.equal(h.indicator.disabled, true);
+      assert.equal(h.indicator.attributes.get("aria-busy"), "true");
+      assert.equal(h.catalogReads.length, 0);
+      await assert.rejects(h.context.requestRemote("/api/read/thread", { method: "POST" }, r => r.json()),
+        error => error.notSubmitted === true);
+      const duplicate = h.indicator.onclick();
+      h.fire("online"); await h.flush();
+      assert.equal(h.calls.length, before + 1, "点击与在线事件合并为一次探测");
+      reply.resolve(h.json(h.snapshot())); await duplicate; await h.flush();
+      assert.equal(h.sockets.length, 2, "探测成功后事件通道立即重新握手");
+      assert.equal(h.sockets[1].time, 17000);
+      assert.equal(h.indicator.disabled, false);
+      assert.equal(h.context.pending, pending);
+      assert.equal(h.pendingWrite.signal.aborted, false);
+      assert.equal(h.context.drafts.get("main"), "保留普通草稿");
+      assert.equal(h.writes.length, 0);
+    } finally { h.dispose(); }
+  });
+
+for (const [status, headers] of [[429, {}], [429, { "Retry-After": "60" }], [503, { "Retry-After": "60" }]])
+  test(`手动探测保留HTTP ${status}及${headers["Retry-After"] || "默认"}限流等待`, async () => {
+    const h = transportRecoveryHarness();
+    try {
+      h.context.fetch = async () => {
+        h.calls.push("limited");
+        return jsonResponse({ message: "limited" }, status, headers);
+      };
+      await assert.rejects(h.context.raceRemoteRead("/api/session", { method: "GET" }, response => {
+        if (!response.ok) throw new Error("limited");
+        return response.json();
+      }, () => {}));
+      await h.indicator.onclick();
+      assert.equal(h.calls.length, 1, "手动点击不能越过服务端限流");
+      assert.match(h.notices.at(-1), /服务暂时限制请求/);
+      assert.equal(h.indicator.disabled, false);
+    } finally { h.dispose(); }
+  });
+
+test("显式点击在浏览器offline标记尚未更新时仍执行只读探测", async () => {
+  const h = transportRecoveryHarness();
+  try {
+    await h.establishCooldown();
+    h.context.navigator.onLine = false;
+    const before = h.calls.length, reply = h.holdSession(), probe = h.indicator.onclick();
+    await h.flush();
+    assert.equal(h.calls.length, before + 1);
+    assert.equal(h.calls.at(-1).path, "/api/session");
+    assert.equal(h.indicator.disabled, true);
+    reply.reject(new TypeError("network unavailable"));
+    await probe;
+    assert.equal(h.indicator.disabled, false);
+    assert.equal(h.writes.length, 0);
+  } finally { h.dispose(); }
+});
+
+test("手动探测失败会释放按钮，下次点击仍能越过网络退避，迟到页面结果不弹提示", async () => {
+  const h = transportRecoveryHarness();
+  try {
+    await h.establishCooldown();
+    const first = h.holdSession(), failed = h.indicator.onclick();
+    await h.flush();
+    first.reject(new TypeError("network unavailable")); await failed;
+    assert.equal(h.indicator.disabled, false);
+    assert.equal(h.notices.length, 1);
+    const count = h.calls.length, second = h.holdSession(), recovered = h.indicator.onclick();
+    await h.flush();
+    assert.equal(h.calls.length, count + 1);
+    h.context.pageLeaving = true;
+    second.reject(new TypeError("late failure")); await recovered;
+    assert.equal(h.notices.length, 1, "已离开页面不得弹出旧请求错误");
+    assert.equal(h.context.pending.id, "original-write");
+    assert.equal(h.pendingWrite.signal.aborted, false);
+  } finally { h.dispose(); }
+});
+
+for (const phase of ["connecting", "retrying", "open"])
+  test(`成功探测处理${phase}事件通道，只重新建立过时握手或解除旧退避`, async () => {
+    const h = transportRecoveryHarness();
+    try {
+      h.context.openStream(); await h.flush();
+      const original = h.sockets[0].socket;
+      if (phase === "retrying") original.onerror();
+      if (phase === "open") {
+        // 本例只验证传输层与手动探测，避免初次 onopen 同时派发独立会话读取。
+        h.context.stream.onopen = () => {};
+        original.onopen();
+      }
+      h.setNetworkReady();
+      await h.indicator.onclick(); await h.flush();
+      assert.equal(h.sockets.length, phase === "open" ? 1 : 2);
+      assert.ok(h.sockets.every(entry => entry.time === 1000), "成功探测后不得等待旧重试或握手超时");
+      if (phase === "retrying") {
+        h.sockets.at(-1).socket.onopen(); await h.flush();
+        await h.advance(2000);
+        assert.equal(h.sockets.length, 2, "已恢复的连接不能被外层旧重试计时器再次关闭");
+      }
+      assert.equal(h.writes.length, 0);
+    } finally { h.dispose(); }
+  });
+
+test("手动恢复退役旧onopen探测，旧取消错误不覆盖新连接或弹出提示", async () => {
+  const h = transportRecoveryHarness();
+  try {
+    h.context.openStream(); await h.flush();
+    h.sockets[0].socket.onopen(); await h.flush();
+    assert.equal(h.calls.filter(call => call.path === "/api/session").length, 1);
+    h.setNetworkReady();
+    await h.indicator.onclick(); await h.flush();
+    assert.equal(h.calls.filter(call => call.path === "/api/session").length, 2);
+    assert.equal(h.context.connected, true);
+    assert.deepEqual(h.notices, []);
+    assert.equal(h.indicator.disabled, false);
+  } finally { h.dispose(); }
+});
+
+test("HTTP探测成功但WebSocket构造失败时保留新退避，不递归重连", async () => {
+  const h = transportRecoveryHarness();
+  let attempts = 0;
+  try {
+    h.context.WebSocket = class { constructor() { attempts++; throw new Error("socket unavailable"); } };
+    h.context.openStream(); await h.flush();
+    assert.equal(attempts, 1);
+    h.setNetworkReady();
+    await h.indicator.onclick(); await h.flush();
+    assert.equal(attempts, 2);
+    assert.equal(h.indicator.disabled, false);
+    assert.equal(h.context.connected, false);
+  } finally { h.dispose(); }
+});
 
 test("准备导航但仍停留原页面时，beforeunload 不关闭实时连接或连接轮询", () => {
   const h = connectionRecoveryHarness(), original = h.context.stream;

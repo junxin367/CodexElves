@@ -9130,7 +9130,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "108";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "109";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -11375,6 +11375,91 @@ fn injection_script_exposes_conversation_view_width_control() {
 }
 
 #[test]
+fn conversation_view_applies_width_before_frames_and_observes_replaced_views() {
+    let script = assets::renderer_features_script();
+    let start = script
+        .find("  function conversationViewObserverRoot()")
+        .unwrap();
+    let end = script[start..]
+        .find("  function scheduleConversationViewRouteRefresh()")
+        .map(|offset| start + offset)
+        .unwrap();
+    let node_script = format!(
+        "const source = {};\n",
+        serde_json::to_string(&script[start..end]).unwrap()
+    ) + r#"
+const assert = require("node:assert/strict");
+let enabled = true, configuredWidth = 1000, frames = 0, alignments = 0, restored = 0, observer;
+const properties = new Map(), attributes = new Map(), body = {};
+const root = {
+  style: {
+    getPropertyValue: key => properties.get(key) || "",
+    setProperty: (key, value) => properties.set(key, value),
+    removeProperty: key => properties.delete(key),
+  },
+  getAttribute: key => attributes.get(key) || null,
+  setAttribute: (key, value) => attributes.set(key, value),
+  removeAttribute: key => attributes.delete(key),
+};
+const state = {elements:new Set(), observed:new WeakSet(), contentEl:null, composerEl:null,
+  rafId:0, settleFramesLeft:0, settleTimer:0, mo:null, ro:null};
+const env = {
+  window:{}, document:{body,documentElement:root,querySelectorAll:()=>[]},
+  conversationViewState:state,
+  conversationViewContentSelector:"[data-thread-user-message-navigation-content]",
+  conversationViewComposerShellSelector:"[data-pip-obstacle='thread-footer']",
+  codexElvesSettings:()=>({conversationView:enabled}), conversationViewWidth:()=>configuredWidth,
+  conversationViewResolveTargets:()=>{alignments++;},
+  conversationViewAlignElement:()=>{}, conversationViewObserveIfNeeded:()=>{},
+  codexServiceTierIsMainComposerElement:()=>true,
+  conversationViewRestoreElement:()=>{restored++;},
+  requestAnimationFrame:()=>++frames, cancelAnimationFrame:()=>{}, clearTimeout:()=>{},
+  ResizeObserver:class{observe(){} disconnect(){}},
+  MutationObserver:class{
+    constructor(callback){this.callback=callback;observer=this;}
+    observe(target,options){this.target=target;this.options=options;}
+    disconnect(){}
+  },
+};
+const api=new Function("env",`with(env){${source}
+return {refresh:refreshConversationView,relevant:conversationViewMutationRelevant};}`)(env);
+api.refresh(true);
+assert.equal(properties.get("--codex-conversation-view-max-width"),"1000px");
+assert.equal(attributes.get("data-codex-conversation-view"),"true");
+assert.equal(alignments,1,"首次调用必须同步对齐，不能等RAF才应用宽度");
+assert.equal(state.settleFramesLeft,2,"只承接两帧布局，不连续轮询180帧");
+assert.equal(observer.target,body,"观察器必须跨越原生main节点替换");
+const target={nodeType:1,matches:()=>true,querySelector:()=>null,hasAttribute:()=>false};
+const unrelated={nodeType:1,matches:()=>false,querySelector:()=>null};
+const before=alignments;
+observer.callback([{type:"childList",addedNodes:[{nodeType:3}],removedNodes:[]}]);
+observer.callback([{type:"childList",addedNodes:[unrelated],removedNodes:[]}]);
+assert.equal(alignments,before,"普通流式消息不应触发全局定位");
+observer.callback([{type:"childList",addedNodes:[target],removedNodes:[]}]);
+assert.equal(alignments,before+1,"新会话在MutationObserver回调内同步对齐");
+assert.equal(api.relevant({type:"attributes",attributeName:"style",
+  target:{...target,hasAttribute:()=>true}}),false,"自己写入样式不能触发观察器循环");
+configuredWidth=1200;api.refresh();
+assert.equal(properties.get("--codex-conversation-view-max-width"),"1200px");
+state.elements.add(target);enabled=false;api.refresh();
+assert.equal(attributes.has("data-codex-conversation-view"),false);
+assert.equal(properties.has("--codex-conversation-view-max-width"),false);
+assert.equal(restored,1);
+assert.equal(state.mo,null);assert.equal(state.ro,null);assert.equal(state.rafId,0);
+"#;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(node_script)
+        .output()
+        .expect("node should be available");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn injection_script_exposes_compact_per_thread_token_usage_summary() {
     let script = assets::injection_script(45221);
 
@@ -11516,7 +11601,7 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("codex-open-in-menu"));
     assert!(script.contains(r#"const codexOpenInVersion = "14";"#));
     assert!(script.contains("window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion"));
-    assert!(script.contains(r#"const codexDeleteStyleVersion = "108";"#));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "109";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
     assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
     assert!(script.contains("width: 30px !important;"));
