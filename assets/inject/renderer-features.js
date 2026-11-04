@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "105";
+  const codexDeleteStyleVersion = "107";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -43,7 +43,7 @@
   let codexElvesVersion = window.__CODEX_ELVES_VERSION__ || "unknown";
   const codexElvesBuild = window.__CODEX_ELVES_BUILD__ || "unknown";
   const codexElvesSettingsKey = "codexElvesSettings";
-  const codexAppServerManagerDiscoveryVersion = "11";
+  const codexAppServerManagerDiscoveryVersion = "12";
   const codexAppServerRestartErrorText = "failed to start turn: internal error; agent loop died unexpectedly";
   const codexAppServerRestartRecoveryDelaysMs = [120, 280, 520, 900, 1500, 2400];
   const codexStatsigModelVisibilityConfigId = "107580212";
@@ -72,7 +72,7 @@
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
   const codexOpenInButtonAttribute = "data-codex-open-in-button";
-  const codexOpenInVersion = "13";
+  const codexOpenInVersion = "14";
   const codexOpenInGroupClass = "codex-open-in-group";
   const codexOpenInMenuClass = "codex-open-in-menu";
   const codexOpenInTargetsCacheLimit = 12;
@@ -80,7 +80,7 @@
   const codexOpenInActivationDebounceMs = 500;
   const codexOpenInServiceDiscoveryCooldownMs = 30000;
   const codexOpenInContextMissingCooldownMs = 5000;
-  const codexPromptOptimizeVersion = "19";
+  const codexPromptOptimizeVersion = "20";
   const codexPromptOptimizeButtonAttribute = "data-codex-prompt-optimize-button";
   const codexPromptOptimizePortalClass = "codex-prompt-optimize-portal";
   const codexPromptOptimizeSettingsOverlayClass = "codex-prompt-optimize-settings-overlay";
@@ -94,7 +94,7 @@
   const codexPromptOptimizeCompactCollisionMaxWidth = 140;
   const codexPromptOptimizeCompactCollisionMaxHeight = 84;
   const codexPromptOptimizeMaxRecentContextChars = 100000;
-  const codexWorkspaceCheckpointVersion = "8";
+  const codexWorkspaceCheckpointVersion = "9";
   const codexWorkspaceCheckpointButtonAttribute = "data-codex-workspace-checkpoint-button";
   const codexWorkspaceCheckpointButtonGap = 6;
   const codexWorkspaceCheckpointDialogClass = "codex-workspace-checkpoint-dialog";
@@ -634,7 +634,7 @@
     nativeMenuBar: "[class*=\"ms-auto\"][class*=\"flex\"][class*=\"items-center\"]",
     headerContextMenuSurface: '[data-testid="app-shell-header-context-menu-surface"]',
     pinnedSummaryPanel: '[data-pip-obstacle="thread-summary-panel"]',
-    pinnedSummaryToggle: 'button[aria-label="切换置顶摘要"], button[title="切换置顶摘要"], button[aria-label="Toggle Pinned Summary"], button[title="Toggle Pinned Summary"]',
+    pinnedSummaryToggle: '[data-thread-summary-panel-toggle], button[aria-label="切换摘要面板固定状态"], button[aria-label="切换置顶摘要"], button[title="切换置顶摘要"], button[aria-label="Toggle Pinned Summary"], button[title="Toggle Pinned Summary"]',
     archiveNav: 'button[aria-label="已归档对话"], button[aria-label="Archived conversations"]',
     pluginSvgPath: 'svg path[d^="M7.94562 14.0277"]',
   };
@@ -698,8 +698,12 @@
         font-size: 13px !important;
         line-height: 20px !important;
       }
-      [data-codex-activity-session-layout="true"] [class*="_inlineTitleSuffix_"] {
+      /* 用户要求：活动视图精简下，会话标题滚动或 hover 时仍显示第二行项目名称。
+         原生标题滚动时会以 .group:hover [data-marquee-animatable] + .inlineTitleSuffix-* 设置 visibility: hidden，需用 visibility: visible !important 覆盖；
+         内层 span 的原生 group-hover:hidden 由下方 > span 规则的 display: block !important 覆盖。以上声明不可删除；类名为 inlineTitleSuffix-<hash>，不可改回 _inlineTitleSuffix_。 */
+      [data-codex-activity-session-layout="true"] [class*="inlineTitleSuffix"] {
         display: block !important;
+        visibility: visible !important;
         min-width: 0;
         max-width: 100%;
         flex: 0 1 auto !important;
@@ -709,7 +713,7 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      [data-codex-activity-session-layout="true"] [class*="_inlineTitleSuffix_"] > span {
+      [data-codex-activity-session-layout="true"] [class*="inlineTitleSuffix"] > span {
         display: block !important;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -4657,6 +4661,8 @@
     codexServiceTierModernModulePart,
   ];
   let codexServiceTierDispatcher = null;
+  let codexFastAppServices = null;
+  let codexFastAppServicesFound = false;
   function codexServiceTierRequestClientClassFromModule(module) {
     if (!module || typeof module !== "object") return null;
     for (const value of Object.values(module)) {
@@ -4675,6 +4681,8 @@
   }
 
   function codexServiceTierRequestClientClassFromConversationManager() {
+    const scopedClient = findCodexAppServerRequestClientInScopedSignals();
+    if (scopedClient) return scopedClient.constructor;
     let manager = window.__codexElvesConversationStateManager || null;
     if (!manager) {
       try {
@@ -4722,7 +4730,37 @@
     return null;
   }
 
+  async function codexLoadedAppModuleExports() {
+    const modules = [];
+    for (const script of Array.from(document.scripts || [])) {
+      if (!script.src?.startsWith(`${location.origin}/assets/`)) continue;
+      try {
+        const entry = await import(script.src);
+        const cache = entry.__webpack_require__?.c;
+        if (cache) modules.push(...Object.values(cache).map((module) => module?.exports).filter(Boolean));
+      } catch {
+      }
+    }
+    return modules;
+  }
+
   async function findCodexServiceTierDispatcher() {
+    // 新版 Codex 使用 Rspack 数字 chunk；只检查已执行模块的实际导出能力，
+    // 不依赖文件名、模块 ID 或原生 Fast 组件，亦不执行缓存外的模块工厂。
+    let found = null;
+    for (const module of await codexLoadedAppModuleExports()) {
+      if (Object.hasOwn(module, "appServices")) {
+        codexFastAppServices = module.appServices;
+        codexFastAppServicesFound = true;
+      }
+      for (const value of Object.values(module)) {
+        if (!value || typeof value !== "object") continue;
+        const handlers = Object.getOwnPropertyDescriptor(value, "handlers")?.value;
+        if (handlers instanceof Map && typeof value.dispatchMessage === "function"
+          && typeof value.handleMessage === "function") found = value;
+      }
+    }
+    if (found) return found;
     let lastError = null;
     for (const namePart of codexServiceTierDispatcherModuleParts) {
       let module;
@@ -4793,9 +4831,8 @@
 
   // 从 composer footer 读取用户当前实际选中的模型，并匹配到 catalog 的 slug。
   // 解决：fast 能力判断不应使用后端配置的默认模型，而应使用会话里实际选中的模型。
-  function codexServiceTierComposerSelectedModel() {
+  function codexServiceTierComposerSelectedModel(entries = codexServiceTierCatalogEntries()) {
     try {
-      const entries = codexServiceTierCatalogEntries();
       if (!entries.length) return "";
       if (typeof codexServiceTierBestComposerFooter !== "function") return "";
       const footer = codexServiceTierBestComposerFooter();
@@ -5064,6 +5101,28 @@
       ["inprogress", "in_progress", "running", "active"]
         .includes(String(turn?.status || "").toLowerCase())
     );
+  }
+
+  async function codexWorkspaceCheckpointConversationBusyAsync(threadId) {
+    if (codexWorkspaceCheckpointConversation(threadId)) {
+      return codexWorkspaceCheckpointConversationBusy(threadId);
+    }
+    // 新版 manager 在宿主端：恢复文件前读取真实执行状态，不能把“未发现 manager”
+    // 当作空闲。查询失败或状态未知时保持恢复入口不执行。
+    const rpc = findCodexAppServerManagerRpcInScopedSignals();
+    if (!rpc) return null;
+    let timer;
+    try {
+      const state = await Promise.race([
+        rpc.getThreadExecutionState(threadId),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(null), 2000); }),
+      ]);
+      return typeof state?.inProgress === "boolean" ? state.inProgress : null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   function codexWorkspaceCheckpointClientHostId(client) {
@@ -5741,12 +5800,46 @@
   function codexWorkspaceCheckpointConversationManager() {
     const activeManager = window.__codexElvesConversationStateManager || null;
     if (typeof activeManager?.addNotificationCallback === "function") return activeManager;
-    try {
-      const manager = findCodexConversationManagerInReactTree()?.manager || null;
-      return typeof manager?.addNotificationCallback === "function" ? manager : null;
-    } catch {
+    const rpc = findCodexAppServerManagerRpcInScopedSignals();
+    if (!rpc) {
+      try {
+        const manager = findCodexConversationManagerInReactTree()?.manager || null;
+        if (typeof manager?.addNotificationCallback === "function") return manager;
+      } catch {
+      }
       return null;
     }
+    const cached = window.__codexWorkspaceCheckpointRpcAdapter;
+    if (cached?.rpc === rpc) return cached;
+    // 新版会话 manager 已迁到宿主 RPC，完成通知通过它订阅；不能只挂在 renderer 的
+    // mcp-notification 上，否则原生聊天结束时不会封存 Checkpoint。
+    const adapter = {
+      rpc,
+      hostId: "local",
+      addNotificationCallback(method, callback) {
+        let disposed = false;
+        let subscription = null;
+        const pending = rpc.subscribe({
+          type: "notification", key: { hostId: "local" }, methods: [method],
+          listener: (notification) => { if (!disposed) return callback(notification); },
+        });
+        pending.then((value) => {
+          if (disposed) value?.[Symbol.dispose]?.();
+          else subscription = value;
+        }, (error) => {
+          if (!disposed) sendCodexElvesDiagnostic("workspace_checkpoint_completion_listener_failed", {
+            errorMessage: error?.message || String(error),
+          });
+        });
+        return () => {
+          disposed = true;
+          subscription?.[Symbol.dispose]?.();
+          pending?.[Symbol.dispose]?.();
+        };
+      },
+    };
+    window.__codexWorkspaceCheckpointRpcAdapter = adapter;
+    return adapter;
   }
 
   function refreshOpenCodexWorkspaceCheckpointDialog(threadId) {
@@ -6066,10 +6159,11 @@
     if (now < nextAttemptAt) return Promise.resolve(false);
     const patch = async () => {
       try {
-        let requestClientClass = null;
-        let requestClientSource = "";
+        let requestClientClass = findCodexAppServerRequestClientInScopedSignals()?.constructor || null;
+        let requestClientSource = requestClientClass ? "local_scoped_client" : "";
         let lastError = null;
         for (const namePart of codexServiceTierRequestClientModuleParts) {
+          if (requestClientClass) break;
           try {
             const module = await loadCodexAppModule(namePart);
             requestClientClass = codexServiceTierRequestClientClassFromModule(module);
@@ -6691,8 +6785,11 @@
     if (!checkpointId) return;
     const safety = button.getAttribute("data-codex-workspace-checkpoint-kind") === "restoreSafety";
     const restoreLabel = codexWorkspaceCheckpointRestoreLabel({ kind: safety ? "restoreSafety" : "turnStart" });
-    if (codexWorkspaceCheckpointConversationBusy(context.threadId)) {
-      showToast("AI 正在运行，结束后才能恢复 Checkpoint");
+    const busy = codexWorkspaceCheckpointConversation(context.threadId)
+      ? codexWorkspaceCheckpointConversationBusy(context.threadId)
+      : await codexWorkspaceCheckpointConversationBusyAsync(context.threadId);
+    if (busy !== false) {
+      showToast(busy ? "AI 正在运行，结束后才能恢复 Checkpoint" : "暂时无法确认会话状态，请稍后恢复 Checkpoint");
       return;
     }
     const confirmed = await confirmCodexElvesAction({
@@ -6753,8 +6850,11 @@
       showToast("未识别到当前会话工作目录或 thread");
       return;
     }
-    if (codexWorkspaceCheckpointConversationBusy(context.threadId)) {
-      showToast("AI 正在运行，结束后才能撤销文件修改");
+    const busy = codexWorkspaceCheckpointConversation(context.threadId)
+      ? codexWorkspaceCheckpointConversationBusy(context.threadId)
+      : await codexWorkspaceCheckpointConversationBusyAsync(context.threadId);
+    if (busy !== false) {
+      showToast(busy ? "AI 正在运行，结束后才能撤销文件修改" : "暂时无法确认会话状态，请稍后撤销文件修改");
       return;
     }
     const confirmed = await confirmCodexElvesAction({
@@ -7016,6 +7116,31 @@
       enhancementsEnabled: codexElvesBackendSettings.enhancementsEnabled === true,
       codexAppNativeFastUnlock: codexElvesBackendSettings.codexAppNativeFastUnlock === true,
     });
+    void window.__codexElvesComposerFast?.configure({
+      enabled: codexElvesBackendSettings.enhancementsEnabled === true
+        && codexElvesBackendSettings.codexAppNativeFastUnlock === true,
+      getAnchor: codexFastComposerPlacement,
+      // 直接使用 app-server 的模型目录，不等待管理器后端目录加载或导出的内部组件。
+      getModel: (models) => codexServiceTierComposerSelectedModel(models?.map((entry) => ({
+        slug: entry.model || entry.id,
+        displayName: entry.displayName || "",
+      }))),
+      isGptModel: (model) => window.__codexElvesNativeFastUnlock?.runtime?.isGptModel(model) === true,
+      getDispatcher: async () => codexServiceTierDispatcher ||= await findCodexServiceTierDispatcher(),
+      isCopilotActive: async () => {
+        // 热注入会更换此闭包，独立请求包装仍可保留；先恢复本轮的服务发现再判断认证。
+        codexServiceTierDispatcher ||= await findCodexServiceTierDispatcher();
+        if (codexFastAppServicesFound) {
+          // Copilot 使用自己的推理服务，即使底层 account/read 仍是 API Key 也不能混入 Fast。
+          const copilot = codexFastAppServices?.copilot;
+          if (!copilot) return false;
+          const preferences = await copilot.getPreferences();
+          return preferences?.useForInference !== false;
+        }
+        return await getCodexGlobalState("use-copilot-auth-if-available") === true;
+      },
+      notify: showToast,
+    });
   }
 
   function refreshCodexElvesBackendToggles() {
@@ -7252,7 +7377,7 @@
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="openInQuickAccess"><span></span></button>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">原生 Fast 入口</div><div class="codex-elves-row-description">仅为支持 Fast 的 GPT 模型恢复原生开关，非 GPT 模型不开放；保存后重新启动 Codex 生效，实际支持与计费由供应商决定。</div></div>
+              <div><div class="codex-elves-row-title">Fast 快捷开关</div><div class="codex-elves-row-description">在输入框工具栏显示独立 Fast 开关，仅适用于支持 Fast 的 GPT 模型和本机 API 模式；设置即时生效，实际支持与计费由供应商决定。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="nativeFastUnlock"><span></span></button>
             </div>
             <div class="codex-elves-row">
@@ -8491,8 +8616,11 @@
   // composer 上方节点携带 Codex 分配的真实 conversation id，
   // 用它校正临时 id，避免后端按临时 id 查不到会话。
   function activeConversationIdFromDom() {
-    const raw = document
-      .querySelector("[data-above-composer-conversation-id]")
+    // 新版保留多个隐藏聊天页面；只能使用可见主页面的标记，防止 Token、Open in、
+    // Checkpoint 读取到另一个聊天的数据或操作另一个工作区。
+    const raw = Array.from(document.querySelectorAll("[data-above-composer-conversation-id]"))
+      .filter(codexServiceTierIsMainComposerElement)
+      .find(codexServiceTierBadgeVisibleElement)
       ?.getAttribute("data-above-composer-conversation-id");
     const id = String(raw || "").trim();
     if (!id || isTemporaryThreadId(id)) return "";
@@ -8511,12 +8639,15 @@
   // 这种情况下 composer 上方节点通常仍在，因此作为独立主来源使用。
   function currentSessionRefFromDom() {
     const rows = sessionRows();
+    const conversationId = activeConversationIdFromDom();
+    if (conversationId) {
+      const row = rows.find((candidate) => sessionRefFromRow(candidate).session_id === conversationId);
+      return { session_id: conversationId, title: row ? sessionRefFromRow(row).title : "" };
+    }
     for (const row of rows) {
       const ref = sessionRefFromRow(row);
       if (ref.session_id && isCurrentSessionRow(row, ref)) return resolveTemporarySessionRef(ref);
     }
-    const conversationId = activeConversationIdFromDom();
-    if (conversationId) return { session_id: conversationId, title: "" };
     return resolveTemporarySessionRef({ session_id: locationThreadId(), title: "" });
   }
 
@@ -8970,10 +9101,17 @@
     `;
   }
 
+  function codexPinnedSummaryToggle() {
+    return Array.from(document.querySelectorAll(selectors.pinnedSummaryToggle))
+      .find(codexServiceTierBadgeVisibleElement) || null;
+  }
+
   function codexPinnedSummaryMount() {
-    const toggle = document.querySelector(selectors.pinnedSummaryToggle);
+    const toggle = codexPinnedSummaryToggle();
     if (toggle && toggle.getAttribute("aria-pressed") !== "true") return null;
-    const obstacle = document.querySelector(selectors.pinnedSummaryPanel);
+    // obstacle 自身有 aria-hidden，因为它只参与避让计算；按几何可见性选当前页即可。
+    const obstacle = Array.from(document.querySelectorAll(selectors.pinnedSummaryPanel))
+      .find(codexServiceTierBadgeVisibleElement);
     if (!obstacle?.parentElement) return null;
     const host = obstacle.parentElement;
     const panel = Array.from(host.children).find((node) =>
@@ -9263,7 +9401,7 @@
     clearTimeout(window.__codexTokenUsageRefreshTimer);
     window.__codexTokenUsageRefreshTimer = null;
     if (!codexElvesSettings().tokenUsage) return;
-    const toggle = document.querySelector(selectors.pinnedSummaryToggle);
+    const toggle = codexPinnedSummaryToggle();
     if (!toggle || toggle.getAttribute("aria-pressed") !== "true") return;
     window.__codexTokenUsageRefreshTimer = setTimeout(() => {
       window.__codexTokenUsageRefreshTimer = null;
@@ -9273,7 +9411,7 @@
 
   function syncCodexTokenUsageWithPinnedSummaryState() {
     if (!codexElvesSettings().tokenUsage) return true;
-    const toggle = document.querySelector(selectors.pinnedSummaryToggle);
+    const toggle = codexPinnedSummaryToggle();
     if (!toggle || toggle.getAttribute("aria-pressed") !== "true") {
       pauseCodexTokenUsageForHiddenPinnedSummary();
       return true;
@@ -9291,7 +9429,7 @@
     const syncBeforePaint = () => {
       window.__codexTokenUsagePinnedSummarySyncRafId = 0;
       if (!codexElvesSettings().tokenUsage) return;
-      const toggle = document.querySelector(selectors.pinnedSummaryToggle);
+      const toggle = codexPinnedSummaryToggle();
       const currentPressed = toggle?.getAttribute("aria-pressed") || "";
       if (currentPressed !== previousPressed) {
         if (!syncCodexTokenUsageWithPinnedSummaryState()) {
@@ -9331,7 +9469,7 @@
     const observer = new MutationObserver(() => {
       if (!codexElvesSettings().tokenUsage) return;
       const observedToggle = window.__codexTokenUsagePinnedSummaryObserverTarget;
-      if (window.__codexTokenUsagePinnedSummaryObserverTarget?.isConnected) {
+      if (observedToggle && observedToggle === codexPinnedSummaryToggle()) {
         if (observedToggle.getAttribute("aria-pressed") !== "true") return;
         const card = document.querySelector(`.${codexTokenUsageCardClass}`);
         if (card && !card.hidden) return;
@@ -9356,7 +9494,7 @@
       return false;
     }
     installCodexTokenUsagePinnedSummaryLifecycleObserver();
-    const toggle = document.querySelector(selectors.pinnedSummaryToggle);
+    const toggle = codexPinnedSummaryToggle();
     if (window.__codexTokenUsagePinnedSummaryObserverTarget === toggle) {
       if (toggle && !syncCodexTokenUsageWithPinnedSummaryState()) {
         scheduleCodexTokenUsagePinnedSummarySync();
@@ -9752,9 +9890,14 @@
   }
 
   function codexSessionPrewarmReactObjectRoots() {
+    const composer = taskBoardNativeComposer();
     const nodes = [
+      // manager 与编辑器 controller 都在当前 composer 的 React scope 上；
+      // 从可见输入区起步，避免隐藏聊天或最外层 main 尚未绑定会话状态。
+      composer?.parentElement,
+      composer?.parentElement?.parentElement,
       document.querySelector("aside"),
-      document.querySelector("main"),
+      Array.from(document.querySelectorAll("main")).find(codexServiceTierBadgeVisibleElement),
       document.body?.firstElementChild || null,
     ].filter(Boolean);
     if (!nodes.some((node) => reactFiberKeys(node).length > 0)) {
@@ -9822,7 +9965,7 @@
       && !!candidate.threadStore;
   }
 
-  function findCodexConversationManagerInScopedSignals() {
+  function findCodexLocalRuntimeInScopedSignals(matches) {
     // 新版客户端类不再导出；已创建的 manager 存在上层 React scope 的
     // signal-family binding 中，其值由 store 持有，普通属性遍历无法读到。
     const visitedFibers = new Set();
@@ -9853,7 +9996,7 @@
                 if (!signal?.atom || typeof signal.store?.get !== "function") continue;
                 try {
                   const candidate = signal.store.get(signal.atom);
-                  if (isCodexConversationManager(candidate)) return candidate;
+                  if (matches(candidate)) return candidate;
                 } catch {
                 }
               }
@@ -9865,6 +10008,29 @@
     return null;
   }
 
+  function findCodexConversationManagerInScopedSignals() {
+    return findCodexLocalRuntimeInScopedSignals(isCodexConversationManager);
+  }
+
+  function findCodexAppServerRequestClientInScopedSignals() {
+    // 新版 manager 只暴露 facade，真实请求客户端仍由 local scope 持有；
+    // 按能力发现既有实例，不依赖压缩类名、模块名或不存在的 prewarmThreadStart。
+    return findCodexLocalRuntimeInScopedSignals((candidate) =>
+      candidate?.hostId === "local"
+      && typeof candidate.sendRequest === "function"
+      && typeof candidate.createRequest === "function"
+      && typeof candidate.enqueueRequest === "function"
+    );
+  }
+
+  function findCodexAppServerManagerRpcInScopedSignals() {
+    const binding = findCodexLocalRuntimeInScopedSignals((candidate) =>
+      candidate?.status === "ready"
+      && candidate.client?.hostId === "local"
+      && String(candidate.client?.rpc) === "[object RpcStub]"
+    );
+    return binding?.client?.rpc || null;
+  }
   function findCodexConversationManagerInObjectGraph(roots, maxNodes = 30000) {
     const priorityQueue = [];
     const queue = [];
@@ -11853,7 +12019,9 @@
   }
 
   function taskBoardNativeComposer() {
-    return document.querySelector('[data-codex-composer][contenteditable="true"][role="textbox"]');
+    return Array.from(document.querySelectorAll('[data-codex-composer][contenteditable="true"][role="textbox"]'))
+      .filter(codexServiceTierIsMainComposerElement)
+      .find(codexServiceTierBadgeVisibleElement) || null;
   }
 
   function taskBoardNativeComposerController(composer) {
@@ -24811,7 +24979,8 @@
   function codexServiceTierFooterHasNearbyComposerInput(footer) {
     if (!(footer instanceof HTMLElement)) return false;
     const footerRect = footer.getBoundingClientRect();
-    for (let node = footer.parentElement, depth = 0; node instanceof HTMLElement && depth < 7; depth += 1, node = node.parentElement) {
+    // 语义按钮外可能有多层 tooltip/响应式包装，最多检查 10 层并以输入框几何关系确认。
+    for (let node = footer.parentElement, depth = 0; node instanceof HTMLElement && depth < 10; depth += 1, node = node.parentElement) {
       const inputs = codexServiceTierComposerInputs(node);
       if (!inputs.length) continue;
       if (!inputs.some((input) => {
@@ -24847,6 +25016,35 @@
   }
 
   const codexServiceTierComposerFooterSelector = '.composer-footer, [class*="_footer_"], [class*="ComposerLayoutFooter"]';
+
+  function codexFastComposerAnchor() {
+    // 用户要求依靠附近元素安放 Fast，不再寻找原生 Fast 的位置或压缩类名。
+    // 优先推理/模型按钮，其次权限按钮；必须与可见主输入框处于同一工具栏。
+    const selectors = [
+      '[data-composer-navigation-target="reasoning"]',
+      '[data-composer-navigation-target="model"]',
+      '[data-composer-navigation-target="permissions"]',
+    ];
+    for (const selector of selectors) {
+      const candidates = Array.from(document.querySelectorAll(selector))
+        .filter(codexServiceTierIsMainComposerElement)
+        .filter(codexServiceTierBadgeVisibleElement);
+      const anchor = candidates.find((button) => codexServiceTierFooterHasNearbyComposerInput(button));
+      if (anchor) return anchor;
+    }
+    return null;
+  }
+
+  function codexFastComposerPlacement() {
+    const anchor = codexFastComposerAnchor();
+    // tooltip 外层可能是普通 block，直接插入会让 Fast 换行；找到最近的横向 flex 子项。
+    // 最多跨过 4 层局部包装，不移动到整个输入区或发送按钮外侧。
+    for (let node = anchor, depth = 0; node?.parentElement && depth < 4; node = node.parentElement, depth++) {
+      const style = getComputedStyle(node.parentElement);
+      if (["flex", "inline-flex"].includes(style.display) && style.flexDirection === "row") return node;
+    }
+    return null;
+  }
 
   function codexServiceTierIsComposerFooter(element) {
     return element instanceof HTMLElement && element.matches?.(codexServiceTierComposerFooterSelector);
@@ -24921,9 +25119,18 @@
   }
 
   function codexServiceTierBestComposerFooter(root = document) {
-    return codexServiceTierVisibleComposerFooters(root)
+    const known = codexServiceTierVisibleComposerFooters(root)
       .map((footer, index) => ({ footer, index, score: codexServiceTierComposerScore(footer) }))
       .sort((left, right) => (right.score - left.score) || (left.index - right.index))[0]?.footer || null;
+    if (known) return known;
+    // 工具栏 CSS 类名变化时，从语义按钮向上找到包含输入框的最小容器。
+    // 模型识别与 Fast 安放共用此入口，避免按钮存在却无法确认当前模型。
+    const anchor = codexFastComposerAnchor();
+    if (!anchor || (root !== document && !root.contains?.(anchor))) return null;
+    for (let node = anchor.parentElement, depth = 0; node && depth < 7; node = node.parentElement, depth++) {
+      if (codexServiceTierComposerInputs(node).length) return node;
+    }
+    return null;
   }
 
   function codexServiceTierFindComposerEl() {
@@ -25235,12 +25442,17 @@
         scheduleCodexTokenUsagePinnedSummarySync(
           toggle.getAttribute("aria-pressed") || ""
         );
-      } else if (event.target?.closest?.(selectors.sidebarThread)) scheduleCodexRouteFeatureRefresh();
+      } else if (event.target?.closest?.(`${selectors.sidebarThread}, [role="tab"]`)) scheduleCodexRouteFeatureRefresh();
       else if (shouldRefreshConversationViewForControl(event)) scheduleConversationViewRouteRefresh();
     };
     const keyboardHandler = (event) => {
+      const tab = event.target?.closest?.('[role="tab"]');
+      if (tab && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+        scheduleCodexRouteFeatureRefresh();
+        return;
+      }
       if (event.key !== "Enter" && event.key !== " ") return;
-      if (event.target?.closest?.(selectors.sidebarThread)) scheduleCodexRouteFeatureRefresh();
+      if (event.target?.closest?.(`${selectors.sidebarThread}, [role="tab"]`)) scheduleCodexRouteFeatureRefresh();
       else if (shouldRefreshConversationViewForControl(event)) scheduleConversationViewRouteRefresh();
     };
     window.__codexRouteFeaturePointerHandler = null;
@@ -25327,6 +25539,12 @@
     if (codexOpenInServicePromise) return await codexOpenInServicePromise;
     codexOpenInServicePromise = (async () => {
       let fallbackService = null;
+      // 新版数字 chunk 中的 appServices.openIn 保持原服务契约；复用已加载实例。
+      for (const module of await codexLoadedAppModuleExports()) {
+        if (!Object.hasOwn(module, "appServices")) continue;
+        const service = module.appServices?.openIn;
+        if (isCodexOpenInService(service) && String(service) === "[object RpcStub]") return service;
+      }
       // 26.928 起原生服务迁移到 app-shared，旧版仍从 app-initial 导出。
       for (const namePart of ["app-shared-", "app-initial-"]) {
         const url = codexAppAssetUrl(namePart) || await codexOpenInAppModuleUrlFromScripts(namePart);
@@ -25593,7 +25811,9 @@
   }
 
   function codexOpenInNativeButtonExists() {
-    const surface = document.querySelector(selectors.headerContextMenuSurface) || document.querySelector("header");
+    const surface = codexPinnedSummaryToggle()?.closest("[data-app-shell-header-toolbar]")
+      || Array.from(document.querySelectorAll(selectors.headerContextMenuSurface)).find(conversationViewElementIsActive)
+      || Array.from(document.querySelectorAll("header")).find(conversationViewElementIsActive);
     if (!surface) return false;
     return Array.from(surface.querySelectorAll("button")).some((button) => {
       if (button.closest(`.${codexOpenInGroupClass}`)) return false;
@@ -25606,8 +25826,24 @@
   }
 
   function codexOpenInAnchor() {
+    const toggle = codexPinnedSummaryToggle();
+    const toolbar = toggle?.closest("[data-app-shell-header-toolbar]");
+    if (toolbar) {
+      // 用户要求 Open in 保留在顶部工具栏最左侧；从当前摘要按钮找到同排操作容器，
+      // 跳过 display:contents 包装，不依赖 Header/Toolbar 的哈希类名。
+      for (let group = toggle.parentElement; group && group !== toolbar; group = group.parentElement) {
+        const style = getComputedStyle(group);
+        if (style.display !== "flex" || style.flexDirection !== "row") continue;
+        return {
+          parent: group,
+          before: Array.from(group.children).find((node) => !node.hasAttribute(codexOpenInButtonAttribute)) || null,
+          nativeClass: toggle.className || headerIconTextButtonClass,
+          anchorType: "toolbar",
+        };
+      }
+    }
     const surface = Array.from(document.querySelectorAll(selectors.headerContextMenuSurface))
-      .find((node) => !node.closest('[aria-hidden="true"], [inert]'));
+      .find(conversationViewElementIsActive);
     const titlebar = surface?.closest("[data-app-shell-titlebar]");
     // 完整视图将操作区移到同一标题栏的 end slot，context surface 内只保留聊天选项卡。
     const roots = [
@@ -26130,6 +26366,7 @@
     }
     if (conversationDirty) {
       refreshConversationView();
+      void window.__codexElvesComposerFast?.refresh();
       installCodexAppServerRestartButtons();
       installCodexWorkspaceCheckpointTurnCompletionListener();
       installCodexWorkspaceCheckpointEditButtons();
@@ -26257,6 +26494,7 @@
   }
 
   function isExtensionUiNode(node) {
+    if (node?.closest?.("[data-codex-elves-fast]")) return true;
     return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-elves-modal-overlay, .codex-workspace-checkpoint-overlay, [${codexWorkspaceCheckpointEditButtonAttribute}="true"], [${codexWorkspaceCheckpointButtonAttribute}="true"], .${projectMoveOverlayClass}, .codex-conversation-timeline, .${codexTokenUsageCardClass}, .${codexAppServerRestartButtonClass}, .${codexAppServerRestartDialogClass}, .${taskBoardMainHostClass}, .${taskBoardEntryContextMenuClass}, [${taskBoardEntryAttribute}="true"], .${codexOpenInMenuClass}, [${codexOpenInButtonAttribute}="true"], .${codexPromptOptimizePortalClass}, .${codexPromptOptimizeSettingsOverlayClass}, [${codexPromptOptimizeButtonAttribute}="true"], #codex-elves-menu`);
   }
 
@@ -26276,6 +26514,7 @@
     if (domain === "header") {
       return [
         selectors.applicationMenuTopBar,
+        "[data-app-shell-header-toolbar]",
         selectors.appHeader,
         selectors.pinnedSummaryPanel,
         selectors.pinnedSummaryToggle,
@@ -26292,6 +26531,8 @@
         '[class*="UserMessage"]',
         ".composer-footer",
         '[class*="_footer_"]',
+        '[data-composer-navigation-target]',
+        '[data-composer-footer-responsive]',
         ".ProseMirror",
         selectors.pinnedSummaryPanel,
         selectors.pinnedSummaryToggle,
@@ -26387,6 +26628,11 @@
       document.querySelector(selectors.appHeader)?.closest?.("header, [role='banner']") ||
       document.querySelector("header, [role='banner']");
     const scopedRootsReady = !!sidebarRoot && !!conversationRoot && !!headerRoot;
+    // 多聊天标签页不会更改 app:// URL；同时观察当前工具栏的选中状态和内容。
+    push("header", codexPinnedSummaryToggle()?.closest("[data-app-shell-header-toolbar]"), {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ["aria-pressed", "aria-selected"],
+    });
     push("shell", document.body || document.documentElement, {
       childList: true,
       subtree: !scopedRootsReady,

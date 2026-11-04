@@ -482,7 +482,9 @@ fn native_write_fallback_allowed(value: &Value) -> bool {
             value
                 .pointer("/nativeDispatch/phase")
                 .and_then(Value::as_str),
-            Some("injection" | "manager-discovery")
+            // 用户要求发送可独立降级：send-preparation 仅由无业务写入的能力预检签发。
+            // 动作开始后的异常、超时与未知结果仍不允许切换通道重发。
+            Some("injection" | "manager-discovery" | "send-preparation")
         )
 }
 
@@ -6519,9 +6521,20 @@ call("send",{threadId:"isolated-thread",prompt:"隔离发送"})
             discovery_failure.pointer("/nativeDispatch/phase"),
             Some(&json!("manager-discovery"))
         );
-        for authorized in [false, true] {
+        for (authorized, failure) in [false, true].into_iter().flat_map(|authorized| {
+            [
+                (authorized, discovery_failure.clone()),
+                (
+                    authorized,
+                    json!({
+                        "ok":false,"code":503,"message":"原生发送准备能力不可用",
+                        "nativeDispatch":{"status":"not-dispatched","phase":"send-preparation"}
+                    }),
+                ),
+            ]
+        }) {
             let (server, status, counts) =
-                isolated_cdp_server(IsolatedCdpReply::Value(discovery_failure.clone())).await;
+                isolated_cdp_server(IsolatedCdpReply::Value(failure)).await;
             let (bridge, service) = isolated_native_preferred_bridge(Some(status));
             let result = if authorized {
                 let (_directory, authorization) = service_dispatch_fixture().await;

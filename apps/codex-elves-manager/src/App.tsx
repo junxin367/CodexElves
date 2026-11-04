@@ -132,6 +132,11 @@ type OverviewResult = CommandResult<{
   logs_path: string;
 }>;
 
+type CodexUpdatePolicyResult = CommandResult<{
+  disabled?: boolean;
+  requirementsPath?: string;
+}>;
+
 type PluginMarketplaceRepairResult = CommandResult<{
   codexHome: string;
   marketplaceRoot?: string | null;
@@ -1099,6 +1104,7 @@ let browserPreviewFrpConfigMatchesActive = false;
 let browserPreviewFrpInstalled = false;
 let browserPreviewFrpDownloadStartedAt = 0;
 const browserPreviewFrpDownloadBytes = 14_152_383;
+let browserPreviewCodexAutoUpdateDisabled = false;
 
 function isBrowserPreview(): boolean {
   return typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
@@ -1966,6 +1972,15 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
   const settings = browserPreviewSettings();
   const active = activeRelayProfile(settings);
   switch (command) {
+    case "load_codex_update_policy":
+    case "set_codex_auto_update_disabled":
+      if (command === "set_codex_auto_update_disabled") {
+        browserPreviewCodexAutoUpdateDisabled = args?.disabled === true;
+      }
+      return Promise.resolve(browserPreviewResult({
+        disabled: browserPreviewCodexAutoUpdateDisabled,
+        requirementsPath: "浏览器预览（不会写入系统策略）",
+      }, "浏览器预览已模拟更新策略，未修改系统文件。") as T);
     case "startup_options":
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
@@ -2586,6 +2601,9 @@ export function App() {
   const [route, setRoute] = useState<Route>(() => loadInitialRoute());
   const [notice, setNotice] = useState<{ title: string; message: string; status?: Status } | null>(null);
   const [overview, setOverview] = useState<OverviewResult | null>(null);
+  const [codexUpdatePolicy, setCodexUpdatePolicy] = useState<CodexUpdatePolicyResult | null>(null);
+  const [codexUpdatePolicyBusy, setCodexUpdatePolicyBusy] = useState(false);
+  const codexUpdatePolicyBusyRef = useRef(false);
   const [settings, setSettings] = useState<SettingsResult | null>(null);
   const [relayFiles, setRelayFiles] = useState<RelayFilesResult | null>(null);
   const [envConflicts, setEnvConflicts] = useState<EnvConflictsResult | null>(null);
@@ -2703,6 +2721,40 @@ export function App() {
       prevLaunchStatusRef.current = current ?? null;
       setOverview(result);
       if (!silent) showResultNotice("概览已检查", result, { silentSuccess: true });
+    }
+  };
+
+  const refreshCodexUpdatePolicy = async () => {
+    if (codexUpdatePolicyBusyRef.current) return;
+    codexUpdatePolicyBusyRef.current = true;
+    setCodexUpdatePolicyBusy(true);
+    try {
+      const result = await run(() => call<CodexUpdatePolicyResult>("load_codex_update_policy"));
+      setCodexUpdatePolicy(result);
+      if (result && !isSuccessStatus(result.status)) {
+        showResultNotice("Codex 自动更新", result);
+      }
+    } finally {
+      codexUpdatePolicyBusyRef.current = false;
+      setCodexUpdatePolicyBusy(false);
+    }
+  };
+
+  const toggleCodexAutoUpdate = async () => {
+    if (codexUpdatePolicyBusyRef.current || typeof codexUpdatePolicy?.disabled !== "boolean") return;
+    codexUpdatePolicyBusyRef.current = true;
+    setCodexUpdatePolicyBusy(true);
+    try {
+      const result = await run(() => call<CodexUpdatePolicyResult>("set_codex_auto_update_disabled", {
+        disabled: !codexUpdatePolicy.disabled,
+      }));
+      // 用户要求显示实际策略状态；保存失败不乐观翻转，回读文件确认当前值。
+      if (result) showResultNotice("Codex 自动更新", result);
+      const current = await run(() => call<CodexUpdatePolicyResult>("load_codex_update_policy"));
+      setCodexUpdatePolicy(current);
+    } finally {
+      codexUpdatePolicyBusyRef.current = false;
+      setCodexUpdatePolicyBusy(false);
     }
   };
 
@@ -4085,6 +4137,7 @@ export function App() {
 
   useEffect(() => {
     void (async () => {
+      void refreshCodexUpdatePolicy();
       const loadedSettings = await refreshSettings(true);
       if (loadedSettings?.githubReleaseUpdatePromptEnabled !== false) {
         void checkUpdate(true);
@@ -4106,6 +4159,12 @@ export function App() {
       await checkPluginMarketplacePrompt();
       await checkRemotePluginMarketplacePrompt();
     })();
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => void refreshCodexUpdatePolicy();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
   }, []);
 
   useEffect(() => {
@@ -4228,6 +4287,7 @@ export function App() {
   const actions = useMemo(
     () => ({
       refreshCurrent: async () => {
+        void refreshCodexUpdatePolicy();
         await navigate(route);
       },
       launch,
@@ -4508,6 +4568,31 @@ export function App() {
           </div>
           <div className="topbar-actions">
             <LocalProxyTopbarBadge status={localProxyStatus} onLaunch={actions.launch} />
+            {/* 用户要求交换重启与主题按钮，禁止自动更新开关必须紧邻重启按钮右侧。 */}
+            <div className="codex-topbar-controls">
+              <Button onClick={() => void actions.restart()} title="重启 Codex" variant="outline">
+                <Rocket className="h-4 w-4" />
+                重启 Codex
+              </Button>
+              <Button
+                aria-checked={codexUpdatePolicy?.disabled === true}
+                aria-busy={codexUpdatePolicyBusy}
+                aria-label="禁止 Codex 自动更新"
+                className={`codex-update-toggle ${codexUpdatePolicy?.disabled ? "active" : ""}`}
+                disabled={codexUpdatePolicyBusy || typeof codexUpdatePolicy?.disabled !== "boolean"}
+                onClick={() => void toggleCodexAutoUpdate()}
+                role="switch"
+                title={codexUpdatePolicy?.requirementsPath
+                  ? `仅控制 Codex 应用内更新，保存后需重启生效。策略文件：${codexUpdatePolicy.requirementsPath}`
+                  : codexUpdatePolicy?.message || "正在读取 Codex 更新策略"}
+                variant="outline"
+              >
+                <span>禁止 Codex 自动更新</span>
+                <span className="context-switch-track" aria-hidden="true">
+                  <span className="context-switch-thumb" />
+                </span>
+              </Button>
+            </div>
             <Button
               onClick={actions.toggleTheme}
               size="icon"
@@ -4515,10 +4600,6 @@ export function App() {
               variant="outline"
             >
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </Button>
-            <Button onClick={() => void actions.restart()} title="重启 Codex" variant="outline">
-              <Rocket className="h-4 w-4" />
-              重启 Codex
             </Button>
             <Button onClick={() => void actions.refreshCurrent()} size="icon" title="刷新当前页面" variant="outline">
               <RefreshCw className="h-4 w-4" />
@@ -6619,7 +6700,8 @@ function EnhanceScreen({
             <FeatureToggle title="任务看板" detail="在 Codex 左侧导航的“插件”下方显示内置任务看板入口；关闭时退出看板并恢复原生页面。默认开启。" checked={form.codexAppTaskBoard} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppTaskBoard", value)} />
             <FeatureToggle title="活动视图精简" detail="在 Codex 原生“查看活动”中仅显示会话名称和项目名称两行，隐藏消息摘要；关闭时恢复原生展示。默认关闭。" checked={form.codexAppActivityViewCompact} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppActivityViewCompact", value)} />
             <FeatureToggle title="快速打开工作区" detail="在 Codex 顶部工具栏最左侧显示 Open in 快捷按钮，用首选应用打开当前会话的工作目录。默认开启。" checked={form.codexAppOpenInQuickAccess} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppOpenInQuickAccess", value)} />
-            <FeatureToggle title="原生 Fast 入口" detail="仅为支持 Fast 的 GPT 模型恢复原生开关，非 GPT 模型不开放；保存后重新启动 Codex 生效，实际支持与计费由供应商决定。" checked={form.codexAppNativeFastUnlock} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeFastUnlock", value)} />
+            {/* 用户要求 Fast 通过输入框相邻控件定位，保留原配置键以兼容已有开关。 */}
+            <FeatureToggle title="Fast 快捷开关" detail="在输入框工具栏显示独立 Fast 开关，仅适用于支持 Fast 的 GPT 模型和本机 API 模式；设置即时生效，实际支持与计费由供应商决定。" checked={form.codexAppNativeFastUnlock} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeFastUnlock", value)} />
             <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮；删除后不可恢复。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />

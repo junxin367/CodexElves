@@ -342,6 +342,8 @@ body {
   z-index: var(--z-topbar);
   flex: 0 0 auto;
   display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
   align-items: center;
   justify-content: space-between;
   min-height: 72px;
@@ -364,8 +366,30 @@ body {
 
 .topbar-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  margin-left: auto;
+}
+
+/* 用户要求开关紧邻重启按钮；窗口变窄时两者整体换行，保持相对位置。 */
+.codex-topbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.codex-update-toggle {
+  padding-inline: 10px;
+  font-size: 12px;
+}
+
+.codex-update-toggle.active .context-switch-track {
+  background: hsl(var(--primary));
+}
+
+.codex-update-toggle.active .context-switch-thumb {
+  transform: translateX(12px);
 }
 
 .proxy-topbar-badge {

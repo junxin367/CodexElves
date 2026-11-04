@@ -6688,6 +6688,21 @@ const unknown=await call("send",{threadId:"isolated",prompt:"隔离发送"});
 assert.equal(unknown.outcomeUnknown,true);
 assert.equal(unknown.nativeDispatch,undefined);
 assert.equal(actions,5);
+env.prepareNativeSendCapabilities=new Function("env",`with(env){
+  ${extract("async function prepareNativeSendCapabilities(","function nativeCreationProvider(")}
+  return prepareNativeSendCapabilities;
+}`)(env);
+env.nativeModuleSnapshot=async()=>{throw env.failure(503,"原生发送模块不可用");};
+const preparation=await call("send",{threadId:"isolated",prompt:"隔离发送"});
+assert.deepEqual(preparation.nativeDispatch,{status:"not-dispatched",phase:"send-preparation"});
+assert.equal(preparation.outcomeUnknown,undefined);
+assert.equal(actions,5,"模块预检失败前不得调用发送、恢复或队列动作");
+for (const details of [{code:403},{code:409},{nativeOnly:true},{outcomeUnknown:true}]) {
+  env.nativeModuleSnapshot=async()=>{throw env.failure(503,"拒绝",{...details});};
+  const denied=await call("send",{threadId:"isolated",prompt:"隔离发送"});
+  assert.equal(denied.nativeDispatch,undefined);
+  assert.equal(actions,5);
+}
 "#,
     );
 }
@@ -6716,6 +6731,7 @@ function createConversationHarness(rpc) {
     failure:(code,message,details={})=>Object.assign(new Error(message),
       {code,remoteValidationFailure:true,...details}),
     safeNativeCallback:(_,callback)=>callback,reportNativeCallbackFailure:()=>{},
+    prepareNativeSendCapabilities:async()=>{},
     syncBlockingRequests:()=>{},syncAsyncQuestions:()=>{},
     syncSidebarConversationState:()=>{},emit:()=>{}
   };
@@ -6833,6 +6849,24 @@ fn renderer_features_delete_is_permanent_without_undo_ui() {
     assert!(script.contains("async function deleteSessionWithCodex(ref)"));
     assert!(!script.contains("postJson(\"/delete\", ref)"));
     assert!(manager_source.contains("deleteStatus === \"partial\""));
+}
+
+#[test]
+fn activity_compact_project_name_stays_visible_when_row_is_hovered() {
+    let script = assets::renderer_features_script();
+    let suffix_start = script
+        .find(r#"[data-codex-activity-session-layout="true"] [class*="inlineTitleSuffix"] {"#)
+        .expect("compact project name rule should match the current Codex suffix class");
+    let suffix_end = suffix_start + script[suffix_start..].find('}').unwrap();
+    assert!(script[suffix_start..suffix_end].contains("display: block !important;"));
+    assert!(script[suffix_start..suffix_end].contains("visibility: visible !important;"));
+    let span_start = script
+        .find(
+            r#"[data-codex-activity-session-layout="true"] [class*="inlineTitleSuffix"] > span {"#,
+        )
+        .expect("compact project name inner span rule should exist");
+    let span_end = span_start + script[span_start..].find('}').unwrap();
+    assert!(script[span_start..span_end].contains("display: block !important;"));
 }
 
 #[test]
@@ -7360,7 +7394,7 @@ fn renderer_workspace_checkpoint_wraps_turns_and_native_message_edits() {
     ));
     assert!(script.contains("data-codex-workspace-checkpoint-button"));
     assert!(script.contains("button.setAttribute?.(\"aria-label\", \"打开 Checkpoint\")"));
-    assert!(script.contains(r#"const codexWorkspaceCheckpointVersion = "8";"#));
+    assert!(script.contains(r#"const codexWorkspaceCheckpointVersion = "9";"#));
     assert!(script.contains(
         "window.__codexElvesWorkspaceCheckpointRuntimeVersion === codexWorkspaceCheckpointVersion"
     ));
@@ -7642,6 +7676,7 @@ let nativeConfirmCalls = 0;
 let activeConversationId = "thread-12345678";
 function node() {{
   return {{
+    getBoundingClientRect() {{ return {{ left: 0, top: 0, right: 300, bottom: 40, width: 300, height: 40 }}; }},
     appendChild(child) {{
       child.parentElement = this;
       child.isConnected = true;
@@ -7783,7 +7818,9 @@ globalThis.document = {{
       ? conversationSignal
       : null,
   querySelectorAll: (selector) =>
-    editorQueryEnabled && String(selector).includes('[aria-label="编辑消息"]') ? [editor] : [],
+    selector === "[data-above-composer-conversation-id]" ? [conversationSignal]
+      : selector === "main" && document.querySelector("main") ? [document.querySelector("main")]
+      : editorQueryEnabled && String(selector).includes('[aria-label="编辑消息"]') ? [editor] : [],
   addEventListener() {{}},
   removeEventListener() {{}},
 }};
@@ -8250,7 +8287,7 @@ api.setBackendSettingsForTest({{
   const providerFiber = {{
     memoizedProps: {{ value: new Map([["scope", {{ parent: ancestorScope }}]]) }},
   }};
-  const mainFiberNode = {{ __reactFiberCheckpointTest: {{ return: providerFiber }} }};
+  const mainFiberNode = {{ ...node(), __reactFiberCheckpointTest: {{ return: providerFiber }} }};
   const originalQuerySelector = document.querySelector;
   document.querySelector = (selector) =>
     selector === "main" ? mainFiberNode : originalQuerySelector(selector);
@@ -9080,7 +9117,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "105";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "107";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -10669,8 +10706,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = include_str!("../../../assets/remote-access/native.js");
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 129"));
-    assert!(script.contains("version: 129"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 130"));
+    assert!(script.contains("version: 130"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));
@@ -10822,6 +10859,25 @@ function locate(scripts, ambiguous = false) {
   assert.deepEqual(foreign.reads, [], "外部脚本不能成为可信 app 入口");
   const ambiguous = locate([entry], true);
   await assert.rejects(ambiguous.lookup(), error => error.code === 503 && /版本不唯一/.test(error.message));
+  let factories=0;
+  function exported() {}
+  function lazyExported() {}
+  const runtime=()=>{factories++;throw new Error("不能执行模块工厂");};
+  runtime.c={first:{exports:{a:exported}},alias:{exports:{b:exported}}};
+  runtime.m={first(){factories++;},alias(){factories++;},unloaded(){factories++;}};
+  const context={nativeRspackRuntime:{runtime,resource:entry},nativeRspackSnapshot:null};
+  vm.createContext(context);
+  vm.runInContext(source,context);
+  const snapshot=await vm.runInContext("nativeRuntimeSnapshot()",context);
+  assert.equal(snapshot.rspack,true);
+  assert.equal(Object.keys(snapshot.module).length,1,"相同导出重用时不能误判接口有歧义");
+  assert.equal(snapshot.records.length,2,"不能扫描缓存外尚未执行的模块");
+  assert.equal(await vm.runInContext("nativeRuntimeSnapshot()",context),snapshot);
+  runtime.c.lazy={exports:{value:lazyExported}};
+  runtime.m.lazy=function(){factories++;};
+  const refreshed=await vm.runInContext("nativeRuntimeSnapshot()",context);
+  assert.equal(Object.keys(refreshed.module).length,2,"原生懒加载新模块后必须刷新导出快照");
+  assert.equal(factories,0);
 })().catch(error => {console.error(error);process.exitCode = 1;});
 "###
     .replace(
@@ -11363,7 +11419,7 @@ fn injection_script_exposes_compact_per_thread_token_usage_summary() {
     assert!(script.contains("function syncCodexTokenUsageWithPinnedSummaryState()"));
     assert!(script.contains("function installCodexTokenUsagePinnedSummaryObserver()"));
     assert!(script.contains("function installCodexTokenUsagePinnedSummaryLifecycleObserver()"));
-    assert!(script.contains("window.__codexTokenUsagePinnedSummaryObserverTarget?.isConnected"));
+    assert!(script.contains("observedToggle === codexPinnedSummaryToggle()"));
     assert!(script.contains("document.getElementById(\"root\") || document.body"));
     assert!(script.contains("attributeFilter: [\"aria-pressed\"]"));
     assert!(script.contains("function hideCodexTokenUsageCards()"));
@@ -11404,7 +11460,7 @@ fn injection_script_keeps_session_ref_stable_and_refreshes_after_turn_completion
     // 侧边栏瞬时拿不到会话时，composer id 作为独立主来源兼宽容期内沍用上一次结果。
     assert!(script.contains("function currentSessionRefFromDom()"));
     assert!(
-        script.contains("if (conversationId) return { session_id: conversationId, title: \"\" };")
+        script.contains("return { session_id: conversationId, title: row ? sessionRefFromRow(row).title : \"\" };")
     );
     assert!(script.contains("codexSessionRefGraceMs = 15000"));
     assert!(script.contains("window.__codexElvesLastSessionRef"));
@@ -11444,9 +11500,9 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("快速打开工作区"));
     assert!(script.contains("data-codex-open-in-button"));
     assert!(script.contains("codex-open-in-menu"));
-    assert!(script.contains(r#"const codexOpenInVersion = "13";"#));
+    assert!(script.contains(r#"const codexOpenInVersion = "14";"#));
     assert!(script.contains("window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion"));
-    assert!(script.contains(r#"const codexDeleteStyleVersion = "105";"#));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "107";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
     assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
     assert!(script.contains("width: 30px !important;"));
@@ -11886,6 +11942,8 @@ const document={
 };
 const env={
   document,window:{},selectors:{headerContextMenuSurface:'[data-testid="app-shell-header-context-menu-surface"]'},
+  codexPinnedSummaryToggle:()=>null,
+  conversationViewElementIsActive:node=>!node.closest('[aria-hidden="true"], [inert]'),
   codexOpenInButtonAttribute:"data-codex-open-in-button",codexOpenInGroupClass:"codex-open-in-group",
   codexOpenInVersion:source.match(/const codexOpenInVersion = "([^"]+)"/)[1],
   headerIconTextButtonClass:"native action",codexOpenInControlGroup:null,codexOpenInMenuState:null,
@@ -12128,10 +12186,16 @@ fn injection_script_uses_codex_native_model_catalog_without_model_list_patching(
 }
 
 #[test]
-fn injection_script_uses_native_fast_without_custom_controls_or_request_overrides() {
+fn injection_script_uses_independent_fast_with_semantic_composer_anchors() {
     let script = assets::renderer_features_script();
-    assert!(script.contains("原生 Fast 入口"));
+    assert!(script.contains("Fast 快捷开关"));
     assert!(script.contains("codexAppNativeFastUnlock"));
+    assert!(script.contains("getAnchor: codexFastComposerPlacement"));
+    assert!(script.contains(r#"'[data-composer-navigation-target="reasoning"]'"#));
+    let bootstrap = assets::injection_script(45221);
+    assert!(bootstrap.contains("data-codex-elves-fast"));
+    assert!(bootstrap.contains("config/batchWrite"));
+    assert!(bootstrap.contains("params.collaborationMode?.settings?.model || params.model"));
     assert!(!script.contains("data-codex-service-tier-controls"));
     assert!(!script.contains("data-codex-service-tier-badge"));
     assert!(!script.contains("codexThreadServiceTierOverrides"));
@@ -12239,11 +12303,12 @@ assert.equal(api.hasInput(), true);
 }
 
 #[test]
-fn injection_script_updates_native_fast_settings_without_installing_request_patches() {
+fn injection_script_updates_independent_fast_settings_with_legacy_compatibility() {
     let script = assets::injection_script(45221);
     assert!(script.contains("refreshCodexNativeFastUnlockState"));
     assert!(script.contains("key === codexElvesBackendSettingMap.nativeFastUnlock"));
     assert!(script.contains("window.__codexElvesNativeFastUnlock?.runtime?.update?.("));
+    assert!(script.contains("window.__codexElvesComposerFast?.configure("));
     assert!(!script.contains("installCodexServiceTierDispatcherPatch"));
     assert!(!script.contains("installCodexServiceTierRequestClientPatch"));
 }
@@ -12439,7 +12504,7 @@ fn renderer_model_catalog_matching_preserves_aliases() {
 #[test]
 fn injection_script_does_not_patch_app_server_model_requests() {
     let script = assets::injection_script(45221);
-    assert!(script.contains("const codexAppServerManagerDiscoveryVersion = \"11\";"));
+    assert!(script.contains("const codexAppServerManagerDiscoveryVersion = \"12\";"));
     assert!(!script.contains("__codexElvesModelOriginalSendRequest"));
     assert!(!script.contains("__codexElvesModelRequestPatch"));
     assert!(!script.contains("codexElvesModelPatchedSendRequest"));
@@ -12560,7 +12625,7 @@ fn injection_script_includes_builtin_prompt_optimization_without_edge_fallbacks(
         .and_then(|tail| tail.split("function promptOptimizeFeatureEnabled()").next())
         .expect("prompt optimization settings dialog should exist");
 
-    assert!(script.contains(r#"const codexPromptOptimizeVersion = "19";"#));
+    assert!(script.contains(r#"const codexPromptOptimizeVersion = "20";"#));
     assert!(feature.contains("const promptOptimizeSettingsVersion = 4;"));
     assert!(script.contains("const codexPromptOptimizeButtonSize = 16;"));
     assert!(script.contains("const codexPromptOptimizeAnchorGap = 8;"));

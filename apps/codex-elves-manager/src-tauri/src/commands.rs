@@ -491,6 +491,33 @@ pub async fn load_overview() -> CommandResult<OverviewPayload> {
 }
 
 #[tauri::command]
+pub fn load_codex_update_policy() -> CommandResult<Value> {
+    let result = codex_elves_core::codex_update_policy::system_requirements_path()
+        .and_then(|path| codex_elves_core::codex_update_policy::read(&path));
+    match result {
+        Ok(policy) => ok("已读取本机 Codex 更新策略。", json!(policy)),
+        Err(error) => failed(&format!("读取 Codex 更新策略失败：{error:#}"), json!({})),
+    }
+}
+
+#[tauri::command]
+pub fn set_codex_auto_update_disabled(disabled: bool) -> CommandResult<Value> {
+    let result = codex_elves_core::codex_update_policy::system_requirements_path()
+        .and_then(|path| codex_elves_core::codex_update_policy::set_disabled(&path, disabled));
+    match result {
+        Ok(policy) => ok(
+            if disabled {
+                "已保存禁止自动更新策略。请重启 Codex，并在设置 → 通用 → In-app updates 确认出现 Managed。此开关仅控制应用内更新，不影响 Microsoft Store 等外部更新。"
+            } else {
+                "已移除本机禁止自动更新策略，请重启 Codex 生效；若仍显示 Managed，请检查组织或其他系统策略。"
+            },
+            json!(policy),
+        ),
+        Err(error) => failed(&format!("保存 Codex 更新策略失败：{error:#}"), json!({})),
+    }
+}
+
+#[tauri::command]
 pub fn launch_codex_elves(request: LaunchRequest) -> CommandResult<Value> {
     spawn_codex_elves_launch(request, "启动任务已在后台开始，可稍后查看概览状态。")
 }

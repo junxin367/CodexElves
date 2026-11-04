@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 129) return;
+  if (window.__codexElvesRemoteAccess?.version === 130) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -40,6 +40,8 @@
   let goalMaterializer = null;
   const nativeModuleSnapshots = new Map();
   const nativeResourceSources = new Map();
+  let nativeRspackRuntime = null;
+  let nativeRspackSnapshot = null;
   let relatedNativeState = null;
   let nativeSideBindings = null;
   let requestClientConversationReader = null;
@@ -1856,7 +1858,75 @@
     }
     return await pending;
   }
+  async function nativeRuntimeSnapshot() {
+    // 用户要求兼容新版 Codex：Rspack 不再保留 app-initial 等文件名。
+    // 仅导入页面已经加载的同源入口、读取已执行模块缓存；禁止执行未加载的模块工厂。
+    if (!nativeRspackRuntime) {
+      const resources = [...new Set(Array.from(document.scripts || [], script => script.src)
+        .filter(url => /^app:\/\/-\/assets\/\d+\.[A-Za-z0-9_-]+\.js$/.test(url)))];
+      if (!resources.length) return null;
+      const runtimes = new Map();
+      for (const resource of resources) {
+        const entry = await import(resource);
+        const runtime = entry.__webpack_require__;
+        if (typeof runtime === "function" && runtime.c && runtime.m)
+          runtimes.set(runtime, resource);
+      }
+      if (runtimes.size !== 1) throw failure(503, "当前 Codex 版本的原生模块运行时无法唯一识别");
+      const [runtime, resource] = [...runtimes][0];
+      nativeRspackRuntime = { runtime, resource };
+    }
+    const { runtime, resource } = nativeRspackRuntime;
+    const ids = Object.keys(runtime.c);
+    if (nativeRspackSnapshot?.count === ids.length) return nativeRspackSnapshot;
+    const module = Object.create(null), records = [], seen = new Set();
+    for (const id of ids) {
+      const exports = runtime.c[id]?.exports, factory = runtime.m[id];
+      if (!exports || typeof factory !== "function") continue;
+      let source;
+      try { source = Function.prototype.toString.call(factory); } catch { continue; }
+      records.push({ module: exports, source, resource, rspack: true });
+      for (const key of Object.keys(exports)) {
+        let value;
+        try {
+          value = exports[key];
+          // RPC 代理的 typeof 也可能是 function，但不能当作本机模块函数检查。
+          if (typeof value === "function") Function.prototype.toString.call(value);
+        } catch { continue; }
+        if (value == null || !["object", "function"].includes(typeof value) || seen.has(value)) continue;
+        seen.add(value);
+        module[`export_${seen.size}`] = value;
+      }
+    }
+    return nativeRspackSnapshot = { module, records, resource, rspack: true, count: ids.length };
+  }
+  function nativeRuntimeRecord(snapshot, predicate, label) {
+    const records = snapshot.records.filter(record => predicate(record.source, record.module));
+    if (records.length !== 1) throw failure(503, `当前 Codex 版本的原生${label}模块无法唯一识别`);
+    return records[0];
+  }
+  function nativeRuntimeExport(snapshot, name) {
+    const values = [...new Set(snapshot.records.flatMap(record =>
+      Object.hasOwn(record.module, name) ? [record.module[name]] : []))];
+    if (values.length !== 1) throw failure(503, `当前 Codex 版本的原生接口不可用（${name}）`);
+    return values[0];
+  }
+  function nativeRuntimeScope(snapshot, name) {
+    const pattern = new RegExp(`([\\w$]+)=\\(0,[\\w$]+\\.[\\w$]+\\)\\(["'\`]${name}["'\`],`);
+    const record = nativeRuntimeRecord(snapshot, source => pattern.test(source), name);
+    const scope = nativeExport(record, record.source.match(pattern)[1]);
+    if (!scope?.id || !scope.parent?.id) throw failure(503, `原生作用域无效（${name}）`);
+    return scope;
+  }
   async function nativeModuleSnapshot(name) {
+    const runtime = await nativeRuntimeSnapshot();
+    if (runtime) {
+      if (name === "background") return nativeRuntimeRecord(runtime, source =>
+        source.includes("sourceLinkedThreadsDiscoveryComplete:") && source.includes("getIndexedSubagentProgress:")
+        && source.includes(".rpc.discoverSubagentDescendantSnapshot("),
+      "子代理列表");
+      return runtime;
+    }
     const resource = await nativeResource(name);
     if (!nativeModuleSnapshots.has(resource)) {
       const pending = (async () => {
@@ -1880,6 +1950,13 @@
     if (typeof symbol !== "string" || !/^[\w$]+$/.test(symbol))
       throw failure(503, "原生关联会话接口标识无效");
     const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (snapshot.rspack) {
+      const names = [...snapshot.source.matchAll(new RegExp(
+        `(?:[,{])\\s*([\\w$]+):\\(\\)=>${escaped}(?=[,}])`, "g"))].map(match => match[1]);
+      if (names.length !== 1 || snapshot.module[names[0]] == null)
+        throw failure(503, "当前 Codex 版本的原生状态接口无法唯一识别");
+      return snapshot.module[names[0]];
+    }
     const exports = [...snapshot.source.matchAll(/\bexport\s*\{([^{}]*)\}/g)].at(-1)?.[1] ?? "";
     const name = exports.match(new RegExp(`(?:^|,)\\s*${escaped}\\s+as\\s+([\\w$]+)\\s*(?=,|$)`))?.[1];
     if (!name || snapshot.module[name] == null)
@@ -1890,7 +1967,7 @@
     const index = source.lastIndexOf(marker);
     if (index < 0) throw failure(503, "原生关联会话状态标记缺失");
     const assignments = [...source.slice(0, index).matchAll(
-      /([\w$]+)=[\w$]+\([\w$]+,\([\w$]+,\{get:[\w$]+(?:,scope:[\w$]+)?\}\)=>\{/g)];
+      /([\w$]+)=(?:[\w$]+|\(0,[\w$]+\.[\w$]+\))\([\w$]+(?:\.[\w$]+)?,\([\w$]+,\{get:[\w$]+(?:,scope:[\w$]+)?\}\)=>/g)];
     const symbol = assignments.at(-1)?.[1];
     if (!symbol) throw failure(503, "当前 Codex 版本的原生关联会话状态无法识别");
     return symbol;
@@ -1907,28 +1984,30 @@
         const background = await nativeModuleSnapshot("background").catch(() => null);
         const rowsMarker = "sourceLinkedThreadsDiscoveryComplete:";
         const rowsSnapshot = [background, primary].find(snapshot =>
-          snapshot?.source.includes(rowsMarker) && snapshot.source.includes("getIndexedSubagentProgress:"));
+          snapshot?.source?.includes(rowsMarker) && snapshot.source.includes("getIndexedSubagentProgress:"));
         if (!rowsSnapshot) throw failure(503, "当前 Codex 版本的原生子代理列表无法识别");
         const beforeRows = rowsSnapshot.source.slice(0, rowsSnapshot.source.lastIndexOf(rowsMarker));
         const initializer = [...beforeRows.matchAll(/function\s+([\w$]+)\(\)\{return\(\1=/g)].at(-1);
-        if (!initializer || !beforeRows.slice(initializer.index).includes("getIndexedSubagentProgress:"))
+        if (!rowsSnapshot.rspack && (!initializer || !beforeRows.slice(initializer.index).includes("getIndexedSubagentProgress:")))
           throw failure(503, "当前 Codex 版本的原生子代理列表无法识别");
         // 打包器首次执行后会改写初始化函数，必须从静态源码识别导出，不能检查当前函数体。
-        const initializeRows = nativeExport(rowsSnapshot, initializer[1]);
-        if (typeof initializeRows !== "function") throw failure(503, "原生子代理列表初始化接口无效");
         const rowsSymbol = nativeFamilyBefore(rowsSnapshot.source, rowsMarker);
-        initializeRows();
+        if (!rowsSnapshot.rspack) {
+          const initializeRows = nativeExport(rowsSnapshot, initializer[1]);
+          if (typeof initializeRows !== "function") throw failure(503, "原生子代理列表初始化接口无效");
+          initializeRows();
+        }
         const rowsFamily = nativeExport(rowsSnapshot, rowsSymbol);
         if (typeof rowsFamily?.read !== "function") throw failure(503, "原生子代理列表状态无效");
-        const sortRows = nativeFunction(rowsSnapshot.module, source => source.length < 240
+        const sortRows = nativeFunction(rowsSnapshot.rspack ? initial.module : rowsSnapshot.module, source => source.length < 240
           && source.includes(".sort(") && source.includes("recencyAtMs"), "子代理排序");
         const formatAgentPath = nativeFunction(initial.module, source => source.length < 500
-          && source.includes(".split(`/`)") && source.includes("`root`")
+          && /\.split\(["'`]\/["'`]\)/.test(source) && /["'`]root["'`]/.test(source)
           && source.includes(".toUpperCase()"), "子代理名称");
         // 新版由可挂载的 signal 通过桌面 RPC 加载后代；只 get 行列表不会启动该生命周期。
         const discoveryIndex = rowsSnapshot.source.indexOf(".rpc.discoverSubagentDescendantSnapshot(");
         const snapshotSymbol = discoveryIndex < 0 ? null : [...rowsSnapshot.source.slice(0, discoveryIndex)
-          .matchAll(/([\w$]+)=[\w$]+\([\w$]+,[\w$]+=>null,\{onMount:/g)].at(-1)?.[1];
+          .matchAll(/([\w$]+)=(?:[\w$]+|\(0,[\w$]+\.[\w$]+\))\([\w$]+(?:\.[\w$]+)?,[\w$]+=>null,\{onMount:/g)].at(-1)?.[1];
         const snapshotFamily = snapshotSymbol ? nativeExport(rowsSnapshot, snapshotSymbol) : null;
         return { rowsFamily, sortRows, formatAgentPath, snapshotFamily };
       })();
@@ -1940,6 +2019,30 @@
     if (!nativeSideBindings) {
       nativeSideBindings = (async () => {
         const initial = await nativeModuleSnapshot("initial");
+        if (initial.rspack) {
+          const open = nativeRuntimeExport(initial, "openLocalConversationSideChat");
+          let feature = null, reads = 0;
+          // 只在隔离 scope 中让原生开关拒绝创建，从实际入口取得 feature，不写桌面状态。
+          const result = await open({ get(value) { reads++; feature = value; return false; } }, null, {
+            sourceConversationId: "__codex_elves_capability_probe__", threadSource: "user"
+          });
+          if (result !== null || reads !== 1 || !feature)
+            throw failure(503, "当前 Codex 版本的侧边会话开关无法验证");
+          return {
+            open, feature,
+            lookupScope: nativeFunction(initial.module, source => source.length < 700
+              && source.includes(".retainedScopeEntries.get(") && source.includes("new Map("), "会话页面上下文"),
+            panel: nativeRuntimeExport(initial, "getThreadPanelTabController"),
+            allTabs: nativeFunction(initial.module, source => source.length < 600
+              && source.includes("excludeTab:") && source.includes(".tabs$"), "侧边标签"),
+            threadScope: nativeRuntimeScope(initial, "ThreadScope"),
+            routeScope: nativeRuntimeScope(initial, "RouteScope"),
+            // 与桌面相同的懒加载入口，避免同时加载的实现函数被误判为重复接口。
+            component: nativeRuntimeRecord(initial, (source, module) =>
+              typeof module.LocalConversationSideChatTab === "function"
+              && source.includes("propagateLoadError:!0"), "侧边会话页面").module.LocalConversationSideChatTab
+          };
+        }
         const side = await nativeModuleSnapshot("side").catch(() => null);
         const sideSnapshot = side?.source.includes("`sidechat-loading:`") ? side : initial;
         const marker = sideSnapshot.source.indexOf("`sidechat-loading:`");
@@ -2409,7 +2512,8 @@
     const scope = await nativeSideScope(parentThreadId, native);
     if (typeof nativeIntl?.formatMessage !== "function" || !nativeSideFeatureEnabled(native, scope))
       throw failure(503, "当前 Codex 页面尚未提供原生侧边会话入口");
-    const { LocalConversationSideChatTab } = await import(native.componentUrl);
+    const LocalConversationSideChatTab = native.component
+      || (await import(native.componentUrl)).LocalConversationSideChatTab;
     if (typeof LocalConversationSideChatTab !== "function")
       throw failure(503, "原生侧边会话页面尚未就绪");
     let threadId = null, submitted = false;
@@ -3201,6 +3305,17 @@
           let pending = nativeQueuedEditInputContracts.get(initial.module);
           if (!pending) {
             pending = (async () => {
+              if (initial.rspack) {
+                const serialize = nativeFunction(initial.module, source => source.includes("isRemoteHost:")
+                  && source.includes("localTurnMetadata:") && source.includes("promptContextWithoutReviewedMessages:")
+                  && source.includes("responseItems:"), "队列原始输入序列化");
+                const digest = await crypto.subtle.digest("SHA-256",
+                  new TextEncoder().encode(Function.prototype.toString.call(serialize)));
+                // 新版仍须核准完整输入合同，不能仅凭函数名放开队列编辑后恢复原始输入。
+                if (hexBytes(new Uint8Array(digest)) !== "2a2d0476f375de66982e2f69cd0fab6c6ccff56c55f8a8a75f9c57a305f5cbf5")
+                  throw failure(503, "当前 Codex 版本的队列取消输入合成合同尚未核准");
+                return serialize;
+              }
               const from = initial.source.indexOf("function w8t(");
               const to = initial.source.indexOf("function ", from + 13);
               const digest = from < 0 || to < 0 ? null : await crypto.subtle.digest("SHA-256",
@@ -4076,7 +4191,8 @@
       closePanel({
         get(family, fieldKey) {
           reads.push({ family, key: fieldKey });
-          return reads.length === 1 ? {} : key;
+          // 新版关闭入口读取完整面板，旧版读取 selectedQuestionKey；两者使用同一隔离身份。
+          return reads.length === 1 ? {} : { ...key, selectedQuestionKey: key };
         },
         set(family, fieldKey, update) { writes.push({ family, key: fieldKey, update }); }
       }, key);
@@ -6669,7 +6785,21 @@
     }
   }
   async function nativeCreationModule() {
-    return await import(await nativeResource("initial"));
+    return (await nativeModuleSnapshot("initial")).module;
+  }
+  async function prepareNativeSendCapabilities() {
+    if (!manager.__codexElvesRequestClientManager) return;
+    const initial = await nativeModuleSnapshot("initial");
+    // 用户要求普通发送可由 server 兜底：仅在此处做模块/函数检查，不恢复会话、不入队、不发送。
+    // 这段边界内的能力失败才能签发 send-preparation；后续动作错误不能借用该证明重发。
+    const read = nativeFunction(initial.module, source =>
+      source.includes("AppServerManager RPC is unavailable for hostId:")
+      && source.includes(".forHost("), "会话数据读取");
+    const prepare = nativeFunction(initial.module, source =>
+      source.includes("inheritNativeWorkspacePermissions")
+      && source.includes("allowStartAfterNoActiveTurn"), "队列消息准备");
+    requestClientConversationReader = read;
+    requestClientQueuePrepare = prepare;
   }
   function nativeCreationProvider(module) {
     if (!appScope) discover();
@@ -6927,6 +7057,16 @@
           const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
           const imageAttachments = remoteImageAttachments(payload, "send-validation");
           if (!prompt && !imageAttachments.length) throw failure(400, "消息不能为空");
+          try {
+            await prepareNativeSendCapabilities();
+          } catch (error) {
+            const code = error?.code;
+            if (code != null && code !== 503 || error?.nativeOnly === true || error?.outcomeUnknown === true)
+              throw error;
+            reportNativeCompatibilityDiagnostic(action, error);
+            return { ok: false, code: 503, message: error?.message || "原生发送准备能力不可用",
+              nativeDispatch: { status: "not-dispatched", phase: "send-preparation" } };
+          }
           const conversation = manager.getConversation(id);
           const status = manager.getThreadRuntimeStatusEvidence?.(id)
             || conversation?.threadRuntimeStatus || loaded.status;
@@ -7220,7 +7360,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 129, call,
+    version: 130, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {

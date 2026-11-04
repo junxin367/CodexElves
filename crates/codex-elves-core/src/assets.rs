@@ -12,7 +12,8 @@ const RENDERER_BOOTSTRAP_SCRIPT: &str = include_str!("../../../assets/inject/ren
 const RENDERER_FEATURES_SCRIPT: &str = include_str!("../../../assets/inject/renderer-features.js");
 const NATIVE_FAST_UNLOCK_SCRIPT: &str =
     include_str!("../../../assets/inject/native-fast-unlock.js");
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261021-native-fast-compat";
+const COMPOSER_FAST_SCRIPT: &str = include_str!("../../../assets/inject/composer-fast.js");
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261104-runtime-compat";
 
 pub fn renderer_script() -> &'static str {
     RENDERER_FEATURES_SCRIPT
@@ -33,8 +34,9 @@ pub fn native_fast_unlock_script() -> &'static str {
 
 pub(crate) fn native_fast_bootstrap(settings: &BackendSettings) -> String {
     format!(
-        "{}\nwindow.__codexElvesNativeFastUnlock.runtime.update({});",
+        "{}\n{}\nwindow.__codexElvesNativeFastUnlock.runtime.update({});",
         native_fast_unlock_script(),
+        COMPOSER_FAST_SCRIPT,
         json!({
             "enhancementsEnabled": settings.enhancements_enabled,
             "codexAppNativeFastUnlock": settings.codex_app_native_fast_unlock,

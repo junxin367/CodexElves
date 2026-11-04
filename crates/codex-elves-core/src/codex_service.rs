@@ -606,7 +606,10 @@ impl CodexCliService {
         guard: Option<&dyn ServiceDispatchGuard>,
     ) -> anyhow::Result<Value> {
         let thread_id = required_service_thread_id(&payload)?;
-        let params = service_turn_start_params(&payload, thread_id)?;
+        let params = match service_turn_start_params(&payload, thread_id) {
+            Ok(params) => params,
+            Err(error) => return Ok(service_not_sent_error(thread_id, &format!("{error:#}"))),
+        };
         let preflight = ServiceOwnerPreflight { service: self };
         let owner = desktop_owner_ipc::try_send(&payload, params.clone(), &preflight, guard).await;
         owner_or_cli(owner, || self.send_with_cli(&payload, params, guard)).await
@@ -1718,6 +1721,15 @@ fn service_turn_start_params(payload: &Value, thread_id: &str) -> anyhow::Result
     {
         bail!("CLI 兜底暂不支持图片消息");
     }
+    // 用户要求发送兜底保留原始语义；纯文本通道不能静默丢弃 Skill 或把目标当普通消息发送。
+    if payload
+        .get("skills")
+        .and_then(Value::as_array)
+        .is_some_and(|skills| !skills.is_empty())
+        || payload.get("goalMode").and_then(Value::as_bool) == Some(true)
+    {
+        bail!("CLI 兜底仅支持普通纯文本消息，暂不支持 Skill 或目标消息");
+    }
     let mut params = json!({
         "threadId": thread_id,
         "input": [{"type": "text", "text": prompt}],
@@ -1943,6 +1955,18 @@ mod tests {
             )
             .is_err()
         );
+        for extra in [
+            json!({"skills":[{"name":"fixture","path":"fixture/SKILL.md"}]}),
+            json!({"goalMode":true}),
+            json!({"images":[{"dataUrl":"data:image/png;base64,fixture"}]}),
+        ] {
+            let mut unsupported = json!({"threadId":"thread-1","prompt":"x"});
+            unsupported
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            assert!(service_turn_start_params(&unsupported, "thread-1").is_err());
+        }
     }
 
     #[tokio::test]
