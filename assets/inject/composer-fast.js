@@ -1,6 +1,6 @@
 (() => {
   const root = typeof window === "object" ? window : {};
-  const version = "2";
+  const version = "3";
   if (root.__codexElvesComposerFast?.version === version) return;
   root.__codexElvesComposerFast?.configure?.({ enabled: false });
   const attribute = "data-codex-elves-fast";
@@ -249,6 +249,17 @@
       return refresh();
     },
     refresh,
+    // 新版原生发送走 RPC，和旧 dispatcher 共用同一组账号、模型及管理员限制。
+    async patchTurnRequest(params) {
+      try {
+        return (await patchMessage("mcp-request", {
+          hostId: "local", request: { method: "turn/start", params },
+        })).request.params;
+      } catch (error) {
+        adapters?.notify?.(`${error.message}，本轮保留原生服务等级`);
+        return params;
+      }
+    },
     status: () => ({ enabled, ready: !!dispatcher, loaded: !!snapshot, model: selectedModel() || null }),
   };
   if (typeof module === "object" && module.exports) {

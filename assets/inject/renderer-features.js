@@ -391,6 +391,17 @@
       if (location.protocol !== "app:") {
         throw new Error("当前页面不是 Codex App");
       }
+      const services = await resolveCodexAppServices();
+      if (services) {
+        if (!services.appActions) throw new Error("当前 Codex 未提供外观动作服务");
+        return new Map([["app.appearance.set_mode", async (action) => {
+          const result = await services.appActions.runInPrimaryWindow({ action });
+          if (result?.ok === false || result?.success === false) {
+            throw new Error(result.message || "Codex 外观切换失败");
+          }
+          return result;
+        }]]);
+      }
       let entryUrl = "";
       for (let attempt = 0; attempt < 20 && !entryUrl; attempt += 1) {
         entryUrl = Array.from(document.scripts)
@@ -4745,6 +4756,248 @@
     return modules;
   }
 
+  let codexAppServicesModule = null;
+  let codexNativeScopeTokens = [];
+  async function resolveCodexAppServices() {
+    if (codexAppServicesModule?.appServices) return codexAppServicesModule.appServices;
+    const loaded = await codexLoadedAppModuleExports();
+    codexNativeScopeTokens = [...new Set(loaded.flatMap((module) => Object.values(module))
+      .filter((value) => value?.cache === "signal" && typeof value.resolve === "function"))];
+    const modules = loaded
+      .filter((module) => Object.hasOwn(module, "appServices") && module.appServices);
+    const services = new Set(modules.map((module) => module.appServices));
+    if (services.size > 1) throw new Error("无法唯一识别 Codex 原生服务");
+    if (!modules.length) return null;
+    // 用户要求统一补齐新版兼容；保持对 live export 的引用，避免模块 ID/hash 和 RPC 重建失效。
+    codexAppServicesModule = modules[0];
+    return codexAppServicesModule.appServices;
+  }
+
+  const codexNativeCheckpointOperations = new Map();
+  function copyCodexNativeValue(value, changes) {
+    // 原生准备结果携带不可枚举的 dispose；复制时保留 RPC 资源释放语义。
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    for (const [key, next] of Object.entries(changes)) {
+      descriptors[key] = { value: next, writable: true, enumerable: true, configurable: true };
+    }
+    return Object.defineProperties({}, descriptors);
+  }
+
+  async function patchCodexNativeTurnParams(params) {
+    return await window.__codexElvesComposerFast?.patchTurnRequest?.(params) || params;
+  }
+
+  async function beginCodexNativeCheckpoint(operation, params) {
+    if (!codexWorkspaceCheckpointFeatureEnabled()) return;
+    if (operation.creation) return await operation.creation;
+    const threadId = codexWorkspaceCheckpointRequestThreadId(params);
+    if (!threadId) throw new Error("未识别到原生发送的会话 ID");
+    operation.threadId = threadId;
+    operation.params = params;
+    operation.done = new Promise((resolve) => { operation.resolve = resolve; });
+    const pending = codexNativeCheckpointOperations.get(threadId) || new Set();
+    pending.add(operation.done);
+    codexNativeCheckpointOperations.set(threadId, pending);
+    operation.timeout = setTimeout(() => { void finishCodexNativeCheckpoint(operation, null); }, 60000);
+    operation.timeout?.unref?.();
+    operation.creation = (async () => {
+      clearCodexWorkspaceCheckpointCompletionHint(threadId);
+      installCodexWorkspaceCheckpointTurnCompletionListener();
+      try {
+        operation.created = await createCodexWorkspaceCheckpoint({ hostId: "local" }, params);
+      } catch (error) {
+        if (!["checkpoint_bridge_unavailable", "checkpoint_request_timeout"].includes(error?.code)) {
+          showToast(`${error?.message || "创建 Checkpoint 失败"}；本轮发送已取消`);
+          throw error;
+        }
+        operation.created = { skipped: true };
+        showToast("Checkpoint 暂不可用，本轮未保存快照，继续发送");
+      }
+    })();
+    return await operation.creation;
+  }
+
+  async function finishCodexNativeCheckpoint(operation, result) {
+    if (!operation.creation || operation.finished) return;
+    // 新建会话可能先返回 outcome-unknown，最终回执由 onSettled 提供，不能提前绑定。
+    if (result?.status === "outcome-unknown" || result?.firstTurn?.status === "outcome-unknown") return;
+    operation.finished = true;
+    clearTimeout(operation.timeout);
+    try {
+      await operation.creation;
+      let turnId = codexWorkspaceCheckpointTurnId(result?.firstTurn || result);
+      if (!turnId && result != null && operation.params?.clientUserMessageId) {
+        const rpc = findCodexAppServerManagerRpcInScopedSignals();
+        const history = await rpc?.getLoadedConversationHistory(operation.threadId);
+        const matches = history?.turns?.filter((turn) =>
+          turn.params?.clientUserMessageId === operation.params.clientUserMessageId && turn.turnId
+        ) || [];
+        if (matches.length === 1) turnId = matches[0].turnId;
+      }
+      if (turnId && !operation.created?.skipped) {
+        await trackCodexWorkspaceCheckpointBinding(operation.created, { turnId },
+          bindCodexWorkspaceCheckpoint(operation.created, { turnId }));
+      }
+    } catch (error) {
+      // 原生回执已经成功，绑定失败不能让用户误以为消息未发送而重复提交。
+      sendCodexElvesDiagnostic("workspace_checkpoint_native_bind_failed", {
+        errorMessage: error?.message || String(error),
+      });
+    } finally {
+      operation.resolve?.();
+      const pending = codexNativeCheckpointOperations.get(operation.threadId);
+      pending?.delete(operation.done);
+      if (!pending?.size) codexNativeCheckpointOperations.delete(operation.threadId);
+    }
+  }
+
+  async function prepareCodexNativeSubmission(submission, operation) {
+    if (submission?.executionHostId !== "local" || !submission.start?.request) return submission;
+    const start = submission.start;
+    const request = await patchCodexNativeTurnParams(start.request);
+    const context = {
+      ...start.context,
+      beforeSendRequest: async (...args) => {
+        await start.context?.beforeSendRequest?.(...args);
+        await beginCodexNativeCheckpoint(operation, request);
+      },
+    };
+    const nextStart = copyCodexNativeValue(start, { request, context });
+    return copyCodexNativeValue(submission, {
+      start: nextStart,
+      resume: submission.resume ? { ...submission.resume, serviceTier: request.serviceTier } : submission.resume,
+      steer: submission.steer ? {
+        ...submission.steer,
+        ...(submission.steer.userMessageAdmissionStart === start ? { userMessageAdmissionStart: nextStart } : {}),
+      } : submission.steer,
+    });
+  }
+
+  async function invokeCodexNativeTurn(rpc, method, args) {
+    const next = [...args];
+    const operation = {};
+    try {
+      if (method === "startConversation") {
+        next[0] = await patchCodexNativeTurnParams(args[0]);
+        const options = args[1] || {};
+        next[1] = {
+          ...options,
+          beforeFirstTurn: async (context) => {
+            await options.beforeFirstTurn?.(context);
+            await beginCodexNativeCheckpoint(operation, { ...next[0], threadId: context.conversationId });
+          },
+          onSettled: async (result) => {
+            await finishCodexNativeCheckpoint(operation, result);
+            return await options.onSettled?.(result);
+          },
+        };
+      } else if (method === "startTurn" || method === "startTurnWithOutcome") {
+        const start = args[1];
+        if (!start?.request) return await rpc[method](...args);
+        const prepared = await prepareCodexNativeSubmission({
+          executionHostId: "local", start,
+        }, operation);
+        next[1] = prepared.start;
+        // startTurn 的第四个参数优先于 context 中的回调。
+        if (typeof args[3] === "function") {
+          next[3] = async (...values) => {
+            await args[3](...values);
+            await beginCodexNativeCheckpoint(operation, prepared.start.request);
+          };
+        }
+      } else if (method === "editLastUserTurn") {
+        const history = codexWorkspaceCheckpointFeatureEnabled()
+          ? await rpc.getLoadedConversationHistory(args[0]) : null;
+        const intent = codexWorkspaceCheckpointIntentForRequest({ threadId: args[0] });
+        if (intent && codexWorkspaceCheckpointFeatureEnabled()) {
+          const turnId = args[1]?.turnId;
+          if (!turnId) throw new Error("未识别到待编辑轮次，文件未改变");
+          const turn = history?.turns?.find((item) => item.turnId === turnId);
+          const laterTurns = history?.turns?.slice(history.turns.indexOf(turn) + 1) || [];
+          if (!turn || history.turns.some((item) => item.status === "inProgress")
+            || (!args[1]?.allowEarlierMessages && laterTurns.some((item) => item.params?.input?.length))) {
+            throw new Error("无法确认待编辑轮次或会话仍在运行，文件未改变");
+          }
+          intent.phase = "restoring";
+          try {
+            await restoreCodexWorkspaceCheckpointForNativeRevert({ hostId: "local" }, "thread/revert",
+              { threadId: args[0], beforeTurnId: turnId }, intent);
+          } finally {
+            clearCodexWorkspaceCheckpointRestoreIntent(intent);
+          }
+        }
+        next[1] = await patchCodexNativeTurnParams(args[1] || {});
+        if (history) {
+          operation.previousTurnIds = new Set(history.turns.map((turn) => turn.turnId).filter(Boolean));
+          await beginCodexNativeCheckpoint(operation, {
+            threadId: args[0], cwd: history.cwd, input: [{ type: "text", text: args[1]?.message || "" }],
+          });
+        }
+      } else {
+        // 空轮次/后续消息的原生返回值不保证有 turnId，保留原流程及参数契约。
+        next[1] = await patchCodexNativeTurnParams(args[1] || {});
+      }
+      const result = await rpc[method](...next);
+      let checkpointResult = result;
+      if (operation.previousTurnIds) {
+        // 原生编辑返回 void；只在前后历史中恰好新增一个轮次时绑定，不能猜“最后一轮”。
+        try {
+          const history = await rpc.getLoadedConversationHistory(args[0]);
+          const added = history?.turns?.filter((turn) => turn.turnId && !operation.previousTurnIds.has(turn.turnId)) || [];
+          if (added.length === 1) checkpointResult = { turnId: added[0].turnId };
+        } catch (error) {
+          sendCodexElvesDiagnostic("workspace_checkpoint_native_history_failed", { errorMessage: error?.message || String(error) });
+        }
+      }
+      await finishCodexNativeCheckpoint(operation, checkpointResult);
+      return result;
+    } catch (error) {
+      await finishCodexNativeCheckpoint(operation, null);
+      throw error;
+    }
+  }
+
+  let codexNativeRpcInstallPromise = null;
+  async function installCodexNativeRpcCompat() {
+    if (codexNativeRpcInstallPromise) return await codexNativeRpcInstallPromise;
+    codexNativeRpcInstallPromise = (async () => {
+      const runtime = window.__codexElvesNativeRpcCompat;
+      if (!runtime) return false;
+      runtime.configure({
+        enabled: () => codexElvesBackendSettings.enhancementsEnabled === true,
+        prepareSubmission: prepareCodexNativeSubmission,
+        finishSubmission: finishCodexNativeCheckpoint,
+        invokeTurn: invokeCodexNativeTurn,
+        sendRequest: (rpc, [method, params, options]) => {
+          // 在普通适配对象上复用旧拦截，绝不向 RPC Stub 写入或删除属性。
+          const adapter = { hostId: "local", sendRequest: rpc.sendRequest.bind(rpc) };
+          if (codexElvesSettings().pluginMarketplaceUnlock) patchPluginMarketplaceRequestClient(adapter);
+          else adapter.sendRequest = (...values) =>
+            codexWorkspaceCheckpointSendRequest(rpc.sendRequest, adapter, ...values);
+          return adapter.sendRequest(method, params, options);
+        },
+        prepareWorktree: (request) => applyUpstreamPendingWorktreeOverride({ request }).request,
+      });
+      const services = await resolveCodexAppServices();
+      if (!services) return false;
+      runtime.patchProvider(services);
+      const registry = findCodexLocalRuntimeInScopedSignals((value) =>
+        typeof Object.getOwnPropertyDescriptor(value || {}, "forHost")?.value === "function"
+      , codexNativeScopeTokens);
+      const registryPatched = runtime.patchRegistry(registry);
+      const binding = findCodexLocalRuntimeInScopedSignals((value) =>
+        value?.status === "ready" && value.client?.hostId === "local" && value.client.rpc
+      );
+      const clientPatched = runtime.patchClient(binding?.client);
+      runtime.patchWorktrees(services);
+      return registryPatched || clientPatched;
+    })().catch((error) => {
+      sendCodexElvesDiagnostic("native_rpc_compat_install_failed", { errorMessage: error?.message || String(error) });
+      return false;
+    }).finally(() => { codexNativeRpcInstallPromise = null; });
+    return await codexNativeRpcInstallPromise;
+  }
+
   async function findCodexServiceTierDispatcher() {
     // 新版 Codex 使用 Rspack 数字 chunk；只检查已执行模块的实际导出能力，
     // 不依赖文件名、模块 ID 或原生 Fast 组件，亦不执行缓存外的模块工厂。
@@ -5863,6 +6116,7 @@
     if (!context.local || (hostId && hostId !== "local")) return false;
     if (!cwd) throw new Error("未识别到已完成轮次的工作目录");
 
+    await Promise.all([...(codexNativeCheckpointOperations.get(completion.threadId) || [])]);
     await waitForCodexWorkspaceCheckpointBinding(
       completion.threadId,
       completion.turnId
@@ -6160,6 +6414,11 @@
     if (now < nextAttemptAt) return Promise.resolve(false);
     const patch = async () => {
       try {
+        if (await installCodexNativeRpcCompat()) {
+          window.__codexWorkspaceCheckpointRequestClientPatchInstalled = codexWorkspaceCheckpointVersion;
+          clearCodexWorkspaceCheckpointPatchRetry(true);
+          return true;
+        }
         let requestClientClass = findCodexAppServerRequestClientInScopedSignals()?.constructor || null;
         let requestClientSource = requestClientClass ? "local_scoped_client" : "";
         let lastError = null;
@@ -7113,6 +7372,7 @@
 
   function refreshCodexNativeFastUnlockState() {
     if (!codexElvesBackendSettingsLoaded) return;
+    void installCodexNativeRpcCompat();
     window.__codexElvesNativeFastUnlock?.runtime?.update?.({
       enhancementsEnabled: codexElvesBackendSettings.enhancementsEnabled === true,
       codexAppNativeFastUnlock: codexElvesBackendSettings.codexAppNativeFastUnlock === true,
@@ -8255,6 +8515,10 @@
     if (!codexElvesSettings().pluginMarketplaceUnlock) return;
     const patch = async () => {
       try {
+        if (await installCodexNativeRpcCompat()) {
+          window.__codexPluginMarketplaceUnlockInstalled = codexPluginMarketplaceUnlockVersion;
+          return;
+        }
         let patchedCount = 0;
         let manager = codexSessionPrewarmManager || window.__codexElvesSessionPrewarmManager || null;
         if (!manager) {
@@ -9729,11 +9993,31 @@
   }
 
   async function codexStateCall(method, params) {
+    const services = await resolveCodexAppServices();
+    if (services) {
+      const state = services.applicationState;
+      if (!state) throw new Error("Codex 状态服务不可用");
+      const payload = params?.params || {};
+      if (method === "get-global-state") return await state.read(payload.key);
+      if (method === "set-global-state") {
+        const result = await state.write(payload.key, payload.value);
+        if (result?.success !== true) throw new Error("Codex 状态保存未确认");
+        return result;
+      }
+      throw new Error(`不支持的 Codex 状态操作：${method}`);
+    }
     const call = await codexStateApi();
     return await call(method, params);
   }
 
   async function getCodexGlobalState(key) {
+    if (key === "projectless-thread-ids" || key === "thread-project-assignments") {
+      const services = await resolveCodexAppServices();
+      if (services?.threadProjectAssignments) {
+        const result = await services.threadProjectAssignments.readMemberships();
+        return key === "projectless-thread-ids" ? result.projectlessThreadIds : result.assignments;
+      }
+    }
     const result = await codexStateCall("get-global-state", { params: { key } });
     return result && Object.prototype.hasOwnProperty.call(result, "value") ? result.value : result;
   }
@@ -9966,7 +10250,7 @@
       && !!candidate.threadStore;
   }
 
-  function findCodexLocalRuntimeInScopedSignals(matches) {
+  function findCodexLocalRuntimeInScopedSignals(matches, tokens = []) {
     // 新版客户端类不再导出；已创建的 manager 存在上层 React scope 的
     // signal-family binding 中，其值由 store 持有，普通属性遍历无法读到。
     const visitedFibers = new Set();
@@ -9988,6 +10272,17 @@
             for (let count = 0; scope && count < 16; count += 1, scope = scope.parent) {
               if (visitedScopes.has(scope)) break;
               visitedScopes.add(scope);
+              // 新版 registry 在非 family 的已绑定 atom 中。只读 WeakMap 中已有 atom，
+              // 不调用 token.resolve 或 scope.get，避免创建原生客户端或执行未知工厂。
+              for (const token of tokens) {
+                const atom = scope.signalBindings?.get?.(token);
+                if (typeof atom?.read !== "function" || typeof atom?.write !== "function") continue;
+                try {
+                  const candidate = scope.store?.get?.(atom);
+                  if (candidate && matches(candidate)) return candidate;
+                } catch {
+                }
+              }
               if (!(scope.familyBindings instanceof Map)) continue;
               // 只读已经绑定的 local 实例，不调用 family.resolve/get 创建新客户端，
               // 也不读取远程 host 或无关 family 参数的状态。
@@ -10589,6 +10884,40 @@
     setCodexAppServerRestartButtonBusy(button, true);
     let recovered = false;
     try {
+      const rpc = findCodexAppServerManagerRpcInScopedSignals();
+      if (rpc) {
+        const services = await resolveCodexAppServices();
+        if (!services?.appServerLifecycle) throw new Error("Codex 原生重启服务不可用");
+        const work = await rpc.getWorkInProgress();
+        if (!Array.isArray(work) || work.some((item) => typeof item?.kind !== "string")) {
+          await showCodexAppServerRestartNotice("暂时无法重启", "无法确认当前是否还有执行中的会话，请稍后重试。");
+          return;
+        }
+        if (work.length) {
+          const conversations = [...new Map(work.map((item) => [
+            item.conversationId || `pending:${item.kind}`,
+            { id: item.conversationId || "", title: item.conversationId || "待处理操作" },
+          ])).values()];
+          await showCodexAppServerRestartBlockedDialog(conversations.length);
+          return;
+        }
+        // 新版由宿主维护所有会话；先核对原生忙碌状态，再重启并通过只读请求确认恢复。
+        await services.appServerLifecycle.restart("local");
+        for (const delay of codexAppServerRestartRecoveryDelaysMs) {
+          await waitForCodexAppServerRestartDelay(delay);
+          const current = findCodexAppServerManagerRpcInScopedSignals();
+          if (!current) continue;
+          try {
+            await current.sendRequest("config/read", { includeLayers: false, cwd: null }, { timeoutMs: 2000 });
+            recovered = true;
+            break;
+          } catch {
+          }
+        }
+        if (!recovered) throw new Error("app-server 已请求重启，但连接尚未恢复，请稍后检查");
+        showCodexAppServerRestartToast("app-server 已重启，可以重新发送消息");
+        return;
+      }
       const discovery = findCodexConversationManagerInReactTree(true);
       const manager = discovery.manager;
       const running = codexAppServerRunningConversations(manager, conversationId);
@@ -11161,6 +11490,21 @@
     return projectRow.closest?.('[role="listitem"][aria-label]') || projectRow.closest?.('[role="listitem"]') || projectRow;
   }
 
+  let codexNativeProjectTargetsCache = [];
+  async function loadCodexNativeProjectTargets() {
+    const services = await resolveCodexAppServices();
+    if (!services) return;
+    if (!services.projectCatalog) throw new Error("Codex 项目目录服务不可用");
+    const projects = await services.projectCatalog.readLocalProjects();
+    codexNativeProjectTargetsCache = Object.values(projects || {}).flatMap((project) =>
+      (Array.isArray(project?.rootPaths) ? project.rootPaths : []).filter((path) => typeof path === "string" && path.trim())
+        .map((path) => ({
+          kind: "project", projectId: project.id, label: project.name || displayProjectName(path),
+          description: path, path, normalizedPath: normalizeWorkspacePath(path),
+        }))
+    );
+  }
+
   function nativeProjectTargets() {
     const section = projectsSection();
     const seen = new Set();
@@ -11174,6 +11518,11 @@
       seen.add(normalizedPath);
       targets.push({ kind: "project", label: String(label || displayProjectName(path)), description: path, path, normalizedPath, row, listItem: projectRowListItem(row) });
     });
+    for (const target of codexNativeProjectTargetsCache) {
+      const existing = targets.find((item) => sameWorkspacePath(item.path, target.path));
+      if (existing) existing.projectId ||= target.projectId;
+      else targets.push(target);
+    }
     return targets;
   }
 
@@ -12069,8 +12418,11 @@
   }
 
   function taskBoardNativeSessionSignalId() {
+    // 新版保留隐藏标签页；看板创建后的会话归属必须取当前可见主输入区的标记。
     return String(
-      document.querySelector("[data-above-composer-conversation-id]")
+      Array.from(document.querySelectorAll("[data-above-composer-conversation-id]"))
+        .filter(codexServiceTierIsMainComposerElement)
+        .find(codexServiceTierBadgeVisibleElement)
         ?.getAttribute?.("data-above-composer-conversation-id") ||
       "",
     ).trim();
@@ -13009,9 +13361,10 @@
   }
 
   function taskBoardMainHost() {
-    return document.querySelector("main[data-app-shell-main-surface]") ||
-      document.querySelector("main") ||
-      document.querySelector("[role='main']");
+    // 看板只挂到当前可见主页面，不能因 DOM 顺序把入口挂入隐藏聊天。
+    return ["main[data-app-shell-main-surface]", "main", "[role='main']"]
+      .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+      .find(conversationViewElementIsActive) || null;
   }
 
   function taskBoardEntryButtons() {
@@ -15321,8 +15674,12 @@
   }
 
   function promptOptimizeRecentContextTurnCandidates() {
+    const main = promptOptimizeCurrentComposer()?.closest?.("main, [role='main']");
+    if (!main) return [];
+    // 用户要求最近上下文仅来自当前聊天；不可把后台标签页或右侧会话当成最近一轮。
+    // 不按 viewport 坐标过滤，保留当前聊天中滚动到屏幕外的完整轮次。
     const candidates = Array.from(
-      document.querySelectorAll?.(
+      main.querySelectorAll?.(
         '[data-content-search-turn-key], [data-testid="conversation-turn"]',
       ) || [],
     );
@@ -15330,7 +15687,16 @@
       turn &&
       candidates.indexOf(turn) === index &&
       turn.isConnected !== false &&
-      !turn.closest?.('[hidden], [aria-hidden="true"], [inert]')
+      codexServiceTierIsMainComposerElement(turn) &&
+      !turn.closest?.('[hidden], [aria-hidden="true"], [inert]') &&
+      !(() => {
+        for (let node = turn; node; node = node.parentElement) {
+          const style = getComputedStyle(node);
+          if (style.display === "none" || style.visibility === "hidden") return true;
+          if (node === main) break;
+        }
+        return false;
+      })()
     ));
   }
 
@@ -22148,7 +22514,7 @@
   }
 
   function serializableProjectTarget(target) {
-    return { kind: target.kind, label: target.label, description: target.description, path: target.path, normalizedPath: target.normalizedPath || normalizeWorkspacePath(target.path) };
+    return { kind: target.kind, projectId: target.projectId, label: target.label, description: target.description, path: target.path, normalizedPath: target.normalizedPath || normalizeWorkspacePath(target.path) };
   }
 
   function projectMoveTargets() {
@@ -22661,8 +23027,14 @@
 
   async function refreshRecentConversationsForHost() {
     try {
-      const signals = await import("./assets/app-server-manager-signals-C1h8B-R-.js");
-      if (typeof signals.rn === "function") await signals.rn("refresh-recent-conversations-for-host", { hostId: "local", sortKey: "updated_at" });
+      const rpc = findCodexAppServerManagerRpcInScopedSignals();
+      if (rpc) {
+        await rpc.refreshRecentConversations({ mode: "expanded" });
+        return;
+      }
+      const signals = await loadCodexAppModule("app-server-manager-signals-");
+      if (typeof signals.rn !== "function") throw new Error("Codex 最近会话刷新接口不可用");
+      await signals.rn("refresh-recent-conversations-for-host", { hostId: "local", sortKey: "updated_at" });
     } catch (error) {
       appendCodexElvesFailure("__codexProjectMoveRefreshFailures", error);
     }
@@ -22853,7 +23225,15 @@
   async function setProjectlessThreadIds(ref, mode) {
     const variants = threadIdVariants(ref.session_id);
     if (variants.length === 0) throw new Error("未找到会话 ID");
-    const existingIds = await getCodexGlobalState("projectless-thread-ids").catch(() => []);
+    const services = await resolveCodexAppServices();
+    if (services?.threadProjectAssignments) {
+      await services.threadProjectAssignments.setProjectless({
+        threadId: projectMoveSessionKey(ref.session_id), projectless: mode === "add",
+      });
+      return;
+    }
+    // 读取失败时停止，不能用空列表覆盖其他会话的真实归属。
+    const existingIds = await getCodexGlobalState("projectless-thread-ids");
     const ids = Array.isArray(existingIds) ? existingIds : [];
     const variantSet = new Set(variants);
     const nextIds = mode === "add" ? uniqueValues([...ids, ...variants]) : ids.filter((id) => !variantSet.has(id));
@@ -22863,7 +23243,7 @@
   async function clearThreadWorkspaceHints(ref) {
     const variants = threadIdVariants(ref.session_id);
     if (variants.length === 0) return;
-    const hints = objectGlobalState(await getCodexGlobalState("thread-workspace-root-hints").catch(() => ({})));
+    const hints = objectGlobalState(await getCodexGlobalState("thread-workspace-root-hints"));
     const hintKeys = variants.filter((id) => Object.prototype.hasOwnProperty.call(hints, id));
     if (hintKeys.length > 0) {
       hintKeys.forEach((id) => delete hints[id]);
@@ -22874,7 +23254,7 @@
   async function clearThreadWritableRoots(ref) {
     const variants = threadIdVariants(ref.session_id);
     if (variants.length === 0) return;
-    const roots = objectGlobalState(await getCodexGlobalState("thread-writable-roots").catch(() => ({})));
+    const roots = objectGlobalState(await getCodexGlobalState("thread-writable-roots"));
     const rootKeys = variants.filter((id) => Object.prototype.hasOwnProperty.call(roots, id));
     if (rootKeys.length > 0) {
       rootKeys.forEach((id) => delete roots[id]);
@@ -22885,7 +23265,7 @@
   async function clearThreadProjectlessOutputDirectories(ref) {
     const variants = threadIdVariants(ref.session_id);
     if (variants.length === 0) return;
-    const dirs = objectGlobalState(await getCodexGlobalState("thread-projectless-output-directories").catch(() => ({})));
+    const dirs = objectGlobalState(await getCodexGlobalState("thread-projectless-output-directories"));
     const dirKeys = variants.filter((id) => Object.prototype.hasOwnProperty.call(dirs, id));
     if (dirKeys.length > 0) {
       dirKeys.forEach((id) => delete dirs[id]);
@@ -22895,7 +23275,16 @@
 
   async function moveSessionToProjectless(ref) {
     if (!ref.session_id) throw new Error("未找到会话 ID");
-    await setProjectlessThreadIds(ref, "add");
+    const services = await resolveCodexAppServices();
+    if (services) {
+      if (!services.threadProjectAssignments) throw new Error("Codex 会话归属服务不可用");
+      // 新版原生服务原子维护 assignment 与 projectless 标记，不能只写旧全局列表。
+      await services.threadProjectAssignments.setMembership({
+        threadId: projectMoveSessionKey(ref.session_id), assignment: null, projectless: true, hostId: "local",
+      });
+    } else {
+      await setProjectlessThreadIds(ref, "add");
+    }
     await clearThreadWorkspaceHints(ref);
     await clearThreadWritableRoots(ref);
     await clearThreadProjectlessOutputDirectories(ref);
@@ -22910,10 +23299,30 @@
   async function moveSessionToProject(ref, target) {
     if (!ref.session_id) throw new Error("未找到会话 ID");
     if (!target?.path) throw new Error("目标项目路径为空");
-    if (!isNativeProjectTarget(target)) throw new Error("目标项目不在 Codex 项目列表中");
+    const services = await resolveCodexAppServices();
+    let projectId = null;
+    if (services) {
+      await loadCodexNativeProjectTargets();
+      const matches = codexNativeProjectTargetsCache.filter((entry) => sameWorkspacePath(entry.path, target.path)
+        && (!target.projectId || target.projectId === entry.projectId));
+      const ids = new Set(matches.map((entry) => entry.projectId).filter(Boolean));
+      if (ids.size !== 1 || !services.threadProjectAssignments) throw new Error("无法唯一确认目标原生项目");
+      projectId = [...ids][0];
+    } else if (!isNativeProjectTarget(target)) throw new Error("目标项目不在 Codex 项目列表中");
     const result = await postJson("/move-thread-workspace", { ...ref, target_cwd: target.path });
     if (result.status !== "moved") throw new Error(result.message || "移动项目失败");
-    await setProjectlessThreadIds(ref, "remove");
+    if (services) {
+      try {
+        await services.threadProjectAssignments.setMembership({
+          threadId: projectMoveSessionKey(ref.session_id),
+          assignment: { projectKind: "local", projectId }, projectless: false, hostId: "local",
+        });
+      } catch (error) {
+        throw new Error(`工作目录已更新，但原生项目归属未确认：${error?.message || error}`);
+      }
+    } else {
+      await setProjectlessThreadIds(ref, "remove");
+    }
     await clearThreadWorkspaceHints(ref);
     return result;
   }
@@ -23575,7 +23984,7 @@
     if (!selection || !request || request.launchMode !== "start-conversation") return false;
     const sourceRoot = request.sourceWorkspaceRoot || "";
     if (selection.repoPath && sourceRoot) return sameWorkspacePath(sourceRoot, selection.repoPath);
-    if (selection.projectId) return true;
+    if (selection.projectId) return request.projectId === selection.projectId;
     return !selection.repoPath || sameWorkspacePath(sourceRoot, selection.repoPath);
   }
 
@@ -23601,10 +24010,19 @@
   }
 
   function installUpstreamPendingWorktreeDispatcherPatch() {
-    const patchVersion = "1";
+    const patchVersion = "2";
     if (window.__codexUpstreamPendingWorktreeDispatcherPatch === patchVersion) return;
     const patch = async () => {
       try {
+        const services = await resolveCodexAppServices();
+        if (services) {
+          await installCodexNativeRpcCompat();
+          if (!window.__codexElvesNativeRpcCompat?.patchWorktrees(services)) {
+            throw new Error("Codex 原生 worktree 服务不可用");
+          }
+          window.__codexUpstreamPendingWorktreeDispatcherPatch = patchVersion;
+          return;
+        }
         const module = await loadCodexAppModule("setting-storage-");
         const dispatcherClass = typeof module.v === "function" && String(module.v).includes("dispatchMessage") ? module.v : null;
         const dispatcher = dispatcherClass?.getInstance?.();
@@ -24124,6 +24542,21 @@
     if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(threadId)) {
       throw new Error("会话尚未创建完成，不能永久删除");
     }
+    const rpc = findCodexAppServerManagerRpcInScopedSignals();
+    if (rpc) {
+      // 用户要求新版删除恢复可用：复用原生完整生命周期，包含归属和关联会话清理。
+      // 请求已交给 RPC 后不切到旧管理器重发；只保留明确缺失同一 rollout 的专用恢复。
+      try {
+        await rpc.deleteConversation(threadId);
+      } catch (error) {
+        const missingId = String(error?.message || error).match(/no rollout found for thread id ([0-9a-f-]{36})$/i)?.[1];
+        const client = findCodexAppServerRequestClientInScopedSignals();
+        if (missingId?.toLowerCase() !== threadId.toLowerCase()
+          || typeof client?.sendAppServerExtensionRequest !== "function") throw error;
+        await client.sendAppServerExtensionRequest("thread/delete", { threadId, missingRolloutRecovery: true });
+      }
+      return { status: "local_deleted", session_id: threadId, message: "会话已永久删除" };
+    }
     const manager = isCodexConversationManager(window.__codexElvesConversationStateManager)
       ? window.__codexElvesConversationStateManager
       : findCodexConversationManagerInReactTree()?.manager;
@@ -24288,6 +24721,7 @@
     }, true);
     document.body.appendChild(overlay);
     try {
+      await loadCodexNativeProjectTargets();
       const targets = projectMoveTargets();
       const list = overlay.querySelector(".codex-project-move-list");
       if (!list) return;
@@ -26488,6 +26922,7 @@
     installStyle();
     refreshCodexActivitySessionLayout();
     installPromptOptimizeFeature();
+    void installCodexNativeRpcCompat();
     if (window.__codexElvesRuntimeOnceInstalled === codexElvesBuild) return;
     cleanupLegacyCodexComposerOverflowGuards();
     void loadCodexModelCatalog();

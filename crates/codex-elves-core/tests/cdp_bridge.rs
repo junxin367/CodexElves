@@ -6913,18 +6913,22 @@ fn renderer_delete_uses_codex_lifecycle_and_keeps_failed_rows() {
 const assert = require("node:assert/strict");
 const id = "01a0bcd2-2190-70b1-bb66-94cac705d622";
 const ref = { session_id: `local:${id}` };
-function create(manager) {
+function create(manager, rpc = null) {
   return new Function(
     "window",
     "validThreadSessionKey",
     "isCodexConversationManager",
     "findCodexConversationManagerInReactTree",
+    "findCodexAppServerManagerRpcInScopedSignals",
+    "findCodexAppServerRequestClientInScopedSignals",
     `return (${source.trim()});`
   )(
     { __codexElvesConversationStateManager: manager },
     (value) => value.replace(/^local:/, ""),
     (value) => value === manager,
-    () => ({ manager })
+    () => ({ manager }),
+    () => rpc,
+    () => manager?.requestClient
   );
 }
 (async () => {
@@ -6983,6 +6987,15 @@ function create(manager) {
     },
   };
   assert.equal((await create(partial)(ref)).status, "partial");
+  const rpcCalls = [];
+  assert.equal((await create(null, {
+    deleteConversation: async (threadId) => rpcCalls.push(threadId),
+  })(ref)).status, "local_deleted");
+  assert.deepEqual(rpcCalls, [id]);
+  await assert.rejects(create(normal, {
+    deleteConversation: async () => { throw Error("RPC permission denied"); },
+  })(ref), /RPC permission denied/);
+  assert.equal(calls.length, 2, "RPC 失败不能向旧管理器再次发起删除");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 "#;
     let output = Command::new("node")
@@ -11460,9 +11473,9 @@ fn injection_script_keeps_session_ref_stable_and_refreshes_after_turn_completion
 
     // 侧边栏瞬时拿不到会话时，composer id 作为独立主来源兼宽容期内沍用上一次结果。
     assert!(script.contains("function currentSessionRefFromDom()"));
-    assert!(
-        script.contains("return { session_id: conversationId, title: row ? sessionRefFromRow(row).title : \"\" };")
-    );
+    assert!(script.contains(
+        "return { session_id: conversationId, title: row ? sessionRefFromRow(row).title : \"\" };"
+    ));
     assert!(script.contains("codexSessionRefGraceMs = 15000"));
     assert!(script.contains("window.__codexElvesLastSessionRef"));
 
@@ -13646,6 +13659,8 @@ function element(tag, rect) {
   api.closeSettings();
   settingsLifecycle.closed = !api.settingsOpen();
 
+  const contextMain = element("main", { left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 });
+  body.appendChild(contextMain);
   function appendPromptContextTurn(key, userText, assistantTexts, legacy = false) {
     const turn = element("div", {
       left: 0,
@@ -13672,7 +13687,7 @@ function element(tag, rect) {
       assistant.textContent = text;
       turn.appendChild(assistant);
     });
-    body.appendChild(turn);
+    contextMain.appendChild(turn);
     return turn;
   }
 
@@ -13687,7 +13702,12 @@ function element(tag, rect) {
     "latest user context",
     ["latest assistant part one", "latest assistant part two"],
   );
-  const extractedRecentContext = api.recentContext();
+  // 隐藏标签页保留较新的 DOM，最近一轮仍必须属于当前输入框所在的 main。
+  const backgroundMain = element("main", contextMain._rect);
+  backgroundMain.setAttribute("hidden", "");
+  body.appendChild(backgroundMain);
+  const backgroundTurn = appendPromptContextTurn("turn-background", "wrong user context", ["wrong assistant context"]);
+  backgroundMain.appendChild(backgroundTurn);
 
   let composerText = "draft";
   let normalizeComposerWrites = false;
@@ -13744,6 +13764,8 @@ function element(tag, rect) {
     controller,
     threadId: "thread-a",
   });
+  contextMain.appendChild(composerOne);
+  const extractedRecentContext = api.recentContext();
   api.install();
   await flush(1100);
   await flush(1);
@@ -13857,6 +13879,7 @@ function element(tag, rect) {
   });
   clusterTwo.append(nativeUsageTwo, anchorTwo);
   body.appendChild(clusterTwo);
+  contextMain.appendChild(composerTwo);
   api.setDom({
     composer: composerTwo,
     anchor: anchorTwo,
@@ -13951,8 +13974,8 @@ function element(tag, rect) {
     await api.activate();
   }
   composerText = "draft";
-  body.appendChild(oldContextTurn);
-  body.appendChild(latestContextTurn);
+  contextMain.appendChild(oldContextTurn);
+  contextMain.appendChild(latestContextTurn);
 
   const firstOptimizeCallIndex = bridgeCalls.filter(
     (call) => call.path === "/prompt-optimize",
@@ -18010,6 +18033,7 @@ function documentListenerSet(type) {
 }
 const mainSurface = node("main");
 mainSurface.setAttribute("data-app-shell-main-surface", "true");
+mainSurface.getBoundingClientRect = () => ({ x: 0, y: 0, width: 1000, height: 800 });
 globalThis.document = {
   readyState: "complete",
   scripts: [],
@@ -18024,7 +18048,10 @@ globalThis.document = {
     if (selector === "main[data-app-shell-main-surface]" || selector === "main" || selector === "[role='main']") return mainSurface;
     return null;
   },
-  querySelectorAll: () => [],
+  querySelectorAll(selector) {
+    if (selector === "main[data-app-shell-main-surface]" || selector === "main" || selector === "[role='main']") return [mainSurface];
+    return [];
+  },
   addEventListener(type, listener) { documentListenerSet(type).add(listener); },
   removeEventListener(type, listener) { documentListenerSet(type).delete(listener); },
   listenerCount(type) { return documentListeners.get(type)?.size || 0; },
@@ -21546,6 +21573,204 @@ module.exports = runNativeFastModuleTests;
         .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .output()
         .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn renderer_native_rpc_compat_contracts() {
+    let output = Command::new("node")
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .arg("-e")
+        .arg(r###"
+const fs = require("node:fs");
+const assert = require("node:assert/strict");
+const {createRuntime} = require("./assets/inject/native-rpc-compat.js");
+const source = fs.readFileSync("assets/inject/renderer-features.js", "utf8");
+function section(start, end) {
+  const a = source.indexOf(start), b = source.indexOf(end, a);
+  assert(a >= 0 && b > a, start);
+  return source.slice(a, b);
+}
+function build(text, env, expression) {
+  return new Function("env", `with(env){${text};return ${expression};}`)(env);
+}
+(async () => {
+  let deletes = 0, fallback = 0;
+  const id = "01a0bcd2-2190-70b1-bb66-94cac705d622";
+  let rpc = {deleteConversation: async thread => { assert.equal(thread,id); deletes++; }};
+  let recovery = [];
+  const remove = build(section("  async function deleteSessionWithCodex(", "\n  window.__codexElvesNativeDeleteThread"), {
+    findCodexAppServerManagerRpcInScopedSignals: () => rpc,
+    findCodexAppServerRequestClientInScopedSignals: () => ({
+      sendAppServerExtensionRequest: async (...args) => recovery.push(args),
+    }),
+    validThreadSessionKey: value => value.replace(/^local:/,""),
+    window: {},
+    isCodexConversationManager: () => false,
+    findCodexConversationManagerInReactTree: () => {fallback++;return {};},
+  }, "deleteSessionWithCodex");
+  assert.equal((await remove({session_id:`local:${id}`})).status,"local_deleted");
+  assert.equal(deletes,1); assert.equal(fallback,0);
+  rpc.deleteConversation = async () => {throw Error("permission denied");};
+  await assert.rejects(remove({session_id:`local:${id}`}),/permission denied/);
+  assert.equal(recovery.length,0);
+  rpc.deleteConversation = async () => {throw Error(`no rollout found for thread id ${id}`);};
+  await remove({session_id:`local:${id}`});
+  assert.deepEqual(recovery,[["thread/delete",{threadId:id,missingRolloutRecovery:true}]]);
+
+  const runtime = createRuntime(), calls = [], events = [];
+  let enabled = true;
+  function stub(value) {
+    return new Proxy(value, {
+      set(){throw Error("RPC stubs are immutable");},
+      deleteProperty(){throw Error("RPC stubs are immutable");},
+      defineProperty(){throw Error("RPC stubs are immutable");},
+    });
+  }
+  const coordinator = stub({
+    sendMessage: async (req, prepare) => { calls.push(await prepare(req,"start")); return {turnId:"turn"}; },
+    sendQueuedMessageNow: async (id, msg, options, prepare) => {
+      calls.push(await prepare({conversationId:id},"start")); return {turnId:"queued-turn"};
+    },
+    [Symbol.dispose]() {events.push("dispose");},
+  });
+  const manager = stub({
+    startTurn: async (...args) => args,
+    sendRequest: async (...args) => args,
+    getTurnCoordinator: () => Promise.resolve(coordinator),
+  });
+  const registry = {forHost: () => manager};
+  const client = {hostId:"local",rpc:manager};
+  const services = {managedWorktrees: stub({pending:stub({create:async r=>r})})};
+  let provider;
+  provider=stub({dup:()=>provider,subscribe:(hostId,listener)=>listener({status:"ready",manager})});
+  services.appServerManagers=provider;
+  runtime.configure({
+    enabled:()=>enabled,
+    prepareSubmission:async (r, operation) => {operation.prepared=true;return {...r,patched:true};},
+    finishSubmission:async (operation,result) => {assert(operation.prepared);events.push(result.turnId);},
+    invokeTurn:(original,key,args)=>original[key](...args,"wrapped"),
+    sendRequest:(original,args)=>original.sendRequest(...args,"wrapped"),
+    prepareWorktree:r=>({...r,branch:"refs/remotes/upstream/main"}),
+  });
+  assert(runtime.patchRegistry(registry)); assert(runtime.patchRegistry(registry));
+  assert(runtime.patchClient(client)); assert(runtime.patchClient(client));
+  assert(runtime.patchWorktrees(services));
+  assert.equal(runtime.patchRegistry(provider),false,"不可向 RPC provider 写入 forHost");
+  assert(runtime.patchProvider(services));
+  let subscribed;
+  services.appServerManagers.dup().subscribe("local",value=>{subscribed=value.manager;});
+  assert.equal(subscribed,client.rpc,"连接重建后仍包装新 manager");
+  assert.equal(registry.forHost("remote"),manager);
+  assert.equal(registry.forHost("local"),client.rpc);
+  assert.deepEqual(await client.rpc.startTurn(1,2),[1,2,"wrapped"]);
+  assert.deepEqual(await client.rpc.sendRequest("read",{}),["read",{},"wrapped"]);
+  const c = await client.rpc.getTurnCoordinator();
+  await c.sendMessage({}, async()=>({start:{}}));
+  await c.sendQueuedMessageNow("thread","msg",{},async()=>({start:{}}));
+  assert(calls.every(r=>r.patched)); c[Symbol.dispose]();
+  assert.deepEqual(events,["turn","queued-turn","dispose"]);
+  assert.equal((await services.managedWorktrees.pending.create({id:"one"})).branch,"refs/remotes/upstream/main");
+  enabled=false;
+  assert.deepEqual(await client.rpc.startTurn(1),[1]);
+  assert.equal((await services.managedWorktrees.pending.create({id:"two"})).branch,undefined);
+  runtime.dispose();
+  assert.equal(client.rpc,manager); assert.equal(registry.forHost("local"),manager);
+  class NativeStub {
+    #alive = true;
+    toString() { return this.#alive ? "[object RpcStub]" : "disposed"; }
+    onRpcBroken() { return this.#alive; }
+    [Symbol.dispose]() { this.#alive = false; }
+  }
+  const forwarded = runtime.wrapManager(new NativeStub());
+  assert.equal(String(forwarded), "[object RpcStub]");
+  assert.equal(forwarded.onRpcBroken(), true);
+  forwarded[Symbol.dispose]();
+  assert.equal(String(forwarded), "disposed", "原型上的 RPC 生命周期方法必须使用原接收者");
+
+  const nativeSource = section("  const codexNativeCheckpointOperations", "  let codexNativeRpcInstallPromise");
+  const checkpoints=[], bindings=[], env = {
+    window:{__codexElvesComposerFast:{patchTurnRequest:async p=>({...p,serviceTier:"priority"})}},
+    codexWorkspaceCheckpointFeatureEnabled:()=>true,
+    codexWorkspaceCheckpointRequestThreadId:p=>p.threadId,
+    clearCodexWorkspaceCheckpointCompletionHint:()=>{},
+    installCodexWorkspaceCheckpointTurnCompletionListener:()=>{},
+    createCodexWorkspaceCheckpoint:async (client,params)=>{
+      checkpoints.push(params);return {context:{threadId:params.threadId},checkpoint:{id:"checkpoint"}};
+    },
+    codexWorkspaceCheckpointTurnId:r=>r?.turnId||r?.turn?.id||"",
+    bindCodexWorkspaceCheckpoint:async (created,result)=>bindings.push([created.context.threadId,result.turnId]),
+    trackCodexWorkspaceCheckpointBinding:(created,result,promise)=>promise,
+    sendCodexElvesDiagnostic:(name,value)=>{throw Error(`${name}: ${JSON.stringify(value)}`);},
+    showToast:()=>{},
+  };
+  const helpers=build(nativeSource,env,"({prepare:prepareCodexNativeSubmission,finish:finishCodexNativeCheckpoint,invoke:invokeCodexNativeTurn})");
+  const operation={}, original={executionHostId:"local",start:{request:{threadId:id,model:"gpt-5.5"},context:{beforeSendRequest:async()=>events.push("native-before")}}};
+  Object.defineProperty(original,Symbol.dispose,{value:()=>events.push("prepared-dispose")});
+  const prepared=await helpers.prepare(original,operation);
+  assert.equal(prepared.start.request.serviceTier,"priority");
+  assert.equal(checkpoints.length,0,"准备阶段不能提前保存，队列可能尚未发送");
+  assert.equal(prepared[Symbol.dispose],original[Symbol.dispose]);
+  await prepared.start.context.beforeSendRequest();
+  await prepared.start.context.beforeSendRequest();
+  assert.equal(checkpoints.length,1,"重复原生回调只保存一次");
+  await helpers.finish(operation,{status:"sent",turnId:"turn"});
+  await helpers.finish(operation,{status:"sent",turnId:"turn"});
+  assert.deepEqual(bindings,[[id,"turn"]]);
+  const remote={...original,executionHostId:"remote"};
+  assert.equal(await helpers.prepare(remote,{}),remote);
+  const createRpc={startConversation:async(params,options)=>{
+    await options.beforeFirstTurn({conversationId:id});
+    const result={status:"created",conversationId:id,firstTurn:{status:"accepted",turnId:"first"}};
+    await options.onSettled(result);
+    return result;
+  }};
+  const result=await helpers.invoke(createRpc,"startConversation",[{cwd:"E:/repo",model:"gpt-5.5"},{}]);
+  assert.equal(result.firstTurn.turnId,"first");
+  assert.deepEqual(bindings.at(-1),[id,"first"]);
+  const memberships=[],writes=[],moveCalls=[];
+  const stateServices={
+    applicationState:{read:async()=>({value:{keep:true}}),write:async(k,v)=>{writes.push([k,v]);return{success:true};}},
+    threadProjectAssignments:{
+      readMemberships:async()=>({assignments:{[id]:{projectKind:"local",projectId:"p1"}},projectlessThreadIds:[id]}),
+      setMembership:async p=>memberships.push(p),
+    },
+  };
+  const stateApi=build(section("  async function codexStateCall(", "  function objectGlobalState("), {
+    resolveCodexAppServices:async()=>stateServices,
+  },"({read:getCodexGlobalState,write:setCodexGlobalState})");
+  assert.deepEqual(await stateApi.read("projectless-thread-ids"),[id]);
+  assert.deepEqual(await stateApi.read("thread-workspace-root-hints"),{keep:true});
+  await stateApi.write("key","value");
+  assert.deepEqual(writes,[["key","value"]]);
+  stateServices.applicationState.write=async()=>({success:false});
+  await assert.rejects(stateApi.write("key","bad"),/保存未确认/);
+  const moveApi=build(section("  async function moveSessionToProjectless(", "  function showToast("), {
+    resolveCodexAppServices:async()=>stateServices,
+    projectMoveSessionKey:v=>v.replace(/^local:/,""),
+    loadCodexNativeProjectTargets:async()=>{},
+    codexNativeProjectTargetsCache:[{projectId:"p1",path:"E:/repo"}],
+    sameWorkspacePath:(a,b)=>a===b,
+    clearThreadWorkspaceHints:async()=>{},clearThreadWritableRoots:async()=>{},
+    clearThreadProjectlessOutputDirectories:async()=>{},
+    postJson:async(path,payload)=>{moveCalls.push([path,payload]);return {status:"moved"};},
+  },"({project:moveSessionToProject,projectless:moveSessionToProjectless})");
+  await moveApi.project({session_id:`local:${id}`},{path:"E:/repo",projectId:"p1"});
+  assert.deepEqual(memberships.at(-1),{threadId:id,assignment:{projectKind:"local",projectId:"p1"},projectless:false,hostId:"local"});
+  await moveApi.projectless({session_id:`local:${id}`});
+  assert.deepEqual(memberships.at(-1),{threadId:id,assignment:null,projectless:true,hostId:"local"});
+  const before=moveCalls.length;
+  await assert.rejects(moveApi.project({session_id:id},{path:"E:/unknown"}),/目标原生项目/);
+  assert.equal(moveCalls.length,before,"目标无法确认时不得先移动工作目录");
+  console.log("新版删除、RPC 不可写代理、队列、禁用、资源释放、首轮 Checkpoint 合约通过");
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"###)
+        .output()
+        .expect("node should be available");
     assert!(
         output.status.success(),
         "{}",
