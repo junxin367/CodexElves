@@ -383,7 +383,12 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
   .thread-row>.row-menu-button{visibility:hidden;pointer-events:none}
 }
 @media(hover:none),(max-width:760px){.select-trigger{min-height:36px}.load-more{min-height:40px}.priority-section-label{min-height:40px}}
-@media(max-width:760px){#project-select.new-chat-project-select{max-width:100%;min-height:36px}.project-picker-popup{max-width:calc(100vw - 16px)}.project-picker-popup .popup-option{min-height:var(--control-menu-height)}}
+@media(max-width:760px){
+  #project-select.new-chat-project-select{max-width:100%;min-height:36px}
+  .project-picker-popup{max-width:calc(100vw - 16px)}
+  /* 用户要求手机项目列表更紧凑：行高由 44px 降至 36px，上下内边距由 7px 降至 4px；底部选项同步，桌面仍保持 38px。 */
+  .project-picker-popup .popup-option{min-height:36px;padding:4px 9px}
+}
 .color-swatch{width:50px;height:34px;padding:3px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
 .color-swatch:hover{background:var(--bg)}
 .color-swatch::before{content:"";display:block;width:100%;height:100%;border-radius:5px;background:var(--swatch,transparent)}

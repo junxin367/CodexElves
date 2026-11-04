@@ -389,7 +389,8 @@ export function mountSessionMenu({
       button.dataset.menuKey = `side:${item.id}`; sides.append(button);
     }
     let status = message;
-    if (!canRead(context)) status = context?.threadId ? "当前授权不可用" : "请选择会话后查看相关会话";
+    // 用户要求新建会话时不显示选会话提示；已有会话仍保留授权异常说明。
+    if (!canRead(context)) status = context?.threadId ? "当前授权不可用" : "";
     else if (!context.connected) status = data ? "当前离线，显示上次记录" : "当前离线，连接后读取相关会话";
     if (status) {
       const note = element("p", "session-related-menu-status", status);
