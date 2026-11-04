@@ -912,6 +912,7 @@ impl SQLiteStorageAdapter {
                 "db_path": self.db_path.to_string_lossy().to_string(),
                 "rollout_path": rollout_path,
                 "summary": Value::Object(summary),
+                "contextUsage": root_usage.last_request_context_usage,
             });
             if include_history {
                 response
@@ -1375,6 +1376,7 @@ impl TokenUsageTotals {
 #[derive(Debug, Clone)]
 struct RolloutUsageReport {
     history: Vec<Value>,
+    last_request_context_usage: Option<Value>,
     total_usage: TokenUsageTotals,
     turn_usage: HashMap<String, TokenUsageTotals>,
     last_turn_usage: TokenUsageTotals,
@@ -1392,6 +1394,7 @@ struct RolloutUsageReport {
 struct RolloutUsageParser {
     current_turn_id: String,
     history: Vec<Value>,
+    last_request_context_usage: Option<Value>,
     turn_ids: HashSet<String>,
     turn_usage: HashMap<String, TokenUsageTotals>,
     active_task_turns: HashSet<String>,
@@ -1428,6 +1431,7 @@ impl RolloutUsageParser {
             .unwrap_or_default();
         RolloutUsageReport {
             history: self.history.clone(),
+            last_request_context_usage: self.last_request_context_usage.clone(),
             total_usage,
             turn_usage: self.turn_usage.clone(),
             last_turn_usage,
@@ -1539,7 +1543,7 @@ impl RolloutUsageParser {
                 if event_type != "token_count" {
                     return;
                 }
-                let Some(info) = payload.get("info") else {
+                let Some(info) = payload.get("info").filter(|info| info.is_object()) else {
                     return;
                 };
                 let last = info.get("last_token_usage");
@@ -1548,6 +1552,17 @@ impl RolloutUsageParser {
                     .get("model_context_window")
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
+                // 用户要求旧会话也能显示上下文用量：只保留本会话最后一次请求的实测值，
+                // 不使用累计用量、轮次总和或子会话用量；零用量有效，缺少容量时保持未知。
+                self.last_request_context_usage = last
+                    .and_then(|usage| usage.get("total_tokens"))
+                    .and_then(Value::as_u64)
+                    .filter(|_| model_context_window > 0)
+                    .map(|used| json!({
+                        "usedTokens": used,
+                        "contextWindow": model_context_window,
+                        "observedAt": value.get("timestamp").and_then(Value::as_str),
+                    }));
                 let last_usage = TokenUsageTotals::from_json(last);
                 let total_usage = TokenUsageTotals::from_json(total);
                 let context_used = total_usage.total_tokens.max(last_usage.total_tokens);
@@ -1876,6 +1891,7 @@ fn rollout_only_usage_value(
         "matched_by": "rollout_file",
         "rollout_path": rollout_path.to_string_lossy().to_string(),
         "summary": Value::Object(summary),
+        "contextUsage": report.last_request_context_usage,
     });
     if include_history {
         response

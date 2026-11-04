@@ -9117,7 +9117,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "107";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "108";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -11372,7 +11372,8 @@ fn injection_script_exposes_compact_per_thread_token_usage_summary() {
     assert!(script.contains("[data-pip-obstacle=\"thread-summary-panel\"]"));
     assert!(script.contains("aria-pressed"));
     assert!(script.contains("/thread-usage-summary"));
-    assert!(!script.contains("postJson(\"/thread-usage-history\""));
+    assert!(script.contains("Object.hasOwn(result, \"contextUsage\")"));
+    assert!(script.contains("usedTokens: last?.usage?.totalTokens"));
     assert!(script.contains("turnId === latestTurnId"));
     assert!(script.contains("最近一轮"));
     assert!(script.contains("formatCodexTokenCount"));
@@ -11502,7 +11503,7 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("codex-open-in-menu"));
     assert!(script.contains(r#"const codexOpenInVersion = "14";"#));
     assert!(script.contains("window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion"));
-    assert!(script.contains(r#"const codexDeleteStyleVersion = "107";"#));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "108";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
     assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
     assert!(script.contains("width: 30px !important;"));

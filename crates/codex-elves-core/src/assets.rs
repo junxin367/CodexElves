@@ -13,7 +13,7 @@ const RENDERER_FEATURES_SCRIPT: &str = include_str!("../../../assets/inject/rend
 const NATIVE_FAST_UNLOCK_SCRIPT: &str =
     include_str!("../../../assets/inject/native-fast-unlock.js");
 const COMPOSER_FAST_SCRIPT: &str = include_str!("../../../assets/inject/composer-fast.js");
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261104-runtime-compat";
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261104-context-usage";
 
 pub fn renderer_script() -> &'static str {
     RENDERER_FEATURES_SCRIPT

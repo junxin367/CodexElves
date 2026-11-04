@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "107";
+  const codexDeleteStyleVersion = "108";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -331,6 +331,7 @@
     window.__codexElvesRefreshRuntime();
     return;
   }
+  window.__codexComposerContextUsageCleanup?.();
   try {
     window.__codexElvesPromptOptimizeCleanup?.();
   } catch (_) {}
@@ -25139,6 +25140,192 @@
       .sort((left, right) => (right.score - left.score) || (left.index - right.index))[0]?.composer || null;
   }
 
+  const codexContextUsageAttribute = "data-codex-context-usage";
+  const codexContextUsageRecovery = {
+    id: "", usage: null, at: 0, pending: null, timer: null,
+    settingsService: null, allowed: false, legacyCache: null, disposed: false,
+  };
+
+  function removeCodexRecoveredContextUsage() {
+    document.querySelectorAll(`[${codexContextUsageAttribute}]`).forEach((node) => node.remove());
+  }
+
+  function cleanupCodexComposerContextUsage() {
+    codexContextUsageRecovery.disposed = true;
+    clearTimeout(codexContextUsageRecovery.timer);
+    document.removeEventListener("visibilitychange", refreshCodexContextUsageAfterVisibility);
+    removeCodexRecoveredContextUsage();
+  }
+
+  function refreshCodexContextUsageAfterVisibility() {
+    if (document.visibilityState === "visible") requestAnimationFrame(refreshCodexComposerContextUsage);
+  }
+
+  function codexContextUsageNativeVisible(footer) {
+    return Array.from(footer?.querySelectorAll('[role="img"][aria-label]') || [])
+      .some((node) => !node.hasAttribute(codexContextUsageAttribute)
+        && (/上下文用量|context usage/i.test(node.getAttribute("aria-label") || "")
+          || !!node.querySelector('circle[pathLength="100"]')));
+  }
+
+  function codexContextUsageNativeAllowsRecovery(anchor) {
+    // 原生在听写、窄浮动输入框、后台任务和云模式下有意隐藏圆环；补读不能绕过这些条件。
+    // 只读取既有 React props 的语义字段，不修改原生状态或依赖压缩组件名。
+    for (let node = anchor, depth = 0; node && depth < 4; node = node.parentElement, depth++) {
+      for (const key of reactFiberKeys(node)) {
+        for (let fiber = node[key], count = 0; fiber && count < 80; fiber = fiber.return, count++) {
+          const props = fiber.memoizedProps;
+          if (!props || !Object.hasOwn(props, "isNarrowFloatingComposer")
+            || !Object.hasOwn(props, "isAeonActive") || !Object.hasOwn(props, "composerMode")) continue;
+          return props.composerMode === "local" && !props.isDictating
+            && !props.isAeonActive && !props.isNarrowFloatingComposer;
+        }
+      }
+    }
+    return false;
+  }
+
+  function codexContextUsageMeasurement(value) {
+    const used = value?.usedTokens;
+    const capacity = value?.contextWindow;
+    if (!Number.isSafeInteger(used) || used < 0
+      || !Number.isSafeInteger(capacity) || capacity <= 0) return null;
+    return { usedTokens: used, contextWindow: capacity, observedAt: value.observedAt || "" };
+  }
+
+  async function readCodexContextUsageEnabled() {
+    const state = codexContextUsageRecovery;
+    if (!state.settingsService) {
+      const module = (await codexLoadedAppModuleExports())
+        .find((module) => Object.hasOwn(module, "appServices") && module.appServices?.settings);
+      state.settingsService = module?.appServices.settings || null;
+    }
+    if (!state.settingsService) return false;
+    const result = await state.settingsService.read("show-context-window-usage");
+    return result?.effective === true;
+  }
+
+  function codexContextUsageResponseMatches(result, id) {
+    return result?.status === "ok" && projectMoveSessionKey(result.session_id) === id
+      && (!result.matched_by || ["id", "rollout_file"].includes(result.matched_by));
+  }
+
+  async function readCodexContextUsageMeasurement(id) {
+    const payload = { session_id: id, title: "" };
+    const result = await postJson("/thread-usage-summary", payload);
+    if (!codexContextUsageResponseMatches(result, id)) return null;
+    if (Object.hasOwn(result, "contextUsage")) return codexContextUsageMeasurement(result.contextUsage);
+    // 兼容尚未重启的旧 helper：只在缺少新字段时读取历史，同一记录时间复用结果。
+    // contextUsed 是旧接口累计口径，不能作为上下文占用；必须取最后一次请求的 totalTokens。
+    const observed = result.summary?.observedAt || "";
+    const state = codexContextUsageRecovery;
+    if (state.legacyCache?.id === id && state.legacyCache.observed === observed) return state.legacyCache.usage;
+    const history = await postJson("/thread-usage-history", payload);
+    if (!codexContextUsageResponseMatches(history, id)) return null;
+    const last = (history.history || [])
+      .filter((entry) => projectMoveSessionKey(entry.conversation_id) === id).at(-1);
+    const usage = codexContextUsageMeasurement({
+      usedTokens: last?.usage?.totalTokens,
+      contextWindow: last?.usage?.contextLimit,
+      observedAt: last?.observed_at,
+    });
+    if (state.id === id) state.legacyCache = { id, observed, usage };
+    return usage;
+  }
+
+  function renderCodexRecoveredContextUsage(id, usage) {
+    if (activeConversationIdFromDom() !== id) return;
+    const footer = codexServiceTierBestComposerFooter();
+    const anchor = codexFastComposerAnchor();
+    const placement = codexFastComposerPlacement();
+    if (!usage || !anchor || !placement || codexContextUsageNativeVisible(footer)
+      || !codexContextUsageNativeAllowsRecovery(anchor)) {
+      removeCodexRecoveredContextUsage();
+      return;
+    }
+    let badge = document.querySelector(`[${codexContextUsageAttribute}]`);
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.setAttribute(codexContextUsageAttribute, "true");
+      badge.setAttribute("role", "img");
+      badge.tabIndex = 0;
+      // 用户要求恢复上下文入口：保持原生 16px 容器、12px 圆环和 5px 半径，
+      // 使用同一排的普通布局；放在 Fast/模型左侧，提示词优化与 Checkpoint 随容器避让。
+      badge.style.cssText = "display:inline-flex;align-items:center;justify-content:center;flex:0 0 16px;width:16px;height:16px;color:var(--color-text-tertiary,currentColor);cursor:help";
+      badge.innerHTML = '<svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="2" fill="none" opacity=".16"/><circle data-context-progress cx="6" cy="6" r="5" stroke="currentColor" stroke-width="2" fill="none" pathLength="100" stroke-dasharray="100" transform="rotate(-90 6 6)"/></svg>';
+    }
+    const percent = Math.max(0, Math.min(100, usage.usedTokens / usage.contextWindow * 100));
+    const rounded = Math.round(percent);
+    badge.setAttribute("aria-label", `上下文用量：${rounded}%（上次请求记录）`);
+    badge.title = `上下文窗口\n${rounded}% 已使用（${100 - rounded}% 剩余）\n${usage.usedTokens.toLocaleString()} / ${usage.contextWindow.toLocaleString()} tokens\n上次请求记录；原生数据恢复后自动切回`;
+    badge.querySelector("[data-context-progress]").setAttribute("stroke-dashoffset", String(100 - percent));
+    const fast = placement.parentElement?.querySelector("[data-codex-elves-fast]");
+    const before = fast?.parentElement === placement.parentElement ? fast : placement;
+    if (before.previousElementSibling !== badge) before.before(badge);
+  }
+
+  function refreshCodexComposerContextUsage() {
+    const state = codexContextUsageRecovery;
+    clearTimeout(state.timer);
+    state.timer = null;
+    const id = activeConversationIdFromDom();
+    const footer = codexServiceTierBestComposerFooter();
+    const anchor = codexFastComposerAnchor();
+    if (state.disposed || document.visibilityState === "hidden"
+      || codexElvesBackendSettings.enhancementsEnabled !== true
+      || !id || !anchor || codexContextUsageNativeVisible(footer)
+      || !codexContextUsageNativeAllowsRecovery(anchor)) {
+      // 离开聊天或关闭开关后使旧读取失效，返回时重新确认原生显示设置。
+      state.pending = null;
+      state.at = 0;
+      removeCodexRecoveredContextUsage();
+      return;
+    }
+    if (state.id !== id) {
+      state.id = id;
+      state.usage = null;
+      state.at = 0;
+      state.legacyCache = null;
+      removeCodexRecoveredContextUsage();
+    }
+    const schedule = () => {
+      if (!state.disposed && activeConversationIdFromDom() === id) {
+        clearTimeout(state.timer);
+        state.timer = setTimeout(refreshCodexComposerContextUsage, 5000);
+      }
+    };
+    if (state.at && Date.now() - state.at < 5000) {
+      renderCodexRecoveredContextUsage(id, state.allowed ? state.usage : null);
+      schedule();
+      return;
+    }
+    if (state.pending?.id === id) return;
+    const pending = { id };
+    state.pending = pending;
+    void (async () => {
+      try {
+        const allowed = await readCodexContextUsageEnabled();
+        const usage = allowed ? await readCodexContextUsageMeasurement(id) : null;
+        if (state.disposed || state.pending !== pending || activeConversationIdFromDom() !== id) return;
+        state.allowed = allowed;
+        state.usage = usage;
+        state.at = Date.now();
+        if (codexElvesBackendSettings.enhancementsEnabled === true) renderCodexRecoveredContextUsage(id, usage);
+      } catch {
+        if (state.pending === pending) {
+          state.at = Date.now();
+          state.usage = null;
+          removeCodexRecoveredContextUsage();
+        }
+      } finally {
+        if (state.pending === pending) {
+          state.pending = null;
+          schedule();
+        }
+      }
+    })();
+  }
+
   function conversationViewRememberOriginals(el) {
     if (!el) return;
     conversationViewState.elements.add(el);
@@ -26367,6 +26554,7 @@
     if (conversationDirty) {
       refreshConversationView();
       void window.__codexElvesComposerFast?.refresh();
+      refreshCodexComposerContextUsage();
       installCodexAppServerRestartButtons();
       installCodexWorkspaceCheckpointTurnCompletionListener();
       installCodexWorkspaceCheckpointEditButtons();
@@ -26494,6 +26682,7 @@
   }
 
   function isExtensionUiNode(node) {
+    if (node?.closest?.("[data-codex-context-usage]")) return true;
     if (node?.closest?.("[data-codex-elves-fast]")) return true;
     return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-elves-modal-overlay, .codex-workspace-checkpoint-overlay, [${codexWorkspaceCheckpointEditButtonAttribute}="true"], [${codexWorkspaceCheckpointButtonAttribute}="true"], .${projectMoveOverlayClass}, .codex-conversation-timeline, .${codexTokenUsageCardClass}, .${codexAppServerRestartButtonClass}, .${codexAppServerRestartDialogClass}, .${taskBoardMainHostClass}, .${taskBoardEntryContextMenuClass}, [${taskBoardEntryAttribute}="true"], .${codexOpenInMenuClass}, [${codexOpenInButtonAttribute}="true"], .${codexPromptOptimizePortalClass}, .${codexPromptOptimizeSettingsOverlayClass}, [${codexPromptOptimizeButtonAttribute}="true"], #codex-elves-menu`);
   }
@@ -26771,6 +26960,8 @@
     installCodexAppServerRestartPositionTracking();
   };
   window.__codexElvesRuntimeBuild = codexElvesBuild;
+  window.__codexComposerContextUsageCleanup = cleanupCodexComposerContextUsage;
+  document.addEventListener("visibilitychange", refreshCodexContextUsageAfterVisibility);
   installCodexTransportBadges();
   window.__codexElvesRuntimeHelperBase = helperBase;
   window.__codexElvesRuntimeStyleVersion = codexDeleteStyleVersion;

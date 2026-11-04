@@ -1,7 +1,8 @@
 (() => {
   const root = typeof window === "object" ? window : {};
-  const version = "1";
+  const version = "2";
   if (root.__codexElvesComposerFast?.version === version) return;
+  root.__codexElvesComposerFast?.configure?.({ enabled: false });
   const attribute = "data-codex-elves-fast";
   let adapters = null;
   let enabled = false;
@@ -158,6 +159,9 @@
 
   function render(state, error = "") {
     if (!enabled) { removeButton(); return; }
+    const model = selectedModel();
+    // 用户要求非 GPT 模型不显示 Fast；按实际模型及别名判断，未知模型也不显示灰色占位。
+    if (!model || !adapters?.isGptModel(model)) { removeButton(); return; }
     const anchor = adapters?.getAnchor();
     if (!anchor?.isConnected) { removeButton(); return; }
     let button = root.document.querySelector(`[${attribute}]`);
@@ -172,7 +176,6 @@
       button.addEventListener("click", toggle);
     }
     if (anchor.previousElementSibling !== button) anchor.before(button);
-    const model = selectedModel();
     const supported = state && allowed(state) && modelCapability(state, model);
     const active = supported && configuredFast(state);
     button.disabled = writing || !dispatcher || !supported || !!error;
