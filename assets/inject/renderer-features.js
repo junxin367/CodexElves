@@ -106,7 +106,7 @@
   const codexWorkspaceCheckpointPatchRetryMaxMs = 30000;
   const codexWorkspaceCheckpointBridgeTimeoutMs = 2000;
   const codexWorkspaceCheckpointRequestTimeoutMs = 60000;
-  const taskBoardRuntimeVersion = "63";
+  const taskBoardRuntimeVersion = "64";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
   const taskBoardNativeCreateBusyMessage = "另一个窗口正在创建原生会话，请稍后重试";
   const taskBoardEntryAttribute = "data-codex-task-board-entry";
@@ -7396,12 +7396,9 @@
     void window.__codexElvesComposerFast?.configure({
       enabled: codexElvesBackendSettings.enhancementsEnabled === true
         && codexElvesBackendSettings.codexAppNativeFastUnlock === true,
-      getAnchor: codexFastComposerPlacement,
+      getMenu: codexFastModelMenu,
       // 直接使用 app-server 的模型目录，不等待管理器后端目录加载或导出的内部组件。
-      getModel: (models) => codexServiceTierComposerSelectedModel(models?.map((entry) => ({
-        slug: entry.model || entry.id,
-        displayName: entry.displayName || "",
-      }))),
+      getModel: codexFastSelectedModel,
       isGptModel: (model) => window.__codexElvesNativeFastUnlock?.runtime?.isGptModel(model) === true,
       getDispatcher: async () => codexServiceTierDispatcher ||= await findCodexServiceTierDispatcher(),
       isCopilotActive: async () => {
@@ -7642,7 +7639,7 @@
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="pluginEntryUnlock" ${codexElvesBackendSettings.launchMode === "relay" ? 'disabled data-relay-unneeded="true"' : ""}><span></span></button>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">任务看板</div><div class="codex-elves-row-description">在左侧导航的“插件”下方显示内置任务看板入口；关闭时退出看板并恢复原生页面。默认开启。</div></div>
+              <div><div class="codex-elves-row-title">任务看板</div><div class="codex-elves-row-description">在左侧导航的“插件”下方显示入口，点击打开或唤醒独立任务看板窗口；关闭时移除入口。默认开启。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="taskBoard"><span></span></button>
             </div>
             <div class="codex-elves-row">
@@ -7654,7 +7651,7 @@
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="openInQuickAccess"><span></span></button>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">Fast 快捷开关</div><div class="codex-elves-row-description">在输入框工具栏显示独立 Fast 开关，仅适用于支持 Fast 的 GPT 模型和本机 API 模式；设置即时生效，实际支持与计费由供应商决定。</div></div>
+              <div><div class="codex-elves-row-title">Fast 快捷开关</div><div class="codex-elves-row-description">在默认模型选择菜单左上角显示独立 Fast 开关，仅适用于支持 Fast 的 GPT 模型和本机 API 模式；设置即时生效，实际支持与计费由供应商决定。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="nativeFastUnlock"><span></span></button>
             </div>
             <div class="codex-elves-row">
@@ -13597,15 +13594,8 @@
       event.preventDefault();
       event.stopPropagation();
       closeTaskBoardEntryContextMenu({ restoreFocus: false });
-      activateTaskBoard();
-    });
-    entry.addEventListener("contextmenu", (event) => {
-      openTaskBoardEntryContextMenu(entry, event);
-    });
-    entry.addEventListener("keydown", (event) => {
-      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
-        openTaskBoardEntryContextMenu(entry, event);
-      }
+      // 用户要求 Codex 内只保留入口；普通点击和键盘激活均唤醒独立任务看板窗口。
+      void activateTaskBoard();
     });
     return entry;
   }
@@ -21659,18 +21649,9 @@
       reconcileTaskBoardRuntime();
       return;
     }
-    taskBoardState.active = true;
-    taskBoardState.nativeCreateRecoveryAttempted = false;
-    clearTaskBoardNativeSelection();
-    taskBoardSetEntryActive(true);
-    if (!mountTaskBoardRoot()) {
-      taskBoardState.active = false;
-      taskBoardSetEntryActive(false);
-      restoreTaskBoardNativeSelection();
-      showToast("未找到 Codex 内容区，任务看板暂不可用");
-      return;
-    }
-    void refreshTaskBoardData().finally(() => void taskBoardRetryNativeCreateRecovery());
+    // 用户要求移除 Codex 内嵌看板：清理旧面板后只启动/唤醒独立窗口，不切换原生页面或导航选中项。
+    deactivateTaskBoard({ restoreNativeSelection: true });
+    return openStandaloneTaskBoard();
   }
 
   function installTaskBoardEntry() {
@@ -21678,24 +21659,7 @@
     const entry = reconcileTaskBoardEntry();
     if (!entry) return;
     taskBoardState.entry = entry;
-    taskBoardSetEntryActive(taskBoardState.active);
-    if (taskBoardState.navigationHandler) return;
-    taskBoardState.navigationHandler = (event) => {
-      if (!taskBoardState.active) return;
-      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-      if (!target || target.closest?.(`[${taskBoardEntryAttribute}="true"]`)) return;
-      const nativeNavigationTarget = taskBoardNativeNavigationControl(target);
-      if (!nativeNavigationTarget) return;
-      const releaseId = ++taskBoardState.navigationReleaseId;
-      queueMicrotask(() => {
-        if (!taskBoardState.active || releaseId !== taskBoardState.navigationReleaseId) return;
-        deactivateTaskBoard({
-          restoreNativeSelection: false,
-          nativeNavigationTarget,
-        });
-      });
-    };
-    document.addEventListener("click", taskBoardState.navigationHandler, true);
+    taskBoardSetEntryActive(false);
   }
 
   function disableTaskBoardRuntime() {
@@ -21717,11 +21681,9 @@
       disableTaskBoardRuntime();
       return;
     }
+    // 热更新或旧状态恢复也不得重新挂载内嵌界面；独立窗口继续复用原生会话宿主接口。
+    if (taskBoardState.active || taskBoardState.root) deactivateTaskBoard({ restoreNativeSelection: true });
     installTaskBoardEntry();
-    if (!taskBoardState.active) return;
-    clearTaskBoardNativeSelection();
-    if (!mountTaskBoardRoot()) return;
-    taskBoardSetEntryActive(true);
   }
 
   function refreshTaskBoardRuntime() {
@@ -25471,8 +25433,8 @@
   const codexServiceTierComposerFooterSelector = '.composer-footer, [class*="_footer_"], [class*="ComposerLayoutFooter"]';
 
   function codexFastComposerAnchor() {
-    // 用户要求依靠附近元素安放 Fast，不再寻找原生 Fast 的位置或压缩类名。
-    // 优先推理/模型按钮，其次权限按钮；必须与可见主输入框处于同一工具栏。
+    // 通过可见主输入框旁的推理/模型按钮读取当前模型，并供上下文用量图标定位。
+    // Fast 的位置单独由 codexFastModelMenu 决定，不再使用输入工具栏。
     const selectors = [
       '[data-composer-navigation-target="reasoning"]',
       '[data-composer-navigation-target="model"]',
@@ -25488,10 +25450,47 @@
     return null;
   }
 
-  function codexFastComposerPlacement() {
+  function codexFastModelMenu() {
+    // 用户要求按模型菜单定位，使用原生菜单的语义属性，避开原生 Fast 和每次构建会变化的 CSS 类名。
+    // 仅默认滑块视图显示入口，模型列表等子视图不占用左上角。
+    const menus = new Set();
+    for (const surface of document.querySelectorAll("[data-model-picker-view], [data-model-picker-power-slider]")) {
+      const menu = surface.closest?.('[role="menu"], [role="dialog"]');
+      if (!menu || menus.has(menu) || !codexServiceTierBadgeVisibleElement(menu)) continue;
+      menus.add(menu);
+      const view = menu.querySelector("[data-model-picker-view]");
+      if (view && view.getAttribute("data-model-picker-view") !== "simple") continue;
+      const owner = document.getElementById(menu.getAttribute("aria-labelledby") || "");
+      if (owner && !codexServiceTierIsMainComposerElement(owner)) continue;
+      return menu;
+    }
+    return null;
+  }
+
+  function codexFastSelectedModel(models = []) {
+    const entries = models.map((entry) => ({
+      slug: entry.model || entry.id, displayName: entry.displayName || "",
+    }));
+    // 菜单展开时优先读取该菜单的当前模型，避免输入框被原生菜单暂时遮蔽后丢失 Fast。
+    // 未识别或别名冲突时不猜测默认模型，保持非 GPT 模型不显示 Fast 的边界。
+    const control = codexFastModelMenu()?.querySelector("[data-model-picker-view-toggle]");
+    const texts = control ? codexServiceTierSelectedModelTexts(control) : [];
+    if (texts.length) {
+      for (const partial of [false, true]) {
+        for (const text of texts) {
+          const match = codexServiceTierCatalogModelMatch(text, partial, entries);
+          if (match.slug) return match.slug;
+          if (match.ambiguous) return "";
+        }
+      }
+      return "";
+    }
+    return codexServiceTierComposerSelectedModel(entries);
+  }
+
+  function codexComposerModelPlacement() {
     const anchor = codexFastComposerAnchor();
-    // tooltip 外层可能是普通 block，直接插入会让 Fast 换行；找到最近的横向 flex 子项。
-    // 最多跨过 4 层局部包装，不移动到整个输入区或发送按钮外侧。
+    // 保留上下文用量图标的工具栏布局：跨过局部 tooltip 包装，停在最近的横向 flex 子项。
     for (let node = anchor, depth = 0; node?.parentElement && depth < 4; node = node.parentElement, depth++) {
       const style = getComputedStyle(node.parentElement);
       if (["flex", "inline-flex"].includes(style.display) && style.flexDirection === "row") return node;
@@ -25577,7 +25576,7 @@
       .sort((left, right) => (right.score - left.score) || (left.index - right.index))[0]?.footer || null;
     if (known) return known;
     // 工具栏 CSS 类名变化时，从语义按钮向上找到包含输入框的最小容器。
-    // 模型识别与 Fast 安放共用此入口，避免按钮存在却无法确认当前模型。
+    // 当前模型读取和上下文用量图标共用此入口；Fast 固定在默认模型菜单中。
     const anchor = codexFastComposerAnchor();
     if (!anchor || (root !== document && !root.contains?.(anchor))) return null;
     for (let node = anchor.parentElement, depth = 0; node && depth < 7; node = node.parentElement, depth++) {
@@ -25689,7 +25688,7 @@
     if (activeConversationIdFromDom() !== id) return;
     const footer = codexServiceTierBestComposerFooter();
     const anchor = codexFastComposerAnchor();
-    const placement = codexFastComposerPlacement();
+    const placement = codexComposerModelPlacement();
     if (!usage || !anchor || !placement || codexContextUsageNativeVisible(footer)
       || !codexContextUsageNativeAllowsRecovery(anchor)) {
       removeCodexRecoveredContextUsage();
@@ -25702,7 +25701,7 @@
       badge.setAttribute("role", "img");
       badge.tabIndex = 0;
       // 用户要求恢复上下文入口：保持原生 16px 容器、12px 圆环和 5px 半径，
-      // 使用同一排的普通布局；放在 Fast/模型左侧，提示词优化与 Checkpoint 随容器避让。
+      // 使用同一排的普通布局；放在模型左侧，提示词优化与 Checkpoint 随容器避让。
       badge.style.cssText = "display:inline-flex;align-items:center;justify-content:center;flex:0 0 16px;width:16px;height:16px;color:var(--color-text-tertiary,currentColor);cursor:help";
       badge.innerHTML = '<svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="2" fill="none" opacity=".16"/><circle data-context-progress cx="6" cy="6" r="5" stroke="currentColor" stroke-width="2" fill="none" pathLength="100" stroke-dasharray="100" transform="rotate(-90 6 6)"/></svg>';
     }
@@ -25711,9 +25710,7 @@
     badge.setAttribute("aria-label", `上下文用量：${rounded}%（上次请求记录）`);
     badge.title = `上下文窗口\n${rounded}% 已使用（${100 - rounded}% 剩余）\n${usage.usedTokens.toLocaleString()} / ${usage.contextWindow.toLocaleString()} tokens\n上次请求记录；原生数据恢复后自动切回`;
     badge.querySelector("[data-context-progress]").setAttribute("stroke-dashoffset", String(100 - percent));
-    const fast = placement.parentElement?.querySelector("[data-codex-elves-fast]");
-    const before = fast?.parentElement === placement.parentElement ? fast : placement;
-    if (before.previousElementSibling !== badge) before.before(badge);
+    if (placement.previousElementSibling !== badge) placement.before(badge);
   }
 
   function refreshCodexComposerContextUsage() {

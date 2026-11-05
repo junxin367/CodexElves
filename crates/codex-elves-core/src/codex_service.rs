@@ -1508,11 +1508,27 @@ fn normalize_model(model: &Value) -> Option<Value> {
         .and_then(Value::as_str)
         .or_else(|| model.get("id").and_then(Value::as_str))
         .filter(|value| !value.trim().is_empty())?;
-    let supported = model
+    let mut supported = model
         .get("supportedReasoningEfforts")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    // 用户要求：没有桌面注入时，GPT 默认提供 Ultra；此补齐仅作用于 CLI 兜底，
+    // 注入路径仍由 native.js 按 Codex 的可见等级和功能开关处理。
+    if model_name
+        .trim()
+        .rsplit('/')
+        .next()
+        .is_some_and(|slug| slug.to_ascii_lowercase().starts_with("gpt-"))
+        && !supported
+            .iter()
+            .any(|effort| effort["reasoningEffort"] == "ultra")
+    {
+        supported.push(json!({
+            "reasoningEffort": "ultra",
+            "description": "Maximum reasoning with automatic task delegation"
+        }));
+    }
     Some(json!({
         "id": model.get("id").and_then(Value::as_str).unwrap_or(model_name),
         "model": model_name,
@@ -2153,6 +2169,46 @@ mod tests {
             "ultra"
         );
         assert!(normalize_model(&json!({"model":"hidden","hidden":true})).is_none());
+    }
+
+    #[test]
+    fn service_model_catalog_adds_ultra_only_for_gpt_without_changing_defaults() {
+        for model in ["gpt-5.5", "gpt-6.1-sol", "openai/gpt-6.1-terra"] {
+            let original = json!({
+                "model": model,
+                "defaultReasoningEffort": "xhigh",
+                "supportedReasoningEfforts": [{"reasoningEffort": "xhigh"}]
+            });
+            let normalized = normalize_model(&original).unwrap();
+            assert_eq!(normalized["defaultReasoningEffort"], "xhigh");
+            assert_eq!(
+                normalized["supportedReasoningEfforts"][0]["reasoningEffort"],
+                "xhigh"
+            );
+            assert_eq!(
+                normalized["supportedReasoningEfforts"][1]["reasoningEffort"],
+                "ultra"
+            );
+            assert_eq!(normalize_model(&normalized).unwrap(), normalized);
+            assert_eq!(
+                original["supportedReasoningEfforts"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        for model in ["claude-opus-5", "kimi-k3", "o3", "gptish-model"] {
+            let normalized = normalize_model(&json!({
+                "model": model,
+                "supportedReasoningEfforts": [{"reasoningEffort": "high"}]
+            }))
+            .unwrap();
+            assert_eq!(
+                normalized["supportedReasoningEfforts"],
+                json!([{"reasoningEffort": "high"}])
+            );
+        }
     }
 
     #[tokio::test]

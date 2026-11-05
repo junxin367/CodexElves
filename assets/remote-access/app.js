@@ -137,6 +137,7 @@ const submittedDrafts = new WeakMap();
 const promptOptimizations = new Map();
 let selectedSkills = [], selectedModel = "", selectedEffort = "", selectedGoal = null;
 let models = [], modelsPromise = null, modelsLoadedAt = 0, modelQuery = "", skillChoices = [], skillIndex = 0, skillLoadVersion = 0, skillScope = "";
+const modelCatalogCacheVersion = 1;
 let modelDefaults = { model: "", reasoningEffort: "" };
 const newChatModels = new Map();
 let skillLoading = null, creationProject = "", threadReadVersion = 0, tokenUsageVersion = 0, notifiedTokenUsage = null;
@@ -2665,7 +2666,8 @@ async function restoreReadViews(value) {
       && saved.savedSidebar.projects.every(project => validSummary(project) && Array.isArray(project.threads)
         && project.threads.every(validSummary)))
     sidebar = sidebarSnapshot(saved.savedSidebar);
-  if (saved.modelCatalog && Array.isArray(saved.modelCatalog.models)
+  // 用户要求注入路径跟随 Codex 配置；旧缓存尚未过滤 Ultra，升级后必须重新读取。
+  if (saved.modelCatalog?.version === modelCatalogCacheVersion && Array.isArray(saved.modelCatalog.models)
       && saved.modelCatalog.models.every(model => model && typeof model.model === "string"
         && (model.supportedReasoningEfforts == null || Array.isArray(model.supportedReasoningEfforts)))
       && catalogUsable(saved.modelCatalog)) {
@@ -3216,14 +3218,16 @@ async function loadModels(force = false) {
     if (!Array.isArray(result.data) || !result.data.every(model => model && typeof model.model === "string"
         && (model.supportedReasoningEfforts == null || Array.isArray(model.supportedReasoningEfforts))))
       throw new Error("模型列表返回格式无效");
+    // 用户要求两条路径各自决定 Ultra 可见性，网页不能绕过注入路径返回的关闭状态。
     const nextModels = result.data.map(model => ({
       ...model,
-      supportedReasoningEfforts: model.supportedReasoningEfforts || []
+      supportedReasoningEfforts: (model.supportedReasoningEfforts || [])
+        .filter(effort => result.ultraReasoningEnabled !== false || effort.reasoningEffort !== "ultra")
     }));
     models = nextModels;
     modelDefaults = { model: result.defaultModel || "", reasoningEffort: result.defaultReasoningEffort || "" };
     modelsLoadedAt = Date.now(); modelsRetryAt = 0;
-    cacheDisplayData("models", "global", { models, defaults: modelDefaults, loadedAt: modelsLoadedAt },
+    cacheDisplayData("models", "global", { version: modelCatalogCacheVersion, models, defaults: modelDefaults, loadedAt: modelsLoadedAt },
       { maxAge: catalogFallbackMs });
     return models;
   })();

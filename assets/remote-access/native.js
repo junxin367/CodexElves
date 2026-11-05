@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 130) return;
+  if (window.__codexElvesRemoteAccess?.version === 131) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -1036,6 +1036,30 @@
   const HISTORY_TURN_READ_CONCURRENCY = 2;
   const transcriptEventTypes = new Set(["modelChanged", "modelRerouted", "contextCompaction"]);
   const normalizePath = path => String(path || "").replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
+  async function nativeReasoningEffortSettings() {
+    if (!appScope) discover();
+    if (typeof appScope?.get !== "function")
+      throw failure(503, "Codex 原生思考深度配置尚未就绪");
+    const snapshot = await nativeModuleSnapshot("initial");
+    if (!snapshot?.rspack) throw failure(503, "当前 Codex 版本的原生思考深度配置无法识别");
+    const record = nativeRuntimeRecord(snapshot, source => source.includes("includeUltraReasoningEffort:")
+      && source.includes("enabledReasoningEfforts:") && source.includes('sendRequest("model/list"')
+      && source.includes("refetchOnWindowFocus:"), "模型配置");
+    const includeUltra = record.source.match(/includeUltraReasoningEffort:([\w$]+)/)?.[1];
+    const enabledEfforts = record.source.match(/enabledReasoningEfforts:([\w$]+)/)?.[1];
+    const escapeSymbol = symbol => symbol?.replace(/\$/g, "\\$");
+    const gate = includeUltra && record.source.match(new RegExp(
+      `=${escapeSymbol(includeUltra)}&&[\\w$]+\\(([\\w$]+)\\.([\\w$]+),["'\`]([^"'\`]+)["'\`]\\)`));
+    const preferences = enabledEfforts && record.source.match(new RegExp(
+      `null==${escapeSymbol(enabledEfforts)}\\?[\\w$]+\\(([\\w$]+)\\.([\\w$]+)\\):new Set\\(`));
+    if (!gate || !preferences) throw failure(503, "Codex 原生思考深度配置入口无法识别");
+    const feature = nativeRuntimeDependencyExport(record, gate[1], gate[2]);
+    const visibility = nativeRuntimeDependencyExport(record, preferences[1], preferences[2]);
+    const enabled = appScope.get(visibility);
+    if (!(enabled instanceof Set)) throw failure(503, "Codex 原生思考深度可见性配置无效");
+    return { enabledEfforts: new Set([...enabled, "persistent"]),
+      ultraEnabled: appScope.get(feature, gate[3]) === true };
+  }
   async function nativeModelCatalog() {
     const data = [], cursors = new Set();
     let cursor = null;
@@ -1046,9 +1070,17 @@
       if (cursor && cursors.has(cursor)) throw failure(503, "原生模型列表分页无效");
       if (cursor) cursors.add(cursor);
     } while (cursor);
+    // 用户要求：注入路径跟随 Codex 的可见等级和 Ultra 开关，不能把目录声明当作已开放。
+    // 原生配置无法读取时仅保留其它档位，禁止转用非注入路径的 GPT Ultra 默认策略。
+    const settings = await nativeReasoningEffortSettings().catch(error => {
+      reportNativeCompatibilityDiagnostic("models", error);
+      return { enabledEfforts: null, ultraEnabled: false };
+    });
     return data.filter(model => !model.hidden).map(model => ({
       ...model,
       supportedReasoningEfforts: array(model.supportedReasoningEfforts)
+        .filter(entry => entry.reasoningEffort !== "ultra" || settings.ultraEnabled)
+        .filter(entry => !settings.enabledEfforts || settings.enabledEfforts.has(entry.reasoningEffort))
     }));
   }
   async function validateReasoningEffort(model, effort) {
@@ -1910,6 +1942,16 @@
       Object.hasOwn(record.module, name) ? [record.module[name]] : []))];
     if (values.length !== 1) throw failure(503, `当前 Codex 版本的原生接口不可用（${name}）`);
     return values[0];
+  }
+  function nativeRuntimeDependencyExport(record, symbol, name) {
+    const escaped = symbol.replace(/\$/g, "\\$");
+    const imports = [...record.source.matchAll(new RegExp(
+      `(?:^|[^\\w$])${escaped}=[\\w$]+\\(["'\`]([^"'\`]+)["'\`]\\)`, "g"))];
+    const module = imports.length === 1
+      ? nativeRspackRuntime?.runtime.c[imports[0][1]]?.exports : null;
+    if (!module || !Object.hasOwn(module, name))
+      throw failure(503, "Codex 原生思考深度配置依赖未就绪");
+    return module[name];
   }
   function nativeRuntimeScope(snapshot, name) {
     const pattern = new RegExp(`([\\w$]+)=\\(0,[\\w$]+\\.[\\w$]+\\)\\(["'\`]${name}["'\`],`);
@@ -7360,7 +7402,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 130, call,
+    version: 131, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {

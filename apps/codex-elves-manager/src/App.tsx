@@ -6697,11 +6697,11 @@ function EnhanceScreen({
           <div className="feature-switch-grid">
             <FeatureToggle title="插件市场解锁" detail="API Key 模式下扩展插件市场请求，尽量显示完整插件列表；官方/混合模式通常不需要。" checked={form.codexAppPluginMarketplaceUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginMarketplaceUnlock", value)} />
             <FeatureToggle title="强制解锁入口" detail="恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。" checked={form.codexAppPluginEntryUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginEntryUnlock", value)} />
-            <FeatureToggle title="任务看板" detail="在 Codex 左侧导航的“插件”下方显示内置任务看板入口；关闭时退出看板并恢复原生页面。默认开启。" checked={form.codexAppTaskBoard} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppTaskBoard", value)} />
+            <FeatureToggle title="任务看板" detail="在 Codex 左侧导航的“插件”下方显示入口，点击打开或唤醒独立任务看板窗口；关闭时移除入口。默认开启。" checked={form.codexAppTaskBoard} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppTaskBoard", value)} />
             <FeatureToggle title="活动视图精简" detail="在 Codex 原生“查看活动”中仅显示会话名称和项目名称两行，隐藏消息摘要；关闭时恢复原生展示。默认关闭。" checked={form.codexAppActivityViewCompact} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppActivityViewCompact", value)} />
             <FeatureToggle title="快速打开工作区" detail="在 Codex 顶部工具栏最左侧显示 Open in 快捷按钮，用首选应用打开当前会话的工作目录。默认开启。" checked={form.codexAppOpenInQuickAccess} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppOpenInQuickAccess", value)} />
-            {/* 用户要求 Fast 通过输入框相邻控件定位，保留原配置键以兼容已有开关。 */}
-            <FeatureToggle title="Fast 快捷开关" detail="在输入框工具栏显示独立 Fast 开关，仅适用于支持 Fast 的 GPT 模型和本机 API 模式；设置即时生效，实际支持与计费由供应商决定。" checked={form.codexAppNativeFastUnlock} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeFastUnlock", value)} />
+            {/* 用户要求 Fast 固定在默认模型菜单左上角，保留原配置键以兼容已有开关。 */}
+            <FeatureToggle title="Fast 快捷开关" detail="在默认模型选择菜单左上角显示独立 Fast 开关，仅适用于支持 Fast 的 GPT 模型和本机 API 模式；设置即时生效，实际支持与计费由供应商决定。" checked={form.codexAppNativeFastUnlock} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeFastUnlock", value)} />
             <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮；删除后不可恢复。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />

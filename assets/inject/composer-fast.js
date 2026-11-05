@@ -1,6 +1,6 @@
 (() => {
   const root = typeof window === "object" ? window : {};
-  const version = "3";
+  const version = "4";
   if (root.__codexElvesComposerFast?.version === version) return;
   root.__codexElvesComposerFast?.configure?.({ enabled: false });
   const attribute = "data-codex-elves-fast";
@@ -13,6 +13,9 @@
   let refreshing = null;
   let writing = false;
   let revision = 0;
+  let menuPlacement = null;
+  let menuObserver = null;
+  let menuRefreshFrame = null;
   const pending = new Map();
 
   function request(method, params) {
@@ -155,6 +158,37 @@
 
   function removeButton() {
     root.document?.querySelectorAll(`[${attribute}]`).forEach((button) => button.remove());
+    if (menuPlacement?.restorePosition && menuPlacement.menu.style.position === "relative")
+      menuPlacement.menu.style.position = menuPlacement.originalPosition;
+    menuPlacement = null;
+  }
+
+  function syncMenuObserver() {
+    if (!enabled) {
+      menuObserver?.disconnect();
+      menuObserver = null;
+      if (menuRefreshFrame != null) root.cancelAnimationFrame(menuRefreshFrame);
+      menuRefreshFrame = null;
+      return;
+    }
+    if (menuObserver || !root.MutationObserver || !root.document?.body) return;
+    const selector = "[data-model-picker-view], [data-model-picker-power-slider]";
+    menuObserver = new root.MutationObserver((mutations) => {
+      const relevant = menuPlacement && !menuPlacement.menu.isConnected || mutations.some((mutation) =>
+        mutation.target?.closest?.(selector)
+        || [...mutation.addedNodes || [], ...mutation.removedNodes || []].some((node) =>
+          node.matches?.(selector) || node.querySelector?.(selector)));
+      if (!relevant || menuRefreshFrame != null) return;
+      menuRefreshFrame = root.requestAnimationFrame(() => {
+        menuRefreshFrame = null;
+        void refresh();
+      });
+    });
+    // 用户要求 Fast 跟随模型菜单：单独观察菜单开关和视图切换，不依赖原生 Fast 或输入区重绘。
+    menuObserver.observe(root.document.body, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ["data-model-picker-view", "data-state", "aria-hidden"],
+    });
   }
 
   function render(state, error = "") {
@@ -162,20 +196,27 @@
     const model = selectedModel();
     // 用户要求非 GPT 模型不显示 Fast；按实际模型及别名判断，未知模型也不显示灰色占位。
     if (!model || !adapters?.isGptModel(model)) { removeButton(); return; }
-    const anchor = adapters?.getAnchor();
-    if (!anchor?.isConnected) { removeButton(); return; }
+    const menu = adapters?.getMenu?.();
+    if (!menu?.isConnected) { removeButton(); return; }
+    if (menuPlacement?.menu !== menu) {
+      removeButton();
+      menuPlacement = { menu, originalPosition: menu.style.position,
+        restorePosition: root.getComputedStyle(menu).position === "static" };
+      if (menuPlacement.restorePosition) menu.style.position = "relative";
+    }
     let button = root.document.querySelector(`[${attribute}]`);
     if (!button) {
       button = root.document.createElement("button");
       button.type = "button";
       button.setAttribute(attribute, "true");
-      // 用户要求 Fast 只显示闪电图标并放在模型左侧；28px 点击区跟随工具栏高度，
-      // 16px 图标保持与相邻工具一致，不以文字宽度或绝对坐标定位。
+      // 用户要求 Fast 固定在默认模型选择菜单左上角，不再跟随原生 Fast 或输入工具栏。
+      // 28px 点击区、16px 图标和菜单内侧 8px 间距对应此紧凑菜单，不挤占中央模型标签和下方滑块。
       button.innerHTML = '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h8l-1 8 11-12h-8V2Z"/></svg>';
-      button.style.cssText = "display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;align-self:center;width:var(--height-button-composer,28px);height:var(--height-button-composer,28px);padding:0;margin-inline:2px;border:1px solid transparent;border-radius:999px;cursor:pointer";
+      button.style.cssText = "position:absolute;top:8px;left:8px;z-index:2;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;margin:0;border:1px solid transparent;border-radius:999px;cursor:pointer";
+      button.addEventListener("pointerdown", (event) => event.stopPropagation());
       button.addEventListener("click", toggle);
     }
-    if (anchor.previousElementSibling !== button) anchor.before(button);
+    if (button.parentElement !== menu) menu.appendChild(button);
     const supported = state && allowed(state) && modelCapability(state, model);
     const active = supported && configuredFast(state);
     button.disabled = writing || !dispatcher || !supported || !!error;
@@ -246,6 +287,7 @@
       const next = options.enabled === true;
       if (next !== enabled) { revision += 1; snapshotAt = 0; }
       enabled = next;
+      syncMenuObserver();
       return refresh();
     },
     refresh,

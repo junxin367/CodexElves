@@ -64,6 +64,7 @@ test("存储事件只匹配当前授权范围", () => {
 });
 
 const app = await readFile(new URL("../assets/remote-access/app.js", import.meta.url), "utf8");
+const native = await readFile(new URL("../assets/remote-access/native.js", import.meta.url), "utf8");
 const channels = await readFile(new URL("../assets/remote-access/channels.js", import.meta.url), "utf8");
 const diagnostics = await readFile(new URL("../assets/remote-access/diagnostics.js", import.meta.url), "utf8");
 const eventsClient = await readFile(new URL("../assets/remote-access/events-client.js", import.meta.url), "utf8");
@@ -3753,4 +3754,128 @@ test("没有内存记录时先恢复本地展示缓存，再等待会话网络�
   await opening;
   assert.equal(context.currentThreadDisplay().goal, null);
   assert.equal(context.currentThreadDisplay().queuedMessages.length, 0);
+});
+
+function nativeReasoningEffortHarness({ featureEnabled = true, visibleEfforts = ["low", "medium", "high", "xhigh", "max"],
+  unavailable = false, rawUltra = true } = {}) {
+  const feature = {}, visibility = {}, diagnostics = [];
+  const state = { featureEnabled, visibleEfforts, unavailable };
+  const levels = ["minimal", "low", "medium", "high", "xhigh", "max", ...(rawUltra ? ["ultra"] : [])];
+  const raw = [{ id: "gpt-6.1-sol", model: "gpt-6.1-sol", defaultReasoningEffort: "xhigh",
+    supportedReasoningEfforts: levels.map(reasoningEffort => ({ reasoningEffort })) },
+  { model: "hidden-model", hidden: true, supportedReasoningEfforts: [] }];
+  // 使用与当前 Codex 一致的查询结构，并覆盖打包器将导入符号压缩成含 $ 标识符的情况。
+  const record = { source: `modelList(e,t,n){var $flags=n("flags"),$visibility=n("visibility");
+    let query=({enabledReasoningEfforts:$efforts,includeUltraReasoningEffort:$ultra},{get:$get})=>{
+      let enabled=null==$efforts?$get($visibility.enabled):new Set([...$efforts,"persistent"]),
+        ultra=$ultra&&$get($flags.feature,"native-ultra-gate");
+      return {refetchOnWindowFocus:!0,queryFn:()=>client.sendRequest("model/list",{})};};}` };
+  const context = {
+    Set, state, raw, diagnostics, appScope: { get(value, key) {
+      if (value === visibility) return new Set(state.visibleEfforts);
+      assert.equal(value, feature); assert.equal(key, "native-ultra-gate");
+      return state.featureEnabled;
+    } },
+    nativeRspackRuntime: { runtime: { c: {
+      flags: { exports: { feature } }, visibility: { exports: { enabled: visibility } },
+    } } },
+    nativeModuleSnapshot: async () => {
+      if (state.unavailable) throw new Error("原生配置不可用");
+      return { rspack: true, records: [record] };
+    },
+    manager: { requestClient: { sendRequest: async (method, payload) => {
+      assert.equal(method, "model/list"); assert.equal(payload.limit, 100);
+      return { data: raw, nextCursor: null };
+    } } },
+    array: value => Array.isArray(value) ? value : [],
+    failure: (code, message) => Object.assign(new Error(message), { code }),
+    reportNativeCompatibilityDiagnostic: (...args) => diagnostics.push(args),
+    discover: () => assert.fail("已有原生配置上下文时不应重新发现"),
+  };
+  const section = (start, end) => {
+    const from = native.indexOf(start), to = native.indexOf(end, from);
+    assert.ok(from >= 0 && to > from); return native.slice(from, to);
+  };
+  vm.createContext(context);
+  vm.runInContext([
+    section("async function nativeReasoningEffortSettings(", "async function defaultModelSettings("),
+    section("function nativeRuntimeRecord(", "function nativeRuntimeScope("),
+  ].join("\n"), context);
+  return { context, state, raw, diagnostics,
+    efforts: model => Array.from(model.supportedReasoningEfforts, effort => effort.reasoningEffort) };
+}
+
+test("注入模型目录遵循 Codex 可见等级，原始目录中的 Ultra 不能绕过配置或发送校验", async () => {
+  const h = nativeReasoningEffortHarness();
+  const models = await h.context.nativeModelCatalog();
+  assert.equal(models.length, 1);
+  assert.deepEqual(h.efforts(models[0]), ["low", "medium", "high", "xhigh", "max"]);
+  assert.equal(models[0].defaultReasoningEffort, "xhigh");
+  assert.equal(h.efforts(h.raw[0]).includes("ultra"), true);
+  assert.equal(h.diagnostics.length, 0);
+  await assert.rejects(h.context.validateReasoningEffort("gpt-6.1-sol", "ultra"), { code: 400 });
+  await h.context.validateReasoningEffort("gpt-6.1-sol", "xhigh");
+});
+
+test("注入的 Ultra 只有在 Codex 开关和可见等级同时允许时展示，并在配置变化后重新核对", async () => {
+  const h = nativeReasoningEffortHarness({ featureEnabled: false, visibleEfforts: ["xhigh", "ultra"] });
+  assert.deepEqual(h.efforts((await h.context.nativeModelCatalog())[0]), ["xhigh"]);
+  h.state.featureEnabled = true;
+  assert.deepEqual(h.efforts((await h.context.nativeModelCatalog())[0]), ["xhigh", "ultra"]);
+  await h.context.validateReasoningEffort("gpt-6.1-sol", "ultra");
+  h.state.visibleEfforts = ["xhigh"];
+  assert.deepEqual(h.efforts((await h.context.nativeModelCatalog())[0]), ["xhigh"]);
+  await assert.rejects(h.context.validateReasoningEffort("gpt-6.1-sol", "ultra"), { code: 400 });
+});
+
+test("注入配置无法读取时保留其它等级且不开放 Ultra，原生未声明的 Ultra 也不补齐", async () => {
+  const unavailable = nativeReasoningEffortHarness({ unavailable: true });
+  assert.equal(unavailable.efforts((await unavailable.context.nativeModelCatalog())[0]).includes("xhigh"), true);
+  assert.equal(unavailable.efforts((await unavailable.context.nativeModelCatalog())[0]).includes("ultra"), false);
+  assert.ok(unavailable.diagnostics.length > 0);
+  const missing = nativeReasoningEffortHarness({ rawUltra: false, visibleEfforts: ["xhigh", "ultra"] });
+  assert.deepEqual(missing.efforts((await missing.context.nativeModelCatalog())[0]), ["xhigh"]);
+});
+
+test("模型列表显式关闭 Ultra 时网页不展示该等级，并保存带版本的目录缓存", async () => {
+  const writes = [];
+  const context = {
+    models: [], modelsPromise: null, modelsLoadedAt: 0, modelsRetryAt: 0,
+    modelDefaults: {}, modelCatalogCacheVersion: 1, catalogFallbackMs: 10000,
+    session: { device: { id: "device-a" } }, privateInputScope: () => "device-a",
+    cacheDisplayData: (...args) => writes.push(args),
+    catalogUsable: () => false, scheduleCatalogRefresh() {}, updateComposer() {}, $: () => ({ hidden: true }),
+    api: async path => {
+      assert.equal(path, "/api/read/models");
+      return { defaultModel: "gpt-6.1-sol", defaultReasoningEffort: "xhigh", ultraReasoningEnabled: false,
+        data: [{ model: "gpt-6.1-sol", supportedReasoningEfforts: [
+          { reasoningEffort: "xhigh" }, { reasoningEffort: "max" }, { reasoningEffort: "ultra" },
+        ] }] };
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(sourceSection("async function loadModels(", "function rememberedNewChatModel("), context);
+  const models = await context.loadModels(true);
+  assert.deepEqual(Array.from(models[0].supportedReasoningEfforts, effort => effort.reasoningEffort), ["xhigh", "max"]);
+  assert.equal(writes[0][2].version, 1);
+  assert.equal(context.modelDefaults.reasoningEffort, "xhigh");
+});
+
+test("升级后的远程页面拒绝恢复未按 Codex 配置过滤的旧模型目录缓存", async () => {
+  for (const version of [undefined, 1]) {
+    const modelCatalog = { version, loadedAt: Date.now(), models: [
+      { model: "gpt-6.1-sol", supportedReasoningEfforts: [{ reasoningEffort: "xhigh" }] },
+    ] };
+    const context = {
+      URLSearchParams, location: { hash: "" }, session: { device: { id: "device-a" } },
+      readScope: null, readGeneration: 0, sidebar: null, privateInputScope: () => "device-a",
+      models: [], modelsLoadedAt: 0, modelDefaults: {}, modelCatalogCacheVersion: 1,
+      readCache: { activate: async () => {}, get: async (_scope, kind) => kind === "models" ? modelCatalog : null },
+      optionalCachedRead: value => value, catalogUsable: () => true,
+    };
+    vm.createContext(context);
+    vm.runInContext(sourceSection("async function restoreReadViews(", "function clearPrivateInputs("), context);
+    await context.restoreReadViews(context.session);
+    assert.equal(context.models.length, version === 1 ? 1 : 0);
+  }
 });
