@@ -19,11 +19,17 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+; 用户要求安装完成页提供运行选项：默认勾选，仅点击“完成”后启动管理工具；取消勾选或静默安装均不启动。
+!define MUI_FINISHPAGE_RUN "$INSTDIR\codex-elves-manager.exe"
+!define MUI_FINISHPAGE_RUN_TEXT "$(FinishRunManager)"
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "English"
+
+LangString FinishRunManager ${LANG_SIMPCHINESE} "运行 CodexElves 管理工具"
+LangString FinishRunManager ${LANG_ENGLISH} "Run CodexElves Manager"
 
 Section "Install"
   SetOutPath "$INSTDIR"
@@ -61,8 +67,6 @@ Section "Install"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexElves" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexElves" "UninstallString" "$INSTDIR\uninstall.exe"
 
-  IfFileExists "$INSTDIR\codex-elves-manager.exe" 0 +2
-    Exec '"$INSTDIR\codex-elves-manager.exe"'
 SectionEnd
 
 Section "Uninstall"

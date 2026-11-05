@@ -115,6 +115,29 @@ fn windows_nsis_installer_uses_chinese_manager_shortcut_only() {
     assert!(!script.contains(r#"CreateShortcut "$DESKTOP\CodexElves Manager.lnk""#));
     assert!(script.contains(r#"Delete "$SMPROGRAMS\CodexElves Manager.lnk""#));
     assert!(script.contains(r#"Delete "$DESKTOP\CodexElves Manager.lnk""#));
+
+    // 完成页的运行选项默认勾选；安装区块不得提前启动程序，静默安装也不会触发完成页。
+    let finish_page = script
+        .split("!insertmacro MUI_PAGE_FINISH")
+        .next()
+        .expect("finish page configuration");
+    assert!(
+        finish_page.contains(r#"!define MUI_FINISHPAGE_RUN "$INSTDIR\codex-elves-manager.exe""#)
+    );
+    assert!(!finish_page.contains("MUI_FINISHPAGE_RUN_NOTCHECKED"));
+    let install_section = script
+        .split_once("Section \"Install\"")
+        .expect("install section")
+        .1
+        .split("SectionEnd")
+        .next()
+        .expect("install section body");
+    assert!(!install_section.lines().any(|line| {
+        let line = line.trim_start();
+        ["Exec ", "ExecWait ", "ExecShell "]
+            .iter()
+            .any(|command| line.starts_with(command))
+    }));
 }
 
 #[test]
