@@ -7407,7 +7407,7 @@ fn renderer_workspace_checkpoint_wraps_turns_and_native_message_edits() {
     ));
     assert!(script.contains("data-codex-workspace-checkpoint-button"));
     assert!(script.contains("button.setAttribute?.(\"aria-label\", \"打开 Checkpoint\")"));
-    assert!(script.contains(r#"const codexWorkspaceCheckpointVersion = "9";"#));
+    assert!(script.contains(r#"const codexWorkspaceCheckpointVersion = "10";"#));
     assert!(script.contains(
         "window.__codexElvesWorkspaceCheckpointRuntimeVersion === codexWorkspaceCheckpointVersion"
     ));

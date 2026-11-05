@@ -94,7 +94,7 @@
   const codexPromptOptimizeCompactCollisionMaxWidth = 140;
   const codexPromptOptimizeCompactCollisionMaxHeight = 84;
   const codexPromptOptimizeMaxRecentContextChars = 100000;
-  const codexWorkspaceCheckpointVersion = "9";
+  const codexWorkspaceCheckpointVersion = "10";
   const codexWorkspaceCheckpointButtonAttribute = "data-codex-workspace-checkpoint-button";
   const codexWorkspaceCheckpointButtonGap = 6;
   const codexWorkspaceCheckpointDialogClass = "codex-workspace-checkpoint-dialog";
@@ -105,6 +105,7 @@
   const codexWorkspaceCheckpointPatchRetryBaseMs = 1000;
   const codexWorkspaceCheckpointPatchRetryMaxMs = 30000;
   const codexWorkspaceCheckpointBridgeTimeoutMs = 2000;
+  const codexWorkspaceCheckpointNativeContextTimeoutMs = 2000;
   const codexWorkspaceCheckpointRequestTimeoutMs = 60000;
   const taskBoardRuntimeVersion = "64";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
@@ -5691,6 +5692,45 @@
     return promise;
   }
 
+  async function codexWorkspaceCheckpointNativeSessionContext(threadId) {
+    const id = validThreadSessionKey(threadId);
+    if (!id) return null;
+    let request;
+    let timer;
+    try {
+      const rpc = findCodexAppServerManagerRpcInScopedSignals();
+      if (!rpc) return null;
+      // 用户要求侧边会话正常发送：临时会话未必写入本地记录，须按目标 ID 读取原生目录。
+      // 原生读取最多等待 2 秒；只接受同一连接、同一会话的绝对路径，不借用父会话或当前页面目录。
+      request = rpc.getConversation(id);
+      const conversation = await Promise.race([
+        request,
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve(null), codexWorkspaceCheckpointNativeContextTimeoutMs);
+        }),
+      ]);
+      if (
+        !conversation ||
+        findCodexAppServerManagerRpcInScopedSignals() !== rpc ||
+        codexWorkspaceCheckpointSessionKey(conversation.id || conversation.conversationId) !==
+          codexWorkspaceCheckpointSessionKey(id) ||
+        (conversation.hostId && conversation.hostId !== "local")
+      ) {
+        return null;
+      }
+      const cwd = codexWorkspaceCheckpointConversationCwd(conversation);
+      return cwd ? { cwd, hostId: "local" } : null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+      try {
+        request?.[Symbol.dispose]?.();
+      } catch {
+      }
+    }
+  }
+
   function codexWorkspaceCheckpointContext(client, params = {}) {
     const threadId = codexWorkspaceCheckpointRequestThreadId(params);
     const previousWorkspace = window.__codexWorkspaceCheckpointLastWorkspace;
@@ -5798,6 +5838,22 @@
         local: (sessionContext.hostId || context.hostId || "local") === "local",
         cwdSource: "session",
       };
+    }
+    if (!resolved.cwd && !resolved.bridgeError) {
+      const nativeContext = await codexWorkspaceCheckpointNativeSessionContext(context.threadId);
+      if (nativeContext?.cwd) {
+        resolved = {
+          ...context,
+          ...nativeContext,
+          local: true,
+          cwdSource: "native",
+        };
+        rememberCodexWorkspaceCheckpointWorkspace(
+          context.threadId,
+          nativeContext.cwd,
+          nativeContext.hostId
+        );
+      }
     }
     if (!codexWorkspaceCheckpointHasExplicitThread(params)) {
       const current = codexWorkspaceCheckpointContext(client, {});

@@ -144,7 +144,7 @@ pub fn default_user_runtime_candidates() -> Vec<PathBuf> {
         }
     }
     candidates.retain(|path| !is_desktop_codex_path(path));
-    sort_codex_paths(&mut candidates);
+    // 用户要求减少重启时的重复探测：这里只收集候选，由调用方统一探测版本并排序。
     candidates
 }
 
@@ -195,12 +195,6 @@ fn probe_codex_cli_version_with_timeout(
             .map(|extension| extension.to_ascii_lowercase())
     });
     let mut command = match (cfg!(windows), extension.as_deref()) {
-        (true, Some("cmd" | "bat")) => {
-            let command_line = format!("\"{}\" --version", executable.display());
-            let mut command = Command::new("cmd.exe");
-            command.args(["/d", "/s", "/c", &command_line]);
-            command
-        }
         (true, Some("ps1")) => {
             let mut command = Command::new("powershell.exe");
             command.args([
@@ -215,11 +209,18 @@ fn probe_codex_cli_version_with_timeout(
             command
         }
         _ => {
+            // 命令脚本交给 Rust 处理 Windows 引号，避免手工包一层 cmd 导致版本探测失败。
             let mut command = Command::new(executable);
             command.arg("--version");
             command
         }
     };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // 用户要求重启 Codex 时不闪出终端；版本探测的 exe、cmd 和 PowerShell 入口都必须静默启动。
+        command.creation_flags(crate::windows_integration::CREATE_NO_WINDOW);
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
