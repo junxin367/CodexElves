@@ -14,8 +14,8 @@ const NATIVE_FAST_UNLOCK_SCRIPT: &str =
     include_str!("../../../assets/inject/native-fast-unlock.js");
 const COMPOSER_FAST_SCRIPT: &str = include_str!("../../../assets/inject/composer-fast.js");
 const NATIVE_RPC_COMPAT_SCRIPT: &str = include_str!("../../../assets/inject/native-rpc-compat.js");
-// RPC 转发修复需更换构建标识，确保已注入的旧运行时重新安装，不能只刷新旧处理器。
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261104-native-rpc-forwarding";
+// Fast 会话隔离需更换构建标识，让已注入的全局开关和原生发送处理器一起更新。
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261105-session-fast";
 
 pub fn renderer_script() -> &'static str {
     RENDERER_FEATURES_SCRIPT

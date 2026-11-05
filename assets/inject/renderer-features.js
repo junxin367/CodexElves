@@ -4796,8 +4796,8 @@
     return Object.defineProperties({}, descriptors);
   }
 
-  async function patchCodexNativeTurnParams(params) {
-    return await window.__codexElvesComposerFast?.patchTurnRequest?.(params) || params;
+  async function patchCodexNativeTurnParams(params, context) {
+    return await window.__codexElvesComposerFast?.patchTurnRequest?.(params, context) || params;
   }
 
   async function beginCodexNativeCheckpoint(operation, params) {
@@ -4864,10 +4864,10 @@
     }
   }
 
-  async function prepareCodexNativeSubmission(submission, operation) {
+  async function prepareCodexNativeSubmission(submission, operation, threadId) {
     if (submission?.executionHostId !== "local" || !submission.start?.request) return submission;
     const start = submission.start;
-    const request = await patchCodexNativeTurnParams(start.request);
+    const request = await patchCodexNativeTurnParams(start.request, { threadId });
     const context = {
       ...start.context,
       beforeSendRequest: async (...args) => {
@@ -4891,11 +4891,15 @@
     const operation = {};
     try {
       if (method === "startConversation") {
-        next[0] = await patchCodexNativeTurnParams(args[0]);
+        // 新建页的 Fast 选择在提交时固定；只有这次创建拿到真实 ID 后才保存，不能影响另一个草稿。
+        const fast = window.__codexElvesComposerFast;
+        const fastContext = fast?.captureContext?.();
+        next[0] = await patchCodexNativeTurnParams(args[0], fastContext);
         const options = args[1] || {};
         next[1] = {
           ...options,
           beforeFirstTurn: async (context) => {
+            fast?.bindConversation?.(fastContext, context.conversationId);
             await options.beforeFirstTurn?.(context);
             await beginCodexNativeCheckpoint(operation, { ...next[0], threadId: context.conversationId });
           },
@@ -4909,7 +4913,7 @@
         if (!start?.request) return await rpc[method](...args);
         const prepared = await prepareCodexNativeSubmission({
           executionHostId: "local", start,
-        }, operation);
+        }, operation, args[0]);
         next[1] = prepared.start;
         // startTurn 的第四个参数优先于 context 中的回调。
         if (typeof args[3] === "function") {
@@ -4939,7 +4943,7 @@
             clearCodexWorkspaceCheckpointRestoreIntent(intent);
           }
         }
-        next[1] = await patchCodexNativeTurnParams(args[1] || {});
+        next[1] = await patchCodexNativeTurnParams(args[1] || {}, { threadId: args[0] });
         if (history) {
           operation.previousTurnIds = new Set(history.turns.map((turn) => turn.turnId).filter(Boolean));
           await beginCodexNativeCheckpoint(operation, {
@@ -4948,7 +4952,7 @@
         }
       } else {
         // 空轮次/后续消息的原生返回值不保证有 turnId，保留原流程及参数契约。
-        next[1] = await patchCodexNativeTurnParams(args[1] || {});
+        next[1] = await patchCodexNativeTurnParams(args[1] || {}, { threadId: args[0] });
       }
       const result = await rpc[method](...next);
       let checkpointResult = result;
@@ -4981,7 +4985,7 @@
         prepareSubmission: prepareCodexNativeSubmission,
         finishSubmission: finishCodexNativeCheckpoint,
         invokeTurn: invokeCodexNativeTurn,
-        sendRequest: (rpc, [method, params, options]) => {
+        sendRequest: async (rpc, [method, params, options]) => {
           // 在普通适配对象上复用旧拦截，绝不向 RPC Stub 写入或删除属性。
           // 用户要求注入后不阻断 Windows 沙盒检查；新版 RPC 的 bind/call 会被解析为远程路径，
           // 必须用普通函数转发，让插件市场与 Checkpoint 两条分支只绑定本地函数。
@@ -4990,7 +4994,8 @@
           if (codexElvesSettings().pluginMarketplaceUnlock) patchPluginMarketplaceRequestClient(adapter);
           else adapter.sendRequest = (...values) =>
             codexWorkspaceCheckpointSendRequest(sendRequest, adapter, ...values);
-          return adapter.sendRequest(method, params, options);
+          const nextParams = method === "turn/start" ? await patchCodexNativeTurnParams(params) : params;
+          return adapter.sendRequest(method, nextParams, options);
         },
         prepareWorktree: (request) => applyUpstreamPendingWorktreeOverride({ request }).request,
       });
@@ -7399,6 +7404,9 @@
       getMenu: codexFastModelMenu,
       // 直接使用 app-server 的模型目录，不等待管理器后端目录加载或导出的内部组件。
       getModel: codexFastSelectedModel,
+      getContext: codexFastComposerContext,
+      getStatusPlacement: codexComposerModelPlacement,
+      getSessionRows: codexFastSessionRows,
       isGptModel: (model) => window.__codexElvesNativeFastUnlock?.runtime?.isGptModel(model) === true,
       getDispatcher: async () => codexServiceTierDispatcher ||= await findCodexServiceTierDispatcher(),
       isCopilotActive: async () => {
@@ -7651,7 +7659,7 @@
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="openInQuickAccess"><span></span></button>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">Fast 快捷开关</div><div class="codex-elves-row-description">在默认模型选择菜单左上角显示独立 Fast 开关，仅适用于支持 Fast 的 GPT 模型和本机 API 模式；设置即时生效，实际支持与计费由供应商决定。</div></div>
+              <div><div class="codex-elves-row-title">Fast 快捷开关</div><div class="codex-elves-row-description">在默认模型选择菜单左上角显示独立 Fast 开关，按会话保存，新会话默认关闭；输入区显示开关状态，侧栏闪电标记已开启的会话。仅适用于支持 Fast 的 GPT 模型和本机 API 模式，实际支持与计费由供应商决定。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="nativeFastUnlock"><span></span></button>
             </div>
             <div class="codex-elves-row">
@@ -25434,7 +25442,7 @@
 
   function codexFastComposerAnchor() {
     // 通过可见主输入框旁的推理/模型按钮读取当前模型，并供上下文用量图标定位。
-    // Fast 的位置单独由 codexFastModelMenu 决定，不再使用输入工具栏。
+    // Fast 开关仍固定在模型菜单；输入工具栏仅显示当前会话状态。
     const selectors = [
       '[data-composer-navigation-target="reasoning"]',
       '[data-composer-navigation-target="model"]',
@@ -25465,6 +25473,44 @@
       return menu;
     }
     return null;
+  }
+
+  const codexFastDraftIds = new WeakMap();
+  function codexFastComposerContext() {
+    const anchor = codexFastComposerAnchor();
+    if (!anchor) return null;
+    let mode = null, hostId = null, id = null;
+    // 用户要求会话独立：读取可见主输入框的原生会话属性，不能借侧栏当前行或隐藏聊天的 ID。
+    // marker 本身可能为零尺寸，优先沿语义模型按钮读取 React props，不修改原生状态。
+    for (let node = anchor, depth = 0; node && depth < 4; node = node.parentElement, depth++) {
+      for (const key of reactFiberKeys(node)) {
+        for (let fiber = node[key], count = 0; fiber && count < 80; fiber = fiber.return, count++) {
+          const props = fiber.memoizedProps;
+          if (!props || typeof props !== "object") continue;
+          if (mode == null && typeof props.composerMode === "string") mode = props.composerMode;
+          if (hostId == null && typeof props.hostId === "string") hostId = props.hostId;
+          if (id == null && Object.hasOwn(props, "conversationId")) id = props.conversationId || "";
+        }
+      }
+    }
+    if (mode !== "local" || (hostId != null && hostId !== "local")) return null;
+    if (id && !isTemporaryThreadId(id)) {
+      codexFastDraftIds.delete(anchor);
+      return { hostId: "local", threadId: validThreadSessionKey(id) };
+    }
+    if (id == null) return null;
+    if (!codexFastDraftIds.has(anchor)) codexFastDraftIds.set(anchor, crypto.randomUUID());
+    return { hostId: "local", draftId: id || codexFastDraftIds.get(anchor) };
+  }
+
+  function codexFastSessionRows() {
+    return sessionRows().flatMap((row) => {
+      const raw = row.getAttribute("data-app-action-sidebar-thread-id") || "";
+      if (!raw.startsWith("local:")) return [];
+      const id = isTemporaryThreadId(raw) ? sessionDeleteConversationIdFromRow(row) : validThreadSessionKey(raw);
+      const placement = row.querySelector(`${selectors.threadTitle}, .truncate.select-none, .truncate.text-base`);
+      return id && placement ? [{ row, placement, hostId: "local", threadId: id }] : [];
+    });
   }
 
   function codexFastSelectedModel(models = []) {
@@ -27044,10 +27090,10 @@
     }
     if (sidebarDirty || conversationDirty) {
       archivedPageRows().forEach(attachArchivedPageDeleteButton);
+      void window.__codexElvesComposerFast?.refresh();
     }
     if (conversationDirty) {
       refreshConversationView();
-      void window.__codexElvesComposerFast?.refresh();
       refreshCodexComposerContextUsage();
       installCodexAppServerRestartButtons();
       installCodexWorkspaceCheckpointTurnCompletionListener();
@@ -27178,6 +27224,7 @@
   function isExtensionUiNode(node) {
     if (node?.closest?.("[data-codex-context-usage]")) return true;
     if (node?.closest?.("[data-codex-elves-fast]")) return true;
+    if (node?.closest?.("[data-codex-elves-fast-status], [data-codex-elves-fast-session]")) return true;
     return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-elves-modal-overlay, .codex-workspace-checkpoint-overlay, [${codexWorkspaceCheckpointEditButtonAttribute}="true"], [${codexWorkspaceCheckpointButtonAttribute}="true"], .${projectMoveOverlayClass}, .codex-conversation-timeline, .${codexTokenUsageCardClass}, .${codexAppServerRestartButtonClass}, .${codexAppServerRestartDialogClass}, .${taskBoardMainHostClass}, .${taskBoardEntryContextMenuClass}, [${taskBoardEntryAttribute}="true"], .${codexOpenInMenuClass}, [${codexOpenInButtonAttribute}="true"], .${codexPromptOptimizePortalClass}, .${codexPromptOptimizeSettingsOverlayClass}, [${codexPromptOptimizeButtonAttribute}="true"], #codex-elves-menu`);
   }
 

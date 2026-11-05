@@ -11087,11 +11087,14 @@ fn injection_script_uses_independent_fast_in_default_model_menu() {
     assert!(script.contains("codexAppNativeFastUnlock"));
     assert!(script.contains("getMenu: codexFastModelMenu"));
     assert!(script.contains("getModel: codexFastSelectedModel"));
+    assert!(script.contains("getContext: codexFastComposerContext"));
+    assert!(script.contains("getSessionRows: codexFastSessionRows"));
     assert!(script.contains("[data-model-picker-view], [data-model-picker-power-slider]"));
     assert!(script.contains(r#"getAttribute("data-model-picker-view") !== "simple""#));
     let bootstrap = assets::injection_script(45221);
     assert!(bootstrap.contains("data-codex-elves-fast"));
-    assert!(bootstrap.contains("config/batchWrite"));
+    assert!(bootstrap.contains("codex-elves-fast-session-v1:"));
+    assert!(!bootstrap.contains(r#"request("config/batchWrite""#));
     assert!(bootstrap.contains("params.collaborationMode?.settings?.model || params.model"));
     assert!(!script.contains("data-codex-service-tier-controls"));
     assert!(!script.contains("data-codex-service-tier-badge"));
@@ -11103,19 +11106,36 @@ fn injection_script_uses_independent_fast_in_default_model_menu() {
 }
 
 #[test]
-fn independent_fast_tracks_model_menu_without_moving_composer_controls() {
+fn independent_fast_tracks_threads_drafts_and_visible_state() {
     let node_script = r#"
 const assert=require("node:assert/strict"),fs=require("node:fs"),vm=require("node:vm");
-const source=fs.readFileSync(process.argv[1],"utf8"),buttons=[],listeners=new Map();
-let model="gpt-6.1-sol",menu={isConnected:true,style:{position:""},children:[],
-  appendChild(button){button.parentElement=this;this.children.push(button);}};
-function button(){
+const source=fs.readFileSync(process.argv[1],"utf8"),elements=[],listeners=new Map(),storage=new Map(),requests=[],notices=[];
+let model="gpt-6.1-sol",context={hostId:"local",threadId:"thread-aaaaaaaa"},storageFailure=false,deferConfig=null;
+function container(){
+  return {isConnected:true,style:{position:""},children:[],
+    appendChild(node){node.remove();node.parentElement=this;this.children.push(node);},
+    querySelector(selector){return this.children.find(node=>matches(node,selector))||null;}};
+}
+function matches(node,selector){
+  return selector.split(",").some(part=>node.getAttribute(part.trim().replace(/^\[|\]$/g,""))!==undefined);
+}
+function element(tag){
   const attributes=new Map(),svg={setAttribute(key,value){this[key]=value;}};
-  return {style:{},parentElement:null,disabled:false,events:new Map(),
+  const node={tagName:tag,style:{},parentElement:null,disabled:false,events:new Map(),textContent:"",
+    get isConnected(){return !!this.parentElement?.isConnected;},
+    get previousElementSibling(){const nodes=this.parentElement?.children||[];return nodes[nodes.indexOf(this)-1];},
+    before(value){value.remove();const nodes=this.parentElement.children;nodes.splice(nodes.indexOf(this),0,value);value.parentElement=this.parentElement;},
     setAttribute:(key,value)=>attributes.set(key,value),getAttribute:key=>attributes.get(key),
     querySelector:()=>svg,addEventListener(type,handler){this.events.set(type,handler);},
     remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(value=>value!==this);this.parentElement=null;}};
+  elements.push(node);return node;
 }
+let menu=container();
+const composer=container(),placement=element("button");composer.appendChild(placement);
+const rows=["thread-aaaaaaaa","thread-bbbbbbbb","thread-cccccccc"].map(threadId=>{
+ const row=container(),placement=element("span");row.appendChild(placement);
+ return{threadId,hostId:"local",row,placement};
+});
 const responses={
  "account/read":{account:{type:"apiKey"}},"configRequirements/read":{requirements:null},
  "config/read":{config:{service_tier:"priority",features:{fast_mode:true}}},
@@ -11124,34 +11144,115 @@ const responses={
 const root={crypto:{randomUUID:()=>String(Math.random())},setTimeout,clearTimeout,
  addEventListener:(type,handler)=>listeners.set(type,handler),
  getComputedStyle:element=>({position:element.style.position||"static"}),
- document:{body:{},querySelector:()=>buttons.find(value=>value.parentElement)||null,
-   querySelectorAll:()=>buttons.filter(value=>value.parentElement),
-   createElement(){const value=button();buttons.push(value);return value;}},
+ localStorage:{getItem:key=>storage.get(key)||null,setItem(key,value){if(storageFailure)throw Error("存储失败");storage.set(key,value);},
+   removeItem(key){if(storageFailure)throw Error("存储失败");storage.delete(key);}},
+ document:{body:{},querySelector:selector=>elements.find(value=>value.isConnected&&matches(value,selector))||null,
+   querySelectorAll:selector=>elements.filter(value=>value.isConnected&&matches(value,selector)),
+   createElement:element},
  electronBridge:{sendMessageFromView({request}){
-   queueMicrotask(()=>listeners.get("message")({data:{type:"mcp-response",hostId:"local",
-     message:{id:request.id,result:responses[request.method]}}}));return Promise.resolve();
+   requests.push(request);
+   const respond=()=>listeners.get("message")({data:{type:"mcp-response",hostId:"local",
+     message:{id:request.id,result:responses[request.method]}}});
+   if(request.method==="config/read"&&deferConfig){deferConfig(respond);deferConfig=null;}
+   else queueMicrotask(respond);return Promise.resolve();
  }}
 };
-const context={window:root,module:{exports:{}}};vm.runInNewContext(source,context);
-const api=root.__codexElvesComposerFast,dispatcher={dispatchMessage:()=>{}};
+const vmContext={window:root,module:{exports:{}}};vm.runInNewContext(source,vmContext);
+const api=root.__codexElvesComposerFast,dispatched=[],dispatcher={dispatchMessage:(...args)=>dispatched.push(args)};
+const options={enabled:true,getMenu:()=>menu,getModel:()=>model,getContext:()=>context,
+ getStatusPlacement:()=>placement,getSessionRows:()=>rows,
+ isGptModel:value=>value.startsWith("gpt-"),getDispatcher:async()=>dispatcher,
+ isCopilotActive:async()=>false,notify:message=>notices.push(message)};
+const query=attribute=>root.document.querySelector(`[${attribute}]`);
+const toggle=()=>query("data-codex-elves-fast").events.get("click")({preventDefault(){},stopPropagation(){}});
+const turn=(threadId,model="gpt-6.1-sol",serviceTier="priority")=>({threadId,model,serviceTier});
 (async()=>{
- await api.configure({enabled:true,getMenu:()=>menu,getModel:()=>model,
-   isGptModel:value=>value.startsWith("gpt-"),getDispatcher:async()=>dispatcher,
-   isCopilotActive:async()=>false,notify:message=>assert.fail(message)});
- const first=root.document.querySelector();
+ await api.configure(options);
+ const first=query("data-codex-elves-fast");
  assert.equal(first.parentElement,menu);
  assert.match(first.style.cssText,/position:absolute;top:8px;left:8px/);
  assert.match(first.style.cssText,/width:28px;height:28px/);
+ assert.equal(first.getAttribute("aria-pressed"),"false","旧全局 priority 不能开启新会话");
+ assert.equal(query("data-codex-elves-fast-status").textContent,"Fast 关");
+ assert.equal((await api.patchTurnRequest(turn("thread-aaaaaaaa"))).serviceTier,"default");
+ await toggle();
  assert.equal(first.getAttribute("aria-pressed"),"true");
+ assert.equal(query("data-codex-elves-fast-status").textContent,"Fast 开");
+ assert.equal(rows[0].row.querySelector("[data-codex-elves-fast-session]").getAttribute("aria-label"),"本会话已开启 Fast");
+ assert.equal(storage.get("codex-elves-fast-session-v1:local:thread-aaaaaaaa"),"true");
  assert.equal(menu.style.position,"relative");
- await api.refresh();assert.equal(root.document.querySelector(),first);
+ await api.refresh();assert.equal(query("data-codex-elves-fast"),first);
  const closed=menu;menu=null;await api.refresh();
- assert.equal(root.document.querySelector(),null);assert.equal(closed.style.position,"");
+ assert.equal(query("data-codex-elves-fast"),null);assert.equal(closed.style.position,"");
+ assert.equal(query("data-codex-elves-fast-status").textContent,"Fast 开","菜单关闭仍可确认状态");
  menu={...closed,style:{position:"fixed"},children:[]};await api.refresh();
- assert.equal(root.document.querySelector().parentElement,menu);
+ assert.equal(query("data-codex-elves-fast").parentElement,menu);
  assert.equal(menu.style.position,"fixed");
- model="claude-opus-5";await api.refresh();assert.equal(root.document.querySelector(),null);
+
+ context={hostId:"local",threadId:"thread-bbbbbbbb"};await api.refresh();
+ assert.equal(query("data-codex-elves-fast").getAttribute("aria-pressed"),"false");
+ assert.equal((await api.patchTurnRequest(turn("thread-bbbbbbbb"))).serviceTier,"default");
+ assert.equal((await api.patchTurnRequest(turn("thread-bbbbbbbb"),null)).serviceTier,"default");
+ assert.equal((await api.patchTurnRequest(turn("local:thread-aaaaaaaa"))).serviceTier,"priority","后台会话按自己的 ID 读取");
+ assert.equal((await api.patchTurnRequest(turn(undefined))).serviceTier,"default","无 ID 请求不能借用当前页面的设置");
+ const queued={hostId:"local",request:{method:"turn/start",params:turn("thread-aaaaaaaa")}};
+ await dispatcher.dispatchMessage("mcp-request",queued);
+ assert.equal(dispatched.at(-1)[1].request.params.serviceTier,"priority","旧 dispatcher 排队发送仍隔离会话");
+ assert.equal((await api.patchTurnRequest(turn("thread-bbbbbbbb","gpt-6.1-sol","ultrafast"))).serviceTier,"ultrafast");
+ const remote={...queued,hostId:"remote"};
+ dispatcher.dispatchMessage("mcp-request",remote);
+ assert.equal(dispatched.at(-1)[1],remote,"远程请求不变");
+ const nonGpt=turn("thread-aaaaaaaa","claude-opus-5",null);
+ assert.equal(await api.patchTurnRequest(nonGpt),nonGpt,"非 GPT 由原生模型门控处理");
+ model="claude-opus-5";await api.refresh();
+ assert.equal(query("data-codex-elves-fast"),null);
+ assert.equal(query("data-codex-elves-fast-status"),null);
+ model="gpt-6.1-sol";await api.refresh();
+
+ context={hostId:"local",draftId:"draft-first"};await api.refresh();
+ assert.equal(api.status().fast,false);
+ await toggle();const captured=api.captureContext();
+ assert.equal((await api.patchTurnRequest(turn(undefined),captured)).serviceTier,"priority","草稿只在显式创建路径使用");
+ context={hostId:"local",draftId:"draft-other"};await api.refresh();
+ assert.equal(api.status().fast,false,"另一个新建页默认关闭");
+ assert.equal((await api.patchTurnRequest(turn(undefined),api.captureContext())).serviceTier,"default");
+ api.bindConversation(captured,"thread-cccccccc");
+ assert.equal((await api.patchTurnRequest(turn("thread-cccccccc"))).serviceTier,"priority","首轮前绑定真实会话");
+ context={hostId:"local",draftId:"draft-first"};await api.refresh();
+ assert.equal(api.status().fast,false,"已提交草稿不影响下次新建");
+ context={hostId:"local",threadId:"thread-cccccccc"};await api.refresh();await toggle();
+ api.bindConversation(captured,"thread-cccccccc");
+ assert.equal(api.status().fast,false,"重复创建回调不能覆盖后来关闭的设置");
+
+ context={hostId:"local",threadId:"thread-bbbbbbbb"};await api.refresh();
+ storageFailure=true;await toggle();storageFailure=false;
+ assert.equal(api.status().fast,false,"保存失败不点亮");
+ assert.equal(notices.pop(),"存储失败");
+ let resume;deferConfig=resolve=>{resume=resolve;};
+ const changing=toggle();await new Promise(resolve=>setImmediate(resolve));
+ context={hostId:"local",threadId:"thread-aaaaaaaa"};resume();await changing;await api.refresh();
+ assert.equal(api.status().fast,true);
+ assert.equal(storage.has("codex-elves-fast-session-v1:local:thread-bbbbbbbb"),false,"导航后旧异步切换不能串写");
+ responses["configRequirements/read"]={requirements:{featureRequirements:{fast_mode:false}}};
+ assert.equal(await api.patchTurnRequest(nonGpt),nonGpt);
+ const denied=turn("thread-aaaaaaaa");
+ assert.equal(await api.patchTurnRequest(denied),denied,"保留管理员限制");
+ responses["configRequirements/read"]={requirements:null};
+ options.isCopilotActive=async()=>true;
+ await api.configure(options);
+ assert.equal(await api.patchTurnRequest(denied),denied,"保留 Copilot 边界");
+ options.isCopilotActive=async()=>false;
+ assert.equal(requests.some(request=>request.method==="config/batchWrite"),false,"切换从不修改全局配置");
  await api.configure({enabled:false});assert.equal(menu.style.position,"fixed");
+ assert.equal(query("data-codex-elves-fast-status"),null);
+ assert.equal(query("data-codex-elves-fast-session"),null);
+
+ const secondRoot={...root,document:{...root.document,body:null}},secondVm={window:secondRoot,module:{exports:{}}};
+ vm.runInNewContext(source,secondVm);
+ await secondRoot.__codexElvesComposerFast.configure(options);
+ assert.equal(secondRoot.__codexElvesComposerFast.status().fast,true,"重新加载保留已保存的会话设置");
+ await secondRoot.__codexElvesComposerFast.configure({enabled:false});
+ assert.deepEqual(notices,[]);
 })().catch(error=>{console.error(error);process.exitCode=1;});
 "#;
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -11215,6 +11316,61 @@ text="Sol";assert.equal(read([
 ]),"");
 assert.equal(fallbackCalls,0);
 text=null;assert.equal(read(entries),"gpt-6.1-sol");assert.equal(fallbackCalls,1);
+"#;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(node_script)
+        .output()
+        .expect("node should be available");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn renderer_fast_resolves_only_the_active_local_composer_context() {
+    let source = assets::renderer_features_script();
+    let start = source.find("  const codexFastDraftIds =").unwrap();
+    let end = start
+        + source[start..]
+            .find("  function codexFastSessionRows(")
+            .unwrap();
+    let node_script = format!(
+        "const source={};\n",
+        serde_json::to_string(&source[start..end]).unwrap()
+    ) + r#"
+const assert=require("node:assert/strict");
+let anchor=null,sequence=0;
+const read=new Function("codexFastComposerAnchor","reactFiberKeys","isTemporaryThreadId",
+ "validThreadSessionKey","crypto",`${source};return codexFastComposerContext;`)(
+ ()=>anchor,()=>["fiber"],id=>id.includes("client-new-thread:"),
+ id=>/^[a-z0-9-]{8,128}$/i.test(id)?id:"",
+ {randomUUID:()=>`draft-${++sequence}`}
+);
+const props=(conversationId,composerMode="local",hostId="local")=>({
+ memoizedProps:{conversationId},
+ return:{memoizedProps:{composerMode,hostId}}
+});
+assert.equal(read(),null);
+anchor={fiber:props("thread-aaaaaaaa")};
+assert.deepEqual(read(),{hostId:"local",threadId:"thread-aaaaaaaa"});
+anchor.fiber=props(null);
+const first=read();
+assert.deepEqual(first,{hostId:"local",draftId:"draft-1"});
+assert.deepEqual(read(),first,"同一未提交草稿保持选择");
+anchor.fiber=props("thread-bbbbbbbb");read();
+anchor.fiber=props(null);
+assert.equal(read().draftId,"draft-2","从已有聊天返回新建页，不复用上一个草稿");
+anchor.fiber=props("client-new-thread:unique-id");
+assert.equal(read().draftId,"client-new-thread:unique-id");
+anchor.fiber=props("thread-aaaaaaaa","cloud");
+assert.equal(read(),null);
+anchor.fiber=props("thread-aaaaaaaa","local","remote-host");
+assert.equal(read(),null);
+anchor.fiber={memoizedProps:{composerMode:"local"}};
+assert.equal(read(),null,"缺少会话或草稿身份时不猜测当前侧栏行");
 "#;
     let output = Command::new("node")
         .arg("-e")
@@ -17873,6 +18029,7 @@ function build(text, env, expression) {
       resolveCodexAppServices:async()=>({}),
       findCodexLocalRuntimeInScopedSignals:predicate=>[requestRegistry,binding].find(predicate),
       codexNativeScopeTokens:[],
+      patchCodexNativeTurnParams:async params=>params,
       codexPluginMarketplaceUnlockVersion:"test",
       appServerRequestMethod:method=>method,
       restorePluginMarketplaceRequestParams:params=>params,
@@ -17920,8 +18077,12 @@ function build(text, env, expression) {
   }
 
   const nativeSource = section("  const codexNativeCheckpointOperations", "  let codexNativeRpcInstallPromise");
-  const checkpoints=[], bindings=[], env = {
-    window:{__codexElvesComposerFast:{patchTurnRequest:async p=>({...p,serviceTier:"priority"})}},
+  const checkpoints=[], bindings=[], fastContexts=[], fastBindings=[], draft={hostId:"local",draftId:"native-draft",fast:true}, env = {
+    window:{__codexElvesComposerFast:{
+      captureContext:()=>draft,
+      bindConversation:(context,id)=>fastBindings.push([context,id]),
+      patchTurnRequest:async (p,context)=>{fastContexts.push(context);return{...p,serviceTier:"priority"};}
+    }},
     codexWorkspaceCheckpointFeatureEnabled:()=>true,
     codexWorkspaceCheckpointRequestThreadId:p=>p.threadId,
     clearCodexWorkspaceCheckpointCompletionHint:()=>{},
@@ -17959,6 +18120,16 @@ function build(text, env, expression) {
   const result=await helpers.invoke(createRpc,"startConversation",[{cwd:"E:/repo",model:"gpt-5.5"},{}]);
   assert.equal(result.firstTurn.turnId,"first");
   assert.deepEqual(bindings.at(-1),[id,"first"]);
+  assert.equal(fastContexts.at(-1),draft);
+  assert.deepEqual(fastBindings,[[draft,id]],"首轮前把本次草稿选择绑定到真实会话");
+  const direct={startTurn:async(id,start)=>({status:"accepted",turnId:"direct"}),
+    startEmptyTurn:async()=>null,sendFollowUpMessage:async()=>null};
+  await helpers.invoke(direct,"startTurn",[id,{request:{model:"gpt-5.5"},context:{}}]);
+  assert.deepEqual(fastContexts.at(-1),{threadId:id},"原生直接发送显式传入目标会话");
+  for(const method of ["startEmptyTurn","sendFollowUpMessage"]){
+    await helpers.invoke(direct,method,[id,{model:"gpt-5.5"}]);
+    assert.deepEqual(fastContexts.at(-1),{threadId:id},"后续发送不能使用正在查看的另一个会话");
+  }
   const memberships=[],writes=[],moveCalls=[];
   const stateServices={
     applicationState:{read:async()=>({value:{keep:true}}),write:async(k,v)=>{writes.push([k,v]);return{success:true};}},

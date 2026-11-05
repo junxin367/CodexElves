@@ -1,9 +1,13 @@
 (() => {
   const root = typeof window === "object" ? window : {};
-  const version = "4";
+  const version = "5";
   if (root.__codexElvesComposerFast?.version === version) return;
   root.__codexElvesComposerFast?.configure?.({ enabled: false });
   const attribute = "data-codex-elves-fast";
+  const statusAttribute = "data-codex-elves-fast-status";
+  const sidebarAttribute = "data-codex-elves-fast-session";
+  const preferencePrefix = "codex-elves-fast-session-v1:";
+  const lightning = '<svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h8l-1 8 11-12h-8V2Z"/></svg>';
   let adapters = null;
   let enabled = false;
   let dispatcher = null;
@@ -17,6 +21,50 @@
   let menuObserver = null;
   let menuRefreshFrame = null;
   const pending = new Map();
+  const drafts = new Map();
+  const boundDrafts = new WeakSet();
+
+  function threadId(value) {
+    const id = typeof value === "string" ? value.trim().replace(/^local:/, "") : "";
+    return /^[A-Za-z0-9_.-]{8,128}$/.test(id)
+      && !["__proto__", "prototype", "constructor"].includes(id) ? id : "";
+  }
+
+  function contextKey(context) {
+    if (context?.hostId !== "local") return "";
+    const id = threadId(context.threadId);
+    return id ? `${preferencePrefix}local:${id}`
+      : context.draftId ? `draft:${context.draftId}` : "";
+  }
+
+  function readPreference(context) {
+    const key = contextKey(context);
+    if (!key) return false;
+    if (key.startsWith("draft:")) return drafts.get(key) === true;
+    return root.localStorage?.getItem(key) === "true";
+  }
+
+  function writePreference(context, value) {
+    const key = contextKey(context);
+    if (!key) throw new Error("未识别到当前本机会话，Fast 设置未改变");
+    if (key.startsWith("draft:")) {
+      if (value === true) drafts.set(key, true);
+      else drafts.delete(key);
+      return;
+    }
+    if (!root.localStorage) throw new Error("会话设置存储不可用");
+    if (value === true) root.localStorage.setItem(key, "true");
+    else root.localStorage.removeItem(key);
+    if (readPreference(context) !== (value === true)) throw new Error("Fast 会话设置保存失败");
+  }
+
+  function currentContext() {
+    return adapters?.getContext?.() || null;
+  }
+
+  function configuredFast(context = currentContext()) {
+    try { return readPreference(context); } catch { return false; }
+  }
 
   function request(method, params) {
     return new Promise((resolve, reject) => {
@@ -79,7 +127,6 @@
         requirements,
         config: {
           service_tier: configResponse?.config?.service_tier,
-          profile: configResponse?.config?.profile,
           features: { fast_mode: configResponse?.config?.features?.fast_mode },
         },
         models,
@@ -106,18 +153,20 @@
       && state.config.features?.fast_mode !== false;
   }
 
-  function configuredFast(state) {
-    return ["fast", "priority"].includes(state?.config?.service_tier);
-  }
-
   function selectedModel() {
     return adapters?.getModel?.(snapshot?.models) || "";
   }
 
-  async function patchMessage(type, payload) {
+  async function patchMessage(type, payload, context = {}) {
     const params = payload?.request?.params;
     if (!enabled || type !== "mcp-request" || payload?.hostId !== "local"
       || payload.request?.method !== "turn/start" || !params) return payload;
+    // 用户要求按会话设置 Fast：只按该请求的真实 threadId 查找，后台与排队发送不能读取当前页面。
+    // 新建请求由原生 startConversation 显式传入草稿，禁止把全局 service_tier 当作会话默认值。
+    const target = { hostId: "local", threadId: threadId(params.threadId) || threadId(context?.threadId),
+      draftId: context?.draftId };
+    const fast = target.threadId ? configuredFast(target)
+      : contextKey(target) && context?.fast === true;
     const state = await readSnapshot(true);
     if (!allowed(state)) return payload;
     // 用户要求 Fast 不依赖原生入口：在最终发送边界补齐等级，覆盖普通发送和出队发送。
@@ -125,11 +174,11 @@
     const model = params.collaborationMode?.settings?.model || params.model;
     const tier = modelCapability(state, model);
     if (!tier) return payload;
-    const selected = state.config.service_tier;
-    // 未配置时保留原生参数；flex/ultrafast 等其他等级也不能被此二态按钮改写。
-    if (!["fast", "priority", "default"].includes(selected)) return payload;
+    // flex/ultrafast 等其他等级仍由原生逻辑负责；显式开启本会话 Fast 时才选择 Fast。
+    const selected = params.serviceTier ?? state.config.service_tier;
+    if (!fast && selected != null && !["fast", "priority", "default"].includes(selected)) return payload;
     return { ...payload, request: { ...payload.request, params: {
-      ...params, serviceTier: configuredFast(state) ? tier.id : "default",
+      ...params, serviceTier: fast ? tier.id : "default",
     } } };
   }
 
@@ -163,6 +212,59 @@
     menuPlacement = null;
   }
 
+  function removeIndicators() {
+    root.document?.querySelectorAll(`[${statusAttribute}], [${sidebarAttribute}]`)
+      .forEach((node) => node.remove());
+  }
+
+  function renderIndicators(state, error) {
+    const model = selectedModel();
+    const context = currentContext();
+    const supported = !error && state && allowed(state) && contextKey(context) && modelCapability(state, model);
+    const placement = supported ? adapters?.getStatusPlacement?.() : null;
+    let badge = root.document?.querySelector(`[${statusAttribute}]`);
+    if (!placement?.isConnected) badge?.remove();
+    else {
+      if (!badge) {
+        badge = root.document.createElement("span");
+        badge.setAttribute(statusAttribute, "true");
+        badge.setAttribute("role", "status");
+        // 用户要求不展开模型菜单也能确认状态：在模型旁显示 Fast 开/关，使用普通布局避免覆盖原生控件。
+        // 11px 文字与模型工具栏的小字一致，不设置固定宽度，让开/关文案按内容占位。
+        badge.style.cssText = "display:inline-flex;align-items:center;gap:3px;flex:0 0 auto;font-size:11px;white-space:nowrap;cursor:help";
+      }
+      const active = configuredFast(context);
+      const text = active ? "Fast 开" : "Fast 关";
+      if (badge.textContent !== text) badge.textContent = text;
+      badge.style.color = active ? "#3b82f6" : "var(--color-text-tertiary,currentColor)";
+      badge.title = `本会话 ${text}；从下一次发送生效，实际服务等级以供应商响应为准`;
+      if (placement.previousElementSibling !== badge) placement.before(badge);
+    }
+    // 侧栏只标记明确开启的本机会话；标记表示已保存的发送设置，不能声称上游实际采用了 Fast。
+    const marked = new Set();
+    for (const entry of adapters?.getSessionRows?.() || []) {
+      const id = threadId(entry.threadId);
+      const active = enabled && allowed(state) && id && configuredFast({ hostId: entry.hostId, threadId: id });
+      let icon = entry.row.querySelector(`[${sidebarAttribute}]`);
+      if (!active || !entry.placement?.isConnected) { icon?.remove(); continue; }
+      if (!icon) {
+        icon = root.document.createElement("span");
+        icon.setAttribute(sidebarAttribute, "true");
+        icon.setAttribute("role", "img");
+        icon.setAttribute("aria-label", "本会话已开启 Fast");
+        // 14px 占位须与上方 SVG 尺寸一致；4px 间隔保留图标和原生标题之间的分隔。
+        icon.style.cssText = "display:inline-flex;align-items:center;flex:0 0 14px;width:14px;height:14px;margin-inline-end:4px;color:#3b82f6";
+        icon.innerHTML = lightning.replace('fill="none"', 'fill="currentColor"');
+      }
+      icon.title = "本会话已开启 Fast；仅在支持 Fast 的 GPT 模型发送时生效";
+      if (entry.placement.previousElementSibling !== icon) entry.placement.before(icon);
+      marked.add(icon);
+    }
+    root.document?.querySelectorAll(`[${sidebarAttribute}]`).forEach((icon) => {
+      if (!marked.has(icon)) icon.remove();
+    });
+  }
+
   function syncMenuObserver() {
     if (!enabled) {
       menuObserver?.disconnect();
@@ -192,7 +294,8 @@
   }
 
   function render(state, error = "") {
-    if (!enabled) { removeButton(); return; }
+    if (!enabled) { removeButton(); removeIndicators(); return; }
+    renderIndicators(state, error);
     const model = selectedModel();
     // 用户要求非 GPT 模型不显示 Fast；按实际模型及别名判断，未知模型也不显示灰色占位。
     if (!model || !adapters?.isGptModel(model)) { removeButton(); return; }
@@ -217,11 +320,11 @@
       button.addEventListener("click", toggle);
     }
     if (button.parentElement !== menu) menu.appendChild(button);
-    const supported = state && allowed(state) && modelCapability(state, model);
-    const active = supported && configuredFast(state);
+    const supported = state && allowed(state) && contextKey(currentContext()) && modelCapability(state, model);
+    const active = supported && configuredFast();
     button.disabled = writing || !dispatcher || !supported || !!error;
     button.setAttribute("aria-pressed", String(!!active));
-    button.setAttribute("aria-label", active ? "关闭 Fast" : "开启 Fast");
+    button.setAttribute("aria-label", active ? "关闭本会话 Fast" : "开启本会话 Fast");
     // 用户要求开启时显示实心蓝色闪电，两种状态均无背景；关闭时使用灰色空心图标。
     button.style.color = active ? "#3b82f6" : "var(--color-text-tertiary,currentColor)";
     button.style.background = "transparent";
@@ -229,7 +332,9 @@
     button.style.opacity = button.disabled ? ".5" : "1";
     button.title = error || (writing ? "正在保存 Fast 设置" : !state ? "正在读取 Fast 能力"
       : !allowed(state) ? "Fast 入口仅适用于允许 Fast 的本机 API 模式"
-        : !supported ? "当前模型未声明 Fast 能力" : active ? "Fast 已开启，点击关闭" : "Fast 已关闭，点击开启");
+        : !contextKey(currentContext()) ? "未识别到当前本机会话"
+          : !supported ? "当前模型未声明 Fast 能力"
+            : active ? "本会话 Fast 已开启，点击关闭" : "本会话 Fast 已关闭，点击开启");
   }
 
   async function toggle(event) {
@@ -238,24 +343,18 @@
     if (writing || !enabled) return;
     const token = revision;
     const model = selectedModel();
+    const context = currentContext();
+    const key = contextKey(context);
+    if (!key) return;
     writing = true;
     render(snapshot);
     try {
       const state = await readSnapshot(true);
       const capability = modelCapability(state, model);
-      if (token !== revision || !allowed(state) || !capability || selectedModel() !== model) return;
-      const profile = state.config.profile;
-      // 和原生开关一致，保存当前配置 profile 的默认服务等级；成功回读后才点亮。
-      await request("config/batchWrite", {
-        edits: [{
-          keyPath: profile ? `profiles.${profile}.service_tier` : "service_tier",
-          value: configuredFast(state) ? "default" : capability.id,
-          mergeStrategy: "upsert",
-        }],
-        filePath: null, expectedVersion: null, reloadUserConfig: true,
-      });
-      snapshotAt = 0;
-      await readSnapshot(true);
+      if (token !== revision || !allowed(state) || !capability || selectedModel() !== model
+        || contextKey(currentContext()) !== key) return;
+      // 用户要求现有会话互不影响、新会话默认关闭；不再写入 config.toml 或 profile 的全局服务等级。
+      writePreference(context, !configuredFast(context));
     } catch (error) {
       adapters?.notify?.(error.message || "Fast 设置保存失败");
     } finally {
@@ -265,7 +364,7 @@
   }
 
   function refresh() {
-    if (!enabled) { removeButton(); return Promise.resolve(); }
+    if (!enabled) { removeButton(); removeIndicators(); return Promise.resolve(); }
     render(snapshot);
     if (refreshing) return refreshing;
     refreshing = (async () => {
@@ -291,22 +390,40 @@
       return refresh();
     },
     refresh,
+    captureContext() {
+      const context = currentContext();
+      return context && { ...context, fast: configuredFast(context) };
+    },
+    bindConversation(context, id) {
+      if (!enabled || !context?.draftId || !contextKey(context) || !threadId(id) || boundDrafts.has(context)) return;
+      // 新建页的选择只交给本次创建的真实会话；草稿清空后，下一个新会话默认关闭。
+      try {
+        writePreference({ hostId: context.hostId, threadId: id }, context.fast === true);
+        boundDrafts.add(context);
+        drafts.delete(contextKey(context));
+        void refresh();
+      } catch (error) { adapters?.notify?.(error.message || "Fast 会话设置保存失败"); }
+    },
     // 新版原生发送走 RPC，和旧 dispatcher 共用同一组账号、模型及管理员限制。
-    async patchTurnRequest(params) {
+    async patchTurnRequest(params, context = {}) {
       try {
         return (await patchMessage("mcp-request", {
           hostId: "local", request: { method: "turn/start", params },
-        })).request.params;
+        }, context)).request.params;
       } catch (error) {
         adapters?.notify?.(`${error.message}，本轮保留原生服务等级`);
         return params;
       }
     },
-    status: () => ({ enabled, ready: !!dispatcher, loaded: !!snapshot, model: selectedModel() || null }),
+    status: () => ({ enabled, ready: !!dispatcher, loaded: !!snapshot, model: selectedModel() || null,
+      threadId: threadId(currentContext()?.threadId) || null, fast: configuredFast() }),
   };
   if (typeof module === "object" && module.exports) {
     module.exports = { api, modelCapability, allowed, patchMessage, onMessage };
   }
   root.addEventListener?.("message", onMessage);
+  root.addEventListener?.("storage", (event) => {
+    if (event.key?.startsWith(preferencePrefix)) void refresh();
+  });
   root.__codexElvesComposerFast = api;
 })();
