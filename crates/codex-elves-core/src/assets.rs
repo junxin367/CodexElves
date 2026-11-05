@@ -14,8 +14,8 @@ const NATIVE_FAST_UNLOCK_SCRIPT: &str =
     include_str!("../../../assets/inject/native-fast-unlock.js");
 const COMPOSER_FAST_SCRIPT: &str = include_str!("../../../assets/inject/composer-fast.js");
 const NATIVE_RPC_COMPAT_SCRIPT: &str = include_str!("../../../assets/inject/native-rpc-compat.js");
-// Fast 保持按会话隔离；名称标蓝提示需更新构建标识，让旧文字标签与样式一起替换。
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261105-fast-model-name";
+// Fast 保持按会话隔离和模型名称标蓝；更新构建标识，让旧版会话列表闪电随注入更新清理。
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261105-fast-no-sidebar";
 
 pub fn renderer_script() -> &'static str {
     RENDERER_FEATURES_SCRIPT

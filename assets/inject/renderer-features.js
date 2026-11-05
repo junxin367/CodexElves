@@ -671,7 +671,7 @@
     style.dataset.codexDeleteStyleVersion = codexDeleteStyleVersion;
     style.textContent = `
       /* 用户要求 Fast 开启时仅将当前模型名称标蓝；移除属性后恢复原生主题颜色，不占用额外输入区宽度。
-         蓝色沿用 Fast 菜单及侧栏闪电的 #3b82f6，三处状态色需保持一致。 */
+         蓝色沿用 Fast 菜单的 #3b82f6，两处状态色需保持一致。 */
       [data-codex-elves-fast-model="true"] {
         color: #3b82f6 !important;
       }
@@ -7411,7 +7411,6 @@
       getModel: codexFastSelectedModel,
       getContext: codexFastComposerContext,
       getModelLabel: codexFastModelLabel,
-      getSessionRows: codexFastSessionRows,
       isGptModel: (model) => window.__codexElvesNativeFastUnlock?.runtime?.isGptModel(model) === true,
       getDispatcher: async () => codexServiceTierDispatcher ||= await findCodexServiceTierDispatcher(),
       isCopilotActive: async () => {
@@ -7664,7 +7663,7 @@
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="openInQuickAccess"><span></span></button>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">Fast 快捷开关</div><div class="codex-elves-row-description">在默认模型选择菜单左上角显示独立 Fast 开关，按会话保存，新会话默认关闭；开启时模型名称标蓝，侧栏闪电标记已开启的会话。仅适用于支持 Fast 的 GPT 模型和本机 API 模式，实际支持与计费由供应商决定。</div></div>
+              <div><div class="codex-elves-row-title">Fast 快捷开关</div><div class="codex-elves-row-description">在默认模型选择菜单左上角显示独立 Fast 开关，按会话保存，新会话默认关闭；开启时模型名称标蓝。仅适用于支持 Fast 的 GPT 模型和本机 API 模式，实际支持与计费由供应商决定。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="nativeFastUnlock"><span></span></button>
             </div>
             <div class="codex-elves-row">
@@ -25506,16 +25505,6 @@
     if (id == null) return null;
     if (!codexFastDraftIds.has(anchor)) codexFastDraftIds.set(anchor, crypto.randomUUID());
     return { hostId: "local", draftId: id || codexFastDraftIds.get(anchor) };
-  }
-
-  function codexFastSessionRows() {
-    return sessionRows().flatMap((row) => {
-      const raw = row.getAttribute("data-app-action-sidebar-thread-id") || "";
-      if (!raw.startsWith("local:")) return [];
-      const id = isTemporaryThreadId(raw) ? sessionDeleteConversationIdFromRow(row) : validThreadSessionKey(raw);
-      const placement = row.querySelector(`${selectors.threadTitle}, .truncate.select-none, .truncate.text-base`);
-      return id && placement ? [{ row, placement, hostId: "local", threadId: id }] : [];
-    });
   }
 
   function codexFastSelectedModel(models = []) {

@@ -1,14 +1,14 @@
 (() => {
   const root = typeof window === "object" ? window : {};
-  const version = "6";
+  const version = "7";
   if (root.__codexElvesComposerFast?.version === version) return;
   root.__codexElvesComposerFast?.configure?.({ enabled: false });
   const attribute = "data-codex-elves-fast";
   const statusAttribute = "data-codex-elves-fast-status";
   const modelAttribute = "data-codex-elves-fast-model";
+  // 仅用于清理旧版列表闪电；用户要求会话列表不再增加 Fast 标识。
   const sidebarAttribute = "data-codex-elves-fast-session";
   const preferencePrefix = "codex-elves-fast-session-v1:";
-  const lightning = '<svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h8l-1 8 11-12h-8V2Z"/></svg>';
   let adapters = null;
   let enabled = false;
   let dispatcher = null;
@@ -233,32 +233,10 @@
     const model = selectedModel();
     const context = currentContext();
     const supported = !error && state && allowed(state) && contextKey(context) && modelCapability(state, model);
-    // 清理旧版本的“Fast 开 / Fast 关”标签，新的状态只通过当前模型名称颜色显示。
-    root.document?.querySelectorAll(`[${statusAttribute}]`).forEach((node) => node.remove());
+    // 用户要求去除会话列表闪电；同时清理旧文字标签，只通过模型名称标蓝提示当前会话状态。
+    root.document?.querySelectorAll(`[${statusAttribute}], [${sidebarAttribute}]`)
+      .forEach((node) => node.remove());
     highlightModel(supported && configuredFast(context) ? adapters?.getModelLabel?.(state.models) : null);
-    // 侧栏只标记明确开启的本机会话；标记表示已保存的发送设置，不能声称上游实际采用了 Fast。
-    const marked = new Set();
-    for (const entry of adapters?.getSessionRows?.() || []) {
-      const id = threadId(entry.threadId);
-      const active = enabled && allowed(state) && id && configuredFast({ hostId: entry.hostId, threadId: id });
-      let icon = entry.row.querySelector(`[${sidebarAttribute}]`);
-      if (!active || !entry.placement?.isConnected) { icon?.remove(); continue; }
-      if (!icon) {
-        icon = root.document.createElement("span");
-        icon.setAttribute(sidebarAttribute, "true");
-        icon.setAttribute("role", "img");
-        icon.setAttribute("aria-label", "本会话已开启 Fast");
-        // 14px 占位须与上方 SVG 尺寸一致；4px 间隔保留图标和原生标题之间的分隔。
-        icon.style.cssText = "display:inline-flex;align-items:center;flex:0 0 14px;width:14px;height:14px;margin-inline-end:4px;color:#3b82f6";
-        icon.innerHTML = lightning.replace('fill="none"', 'fill="currentColor"');
-      }
-      icon.title = "本会话已开启 Fast；仅在支持 Fast 的 GPT 模型发送时生效";
-      if (entry.placement.previousElementSibling !== icon) entry.placement.before(icon);
-      marked.add(icon);
-    }
-    root.document?.querySelectorAll(`[${sidebarAttribute}]`).forEach((icon) => {
-      if (!marked.has(icon)) icon.remove();
-    });
   }
 
   function syncMenuObserver() {

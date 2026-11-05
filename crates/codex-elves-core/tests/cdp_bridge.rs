@@ -11097,7 +11097,8 @@ fn injection_script_uses_independent_fast_in_default_model_menu() {
         .unwrap();
     assert!(model_color.contains("color: #3b82f6 !important;"));
     assert!(script.contains("getContext: codexFastComposerContext"));
-    assert!(script.contains("getSessionRows: codexFastSessionRows"));
+    assert!(!script.contains("getSessionRows: codexFastSessionRows"));
+    assert!(!script.contains("function codexFastSessionRows("));
     assert!(script.contains("[data-model-picker-view], [data-model-picker-power-slider]"));
     assert!(script.contains(r#"getAttribute("data-model-picker-view") !== "simple""#));
     let bootstrap = assets::injection_script(45221);
@@ -11145,10 +11146,9 @@ const composer=container(),placement=element("button");composer.appendChild(plac
 let modelLabel=element("span");modelLabel.textContent="6.1 Sol";modelLabel.style.color="orange";composer.appendChild(modelLabel);
 const legacyLabel=element("span");legacyLabel.setAttribute("data-codex-elves-fast-status","true");
 legacyLabel.textContent="Fast 开";composer.appendChild(legacyLabel);
-const rows=["thread-aaaaaaaa","thread-bbbbbbbb","thread-cccccccc"].map(threadId=>{
- const row=container(),placement=element("span");row.appendChild(placement);
- return{threadId,hostId:"local",row,placement};
-});
+const sidebarRow=container(),nativeSidebarIcon=element("span"),legacySidebarIcon=element("span");
+sidebarRow.appendChild(nativeSidebarIcon);
+legacySidebarIcon.setAttribute("data-codex-elves-fast-session","true");sidebarRow.appendChild(legacySidebarIcon);
 const responses={
  "account/read":{account:{type:"apiKey"}},"configRequirements/read":{requirements:null},
  "config/read":{config:{service_tier:"priority",features:{fast_mode:true}}},
@@ -11173,7 +11173,7 @@ const root={crypto:{randomUUID:()=>String(Math.random())},setTimeout,clearTimeou
 const vmContext={window:root,module:{exports:{}}};vm.runInNewContext(source,vmContext);
 const api=root.__codexElvesComposerFast,dispatched=[],dispatcher={dispatchMessage:(...args)=>dispatched.push(args)};
 const options={enabled:true,getMenu:()=>menu,getModel:()=>model,getContext:()=>context,
- getModelLabel:()=>modelLabel,getSessionRows:()=>rows,
+ getModelLabel:()=>modelLabel,getSessionRows:()=>assert.fail("Fast 不再读取会话列表创建标识"),
  isGptModel:value=>value.startsWith("gpt-"),getDispatcher:async()=>dispatcher,
  isCopilotActive:async()=>false,notify:message=>notices.push(message)};
 const query=attribute=>root.document.querySelector(`[${attribute}]`);
@@ -11187,6 +11187,8 @@ const turn=(threadId,model="gpt-6.1-sol",serviceTier="priority")=>({threadId,mod
  assert.match(first.style.cssText,/width:28px;height:28px/);
  assert.equal(first.getAttribute("aria-pressed"),"false","旧全局 priority 不能开启新会话");
  assert.equal(query("data-codex-elves-fast-status"),null,"清理旧版本文字标签，不增加新的常驻文字");
+ assert.equal(query("data-codex-elves-fast-session"),null,"清理旧版会话列表闪电");
+ assert.equal(nativeSidebarIcon.isConnected,true,"保留原生会话列表图标");
  assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),undefined);
  assert.equal(modelLabel.style.color,"orange","关闭时保留原生主题与行内颜色");
  assert.equal((await api.patchTurnRequest(turn("thread-aaaaaaaa"))).serviceTier,"default");
@@ -11195,7 +11197,8 @@ const turn=(threadId,model="gpt-6.1-sol",serviceTier="priority")=>({threadId,mod
  assert.equal(query("data-codex-elves-fast-status"),null);
  assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true");
  assert.equal(modelLabel.textContent,"6.1 Sol","开启时不改写模型名称文字");
- assert.equal(rows[0].row.querySelector("[data-codex-elves-fast-session]").getAttribute("aria-label"),"本会话已开启 Fast");
+ assert.equal(query("data-codex-elves-fast-session"),null,"开启 Fast 不再创建会话列表闪电");
+ assert.equal(nativeSidebarIcon.isConnected,true);
  assert.equal(storage.get("codex-elves-fast-session-v1:local:thread-aaaaaaaa"),"true");
  assert.equal(menu.style.position,"relative");
  await api.refresh();assert.equal(query("data-codex-elves-fast"),first);
@@ -11379,7 +11382,7 @@ fn renderer_fast_resolves_only_the_active_local_composer_context() {
     let start = source.find("  const codexFastDraftIds =").unwrap();
     let end = start
         + source[start..]
-            .find("  function codexFastSessionRows(")
+            .find("  function codexFastSelectedModel(")
             .unwrap();
     let node_script = format!(
         "const source={};\n",
