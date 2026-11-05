@@ -10397,7 +10397,7 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("codex-open-in-menu"));
     assert!(script.contains(r#"const codexOpenInVersion = "14";"#));
     assert!(script.contains("window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion"));
-    assert!(script.contains(r#"const codexDeleteStyleVersion = "109";"#));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "110";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
     assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
     assert!(script.contains("width: 30px !important;"));
@@ -11087,6 +11087,15 @@ fn injection_script_uses_independent_fast_in_default_model_menu() {
     assert!(script.contains("codexAppNativeFastUnlock"));
     assert!(script.contains("getMenu: codexFastModelMenu"));
     assert!(script.contains("getModel: codexFastSelectedModel"));
+    assert!(script.contains("getModelLabel: codexFastModelLabel"));
+    let model_color = script
+        .split(r#"[data-codex-elves-fast-model="true"] {"#)
+        .nth(1)
+        .expect("Fast model name style")
+        .split('}')
+        .next()
+        .unwrap();
+    assert!(model_color.contains("color: #3b82f6 !important;"));
     assert!(script.contains("getContext: codexFastComposerContext"));
     assert!(script.contains("getSessionRows: codexFastSessionRows"));
     assert!(script.contains("[data-model-picker-view], [data-model-picker-power-slider]"));
@@ -11126,12 +11135,16 @@ function element(tag){
     get previousElementSibling(){const nodes=this.parentElement?.children||[];return nodes[nodes.indexOf(this)-1];},
     before(value){value.remove();const nodes=this.parentElement.children;nodes.splice(nodes.indexOf(this),0,value);value.parentElement=this.parentElement;},
     setAttribute:(key,value)=>attributes.set(key,value),getAttribute:key=>attributes.get(key),
+    removeAttribute:key=>attributes.delete(key),
     querySelector:()=>svg,addEventListener(type,handler){this.events.set(type,handler);},
     remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(value=>value!==this);this.parentElement=null;}};
   elements.push(node);return node;
 }
 let menu=container();
 const composer=container(),placement=element("button");composer.appendChild(placement);
+let modelLabel=element("span");modelLabel.textContent="6.1 Sol";modelLabel.style.color="orange";composer.appendChild(modelLabel);
+const legacyLabel=element("span");legacyLabel.setAttribute("data-codex-elves-fast-status","true");
+legacyLabel.textContent="Fast 开";composer.appendChild(legacyLabel);
 const rows=["thread-aaaaaaaa","thread-bbbbbbbb","thread-cccccccc"].map(threadId=>{
  const row=container(),placement=element("span");row.appendChild(placement);
  return{threadId,hostId:"local",row,placement};
@@ -11160,7 +11173,7 @@ const root={crypto:{randomUUID:()=>String(Math.random())},setTimeout,clearTimeou
 const vmContext={window:root,module:{exports:{}}};vm.runInNewContext(source,vmContext);
 const api=root.__codexElvesComposerFast,dispatched=[],dispatcher={dispatchMessage:(...args)=>dispatched.push(args)};
 const options={enabled:true,getMenu:()=>menu,getModel:()=>model,getContext:()=>context,
- getStatusPlacement:()=>placement,getSessionRows:()=>rows,
+ getModelLabel:()=>modelLabel,getSessionRows:()=>rows,
  isGptModel:value=>value.startsWith("gpt-"),getDispatcher:async()=>dispatcher,
  isCopilotActive:async()=>false,notify:message=>notices.push(message)};
 const query=attribute=>root.document.querySelector(`[${attribute}]`);
@@ -11173,24 +11186,35 @@ const turn=(threadId,model="gpt-6.1-sol",serviceTier="priority")=>({threadId,mod
  assert.match(first.style.cssText,/position:absolute;top:8px;left:8px/);
  assert.match(first.style.cssText,/width:28px;height:28px/);
  assert.equal(first.getAttribute("aria-pressed"),"false","旧全局 priority 不能开启新会话");
- assert.equal(query("data-codex-elves-fast-status").textContent,"Fast 关");
+ assert.equal(query("data-codex-elves-fast-status"),null,"清理旧版本文字标签，不增加新的常驻文字");
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),undefined);
+ assert.equal(modelLabel.style.color,"orange","关闭时保留原生主题与行内颜色");
  assert.equal((await api.patchTurnRequest(turn("thread-aaaaaaaa"))).serviceTier,"default");
  await toggle();
  assert.equal(first.getAttribute("aria-pressed"),"true");
- assert.equal(query("data-codex-elves-fast-status").textContent,"Fast 开");
+ assert.equal(query("data-codex-elves-fast-status"),null);
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true");
+ assert.equal(modelLabel.textContent,"6.1 Sol","开启时不改写模型名称文字");
  assert.equal(rows[0].row.querySelector("[data-codex-elves-fast-session]").getAttribute("aria-label"),"本会话已开启 Fast");
  assert.equal(storage.get("codex-elves-fast-session-v1:local:thread-aaaaaaaa"),"true");
  assert.equal(menu.style.position,"relative");
  await api.refresh();assert.equal(query("data-codex-elves-fast"),first);
  const closed=menu;menu=null;await api.refresh();
  assert.equal(query("data-codex-elves-fast"),null);assert.equal(closed.style.position,"");
- assert.equal(query("data-codex-elves-fast-status").textContent,"Fast 开","菜单关闭仍可确认状态");
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true","菜单关闭后仍通过模型名称颜色确认状态");
+ const previousModelLabel=modelLabel;
+ modelLabel=element("span");modelLabel.textContent="6.1 Sol";modelLabel.style.color="orange";composer.appendChild(modelLabel);
+ await api.refresh();
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true","原生重绘模型名称后重新标蓝");
+ assert.equal(previousModelLabel.getAttribute("data-codex-elves-fast-model"),undefined,"旧名称节点恢复原色");
  menu={...closed,style:{position:"fixed"},children:[]};await api.refresh();
  assert.equal(query("data-codex-elves-fast").parentElement,menu);
  assert.equal(menu.style.position,"fixed");
 
  context={hostId:"local",threadId:"thread-bbbbbbbb"};await api.refresh();
  assert.equal(query("data-codex-elves-fast").getAttribute("aria-pressed"),"false");
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),undefined,"切换到未开启 Fast 的会话后恢复原色");
+ assert.equal(modelLabel.style.color,"orange");
  assert.equal((await api.patchTurnRequest(turn("thread-bbbbbbbb"))).serviceTier,"default");
  assert.equal((await api.patchTurnRequest(turn("thread-bbbbbbbb"),null)).serviceTier,"default");
  assert.equal((await api.patchTurnRequest(turn("local:thread-aaaaaaaa"))).serviceTier,"priority","后台会话按自己的 ID 读取");
@@ -11207,6 +11231,7 @@ const turn=(threadId,model="gpt-6.1-sol",serviceTier="priority")=>({threadId,mod
  model="claude-opus-5";await api.refresh();
  assert.equal(query("data-codex-elves-fast"),null);
  assert.equal(query("data-codex-elves-fast-status"),null);
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),undefined);
  model="gpt-6.1-sol";await api.refresh();
 
  context={hostId:"local",draftId:"draft-first"};await api.refresh();
@@ -11246,11 +11271,15 @@ const turn=(threadId,model="gpt-6.1-sol",serviceTier="priority")=>({threadId,mod
  await api.configure({enabled:false});assert.equal(menu.style.position,"fixed");
  assert.equal(query("data-codex-elves-fast-status"),null);
  assert.equal(query("data-codex-elves-fast-session"),null);
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),undefined,"关闭功能增强后恢复原色");
+ assert.equal(modelLabel.style.color,"orange");
 
  const secondRoot={...root,document:{...root.document,body:null}},secondVm={window:secondRoot,module:{exports:{}}};
+ delete secondRoot.__codexElvesComposerFast;
  vm.runInNewContext(source,secondVm);
  await secondRoot.__codexElvesComposerFast.configure(options);
  assert.equal(secondRoot.__codexElvesComposerFast.status().fast,true,"重新加载保留已保存的会话设置");
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true","重新加载后恢复模型名称标蓝");
  await secondRoot.__codexElvesComposerFast.configure({enabled:false});
  assert.deepEqual(notices,[]);
 })().catch(error=>{console.error(error);process.exitCode=1;});
@@ -11298,16 +11327,21 @@ fn renderer_fast_reads_open_model_menu_without_guessing_the_composer_model() {
         serde_json::to_string(&source).unwrap()
     ) + r#"
 const assert=require("node:assert/strict");
-let text="6.1 Sol Extra High",fallbackCalls=0;
+let text="6.1 Sol Extra High",fallbackCalls=0,labels=[],isModelControl=true;
 const entries=[{model:"gpt-6.1-sol"},{model:"claude-opus-5"}];
-const read=new Function("codexFastModelMenu","codexServiceTierSelectedModelTexts",
+const api=new Function("codexFastModelMenu","codexServiceTierSelectedModelTexts",
  "codexServiceTierComposerSelectedModel","taskBoardReasoningEffortDefinitions",
- `${source};return codexFastSelectedModel;`)(
+ "codexFastComposerAnchor","codexServiceTierBadgeVisibleElement","codexServiceTierBadgeText",
+ `${source};return {read:codexFastSelectedModel,label:codexFastModelLabel};`)(
  ()=>text===null?null:{querySelector:selector=>{assert.equal(selector,"[data-model-picker-view-toggle]");return{text};}},
  control=>[control.text],
  ()=>{fallbackCalls++;return"gpt-6.1-sol";},
- ["low","medium","high","xhigh","max","ultra"].map(id=>({id,label:id}))
+ ["low","medium","high","xhigh","max","ultra"].map(id=>({id,label:id})),
+ ()=>({matches:()=>isModelControl,querySelectorAll:()=>labels}),
+ node=>node.visible,
+ node=>node.textContent
 );
+const read=api.read;
 assert.equal(read(entries),"gpt-6.1-sol");
 text="Claude Opus 5";assert.equal(read(entries),"claude-opus-5");
 text="未知模型";assert.equal(read(entries),"");
@@ -11316,6 +11350,16 @@ text="Sol";assert.equal(read([
 ]),"");
 assert.equal(fallbackCalls,0);
 text=null;assert.equal(read(entries),"gpt-6.1-sol");assert.equal(fallbackCalls,1);
+text="6.1 Sol Extra High";
+const name={textContent:"6.1 Sol",visible:true,childElementCount:0,closest:()=>null};
+const effort={textContent:"Extra High",visible:true,childElementCount:0,closest:()=>null};
+const hidden={...name,closest:()=>({})};
+labels=[hidden,effort,name];
+assert.equal(api.label(entries),name,"只定位可见的模型名称，不给推理等级或隐藏测量文本染色");
+isModelControl=false;assert.equal(api.label(entries),null,"权限按钮不能作为模型名称标蓝");
+isModelControl=true;labels=[hidden,effort];
+assert.equal(api.label(entries),null,"未定位到模型名称时不染色整个按钮");
+assert.match(source,/用户要求只改变模型名称颜色/);
 "#;
     let output = Command::new("node")
         .arg("-e")

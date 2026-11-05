@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "109";
+  const codexDeleteStyleVersion = "110";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -670,6 +670,11 @@
     style.id = styleId;
     style.dataset.codexDeleteStyleVersion = codexDeleteStyleVersion;
     style.textContent = `
+      /* 用户要求 Fast 开启时仅将当前模型名称标蓝；移除属性后恢复原生主题颜色，不占用额外输入区宽度。
+         蓝色沿用 Fast 菜单及侧栏闪电的 #3b82f6，三处状态色需保持一致。 */
+      [data-codex-elves-fast-model="true"] {
+        color: #3b82f6 !important;
+      }
       /* 用户要求切换会话时宽度保持稳定：新节点和隐藏标签页从首次布局就使用设置值，
          不等待路由计时器/RAF 再从原生 768px 放大；右侧会话及其它焦点区域保持原生布局。 */
       html[data-codex-conversation-view="true"] :is(
@@ -7405,7 +7410,7 @@
       // 直接使用 app-server 的模型目录，不等待管理器后端目录加载或导出的内部组件。
       getModel: codexFastSelectedModel,
       getContext: codexFastComposerContext,
-      getStatusPlacement: codexComposerModelPlacement,
+      getModelLabel: codexFastModelLabel,
       getSessionRows: codexFastSessionRows,
       isGptModel: (model) => window.__codexElvesNativeFastUnlock?.runtime?.isGptModel(model) === true,
       getDispatcher: async () => codexServiceTierDispatcher ||= await findCodexServiceTierDispatcher(),
@@ -7659,7 +7664,7 @@
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="openInQuickAccess"><span></span></button>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">Fast 快捷开关</div><div class="codex-elves-row-description">在默认模型选择菜单左上角显示独立 Fast 开关，按会话保存，新会话默认关闭；输入区显示开关状态，侧栏闪电标记已开启的会话。仅适用于支持 Fast 的 GPT 模型和本机 API 模式，实际支持与计费由供应商决定。</div></div>
+              <div><div class="codex-elves-row-title">Fast 快捷开关</div><div class="codex-elves-row-description">在默认模型选择菜单左上角显示独立 Fast 开关，按会话保存，新会话默认关闭；开启时模型名称标蓝，侧栏闪电标记已开启的会话。仅适用于支持 Fast 的 GPT 模型和本机 API 模式，实际支持与计费由供应商决定。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="nativeFastUnlock"><span></span></button>
             </div>
             <div class="codex-elves-row">
@@ -25442,7 +25447,7 @@
 
   function codexFastComposerAnchor() {
     // 通过可见主输入框旁的推理/模型按钮读取当前模型，并供上下文用量图标定位。
-    // Fast 开关仍固定在模型菜单；输入工具栏仅显示当前会话状态。
+    // Fast 开关仍固定在模型菜单；开启时仅通过输入区模型名称标蓝提示状态。
     const selectors = [
       '[data-composer-navigation-target="reasoning"]',
       '[data-composer-navigation-target="model"]',
@@ -25532,6 +25537,36 @@
       return "";
     }
     return codexServiceTierComposerSelectedModel(entries);
+  }
+
+  function codexFastModelLabel(models = []) {
+    const anchor = codexFastComposerAnchor();
+    if (!anchor?.matches?.('[data-codex-intelligence-trigger="true"], [data-composer-navigation-target="reasoning"], [data-composer-navigation-target="model"]')) return null;
+    const selected = codexFastSelectedModel(models);
+    if (!selected) return null;
+    const entries = models.map((entry) => ({ slug: entry.model || entry.id, displayName: entry.displayName || "" }));
+    const selectors = [
+      '[class*="_ModelPickerTriggerModelText_"]',
+      '[class*="_ModelPickerTriggerModelLabel_"]',
+      '[class*="_WorkTriggerModelText_"]',
+      '[class*="_WorkTriggerModelLabel_"]',
+      '[data-tooltip-overflow-target="true"]',
+      "span",
+    ];
+    // 用户要求只改变模型名称颜色；排除隐藏测量文本，不给整个按钮、推理等级或权限入口染色。
+    for (const selector of selectors) {
+      const labels = Array.from(anchor.querySelectorAll(selector))
+        .filter((node) => !node.closest?.('[aria-hidden="true"]'))
+        .filter(codexServiceTierBadgeVisibleElement)
+        .filter((node) => (selector !== "span" && selector !== '[data-tooltip-overflow-target="true"]')
+          || node.childElementCount === 0);
+      for (const partial of [false, true]) {
+        const label = labels.find((node) =>
+          codexServiceTierCatalogModelMatch(codexServiceTierBadgeText(node), partial, entries).slug === selected);
+        if (label) return label;
+      }
+    }
+    return null;
   }
 
   function codexComposerModelPlacement() {

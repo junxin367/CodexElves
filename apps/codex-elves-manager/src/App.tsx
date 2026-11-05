@@ -6702,7 +6702,7 @@ function EnhanceScreen({
             <FeatureToggle title="快速打开工作区" detail="在 Codex 顶部工具栏最左侧显示 Open in 快捷按钮，用首选应用打开当前会话的工作目录。默认开启。" checked={form.codexAppOpenInQuickAccess} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppOpenInQuickAccess", value)} />
             {/* 用户要求 Fast 固定在默认模型菜单左上角，保留原配置键以兼容已有开关。 */}
             {/* Fast 的实际选择按会话保存；此开关仅控制入口与提示的启用，不能让新会话继承 Fast。 */}
-            <FeatureToggle title="Fast 快捷开关" detail="在默认模型选择菜单左上角显示独立 Fast 开关，按会话保存，新会话默认关闭；输入区显示开关状态，侧栏闪电标记已开启的会话。仅适用于支持 Fast 的 GPT 模型和本机 API 模式，实际支持与计费由供应商决定。" checked={form.codexAppNativeFastUnlock} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeFastUnlock", value)} />
+            <FeatureToggle title="Fast 快捷开关" detail="在默认模型选择菜单左上角显示独立 Fast 开关，按会话保存，新会话默认关闭；开启时模型名称标蓝，侧栏闪电标记已开启的会话。仅适用于支持 Fast 的 GPT 模型和本机 API 模式，实际支持与计费由供应商决定。" checked={form.codexAppNativeFastUnlock} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeFastUnlock", value)} />
             <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮；删除后不可恢复。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />

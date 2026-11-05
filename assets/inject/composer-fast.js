@@ -1,10 +1,11 @@
 (() => {
   const root = typeof window === "object" ? window : {};
-  const version = "5";
+  const version = "6";
   if (root.__codexElvesComposerFast?.version === version) return;
   root.__codexElvesComposerFast?.configure?.({ enabled: false });
   const attribute = "data-codex-elves-fast";
   const statusAttribute = "data-codex-elves-fast-status";
+  const modelAttribute = "data-codex-elves-fast-model";
   const sidebarAttribute = "data-codex-elves-fast-session";
   const preferencePrefix = "codex-elves-fast-session-v1:";
   const lightning = '<svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h8l-1 8 11-12h-8V2Z"/></svg>';
@@ -215,31 +216,26 @@
   function removeIndicators() {
     root.document?.querySelectorAll(`[${statusAttribute}], [${sidebarAttribute}]`)
       .forEach((node) => node.remove());
+    highlightModel(null);
+  }
+
+  function highlightModel(label) {
+    // 用户要求只在 Fast 开启时将模型名称标蓝；移除属性即可恢复原主题颜色，不改写原生行内样式。
+    root.document?.querySelectorAll(`[${modelAttribute}]`).forEach((node) => {
+      if (node !== label) node.removeAttribute(modelAttribute);
+    });
+    if (label?.isConnected && label.getAttribute(modelAttribute) !== "true") {
+      label.setAttribute(modelAttribute, "true");
+    }
   }
 
   function renderIndicators(state, error) {
     const model = selectedModel();
     const context = currentContext();
     const supported = !error && state && allowed(state) && contextKey(context) && modelCapability(state, model);
-    const placement = supported ? adapters?.getStatusPlacement?.() : null;
-    let badge = root.document?.querySelector(`[${statusAttribute}]`);
-    if (!placement?.isConnected) badge?.remove();
-    else {
-      if (!badge) {
-        badge = root.document.createElement("span");
-        badge.setAttribute(statusAttribute, "true");
-        badge.setAttribute("role", "status");
-        // 用户要求不展开模型菜单也能确认状态：在模型旁显示 Fast 开/关，使用普通布局避免覆盖原生控件。
-        // 11px 文字与模型工具栏的小字一致，不设置固定宽度，让开/关文案按内容占位。
-        badge.style.cssText = "display:inline-flex;align-items:center;gap:3px;flex:0 0 auto;font-size:11px;white-space:nowrap;cursor:help";
-      }
-      const active = configuredFast(context);
-      const text = active ? "Fast 开" : "Fast 关";
-      if (badge.textContent !== text) badge.textContent = text;
-      badge.style.color = active ? "#3b82f6" : "var(--color-text-tertiary,currentColor)";
-      badge.title = `本会话 ${text}；从下一次发送生效，实际服务等级以供应商响应为准`;
-      if (placement.previousElementSibling !== badge) placement.before(badge);
-    }
+    // 清理旧版本的“Fast 开 / Fast 关”标签，新的状态只通过当前模型名称颜色显示。
+    root.document?.querySelectorAll(`[${statusAttribute}]`).forEach((node) => node.remove());
+    highlightModel(supported && configuredFast(context) ? adapters?.getModelLabel?.(state.models) : null);
     // 侧栏只标记明确开启的本机会话；标记表示已保存的发送设置，不能声称上游实际采用了 Fast。
     const marked = new Set();
     for (const entry of adapters?.getSessionRows?.() || []) {
