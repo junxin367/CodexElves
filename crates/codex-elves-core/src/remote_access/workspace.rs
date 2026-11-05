@@ -56,6 +56,7 @@ struct Repository {
 struct GitOutput {
     bytes: Vec<u8>,
     success: bool,
+    exit_code: Option<i32>,
     truncated: bool,
 }
 
@@ -70,6 +71,7 @@ struct Blob {
 struct FileStamp {
     size: u64,
     modified: Option<SystemTime>,
+    resolved_path: Option<PathBuf>,
 }
 
 struct Side {
@@ -955,16 +957,22 @@ impl Repository {
         Ok(side)
     }
 
-    async fn read_worktree(&self, path: &str) -> Result<Side, ApiError> {
+    async fn read_worktree(&self, path: &str, tracked_file: bool) -> Result<Side, ApiError> {
         self.authorization
             .check()
             .await
             .map_err(super::authorization_error)?;
         let root = self.root.clone();
         let path = path.to_owned();
-        tokio::task::spawn_blocking(move || read_local(&root, &path))
-            .await
-            .map_err(|_| ApiError::new(503, "无法读取工作目录文件"))?
+        tokio::task::spawn_blocking(move || {
+            if tracked_file {
+                read_tracked_local(&root, &path)
+            } else {
+                read_local(&root, &path)
+            }
+        })
+        .await
+        .map_err(|_| ApiError::new(503, "无法读取工作目录文件"))?
     }
 
     async fn detail(&self, entry: &ChangeEntry) -> Result<Value, ApiError> {
@@ -980,11 +988,17 @@ impl Repository {
         } else {
             None
         };
+        // 用户要求预览目录联接内的已跟踪文件；仅放行 index 中仍为普通文件的准确路径。
+        let tracked_file = entry.section == "unstaged"
+            && old_path == entry.path
+            && before_blob
+                .as_ref()
+                .is_some_and(|blob| matches!(blob.mode.as_str(), "100644" | "100755"));
         let before = self.read_blob(before_blob.as_ref()).await?;
         let after = if entry.section == "staged" {
             self.read_blob(after_blob.as_ref()).await?
         } else {
-            self.read_worktree(&entry.path).await?
+            self.read_worktree(&entry.path, tracked_file).await?
         };
         let image = [(&before, old_path), (&after, entry.path.as_str())]
             .iter()
@@ -1104,9 +1118,15 @@ impl Repository {
                 .map_err(super::authorization_error)?;
             let root = self.root.clone();
             let path = entry.path.clone();
-            let current = tokio::task::spawn_blocking(move || local_stamp(&root, &path))
-                .await
-                .map_err(|_| ApiError::new(503, "无法校验文件状态"))??;
+            let current = tokio::task::spawn_blocking(move || {
+                if tracked_file {
+                    tracked_local_stamp(&root, &path)
+                } else {
+                    local_stamp(&root, &path)
+                }
+            })
+            .await
+            .map_err(|_| ApiError::new(503, "无法校验文件状态"))??;
             if current.as_ref() != Some(stamp) {
                 return Err(ApiError::new(409, "文件内容在读取期间更新，请刷新后重试"));
             }
@@ -1292,13 +1312,16 @@ async fn git_configured(
     authorization: Option<&RemoteAuthorization>,
     extra_config: &[&str],
 ) -> Result<GitOutput, ApiError> {
-    let mut config: Vec<_> = extra_config
-        .iter()
-        .map(|value| (*value).to_owned())
-        .collect();
+    let reads_worktree = matches!(args.first(), Some(&"status") | Some(&"diff"));
+    let mut config = if reads_worktree {
+        git_text_config(cwd).await?
+    } else {
+        Vec::new()
+    };
+    config.extend(extra_config.iter().map(|value| (*value).to_owned()));
     // status/diff can invoke arbitrary clean/process filters while hashing a
     // worktree file. Clear every configured driver, not just the common LFS one.
-    if matches!(args.first(), Some(&"status") | Some(&"diff")) {
+    if reads_worktree {
         let filters = git_process(
             cwd,
             &[
@@ -1341,11 +1364,77 @@ async fn git_configured(
     git_process(cwd, args, limit, &config).await
 }
 
+async fn git_text_config(cwd: &Path) -> Result<Vec<String>, ApiError> {
+    // 用户要求远程变更与本机 Git 一致：只读取原有换行设置，仍隔离钩子、过滤器和外部命令。
+    // 按 Git 自身的 include / worktree 优先级读取，后出现的同名配置覆盖前值。
+    let output = git_process_with_config_sources(
+        cwd,
+        &[
+            "config",
+            "--null",
+            "--includes",
+            "--type=bool-or-str",
+            "--get-regexp",
+            r"^core\.(autocrlf|eol)$",
+        ],
+        16 * 1024,
+        &[],
+        true,
+    )
+    .await?;
+    if output.truncated || !matches!(output.exit_code, Some(0 | 1)) {
+        return Err(ApiError::new(503, "无法读取 Git 换行设置"));
+    }
+    parse_git_text_config(&output.bytes)
+}
+
+fn parse_git_text_config(bytes: &[u8]) -> Result<Vec<String>, ApiError> {
+    let mut autocrlf = None;
+    let mut eol = None;
+    for record in bytes
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+    {
+        let record =
+            std::str::from_utf8(record).map_err(|_| ApiError::new(503, "Git 换行设置编码无效"))?;
+        let (key, value) = record
+            .split_once('\n')
+            .ok_or_else(|| ApiError::new(503, "Git 换行设置格式无效"))?;
+        let value = value.to_ascii_lowercase();
+        match key {
+            "core.autocrlf" if matches!(value.as_str(), "true" | "false" | "input") => {
+                autocrlf = Some(value);
+            }
+            "core.eol" if matches!(value.as_str(), "lf" | "crlf" | "native") => {
+                eol = Some(value);
+            }
+            _ => return Err(ApiError::new(503, "Git 换行设置包含无效值")),
+        }
+    }
+    Ok([
+        autocrlf.map(|value| format!("core.autocrlf={value}")),
+        eol.map(|value| format!("core.eol={value}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect())
+}
+
 async fn git_process(
     cwd: &Path,
     args: &[&str],
     limit: usize,
     config: &[String],
+) -> Result<GitOutput, ApiError> {
+    git_process_with_config_sources(cwd, args, limit, config, false).await
+}
+
+async fn git_process_with_config_sources(
+    cwd: &Path,
+    args: &[&str],
+    limit: usize,
+    config: &[String],
+    read_config_sources: bool,
 ) -> Result<GitOutput, ApiError> {
     let mut command = Command::new("git");
     command
@@ -1384,12 +1473,13 @@ async fn git_process(
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
         .env("GIT_NO_LAZY_FETCH", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env(
+        .env("GIT_TERMINAL_PROMPT", "0");
+    if !read_config_sources {
+        command.env("GIT_CONFIG_NOSYSTEM", "1").env(
             "GIT_CONFIG_GLOBAL",
             if cfg!(windows) { "NUL" } else { "/dev/null" },
         );
+    }
     #[cfg(windows)]
     command.creation_flags(0x08000000);
     let mut child = command
@@ -1416,6 +1506,7 @@ async fn git_process(
         Ok(GitOutput {
             bytes,
             success: status.success(),
+            exit_code: status.code(),
             truncated,
         })
     };
@@ -1565,6 +1656,7 @@ fn stamp(metadata: &Metadata) -> FileStamp {
     FileStamp {
         size: metadata.len(),
         modified: metadata.modified().ok(),
+        resolved_path: None,
     }
 }
 
@@ -1621,6 +1713,85 @@ fn local_stamp(root: &Path, relative: &str) -> Result<Option<FileStamp>, ApiErro
         .map(|file| file.metadata().map(|metadata| stamp(&metadata)))
         .transpose()
         .map_err(|_| ApiError::new(503, "无法校验文件属性"))
+}
+
+fn tracked_local_target(root: &Path, relative: &str) -> Result<Option<PathBuf>, ApiError> {
+    if !safe_relative_path(relative) {
+        return Err(ApiError::new(400, "文件路径无效"));
+    }
+    let path = root.join(relative);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if is_link(&metadata) || !metadata.is_file() => {
+            return Err(ApiError::new(422, "符号链接、目录和特殊文件不提供内容预览"));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(ApiError::new(403, "无法读取已跟踪文件属性")),
+    }
+    let target = std::fs::canonicalize(path)
+        .map_err(|_| ApiError::new(409, "文件路径在读取期间更新，请刷新后重试"))?;
+    if !super::canonical_path_is_local(&target)
+        || target.components().any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|value| value.eq_ignore_ascii_case(".git"))
+        })
+    {
+        return Err(ApiError::new(403, "不预览网络路径或 Git 内部文件"));
+    }
+    Ok(Some(target))
+}
+
+fn tracked_target_parts(target: &Path) -> Result<(&Path, &str), ApiError> {
+    target
+        .parent()
+        .zip(target.file_name().and_then(|name| name.to_str()))
+        .ok_or_else(|| ApiError::new(422, "已跟踪文件的实际路径无法识别"))
+}
+
+fn read_tracked_local(root: &Path, relative: &str) -> Result<Side, ApiError> {
+    let target = match tracked_local_target(root, relative) {
+        Ok(Some(target)) => target,
+        Ok(None) => return Ok(Side::absent()),
+        Err(error) if error.code == 422 => {
+            return Ok(Side {
+                exists: true,
+                size: 0,
+                bytes: Vec::new(),
+                truncated: false,
+                unsupported: true,
+                stamp: None,
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    // 目录联接可以指向本机共享目录，但只读取 index 已确认的单个普通文件。
+    // 固定解析后的目标再打开，并在读后及响应前复核目标，防止联接被切换后混入另一文件。
+    let (parent, name) = tracked_target_parts(&target)?;
+    let mut side = read_local(parent, name)?;
+    if tracked_local_target(root, relative)?.as_ref() != Some(&target) {
+        return Err(ApiError::new(409, "目录联接目标已变化，请刷新后重试"));
+    }
+    if let Some(stamp) = &mut side.stamp {
+        stamp.resolved_path = Some(target);
+    }
+    Ok(side)
+}
+
+fn tracked_local_stamp(root: &Path, relative: &str) -> Result<Option<FileStamp>, ApiError> {
+    let Some(target) = tracked_local_target(root, relative)? else {
+        return Ok(None);
+    };
+    let (parent, name) = tracked_target_parts(&target)?;
+    let mut stamp = local_stamp(parent, name)?;
+    if tracked_local_target(root, relative)?.as_ref() != Some(&target) {
+        return Err(ApiError::new(409, "目录联接目标已变化，请刷新后重试"));
+    }
+    if let Some(stamp) = &mut stamp {
+        stamp.resolved_path = Some(target);
+    }
+    Ok(stamp)
 }
 
 fn raster_mime(bytes: &[u8]) -> Option<&'static str> {
@@ -1749,6 +1920,7 @@ fn added_diff(path: &str, bytes: &[u8]) -> GitOutput {
     GitOutput {
         bytes: diff.into_bytes(),
         success: true,
+        exit_code: Some(0),
         truncated,
     }
 }
