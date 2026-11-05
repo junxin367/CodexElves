@@ -1034,8 +1034,9 @@ mod protocol_history_integrity_review {
         let text = converted["messages"].to_string();
         assert!(!text.contains("opaque-openai-reasoning"));
         assert!(!text.contains("\"type\":\"thinking\""));
-        assert!(text.contains("历史摘要"));
-        assert!(text.contains("Chat 推理但没有签名"));
+        assert!(!text.contains("历史摘要"));
+        assert!(!text.contains("Chat 推理但没有签名"));
+        assert!(text.contains("历史回答"));
     }
 
     #[test]
@@ -1050,7 +1051,7 @@ mod protocol_history_integrity_review {
             response["output"][0]["encrypted_content"]
                 .as_str()
                 .unwrap()
-                .starts_with("codex-elves-anthropic-thinking-v1:")
+                .starts_with("codex-elves-anthropic-thinking-v2:")
         );
         for reasoning in [
             response["output"][0].clone(),
@@ -3665,6 +3666,547 @@ mod protocol_continuation_review {
         assert_eq!(output[0]["content"][0]["text"], "before");
         assert_eq!(output[1]["content"][0]["refusal"], "refused");
         assert_eq!(output[2]["content"][0]["text"], "after");
+    }
+}
+
+mod anthropic_model_switching {
+    use super::*;
+
+    fn thinking_blocks() -> Vec<Value> {
+        vec![
+            json!({"type":"thinking","thinking":"先检查工具结果。","signature":"opaque-signed-reasoning"}),
+            json!({"type":"redacted_thinking","data":"opaque-redacted-reasoning"}),
+            json!({"type":"text","text":"正在检查。"}),
+            json!({"type":"tool_use","id":"call_switch","name":"lookup","input":{"q":"test"}}),
+        ]
+    }
+
+    fn request(model: &str, issuer: Option<&str>, output: &[Value]) -> Value {
+        let mut input = vec![json!({"role":"user","content":"检查项目"})];
+        input.extend_from_slice(output);
+        if !output.is_empty() {
+            input.push(json!({
+                "type":"function_call_output","call_id":"call_switch","output":"工具执行成功"
+            }));
+        }
+        let mut request = json!({
+            "model":model,"input":input,"reasoning":{"effort":"high"},
+            "tools":[{"type":"function","name":"lookup","parameters":{
+                "type":"object","properties":{"q":{"type":"string"}}
+            }}]
+        });
+        if let Some(issuer) = issuer {
+            request["codex_elves_compat"] = json!({
+                "anthropic_replay_origin":{"model":model,"issuer":issuer}
+            });
+        }
+        request
+    }
+
+    fn upstream_response(model: &str) -> Value {
+        json!({
+            "id":"msg_switch","model":model,"content":thinking_blocks(),"stop_reason":"tool_use"
+        })
+    }
+
+    fn response(model: &str, issuer: Option<&str>, stream: bool) -> Value {
+        let original = request(model, issuer, &[]);
+        if !stream {
+            return anthropic_message_to_response_with_request(upstream_response(model), &original)
+                .unwrap();
+        }
+        let mut chunks =
+            vec![json!({"type":"message_start","message":{"id":"msg_switch","model":model}})];
+        for (index, block) in thinking_blocks().iter().enumerate() {
+            chunks.push(json!({"type":"content_block_start","index":index,"content_block":block}));
+            chunks.push(json!({"type":"content_block_stop","index":index}));
+        }
+        chunks.push(json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}));
+        chunks.push(json!({"type":"message_stop"}));
+        let wire: String = chunks
+            .iter()
+            .map(|chunk| format!("data: {chunk}\n\n"))
+            .collect();
+        let sse = anthropic_sse_to_responses_sse_with_request(&wire, &original);
+        parse_response_sse_events(&sse).last().unwrap().data["response"].clone()
+    }
+
+    fn assert_tool_history(request: &Value) {
+        let messages = request["messages"].as_array().unwrap();
+        assert!(messages.iter().any(|message| {
+            message["role"] == "assistant"
+                && message["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|block| block["type"] == "tool_use" && block["id"] == "call_switch")
+        }));
+        assert!(messages.iter().any(|message| {
+            message["role"] == "user"
+                && message["content"].as_array().unwrap().iter().any(|block| {
+                    block["type"] == "tool_result" && block["tool_use_id"] == "call_switch"
+                })
+        }));
+    }
+
+    fn completed_response(model: &str, thinking: &str) -> Value {
+        anthropic_message_to_response_with_request(
+            json!({
+                "id":"msg_completed","model":model,"stop_reason":"end_turn",
+                "content":[
+                    {"type":"thinking","thinking":thinking,"signature":"completed-signature"},
+                    {"type":"redacted_thinking","data":"completed-redacted-data"},
+                    {"type":"text","text":"已完成轮次的回答"}
+                ]
+            }),
+            &request(model, Some("same-gateway"), &[]),
+        )
+        .unwrap()
+    }
+
+    fn history_request(target: &str, completed: &Value, current: &Value) -> Value {
+        let mut history = vec![json!({"role":"user","content":"上一轮任务"})];
+        history.extend(completed["output"].as_array().unwrap().iter().cloned());
+        history.push(json!({"role":"user","content":"本轮继续检查"}));
+        history.extend(current["output"].as_array().unwrap().iter().cloned());
+        history.push(json!({
+            "type":"function_call_output","call_id":"call_switch","output":[
+                {"type":"input_text","text":"工具执行成功"},
+                {"type":"input_image","image_url":"https://example.com/tool.png"}
+            ]
+        }));
+        let mut request = request(target, Some("same-gateway"), &[]);
+        request["input"] = json!(history);
+        request
+    }
+
+    #[test]
+    fn completed_foreign_reasoning_size_does_not_change_claude_request() {
+        let mut current_blocks = thinking_blocks();
+        current_blocks.insert(1, json!({
+            "type":"thinking","thinking":"同一轮的第二个思考块","signature":"second-current-signature"
+        }));
+        let current = anthropic_message_to_response_with_request(
+            json!({
+                "id":"msg_current","model":"claude-opus-4-8",
+                "content":current_blocks,"stop_reason":"tool_use"
+            }),
+            &request("claude-opus-4-8", Some("same-gateway"), &[]),
+        )
+        .unwrap();
+        let mut projected = Vec::new();
+        for repetitions in [1, 8192] {
+            let completed =
+                completed_response("kimi-k3", &"外来历史推理不得进入新请求".repeat(repetitions));
+            let original = history_request("claude-opus-4-8", &completed, &current);
+            let replay = responses_to_anthropic_messages(original.clone()).unwrap();
+            let wire = replay["messages"].to_string();
+            assert!(!wire.contains("外来历史推理"));
+            assert!(!wire.contains("completed-signature"));
+            assert!(!wire.contains("completed-redacted-data"));
+            assert!(wire.contains("已完成轮次的回答"));
+            assert!(wire.contains("https://example.com/tool.png"));
+            assert_tool_history(&replay);
+            let latest = replay["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|message| message["role"] == "assistant")
+                .next_back()
+                .unwrap();
+            assert_eq!(latest["content"], json!(current_blocks));
+
+            let mut switched_back = original;
+            switched_back["model"] = json!("kimi-k3");
+            let restored = responses_to_anthropic_messages(switched_back).unwrap();
+            assert!(
+                restored["messages"]
+                    .to_string()
+                    .contains("completed-signature")
+            );
+            projected.push(replay);
+        }
+        assert_eq!(projected[0], projected[1]);
+    }
+
+    #[test]
+    fn same_source_thinking_is_preserved_in_completed_and_current_turns() {
+        let completed = completed_response("claude-sonnet-4-6", "同源历史推理必须保留");
+        let current = response("claude-opus-4-8", Some("same-gateway"), false);
+        let replay = responses_to_anthropic_messages(history_request(
+            "claude-opus-4-8",
+            &completed,
+            &current,
+        ))
+        .unwrap();
+        assert_eq!(
+            replay["messages"][1]["content"][0],
+            json!({
+                "type":"thinking","thinking":"同源历史推理必须保留","signature":"completed-signature"
+            })
+        );
+        assert_eq!(
+            replay["messages"][1]["content"][1],
+            json!({
+                "type":"redacted_thinking","data":"completed-redacted-data"
+            })
+        );
+        let latest = replay["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .next_back()
+            .unwrap();
+        assert_eq!(latest["content"], json!(thinking_blocks()));
+        assert_tool_history(&replay);
+    }
+
+    #[test]
+    fn unsigned_foreign_thinking_is_retained_only_for_the_current_tool_turn() {
+        let completed = completed_response("kimi-k3", "已结束的外来推理应省略");
+        let current = response("kimi-k3", Some("same-gateway"), true);
+        for start_next_turn in [false, true] {
+            let mut original = history_request("glm-5.2", &completed, &current);
+            if start_next_turn {
+                original["input"].as_array_mut().unwrap().push(json!({
+                    "role":"user","content":"开始下一轮任务"
+                }));
+            }
+            let replay = responses_to_anthropic_messages(original).unwrap();
+            let wire = replay["messages"].to_string();
+            assert!(!wire.contains("已结束的外来推理"));
+            assert!(!wire.contains("completed-signature"));
+            assert!(!wire.contains("opaque-signed-reasoning"));
+            assert!(!wire.contains("opaque-redacted-reasoning"));
+            assert_eq!(wire.contains("先检查工具结果。"), !start_next_turn);
+            assert!(wire.contains("已完成轮次的回答"));
+            assert!(wire.contains("https://example.com/tool.png"));
+            assert_tool_history(&replay);
+        }
+    }
+
+    #[test]
+    fn foreign_latest_thinking_is_omitted_for_claude_and_survives_switching_back() {
+        for model in ["kimi-k3", "glm-5.2", "minimax-m2"] {
+            for stream in [false, true] {
+                let response = response(model, Some("same-gateway"), stream);
+                let output = response["output"].as_array().unwrap();
+                let claude = responses_to_anthropic_messages(request(
+                    "claude-opus-4-8",
+                    Some("same-gateway"),
+                    output,
+                ))
+                .unwrap();
+                let wire = claude["messages"].to_string();
+                assert!(!wire.contains("\"type\":\"thinking\""), "{model}: {wire}");
+                assert!(!wire.contains("opaque-signed-reasoning"));
+                assert!(!wire.contains("opaque-redacted-reasoning"));
+                assert!(!wire.contains("先检查工具结果。"));
+                assert!(wire.contains("正在检查。"));
+                assert_tool_history(&claude);
+
+                let restored =
+                    responses_to_anthropic_messages(request(model, Some("same-gateway"), output))
+                        .unwrap();
+                assert_eq!(restored["messages"][1]["content"][0], thinking_blocks()[0]);
+                assert_eq!(restored["messages"][1]["content"][1], thinking_blocks()[1]);
+                assert_tool_history(&restored);
+            }
+        }
+    }
+
+    #[test]
+    fn claude_model_switch_preserves_own_blocks_but_new_issuer_does_not() {
+        for stream in [false, true] {
+            let response = response("claude-sonnet-4-6", Some("account-a"), stream);
+            let output = response["output"].as_array().unwrap();
+            for (target, issuer, signed) in [
+                ("claude-opus-4-8", "account-a", true),
+                ("claude-sonnet-4-6", "account-b", false),
+                ("kimi-k3", "account-a", false),
+            ] {
+                let replay =
+                    responses_to_anthropic_messages(request(target, Some(issuer), output)).unwrap();
+                if signed {
+                    assert_eq!(replay["messages"][1]["content"][0], thinking_blocks()[0]);
+                    assert_eq!(replay["messages"][1]["content"][1], thinking_blocks()[1]);
+                } else {
+                    let wire = replay["messages"].to_string();
+                    assert!(!wire.contains("opaque-signed-reasoning"));
+                    assert!(!wire.contains("opaque-redacted-reasoning"));
+                    assert_eq!(wire.contains("先检查工具结果。"), target == "kimi-k3");
+                }
+                assert_tool_history(&replay);
+            }
+        }
+    }
+
+    #[test]
+    fn empty_claude_signature_is_not_replayed_as_native_thinking() {
+        let original = request("claude-opus-4-8", None, &[]);
+        let response = anthropic_message_to_response_with_request(
+            json!({"id":"msg_unsigned","model":"claude-opus-4-8","stop_reason":"end_turn",
+                "content":[{"type":"thinking","thinking":"未完成的推理","signature":""},
+                    {"type":"text","text":"已有正文"}]}),
+            &original,
+        )
+        .unwrap();
+        let replay = responses_to_anthropic_messages(request(
+            "claude-opus-4-8",
+            None,
+            response["output"].as_array().unwrap(),
+        ))
+        .unwrap();
+        assert!(
+            !replay["messages"]
+                .to_string()
+                .contains("\"type\":\"thinking\"")
+        );
+        assert!(replay["messages"].to_string().contains("已有正文"));
+        assert!(!replay["messages"].to_string().contains("未完成的推理"));
+    }
+
+    fn write_settings(path: &Path, base_url: &str, api_key: &str) {
+        let settings = json!({
+            "relayProfiles":[{
+                "id":"switch","name":"Switch","baseUrl":base_url,"upstreamBaseUrl":base_url,
+                "apiKey":api_key,"protocol":"anthropic","localProxyEnabled":true,
+                "relayMode":"mixedApi",
+                "modelMappings":[
+                    {"requestModel":"kimi-k3","protocol":"anthropic","contextWindow":"1000000"},
+                    {"requestModel":"claude-opus-4-8","protocol":"anthropic","contextWindow":"1000000"},
+                    {"requestModel":"gpt-responses","protocol":"responses","contextWindow":"1000000"}
+                ]
+            }],"activeRelayId":"switch"
+        });
+        std::fs::write(
+            path.join("settings.json"),
+            serde_json::to_vec(&settings).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_records_actual_issuer_and_preserves_history_across_three_way_switch() {
+        let _lock = settings_path_test_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+        let server = spawn_chat_server_with_responses(vec![
+            upstream_response("kimi-k3").to_string(),
+            upstream_response("claude-opus-4-8").to_string(),
+            upstream_response("kimi-k3").to_string(),
+            json!({"id":"resp_native","output":[],"status":"completed"}).to_string(),
+        ]);
+        let key = "test-secret-must-not-be-in-history";
+        write_settings(temp.path(), &server.base_url, key);
+        let first = handle_responses_proxy_request(&request("kimi-k3", None, &[]).to_string())
+            .await
+            .unwrap();
+        let first: Value = serde_json::from_slice(&first.body).unwrap();
+        assert!(!first.to_string().contains(key));
+        assert!(!first.to_string().contains(&server.base_url));
+        let envelope = first["output"][0]["encrypted_content"].as_str().unwrap();
+        let envelope: Value = serde_json::from_str(
+            envelope
+                .strip_prefix("codex-elves-anthropic-thinking-v2:")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(envelope["origin"]["model"], "kimi-k3");
+        assert_eq!(envelope["origin"]["issuer"].as_str().unwrap().len(), 64);
+        let output = first["output"].as_array().unwrap();
+        for target in ["claude-opus-4-8", "kimi-k3", "gpt-responses"] {
+            let reply = handle_responses_proxy_request(&request(target, None, output).to_string())
+                .await
+                .unwrap();
+            assert_eq!(reply.status, "200 OK");
+        }
+        let requests = server.finish_all();
+        let claude: Value = serde_json::from_str(&requests[1].body).unwrap();
+        assert!(
+            !claude["messages"]
+                .to_string()
+                .contains("opaque-signed-reasoning")
+        );
+        assert_tool_history(&claude);
+        assert!(!claude["messages"].to_string().contains("先检查工具结果。"));
+        let restored: Value = serde_json::from_str(&requests[2].body).unwrap();
+        assert_eq!(restored["messages"][1]["content"][0], thinking_blocks()[0]);
+        assert_tool_history(&restored);
+        assert_eq!(requests[3].path, "/v1/responses");
+        assert!(!requests[3].body.contains("codex-elves-anthropic-thinking"));
+        assert!(!requests[3].body.contains("opaque-redacted-reasoning"));
+        assert!(!requests[3].body.contains("先检查工具结果。"));
+    }
+
+    #[tokio::test]
+    async fn rejected_legacy_signature_recovers_once_without_changing_model_or_tools() {
+        let _lock = settings_path_test_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+        let error = json!({"type":"error","error":{"type":"invalid_request_error",
+            "message":"messages.1.content.0: Invalid `signature` in `thinking` block"}});
+        for second_status in ["200 OK", "400 Bad Request"] {
+            let server = spawn_chat_server_with_status_responses(vec![
+                ("400 Bad Request".into(), error.to_string()),
+                (
+                    second_status.into(),
+                    if second_status == "200 OK" {
+                        upstream_response("claude-opus-4-8").to_string()
+                    } else {
+                        error.to_string()
+                    },
+                ),
+            ]);
+            write_settings(temp.path(), &server.base_url, "sk-test");
+            let mut output = vec![
+                json!({"type":"reasoning","reasoning_content":"旧模型推理",
+                    "encrypted_content":"old-foreign-signature"}),
+                json!({"type":"reasoning","encrypted_content":format!(
+                    "codex-elves-anthropic-thinking-v1:{}",
+                    json!({"type":"redacted_thinking","data":"old-redacted-data"})
+                )}),
+            ];
+            output.push(
+                json!({"type":"function_call","call_id":"call_switch","name":"lookup",
+                "arguments":"{\"q\":\"test\"}"}),
+            );
+            let response = handle_responses_proxy_request(
+                &request("claude-opus-4-8", None, &output).to_string(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status, second_status);
+            let requests = server.finish_all();
+            assert_eq!(requests.len(), 2);
+            let first: Value = serde_json::from_str(&requests[0].body).unwrap();
+            let retry: Value = serde_json::from_str(&requests[1].body).unwrap();
+            assert!(
+                first["messages"]
+                    .to_string()
+                    .contains("old-foreign-signature")
+            );
+            assert!(
+                !retry["messages"]
+                    .to_string()
+                    .contains("old-foreign-signature")
+            );
+            assert!(!retry["messages"].to_string().contains("old-redacted-data"));
+            assert!(!retry["messages"].to_string().contains("旧模型推理"));
+            assert_eq!(first["model"], retry["model"]);
+            assert_eq!(first["thinking"], retry["thinking"]);
+            assert_eq!(first["output_config"], retry["output_config"]);
+            assert_eq!(requests[0].path, requests[1].path);
+            assert_tool_history(&retry);
+        }
+    }
+
+    #[tokio::test]
+    async fn signature_recovery_preserves_signed_prefix_and_does_not_retry_other_errors() {
+        let _lock = settings_path_test_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+        let output = vec![
+            json!({"type":"reasoning","reasoning_content":"有效前缀","encrypted_content":"prefix-sig"}),
+            json!({"type":"reasoning","reasoning_content":"外来推理","encrypted_content":"foreign-sig"}),
+            json!({"type":"function_call","call_id":"call_switch","name":"lookup","arguments":"{}"}),
+        ];
+        for (status, error_type, message, should_retry) in [
+            (
+                "400 Bad Request",
+                "invalid_request_error",
+                "messages.1.content.1: Invalid `signature` in `thinking` block",
+                true,
+            ),
+            (
+                "400 Bad Request",
+                "invalid_request_error",
+                "max_tokens is invalid",
+                false,
+            ),
+            (
+                "400 Bad Request",
+                "api_error",
+                "Invalid signature in thinking block",
+                false,
+            ),
+            (
+                "401 Unauthorized",
+                "invalid_request_error",
+                "Invalid signature in thinking block",
+                false,
+            ),
+        ] {
+            let error = json!({"type":"error","error":{"type":error_type,"message":message}});
+            let mut responses = vec![(status.into(), error.to_string())];
+            if should_retry {
+                responses.push((
+                    "200 OK".into(),
+                    upstream_response("claude-opus-4-8").to_string(),
+                ));
+            }
+            let server = spawn_chat_server_with_status_responses(responses);
+            write_settings(temp.path(), &server.base_url, "sk-test");
+            let response = handle_responses_proxy_request(
+                &request("claude-opus-4-8", None, &output).to_string(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                response.status,
+                if should_retry { "200 OK" } else { status }
+            );
+            let requests = server.finish_all();
+            assert_eq!(requests.len(), if should_retry { 2 } else { 1 });
+            if should_retry {
+                let retry: Value = serde_json::from_str(&requests[1].body).unwrap();
+                assert_eq!(
+                    retry["messages"][1]["content"][0]["signature"],
+                    "prefix-sig"
+                );
+                assert!(!retry["messages"].to_string().contains("foreign-sig"));
+                assert!(!retry["messages"].to_string().contains("外来推理"));
+                assert_tool_history(&retry);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn changing_credentials_on_the_same_relay_does_not_replay_old_signatures() {
+        let _lock = settings_path_test_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+        let server = spawn_chat_server_with_responses(vec![
+            upstream_response("claude-opus-4-8").to_string(),
+            upstream_response("claude-opus-4-8").to_string(),
+        ]);
+        write_settings(temp.path(), &server.base_url, "account-a-key");
+        let first =
+            handle_responses_proxy_request(&request("claude-opus-4-8", None, &[]).to_string())
+                .await
+                .unwrap();
+        let first: Value = serde_json::from_slice(&first.body).unwrap();
+        write_settings(temp.path(), &server.base_url, "account-b-key");
+        let next = handle_responses_proxy_request(
+            &request("claude-opus-4-8", None, first["output"].as_array().unwrap()).to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next.status, "200 OK");
+        let requests = server.finish_all();
+        let replay: Value = serde_json::from_str(&requests[1].body).unwrap();
+        assert!(
+            !replay["messages"]
+                .to_string()
+                .contains("opaque-signed-reasoning")
+        );
+        assert!(
+            !replay["messages"]
+                .to_string()
+                .contains("opaque-redacted-reasoning")
+        );
+        assert_tool_history(&replay);
     }
 }
 

@@ -49,6 +49,7 @@ const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
 const ERROR_BODY_PREVIEW_LIMIT: usize = 1024;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_THINKING_REPLAY_PREFIX: &str = "codex-elves-anthropic-thinking-v1:";
+const ANTHROPIC_THINKING_REPLAY_V2_PREFIX: &str = "codex-elves-anthropic-thinking-v2:";
 const ANTHROPIC_CONTENT_REPLAY_PREFIX: &str = "codex-elves-anthropic-content-v1:";
 const ANTHROPIC_PAUSE_TURN_ERROR: &str = "Anthropic pause_turn requires upstream continuation, which this protocol bridge does not support";
 const WEB_SEARCH_DISCOVERY_QUERY: &str = "web search tavily exa";
@@ -65,6 +66,96 @@ const ANTHROPIC_CLAUDE_4_5_MAX_OUTPUT_TOKENS: u64 = 64_000;
 const REASONING_EFFORT_ORDER: &[&str] =
     &["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 static PROTOCOL_PROXY_DIAGNOSTIC_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct AnthropicThinkingReplayOrigin {
+    #[serde(default)]
+    model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    issuer: Option<String>,
+}
+
+impl AnthropicThinkingReplayOrigin {
+    fn from_request(request: &Value) -> Self {
+        Self {
+            model: request["model"].as_str().unwrap_or_default().to_string(),
+            issuer: request
+                .pointer("/codex_elves_compat/anthropic_replay_origin/issuer")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+        }
+    }
+
+    fn from_response(request: Option<&Value>, response_model: &str) -> Self {
+        let mut origin = request
+            .and_then(|request| {
+                request
+                    .pointer("/codex_elves_compat/anthropic_replay_origin")
+                    .and_then(|origin| serde_json::from_value(origin.clone()).ok())
+            })
+            .unwrap_or_else(|| request.map(Self::from_request).unwrap_or_default());
+        if !response_model.trim().is_empty() {
+            origin.model = response_model.to_string();
+        }
+        origin
+    }
+
+    fn for_upstream(
+        relay: &crate::settings::RelayProfile,
+        request: &Value,
+        protocol: UpstreamResponseProtocol,
+    ) -> Option<Self> {
+        if protocol != UpstreamResponseProtocol::Anthropic {
+            return None;
+        }
+        use sha2::{Digest, Sha256};
+        // 用户要求跨模型/供应商切换仍可续聊：协议相同不代表签名同源。
+        // 仅保存实际上游与凭据作用域的摘要，不把 URL 中的凭据或 API key 写入历史。
+        let identity = serde_json::to_vec(&[
+            anthropic_messages_url(&relay.base_url),
+            relay.api_key.trim().to_string(),
+        ])
+        .expect("string array is serializable");
+        Some(Self {
+            model: request["model"].as_str().unwrap_or_default().to_string(),
+            issuer: Some(format!("{:x}", Sha256::digest(identity))),
+        })
+    }
+
+    fn can_replay_to(&self, target: &Self) -> bool {
+        if self.issuer != target.issuer {
+            return false;
+        }
+        self.model.eq_ignore_ascii_case(&target.model)
+            || (is_claude_thinking_target(&self.model) && is_claude_thinking_target(&target.model))
+    }
+}
+
+fn request_with_anthropic_replay_origin(
+    request: &Value,
+    origin: Option<&AnthropicThinkingReplayOrigin>,
+) -> Value {
+    let mut request = request.clone();
+    annotate_anthropic_replay_origin(&mut request, origin);
+    request
+}
+
+fn annotate_anthropic_replay_origin(
+    request: &mut Value,
+    origin: Option<&AnthropicThinkingReplayOrigin>,
+) {
+    if let Some(origin) = origin {
+        if !request["codex_elves_compat"].is_object() {
+            request["codex_elves_compat"] = json!({});
+        }
+        request["codex_elves_compat"]["anthropic_replay_origin"] = json!(origin);
+    }
+}
+
+fn is_claude_thinking_target(model: &str) -> bool {
+    crate::model_capabilities::model_family(model) == crate::model_capabilities::ModelFamily::Claude
+}
 
 fn next_protocol_proxy_diagnostic_id() -> String {
     let sequence = PROTOCOL_PROXY_DIAGNOSTIC_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1304,7 +1395,7 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
             &mut messages,
             &mut system_chunks,
             &tool_context,
-            model,
+            &AnthropicThinkingReplayOrigin::from_request(&body),
         );
     }
     if messages.is_empty() {
@@ -1498,8 +1589,12 @@ fn anthropic_message_to_response_with_context(
         ANTHROPIC_PAUSE_TURN_ERROR
     );
     let status = anthropic_response_status(stop_reason);
+    let origin = AnthropicThinkingReplayOrigin::from_response(
+        original_request,
+        body["model"].as_str().unwrap_or_default(),
+    );
     let mut output =
-        anthropic_content_to_response_output_items(content, &response_id, tool_context);
+        anthropic_content_to_response_output_items(content, &response_id, tool_context, &origin);
     if status == "incomplete" {
         output.retain(|item| matches!(item["type"].as_str(), Some("message" | "reasoning")));
         mark_messages_incomplete(&mut output);
@@ -1812,6 +1907,7 @@ pub struct UpstreamProxyResponse {
     pub relay_name: Option<String>,
     pub endpoint: Option<String>,
     pub request_body: String,
+    anthropic_replay_origin: Option<AnthropicThinkingReplayOrigin>,
     pub response: Option<reqwest::Response>,
     pub body_override: Option<Vec<u8>>,
     /// 已在本地响应改写前观测到的真实上游响应模型。
@@ -2042,6 +2138,10 @@ fn validate_remote_compaction_v2_bridge_candidate(
 }
 
 impl UpstreamProxyResponse {
+    pub(crate) fn annotate_anthropic_response_request(&self, request: &mut Value) {
+        annotate_anthropic_replay_origin(request, self.anthropic_replay_origin.as_ref());
+    }
+
     pub fn status(&self) -> String {
         http_status_line(self.status_code)
     }
@@ -2999,6 +3099,11 @@ async fn execute_validated_compaction(
             relay_name: Some(relay.name.clone()),
             endpoint: Some(upstream_endpoint_for_protocol(&relay, plan.protocol)),
             request_body: serialized_proxy_request_body(&wire),
+            anthropic_replay_origin: AnthropicThinkingReplayOrigin::for_upstream(
+                &relay,
+                &wire,
+                plan.protocol,
+            ),
             response: Some(raw),
             body_override: None,
             upstream_response_model: None,
@@ -3183,6 +3288,7 @@ async fn execute_validated_compaction(
         relay_name: None,
         endpoint: None,
         request_body: body.to_string(),
+        anthropic_replay_origin: None,
         response: None,
         body_override: None,
         upstream_response_model: None,
@@ -3327,6 +3433,7 @@ fn unavailable_native_compaction_response(
         relay_name: None,
         endpoint: None,
         request_body: body.to_string(),
+        anthropic_replay_origin: None,
         response: None,
         body_override: Some(
             json!({
@@ -3458,6 +3565,7 @@ async fn open_responses_proxy_request_once(
                         source_response_protocol,
                     )),
                     request_body: serialized_proxy_request_body(&source_request_json),
+                    anthropic_replay_origin: None,
                     response: None,
                     body_override: Some(serde_json::to_vec(&json!({
                         "error": {
@@ -3686,6 +3794,7 @@ async fn open_responses_proxy_request_once(
             apply_cached_anthropic_reasoning_compatibility(&relay, &mut anthropic_request);
             if should_retry_anthropic_effort(status_code, &content_type, &anthropic_request)
                 || (status_code == 400 && is_deepseek_thinking_tool_history(&anthropic_request))
+                || (status_code == 400 && anthropic_request_has_thinking(&anthropic_request))
             {
                 let response = upstream_response
                     .take()
@@ -3752,11 +3861,23 @@ async fn open_responses_proxy_request_once(
                     .unwrap_or_default()
                     .to_string();
                 let compatibility_retry = if let Some(retry_request) =
-                    deepseek_chat_reasoning_replay_request(
-                        &request_json,
-                        &anthropic_request,
-                        &error_body,
-                    )? {
+                    anthropic_signature_recovery_request(&anthropic_request, &error_body)
+                {
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "protocol_proxy.anthropic_signature_recovery_retry",
+                        json!({
+                            "diagnosticId": diagnostic_id,
+                            "relayId": relay.id,
+                            "model": retry_request.get("model"),
+                            "reason": "invalid_thinking_signature"
+                        }),
+                    );
+                    Some((retry_request, UpstreamResponseProtocol::Anthropic))
+                } else if let Some(retry_request) = deepseek_chat_reasoning_replay_request(
+                    &request_json,
+                    &anthropic_request,
+                    &error_body,
+                )? {
                     let _ = crate::diagnostic_log::append_diagnostic_log(
                         "protocol_proxy.deepseek_reasoning_replay_retry",
                         json!({
@@ -4016,6 +4137,11 @@ async fn open_responses_proxy_request_once(
                     )
                 })
                 .flatten();
+            let anthropic_replay_origin = AnthropicThinkingReplayOrigin::for_upstream(
+                &relay,
+                &cache_wire_request,
+                response_protocol,
+            );
             return Ok(UpstreamProxyResponse {
                 audit,
                 status_code,
@@ -4027,6 +4153,7 @@ async fn open_responses_proxy_request_once(
                 relay_name: Some(relay.name),
                 endpoint: Some(endpoint),
                 request_body: logged_request_body,
+                anthropic_replay_origin,
                 response: upstream_response,
                 body_override,
                 upstream_response_model: None,
@@ -4069,21 +4196,27 @@ async fn send_responses_upstream_request(
     can_recover_ws: bool,
     cache_reference: Option<&Value>,
 ) -> anyhow::Result<(reqwest::Response, Value, bool)> {
+    let origin =
+        AnthropicThinkingReplayOrigin::for_upstream(relay, request_json, response_protocol);
+    let conversion_request = origin
+        .as_ref()
+        .map(|origin| request_with_anthropic_replay_origin(request_json, Some(origin)));
     let mut upstream_request = responses_upstream_request_for_protocol(
-        request_json,
+        conversion_request.as_ref().unwrap_or(request_json),
         response_protocol,
         is_stream,
         diagnostic_id,
     )?;
     if let Some(reference) = cache_reference {
         // 用完整历史的转换结果冻结缓存字段，避免末尾 developer/system 随补回切分消失。
-        let reference = crate::layered_compaction::prepare_compaction_attempt_request(
+        let mut reference = crate::layered_compaction::prepare_compaction_attempt_request(
             reference,
             crate::layered_compaction::CompactionKind::of_request(reference).expect("compaction"),
             crate::layered_compaction::CompactionRoute::CacheReuse,
             &crate::layered_compaction::CompactionOptions::default(),
             crate::layered_compaction::CompactionAttempt::First,
         );
+        annotate_anthropic_replay_origin(&mut reference, origin.as_ref());
         let reference = responses_upstream_request_for_protocol(
             &reference,
             response_protocol,
@@ -4348,6 +4481,7 @@ pub async fn open_models_proxy_request(
         relay_name: Some(relay.name),
         endpoint: Some(endpoint),
         request_body: String::new(),
+        anthropic_replay_origin: None,
         response: Some(upstream),
         body_override: None,
         upstream_response_model: None,
@@ -4469,6 +4603,7 @@ pub async fn open_chat_completions_proxy_request(
             relay_name: Some(relay.name.clone()),
             endpoint: Some(chat_completions_url(&relay.base_url)),
             request_body: serialized_proxy_request_body(&request_json),
+            anthropic_replay_origin: None,
             response: Some(upstream),
             body_override: None,
             upstream_response_model: None,
@@ -5423,6 +5558,8 @@ pub async fn handle_responses_proxy_request(body: &str) -> anyhow::Result<ProxyH
     let response_protocol = upstream.response_protocol;
     let diagnostic_id = upstream.diagnostic_id.clone();
     let bridge_remote_compaction_v2 = upstream.bridge_remote_compaction_v2;
+    let mut request_json = request_json;
+    upstream.annotate_anthropic_response_request(&mut request_json);
     let upstream_body = match upstream.into_body_bytes().await {
         Ok(body) => body,
         Err(error) if bridge_remote_compaction_v2 => {
@@ -5831,25 +5968,15 @@ pub(crate) fn normalize_native_responses_request(request_json: &Value) -> Value 
     let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
         return request;
     };
-    // 本地服务端工具历史只在 Anthropic 回放，不能作为原生 Responses 密文发送。
-    input.retain_mut(|item| {
+    // 用户要求省略外来历史推理，不能再把 Anthropic thinking 全文转成正文占用上下文。
+    // HTTP/WS 共用这里；只移除本地 Anthropic 封装，原生 Responses 密文、正文和工具记录保留。
+    input.retain(|item| {
         let Some(encrypted) = item.get("encrypted_content").and_then(Value::as_str) else {
             return true;
         };
-        if encrypted.starts_with(ANTHROPIC_CONTENT_REPLAY_PREFIX) {
-            return false;
-        }
-        if let Some(payload) = encrypted.strip_prefix(ANTHROPIC_THINKING_REPLAY_PREFIX) {
-            let block = serde_json::from_str::<Value>(payload).unwrap_or(Value::Null);
-            let Some(text) = block["thinking"].as_str().filter(|text| !text.is_empty()) else {
-                return false;
-            };
-            *item = json!({
-                "type":"message","role":"assistant",
-                "content":[{"type":"output_text","text":format!("[Historical reasoning from another protocol]\n{text}")}]
-            });
-        }
-        true
+        !encrypted.starts_with(ANTHROPIC_CONTENT_REPLAY_PREFIX)
+            && !encrypted.starts_with(ANTHROPIC_THINKING_REPLAY_PREFIX)
+            && !encrypted.starts_with(ANTHROPIC_THINKING_REPLAY_V2_PREFIX)
     });
 
     for item in input {
@@ -6714,10 +6841,15 @@ impl ChatSseState {
             item["encrypted_content"] = json!(encrypted_content);
         }
         if let Some(block) = self.reasoning.anthropic_thinking_block.take() {
+            let origin = AnthropicThinkingReplayOrigin::from_response(
+                self.original_request.as_ref(),
+                &self.model,
+            );
             item = anthropic_thinking_response_item(
                 &block,
                 &self.reasoning.item_id,
                 self.tool_context.inline_citations,
+                &origin,
             );
         }
         self.output_items.push((output_index, item.clone()));
@@ -7139,6 +7271,10 @@ impl AnthropicSseState {
                     block,
                     &item_id,
                     self.inner.tool_context.inline_citations,
+                    &AnthropicThinkingReplayOrigin::from_response(
+                        self.inner.original_request.as_ref(),
+                        &self.inner.model,
+                    ),
                 );
                 push_sse(
                     output,
@@ -7802,7 +7938,7 @@ fn append_responses_input_to_anthropic(
     messages: &mut Vec<Value>,
     system_chunks: &mut Vec<String>,
     tool_context: &CodexToolContext,
-    model: &str,
+    replay_target: &AnthropicThinkingReplayOrigin,
 ) {
     match input {
         Value::String(text) => push_anthropic_message(
@@ -7813,11 +7949,13 @@ fn append_responses_input_to_anthropic(
         Value::Array(items) => {
             let mut seen_tool_call_ids = BTreeSet::new();
             let mut ignored_tool_call_ids = BTreeSet::new();
-            for item in items {
+            let current_tool_turn = responses_current_tool_turn_start(items);
+            for (index, item) in items.iter().enumerate() {
                 append_responses_item_to_anthropic(
                     item,
                     tool_context,
-                    model,
+                    replay_target,
+                    current_tool_turn.is_some_and(|start| index >= start),
                     messages,
                     system_chunks,
                     &mut seen_tool_call_ids,
@@ -7831,7 +7969,8 @@ fn append_responses_input_to_anthropic(
             append_responses_item_to_anthropic(
                 input,
                 tool_context,
-                model,
+                replay_target,
+                false,
                 messages,
                 system_chunks,
                 &mut seen_tool_call_ids,
@@ -7842,10 +7981,34 @@ fn append_responses_input_to_anthropic(
     }
 }
 
+fn responses_current_tool_turn_start(items: &[Value]) -> Option<usize> {
+    // 一轮由真实 user 消息开始；工具结果虽然会转成 Anthropic user 消息，
+    // 仍属于同一工具轮次，不能按最后一个 thinking 块或最后一条工具结果截断。
+    let start = items
+        .iter()
+        .rposition(|item| {
+            item["role"] == "user"
+                && !item["content"].as_array().is_some_and(|parts| {
+                    !parts.is_empty() && parts.iter().all(|part| part["type"] == "tool_result")
+                })
+        })
+        .unwrap_or(0);
+    items[start..]
+        .iter()
+        .any(|item| {
+            matches!(
+                item["type"].as_str(),
+                Some("function_call" | "custom_tool_call" | "tool_call" | "tool_search_call")
+            )
+        })
+        .then_some(start)
+}
+
 fn append_responses_item_to_anthropic(
     item: &Value,
     tool_context: &CodexToolContext,
-    model: &str,
+    replay_target: &AnthropicThinkingReplayOrigin,
+    retain_foreign_thinking: bool,
     messages: &mut Vec<Value>,
     system_chunks: &mut Vec<String>,
     seen_tool_call_ids: &mut BTreeSet<String>,
@@ -8069,7 +8232,11 @@ fn append_responses_item_to_anthropic(
                 }
                 return;
             }
-            if let Some(block) = responses_reasoning_to_anthropic_thinking_block(item, model) {
+            if let Some(block) = responses_reasoning_to_anthropic_thinking_block(
+                item,
+                replay_target,
+                retain_foreign_thinking,
+            ) {
                 push_anthropic_message(messages, "assistant", vec![block]);
             }
         }
@@ -9204,35 +9371,130 @@ fn responses_reasoning_text(item: &Value) -> Option<String> {
     extract_reasoning_summary_text(item).or_else(|| extract_reasoning_field_text(item))
 }
 
-fn responses_reasoning_to_anthropic_thinking_block(item: &Value, model: &str) -> Option<Value> {
-    let encrypted_content = responses_reasoning_encrypted_content(item);
-    if let Some(payload) = encrypted_content
-        .as_deref()
-        .and_then(|value| value.strip_prefix(ANTHROPIC_THINKING_REPLAY_PREFIX))
-    {
-        let block: Value = serde_json::from_str(payload).ok()?;
-        return match block["type"].as_str() {
-            Some("thinking") if block["thinking"].is_string() && block["signature"].is_string() => {
-                Some(block)
+fn anthropic_request_has_thinking(request: &Value) -> bool {
+    request["messages"].as_array().is_some_and(|messages| {
+        messages.iter().any(|message| {
+            message["content"].as_array().is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    matches!(
+                        block["type"].as_str(),
+                        Some("thinking" | "redacted_thinking")
+                    )
+                })
+            })
+        })
+    })
+}
+
+fn anthropic_signature_recovery_request(request: &Value, error_body: &[u8]) -> Option<Value> {
+    let error: Value = serde_json::from_slice(error_body).ok()?;
+    if error.pointer("/error/type").and_then(Value::as_str) != Some("invalid_request_error") {
+        return None;
+    }
+    let message = error.pointer("/error/message")?.as_str()?;
+    let normalized = message.to_ascii_lowercase().replace('`', "");
+    if !normalized.contains("invalid signature") || !normalized.contains("thinking") {
+        return None;
+    }
+    let position = message.find("messages.").and_then(|start| {
+        let path = &message[start + "messages.".len()..];
+        let (message_index, rest) = path.split_once(".content.")?;
+        let block_index: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        Some((
+            message_index.parse::<usize>().ok()?,
+            block_index.parse::<usize>().ok()?,
+        ))
+    });
+    // 旧 v1/裸签名没有来源，先保留正常续写；只有上游明确拒绝签名时才恢复一次。
+    // 从问题块起移除后续 thinking，避免编辑前缀后继续携带受其影响的签名。
+    // 用户要求控制输入体积：恢复时同样不把失效推理全文改写成普通文本。
+    // 保留模型、思考档位、正文、附件和 tool_use/tool_result，不修改持久化历史。
+    let mut retry = request.clone();
+    let messages = retry.get_mut("messages")?.as_array_mut()?;
+    let mut changed = false;
+    for (message_index, message) in messages.iter_mut().enumerate() {
+        if message["role"] != "assistant" {
+            continue;
+        }
+        let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let mut normalized_blocks = Vec::with_capacity(blocks.len());
+        for (block_index, block) in std::mem::take(blocks).into_iter().enumerate() {
+            if position.is_some_and(|position| (message_index, block_index) < position) {
+                normalized_blocks.push(block);
+                continue;
             }
-            Some("redacted_thinking") if block["data"].is_string() => Some(block),
+            match block["type"].as_str() {
+                Some("thinking" | "redacted_thinking") => changed = true,
+                _ => normalized_blocks.push(block),
+            }
+        }
+        *blocks = normalized_blocks;
+    }
+    messages.retain(|message| {
+        message["role"] != "assistant" || !message["content"].as_array().is_some_and(Vec::is_empty)
+    });
+    changed.then_some(retry)
+}
+
+fn decode_anthropic_thinking_replay(
+    encrypted: &str,
+) -> Option<(Value, Option<AnthropicThinkingReplayOrigin>)> {
+    if let Some(payload) = encrypted.strip_prefix(ANTHROPIC_THINKING_REPLAY_V2_PREFIX) {
+        let envelope: Value = serde_json::from_str(payload).ok()?;
+        let origin = serde_json::from_value(envelope.get("origin")?.clone()).ok()?;
+        return Some((envelope.get("block")?.clone(), Some(origin)));
+    }
+    let payload = encrypted.strip_prefix(ANTHROPIC_THINKING_REPLAY_PREFIX)?;
+    Some((serde_json::from_str(payload).ok()?, None))
+}
+
+fn responses_reasoning_to_anthropic_thinking_block(
+    item: &Value,
+    target: &AnthropicThinkingReplayOrigin,
+    retain_foreign_thinking: bool,
+) -> Option<Value> {
+    let encrypted_content = responses_reasoning_encrypted_content(item);
+    if let Some(encrypted) = encrypted_content.as_deref().filter(|value| {
+        value.starts_with(ANTHROPIC_THINKING_REPLAY_PREFIX)
+            || value.starts_with(ANTHROPIC_THINKING_REPLAY_V2_PREFIX)
+    }) {
+        let (block, origin) = decode_anthropic_thinking_replay(encrypted)?;
+        // 参考 oh-my-pi #6380 / OpenCode #6418：最新一条也要检查来源，
+        // 用户要求已完成轮次的外来推理不再全文回填；发往 Claude 时直接省略外来块，
+        // 其他兼容模型仅在当前工具轮次保留必要的无签名推理。同源块始终完整回放，
+        // 不能只留最后一个块；原始封装不变，切回原模型仍可恢复完整 thinking。
+        let compatible = origin.as_ref().is_none_or(|origin| {
+            (origin.model.is_empty() && origin.issuer.is_none()) || origin.can_replay_to(target)
+        });
+        return match block["type"].as_str() {
+            Some("thinking") if block["thinking"].is_string() => {
+                let text = block["thinking"].as_str().unwrap_or_default();
+                let signed = block["signature"]
+                    .as_str()
+                    .is_some_and(|signature| !signature.trim().is_empty());
+                if compatible && (signed || !is_claude_thinking_target(&target.model)) {
+                    Some(block)
+                } else if retain_foreign_thinking && !is_claude_thinking_target(&target.model) {
+                    (!text.is_empty()).then(|| json!({"type":"thinking","thinking":text}))
+                } else {
+                    None
+                }
+            }
+            Some("redacted_thinking") if compatible && block["data"].is_string() => Some(block),
             _ => None,
         };
     }
     let text = responses_reasoning_text(item).unwrap_or_default();
-    if model.to_ascii_lowercase().contains("claude") {
+    if is_claude_thinking_target(&target.model) {
         // 老版本桥接器会同时写入 reasoning_content 和原始 signature。
         // 这只是向后兼容的来源标记，不是对任意客户端内容的身份认证；
         // 新回包统一使用版本封装，不能把原生 Responses 密文猜成 Claude 签名。
         let legacy_bridge_signature = item.get("reasoning_content").is_some_and(Value::is_string)
             && encrypted_content.is_some();
         if !legacy_bridge_signature {
-            return (!text.is_empty()).then(|| {
-                json!({
-                    "type":"text",
-                    "text":format!("[Historical reasoning from another protocol]\n{text}")
-                })
-            });
+            return None;
         }
     }
     if text.is_empty() && encrypted_content.is_none() {
@@ -11344,7 +11606,12 @@ fn web_search_fallback_arguments(arguments: &str, fallback: &CodexWebSearchFallb
     canonical_json_string(&Value::Object(object))
 }
 
-fn anthropic_thinking_response_item(block: &Value, item_id: &str, inline_citations: bool) -> Value {
+fn anthropic_thinking_response_item(
+    block: &Value,
+    item_id: &str,
+    inline_citations: bool,
+    origin: &AnthropicThinkingReplayOrigin,
+) -> Value {
     let raw = block["thinking"].as_str().unwrap_or("");
     let text = clean_inline_citations(raw, inline_citations);
     let mut item = json!({
@@ -11355,10 +11622,10 @@ fn anthropic_thinking_response_item(block: &Value, item_id: &str, inline_citatio
     });
     if block["type"] == "redacted_thinking" || block["signature"].is_string() {
         // 展示文本可以过滤引用标签，签名对应的原始块必须按原样回放。
-        // 这是本地版本化封装，不对上游签名或 redacted data 做解密。
+        // v2 同时保存签发来源；签名保持不透明，不能按长度或固定前缀猜测兼容性。
         item["encrypted_content"] = json!(format!(
-            "{ANTHROPIC_THINKING_REPLAY_PREFIX}{}",
-            canonical_json_string(block)
+            "{ANTHROPIC_THINKING_REPLAY_V2_PREFIX}{}",
+            canonical_json_string(&json!({"origin":origin,"block":block}))
         ));
     }
     item
@@ -11467,6 +11734,7 @@ fn anthropic_content_to_response_output_items(
     content: &Value,
     response_id: &str,
     tool_context: &CodexToolContext,
+    origin: &AnthropicThinkingReplayOrigin,
 ) -> Vec<Value> {
     let Some(blocks) = content.as_array() else {
         return Vec::new();
@@ -11497,6 +11765,7 @@ fn anthropic_content_to_response_output_items(
                     block,
                     &item_id,
                     tool_context.inline_citations,
+                    origin,
                 ));
             }
             "text" => {
@@ -14881,19 +15150,14 @@ mod remote_compaction_v2_tests {
         let websocket = normalize_native_responses_request(&request);
         assert_eq!(http, websocket);
         assert!(http.get("codex_elves_compat").is_none());
-        assert_eq!(http["input"].as_array().unwrap().len(), 4);
+        assert_eq!(http["input"].as_array().unwrap().len(), 3);
+        assert!(!http.to_string().contains("visible historical reasoning"));
         assert!(
-            http["input"][1]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("visible historical reasoning")
-        );
-        assert!(
-            http["input"][2]["content"][0]
+            http["input"][1]["content"][0]
                 .get("anthropic_citations")
                 .is_none()
         );
-        assert_eq!(http["input"][3], native);
+        assert_eq!(http["input"][2], native);
         assert!(!http.to_string().contains("anthropic-only"));
         assert!(
             !http

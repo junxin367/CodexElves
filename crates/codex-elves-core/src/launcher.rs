@@ -2287,6 +2287,11 @@ async fn handle_protocol_proxy_connection_inner(
         }
     };
 
+    // 用户要求模型切换可续聊：普通响应和 deferred SSE 都按实际选中的上游记录签名来源。
+    let mut request_json = request_json;
+    if let Some(request) = request_json.as_mut() {
+        upstream.annotate_anthropic_response_request(request);
+    }
     let logged_request_body = progress.observe_upstream(&mut upstream, request_body);
     let logged_request_json = serde_json::from_str::<serde_json::Value>(&logged_request_body).ok();
     let logged_request_metadata =
@@ -3300,6 +3305,11 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         }
     };
 
+    // 与普通响应共用签名来源封装，避免流式会话遗漏供应商或账号作用域。
+    let mut request_json = request_json;
+    if let Some(request) = request_json.as_mut() {
+        upstream.annotate_anthropic_response_request(request);
+    }
     let logged_request_body = progress.observe_upstream(&mut upstream, request_body);
     let logged_request_json = serde_json::from_str::<serde_json::Value>(&logged_request_body).ok();
     let logged_request_metadata =
