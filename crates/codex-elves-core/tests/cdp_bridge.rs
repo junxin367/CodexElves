@@ -10409,6 +10409,116 @@ fn injection_script_resolves_temporary_thread_id_and_marks_stale_token_usage() {
 }
 
 #[test]
+fn renderer_token_usage_resolves_hidden_markers_only_within_visible_main_page() {
+    let script = assets::renderer_features_script();
+    let section = |start: &str, end: &str| {
+        let from = script.find(start).expect("session identity helper");
+        let to = from + script[from..].find(end).expect("helper boundary");
+        &script[from..to]
+    };
+    let source = [
+        section(
+            "  function validThreadSessionKey(",
+            "\n  let codexTransportPollBusy",
+        ),
+        section(
+            "  function codexServiceTierBadgeVisibleElement(",
+            "\n  function codexServiceTierBadgeText(",
+        ),
+        section(
+            "  function codexServiceTierIsMainComposerElement(",
+            "\n  function codexServiceTierVisibleComposerFooters(",
+        ),
+    ]
+    .join("\n");
+    let node_script = format!(
+        "const source={};\n",
+        serde_json::to_string(&source).unwrap()
+    ) + r#"
+const assert=require("node:assert/strict");
+class Element {
+  constructor(parent=null,options={}) {
+    this.parentElement=parent;this.isConnected=true;
+    this.display=options.display||"block";this.visibility=options.visibility||"visible";
+    this.width=options.width??800;this.height=options.height??200;
+    this.attrs={...options.attrs};
+  }
+  getAttribute(name) { return this.attrs[name]??null; }
+  closest(selector) {
+    for(let node=this;node;node=node.parentElement) {
+      if(selector==="[data-app-shell-focus-area]") {
+        if(node.getAttribute("data-app-shell-focus-area")!==null)return node;
+      } else if(Object.hasOwn(node.attrs,"hidden")||node.attrs["aria-hidden"]==="true"
+          ||Object.hasOwn(node.attrs,"inert"))return node;
+    }
+    return null;
+  }
+  getBoundingClientRect() {
+    for(let node=this;node;node=node.parentElement)
+      if(node.display==="none"||Object.hasOwn(node.attrs,"hidden"))return {width:0,height:0};
+    return this.display==="contents"?{width:0,height:0}:{width:this.width,height:this.height};
+  }
+}
+const area=(name,options={})=>new Element(null,{
+  ...options,attrs:{"data-app-shell-focus-area":name,...options.attrs}
+});
+const marker=(owner,id,options={})=>new Element(owner,{
+  display:"none",...options,attrs:{"data-above-composer-conversation-id":id}
+});
+const selected={ref:{session_id:"local:client-new-thread:temporary-token-session",title:"界面名称与存储标题不同"}};
+const realId="01a1b111-2222-7333-8444-555566667777";
+const cached=marker(new Element(area("main",{display:"none"})),"cached-thread-11111111",{display:"grid"});
+const side=marker(new Element(area("right")),"side-thread-22222222");
+const mainOwner=new Element(area("main"));
+const current=marker(mainOwner,realId);
+function create(markers) {
+  return new Function("document","HTMLElement","getComputedStyle","projectMoveSessionKey",
+    "sessionRows","sessionRefFromRow","isCurrentSessionRow","locationThreadId",
+    `${source};return {active:activeConversationIdFromDom,current:currentSessionRefFromDom,
+      resolve:resolveTemporarySessionRef};`)(
+    {querySelectorAll:selector=>{
+      assert.equal(selector,"[data-above-composer-conversation-id]");return markers;
+    }},
+    Element,node=>({display:node.display,visibility:node.visibility}),
+    id=>String(id||"").replace(/^local:/,""),()=>[selected],row=>row.ref,
+    row=>row===selected,()=>""
+  );
+}
+let api=create([cached,side,current]);
+assert.equal(api.active(),realId,"编号标记隐藏但所属主页面可见时，仍须取得真实编号");
+assert.equal(api.current().session_id,realId,"Token 查询不能继续使用侧栏保留的临时编号");
+assert.deepEqual(api.resolve(selected.ref),{...selected.ref,session_id:realId});
+const stable={session_id:"local:stable-thread-33333333",title:"已有会话"};
+assert.equal(api.resolve(stable),stable,"已有稳定编号不改写");
+assert.equal(create([cached,side]).active(),"","隐藏页面和侧边面板都不能成为主会话来源");
+
+const contents=new Element(mainOwner,{display:"contents"});
+assert.equal(create([marker(contents,realId)]).active(),realId,"无布局框的包装层不应阻断解析");
+const hiddenContents=new Element(mainOwner,{display:"contents",visibility:"hidden"});
+assert.equal(create([marker(hiddenContents,realId)]).active(),"","不能越过隐藏的包装层");
+for(const attrs of [{hidden:""},{"aria-hidden":"true"},{inert:""}]) {
+  const hiddenOwner=new Element(mainOwner,{attrs});
+  assert.equal(create([marker(hiddenOwner,realId)]).active(),"","隐藏或停用的页面不能借用外层可见区域");
+}
+const zeroOwner=new Element(mainOwner,{width:0,height:0});
+assert.equal(create([marker(zeroOwner,realId)]).active(),"","不能越过零尺寸布局容器寻找可见祖先");
+const shown=marker(mainOwner,realId,{display:"grid"});
+assert.equal(create([shown]).active(),realId,"保留原有可见标记的读取");
+assert.equal(create([marker(mainOwner,"local:client-new-thread:pending")]).active(),"","临时编号不能冒充真实编号");
+"#;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(node_script)
+        .output()
+        .expect("node should be available");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn injection_script_keeps_session_ref_stable_and_refreshes_after_turn_completion() {
     let script = assets::injection_script(45221);
 

@@ -15,7 +15,8 @@ const NATIVE_FAST_UNLOCK_SCRIPT: &str =
 const COMPOSER_FAST_SCRIPT: &str = include_str!("../../../assets/inject/composer-fast.js");
 const NATIVE_RPC_COMPAT_SCRIPT: &str = include_str!("../../../assets/inject/native-rpc-compat.js");
 // Fast 保持按会话隔离和模型名称标蓝；更新构建标识，让旧版会话列表闪电随注入更新清理。
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261105-fast-no-sidebar";
+// Token 用量修复也须替换已驻留的旧编号解析，不能继续复用同版本的旧运行时。
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261106-token-usage-visible-owner";
 
 pub fn renderer_script() -> &'static str {
     RENDERER_FEATURES_SCRIPT

@@ -8962,11 +8962,22 @@
   // composer 上方节点携带 Codex 分配的真实 conversation id，
   // 用它校正临时 id，避免后端按临时 id 查不到会话。
   function activeConversationIdFromDom() {
-    // 新版保留多个隐藏聊天页面；只能使用可见主页面的标记，防止 Token、Open in、
-    // Checkpoint 读取到另一个聊天的数据或操作另一个工作区。
+    // 用户要求 Token 用量读取真实会话：编号标记可能因 empty:hidden 不显示，
+    // 应检查其所属主页面；隐藏会话及侧边面板仍不能作为 Token、Open in、Checkpoint 的来源。
     const raw = Array.from(document.querySelectorAll("[data-above-composer-conversation-id]"))
       .filter(codexServiceTierIsMainComposerElement)
-      .find(codexServiceTierBadgeVisibleElement)
+      .find((marker) => {
+        const parent = marker.parentElement;
+        if (parent?.closest?.('[hidden], [aria-hidden="true"], [inert]')) return false;
+        if (codexServiceTierBadgeVisibleElement(marker)) return true;
+        // 只跳过不产生布局框的 contents 包装，不能越过隐藏或零尺寸页面去借用外层可见区域。
+        for (let owner = parent; owner; owner = owner.parentElement) {
+          const style = getComputedStyle(owner);
+          if (style.visibility === "hidden" || style.visibility === "collapse") return false;
+          if (style.display !== "contents") return codexServiceTierBadgeVisibleElement(owner);
+        }
+        return false;
+      })
       ?.getAttribute("data-above-composer-conversation-id");
     const id = String(raw || "").trim();
     if (!id || isTemporaryThreadId(id)) return "";
