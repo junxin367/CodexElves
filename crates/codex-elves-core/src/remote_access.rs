@@ -2342,6 +2342,7 @@ fn build_app_resources_manifest(
 }
 
 fn web_resource_revision() -> u64 {
+    // 网页资源有改动时递增编号；Android 会拒绝不高于缓存的版本，APK 与服务共用此文件。
     include_str!("../../../assets/remote-access/resource-revision.txt")
         .trim()
         .parse()
@@ -3340,7 +3341,14 @@ fn workspace_identity(payload: &Value) -> Result<Value, ApiError> {
     if object.keys().any(|key| {
         !matches!(
             key.as_str(),
-            "threadId" | "projectId" | "path" | "section" | "ifRevision" | "query"
+            "threadId"
+                | "projectId"
+                | "path"
+                | "section"
+                | "ifRevision"
+                | "query"
+                | "allRepositories"
+                | "repository"
         )
     }) {
         return Err(ApiError::new(400, "只能通过会话或项目标识读取变更"));

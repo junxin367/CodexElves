@@ -35,24 +35,48 @@ function byteSize(size) {
 function statusLabel(value) {
   return statusLabels[value] || statusLabels[String(value).trim()] || String(value || "变更");
 }
-const cacheSchema = 1, responseVersion = 2, memoryLimit = 16 * 1024 * 1024;
+const cacheSchema = 1, responseVersion = 3, memoryLimit = 16 * 1024 * 1024;
 const validRevision = value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const objectValue = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const safeString = (value, maximum = 32768) => typeof value === "string" && value.length <= maximum;
 const validRoot = value => safeString(value) && value.length > 0;
-const detailKey = file => JSON.stringify([file.section, file.path]);
+const validRepository = value => safeString(value, 16384) && (value === "" || !/[\\:\0]/.test(value)
+  && value.split("/").every(part => part && part !== "." && part !== ".." && part.toLowerCase() !== ".git" && !/[ .]$/.test(part)));
+// 用户要求多仓库全部可查：列表、详情缓存和历史导航都包含仓库身份，隔离各仓库的同名文件。
+const detailKey = file => JSON.stringify([file.repository || "", file.section, file.path]);
+const displayedPath = file => file.repository ? `${file.repository}/${file.path}` : file.path;
+const groupKey = (repository, section) => repository ? JSON.stringify([repository, section]) : section;
 function fileEntry(value) {
   return objectValue(value) && sections.some(([section]) => section === value.section)
     && safeString(value.path) && value.path.length > 0 && safeString(value.status, 64)
+    && (value.repository == null || validRepository(value.repository))
     && (value.oldPath == null || safeString(value.oldPath));
 }
 function listResponse(value) {
   if (!objectValue(value) || value.ok === false || !validRoot(value.root) || !validRevision(value.revision)
       || !Array.isArray(value.files) || value.files.length > 10000 || !value.files.every(fileEntry)
       || typeof value.truncated !== "boolean" || value.message != null && !safeString(value.message, 10000)) return null;
+  let repositories;
+  if (value.repositories != null) {
+    if (!Array.isArray(value.repositories) || value.repositories.length > 256) return null;
+    repositories = value.repositories.map(repository => {
+      if (!objectValue(repository) || !validRepository(repository.path) || !validRoot(repository.root)
+          || !Number.isSafeInteger(repository.fileCount) || repository.fileCount < 0
+          || typeof repository.truncated !== "boolean"
+          || repository.error != null && !safeString(repository.error, 10000)) return null;
+      return { path: repository.path, root: repository.root, fileCount: repository.fileCount,
+        truncated: repository.truncated, error: repository.error || null };
+    });
+    if (repositories.includes(null)) return null;
+    const paths = new Set(repositories.map(repository => repository.path));
+    if (paths.size !== repositories.length
+        || value.files.some(file => typeof file.repository !== "string" || !paths.has(file.repository))) return null;
+  } else if (value.files.some(file => file.repository != null)) return null;
   return { ok: true, root: value.root, revision: value.revision, truncated: value.truncated,
     message: value.message || null,
+    ...(repositories ? { repositories } : {}),
     files: value.files.map(file => ({ section: file.section, path: file.path, status: file.status,
+      ...(file.repository != null ? { repository: file.repository } : {}),
       ...(file.oldPath != null ? { oldPath: file.oldPath } : {}) })) };
 }
 function detailResponse(value, file) {
@@ -61,6 +85,8 @@ function detailResponse(value, file) {
     && (side.dataUrl == null || imageSource(side.dataUrl));
   if (!objectValue(value) || value.ok === false || !validRoot(value.root) || !validRevision(value.revision)
       || value.path !== file.path || value.section !== file.section
+      || value.repository != null && !validRepository(value.repository)
+      || (value.repository || "") !== (file.repository || "")
       || !["text", "image", "binary", "unsupported"].includes(value.kind)
       || typeof value.truncated !== "boolean" || value.diff != null && !safeString(value.diff, 4 * 1024 * 1024)
       || value.message != null && !safeString(value.message, 10000)
@@ -69,13 +95,15 @@ function detailResponse(value, file) {
     exists: value.exists, size: value.size, mime: value.mime || null, dataUrl: value.dataUrl || null
   };
   return { ok: true, root: value.root, revision: value.revision, path: value.path, section: value.section,
+    ...(value.repository != null ? { repository: value.repository } : {}),
     kind: value.kind, diff: value.diff || "", truncated: value.truncated, message: value.message || null,
     before: side(value.before), after: side(value.after) };
 }
 function uiState(value = {}) {
   return {
     query: safeString(value?.query, 1000) ? value.query : "",
-    collapsed: Object.fromEntries(sections.map(([section]) => [section, value?.collapsed?.[section] === true])),
+    collapsed: Object.fromEntries(Object.entries(objectValue(value?.collapsed) ? value.collapsed : {})
+      .filter(([key, collapsed]) => safeString(key, 32768) && collapsed === true).slice(0, 768)),
     scrollTop: Number.isFinite(value?.scrollTop) ? Math.max(0, value.scrollTop) : 0,
     wrap: value?.wrap === true
   };
@@ -91,6 +119,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
   let files = [], selectedFile = null, changesLoaded = false, changesBusy = false;
   let returnView = null, wrapDiff = false, pageExitTimer = null, detailExitTimer = null;
   let project = null, displayedProject = null, detailRecord = null, authorized = true, projectSequence = 0;
+  let legacyChangesUntil = 0;
   const projects = new Map(), cacheReads = new Set(), cacheMutations = new Map();
   const controllers = new Set(), inertState = new Map();
   const navigationOwner = Math.random().toString(36).slice(2);
@@ -219,6 +248,18 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     } finally {
       clearTimeout(timeout); controllers.delete(controller);
       signal?.removeEventListener("abort", abort);
+    }
+  }
+  async function requestChanges(payload, signal) {
+    const path = "/api/workspace/changes";
+    if (Date.now() < legacyChangesUntil) return request(path, payload, signal);
+    try {
+      return await request(path, { ...payload, allRepositories: true }, signal);
+    } catch (error) {
+      // 手机网页可能先于电脑后台更新；仅对旧版白名单拒绝回退单仓库读取，不吞掉授权及真实读取错误。
+      if (error.code !== 400 || error.message !== "只能通过会话或项目标识读取变更") throw error;
+      legacyChangesUntil = Date.now() + 30000;
+      return request(path, payload, signal);
     }
   }
   function status(element, message, failed = false) {
@@ -383,6 +424,11 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     }
   }
   function summary(p) {
+    if (p.list?.repositories) {
+      if (!p.list.repositories.length) return p.list.message || "当前项目未发现 Git 仓库。";
+      const count = `${p.list.repositories.length} 个仓库 · ${p.list.files.length} 项变更`;
+      return p.list.truncated ? `${count}\n${p.list.message || "部分数据未完整读取。"}` : count;
+    }
     return p.list?.truncated ? "变更较多，仅显示部分文件。"
       : p.list?.files.length ? `${p.list.files.length} 项变更` : "当前项目没有未提交变更。";
   }
@@ -496,8 +542,8 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
         p.list = response; p.listBytes = responseBytes(response);
         if (Array.isArray(saved.detailIds)) for (const id of saved.detailIds.slice(0, 64)) {
           try {
-            const [section, path] = JSON.parse(id);
-            if (detailKey({ section, path }) === id) {
+            const [repository, section, path] = JSON.parse(id);
+            if (detailKey({ repository, section, path }) === id) {
               if (response.files.some(file => detailKey(file) === id)) p.detailIds.add(id);
               else mutation(p, "workspace-detail", JSON.stringify([p.id, id]), "remove");
             }
@@ -552,7 +598,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
       if (!current()) return;
       const cached = p.list;
       const payload = { ...p.target, ...(cached ? { ifRevision: cached.revision } : {}) };
-      let result = await request("/api/workspace/changes", payload, controller.signal);
+      let result = await requestChanges(payload, controller.signal);
       if (!current()) return;
       if (result?.notModified === true) {
         if (cached && validRoot(result.root) && result.root !== cached.root) {
@@ -562,7 +608,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
         if (cached && result.revision === cached.revision && result.root === cached.root && p.list === cached) {
           ++p.networkVersion; status(changesStatus, summary(p)); return;
         }
-        result = await request("/api/workspace/changes", p.target, controller.signal);
+        result = await requestChanges(p.target, controller.signal);
         if (!current()) return;
       }
       const response = listResponse(result);
@@ -596,44 +642,61 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     const query = p.ui.query.trim().toLocaleLowerCase();
     const signature = JSON.stringify([p.list?.revision || "", query]);
     if (signature === p.rendered) {
-      for (const [section] of sections) applyFold(p, section);
+      for (const key of p.groups.keys()) applyFold(p, key);
       return;
     }
     const scrollTop = !restoreScroll && project === p && displayedProject === p ? fileList.scrollTop : p.ui.scrollTop;
     p.rendered = signature; p.listView.replaceChildren(); p.buttons.clear(); p.groups.clear();
     const source = p.list?.files || [];
-    const visible = source.filter(file => !query || `${file.path} ${file.oldPath || ""}`.toLocaleLowerCase().includes(query));
+    const visible = source.filter(file => !query || `${displayedPath(file)} ${file.oldPath || ""}`.toLocaleLowerCase().includes(query));
     if (source.length && !visible.length) p.listView.append(node("p", "session-tools-empty", "没有匹配的变更文件。"));
-    for (const [section, label] of sections) {
-      const entries = visible.filter(file => file.section === section);
-      if (!entries.length) continue;
-      const group = node("section", "session-tools-file-group"), title = node("h3");
-      const body = node("div", "session-tools-file-group-body");
-      body.id = `session-tools-group-${navigationOwner}-${p.number}-${section}`;
-      const toggle = control("", `${label} · ${entries.length}`, () => {
-        if (project !== p || disposed) return;
-        if (p.ui.query.trim()) {
-          if (p.searchCollapsed.has(section)) p.searchCollapsed.delete(section);
-          else p.searchCollapsed.add(section);
-        } else p.ui.collapsed[section] = !p.ui.collapsed[section];
-        applyFold(p, section); p.ui.scrollTop = fileList.scrollTop; markViewChanged(p);
-      }, "session-tools-group-toggle");
-      toggle.setAttribute("aria-controls", body.id);
-      const chevron = node("span", "session-tools-group-chevron", "›"); chevron.setAttribute("aria-hidden", "true");
-      toggle.append(chevron, node("span", "session-tools-group-label", `${label} · ${entries.length}`));
-      title.append(toggle); group.append(title, body); p.groups.set(section, { toggle, body });
-      applyFold(p, section);
-      for (const file of entries) {
-        const button = control("", `${label}：${file.path}`, () => void loadDetail(file), "session-tools-file");
-        const parts = fileParts(file), copy = node("span", "session-tools-file-copy");
-        const directory = file.oldPath ? `${parts.directory} · 原路径：${file.oldPath}` : parts.directory;
-        copy.append(node("strong", "session-tools-file-name", parts.name), node("span", "session-tools-file-directory", directory));
-        copy.title = file.oldPath ? `${file.oldPath} → ${file.path}` : file.path;
-        const badge = node("span", "session-tools-file-status", statusLabel(file.status)); badge.setAttribute("data-status", file.status);
-        button.append(node("span", "session-tools-file-icon", "▤"), copy, badge, node("span", "session-tools-file-chevron", "›"));
-        p.buttons.set(detailKey(file), button); body.append(button);
+    const repositories = p.list?.repositories || [{ path: "", root: p.list?.root || "" }];
+    for (const repository of repositories) {
+      const repositoryFiles = visible.filter(file => (file.repository || "") === repository.path);
+      if (!repositoryFiles.length && !repository.error) continue;
+      let host = p.listView;
+      if (repositories.length > 1 || repository.path || repository.error) {
+        host = node("section", "session-tools-repository");
+        const heading = node("h2", "session-tools-repository-heading",
+          `${repository.path || repository.root.split(/[\\/]/).filter(Boolean).at(-1) || "当前仓库"} · ${repositoryFiles.length}`);
+        heading.title = repository.root;
+        host.append(heading);
+        if (repository.error) host.append(node("p", "session-tools-status error-text", repository.error));
+        else if (repository.truncated) host.append(node("p", "session-tools-warning", "此仓库仅显示部分变更。"));
+        p.listView.append(host);
       }
-      p.listView.append(group);
+      for (const [section, label] of sections) {
+        const key = groupKey(repository.path, section);
+        const entries = repositoryFiles.filter(file => file.section === section);
+        if (!entries.length) continue;
+        const group = node("section", "session-tools-file-group"), title = node("h3");
+        const body = node("div", "session-tools-file-group-body");
+        body.id = `session-tools-group-${navigationOwner}-${p.number}-${p.groups.size}`;
+        const toggle = control("", `${label} · ${entries.length}`, () => {
+          if (project !== p || disposed) return;
+          if (p.ui.query.trim()) {
+            if (p.searchCollapsed.has(key)) p.searchCollapsed.delete(key);
+            else p.searchCollapsed.add(key);
+          } else p.ui.collapsed[key] = !p.ui.collapsed[key];
+          applyFold(p, key); p.ui.scrollTop = fileList.scrollTop; markViewChanged(p);
+        }, "session-tools-group-toggle");
+        toggle.setAttribute("aria-controls", body.id);
+        const chevron = node("span", "session-tools-group-chevron", "›"); chevron.setAttribute("aria-hidden", "true");
+        toggle.append(chevron, node("span", "session-tools-group-label", `${label} · ${entries.length}`));
+        title.append(toggle); group.append(title, body); p.groups.set(key, { toggle, body });
+        applyFold(p, key);
+        for (const file of entries) {
+          const button = control("", `${label}：${displayedPath(file)}`, () => void loadDetail(file), "session-tools-file");
+          const parts = fileParts(file), copy = node("span", "session-tools-file-copy");
+          const directory = file.oldPath ? `${parts.directory} · 原路径：${file.oldPath}` : parts.directory;
+          copy.append(node("strong", "session-tools-file-name", parts.name), node("span", "session-tools-file-directory", directory));
+          copy.title = file.oldPath ? `${file.oldPath} → ${displayedPath(file)}` : displayedPath(file);
+          const badge = node("span", "session-tools-file-status", statusLabel(file.status)); badge.setAttribute("data-status", file.status);
+          button.append(node("span", "session-tools-file-icon", "▤"), copy, badge, node("span", "session-tools-file-chevron", "›"));
+          p.buttons.set(detailKey(file), button); body.append(button);
+        }
+        host.append(group);
+      }
     }
     p.ui.scrollTop = scrollTop;
     if (project === p) attachList(p);
@@ -707,8 +770,9 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
       && p.generation === generation && epoch === detailEpoch && !controller.signal.aborted;
     selectedFile = file;
     const parts = fileParts(file);
-    detailTitle.textContent = parts.name; detailTitle.title = file.path;
-    detailPath.textContent = parts.directory; detailPath.title = file.path;
+    detailTitle.textContent = parts.name; detailTitle.title = displayedPath(file);
+    detailPath.textContent = file.repository ? `${file.repository} / ${parts.directory}` : parts.directory;
+    detailPath.title = displayedPath(file);
     let cached = p.details.get(id);
     if (cached && cached.response.root !== p.list.root) {
       p.details.delete(id); p.detailIds.delete(id);
@@ -730,7 +794,8 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
         } else if (saved) mutation(p, "workspace-detail", JSON.stringify([p.id, id]), "remove");
       }
       if (!current()) return;
-      const payload = { ...p.target, path: file.path, section: file.section };
+      const payload = { ...p.target, path: file.path, section: file.section,
+        ...(file.repository != null ? { repository: file.repository } : {}) };
       let result = await request("/api/workspace/change",
         { ...payload, ...(cached ? { ifRevision: cached.response.revision } : {}) }, controller.signal);
       if (!current()) return;
@@ -854,7 +919,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     history.pushState({
       ...(history.state || {}),
       [historyKey]: { owner: navigationOwner, route, page: activePage, context: contextKey,
-        ...(file ? { path: file.path, section: file.section } : {}) }
+        ...(file ? { path: file.path, section: file.section, repository: file.repository || "" } : {}) }
     }, "", location.href);
   }
   function openPage(name, options = {}) {
@@ -929,7 +994,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     detailPanel.hidden = true;
     panel.inert = !opened;
     if (focus && opened) {
-      const selected = selectedFile && fileTriggers.get(JSON.stringify([selectedFile.section, selectedFile.path]));
+      const selected = selectedFile && fileTriggers.get(detailKey(selectedFile));
       (selected || backToConversation).focus({ preventScroll: true });
     }
   }
@@ -960,7 +1025,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     beforeOpen?.();
     if (route.route === "detail") {
       if (!opened) showPage(route.page, { recordHistory: false });
-      const file = files.find(entry => entry.path === route.path && entry.section === route.section);
+      const file = files.find(entry => detailKey(entry) === detailKey(route));
       if (file && (!detailVisible || selectedFile !== file)) void loadDetail(file, { recordHistory: false });
     } else if (pageTitles[route.route]) {
       if (detailVisible) hideDetail();

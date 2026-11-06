@@ -19,8 +19,9 @@ const NATIVE_FAST_UNLOCK_SCRIPT: &str =
     include_str!("../../../assets/inject/native-fast-unlock.js");
 const COMPOSER_FAST_SCRIPT: &str = include_str!("../../../assets/inject/composer-fast.js");
 const NATIVE_RPC_COMPAT_SCRIPT: &str = include_str!("../../../assets/inject/native-rpc-compat.js");
-// 统一保留主线缓存修复、Token 编号解析与侧边 Fast；更新标识以替换旧运行时。
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261106-remote-runtime-unified";
+// 保留主线缓存修复、Token 编号解析与侧边 Fast；
+// 多仓库变更使用独立构建标识，便于核对网页和电脑后台是否来自同一包。
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261106-remote-multi-repo";
 
 pub fn statsig_cache_script() -> String {
     // 缓存修复必须在 SDK 首次读取前执行；压缩库不污染宿主模块加载器或全局对象。

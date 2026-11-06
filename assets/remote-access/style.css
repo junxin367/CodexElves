@@ -914,6 +914,9 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-tools-status.error-text{color:var(--danger)}
 .session-tools-warning{padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--side);color:var(--text)}
 .session-tools-file-search{display:block;flex-shrink:0;width:calc(100% - 28px);margin:10px 14px 0;padding:8px 11px;background:var(--side);font-size:.85714rem}
+/* 多仓库按相对目录分组，仓库内继续保留暂存分区，手机端不横向挤压文件名。 */
+.session-tools-repository+.session-tools-repository{border-top:1px solid var(--line);padding-top:8px;margin-top:4px}
+.session-tools-repository-heading{margin:8px 14px;font-size:.85714rem;font-weight:600;overflow-wrap:anywhere}
 .session-tools-file-group{padding:0 8px 8px}
 .session-tools-file-group h3{margin:0;font-size:.78571rem;font-weight:500;color:var(--muted)}
 .session-tools-group-toggle{display:flex;align-items:center;gap:6px;width:100%;min-width:0;min-height:36px;padding:6px;border:0;text-align:left;color:inherit;font:inherit}

@@ -68,6 +68,7 @@ const native = await readFile(new URL("../assets/remote-access/native.js", impor
 const channels = await readFile(new URL("../assets/remote-access/channels.js", import.meta.url), "utf8");
 const diagnostics = await readFile(new URL("../assets/remote-access/diagnostics.js", import.meta.url), "utf8");
 const eventsClient = await readFile(new URL("../assets/remote-access/events-client.js", import.meta.url), "utf8");
+const sessionTools = await readFile(new URL("../assets/remote-access/session-tools.js", import.meta.url), "utf8");
 
 async function connectionDiagnosticsHarness({ android = true } = {}) {
   const logs = [], documentListeners = new Map(), windowListeners = new Map(), timers = new Map();
@@ -3989,4 +3990,78 @@ test("服务部分侧栏保留旧会话展示，完整目录及其他后端不�
   assert.deepEqual(Array.from(merged.projects[0].threads, row => row.id), ["known", "old"]);
   for (const input of [{ ...current, complete: true }, { ...current, nativeBridge: "cdp" }])
     assert.equal(context.mergeIncompleteSidebar(previous, input), input);
+});
+
+function workspaceChangeContract() {
+  const context = vm.createContext({});
+  vm.runInContext(sessionTools.slice(sessionTools.indexOf("const sections ="), sessionTools.indexOf("export function mountSessionTools"))
+    + "\nglobalThis.contract = { detailKey, displayedPath, listResponse, detailResponse, uiState };", context);
+  return context.contract;
+}
+
+test("多仓库变更按仓库隔离同名路径，保留分组信息和各仓库折叠状态", () => {
+  const contract = workspaceChangeContract();
+  const alpha = { repository: "web/alpha", path: "src/app.ts", section: "unstaged", status: "M" };
+  const beta = { ...alpha, repository: "web/beta" };
+  assert.notEqual(contract.detailKey(alpha), contract.detailKey(beta));
+  assert.equal(contract.displayedPath(beta), "web/beta/src/app.ts");
+  const response = contract.listResponse({
+    ok: true, root: "D:/workspace", revision: "a".repeat(64), truncated: false,
+    repositories: ["web/alpha", "web/beta"].map(path => ({
+      path, root: `D:/workspace/${path}`, fileCount: 1, truncated: false, error: null
+    })),
+    files: [alpha, beta],
+  });
+  assert.equal(response.repositories.length, 2);
+  assert.equal(response.files[1].repository, "web/beta");
+  assert.equal(response.files[1].path, "src/app.ts");
+  const alphaGroup = JSON.stringify(["web/alpha", "unstaged"]);
+  const betaGroup = JSON.stringify(["web/beta", "unstaged"]);
+  const ui = contract.uiState({ collapsed: { [alphaGroup]: true, [betaGroup]: false } });
+  assert.equal(ui.collapsed[alphaGroup], true);
+  assert.notEqual(ui.collapsed[betaGroup], true);
+});
+
+test("多仓库变更拒绝越界、重复仓库和错误仓库的详情，同时兼容单仓库旧响应", () => {
+  const contract = workspaceChangeContract();
+  const file = { repository: "alpha", path: "same.txt", section: "untracked", status: "A" };
+  const repository = { path: "alpha", root: "D:/workspace/alpha", fileCount: 1, truncated: false, error: null };
+  const response = { ok: true, root: "D:/workspace", revision: "b".repeat(64), truncated: false,
+    repositories: [repository], files: [file] };
+  for (const path of ["../outside", "/outside", "C:/outside", "alpha/.git/objects"]) {
+    assert.equal(contract.listResponse({ ...response, files: [{ ...file, repository: path }] }), null);
+  }
+  assert.equal(contract.listResponse({ ...response, repositories: [repository, repository] }), null);
+  const detail = { ...file, root: response.root, revision: response.revision, kind: "text", truncated: false, diff: "+alpha" };
+  assert.ok(contract.detailResponse(detail, file));
+  assert.equal(contract.detailResponse({ ...detail, repository: "beta" }, file), null);
+  const { repository: _repository, ...legacyFile } = file;
+  const legacy = contract.listResponse({ ok: true, root: response.root, revision: response.revision,
+    truncated: false, files: [legacyFile] });
+  assert.ok(legacy);
+  assert.equal(legacy.repositories, undefined);
+  assert.equal(legacy.files[0].repository, undefined);
+});
+
+test("新版多仓库页面连接旧后台时仅对旧白名单拒绝回退，并暂时记住旧能力", async () => {
+  const calls = [];
+  const context = vm.createContext({
+    legacyChangesUntil: 0,
+    request: async (path, payload) => {
+      calls.push({ path, payload });
+      if (payload.allRepositories) throw Object.assign(new Error("只能通过会话或项目标识读取变更"), { code: 400 });
+      return { ok: true, legacy: true };
+    },
+  });
+  vm.runInContext(sessionTools.slice(sessionTools.indexOf("  async function requestChanges("), sessionTools.indexOf("  function status(")), context);
+  assert.equal((await context.requestChanges({ threadId: "thread" })).legacy, true);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].payload.allRepositories, true);
+  assert.equal(calls[1].payload.allRepositories, undefined);
+  await context.requestChanges({ threadId: "thread" });
+  assert.equal(calls.length, 3);
+  assert.equal(calls[2].payload.allRepositories, undefined);
+  context.legacyChangesUntil = 0;
+  context.request = async () => { throw Object.assign(new Error("访问已撤销"), { code: 403 }); };
+  await assert.rejects(context.requestChanges({ threadId: "thread" }), error => error.code === 403);
 });

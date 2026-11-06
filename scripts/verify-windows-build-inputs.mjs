@@ -21,6 +21,8 @@ const programs = [
     "assets/remote-access/app.js",
     "assets/remote-access/native.js",
     "assets/remote-access/session-menu.js",
+    "assets/remote-access/session-tools.js",
+    "assets/remote-access/style.css",
   ]],
 ];
 const failures = [];
