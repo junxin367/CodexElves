@@ -123,6 +123,7 @@ $ReleaseDir = Join-Path $CargoTargetDir "release-fast"
 $ReleaseMirrorDir = Join-Path $CargoTargetDir "release"
 
 $NpmPath = Resolve-ToolPath -Name "npm.cmd" -ExplicitPath "" -FallbackPaths @()
+$NodePath = Resolve-ToolPath -Name "node.exe" -ExplicitPath "" -FallbackPaths @()
 $NsisPath = Resolve-ToolPath `
     -Name "makensis" `
     -ExplicitPath $MakensisPath `
@@ -140,6 +141,9 @@ Write-Output "[INFO] makensis: $NsisPath"
 Write-Output "[INFO] Cargo target: $CargoTargetDir"
 
 Invoke-Checked -FilePath $NpmPath -Arguments @("run", "build") -WorkingDirectory $ManagerDir
+# 更新远程功能时不能误打入另一工作树的同版本程序；复制前、NSIS 打包前分别核对完整内嵌资源。
+$BuildInputVerifier = Join-Path $RepoRoot "scripts\verify-windows-build-inputs.mjs"
+Invoke-Checked -FilePath $NodePath -Arguments @($BuildInputVerifier, $RepoRoot, $ReleaseDir) -WorkingDirectory $RepoRoot
 
 New-Item -ItemType Directory -Path $DistAppDir -Force | Out-Null
 New-Item -ItemType Directory -Path $ReleaseMirrorDir -Force | Out-Null
@@ -157,6 +161,8 @@ foreach ($artifact in @($LauncherExe, $ManagerExe, $TaskBoardExe)) {
     Copy-Item -LiteralPath $artifact -Destination $mirrorPath -Force
     Copy-Item -LiteralPath $artifact -Destination $DistAppDir -Force
 }
+
+Invoke-Checked -FilePath $NodePath -Arguments @($BuildInputVerifier, $RepoRoot, $DistAppDir) -WorkingDirectory $RepoRoot
 
 Invoke-Checked `
     -FilePath $NsisPath `

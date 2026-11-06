@@ -874,15 +874,19 @@ fn thread_usage_summary_omits_history_and_preserves_totals() {
     assert_eq!(value["summary"]["lastTurnUsage"]["totalTokens"], 1320);
     assert_eq!(value["contextUsage"]["usedTokens"], 1320);
     assert_eq!(value["contextUsage"]["contextWindow"], 258400);
-    assert_eq!(
-        value["contextUsage"]["observedAt"],
-        "2026-06-02T05:00:00Z"
-    );
+    assert_eq!(value["contextUsage"]["observedAt"], "2026-06-02T05:00:00Z");
     // 上下文快照先于累计用量去重更新：零占用有效，限流通知不能覆盖最近一次有效占用。
     use std::io::Write;
-    let mut file = fs::OpenOptions::new().append(true).open(&rollout_path).unwrap();
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&rollout_path)
+        .unwrap();
     writeln!(file, r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":5000,"cached_input_tokens":1500,"output_tokens":500,"total_tokens":5500}},"last_token_usage":{{"total_tokens":0}},"model_context_window":258400}}}}}}"#).unwrap();
-    writeln!(file, r#"{{"type":"event_msg","payload":{{"type":"token_count","info":null}}}}"#).unwrap();
+    writeln!(
+        file,
+        r#"{{"type":"event_msg","payload":{{"type":"token_count","info":null}}}}"#
+    )
+    .unwrap();
     let cleared = adapter.codex_thread_usage_summary(&session("local:t1", "Codex Thread"));
     assert_eq!(cleared["contextUsage"]["usedTokens"], 0);
     assert_eq!(cleared["contextUsage"]["contextWindow"], 258400);

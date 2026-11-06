@@ -44,6 +44,10 @@ const MODEL_CAPACITY_RETRY_DELAYS: [Duration; 5] = [
 ];
 static NEXT_WEBSOCKET_CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Debug, thiserror::Error)]
+#[error("当前模型不是原生 Responses 协议")]
+struct ResponsesWebSocketProtocolMismatch;
+
 #[derive(Default)]
 pub(crate) struct WebSocketTransportLiveness {
     next_ping_sequence: u64,
@@ -214,7 +218,7 @@ pub async fn handle_responses_websocket_connection(
         reject_upgrade(
             &mut stream,
             StatusCode::UPGRADE_REQUIRED,
-            "当前会话暂用 HTTP，后台每 3 分钟尝试恢复 WS",
+            "当前会话暂用 HTTP，连接探测逐步退避，连通后等待完整请求恢复 WS",
         )
         .await?;
         return Ok(());
@@ -238,7 +242,7 @@ pub async fn handle_responses_websocket_connection(
         &relay.id,
         &connection_context,
     ) {
-        let message = "当前会话轮次的独立压缩模型使用其他协议，临时改走 HTTP";
+        let message = "当前会话轮次的请求使用其他协议，临时改走 HTTP";
         log_websocket_event(
             "helper.responses_websocket_http_fallback",
             &relay,
@@ -249,10 +253,16 @@ pub async fn handle_responses_websocket_connection(
         reject_upgrade(&mut stream, StatusCode::UPGRADE_REQUIRED, message).await?;
         return Ok(());
     }
-    if should_temporarily_fallback_early_disconnect_responses_websocket_to_http(
-        &relay.id,
-        &connection_context,
-    ) {
+    // 用户要求：有会话恢复状态时以该状态为准；旧的 30 秒轮次标记不能
+    // 在 5 秒探测成功后继续拒绝 WS，否则会延长已经结束的降级。
+    let has_session_transport =
+        crate::session_transport::generation(&relay, &request_context).is_some();
+    if !has_session_transport
+        && should_temporarily_fallback_early_disconnect_responses_websocket_to_http(
+            &relay.id,
+            &connection_context,
+        )
+    {
         let message = "当前会话轮次的 Responses WebSocket 在首个请求前异常断开，临时回退 HTTP";
         log_websocket_event(
             "helper.responses_websocket_http_fallback",
@@ -264,10 +274,12 @@ pub async fn handle_responses_websocket_connection(
         reject_upgrade(&mut stream, StatusCode::UPGRADE_REQUIRED, message).await?;
         return Ok(());
     }
-    if should_temporarily_fallback_upstream_failure_responses_websocket_to_http(
-        &relay.id,
-        &connection_context,
-    ) {
+    if !has_session_transport
+        && should_temporarily_fallback_upstream_failure_responses_websocket_to_http(
+            &relay.id,
+            &connection_context,
+        )
+    {
         let message = "当前会话轮次的 Responses WebSocket 上游连续失败，临时回退 HTTP";
         log_websocket_event(
             "helper.responses_websocket_http_fallback",
@@ -288,8 +300,13 @@ pub async fn handle_responses_websocket_connection(
     {
         Ok(upstream) => upstream,
         Err(error) => {
-            crate::session_transport::mark_http(&relay, &request_context, &format!("{error:#}"));
-            let fallback_armed = arm_upstream_failure_responses_websocket_http_fallback(
+            ensure_websocket_relay_still_current(&relay)?;
+            // 用户要求：内部安全重试耗尽只计一个建连失败周期，达到会话阈值才强制 HTTP。
+            let fallback_armed = crate::session_transport::record_transport_failure(
+                &relay,
+                &request_context,
+                &format!("{error:#}"),
+            ) && arm_upstream_failure_responses_websocket_http_fallback(
                 &relay.id,
                 &connection_context,
             );
@@ -374,10 +391,11 @@ pub async fn handle_responses_websocket_connection(
         upstream,
         &relay,
         request_logger.clone(),
-        request_context,
+        request_context.clone(),
     )
     .await;
     if !request_logger.has_recorded_application_requests()
+        && crate::session_transport::should_use_http(&relay, &request_context)
         && arm_early_disconnect_responses_websocket_http_fallback(&relay.id, &connection_context)
     {
         log_websocket_event(
@@ -391,6 +409,7 @@ pub async fn handle_responses_websocket_connection(
     if result.is_err()
         && request_logger.has_recorded_application_requests()
         && request_logger.interrupted_before_response()
+        && crate::session_transport::should_use_http(&relay, &request_context)
     {
         let fallback_armed =
             arm_upstream_failure_responses_websocket_http_fallback(&relay.id, &connection_context);
@@ -487,6 +506,14 @@ async fn bridge_responses_websockets(
                         Ok(payload) => payload,
                         Err(error) => {
                             if let Ok(state) = request_logger.state.lock() {
+                                if error.is::<ResponsesWebSocketProtocolMismatch>() {
+                                    // 用户要求：明确的协议不匹配仍按当前轮次走 HTTP，
+                                    // 不把它当成偶发断流，也不降低后续 Responses 请求的 WS 能力。
+                                    arm_compaction_responses_websocket_http_fallback(
+                                        &relay.id,
+                                        &state.connection_context,
+                                    );
+                                }
                                 log_websocket_event(
                                     "helper.responses_websocket_request_rejected",
                                     &relay,
@@ -760,7 +787,7 @@ async fn bridge_responses_websockets(
                     )
                     .await.map_err(|error| {
                         if !is_close {
-                            request_logger.mark_http_fallback("发送 WS 请求失败");
+                            request_logger.record_transport_failure("发送 WS 请求失败");
                         }
                         error
                     })?
@@ -777,6 +804,14 @@ async fn bridge_responses_websockets(
                 BridgeEvent::Upstream(message) => {
                     let message = match message {
                         Some(Ok(message)) => message,
+                        // 用户要求：请求已完成后发生 EOF/非规范断开，只废弃旧连接，
+                        // 不改写成功结果、不计连续失败，下次完整请求仍可新建 WS。
+                        Some(Err(_)) | None
+                            if !request_logger.has_pending_requests()
+                                && request_logger.has_recorded_application_requests() =>
+                        {
+                            Message::Close(None)
+                        }
                         Some(Err(_)) | None if continuation.has_validated_compaction() => {
                             Message::Close(None)
                         }
@@ -912,7 +947,7 @@ async fn bridge_responses_websockets(
                     request_logger.record_upstream_application_activity(&message);
                     let is_close = matches!(message, Message::Close(_));
                     if is_close && request_logger.has_pending_requests() {
-                        request_logger.mark_http_fallback("上游在请求完成前关闭 WS");
+                        request_logger.record_transport_failure("上游在请求完成前关闭 WS");
                     }
                     request_logger.record_first_response_event(&message);
                     match continuation.handle_upstream_message(message)? {
@@ -1091,7 +1126,7 @@ async fn bridge_responses_websockets(
                                 "转发 Responses WebSocket Ping 失败",
                             )
                             .await.map_err(|error| {
-                                request_logger.mark_http_fallback("发送 WS Ping 失败");
+                                request_logger.record_transport_failure("发送 WS Ping 失败");
                                 error
                             })?;
                         }
@@ -1202,7 +1237,9 @@ async fn send_downstream_terminal_failure(
     request_logger: &WebSocketRequestLogger,
     error_message: &str,
 ) -> anyhow::Result<()> {
-    request_logger.mark_http_fallback(error_message);
+    // 用户要求：通知客户端恢复当前请求，与是否让整个会话降级分别决定；
+    // 已有输出或 previous_response_id 时，保留原有禁止透明重放的边界。
+    request_logger.record_transport_failure(error_message);
     forward_websocket_message(
         downstream,
         Message::Close(Some(websocket_failure_close_frame(
@@ -2345,10 +2382,26 @@ impl WebSocketRequestLogger {
         }
     }
 
-    fn mark_http_fallback(&self, reason: &str) {
+    fn record_transport_failure(&self, reason: &str) {
+        if let Ok(state) = self.state.lock() {
+            if state.requests.is_empty() {
+                return;
+            }
+            if let Some((relay, context, Some(generation))) = state.transport_context.as_ref() {
+                crate::session_transport::record_transport_failure_for_generation(
+                    relay,
+                    context,
+                    reason,
+                    *generation,
+                );
+            }
+        }
+    }
+
+    fn wait_for_full_request(&self, reason: &str) {
         if let Ok(state) = self.state.lock() {
             if let Some((relay, context, Some(generation))) = state.transport_context.as_ref() {
-                crate::session_transport::mark_http_for_generation(
+                crate::session_transport::wait_for_full_request_for_generation(
                     relay,
                     context,
                     reason,
@@ -3016,7 +3069,15 @@ impl WebSocketRequestLogger {
             state.response_ids.retain(|_, id| id != &log_id);
             activate_next_queued_websocket_request(&mut state, Instant::now());
         }
+        let successful_transport = if event_type == "response.completed" {
+            state.transport_context.clone()
+        } else {
+            None
+        };
         drop(state);
+        if let Some((relay, context, Some(generation))) = successful_transport {
+            crate::session_transport::record_success_for_generation(&relay, &context, generation);
+        }
         if let Some(observer) = completed_cache_observer {
             observer.finish();
         }
@@ -3164,7 +3225,7 @@ impl WebSocketRequestLogger {
         request_bytes: usize,
         safe_max_bytes: usize,
     ) {
-        self.mark_http_fallback("请求超过 WS 的 16 MiB 安全上限");
+        self.wait_for_full_request("当前请求超过 WS 的 16 MiB 安全上限，等待较小的完整请求");
         let Some(log_id) = log_id else {
             return;
         };
@@ -3227,7 +3288,7 @@ impl WebSocketRequestLogger {
     }
 
     fn finish_cross_protocol_compaction_request(&self, log_id: Option<&str>) {
-        self.mark_http_fallback("独立压缩模型需要通过 HTTP 使用其他协议");
+        self.wait_for_full_request("当前独立压缩模型需要通过 HTTP 使用其他协议");
         let Some(log_id) = log_id else {
             return;
         };
@@ -3532,7 +3593,7 @@ fn validate_downstream_message(
     }
     let current_relay = settings.active_relay_profile();
     if current_relay.resolve_protocol_for_model(&model)? != RelayProtocol::Responses {
-        anyhow::bail!("当前模型不是原生 Responses 协议");
+        return Err(ResponsesWebSocketProtocolMismatch.into());
     }
     let rewritten_payload = crate::protocol_proxy::apply_codex_system_prompt_to_responses_request(
         &payload,
@@ -5300,7 +5361,7 @@ mod tests {
         logger.record_request(&request, &request.to_string());
         crate::session_transport::forget_thread(&context);
         crate::session_transport::observe_native_request(&relay, &context, &request, 100);
-        logger.mark_http_fallback("old connection failed after a model switch");
+        logger.record_transport_failure("old connection failed after a model switch");
         assert!(!crate::session_transport::should_use_http(&relay, &context));
         crate::session_transport::forget_thread(&context);
     }

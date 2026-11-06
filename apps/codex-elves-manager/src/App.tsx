@@ -7138,13 +7138,14 @@ function SessionsScreen({
       other: [...options],
     };
   }, [form]);
+  // 用户要求：三个会话家族都未选择独立模型时，隐藏这段说明和告警；已选模型的配置告警仍保留。
+  const hasCompactionModelSelection = COMPACTION_MODEL_FAMILIES.some(
+    ({ value: family }) => form.layeredCompactionModels[family].trim(),
+  );
   const compactionModelWarnings = useMemo(() => {
     if (!form.layeredCompactionModelOverrideEnabled) return [];
     const profile = activeRelayProfile(form);
     const knownModels = new Set(relayProfileCatalogModels(profile));
-    if (COMPACTION_MODEL_FAMILIES.every(({ value: family }) => !form.layeredCompactionModels[family].trim())) {
-      return ["尚未选择独立模型，实际仍使用会话原模型"];
-    }
     return COMPACTION_MODEL_FAMILIES.flatMap(({ value: family, label }) => {
       const model = form.layeredCompactionModels[family].trim();
       if (!model) return [];
@@ -7422,11 +7423,13 @@ function SessionsScreen({
               <div className="session-context-compaction-option">
                 <div className="session-context-compaction-option-copy">
                   <strong>独立压缩模型</strong>
-                  <small data-warning={compactionModelWarnings.length > 0 || undefined}>
-                    {compactionModelWarnings.length
-                      ? `${compactionModelWarnings.join("；")}。${compactionModelUsageDescription}`
-                      : compactionModelUsageDescription}
-                  </small>
+                  {hasCompactionModelSelection ? (
+                    <small data-warning={compactionModelWarnings.length > 0 || undefined}>
+                      {compactionModelWarnings.length
+                        ? `${compactionModelWarnings.join("；")}。${compactionModelUsageDescription}`
+                        : compactionModelUsageDescription}
+                    </small>
+                  ) : null}
                 </div>
                 <div className="session-context-compaction-option-control">
                   <button

@@ -5888,6 +5888,81 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     }
 
     #[tokio::test]
+    async fn runtime_mode_http_routes_read_and_switch_without_native_dispatch() {
+        let (_directory, authorization) = harness_fixture().await;
+        let state = WebState {
+            controller: authorization.controller.clone(),
+            settings: RemoteAccessSettings::default(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("codex_elves_device=isolated-service-dispatch-token"),
+        );
+        assert_eq!(
+            read(
+                State(state.clone()),
+                Path("runtime".into()),
+                HeaderMap::new(),
+                Json(json!({}))
+            )
+            .await
+            .unwrap_err()
+            .code,
+            401
+        );
+        for (step, enabled, revision) in [(0, false, 1), (1, true, 2), (2, false, 3)] {
+            if step > 0 {
+                headers.insert(
+                    "idempotency-key",
+                    HeaderValue::from_str(&format!("runtime-switch-{step}")).unwrap(),
+                );
+                let result = action(
+                    State(state.clone()),
+                    Path("setRuntime".into()),
+                    headers.clone(),
+                    Json(json!({
+                        "cdpInjectionEnabled":enabled,"expectedRevision":revision - 1
+                    })),
+                )
+                .await
+                .unwrap()
+                .0;
+                assert_eq!(result["state"], "completed", "{result}");
+                assert_eq!(result["result"]["runtime"]["revision"], revision);
+            }
+            let response = read(
+                State(state.clone()),
+                Path("runtime".into()),
+                headers.clone(),
+                Json(json!({})),
+            )
+            .await
+            .unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+                .await
+                .unwrap();
+            let result: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(result["runtime"]["cdpInjectionEnabled"], enabled);
+            assert_eq!(result["runtime"]["revision"], revision);
+        }
+        let mut read_only = state;
+        read_only.settings.read_only = true;
+        assert_eq!(
+            action(
+                State(read_only),
+                Path("setRuntime".into()),
+                headers,
+                Json(json!({"cdpInjectionEnabled":true,"expectedRevision":3}))
+            )
+            .await
+            .unwrap_err()
+            .code,
+            403
+        );
+    }
+
+    #[tokio::test]
     async fn harness_session_queue_and_approval_share_one_runtime() {
         let (directory, authorization) = harness_fixture().await;
         let controller = &authorization.controller;

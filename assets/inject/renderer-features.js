@@ -7467,6 +7467,9 @@
       getModel: codexFastSelectedModel,
       getContext: codexFastComposerContext,
       getModelLabel: codexFastModelLabel,
+      getComposers: codexFastComposerAnchors,
+      // 主页面新建请求不能借用当时打开的侧边菜单或其会话设置。
+      getCreationContext: () => codexFastComposerContext(codexFastComposerAnchor()),
       isGptModel: (model) => window.__codexElvesNativeFastUnlock?.runtime?.isGptModel(model) === true,
       getDispatcher: async () => codexServiceTierDispatcher ||= await findCodexServiceTierDispatcher(),
       isCopilotActive: async () => {
@@ -9031,9 +9034,13 @@
       host.prepend(badge);
     }
     const waiting = state.mode !== "ws";
+    // 用户要求：WS 连通但仍缺完整请求时，显示上下文等待，不伪造 0:00 探测倒计时。
+    // 探测退避由后端 5/15/30/60/180 秒调度，前端只显示 nextProbeAtMs。
+    const waitingForRequest = waiting && state.wsReady && !state.nextProbeAtMs;
     const seconds = Math.max(0, Math.ceil((Number(state.nextProbeAtMs || 0) - Date.now()) / 1000));
     const text = state.mode === "probing"
       ? "HTTP · 检测 WS"
+      : waitingForRequest ? "HTTP · 待完整请求"
       : waiting ? `HTTP · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`
       : "上游 WS";
     if (badge.textContent !== text) badge.textContent = text;
@@ -9044,9 +9051,11 @@
       badge.style.background = waiting ? "rgba(217,119,6,.14)" : "rgba(22,163,74,.12)";
       badge.style.color = color;
     }
-    const title = waiting
-      ? `当前会话上游已回退 HTTP，每 3 分钟尝试恢复 WS。\n${state.reason || ""}`
-      : "当前会话上游使用 WebSocket；客户端仍可通过本地 HTTP 连接提交请求。";
+    const title = waitingForRequest
+      ? `当前请求继续使用 HTTP，后续符合条件的完整请求可重新尝试 WS。\n${state.reason || ""}`
+      : waiting
+      ? `当前会话暂用 HTTP，后台按 5、15、30、60、180 秒间隔尝试恢复 WS。\n${state.reason || ""}`
+      : "当前会话上游优先尝试 WebSocket；客户端仍可通过本地 HTTP 连接提交请求。";
     if (badge.title !== title) {
       badge.title = title;
       badge.setAttribute("aria-label", title);
@@ -25529,6 +25538,22 @@
     return null;
   }
 
+  function codexFastComposerAnchors() {
+    // 用户要求侧边会话同样支持 Fast；分别读取每个可见输入框，不改变其他增强的主页面范围。
+    return [...new Set([
+      ...document.querySelectorAll('[data-composer-navigation-target="reasoning"]'),
+      ...document.querySelectorAll('[data-composer-navigation-target="model"]'),
+    ])].filter(codexServiceTierBadgeVisibleElement)
+      .filter(codexServiceTierFooterHasNearbyComposerInput);
+  }
+
+  function codexFastModelMenuOwner(menu) {
+    const owner = document.getElementById(menu?.getAttribute("aria-labelledby") || "");
+    return owner && codexServiceTierBadgeVisibleElement(owner)
+      && owner.matches?.('[data-composer-navigation-target="reasoning"], [data-composer-navigation-target="model"]')
+      && codexServiceTierFooterHasNearbyComposerInput(owner) ? owner : null;
+  }
+
   function codexFastModelMenu() {
     // 用户要求按模型菜单定位，使用原生菜单的语义属性，避开原生 Fast 和每次构建会变化的 CSS 类名。
     // 仅默认滑块视图显示入口，模型列表等子视图不占用左上角。
@@ -25539,19 +25564,25 @@
       menus.add(menu);
       const view = menu.querySelector("[data-model-picker-view]");
       if (view && view.getAttribute("data-model-picker-view") !== "simple") continue;
-      const owner = document.getElementById(menu.getAttribute("aria-labelledby") || "");
-      if (owner && !codexServiceTierIsMainComposerElement(owner)) continue;
+      // Fast 跟随打开菜单的本地输入框，主会话、右侧及底部侧边会话各自使用自己的编号。
+      const owner = codexFastModelMenuOwner(menu);
+      const context = owner && codexFastComposerContext(owner);
+      if (!context || !context.threadId && !context.draftId) continue;
       return menu;
     }
     return null;
   }
 
+  function codexFastTargetComposerAnchor() {
+    const menu = codexFastModelMenu();
+    return menu ? codexFastModelMenuOwner(menu) : codexFastComposerAnchor();
+  }
+
   const codexFastDraftIds = new WeakMap();
-  function codexFastComposerContext() {
-    const anchor = codexFastComposerAnchor();
+  function codexFastComposerContext(anchor = codexFastTargetComposerAnchor()) {
     if (!anchor) return null;
     let mode = null, hostId = null, id = null;
-    // 用户要求会话独立：读取可见主输入框的原生会话属性，不能借侧栏当前行或隐藏聊天的 ID。
+    // 用户要求会话独立：读取目标输入框的原生会话属性，不能借主会话、侧栏或隐藏聊天的 ID。
     // marker 本身可能为零尺寸，优先沿语义模型按钮读取 React props，不修改原生状态。
     for (let node = anchor, depth = 0; node && depth < 4; node = node.parentElement, depth++) {
       for (const key of reactFiberKeys(node)) {
@@ -25574,13 +25605,13 @@
     return { hostId: "local", draftId: id || codexFastDraftIds.get(anchor) };
   }
 
-  function codexFastSelectedModel(models = []) {
+  function codexFastSelectedModel(models = [], anchor) {
     const entries = models.map((entry) => ({
       slug: entry.model || entry.id, displayName: entry.displayName || "",
     }));
     // 菜单展开时优先读取该菜单的当前模型，避免输入框被原生菜单暂时遮蔽后丢失 Fast。
     // 未识别或别名冲突时不猜测默认模型，保持非 GPT 模型不显示 Fast 的边界。
-    const control = codexFastModelMenu()?.querySelector("[data-model-picker-view-toggle]");
+    const control = anchor || codexFastModelMenu()?.querySelector("[data-model-picker-view-toggle]");
     const texts = control ? codexServiceTierSelectedModelTexts(control) : [];
     if (texts.length) {
       for (const partial of [false, true]) {
@@ -25592,13 +25623,14 @@
       }
       return "";
     }
+    // 单独读取侧边输入框的模型时，缺少标签不能回退到主会话。
+    if (anchor) return "";
     return codexServiceTierComposerSelectedModel(entries);
   }
 
-  function codexFastModelLabel(models = []) {
-    const anchor = codexFastComposerAnchor();
+  function codexFastModelLabel(models = [], anchor = codexFastTargetComposerAnchor()) {
     if (!anchor?.matches?.('[data-codex-intelligence-trigger="true"], [data-composer-navigation-target="reasoning"], [data-composer-navigation-target="model"]')) return null;
-    const selected = codexFastSelectedModel(models);
+    const selected = codexFastSelectedModel(models, anchor);
     if (!selected) return null;
     const entries = models.map((entry) => ({ slug: entry.model || entry.id, displayName: entry.displayName || "" }));
     const selectors = [

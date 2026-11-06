@@ -85,6 +85,169 @@ fn bootstrap_injection_script_loads_features_without_inlining_full_runtime() {
     assert!(script.contains("http://127.0.0.1:45221"));
     assert!(!script.contains("function installCodexElvesMenu"));
     assert!(assets::renderer_features_script().contains("function installCodexElvesMenu"));
+    assert!(
+        script.find("__codexElvesStatsigCache").unwrap() < script.find("DOMContentLoaded").unwrap()
+    );
+}
+
+#[test]
+fn statsig_cache_preserves_large_evaluations_across_fresh_contexts() {
+    let program = r#"
+const assert = require("node:assert/strict");
+const vm = require("node:vm");
+const patch = __STATSIG_CACHE_PATCH__;
+
+function realm(disk = new Map()) {
+  const context = vm.createContext({
+    disk, sessionDisk: new Map(), console,
+    setTimeout: () => 0, clearTimeout() {},
+  });
+  vm.runInContext(`
+    globalThis.window = globalThis;
+    globalThis.quotaBytes = 10 * 1024 * 1024;
+    globalThis.Storage = class Storage {
+      constructor(data) { this.data = data; }
+      get length() { return this.data.size; }
+      key(index) { return [...this.data.keys()][index] ?? null; }
+      getItem(key) { return this.data.get(String(key)) ?? null; }
+      setItem(key, value) {
+        key = String(key); value = String(value);
+        let bytes = 2 * (key.length + value.length);
+        for (const [otherKey, otherValue] of this.data) {
+          if (key !== otherKey) bytes += 2 * (otherKey.length + otherValue.length);
+        }
+        if (bytes > globalThis.quotaBytes) {
+          const error = new Error("storage full");
+          error.name = "QuotaExceededError";
+          throw error;
+        }
+        this.data.set(key, value);
+      }
+      removeItem(key) { this.data.delete(String(key)); }
+    };
+    globalThis.localStorage = new Storage(disk);
+    globalThis.sessionStorage = new Storage(sessionDisk);
+  `, context);
+  return { context, disk, storage: context.localStorage, install() {
+    vm.runInContext(patch, context);
+  }};
+}
+
+(async () => {
+  const key = "statsig.cached.evaluations.account-a";
+  const otherKey = "statsig.cached.evaluations.account-b";
+  const alias = "codexElves.statsigCache.v1:" + key;
+  const raw = JSON.stringify({
+    source: "Network", stableID: "identity-a",
+    data: JSON.stringify({
+      feature_gates: { language: { value: true } },
+      dynamic_configs: { large: { value: "配置 abc 😀 ".repeat(550000) } },
+      layer_configs: { locale: { value: { enable_i18n: true } } },
+      unicode: ["\ud800", "\udfff", "中文", "\u0000", "quote\"\\", "😀"],
+    }),
+  });
+  assert.ok(raw.length * 2 > 10 * 1024 * 1024);
+  const first = realm();
+  first.storage.setItem("unrelated-user-preference", "keep");
+  assert.throws(() => first.storage.setItem(key, raw), /QuotaExceededError/);
+  first.install();
+  first.storage.setItem(key, raw);
+  assert.equal(first.storage.getItem(key), raw, "配置内容必须逐字符无损");
+  assert.equal(first.storage.getItem(otherKey), null, "不得把缓存回填到其他账号键");
+  assert.equal(first.disk.has(key), false);
+  assert.ok(first.disk.get(alias).length < raw.length / 4);
+  assert.equal(first.storage.getItem("unrelated-user-preference"), "keep");
+  assert.throws(() => first.context.sessionStorage.setItem(key, raw), /QuotaExceededError/);
+  const getItem = first.context.Storage.prototype.getItem;
+  first.install();
+  assert.equal(first.context.Storage.prototype.getItem, getItem, "重复注入不能叠加拦截");
+
+  const fresh = realm(first.disk);
+  assert.equal(fresh.storage.getItem(key), null, "未加载增强时不能暴露压缩文本给原生 SDK");
+  fresh.install();
+  assert.equal(fresh.storage.getItem(key), raw, "新的 JS 上下文必须读回上次持久化的完整配置");
+  const valid = fresh.disk.get(alias);
+  fresh.context.quotaBytes = 0;
+  assert.throws(() => fresh.storage.setItem(key, raw + "x"), /QuotaExceededError/);
+  assert.equal(fresh.disk.get(alias), valid, "写入失败必须保留之前有效的副本");
+  fresh.context.quotaBytes = 10 * 1024 * 1024;
+  fresh.disk.set(alias, "ce-sc1:999:00000000:broken");
+  assert.equal(fresh.storage.getItem(key), null, "损坏副本不能成为可用配置");
+  fresh.disk.set(key, '{"source":"Cache","data":"legacy"}');
+  assert.equal(fresh.storage.getItem(key), '{"source":"Cache","data":"legacy"}');
+  fresh.disk.delete(key);
+  fresh.disk.set(alias, valid);
+
+  let currentUser = { userID: "a", customIDs: { stableID: "identity-a" } };
+  let values = null;
+  let updated = 0;
+  let storageDisabled = false;
+  const adapter = {
+    _getCacheKey: user => user.userID === "a" ? key : otherKey,
+    getDataSync(user) {
+      const text = fresh.storage.getItem(this._getCacheKey(user));
+      if (!text) return null;
+      const entry = JSON.parse(text);
+      if (entry.stableID !== user.customIDs.stableID) return null;
+      return { ...entry, source: "Cache" };
+    },
+  };
+  fresh.context.__STATSIG__ = { firstInstance: {
+    loadingStatus: "Ready", dataAdapter: adapter,
+    _initializePromise: Promise.resolve({ success: false, source: "NoValues" }),
+    getContext: () => ({ user: currentUser, values, options: { disableStorage: storageDisabled } }),
+    updateUserSync(user, options) {
+      assert.equal(user, currentUser);
+      assert.equal(options.disableBackgroundCacheRefresh, true);
+      const entry = adapter.getDataSync(user);
+      values = JSON.parse(entry.data);
+      updated++;
+      return { success: true, source: "Cache" };
+    },
+  }};
+  const recovered = await fresh.context.__codexElvesStatsigCache.recover();
+  assert.equal(recovered.results[0].restored, true);
+  assert.equal(values.layer_configs.locale.value.enable_i18n, true);
+  assert.equal(updated, 1);
+  currentUser = { userID: "b", customIDs: { stableID: "identity-b" } };
+  values = null;
+  const other = await fresh.context.__codexElvesStatsigCache.recover();
+  assert.equal(other.results[0].hasValues, false);
+  assert.equal(updated, 1, "切换身份后不能复用此前账号的评估");
+  currentUser = { userID: "a", customIDs: { stableID: "identity-a" } };
+  storageDisabled = true;
+  const disabled = await fresh.context.__codexElvesStatsigCache.recover();
+  assert.equal(disabled.results[0].hasValues, false);
+  assert.equal(updated, 1, "显式禁用 SDK 缓存时不能自行恢复");
+  fresh.storage.removeItem(key);
+  assert.equal(fresh.disk.has(alias), false);
+  assert.equal(fresh.storage.getItem("unrelated-user-preference"), "keep");
+  console.log("large cache, cold context, identity, corruption and quota contracts passed");
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"#
+    .replace(
+        "__STATSIG_CACHE_PATCH__",
+        &serde_json::to_string(&assets::statsig_cache_script()).unwrap(),
+    );
+    let mut child = Command::new("node")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("node should start for the cache persistence contract");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(program.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -11258,6 +11421,7 @@ fn injection_script_uses_independent_fast_in_default_model_menu() {
     assert!(script.contains("getMenu: codexFastModelMenu"));
     assert!(script.contains("getModel: codexFastSelectedModel"));
     assert!(script.contains("getModelLabel: codexFastModelLabel"));
+    assert!(script.contains("getComposers: codexFastComposerAnchors"));
     let model_color = script
         .split(r#"[data-codex-elves-fast-model="true"] {"#)
         .nth(1)
@@ -11407,6 +11571,41 @@ const turn=(threadId,model="gpt-6.1-sol",serviceTier="priority")=>({threadId,mod
  assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),undefined);
  model="gpt-6.1-sol";await api.refresh();
 
+ const sideLabel=element("span");sideLabel.textContent="6.1 Sol";composer.appendChild(sideLabel);
+ const mainTarget={context:{hostId:"local",threadId:"thread-aaaaaaaa"},model:"gpt-6.1-sol",label:modelLabel};
+ const sideTarget={context:{hostId:"local",threadId:"side-thread-dddddddd"},model:"gpt-6.1-sol",label:sideLabel};
+ const originalGetters={getContext:options.getContext,getModel:options.getModel,getModelLabel:options.getModelLabel};
+ options.getComposers=()=>[mainTarget,sideTarget];
+ options.getContext=anchor=>anchor?anchor.context:context;
+ options.getModel=(_models,anchor)=>anchor?anchor.model:model;
+ options.getModelLabel=(_models,anchor)=>anchor?anchor.label:modelLabel;
+ context=sideTarget.context;
+ await api.refresh();
+ assert.equal(query("data-codex-elves-fast").getAttribute("aria-pressed"),"false","侧边默认关闭，不继承主会话 Fast");
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true","主会话标蓝不因打开侧边菜单而丢失");
+ assert.equal(sideLabel.getAttribute("data-codex-elves-fast-model"),undefined);
+ await toggle();
+ assert.equal(storage.get("codex-elves-fast-session-v1:local:side-thread-dddddddd"),"true");
+ assert.equal(storage.get("codex-elves-fast-session-v1:local:thread-aaaaaaaa"),"true","侧边切换不能改主会话设置");
+ assert.equal(sideLabel.getAttribute("data-codex-elves-fast-model"),"true");
+ assert.equal((await api.patchTurnRequest(turn("side-thread-dddddddd"))).serviceTier,"priority","侧边请求使用自己的 Fast");
+ assert.equal((await api.patchTurnRequest(turn("thread-bbbbbbbb"))).serviceTier,"default","未开启的其他会话保持默认等级");
+ const sideMenu=menu;menu=null;await api.refresh();
+ assert.equal(sideLabel.getAttribute("data-codex-elves-fast-model"),"true","侧边菜单关闭后保持自己的标蓝");
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true","主会话同时保持自己的标蓝");
+ const mainDraft={hostId:"local",draftId:"main-draft-beside-side-menu"};
+ options.getCreationContext=()=>mainDraft;
+ assert.equal(api.captureContext().draftId,mainDraft.draftId,"主页面创建不能捕获侧边菜单的会话");
+ assert.equal(api.captureContext().fast,false,"主页面新草稿不能继承侧边 Fast");
+ options.getCreationContext=()=>null;
+ assert.equal(api.captureContext(),null,"无法确认创建草稿时不能退回侧边会话");
+ delete options.getCreationContext;
+ sideTarget.model="claude-opus-5";model=sideTarget.model;menu=sideMenu;await api.refresh();
+ assert.equal(query("data-codex-elves-fast"),null,"侧边非 GPT 模型不显示 Fast");
+ assert.equal(sideLabel.getAttribute("data-codex-elves-fast-model"),undefined);
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true");
+ delete options.getComposers;Object.assign(options,originalGetters);model="gpt-6.1-sol";
+
  context={hostId:"local",draftId:"draft-first"};await api.refresh();
  assert.equal(api.status().fast,false);
  await toggle();const captured=api.captureContext();
@@ -11473,6 +11672,124 @@ const turn=(threadId,model="gpt-6.1-sol",serviceTier="priority")=>({threadId,mod
 }
 
 #[test]
+fn renderer_fast_side_menu_uses_its_own_composer_model_and_thread() {
+    let script = assets::renderer_features_script();
+    let section = |start: &str, end: &str| {
+        let from = script.find(start).unwrap();
+        let to = from + script[from..].find(end).unwrap();
+        &script[from..to]
+    };
+    let source = [
+        section(
+            "function codexServiceTierModelMatchKey(",
+            "// 从 composer footer",
+        ),
+        section(
+            "function codexServiceTierUniqueCatalogMatch(",
+            "function codexServiceTierSelectedModelTexts(",
+        ),
+        section(
+            "  function codexFastComposerAnchor(",
+            "  function codexComposerModelPlacement(",
+        ),
+    ]
+    .join("\n");
+    let node_script = format!(
+        "const source={};\n",
+        serde_json::to_string(&source).unwrap()
+    ) + r#"
+const assert=require("node:assert/strict");
+const models=[{model:"gpt-6.1-sol"},{model:"claude-opus-5"}],anchors=new Map();
+let opened=[],fallbackReads=0;
+function anchor(id,area,threadId,model) {
+  const value={id,area,text:model,visible:true,nearby:true,
+    getAttribute:key=>key==="data-composer-navigation-target"?"reasoning":null,
+    matches:()=>true,querySelectorAll:()=>[],
+    fiber:{memoizedProps:{conversationId:threadId},
+      return:{memoizedProps:{composerMode:"local",hostId:"local"}}}};
+  anchors.set(id,value);return value;
+}
+function menu(owner,text=owner?.text,view="simple") {
+  const value={isConnected:true,visible:true,owner,view,
+    getAttribute:key=>key==="aria-labelledby"?(owner?.id||""):null,
+    querySelector:selector=>selector==="[data-model-picker-view]"
+      ?{getAttribute:()=>value.view}
+      :selector==="[data-model-picker-view-toggle]"?{text}:null};
+  value.surface={closest:()=>value};return value;
+}
+const main=anchor("main-trigger","main","thread-main-aaaaaaaa","6.1 Sol");
+const side=anchor("side-trigger","right-panel","thread-side-bbbbbbbb","6.1 Sol");
+const bottom=anchor("bottom-trigger","bottom-panel","thread-bottom-cccccccc","Claude Opus 5");
+const document={
+  querySelectorAll:selector=>selector==="[data-model-picker-view], [data-model-picker-power-slider]"
+    ?opened.map(value=>value.surface)
+    :selector==='[data-composer-navigation-target="reasoning"]'?[main,side,bottom]:[],
+  getElementById:id=>anchors.get(id)||null
+};
+const api=new Function("document","codexServiceTierIsMainComposerElement",
+  "codexServiceTierBadgeVisibleElement","codexServiceTierFooterHasNearbyComposerInput",
+  "reactFiberKeys","isTemporaryThreadId","validThreadSessionKey","crypto",
+  "codexServiceTierSelectedModelTexts","codexServiceTierComposerSelectedModel",
+  "taskBoardReasoningEffortDefinitions",`${source};return {
+    main:codexFastComposerAnchor,menu:codexFastModelMenu,context:codexFastComposerContext,
+    model:codexFastSelectedModel
+  };`)(document,node=>node.area==="main",node=>node?.visible===true,node=>node.nearby===true,
+  ()=>["fiber"],id=>String(id).includes("new-thread:"),id=>id,
+  {randomUUID:()=>assert.fail("已有侧边会话不能被当作草稿")},
+  node=>node?.text?[node.text]:[],
+  ()=>{fallbackReads++;return "gpt-6.1-sol";},
+  ["low","medium","high","xhigh","max","ultra"].map(id=>({id,label:id})));
+const mainMenu=menu(main),sideMenu=menu(side),bottomMenu=menu(bottom);
+opened=[sideMenu];
+assert.equal(api.menu(),sideMenu,"侧边菜单不能被主输入框条件排除");
+assert.deepEqual(api.context(),{hostId:"local",threadId:"thread-side-bbbbbbbb"});
+assert.equal(api.model(models),"gpt-6.1-sol");
+assert.equal(api.main(),main,"其他主页面功能的锚点仍限于主输入框");
+opened=[bottomMenu];
+assert.deepEqual(api.context(),{hostId:"local",threadId:"thread-bottom-cccccccc"});
+assert.equal(api.model(models),"claude-opus-5","侧边模型不能借用主会话的 GPT");
+assert.equal(api.model(models,side),"gpt-6.1-sol","显式输入框读取不受另一个菜单影响");
+opened=[mainMenu];
+assert.deepEqual(api.context(),{hostId:"local",threadId:"thread-main-aaaaaaaa"});
+opened=[];
+assert.deepEqual(api.context(side),{hostId:"local",threadId:"thread-side-bbbbbbbb"},
+  "菜单关闭后仍可按侧边输入框恢复独立显示");
+side.text="未识别模型";
+assert.equal(api.model(models,side),"","侧边模型未知时不能回退主会话模型");
+assert.equal(fallbackReads,0);
+side.text="6.1 Sol";
+
+for(const owner of [null,{...side,id:"missing-owner"}]) {
+  opened=[menu(owner)];assert.equal(api.menu(),null,"无法确认菜单归属时不猜主会话");
+}
+opened=[sideMenu];side.visible=false;
+assert.equal(api.menu(),null,"隐藏的菜单所属输入框不能生效");
+side.visible=true;side.nearby=false;
+assert.equal(api.menu(),null,"普通按钮不能冒充聊天输入框");
+side.nearby=true;sideMenu.view="models";
+assert.equal(api.menu(),null,"Fast 仅显示在默认滑块视图");
+sideMenu.view="simple";
+for(const props of [{composerMode:"cloud",hostId:"local"},{composerMode:"local",hostId:"remote-host"}]) {
+  side.fiber.return.memoizedProps=props;
+  assert.equal(api.menu(),null,"云会话和远程 host 不进入本地 Fast");
+}
+side.fiber.return.memoizedProps={composerMode:"local",hostId:"local"};
+mainMenu.visible=false;opened=[mainMenu,sideMenu];
+assert.equal(api.menu(),sideMenu,"隐藏的旧菜单不能抢占侧边菜单");
+"#;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(node_script)
+        .output()
+        .expect("node should be available");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn renderer_fast_reads_open_model_menu_without_guessing_the_composer_model() {
     let script = assets::renderer_features_script();
     let section = |start: &str, end: &str| {
@@ -11504,13 +11821,13 @@ let text="6.1 Sol Extra High",fallbackCalls=0,labels=[],isModelControl=true;
 const entries=[{model:"gpt-6.1-sol"},{model:"claude-opus-5"}];
 const api=new Function("codexFastModelMenu","codexServiceTierSelectedModelTexts",
  "codexServiceTierComposerSelectedModel","taskBoardReasoningEffortDefinitions",
- "codexFastComposerAnchor","codexServiceTierBadgeVisibleElement","codexServiceTierBadgeText",
+ "codexFastTargetComposerAnchor","codexServiceTierBadgeVisibleElement","codexServiceTierBadgeText",
  `${source};return {read:codexFastSelectedModel,label:codexFastModelLabel};`)(
  ()=>text===null?null:{querySelector:selector=>{assert.equal(selector,"[data-model-picker-view-toggle]");return{text};}},
  control=>[control.text],
  ()=>{fallbackCalls++;return"gpt-6.1-sol";},
  ["low","medium","high","xhigh","max","ultra"].map(id=>({id,label:id})),
- ()=>({matches:()=>isModelControl,querySelectorAll:()=>labels}),
+ ()=>({text,matches:()=>isModelControl,querySelectorAll:()=>labels}),
  node=>node.visible,
  node=>node.textContent
 );
@@ -11560,7 +11877,7 @@ fn renderer_fast_resolves_only_the_active_local_composer_context() {
     ) + r#"
 const assert=require("node:assert/strict");
 let anchor=null,sequence=0;
-const read=new Function("codexFastComposerAnchor","reactFiberKeys","isTemporaryThreadId",
+const read=new Function("codexFastTargetComposerAnchor","reactFiberKeys","isTemporaryThreadId",
  "validThreadSessionKey","crypto",`${source};return codexFastComposerContext;`)(
  ()=>anchor,()=>["fiber"],id=>id.includes("client-new-thread:"),
  id=>/^[a-z0-9-]{8,128}$/i.test(id)?id:"",

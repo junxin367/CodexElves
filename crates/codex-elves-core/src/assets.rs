@@ -10,13 +10,25 @@ use crate::settings::BackendSettings;
 
 const RENDERER_BOOTSTRAP_SCRIPT: &str = include_str!("../../../assets/inject/renderer-inject.js");
 const RENDERER_FEATURES_SCRIPT: &str = include_str!("../../../assets/inject/renderer-features.js");
+const STATSIG_CACHE_CODEC: &str =
+    include_str!("../../../assets/inject/vendor/lz-string-1.5.0.min.js");
+const STATSIG_CACHE_CODEC_LICENSE: &str =
+    include_str!("../../../assets/inject/vendor/lz-string-LICENSE.txt");
+const STATSIG_CACHE_SCRIPT: &str = include_str!("../../../assets/inject/statsig-cache.js");
 const NATIVE_FAST_UNLOCK_SCRIPT: &str =
     include_str!("../../../assets/inject/native-fast-unlock.js");
 const COMPOSER_FAST_SCRIPT: &str = include_str!("../../../assets/inject/composer-fast.js");
 const NATIVE_RPC_COMPAT_SCRIPT: &str = include_str!("../../../assets/inject/native-rpc-compat.js");
-// Fast 保持按会话隔离和模型名称标蓝；更新构建标识，让旧版会话列表闪电随注入更新清理。
-// Token 用量修复也须替换已驻留的旧编号解析，不能继续复用同版本的旧运行时。
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261106-token-usage-visible-owner";
+// 统一保留主线缓存修复、Token 编号解析与侧边 Fast；更新标识以替换旧运行时。
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261106-remote-runtime-unified";
+
+pub fn statsig_cache_script() -> String {
+    // 缓存修复必须在 SDK 首次读取前执行；压缩库不污染宿主模块加载器或全局对象。
+    format!(
+        "(()=>{{const define=undefined,module=undefined,angular=undefined;\n/* lz-string 1.5.0\n{}*/\n{}\n{}\n}})();",
+        STATSIG_CACHE_CODEC_LICENSE, STATSIG_CACHE_CODEC, STATSIG_CACHE_SCRIPT
+    )
+}
 
 pub fn renderer_script() -> &'static str {
     RENDERER_FEATURES_SCRIPT
@@ -89,7 +101,7 @@ fn injection_script_source_with_settings(
         source.to_string()
     };
     format!(
-        "window.__CODEX_SESSION_DELETE_HELPER__ = {};\nwindow.__CODEX_ELVES_VERSION__ = {};\nwindow.__CODEX_ELVES_BUILD__ = {};\nwindow.__CODEX_ELVES_LAUNCH_CYCLE__ = {};\nwindow.__CODEX_ELVES_IMAGE_OVERLAY__ = {};\nwindow.__CODEX_ELVES_PLUGIN_MARKETPLACES__ = {};\nwindow.__CODEX_ELVES_SUPPRESSED_THREADS__ = {};\n{}\n{}",
+        "window.__CODEX_SESSION_DELETE_HELPER__ = {};\nwindow.__CODEX_ELVES_VERSION__ = {};\nwindow.__CODEX_ELVES_BUILD__ = {};\nwindow.__CODEX_ELVES_LAUNCH_CYCLE__ = {};\nwindow.__CODEX_ELVES_IMAGE_OVERLAY__ = {};\nwindow.__CODEX_ELVES_PLUGIN_MARKETPLACES__ = {};\nwindow.__CODEX_ELVES_SUPPRESSED_THREADS__ = {};\n{}\n{}\n{}",
         serde_json::to_string(&helper_url).expect("helper URL should serialize"),
         serde_json::to_string(crate::version::VERSION).expect("version should serialize"),
         serde_json::to_string(DIAGNOSTIC_BUILD_ID).expect("build id should serialize"),
@@ -98,6 +110,7 @@ fn injection_script_source_with_settings(
         serde_json::to_string(&image_overlay).expect("image overlay config should serialize"),
         serde_json::to_string(&plugin_marketplaces).expect("plugin marketplaces should serialize"),
         serde_json::to_string(&suppressed_threads).expect("suppressed threads should serialize"),
+        statsig_cache_script(),
         native_fast_bootstrap(settings),
         source,
     )

@@ -1,6 +1,6 @@
 (() => {
   const root = typeof window === "object" ? window : {};
-  const version = "7";
+  const version = "8";
   if (root.__codexElvesComposerFast?.version === version) return;
   root.__codexElvesComposerFast?.configure?.({ enabled: false });
   const attribute = "data-codex-elves-fast";
@@ -59,8 +59,8 @@
     if (readPreference(context) !== (value === true)) throw new Error("Fast 会话设置保存失败");
   }
 
-  function currentContext() {
-    return adapters?.getContext?.() || null;
+  function currentContext(anchor) {
+    return adapters?.getContext?.(anchor) || null;
   }
 
   function configuredFast(context = currentContext()) {
@@ -154,8 +154,8 @@
       && state.config.features?.fast_mode !== false;
   }
 
-  function selectedModel() {
-    return adapters?.getModel?.(snapshot?.models) || "";
+  function selectedModel(anchor) {
+    return adapters?.getModel?.(snapshot?.models, anchor) || "";
   }
 
   async function patchMessage(type, payload, context = {}) {
@@ -216,27 +216,33 @@
   function removeIndicators() {
     root.document?.querySelectorAll(`[${statusAttribute}], [${sidebarAttribute}]`)
       .forEach((node) => node.remove());
-    highlightModel(null);
+    highlightModels([]);
   }
 
-  function highlightModel(label) {
+  function highlightModels(labels) {
     // 用户要求只在 Fast 开启时将模型名称标蓝；移除属性即可恢复原主题颜色，不改写原生行内样式。
+    const active = new Set(labels.filter((label) => label?.isConnected));
     root.document?.querySelectorAll(`[${modelAttribute}]`).forEach((node) => {
-      if (node !== label) node.removeAttribute(modelAttribute);
+      if (!active.has(node)) node.removeAttribute(modelAttribute);
     });
-    if (label?.isConnected && label.getAttribute(modelAttribute) !== "true") {
-      label.setAttribute(modelAttribute, "true");
-    }
+    for (const label of active)
+      if (label.getAttribute(modelAttribute) !== "true") label.setAttribute(modelAttribute, "true");
   }
 
   function renderIndicators(state, error) {
-    const model = selectedModel();
-    const context = currentContext();
-    const supported = !error && state && allowed(state) && contextKey(context) && modelCapability(state, model);
     // 用户要求去除会话列表闪电；同时清理旧文字标签，只通过模型名称标蓝提示当前会话状态。
     root.document?.querySelectorAll(`[${statusAttribute}], [${sidebarAttribute}]`)
       .forEach((node) => node.remove());
-    highlightModel(supported && configuredFast(context) ? adapters?.getModelLabel?.(state.models) : null);
+    // 主会话与侧边会话分别恢复颜色；关闭菜单后也不能把侧边状态套给主会话或清掉另一会话的标蓝。
+    const labels = [];
+    if (!error && state && allowed(state)) {
+      for (const anchor of adapters?.getComposers?.() || [undefined]) {
+        const context = currentContext(anchor), model = selectedModel(anchor);
+        if (contextKey(context) && modelCapability(state, model) && configuredFast(context))
+          labels.push(adapters?.getModelLabel?.(state.models, anchor));
+      }
+    }
+    highlightModels(labels);
   }
 
   function syncMenuObserver() {
@@ -365,7 +371,7 @@
     },
     refresh,
     captureContext() {
-      const context = currentContext();
+      const context = adapters?.getCreationContext ? adapters.getCreationContext() : currentContext();
       return context && { ...context, fast: configuredFast(context) };
     },
     bindConversation(context, id) {

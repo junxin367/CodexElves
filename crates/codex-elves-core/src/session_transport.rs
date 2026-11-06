@@ -1,7 +1,7 @@
 //! Native Responses transport recovery, scoped to a relay and a Codex thread.
 //! HTTP clients stay connected to the local proxy; recovery changes the actual upstream transport.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -18,7 +18,19 @@ use crate::responses_websocket::{
 };
 use crate::settings::RelayProfile;
 
-const RECOVERY_INTERVAL: Duration = Duration::from_secs(180);
+// 用户要求：偶发断流不能判定整个会话不支持 WS；同一供应商、同一会话在
+// 60 秒内连续失败 3 个请求/建连周期才降级，周期内的两次安全重试不重复计数。
+const FAILURE_WINDOW: Duration = Duration::from_secs(60);
+const FAILURE_THRESHOLD: usize = 3;
+// 用户要求：降级后按 5、15、30、60、180 秒逐步探测；达到 180 秒后保持该间隔。
+// 初始化、探测失败后的调度与前端 nextProbeAtMs 倒计时共用这份定义。
+const RECOVERY_DELAYS: [Duration; 5] = [
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(180),
+];
 const PROBE_TIMEOUT: Duration = Duration::from_secs(25);
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 static NEXT_OBSERVATION: AtomicU64 = AtomicU64::new(1);
@@ -49,8 +61,12 @@ impl Mode {
 #[derive(Clone)]
 struct Session {
     mode: Mode,
+    // 表示允许后续完整请求重试 WS；一次握手/Pong 不能保证下一次业务请求成功。
+    ws_ready: bool,
     generation: u64,
     next_probe_ms: Option<u64>,
+    probe_attempts: usize,
+    recent_failures: VecDeque<Instant>,
     reason: String,
     model: String,
     request_bytes: usize,
@@ -80,8 +96,11 @@ fn now_ms() -> u64 {
 fn new_session(relay: &RelayProfile, context: &RequestContext) -> Session {
     Session {
         mode: Mode::Ws,
+        ws_ready: true,
         generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
         next_probe_ms: None,
+        probe_attempts: 0,
+        recent_failures: VecDeque::new(),
         reason: String::new(),
         model: String::new(),
         request_bytes: 0,
@@ -101,10 +120,13 @@ fn log_state(key: &SessionKey, session: &Session, event: &str) {
             "threadId": crate::responses_websocket_bridge::redact_transport_thread_id(&key.thread_id),
             "event": event,
             "mode": session.mode.label(),
+            "wsReady": session.ws_ready,
             "reason": session.reason,
             "model": session.model,
             "requestBytes": session.request_bytes,
             "nextProbeAtMs": session.next_probe_ms,
+            "consecutiveFailures": session.recent_failures.len(),
+            "probeAttempts": session.probe_attempts,
         }),
     );
 }
@@ -128,17 +150,21 @@ pub(crate) fn observe_native_request(
         // A -> B -> A is still a new configuration lifetime. Never let an
         // old A connection regain authority just because the fields match again.
         state.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        state.recent_failures.clear();
+        state.probe_attempts = 0;
         if state.mode != Mode::Ws {
             state.mode = Mode::Http;
+            state.ws_ready = false;
             state.next_probe_ms = Some(
                 state
                     .next_probe_ms
                     .filter(|deadline| *deadline > now_ms())
-                    .unwrap_or_else(|| now_ms() + RECOVERY_INTERVAL.as_millis() as u64),
+                    .unwrap_or_else(|| now_ms() + recovery_delay(0).as_millis() as u64),
             );
             state.reason = "供应商配置已改变，等待下一次 WS 探测".to_string();
             Some(state.generation)
         } else {
+            state.reason.clear();
             None
         }
     } else {
@@ -157,14 +183,47 @@ pub(crate) fn observe_native_request(
     state.last_seen_order = NEXT_OBSERVATION.fetch_add(1, Ordering::Relaxed);
     state.relay = relay.clone();
     state.context = context.clone();
+    let recovered = if state.mode == Mode::Http && state.ws_ready {
+        if let Some(reason) = request_wait_reason(state) {
+            state.reason = reason.to_string();
+            None
+        } else {
+            // 用户要求：连接已恢复时，后续完整请求立即回 WS，不再等一轮定时器。
+            state.mode = Mode::Ws;
+            state.reason.clear();
+            Some(state.clone())
+        }
+    } else {
+        None
+    };
     drop(states);
     if let Some(generation) = reschedule {
         schedule_probe(key, generation);
+    } else if let Some(snapshot) = recovered {
+        log_state(&key, &snapshot, "ws_recovered");
     }
 }
 
 pub(crate) fn mark_http(relay: &RelayProfile, context: &RequestContext, reason: &str) {
-    mark_http_inner(relay, context, reason, None);
+    let Some(key) = key(relay, context) else {
+        return;
+    };
+    let snapshot = {
+        let Ok(mut states) = sessions().lock() else {
+            return;
+        };
+        let state = states
+            .entry(key.clone())
+            .or_insert_with(|| new_session(relay, context));
+        if state.mode != Mode::Ws {
+            // 已有恢复任务或仅等待完整请求时，普通 HTTP 流量不能重置调度。
+            return;
+        }
+        enter_http(state, relay, context, reason);
+        state.clone()
+    };
+    schedule_probe(key.clone(), snapshot.generation);
+    log_state(&key, &snapshot, "fallback");
 }
 
 pub(crate) fn generation(relay: &RelayProfile, context: &RequestContext) -> Option<u64> {
@@ -176,13 +235,21 @@ pub(crate) fn generation(relay: &RelayProfile, context: &RequestContext) -> Opti
         .map(|state| state.generation)
 }
 
-pub(crate) fn mark_http_for_generation(
+pub(crate) fn record_transport_failure(
+    relay: &RelayProfile,
+    context: &RequestContext,
+    reason: &str,
+) -> bool {
+    record_transport_failure_inner(relay, context, reason, None)
+}
+
+pub(crate) fn record_transport_failure_for_generation(
     relay: &RelayProfile,
     context: &RequestContext,
     reason: &str,
     generation: u64,
-) {
-    mark_http_inner(relay, context, reason, Some(generation));
+) -> bool {
+    record_transport_failure_inner(relay, context, reason, Some(generation))
 }
 
 fn same_upstream(left: &RelayProfile, right: &RelayProfile) -> bool {
@@ -195,18 +262,43 @@ fn same_upstream(left: &RelayProfile, right: &RelayProfile) -> bool {
         && left.local_proxy_enabled() == right.local_proxy_enabled()
 }
 
-fn mark_http_inner(
+fn recovery_delay(attempts: usize) -> Duration {
+    RECOVERY_DELAYS[attempts.min(RECOVERY_DELAYS.len() - 1)]
+}
+
+fn request_wait_reason(state: &Session) -> Option<&'static str> {
+    if state.request_bytes > RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES {
+        Some("WS 可重试，当前请求超过 16 MiB 安全上限，等待较小的完整请求")
+    } else if state.needs_previous_response {
+        Some("WS 可重试，当前请求需要原响应上下文，等待完整请求后恢复 WS")
+    } else {
+        None
+    }
+}
+
+fn enter_http(state: &mut Session, relay: &RelayProfile, context: &RequestContext, reason: &str) {
+    state.mode = Mode::Http;
+    state.ws_ready = false;
+    state.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    state.probe_attempts = 0;
+    state.next_probe_ms = Some(now_ms() + recovery_delay(0).as_millis() as u64);
+    state.reason = reason.to_string();
+    state.relay = relay.clone();
+    state.context = context.clone();
+}
+
+fn record_transport_failure_inner(
     relay: &RelayProfile,
     context: &RequestContext,
     reason: &str,
     attempt_generation: Option<u64>,
-) {
+) -> bool {
     let Some(key) = key(relay, context) else {
-        return;
+        return false;
     };
     let (generation, snapshot) = {
         let Ok(mut states) = sessions().lock() else {
-            return;
+            return false;
         };
         if let Some(generation) = attempt_generation
             && !states.get(&key).is_some_and(|state| {
@@ -214,25 +306,104 @@ fn mark_http_inner(
             })
         {
             // An old stream must not recreate a removed state or overwrite a new provider.
-            return;
+            return false;
         }
         let state = states
             .entry(key.clone())
             .or_insert_with(|| new_session(relay, context));
-        if state.mode == Mode::Http {
-            // Ordinary HTTP traffic and repeated failures must not postpone the next probe.
-            return;
+        if !same_upstream(&state.relay, relay) {
+            *state = new_session(relay, context);
         }
-        state.mode = Mode::Http;
-        state.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-        state.next_probe_ms = Some(now_ms() + RECOVERY_INTERVAL.as_millis() as u64);
+        if state.mode != Mode::Ws && !state.ws_ready {
+            // 连续失败已触发降级时，晚到的失败不能推迟下一次探测。
+            return true;
+        }
+        let now = Instant::now();
+        state
+            .recent_failures
+            .retain(|failed_at| now.saturating_duration_since(*failed_at) <= FAILURE_WINDOW);
+        state.recent_failures.push_back(now);
         state.reason = reason.to_string();
-        state.relay = relay.clone();
-        state.context = context.clone();
+        if state.recent_failures.len() >= FAILURE_THRESHOLD {
+            enter_http(state, relay, context, reason);
+        }
         (state.generation, state.clone())
     };
-    schedule_probe(key.clone(), generation);
-    log_state(&key, &snapshot, "fallback");
+    let fallback = !snapshot.ws_ready;
+    if fallback {
+        schedule_probe(key.clone(), generation);
+    }
+    log_state(
+        &key,
+        &snapshot,
+        if fallback {
+            "fallback"
+        } else {
+            "ws_interrupted"
+        },
+    );
+    fallback
+}
+
+pub(crate) fn record_success_for_generation(
+    relay: &RelayProfile,
+    context: &RequestContext,
+    generation: u64,
+) {
+    let Some(key) = key(relay, context) else {
+        return;
+    };
+    let snapshot = {
+        let Ok(mut states) = sessions().lock() else {
+            return;
+        };
+        let Some(state) = states.get_mut(&key) else {
+            return;
+        };
+        if state.generation != generation || !same_upstream(&state.relay, relay) {
+            return;
+        }
+        let had_failures = !state.recent_failures.is_empty();
+        // 用户要求：只有业务请求成功完成才清零，握手/Pong 不抹掉连续失败记录。
+        state.recent_failures.clear();
+        if state.mode == Mode::Ws {
+            state.reason.clear();
+        }
+        had_failures.then(|| state.clone())
+    };
+    if let Some(snapshot) = snapshot {
+        log_state(&key, &snapshot, "ws_request_completed");
+    }
+}
+
+pub(crate) fn wait_for_full_request_for_generation(
+    relay: &RelayProfile,
+    context: &RequestContext,
+    reason: &str,
+    generation: u64,
+) {
+    let Some(key) = key(relay, context) else {
+        return;
+    };
+    let snapshot = {
+        let Ok(mut states) = sessions().lock() else {
+            return;
+        };
+        let Some(state) = states.get_mut(&key) else {
+            return;
+        };
+        if state.generation != generation || !same_upstream(&state.relay, relay) || !state.ws_ready
+        {
+            return;
+        }
+        // 用户要求：单个请求的大小/上下文/协议限制不等于 WS 连接失效。
+        // 不删除 previous_response_id、不重放已有输出，也不启动连接故障退避。
+        state.mode = Mode::Http;
+        state.next_probe_ms = None;
+        state.reason = reason.to_string();
+        state.clone()
+    };
+    log_state(&key, &snapshot, "ws_available_waiting_request");
 }
 
 pub(crate) fn forget_thread(context: &RequestContext) {
@@ -267,12 +438,14 @@ pub(crate) fn status(thread_ids: &[String]) -> Value {
                 "relayId": key.relay_id,
                 "relayName": state.relay.name,
                 "mode": state.mode.label(),
+                "wsReady": state.ws_ready,
                 "model": state.model,
                 "reason": state.reason,
                 "requestBytes": state.request_bytes,
                 "nextProbeAtMs": state.next_probe_ms,
                 "lastSeenAtMs": state.last_seen_ms,
                 "lastSeenOrder": state.last_seen_order,
+                "consecutiveFailures": state.recent_failures.len(),
             })).collect::<Vec<_>>()
     })
 }
@@ -290,7 +463,7 @@ fn schedule_probe(key: SessionKey, generation: u64) {
                 let Some(state) = states.get(&key) else {
                     return;
                 };
-                if state.generation != generation || state.mode == Mode::Ws {
+                if state.generation != generation || state.ws_ready {
                     return;
                 }
                 state.next_probe_ms.unwrap_or_else(now_ms)
@@ -360,46 +533,39 @@ async fn probe_once(
         let Some(state) = states.get_mut(key) else {
             return false;
         };
-        if state.generation != generation || state.mode == Mode::Ws {
+        if state.generation != generation || state.ws_ready {
             return false;
         }
         state.mode = Mode::Probing;
         state.clone()
     };
     log_state(key, &snapshot, "probe_started");
-    let result = if snapshot.request_bytes > RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES {
-        Err(anyhow::anyhow!("最近请求仍超过 WS 的 16 MiB 安全上限"))
-    } else if snapshot.needs_previous_response {
-        Err(anyhow::anyhow!(
-            "最近请求需要原响应上下文，等待完整请求后恢复 WS"
-        ))
-    } else {
-        tokio::time::timeout(PROBE_TIMEOUT, async {
-            let mut socket = open_responses_websocket_upstream_with_request_context(
-                &snapshot.relay,
-                &snapshot.context,
-            )
-            .await?;
-            let ping = format!("codex-elves-recovery:{generation}").into_bytes();
-            socket.send(Message::Ping(ping.clone().into())).await?;
-            loop {
-                match socket.next().await {
-                    Some(Ok(Message::Pong(payload))) if payload.as_ref() == ping.as_slice() => {
-                        let _ =
-                            tokio::time::timeout(Duration::from_secs(1), socket.close(None)).await;
-                        return Ok(());
-                    }
-                    Some(Ok(Message::Ping(payload))) => socket.send(Message::Pong(payload)).await?,
-                    Some(Ok(Message::Pong(_))) => {}
-                    Some(Err(error)) => return Err(error.into()),
-                    _ => anyhow::bail!("WS 探测未收到有效 Pong"),
+    // 用户要求：即使最近请求是增量请求或超大请求，也独立探测 WS 连接。
+    // 此处只发 Ping；能连通不代表可在新连接上直接重放旧 response.create。
+    let result = tokio::time::timeout(PROBE_TIMEOUT, async {
+        let mut socket = open_responses_websocket_upstream_with_request_context(
+            &snapshot.relay,
+            &snapshot.context,
+        )
+        .await?;
+        let ping = format!("codex-elves-recovery:{generation}").into_bytes();
+        socket.send(Message::Ping(ping.clone().into())).await?;
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Pong(payload))) if payload.as_ref() == ping.as_slice() => {
+                    let _ = tokio::time::timeout(Duration::from_secs(1), socket.close(None)).await;
+                    return Ok(());
                 }
+                Some(Ok(Message::Ping(payload))) => socket.send(Message::Pong(payload)).await?,
+                Some(Ok(Message::Pong(_))) => {}
+                Some(Err(error)) => return Err(error.into()),
+                _ => anyhow::bail!("WS 探测未收到有效 Pong"),
             }
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("WS 恢复探测超时"))
-        .and_then(|result| result)
-    };
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("WS 恢复探测超时"))
+    .and_then(|result| result);
     if !refresh_policy() {
         return false;
     }
@@ -418,22 +584,26 @@ async fn probe_once(
         Err(anyhow::anyhow!("供应商配置已改变，等待下一次 WS 探测"))
     };
     let retry = match result {
-        Ok(())
-            if state.request_bytes <= RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES
-                && !state.needs_previous_response =>
-        {
-            state.mode = Mode::Ws;
+        Ok(()) => {
+            state.ws_ready = true;
+            state.probe_attempts = 0;
             state.next_probe_ms = None;
-            state.reason.clear();
+            if let Some(reason) = request_wait_reason(state) {
+                state.mode = Mode::Http;
+                state.reason = reason.to_string();
+            } else {
+                state.mode = Mode::Ws;
+                state.reason.clear();
+            }
             false
         }
-        result => {
+        Err(error) => {
             state.mode = Mode::Http;
-            state.reason = result
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "最新请求尚不适合恢复 WS".to_string());
-            state.next_probe_ms = Some(now_ms() + RECOVERY_INTERVAL.as_millis() as u64);
+            state.ws_ready = false;
+            state.reason = error.to_string();
+            state.probe_attempts = state.probe_attempts.saturating_add(1);
+            state.next_probe_ms =
+                Some(now_ms() + recovery_delay(state.probe_attempts).as_millis() as u64);
             true
         }
     };
@@ -445,6 +615,8 @@ async fn probe_once(
         &snapshot,
         if retry {
             "probe_failed"
+        } else if snapshot.mode == Mode::Http {
+            "ws_available_waiting_request"
         } else {
             "ws_recovered"
         },
@@ -483,14 +655,28 @@ pub(crate) async fn try_ws_for_http(
         return None;
     }
     if text.len() > RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES {
-        mark_http(relay, context, "请求超过 WS 的 16 MiB 安全上限");
+        if let Some(generation) = generation(relay, context) {
+            wait_for_full_request_for_generation(
+                relay,
+                context,
+                "请求超过 WS 的 16 MiB 安全上限，当前请求使用 HTTP",
+                generation,
+            );
+        }
         return None;
     }
     if ws_request
         .get("previous_response_id")
         .is_some_and(|id| !id.is_null())
     {
-        mark_http(relay, context, "增量请求需要原响应上下文，继续使用 HTTP");
+        if let Some(generation) = generation(relay, context) {
+            wait_for_full_request_for_generation(
+                relay,
+                context,
+                "当前增量请求需要原响应上下文，等待完整请求后恢复 WS",
+                generation,
+            );
+        }
         return None;
     }
     let generation = {
@@ -531,7 +717,7 @@ pub(crate) async fn try_ws_for_http(
                 let data = match state.next_event().await {
                     Ok(text) => text,
                     Err(error) => {
-                        mark_http_inner(
+                        record_transport_failure_inner(
                             &state.relay,
                             &state.context,
                             &error.to_string(),
@@ -568,7 +754,7 @@ pub(crate) async fn try_ws_for_http(
     match result {
         Ok(response) => Some((response, ws_request)),
         Err(error) => {
-            mark_http_inner(relay, context, &error.to_string(), Some(generation));
+            record_transport_failure_inner(relay, context, &error.to_string(), Some(generation));
             None
         }
     }
@@ -635,9 +821,10 @@ impl WsSseStream {
                             }
                             self.finished = matches!(event, "response.completed" | "response.incomplete" | "response.failed" | "error");
                             if self.finished {
-                                if matches!(event, "response.failed" | "error") {
-                                    mark_http_inner(&self.relay, &self.context, "WS 返回失败事件", Some(self.generation));
+                                if event == "response.completed" {
+                                    record_success_for_generation(&self.relay, &self.context, self.generation);
                                 }
+                                // 业务失败事件也证明 WS 已返回应用结果，不能当作连接故障重执行。
                                 let _ = tokio::time::timeout(Duration::from_secs(1), self.socket.close(None)).await;
                             }
                             // WS frames may contain pretty-printed JSON. SSE data fields
@@ -678,6 +865,7 @@ impl WsSseStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tokio::net::TcpListener;
 
     async fn probe_once(key: &SessionKey, generation: u64) -> bool {
@@ -748,6 +936,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn single_interruptions_only_fall_back_after_three_failures_in_sixty_seconds() {
+        let (relay, context, request) = fixture("127.0.0.1:1".parse().unwrap());
+        observe_native_request(&relay, &context, &request, 100);
+        let original_generation = generation(&relay, &context).unwrap();
+        for count in 1..=FAILURE_THRESHOLD {
+            assert_eq!(
+                record_transport_failure_for_generation(
+                    &relay,
+                    &context,
+                    "connection interrupted",
+                    original_generation,
+                ),
+                count == FAILURE_THRESHOLD,
+            );
+            let (_, state) = snapshot(&relay, &context);
+            assert_eq!(state.recent_failures.len(), count);
+            assert_eq!(
+                should_use_http(&relay, &context),
+                count == FAILURE_THRESHOLD
+            );
+        }
+        let (key, state) = snapshot(&relay, &context);
+        assert!(!state.ws_ready);
+        assert!(state.next_probe_ms.unwrap() <= now_ms() + 5_000);
+        assert_ne!(state.generation, original_generation);
+        record_transport_failure_for_generation(
+            &relay,
+            &context,
+            "late failure",
+            original_generation,
+        );
+        assert_eq!(
+            snapshot(&relay, &context).1.next_probe_ms,
+            state.next_probe_ms
+        );
+        sessions().lock().unwrap().remove(&key);
+    }
+
+    #[tokio::test]
+    async fn old_failures_expire_and_success_or_configuration_changes_reset_the_streak() {
+        let (relay, context, request) = fixture("127.0.0.1:1".parse().unwrap());
+        observe_native_request(&relay, &context, &request, 100);
+        let original_generation = generation(&relay, &context).unwrap();
+        let session_key = key(&relay, &context).unwrap();
+        {
+            let mut states = sessions().lock().unwrap();
+            let state = states.get_mut(&session_key).unwrap();
+            state.recent_failures = VecDeque::from([
+                Instant::now() - FAILURE_WINDOW - Duration::from_secs(1),
+                Instant::now() - FAILURE_WINDOW - Duration::from_secs(1),
+            ]);
+        }
+        assert!(!record_transport_failure(&relay, &context, "new failure"));
+        assert_eq!(snapshot(&relay, &context).1.recent_failures.len(), 1);
+        record_success_for_generation(&relay, &context, original_generation);
+        assert!(snapshot(&relay, &context).1.recent_failures.is_empty());
+        assert!(!record_transport_failure(
+            &relay,
+            &context,
+            "first failure after success"
+        ));
+        assert!(!record_transport_failure(
+            &relay,
+            &context,
+            "second failure after success"
+        ));
+        let mut changed = relay.clone();
+        changed.api_key = "replacement-test-key".into();
+        observe_native_request(&changed, &context, &request, 100);
+        assert!(snapshot(&changed, &context).1.recent_failures.is_empty());
+        for _ in 0..FAILURE_THRESHOLD {
+            assert!(!record_transport_failure_for_generation(
+                &relay,
+                &context,
+                "obsolete connection",
+                original_generation,
+            ));
+        }
+        assert!(!should_use_http(&changed, &context));
+        assert!(!record_transport_failure(
+            &changed,
+            &context,
+            "new provider failure"
+        ));
+        assert_eq!(snapshot(&changed, &context).1.recent_failures.len(), 1);
+        sessions().lock().unwrap().remove(&session_key);
+    }
+
+    #[test]
+    fn probe_backoff_stops_growing_at_three_minutes() {
+        assert_eq!(
+            (0..7)
+                .map(|attempt| recovery_delay(attempt).as_secs())
+                .collect::<Vec<_>>(),
+            vec![5, 15, 30, 60, 180, 180, 180],
+        );
+    }
+
+    #[tokio::test]
     async fn fallback_deadline_is_fixed_and_sessions_and_relays_are_isolated() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (relay, context, request) = fixture(listener.local_addr().unwrap());
@@ -755,9 +1042,9 @@ mod tests {
         observe_native_request(&relay, &context, &request, 100);
         mark_http(&relay, &context, "disconnected");
         let (_, first) = snapshot(&relay, &context);
-        assert_eq!(RECOVERY_INTERVAL, Duration::from_secs(180));
-        assert!(first.next_probe_ms.unwrap() >= before + 180_000);
-        assert!(first.next_probe_ms.unwrap() <= now_ms() + 180_000);
+        assert_eq!(recovery_delay(0), Duration::from_secs(5));
+        assert!(first.next_probe_ms.unwrap() >= before + 5_000);
+        assert!(first.next_probe_ms.unwrap() <= now_ms() + 5_000);
         observe_native_request(&relay, &context, &request, 120);
         mark_http(&relay, &context, "another HTTP retry");
         let (key, second) = snapshot(&relay, &context);
@@ -781,8 +1068,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_probe_waits_another_three_minutes_and_success_routes_following_requests_to_ws()
-    {
+    async fn failed_probe_backs_off_and_success_routes_following_requests_to_ws() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (relay, context, request) = fixture(listener.local_addr().unwrap());
         observe_native_request(&relay, &context, &request, 100);
@@ -816,7 +1102,9 @@ mod tests {
         assert!(probe_once(&key, state.generation).await);
         let (_, failed) = snapshot(&relay, &context);
         assert_eq!(failed.mode.label(), "http");
-        assert!(failed.next_probe_ms.unwrap() >= before + 180_000);
+        assert_eq!(failed.probe_attempts, 1);
+        assert!(failed.next_probe_ms.unwrap() >= before + 15_000);
+        assert!(failed.next_probe_ms.unwrap() <= now_ms() + 15_000);
         assert!(!probe_once(&key, state.generation).await);
         assert!(!should_use_http(&relay, &context));
         assert!(snapshot(&relay, &context).1.next_probe_ms.is_none());
@@ -844,39 +1132,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_and_incremental_requests_do_not_claim_a_false_recovery() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let (relay, context, mut request) = fixture(listener.local_addr().unwrap());
-        observe_native_request(
-            &relay,
-            &context,
-            &request,
-            RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES + 1,
-        );
-        mark_http(&relay, &context, "oversized");
-        let (key, state) = snapshot(&relay, &context);
-        assert!(probe_once(&key, state.generation).await);
-        assert!(should_use_http(&relay, &context));
-        request["previous_response_id"] = json!("resp_on_old_connection");
-        observe_native_request(&relay, &context, &request, 100);
-        assert!(probe_once(&key, state.generation).await);
-        assert!(should_use_http(&relay, &context));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(30), listener.accept())
-                .await
-                .is_err()
-        );
-        // A later full request can be probed in the next cycle.
-        request
-            .as_object_mut()
-            .unwrap()
-            .remove("previous_response_id");
-        observe_native_request(&relay, &context, &request, 100);
-        let server = tokio::spawn(async move { pong_probe(&listener).await });
-        assert!(!probe_once(&key, state.generation).await);
-        assert!(!should_use_http(&relay, &context));
-        server.await.unwrap();
-        sessions().lock().unwrap().remove(&key);
+    async fn oversized_and_incremental_requests_do_not_block_connection_probes_or_replay_context() {
+        for incremental in [false, true] {
+            let listener = Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
+            let (relay, context, mut request) = fixture(listener.local_addr().unwrap());
+            let bytes = if incremental {
+                request["previous_response_id"] = json!("resp_on_old_connection");
+                100
+            } else {
+                RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES + 1
+            };
+            observe_native_request(&relay, &context, &request, bytes);
+            mark_http(&relay, &context, "transport failure");
+            let (key, state) = snapshot(&relay, &context);
+            let provider = listener.clone();
+            let server = tokio::spawn(async move { pong_probe(&provider).await });
+            assert!(!probe_once(&key, state.generation).await);
+            server.await.unwrap();
+            let (_, waiting) = snapshot(&relay, &context);
+            assert!(waiting.ws_ready);
+            assert!(waiting.next_probe_ms.is_none());
+            assert!(should_use_http(&relay, &context));
+            if incremental {
+                let original = request.clone();
+                assert!(try_ws_for_http(&relay, &context, &request).await.is_none());
+                assert_eq!(request, original, "the old response reference must survive");
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), listener.accept())
+                    .await
+                    .is_err(),
+                "a connection probe must never replay the model request"
+            );
+            request
+                .as_object_mut()
+                .unwrap()
+                .remove("previous_response_id");
+            observe_native_request(&relay, &context, &request, 100);
+            assert!(!should_use_http(&relay, &context));
+            sessions().lock().unwrap().remove(&key);
+        }
     }
 
     #[tokio::test]
@@ -919,7 +1214,8 @@ mod tests {
                     "existing HTTP path must handle this attempt"
                 );
             }
-            assert!(should_use_http(&relay, &context));
+            assert!(!should_use_http(&relay, &context));
+            assert_eq!(snapshot(&relay, &context).1.recent_failures.len(), 1);
             server.await.unwrap();
             let (key, _) = snapshot(&relay, &context);
             sessions().lock().unwrap().remove(&key);
@@ -1337,7 +1633,8 @@ mod tests {
                 .contains("resp_http")
         );
         assert_eq!(server.await.unwrap(), request);
-        assert!(should_use_http(&relay, &context));
+        assert!(!should_use_http(&relay, &context));
+        assert_eq!(snapshot(&relay, &context).1.recent_failures.len(), 1);
         forget_thread(&context);
     }
 
@@ -1390,7 +1687,7 @@ mod tests {
         changed.api_key = "replacement-test-key".into();
         observe_native_request(&changed, &context, &request, 100);
         observe_native_request(&relay, &context, &request, 100);
-        mark_http_for_generation(
+        record_transport_failure_for_generation(
             &relay,
             &context,
             "late failure from the first connection",
@@ -1467,6 +1764,8 @@ mod tests {
         assert!(text.contains("resp_already_executed"));
         assert!(text.contains("response.failed"));
         assert!(!text.contains("response.completed"));
+        assert!(!should_use_http(&relay, &context));
+        assert!(snapshot(&relay, &context).1.recent_failures.is_empty());
         forget_thread(&context);
     }
 
@@ -1499,8 +1798,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "uses two real three-minute recovery intervals; run explicitly for end-to-end timer checks"]
-    async fn real_clock_failure_then_recovery_keeps_the_three_minute_cycle() {
+    #[ignore = "uses real 5-second and 15-second intervals; run explicitly for end-to-end timer checks"]
+    async fn real_clock_failure_then_recovery_uses_progressive_delays() {
         struct SettingsGuard(Option<std::path::PathBuf>);
         impl Drop for SettingsGuard {
             fn drop(&mut self) {
@@ -1529,14 +1828,16 @@ mod tests {
         let provider = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let first_at = started.elapsed();
-            assert!(first_at >= Duration::from_secs(179));
+            assert!(first_at >= Duration::from_secs(5));
+            assert!(first_at < Duration::from_secs(10));
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
             assert!(matches!(socket.next().await, Some(Ok(Message::Ping(_)))));
             socket.close(None).await.unwrap();
             first_tx.send(first_at).unwrap();
             let (stream, _) = listener.accept().await.unwrap();
             let second_at = started.elapsed();
-            assert!(second_at.saturating_sub(first_at) >= Duration::from_secs(179));
+            assert!(second_at.saturating_sub(first_at) >= Duration::from_secs(15));
+            assert!(second_at.saturating_sub(first_at) < Duration::from_secs(20));
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
             let Some(Ok(Message::Ping(payload))) = socket.next().await else {
                 panic!("expected probe Ping")
@@ -1562,8 +1863,8 @@ mod tests {
         });
         observe_native_request(&relay, &context, &request, 100);
         mark_http(&relay, &context, "real clock test");
-        eprintln!("REAL_CLOCK: waiting for the first scheduled 180-second probe");
-        let first_at = tokio::time::timeout(Duration::from_secs(200), first_rx)
+        eprintln!("REAL_CLOCK: waiting for the first scheduled 5-second probe");
+        let first_at = tokio::time::timeout(Duration::from_secs(10), first_rx)
             .await
             .unwrap()
             .unwrap();
@@ -1572,7 +1873,7 @@ mod tests {
             first_at.as_secs_f64()
         );
         assert!(should_use_http(&relay, &context));
-        let second_at = tokio::time::timeout(Duration::from_secs(200), second_rx)
+        let second_at = tokio::time::timeout(Duration::from_secs(20), second_rx)
             .await
             .unwrap()
             .unwrap();

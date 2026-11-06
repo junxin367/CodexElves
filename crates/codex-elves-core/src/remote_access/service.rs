@@ -17,7 +17,8 @@ use serde_json::{Value, json};
 
 const ENDPOINT_FILE: &str = "remote-access-service.json";
 const LOCK_FILE: &str = "remote-access-service.lock";
-const PROTOCOL_VERSION: u32 = 2;
+// 运行模式和自建服务路由属于同一版后台合同；新版不能继续复用仅支持 CDP 的旧后台。
+const PROTOCOL_VERSION: u32 = 3;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(windows)]
@@ -274,6 +275,8 @@ async fn health(
         "status":"ok",
         "protocolVersion":endpoint.protocol_version,
         "processId":endpoint.process_id,
+        "version":crate::version::VERSION,
+        "buildId":crate::assets::DIAGNOSTIC_BUILD_ID,
     })))
 }
 
@@ -429,6 +432,27 @@ mod tests {
             .unwrap();
             assert!(load_endpoint(directory.path()).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn cdp_only_service_is_not_reused_for_runtime_modes() {
+        let directory = test_directory();
+        std::fs::write(
+            directory.path().join(ENDPOINT_FILE),
+            serde_json::to_vec(&json!({
+                "protocolVersion":2,"processId":12345,"port":12345,"token":"a".repeat(64)
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            load_endpoint_any(directory.path()).unwrap().is_some(),
+            "旧后台仍可识别，以便只退役已验证的旧进程"
+        );
+        assert!(
+            load_endpoint(directory.path()).unwrap().is_none(),
+            "仅 CDP 的旧后台不能被新版运行模式复用"
+        );
     }
 
     #[test]
