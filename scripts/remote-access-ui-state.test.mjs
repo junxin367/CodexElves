@@ -70,6 +70,113 @@ const diagnostics = await readFile(new URL("../assets/remote-access/diagnostics.
 const platform = await readFile(new URL("../assets/remote-access/platform.js", import.meta.url), "utf8");
 const eventsClient = await readFile(new URL("../assets/remote-access/events-client.js", import.meta.url), "utf8");
 const sessionTools = await readFile(new URL("../assets/remote-access/session-tools.js", import.meta.url), "utf8");
+const sessionFiles = await readFile(new URL("../assets/remote-access/session-files.js", import.meta.url), "utf8");
+
+test("文件阅读字号默认12，旧配置和新设置都限制在6至14且独立于全局字号", () => {
+  const disk = storage();
+  const context = vm.createContext({ localStorage: disk, matchMedia: () => ({ matches: false }) });
+  vm.runInContext(app.slice(app.indexOf("const appearancePresets ="), app.indexOf("let ambientLightStatus =")), context);
+  for (const [saved, expected] of [[undefined, 12], [null, 12], [6, 6], [12, 12], [14, 14], [16, 14], [5, 6], ["8", 12]]) {
+    disk.setItem("codex-elves-web-appearance", JSON.stringify({ fontSize: 20, fileReadingFontSize: saved }));
+    context.appearance = context.readAppearance();
+    assert.equal(context.currentFileReadingFontSize(), expected);
+    assert.equal(context.appearance.fontSize, 20);
+  }
+  assert.equal(context.defaultAppearance().fileReadingFontSize, 12);
+});
+
+function previewControlsScrollHarness() {
+  class PreviewElement {
+    constructor() {
+      this.children = []; this.parentElement = null; this.hidden = false; this.inert = false;
+      this.scrollTop = 0; this.scrollHeight = 40; this.clientHeight = 40; this.listeners = new Map();
+      this.properties = new Map();
+      this.style = {
+        setProperty: (key, value) => this.properties.set(key, value),
+        removeProperty: key => this.properties.delete(key)
+      };
+    }
+    append(...children) {
+      for (const child of children) {
+        if (child.parentElement) child.parentElement.children.splice(child.parentElement.children.indexOf(child), 1);
+        this.children.push(child); child.parentElement = this;
+      }
+    }
+    before(child) {
+      const parent = this.parentElement;
+      parent.children.splice(parent.children.indexOf(this), 0, child); child.parentElement = parent;
+    }
+    replaceWith(child) {
+      const parent = this.parentElement;
+      if (child.parentElement) child.parentElement.children.splice(child.parentElement.children.indexOf(child), 1);
+      parent.children.splice(parent.children.indexOf(this), 1, child);
+      child.parentElement = parent; this.parentElement = null;
+    }
+    addEventListener(name, listener) { this.listeners.set(name, listener); }
+    removeEventListener(name) { this.listeners.delete(name); }
+  }
+  const screen = new PreviewElement(), controls = new PreviewElement(), body = new PreviewElement();
+  body.scrollHeight = 2000; body.clientHeight = 600; body.scrollTop = 100;
+  screen.append(controls, body);
+  let active = true;
+  const context = vm.createContext({
+    Element: PreviewElement, node: () => new PreviewElement(),
+    getComputedStyle: element => ({ overflowY: element.overflowY || "visible" })
+  });
+  vm.runInContext(sessionFiles.slice(sessionFiles.indexOf("export function mountPreviewControlsScroll"),
+    sessionFiles.indexOf("export function mountSessionFiles")).replace(/^export /gm, ""), context);
+  const controller = context.mountPreviewControlsScroll({ body, controls, isActive: () => active });
+  const shell = screen.children[0];
+  const wheel = options => body.listeners.get("wheel")({
+    deltaY: 0, deltaX: 0, deltaMode: 0, target: body, ...options
+  });
+  return { controller, screen, shell, controls, body, wheel, PreviewElement,
+    reveal: () => Number(shell.properties.get("--preview-controls-reveal") ?? 1),
+    active: value => { active = value; } };
+}
+
+test("文件预览第二行随上滑渐进收起和回滑展开，聚焦与重新打开恢复完整工具行", () => {
+  const h = previewControlsScrollHarness();
+  h.wheel({ deltaY: 40 });
+  assert.equal(h.reveal(), .75);
+  h.wheel({ deltaY: 120 });
+  assert.equal(h.reveal(), 0); assert.equal(h.shell.inert, true);
+  h.wheel({ deltaY: -80 });
+  assert.equal(h.reveal(), .5); assert.equal(h.shell.inert, false);
+  h.controls.listeners.get("focusin")();
+  assert.equal(h.reveal(), 1);
+  assert.equal(h.shell.properties.has("--preview-controls-rows"), false);
+  h.wheel({ deltaY: 500 }); h.controller.reset();
+  assert.equal(h.reveal(), 1);
+  h.controller.dispose();
+  assert.deepEqual(h.screen.children, [h.controls, h.body]);
+  assert.equal(h.body.listeners.size, 0);
+  assert.equal(h.controls.listeners.size, 0);
+});
+
+test("文件预览只响应正文纵向手势，短文件、横向滚动、缩放及内层滚动不会误收起", () => {
+  const h = previewControlsScrollHarness();
+  h.body.scrollHeight = 600; h.body.scrollTop = 0;
+  h.wheel({ deltaY: 100 }); assert.equal(h.reveal(), 1);
+  h.body.scrollHeight = 2000;
+  h.wheel({ deltaX: 200, deltaY: 50 });
+  h.wheel({ ctrlKey: true, deltaY: 200 });
+  assert.equal(h.reveal(), 1);
+  const nested = new h.PreviewElement();
+  nested.scrollHeight = 800; nested.clientHeight = 100; nested.scrollTop = 100; nested.overflowY = "auto";
+  h.body.append(nested);
+  h.wheel({ deltaY: 200, target: nested }); assert.equal(h.reveal(), 1);
+  h.active(false); h.wheel({ deltaY: 200 }); assert.equal(h.reveal(), 1);
+  h.active(true);
+  h.body.listeners.get("touchstart")({ touches: [{ clientX: 100, clientY: 300 }] });
+  h.body.listeners.get("touchmove")({ touches: [{ clientX: 100, clientY: 260 }], target: h.body });
+  assert.equal(h.reveal(), .75);
+  h.body.listeners.get("touchmove")({ touches: [{ clientX: 200, clientY: 250 }], target: h.body });
+  assert.equal(h.reveal(), .75);
+  h.body.scrollTop = 800;
+  assert.equal(h.reveal(), .75, "恢复滚动位置不应改变工具行展开比例");
+  h.controller.dispose();
+});
 
 async function connectionDiagnosticsHarness({ android = true } = {}) {
   const logs = [], documentListeners = new Map(), windowListeners = new Map(), timers = new Map();

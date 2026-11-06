@@ -356,10 +356,10 @@ const appearancePresets = {
   dark: { background: "#171717", foreground: "#ededed", accent: "#ededed" }
 };
 const projectThreadLimits = [5, 10, 20, 50];
-// 用户要求文件阅读字号统一控制变更预览和文件查看，限 10～16px、步长 1px；文件列表继续使用原字号。
-const fileReadingFontMin = 10, fileReadingFontMax = 16;
+// 用户要求文件阅读字号统一控制变更预览和文件查看，范围 6～14px、默认 12px、步长 1px；文件列表继续使用原字号。
+const fileReadingFontMin = 6, fileReadingFontMax = 14, fileReadingFontDefault = 12;
 function defaultAppearance(theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") {
-  return { theme, themeMode: "manual", fontSize: 13, fileReadingFontSize: null, projectThreadLimit: 5, backgroundOpacity: 35, backgroundFit: "cover",
+  return { theme, themeMode: "manual", fontSize: 13, fileReadingFontSize: fileReadingFontDefault, projectThreadLimit: 5, backgroundOpacity: 35, backgroundFit: "cover",
     colors: { light: { ...appearancePresets.light }, dark: { ...appearancePresets.dark } } };
 }
 function readAppearance() {
@@ -382,8 +382,8 @@ function readAppearance() {
   return value;
 }
 function currentFileReadingFontSize() {
-  // 未单独设置或恢复默认后跟随当前设备的全局字号，仍遵守文件阅读的 10～16px 范围。
-  return Math.min(fileReadingFontMax, Math.max(fileReadingFontMin, appearance.fileReadingFontSize ?? appearance.fontSize));
+  // 用户已将默认值改为固定 12px；兼容旧版保存的 null，旧范围内的 15/16px 则收敛到 14px。
+  return Math.min(fileReadingFontMax, Math.max(fileReadingFontMin, appearance.fileReadingFontSize ?? fileReadingFontDefault));
 }
 let ambientLightStatus = { supported: false, lux: null };
 let syncAppearanceThemeControls = null;
@@ -727,7 +727,7 @@ function openAppearance() {
     <div id="appearance-colors"></div>
     <label class="appearance-field">字体大小<span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="字体大小"><output id="appearance-font-value"></output></span></label>
     <label class="appearance-field"><span>文件阅读字号</span><span class="appearance-font"><input id="appearance-file-reading-font" type="range" min="${fileReadingFontMin}" max="${fileReadingFontMax}" step="1" aria-label="文件阅读字号" aria-describedby="appearance-file-reading-font-hint"><output id="appearance-file-reading-font-value" for="appearance-file-reading-font"></output></span></label>
-    <div id="appearance-file-reading-font-hint" class="appearance-reading-font-hint"><span>用于变更预览与文件查看。</span><button type="button" id="appearance-file-reading-font-reset" class="text-button" title="恢复跟随全局字号，范围为 10～16px">恢复默认</button></div>
+    <div id="appearance-file-reading-font-hint" class="appearance-reading-font-hint"><span>用于变更预览与文件查看。</span><button type="button" id="appearance-file-reading-font-reset" class="text-button" title="恢复为 ${fileReadingFontDefault}px">恢复默认</button></div>
     </section>
     <section id="appearance-diagnostics-page" class="appearance-body appearance-settings-page" hidden>
     <h3 class="appearance-panel-title">诊断日志</h3>
@@ -1307,7 +1307,7 @@ function openAppearance() {
     $("#appearance-file-reading-font").style.setProperty("--range-fill",
       `${(readingFontSize - fileReadingFontMin) / (fileReadingFontMax - fileReadingFontMin) * 100}%`);
     $("#appearance-file-reading-font-value").textContent = `${readingFontSize}px`;
-    $("#appearance-file-reading-font-reset").disabled = appearance.fileReadingFontSize === null;
+    $("#appearance-file-reading-font-reset").disabled = readingFontSize === fileReadingFontDefault;
   };
   syncAppearanceThemeControls = sync;
   sync();
@@ -1375,7 +1375,7 @@ function openAppearance() {
     appearance.fileReadingFontSize = size; applyAppearance(true); sync();
   };
   $("#appearance-file-reading-font-reset").onclick = () => {
-    appearance.fileReadingFontSize = null; applyAppearance(true); sync();
+    appearance.fileReadingFontSize = fileReadingFontDefault; applyAppearance(true); sync();
   };
   $("#appearance-reset").onclick = async () => {
     if (subpageEntry || remoteBackgroundBusy) return;

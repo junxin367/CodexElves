@@ -693,7 +693,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .edited-files-detail{min-width:0;padding:0 14px 12px}
 .edited-files-detail-label{padding:4px 0 7px;color:var(--muted);font-size:.75rem}
 /* 用户要求文件阅读字号覆盖差异正文；文件名、列表与工具栏仍使用原字号。须与完整差异和文件查看同步。 */
-.edited-files-diff{max-width:100%;max-height:300px;margin:0;padding:10px 12px;overflow:auto;border-radius:8px;background:var(--code);white-space:pre;tab-size:2;font:var(--file-reading-font-size,.75rem)/1.65 "JetBrains Mono",Consolas,monospace}
+.edited-files-diff{max-width:100%;max-height:300px;margin:0;padding:10px 12px;overflow:auto;border-radius:8px;background:var(--code);white-space:pre;tab-size:2;font:var(--file-reading-font-size,12px)/1.65 "JetBrains Mono",Consolas,monospace}
 .edited-files-more{display:flex;align-items:center;gap:6px;width:100%;min-height:36px;padding:8px 14px;border:0;border-radius:0;color:var(--muted);text-align:left;font-size:.92857rem;font-weight:500}
 .edited-files-more>.ui-icon{width:14px;height:14px;transition:transform var(--duration-control)}
 .edited-files-more[aria-expanded=true]>.ui-icon{transform:rotate(180deg)}
@@ -939,6 +939,10 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-tools-detail{flex:1;min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;padding-bottom:20px;scrollbar-width:thin}
 .session-tools-detail:empty{display:none}
 .session-tools-detail-controls{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;flex-shrink:0;gap:8px 12px;padding:7px 14px;border-bottom:1px solid var(--line);font-size:.78571rem}
+/* 用户要求只收起预览第二行，文件名/返回行保持固定；沿用会话输入区 .18s ease-out 的网格高度和透明度过渡。 */
+.session-preview-controls{display:grid;grid-template-rows:minmax(0,var(--preview-controls-rows,1fr));flex-shrink:0;opacity:var(--preview-controls-reveal,1);transition:grid-template-rows .18s ease-out,opacity .18s ease-out}
+/* 内层裁切包住工具行的内边距和边框，0fr 时第二行完整收起，不留下空白条。 */
+.session-preview-controls-content{min-height:0;overflow:hidden}
 .session-files-screen .session-tools-detail-controls{justify-content:flex-start}
 .session-tools-diff-stats{display:flex;gap:10px;font-variant-numeric:tabular-nums}
 .session-tools-additions{color:var(--green)}
@@ -947,7 +951,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-tools-detail-controls button[aria-pressed=true]{background:var(--hover)}
 .session-tools-cache-note{flex-shrink:0;margin:7px 14px}
 /* 文件阅读字号仅作用于预览正文及继承字号的行号，文件列表不读取该变量。 */
-.session-tools-diff{overflow:auto;border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:var(--code);font:var(--file-reading-font-size,.85714rem)/1.75 Consolas,"JetBrains Mono",monospace;tab-size:4}
+.session-tools-diff{overflow:auto;border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:var(--code);font:var(--file-reading-font-size,12px)/1.75 Consolas,"JetBrains Mono",monospace;tab-size:4}
 .session-tools-diff-line{display:flex;width:max-content;min-width:100%}
 .session-tools-diff-line>code{flex:1;padding:0 10px;white-space:pre}
 .session-tools-line-number{flex:0 0 var(--line-number-width,3.2ch);width:var(--line-number-width,3.2ch);padding:0 .45ch;text-align:right;color:var(--muted);background:color-mix(in srgb,var(--side) 70%,transparent);user-select:none;border-right:1px solid var(--line)}
@@ -1058,13 +1062,13 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-files-screen .session-tools-status{margin:0;padding:8px 16px;font-size:.85714rem;white-space:pre-wrap}
 .session-files-screen .session-tools-status>button{margin-left:10px}
 .session-files-content{overflow:auto;min-height:0;flex:1;padding:0}
-.session-files-markdown{padding:16px;font-size:var(--file-reading-font-size,1rem);line-height:1.65;overflow-wrap:anywhere}
+.session-files-markdown{padding:16px;font-size:var(--file-reading-font-size,12px);line-height:1.65;overflow-wrap:anywhere}
 /* 文件预览内的标题和表格相对阅读字号缩放，避免继续使用全局 rem 而与正文脱节。 */
 .session-files-markdown h1{font-size:1.71429em}
 .session-files-markdown h2{font-size:1.35714em}
 .session-files-markdown h3{font-size:1.14286em}
 .session-files-markdown table{font-size:.85714em}
-.session-files-source{min-width:100%;width:max-content;padding:12px 0;font:var(--file-reading-font-size,.85714rem)/1.6 "JetBrains Mono",Consolas,monospace}
+.session-files-source{min-width:100%;width:max-content;padding:12px 0;font:var(--file-reading-font-size,12px)/1.6 "JetBrains Mono",Consolas,monospace}
 .session-files-source-line{display:flex;min-height:1.6em}
 .session-files-source-line>.session-tools-line-number{flex:0 0 5ch;padding:0 1ch;text-align:right;user-select:none}
 .session-files-source-line>code{display:block;flex:1;white-space:pre;padding-right:16px}

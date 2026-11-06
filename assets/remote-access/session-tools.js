@@ -1,5 +1,5 @@
 import { requestRemote } from "./channels.js";
-import { mountSessionFiles } from "./session-files.js";
+import { mountPreviewControlsScroll, mountSessionFiles } from "./session-files.js";
 import { safeInlineImageSource } from "./attachments.js";
 
 const sections = [
@@ -175,6 +175,9 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
   const detailNotice = node("p", "session-tools-status session-tools-cache-note");
   detailNotice.setAttribute("role", "status"); detailNotice.hidden = true;
   detailPanel.append(detailHeading, detailControls, detailNotice, detail);
+  const detailControlsScroll = mountPreviewControlsScroll({
+    body: detail, controls: detailControls, isActive: () => !disposed && detailVisible && !detailPanel.inert
+  });
   workspace.append(panel, detailPanel);
 
   const changesPage = pageBodies.get("changes");
@@ -768,6 +771,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     const controller = new AbortController(); detailController = controller;
     const current = () => !disposed && authorized && opened && detailVisible && ownsProject(p)
       && p.generation === generation && epoch === detailEpoch && !controller.signal.aborted;
+    if (!detailVisible || !selectedFile || detailKey(selectedFile) !== id) detailControlsScroll.reset();
     selectedFile = file;
     const parts = fileParts(file);
     detailTitle.textContent = parts.name; detailTitle.title = displayedPath(file);
@@ -1046,7 +1050,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     } else if (event.key === "Tab") {
       const currentPanel = detailVisible ? detailPanel : panel;
       const focusable = [...currentPanel.querySelectorAll("button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex='0']")]
-        .filter(element => element.tabIndex >= 0 && !element.hidden && element.getClientRects().length);
+        .filter(element => element.tabIndex >= 0 && !element.closest("[hidden],[inert]") && element.getClientRects().length);
       const first = focusable[0], last = focusable.at(-1), active = document.activeElement;
       if (event.shiftKey && (active === first || !currentPanel.contains(active))) {
         event.preventDefault(); last?.focus({ preventScroll: true });
@@ -1073,6 +1077,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     close: requestBack,
     dispose() {
       if (disposed) return;
+      detailControlsScroll.dispose();
       projectFiles.dispose();
       saveCurrentView(true);
       disposed = true; opened = false; detailVisible = false; ++changesEpoch; ++detailEpoch;
