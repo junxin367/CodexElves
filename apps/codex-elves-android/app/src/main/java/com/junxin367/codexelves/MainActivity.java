@@ -907,6 +907,9 @@ public final class MainActivity extends Activity {
         try {
             JSONObject detail = new JSONObject().put("type", "ambient-light").put("supported", supported);
             if (supported && lux != null) detail.put("lux", lux.doubleValue());
+            // 仅补诊断年龄；网页仍按原 supported/lux 判断，缓存回传不伪造新采样。
+            Long sampleAge = ambientLight.sampleAgeMs();
+            if (supported && lux != null && sampleAge != null) detail.put("sampleAgeMs", sampleAge);
             String script = "window.dispatchEvent(new CustomEvent('codex-elves-ambient-light',{detail:"
                 + detail.toString() + "}))";
             view.evaluateJavascript(script, null);
@@ -1927,6 +1930,8 @@ public final class MainActivity extends Activity {
         BooleanSupplier current,
         JavaScriptReplyProxy reply
     ) {
+        // 用户要求上报切换前后光照；与快照共用串行队列，确保包含当前原生传感器状态。
+        if (ambientLight != null) diagnostic("theme.sensor", ambientLight.diagnosticFields());
         diagnostics.snapshot(diagnosticsApp(), (bundle, errorCode) -> {
             final String response;
             try {
@@ -1957,6 +1962,7 @@ public final class MainActivity extends Activity {
     ) {
         long generation = connectionGeneration.get();
         diagnostic("native.diagnostics.export", DiagnosticsPolicy.fields("reason", "manual"));
+        if (ambientLight != null) diagnostic("theme.sensor", ambientLight.diagnosticFields());
         diagnostics.export(diagnosticsApp(), (file, errorCode) -> {
             Uri sharedUri = null;
             String failure = errorCode;

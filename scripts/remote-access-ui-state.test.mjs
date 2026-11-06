@@ -67,6 +67,7 @@ const app = await readFile(new URL("../assets/remote-access/app.js", import.meta
 const native = await readFile(new URL("../assets/remote-access/native.js", import.meta.url), "utf8");
 const channels = await readFile(new URL("../assets/remote-access/channels.js", import.meta.url), "utf8");
 const diagnostics = await readFile(new URL("../assets/remote-access/diagnostics.js", import.meta.url), "utf8");
+const platform = await readFile(new URL("../assets/remote-access/platform.js", import.meta.url), "utf8");
 const eventsClient = await readFile(new URL("../assets/remote-access/events-client.js", import.meta.url), "utf8");
 const sessionTools = await readFile(new URL("../assets/remote-access/session-tools.js", import.meta.url), "utf8");
 
@@ -147,6 +148,160 @@ test("连接诊断保留关闭码与恢复状态，剔除消息凭证、原始�
   assert.deepEqual(h.logs[1].fields, {});
   h.context.setDiagnosticSink(() => { throw new Error("diagnostic failure"); });
   assert.doesNotThrow(() => h.context.recordDiagnostic("socket.error", { reason: "network-error" }));
+});
+
+test("主题日志保留小数光照和固定判断字段，未知文本及非法年龄不会上传", async () => {
+  const h = await connectionDiagnosticsHarness();
+  h.context.recordDiagnostic("theme.transition", {
+    lux: 44.99, previousLux: 10.01, theme: "dark", previousTheme: "light", targetTheme: "dark",
+    themeMode: "auto", decision: "applied", reason: "sensor", phase: "after",
+    sampleAgeMs: 2100, stableMs: 5000, themeSequence: 1, localHour: 21, timezoneOffsetMinutes: -480,
+    supported: true, registered: false, token: "private", message: "private"
+  });
+  assert.deepEqual(h.logs[0].fields, {
+    lux: 44.99, previousLux: 10.01, theme: "dark", previousTheme: "light", targetTheme: "dark",
+    themeMode: "auto", decision: "applied", reason: "sensor", phase: "after",
+    sampleAgeMs: 2100, stableMs: 5000, themeSequence: 1, localHour: 21, timezoneOffsetMinutes: -480,
+    supported: true, registered: false
+  });
+  h.context.recordDiagnostic("theme.sample", {
+    lux: Infinity, previousLux: -1, sampleAgeMs: -1, themeSequence: NaN, localHour: 24,
+    timezoneOffsetMinutes: -841, theme: "private", themeMode: "private", phase: "private", reason: "private"
+  });
+  assert.deepEqual(h.logs[1].fields, {});
+});
+
+test("光照桥兼容旧APK，非法诊断年龄不改变原有光照回调", () => {
+  const values = [], messages = [], listeners = new Map();
+  const context = vm.createContext({
+    values, CodexElvesAndroid: { postMessage: value => messages.push(JSON.parse(value)) },
+    addEventListener: (name, callback) => listeners.set(name, callback),
+    removeEventListener: name => listeners.delete(name)
+  });
+  vm.runInContext(platform.replace(/^export /gm, ""), context);
+  vm.runInContext(`
+    globalThis.unsubscribe = subscribeAndroidAmbientLight(status => values.push(status));
+    globalThis.emit = json => onAmbientLight({ detail: JSON.parse(json) });
+  `, context);
+  for (const detail of [
+    { type: "ambient-light", supported: true, lux: 9.99 },
+    { type: "ambient-light", supported: true, lux: 45.125, sampleAgeMs: 90000 },
+    { type: "ambient-light", supported: true, lux: 20.5, sampleAgeMs: -1 },
+    { type: "ambient-light", supported: false }
+  ]) context.emit(JSON.stringify(detail));
+  assert.deepEqual(values.map(value => ({ ...value })), [
+    { supported: true, lux: 9.99, sampleAgeMs: null },
+    { supported: true, lux: 45.125, sampleAgeMs: 90000 },
+    { supported: true, lux: 20.5, sampleAgeMs: null },
+    { supported: false, lux: null, sampleAgeMs: null }
+  ]);
+  assert.ok(values.every(Object.isFrozen));
+  context.emit(JSON.stringify({ type: "ambient-light", supported: true, lux: -1 }));
+  assert.equal(values.length, 4);
+  context.unsubscribe();
+  assert.equal(listeners.size, 0);
+  assert.deepEqual(messages.map(value => value.type), ["ambient-light-subscribe", "ambient-light-unsubscribe"]);
+});
+
+async function themeDiagnosticsHarness({ android = true } = {}) {
+  const h = await connectionDiagnosticsHarness({ android });
+  let hour = 21, ambient;
+  const Clock = h.context.Date;
+  h.context.Date = class extends Clock {
+    getHours() { return hour; }
+    getTimezoneOffset() { return -480; }
+  };
+  Object.assign(h.context, {
+    appearance: { theme: "light", themeMode: "auto" },
+    ambientLightStatus: { supported: false, lux: null },
+    syncAppearanceThemeControls: null, applyAppearance() {},
+    subscribeAndroidAmbientLight: callback => { ambient = callback; }
+  });
+  h.load(app.slice(app.indexOf("const automaticThemeStableMs ="), app.indexOf("function mixColor(")));
+  const startup = app.indexOf('applyAutomaticAppearance(false, { immediate: true, reason: "startup" })');
+  const timers = app.indexOf("setInterval(() => {", startup);
+  h.load(app.slice(timers, app.indexOf("function currentFileBrowserThreadId(", timers)));
+  return {
+    ...h, appearance: h.context.appearance, hour: value => { hour = value; },
+    sensor: (lux, sampleAgeMs = 0) => ambient({ supported: lux !== null, lux, sampleAgeMs }),
+    runAfter: delay => {
+      const timer = [...h.timers.entries()].find(([, value]) => !value.interval && value.delay === delay);
+      assert.ok(timer, `缺少 ${delay}ms 诊断回调`);
+      h.timers.delete(timer[0]); timer[1].callback();
+    }
+  };
+}
+
+test("主题切换保留前后真实光照及年龄，延迟采证不会提前应用下一次切换", async () => {
+  const h = await themeDiagnosticsHarness();
+  h.sensor(60.25);
+  h.advance(2000); h.sensor(9.5);
+  assert.equal(h.appearance.theme, "light");
+  assert.equal([...h.timers.values()].filter(timer => !timer.interval).length, 0);
+  h.advance(4999); h.context.applyAutomaticAppearance(true);
+  assert.equal(h.appearance.theme, "light");
+  h.advance(1); h.context.applyAutomaticAppearance(true);
+  assert.equal(h.appearance.theme, "dark");
+  const before = h.logs.filter(event => event.name === "theme.sample" && event.fields.phase === "before");
+  assert.deepEqual(before.map(event => event.fields.lux), [60.25, 9.5]);
+  const after = h.logs.find(event => event.name === "theme.transition" && event.fields.phase === "after").fields;
+  assert.deepEqual({ ...after }, {
+    theme: "dark", themeMode: "auto", themeSequence: 1, supported: true, lux: 9.5, previousLux: 60.25,
+    sampleAgeMs: 5000, localHour: 21, timezoneOffsetMinutes: -480, visible: true,
+    previousTheme: "light", targetTheme: "dark", reason: "timer", phase: "after"
+  });
+  h.advance(2000); h.sensor(12.25); h.runAfter(2000);
+  h.advance(3000); h.sensor(60.125); h.runAfter(5000);
+  h.advance(5000); h.runAfter(10000);
+  const samples = h.logs.filter(event => event.name === "theme.sample" && event.fields.phase === "after");
+  assert.deepEqual(samples.map(event => event.fields.lux), [12.25, 60.125, 60.125]);
+  assert.deepEqual(samples.map(event => event.fields.durationMs), [2000, 5000, 10000]);
+  assert.deepEqual(samples.map(event => event.fields.sampleAgeMs), [0, 0, 5000]);
+  assert.equal(h.appearance.theme, "dark", "诊断回调不能推进已满 5 秒的切换候选");
+  h.context.applyAutomaticAppearance(true);
+  assert.equal(h.appearance.theme, "light", "原有业务触发仍可应用稳定候选");
+  h.windowListeners.get("pagehide")();
+  assert.equal([...h.timers.values()].filter(timer => !timer.interval).length, 0);
+});
+
+test("新增诊断保持夜间范围、10/45lux滞回和候选取消规则", async () => {
+  const h = await themeDiagnosticsHarness();
+  for (const hour of [7, 8, 20, 21]) {
+    h.hour(hour);
+    for (const lux of [null, 0, 10, 10.01, 44.99, 45, 100]) {
+      h.context.ambientLightStatus = { supported: lux !== null, lux };
+      for (const current of ["light", "dark"]) {
+        const expected = hour >= 8 && hour < 21 ? "light"
+          : lux === null || lux <= 10 ? "dark" : lux >= 45 ? "light" : current;
+        assert.equal(h.context.automaticAppearanceTheme(undefined, current), expected);
+      }
+    }
+  }
+  h.hour(21); h.sensor(5); h.advance(3000); h.sensor(50);
+  assert.equal(h.appearance.theme, "light");
+  assert.equal(h.logs.find(event => event.fields.decision === "cancelled").fields.durationMs, 3000);
+  const browser = await themeDiagnosticsHarness({ android: false });
+  browser.sensor(0); browser.advance(5000); browser.context.applyAutomaticAppearance(true);
+  assert.equal(browser.appearance.theme, "dark");
+  assert.equal(browser.logs.length, 0);
+  assert.equal([...browser.timers.values()].filter(timer => !timer.interval).length, 0);
+});
+
+test("主题诊断限制前序采样数量，缓存及旧APK缺少的采样时间不会伪装成新读数", async () => {
+  const h = await themeDiagnosticsHarness();
+  for (let index = 0; index < 12; index++) { h.sensor(60 + index, 90_000); h.advance(1000); }
+  h.context.setAppearanceThemeMode("manual");
+  const samples = h.logs.filter(event => event.name === "theme.sample" && event.fields.phase === "before");
+  assert.equal(samples.length, 8);
+  assert.equal(samples[0].fields.sampleAgeMs, 98_000);
+  const transitions = h.logs.filter(event => event.name === "theme.transition");
+  assert.deepEqual(transitions.map(event => event.fields.themeMode), ["auto", "manual"]);
+  h.advance(31_000); h.context.setAppearanceThemeMode("auto");
+  const latest = h.logs.filter(event => event.name === "theme.sample" && event.fields.phase === "before").at(-1);
+  assert.equal(latest.fields.sampleAgeMs, 122_000);
+  assert.equal(h.logs.filter(event => event.name === "theme.sample" && event.fields.phase === "before").length, 9);
+  h.sensor(80, null);
+  assert.equal(h.logs.filter(event => event.name === "theme.ambient").at(-1).fields.sampleAgeMs, undefined);
 });
 
 test("前后台日志保留后台时长及网络事件来源，online值仍反映当前浏览器状态", async () => {

@@ -8,8 +8,9 @@ const threadPattern = /^[A-Za-z0-9_-]{1,120}(?![\s\S])/;
 const tokenPattern = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 // 用户要求上传日志后能追踪前后台断连；字段须与 Android DiagnosticsPolicy 和电脑端 diagnostics.rs 同步。
 const numericFields = new Set(["status", "durationMs", "bytes", "sdk", "generation", "readyState",
-  "expectedBytes", "loadedBytes", "line", "width", "height", "lux", "stableMs"]);
-const tokenFields = new Set(["method", "errorType", "reason", "routeName", "phase", "imageKind", "network", "theme", "decision", "blockedBy"]);
+  "expectedBytes", "loadedBytes", "line", "width", "height", "stableMs", "sampleAgeMs", "themeSequence"]);
+const tokenFields = new Set(["method", "errorType", "reason", "routeName", "phase", "imageKind", "network",
+  "theme", "previousTheme", "targetTheme", "themeMode", "decision", "blockedBy"]);
 const errorTypes = new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError",
   "URIError", "EvalError", "DOMException", "AbortError", "TimeoutError", "NetworkError", "SecurityError"]);
 const fieldTokens = {
@@ -20,11 +21,14 @@ const fieldTokens = {
     "worker-timeout", "worker-response-timeout", "all-channels-disconnected", "route-change",
     "socket-open-timeout", "socket-idle-timeout", "handshake-invalid", "page-resume"]),
   phase: new Set(["request", "body", "complete", "ready", "failure", "pending",
-    "create", "start", "resume", "stop", "open", "close", "retry"]),
+    "create", "start", "resume", "stop", "open", "close", "retry", "before", "after"]),
   imageKind: new Set(["preview", "thumbnail", "image"]),
   routeName: new Set(["zrok", "ngrok"]),
   network: new Set(["wifi", "cellular", "ethernet", "vpn", "other", "none", "unknown"]),
   theme: new Set(["light", "dark"]),
+  previousTheme: new Set(["light", "dark"]),
+  targetTheme: new Set(["light", "dark"]),
+  themeMode: new Set(["auto", "manual"]),
   decision: new Set(["pending", "cancelled", "applied"]),
   blockedBy: new Set(["ready", "delete", "busy", "stopping", "compaction-edit", "compaction-scope",
     "compaction-unknown", "compaction-pending", "compaction-unsupported", "offline", "read-only",
@@ -75,6 +79,12 @@ function safeFields(value) {
   const result = {};
   for (const [key, field] of Object.entries(value || {})) {
     if (key === "errorCode" && Number.isSafeInteger(field) && field >= -1000 && field <= 1000) result[key] = field;
+    // 用户要求先记录真实光照再判断；保留 lux 小数，不把阈值附近的测量四舍五入成另一侧。
+    else if (["lux", "previousLux"].includes(key) && Number.isFinite(field) && field >= 0 && field <= Number.MAX_SAFE_INTEGER)
+      result[key] = field;
+    else if (key === "localHour" && Number.isInteger(field) && field >= 0 && field <= 23) result[key] = field;
+    else if (key === "timezoneOffsetMinutes" && Number.isInteger(field) && field >= -840 && field <= 840) result[key] = field;
+    else if (key === "count" && Number.isSafeInteger(field) && field >= 0 && field <= 10000) result[key] = field;
     else if (["closeCode", "delayMs", "backgroundMs", "attempt"].includes(key)) {
       const maximum = { closeCode: 65535, delayMs: 86400000, backgroundMs: Number.MAX_SAFE_INTEGER, attempt: 10000 }[key];
       if (Number.isSafeInteger(field) && field >= 0 && field <= maximum) result[key] = field;
@@ -82,7 +92,7 @@ function safeFields(value) {
     else if (["draftChars", "attachmentCount"].includes(key) && Number.isSafeInteger(field) && field >= 0) result[key] = field;
     else if (numericFields.has(key) && Number.isFinite(field) && field >= 0)
       result[key] = Math.min(key === "durationMs" ? 86400000 : Number.MAX_SAFE_INTEGER, Math.round(field));
-    else if (["visible", "online", "supported", "pageLeaving", "connected", "wasClean", "isTrusted"].includes(key)
+    else if (["visible", "online", "supported", "registered", "pageLeaving", "connected", "wasClean", "isTrusted"].includes(key)
         && typeof field === "boolean") result[key] = field;
     else if (key === "errorType" && typeof field === "string") result[key] = errorTypes.has(field) ? field : "unknown";
     else if (tokenFields.has(key) && typeof field === "string" && fieldTokens[key]?.has(field)) result[key] = field;

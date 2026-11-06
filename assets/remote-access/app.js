@@ -356,8 +356,10 @@ const appearancePresets = {
   dark: { background: "#171717", foreground: "#ededed", accent: "#ededed" }
 };
 const projectThreadLimits = [5, 10, 20, 50];
+// 用户要求文件阅读字号统一控制变更预览和文件查看，限 10～16px、步长 1px；文件列表继续使用原字号。
+const fileReadingFontMin = 10, fileReadingFontMax = 16;
 function defaultAppearance(theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") {
-  return { theme, themeMode: "manual", fontSize: 13, projectThreadLimit: 5, backgroundOpacity: 35, backgroundFit: "cover",
+  return { theme, themeMode: "manual", fontSize: 13, fileReadingFontSize: null, projectThreadLimit: 5, backgroundOpacity: 35, backgroundFit: "cover",
     colors: { light: { ...appearancePresets.light }, dark: { ...appearancePresets.dark } } };
 }
 function readAppearance() {
@@ -370,12 +372,18 @@ function readAppearance() {
     if (Number.isInteger(saved.backgroundOpacity)) value.backgroundOpacity = Math.min(100, Math.max(1, saved.backgroundOpacity));
     if (["cover", "contain"].includes(saved.backgroundFit)) value.backgroundFit = saved.backgroundFit;
     if (Number.isInteger(saved.fontSize)) value.fontSize = Math.min(20, Math.max(10, saved.fontSize));
+    if (Number.isInteger(saved.fileReadingFontSize))
+      value.fileReadingFontSize = Math.min(fileReadingFontMax, Math.max(fileReadingFontMin, saved.fileReadingFontSize));
     if (projectThreadLimits.includes(saved.projectThreadLimit)) value.projectThreadLimit = saved.projectThreadLimit;
     for (const theme of ["light", "dark"]) for (const name of ["background", "foreground", "accent"]) {
       if (/^#[0-9a-f]{6}$/i.test(saved.colors?.[theme]?.[name])) value.colors[theme][name] = saved.colors[theme][name];
     }
   } catch {}
   return value;
+}
+function currentFileReadingFontSize() {
+  // 未单独设置或恢复默认后跟随当前设备的全局字号，仍遵守文件阅读的 10～16px 范围。
+  return Math.min(fileReadingFontMax, Math.max(fileReadingFontMin, appearance.fileReadingFontSize ?? appearance.fontSize));
 }
 let ambientLightStatus = { supported: false, lux: null };
 let syncAppearanceThemeControls = null;
@@ -457,6 +465,71 @@ const automaticThemeStableMs = 5000;
 const automaticThemeDarkLux = 10;
 const automaticThemeLightLux = 45;
 let automaticThemeCandidate = null;
+// 用户要求先记录切换前后光照，不调整主题规则。最多留 8 个观测点，回看最近 30 秒；无近期点时标注旧读数年龄。
+const themeLightSamples = [];
+let themeDiagnosticSequence = 0;
+const themeDiagnosticTimers = new Set();
+function themeDiagnosticNow() {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
+function themeDiagnosticFields(extra = {}, sample = themeLightSamples.at(-1)) {
+  const date = new Date();
+  return {
+    theme: appearance.theme, themeMode: appearance.themeMode, themeSequence: themeDiagnosticSequence,
+    supported: sample?.supported ?? ambientLightStatus.supported,
+    lux: sample ? sample.lux : ambientLightStatus.lux,
+    previousLux: sample?.previousLux,
+    sampleAgeMs: sample?.sampledAtMs != null ? Math.max(0, Math.round(themeDiagnosticNow() - sample.sampledAtMs)) : undefined,
+    localHour: date.getHours(), timezoneOffsetMinutes: date.getTimezoneOffset(), visible: !document.hidden,
+    ...extra
+  };
+}
+function recordThemeDiagnostic(name, extra = {}, sample) {
+  if (isAndroidContainer()) recordDiagnostic(name, themeDiagnosticFields(extra, sample));
+}
+function observeThemeLight(status) {
+  if (!isAndroidContainer()) return;
+  const now = themeDiagnosticNow(), previous = themeLightSamples.at(-1);
+  themeLightSamples.push({
+    supported: status.supported, lux: status.lux, previousLux: previous?.lux, observedAtMs: now,
+    // 老 APK 没有真实采样年龄时保持未知；不能把收到缓存回调的时间当成传感器采样时间。
+    sampledAtMs: status.supported && Number.isSafeInteger(status.sampleAgeMs) && status.sampleAgeMs >= 0
+      ? now - status.sampleAgeMs : null
+  });
+  if (themeLightSamples.length > 8) themeLightSamples.shift();
+}
+function clearThemeDiagnosticTimers() {
+  for (const timer of themeDiagnosticTimers) clearTimeout(timer);
+  themeDiagnosticTimers.clear();
+}
+function beginThemeDiagnosticTransition(targetTheme, reason,
+  { previousTheme = appearance.theme, previousMode = appearance.themeMode } = {}) {
+  if (!isAndroidContainer()) return null;
+  clearThemeDiagnosticTimers();
+  const transition = {
+    previousTheme, targetTheme, reason, themeSequence: ++themeDiagnosticSequence
+  };
+  const now = themeDiagnosticNow(), recent = themeLightSamples.filter(sample => now - sample.observedAtMs <= 30_000);
+  for (const sample of recent.length ? recent : themeLightSamples.slice(-1))
+    recordThemeDiagnostic("theme.sample", { ...transition, phase: "before", theme: previousTheme, themeMode: previousMode }, sample);
+  recordThemeDiagnostic("theme.transition", { ...transition, phase: "before", theme: previousTheme, themeMode: previousMode });
+  return { ...transition, startedAtMs: now };
+}
+function finishThemeDiagnosticTransition(transition) {
+  if (!transition) return;
+  const { startedAtMs, ...fields } = transition;
+  recordThemeDiagnostic("theme.transition", { ...fields, phase: "after" });
+  // 2/5/10 秒回调只记录最新可用读数及实际间隔，不调用主题判断、不推进 5 秒稳定候选。
+  for (const delayMs of [2000, 5000, 10_000]) {
+    const timer = setTimeout(() => {
+      themeDiagnosticTimers.delete(timer);
+      if (fields.themeSequence === themeDiagnosticSequence)
+        recordThemeDiagnostic("theme.sample", { ...fields, phase: "after", delayMs,
+          durationMs: Math.max(0, themeDiagnosticNow() - startedAtMs) });
+    }, delayMs);
+    themeDiagnosticTimers.add(timer);
+  }
+}
 function automaticAppearanceTheme(date = new Date(), currentTheme = appearance.theme) {
   const hour = date.getHours();
   // 用户要求夜间时段按设备本地时间从 21:00（含）到次日 08:00（不含），时段内保留原有光照判断。
@@ -471,32 +544,44 @@ function applyAutomaticAppearance(save = false, { immediate = false, reason = "t
   if (appearance.themeMode !== "auto") { automaticThemeCandidate = null; return false; }
   const next = automaticAppearanceTheme();
   if (next === appearance.theme) {
-    if (automaticThemeCandidate) recordDiagnostic("theme.decision", { theme: next, decision: "cancelled", reason });
+    if (automaticThemeCandidate) recordThemeDiagnostic("theme.decision", {
+      targetTheme: automaticThemeCandidate.theme, decision: "cancelled", reason,
+      durationMs: Math.max(0, now - automaticThemeCandidate.since)
+    });
     automaticThemeCandidate = null;
     return false;
   }
   if (!immediate) {
     if (automaticThemeCandidate?.theme !== next) {
       automaticThemeCandidate = { theme: next, since: now, reason };
-      recordDiagnostic("theme.decision", { theme: next, decision: "pending", reason });
+      recordThemeDiagnostic("theme.decision", { targetTheme: next, decision: "pending", reason, stableMs: automaticThemeStableMs });
       return false;
     }
     if (now - automaticThemeCandidate.since < automaticThemeStableMs) return false;
   }
+  const stableDurationMs = automaticThemeCandidate ? Math.max(0, now - automaticThemeCandidate.since) : 0;
+  const transition = beginThemeDiagnosticTransition(next, reason);
   automaticThemeCandidate = null;
   appearance.theme = next;
   applyAppearance(save);
   syncAppearanceThemeControls?.();
-  recordDiagnostic("theme.decision", { theme: next, decision: "applied", reason, stableMs: automaticThemeStableMs });
+  recordThemeDiagnostic("theme.decision", { targetTheme: next, decision: "applied", reason,
+    stableMs: automaticThemeStableMs, durationMs: stableDurationMs });
+  finishThemeDiagnosticTransition(transition);
   return true;
 }
 function setAppearanceThemeMode(mode) {
   if (!["auto", "manual"].includes(mode)) return;
+  const previousTheme = appearance.theme, previousMode = appearance.themeMode;
   automaticThemeCandidate = null;
   appearance.themeMode = mode;
   if (mode === "auto") appearance.theme = automaticAppearanceTheme();
+  const transition = previousMode !== mode || previousTheme !== appearance.theme
+    ? beginThemeDiagnosticTransition(appearance.theme, "manual", { previousTheme, previousMode }) : null;
   applyAppearance(true);
   syncAppearanceThemeControls?.();
+  finishThemeDiagnosticTransition(transition);
+  recordThemeDiagnostic("theme.snapshot", { reason: "manual" });
 }
 function mixColor(left, right, weight) {
   return "#" + [1, 3, 5].map(index => Math.round(
@@ -517,6 +602,7 @@ function applyAppearance(save = false) {
     side: mixColor(background, foreground, .035), code: mixColor(background, foreground, .05),
     hover: mixColor(background, foreground, .075), line: mixColor(background, foreground, .14),
     muted: mixColor(background, foreground, .58), "font-size": `${appearance.fontSize}px`,
+    "file-reading-font-size": `${currentFileReadingFontSize()}px`,
     danger: appearance.theme === "dark" ? "#ff9c97" : "#b42318", green: appearance.theme === "dark" ? "#77c7a0" : "#168350"
   };
   for (const [name, value] of Object.entries(values)) root.style.setProperty(`--${name}`, value);
@@ -537,6 +623,7 @@ function applyAppearance(save = false) {
 }
 applyAutomaticAppearance(false, { immediate: true, reason: "startup" });
 applyAppearance();
+recordThemeDiagnostic("theme.snapshot", { reason: "startup" });
 const initialRemoteBackgroundOperation = ++remoteBackgroundOperation;
 void readRemoteBackground().then(record => {
   if (initialRemoteBackgroundOperation !== remoteBackgroundOperation) return;
@@ -549,13 +636,21 @@ void readRemoteBackground().then(record => {
   remoteBackgroundError = "无法读取已保存的背景图片。";
   syncAppearanceThemeControls?.();
 });
-setInterval(() => applyAutomaticAppearance(true), 60_000);
+setInterval(() => {
+  applyAutomaticAppearance(true);
+  recordThemeDiagnostic("theme.snapshot", { reason: "timer" });
+}, 60_000);
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) applyAutomaticAppearance(true, { reason: "visibility" });
+  if (!document.hidden) {
+    applyAutomaticAppearance(true, { reason: "visibility" });
+    recordThemeDiagnostic("theme.snapshot", { reason: "visibility" });
+  }
 });
+globalThis.addEventListener("pagehide", clearThemeDiagnosticTimers);
 subscribeAndroidAmbientLight(status => {
   ambientLightStatus = status;
-  recordDiagnostic("theme.ambient", { supported: status.supported, lux: status.lux ?? -1 });
+  observeThemeLight(status);
+  recordThemeDiagnostic("theme.ambient", { reason: "sensor" });
   applyAutomaticAppearance(true, { reason: "sensor" });
 });
 function currentFileBrowserThreadId() {
@@ -631,6 +726,8 @@ function openAppearance() {
     <h3 class="appearance-panel-title">外观主题</h3>
     <div id="appearance-colors"></div>
     <label class="appearance-field">字体大小<span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="字体大小"><output id="appearance-font-value"></output></span></label>
+    <label class="appearance-field"><span>文件阅读字号</span><span class="appearance-font"><input id="appearance-file-reading-font" type="range" min="${fileReadingFontMin}" max="${fileReadingFontMax}" step="1" aria-label="文件阅读字号" aria-describedby="appearance-file-reading-font-hint"><output id="appearance-file-reading-font-value" for="appearance-file-reading-font"></output></span></label>
+    <div id="appearance-file-reading-font-hint" class="appearance-reading-font-hint"><span>用于变更预览与文件查看。</span><button type="button" id="appearance-file-reading-font-reset" class="text-button" title="恢复跟随全局字号，范围为 10～16px">恢复默认</button></div>
     </section>
     <section id="appearance-diagnostics-page" class="appearance-body appearance-settings-page" hidden>
     <h3 class="appearance-panel-title">诊断日志</h3>
@@ -1109,9 +1206,11 @@ function openAppearance() {
   };
   const themeButton = button("", "切换主题", () => {
     if (appearance.themeMode === "auto") return;
+    const transition = beginThemeDiagnosticTransition(appearance.theme === "light" ? "dark" : "light", "manual");
     appearance.theme = appearance.theme === "light" ? "dark" : "light";
     applyAppearance(true);
     sync();
+    finishThemeDiagnosticTransition(transition);
   }, "appearance-theme-button");
   const modeGroup = element("div", "appearance-theme-mode");
   modeGroup.setAttribute("role", "group"); modeGroup.setAttribute("aria-label", "主题模式");
@@ -1203,6 +1302,12 @@ function openAppearance() {
     $("#appearance-font").value = appearance.fontSize;
     $("#appearance-font").style.setProperty("--range-fill", `${(appearance.fontSize - 10) * 10}%`);
     $("#appearance-font-value").textContent = `${appearance.fontSize}px`;
+    const readingFontSize = currentFileReadingFontSize();
+    $("#appearance-file-reading-font").value = readingFontSize;
+    $("#appearance-file-reading-font").style.setProperty("--range-fill",
+      `${(readingFontSize - fileReadingFontMin) / (fileReadingFontMax - fileReadingFontMin) * 100}%`);
+    $("#appearance-file-reading-font-value").textContent = `${readingFontSize}px`;
+    $("#appearance-file-reading-font-reset").disabled = appearance.fileReadingFontSize === null;
   };
   syncAppearanceThemeControls = sync;
   sync();
@@ -1264,6 +1369,14 @@ function openAppearance() {
     applyAppearance(true); sync();
   };
   $("#appearance-font").oninput = event => { appearance.fontSize = Number(event.target.value); applyAppearance(true); sync(); };
+  $("#appearance-file-reading-font").oninput = event => {
+    const size = Number(event.target.value);
+    if (!Number.isInteger(size) || size < fileReadingFontMin || size > fileReadingFontMax) return;
+    appearance.fileReadingFontSize = size; applyAppearance(true); sync();
+  };
+  $("#appearance-file-reading-font-reset").onclick = () => {
+    appearance.fileReadingFontSize = null; applyAppearance(true); sync();
+  };
   $("#appearance-reset").onclick = async () => {
     if (subpageEntry || remoteBackgroundBusy) return;
     const operation = ++remoteBackgroundOperation;

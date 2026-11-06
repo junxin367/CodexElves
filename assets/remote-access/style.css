@@ -186,13 +186,15 @@ html{scrollbar-color:var(--muted) transparent}
 .appearance-field{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:12px 0;font-size:calc(var(--font-size)*.9)}
 .appearance-field input[type=color]{width:50px;height:34px;padding:3px;cursor:pointer}
 .appearance-font{display:flex;align-items:center;gap:10px;min-width:0}
-#appearance-font{appearance:none;-webkit-appearance:none;width:160px;max-width:100%;min-width:48px;height:32px;flex:1 1 160px;padding:0;margin:0;border:0;border-radius:0;background:transparent;cursor:pointer;--range-fill:40%}
+#appearance-font,#appearance-file-reading-font{appearance:none;-webkit-appearance:none;width:160px;max-width:100%;min-width:48px;height:32px;flex:1 1 160px;padding:0;margin:0;border:0;border-radius:0;background:transparent;cursor:pointer;--range-fill:40%}
 #appearance-background-opacity{appearance:none;-webkit-appearance:none;width:160px;max-width:100%;min-width:48px;height:32px;flex:1 1 160px;padding:0;margin:0;border:0;border-radius:0;background:transparent;cursor:pointer;--range-fill:34%}
-#appearance-font::-webkit-slider-runnable-track,#appearance-background-opacity::-webkit-slider-runnable-track{height:4px;border:0;border-radius:4px;background:linear-gradient(to right,var(--accent) 0 var(--range-fill),var(--line) var(--range-fill) 100%)}
-#appearance-font::-webkit-slider-thumb,#appearance-background-opacity::-webkit-slider-thumb{appearance:none;-webkit-appearance:none;width:14px;height:14px;margin-top:-5px;border:0;border-radius:50%;background:var(--accent);box-shadow:none}
-#appearance-font::-moz-range-track,#appearance-background-opacity::-moz-range-track{height:4px;border:0;border-radius:4px;background:var(--line)}
-#appearance-font::-moz-range-progress,#appearance-background-opacity::-moz-range-progress{height:4px;border-radius:4px;background:var(--accent)}
-#appearance-font::-moz-range-thumb,#appearance-background-opacity::-moz-range-thumb{width:14px;height:14px;border:0;border-radius:50%;background:var(--accent);box-shadow:none}
+#appearance-font::-webkit-slider-runnable-track,#appearance-file-reading-font::-webkit-slider-runnable-track,#appearance-background-opacity::-webkit-slider-runnable-track{height:4px;border:0;border-radius:4px;background:linear-gradient(to right,var(--accent) 0 var(--range-fill),var(--line) var(--range-fill) 100%)}
+#appearance-font::-webkit-slider-thumb,#appearance-file-reading-font::-webkit-slider-thumb,#appearance-background-opacity::-webkit-slider-thumb{appearance:none;-webkit-appearance:none;width:14px;height:14px;margin-top:-5px;border:0;border-radius:50%;background:var(--accent);box-shadow:none}
+#appearance-font::-moz-range-track,#appearance-file-reading-font::-moz-range-track,#appearance-background-opacity::-moz-range-track{height:4px;border:0;border-radius:4px;background:var(--line)}
+#appearance-font::-moz-range-progress,#appearance-file-reading-font::-moz-range-progress,#appearance-background-opacity::-moz-range-progress{height:4px;border-radius:4px;background:var(--accent)}
+#appearance-font::-moz-range-thumb,#appearance-file-reading-font::-moz-range-thumb,#appearance-background-opacity::-moz-range-thumb{width:14px;height:14px;border:0;border-radius:50%;background:var(--accent);box-shadow:none}
+.appearance-reading-font-hint{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:-4px 0 12px;color:var(--muted);font-size:calc(var(--font-size)*.78);line-height:1.5}
+.appearance-reading-font-hint>.text-button{flex-shrink:0;padding:3px 0;font-size:inherit}
 .appearance-background-field{flex-direction:row;align-items:center;gap:12px}
 .appearance-background-field>span{flex-shrink:0}
 .appearance-background-actions{display:flex;flex-shrink:0;align-items:center;justify-content:flex-end;gap:8px;min-width:0;margin-left:auto}
@@ -376,7 +378,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 @keyframes popup-appear{from{opacity:0}to{opacity:1}}
 @media(hover:none){.row-menu-button{opacity:1}}
 @media(max-width:760px){.sidebar{width:80vw;padding-bottom:max(12px,env(safe-area-inset-bottom));transition:transform var(--duration-popup) ease-out}.row-menu-button{opacity:1}.footer-button{min-height:40px}.appearance-dialog[open]{max-height:var(--popup-max-height);padding:12px 14px 14px}.appearance-font input{width:100%;max-width:120px;min-width:48px}.appearance-font{flex:1;justify-content:flex-end}.appearance-field{gap:12px}.appearance-field>span:first-child{flex-shrink:0}.appearance-thread-limit-field>span:first-child{min-width:0;flex-shrink:1;line-height:1.4}#notice{top:max(16px,env(safe-area-inset-top))}}
-@media(max-width:760px){#appearance-font{width:120px;flex-basis:120px}}
+@media(max-width:760px){#appearance-font,#appearance-file-reading-font{width:120px;flex-basis:120px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 @media(max-width:760px){#open-sidebar{display:grid;place-items:center;min-width:36px;min-height:36px;padding:0}#close-sidebar{display:grid;place-items:center;min-width:32px;min-height:32px;padding:0}.composer-toolbar .model-button{min-height:36px}.send-button{width:36px;height:36px}.context-info{font-size:calc(var(--font-size)*.72)}}
 @media(hover:none),(max-width:760px){.row-menu-button{opacity:1}.popup-option{min-height:44px}.copy-code{min-height:32px;padding:4px 10px}}
@@ -690,12 +692,13 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .edited-files-name{color:var(--text)}
 .edited-files-detail{min-width:0;padding:0 14px 12px}
 .edited-files-detail-label{padding:4px 0 7px;color:var(--muted);font-size:.75rem}
-.edited-files-diff{max-width:100%;max-height:300px;margin:0;padding:10px 12px;overflow:auto;border-radius:8px;background:var(--code);white-space:pre;tab-size:2;font:.75rem/1.65 "JetBrains Mono",Consolas,monospace}
+/* 用户要求文件阅读字号覆盖差异正文；文件名、列表与工具栏仍使用原字号。须与完整差异和文件查看同步。 */
+.edited-files-diff{max-width:100%;max-height:300px;margin:0;padding:10px 12px;overflow:auto;border-radius:8px;background:var(--code);white-space:pre;tab-size:2;font:var(--file-reading-font-size,.75rem)/1.65 "JetBrains Mono",Consolas,monospace}
 .edited-files-more{display:flex;align-items:center;gap:6px;width:100%;min-height:36px;padding:8px 14px;border:0;border-radius:0;color:var(--muted);text-align:left;font-size:.92857rem;font-weight:500}
 .edited-files-more>.ui-icon{width:14px;height:14px;transition:transform var(--duration-control)}
 .edited-files-more[aria-expanded=true]>.ui-icon{transform:rotate(180deg)}
 .edited-files-more:hover{background:var(--hover);color:var(--text)}
-@media(max-width:760px){.edited-files-card{margin-bottom:16px}.edited-files-heading,.edited-files-summary{padding-left:12px;padding-right:12px}.edited-files-detail{padding-left:12px;padding-right:12px}.edited-files-diff{font-size:.71429rem}}
+@media(max-width:760px){.edited-files-card{margin-bottom:16px}.edited-files-heading,.edited-files-summary{padding-left:12px;padding-right:12px}.edited-files-detail{padding-left:12px;padding-right:12px}}
 .subagent-item{display:grid;grid-template-columns:1.14286rem minmax(0,1fr) auto;align-items:center;column-gap:8px;width:fit-content;max-width:100%;min-width:0;margin:0;padding:2px 0;color:var(--muted);font-size:.85714rem;line-height:1.5}
 .subagent-item.failed{color:var(--danger)}
 .subagent-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;align-self:center;width:1.14286rem;height:1.14286rem;line-height:1}
@@ -943,7 +946,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-tools-detail-controls>.text-button{font-size:inherit}
 .session-tools-detail-controls button[aria-pressed=true]{background:var(--hover)}
 .session-tools-cache-note{flex-shrink:0;margin:7px 14px}
-.session-tools-diff{overflow:auto;border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:var(--code);font:.85714rem/1.75 Consolas,"JetBrains Mono",monospace;tab-size:4}
+/* 文件阅读字号仅作用于预览正文及继承字号的行号，文件列表不读取该变量。 */
+.session-tools-diff{overflow:auto;border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:var(--code);font:var(--file-reading-font-size,.85714rem)/1.75 Consolas,"JetBrains Mono",monospace;tab-size:4}
 .session-tools-diff-line{display:flex;width:max-content;min-width:100%}
 .session-tools-diff-line>code{flex:1;padding:0 10px;white-space:pre}
 .session-tools-line-number{flex:0 0 var(--line-number-width,3.2ch);width:var(--line-number-width,3.2ch);padding:0 .45ch;text-align:right;color:var(--muted);background:color-mix(in srgb,var(--side) 70%,transparent);user-select:none;border-right:1px solid var(--line)}
@@ -1054,8 +1058,13 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-files-screen .session-tools-status{margin:0;padding:8px 16px;font-size:.85714rem;white-space:pre-wrap}
 .session-files-screen .session-tools-status>button{margin-left:10px}
 .session-files-content{overflow:auto;min-height:0;flex:1;padding:0}
-.session-files-markdown{padding:16px;line-height:1.65;overflow-wrap:anywhere}
-.session-files-source{min-width:100%;width:max-content;padding:12px 0;font:.85714rem/1.6 "JetBrains Mono",Consolas,monospace}
+.session-files-markdown{padding:16px;font-size:var(--file-reading-font-size,1rem);line-height:1.65;overflow-wrap:anywhere}
+/* 文件预览内的标题和表格相对阅读字号缩放，避免继续使用全局 rem 而与正文脱节。 */
+.session-files-markdown h1{font-size:1.71429em}
+.session-files-markdown h2{font-size:1.35714em}
+.session-files-markdown h3{font-size:1.14286em}
+.session-files-markdown table{font-size:.85714em}
+.session-files-source{min-width:100%;width:max-content;padding:12px 0;font:var(--file-reading-font-size,.85714rem)/1.6 "JetBrains Mono",Consolas,monospace}
 .session-files-source-line{display:flex;min-height:1.6em}
 .session-files-source-line>.session-tools-line-number{flex:0 0 5ch;padding:0 1ch;text-align:right;user-select:none}
 .session-files-source-line>code{display:block;flex:1;white-space:pre;padding-right:16px}
