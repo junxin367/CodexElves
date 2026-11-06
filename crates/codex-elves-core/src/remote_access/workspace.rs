@@ -1618,7 +1618,7 @@ async fn git_configured(
 ) -> Result<GitOutput, ApiError> {
     let reads_worktree = matches!(args.first(), Some(&"status") | Some(&"diff"));
     let mut config = if reads_worktree {
-        git_text_config(cwd).await?
+        git_safe_read_config(cwd).await?
     } else {
         Vec::new()
     };
@@ -1668,8 +1668,9 @@ async fn git_configured(
     git_process(cwd, args, limit, &config).await
 }
 
-async fn git_text_config(cwd: &Path) -> Result<Vec<String>, ApiError> {
-    // 用户要求远程变更与本机 Git 一致：只读取原有换行设置，仍隔离钩子、过滤器和外部命令。
+async fn git_safe_read_config(cwd: &Path) -> Result<Vec<String>, ApiError> {
+    // 用户要求远程变更与本机 Git 一致：只恢复换行设置和有效忽略文件，
+    // 仍隔离钩子、过滤器和外部命令，不能整体重新启用全局配置。
     // 按 Git 自身的 include / worktree 优先级读取，后出现的同名配置覆盖前值。
     let output = git_process_with_config_sources(
         cwd,
@@ -1689,7 +1690,37 @@ async fn git_text_config(cwd: &Path) -> Result<Vec<String>, ApiError> {
     if output.truncated || !matches!(output.exit_code, Some(0 | 1)) {
         return Err(ApiError::new(503, "无法读取 Git 换行设置"));
     }
-    parse_git_text_config(&output.bytes)
+    let mut config = parse_git_text_config(&output.bytes)?;
+    // 让 Git 按 include、仓库及工作树优先级取最终值，并展开 ~/ 等路径；
+    // 未显式配置时不覆盖 Git 自带的 XDG 默认忽略文件。
+    let excludes = git_process_with_config_sources(
+        cwd,
+        &[
+            "config",
+            "--null",
+            "--includes",
+            "--type=path",
+            "--get",
+            "core.excludesfile",
+        ],
+        32 * 1024,
+        &[],
+        true,
+    )
+    .await?;
+    if excludes.truncated || !matches!(excludes.exit_code, Some(0 | 1)) {
+        return Err(ApiError::new(503, "无法读取 Git 全局忽略文件设置"));
+    }
+    if excludes.exit_code == Some(0) {
+        let path = excludes
+            .bytes
+            .strip_suffix(&[0])
+            .filter(|path| !path.contains(&0))
+            .and_then(|path| std::str::from_utf8(path).ok())
+            .ok_or_else(|| ApiError::new(503, "Git 忽略文件路径格式无效"))?;
+        config.push(format!("core.excludesfile={path}"));
+    }
+    Ok(config)
 }
 
 fn parse_git_text_config(bytes: &[u8]) -> Result<Vec<String>, ApiError> {
@@ -2931,6 +2962,166 @@ mod tests {
         assert_eq!(snapshot.files[2].old_path.as_deref(), Some("old name.txt"));
         assert_eq!(snapshot.files[3].section, "untracked");
         assert_eq!(snapshot.files[4].status, "U");
+    }
+
+    #[tokio::test]
+    async fn workspace_global_ignores_match_git_in_an_isolated_home() {
+        let fixture = fixture_dir();
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "remote_access::workspace::tests::workspace_global_ignore_fixture_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CODEX_ELVES_WORKSPACE_IGNORE_TEST_ROOT", fixture.path())
+            .env("HOME", fixture.path().join("home"))
+            .env("USERPROFILE", fixture.path().join("home"))
+            .env("XDG_CONFIG_HOME", fixture.path().join("xdg"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        child.creation_flags(0x08000000);
+        let output = tokio::time::timeout(Duration::from_secs(60), child.output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "隔离忽略规则回归失败：\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "仅由隔离 HOME 的父测试调用，不改宿主 Git 配置"]
+    async fn workspace_global_ignore_fixture_child() {
+        let Ok(fixture) = std::env::var("CODEX_ELVES_WORKSPACE_IGNORE_TEST_ROOT") else {
+            return;
+        };
+        let fixture = PathBuf::from(fixture);
+        let root = fixture.join("repo");
+        let home = fixture.join("home");
+        let ignore_directory = home.join("ignore rules");
+        let xdg_git = fixture.join("xdg/git");
+        for directory in [&root, &ignore_directory, &xdg_git] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        std::fs::write(
+            home.join(".gitconfig"),
+            "[include]\npath = ignore-settings.gitconfig\n[core]\nautocrlf = false\n",
+        )
+        .unwrap();
+        let included = home.join("ignore-settings.gitconfig");
+        std::fs::write(
+            &included,
+            "[core]\nexcludesFile = \"~/ignore rules/global.ignore\"\n",
+        )
+        .unwrap();
+        std::fs::write(ignore_directory.join("global.ignore"), ".factorypath\n").unwrap();
+        assert!(
+            git_unchecked(&root, &["init", "--quiet"], 16 * 1024)
+                .await
+                .unwrap()
+                .success
+        );
+        std::fs::write(root.join(".factorypath"), "ignored editor configuration").unwrap();
+        std::fs::write(root.join("Visible.java"), "before\n").unwrap();
+        std::fs::write(root.join("local-only.tmp"), "local ignore candidate").unwrap();
+
+        async fn compare_status(root: &Path) -> Vec<ChangeEntry> {
+            let args = ["status", "--porcelain=v1", "-z", "--untracked-files=all"];
+            let normal = git_process_with_config_sources(root, &args, MAX_STATUS_BYTES, &[], true)
+                .await
+                .unwrap();
+            let remote = git_unchecked(root, &args, MAX_STATUS_BYTES).await.unwrap();
+            assert!(normal.success && remote.success);
+            let normal = parse_status(&normal.bytes, normal.truncated).unwrap().files;
+            let remote = parse_status(&remote.bytes, remote.truncated).unwrap().files;
+            assert_eq!(remote, normal);
+            remote
+        }
+        let files = compare_status(&root).await;
+        assert!(files.iter().all(|file| file.path != ".factorypath"));
+        assert!(files.iter().any(|file| file.path == "Visible.java"));
+
+        // 仓库的显式设置优先于全局设置，不能把全局忽略文件直接强加到所有仓库。
+        let local_ignore = fixture.join("local.ignore");
+        std::fs::write(&local_ignore, "local-only.tmp\n").unwrap();
+        assert!(
+            git_unchecked(
+                &root,
+                &[
+                    "config",
+                    "core.excludesFile",
+                    local_ignore.to_str().unwrap()
+                ],
+                16 * 1024
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let files = compare_status(&root).await;
+        assert!(files.iter().any(|file| file.path == ".factorypath"));
+        assert!(files.iter().all(|file| file.path != "local-only.tmp"));
+        assert!(
+            git_unchecked(
+                &root,
+                &["config", "--unset", "core.excludesFile"],
+                16 * 1024
+            )
+            .await
+            .unwrap()
+            .success
+        );
+
+        // 未配置路径时保留 Git 默认的 XDG 忽略规则；显式空值同样按 Git 原生行为处理。
+        std::fs::write(&included, "[core]\n").unwrap();
+        std::fs::write(xdg_git.join("ignore"), ".factorypath\n").unwrap();
+        compare_status(&root).await;
+        std::fs::write(&included, "[core]\nexcludesFile = \"\"\n").unwrap();
+        compare_status(&root).await;
+        assert!(
+            git_safe_read_config(&root)
+                .await
+                .unwrap()
+                .contains(&"core.excludesfile=".to_owned())
+        );
+
+        // 恢复忽略规则不能恢复会执行命令的全局过滤器。
+        std::fs::write(
+            &included,
+            "[core]\nexcludesFile = \"~/ignore rules/global.ignore\"\n[filter \"guard-test\"]\nclean = workspace-global-filter-that-must-not-execute\nrequired = true\n",
+        )
+        .unwrap();
+        std::fs::write(root.join(".gitattributes"), "* filter=guard-test\n").unwrap();
+        assert!(
+            git_unchecked(&root, &["add", "--", "Visible.java"], 16 * 1024)
+                .await
+                .unwrap()
+                .success
+        );
+        std::fs::write(root.join("Visible.java"), "after\n").unwrap();
+        let diff = git_unchecked(
+            &root,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--",
+                "Visible.java",
+            ],
+            16 * 1024,
+        )
+        .await
+        .unwrap();
+        assert!(diff.success);
+        assert!(String::from_utf8_lossy(&diff.bytes).contains("+after"));
     }
 
     #[test]
