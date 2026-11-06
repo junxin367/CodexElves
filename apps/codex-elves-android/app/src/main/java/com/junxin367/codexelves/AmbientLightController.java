@@ -7,6 +7,8 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.os.SystemClock;
 
+import org.json.JSONObject;
+
 /** Lifecycle-aware ambient light subscription; no sensor permission is required. */
 final class AmbientLightController implements SensorEventListener {
     interface Listener {
@@ -19,7 +21,9 @@ final class AmbientLightController implements SensorEventListener {
     private int subscriptions;
     private boolean resumed = true;
     private boolean registered;
+    private boolean registrationSucceeded;
     private Float lastLux;
+    private long lastSampleAtMs = -1;
     private long lastPublishedAtMs;
     private Float lastPublishedLux;
 
@@ -61,9 +65,25 @@ final class AmbientLightController implements SensorEventListener {
     private void updateRegistration() {
         boolean needed = subscriptions > 0 && resumed && sensor != null;
         if (needed == registered || manager == null) return;
-        if (needed) manager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_NORMAL);
-        else manager.unregisterListener(this);
+        // 用户要求先采证；单独保存实际注册结果，保留原有注册、重试和生命周期判断。
+        if (needed) registrationSucceeded = manager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_NORMAL);
+        else {
+            manager.unregisterListener(this);
+            registrationSucceeded = false;
+        }
         registered = needed;
+    }
+
+    synchronized Long sampleAgeMs() {
+        return lastSampleAtMs < 0 ? null : Math.max(0, SystemClock.elapsedRealtime() - lastSampleAtMs);
+    }
+
+    synchronized JSONObject diagnosticFields() {
+        return DiagnosticsPolicy.fields(
+            "supported", sensor != null, "registered", registrationSucceeded,
+            "visible", resumed, "count", subscriptions,
+            "lux", lastLux == null ? null : lastLux.doubleValue(), "sampleAgeMs", sampleAgeMs()
+        );
     }
 
     @Override public void onSensorChanged(SensorEvent event) {
@@ -72,6 +92,8 @@ final class AmbientLightController implements SensorEventListener {
         if (!Float.isFinite(lux) || lux < 0) return;
         lastLux = lux;
         long now = SystemClock.elapsedRealtime();
+        // 记录真实采样时间，节流与缓存回传不能把旧读数记成新采样。
+        lastSampleAtMs = now;
         if (lastPublishedLux != null && Math.abs(lastPublishedLux - lux) < 2f && now - lastPublishedAtMs < 2000L)
             return;
         lastPublishedLux = lux;

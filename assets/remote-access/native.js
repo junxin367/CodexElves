@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 131) return;
+  if (window.__codexElvesRemoteAccess?.version === 134) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -3809,6 +3809,55 @@
       if (locked) goalSubmissions.delete(submission.threadId);
     }
   }
+  async function compactThreadContext(id) {
+    const sourceManager = manager, scope = appScope;
+    const assertCurrent = () => {
+      if (manager !== sourceManager || sourceManager.disposed || appScope !== scope)
+        throw failure(409, "原生会话连接已变化，请重新读取后再压缩");
+      if (isDeletedThread(id)) throw failure(404, "会话已永久删除");
+    };
+    const assertIdle = () => {
+      if (runtimeCompaction(id).state !== "idle")
+        throw failure(409, "此会话正在压缩上下文，请等待完成后再试");
+    };
+    const thread = await readThread(id);
+    assertCurrent();
+    assertIdle();
+    const nativeManager = sourceManager.__codexElvesRequestClientManager
+      ? await requestClientNativeRpc() : sourceManager;
+    assertCurrent();
+    const canReadRole = typeof nativeManager.getStreamRole === "function";
+    const role = canReadRole ? await nativeManager.getStreamRole(id) : null;
+    assertCurrent();
+    const conversation = sourceManager.getConversation(id);
+    // 用户要求远程历史会话可直接压缩：thread/read 只读历史，不能代替原生 resume。
+    // RPC 适配器可能只有侧栏摘要，须以原生所有权判断是否恢复；已有 follower 继续原生转发。
+    if (!["owner", "follower"].includes(role?.role)
+        || role?.role !== "follower" && conversation?.resumeState === "needs_resume") {
+      const cwd = sourceManager.getConversationCwd(id) || thread.cwd;
+      if (typeof cwd !== "string" || !cwd.trim())
+        throw failure(409, "此会话没有可用的工作目录，无法恢复上下文压缩");
+      if (typeof sourceManager.resumeConversation !== "function")
+        throw failure(503, "当前 Codex 版本的原生会话恢复不可用，请更新桌面端");
+      const resumed = await retryExecutionConfigLoading(() => sourceManager.resumeConversation({
+        // 压缩只恢复原会话，不指定新模型或思考深度；沿用原生持久化配置和所有权协调。
+        conversationId: id, model: null, reasoningEffort: null,
+        workspaceRoots: [cwd], collaborationMode: conversation?.latestCollaborationMode ?? null
+      }), assertCurrent);
+      assertCurrent();
+      if (resumed?.status === "not-ready")
+        throw failure(409, "会话尚未恢复，请稍后重试压缩");
+      if (canReadRole) {
+        const resumedRole = await nativeManager.getStreamRole(id);
+        assertCurrent();
+        if (!["owner", "follower"].includes(resumedRole?.role))
+          throw failure(409, "会话所有权尚未就绪，请重新读取后再压缩");
+      }
+    }
+    assertCurrent();
+    assertIdle();
+    await sourceManager.compactThread(id);
+  }
   function runtimeCompaction(id, conversation = manager.getConversation(id)) {
     const turns = nativeConversationTurns(conversation);
     let latest = null;
@@ -6928,7 +6977,11 @@
       if (action === "dispose") { window.__codexElvesRemoteAccess.dispose(); return { ok: true }; }
       if (["send", "create", "setGoal"].includes(action)) validateGoalComposerPayload(action, payload);
       resetStaleManager();
-      if (!manager || !sidebarOnly && !manager.__codexElvesRequestClientManager
+      // 用户要求恢复 CDP 侧边会话能力并保留禁用规则；request-client 也须补取缺失的原生依赖。
+      // 仅侧边操作按需重找，依赖齐全后复用，避免普通读取反复扫描整页。
+      const needsSideContext = ["relatedThreads", "createSideThread", "closeSideThread"].includes(action)
+        && (!appScope || !nativeNavigate || typeof nativeIntl?.formatMessage !== "function");
+      if (!manager || needsSideContext || !sidebarOnly && !manager.__codexElvesRequestClientManager
           && (!unsubscribe.length || !appScope || !nativeNavigate
             || typeof nativeIntl?.formatMessage !== "function")) {
         try { discover(sidebarOnly); }
@@ -7245,9 +7298,7 @@
         }
         case "compact": {
           const id = requiredId(payload.threadId);
-          await readThread(id);
-          if (runtimeCompaction(id).state !== "idle") throw failure(409, "此会话正在压缩上下文，请等待完成后再试");
-          await manager.compactThread(id);
+          await compactThreadContext(id);
           if (manager.__codexElvesRequestClientManager) {
             await refreshRequestClientConversation(id, { fresh: true })
               .catch(error => reportNativeCallbackFailure("compact_state_refresh", error));
@@ -7402,7 +7453,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 131, call,
+    version: 134, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {

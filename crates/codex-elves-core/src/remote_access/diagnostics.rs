@@ -221,6 +221,9 @@ fn string_field(key: &str, value: &str) -> Option<String> {
             value,
             "GET" | "HEAD" | "POST" | "OPTIONS" | "PUT" | "PATCH" | "DELETE"
         ),
+        "theme" | "previousTheme" | "targetTheme" => matches!(value, "light" | "dark"),
+        "themeMode" => matches!(value, "auto" | "manual"),
+        "decision" => matches!(value, "pending" | "cancelled" | "applied"),
         "mime" => matches!(
             value,
             "application/json"
@@ -429,6 +432,8 @@ fn string_field(key: &str, value: &str) -> Option<String> {
                 | "handshake-invalid"
                 | "page-resume"
                 | "startup"
+                | "sensor"
+                | "timer"
         ),
         "phase" => matches!(
             value,
@@ -492,7 +497,7 @@ fn field(key: &str, value: &Value) -> Option<Value> {
             .as_i64()
             .filter(|value| (-1000..=1000).contains(value))
             .map(Value::from),
-        "durationMs" => value
+        "durationMs" | "lux" | "previousLux" => value
             .as_f64()
             .filter(|number| {
                 number.is_finite() && *number >= 0.0 && *number <= MAX_JSON_INTEGER as f64
@@ -519,11 +524,20 @@ fn field(key: &str, value: &Value) -> Option<Value> {
             .filter(|value| *value <= 10_000)
             .map(Value::from),
         "backgroundMs" => integer(value),
+        "localHour" => value.as_u64().filter(|value| *value <= 23).map(Value::from),
+        "count" => value
+            .as_u64()
+            .filter(|value| *value <= 10_000)
+            .map(Value::from),
+        "timezoneOffsetMinutes" => value
+            .as_i64()
+            .filter(|value| (-840..=840).contains(value))
+            .map(Value::from),
         "bytes" | "sdk" | "generation" | "expectedBytes" | "loadedBytes" | "versionCode"
-        | "line" | "width" | "height" | "draftChars" | "attachmentCount" => integer(value),
-        "visible" | "online" | "pageLeaving" | "connected" | "wasClean" | "isTrusted" => {
-            value.as_bool().map(Value::Bool)
-        }
+        | "line" | "width" | "height" | "draftChars" | "attachmentCount" | "stableMs"
+        | "sampleAgeMs" | "themeSequence" => integer(value),
+        "visible" | "online" | "pageLeaving" | "connected" | "wasClean" | "isTrusted"
+        | "supported" | "registered" => value.as_bool().map(Value::Bool),
         _ => value
             .as_str()
             .and_then(|value| string_field(key, value))
@@ -628,6 +642,22 @@ fn sanitize_bundle(value: &Value) -> Result<Value, ApiError> {
                             | "line"
                             | "width"
                             | "height"
+                            // 用户要求从上报还原切换光照；名称与值校验必须同时放行，不能只扩展 field()。
+                            | "lux"
+                            | "previousLux"
+                            | "sampleAgeMs"
+                            | "stableMs"
+                            | "themeSequence"
+                            | "localHour"
+                            | "timezoneOffsetMinutes"
+                            | "supported"
+                            | "registered"
+                            | "count"
+                            | "theme"
+                            | "previousTheme"
+                            | "targetTheme"
+                            | "themeMode"
+                            | "decision"
                     )
                 })
                 .filter_map(|(key, value)| field(key, value).map(|value| (key.clone(), value)))
@@ -921,6 +951,23 @@ mod tests {
         fields["backgroundMs"] = json!(MAX_JSON_INTEGER);
         fields["attempt"] = json!(3);
         bundle
+    }
+
+    fn theme_bundle() -> Value {
+        let mut value = bundle();
+        value["events"].as_array_mut().unwrap().extend([
+            json!({"timeMs":124,"source":"web","name":"theme.transition","fields":{
+                "theme":"dark","previousTheme":"light","targetTheme":"dark","themeMode":"auto",
+                "themeSequence":1,"decision":"applied","reason":"sensor","phase":"after",
+                "lux":9.75,"previousLux":45.125,"supported":true,"sampleAgeMs":2000,
+                "stableMs":5000,"localHour":21,"timezoneOffsetMinutes":-480,"visible":true
+            }}),
+            json!({"timeMs":125,"source":"native","name":"theme.sensor","fields":{
+                "supported":true,"registered":true,"lux":10.01,"sampleAgeMs":500,
+                "visible":true,"count":1
+            }}),
+        ]);
+        value
     }
 
     fn test_state() -> (tempfile::TempDir, WebState, HeaderMap, HeaderMap) {
@@ -1241,6 +1288,84 @@ mod tests {
         );
     }
 
+    #[test]
+    fn diagnostics_preserves_theme_evidence_and_rejects_invalid_values() {
+        let input = theme_bundle();
+        let clean = sanitize_bundle(&input).unwrap();
+        assert_eq!(clean["events"][1], input["events"][1]);
+        assert_eq!(clean["events"][2], input["events"][2]);
+        assert_eq!(sanitize_bundle(&clean).unwrap(), clean);
+        for key in ["lux", "previousLux"] {
+            for valid in [0.0, 9.99, 10.01, 44.99, 45.125, MAX_JSON_INTEGER as f64] {
+                assert_eq!(field(key, &json!(valid)), Some(json!(valid)));
+            }
+            for invalid in [
+                json!(-0.01),
+                json!(MAX_JSON_INTEGER + 1),
+                json!("10"),
+                json!(true),
+                Value::Null,
+            ] {
+                assert!(field(key, &invalid).is_none(), "非法 {key}: {invalid}");
+            }
+        }
+        for key in ["stableMs", "sampleAgeMs", "themeSequence"] {
+            for valid in [0, 1, MAX_JSON_INTEGER] {
+                assert_eq!(field(key, &json!(valid)), Some(json!(valid)));
+            }
+            for invalid in [
+                json!(-1),
+                json!(0.5),
+                json!(MAX_JSON_INTEGER + 1),
+                json!("1"),
+                Value::Null,
+            ] {
+                assert!(field(key, &invalid).is_none());
+            }
+        }
+        for (key, minimum, maximum) in [
+            ("localHour", 0, 23),
+            ("timezoneOffsetMinutes", -840, 840),
+            ("count", 0, 10_000),
+        ] {
+            for valid in [minimum, maximum] {
+                assert_eq!(field(key, &json!(valid)), Some(json!(valid)));
+            }
+            for invalid in [
+                json!(minimum - 1),
+                json!(maximum + 1),
+                json!(0.5),
+                json!("1"),
+                Value::Null,
+            ] {
+                assert!(field(key, &invalid).is_none());
+            }
+        }
+        for key in ["supported", "registered"] {
+            assert_eq!(field(key, &json!(true)), Some(json!(true)));
+            assert_eq!(field(key, &json!(false)), Some(json!(false)));
+            for invalid in [json!(1), json!("true"), Value::Null] {
+                assert!(field(key, &invalid).is_none());
+            }
+        }
+        for (key, values) in [
+            ("theme", vec!["light", "dark"]),
+            ("previousTheme", vec!["light", "dark"]),
+            ("targetTheme", vec!["light", "dark"]),
+            ("themeMode", vec!["auto", "manual"]),
+            ("decision", vec!["pending", "cancelled", "applied"]),
+            ("reason", vec!["sensor", "timer"]),
+            ("phase", vec!["before", "after"]),
+        ] {
+            for value in values {
+                assert_eq!(field(key, &json!(value)), Some(json!(value)));
+            }
+            for invalid in [json!("private-text"), json!(true), Value::Null] {
+                assert!(field(key, &invalid).is_none());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn diagnostics_request_upload_read_rate_limit_expiry_and_revocation() {
         let (directory, state, headers_a, headers_b) = test_state();
@@ -1331,7 +1456,7 @@ mod tests {
         let _ = upload(
             State(state.clone()),
             headers_a.clone(),
-            Json(json!({"requestId":requested_a["requestId"],"bundle":bundle()})),
+            Json(json!({"requestId":requested_a["requestId"],"bundle":theme_bundle()})),
         )
         .await
         .unwrap();
@@ -1348,6 +1473,14 @@ mod tests {
                 .is_none()
         );
         assert_eq!(read_a["report"]["requestId"], requested_a["requestId"]);
+        assert_eq!(
+            read_a["report"]["bundle"]["events"][1],
+            theme_bundle()["events"][1]
+        );
+        assert_eq!(
+            read_a["report"]["bundle"]["events"][2],
+            theme_bundle()["events"][2]
+        );
         controller
             .diagnostics
             .state

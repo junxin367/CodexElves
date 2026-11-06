@@ -123,6 +123,7 @@ $ReleaseDir = Join-Path $CargoTargetDir "release-fast"
 $ReleaseMirrorDir = Join-Path $CargoTargetDir "release"
 
 $NpmPath = Resolve-ToolPath -Name "npm.cmd" -ExplicitPath "" -FallbackPaths @()
+$NodePath = Resolve-ToolPath -Name "node.exe" -ExplicitPath "" -FallbackPaths @()
 $NsisPath = Resolve-ToolPath `
     -Name "makensis" `
     -ExplicitPath $MakensisPath `
@@ -139,7 +140,11 @@ Write-Output "[INFO] npm: $NpmPath"
 Write-Output "[INFO] makensis: $NsisPath"
 Write-Output "[INFO] Cargo target: $CargoTargetDir"
 
+$BuildInputVerifier = Join-Path $RepoRoot "scripts\verify-windows-build-inputs.mjs"
+# 用户要求已修复功能不能因构建基线回退；编译前核对运行模式协议及压缩恢复，复制前后再核对完整资源。
+Invoke-Checked -FilePath $NodePath -Arguments @($BuildInputVerifier, $RepoRoot, "--source-only") -WorkingDirectory $RepoRoot
 Invoke-Checked -FilePath $NpmPath -Arguments @("run", "build") -WorkingDirectory $ManagerDir
+Invoke-Checked -FilePath $NodePath -Arguments @($BuildInputVerifier, $RepoRoot, $ReleaseDir) -WorkingDirectory $RepoRoot
 
 New-Item -ItemType Directory -Path $DistAppDir -Force | Out-Null
 New-Item -ItemType Directory -Path $ReleaseMirrorDir -Force | Out-Null
@@ -157,6 +162,8 @@ foreach ($artifact in @($LauncherExe, $ManagerExe, $TaskBoardExe)) {
     Copy-Item -LiteralPath $artifact -Destination $mirrorPath -Force
     Copy-Item -LiteralPath $artifact -Destination $DistAppDir -Force
 }
+
+Invoke-Checked -FilePath $NodePath -Arguments @($BuildInputVerifier, $RepoRoot, $DistAppDir) -WorkingDirectory $RepoRoot
 
 Invoke-Checked `
     -FilePath $NsisPath `

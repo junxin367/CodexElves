@@ -59,8 +59,8 @@
     if (readPreference(context) !== (value === true)) throw new Error("Fast 会话设置保存失败");
   }
 
-  function currentContext() {
-    return adapters?.getContext?.() || null;
+  function currentContext(anchor) {
+    return adapters?.getContext?.(anchor) || null;
   }
 
   function configuredFast(context = currentContext()) {
@@ -154,8 +154,8 @@
       && state.config.features?.fast_mode !== false;
   }
 
-  function selectedModel() {
-    return adapters?.getModel?.(snapshot?.models) || "";
+  function selectedModel(anchor) {
+    return adapters?.getModel?.(snapshot?.models, anchor) || "";
   }
 
   async function patchMessage(type, payload, context = {}) {
@@ -216,32 +216,33 @@
   function removeIndicators() {
     root.document?.querySelectorAll(`[${statusAttribute}], [${sidebarAttribute}]`)
       .forEach((node) => node.remove());
-    highlightModels();
+    highlightModels([]);
   }
 
-  function highlightModels(labels = []) {
+  function highlightModels(labels) {
     // 用户要求只在 Fast 开启时将模型名称标蓝；移除属性即可恢复原主题颜色，不改写原生行内样式。
-    const selected = new Set(labels.filter((label) => label?.isConnected));
+    const active = new Set(labels.filter((label) => label?.isConnected));
     root.document?.querySelectorAll(`[${modelAttribute}]`).forEach((node) => {
-      if (!selected.has(node)) node.removeAttribute(modelAttribute);
+      if (!active.has(node)) node.removeAttribute(modelAttribute);
     });
-    for (const label of selected) {
+    for (const label of active)
       if (label.getAttribute(modelAttribute) !== "true") label.setAttribute(modelAttribute, "true");
-    }
   }
 
   function renderIndicators(state, error) {
     // 用户要求去除会话列表闪电；同时清理旧文字标签，只通过模型名称标蓝提示当前会话状态。
     root.document?.querySelectorAll(`[${statusAttribute}], [${sidebarAttribute}]`)
       .forEach((node) => node.remove());
-    const indicators = !error && state && allowed(state)
-      ? adapters?.getIndicators?.(state.models) ?? [{
-        context: currentContext(), model: selectedModel(), label: adapters?.getModelLabel?.(state.models),
-      }] : [];
-    // 用户要求侧边 Fast 与主会话互不影响；两个输入区同时可见时按各自会话设置更新名称颜色。
-    highlightModels(indicators.filter(({ context, model }) =>
-      contextKey(context) && modelCapability(state, model) && configuredFast(context)
-    ).map(({ label }) => label));
+    // 主会话与侧边会话分别恢复颜色；关闭菜单后也不能把侧边状态套给主会话或清掉另一会话的标蓝。
+    const labels = [];
+    if (!error && state && allowed(state)) {
+      for (const anchor of adapters?.getComposers?.() || [undefined]) {
+        const context = currentContext(anchor), model = selectedModel(anchor);
+        if (contextKey(context) && modelCapability(state, model) && configuredFast(context))
+          labels.push(adapters?.getModelLabel?.(state.models, anchor));
+      }
+    }
+    highlightModels(labels);
   }
 
   function syncMenuObserver() {
@@ -370,7 +371,7 @@
     },
     refresh,
     captureContext() {
-      const context = currentContext();
+      const context = adapters?.getCreationContext ? adapters.getCreationContext() : currentContext();
       return context && { ...context, fast: configuredFast(context) };
     },
     bindConversation(context, id) {

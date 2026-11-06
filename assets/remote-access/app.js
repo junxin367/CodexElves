@@ -356,8 +356,10 @@ const appearancePresets = {
   dark: { background: "#171717", foreground: "#ededed", accent: "#ededed" }
 };
 const projectThreadLimits = [5, 10, 20, 50];
+// 用户要求文件阅读字号统一控制变更预览和文件查看，范围 6～14px、默认 12px、步长 1px；文件列表继续使用原字号。
+const fileReadingFontMin = 6, fileReadingFontMax = 14, fileReadingFontDefault = 12;
 function defaultAppearance(theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") {
-  return { theme, themeMode: "manual", fontSize: 13, projectThreadLimit: 5, backgroundOpacity: 35, backgroundFit: "cover",
+  return { theme, themeMode: "manual", fontSize: 13, fileReadingFontSize: fileReadingFontDefault, projectThreadLimit: 5, backgroundOpacity: 35, backgroundFit: "cover",
     colors: { light: { ...appearancePresets.light }, dark: { ...appearancePresets.dark } } };
 }
 function readAppearance() {
@@ -370,12 +372,18 @@ function readAppearance() {
     if (Number.isInteger(saved.backgroundOpacity)) value.backgroundOpacity = Math.min(100, Math.max(1, saved.backgroundOpacity));
     if (["cover", "contain"].includes(saved.backgroundFit)) value.backgroundFit = saved.backgroundFit;
     if (Number.isInteger(saved.fontSize)) value.fontSize = Math.min(20, Math.max(10, saved.fontSize));
+    if (Number.isInteger(saved.fileReadingFontSize))
+      value.fileReadingFontSize = Math.min(fileReadingFontMax, Math.max(fileReadingFontMin, saved.fileReadingFontSize));
     if (projectThreadLimits.includes(saved.projectThreadLimit)) value.projectThreadLimit = saved.projectThreadLimit;
     for (const theme of ["light", "dark"]) for (const name of ["background", "foreground", "accent"]) {
       if (/^#[0-9a-f]{6}$/i.test(saved.colors?.[theme]?.[name])) value.colors[theme][name] = saved.colors[theme][name];
     }
   } catch {}
   return value;
+}
+function currentFileReadingFontSize() {
+  // 用户已将默认值改为固定 12px；兼容旧版保存的 null，旧范围内的 15/16px 则收敛到 14px。
+  return Math.min(fileReadingFontMax, Math.max(fileReadingFontMin, appearance.fileReadingFontSize ?? fileReadingFontDefault));
 }
 let ambientLightStatus = { supported: false, lux: null };
 let syncAppearanceThemeControls = null;
@@ -457,6 +465,71 @@ const automaticThemeStableMs = 5000;
 const automaticThemeDarkLux = 10;
 const automaticThemeLightLux = 45;
 let automaticThemeCandidate = null;
+// 用户要求先记录切换前后光照，不调整主题规则。最多留 8 个观测点，回看最近 30 秒；无近期点时标注旧读数年龄。
+const themeLightSamples = [];
+let themeDiagnosticSequence = 0;
+const themeDiagnosticTimers = new Set();
+function themeDiagnosticNow() {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
+function themeDiagnosticFields(extra = {}, sample = themeLightSamples.at(-1)) {
+  const date = new Date();
+  return {
+    theme: appearance.theme, themeMode: appearance.themeMode, themeSequence: themeDiagnosticSequence,
+    supported: sample?.supported ?? ambientLightStatus.supported,
+    lux: sample ? sample.lux : ambientLightStatus.lux,
+    previousLux: sample?.previousLux,
+    sampleAgeMs: sample?.sampledAtMs != null ? Math.max(0, Math.round(themeDiagnosticNow() - sample.sampledAtMs)) : undefined,
+    localHour: date.getHours(), timezoneOffsetMinutes: date.getTimezoneOffset(), visible: !document.hidden,
+    ...extra
+  };
+}
+function recordThemeDiagnostic(name, extra = {}, sample) {
+  if (isAndroidContainer()) recordDiagnostic(name, themeDiagnosticFields(extra, sample));
+}
+function observeThemeLight(status) {
+  if (!isAndroidContainer()) return;
+  const now = themeDiagnosticNow(), previous = themeLightSamples.at(-1);
+  themeLightSamples.push({
+    supported: status.supported, lux: status.lux, previousLux: previous?.lux, observedAtMs: now,
+    // 老 APK 没有真实采样年龄时保持未知；不能把收到缓存回调的时间当成传感器采样时间。
+    sampledAtMs: status.supported && Number.isSafeInteger(status.sampleAgeMs) && status.sampleAgeMs >= 0
+      ? now - status.sampleAgeMs : null
+  });
+  if (themeLightSamples.length > 8) themeLightSamples.shift();
+}
+function clearThemeDiagnosticTimers() {
+  for (const timer of themeDiagnosticTimers) clearTimeout(timer);
+  themeDiagnosticTimers.clear();
+}
+function beginThemeDiagnosticTransition(targetTheme, reason,
+  { previousTheme = appearance.theme, previousMode = appearance.themeMode } = {}) {
+  if (!isAndroidContainer()) return null;
+  clearThemeDiagnosticTimers();
+  const transition = {
+    previousTheme, targetTheme, reason, themeSequence: ++themeDiagnosticSequence
+  };
+  const now = themeDiagnosticNow(), recent = themeLightSamples.filter(sample => now - sample.observedAtMs <= 30_000);
+  for (const sample of recent.length ? recent : themeLightSamples.slice(-1))
+    recordThemeDiagnostic("theme.sample", { ...transition, phase: "before", theme: previousTheme, themeMode: previousMode }, sample);
+  recordThemeDiagnostic("theme.transition", { ...transition, phase: "before", theme: previousTheme, themeMode: previousMode });
+  return { ...transition, startedAtMs: now };
+}
+function finishThemeDiagnosticTransition(transition) {
+  if (!transition) return;
+  const { startedAtMs, ...fields } = transition;
+  recordThemeDiagnostic("theme.transition", { ...fields, phase: "after" });
+  // 2/5/10 秒回调只记录最新可用读数及实际间隔，不调用主题判断、不推进 5 秒稳定候选。
+  for (const delayMs of [2000, 5000, 10_000]) {
+    const timer = setTimeout(() => {
+      themeDiagnosticTimers.delete(timer);
+      if (fields.themeSequence === themeDiagnosticSequence)
+        recordThemeDiagnostic("theme.sample", { ...fields, phase: "after", delayMs,
+          durationMs: Math.max(0, themeDiagnosticNow() - startedAtMs) });
+    }, delayMs);
+    themeDiagnosticTimers.add(timer);
+  }
+}
 function automaticAppearanceTheme(date = new Date(), currentTheme = appearance.theme) {
   const hour = date.getHours();
   // 用户要求夜间时段按设备本地时间从 21:00（含）到次日 08:00（不含），时段内保留原有光照判断。
@@ -471,32 +544,44 @@ function applyAutomaticAppearance(save = false, { immediate = false, reason = "t
   if (appearance.themeMode !== "auto") { automaticThemeCandidate = null; return false; }
   const next = automaticAppearanceTheme();
   if (next === appearance.theme) {
-    if (automaticThemeCandidate) recordDiagnostic("theme.decision", { theme: next, decision: "cancelled", reason });
+    if (automaticThemeCandidate) recordThemeDiagnostic("theme.decision", {
+      targetTheme: automaticThemeCandidate.theme, decision: "cancelled", reason,
+      durationMs: Math.max(0, now - automaticThemeCandidate.since)
+    });
     automaticThemeCandidate = null;
     return false;
   }
   if (!immediate) {
     if (automaticThemeCandidate?.theme !== next) {
       automaticThemeCandidate = { theme: next, since: now, reason };
-      recordDiagnostic("theme.decision", { theme: next, decision: "pending", reason });
+      recordThemeDiagnostic("theme.decision", { targetTheme: next, decision: "pending", reason, stableMs: automaticThemeStableMs });
       return false;
     }
     if (now - automaticThemeCandidate.since < automaticThemeStableMs) return false;
   }
+  const stableDurationMs = automaticThemeCandidate ? Math.max(0, now - automaticThemeCandidate.since) : 0;
+  const transition = beginThemeDiagnosticTransition(next, reason);
   automaticThemeCandidate = null;
   appearance.theme = next;
   applyAppearance(save);
   syncAppearanceThemeControls?.();
-  recordDiagnostic("theme.decision", { theme: next, decision: "applied", reason, stableMs: automaticThemeStableMs });
+  recordThemeDiagnostic("theme.decision", { targetTheme: next, decision: "applied", reason,
+    stableMs: automaticThemeStableMs, durationMs: stableDurationMs });
+  finishThemeDiagnosticTransition(transition);
   return true;
 }
 function setAppearanceThemeMode(mode) {
   if (!["auto", "manual"].includes(mode)) return;
+  const previousTheme = appearance.theme, previousMode = appearance.themeMode;
   automaticThemeCandidate = null;
   appearance.themeMode = mode;
   if (mode === "auto") appearance.theme = automaticAppearanceTheme();
+  const transition = previousMode !== mode || previousTheme !== appearance.theme
+    ? beginThemeDiagnosticTransition(appearance.theme, "manual", { previousTheme, previousMode }) : null;
   applyAppearance(true);
   syncAppearanceThemeControls?.();
+  finishThemeDiagnosticTransition(transition);
+  recordThemeDiagnostic("theme.snapshot", { reason: "manual" });
 }
 function mixColor(left, right, weight) {
   return "#" + [1, 3, 5].map(index => Math.round(
@@ -517,6 +602,7 @@ function applyAppearance(save = false) {
     side: mixColor(background, foreground, .035), code: mixColor(background, foreground, .05),
     hover: mixColor(background, foreground, .075), line: mixColor(background, foreground, .14),
     muted: mixColor(background, foreground, .58), "font-size": `${appearance.fontSize}px`,
+    "file-reading-font-size": `${currentFileReadingFontSize()}px`,
     danger: appearance.theme === "dark" ? "#ff9c97" : "#b42318", green: appearance.theme === "dark" ? "#77c7a0" : "#168350"
   };
   for (const [name, value] of Object.entries(values)) root.style.setProperty(`--${name}`, value);
@@ -537,6 +623,7 @@ function applyAppearance(save = false) {
 }
 applyAutomaticAppearance(false, { immediate: true, reason: "startup" });
 applyAppearance();
+recordThemeDiagnostic("theme.snapshot", { reason: "startup" });
 const initialRemoteBackgroundOperation = ++remoteBackgroundOperation;
 void readRemoteBackground().then(record => {
   if (initialRemoteBackgroundOperation !== remoteBackgroundOperation) return;
@@ -549,13 +636,21 @@ void readRemoteBackground().then(record => {
   remoteBackgroundError = "无法读取已保存的背景图片。";
   syncAppearanceThemeControls?.();
 });
-setInterval(() => applyAutomaticAppearance(true), 60_000);
+setInterval(() => {
+  applyAutomaticAppearance(true);
+  recordThemeDiagnostic("theme.snapshot", { reason: "timer" });
+}, 60_000);
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) applyAutomaticAppearance(true, { reason: "visibility" });
+  if (!document.hidden) {
+    applyAutomaticAppearance(true, { reason: "visibility" });
+    recordThemeDiagnostic("theme.snapshot", { reason: "visibility" });
+  }
 });
+globalThis.addEventListener("pagehide", clearThemeDiagnosticTimers);
 subscribeAndroidAmbientLight(status => {
   ambientLightStatus = status;
-  recordDiagnostic("theme.ambient", { supported: status.supported, lux: status.lux ?? -1 });
+  observeThemeLight(status);
+  recordThemeDiagnostic("theme.ambient", { reason: "sensor" });
   applyAutomaticAppearance(true, { reason: "sensor" });
 });
 function currentFileBrowserThreadId() {
@@ -611,6 +706,7 @@ function openAppearance() {
     <nav class="appearance-nav" aria-label="设置导航">
       <button type="button" id="appearance-general-entry" class="appearance-nav-item" aria-controls="appearance-general-page" aria-selected="true"><span class="appearance-nav-icon"></span><span>通用设置</span></button>
       <button type="button" id="appearance-customization-entry" class="appearance-nav-item" title="打开外观主题" aria-label="打开外观主题" aria-controls="appearance-customization-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>外观主题</span></button>
+      <button type="button" id="appearance-runtime-entry" class="appearance-nav-item" aria-controls="appearance-runtime-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>运行模式</span></button>
       <button type="button" id="appearance-notifications-entry" class="appearance-nav-item" title="打开通知事件" aria-label="打开通知事件" aria-controls="appearance-notifications-page" aria-selected="false" hidden><span class="appearance-nav-icon"></span><span>通知事件</span></button>
       <button type="button" id="appearance-diagnostics-entry" class="appearance-nav-item" title="打开诊断日志" aria-label="打开诊断日志" aria-controls="appearance-diagnostics-page" aria-selected="false" hidden><span class="appearance-nav-icon"></span><span>诊断日志</span></button>
     </nav>
@@ -630,11 +726,18 @@ function openAppearance() {
     <h3 class="appearance-panel-title">外观主题</h3>
     <div id="appearance-colors"></div>
     <label class="appearance-field">字体大小<span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="字体大小"><output id="appearance-font-value"></output></span></label>
+    <label class="appearance-field"><span>文件阅读字号</span><span class="appearance-font"><input id="appearance-file-reading-font" type="range" min="${fileReadingFontMin}" max="${fileReadingFontMax}" step="1" aria-label="文件阅读字号" aria-describedby="appearance-file-reading-font-hint"><output id="appearance-file-reading-font-value" for="appearance-file-reading-font"></output></span></label>
+    <div id="appearance-file-reading-font-hint" class="appearance-reading-font-hint"><span>用于变更预览与文件查看。</span><button type="button" id="appearance-file-reading-font-reset" class="text-button" title="恢复为 ${fileReadingFontDefault}px">恢复默认</button></div>
     </section>
     <section id="appearance-diagnostics-page" class="appearance-body appearance-settings-page" hidden>
     <h3 class="appearance-panel-title">诊断日志</h3>
     <div id="appearance-diagnostics-field" class="appearance-field" hidden><span>运行日志</span><div class="appearance-action-buttons"><button type="button" id="appearance-diagnostics-export" disabled>导出</button><button type="button" id="appearance-diagnostics-send" disabled>发送到电脑</button></div></div>
     <p id="appearance-diagnostics-status" class="appearance-notification-status" role="status" hidden></p>
+    </section>
+    <section id="appearance-runtime-page" class="appearance-body appearance-settings-page" hidden>
+    <h3 class="appearance-panel-title">运行模式</h3>
+    <label class="appearance-notification-row"><span id="appearance-runtime-mode" aria-live="polite">CDP 模式</span><input id="appearance-cdp-injection" class="appearance-notification-switch" type="checkbox" role="switch" aria-label="切换运行模式，当前为 CDP 模式" checked disabled></label>
+    <p id="appearance-runtime-status" class="appearance-notification-status" role="status" hidden></p>
     </section>
     </div></div>
     <div class="appearance-actions"><button type="button" class="appearance-version" id="appearance-app-version" hidden disabled></button><div class="appearance-action-buttons"><button type="button" id="appearance-reset">恢复默认</button><button type="button" class="primary" id="appearance-close">完成</button></div></div>`;
@@ -649,6 +752,64 @@ function openAppearance() {
   const entryButton = $("#appearance-notifications-entry", dialog);
   const diagnosticsEntry = $("#appearance-diagnostics-entry", dialog);
   const diagnosticsPage = $("#appearance-diagnostics-page", dialog);
+  const runtimeEntry = $("#appearance-runtime-entry", dialog);
+  const runtimePage = $("#appearance-runtime-page", dialog);
+  const runtimeSwitch = $("#appearance-cdp-injection", dialog);
+  const runtimeMode = $("#appearance-runtime-mode", dialog);
+  const runtimeStatus = $("#appearance-runtime-status", dialog);
+  let runtimeSettings = session?.runtime || null, runtimeBusy = false;
+  const updateRuntimeSwitch = () => {
+    if (!dialog.isConnected) return;
+    const latest = session?.runtime;
+    if (typeof latest?.cdpInjectionEnabled === "boolean" && Number.isSafeInteger(latest.revision)
+        && latest.revision >= (runtimeSettings?.revision ?? -1)) runtimeSettings = latest;
+    // 用户要求开关表达两种模式的切换：名称始终跟随当前选择，保存失败后一起回退。
+    if (!runtimeBusy) runtimeSwitch.checked = runtimeSettings?.cdpInjectionEnabled !== false;
+    runtimeMode.textContent = runtimeSwitch.checked ? "CDP 模式" : "服务模式";
+    runtimeSwitch.setAttribute("aria-label", `切换运行模式，当前为 ${runtimeMode.textContent}`);
+    runtimeSwitch.setAttribute("aria-busy", String(runtimeBusy));
+    // 未确认写入或正在编辑的草稿继续由原后端处理，避免切换后丢失编辑事务。
+    runtimeSwitch.disabled = runtimeBusy || !runtimeSettings || !session || session.readOnly || !connected
+      || busy || stopping || !!pending || !!editingMessage || !!editingQueuedMessage;
+  };
+  dialog.updateRemoteRuntimeSwitch = updateRuntimeSwitch;
+  updateRuntimeSwitch();
+  const readRuntimeSettings = async () => {
+    const deviceId = session?.device.id;
+    try {
+      const response = await api("/api/read/runtime", {});
+      if (!dialog.isConnected || session?.device.id !== deviceId) return;
+      if (typeof response.runtime?.cdpInjectionEnabled !== "boolean"
+          || !Number.isSafeInteger(response.runtime.revision)) throw new Error("运行模式数据无效，请重试。");
+      if (response.runtime.revision < (runtimeSettings?.revision ?? -1)) return;
+      runtimeSettings = response.runtime;
+      updateRuntimeSwitch();
+    } catch (error) {
+      if (!dialog.isConnected) return;
+      runtimeStatus.textContent = error.message;
+      runtimeStatus.hidden = false;
+    }
+  };
+  // 用户要求默认开启且仅当前设备生效；按设备授权保存，失败时恢复服务器确认值。
+  runtimeSwitch.onchange = async () => {
+    if (runtimeBusy || !runtimeSettings) return;
+    const enabled = runtimeSwitch.checked;
+    runtimeBusy = true; runtimeStatus.hidden = true; updateRuntimeSwitch();
+    try {
+      const result = await mutate("setRuntime", {
+        cdpInjectionEnabled: enabled, expectedRevision: runtimeSettings.revision
+      }, { reliable: true });
+      runtimeSettings = result.runtime;
+      applyRemoteRuntime(result.runtime);
+      await refreshConnectedSession();
+    } catch (error) {
+      if (dialog.isConnected) { runtimeStatus.textContent = error.message; runtimeStatus.hidden = false; }
+      await readRuntimeSettings();
+    } finally {
+      runtimeBusy = false;
+      updateRuntimeSwitch();
+    }
+  };
   const resetButton = $("#appearance-reset", dialog);
   const notificationVersionButton = $("#appearance-app-version", dialog);
   if (androidContainer) {
@@ -698,6 +859,7 @@ function openAppearance() {
   customizationEntry.querySelector(".appearance-nav-icon").append(icon("sun"));
   entryButton.querySelector(".appearance-nav-icon").append(icon("globe"));
   diagnosticsEntry.querySelector(".appearance-nav-icon").append(icon("tools"));
+  runtimeEntry.querySelector(".appearance-nav-icon").append(icon("settings"));
   headingButton.append(icon("close"));
   renderPwaCacheState();
   const versionButton = notificationVersionButton;
@@ -790,6 +952,11 @@ function openAppearance() {
   diagnosticsEntry.onclick = () => {
     if (!dialog.isConnected || !dialog.open || diagnosticsEntry.hidden) return;
     showAppearancePage(diagnosticsPage, "诊断日志", diagnosticsEntry);
+  };
+  runtimeEntry.onclick = () => {
+    if (!dialog.isConnected || !dialog.open) return;
+    showAppearancePage(runtimePage, "运行模式", runtimeEntry);
+    void readRuntimeSettings();
   };
   if (androidContainer) entryButton.onclick = () => {
     if (!dialog.isConnected || !dialog.open) return;
@@ -1039,9 +1206,11 @@ function openAppearance() {
   };
   const themeButton = button("", "切换主题", () => {
     if (appearance.themeMode === "auto") return;
+    const transition = beginThemeDiagnosticTransition(appearance.theme === "light" ? "dark" : "light", "manual");
     appearance.theme = appearance.theme === "light" ? "dark" : "light";
     applyAppearance(true);
     sync();
+    finishThemeDiagnosticTransition(transition);
   }, "appearance-theme-button");
   const modeGroup = element("div", "appearance-theme-mode");
   modeGroup.setAttribute("role", "group"); modeGroup.setAttribute("aria-label", "主题模式");
@@ -1133,6 +1302,12 @@ function openAppearance() {
     $("#appearance-font").value = appearance.fontSize;
     $("#appearance-font").style.setProperty("--range-fill", `${(appearance.fontSize - 10) * 10}%`);
     $("#appearance-font-value").textContent = `${appearance.fontSize}px`;
+    const readingFontSize = currentFileReadingFontSize();
+    $("#appearance-file-reading-font").value = readingFontSize;
+    $("#appearance-file-reading-font").style.setProperty("--range-fill",
+      `${(readingFontSize - fileReadingFontMin) / (fileReadingFontMax - fileReadingFontMin) * 100}%`);
+    $("#appearance-file-reading-font-value").textContent = `${readingFontSize}px`;
+    $("#appearance-file-reading-font-reset").disabled = readingFontSize === fileReadingFontDefault;
   };
   syncAppearanceThemeControls = sync;
   sync();
@@ -1194,6 +1369,14 @@ function openAppearance() {
     applyAppearance(true); sync();
   };
   $("#appearance-font").oninput = event => { appearance.fontSize = Number(event.target.value); applyAppearance(true); sync(); };
+  $("#appearance-file-reading-font").oninput = event => {
+    const size = Number(event.target.value);
+    if (!Number.isInteger(size) || size < fileReadingFontMin || size > fileReadingFontMax) return;
+    appearance.fileReadingFontSize = size; applyAppearance(true); sync();
+  };
+  $("#appearance-file-reading-font-reset").onclick = () => {
+    appearance.fileReadingFontSize = fileReadingFontDefault; applyAppearance(true); sync();
+  };
   $("#appearance-reset").onclick = async () => {
     if (subpageEntry || remoteBackgroundBusy) return;
     const operation = ++remoteBackgroundOperation;
@@ -2089,6 +2272,10 @@ function resetRelatedSessions({ persisted = false } = {}) {
   if (persisted) try { sessionStorage.removeItem(relatedOperationStorageKey); } catch {}
 }
 async function loadRelatedThreads(parentThreadId) {
+  if (session?.runtime?.cdpInjectionEnabled === false) return {
+    ok: true, threadId: parentThreadId, subagents: [], sideThreads: [],
+    completedSubagents: [], completedSubagentCount: 0, subagentsComplete: true, canCreateSideThread: false
+  };
   if (!session || !validRelatedThreadId(parentThreadId))
     throw new Error("请先选择主会话");
   const scope = privateInputScope(session);
@@ -2161,6 +2348,7 @@ async function openRelatedThread(item, kind, parentThreadId = selectedId, {
   owner = relatedNavigationOwner, initialThread = null, replaceHistory = false,
   preparedView = false, onViewReady = null
 } = {}) {
+  if (session?.runtime?.cdpInjectionEnabled === false) return;
   if (relatedSessionView || !validRelatedThreadId(item?.id) || parentThreadId !== selectedId) return;
   const view = rememberRelatedView(item.id, kind, null, item.name || item.title || "",
     { openedFromThreadId: parentThreadId, ephemeral: item.ephemeral });
@@ -2360,6 +2548,7 @@ async function resolveRelatedOperation(record, { allowSelection = false } = {}) 
   return record.request;
 }
 async function runRelatedOperation(action, item = null) {
+  if (session?.runtime?.cdpInjectionEnabled === false) return;
   const parentThreadId = selectedId, scope = privateInputScope(session);
   if (!session || relatedSessionView || !validRelatedThreadId(parentThreadId) || thread?.id !== parentThreadId
       || threadReadOnly(parentThreadId) || !connected) return;
@@ -3211,10 +3400,12 @@ async function loadModels(force = false) {
   }
   if (modelsPromise) return modelsPromise;
   const scope = privateInputScope(session);
+  const runtimeRevision = session?.runtime?.revision ?? 0;
   const previousModels = models;
   const request = (async () => {
-    const result = await api("/api/read/models", {});
-    if (!scope || privateInputScope(session) !== scope) return [];
+    const result = await api("/api/read/models", { forceReload: force });
+    if (!scope || privateInputScope(session) !== scope
+        || (session?.runtime?.revision ?? 0) !== runtimeRevision) return [];
     if (!Array.isArray(result.data) || !result.data.every(model => model && typeof model.model === "string"
         && (model.supportedReasoningEfforts == null || Array.isArray(model.supportedReasoningEfforts))))
       throw new Error("模型列表返回格式无效");
@@ -4722,6 +4913,7 @@ async function syncConnectionState(source = stream, { recoveryProbe = false } = 
     await reconnectChangedAuthorization();
     return false;
   }
+  if (latest.runtime) applyRemoteRuntime(latest.runtime);
   session = latest;
   setConnection((latest.nativeConnected || latest.serviceConnected) && source?.readyState === EventSource.OPEN);
   renderApprovals();
@@ -6115,6 +6307,7 @@ function shell() {
         ? relatedSessionView.openedFromThreadId || relatedSessionView.parentThreadId : null;
       return { deviceId: session?.device.id, cacheScope: privateInputScope(session),
         threadId: !creating ? parentThreadId || selectedId : null, readOnly: threadReadOnly(), connected,
+        relatedEnabled: session?.runtime?.cdpInjectionEnabled !== false,
         createPending: [...relatedThreadOperations.values()].some(record => ownsRelatedOperation(record)
           && record.parentThreadId === (parentThreadId || selectedId) && record.action === "createSideThread") };
     },
@@ -6314,6 +6507,28 @@ async function startNewChat(projectId, { focus = true, closeSidebar = true } = {
   rememberReadingPosition();
   if (focus) $("#prompt").focus();
 }
+function mergeIncompleteSidebar(previous, current) {
+  if (current.complete !== false || current.nativeBridge !== "harness"
+      || previous?.nativeBridge !== "harness") return current;
+  // 服务首批目录不完整时继续展示同一后端的已知会话；新数据优先，
+  // 完整目录返回后整体核对，不能把部分结果当作删除或取消置顶的证据。
+  const freshIds = new Set([...current.recent, ...current.pinnedThreads,
+    ...current.projects.flatMap(project => project.threads)].map(item => item.id));
+  const mergeRows = (old, fresh) => [...fresh, ...old.filter(item => !freshIds.has(item.id))];
+  const oldProjects = new Map(previous.projects.map(project => [project.id, project]));
+  const projectIds = new Set(current.projects.map(project => project.id));
+  return { ...current,
+    recent: mergeRows(previous.recent, current.recent),
+    pinnedThreads: mergeRows(previous.pinnedThreads, current.pinnedThreads),
+    projects: [
+      ...current.projects.map(project => ({ ...project,
+        threads: mergeRows(oldProjects.get(project.id)?.threads || [], project.threads) })),
+      ...previous.projects.filter(project => project.synthetic && !projectIds.has(project.id))
+        .map(project => ({ ...project, threads: project.threads.filter(item => !freshIds.has(item.id)) }))
+        .filter(project => project.threads.length)
+    ]
+  };
+}
 async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "foreground" } = {}) {
   if (pageLeaving || document.hidden) return;
   const generation = foregroundReadGeneration;
@@ -6368,6 +6583,8 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
         .filter(item => !sidebarReadRefreshSuppressions.has(item.id));
       filterDeletedSidebar(result, deviceId);
       filterSideThreadSidebar(result);
+      result = mergeIncompleteSidebar(sidebar, result);
+      filterDeletedSidebar(result, deviceId);
       if (JSON.stringify(sidebar) !== JSON.stringify(result)) {
         sidebar = result;
         cacheDisplayData("sidebar", "main", sidebarSnapshot(result));
@@ -7795,7 +8012,10 @@ function renderSubagentItem(item, previous, running = false) {
   node.setAttribute("aria-label", `${name}，${presentation.label}`);
   if (presentation.active) node.setAttribute("role", "status"); else node.removeAttribute("role");
   const ids = subagentThreadIds(item).filter(id => validRelatedThreadId(id) && id !== selectedId);
-  const canOpen = !relatedSessionView && ids.length === 1, parentThreadId = selectedId;
+  const disabled = session?.runtime?.cdpInjectionEnabled === false;
+  node.classList.toggle("subagent-item-disabled", disabled);
+  if (disabled) node.setAttribute("aria-disabled", "true"); else node.removeAttribute("aria-disabled");
+  const canOpen = !disabled && !relatedSessionView && ids.length === 1, parentThreadId = selectedId;
   node.onclick = canOpen ? () => void openRelatedThread({ id: ids[0], name }, "subagent", parentThreadId)
     .catch(error => notice(error.message, true)) : null;
   node.onkeydown = canOpen ? event => {
@@ -9704,12 +9924,13 @@ function renderMessages(keepScroll = true) {
       const editing = item.type === "userMessage" && editingMessage?.threadId === selectedId && editingMessage.messageId === item.id;
       const skillKey = userMessageHasSkills(item)
         ? JSON.stringify([skillRenderVersion, (item.content || []).filter(part => part.type === "skill")]) : "";
+      const relatedEnabled = session?.runtime?.cdpInjectionEnabled !== false;
       const node = cached?.item === item && cached.inActivity === inActivity && cached.running === running
         && cached.editing === editing && cached.skillKey === skillKey && cached.markdownVersion === markdownRenderVersion
-        && cached.relatedViewKind === relatedViewKind
+        && cached.relatedViewKind === relatedViewKind && cached.relatedEnabled === relatedEnabled
         ? cached.node : renderItem(item, cached?.item.type === item.type ? cached.node : null, inActivity, running);
       node.dataset.key = key;
-      renderedItems.set(key, { item, node, inActivity, running, editing, skillKey, relatedViewKind, markdownVersion: markdownRenderVersion });
+      renderedItems.set(key, { item, node, inActivity, running, editing, skillKey, relatedViewKind, relatedEnabled, markdownVersion: markdownRenderVersion });
       if (editing) node.messageActionBinding?.dispose();
       else if (item.type === "userMessage" || item.type === "agentMessage") {
         const threadId = selectedId;
@@ -9911,6 +10132,12 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   suppressAutomaticNewChat = false;
   const navigationVersion = ++relatedSelectionVersion;
   const nextRelatedView = relatedView === undefined ? relatedViewForThread(id) : normalizeRelatedView(relatedView, id);
+  if (session.runtime?.cdpInjectionEnabled === false && nextRelatedView) {
+    const parent = nextRelatedView.openedFromThreadId || nextRelatedView.parentThreadId;
+    if (validRelatedThreadId(parent) && parent !== id)
+      return selectThread(parent, { closeSidebar, force, relatedView: null, replaceHistory: true });
+    return showWelcome();
+  }
   const currentRelatedView = normalizeRelatedView(relatedSessionView, selectedId);
   const menuHeld = sessionMenu?.isOpen?.() || sessionMenu?.isSuspended?.();
   const returningToParent = !!(menuHeld && !nextRelatedView && currentRelatedView?.kind === "side"
@@ -11846,6 +12073,7 @@ function syncPendingFeedbackTimer() {
   }, Math.min(...remaining));
 }
 function updateComposer() {
+  $("#appearance-dialog")?.updateRemoteRuntimeSwitch?.();
   sessionTools?.updateContext();
   syncRelatedSessionLayout();
   if (!$("#composer")) return;
@@ -12275,7 +12503,8 @@ function setConnection(value) {
       || connectionRtt.nativeVersion !== nativeConnectionVersion
       || connectionRtt.connectionVersion !== connectionCycleVersion)) connectionRtt = null;
   const guidance = $("#desktop-connection-guidance");
-  if (guidance) guidance.hidden = session?.nativeConnected !== false || session?.serviceConnected === true;
+  if (guidance) guidance.hidden = session?.runtime?.cdpInjectionEnabled === false
+    || session?.nativeConnected !== false || session?.serviceConnected === true;
   renderConnectionIndicator();
   updateComposer();
   if (thread?.requests?.some(request => request.method === "remote/requestUserInputAsync")) renderApprovals();
@@ -12396,8 +12625,39 @@ function scheduleSidebarRefresh() {
   clearTimeout(sidebarTimer);
   sidebarTimer = setTimeout(() => void loadSidebar(null, { fresh: true }).catch(() => {}), 1200);
 }
+function applyRemoteRuntime(runtime) {
+  if (!session || typeof runtime?.cdpInjectionEnabled !== "boolean"
+      || !Number.isSafeInteger(runtime.revision)
+      || (session.runtime?.revision ?? -1) > runtime.revision) return;
+  const changed = session.runtime?.cdpInjectionEnabled !== runtime.cdpInjectionEnabled;
+  session.runtime = runtime;
+  session.capabilities = { ...session.capabilities,
+    sideThreads: runtime.cdpInjectionEnabled, subagents: runtime.cdpInjectionEnabled };
+  if (changed) {
+    ++nativeConnectionVersion;
+    cancelConnectionProbe();
+    retireForegroundReads("运行方式已切换");
+    // 切换后保留已有目录展示，静默读取新后端；旧后端的迟到响应不能回填。
+    modelsLoadedAt = 0; modelsPromise = null; modelsRetryAt = 0;
+    if ($("#model-button")) void loadModels(true).catch(() => {});
+    sessionMenu?.close();
+    sessionMenu?.invalidate();
+    if ($("#messages")) renderMessages();
+    if (!runtime.cdpInjectionEnabled) {
+      stopRelatedSessionTimers();
+      dismissSideCreation({ canceled: true });
+      if (relatedSessionView) void returnToParentSession().catch(() => {});
+    }
+  }
+  sessionMenu?.updateContext();
+}
 function receive(event) {
   if (handleRemoteChannelEvent(event)) return;
+  if (event.method === "remote/runtimeChanged") {
+    applyRemoteRuntime(event.params?.runtime);
+    void withRecoveryErrorSilence(() => refreshConnectedSession()).catch(() => {});
+    return;
+  }
   const rawParams = event.params || {};
   const eventThreadId = rawParams.threadId ?? rawParams.conversationId ?? rawParams.thread?.id;
   const suppressSidebarRefresh = event.method === "remote/sidebarChanged"
@@ -12923,13 +13183,15 @@ async function connectPage(signal) {
   const deviceId = session.device.id;
   startConnectionPoll(deviceId);
   void recoverQuestionReceipts();
-  try { await refreshAll(); }
-  catch (error) { if (session?.device.id === deviceId) notice(error.message, true); }
+  // 用户要求首次进入及上次停在新建时立即可编辑；侧栏读取不能阻塞新建页，
+  // 已有会话仍先恢复缓存和原会话身份，不在后台刷新结束后覆盖用户的新选择。
   if (session?.device.id === deviceId && !selectedId && !creating
       && !new URLSearchParams(location.hash.slice(1)).get("thread")) {
     const startNew = !suppressAutomaticNewChat;
     showWelcome({ startNew });
   }
+  try { await refreshAll(); }
+  catch (error) { if (session?.device.id === deviceId) notice(error.message, true); }
   updateComposer(); void resolvePending(); drainPendingNotificationOpen();
 }
 function probeConnectionRecovery() {

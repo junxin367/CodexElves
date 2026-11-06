@@ -317,7 +317,10 @@ pub(super) async fn catch_up(
     uri: Uri,
 ) -> Result<Json<Value>, ApiError> {
     let device = authorized(&state, &headers).await?;
-    let value = replay(&state.controller, &uri);
+    let value = state
+        .controller
+        .replay_for_device(&device.id, replay(&state.controller, &uri))
+        .await;
     state
         .controller
         .authorization(device, None)

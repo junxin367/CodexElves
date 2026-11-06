@@ -509,6 +509,66 @@ h.api.clear();
     );
 }
 
+#[test]
+fn request_client_side_thread_context_recovers_after_late_intl() {
+    run_native_subagent_contract(
+        r#"
+const h=createHarness(),scans=[],intl={formatMessage(){return "侧边聊天";}};
+const root={__reactFiber$fixture:{memoizedProps:{value:null}}};
+h.threads.set("root",{id:"root",cwd:"/side-context-fixture",ephemeral:false});
+h.threads.set("side",{id:"side",ephemeral:true});
+h.env.sideThreadEntries=async()=>[{threadId:"side",parentThreadId:"root",title:"侧边",createdAtMs:10}];
+let enabled=true,created=0;
+Object.assign(h.env,{
+  window:{},document:{querySelectorAll(selector){scans.push(selector);return [root];}},
+  Node:class {},nativeIntl:null,nativeNavigate:()=>{},
+  isManager:value=>value?.__codexElvesRequestClientManager===true,isRequestClient:()=>false,
+  sideThreadsManager:h.env.manager,notificationManager:h.env.manager,
+  unsubscribe:[],sidebarUnsubscribe:[],ensureRequestClientEvents:()=>{},
+  validateCompactionQueueSendPayload:()=>{},validateGoalComposerPayload:()=>{},resetStaleManager:()=>{},
+  nativeReadActions:new Set(["relatedThreads","workspaceContext"]),
+  requestClientReadActions:new Set(["relatedThreads","createSideThread","workspaceContext"]),
+  guardThreadAction:h.api.guard,relatedThreads:h.api.related,
+  nativeSideFeatureEnabled:()=>enabled,reportNativeCompatibilityDiagnostic:()=>{},
+  createSideThread:async()=>{
+    assert.equal(h.env.nativeIntl,intl,"直接创建也须取得页面的真实格式化对象");
+    created++;return {ok:true,threadId:"created-side"};
+  }
+});
+const call=new Function("env",`with(env){
+  ${extract("function discover(","function blockingRequestsSnapshot(")}
+  ${extract("async function call(action,","window.__codexElvesRemoteAccess =")}
+  return call;
+}`)(h.env);
+let result=await call("workspaceContext",{threadId:"root"});
+assert.equal(result.ok,true,JSON.stringify(result));
+assert.equal(scans.length,0,"普通会话读取不能因侧边依赖缺失而扫描整页");
+result=await call("relatedThreads",{threadId:"root"});
+assert.equal(result.ok,true,JSON.stringify(result));
+assert.equal(result.canCreateSideThread,false,"依赖尚未出现时保留不可创建状态");
+assert.equal(result.sideThreads[0].id,"side","依赖缺失不能丢失已有侧边会话");
+assert(scans.length>0,"已有 request-client 管理器也必须补取缺失的侧边依赖");
+
+root.__reactFiber$fixture.memoizedProps.value=intl;
+result=await call("relatedThreads",{threadId:"root"});
+assert.equal(result.canCreateSideThread,true,"页面依赖稍后出现后，能力应自动恢复");
+assert.equal(h.env.nativeIntl,intl,"必须复用真实页面对象，不能伪造格式化器");
+const readyScans=scans.length;
+enabled=false;
+result=await call("relatedThreads",{threadId:"root"});
+assert.equal(result.canCreateSideThread,false,"原生功能关闭时仍按现有规则禁用");
+assert.equal(scans.length,readyScans,"依赖齐全后不重复扫描页面");
+
+enabled=true;h.env.nativeIntl=null;
+result=await call("createSideThread",{threadId:"root"});
+assert.equal(result.ok,true,JSON.stringify(result));
+assert.equal(created,1,"补取依赖后只派发一次创建");
+assert(scans.length>readyScans,"直接创建也不能依赖之前打开过关联菜单");
+h.api.clear();
+"#,
+    );
+}
+
 fn run_native_subagent_contract(scenario: &str) {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let harness = r#"
@@ -9678,8 +9738,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = include_str!("../../../assets/remote-access/native.js");
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 131"));
-    assert!(script.contains("version: 131"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 134"));
+    assert!(script.contains("version: 134"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));
@@ -10512,6 +10572,116 @@ fn injection_script_resolves_temporary_thread_id_and_marks_stale_token_usage() {
 }
 
 #[test]
+fn renderer_token_usage_resolves_hidden_markers_only_within_visible_main_page() {
+    let script = assets::renderer_features_script();
+    let section = |start: &str, end: &str| {
+        let from = script.find(start).expect("session identity helper");
+        let to = from + script[from..].find(end).expect("helper boundary");
+        &script[from..to]
+    };
+    let source = [
+        section(
+            "  function validThreadSessionKey(",
+            "\n  let codexTransportPollBusy",
+        ),
+        section(
+            "  function codexServiceTierBadgeVisibleElement(",
+            "\n  function codexServiceTierBadgeText(",
+        ),
+        section(
+            "  function codexServiceTierIsMainComposerElement(",
+            "\n  function codexServiceTierVisibleComposerFooters(",
+        ),
+    ]
+    .join("\n");
+    let node_script = format!(
+        "const source={};\n",
+        serde_json::to_string(&source).unwrap()
+    ) + r#"
+const assert=require("node:assert/strict");
+class Element {
+  constructor(parent=null,options={}) {
+    this.parentElement=parent;this.isConnected=true;
+    this.display=options.display||"block";this.visibility=options.visibility||"visible";
+    this.width=options.width??800;this.height=options.height??200;
+    this.attrs={...options.attrs};
+  }
+  getAttribute(name) { return this.attrs[name]??null; }
+  closest(selector) {
+    for(let node=this;node;node=node.parentElement) {
+      if(selector==="[data-app-shell-focus-area]") {
+        if(node.getAttribute("data-app-shell-focus-area")!==null)return node;
+      } else if(Object.hasOwn(node.attrs,"hidden")||node.attrs["aria-hidden"]==="true"
+          ||Object.hasOwn(node.attrs,"inert"))return node;
+    }
+    return null;
+  }
+  getBoundingClientRect() {
+    for(let node=this;node;node=node.parentElement)
+      if(node.display==="none"||Object.hasOwn(node.attrs,"hidden"))return {width:0,height:0};
+    return this.display==="contents"?{width:0,height:0}:{width:this.width,height:this.height};
+  }
+}
+const area=(name,options={})=>new Element(null,{
+  ...options,attrs:{"data-app-shell-focus-area":name,...options.attrs}
+});
+const marker=(owner,id,options={})=>new Element(owner,{
+  display:"none",...options,attrs:{"data-above-composer-conversation-id":id}
+});
+const selected={ref:{session_id:"local:client-new-thread:temporary-token-session",title:"界面名称与存储标题不同"}};
+const realId="01a1b111-2222-7333-8444-555566667777";
+const cached=marker(new Element(area("main",{display:"none"})),"cached-thread-11111111",{display:"grid"});
+const side=marker(new Element(area("right")),"side-thread-22222222");
+const mainOwner=new Element(area("main"));
+const current=marker(mainOwner,realId);
+function create(markers) {
+  return new Function("document","HTMLElement","getComputedStyle","projectMoveSessionKey",
+    "sessionRows","sessionRefFromRow","isCurrentSessionRow","locationThreadId",
+    `${source};return {active:activeConversationIdFromDom,current:currentSessionRefFromDom,
+      resolve:resolveTemporarySessionRef};`)(
+    {querySelectorAll:selector=>{
+      assert.equal(selector,"[data-above-composer-conversation-id]");return markers;
+    }},
+    Element,node=>({display:node.display,visibility:node.visibility}),
+    id=>String(id||"").replace(/^local:/,""),()=>[selected],row=>row.ref,
+    row=>row===selected,()=>""
+  );
+}
+let api=create([cached,side,current]);
+assert.equal(api.active(),realId,"编号标记隐藏但所属主页面可见时，仍须取得真实编号");
+assert.equal(api.current().session_id,realId,"Token 查询不能继续使用侧栏保留的临时编号");
+assert.deepEqual(api.resolve(selected.ref),{...selected.ref,session_id:realId});
+const stable={session_id:"local:stable-thread-33333333",title:"已有会话"};
+assert.equal(api.resolve(stable),stable,"已有稳定编号不改写");
+assert.equal(create([cached,side]).active(),"","隐藏页面和侧边面板都不能成为主会话来源");
+
+const contents=new Element(mainOwner,{display:"contents"});
+assert.equal(create([marker(contents,realId)]).active(),realId,"无布局框的包装层不应阻断解析");
+const hiddenContents=new Element(mainOwner,{display:"contents",visibility:"hidden"});
+assert.equal(create([marker(hiddenContents,realId)]).active(),"","不能越过隐藏的包装层");
+for(const attrs of [{hidden:""},{"aria-hidden":"true"},{inert:""}]) {
+  const hiddenOwner=new Element(mainOwner,{attrs});
+  assert.equal(create([marker(hiddenOwner,realId)]).active(),"","隐藏或停用的页面不能借用外层可见区域");
+}
+const zeroOwner=new Element(mainOwner,{width:0,height:0});
+assert.equal(create([marker(zeroOwner,realId)]).active(),"","不能越过零尺寸布局容器寻找可见祖先");
+const shown=marker(mainOwner,realId,{display:"grid"});
+assert.equal(create([shown]).active(),realId,"保留原有可见标记的读取");
+assert.equal(create([marker(mainOwner,"local:client-new-thread:pending")]).active(),"","临时编号不能冒充真实编号");
+"#;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(node_script)
+        .output()
+        .expect("node should be available");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn injection_script_keeps_session_ref_stable_and_refreshes_after_turn_completion() {
     let script = assets::injection_script(45221);
 
@@ -11251,6 +11421,7 @@ fn injection_script_uses_independent_fast_in_default_model_menu() {
     assert!(script.contains("getMenu: codexFastModelMenu"));
     assert!(script.contains("getModel: codexFastSelectedModel"));
     assert!(script.contains("getModelLabel: codexFastModelLabel"));
+    assert!(script.contains("getComposers: codexFastComposerAnchors"));
     let model_color = script
         .split(r#"[data-codex-elves-fast-model="true"] {"#)
         .nth(1)
@@ -11400,36 +11571,40 @@ const turn=(threadId,model="gpt-6.1-sol",serviceTier="priority")=>({threadId,mod
  assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),undefined);
  model="gpt-6.1-sol";await api.refresh();
 
- const sideComposer=container(),sideLabel=element("span");sideLabel.textContent="6.1 Sol";
- sideComposer.appendChild(sideLabel);
- const sideContext={hostId:"local",threadId:"thread-dddddddd"};
- options.getIndicators=()=>[
-   {context:{hostId:"local",threadId:"thread-aaaaaaaa"},model:"gpt-6.1-sol",label:modelLabel},
-   {context:sideContext,model,label:sideLabel}
- ];
- context=sideContext;await api.refresh();
- assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true",
-   "侧边菜单打开时，已开启 Fast 的主会话仍保持名称标蓝");
+ const sideLabel=element("span");sideLabel.textContent="6.1 Sol";composer.appendChild(sideLabel);
+ const mainTarget={context:{hostId:"local",threadId:"thread-aaaaaaaa"},model:"gpt-6.1-sol",label:modelLabel};
+ const sideTarget={context:{hostId:"local",threadId:"side-thread-dddddddd"},model:"gpt-6.1-sol",label:sideLabel};
+ const originalGetters={getContext:options.getContext,getModel:options.getModel,getModelLabel:options.getModelLabel};
+ options.getComposers=()=>[mainTarget,sideTarget];
+ options.getContext=anchor=>anchor?anchor.context:context;
+ options.getModel=(_models,anchor)=>anchor?anchor.model:model;
+ options.getModelLabel=(_models,anchor)=>anchor?anchor.label:modelLabel;
+ context=sideTarget.context;
+ await api.refresh();
+ assert.equal(query("data-codex-elves-fast").getAttribute("aria-pressed"),"false","侧边默认关闭，不继承主会话 Fast");
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true","主会话标蓝不因打开侧边菜单而丢失");
  assert.equal(sideLabel.getAttribute("data-codex-elves-fast-model"),undefined);
  await toggle();
- assert.equal(storage.get("codex-elves-fast-session-v1:local:thread-dddddddd"),"true");
+ assert.equal(storage.get("codex-elves-fast-session-v1:local:side-thread-dddddddd"),"true");
+ assert.equal(storage.get("codex-elves-fast-session-v1:local:thread-aaaaaaaa"),"true","侧边切换不能改主会话设置");
  assert.equal(sideLabel.getAttribute("data-codex-elves-fast-model"),"true");
- assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true");
- assert.equal((await api.patchTurnRequest(turn("thread-dddddddd"))).serviceTier,"priority");
- assert.equal((await api.patchTurnRequest(turn("thread-bbbbbbbb"))).serviceTier,"default",
-   "侧边开启 Fast 不能修改其他主会话");
- model="claude-opus-5";await api.refresh();
- assert.equal(sideLabel.getAttribute("data-codex-elves-fast-model"),undefined,
-   "侧边切换非 GPT 后移除该输入区的 Fast 颜色");
- assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true",
-   "侧边模型不支持 Fast 不能清除主会话的有效状态");
- model="gpt-6.1-sol";await api.refresh();await toggle();
+ assert.equal((await api.patchTurnRequest(turn("side-thread-dddddddd"))).serviceTier,"priority","侧边请求使用自己的 Fast");
+ assert.equal((await api.patchTurnRequest(turn("thread-bbbbbbbb"))).serviceTier,"default","未开启的其他会话保持默认等级");
+ const sideMenu=menu;menu=null;await api.refresh();
+ assert.equal(sideLabel.getAttribute("data-codex-elves-fast-model"),"true","侧边菜单关闭后保持自己的标蓝");
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true","主会话同时保持自己的标蓝");
+ const mainDraft={hostId:"local",draftId:"main-draft-beside-side-menu"};
+ options.getCreationContext=()=>mainDraft;
+ assert.equal(api.captureContext().draftId,mainDraft.draftId,"主页面创建不能捕获侧边菜单的会话");
+ assert.equal(api.captureContext().fast,false,"主页面新草稿不能继承侧边 Fast");
+ options.getCreationContext=()=>null;
+ assert.equal(api.captureContext(),null,"无法确认创建草稿时不能退回侧边会话");
+ delete options.getCreationContext;
+ sideTarget.model="claude-opus-5";model=sideTarget.model;menu=sideMenu;await api.refresh();
+ assert.equal(query("data-codex-elves-fast"),null,"侧边非 GPT 模型不显示 Fast");
  assert.equal(sideLabel.getAttribute("data-codex-elves-fast-model"),undefined);
  assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true");
- const sideMenu=menu;menu=null;await api.refresh();
- assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true",
-   "侧边菜单关闭后，主会话的 Fast 状态仍按自己的设置显示");
- menu=sideMenu;delete options.getIndicators;
+ delete options.getComposers;Object.assign(options,originalGetters);model="gpt-6.1-sol";
 
  context={hostId:"local",draftId:"draft-first"};await api.refresh();
  assert.equal(api.status().fast,false);
@@ -11497,6 +11672,124 @@ const turn=(threadId,model="gpt-6.1-sol",serviceTier="priority")=>({threadId,mod
 }
 
 #[test]
+fn renderer_fast_side_menu_uses_its_own_composer_model_and_thread() {
+    let script = assets::renderer_features_script();
+    let section = |start: &str, end: &str| {
+        let from = script.find(start).unwrap();
+        let to = from + script[from..].find(end).unwrap();
+        &script[from..to]
+    };
+    let source = [
+        section(
+            "function codexServiceTierModelMatchKey(",
+            "// 从 composer footer",
+        ),
+        section(
+            "function codexServiceTierUniqueCatalogMatch(",
+            "function codexServiceTierSelectedModelTexts(",
+        ),
+        section(
+            "  function codexFastComposerAnchor(",
+            "  function codexComposerModelPlacement(",
+        ),
+    ]
+    .join("\n");
+    let node_script = format!(
+        "const source={};\n",
+        serde_json::to_string(&source).unwrap()
+    ) + r#"
+const assert=require("node:assert/strict");
+const models=[{model:"gpt-6.1-sol"},{model:"claude-opus-5"}],anchors=new Map();
+let opened=[],fallbackReads=0;
+function anchor(id,area,threadId,model) {
+  const value={id,area,text:model,visible:true,nearby:true,
+    getAttribute:key=>key==="data-composer-navigation-target"?"reasoning":null,
+    matches:()=>true,querySelectorAll:()=>[],
+    fiber:{memoizedProps:{conversationId:threadId},
+      return:{memoizedProps:{composerMode:"local",hostId:"local"}}}};
+  anchors.set(id,value);return value;
+}
+function menu(owner,text=owner?.text,view="simple") {
+  const value={isConnected:true,visible:true,owner,view,
+    getAttribute:key=>key==="aria-labelledby"?(owner?.id||""):null,
+    querySelector:selector=>selector==="[data-model-picker-view]"
+      ?{getAttribute:()=>value.view}
+      :selector==="[data-model-picker-view-toggle]"?{text}:null};
+  value.surface={closest:()=>value};return value;
+}
+const main=anchor("main-trigger","main","thread-main-aaaaaaaa","6.1 Sol");
+const side=anchor("side-trigger","right-panel","thread-side-bbbbbbbb","6.1 Sol");
+const bottom=anchor("bottom-trigger","bottom-panel","thread-bottom-cccccccc","Claude Opus 5");
+const document={
+  querySelectorAll:selector=>selector==="[data-model-picker-view], [data-model-picker-power-slider]"
+    ?opened.map(value=>value.surface)
+    :selector==='[data-composer-navigation-target="reasoning"]'?[main,side,bottom]:[],
+  getElementById:id=>anchors.get(id)||null
+};
+const api=new Function("document","codexServiceTierIsMainComposerElement",
+  "codexServiceTierBadgeVisibleElement","codexServiceTierFooterHasNearbyComposerInput",
+  "reactFiberKeys","isTemporaryThreadId","validThreadSessionKey","crypto",
+  "codexServiceTierSelectedModelTexts","codexServiceTierComposerSelectedModel",
+  "taskBoardReasoningEffortDefinitions",`${source};return {
+    main:codexFastComposerAnchor,menu:codexFastModelMenu,context:codexFastComposerContext,
+    model:codexFastSelectedModel
+  };`)(document,node=>node.area==="main",node=>node?.visible===true,node=>node.nearby===true,
+  ()=>["fiber"],id=>String(id).includes("new-thread:"),id=>id,
+  {randomUUID:()=>assert.fail("已有侧边会话不能被当作草稿")},
+  node=>node?.text?[node.text]:[],
+  ()=>{fallbackReads++;return "gpt-6.1-sol";},
+  ["low","medium","high","xhigh","max","ultra"].map(id=>({id,label:id})));
+const mainMenu=menu(main),sideMenu=menu(side),bottomMenu=menu(bottom);
+opened=[sideMenu];
+assert.equal(api.menu(),sideMenu,"侧边菜单不能被主输入框条件排除");
+assert.deepEqual(api.context(),{hostId:"local",threadId:"thread-side-bbbbbbbb"});
+assert.equal(api.model(models),"gpt-6.1-sol");
+assert.equal(api.main(),main,"其他主页面功能的锚点仍限于主输入框");
+opened=[bottomMenu];
+assert.deepEqual(api.context(),{hostId:"local",threadId:"thread-bottom-cccccccc"});
+assert.equal(api.model(models),"claude-opus-5","侧边模型不能借用主会话的 GPT");
+assert.equal(api.model(models,side),"gpt-6.1-sol","显式输入框读取不受另一个菜单影响");
+opened=[mainMenu];
+assert.deepEqual(api.context(),{hostId:"local",threadId:"thread-main-aaaaaaaa"});
+opened=[];
+assert.deepEqual(api.context(side),{hostId:"local",threadId:"thread-side-bbbbbbbb"},
+  "菜单关闭后仍可按侧边输入框恢复独立显示");
+side.text="未识别模型";
+assert.equal(api.model(models,side),"","侧边模型未知时不能回退主会话模型");
+assert.equal(fallbackReads,0);
+side.text="6.1 Sol";
+
+for(const owner of [null,{...side,id:"missing-owner"}]) {
+  opened=[menu(owner)];assert.equal(api.menu(),null,"无法确认菜单归属时不猜主会话");
+}
+opened=[sideMenu];side.visible=false;
+assert.equal(api.menu(),null,"隐藏的菜单所属输入框不能生效");
+side.visible=true;side.nearby=false;
+assert.equal(api.menu(),null,"普通按钮不能冒充聊天输入框");
+side.nearby=true;sideMenu.view="models";
+assert.equal(api.menu(),null,"Fast 仅显示在默认滑块视图");
+sideMenu.view="simple";
+for(const props of [{composerMode:"cloud",hostId:"local"},{composerMode:"local",hostId:"remote-host"}]) {
+  side.fiber.return.memoizedProps=props;
+  assert.equal(api.menu(),null,"云会话和远程 host 不进入本地 Fast");
+}
+side.fiber.return.memoizedProps={composerMode:"local",hostId:"local"};
+mainMenu.visible=false;opened=[mainMenu,sideMenu];
+assert.equal(api.menu(),sideMenu,"隐藏的旧菜单不能抢占侧边菜单");
+"#;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(node_script)
+        .output()
+        .expect("node should be available");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn renderer_fast_reads_open_model_menu_without_guessing_the_composer_model() {
     let script = assets::renderer_features_script();
     let section = |start: &str, end: &str| {
@@ -11534,7 +11827,7 @@ const api=new Function("codexFastModelMenu","codexServiceTierSelectedModelTexts"
  control=>[control.text],
  ()=>{fallbackCalls++;return"gpt-6.1-sol";},
  ["low","medium","high","xhigh","max","ultra"].map(id=>({id,label:id})),
- ()=>text===null?null:{text:"6.1 Sol",matches:()=>isModelControl,querySelectorAll:()=>labels},
+ ()=>({text,matches:()=>isModelControl,querySelectorAll:()=>labels}),
  node=>node.visible,
  node=>node.textContent
 );
@@ -11542,9 +11835,6 @@ const read=api.read;
 assert.equal(read(entries),"gpt-6.1-sol");
 text="Claude Opus 5";assert.equal(read(entries),"claude-opus-5");
 text="未知模型";assert.equal(read(entries),"");
-assert.equal(read(entries,{text:"Claude Opus 5"}),"claude-opus-5",
- "读取某个输入区的模型时，不能借用另一个仍打开的模型菜单");
-assert.equal(read(entries,{text:"未知模型"}),"","未知侧边模型不能回退到主会话模型");
 text="Sol";assert.equal(read([
  {model:"gpt-6.1-sol",displayName:"Sol"},{model:"gpt-5.6-sol",displayName:"Sol"}
 ]),"");
@@ -11576,9 +11866,7 @@ assert.match(source,/用户要求只改变模型名称颜色/);
 #[test]
 fn renderer_fast_resolves_only_the_active_local_composer_context() {
     let source = assets::renderer_features_script();
-    let start = source
-        .find("  const codexServiceTierComposerFooterSelector =")
-        .unwrap();
+    let start = source.find("  const codexFastDraftIds =").unwrap();
     let end = start
         + source[start..]
             .find("  function codexFastSelectedModel(")
@@ -11588,25 +11876,13 @@ fn renderer_fast_resolves_only_the_active_local_composer_context() {
         serde_json::to_string(&source[start..end]).unwrap()
     ) + r#"
 const assert=require("node:assert/strict");
-let anchor=null,sequence=0,menu=null,controls=[],activeElement=null;
-const owners=new Map();
-const document={
- get activeElement(){return activeElement;},
- getElementById:id=>owners.get(id)||null,
- querySelectorAll:selector=>selector.includes("data-model-picker-view")
-  ?menu?[{closest:()=>menu}]:[]
-  :controls.length?controls:anchor?[anchor]:[]
-};
-const api=new Function("document","codexServiceTierBadgeVisibleElement",
- "codexServiceTierFooterHasNearbyComposerInput","codexServiceTierIsMainComposerElement",
- "reactFiberKeys","isTemporaryThreadId","validThreadSessionKey","crypto",
- `${source};return {read:codexFastComposerContext,menu:codexFastModelMenu,anchor:codexFastComposerAnchor};`)(
- document,node=>node.visible!==false,()=>true,
- node=>!node.area||node.area==="main",()=>["fiber"],id=>id.includes("client-new-thread:"),
+let anchor=null,sequence=0;
+const read=new Function("codexFastTargetComposerAnchor","reactFiberKeys","isTemporaryThreadId",
+ "validThreadSessionKey","crypto",`${source};return codexFastComposerContext;`)(
+ ()=>anchor,()=>["fiber"],id=>id.includes("client-new-thread:"),
  id=>/^[a-z0-9-]{8,128}$/i.test(id)?id:"",
  {randomUUID:()=>`draft-${++sequence}`}
 );
-const read=api.read;
 const props=(conversationId,composerMode="local",hostId="local")=>({
  memoizedProps:{conversationId},
  return:{memoizedProps:{composerMode,hostId}}
@@ -11629,34 +11905,6 @@ anchor.fiber=props("thread-aaaaaaaa","local","remote-host");
 assert.equal(read(),null);
 anchor.fiber={memoizedProps:{composerMode:"local"}};
 assert.equal(read(),null,"缺少会话或草稿身份时不猜测当前侧栏行");
-
-const main={id:"main-trigger",area:"main",fiber:props("thread-main-aaaa"),
- getAttribute:()=>null,matches:()=>true};
-const side={id:"side-trigger",area:"right-panel",fiber:props("thread-side-bbbb"),
- getAttribute:()=>null,matches:()=>true};
-controls=[side,main];
-owners.set(main.id,main);owners.set(side.id,side);
-const sideArea={getAttribute:()=>"right-panel",querySelectorAll:()=>[side]};
-main.closest=()=>({getAttribute:()=>"main",querySelectorAll:()=>[main]});
-side.closest=()=>sideArea;
-menu={id:"side-menu",isConnected:true,
- getAttribute:name=>name==="aria-labelledby"?side.id:null,
- querySelector:()=>({getAttribute:()=>"simple"})};
-assert.equal(api.menu(),menu,"侧边输入区打开的模型菜单也必须提供 Fast 入口");
-assert.deepEqual(read(),{hostId:"local",threadId:"thread-side-bbbb"},
- "菜单的原生触发按钮决定会话归属，不能读取仍可见的主会话");
-assert.equal(api.anchor(),main,"上下文用量等既有主输入区功能仍使用主会话");
-menu.getAttribute=name=>name==="aria-labelledby"?main.id:null;
-assert.deepEqual(read(),{hostId:"local",threadId:"thread-main-aaaa"});
-menu.getAttribute=()=>null;
-assert.equal(read(),null,"多个输入区同时存在时，未知菜单归属不能借用主会话");
-menu=null;activeElement=side;
-assert.deepEqual(read(),{hostId:"local",threadId:"thread-side-bbbb"},
- "关闭侧边菜单后，输入区焦点仍应指向侧边会话");
-activeElement=main;
-assert.deepEqual(read(),{hostId:"local",threadId:"thread-main-aaaa"});
-side.fiber=props("thread-side-bbbb","cloud");
-assert.equal(read(side),null,"侧边入口仍保留本机会话限制");
 "#;
     let output = Command::new("node")
         .arg("-e")
@@ -17603,6 +17851,14 @@ const modernFixture = {
   queueExplicit: bedrockFixture.queueExplicit,
   nativeBedrock: true,
 };
+// 合并旧修复分支时保留结构漂移回归；不恢复早期 request-client 仅可读的过期断言。
+const driftedFixture = {
+  ...modernFixture,
+  queueExplicit: modernFixture.queueExplicit.replace(
+    "let[y,b]=await Promise.all",
+    `${Array.from({length: 2000}, () => "void 0;").join("")}let[y,b]=await Promise.all`,
+  ),
+};
 
 // 原生 requirements 和 tier 解析函数也直接保留，验证补丁没有绕开它们。
 const access = function Uat(e){let t=e.requirements?.featureRequirements,n=t?.fast_mode!==!1;return{fast:n,ultrafast:(`supportsIndependentSpeedModes`in e&&e.supportsIndependentSpeedModes===!0||n)&&t?.ultrafast_mode!==!1}};
@@ -17893,7 +18149,7 @@ async function runNativeFastFixture(fixture) {
 }
 
 async function runNativeFastTests() {
-  for (const fixture of [legacyFixture, bedrockFixture, modernFixture]) await runNativeFastFixture(fixture);
+  for (const fixture of [legacyFixture, bedrockFixture, modernFixture, driftedFixture]) await runNativeFastFixture(fixture);
   await require("./native-fast-module.test.cjs")({ source, url });
   return "Native Fast legacy/current structures, native auth, requirements, local scope, opt-in, queue and module transport behavior passed";
 }
@@ -18019,6 +18275,15 @@ async function runNativeFastModuleTests({ source, url }) {
     source,
   ].join("\n");
   const env = browser();
+  const dependencies = env.api.moduleDependencies(
+    'import "./static.js"; export * from "../export.js"; const dynamic = import("./dynamic.js");',
+    url,
+  );
+  assert.deepEqual(Array.from(dependencies), [
+    "app://-/assets/static.js",
+    "app://-/export.js",
+    "app://-/assets/dynamic.js",
+  ]);
   const prepared = env.api.prepareModule(fixture, url);
   assert.equal(prepared.ok, true, JSON.stringify(prepared.diagnostics));
   assert.equal(prepared.diagnostics.staticImports, 4);

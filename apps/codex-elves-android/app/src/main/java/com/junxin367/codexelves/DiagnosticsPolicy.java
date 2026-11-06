@@ -40,7 +40,7 @@ final class DiagnosticsPolicy {
         "origin-mismatch", "missing-fields", "stream-open", "stream-error", "poll",
         "replace", "heartbeat", "worker-timeout", "worker-response-timeout",
         "all-channels-disconnected", "route-change", "socket-open-timeout",
-        "socket-idle-timeout", "handshake-invalid", "page-resume", "startup"
+        "socket-idle-timeout", "handshake-invalid", "page-resume", "startup", "sensor", "timer"
     );
     private static final Set<String> ERROR_TYPES = set(
         "unknown", "network", "timeout", "http", "ssl", "renderer", "resource", "parse",
@@ -131,6 +131,18 @@ final class DiagnosticsPolicy {
     }
 
     private static boolean validField(String key, Object value) {
+        // 主题诊断须与网页、电脑端同步；只允许光照与固定枚举，不放开任意消息或设备信息。
+        if ("lux".equals(key) || "previousLux".equals(key)) {
+            if (!(value instanceof Number)) return false;
+            double number = ((Number) value).doubleValue();
+            return Double.isFinite(number) && number >= 0 && number <= 9_007_199_254_740_991d;
+        }
+        if ("localHour".equals(key) || "timezoneOffsetMinutes".equals(key)) {
+            if (!(value instanceof Number)) return false;
+            double number = ((Number) value).doubleValue();
+            return Double.isFinite(number) && number == Math.floor(number)
+                && ("localHour".equals(key) ? number >= 0 && number <= 23 : number >= -840 && number <= 840);
+        }
         if ("errorCode".equals(key)) {
             if (!(value instanceof Number)) return false;
             double code = ((Number) value).doubleValue();
@@ -139,7 +151,8 @@ final class DiagnosticsPolicy {
         }
         if ("visible".equals(key) || "online".equals(key)
             || "pageLeaving".equals(key) || "connected".equals(key)
-            || "wasClean".equals(key) || "isTrusted".equals(key)) {
+            || "wasClean".equals(key) || "isTrusted".equals(key)
+            || "supported".equals(key) || "registered".equals(key)) {
             return value instanceof Boolean;
         }
         if ("readyState".equals(key) && value instanceof Number) {
@@ -150,7 +163,7 @@ final class DiagnosticsPolicy {
         if (set("status", "durationMs", "bytes", "sdk", "generation", "expectedBytes",
             "loadedBytes", "line", "width", "height", "count", "port", "closeCode",
             "delayMs", "backgroundMs", "attempt",
-            "draftChars", "attachmentCount").contains(key)) {
+            "draftChars", "attachmentCount", "stableMs", "sampleAgeMs", "themeSequence").contains(key)) {
             if (!(value instanceof Number)) {
                 return false;
             }
@@ -220,6 +233,14 @@ final class DiagnosticsPolicy {
             case "network":
                 return set("wifi", "cellular", "ethernet", "vpn", "other", "none",
                     "unknown").contains(text);
+            case "theme":
+            case "previousTheme":
+            case "targetTheme":
+                return set("light", "dark").contains(text);
+            case "themeMode":
+                return set("auto", "manual").contains(text);
+            case "decision":
+                return set("pending", "cancelled", "applied").contains(text);
             default:
                 return false;
         }

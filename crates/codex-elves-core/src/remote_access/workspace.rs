@@ -1,12 +1,12 @@
-//! Read-only Git views scoped to the workspace resolved by the native session bridge.
-use std::collections::HashSet;
+//! 根据会话后端确认的工作目录，提供只读文件和多仓库 Git 视图。
+use std::collections::{HashSet, VecDeque};
 #[cfg(windows)]
 use std::ffi::OsString;
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::Json;
 use axum::body::Body;
@@ -15,6 +15,7 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use futures_util::{StreamExt, stream};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -31,6 +32,14 @@ const MAX_DIFF_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 8 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(40);
+// 多仓库按目录发现，最多扫描 2 万个目录、10 万个目录项或 5 秒；
+// 同时读取 4 个仓库，完整列表限 1 万项，避免大工作区拖垮手机与电脑端。
+const MAX_REPOSITORIES: usize = 256;
+const MAX_REPOSITORY_DIRECTORIES: usize = 20_000;
+const MAX_REPOSITORY_ENTRIES: usize = 100_000;
+const MAX_WORKSPACE_FILES: usize = 10_000;
+const REPOSITORY_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+const REPOSITORY_LIST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +60,12 @@ struct Repository {
     root: PathBuf,
     head: Option<String>,
     authorization: RemoteAuthorization,
+}
+
+struct WorkspaceRepositories {
+    root: PathBuf,
+    paths: Vec<String>,
+    truncated: bool,
 }
 
 struct GitOutput {
@@ -138,10 +153,23 @@ pub(super) async fn changes(
         .await
         .map_err(super::authorization_error)?;
     let if_revision = requested_revision(&payload)?;
+    let all_repositories = match payload.get("allRepositories") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err(ApiError::new(400, "多仓库读取选项无效")),
+    };
     let cwd = super::workspace_context(&state, &payload, &authorization).await?;
     let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
-        let repo = Repository::discover(cwd, authorization.clone()).await?;
-        repo.listing().await
+        // 新页面显式请求多仓库；旧页面仍接收单仓库格式，避免同名文件被旧客户端错配预览。
+        if all_repositories {
+            WorkspaceRepositories::discover(cwd, &authorization)
+                .await?
+                .listing(&authorization)
+                .await
+        } else {
+            let repo = Repository::discover(cwd, authorization.clone()).await?;
+            repo.listing().await
+        }
     })
     .await
     .map_err(|_| ApiError::new(504, "读取 Git 变更超时，请稍后刷新"))??;
@@ -165,6 +193,13 @@ pub(super) async fn change(
         .await
         .map_err(super::authorization_error)?;
     let if_revision = requested_revision(&payload)?;
+    let repository = match payload.get("repository") {
+        None => None,
+        Some(Value::String(path)) if path.is_empty() || safe_relative_path(path) => {
+            Some(path.clone())
+        }
+        Some(_) => return Err(ApiError::new(400, "仓库路径无效，请从变更列表重新选择")),
+    };
     let path = payload
         .get("path")
         .and_then(Value::as_str)
@@ -179,14 +214,28 @@ pub(super) async fn change(
         .to_owned();
     let cwd = super::workspace_context(&state, &payload, &authorization).await?;
     let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
-        let repo = Repository::discover(cwd, authorization.clone()).await?;
+        let workspace_root = if repository.is_some() {
+            Some(resolve_workspace_root(cwd.clone(), &authorization).await?)
+        } else {
+            None
+        };
+        let repo = if let (Some(root), Some(path)) = (&workspace_root, &repository) {
+            repository_in_workspace(root, path, &authorization).await?
+        } else {
+            Repository::discover(cwd, authorization.clone()).await?
+        };
         let snapshot = repo.snapshot().await?;
         let entry = snapshot
             .files
             .into_iter()
             .find(|entry| entry.path == path && entry.section == section)
             .ok_or_else(|| ApiError::new(409, "该文件的变更状态已更新，请刷新变更列表"))?;
-        repo.detail(&entry).await
+        let mut detail = repo.detail(&entry).await?;
+        if let Some(root) = workspace_root {
+            detail["root"] = json!(root.to_string_lossy());
+            detail["repository"] = json!(repository);
+        }
+        Ok::<_, ApiError>(detail)
     })
     .await
     .map_err(|_| ApiError::new(504, "读取文件差异超时，请稍后重试"))??;
@@ -668,6 +717,253 @@ fn revision_payload(mut payload: Value, if_revision: Option<&str>) -> Result<Val
     }
     payload["revision"] = json!(revision);
     Ok(payload)
+}
+
+async fn resolve_workspace_root(
+    cwd: PathBuf,
+    authorization: &RemoteAuthorization,
+) -> Result<PathBuf, ApiError> {
+    let output = git(
+        &cwd,
+        &["rev-parse", "--show-toplevel"],
+        32 * 1024,
+        authorization,
+    )
+    .await?;
+    if output.truncated {
+        return Err(ApiError::new(503, "Git 仓库目录超过读取上限"));
+    }
+    let root = if output.success {
+        let root = String::from_utf8(output.bytes)
+            .map_err(|_| ApiError::new(422, "Git 仓库路径编码无法识别"))?;
+        let root = root.strip_suffix('\n').unwrap_or(&root);
+        PathBuf::from(root.strip_suffix('\r').unwrap_or(root))
+    } else {
+        // 非 Git 的多仓库容器以会话工作目录为边界，不要求容器自身有 .git。
+        cwd.clone()
+    };
+    tokio::task::spawn_blocking(move || {
+        let root = std::fs::canonicalize(root)
+            .map_err(|_| ApiError::new(404, "当前会话的工作目录已失效"))?;
+        if !cwd.starts_with(&root) || !super::canonical_path_is_local(&root) {
+            return Err(ApiError::new(403, "项目目录与当前会话不一致"));
+        }
+        Ok(root)
+    })
+    .await
+    .map_err(|_| ApiError::new(503, "无法读取项目目录"))?
+}
+
+fn has_repository_marker(root: &Path) -> bool {
+    std::fs::symlink_metadata(root.join(".git"))
+        .is_ok_and(|metadata| !is_link(&metadata) && (metadata.is_dir() || metadata.is_file()))
+}
+
+async fn repository_in_workspace(
+    root: &Path,
+    relative: &str,
+    authorization: &RemoteAuthorization,
+) -> Result<Repository, ApiError> {
+    let root = root.to_owned();
+    let relative = relative.to_owned();
+    let selected = tokio::task::spawn_blocking(move || {
+        let selected = if relative.is_empty() {
+            root
+        } else {
+            safe_local_path(&root, &relative)?
+        };
+        if !has_repository_marker(&selected) {
+            return Err(ApiError::new(409, "仓库目录已变化，请刷新变更列表"));
+        }
+        Ok(selected)
+    })
+    .await
+    .map_err(|_| ApiError::new(503, "无法读取所选仓库目录"))??;
+    let repository = Repository::discover(selected.clone(), authorization.clone()).await?;
+    if repository.root != selected {
+        return Err(ApiError::new(409, "仓库归属已变化，请刷新变更列表"));
+    }
+    Ok(repository)
+}
+
+impl WorkspaceRepositories {
+    async fn discover(cwd: PathBuf, authorization: &RemoteAuthorization) -> Result<Self, ApiError> {
+        let root = resolve_workspace_root(cwd, authorization).await?;
+        tokio::task::spawn_blocking(move || Self::scan(root))
+            .await
+            .map_err(|_| ApiError::new(503, "无法发现项目内的 Git 仓库"))?
+    }
+
+    fn scan(root: PathBuf) -> Result<Self, ApiError> {
+        let started = Instant::now();
+        let mut pending = VecDeque::from([String::new()]);
+        let mut paths = Vec::new();
+        let mut directories = 0;
+        let mut entries_seen = 0;
+        let mut truncated = false;
+        // 独立子仓库可能被外层 .gitignore 忽略；发现阶段按目录识别 .git，
+        // 每个仓库的变更仍由它自己的 Git 和忽略规则计算，不跟随目录联接越出项目。
+        'scan: while let Some(relative) = pending.pop_front() {
+            if directories == MAX_REPOSITORY_DIRECTORIES
+                || started.elapsed() >= REPOSITORY_DISCOVERY_TIMEOUT
+            {
+                truncated = true;
+                break;
+            }
+            directories += 1;
+            let directory = root.join(&relative);
+            if has_repository_marker(&directory) {
+                if paths.len() == MAX_REPOSITORIES {
+                    truncated = true;
+                    break;
+                }
+                paths.push(relative.clone());
+            }
+            let entries = match std::fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(_) if relative.is_empty() => {
+                    return Err(ApiError::new(404, "项目目录不存在或无法读取"));
+                }
+                Err(_) => {
+                    truncated = true;
+                    continue;
+                }
+            };
+            for entry in entries {
+                entries_seen += 1;
+                if entries_seen > MAX_REPOSITORY_ENTRIES
+                    || started.elapsed() >= REPOSITORY_DISCOVERY_TIMEOUT
+                {
+                    truncated = true;
+                    break 'scan;
+                }
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(_) => {
+                        truncated = true;
+                        continue;
+                    }
+                };
+                let file_type = match entry.file_type() {
+                    Ok(file_type) => file_type,
+                    Err(_) => {
+                        truncated = true;
+                        continue;
+                    }
+                };
+                if !file_type.is_dir() || file_type.is_symlink() {
+                    continue;
+                }
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    truncated = true;
+                    continue;
+                };
+                if is_search_skipped_directory(&name)
+                    || matches!(
+                        name.as_str(),
+                        ".venv"
+                            | "venv"
+                            | "__pycache__"
+                            | ".gradle"
+                            | ".next"
+                            | "coverage"
+                            | "out"
+                            | "tmp"
+                    )
+                {
+                    continue;
+                }
+                let child = if relative.is_empty() {
+                    name
+                } else {
+                    format!("{relative}/{name}")
+                };
+                if !safe_relative_path(&child) {
+                    truncated = true;
+                    continue;
+                }
+                // Windows 目录联接不一定被 file_type 标为 symlink，额外按重解析属性阻断。
+                match std::fs::symlink_metadata(entry.path()) {
+                    Ok(metadata) if !is_link(&metadata) => pending.push_back(child),
+                    Ok(_) => {}
+                    Err(_) => truncated = true,
+                }
+            }
+        }
+        paths.sort();
+        Ok(Self {
+            root,
+            paths,
+            truncated,
+        })
+    }
+
+    async fn listing(&self, authorization: &RemoteAuthorization) -> Result<Value, ApiError> {
+        let deadline = tokio::time::Instant::now() + REPOSITORY_LIST_TIMEOUT;
+        // 保持目录顺序并限制四个并发任务，响应版本和达到列表上限后的取舍都保持稳定。
+        let reads = self.paths.iter().cloned().map(|path| {
+            let root = self.root.clone();
+            let authorization = authorization.clone();
+            async move {
+                let result = tokio::time::timeout_at(deadline, async {
+                    let repository = repository_in_workspace(&root, &path, &authorization).await?;
+                    repository.snapshot().await
+                })
+                .await
+                .map_err(|_| ApiError::new(504, "仓库变更读取超时，请稍后刷新"))
+                .and_then(|result| result);
+                (path, result)
+            }
+        });
+        let mut snapshots = stream::iter(reads).buffered(4);
+        let mut repositories = Vec::new();
+        let mut files = Vec::new();
+        let mut truncated = self.truncated;
+        while let Some((path, snapshot)) = snapshots.next().await {
+            let mut repository = json!({
+                "path": &path,
+                "root": self.root.join(&path).to_string_lossy(),
+                "fileCount": 0,
+                "truncated": false,
+                "error": null,
+            });
+            match snapshot {
+                Ok(snapshot) => {
+                    repository["fileCount"] = json!(snapshot.files.len());
+                    repository["truncated"] = json!(snapshot.truncated);
+                    truncated |= snapshot.truncated;
+                    for entry in snapshot.files {
+                        if files.len() == MAX_WORKSPACE_FILES {
+                            truncated = true;
+                            repository["truncated"] = json!(true);
+                            break;
+                        }
+                        let mut entry = serde_json::to_value(entry)
+                            .map_err(|_| ApiError::new(503, "无法生成仓库变更条目"))?;
+                        entry["repository"] = json!(&path);
+                        files.push(entry);
+                    }
+                }
+                Err(error) => {
+                    truncated = true;
+                    repository["error"] = json!(error.message);
+                }
+            }
+            repositories.push(repository);
+        }
+        Ok(json!({
+            "ok": true,
+            "root": self.root.to_string_lossy(),
+            "repositories": repositories,
+            "files": files,
+            "truncated": truncated,
+            "message": if truncated {
+                Some("部分仓库或文件未能完整读取，请查看仓库状态后刷新。")
+            } else if self.paths.is_empty() {
+                Some("当前项目目录及子目录中未发现 Git 仓库。")
+            } else { None },
+        }))
+    }
 }
 
 impl Repository {
@@ -1223,6 +1519,14 @@ fn parse_status(bytes: &[u8], input_truncated: bool) -> Result<Snapshot, ApiErro
             }
             None => None,
         };
+        // Git 把未跟踪的独立子仓库表示为目录占位；由多仓库发现单独读取，不当作文件预览。
+        if x == b'?'
+            && y == b'?'
+            && path.ends_with('/')
+            && safe_relative_path(&path[..path.len() - 1])
+        {
+            continue;
+        }
         if !safe_relative_path(path) || old_path.is_some_and(|path| !safe_relative_path(path)) {
             truncated = true;
             continue;
@@ -1314,7 +1618,7 @@ async fn git_configured(
 ) -> Result<GitOutput, ApiError> {
     let reads_worktree = matches!(args.first(), Some(&"status") | Some(&"diff"));
     let mut config = if reads_worktree {
-        git_text_config(cwd).await?
+        git_safe_read_config(cwd).await?
     } else {
         Vec::new()
     };
@@ -1364,8 +1668,9 @@ async fn git_configured(
     git_process(cwd, args, limit, &config).await
 }
 
-async fn git_text_config(cwd: &Path) -> Result<Vec<String>, ApiError> {
-    // 用户要求远程变更与本机 Git 一致：只读取原有换行设置，仍隔离钩子、过滤器和外部命令。
+async fn git_safe_read_config(cwd: &Path) -> Result<Vec<String>, ApiError> {
+    // 用户要求远程变更与本机 Git 一致：只恢复换行设置和有效忽略文件，
+    // 仍隔离钩子、过滤器和外部命令，不能整体重新启用全局配置。
     // 按 Git 自身的 include / worktree 优先级读取，后出现的同名配置覆盖前值。
     let output = git_process_with_config_sources(
         cwd,
@@ -1385,7 +1690,37 @@ async fn git_text_config(cwd: &Path) -> Result<Vec<String>, ApiError> {
     if output.truncated || !matches!(output.exit_code, Some(0 | 1)) {
         return Err(ApiError::new(503, "无法读取 Git 换行设置"));
     }
-    parse_git_text_config(&output.bytes)
+    let mut config = parse_git_text_config(&output.bytes)?;
+    // 让 Git 按 include、仓库及工作树优先级取最终值，并展开 ~/ 等路径；
+    // 未显式配置时不覆盖 Git 自带的 XDG 默认忽略文件。
+    let excludes = git_process_with_config_sources(
+        cwd,
+        &[
+            "config",
+            "--null",
+            "--includes",
+            "--type=path",
+            "--get",
+            "core.excludesfile",
+        ],
+        32 * 1024,
+        &[],
+        true,
+    )
+    .await?;
+    if excludes.truncated || !matches!(excludes.exit_code, Some(0 | 1)) {
+        return Err(ApiError::new(503, "无法读取 Git 全局忽略文件设置"));
+    }
+    if excludes.exit_code == Some(0) {
+        let path = excludes
+            .bytes
+            .strip_suffix(&[0])
+            .filter(|path| !path.contains(&0))
+            .and_then(|path| std::str::from_utf8(path).ok())
+            .ok_or_else(|| ApiError::new(503, "Git 忽略文件路径格式无效"))?;
+        config.push(format!("core.excludesfile={path}"));
+    }
+    Ok(config)
 }
 
 fn parse_git_text_config(bytes: &[u8]) -> Result<Vec<String>, ApiError> {
@@ -1970,6 +2305,12 @@ mod tests {
         );
         let state = fixture_dir();
         configure_access_key(state.path(), "workspace-detail-test-key").unwrap();
+        // 这些回归测试已授权设备的文件读取，使用合法的无明文旧格式密钥记录。
+        // 避免并行夹具反复淘汰单条 KDF 缓存导致授权过期；密钥校验由 credentials 测试覆盖。
+        let key_path = state.path().join("remote-access-key.json");
+        let mut key: Value = serde_json::from_slice(&std::fs::read(&key_path).unwrap()).unwrap();
+        key["value"] = json!("");
+        std::fs::write(key_path, serde_json::to_vec(&key).unwrap()).unwrap();
         let controller = RemoteAccessController::new(
             Arc::new(WorkspaceTestBridge { cwd: root.clone() }),
             state.path().to_owned(),
@@ -2036,6 +2377,246 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn fixture_child_repo(root: &Path, relative: &str, text: &str) -> PathBuf {
+        let child = root.join(relative);
+        std::fs::create_dir_all(&child).unwrap();
+        assert!(
+            git_unchecked(&child, &["init", "--quiet"], 16 * 1024)
+                .await
+                .unwrap()
+                .success
+        );
+        std::fs::write(child.join("same.txt"), text).unwrap();
+        child
+    }
+
+    #[tokio::test]
+    async fn workspace_multirepo_routes_include_ignored_children_and_scope_same_named_details() {
+        let (_fixture, _state_dir, repo) = fixture_repo().await;
+        std::fs::write(repo.root.join(".gitignore"), "web/\n").unwrap();
+        std::fs::write(repo.root.join("same.txt"), "outer repository\n").unwrap();
+        fixture_child_repo(&repo.root, "web/alpha", "alpha contents\n").await;
+        fixture_child_repo(&repo.root, "web/beta", "beta contents\n").await;
+        fixture_child_repo(&repo.root, "web/alpha/vendor/nested", "nested contents\n").await;
+        let (state, headers) = fixture_web_state(&repo);
+        let request = json!({"threadId":"multi-repo-thread","allRepositories":true});
+        let list = fixture_response_json(
+            changes(State(state.clone()), headers.clone(), Json(request.clone()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let paths: Vec<_> = list["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|repository| repository["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            ["", "web/alpha", "web/alpha/vendor/nested", "web/beta"]
+        );
+        assert_eq!(list["truncated"], false);
+        assert_eq!(list["files"].as_array().unwrap().len(), 5);
+        for (repository, expected) in [
+            ("", "outer repository"),
+            ("web/alpha", "alpha contents"),
+            ("web/beta", "beta contents"),
+            ("web/alpha/vendor/nested", "nested contents"),
+        ] {
+            let detail = fixture_response_json(
+                change(
+                    State(state.clone()),
+                    headers.clone(),
+                    Json(json!({
+                        "threadId":"multi-repo-thread", "repository":repository,
+                        "path":"same.txt", "section":"untracked"
+                    })),
+                )
+                .await
+                .unwrap(),
+            )
+            .await;
+            assert_eq!(detail["root"], list["root"]);
+            assert_eq!(detail["repository"], repository);
+            assert!(detail["diff"].as_str().unwrap().contains(expected));
+        }
+        let mut conditional = request.clone();
+        conditional["ifRevision"] = list["revision"].clone();
+        let unchanged = fixture_response_json(
+            changes(
+                State(state.clone()),
+                headers.clone(),
+                Json(conditional.clone()),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(unchanged["notModified"], true);
+        std::fs::write(repo.root.join("web/beta/new.txt"), "new child file").unwrap();
+        let changed = fixture_response_json(
+            changes(State(state.clone()), headers.clone(), Json(conditional))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_ne!(changed["revision"], list["revision"]);
+        assert_eq!(changed["files"].as_array().unwrap().len(), 6);
+        let legacy = fixture_response_json(
+            changes(
+                State(state.clone()),
+                headers.clone(),
+                Json(json!({"threadId":"multi-repo-thread"})),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert!(legacy.get("repositories").is_none());
+        assert_eq!(legacy["files"].as_array().unwrap().len(), 2);
+        state.controller.auth.lock().await.devices.clear();
+        assert_eq!(
+            changes(State(state), headers, Json(request))
+                .await
+                .unwrap_err()
+                .code,
+            401
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_multirepo_supports_git_files_and_isolates_broken_repositories() {
+        let (_fixture, _state_dir, repo) = fixture_repo().await;
+        std::fs::write(repo.root.join(".gitignore"), "children/\nmetadata/\n").unwrap();
+        let child = repo.root.join("children/worktree");
+        let metadata = repo.root.join("metadata");
+        std::fs::create_dir_all(&child).unwrap();
+        assert!(
+            git_unchecked(
+                &repo.root,
+                &[
+                    "init",
+                    "--quiet",
+                    "--separate-git-dir",
+                    metadata.to_str().unwrap(),
+                    child.to_str().unwrap(),
+                ],
+                16 * 1024,
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        assert!(child.join(".git").is_file());
+        std::fs::write(child.join("same.txt"), "worktree file\n").unwrap();
+        let broken = repo.root.join("children/broken");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(broken.join(".git"), "gitdir: missing-git-directory\n").unwrap();
+        let (state, headers) = fixture_web_state(&repo);
+        let list = fixture_response_json(
+            changes(
+                State(state.clone()),
+                headers.clone(),
+                Json(json!({"threadId":"multi-repo-thread","allRepositories":true})),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(list["repositories"].as_array().unwrap().len(), 3);
+        assert_eq!(list["truncated"], true);
+        assert!(list["repositories"][1]["error"].is_string());
+        assert_eq!(list["repositories"][2]["error"], Value::Null);
+        let detail = fixture_response_json(
+            change(
+                State(state),
+                headers,
+                Json(json!({
+                    "threadId":"multi-repo-thread", "repository":"children/worktree",
+                    "path":"same.txt", "section":"untracked"
+                })),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert!(detail["diff"].as_str().unwrap().contains("worktree file"));
+    }
+
+    #[tokio::test]
+    async fn workspace_multirepo_discovery_handles_containers_and_skips_build_directories() {
+        let (_fixture, _state, repo) = fixture_repo().await;
+        let container = repo.root.join("container");
+        fixture_child_repo(&container, "group/visible", "visible\n").await;
+        fixture_child_repo(&container, "node_modules/hidden", "dependency\n").await;
+        let workspace = WorkspaceRepositories::scan(container).unwrap();
+        assert_eq!(workspace.paths, ["group/visible"]);
+        assert!(!workspace.truncated);
+        let list = workspace.listing(&repo.authorization).await.unwrap();
+        assert_eq!(list["files"][0]["repository"], "group/visible");
+        assert_eq!(list["files"][0]["path"], "same.txt");
+    }
+
+    #[tokio::test]
+    async fn workspace_multirepo_details_reject_external_and_non_repository_paths() {
+        let (_fixture, _state, repo) = fixture_repo().await;
+        std::fs::create_dir(repo.root.join("ordinary-directory")).unwrap();
+        let (state, headers) = fixture_web_state(&repo);
+        for repository in [
+            json!("../outside"),
+            json!("/outside"),
+            json!("C:/outside"),
+            json!("child/.git/objects"),
+            json!(false),
+            Value::Null,
+        ] {
+            assert_eq!(
+                change(
+                    State(state.clone()),
+                    headers.clone(),
+                    Json(json!({
+                        "threadId":"multi-repo-thread", "repository":repository,
+                        "path":"same.txt", "section":"untracked"
+                    })),
+                )
+                .await
+                .unwrap_err()
+                .code,
+                400
+            );
+        }
+        assert_eq!(
+            change(
+                State(state.clone()),
+                headers.clone(),
+                Json(json!({
+                    "threadId":"multi-repo-thread", "repository":"ordinary-directory",
+                    "path":"same.txt", "section":"untracked"
+                })),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            409
+        );
+        assert_eq!(
+            changes(
+                State(state),
+                headers,
+                Json(json!({"threadId":"multi-repo-thread","allRepositories":"true"})),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            400
+        );
+        let snapshot = parse_status(b"?? child-repository/\0?? normal.txt\0", false).unwrap();
+        assert!(!snapshot.truncated);
+        assert_eq!(snapshot.files.len(), 1);
+        assert_eq!(snapshot.files[0].path, "normal.txt");
     }
 
     #[tokio::test]
@@ -2381,6 +2962,166 @@ mod tests {
         assert_eq!(snapshot.files[2].old_path.as_deref(), Some("old name.txt"));
         assert_eq!(snapshot.files[3].section, "untracked");
         assert_eq!(snapshot.files[4].status, "U");
+    }
+
+    #[tokio::test]
+    async fn workspace_global_ignores_match_git_in_an_isolated_home() {
+        let fixture = fixture_dir();
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "remote_access::workspace::tests::workspace_global_ignore_fixture_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CODEX_ELVES_WORKSPACE_IGNORE_TEST_ROOT", fixture.path())
+            .env("HOME", fixture.path().join("home"))
+            .env("USERPROFILE", fixture.path().join("home"))
+            .env("XDG_CONFIG_HOME", fixture.path().join("xdg"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        child.creation_flags(0x08000000);
+        let output = tokio::time::timeout(Duration::from_secs(60), child.output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "隔离忽略规则回归失败：\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "仅由隔离 HOME 的父测试调用，不改宿主 Git 配置"]
+    async fn workspace_global_ignore_fixture_child() {
+        let Ok(fixture) = std::env::var("CODEX_ELVES_WORKSPACE_IGNORE_TEST_ROOT") else {
+            return;
+        };
+        let fixture = PathBuf::from(fixture);
+        let root = fixture.join("repo");
+        let home = fixture.join("home");
+        let ignore_directory = home.join("ignore rules");
+        let xdg_git = fixture.join("xdg/git");
+        for directory in [&root, &ignore_directory, &xdg_git] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        std::fs::write(
+            home.join(".gitconfig"),
+            "[include]\npath = ignore-settings.gitconfig\n[core]\nautocrlf = false\n",
+        )
+        .unwrap();
+        let included = home.join("ignore-settings.gitconfig");
+        std::fs::write(
+            &included,
+            "[core]\nexcludesFile = \"~/ignore rules/global.ignore\"\n",
+        )
+        .unwrap();
+        std::fs::write(ignore_directory.join("global.ignore"), ".factorypath\n").unwrap();
+        assert!(
+            git_unchecked(&root, &["init", "--quiet"], 16 * 1024)
+                .await
+                .unwrap()
+                .success
+        );
+        std::fs::write(root.join(".factorypath"), "ignored editor configuration").unwrap();
+        std::fs::write(root.join("Visible.java"), "before\n").unwrap();
+        std::fs::write(root.join("local-only.tmp"), "local ignore candidate").unwrap();
+
+        async fn compare_status(root: &Path) -> Vec<ChangeEntry> {
+            let args = ["status", "--porcelain=v1", "-z", "--untracked-files=all"];
+            let normal = git_process_with_config_sources(root, &args, MAX_STATUS_BYTES, &[], true)
+                .await
+                .unwrap();
+            let remote = git_unchecked(root, &args, MAX_STATUS_BYTES).await.unwrap();
+            assert!(normal.success && remote.success);
+            let normal = parse_status(&normal.bytes, normal.truncated).unwrap().files;
+            let remote = parse_status(&remote.bytes, remote.truncated).unwrap().files;
+            assert_eq!(remote, normal);
+            remote
+        }
+        let files = compare_status(&root).await;
+        assert!(files.iter().all(|file| file.path != ".factorypath"));
+        assert!(files.iter().any(|file| file.path == "Visible.java"));
+
+        // 仓库的显式设置优先于全局设置，不能把全局忽略文件直接强加到所有仓库。
+        let local_ignore = fixture.join("local.ignore");
+        std::fs::write(&local_ignore, "local-only.tmp\n").unwrap();
+        assert!(
+            git_unchecked(
+                &root,
+                &[
+                    "config",
+                    "core.excludesFile",
+                    local_ignore.to_str().unwrap()
+                ],
+                16 * 1024
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let files = compare_status(&root).await;
+        assert!(files.iter().any(|file| file.path == ".factorypath"));
+        assert!(files.iter().all(|file| file.path != "local-only.tmp"));
+        assert!(
+            git_unchecked(
+                &root,
+                &["config", "--unset", "core.excludesFile"],
+                16 * 1024
+            )
+            .await
+            .unwrap()
+            .success
+        );
+
+        // 未配置路径时保留 Git 默认的 XDG 忽略规则；显式空值同样按 Git 原生行为处理。
+        std::fs::write(&included, "[core]\n").unwrap();
+        std::fs::write(xdg_git.join("ignore"), ".factorypath\n").unwrap();
+        compare_status(&root).await;
+        std::fs::write(&included, "[core]\nexcludesFile = \"\"\n").unwrap();
+        compare_status(&root).await;
+        assert!(
+            git_safe_read_config(&root)
+                .await
+                .unwrap()
+                .contains(&"core.excludesfile=".to_owned())
+        );
+
+        // 恢复忽略规则不能恢复会执行命令的全局过滤器。
+        std::fs::write(
+            &included,
+            "[core]\nexcludesFile = \"~/ignore rules/global.ignore\"\n[filter \"guard-test\"]\nclean = workspace-global-filter-that-must-not-execute\nrequired = true\n",
+        )
+        .unwrap();
+        std::fs::write(root.join(".gitattributes"), "* filter=guard-test\n").unwrap();
+        assert!(
+            git_unchecked(&root, &["add", "--", "Visible.java"], 16 * 1024)
+                .await
+                .unwrap()
+                .success
+        );
+        std::fs::write(root.join("Visible.java"), "after\n").unwrap();
+        let diff = git_unchecked(
+            &root,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--",
+                "Visible.java",
+            ],
+            16 * 1024,
+        )
+        .await
+        .unwrap();
+        assert!(diff.success);
+        assert!(String::from_utf8_lossy(&diff.bytes).contains("+after"));
     }
 
     #[test]

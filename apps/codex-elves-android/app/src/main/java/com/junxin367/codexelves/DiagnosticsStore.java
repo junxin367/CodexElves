@@ -17,9 +17,11 @@ import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Deque;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
@@ -29,8 +31,10 @@ import java.util.function.BooleanSupplier;
 
 /** All file work, including snapshots and exports, stays on its own bounded IO queue. */
 final class DiagnosticsStore {
-    // Leave room for the 64-byte scope marker within the total 512 KiB disk bound.
-    static final int MAX_FILE_BYTES = 256 * 1024 - 64;
+    // 用户要求切换光照不被 HTTP 日志挤掉：主题独占 64 KiB，两份普通日志各让出 32 KiB，合计仍不超过 512 KiB。
+    static final int MAX_FILE_BYTES = 224 * 1024 - 64;
+    static final int MAX_THEME_BYTES = 64 * 1024;
+    private static final int MAX_THEME_GROUP_EVENTS = 64;
     static final int MAX_SNAPSHOT_BYTES = 256 * 1024;
     static final int MAX_SNAPSHOT_EVENTS = 400;
     private final File directory;
@@ -42,14 +46,21 @@ final class DiagnosticsStore {
     private volatile Scope scope;
     private Scope preparedScope;
     private boolean closed;
+    // 切换前后与日常光照各留一半容量，持续传感器回调不能淘汰刚发生的切换证据。
+    private final EventWindow themeTransitions = new EventWindow(MAX_THEME_GROUP_EVENTS, MAX_THEME_BYTES / 2);
+    private final EventWindow themeObservations = new EventWindow(MAX_THEME_GROUP_EVENTS, MAX_THEME_BYTES / 2);
 
     interface Callback<T> {
         void complete(T value, String errorCode);
     }
 
     DiagnosticsStore(Context context, String origin) {
-        directory = new File(context.getFilesDir(), "diagnostics");
-        exports = new File(context.getCacheDir(), "diagnostics-exports");
+        this(context.getFilesDir(), context.getCacheDir(), origin);
+    }
+
+    DiagnosticsStore(File filesDir, File cacheDir, String origin) {
+        directory = new File(filesDir, "diagnostics");
+        exports = new File(cacheDir, "diagnostics-exports");
         scope = new Scope(scopeKey(origin), false);
     }
 
@@ -121,7 +132,8 @@ final class DiagnosticsStore {
             if (!isCurrent(selected)) return;
             try {
                 prepare(selected, false);
-                append(line);
+                if (name.startsWith("theme.")) appendTheme(line);
+                else append(line);
             } catch (IOException ignored) {
                 // No raw exception, response body, or filesystem path enters the log.
             }
@@ -182,50 +194,80 @@ final class DiagnosticsStore {
     }
 
     private JSONObject createSnapshot(JSONObject app) throws IOException, JSONException {
-        Deque<String> lines = new ArrayDeque<>();
-        int retainedBytes = 0;
         // Reserve space for the fixed wrapper and app metadata as well as event separators.
         int budget = MAX_SNAPSHOT_BYTES - app.toString().getBytes(StandardCharsets.UTF_8).length - 256;
+        EventWindow regular = new EventWindow(MAX_SNAPSHOT_EVENTS, budget);
+        EventWindow transitions = new EventWindow(MAX_THEME_GROUP_EVENTS, MAX_THEME_BYTES / 2);
+        EventWindow observations = new EventWindow(MAX_THEME_GROUP_EVENTS, MAX_THEME_BYTES / 2);
         for (File file : new File[] { previous(), current() }) {
-            if (!file.isFile()) continue;
-            if (file.length() > MAX_FILE_BYTES) {
-                Files.deleteIfExists(file.toPath());
-                continue;
-            }
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                new FileInputStream(file), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (!validStoredEvent(line)) continue;
-                    int bytes = line.getBytes(StandardCharsets.UTF_8).length + 1;
-                    lines.addLast(line);
-                    retainedBytes += bytes;
-                    while (lines.size() > MAX_SNAPSHOT_EVENTS || retainedBytes > budget) {
-                        retainedBytes -= lines.removeFirst().getBytes(StandardCharsets.UTF_8).length + 1;
-                    }
-                }
+            for (StoredEvent event : readEvents(file, MAX_FILE_BYTES)) {
+                if (!event.theme) regular.add(event);
+                else if (event.transition) transitions.add(event);
+                else observations.add(event);
             }
         }
+        for (StoredEvent event : themeTransitions.events) transitions.add(event);
+        for (StoredEvent event : themeObservations.events) observations.add(event);
+        // 快照仍限 400 条 / 256 KiB；先保留最多 128 条主题证据，其余留给最新普通事件。
+        observations.trim(MAX_THEME_GROUP_EVENTS, Math.max(0, budget - transitions.bytes));
+        transitions.trim(MAX_THEME_GROUP_EVENTS, Math.max(0, budget));
+        regular.trim(MAX_SNAPSHOT_EVENTS - transitions.events.size() - observations.events.size(),
+            Math.max(0, budget - transitions.bytes - observations.bytes));
+        List<StoredEvent> lines = new ArrayList<>(regular.events);
+        lines.addAll(transitions.events);
+        lines.addAll(observations.events);
+        lines.sort(Comparator.comparingLong(event -> event.timeMs));
         JSONArray events = new JSONArray();
-        for (String line : lines) events.put(new JSONObject(line));
+        for (StoredEvent event : lines) events.put(new JSONObject(event.line));
         return new JSONObject().put("schemaVersion", 1)
             .put("capturedAtMs", System.currentTimeMillis()).put("app", app).put("events", events);
     }
 
-    private static boolean validStoredEvent(String line) {
-        if (line.length() > DiagnosticsPolicy.MAX_EVENT_CHARS) return false;
+    private static StoredEvent storedEvent(String line) {
+        if (line.length() > DiagnosticsPolicy.MAX_EVENT_CHARS) return null;
         try {
             JSONObject event = new JSONObject(line);
             Object time = event.opt("timeMs");
             String source = event.optString("source", "");
-            return event.length() == 4 && time instanceof Number
+            boolean valid = event.length() == 4 && time instanceof Number
                 && ((Number) time).longValue() >= 0
                 && ("web".equals(source) || "native".equals(source))
                 && event.opt("name") instanceof String
                 && DiagnosticsPolicy.validName(event.optString("name"))
                 && DiagnosticsPolicy.validFields(event.optJSONObject("fields"));
+            return valid ? new StoredEvent(line, ((Number) time).longValue(), event.optString("name")) : null;
         } catch (JSONException ignored) {
-            return false;
+            return null;
+        }
+    }
+
+    private static List<StoredEvent> readEvents(File file, int maximumBytes) throws IOException {
+        List<StoredEvent> events = new ArrayList<>();
+        if (!file.isFile()) return events;
+        if (file.length() > maximumBytes) {
+            Files.deleteIfExists(file.toPath());
+            return events;
+        }
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+            new FileInputStream(file), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                StoredEvent event = storedEvent(line);
+                if (event != null) events.add(event);
+            }
+        }
+        return events;
+    }
+
+    private void appendTheme(String line) throws IOException {
+        StoredEvent event = storedEvent(line);
+        if (event == null) return;
+        (event.transition ? themeTransitions : themeObservations).add(event);
+        List<StoredEvent> retained = new ArrayList<>(themeTransitions.events);
+        retained.addAll(themeObservations.events);
+        retained.sort(Comparator.comparingLong(value -> value.timeMs));
+        try (FileOutputStream output = new FileOutputStream(themeJournal())) {
+            for (StoredEvent value : retained) output.write((value.line + "\n").getBytes(StandardCharsets.UTF_8));
         }
     }
 
@@ -251,11 +293,18 @@ final class DiagnosticsStore {
         if (clear || selected.reset || !selected.key.equals(saved)) {
             Files.deleteIfExists(current().toPath());
             Files.deleteIfExists(previous().toPath());
+            Files.deleteIfExists(themeJournal().toPath());
             // An exported file must never survive a logout or service change.
             clearExports();
         }
         for (File file : new File[] { current(), previous() }) {
             if (file.length() > MAX_FILE_BYTES) Files.deleteIfExists(file.toPath());
+        }
+        themeTransitions.clear();
+        themeObservations.clear();
+        for (StoredEvent event : readEvents(themeJournal(), MAX_THEME_BYTES)) {
+            if (!event.theme) continue;
+            (event.transition ? themeTransitions : themeObservations).add(event);
         }
         try (FileOutputStream output = new FileOutputStream(scopeFile)) {
             output.write(selected.key.getBytes(StandardCharsets.US_ASCII));
@@ -294,6 +343,53 @@ final class DiagnosticsStore {
 
     private File previous() {
         return new File(directory, "events-previous.jsonl");
+    }
+
+    private File themeJournal() {
+        return new File(directory, "events-theme.jsonl");
+    }
+
+    private static final class StoredEvent {
+        final String line;
+        final long timeMs;
+        final int bytes;
+        final boolean theme;
+        final boolean transition;
+
+        StoredEvent(String line, long timeMs, String name) {
+            this.line = line;
+            this.timeMs = timeMs;
+            bytes = line.getBytes(StandardCharsets.UTF_8).length + 1;
+            theme = name.startsWith("theme.");
+            transition = "theme.transition".equals(name) || "theme.sample".equals(name) || "theme.snapshot".equals(name);
+        }
+    }
+
+    private static final class EventWindow {
+        final Deque<StoredEvent> events = new ArrayDeque<>();
+        final int maximumEvents;
+        final int maximumBytes;
+        int bytes;
+
+        EventWindow(int maximumEvents, int maximumBytes) {
+            this.maximumEvents = maximumEvents;
+            this.maximumBytes = maximumBytes;
+        }
+
+        void add(StoredEvent event) {
+            events.addLast(event);
+            bytes += event.bytes;
+            trim(maximumEvents, maximumBytes);
+        }
+
+        void trim(int count, int budget) {
+            while (!events.isEmpty() && (events.size() > count || bytes > budget)) bytes -= events.removeFirst().bytes;
+        }
+
+        void clear() {
+            events.clear();
+            bytes = 0;
+        }
     }
 
     private boolean isCurrent(Scope selected) {

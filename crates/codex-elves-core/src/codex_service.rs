@@ -34,7 +34,7 @@ struct OwnerView {
     snapshot: Value,
 }
 
-struct ServiceProjection {
+pub(crate) struct ServiceProjection {
     epoch: String,
     sequence: u64,
     events: VecDeque<(u64, Value)>,
@@ -46,7 +46,7 @@ struct ServiceProjection {
 }
 
 impl ServiceProjection {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             epoch: format!("codex-service-{}", uuid::Uuid::new_v4()),
             sequence: 0,
@@ -149,7 +149,7 @@ impl ServiceProjection {
         }
     }
 
-    fn project_changes(&mut self, thread_id: &str, before: &Value, after: &Value) {
+    pub(crate) fn project_changes(&mut self, thread_id: &str, before: &Value, after: &Value) {
         for (field, method, parameter) in [
             ("threadRuntimeStatus", "thread/status/changed", "status"),
             (
@@ -279,7 +279,7 @@ impl ServiceProjection {
         self.push(json!({"method":"remote/notification","params":event}));
     }
 
-    fn events(&self, payload: &Value) -> Value {
+    pub(crate) fn events(&self, payload: &Value) -> Value {
         let cursor = payload["cursor"].as_u64().unwrap_or(0);
         let reset = payload["epoch"] != self.epoch
             || cursor > self.sequence
@@ -391,12 +391,30 @@ impl Display for RpcFailure {
 
 impl std::error::Error for RpcFailure {}
 
-struct RunningService {
-    child: Child,
-    stdin: mpsc::Sender<WriteFrame>,
-    stdout: BufReader<ChildStdout>,
-    executable: String,
+pub(crate) struct RunningService {
+    pub(crate) child: Child,
+    pub(crate) stdin: mpsc::Sender<WriteFrame>,
+    pub(crate) stdout: BufReader<ChildStdout>,
+    pub(crate) executable: String,
     initialized: bool,
+}
+
+#[cfg(test)]
+impl RunningService {
+    pub(crate) fn for_test(mut child: Child) -> anyhow::Result<Self> {
+        let (stdin, _) = desktop_owner_ipc::spawn_writer(
+            child.stdin.take().context("missing stdin")?,
+            REQUEST_TIMEOUT,
+        );
+        let stdout = BufReader::new(child.stdout.take().context("missing stdout")?);
+        Ok(Self {
+            child,
+            stdin,
+            stdout,
+            executable: "isolated-test-peer".into(),
+            initialized: false,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1201,7 +1219,7 @@ impl CodexCliService {
     }
 }
 
-async fn spawn_service() -> anyhow::Result<RunningService> {
+pub(crate) async fn spawn_service() -> anyhow::Result<RunningService> {
     let settings = crate::settings::SettingsStore::default()
         .load()
         .unwrap_or_default();
@@ -1499,7 +1517,7 @@ fn should_enter_service_cooldown(error: &anyhow::Error) -> bool {
         || rpc_failure(error).is_none_or(|failure| failure.method == "initialize")
 }
 
-fn normalize_model(model: &Value) -> Option<Value> {
+pub(crate) fn normalize_model(model: &Value) -> Option<Value> {
     if model.get("hidden").and_then(Value::as_bool) == Some(true) {
         return None;
     }
@@ -1638,7 +1656,7 @@ fn normalize_history_items_page(
     Ok((items, next_cursor))
 }
 
-fn owner_snapshot_history(snapshot: &Value, thread_id: &str) -> Option<Value> {
+pub(crate) fn owner_snapshot_history(snapshot: &Value, thread_id: &str) -> Option<Value> {
     let complete = if snapshot["turnHistory"]["kind"] == "canonical" {
         snapshot["turnHistory"]["history"]["isComplete"] == true
     } else {
@@ -1729,6 +1747,18 @@ async fn require_empty_local_queue(
     thread_id: &str,
     snapshot: &Value,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        local_queue_is_empty(home, thread_id, snapshot).await?,
+        "会话存在桌面队列消息或本地队列状态未知，未发送"
+    );
+    Ok(())
+}
+
+pub(crate) async fn local_queue_is_empty(
+    home: &Path,
+    thread_id: &str,
+    snapshot: &Value,
+) -> anyhow::Result<bool> {
     let rollout = snapshot["rolloutPath"]
         .as_str()
         .context("桌面会话数据目录未知，无法核对本地队列")?;
@@ -1752,10 +1782,10 @@ async fn require_empty_local_queue(
     );
     let messages = queue.and_then(|queue| queue.get(thread_id));
     anyhow::ensure!(
-        messages.is_none_or(|messages| messages.as_array().is_some_and(Vec::is_empty)),
-        "会话存在桌面队列消息或本地队列状态未知，未发送"
+        messages.is_none_or(Value::is_array),
+        "桌面本地队列状态格式未知"
     );
-    Ok(())
+    Ok(messages.is_none_or(|messages| messages.as_array().is_some_and(Vec::is_empty)))
 }
 
 fn service_turn_start_params(payload: &Value, thread_id: &str) -> anyhow::Result<Value> {
@@ -1839,7 +1869,7 @@ fn service_not_sent_error(thread_id: &str, message: &str) -> Value {
     })
 }
 
-fn normalize_thread_response(response: &Value) -> anyhow::Result<Value> {
+pub(crate) fn normalize_thread_response(response: &Value) -> anyhow::Result<Value> {
     let thread = response
         .get("thread")
         .context("Codex CLI service 未返回会话元数据")?;
@@ -1853,7 +1883,10 @@ fn normalize_thread_response(response: &Value) -> anyhow::Result<Value> {
     Ok(normalized)
 }
 
-fn normalize_owner_thread(snapshot: &Value, metadata: Option<&Value>) -> anyhow::Result<Value> {
+pub(crate) fn normalize_owner_thread(
+    snapshot: &Value,
+    metadata: Option<&Value>,
+) -> anyhow::Result<Value> {
     let mut thread = snapshot.clone();
     thread["status"] = snapshot["threadRuntimeStatus"].clone();
     thread["model"] = snapshot["latestModel"].clone();
@@ -1891,7 +1924,7 @@ fn normalize_owner_thread(snapshot: &Value, metadata: Option<&Value>) -> anyhow:
     Ok(normalized)
 }
 
-fn normalize_thread(thread: &Value) -> anyhow::Result<Value> {
+pub(crate) fn normalize_thread(thread: &Value) -> anyhow::Result<Value> {
     let id = thread
         .get("id")
         .and_then(Value::as_str)

@@ -19,11 +19,12 @@ const NATIVE_FAST_UNLOCK_SCRIPT: &str =
     include_str!("../../../assets/inject/native-fast-unlock.js");
 const COMPOSER_FAST_SCRIPT: &str = include_str!("../../../assets/inject/composer-fast.js");
 const NATIVE_RPC_COMPAT_SCRIPT: &str = include_str!("../../../assets/inject/native-rpc-compat.js");
-// 缓存修复须在 SDK 初次读取前安装；更新构建标识，让运行中的增强同步加载新启动脚本。
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261105-statsig-cache";
+// 保留主线缓存修复、Token 编号解析与侧边 Fast；
+// 多仓库变更使用独立构建标识，便于核对网页和电脑后台是否来自同一包。
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261106-runtime-compaction-complete";
 
 pub fn statsig_cache_script() -> String {
-    // 压缩库只在本闭包内可见，避免改动宿主页面的模块加载器或导出全局 LZString。
+    // 缓存修复必须在 SDK 首次读取前执行；压缩库不污染宿主模块加载器或全局对象。
     format!(
         "(()=>{{const define=undefined,module=undefined,angular=undefined;\n/* lz-string 1.5.0\n{}*/\n{}\n{}\n}})();",
         STATSIG_CACHE_CODEC_LICENSE, STATSIG_CACHE_CODEC, STATSIG_CACHE_SCRIPT

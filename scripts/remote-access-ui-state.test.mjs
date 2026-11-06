@@ -67,7 +67,315 @@ const app = await readFile(new URL("../assets/remote-access/app.js", import.meta
 const native = await readFile(new URL("../assets/remote-access/native.js", import.meta.url), "utf8");
 const channels = await readFile(new URL("../assets/remote-access/channels.js", import.meta.url), "utf8");
 const diagnostics = await readFile(new URL("../assets/remote-access/diagnostics.js", import.meta.url), "utf8");
+const platform = await readFile(new URL("../assets/remote-access/platform.js", import.meta.url), "utf8");
 const eventsClient = await readFile(new URL("../assets/remote-access/events-client.js", import.meta.url), "utf8");
+const sessionTools = await readFile(new URL("../assets/remote-access/session-tools.js", import.meta.url), "utf8");
+const sessionFiles = await readFile(new URL("../assets/remote-access/session-files.js", import.meta.url), "utf8");
+
+test("文件阅读字号默认12，旧配置和新设置都限制在6至14且独立于全局字号", () => {
+  const disk = storage();
+  const context = vm.createContext({ localStorage: disk, matchMedia: () => ({ matches: false }) });
+  vm.runInContext(app.slice(app.indexOf("const appearancePresets ="), app.indexOf("let ambientLightStatus =")), context);
+  for (const [saved, expected] of [[undefined, 12], [null, 12], [6, 6], [12, 12], [14, 14], [16, 14], [5, 6], ["8", 12]]) {
+    disk.setItem("codex-elves-web-appearance", JSON.stringify({ fontSize: 20, fileReadingFontSize: saved }));
+    context.appearance = context.readAppearance();
+    assert.equal(context.currentFileReadingFontSize(), expected);
+    assert.equal(context.appearance.fontSize, 20);
+  }
+  assert.equal(context.defaultAppearance().fileReadingFontSize, 12);
+});
+
+function previewControlsScrollHarness() {
+  class PreviewElement {
+    constructor() {
+      this.children = []; this.parentElement = null; this.hidden = false; this.inert = false;
+      this.scrollTop = 0; this.scrollHeight = 40; this.clientHeight = 40; this.listeners = new Map();
+      this.properties = new Map();
+      this.style = {
+        setProperty: (key, value) => this.properties.set(key, value),
+        removeProperty: key => this.properties.delete(key)
+      };
+    }
+    append(...children) {
+      for (const child of children) {
+        if (child.parentElement) child.parentElement.children.splice(child.parentElement.children.indexOf(child), 1);
+        this.children.push(child); child.parentElement = this;
+      }
+    }
+    before(child) {
+      const parent = this.parentElement;
+      parent.children.splice(parent.children.indexOf(this), 0, child); child.parentElement = parent;
+    }
+    replaceWith(child) {
+      const parent = this.parentElement;
+      if (child.parentElement) child.parentElement.children.splice(child.parentElement.children.indexOf(child), 1);
+      parent.children.splice(parent.children.indexOf(this), 1, child);
+      child.parentElement = parent; this.parentElement = null;
+    }
+    addEventListener(name, listener) { this.listeners.set(name, listener); }
+    removeEventListener(name) { this.listeners.delete(name); }
+  }
+  const screen = new PreviewElement(), controls = new PreviewElement(), body = new PreviewElement();
+  body.scrollHeight = 2000; body.clientHeight = 600; body.scrollTop = 100;
+  screen.append(controls, body);
+  let active = true;
+  const context = vm.createContext({
+    Element: PreviewElement, node: () => new PreviewElement(),
+    getComputedStyle: element => ({ overflowY: element.overflowY || "visible" })
+  });
+  vm.runInContext(sessionFiles.slice(sessionFiles.indexOf("export function mountPreviewControlsScroll"),
+    sessionFiles.indexOf("export function mountSessionFiles")).replace(/^export /gm, ""), context);
+  const controller = context.mountPreviewControlsScroll({ body, controls, isActive: () => active });
+  const shell = screen.children[0];
+  const wheel = options => body.listeners.get("wheel")({
+    deltaY: 0, deltaX: 0, deltaMode: 0, target: body, ...options
+  });
+  return { controller, screen, shell, controls, body, wheel, PreviewElement,
+    reveal: () => Number(shell.properties.get("--preview-controls-reveal") ?? 1),
+    active: value => { active = value; } };
+}
+
+test("文件预览第二行随上滑渐进收起和回滑展开，聚焦与重新打开恢复完整工具行", () => {
+  const h = previewControlsScrollHarness();
+  h.wheel({ deltaY: 40 });
+  assert.equal(h.reveal(), .75);
+  h.wheel({ deltaY: 120 });
+  assert.equal(h.reveal(), 0); assert.equal(h.shell.inert, true);
+  h.wheel({ deltaY: -80 });
+  assert.equal(h.reveal(), .5); assert.equal(h.shell.inert, false);
+  h.controls.listeners.get("focusin")();
+  assert.equal(h.reveal(), 1);
+  assert.equal(h.shell.properties.has("--preview-controls-rows"), false);
+  h.wheel({ deltaY: 500 }); h.controller.reset();
+  assert.equal(h.reveal(), 1);
+  h.controller.dispose();
+  assert.deepEqual(h.screen.children, [h.controls, h.body]);
+  assert.equal(h.body.listeners.size, 0);
+  assert.equal(h.controls.listeners.size, 0);
+});
+
+test("文件预览只响应正文纵向手势，短文件、横向滚动、缩放及内层滚动不会误收起", () => {
+  const h = previewControlsScrollHarness();
+  h.body.scrollHeight = 600; h.body.scrollTop = 0;
+  h.wheel({ deltaY: 100 }); assert.equal(h.reveal(), 1);
+  h.body.scrollHeight = 2000;
+  h.wheel({ deltaX: 200, deltaY: 50 });
+  h.wheel({ ctrlKey: true, deltaY: 200 });
+  assert.equal(h.reveal(), 1);
+  const nested = new h.PreviewElement();
+  nested.scrollHeight = 800; nested.clientHeight = 100; nested.scrollTop = 100; nested.overflowY = "auto";
+  h.body.append(nested);
+  h.wheel({ deltaY: 200, target: nested }); assert.equal(h.reveal(), 1);
+  h.active(false); h.wheel({ deltaY: 200 }); assert.equal(h.reveal(), 1);
+  h.active(true);
+  h.body.listeners.get("touchstart")({ touches: [{ clientX: 100, clientY: 300 }] });
+  h.body.listeners.get("touchmove")({ touches: [{ clientX: 100, clientY: 260 }], target: h.body });
+  assert.equal(h.reveal(), .75);
+  h.body.listeners.get("touchmove")({ touches: [{ clientX: 200, clientY: 250 }], target: h.body });
+  assert.equal(h.reveal(), .75);
+  h.body.scrollTop = 800;
+  assert.equal(h.reveal(), .75, "恢复滚动位置不应改变工具行展开比例");
+  h.controller.dispose();
+});
+
+function nativeSourceSection(start, end) {
+  const from = native.indexOf(start), to = native.indexOf(end, from);
+  assert.ok(from >= 0 && to > from);
+  return native.slice(from, to);
+}
+
+function nativeCompactionHarness(options = {}) {
+  const resumes = [], dispatches = [], refreshes = [];
+  let role = options.role ?? null, deleted = false;
+  const thread = { id: "compact-thread", cwd: "E:/workspace", ...options.thread };
+  let conversation = options.conversation ?? (role ? { ...thread, resumeState: "resumed" } : null);
+  const context = {
+    Error, setTimeout: callback => callback(),
+    appScope: {}, unsubscribe: [() => {}], nativeNavigate() {}, nativeIntl: { formatMessage() {} },
+    window: {}, compactionState: { state: "idle", turnId: null, itemId: null },
+    nativeReadActions: new Set(["thread", "history"]), requestClientReadActions: new Set(["compact"]),
+    validateCompactionQueueSendPayload() {}, resetStaleManager() {}, reportNativeCompatibilityDiagnostic() {},
+    reportNativeCallbackFailure() {}, guardThreadAction: async () => null,
+    isDeletedThread: () => deleted, readThread: async () => thread,
+    runtimeCompaction: () => context.compactionState,
+    refreshRequestClientConversation: async (id, settings) => { refreshes.push({ id, settings }); },
+    requestClientNativeRpc: async () => rpc,
+  };
+  const rpc = {
+    getStreamRole: () => role,
+  };
+  const manager = {
+    __codexElvesRequestClientManager: options.requestClient !== false, disposed: false,
+    getConversation: () => conversation,
+    getConversationCwd: () => conversation?.cwd,
+    requestClient: { sendRequest() { throw new Error("不能绕过原生所有权直接提交压缩"); } },
+    async resumeConversation(params) {
+      resumes.push(JSON.parse(JSON.stringify(params)));
+      const result = typeof options.resumeResult === "function"
+        ? await options.resumeResult(resumes.length) : options.resumeResult ?? { status: "ready" };
+      if (result.status === "ready") {
+        role = Object.hasOwn(options, "resumedRole") ? options.resumedRole : { role: "owner" };
+        conversation = { ...thread, resumeState: "resumed" };
+      }
+      options.onResume?.(context);
+      return result;
+    },
+    async compactThread(id) {
+      if (!["owner", "follower"].includes(role?.role))
+        throw new Error("Please continue this conversation on the window where it was started.");
+      dispatches.push({ id, path: role.role === "follower" ? "forward" : "local" });
+      if (options.compactError) throw options.compactError;
+      context.compactionState = { state: "pending", turnId: null, itemId: "pending-manual-context-compaction" };
+    },
+  };
+  if (options.requestClient === false) manager.getStreamRole = rpc.getStreamRole;
+  context.manager = manager;
+  vm.createContext(context);
+  vm.runInContext([
+    nativeSourceSection("function failure(", "const state ="),
+    nativeSourceSection("async function compactThreadContext(", "function runtimeCompaction("),
+    nativeSourceSection("async function call(action,", "window.__codexElvesRemoteAccess ="),
+  ].join("\n"), context);
+  return {
+    context, manager, resumes, dispatches, refreshes,
+    remove: () => { deleted = true; },
+    compact: () => context.call("compact", { threadId: thread.id }),
+  };
+}
+
+test("远程压缩在新版 RPC 和旧管理器中先恢复未加载会话，再调用原生压缩", async () => {
+  for (const requestClient of [true, false]) {
+    const h = nativeCompactionHarness({ requestClient });
+    const result = await h.compact();
+    assert.equal(result.ok, true);
+    assert.equal(result.compaction.state, "pending");
+    assert.deepEqual(h.resumes, [{
+      conversationId: "compact-thread", model: null, reasoningEffort: null,
+      workspaceRoots: ["E:/workspace"], collaborationMode: null,
+    }]);
+    assert.deepEqual(h.dispatches, [{ id: "compact-thread", path: "local" }]);
+  }
+});
+
+test("远程压缩不把侧栏摘要当成已恢复会话，并沿用原来的模型配置", async () => {
+  const collaborationMode = { mode: "default", settings: { model: "existing-model", reasoning_effort: "max" } };
+  const h = nativeCompactionHarness({
+    conversation: { id: "compact-thread", cwd: "E:/original", latestCollaborationMode: collaborationMode },
+  });
+  assert.equal((await h.compact()).ok, true);
+  assert.equal(h.resumes.length, 1);
+  assert.deepEqual(h.resumes[0], {
+    conversationId: "compact-thread", model: null, reasoningEffort: null,
+    workspaceRoots: ["E:/original"], collaborationMode,
+  });
+});
+
+test("远程压缩保留已加载会话的所有权和跨宿主原生转发", async () => {
+  for (const requestClient of [true, false]) {
+    for (const role of ["owner", "follower"]) {
+      const h = nativeCompactionHarness({ requestClient, role: { role, ownerClientId: "existing-owner" } });
+      assert.equal((await h.compact()).ok, true);
+      assert.equal(h.resumes.length, 0);
+      assert.deepEqual(h.dispatches, [{ id: "compact-thread", path: role === "owner" ? "local" : "forward" }]);
+    }
+  }
+});
+
+test("远程压缩重新恢复 needs_resume 会话，但不抢占已有 follower", async () => {
+  for (const role of ["owner", "follower"]) {
+    const h = nativeCompactionHarness({
+      role: { role }, conversation: { id: "compact-thread", cwd: "E:/workspace", resumeState: "needs_resume" },
+    });
+    assert.equal((await h.compact()).ok, true);
+    assert.equal(h.resumes.length, role === "owner" ? 1 : 0);
+  }
+});
+
+test("远程压缩等待原生执行配置加载，但不会重试真正的压缩提交", async () => {
+  const h = nativeCompactionHarness({
+    resumeResult: attempt => attempt === 1
+      ? { status: "not-ready", reason: "execution-config-loading" } : { status: "ready" },
+  });
+  assert.equal((await h.compact()).ok, true);
+  assert.equal(h.resumes.length, 2);
+  assert.equal(h.dispatches.length, 1);
+  const rejected = nativeCompactionHarness({
+    role: { role: "owner" },
+    compactError: new Error("App-server task is not ready: execution-config-loading"),
+  });
+  assert.equal((await rejected.compact()).ok, false);
+  assert.equal(rejected.resumes.length, 0);
+  assert.equal(rejected.dispatches.length, 1);
+});
+
+test("远程压缩在恢复被拒绝或所有权未就绪时停止提交", async () => {
+  for (const options of [
+    { resumeResult: { status: "not-ready", reason: "inactive-window" } },
+    { resumedRole: null },
+    { resumeResult: () => { throw new Error("恢复失败"); } },
+    { resumeResult: { status: "not-ready", reason: "execution-config-loading" } },
+  ]) {
+    const h = nativeCompactionHarness(options), result = await h.compact();
+    assert.equal(result.ok, false);
+    assert.ok([409, 503].includes(result.code));
+    assert.equal(h.dispatches.length, 0);
+    assert.doesNotMatch(result.message, /Please continue this conversation/);
+  }
+});
+
+test("远程压缩在恢复期间更换连接、作用域、删除或释放管理器时停止提交", async () => {
+  for (const change of ["manager", "scope", "deleted", "disposed"]) {
+    let h;
+    h = nativeCompactionHarness({ onResume(context) {
+      if (change === "manager") context.manager = { ...h.manager };
+      else if (change === "scope") context.appScope = {};
+      else if (change === "deleted") h.remove();
+      else h.manager.disposed = true;
+    } });
+    const result = await h.compact();
+    assert.equal(result.ok, false, change);
+    assert.equal(result.code, change === "deleted" ? 404 : 409, change);
+    assert.equal(h.dispatches.length, 0, change);
+  }
+});
+
+test("远程压缩检查恢复前后的压缩状态，并拒绝在未知工作目录恢复会话", async () => {
+  for (const alreadyRunning of [true, false]) {
+    const h = nativeCompactionHarness({ onResume(context) {
+      context.compactionState = { state: "running" };
+    } });
+    if (alreadyRunning) h.context.compactionState = { state: "running" };
+    const result = await h.compact();
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 409);
+    assert.equal(h.resumes.length, alreadyRunning ? 0 : 1);
+    assert.equal(h.dispatches.length, 0);
+  }
+  const h = nativeCompactionHarness({ thread: { cwd: null } });
+  assert.equal((await h.compact()).code, 409);
+  assert.equal(h.resumes.length, 0);
+  assert.equal(h.dispatches.length, 0);
+});
+
+test("Windows 打包拒绝缺少运行模式或压缩恢复的旧基线", async () => {
+  const verifier = await readFile(new URL("./verify-windows-build-inputs.mjs", import.meta.url), "utf8");
+  const start = verifier.indexOf("function verifyRemoteRuntimeSources(");
+  const end = verifier.indexOf("const runtimeContract =", start);
+  assert.ok(start >= 0 && end > start);
+  const verify = new Function(`${verifier.slice(start, end)}; return verifyRemoteRuntimeSources;`)();
+  const [backend, service] = await Promise.all([
+    readFile(new URL("../crates/codex-elves-core/src/remote_access.rs", import.meta.url), "utf8"),
+    readFile(new URL("../crates/codex-elves-core/src/remote_access/service.rs", import.meta.url), "utf8"),
+  ]);
+  const current = { backend, service, app, native };
+  assert.deepEqual(verify(current), { protocol: 3, bridge: 134 });
+  assert.throws(() => verify({ ...current, service: service.replace("PROTOCOL_VERSION: u32 = 3", "PROTOCOL_VERSION: u32 = 2") }), /后台协议不能低于 3/);
+  assert.throws(() => verify({ ...current, backend: backend.replace('| "runtime"', "") }), /后台缺少运行模式/);
+  assert.throws(() => verify({ ...current, backend: backend.replaceAll('"setRuntime"', '"legacyRuntime"') }), /后台缺少运行模式/);
+  assert.throws(() => verify({ ...current, app: app.replace('"/api/read/runtime"', '"/api/read/legacyRuntime"') }), /远程页面缺少运行模式/);
+  assert.throws(() => verify({ ...current, native: native.replace("version === 134", "version === 132") }), /原生桥缺少/);
+  assert.throws(() => verify({ ...current, native: native.replace("async function compactThreadContext(", "async function obsoleteCompaction(") }), /原生桥缺少/);
+});
 
 async function connectionDiagnosticsHarness({ android = true } = {}) {
   const logs = [], documentListeners = new Map(), windowListeners = new Map(), timers = new Map();
@@ -146,6 +454,160 @@ test("连接诊断保留关闭码与恢复状态，剔除消息凭证、原始�
   assert.deepEqual(h.logs[1].fields, {});
   h.context.setDiagnosticSink(() => { throw new Error("diagnostic failure"); });
   assert.doesNotThrow(() => h.context.recordDiagnostic("socket.error", { reason: "network-error" }));
+});
+
+test("主题日志保留小数光照和固定判断字段，未知文本及非法年龄不会上传", async () => {
+  const h = await connectionDiagnosticsHarness();
+  h.context.recordDiagnostic("theme.transition", {
+    lux: 44.99, previousLux: 10.01, theme: "dark", previousTheme: "light", targetTheme: "dark",
+    themeMode: "auto", decision: "applied", reason: "sensor", phase: "after",
+    sampleAgeMs: 2100, stableMs: 5000, themeSequence: 1, localHour: 21, timezoneOffsetMinutes: -480,
+    supported: true, registered: false, token: "private", message: "private"
+  });
+  assert.deepEqual(h.logs[0].fields, {
+    lux: 44.99, previousLux: 10.01, theme: "dark", previousTheme: "light", targetTheme: "dark",
+    themeMode: "auto", decision: "applied", reason: "sensor", phase: "after",
+    sampleAgeMs: 2100, stableMs: 5000, themeSequence: 1, localHour: 21, timezoneOffsetMinutes: -480,
+    supported: true, registered: false
+  });
+  h.context.recordDiagnostic("theme.sample", {
+    lux: Infinity, previousLux: -1, sampleAgeMs: -1, themeSequence: NaN, localHour: 24,
+    timezoneOffsetMinutes: -841, theme: "private", themeMode: "private", phase: "private", reason: "private"
+  });
+  assert.deepEqual(h.logs[1].fields, {});
+});
+
+test("光照桥兼容旧APK，非法诊断年龄不改变原有光照回调", () => {
+  const values = [], messages = [], listeners = new Map();
+  const context = vm.createContext({
+    values, CodexElvesAndroid: { postMessage: value => messages.push(JSON.parse(value)) },
+    addEventListener: (name, callback) => listeners.set(name, callback),
+    removeEventListener: name => listeners.delete(name)
+  });
+  vm.runInContext(platform.replace(/^export /gm, ""), context);
+  vm.runInContext(`
+    globalThis.unsubscribe = subscribeAndroidAmbientLight(status => values.push(status));
+    globalThis.emit = json => onAmbientLight({ detail: JSON.parse(json) });
+  `, context);
+  for (const detail of [
+    { type: "ambient-light", supported: true, lux: 9.99 },
+    { type: "ambient-light", supported: true, lux: 45.125, sampleAgeMs: 90000 },
+    { type: "ambient-light", supported: true, lux: 20.5, sampleAgeMs: -1 },
+    { type: "ambient-light", supported: false }
+  ]) context.emit(JSON.stringify(detail));
+  assert.deepEqual(values.map(value => ({ ...value })), [
+    { supported: true, lux: 9.99, sampleAgeMs: null },
+    { supported: true, lux: 45.125, sampleAgeMs: 90000 },
+    { supported: true, lux: 20.5, sampleAgeMs: null },
+    { supported: false, lux: null, sampleAgeMs: null }
+  ]);
+  assert.ok(values.every(Object.isFrozen));
+  context.emit(JSON.stringify({ type: "ambient-light", supported: true, lux: -1 }));
+  assert.equal(values.length, 4);
+  context.unsubscribe();
+  assert.equal(listeners.size, 0);
+  assert.deepEqual(messages.map(value => value.type), ["ambient-light-subscribe", "ambient-light-unsubscribe"]);
+});
+
+async function themeDiagnosticsHarness({ android = true } = {}) {
+  const h = await connectionDiagnosticsHarness({ android });
+  let hour = 21, ambient;
+  const Clock = h.context.Date;
+  h.context.Date = class extends Clock {
+    getHours() { return hour; }
+    getTimezoneOffset() { return -480; }
+  };
+  Object.assign(h.context, {
+    appearance: { theme: "light", themeMode: "auto" },
+    ambientLightStatus: { supported: false, lux: null },
+    syncAppearanceThemeControls: null, applyAppearance() {},
+    subscribeAndroidAmbientLight: callback => { ambient = callback; }
+  });
+  h.load(app.slice(app.indexOf("const automaticThemeStableMs ="), app.indexOf("function mixColor(")));
+  const startup = app.indexOf('applyAutomaticAppearance(false, { immediate: true, reason: "startup" })');
+  const timers = app.indexOf("setInterval(() => {", startup);
+  h.load(app.slice(timers, app.indexOf("function currentFileBrowserThreadId(", timers)));
+  return {
+    ...h, appearance: h.context.appearance, hour: value => { hour = value; },
+    sensor: (lux, sampleAgeMs = 0) => ambient({ supported: lux !== null, lux, sampleAgeMs }),
+    runAfter: delay => {
+      const timer = [...h.timers.entries()].find(([, value]) => !value.interval && value.delay === delay);
+      assert.ok(timer, `缺少 ${delay}ms 诊断回调`);
+      h.timers.delete(timer[0]); timer[1].callback();
+    }
+  };
+}
+
+test("主题切换保留前后真实光照及年龄，延迟采证不会提前应用下一次切换", async () => {
+  const h = await themeDiagnosticsHarness();
+  h.sensor(60.25);
+  h.advance(2000); h.sensor(9.5);
+  assert.equal(h.appearance.theme, "light");
+  assert.equal([...h.timers.values()].filter(timer => !timer.interval).length, 0);
+  h.advance(4999); h.context.applyAutomaticAppearance(true);
+  assert.equal(h.appearance.theme, "light");
+  h.advance(1); h.context.applyAutomaticAppearance(true);
+  assert.equal(h.appearance.theme, "dark");
+  const before = h.logs.filter(event => event.name === "theme.sample" && event.fields.phase === "before");
+  assert.deepEqual(before.map(event => event.fields.lux), [60.25, 9.5]);
+  const after = h.logs.find(event => event.name === "theme.transition" && event.fields.phase === "after").fields;
+  assert.deepEqual({ ...after }, {
+    theme: "dark", themeMode: "auto", themeSequence: 1, supported: true, lux: 9.5, previousLux: 60.25,
+    sampleAgeMs: 5000, localHour: 21, timezoneOffsetMinutes: -480, visible: true,
+    previousTheme: "light", targetTheme: "dark", reason: "timer", phase: "after"
+  });
+  h.advance(2000); h.sensor(12.25); h.runAfter(2000);
+  h.advance(3000); h.sensor(60.125); h.runAfter(5000);
+  h.advance(5000); h.runAfter(10000);
+  const samples = h.logs.filter(event => event.name === "theme.sample" && event.fields.phase === "after");
+  assert.deepEqual(samples.map(event => event.fields.lux), [12.25, 60.125, 60.125]);
+  assert.deepEqual(samples.map(event => event.fields.durationMs), [2000, 5000, 10000]);
+  assert.deepEqual(samples.map(event => event.fields.sampleAgeMs), [0, 0, 5000]);
+  assert.equal(h.appearance.theme, "dark", "诊断回调不能推进已满 5 秒的切换候选");
+  h.context.applyAutomaticAppearance(true);
+  assert.equal(h.appearance.theme, "light", "原有业务触发仍可应用稳定候选");
+  h.windowListeners.get("pagehide")();
+  assert.equal([...h.timers.values()].filter(timer => !timer.interval).length, 0);
+});
+
+test("新增诊断保持夜间范围、10/45lux滞回和候选取消规则", async () => {
+  const h = await themeDiagnosticsHarness();
+  for (const hour of [7, 8, 20, 21]) {
+    h.hour(hour);
+    for (const lux of [null, 0, 10, 10.01, 44.99, 45, 100]) {
+      h.context.ambientLightStatus = { supported: lux !== null, lux };
+      for (const current of ["light", "dark"]) {
+        const expected = hour >= 8 && hour < 21 ? "light"
+          : lux === null || lux <= 10 ? "dark" : lux >= 45 ? "light" : current;
+        assert.equal(h.context.automaticAppearanceTheme(undefined, current), expected);
+      }
+    }
+  }
+  h.hour(21); h.sensor(5); h.advance(3000); h.sensor(50);
+  assert.equal(h.appearance.theme, "light");
+  assert.equal(h.logs.find(event => event.fields.decision === "cancelled").fields.durationMs, 3000);
+  const browser = await themeDiagnosticsHarness({ android: false });
+  browser.sensor(0); browser.advance(5000); browser.context.applyAutomaticAppearance(true);
+  assert.equal(browser.appearance.theme, "dark");
+  assert.equal(browser.logs.length, 0);
+  assert.equal([...browser.timers.values()].filter(timer => !timer.interval).length, 0);
+});
+
+test("主题诊断限制前序采样数量，缓存及旧APK缺少的采样时间不会伪装成新读数", async () => {
+  const h = await themeDiagnosticsHarness();
+  for (let index = 0; index < 12; index++) { h.sensor(60 + index, 90_000); h.advance(1000); }
+  h.context.setAppearanceThemeMode("manual");
+  const samples = h.logs.filter(event => event.name === "theme.sample" && event.fields.phase === "before");
+  assert.equal(samples.length, 8);
+  assert.equal(samples[0].fields.sampleAgeMs, 98_000);
+  const transitions = h.logs.filter(event => event.name === "theme.transition");
+  assert.deepEqual(transitions.map(event => event.fields.themeMode), ["auto", "manual"]);
+  h.advance(31_000); h.context.setAppearanceThemeMode("auto");
+  const latest = h.logs.filter(event => event.name === "theme.sample" && event.fields.phase === "before").at(-1);
+  assert.equal(latest.fields.sampleAgeMs, 122_000);
+  assert.equal(h.logs.filter(event => event.name === "theme.sample" && event.fields.phase === "before").length, 9);
+  h.sensor(80, null);
+  assert.equal(h.logs.filter(event => event.name === "theme.ambient").at(-1).fields.sampleAgeMs, undefined);
 });
 
 test("前后台日志保留后台时长及网络事件来源，online值仍反映当前浏览器状态", async () => {
@@ -1451,6 +1913,7 @@ function sidebarReadHarness() {
   };
   vm.createContext(context);
   vm.runInContext([
+    sourceSection("function mergeIncompleteSidebar(", "async function loadSidebar("),
     sourceSection("async function loadSidebar(", "function sidebarUpdatedAt("),
     sourceSection("async function changeSidebar(", "function confirmAction("),
   ].join("\n"), context);
@@ -3878,4 +4341,188 @@ test("升级后的远程页面拒绝恢复未按 Codex 配置过滤的旧模型�
     await context.restoreReadViews(context.session);
     assert.equal(context.models.length, version === 1 ? 1 : 0);
   }
+});
+
+function initialPageHarness({ cdp = false, readOnly = false, suppress = false } = {}) {
+  const h = sideCreationNavigationHarness(), sidebarRead = deferred();
+  const latest = { device: { id: "initial-device", createdAtMs: 1 }, readOnly,
+    capabilities: { projectlessCreation: true }, runtime: { cdpInjectionEnabled: cdp, revision: 1 } };
+  Object.assign(h.context, {
+    session: null, selectedId: null, thread: null, sidebar: null, creating: false,
+    recoveryGeneration: 0, recoveryStore: { observe: async () => null },
+    sessionRecoveryReads: new WeakMap(), restorePrivateInputs: async () => {},
+    restoreReadViews: async () => {}, setAuthenticationRequired() {}, restoreSmallInputRecoveries() {},
+    postPlatformMessage() {}, restoreGoalComposerDrafts() {}, setConnection() {}, openStream() {},
+    startConnectionPoll() {}, recoverQuestionReceipts() {}, resolvePending() {}, drainPendingNotificationOpen() {},
+    readConnectionSession: async () => latest, suppressAutomaticNewChat: suppress,
+    refreshRequest: null, foregroundReadGeneration: 0, clearComposerAttachments() {},
+    loadSidebar: () => sidebarRead.promise,
+    shell() {
+      h.context.$("#thread-title").textContent = "远程会话";
+      h.context.$("#project-select-slot").hidden = true;
+      h.context.updateComposer();
+    },
+    updateComposer() { h.prompt.disabled = readOnly || !h.context.creating && !h.context.selectedId; },
+    welcomeNode: () => ({ textContent: "欢迎页" }),
+  });
+  h.context.location.hash = "";
+  vm.runInContext([
+    sourceSection("async function refreshAll(", "function openStream("),
+    sourceSection("async function connectPage(", "function probeConnectionRecovery("),
+  ].join("\n"), h.context);
+  return { ...h, sidebarRead };
+}
+
+test("首次连接及恢复新建页时，慢侧栏不能阻塞标题、项目区、输入和已有草稿", async () => {
+  for (const cdp of [false, true]) {
+    const h = initialPageHarness({ cdp });
+    h.context.drafts.set("$new:", "尚未发送的新建草稿");
+    const connection = h.context.connectPage();
+    await h.settle();
+    assert.equal(h.context.creating, true);
+    assert.equal(h.context.$("#thread-title").textContent, "新建会话");
+    assert.equal(h.context.$("#project-select-slot").hidden, false);
+    assert.equal(h.prompt.disabled, false);
+    assert.equal(h.prompt.value, "尚未发送的新建草稿");
+    h.context.selectedId = "newer-selection";
+    h.context.creating = false;
+    h.context.$("#thread-title").textContent = "用户后来选择的会话";
+    h.sidebarRead.resolve();
+    await connection;
+    assert.equal(h.context.selectedId, "newer-selection");
+    assert.equal(h.context.$("#thread-title").textContent, "用户后来选择的会话");
+    assert.equal(h.writes.length, 0, "初始化只能恢复页面，不能实际新建或发送会话");
+  }
+});
+
+test("初始只读设备及明确禁止自动新建时保留欢迎页约束", async () => {
+  for (const options of [{ readOnly: true }, { suppress: true }]) {
+    const h = initialPageHarness(options);
+    const connection = h.context.connectPage();
+    await h.settle();
+    assert.equal(h.context.creating, false);
+    assert.equal(h.context.$("#project-select-slot").hidden, true);
+    assert.equal(h.prompt.disabled, true);
+    h.sidebarRead.resolve();
+    await connection;
+    assert.equal(h.writes.length, 0);
+  }
+});
+
+test("切换运行方式后，旧模型读取晚到不能覆盖新后端目录", async () => {
+  const reads = [];
+  const context = {
+    session: { device: { id: "model-device" }, runtime: { cdpInjectionEnabled: true, revision: 1 } },
+    models: [], modelsPromise: null, modelsLoadedAt: 0, modelsRetryAt: 0, modelDefaults: {},
+    modelCatalogCacheVersion: 1, catalogFallbackMs: 1000, catalogRetryMs: 1000,
+    privateInputScope: () => "model-device", catalogUsable: () => false,
+    api: (_path, payload) => { const response = deferred(); reads.push({ response, payload }); return response.promise; },
+    cacheDisplayData() {}, updateComposer() {}, scheduleCatalogRefresh() {}, $: () => null,
+  };
+  vm.createContext(context);
+  vm.runInContext(sourceSection("async function loadModels(", "function rememberedNewChatModel("), context);
+  const oldRead = context.loadModels(true);
+  context.session.runtime = { cdpInjectionEnabled: false, revision: 2 };
+  context.modelsPromise = null;
+  const newRead = context.loadModels(true);
+  reads[1].response.resolve({ data: [{ model: "service-model" }], defaultModel: "service-model" });
+  await newRead;
+  reads[0].response.resolve({ data: [{ model: "old-cdp-model" }], defaultModel: "old-cdp-model" });
+  await oldRead;
+  assert.equal(context.models[0].model, "service-model");
+  assert.equal(context.modelDefaults.model, "service-model");
+  assert.equal(reads[1].payload.forceReload, true);
+});
+
+test("服务部分侧栏保留旧会话展示，完整目录及其他后端不合并旧记录", () => {
+  const previous = { nativeBridge: "harness", recent: [{ id: "old" }, { id: "known", title: "旧名" }],
+    pinnedThreads: [{ id: "unpin" }, { id: "old-pin" }],
+    projects: [{ id: "p", threads: [{ id: "old" }, { id: "known", title: "旧名" }] }] };
+  const current = { nativeBridge: "harness", complete: false,
+    recent: [{ id: "known", title: "新名" }, { id: "unpin", pinned: false }], pinnedThreads: [],
+    projects: [{ id: "p", threads: [{ id: "known", title: "新名" }] }] };
+  const context = {};
+  vm.createContext(context);
+  vm.runInContext(sourceSection("function mergeIncompleteSidebar(", "async function loadSidebar("), context);
+  const merged = context.mergeIncompleteSidebar(previous, current);
+  assert.deepEqual(Array.from(merged.recent, row => row.id), ["known", "unpin", "old"]);
+  assert.equal(merged.recent[0].title, "新名");
+  assert.deepEqual(Array.from(merged.pinnedThreads, row => row.id), ["old-pin"]);
+  assert.deepEqual(Array.from(merged.projects[0].threads, row => row.id), ["known", "old"]);
+  for (const input of [{ ...current, complete: true }, { ...current, nativeBridge: "cdp" }])
+    assert.equal(context.mergeIncompleteSidebar(previous, input), input);
+});
+
+function workspaceChangeContract() {
+  const context = vm.createContext({});
+  vm.runInContext(sessionTools.slice(sessionTools.indexOf("const sections ="), sessionTools.indexOf("export function mountSessionTools"))
+    + "\nglobalThis.contract = { detailKey, displayedPath, listResponse, detailResponse, uiState };", context);
+  return context.contract;
+}
+
+test("多仓库变更按仓库隔离同名路径，保留分组信息和各仓库折叠状态", () => {
+  const contract = workspaceChangeContract();
+  const alpha = { repository: "web/alpha", path: "src/app.ts", section: "unstaged", status: "M" };
+  const beta = { ...alpha, repository: "web/beta" };
+  assert.notEqual(contract.detailKey(alpha), contract.detailKey(beta));
+  assert.equal(contract.displayedPath(beta), "web/beta/src/app.ts");
+  const response = contract.listResponse({
+    ok: true, root: "D:/workspace", revision: "a".repeat(64), truncated: false,
+    repositories: ["web/alpha", "web/beta"].map(path => ({
+      path, root: `D:/workspace/${path}`, fileCount: 1, truncated: false, error: null
+    })),
+    files: [alpha, beta],
+  });
+  assert.equal(response.repositories.length, 2);
+  assert.equal(response.files[1].repository, "web/beta");
+  assert.equal(response.files[1].path, "src/app.ts");
+  const alphaGroup = JSON.stringify(["web/alpha", "unstaged"]);
+  const betaGroup = JSON.stringify(["web/beta", "unstaged"]);
+  const ui = contract.uiState({ collapsed: { [alphaGroup]: true, [betaGroup]: false } });
+  assert.equal(ui.collapsed[alphaGroup], true);
+  assert.notEqual(ui.collapsed[betaGroup], true);
+});
+
+test("多仓库变更拒绝越界、重复仓库和错误仓库的详情，同时兼容单仓库旧响应", () => {
+  const contract = workspaceChangeContract();
+  const file = { repository: "alpha", path: "same.txt", section: "untracked", status: "A" };
+  const repository = { path: "alpha", root: "D:/workspace/alpha", fileCount: 1, truncated: false, error: null };
+  const response = { ok: true, root: "D:/workspace", revision: "b".repeat(64), truncated: false,
+    repositories: [repository], files: [file] };
+  for (const path of ["../outside", "/outside", "C:/outside", "alpha/.git/objects"]) {
+    assert.equal(contract.listResponse({ ...response, files: [{ ...file, repository: path }] }), null);
+  }
+  assert.equal(contract.listResponse({ ...response, repositories: [repository, repository] }), null);
+  const detail = { ...file, root: response.root, revision: response.revision, kind: "text", truncated: false, diff: "+alpha" };
+  assert.ok(contract.detailResponse(detail, file));
+  assert.equal(contract.detailResponse({ ...detail, repository: "beta" }, file), null);
+  const { repository: _repository, ...legacyFile } = file;
+  const legacy = contract.listResponse({ ok: true, root: response.root, revision: response.revision,
+    truncated: false, files: [legacyFile] });
+  assert.ok(legacy);
+  assert.equal(legacy.repositories, undefined);
+  assert.equal(legacy.files[0].repository, undefined);
+});
+
+test("新版多仓库页面连接旧后台时仅对旧白名单拒绝回退，并暂时记住旧能力", async () => {
+  const calls = [];
+  const context = vm.createContext({
+    legacyChangesUntil: 0,
+    request: async (path, payload) => {
+      calls.push({ path, payload });
+      if (payload.allRepositories) throw Object.assign(new Error("只能通过会话或项目标识读取变更"), { code: 400 });
+      return { ok: true, legacy: true };
+    },
+  });
+  vm.runInContext(sessionTools.slice(sessionTools.indexOf("  async function requestChanges("), sessionTools.indexOf("  function status(")), context);
+  assert.equal((await context.requestChanges({ threadId: "thread" })).legacy, true);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].payload.allRepositories, true);
+  assert.equal(calls[1].payload.allRepositories, undefined);
+  await context.requestChanges({ threadId: "thread" });
+  assert.equal(calls.length, 3);
+  assert.equal(calls[2].payload.allRepositories, undefined);
+  context.legacyChangesUntil = 0;
+  context.request = async () => { throw Object.assign(new Error("访问已撤销"), { code: 403 }); };
+  await assert.rejects(context.requestChanges({ threadId: "thread" }), error => error.code === 403);
 });

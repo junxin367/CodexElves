@@ -282,7 +282,9 @@ function onAmbientLight(event) {
   if (!isPlainObject(detail) || detail.type !== "ambient-light" || typeof detail.supported !== "boolean") return;
   const lux = detail.supported && Number.isFinite(detail.lux) && detail.lux >= 0 ? detail.lux : null;
   if (detail.supported && lux === null) return;
-  const status = Object.freeze({ supported: detail.supported, lux });
+  // 原生新版本可附真实采样年龄；旧版本缺失时保持未知，不影响原有光照选择。
+  const sampleAgeMs = Number.isSafeInteger(detail.sampleAgeMs) && detail.sampleAgeMs >= 0 ? detail.sampleAgeMs : null;
+  const status = Object.freeze({ supported: detail.supported, lux, sampleAgeMs });
   for (const listener of ambientLightListeners) {
     try { listener(status); } catch {}
   }

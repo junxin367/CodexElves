@@ -208,6 +208,71 @@ function fileTwisty(isFolder, expanded = false) {
   return result;
 }
 
+// 用户要求两种文件预览的第二行随阅读手势渐隐、收起；只处理用户输入，不把缓存恢复和布局变化当成滚动意图。
+export function mountPreviewControlsScroll({ body, controls, isActive = () => true }) {
+  const shell = node("div", "session-preview-controls");
+  const clip = node("div", "session-preview-controls-content");
+  controls.before(shell); clip.append(controls); shell.append(clip);
+  let reveal = 1, touch = null;
+  const setReveal = value => {
+    reveal = Math.max(0, Math.min(1, value));
+    if (reveal === 1) shell.style.removeProperty("--preview-controls-rows");
+    else shell.style.setProperty("--preview-controls-rows", `${reveal}fr`);
+    shell.style.setProperty("--preview-controls-reveal", String(reveal));
+    shell.inert = reveal === 0;
+    shell.style.pointerEvents = reveal === 0 ? "none" : "";
+  };
+  const expand = () => setReveal(1);
+  const scroll = (delta, target) => {
+    if (!isActive() || controls.hidden || !delta) return;
+    for (let element = target instanceof Element ? target : target?.parentElement;
+      element && element !== body; element = element.parentElement) {
+      if (element.scrollHeight > element.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(element).overflowY)
+          && (delta < 0 ? element.scrollTop > 0 : element.scrollTop + element.clientHeight < element.scrollHeight - 1)) return;
+    }
+    // 上滑令正文向上、scrollTop 增加时收起，反向回滑展开；短文件和滚动到底后的继续上滑不收起。
+    if (delta > 0 && (body.scrollHeight <= body.clientHeight + 1
+        || body.scrollTop + body.clientHeight >= body.scrollHeight - 1)) return;
+    // 与会话输入区一致：用至少 160px 或工具行高度两倍的滚动距离完成展开/收起，CSS 同步使用 .18s ease-out。
+    const distance = Math.max(160, controls.scrollHeight * 2);
+    setReveal(reveal - delta / distance);
+  };
+  const onWheel = event => {
+    if (event.ctrlKey || event.defaultPrevented || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? body.clientHeight : 1;
+    scroll(event.deltaY * unit, event.target);
+  };
+  const onTouchStart = event => {
+    touch = event.touches.length === 1 ? { x: event.touches[0].clientX, y: event.touches[0].clientY } : null;
+  };
+  const onTouchMove = event => {
+    const previous = touch;
+    onTouchStart(event);
+    if (!previous || !touch || event.defaultPrevented) return;
+    const delta = previous.y - touch.y;
+    if (Math.abs(delta) >= Math.abs(previous.x - touch.x)) scroll(delta, event.target);
+  };
+  const onTouchEnd = () => { touch = null; };
+  body.addEventListener("wheel", onWheel, { passive: true });
+  body.addEventListener("touchstart", onTouchStart, { passive: true });
+  body.addEventListener("touchmove", onTouchMove, { passive: true });
+  body.addEventListener("touchend", onTouchEnd, { passive: true });
+  body.addEventListener("touchcancel", onTouchEnd, { passive: true });
+  controls.addEventListener("focusin", expand);
+  return {
+    reset() { touch = null; expand(); },
+    dispose() {
+      body.removeEventListener("wheel", onWheel);
+      body.removeEventListener("touchstart", onTouchStart);
+      body.removeEventListener("touchmove", onTouchMove);
+      body.removeEventListener("touchend", onTouchEnd);
+      body.removeEventListener("touchcancel", onTouchEnd);
+      controls.removeEventListener("focusin", expand);
+      shell.replaceWith(controls);
+    }
+  };
+}
+
 export function mountSessionFiles({
   workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, copyText, request = requestRemote
 }) {
@@ -255,6 +320,9 @@ export function mountSessionFiles({
   const fileStatus = node("p", "session-tools-status"); fileStatus.setAttribute("role", "status");
   const body = node("div", "session-tools-detail session-files-content");
   content.screen.append(contentControls, fileStatus, body);
+  const controlsScroll = mountPreviewControlsScroll({
+    body, controls: contentControls, isActive: () => !disposed && route?.kind === "file" && !content.screen.inert
+  });
   function message(element, text = "", failed = false) {
     element.textContent = text; element.hidden = !text; element.classList.toggle("error-text", failed);
   }
@@ -486,6 +554,7 @@ export function mountSessionFiles({
     ++listEpoch; listController?.abort(); listing.screen.inert = true;
     show(content.screen); content.label.textContent = fileName(path); content.path.textContent = path;
     const saved = views.get(`file:${path}`);
+    controlsScroll.reset();
     sourceMode = line ? true : saved?.sourceMode ?? !/\.mdx?$/iu.test(path); wrap = saved?.wrap || false;
     contentResponse = responses.get(`file:${path}`) || null; renderedFile = path;
     renderContent(); body.scrollTop = saved?.scroll || 0;
@@ -615,7 +684,7 @@ export function mountSessionFiles({
     if (event.key === "Tab") {
       const screen = route.kind === "file" ? content.screen : listing.screen;
       const controls = [...screen.querySelectorAll("button:not(:disabled),input,[tabindex='0'],a[href]")]
-        .filter(element => element.getClientRects().length && !element.closest("[hidden]"));
+        .filter(element => element.getClientRects().length && !element.closest("[hidden],[inert]"));
       const first = controls[0], last = controls.at(-1);
       if (event.shiftKey && (document.activeElement === first || !screen.contains(document.activeElement))) {
         event.preventDefault(); last?.focus();
@@ -654,6 +723,7 @@ export function mountSessionFiles({
     open: () => openDirectory(currentDirectory), openFile, updateContext,
     dispose() {
       if (disposed) return;
+      controlsScroll.dispose();
       hideAll(true); disposed = true;
       for (const controller of controllers) controller.abort();
       document.removeEventListener("keydown", key, true);
