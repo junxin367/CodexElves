@@ -9021,9 +9021,13 @@
       host.prepend(badge);
     }
     const waiting = state.mode !== "ws";
+    // 用户要求：WS 连通但仍缺完整请求时，显示上下文等待，不伪造 0:00 探测倒计时。
+    // 探测退避由后端 5/15/30/60/180 秒调度，前端只显示 nextProbeAtMs。
+    const waitingForRequest = waiting && state.wsReady && !state.nextProbeAtMs;
     const seconds = Math.max(0, Math.ceil((Number(state.nextProbeAtMs || 0) - Date.now()) / 1000));
     const text = state.mode === "probing"
       ? "HTTP · 检测 WS"
+      : waitingForRequest ? "HTTP · 待完整请求"
       : waiting ? `HTTP · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`
       : "上游 WS";
     if (badge.textContent !== text) badge.textContent = text;
@@ -9034,9 +9038,11 @@
       badge.style.background = waiting ? "rgba(217,119,6,.14)" : "rgba(22,163,74,.12)";
       badge.style.color = color;
     }
-    const title = waiting
-      ? `当前会话上游已回退 HTTP，每 3 分钟尝试恢复 WS。\n${state.reason || ""}`
-      : "当前会话上游使用 WebSocket；客户端仍可通过本地 HTTP 连接提交请求。";
+    const title = waitingForRequest
+      ? `当前请求继续使用 HTTP，后续符合条件的完整请求可重新尝试 WS。\n${state.reason || ""}`
+      : waiting
+      ? `当前会话暂用 HTTP，后台按 5、15、30、60、180 秒间隔尝试恢复 WS。\n${state.reason || ""}`
+      : "当前会话上游优先尝试 WebSocket；客户端仍可通过本地 HTTP 连接提交请求。";
     if (badge.title !== title) {
       badge.title = title;
       badge.setAttribute("aria-label", title);

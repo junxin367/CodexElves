@@ -85,6 +85,169 @@ fn bootstrap_injection_script_loads_features_without_inlining_full_runtime() {
     assert!(script.contains("http://127.0.0.1:45221"));
     assert!(!script.contains("function installCodexElvesMenu"));
     assert!(assets::renderer_features_script().contains("function installCodexElvesMenu"));
+    assert!(
+        script.find("__codexElvesStatsigCache").unwrap() < script.find("DOMContentLoaded").unwrap()
+    );
+}
+
+#[test]
+fn statsig_cache_preserves_large_evaluations_across_fresh_contexts() {
+    let program = r#"
+const assert = require("node:assert/strict");
+const vm = require("node:vm");
+const patch = __STATSIG_CACHE_PATCH__;
+
+function realm(disk = new Map()) {
+  const context = vm.createContext({
+    disk, sessionDisk: new Map(), console,
+    setTimeout: () => 0, clearTimeout() {},
+  });
+  vm.runInContext(`
+    globalThis.window = globalThis;
+    globalThis.quotaBytes = 10 * 1024 * 1024;
+    globalThis.Storage = class Storage {
+      constructor(data) { this.data = data; }
+      get length() { return this.data.size; }
+      key(index) { return [...this.data.keys()][index] ?? null; }
+      getItem(key) { return this.data.get(String(key)) ?? null; }
+      setItem(key, value) {
+        key = String(key); value = String(value);
+        let bytes = 2 * (key.length + value.length);
+        for (const [otherKey, otherValue] of this.data) {
+          if (key !== otherKey) bytes += 2 * (otherKey.length + otherValue.length);
+        }
+        if (bytes > globalThis.quotaBytes) {
+          const error = new Error("storage full");
+          error.name = "QuotaExceededError";
+          throw error;
+        }
+        this.data.set(key, value);
+      }
+      removeItem(key) { this.data.delete(String(key)); }
+    };
+    globalThis.localStorage = new Storage(disk);
+    globalThis.sessionStorage = new Storage(sessionDisk);
+  `, context);
+  return { context, disk, storage: context.localStorage, install() {
+    vm.runInContext(patch, context);
+  }};
+}
+
+(async () => {
+  const key = "statsig.cached.evaluations.account-a";
+  const otherKey = "statsig.cached.evaluations.account-b";
+  const alias = "codexElves.statsigCache.v1:" + key;
+  const raw = JSON.stringify({
+    source: "Network", stableID: "identity-a",
+    data: JSON.stringify({
+      feature_gates: { language: { value: true } },
+      dynamic_configs: { large: { value: "配置 abc 😀 ".repeat(550000) } },
+      layer_configs: { locale: { value: { enable_i18n: true } } },
+      unicode: ["\ud800", "\udfff", "中文", "\u0000", "quote\"\\", "😀"],
+    }),
+  });
+  assert.ok(raw.length * 2 > 10 * 1024 * 1024);
+  const first = realm();
+  first.storage.setItem("unrelated-user-preference", "keep");
+  assert.throws(() => first.storage.setItem(key, raw), /QuotaExceededError/);
+  first.install();
+  first.storage.setItem(key, raw);
+  assert.equal(first.storage.getItem(key), raw, "配置内容必须逐字符无损");
+  assert.equal(first.storage.getItem(otherKey), null, "不得把缓存回填到其他账号键");
+  assert.equal(first.disk.has(key), false);
+  assert.ok(first.disk.get(alias).length < raw.length / 4);
+  assert.equal(first.storage.getItem("unrelated-user-preference"), "keep");
+  assert.throws(() => first.context.sessionStorage.setItem(key, raw), /QuotaExceededError/);
+  const getItem = first.context.Storage.prototype.getItem;
+  first.install();
+  assert.equal(first.context.Storage.prototype.getItem, getItem, "重复注入不能叠加拦截");
+
+  const fresh = realm(first.disk);
+  assert.equal(fresh.storage.getItem(key), null, "未加载增强时不能暴露压缩文本给原生 SDK");
+  fresh.install();
+  assert.equal(fresh.storage.getItem(key), raw, "新的 JS 上下文必须读回上次持久化的完整配置");
+  const valid = fresh.disk.get(alias);
+  fresh.context.quotaBytes = 0;
+  assert.throws(() => fresh.storage.setItem(key, raw + "x"), /QuotaExceededError/);
+  assert.equal(fresh.disk.get(alias), valid, "写入失败必须保留之前有效的副本");
+  fresh.context.quotaBytes = 10 * 1024 * 1024;
+  fresh.disk.set(alias, "ce-sc1:999:00000000:broken");
+  assert.equal(fresh.storage.getItem(key), null, "损坏副本不能成为可用配置");
+  fresh.disk.set(key, '{"source":"Cache","data":"legacy"}');
+  assert.equal(fresh.storage.getItem(key), '{"source":"Cache","data":"legacy"}');
+  fresh.disk.delete(key);
+  fresh.disk.set(alias, valid);
+
+  let currentUser = { userID: "a", customIDs: { stableID: "identity-a" } };
+  let values = null;
+  let updated = 0;
+  let storageDisabled = false;
+  const adapter = {
+    _getCacheKey: user => user.userID === "a" ? key : otherKey,
+    getDataSync(user) {
+      const text = fresh.storage.getItem(this._getCacheKey(user));
+      if (!text) return null;
+      const entry = JSON.parse(text);
+      if (entry.stableID !== user.customIDs.stableID) return null;
+      return { ...entry, source: "Cache" };
+    },
+  };
+  fresh.context.__STATSIG__ = { firstInstance: {
+    loadingStatus: "Ready", dataAdapter: adapter,
+    _initializePromise: Promise.resolve({ success: false, source: "NoValues" }),
+    getContext: () => ({ user: currentUser, values, options: { disableStorage: storageDisabled } }),
+    updateUserSync(user, options) {
+      assert.equal(user, currentUser);
+      assert.equal(options.disableBackgroundCacheRefresh, true);
+      const entry = adapter.getDataSync(user);
+      values = JSON.parse(entry.data);
+      updated++;
+      return { success: true, source: "Cache" };
+    },
+  }};
+  const recovered = await fresh.context.__codexElvesStatsigCache.recover();
+  assert.equal(recovered.results[0].restored, true);
+  assert.equal(values.layer_configs.locale.value.enable_i18n, true);
+  assert.equal(updated, 1);
+  currentUser = { userID: "b", customIDs: { stableID: "identity-b" } };
+  values = null;
+  const other = await fresh.context.__codexElvesStatsigCache.recover();
+  assert.equal(other.results[0].hasValues, false);
+  assert.equal(updated, 1, "切换身份后不能复用此前账号的评估");
+  currentUser = { userID: "a", customIDs: { stableID: "identity-a" } };
+  storageDisabled = true;
+  const disabled = await fresh.context.__codexElvesStatsigCache.recover();
+  assert.equal(disabled.results[0].hasValues, false);
+  assert.equal(updated, 1, "显式禁用 SDK 缓存时不能自行恢复");
+  fresh.storage.removeItem(key);
+  assert.equal(fresh.disk.has(alias), false);
+  assert.equal(fresh.storage.getItem("unrelated-user-preference"), "keep");
+  console.log("large cache, cold context, identity, corruption and quota contracts passed");
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"#
+    .replace(
+        "__STATSIG_CACHE_PATCH__",
+        &serde_json::to_string(&assets::statsig_cache_script()).unwrap(),
+    );
+    let mut child = Command::new("node")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("node should start for the cache persistence contract");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(program.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

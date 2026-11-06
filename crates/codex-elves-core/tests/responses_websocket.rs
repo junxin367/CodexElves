@@ -1786,7 +1786,115 @@ async fn explicitly_disabled_websocket_rejects_upgrade_before_connecting_upstrea
 }
 
 #[tokio::test]
-async fn local_proxy_defaults_to_http_for_same_turn_after_disconnect_before_first_request() {
+async fn local_proxy_only_downgrades_repeated_interruptions_and_completed_requests_reset_failures()
+{
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    save_supported_websocket_settings(upstream_address, false, "gpt-streak");
+    let upstream =
+        tokio::spawn(async move {
+            // 两次断流后完成一次，再连续断流三次；已完成后的 EOF 也不能破坏成功结果。
+            for completed in [false, false, true, false, false, false] {
+                let (stream, _) = upstream_listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                assert!(matches!(socket.next().await, Some(Ok(Message::Text(_)))));
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "type": "response.created",
+                            "response": {"id": "resp_streak", "status": "in_progress", "output": []}
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                if completed {
+                    socket.send(Message::Text(serde_json::json!({
+                    "type": "response.completed",
+                    "response": {"id": "resp_streak", "status": "completed", "output": []}
+                }).to_string().into())).await.unwrap();
+                }
+                // 模拟没有 Close 帧的传输中断；收到应用事件后禁止透明重放。
+                drop(socket);
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), upstream_listener.accept(),)
+                    .await
+                    .is_err(),
+                "the rejected upgrade must not reach the provider"
+            );
+        });
+    let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_address = local_listener.local_addr().unwrap();
+    let local_server = tokio::spawn(async move {
+        for index in 0..7 {
+            let (mut stream, remote_addr) = local_listener.accept().await.unwrap();
+            let request_bytes = read_upgrade_request(&mut stream).await;
+            let result =
+                handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr))
+                    .await;
+            assert_eq!(result.is_ok(), matches!(index, 2 | 6));
+        }
+    });
+    let thread_id = format!("streak-{}", uuid::Uuid::new_v4());
+    for index in 0..6 {
+        let (mut client, _) = connect_async(websocket_turn_request(
+            local_address,
+            &thread_id,
+            "same-turn",
+        ))
+        .await
+        .expect("an isolated interruption must allow the next WS connection");
+        client
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "response.create", "model": "gpt-streak", "input": "hello",
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let completed = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut completed = false;
+            while let Some(message) = client.next().await {
+                match message.unwrap() {
+                    Message::Text(text) => {
+                        let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        completed |= event["type"] == "response.completed";
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+            completed
+        })
+        .await
+        .unwrap();
+        assert_eq!(completed, index == 2);
+    }
+    let error = connect_async(websocket_turn_request(
+        local_address,
+        &thread_id,
+        "same-turn",
+    ))
+    .await
+    .unwrap_err();
+    let WebSocketError::Http(response) = error else {
+        panic!("expected HTTP fallback after three interrupted requests");
+    };
+    assert_eq!(response.status().as_u16(), 426);
+    local_server.await.unwrap();
+    upstream.await.unwrap();
+}
+
+#[tokio::test]
+async fn local_proxy_keeps_websocket_after_client_disconnect_before_first_request() {
     let _settings_lock = websocket_settings_test_lock().lock().await;
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_address = upstream_listener.local_addr().unwrap();
@@ -1881,7 +1989,7 @@ async fn local_proxy_defaults_to_http_for_same_turn_after_disconnect_before_firs
         .unwrap();
     let second_response = read_upgrade_request(&mut second_client).await;
     assert!(
-        second_response.starts_with(b"HTTP/1.1 426"),
+        second_response.starts_with(b"HTTP/1.1 101"),
         "{}",
         String::from_utf8_lossy(&second_response)
     );
@@ -1891,7 +1999,7 @@ async fn local_proxy_defaults_to_http_for_same_turn_after_disconnect_before_firs
         .await
         .unwrap()
         .unwrap();
-    second_result.unwrap();
+    assert!(second_result.is_err());
 
     let third_listener = local_listener.clone();
     let third_local_server = tokio::spawn(async move {
@@ -1926,31 +2034,34 @@ async fn local_proxy_defaults_to_http_for_same_turn_after_disconnect_before_firs
     );
 
     upstream.await.unwrap();
-    assert_eq!(upstream_connection_count.load(Ordering::SeqCst), 2);
+    assert_eq!(upstream_connection_count.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]
-async fn local_proxy_downgrades_same_turn_after_disconnect_with_default_settings() {
+async fn local_proxy_does_not_treat_client_cancellation_as_upstream_failure() {
     let _settings_lock = websocket_settings_test_lock().lock().await;
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_address = upstream_listener.local_addr().unwrap();
     let upstream_connection_count = Arc::new(AtomicUsize::new(0));
     let upstream_count = upstream_connection_count.clone();
     let upstream = tokio::spawn(async move {
-        let Ok((stream, _)) = upstream_listener.accept().await else {
-            return;
-        };
-        upstream_count.fetch_add(1, Ordering::SeqCst);
-        let Ok(mut socket) = accept_hdr_async(stream, |_request: &Request, response: Response| {
-            Ok(response)
-        })
-        .await
-        else {
-            return;
-        };
-        while let Some(message) = socket.next().await {
-            if matches!(message, Ok(Message::Close(_)) | Err(_)) {
-                break;
+        for _ in 0..2 {
+            let Ok((stream, _)) = upstream_listener.accept().await else {
+                return;
+            };
+            upstream_count.fetch_add(1, Ordering::SeqCst);
+            let Ok(mut socket) =
+                accept_hdr_async(stream, |_request: &Request, response: Response| {
+                    Ok(response)
+                })
+                .await
+            else {
+                return;
+            };
+            while let Some(message) = socket.next().await {
+                if matches!(message, Ok(Message::Close(_)) | Err(_)) {
+                    break;
+                }
             }
         }
     });
@@ -2008,12 +2119,13 @@ async fn local_proxy_downgrades_same_turn_after_disconnect_with_default_settings
         .await
         .unwrap();
     let second_response = read_upgrade_request(&mut second_client).await;
-    assert!(second_response.starts_with(b"HTTP/1.1 426"));
+    assert!(second_response.starts_with(b"HTTP/1.1 101"));
+    second_client.shutdown().await.unwrap();
     drop(second_client);
-    second_local_server.await.unwrap().unwrap();
+    assert!(second_local_server.await.unwrap().is_err());
 
     upstream.await.unwrap();
-    assert_eq!(upstream_connection_count.load(Ordering::SeqCst), 1);
+    assert_eq!(upstream_connection_count.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

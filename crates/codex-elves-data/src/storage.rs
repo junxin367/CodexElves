@@ -1558,11 +1558,13 @@ impl RolloutUsageParser {
                     .and_then(|usage| usage.get("total_tokens"))
                     .and_then(Value::as_u64)
                     .filter(|_| model_context_window > 0)
-                    .map(|used| json!({
-                        "usedTokens": used,
-                        "contextWindow": model_context_window,
-                        "observedAt": value.get("timestamp").and_then(Value::as_str),
-                    }));
+                    .map(|used| {
+                        json!({
+                            "usedTokens": used,
+                            "contextWindow": model_context_window,
+                            "observedAt": value.get("timestamp").and_then(Value::as_str),
+                        })
+                    });
                 let last_usage = TokenUsageTotals::from_json(last);
                 let total_usage = TokenUsageTotals::from_json(total);
                 let context_used = total_usage.total_tokens.max(last_usage.total_tokens);
