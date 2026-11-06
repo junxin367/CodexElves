@@ -285,6 +285,72 @@ pub(crate) struct OwnerSnapshot {
     pub snapshot: Value,
 }
 
+/// 服务模式通过已有 owner 执行操作；不存在 owner 才允许由自己的运行时接管。
+/// 此入口不连接 CDP，也不在页面中执行脚本。
+#[cfg(windows)]
+pub(crate) async fn request_owner(
+    thread_id: &str,
+    method: &str,
+    params: Value,
+    version: u64,
+    guard: Option<&dyn ServiceDispatchGuard>,
+) -> anyhow::Result<Option<Value>> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+    let stream = match ClientOptions::new().open(PIPE_PATH) {
+        Ok(stream) => stream,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut session = Session::new(stream, thread_id, RPC_TIMEOUT);
+    session.initialize().await?;
+    let Some(owner) = session.discover(None).await? else {
+        return Ok(None);
+    };
+    session.owner = Some(owner.clone());
+    let snapshot = session.fresh_snapshot().await?;
+    ensure!(
+        snapshot["ephemeral"] != true && snapshot.get("parentThreadId").is_none_or(Value::is_null),
+        "服务模式仅支持普通主会话"
+    );
+    let request_id = uuid::Uuid::new_v4().to_string();
+    session
+        .write(
+            &json!({
+                "type":"request","requestId":request_id,"sourceClientId":session.client_id,
+                "method":method,"version":version,"targetClientId":owner,"params":params,
+                "timeoutMs":RPC_TIMEOUT.as_millis() as u64
+            }),
+            guard,
+        )
+        .await?;
+    let response = session
+        .wait_response(&request_id, method, Some(&owner))
+        .await;
+    let _ = session.following(false).await;
+    match response {
+        Ok(value) => Ok(Some(value["result"].clone())),
+        Err(error) => {
+            let message = format!("{error:#}");
+            Err(error.context(DispatchFailure {
+                dispatched: true,
+                authorization_denied: false,
+                message,
+            }))
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn request_owner(
+    _thread_id: &str,
+    _method: &str,
+    _params: Value,
+    _version: u64,
+    _guard: Option<&dyn ServiceDispatchGuard>,
+) -> anyhow::Result<Option<Value>> {
+    Ok(None)
+}
+
 #[cfg(not(windows))]
 pub(crate) async fn available() -> bool {
     false

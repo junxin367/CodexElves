@@ -611,6 +611,7 @@ function openAppearance() {
     <nav class="appearance-nav" aria-label="设置导航">
       <button type="button" id="appearance-general-entry" class="appearance-nav-item" aria-controls="appearance-general-page" aria-selected="true"><span class="appearance-nav-icon"></span><span>通用设置</span></button>
       <button type="button" id="appearance-customization-entry" class="appearance-nav-item" title="打开外观主题" aria-label="打开外观主题" aria-controls="appearance-customization-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>外观主题</span></button>
+      <button type="button" id="appearance-runtime-entry" class="appearance-nav-item" aria-controls="appearance-runtime-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>运行方式</span></button>
       <button type="button" id="appearance-notifications-entry" class="appearance-nav-item" title="打开通知事件" aria-label="打开通知事件" aria-controls="appearance-notifications-page" aria-selected="false" hidden><span class="appearance-nav-icon"></span><span>通知事件</span></button>
       <button type="button" id="appearance-diagnostics-entry" class="appearance-nav-item" title="打开诊断日志" aria-label="打开诊断日志" aria-controls="appearance-diagnostics-page" aria-selected="false" hidden><span class="appearance-nav-icon"></span><span>诊断日志</span></button>
     </nav>
@@ -636,6 +637,11 @@ function openAppearance() {
     <div id="appearance-diagnostics-field" class="appearance-field" hidden><span>运行日志</span><div class="appearance-action-buttons"><button type="button" id="appearance-diagnostics-export" disabled>导出</button><button type="button" id="appearance-diagnostics-send" disabled>发送到电脑</button></div></div>
     <p id="appearance-diagnostics-status" class="appearance-notification-status" role="status" hidden></p>
     </section>
+    <section id="appearance-runtime-page" class="appearance-body appearance-settings-page" hidden>
+    <h3 class="appearance-panel-title">运行方式</h3>
+    <label class="appearance-notification-row"><span>CDP 注入</span><input id="appearance-cdp-injection" class="appearance-notification-switch" type="checkbox" role="switch" aria-label="CDP 注入" checked disabled></label>
+    <p id="appearance-runtime-status" class="appearance-notification-status" role="status" hidden></p>
+    </section>
     </div></div>
     <div class="appearance-actions"><button type="button" class="appearance-version" id="appearance-app-version" hidden disabled></button><div class="appearance-action-buttons"><button type="button" id="appearance-reset">恢复默认</button><button type="button" class="primary" id="appearance-close">完成</button></div></div>`;
   document.body.append(dialog);
@@ -649,6 +655,55 @@ function openAppearance() {
   const entryButton = $("#appearance-notifications-entry", dialog);
   const diagnosticsEntry = $("#appearance-diagnostics-entry", dialog);
   const diagnosticsPage = $("#appearance-diagnostics-page", dialog);
+  const runtimeEntry = $("#appearance-runtime-entry", dialog);
+  const runtimePage = $("#appearance-runtime-page", dialog);
+  const runtimeSwitch = $("#appearance-cdp-injection", dialog);
+  const runtimeStatus = $("#appearance-runtime-status", dialog);
+  let runtimeSettings = null, runtimeBusy = false;
+  const updateRuntimeSwitch = () => {
+    if (!dialog.isConnected) return;
+    runtimeSwitch.checked = runtimeSettings?.cdpInjectionEnabled !== false;
+    // 未确认写入或正在编辑的草稿继续由原后端处理，避免切换后丢失编辑事务。
+    runtimeSwitch.disabled = runtimeBusy || !runtimeSettings || !session || session.readOnly || !connected
+      || busy || stopping || !!pending || !!editingMessage || !!editingQueuedMessage;
+  };
+  dialog.updateRemoteRuntimeSwitch = updateRuntimeSwitch;
+  const readRuntimeSettings = async () => {
+    const deviceId = session?.device.id;
+    try {
+      const response = await api("/api/read/runtime", {});
+      if (!dialog.isConnected || session?.device.id !== deviceId) return;
+      if (typeof response.runtime?.cdpInjectionEnabled !== "boolean"
+          || !Number.isSafeInteger(response.runtime.revision)) throw new Error("运行方式数据无效，请重试。");
+      if (response.runtime.revision < (runtimeSettings?.revision ?? -1)) return;
+      runtimeSettings = response.runtime;
+      updateRuntimeSwitch();
+    } catch (error) {
+      if (!dialog.isConnected) return;
+      runtimeStatus.textContent = error.message;
+      runtimeStatus.hidden = false;
+    }
+  };
+  // 用户要求默认开启且仅当前设备生效；按设备授权保存，失败时恢复服务器确认值。
+  runtimeSwitch.onchange = async () => {
+    if (runtimeBusy || !runtimeSettings) return;
+    const enabled = runtimeSwitch.checked;
+    runtimeBusy = true; runtimeSwitch.disabled = true; runtimeStatus.hidden = true;
+    try {
+      const result = await mutate("setRuntime", {
+        cdpInjectionEnabled: enabled, expectedRevision: runtimeSettings.revision
+      }, { reliable: true });
+      runtimeSettings = result.runtime;
+      applyRemoteRuntime(result.runtime);
+      await refreshConnectedSession();
+    } catch (error) {
+      if (dialog.isConnected) { runtimeStatus.textContent = error.message; runtimeStatus.hidden = false; }
+      await readRuntimeSettings();
+    } finally {
+      runtimeBusy = false;
+      updateRuntimeSwitch();
+    }
+  };
   const resetButton = $("#appearance-reset", dialog);
   const notificationVersionButton = $("#appearance-app-version", dialog);
   if (androidContainer) {
@@ -698,6 +753,7 @@ function openAppearance() {
   customizationEntry.querySelector(".appearance-nav-icon").append(icon("sun"));
   entryButton.querySelector(".appearance-nav-icon").append(icon("globe"));
   diagnosticsEntry.querySelector(".appearance-nav-icon").append(icon("tools"));
+  runtimeEntry.querySelector(".appearance-nav-icon").append(icon("settings"));
   headingButton.append(icon("close"));
   renderPwaCacheState();
   const versionButton = notificationVersionButton;
@@ -790,6 +846,11 @@ function openAppearance() {
   diagnosticsEntry.onclick = () => {
     if (!dialog.isConnected || !dialog.open || diagnosticsEntry.hidden) return;
     showAppearancePage(diagnosticsPage, "诊断日志", diagnosticsEntry);
+  };
+  runtimeEntry.onclick = () => {
+    if (!dialog.isConnected || !dialog.open) return;
+    showAppearancePage(runtimePage, "运行方式", runtimeEntry);
+    void readRuntimeSettings();
   };
   if (androidContainer) entryButton.onclick = () => {
     if (!dialog.isConnected || !dialog.open) return;
@@ -2089,6 +2150,10 @@ function resetRelatedSessions({ persisted = false } = {}) {
   if (persisted) try { sessionStorage.removeItem(relatedOperationStorageKey); } catch {}
 }
 async function loadRelatedThreads(parentThreadId) {
+  if (session?.runtime?.cdpInjectionEnabled === false) return {
+    ok: true, threadId: parentThreadId, subagents: [], sideThreads: [],
+    completedSubagents: [], completedSubagentCount: 0, subagentsComplete: true, canCreateSideThread: false
+  };
   if (!session || !validRelatedThreadId(parentThreadId))
     throw new Error("请先选择主会话");
   const scope = privateInputScope(session);
@@ -2161,6 +2226,7 @@ async function openRelatedThread(item, kind, parentThreadId = selectedId, {
   owner = relatedNavigationOwner, initialThread = null, replaceHistory = false,
   preparedView = false, onViewReady = null
 } = {}) {
+  if (session?.runtime?.cdpInjectionEnabled === false) return;
   if (relatedSessionView || !validRelatedThreadId(item?.id) || parentThreadId !== selectedId) return;
   const view = rememberRelatedView(item.id, kind, null, item.name || item.title || "",
     { openedFromThreadId: parentThreadId, ephemeral: item.ephemeral });
@@ -2360,6 +2426,7 @@ async function resolveRelatedOperation(record, { allowSelection = false } = {}) 
   return record.request;
 }
 async function runRelatedOperation(action, item = null) {
+  if (session?.runtime?.cdpInjectionEnabled === false) return;
   const parentThreadId = selectedId, scope = privateInputScope(session);
   if (!session || relatedSessionView || !validRelatedThreadId(parentThreadId) || thread?.id !== parentThreadId
       || threadReadOnly(parentThreadId) || !connected) return;
@@ -4722,6 +4789,7 @@ async function syncConnectionState(source = stream, { recoveryProbe = false } = 
     await reconnectChangedAuthorization();
     return false;
   }
+  if (latest.runtime) applyRemoteRuntime(latest.runtime);
   session = latest;
   setConnection((latest.nativeConnected || latest.serviceConnected) && source?.readyState === EventSource.OPEN);
   renderApprovals();
@@ -6115,6 +6183,7 @@ function shell() {
         ? relatedSessionView.openedFromThreadId || relatedSessionView.parentThreadId : null;
       return { deviceId: session?.device.id, cacheScope: privateInputScope(session),
         threadId: !creating ? parentThreadId || selectedId : null, readOnly: threadReadOnly(), connected,
+        relatedEnabled: session?.runtime?.cdpInjectionEnabled !== false,
         createPending: [...relatedThreadOperations.values()].some(record => ownsRelatedOperation(record)
           && record.parentThreadId === (parentThreadId || selectedId) && record.action === "createSideThread") };
     },
@@ -7795,7 +7864,10 @@ function renderSubagentItem(item, previous, running = false) {
   node.setAttribute("aria-label", `${name}，${presentation.label}`);
   if (presentation.active) node.setAttribute("role", "status"); else node.removeAttribute("role");
   const ids = subagentThreadIds(item).filter(id => validRelatedThreadId(id) && id !== selectedId);
-  const canOpen = !relatedSessionView && ids.length === 1, parentThreadId = selectedId;
+  const disabled = session?.runtime?.cdpInjectionEnabled === false;
+  node.classList.toggle("subagent-item-disabled", disabled);
+  if (disabled) node.setAttribute("aria-disabled", "true"); else node.removeAttribute("aria-disabled");
+  const canOpen = !disabled && !relatedSessionView && ids.length === 1, parentThreadId = selectedId;
   node.onclick = canOpen ? () => void openRelatedThread({ id: ids[0], name }, "subagent", parentThreadId)
     .catch(error => notice(error.message, true)) : null;
   node.onkeydown = canOpen ? event => {
@@ -9704,12 +9776,13 @@ function renderMessages(keepScroll = true) {
       const editing = item.type === "userMessage" && editingMessage?.threadId === selectedId && editingMessage.messageId === item.id;
       const skillKey = userMessageHasSkills(item)
         ? JSON.stringify([skillRenderVersion, (item.content || []).filter(part => part.type === "skill")]) : "";
+      const relatedEnabled = session?.runtime?.cdpInjectionEnabled !== false;
       const node = cached?.item === item && cached.inActivity === inActivity && cached.running === running
         && cached.editing === editing && cached.skillKey === skillKey && cached.markdownVersion === markdownRenderVersion
-        && cached.relatedViewKind === relatedViewKind
+        && cached.relatedViewKind === relatedViewKind && cached.relatedEnabled === relatedEnabled
         ? cached.node : renderItem(item, cached?.item.type === item.type ? cached.node : null, inActivity, running);
       node.dataset.key = key;
-      renderedItems.set(key, { item, node, inActivity, running, editing, skillKey, relatedViewKind, markdownVersion: markdownRenderVersion });
+      renderedItems.set(key, { item, node, inActivity, running, editing, skillKey, relatedViewKind, relatedEnabled, markdownVersion: markdownRenderVersion });
       if (editing) node.messageActionBinding?.dispose();
       else if (item.type === "userMessage" || item.type === "agentMessage") {
         const threadId = selectedId;
@@ -9911,6 +9984,12 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   suppressAutomaticNewChat = false;
   const navigationVersion = ++relatedSelectionVersion;
   const nextRelatedView = relatedView === undefined ? relatedViewForThread(id) : normalizeRelatedView(relatedView, id);
+  if (session.runtime?.cdpInjectionEnabled === false && nextRelatedView) {
+    const parent = nextRelatedView.openedFromThreadId || nextRelatedView.parentThreadId;
+    if (validRelatedThreadId(parent) && parent !== id)
+      return selectThread(parent, { closeSidebar, force, relatedView: null, replaceHistory: true });
+    return showWelcome();
+  }
   const currentRelatedView = normalizeRelatedView(relatedSessionView, selectedId);
   const menuHeld = sessionMenu?.isOpen?.() || sessionMenu?.isSuspended?.();
   const returningToParent = !!(menuHeld && !nextRelatedView && currentRelatedView?.kind === "side"
@@ -11846,6 +11925,7 @@ function syncPendingFeedbackTimer() {
   }, Math.min(...remaining));
 }
 function updateComposer() {
+  $("#appearance-dialog")?.updateRemoteRuntimeSwitch?.();
   sessionTools?.updateContext();
   syncRelatedSessionLayout();
   if (!$("#composer")) return;
@@ -12275,7 +12355,8 @@ function setConnection(value) {
       || connectionRtt.nativeVersion !== nativeConnectionVersion
       || connectionRtt.connectionVersion !== connectionCycleVersion)) connectionRtt = null;
   const guidance = $("#desktop-connection-guidance");
-  if (guidance) guidance.hidden = session?.nativeConnected !== false || session?.serviceConnected === true;
+  if (guidance) guidance.hidden = session?.runtime?.cdpInjectionEnabled === false
+    || session?.nativeConnected !== false || session?.serviceConnected === true;
   renderConnectionIndicator();
   updateComposer();
   if (thread?.requests?.some(request => request.method === "remote/requestUserInputAsync")) renderApprovals();
@@ -12396,8 +12477,35 @@ function scheduleSidebarRefresh() {
   clearTimeout(sidebarTimer);
   sidebarTimer = setTimeout(() => void loadSidebar(null, { fresh: true }).catch(() => {}), 1200);
 }
+function applyRemoteRuntime(runtime) {
+  if (!session || typeof runtime?.cdpInjectionEnabled !== "boolean"
+      || !Number.isSafeInteger(runtime.revision)
+      || (session.runtime?.revision ?? -1) > runtime.revision) return;
+  const changed = session.runtime?.cdpInjectionEnabled !== runtime.cdpInjectionEnabled;
+  session.runtime = runtime;
+  session.capabilities = { ...session.capabilities,
+    sideThreads: runtime.cdpInjectionEnabled, subagents: runtime.cdpInjectionEnabled };
+  if (changed) {
+    ++nativeConnectionVersion;
+    cancelConnectionProbe();
+    sessionMenu?.close();
+    sessionMenu?.invalidate();
+    if ($("#messages")) renderMessages();
+    if (!runtime.cdpInjectionEnabled) {
+      stopRelatedSessionTimers();
+      dismissSideCreation({ canceled: true });
+      if (relatedSessionView) void returnToParentSession().catch(() => {});
+    }
+  }
+  sessionMenu?.updateContext();
+}
 function receive(event) {
   if (handleRemoteChannelEvent(event)) return;
+  if (event.method === "remote/runtimeChanged") {
+    applyRemoteRuntime(event.params?.runtime);
+    void withRecoveryErrorSilence(() => refreshConnectedSession()).catch(() => {});
+    return;
+  }
   const rawParams = event.params || {};
   const eventThreadId = rawParams.threadId ?? rawParams.conversationId ?? rawParams.thread?.id;
   const suppressSidebarRefresh = event.method === "remote/sidebarChanged"

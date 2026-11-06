@@ -1,0 +1,564 @@
+//! 远程会话服务：统一维护执行引擎、会话归属、队列、编辑事务、审批和事件。
+//! 用户要求关闭 CDP 后完整切换；本模块不包含 CDP、页面脚本或注入回退。
+mod commands;
+mod projection;
+mod reads;
+mod runtime;
+mod store;
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
+use std::time::Duration;
+
+use anyhow::Context;
+use serde_json::{Value, json};
+use tokio::sync::{Mutex, mpsc};
+
+use super::{ApiError, RemoteAccessController, RemoteAuthorization};
+use crate::codex_service::ServiceDispatchGuard;
+use projection::Projection;
+use runtime::Runtime;
+use store::{Queued, Store};
+
+pub(super) struct Harness {
+    runtime: Runtime,
+    projection: Arc<Mutex<Projection>>,
+    store: Mutex<Store>,
+    controller: OnceLock<Weak<RemoteAccessController>>,
+    receiver: Mutex<Option<mpsc::Receiver<Value>>>,
+    worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    queue_worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    owners: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    loaded: Mutex<HashMap<String, String>>,
+    pub enabled: AtomicBool,
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.get_mut().take() {
+            worker.abort();
+        }
+        if let Some(worker) = self.queue_worker.get_mut().take() {
+            worker.abort();
+        }
+        for (_, task) in self.owners.get_mut().drain() {
+            task.abort();
+        }
+    }
+}
+
+impl Harness {
+    #[cfg(test)]
+    pub async fn install_test_process(&self, process: crate::codex_service::RunningService) {
+        self.runtime.install_test_process(process).await;
+    }
+    pub fn new(directory: &Path) -> anyhow::Result<Arc<Self>> {
+        let (events, receiver) = mpsc::channel(512);
+        Ok(Arc::new(Self {
+            runtime: Runtime::new(events),
+            projection: Arc::new(Mutex::new(Projection::default())),
+            store: Mutex::new(Store::open(directory)?),
+            controller: OnceLock::new(),
+            receiver: Mutex::new(Some(receiver)),
+            worker: Mutex::new(None),
+            queue_worker: Mutex::new(None),
+            owners: Mutex::new(HashMap::new()),
+            locks: Mutex::new(HashMap::new()),
+            loaded: Mutex::new(HashMap::new()),
+            enabled: AtomicBool::new(false),
+        }))
+    }
+
+    pub fn attach(&self, controller: Weak<RemoteAccessController>) {
+        let _ = self.controller.set(controller);
+    }
+
+    async fn start(self: &Arc<Self>) -> anyhow::Result<()> {
+        let mut worker = self.worker.lock().await;
+        if worker.is_none() {
+            let mut receiver = self
+                .receiver
+                .lock()
+                .await
+                .take()
+                .context("会话事件接收器已关闭")?;
+            let weak = Arc::downgrade(self);
+            *worker = Some(tokio::spawn(async move {
+                while let Some(frame) = receiver.recv().await {
+                    let Some(service) = weak.upgrade() else { break };
+                    service.projection.lock().await.ingest(frame);
+                }
+            }));
+            let weak = Arc::downgrade(self);
+            *self.queue_worker.lock().await = Some(tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_millis(750));
+                loop {
+                    tick.tick().await;
+                    let Some(service) = weak.upgrade() else { break };
+                    // 派发与接收独立运行，长请求不会堵住流式输出或审批事件。
+                    if service.enabled.load(Ordering::Acquire) {
+                        service.drain_queues().await;
+                    }
+                }
+            }));
+        }
+        drop(worker);
+        let connection = self.runtime.connection().await?;
+        self.projection
+            .lock()
+            .await
+            .ingest(json!({"method":"harness/connected",
+            "_generation":connection.generation,"_generationIndex":connection.generation_index}));
+        Ok(())
+    }
+
+    pub async fn prepare(self: &Arc<Self>) -> anyhow::Result<()> {
+        self.start().await
+    }
+
+    pub async fn can_leave(&self, device_id: &str) -> anyhow::Result<()> {
+        let state = self.store.lock().await;
+        if state
+            .data
+            .queues
+            .values()
+            .flatten()
+            .any(|message| message.device_id == device_id)
+            || self.projection.lock().await.active.keys().any(|id| {
+                state
+                    .data
+                    .thread_devices
+                    .get(id)
+                    .is_some_and(|owner| owner == device_id)
+            })
+        {
+            return Err(error(
+                409,
+                "请先完成或停止当前任务，并处理待发送消息后再切换",
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn owns(&self, id: &str) -> bool {
+        self.loaded.lock().await.contains_key(id)
+    }
+
+    pub async fn idle(&self) -> bool {
+        self.store
+            .lock()
+            .await
+            .data
+            .queues
+            .values()
+            .all(Vec::is_empty)
+            && self.projection.lock().await.active.is_empty()
+    }
+
+    pub async fn release(&self) {
+        for (_, task) in self.owners.lock().await.drain() {
+            task.abort();
+        }
+        self.runtime.shutdown().await;
+        self.loaded.lock().await.clear();
+    }
+
+    async fn thread_lock(&self, id: &str) -> Arc<Mutex<()>> {
+        self.locks
+            .lock()
+            .await
+            .entry(id.to_owned())
+            .or_default()
+            .clone()
+    }
+
+    async fn ensure_loaded(
+        &self,
+        id: &str,
+        guard: &dyn ServiceDispatchGuard,
+    ) -> anyhow::Result<()> {
+        let connection = self.runtime.connection().await?;
+        if self.loaded.lock().await.get(id) == Some(&connection.generation) {
+            return Ok(());
+        }
+        // 仅写操作才 resume；读取不抢占桌面会话，底层 writer lock 决定最终归属。
+        let response = self
+            .runtime
+            .request(
+                "thread/resume",
+                json!({"threadId":id,"excludeTurns":true}),
+                Some(guard),
+            )
+            .await?;
+        let mut thread = crate::codex_service::normalize_thread_response(&response)?;
+        for key in ["model", "reasoningEffort", "serviceTier"] {
+            if let Some(value) = response.get(key) {
+                thread[key] = value.clone();
+            }
+        }
+        self.remember_settings(id, &response).await?;
+        self.projection
+            .lock()
+            .await
+            .threads
+            .insert(id.to_owned(), thread);
+        self.loaded
+            .lock()
+            .await
+            .insert(id.to_owned(), connection.generation.clone());
+        Ok(())
+    }
+
+    async fn remember_settings(&self, id: &str, settings: &Value) -> anyhow::Result<()> {
+        let saved = self.store.lock().await.commit(|data| {
+            let current = data
+                .settings
+                .entry(id.to_owned())
+                .or_insert_with(|| json!({}));
+            for key in ["model", "reasoningEffort", "serviceTier"] {
+                if let Some(value) = settings.get(key) {
+                    current[key] = value.clone();
+                }
+            }
+            Ok(current.clone())
+        })?;
+        let mut projection = self.projection.lock().await;
+        let thread = projection
+            .threads
+            .entry(id.to_owned())
+            .or_insert_with(|| json!({}));
+        for (key, value) in saved.as_object().into_iter().flatten() {
+            thread[key] = value.clone();
+        }
+        Ok(())
+    }
+
+    async fn locally_loaded(&self, id: &str) -> anyhow::Result<bool> {
+        let generation = self.runtime.connection().await?.generation.clone();
+        Ok(self.loaded.lock().await.get(id) == Some(&generation))
+    }
+
+    async fn owner_snapshot(&self, id: &str) -> anyhow::Result<Option<Value>> {
+        if self.locally_loaded(id).await? {
+            return Ok(None);
+        }
+        crate::desktop_owner_ipc::read_snapshot(id).await
+    }
+
+    async fn owner_request(
+        &self,
+        id: &str,
+        method: &str,
+        params: Value,
+        version: u64,
+        guard: Option<&dyn ServiceDispatchGuard>,
+    ) -> anyhow::Result<Option<Value>> {
+        if self.locally_loaded(id).await? {
+            return Ok(None);
+        }
+        crate::desktop_owner_ipc::request_owner(id, method, params, version, guard).await
+    }
+
+    pub async fn call(
+        self: &Arc<Self>,
+        action: &str,
+        payload: Value,
+        authorization: Option<&RemoteAuthorization>,
+    ) -> anyhow::Result<Value> {
+        self.start().await?;
+        if let Some(authorization) = authorization {
+            authorization.check().await?;
+        }
+        let result = match action {
+            "events" => Ok(self.projection.lock().await.events(&payload)),
+            "notifications" => Ok(self.projection.lock().await.notifications(&payload)),
+            "sidebar" => self.sidebar().await,
+            "models" => self.models().await,
+            "skills" => self.skills(&payload).await,
+            "thread" => self.thread(&payload).await,
+            "history" => self.history(&payload).await,
+            "workspaceContext" => self.workspace_context(&payload).await,
+            "queue" => Ok(self.queue(required(&payload, "threadId")?).await),
+            "queueEdit" => self.queue_edit(&payload).await,
+            "sendState" => self.send_state(&payload).await,
+            "relatedThreads" => Ok(
+                json!({"ok":true,"threadId":payload["threadId"],"subagents":[],
+                "completedSubagents":[],"completedSubagentCount":0,"sideThreads":[],
+                "canCreateSideThread":false,"subagentsComplete":true}),
+            ),
+            "createSideThread" | "closeSideThread" => Err(error(409, "不支持的会话操作")),
+            "dispose" => Ok(json!({"ok":true})),
+            _ => {
+                let authorization = authorization.context("会话写操作缺少设备授权")?;
+                let id = payload["threadId"].as_str().unwrap_or("$workspace");
+                let lock = self.thread_lock(id).await;
+                let _serial = lock.lock().await;
+                authorization.check().await?;
+                self.command(action, payload, authorization).await
+            }
+        }?;
+        if let Some(authorization) = authorization {
+            authorization.check().await?;
+        }
+        Ok(result)
+    }
+
+    async fn queue(&self, id: &str) -> Value {
+        let epoch = self.projection.lock().await.epoch.clone();
+        self.store.lock().await.queue(id, &epoch)
+    }
+
+    async fn queue_changed(&self, id: &str) {
+        let snapshot = self.queue(id).await;
+        self.projection
+            .lock()
+            .await
+            .push(json!({"method":"thread/queue/changed","params":snapshot}));
+    }
+
+    async fn drain_queues(self: &Arc<Self>) {
+        let candidates: Vec<_> = self
+            .store
+            .lock()
+            .await
+            .data
+            .queues
+            .iter()
+            .filter(|(_, q)| q.first().is_some_and(|m| m.state == "queued"))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in candidates {
+            let lock = self.thread_lock(&id).await;
+            let Ok(_serial) = lock.try_lock() else {
+                continue;
+            };
+            if self.projection.lock().await.active.contains_key(&id) {
+                continue;
+            }
+            if self.projection.lock().await.compactions.contains_key(&id) {
+                continue;
+            }
+            let message = self
+                .store
+                .lock()
+                .await
+                .data
+                .queues
+                .get(&id)
+                .and_then(|q| q.first())
+                .cloned();
+            let Some(message) = message.filter(|q| q.state == "queued") else {
+                continue;
+            };
+            let result = self.dispatch_queued(&id, &message).await;
+            if let Err(error) = result {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "remote_access.harness_queue_paused",
+                    json!({"threadId":id,"messageId":message.id,"error":format!("{error:#}")}),
+                );
+            }
+        }
+    }
+
+    async fn dispatch_queued(&self, id: &str, message: &Queued) -> anyhow::Result<()> {
+        let controller = self
+            .controller
+            .get()
+            .and_then(Weak::upgrade)
+            .context("远程会话服务已停止")?;
+        let device = controller
+            .auth
+            .lock()
+            .await
+            .devices
+            .iter()
+            .find(|d| d.id == message.device_id && d.key_id == message.key_id)
+            .cloned()
+            .context("队列消息的设备授权已撤销")?;
+        let authorization = controller.authorization(device, Some("send"));
+        authorization.check().await?;
+        if let Some(snapshot) = self.owner_snapshot(id).await? {
+            let active = crate::desktop_owner_ipc::snapshot_turns(&snapshot)
+                .iter()
+                .any(|t| t["status"] == "inProgress");
+            if active {
+                self.follow_owner(id, snapshot).await;
+                return Ok(());
+            }
+            // 桌面已有待发内容时继续等待其持有者处理，不能让服务队列抢先发送。
+            let settings = crate::settings::SettingsStore::default().load()?;
+            let home = crate::codex_home::codex_home_dir_for_settings(&settings);
+            if !crate::codex_service::local_queue_is_empty(&home, id, &snapshot).await? {
+                return Ok(());
+            }
+            let native_queue = self
+                .runtime
+                .request(
+                    "thread/queue/list",
+                    json!({"threadId":id,"cursor":null,"limit":1}),
+                    None,
+                )
+                .await?;
+            let queued = native_queue["data"]
+                .as_array()
+                .context("桌面服务端队列状态未知")?;
+            if !queued.is_empty() || !native_queue["nextCursor"].is_null() {
+                return Ok(());
+            }
+        }
+        self.store.lock().await.commit(|data| {
+            let queued = data
+                .queues
+                .get_mut(id)
+                .and_then(|q| q.iter_mut().find(|q| q.id == message.id))
+                .context("队列消息已变化")?;
+            queued.state = "sending".into();
+            Ok(())
+        })?;
+        let result = self.start_turn(id, &message.payload, &authorization).await;
+        self.store.lock().await.commit(|data| {
+            match &result {
+                Ok(response) => {
+                    data.sent
+                        .insert(sent_key(id, &message.payload), response.clone());
+                    data.sent_hashes.insert(
+                        sent_key(id, &message.payload),
+                        commands::payload_hash(&message.payload),
+                    );
+                    if let Some(queue) = data.queues.get_mut(id) {
+                        queue.retain(|q| q.id != message.id);
+                    }
+                }
+                Err(error) => {
+                    if let Some(queued) = data
+                        .queues
+                        .get_mut(id)
+                        .and_then(|q| q.iter_mut().find(|q| q.id == message.id))
+                    {
+                        queued.state = if error
+                            .downcast_ref::<ApiError>()
+                            .is_some_and(|error| !error.outcome_unknown)
+                        {
+                            "paused"
+                        } else {
+                            "unknown"
+                        }
+                        .into();
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        self.queue_changed(id).await;
+        result.map(|_| ())
+    }
+
+    async fn follow_owner(&self, id: &str, baseline: Value) {
+        let mut owners = self.owners.lock().await;
+        if owners.get(id).is_some_and(|task| !task.is_finished()) {
+            return;
+        }
+        if owners.len() >= 8 {
+            if let Some(key) = owners.keys().next().cloned() {
+                if let Some(task) = owners.remove(&key) {
+                    task.abort();
+                }
+            }
+        }
+        let projection = self.projection.clone();
+        let id_owned = id.to_owned();
+        owners.insert(id.to_owned(), tokio::spawn(async move {
+            let mut previous = baseline;
+            let mut changes = crate::codex_service::ServiceProjection::new();
+            let mut cursor = changes.events(&json!({}));
+            let (sender, mut receiver) = mpsc::channel(8);
+            let watch = crate::desktop_owner_ipc::watch_snapshots(id_owned.clone(), sender);
+            tokio::pin!(watch);
+            loop {
+                tokio::select! {
+                    Some(observation) = receiver.recv() => {
+                        changes.project_changes(&id_owned, &previous, &observation.snapshot);
+                        cursor = changes.events(&cursor);
+                        let mut state = projection.lock().await;
+                        for event in cursor["events"].as_array().into_iter().flatten() {
+                    if event["method"]=="remote/notification" {continue;}
+                            state.ingest(event.clone());
+                        }
+                        if let Ok(thread) = crate::codex_service::normalize_owner_thread(&observation.snapshot, None) {
+                            state.threads.insert(id_owned.clone(), thread);
+                        }
+                        previous = observation.snapshot;
+                    }
+                    _ = &mut watch => break,
+                }
+            }
+            projection.lock().await.push(json!({"method":"remote/resync"}));
+        }));
+    }
+}
+
+fn error(code: u16, message: &str) -> anyhow::Error {
+    ApiError::new(code, message).into()
+}
+fn required<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a str> {
+    value[key]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| error(400, &format!("缺少 {key}")))
+}
+fn sent_key(id: &str, payload: &Value) -> String {
+    format!(
+        "{id}:{}",
+        payload["clientUserMessageId"].as_str().unwrap_or("")
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore]
+    async fn installed_engine_read_only_smoke() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Harness::new(directory.path()).unwrap();
+        service.prepare().await.unwrap();
+        let threads = service
+            .runtime
+            .request("thread/list", json!({"limit":1,"archived":false}), None)
+            .await
+            .unwrap();
+        let projects = service
+            .runtime
+            .request("project/list", json!({"limit":1}), None)
+            .await
+            .unwrap();
+        assert!(projects["data"].is_array());
+        assert!(threads["data"].is_array());
+        if let Some(id) = threads["data"]
+            .as_array()
+            .and_then(|rows| rows.first())
+            .and_then(|row| row["id"].as_str())
+        {
+            let goal = service
+                .runtime
+                .request("thread/goal/get", json!({"threadId":id}), None)
+                .await;
+            assert!(goal.is_ok(), "goal read failed: {goal:?}");
+            let turns = service
+                .runtime
+                .request(
+                    "thread/turns/list",
+                    json!({"threadId":id,"limit":1,"itemsView":"full","sortDirection":"desc"}),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(turns["data"].is_array());
+        }
+        service.release().await;
+    }
+}

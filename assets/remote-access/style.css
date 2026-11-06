@@ -41,6 +41,9 @@ button{appearance:none;-webkit-appearance:none;border:1px solid var(--line);bord
   :where(button:not(:disabled):not(.icon-button,.pair-key-toggle,.priority-clear-button,.row-menu-button,.context-info,.message-action-button,.command-shell-copy,.transcript-event-info,.goal-edit-button,.goal-action-button,.queued-menu-button,.queued-drag-handle,.new-chat-project-clear,.scroll-to-bottom,.image-preview-close,.composer-attachment-remove,.appearance-theme-button)):hover{background:var(--hover)}
 }
 button:disabled{opacity:.45;cursor:not-allowed}
+/* 用户要求服务模式中的侧边会话和子智能体只置灰，不增加提示。 */
+.session-related-menu-disabled>.session-related-menu-group-header>.session-related-menu-heading{opacity:.45}
+.subagent-item-disabled{opacity:.45;cursor:default}
 input,textarea,select{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 11px;min-width:0}
 input:focus,textarea:focus,select:focus,button:focus-visible{outline:2px solid #7b9eff;outline-offset:2px}
 textarea{resize:none;line-height:1.7}.muted{color:var(--muted)}

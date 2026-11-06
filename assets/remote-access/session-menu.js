@@ -80,9 +80,10 @@ export function mountSessionMenu({
     const cacheScope = nonempty(value.cacheScope) ? value.cacheScope : "";
     const threadId = nonempty(value.threadId) ? value.threadId : "";
     return { deviceId, cacheScope, threadId, readOnly: value.readOnly === true,
+      relatedEnabled: value.relatedEnabled !== false,
       createPending: value.createPending === true,
       authorization: JSON.stringify([deviceId, cacheScope]),
-      connected: value.connected === true, owner: JSON.stringify([deviceId, cacheScope, threadId]) };
+      connected: value.connected === true, owner: JSON.stringify([deviceId, cacheScope, threadId, value.relatedEnabled !== false]) };
   }
   function syncContext() {
     if (suspended) return context;
@@ -102,7 +103,7 @@ export function mountSessionMenu({
     if (changed && cached) onData?.(cached.data);
     return next;
   }
-  const canRead = value => !!(value?.deviceId && value.cacheScope && value.threadId);
+  const canRead = value => !!(value?.deviceId && value.cacheScope && value.threadId && value.relatedEnabled !== false);
   const canMutate = value => canRead(value) && value.connected && !value.readOnly;
   function entryFor(value = syncContext()) {
     if (!canRead(value)) return null;
@@ -290,6 +291,23 @@ export function mountSessionMenu({
     files.dataset.menuKey = "files"; tools.append(files);
     const browser = itemButton("浏览器", openBrowser, []);
     browser.dataset.menuKey = "browser"; tools.append(browser);
+    // 用户要求：服务模式第一期只将这两个入口置灰，不展示说明、提示或旧缓存内容。
+    if (context?.relatedEnabled === false) {
+      const subagents = section("子智能体");
+      subagents.classList.add("session-related-menu-disabled");
+      subagents.setAttribute("aria-disabled", "true");
+      const create = itemButton("新建侧边会话", null, []);
+      create.dataset.menuKey = "create";
+      create.classList.add("session-related-menu-heading-action");
+      create.setAttribute("aria-label", "新建侧边会话");
+      create.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+      const sides = section("侧边会话", create);
+      sides.classList.add("session-related-menu-disabled");
+      sides.setAttribute("aria-disabled", "true");
+      if (focusedKey) menuButtons().find(node => node.dataset.menuKey === focusedKey)?.focus();
+      if (opened) fit();
+      return;
+    }
     const data = cached?.data, entry = entries.get(owner), expected = owner;
     const toggleSubagents = element("button", "session-related-menu-item session-related-menu-heading-action session-related-menu-heading-toggle");
     toggleSubagents.type = "button"; toggleSubagents.tabIndex = -1;

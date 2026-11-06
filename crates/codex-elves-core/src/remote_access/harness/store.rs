@@ -1,0 +1,226 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use super::super::{RemoteAuthorization, now_ms};
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct Queued {
+    pub id: String,
+    pub payload: Value,
+    pub created_at: u64,
+    pub device_id: String,
+    pub key_id: String,
+    pub state: String,
+}
+
+impl Queued {
+    pub fn new(mut payload: Value, authorization: &RemoteAuthorization) -> Self {
+        let id = uuid::Uuid::new_v4().to_string();
+        if payload["clientUserMessageId"]
+            .as_str()
+            .is_none_or(str::is_empty)
+        {
+            payload["clientUserMessageId"] = json!(uuid::Uuid::new_v4().to_string());
+        }
+        Self {
+            id,
+            payload,
+            created_at: now_ms(),
+            device_id: authorization.device.id.clone(),
+            key_id: authorization.device.key_id.clone(),
+            state: "queued".into(),
+        }
+    }
+
+    pub fn view(&self) -> Value {
+        let images: Vec<_> = self.payload["images"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|image| json!({"src":image["dataUrl"],"name":image["name"]}))
+            .collect();
+        json!({"id":self.id,"clientUserMessageId":self.payload["clientUserMessageId"],
+            "text":self.payload["prompt"],"prompt":self.payload["prompt"],"createdAt":self.created_at,
+            "canSendNow":matches!(self.state.as_str(),"queued"|"paused"),"pausedReason":match self.state.as_str() {
+                "unknown" => json!("消息送达状态待核对"), "paused" => json!("消息已暂停"), _ => Value::Null },
+            "remoteDeliveryState":if self.state=="unknown" {"outcome-unknown"} else {"queued"},
+            "submission":{"status":match self.state.as_str(){"unknown"=>"outcome-unknown","sending"=>"sending",_=>"queued"}},
+            "context":{"prompt":self.payload["prompt"],"imageAttachments":images},
+            "submissionOptions":{"clientUserMessageId":self.payload["clientUserMessageId"],
+                "model":self.payload["model"],"reasoningEffort":self.payload["reasoningEffort"]}})
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct Edit {
+    pub thread_id: String,
+    pub message_id: String,
+    pub state: String,
+    pub original: Queued,
+    pub result: Value,
+    #[serde(default)]
+    pub terminal_fingerprint: Option<String>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(super) struct Data {
+    pub queues: BTreeMap<String, Vec<Queued>>,
+    pub edits: BTreeMap<String, Edit>,
+    pub sent: BTreeMap<String, Value>,
+    pub sent_hashes: BTreeMap<String, String>,
+    pub thread_pins: BTreeSet<String>,
+    pub project_pins: BTreeSet<String>,
+    pub preferences: Value,
+    pub settings: BTreeMap<String, Value>,
+    pub answered_questions: BTreeMap<String, Value>,
+    pub thread_devices: BTreeMap<String, String>,
+}
+
+pub(super) struct Store {
+    pub path: PathBuf,
+    pub data: Data,
+    pub revision: u64,
+}
+
+impl Store {
+    pub fn open(directory: &Path) -> anyhow::Result<Self> {
+        let path = directory.join("remote-harness-state.json");
+        let mut data: Data = match std::fs::read(&path) {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).context("远程会话服务状态文件损坏，未覆盖原文件")?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Data::default(),
+            Err(error) => return Err(error.into()),
+        };
+        // 用户要求重连后可继续操作；已派发但无回执的消息必须待核对，不能重发。
+        for queue in data.queues.values_mut() {
+            for message in queue
+                .iter_mut()
+                .filter(|message| message.state == "sending")
+            {
+                message.state = "unknown".into();
+            }
+        }
+        Ok(Self {
+            path,
+            data,
+            revision: 1,
+        })
+    }
+
+    pub fn commit<T>(
+        &mut self,
+        change: impl FnOnce(&mut Data) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let mut next = self.data.clone();
+        let value = change(&mut next)?;
+        while next.sent.len() > 4096 {
+            next.sent.pop_first();
+        }
+        next.sent_hashes.retain(|id, _| next.sent.contains_key(id));
+        // 已结束编辑只保留回执和内容指纹，不能长期重复保存原图片挤占待发容量。
+        let completed: Vec<_> = next
+            .edits
+            .iter_mut()
+            .filter(|(_, edit)| matches!(edit.state.as_str(), "committed" | "canceled"))
+            .map(|(id, edit)| {
+                edit.original.payload = json!({"prompt":""});
+                id.clone()
+            })
+            .collect();
+        for id in completed.iter().take(completed.len().saturating_sub(256)) {
+            next.edits.remove(id);
+        }
+        while next.answered_questions.len() > 4096 {
+            next.answered_questions.pop_first();
+        }
+        let bytes = serde_json::to_vec(&next)?;
+        anyhow::ensure!(
+            bytes.len() <= 64 * 1024 * 1024,
+            "远程待发送内容已达 64 MiB，请先处理现有队列"
+        );
+        crate::settings::atomic_write(&self.path, &bytes)?;
+        self.data = next;
+        self.revision += 1;
+        Ok(value)
+    }
+
+    pub fn queue(&self, thread_id: &str, epoch: &str) -> Value {
+        let messages: Vec<_> = self
+            .data
+            .queues
+            .get(thread_id)
+            .into_iter()
+            .flatten()
+            .filter(|q| q.state != "editing")
+            .map(Queued::view)
+            .collect();
+        let edits: Vec<_> = self.data.edits.iter().filter(|(_, e)| e.thread_id == thread_id
+            && !["committed","canceled"].contains(&e.state.as_str()))
+            .map(|(id,e)| json!({"editId":id,"messageId":e.message_id,"state":e.state,
+                "editState":e.state,"originalText":e.original.payload["prompt"],"createdAt":e.original.created_at})).collect();
+        json!({"ok":true,"threadId":thread_id,"queueEpoch":epoch,"queueRevision":self.revision,
+            "queuedMessages":messages,"queuedEdits":edits})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn harness_store_restart_never_replays_an_unconfirmed_dispatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path()).unwrap();
+        store
+            .commit(|data| {
+                data.queues.insert(
+                    "thread-a".into(),
+                    vec![Queued {
+                        id: "message-a".into(),
+                        payload: json!({"prompt":"test","clientUserMessageId":"client-a"}),
+                        created_at: 1,
+                        device_id: "device-a".into(),
+                        key_id: "key-a".into(),
+                        state: "sending".into(),
+                    }],
+                );
+                Ok(())
+            })
+            .unwrap();
+        let reopened = Store::open(directory.path()).unwrap();
+        assert_eq!(reopened.data.queues["thread-a"][0].state, "unknown");
+        let view = reopened.queue("thread-a", "epoch");
+        assert_eq!(view["queuedMessages"][0]["canSendNow"], false);
+        assert_eq!(
+            view["queuedMessages"][0]["submission"]["status"],
+            "outcome-unknown"
+        );
+    }
+
+    #[test]
+    fn harness_store_failed_persistence_does_not_publish_a_mutation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path()).unwrap();
+        std::fs::write(directory.path().join("blocked"), "file").unwrap();
+        store.path = directory.path().join("blocked").join("state.json");
+        let revision = store.revision;
+        assert!(
+            store
+                .commit(|data| {
+                    data.thread_pins.insert("thread-a".into());
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(store.data.thread_pins.is_empty());
+        assert_eq!(store.revision, revision);
+    }
+}

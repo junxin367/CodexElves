@@ -39,6 +39,7 @@ mod credentials;
 mod diagnostics;
 mod frp_recovery;
 mod frp_tunnel;
+mod harness;
 mod image_preview;
 mod ngrok_tunnel;
 mod primary_route;
@@ -93,6 +94,7 @@ const WEB_APPLE_TOUCH_ICON_PNG: &[u8] =
     include_bytes!("../../../assets/remote-access/icons/apple-touch-icon.png");
 const COOKIE_NAME: &str = "codex_elves_device";
 const DESKTOP_READ_GUIDANCE: &str = "暂时无法读取 Codex 桌面数据。若刚启动或重启 Codex，请等待主界面完全打开、能够正常查看会话后，再刷新远程网页；尚未启动时，请在电脑端 CodexElves 管理器右上角点击「重启 Codex」。";
+const HARNESS_READ_GUIDANCE: &str = "远程会话服务暂时不可用，请稍后重试。";
 const MAX_DEVICES: usize = 32;
 const MAX_RECEIPTS: usize = 20_000;
 const MAX_REMOTE_IMAGES: usize = 1_024;
@@ -785,6 +787,9 @@ struct LiveService {
 
 pub struct RemoteAccessController {
     native: Arc<dyn NativeRemoteBridge>,
+    harness: Arc<harness::Harness>,
+    runtime_modes: tokio::sync::RwLock<HashMap<String, RemoteRuntimeMode>>,
+    harness_connected: AtomicBool,
     prompt_optimization: Arc<prompt_optimization::RemotePromptOptimization>,
     state_dir: PathBuf,
     auth: Arc<Mutex<AuthState>>,
@@ -805,6 +810,23 @@ pub struct RemoteAccessController {
     image_previews: std::sync::Mutex<image_preview::PreviewCache>,
     image_preview_slots: Arc<tokio::sync::Semaphore>,
     browser_tunnels: browser::Registry,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct RemoteRuntimeMode {
+    cdp_injection_enabled: bool,
+    revision: u64,
+}
+
+impl Default for RemoteRuntimeMode {
+    fn default() -> Self {
+        // 用户要求默认开启；按当前设备授权保存，其他设备的开关保持独立。
+        Self {
+            cdp_injection_enabled: true,
+            revision: 0,
+        }
+    }
 }
 
 impl RemoteAccessController {
@@ -845,8 +867,20 @@ impl RemoteAccessController {
         let ngrok =
             ngrok_tunnel::NgrokTunnelService::new(state_dir.clone(), channels.secondary.clone());
         let primary = primary_route::Primary::new(&state_dir)?;
-        Ok(Arc::new(Self {
+        let runtime_modes: HashMap<String, RemoteRuntimeMode> =
+            read_json_or_default(&state_dir.join("remote-access-device-runtimes.json"))?;
+        let harness = harness::Harness::new(&state_dir)?;
+        harness.enabled.store(
+            runtime_modes
+                .values()
+                .any(|mode| !mode.cdp_injection_enabled),
+            Ordering::Release,
+        );
+        let controller = Arc::new(Self {
             native,
+            harness: harness.clone(),
+            runtime_modes: tokio::sync::RwLock::new(runtime_modes),
+            harness_connected: AtomicBool::new(false),
             prompt_optimization: Arc::new(prompt_optimization::RemotePromptOptimization::default()),
             state_dir,
             auth: Arc::new(Mutex::new(AuthState {
@@ -885,7 +919,9 @@ impl RemoteAccessController {
             image_previews: std::sync::Mutex::new(image_preview::PreviewCache::default()),
             image_preview_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             browser_tunnels: browser::Registry::new(),
-        }))
+        });
+        harness.attach(Arc::downgrade(&controller));
+        Ok(controller)
     }
 
     fn public_origin(&self) -> Option<String> {
@@ -1202,7 +1238,7 @@ impl RemoteAccessController {
             live.ngrok.stop().await;
             live.zrok.reconcile(false, &zrok_target).await;
             if finished || was_enabled {
-                let _ = self.native.call("dispose", json!({})).await;
+                let _ = self.call_backend("dispose", json!({}), None).await;
             }
             drop(live);
             self.prune_stale_public_devices().await;
@@ -1255,92 +1291,153 @@ impl RemoteAccessController {
         });
         let controller = self.clone();
         let pump = tokio::spawn(async move {
-            let mut cursor = 0;
-            let mut epoch = String::new();
-            let mut failure_since = None;
-            loop {
-                let result = controller
-                    .native
-                    .call("events", json!({"cursor":cursor, "epoch":epoch}))
-                    .await;
-                match &result {
-                    Ok(response) if response["ok"] == true => {
-                        failure_since = None;
-                        let service_response = matches!(
-                            response.get("nativeBridge").and_then(Value::as_str),
-                            Some("service" | "desktop-owner-ipc")
-                        );
-                        let was_connected = controller.native_connected.load(Ordering::SeqCst)
-                            || controller.service_connected.load(Ordering::SeqCst);
-                        let native_changed = controller
-                            .native_connected
-                            .swap(!service_response, Ordering::SeqCst)
-                            != !service_response;
-                        let service_changed = controller
-                            .service_connected
-                            .swap(service_response, Ordering::SeqCst)
-                            != service_response;
-                        let write_available = !service_response;
-                        let write_changed = controller
-                            .native_write_available
-                            .swap(write_available, Ordering::SeqCst)
-                            != write_available;
-                        if !was_connected {
-                            controller.publish_event(json!({
-                                "method":"remote/reconnected",
-                                "params":{
-                                    "nativeConnected":!service_response,
-                                    "serviceConnected":service_response
-                                }
-                            }));
-                        }
-                        if native_changed || service_changed || write_changed {
-                            controller.publish_event(json!({"method":"remote/resync"}));
-                        }
-                        epoch = response["epoch"].as_str().unwrap_or("").to_string();
-                        cursor = response["cursor"].as_u64().unwrap_or(0);
-                        if response["reset"] == true {
-                            controller.publish_event(json!({"method":"remote/resync"}));
-                        }
-                        for event in response["events"].as_array().into_iter().flatten() {
-                            let mut event = event.clone();
-                            controller.attach_event_images(&mut event);
-                            controller.publish_event(event);
-                        }
+            let native_pump = async {
+                let mut cursor = 0;
+                let mut epoch = String::new();
+                let mut failure_since = None;
+                loop {
+                    if !controller.needs_native_backend().await {
+                        tokio::time::sleep(Duration::from_millis(650)).await;
+                        continue;
                     }
-                    _ => {
-                        let started = *failure_since.get_or_insert_with(Instant::now);
-                        if started.elapsed() >= NATIVE_EVENT_FAILURE_GRACE {
-                            let native_disconnected =
-                                controller.native_connected.swap(false, Ordering::SeqCst);
-                            let service_disconnected =
-                                controller.service_connected.swap(false, Ordering::SeqCst);
-                            let disconnected = native_disconnected || service_disconnected;
-                            controller
+                    let result = controller
+                        .call_backend("events", json!({"cursor":cursor, "epoch":epoch}), None)
+                        .await;
+                    match &result {
+                        Ok(response) if response["ok"] == true => {
+                            failure_since = None;
+                            let service_response = matches!(
+                                response.get("nativeBridge").and_then(Value::as_str),
+                                Some("service" | "desktop-owner-ipc" | "harness")
+                            );
+                            let was_connected = controller.native_connected.load(Ordering::SeqCst)
+                                || controller.service_connected.load(Ordering::SeqCst);
+                            let native_changed = controller
+                                .native_connected
+                                .swap(!service_response, Ordering::SeqCst)
+                                != !service_response;
+                            let service_changed = controller
+                                .service_connected
+                                .swap(service_response, Ordering::SeqCst)
+                                != service_response;
+                            let write_available =
+                                !service_response || response["nativeBridge"] == "harness";
+                            let write_changed = controller
                                 .native_write_available
-                                .store(false, Ordering::SeqCst);
-                            if disconnected {
-                                let error_message = match &result {
-                                    Ok(response) => response["message"]
-                                        .as_str()
-                                        .unwrap_or("原生事件读取返回失败")
-                                        .to_owned(),
-                                    Err(error) => error.to_string(),
-                                };
-                                let _ = crate::diagnostic_log::append_diagnostic_log(
-                                    "remote_access.native_events_unavailable",
+                                .swap(write_available, Ordering::SeqCst)
+                                != write_available;
+                            if !was_connected {
+                                controller.publish_backend_event(
+                                    "cdp",
                                     json!({
-                                        "error": error_message,
-                                        "failureDurationMs": started.elapsed().as_millis()
+                                        "method":"remote/reconnected",
+                                        "params":{
+                                            "nativeConnected":!service_response,
+                                            "serviceConnected":service_response
+                                        }
                                     }),
                                 );
-                                controller.publish_event(json!({"method":"remote/disconnected"}));
+                            }
+                            if native_changed || service_changed || write_changed {
+                                controller.publish_backend_event(
+                                    "cdp",
+                                    json!({"method":"remote/resync"}),
+                                );
+                            }
+                            epoch = response["epoch"].as_str().unwrap_or("").to_string();
+                            cursor = response["cursor"].as_u64().unwrap_or(0);
+                            if response["reset"] == true {
+                                controller.publish_backend_event(
+                                    "cdp",
+                                    json!({"method":"remote/resync"}),
+                                );
+                            }
+                            for event in response["events"].as_array().into_iter().flatten() {
+                                let mut event = event.clone();
+                                controller.attach_event_images(&mut event);
+                                controller.publish_backend_event("cdp", event);
+                            }
+                        }
+                        _ => {
+                            let started = *failure_since.get_or_insert_with(Instant::now);
+                            if started.elapsed() >= NATIVE_EVENT_FAILURE_GRACE {
+                                let native_disconnected =
+                                    controller.native_connected.swap(false, Ordering::SeqCst);
+                                let service_disconnected =
+                                    controller.service_connected.swap(false, Ordering::SeqCst);
+                                let disconnected = native_disconnected || service_disconnected;
+                                controller
+                                    .native_write_available
+                                    .store(false, Ordering::SeqCst);
+                                if disconnected {
+                                    let error_message = match &result {
+                                        Ok(response) => response["message"]
+                                            .as_str()
+                                            .unwrap_or("原生事件读取返回失败")
+                                            .to_owned(),
+                                        Err(error) => error.to_string(),
+                                    };
+                                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                                        "remote_access.native_events_unavailable",
+                                        json!({
+                                            "error": error_message,
+                                            "failureDurationMs": started.elapsed().as_millis()
+                                        }),
+                                    );
+                                    controller.publish_backend_event(
+                                        "cdp",
+                                        json!({"method":"remote/disconnected"}),
+                                    );
+                                }
                             }
                         }
                     }
+                    tokio::time::sleep(Duration::from_millis(650)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(650)).await;
-            }
+            };
+            let harness_pump = async {
+                let mut cursor = 0;
+                let mut epoch = String::new();
+                loop {
+                    if controller.harness.enabled.load(Ordering::Acquire) {
+                        let result = controller
+                            .harness
+                            .call("events", json!({"cursor":cursor,"epoch":epoch}), None)
+                            .await;
+                        match result {
+                            Ok(response) if response["ok"] == true => {
+                                if !controller.harness_connected.swap(true, Ordering::SeqCst) {
+                                    controller.publish_backend_event("harness",json!({"method":"remote/reconnected",
+                                        "params":{"nativeConnected":false,"serviceConnected":true}}));
+                                }
+                                epoch = response["epoch"].as_str().unwrap_or("").to_owned();
+                                cursor = response["cursor"].as_u64().unwrap_or(0);
+                                if response["reset"] == true {
+                                    controller.publish_backend_event(
+                                        "harness",
+                                        json!({"method":"remote/resync"}),
+                                    );
+                                }
+                                for event in response["events"].as_array().into_iter().flatten() {
+                                    let mut event = event.clone();
+                                    controller.attach_event_images(&mut event);
+                                    controller.publish_backend_event("harness", event);
+                                }
+                            }
+                            _ => {
+                                if controller.harness_connected.swap(false, Ordering::SeqCst) {
+                                    controller.publish_backend_event(
+                                        "harness",
+                                        json!({"method":"remote/disconnected"}),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(650)).await;
+                }
+            };
+            tokio::join!(native_pump, harness_pump);
         });
         Ok((handle, server, pump))
     }
@@ -1509,6 +1606,14 @@ impl RemoteAccessController {
         payload: Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
+        if action == "runtime" {
+            return Ok(
+                json!({"ok":true,"runtime":self.runtime_for(&authorization.device.id).await}),
+            );
+        }
+        if action == "setRuntime" {
+            return self.change_runtime_mode(payload, authorization).await;
+        }
         if matches!(
             action,
             "optimizePrompt" | "promptOptimization" | "cancelPromptOptimize"
@@ -1523,8 +1628,7 @@ impl RemoteAccessController {
             .filter(|_| action == "thread")
             .map(str::to_owned);
         let value = self
-            .native
-            .call_authorized(action, payload, authorization)
+            .call_backend(action, payload, Some(authorization))
             .await?;
         if let Some(thread_id) = context_thread_id
             && context_usage::needs_usage(&value, &thread_id)
@@ -1544,6 +1648,162 @@ impl RemoteAccessController {
             return Ok(value);
         }
         Ok(value)
+    }
+
+    async fn call_backend(
+        &self,
+        action: &str,
+        payload: Value,
+        authorization: Option<&RemoteAuthorization>,
+    ) -> anyhow::Result<Value> {
+        // 读锁覆盖整次调用；关闭设备的请求只能进入自建服务，不能回退 CDP。
+        let modes = self.runtime_modes.read().await;
+        let cdp_enabled = authorization
+            .and_then(|a| modes.get(&a.device.id))
+            .is_none_or(|mode| mode.cdp_injection_enabled);
+        let owned = if let Some(id) = payload["threadId"].as_str() {
+            self.harness.owns(id).await
+        } else {
+            false
+        };
+        if cdp_enabled && !owned {
+            if let Some(authorization) = authorization {
+                self.native
+                    .call_authorized(action, payload, authorization)
+                    .await
+            } else {
+                self.native.call(action, payload).await
+            }
+        } else {
+            self.harness.call(action, payload, authorization).await
+        }
+    }
+
+    async fn change_runtime_mode(
+        &self,
+        payload: Value,
+        authorization: &RemoteAuthorization,
+    ) -> anyhow::Result<Value> {
+        let enabled = payload["cdpInjectionEnabled"]
+            .as_bool()
+            .ok_or_else(|| ApiError::new(400, "CDP 开关值无效"))?;
+        let mut modes = self.runtime_modes.write().await;
+        let mode = modes
+            .get(&authorization.device.id)
+            .cloned()
+            .unwrap_or_default();
+        if payload["expectedRevision"].as_u64() != Some(mode.revision) {
+            return Err(ApiError::new(409, "当前设备的运行方式已变化，请重新读取").into());
+        }
+        if enabled == mode.cdp_injection_enabled {
+            return Ok(json!({"ok":true,"runtime":mode}));
+        }
+        if enabled {
+            self.harness.can_leave(&authorization.device.id).await?;
+        } else {
+            self.harness.prepare().await?;
+        }
+        let next = RemoteRuntimeMode {
+            cdp_injection_enabled: enabled,
+            revision: mode.revision + 1,
+        };
+        let mut updated = modes.clone();
+        updated.insert(authorization.device.id.clone(), next.clone());
+        let bytes = serde_json::to_vec(&updated)?;
+        let permit = authorization.prepare_dispatch().await?;
+        crate::bridge::CdpDispatchPermit::commit(permit, || {
+            crate::settings::atomic_write(
+                &self.state_dir.join("remote-access-device-runtimes.json"),
+                &bytes,
+            )
+        })?;
+        // 设备独立切换，不能 dispose 其他设备正在使用的原生订阅或共享服务。
+        if !enabled {
+            self.harness.enabled.store(true, Ordering::Release);
+        }
+        *modes = updated;
+        if enabled
+            && modes.values().all(|mode| mode.cdp_injection_enabled)
+            && self.harness.idle().await
+        {
+            self.harness.enabled.store(false, Ordering::Release);
+            self.harness.release().await;
+            self.harness_connected.store(false, Ordering::SeqCst);
+        }
+        self.publish_event(
+            json!({"method":"remote/runtimeChanged","_targetDevice":authorization.device.id,
+            "params":{"runtime":next}}),
+        );
+        Ok(json!({"ok":true,"runtime":next}))
+    }
+
+    async fn runtime_for(&self, device_id: &str) -> RemoteRuntimeMode {
+        self.runtime_modes
+            .read()
+            .await
+            .get(device_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    async fn needs_native_backend(&self) -> bool {
+        let devices: Vec<_> = self
+            .auth
+            .lock()
+            .await
+            .devices
+            .iter()
+            .filter(|d| d.expires_at_ms > now_ms())
+            .map(|d| d.id.clone())
+            .collect();
+        let modes = self.runtime_modes.read().await;
+        devices.is_empty()
+            || devices
+                .iter()
+                .any(|id| modes.get(id).is_none_or(|m| m.cdp_injection_enabled))
+    }
+
+    fn publish_backend_event(&self, source: &str, mut event: Value) {
+        event["_runtimeSource"] = json!(source);
+        self.publish_event(event);
+    }
+
+    async fn event_for_device(&self, device_id: &str, mut event: Value) -> Value {
+        let runtime = self.runtime_for(device_id).await;
+        let thread_id = event["params"]["threadId"]
+            .as_str()
+            .or_else(|| event["params"]["thread"]["id"].as_str());
+        let owned = if let Some(id) = thread_id {
+            self.harness.owns(id).await
+        } else {
+            false
+        };
+        let use_cdp = runtime.cdp_injection_enabled && !owned;
+        let suppressed = event["_targetDevice"]
+            .as_str()
+            .is_some_and(|id| id != device_id)
+            || event["_runtimeSource"]
+                .as_str()
+                .is_some_and(|source| (source == "cdp") != use_cdp);
+        if suppressed {
+            // 双线路合流要求连续序号；屏蔽其他后端的内容时保留空心跳占位，避免制造游标缺口。
+            return json!({"method":"remote/heartbeat","channelEpoch":event["channelEpoch"],
+                "channelSequence":event["channelSequence"]});
+        }
+        if let Some(object) = event.as_object_mut() {
+            object.remove("_runtimeSource");
+            object.remove("_targetDevice");
+        }
+        event
+    }
+
+    async fn replay_for_device(&self, device_id: &str, mut replay: Value) -> Value {
+        if let Some(events) = replay["events"].as_array_mut() {
+            for event in events {
+                *event = self.event_for_device(device_id, event.clone()).await;
+            }
+        }
+        replay
     }
 
     async fn execute(
@@ -3005,17 +3265,28 @@ async fn session(
         .controller
         .native_write_available
         .load(Ordering::SeqCst);
+    let runtime = state.controller.runtime_for(&device.id).await;
+    let (native_connected, service_connected, native_write_available) =
+        if runtime.cdp_injection_enabled {
+            (native_connected, service_connected, native_write_available)
+        } else {
+            let online = state.controller.harness_connected.load(Ordering::SeqCst);
+            (false, online, online)
+        };
+    let related_available = runtime.cdp_injection_enabled;
     Ok(Json(
         json!({"ok":true,"device":device.public(),"nativeConnected":native_connected,
         "serviceConnected":service_connected,"nativeWriteAvailable":native_write_available,
         "readOnly":policy.read_only,"allowApprovals":policy.allow_approvals && native_write_available,
+        "runtime":runtime,
         "diagnosticsRequest":diagnostics_request,
         "capabilities":{"imageInput":native_write_available,"queuedImageRemoval":native_write_available,
         "queuedImageEditing":native_write_available,"queueEditRecovery":native_write_available,
         "queueSendRecovery":native_write_available,"projectlessCreation":native_write_available,
         "promptOptimization":true,"messageEditModelSettings":native_write_available,
         "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
-        "sendText":native_write_available || service_connected}}),
+        "sendText":native_write_available || service_connected,
+        "sideThreads":related_available,"subagents":related_available}}),
     ))
 }
 
@@ -3091,16 +3362,25 @@ async fn workspace_context(
     authorization: &RemoteAuthorization,
 ) -> Result<PathBuf, ApiError> {
     let identity = workspace_identity(payload)?;
+    let guidance = if state
+        .controller
+        .runtime_for(&authorization.device.id)
+        .await
+        .cdp_injection_enabled
+    {
+        DESKTOP_READ_GUIDANCE
+    } else {
+        HARNESS_READ_GUIDANCE
+    };
     let result = state
         .controller
-        .native
-        .call_authorized("workspaceContext", identity.clone(), authorization)
+        .call_backend("workspaceContext", identity.clone(), Some(authorization))
         .await
         .map_err(|error| {
             error
                 .downcast_ref::<ApiError>()
                 .cloned()
-                .unwrap_or_else(|| ApiError::new(503, DESKTOP_READ_GUIDANCE))
+                .unwrap_or_else(|| ApiError::new(503, guidance))
         })?;
     let result = native_result(result)?;
     if result["hostId"] != "local"
@@ -3152,6 +3432,7 @@ async fn read(
     if !matches!(
         action.as_str(),
         "sidebar"
+            | "runtime"
             | "history"
             | "thread"
             | "models"
@@ -3177,6 +3458,16 @@ async fn read(
     if action == "promptOptimization" {
         payload = json!({"requestId": prompt_optimization_request_id(&device.id, payload["requestId"].as_str().unwrap_or(""))?});
     }
+    let guidance = if state
+        .controller
+        .runtime_for(&device.id)
+        .await
+        .cdp_injection_enabled
+    {
+        DESKTOP_READ_GUIDANCE
+    } else {
+        HARNESS_READ_GUIDANCE
+    };
     let authorization = state.controller.authorization(device, None);
     let value = state
         .controller
@@ -3197,7 +3488,7 @@ async fn read(
                     }
                 }),
             );
-            ApiError::new(503, DESKTOP_READ_GUIDANCE)
+            ApiError::new(503, guidance)
         })?;
     let mut value = native_result(value).map_err(|error| {
         let error_message = error.message.to_ascii_lowercase();
@@ -3966,6 +4257,7 @@ async fn action(
     if !matches!(
         action.as_str(),
         "send"
+            | "setRuntime"
             | "stop"
             | "compact"
             | "optimizePrompt"
@@ -4263,6 +4555,7 @@ async fn events(
                         json!({"method":"remote/heartbeat"})
                     }
                 };
+                let event = controller.event_for_device(&id, event).await;
                 if notifications_only {
                     let Some(event) = notification_stream_event(&event) else {
                         continue;
@@ -4349,7 +4642,9 @@ async fn stream_websocket_events(
         }
     };
     let mut receiver = controller.events.subscribe();
-    let ready = channels::replay(&controller, &uri);
+    let ready = controller
+        .replay_for_device(&id, channels::replay(&controller, &uri))
+        .await;
     if !controller.device_active(&id).await || !controller.accepting_requests() {
         close("inactive_at_upgrade", None);
         let _ = socket.close().await;
@@ -4415,6 +4710,7 @@ async fn stream_websocket_events(
                 }
             }
         };
+        event = controller.event_for_device(&id, event).await;
         let authorized = controller.device_active(&id).await;
         let done = !authorized || !controller.accepting_requests();
         if !authorized {
@@ -5363,6 +5659,478 @@ mod tests {
         (directory, controller.authorization(device, Some("send")))
     }
 
+    async fn harness_fixture() -> (tempfile::TempDir, RemoteAuthorization) {
+        let (directory, authorization) = service_dispatch_fixture().await;
+        let mut git = std::process::Command::new("git");
+        git.args(["init", "--quiet"]).current_dir(directory.path());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            git.creation_flags(crate::windows_create_hidden_process());
+        }
+        assert!(git.status().unwrap().success());
+        struct NoCdp;
+        #[async_trait]
+        impl NativeRemoteBridge for NoCdp {
+            async fn call(&self, action: &str, _payload: Value) -> anyhow::Result<Value> {
+                panic!("关闭 CDP 的设备不能调用原生桥接：{action}");
+            }
+        }
+        let controller =
+            RemoteAccessController::new(Arc::new(NoCdp), directory.path().to_owned()).unwrap();
+        controller.publish_access_policy(&RemoteAccessSettings {
+            enabled: true,
+            ..Default::default()
+        });
+        controller.running.store(true, Ordering::SeqCst);
+        controller
+            .auth
+            .lock()
+            .await
+            .devices
+            .push(authorization.device.clone());
+        let authorization = controller.authorization(authorization.device.clone(), Some("send"));
+        let script = directory.path().join("engine.cjs");
+        std::fs::write(&script,r#"
+const fs=require('node:fs'),readline=require('node:readline'),crypto=require('node:crypto');
+const threads=new Map(),goals=new Map();let approval=null;
+const output=v=>process.stdout.write(JSON.stringify(v)+'\n');
+const event=(method,params)=>output({method,params});
+const finish=(id,status='completed')=>{
+  const t=threads.get(id),turn=t?.turns.at(-1);if(!turn)return;
+  turn.status=status;t.status={type:'idle'};event('turn/completed',{threadId:id,turn});
+  event('thread/status/changed',{threadId:id,status:t.status});
+};
+readline.createInterface({input:process.stdin}).on('line',line=>{
+ const q=JSON.parse(line);fs.appendFileSync(__dirname+'/requests.jsonl',JSON.stringify(q)+'\n');
+ if(!q.method){if(approval){finish(approval.threadId);approval=null;}return;}
+ if(q.method==='initialized')return;
+ const p=q.params||{},t=threads.get(p.threadId);let result={};
+ switch(q.method){
+ case 'initialize':result={userAgent:'isolated-fixture'};break;
+ case 'project/list':result={data:[{id:'project-a',name:'隔离项目',roots:[{path:__dirname}],position:0,metadata:{}}],nextCursor:null};break;
+ case 'thread/list':result={data:[...threads.values()],nextCursor:null};break;
+ case 'thread/start':{
+   const id=crypto.randomUUID();const thread={id,cwd:p.cwd,name:'隔离会话',ephemeral:false,threadSource:'user',source:'appServer',
+     projectId:p.projectId,status:{type:'idle'},turns:[],createdAt:1,updatedAt:1};
+   threads.set(id,thread);result={thread,model:'gpt-test',reasoningEffort:'high',cwd:p.cwd};
+   event('thread/started',{thread});break;
+ }
+ case 'thread/read': if(!t){output({id:q.id,error:{code:-32600,message:'unknown thread'}});return;}
+   result={thread:t,readState:{firstUnread:null,revision:'r1'}};break;
+ case 'thread/resume': result={thread:t,model:'gpt-test',reasoningEffort:'high'};break;
+ case 'thread/turns/list':result={data:[...(t?.turns||[])].reverse(),nextCursor:null};break;
+ case 'thread/items/list':result={data:[...(t.turns.find(turn=>turn.id===p.turnId)?.items||[])].reverse(),nextCursor:null};break;
+ case 'thread/goal/get':result={goal:goals.get(p.threadId)||null};break;
+ case 'thread/goal/set':{
+   const goal={...(goals.get(p.threadId)||{createdAt:1,tokensUsed:0,timeUsedSeconds:0,tokenBudget:null}),...p,updatedAt:2};
+   goals.set(p.threadId,goal);result={goal};event('thread/goal/updated',{threadId:p.threadId,goal});break;
+ }
+ case 'thread/goal/clear':goals.delete(p.threadId);event('thread/goal/cleared',{threadId:p.threadId});break;
+ case 'turn/start':{
+   const turn={id:crypto.randomUUID(),status:'inProgress',items:[{id:crypto.randomUUID(),type:'userMessage',content:p.input,clientUserMessageId:p.clientUserMessageId}]};
+   t.turns.push(turn);t.status={type:'active'};event('turn/started',{threadId:p.threadId,turn});result={turn};
+   const prompt=p.input.find(i=>i.type==='text')?.text||'';
+   if(prompt.includes('uncertain')){
+     setTimeout(()=>finish(p.threadId),20);
+     output({id:q.id,error:{code:-32603,message:'test failure after acceptance'}});return;
+   }
+   if(prompt.includes('approval')){
+     approval={threadId:p.threadId};output({id:q.id,method:'item/commandExecution/requestApproval',
+       params:{threadId:p.threadId,turnId:turn.id,itemId:'command-a',command:'echo test',availableDecisions:['accept','decline']}});
+   }else if(!prompt.includes('wait'))setTimeout(()=>finish(p.threadId),20);
+   break;
+ }
+ case 'turn/steer':result={turnId:t.turns.at(-1).id};break;
+ case 'turn/interrupt':finish(p.threadId,'interrupted');break;
+ case 'thread/compact/start':event('item/started',{threadId:p.threadId,turnId:'compact',item:{id:'compact',type:'contextCompaction'}});
+   setTimeout(()=>event('item/completed',{threadId:p.threadId,turnId:'compact',item:{id:'compact',type:'contextCompaction'}}),20);break;
+ case 'thread/name/set':t.name=p.name;break;
+ case 'thread/revert':t.turns=t.turns.filter(turn=>turn.id!==p.beforeTurnId);result={thread:t};break;
+ case 'thread/delete':threads.delete(p.threadId);break;
+ case 'thread/readState/update':result={readState:{firstUnread:null,revision:'r2'}};break;
+ case 'skills/list':result={data:p.cwds.map(cwd=>({cwd,skills:[],errors:[]}))};break;
+ case 'model/list':result={data:[{id:'gpt-test',model:'gpt-test',supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:null};break;
+ case 'config/read':result={config:{model:'gpt-test',model_reasoning_effort:'high'}};break;
+ default: output({id:q.id,error:{code:-32601,message:'unsupported: '+q.method}});return;
+ }
+ output({id:q.id,result});
+});
+"#).unwrap();
+        let mut command = tokio::process::Command::new("node");
+        command
+            .arg(&script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(crate::windows_create_hidden_process());
+        let process =
+            crate::codex_service::RunningService::for_test(command.spawn().unwrap()).unwrap();
+        authorization
+            .controller
+            .harness
+            .install_test_process(process)
+            .await;
+        authorization
+            .controller
+            .change_runtime_mode(
+                json!({"cdpInjectionEnabled":false,"expectedRevision":0}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        (directory, authorization)
+    }
+
+    #[tokio::test]
+    async fn harness_device_modes_and_replayed_events_are_isolated() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        assert!(
+            !controller
+                .runtime_for(&authorization.device.id)
+                .await
+                .cdp_injection_enabled
+        );
+        assert!(
+            controller
+                .runtime_for("other-device")
+                .await
+                .cdp_injection_enabled
+        );
+        let native = json!({"method":"item/agentMessage/delta","params":{"delta":"desktop"},
+            "_runtimeSource":"cdp","channelEpoch":"epoch","channelSequence":3});
+        let masked = controller
+            .event_for_device(&authorization.device.id, native.clone())
+            .await;
+        assert_eq!(masked["method"], "remote/heartbeat");
+        assert_eq!(masked["channelSequence"], 3);
+        assert!(masked.get("params").is_none());
+        assert_eq!(
+            controller.event_for_device("other-device", native).await["params"]["delta"],
+            "desktop"
+        );
+        let harness = json!({"method":"item/agentMessage/delta","params":{"delta":"service"},
+            "_runtimeSource":"harness","channelEpoch":"epoch","channelSequence":4});
+        assert_eq!(
+            controller
+                .event_for_device(&authorization.device.id, harness.clone())
+                .await["params"]["delta"],
+            "service"
+        );
+        assert_eq!(
+            controller.event_for_device("other-device", harness).await["method"],
+            "remote/heartbeat"
+        );
+        let changed = json!({"method":"remote/runtimeChanged","_targetDevice":authorization.device.id,
+            "params":{"runtime":{"cdpInjectionEnabled":false,"revision":1}},"channelSequence":5});
+        assert_eq!(
+            controller.event_for_device("other-device", changed).await["method"],
+            "remote/heartbeat"
+        );
+        let saved: HashMap<String, RemoteRuntimeMode> =
+            read_json_or_default(&directory.path().join("remote-access-device-runtimes.json"))
+                .unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(!saved[&authorization.device.id].cdp_injection_enabled);
+        assert!(
+            controller
+                .change_runtime_mode(
+                    json!({"cdpInjectionEnabled":true,"expectedRevision":0}),
+                    &authorization
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn harness_session_queue_and_approval_share_one_runtime() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let created = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"wait approval"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        assert_eq!(created["ok"], true);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let thread = controller
+            .call_authorized("thread", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        let request = thread["thread"]["requests"][0].clone();
+        assert_eq!(request["method"], "item/commandExecution/requestApproval");
+        let mut png = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut png, ImageFormat::Png)
+            .unwrap();
+        let data_url = format!("data:image/png;base64,{}", STANDARD.encode(png.get_ref()));
+        let mut queued = controller
+            .call_authorized(
+                "send",
+                json!({"threadId":id,"prompt":"queued text","clientUserMessageId":"client-a",
+                    "images":[{"name":"test.png","mime":"image/png","dataUrl":data_url,"size":png.get_ref().len()}]}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        controller.attach_response_images(&mut queued);
+        let message = queued["queuedMessages"][0].clone();
+        let source = message["remoteImages"][0]["source"].clone();
+        assert!(source.as_str().unwrap().starts_with("inline:"));
+        let edit = json!({"threadId":id,"messageId":message["id"],"editId":"edit-a","originalText":"queued text",
+            "clientUserMessageId":"client-a","createdAt":message["createdAt"],"expectedImageSources":[source]});
+        assert_eq!(
+            controller
+                .call_authorized("beginQueuedEdit", edit, &authorization)
+                .await
+                .unwrap()["editState"],
+            "editing"
+        );
+        assert_eq!(controller.call_authorized("editQueued",json!({"threadId":id,"editId":"edit-a","prompt":"edited text","retainedImageSources":[source],"images":[]}),&authorization).await.unwrap()["editState"],"committed");
+        assert!(controller.call_authorized("editQueued",json!({"threadId":id,"editId":"edit-a","prompt":"different text","retainedImageSources":[source],"images":[]}),&authorization).await.is_err());
+        let approve = controller.authorization(authorization.device.clone(), Some("approve"));
+        assert_eq!(
+            controller
+                .call_authorized(
+                    "approve",
+                    json!({"threadId":id,"requestId":request["id"],
+            "method":request["method"],"decision":"accept"}),
+                    &approve
+                )
+                .await
+                .unwrap()["ok"],
+            true
+        );
+        let delivered = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let sent = controller
+                    .call_authorized(
+                        "sendState",
+                        json!({"threadId":id,"clientUserMessageId":"client-a"}),
+                        &authorization,
+                    )
+                    .await
+                    .unwrap();
+                if sent["deliveryState"] == "accepted" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(
+            delivered.is_ok(),
+            "queue did not complete; state={}, methods={}",
+            std::fs::read_to_string(directory.path().join("remote-harness-state.json")).unwrap(),
+            std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap()
+        );
+        let history = controller
+            .call_authorized("history", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(history["data"].as_array().unwrap().len(), 2);
+        let requests = std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap();
+        let frames: Vec<Value> = requests
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|f| f["method"] == "initialize")
+                .count(),
+            1
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|f| f["method"] == "turn/start")
+                .count(),
+            2
+        );
+        assert!(frames.iter().any(
+            |f| f["method"] == "turn/start" && f["params"]["input"][0]["text"] == "edited text"
+        ));
+        assert!(
+            frames
+                .iter()
+                .any(|f| f["method"] == "turn/start" && f["params"]["input"][1]["url"] == data_url)
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|f| f.get("method").is_none() && f["result"]["decision"] == "accept")
+        );
+    }
+
+    #[tokio::test]
+    async fn harness_goals_controls_and_workspace_preview_work_without_cdp() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let created = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"wait goal",
+            "goalMode":true,"model":"gpt-test","reasoningEffort":"high"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        assert_eq!(created["goalSubmission"]["goalSet"], "succeeded");
+        for (operation, before, after) in [
+            ("pause", "active", "paused"),
+            ("resume", "paused", "active"),
+        ] {
+            let response=controller.call_authorized("updateGoal",json!({"threadId":id,"objective":"wait goal",
+                "expectedCreatedAt":1,"expectedObjective":"wait goal","expectedStatus":before,"operation":operation}),&authorization).await.unwrap();
+            assert_eq!(response["goal"]["status"], after);
+        }
+        assert_eq!(
+            controller
+                .call_authorized("stop", json!({"threadId":id}), &authorization)
+                .await
+                .unwrap()["ok"],
+            true
+        );
+        assert_eq!(
+            controller
+                .call_authorized("compact", json!({"threadId":id}), &authorization)
+                .await
+                .unwrap()["ok"],
+            true
+        );
+        controller
+            .call_authorized(
+                "rename",
+                json!({"threadId":id,"title":"服务模式重命名"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        controller
+            .call_authorized(
+                "pinThread",
+                json!({"threadId":id,"pinned":true}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        controller
+            .call_authorized(
+                "pinProject",
+                json!({"projectId":"project-a","pinned":true}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let sidebar = controller
+            .call_authorized("sidebar", json!({}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(sidebar["pinnedThreads"][0]["title"], "服务模式重命名");
+        assert_eq!(sidebar["projects"][0]["pinned"], true);
+        let models = controller
+            .call_authorized("models", json!({}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(models["defaultModel"], "gpt-test");
+        assert_eq!(
+            controller
+                .call_authorized("skills", json!({"threadId":id}), &authorization)
+                .await
+                .unwrap()["data"],
+            json!([])
+        );
+        std::fs::write(directory.path().join("preview.txt"), "远程预览正文").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("codex_elves_device=isolated-service-dispatch-token"),
+        );
+        let state = WebState {
+            controller: controller.clone(),
+            settings: RemoteAccessSettings::default(),
+        };
+        let response = workspace::file(
+            State(state),
+            headers,
+            Json(json!({"threadId":id,"path":"preview.txt"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("远程预览正文"));
+        let deleted=controller.call_authorized("updateGoal",json!({"threadId":id,"objective":"wait goal",
+            "expectedCreatedAt":1,"expectedObjective":"wait goal","expectedStatus":"active","operation":"delete"}),&authorization).await.unwrap();
+        assert!(deleted["goal"].is_null());
+    }
+
+    #[tokio::test]
+    async fn harness_uncertain_send_recovers_from_history_without_duplicate_turn() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let created = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"initial"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        let payload =
+            json!({"threadId":id,"prompt":"uncertain","clientUserMessageId":"uncertain-a"});
+        controller
+            .call_authorized("send", payload.clone(), &authorization)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let state = controller
+                    .call_authorized(
+                        "sendState",
+                        json!({"threadId":id,"clientUserMessageId":"uncertain-a"}),
+                        &authorization,
+                    )
+                    .await
+                    .unwrap();
+                if state["deliveryState"] == "accepted" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let repeated = controller
+            .call_authorized("send", payload, &authorization)
+            .await
+            .unwrap();
+        assert_eq!(repeated["deliveryState"], "accepted");
+        let requests = std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap();
+        let count = requests
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|request| {
+                request["method"] == "turn/start"
+                    && request["params"]["clientUserMessageId"] == "uncertain-a"
+            })
+            .count();
+        assert_eq!(count, 1);
+    }
+
     #[tokio::test]
     async fn service_dispatch_rechecks_revocation_and_expiry_after_preflight() {
         for expired in [false, true] {
@@ -6027,7 +6795,16 @@ mod tests {
                 cdp: cdp.clone(),
             });
             let (_directory, mut state) = login_lock_test_state();
-            Arc::get_mut(&mut state.controller).unwrap().native = bridge.clone();
+            // 控制器现在被服务以 Weak 引用持有；直接注入测试桥接，不再依赖 Arc 无弱引用。
+            state.controller =
+                RemoteAccessController::new(bridge.clone(), _directory.path().to_owned()).unwrap();
+            state
+                .controller
+                .publish_access_policy(&RemoteAccessSettings {
+                    enabled: true,
+                    ..Default::default()
+                });
+            state.controller.running.store(true, Ordering::SeqCst);
             let login = login_lock_attempt(&state, LOGIN_TEST_KEY, "192.0.2.1:1000")
                 .await
                 .unwrap();
