@@ -11237,6 +11237,37 @@ const turn=(threadId,model="gpt-6.1-sol",serviceTier="priority")=>({threadId,mod
  assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),undefined);
  model="gpt-6.1-sol";await api.refresh();
 
+ const sideComposer=container(),sideLabel=element("span");sideLabel.textContent="6.1 Sol";
+ sideComposer.appendChild(sideLabel);
+ const sideContext={hostId:"local",threadId:"thread-dddddddd"};
+ options.getIndicators=()=>[
+   {context:{hostId:"local",threadId:"thread-aaaaaaaa"},model:"gpt-6.1-sol",label:modelLabel},
+   {context:sideContext,model,label:sideLabel}
+ ];
+ context=sideContext;await api.refresh();
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true",
+   "侧边菜单打开时，已开启 Fast 的主会话仍保持名称标蓝");
+ assert.equal(sideLabel.getAttribute("data-codex-elves-fast-model"),undefined);
+ await toggle();
+ assert.equal(storage.get("codex-elves-fast-session-v1:local:thread-dddddddd"),"true");
+ assert.equal(sideLabel.getAttribute("data-codex-elves-fast-model"),"true");
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true");
+ assert.equal((await api.patchTurnRequest(turn("thread-dddddddd"))).serviceTier,"priority");
+ assert.equal((await api.patchTurnRequest(turn("thread-bbbbbbbb"))).serviceTier,"default",
+   "侧边开启 Fast 不能修改其他主会话");
+ model="claude-opus-5";await api.refresh();
+ assert.equal(sideLabel.getAttribute("data-codex-elves-fast-model"),undefined,
+   "侧边切换非 GPT 后移除该输入区的 Fast 颜色");
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true",
+   "侧边模型不支持 Fast 不能清除主会话的有效状态");
+ model="gpt-6.1-sol";await api.refresh();await toggle();
+ assert.equal(sideLabel.getAttribute("data-codex-elves-fast-model"),undefined);
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true");
+ const sideMenu=menu;menu=null;await api.refresh();
+ assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true",
+   "侧边菜单关闭后，主会话的 Fast 状态仍按自己的设置显示");
+ menu=sideMenu;delete options.getIndicators;
+
  context={hostId:"local",draftId:"draft-first"};await api.refresh();
  assert.equal(api.status().fast,false);
  await toggle();const captured=api.captureContext();
@@ -11334,13 +11365,13 @@ let text="6.1 Sol Extra High",fallbackCalls=0,labels=[],isModelControl=true;
 const entries=[{model:"gpt-6.1-sol"},{model:"claude-opus-5"}];
 const api=new Function("codexFastModelMenu","codexServiceTierSelectedModelTexts",
  "codexServiceTierComposerSelectedModel","taskBoardReasoningEffortDefinitions",
- "codexFastComposerAnchor","codexServiceTierBadgeVisibleElement","codexServiceTierBadgeText",
+ "codexFastTargetComposerAnchor","codexServiceTierBadgeVisibleElement","codexServiceTierBadgeText",
  `${source};return {read:codexFastSelectedModel,label:codexFastModelLabel};`)(
  ()=>text===null?null:{querySelector:selector=>{assert.equal(selector,"[data-model-picker-view-toggle]");return{text};}},
  control=>[control.text],
  ()=>{fallbackCalls++;return"gpt-6.1-sol";},
  ["low","medium","high","xhigh","max","ultra"].map(id=>({id,label:id})),
- ()=>({matches:()=>isModelControl,querySelectorAll:()=>labels}),
+ ()=>text===null?null:{text:"6.1 Sol",matches:()=>isModelControl,querySelectorAll:()=>labels},
  node=>node.visible,
  node=>node.textContent
 );
@@ -11348,6 +11379,9 @@ const read=api.read;
 assert.equal(read(entries),"gpt-6.1-sol");
 text="Claude Opus 5";assert.equal(read(entries),"claude-opus-5");
 text="未知模型";assert.equal(read(entries),"");
+assert.equal(read(entries,{text:"Claude Opus 5"}),"claude-opus-5",
+ "读取某个输入区的模型时，不能借用另一个仍打开的模型菜单");
+assert.equal(read(entries,{text:"未知模型"}),"","未知侧边模型不能回退到主会话模型");
 text="Sol";assert.equal(read([
  {model:"gpt-6.1-sol",displayName:"Sol"},{model:"gpt-5.6-sol",displayName:"Sol"}
 ]),"");
@@ -11379,7 +11413,9 @@ assert.match(source,/用户要求只改变模型名称颜色/);
 #[test]
 fn renderer_fast_resolves_only_the_active_local_composer_context() {
     let source = assets::renderer_features_script();
-    let start = source.find("  const codexFastDraftIds =").unwrap();
+    let start = source
+        .find("  const codexServiceTierComposerFooterSelector =")
+        .unwrap();
     let end = start
         + source[start..]
             .find("  function codexFastSelectedModel(")
@@ -11389,13 +11425,25 @@ fn renderer_fast_resolves_only_the_active_local_composer_context() {
         serde_json::to_string(&source[start..end]).unwrap()
     ) + r#"
 const assert=require("node:assert/strict");
-let anchor=null,sequence=0;
-const read=new Function("codexFastComposerAnchor","reactFiberKeys","isTemporaryThreadId",
- "validThreadSessionKey","crypto",`${source};return codexFastComposerContext;`)(
- ()=>anchor,()=>["fiber"],id=>id.includes("client-new-thread:"),
+let anchor=null,sequence=0,menu=null,controls=[],activeElement=null;
+const owners=new Map();
+const document={
+ get activeElement(){return activeElement;},
+ getElementById:id=>owners.get(id)||null,
+ querySelectorAll:selector=>selector.includes("data-model-picker-view")
+  ?menu?[{closest:()=>menu}]:[]
+  :controls.length?controls:anchor?[anchor]:[]
+};
+const api=new Function("document","codexServiceTierBadgeVisibleElement",
+ "codexServiceTierFooterHasNearbyComposerInput","codexServiceTierIsMainComposerElement",
+ "reactFiberKeys","isTemporaryThreadId","validThreadSessionKey","crypto",
+ `${source};return {read:codexFastComposerContext,menu:codexFastModelMenu,anchor:codexFastComposerAnchor};`)(
+ document,node=>node.visible!==false,()=>true,
+ node=>!node.area||node.area==="main",()=>["fiber"],id=>id.includes("client-new-thread:"),
  id=>/^[a-z0-9-]{8,128}$/i.test(id)?id:"",
  {randomUUID:()=>`draft-${++sequence}`}
 );
+const read=api.read;
 const props=(conversationId,composerMode="local",hostId="local")=>({
  memoizedProps:{conversationId},
  return:{memoizedProps:{composerMode,hostId}}
@@ -11418,6 +11466,34 @@ anchor.fiber=props("thread-aaaaaaaa","local","remote-host");
 assert.equal(read(),null);
 anchor.fiber={memoizedProps:{composerMode:"local"}};
 assert.equal(read(),null,"缺少会话或草稿身份时不猜测当前侧栏行");
+
+const main={id:"main-trigger",area:"main",fiber:props("thread-main-aaaa"),
+ getAttribute:()=>null,matches:()=>true};
+const side={id:"side-trigger",area:"right-panel",fiber:props("thread-side-bbbb"),
+ getAttribute:()=>null,matches:()=>true};
+controls=[side,main];
+owners.set(main.id,main);owners.set(side.id,side);
+const sideArea={getAttribute:()=>"right-panel",querySelectorAll:()=>[side]};
+main.closest=()=>({getAttribute:()=>"main",querySelectorAll:()=>[main]});
+side.closest=()=>sideArea;
+menu={id:"side-menu",isConnected:true,
+ getAttribute:name=>name==="aria-labelledby"?side.id:null,
+ querySelector:()=>({getAttribute:()=>"simple"})};
+assert.equal(api.menu(),menu,"侧边输入区打开的模型菜单也必须提供 Fast 入口");
+assert.deepEqual(read(),{hostId:"local",threadId:"thread-side-bbbb"},
+ "菜单的原生触发按钮决定会话归属，不能读取仍可见的主会话");
+assert.equal(api.anchor(),main,"上下文用量等既有主输入区功能仍使用主会话");
+menu.getAttribute=name=>name==="aria-labelledby"?main.id:null;
+assert.deepEqual(read(),{hostId:"local",threadId:"thread-main-aaaa"});
+menu.getAttribute=()=>null;
+assert.equal(read(),null,"多个输入区同时存在时，未知菜单归属不能借用主会话");
+menu=null;activeElement=side;
+assert.deepEqual(read(),{hostId:"local",threadId:"thread-side-bbbb"},
+ "关闭侧边菜单后，输入区焦点仍应指向侧边会话");
+activeElement=main;
+assert.deepEqual(read(),{hostId:"local",threadId:"thread-main-aaaa"});
+side.fiber=props("thread-side-bbbb","cloud");
+assert.equal(read(side),null,"侧边入口仍保留本机会话限制");
 "#;
     let output = Command::new("node")
         .arg("-e")

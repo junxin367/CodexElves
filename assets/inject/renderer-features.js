@@ -7467,6 +7467,7 @@
       getModel: codexFastSelectedModel,
       getContext: codexFastComposerContext,
       getModelLabel: codexFastModelLabel,
+      getIndicators: codexFastComposerIndicators,
       isGptModel: (model) => window.__codexElvesNativeFastUnlock?.runtime?.isGptModel(model) === true,
       getDispatcher: async () => codexServiceTierDispatcher ||= await findCodexServiceTierDispatcher(),
       isCopilotActive: async () => {
@@ -25528,19 +25529,37 @@
       menus.add(menu);
       const view = menu.querySelector("[data-model-picker-view]");
       if (view && view.getAttribute("data-model-picker-view") !== "simple") continue;
-      const owner = document.getElementById(menu.getAttribute("aria-labelledby") || "");
-      if (owner && !codexServiceTierIsMainComposerElement(owner)) continue;
       return menu;
     }
     return null;
   }
 
+  function codexFastTargetComposerAnchor() {
+    const selector = '[data-composer-navigation-target="reasoning"], [data-composer-navigation-target="model"]';
+    const menu = codexFastModelMenu();
+    // 用户要求侧边会话也能设置 Fast：由当前菜单的原生触发按钮确定输入区，不能借用主会话。
+    // 菜单归属无法确认时停止读取；上下文用量等功能仍保留 codexFastComposerAnchor 的主输入区边界。
+    if (menu) {
+      for (const id of (menu.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)) {
+        const owner = document.getElementById(id);
+        if (owner?.matches?.(selector) && codexServiceTierFooterHasNearbyComposerInput(owner)) return owner;
+      }
+      return null;
+    }
+    const area = document.activeElement?.closest?.("[data-app-shell-focus-area]");
+    if (area && area.getAttribute("data-app-shell-focus-area") !== "main") {
+      return Array.from(area.querySelectorAll(selector))
+        .filter(codexServiceTierBadgeVisibleElement)
+        .find(codexServiceTierFooterHasNearbyComposerInput) || null;
+    }
+    return codexFastComposerAnchor();
+  }
+
   const codexFastDraftIds = new WeakMap();
-  function codexFastComposerContext() {
-    const anchor = codexFastComposerAnchor();
+  function codexFastComposerContext(anchor = codexFastTargetComposerAnchor()) {
     if (!anchor) return null;
     let mode = null, hostId = null, id = null;
-    // 用户要求会话独立：读取可见主输入框的原生会话属性，不能借侧栏当前行或隐藏聊天的 ID。
+    // 用户要求会话独立：读取目标输入框的原生会话属性，侧边和主会话不能借用彼此或侧栏行的 ID。
     // marker 本身可能为零尺寸，优先沿语义模型按钮读取 React props，不修改原生状态。
     for (let node = anchor, depth = 0; node && depth < 4; node = node.parentElement, depth++) {
       for (const key of reactFiberKeys(node)) {
@@ -25563,13 +25582,15 @@
     return { hostId: "local", draftId: id || codexFastDraftIds.get(anchor) };
   }
 
-  function codexFastSelectedModel(models = []) {
+  function codexFastSelectedModel(models = [], anchor = null) {
     const entries = models.map((entry) => ({
       slug: entry.model || entry.id, displayName: entry.displayName || "",
     }));
     // 菜单展开时优先读取该菜单的当前模型，避免输入框被原生菜单暂时遮蔽后丢失 Fast。
     // 未识别或别名冲突时不猜测默认模型，保持非 GPT 模型不显示 Fast 的边界。
-    const control = codexFastModelMenu()?.querySelector("[data-model-picker-view-toggle]");
+    const menu = anchor ? null : codexFastModelMenu();
+    const control = anchor || menu?.querySelector("[data-model-picker-view-toggle]")
+      || codexFastTargetComposerAnchor();
     const texts = control ? codexServiceTierSelectedModelTexts(control) : [];
     if (texts.length) {
       for (const partial of [false, true]) {
@@ -25581,13 +25602,13 @@
       }
       return "";
     }
+    if (control || menu) return "";
     return codexServiceTierComposerSelectedModel(entries);
   }
 
-  function codexFastModelLabel(models = []) {
-    const anchor = codexFastComposerAnchor();
+  function codexFastModelLabel(models = [], anchor = codexFastTargetComposerAnchor()) {
     if (!anchor?.matches?.('[data-codex-intelligence-trigger="true"], [data-composer-navigation-target="reasoning"], [data-composer-navigation-target="model"]')) return null;
-    const selected = codexFastSelectedModel(models);
+    const selected = codexFastSelectedModel(models, anchor);
     if (!selected) return null;
     const entries = models.map((entry) => ({ slug: entry.model || entry.id, displayName: entry.displayName || "" }));
     const selectors = [
@@ -25612,6 +25633,19 @@
       }
     }
     return null;
+  }
+
+  function codexFastComposerIndicators(models = []) {
+    // 主会话和侧边会话可同时显示；分别读取模型、会话设置及名称节点，关闭菜单后仍各自保留蓝色状态。
+    return Array.from(document.querySelectorAll(
+      '[data-composer-navigation-target="reasoning"], [data-composer-navigation-target="model"]'
+    )).filter(codexServiceTierBadgeVisibleElement)
+      .filter(codexServiceTierFooterHasNearbyComposerInput)
+      .map((anchor) => ({
+        context: codexFastComposerContext(anchor),
+        model: codexFastSelectedModel(models, anchor),
+        label: codexFastModelLabel(models, anchor),
+      }));
   }
 
   function codexComposerModelPlacement() {
