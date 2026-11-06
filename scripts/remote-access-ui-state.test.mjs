@@ -357,24 +357,123 @@ test("远程压缩检查恢复前后的压缩状态，并拒绝在未知工作�
   assert.equal(h.dispatches.length, 0);
 });
 
-test("Windows 打包拒绝缺少运行模式或压缩恢复的旧基线", async () => {
+test("Windows 打包拒绝缺少分支信息、运行模式或压缩恢复的旧基线", async () => {
   const verifier = await readFile(new URL("./verify-windows-build-inputs.mjs", import.meta.url), "utf8");
   const start = verifier.indexOf("function verifyRemoteRuntimeSources(");
   const end = verifier.indexOf("const runtimeContract =", start);
   assert.ok(start >= 0 && end > start);
   const verify = new Function(`${verifier.slice(start, end)}; return verifyRemoteRuntimeSources;`)();
-  const [backend, service] = await Promise.all([
+  const [backend, service, workspace] = await Promise.all([
     readFile(new URL("../crates/codex-elves-core/src/remote_access.rs", import.meta.url), "utf8"),
     readFile(new URL("../crates/codex-elves-core/src/remote_access/service.rs", import.meta.url), "utf8"),
+    readFile(new URL("../crates/codex-elves-core/src/remote_access/workspace.rs", import.meta.url), "utf8"),
   ]);
-  const current = { backend, service, app, native };
-  assert.deepEqual(verify(current), { protocol: 3, bridge: 134 });
-  assert.throws(() => verify({ ...current, service: service.replace("PROTOCOL_VERSION: u32 = 3", "PROTOCOL_VERSION: u32 = 2") }), /后台协议不能低于 3/);
+  const current = { backend, service, workspace, app, native };
+  assert.deepEqual(verify(current), { protocol: 4, bridge: 134 });
+  for (const obsolete of [2, 3])
+    assert.throws(() => verify({ ...current, service: service.replace("PROTOCOL_VERSION: u32 = 4", `PROTOCOL_VERSION: u32 = ${obsolete}`) }), /后台协议不能低于 4/);
+  assert.throws(() => verify({ ...current, workspace: workspace.replace("async fn branch_metadata(", "async fn obsolete_metadata(") }), /缺少真实分支/);
+  assert.throws(() => verify({ ...current, app: app.replace('api("/api/workspace/context"', 'api("/api/workspace/obsolete"') }), /缺少真实分支/);
   assert.throws(() => verify({ ...current, backend: backend.replace('| "runtime"', "") }), /后台缺少运行模式/);
   assert.throws(() => verify({ ...current, backend: backend.replaceAll('"setRuntime"', '"legacyRuntime"') }), /后台缺少运行模式/);
   assert.throws(() => verify({ ...current, app: app.replace('"/api/read/runtime"', '"/api/read/legacyRuntime"') }), /远程页面缺少运行模式/);
   assert.throws(() => verify({ ...current, native: native.replace("version === 134", "version === 132") }), /原生桥缺少/);
   assert.throws(() => verify({ ...current, native: native.replace("async function compactThreadContext(", "async function obsoleteCompaction(") }), /原生桥缺少/);
+});
+
+function newChatBranchHarness() {
+  const reads = [], label = { textContent: "" }, attributes = new Map();
+  const badge = { hidden: false, title: "", querySelector: () => label, setAttribute: (name, value) => attributes.set(name, value) };
+  let now = 1000;
+  const context = vm.createContext({
+    AbortController, Date: class extends Date { static now() { return now; } },
+    creationBranchRead: null, creationBranchSnapshot: null,
+    session: { device: { id: "branch-device", createdAtMs: 1 }, runtime: { revision: 1 } },
+    creating: true, creationProject: "alpha", selectionToken: "selection-alpha",
+    $: selector => selector === "#new-chat-branch" ? badge : null,
+    privateInputScope: value => JSON.stringify([value.device.id, value.device.createdAtMs]),
+    api: (path, payload, _id, signal) => {
+      const response = deferred();
+      reads.push({ path, payload, signal, response });
+      return response.promise;
+    },
+  });
+  vm.runInContext(sessionFiles.slice(sessionFiles.indexOf("export function workspaceBranchLabel("),
+    sessionFiles.indexOf("export function createWorkspaceBranch(")).replace(/^export /gm, "")
+    + "\n" + sourceSection("function resetNewChatBranch()", "function changeCreationProject()"), context);
+  return { context, reads, badge, label, attributes, advance: ms => { now += ms; } };
+}
+
+test("新建页切换项目或授权时不显示旧请求的分支，查询只携带项目身份", async () => {
+  const h = newChatBranchHarness();
+  const first = h.context.refreshNewChatBranch();
+  assert.equal(h.label.textContent, "读取分支…");
+  h.context.creationProject = "beta"; h.context.selectionToken = "selection-beta";
+  const second = h.context.refreshNewChatBranch();
+  assert.equal(h.reads[0].signal.aborted, true);
+  h.reads[0].response.resolve({ ok: true, git: { branch: "old-alpha", detachedHead: null } });
+  await first;
+  assert.equal(h.label.textContent, "读取分支…");
+  h.reads[1].response.resolve({ ok: true, git: { branch: "feature/界面优化", detachedHead: null } });
+  await second;
+  assert.equal(h.label.textContent, "feature/界面优化");
+  assert.equal(h.badge.title, "当前分支：feature/界面优化");
+  assert.equal(h.attributes.get("aria-label"), h.badge.title);
+  assert.equal(h.reads.every(read => read.path === "/api/workspace/context"), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.reads[1].payload)), { projectId: "beta" });
+
+  h.advance(15000);
+  const previousAuthorization = h.context.refreshNewChatBranch();
+  h.context.session.device.createdAtMs = 2;
+  const newAuthorization = h.context.refreshNewChatBranch();
+  h.reads[2].response.resolve({ ok: true, git: { branch: "old-authorization", detachedHead: null } });
+  await previousAuthorization;
+  assert.equal(h.label.textContent, "读取分支…");
+  h.reads[3].response.resolve({ ok: true, git: { branch: "main", detachedHead: null } });
+  await newAuthorization;
+  assert.equal(h.label.textContent, "main");
+});
+
+test("分支随现有轮询刷新，未选项目、读取失败和重新打开不沿用错误状态", async () => {
+  const h = newChatBranchHarness();
+  const first = h.context.refreshNewChatBranch();
+  h.context.refreshNewChatBranch();
+  assert.equal(h.reads.length, 1, "并发渲染应共享当前读取");
+  h.reads[0].response.resolve({ ok: true, git: { branch: "main", detachedHead: null } });
+  await first;
+  h.context.refreshNewChatBranch();
+  assert.equal(h.reads.length, 1, "15 秒内重复渲染不重复启动 Git");
+  h.advance(15000);
+  const updated = h.context.refreshNewChatBranch();
+  h.reads[1].response.resolve({ ok: true, git: { branch: "release/next", detachedHead: null } });
+  await updated;
+  assert.equal(h.label.textContent, "release/next");
+  h.context.selectionToken = "reopened-new-chat";
+  const reopened = h.context.refreshNewChatBranch();
+  h.reads[2].response.reject(new Error("后台暂不可用"));
+  await reopened;
+  assert.equal(h.label.textContent, "分支不可用", "查询失败不能继续冒充当前分支");
+  h.context.creationProject = "";
+  h.context.refreshNewChatBranch();
+  assert.equal(h.label.textContent, "未选择项目");
+  assert.equal(h.reads.length, 3);
+});
+
+test("路径仅在展示时去掉长路径前缀，分离 HEAD 与无分支状态清楚区分", () => {
+  const context = vm.createContext({});
+  vm.runInContext(sessionFiles.slice(sessionFiles.indexOf("export function displayWorkspacePath("),
+    sessionFiles.indexOf("export function setWorkspaceBranch(")).replace(/^export /gm, ""), context);
+  for (const [input, expected] of [
+    [String.raw`\\?\E:\workspace\project`, String.raw`E:\workspace\project`],
+    ["//?/E:/workspace/project", "E:/workspace/project"],
+    [String.raw`\\?\UNC\server\share\project`, String.raw`\\server\share\project`],
+    ["/home/workspace/project", "/home/workspace/project"],
+  ]) assert.equal(context.displayWorkspacePath(input), expected);
+  assert.equal(context.workspaceBranchLabel({ branch: null, detachedHead: "a".repeat(40) }), "分离 HEAD · aaaaaaaa");
+  assert.equal(context.workspaceBranchLabel({ branch: null, detachedHead: null }), "无 Git 分支");
+  assert.equal(context.workspaceBranchLabel({ unavailable: true }), "分支不可用");
+  assert.equal(context.workspaceBranchLabel(undefined), "", "旧后台没有分支字段时不能伪造分支");
+  assert.equal(context.workspaceBranchLabel({ branch: "\nmain" }), "分支不可用");
 });
 
 async function connectionDiagnosticsHarness({ android = true } = {}) {
@@ -4112,6 +4211,40 @@ test("明确失败在五秒内立即提示，已确认压缩不继续显示未�
   assert.equal(h.area.children.length, 0);
 });
 
+test("压缩完成的回执和实时事件静默解除锁定，失败仍给出错误提示", async () => {
+  const h = delayFeedbackHarness();
+  h.context.setCompactionState = (id, value) => { h.context.compactions.set(id, value); return value; };
+  h.context.reconcileCompaction = (id, value) => h.context.setCompactionState(id, value);
+  h.context.compactions.set("main", { state: "pending", receiptId: "compact-receipt", time: h.now() });
+  await h.context.applyCompactionReceipt("main", "compact-receipt", {
+    state: "completed", result: { compaction: { state: "idle", turnId: "turn", itemId: "compact" } },
+  });
+  assert.equal(h.context.compactionLocked("main"), false);
+  assert.deepEqual(h.notices, []);
+  vm.runInContext(sourceSection("function compactionEventMatches(", "function scheduleSidebarRefresh("), h.context);
+  for (const source of ["manual", "automatic"]) {
+    h.context.compactions.set("main", { state: "running", turnId: "turn", itemId: "compact" });
+    h.context.receiveCompactionLifecycle({ method: "item/completed" }, {
+      threadId: "main", turnId: "turn",
+      item: { type: "contextCompaction", id: "compact", source, completed: true, status: "completed" },
+    });
+    assert.equal(h.context.compactionLocked("main"), false);
+    assert.deepEqual(h.notices, []);
+  }
+  h.context.compactions.set("main", { state: "running", turnId: "turn", itemId: "compact" });
+  h.context.receiveCompactionLifecycle({ method: "turn/completed" }, {
+    threadId: "main", turn: { id: "turn", status: "completed", items: [] },
+  });
+  assert.equal(h.context.compactionLocked("main"), false);
+  assert.deepEqual(h.notices, []);
+  h.context.compactions.set("main", { state: "running", turnId: "turn", itemId: "compact" });
+  h.context.receiveCompactionLifecycle({ method: "item/completed" }, {
+    threadId: "main", turnId: "turn",
+    item: { type: "contextCompaction", id: "compact", completed: true, status: "failed" },
+  });
+  assert.deepEqual(h.notices, [{ message: "上下文压缩失败，请查看原生会话。", error: true }]);
+});
+
 test("问答先显示提交按钮状态，五秒后才增加中性说明且保留原回答回执", async () => {
   for (const skip of [false, true]) {
     const h = delayFeedbackHarness(), key = JSON.stringify(["device-a", "main", "question"]);
@@ -4468,14 +4601,19 @@ test("多仓库变更按仓库隔离同名路径，保留分组信息和各仓�
   assert.equal(contract.displayedPath(beta), "web/beta/src/app.ts");
   const response = contract.listResponse({
     ok: true, root: "D:/workspace", revision: "a".repeat(64), truncated: false,
+    git: { branch: "main", detachedHead: null },
     repositories: ["web/alpha", "web/beta"].map(path => ({
-      path, root: `D:/workspace/${path}`, fileCount: 1, truncated: false, error: null
+      path, root: `D:/workspace/${path}`, fileCount: 1, truncated: false, error: null,
+      git: { branch: path === "web/alpha" ? "feature/alpha" : "release/beta", detachedHead: null }
     })),
     files: [alpha, beta],
   });
   assert.equal(response.repositories.length, 2);
   assert.equal(response.files[1].repository, "web/beta");
   assert.equal(response.files[1].path, "src/app.ts");
+  assert.equal(response.git.branch, "main");
+  assert.equal(response.repositories[0].git.branch, "feature/alpha");
+  assert.equal(response.repositories[1].git.branch, "release/beta");
   const alphaGroup = JSON.stringify(["web/alpha", "unstaged"]);
   const betaGroup = JSON.stringify(["web/beta", "unstaged"]);
   const ui = contract.uiState({ collapsed: { [alphaGroup]: true, [betaGroup]: false } });

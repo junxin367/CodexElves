@@ -147,7 +147,8 @@ pub(super) fn read_path(method: &Method, path: &str) -> bool {
             path.starts_with("/api/read/")
                 || matches!(
                     path,
-                    "/api/workspace/changes"
+                    "/api/workspace/context"
+                        | "/api/workspace/changes"
                         | "/api/workspace/change"
                         | "/api/workspace/files"
                         | "/api/workspace/file"

@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 
 const ENDPOINT_FILE: &str = "remote-access-service.json";
 const LOCK_FILE: &str = "remote-access-service.lock";
-// 运行模式和自建服务路由属于同一版后台合同；新版不能继续复用仅支持 CDP 的旧后台。
-const PROTOCOL_VERSION: u32 = 3;
+// 协议 4 增加项目分支元数据，保留协议 3 的运行模式接口；更新后不能复用缺少新接口的旧后台。
+const PROTOCOL_VERSION: u32 = 4;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(windows)]

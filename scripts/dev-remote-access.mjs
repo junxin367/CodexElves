@@ -165,7 +165,7 @@ function rejectUpgrade(socket, status, message) {
 function allowedApi(method, path) {
   return method === "GET" && (["/api/session", "/api/events"].includes(path)
     || /^\/api\/(?:receipts|images)\/[a-zA-Z0-9_-]+$/.test(path))
-    || method === "POST" && (["/api/connect", "/api/logout", "/api/workspace/changes", "/api/workspace/change", "/api/workspace/files", "/api/workspace/file"].includes(path)
+    || method === "POST" && (["/api/connect", "/api/logout", "/api/workspace/context", "/api/workspace/changes", "/api/workspace/change", "/api/workspace/files", "/api/workspace/file"].includes(path)
       || /^\/api\/(?:read|action)\/[a-zA-Z][a-zA-Z0-9_-]*$/.test(path));
 }
 function mappedCookie(req) {

@@ -1,5 +1,5 @@
 import { requestRemote } from "./channels.js";
-import { mountPreviewControlsScroll, mountSessionFiles } from "./session-files.js";
+import { createWorkspaceBranch, createWorkspaceLocation, displayWorkspacePath, mountPreviewControlsScroll, mountSessionFiles, setWorkspaceBranch } from "./session-files.js";
 import { safeInlineImageSource } from "./attachments.js";
 
 const sections = [
@@ -65,7 +65,8 @@ function listResponse(value) {
           || typeof repository.truncated !== "boolean"
           || repository.error != null && !safeString(repository.error, 10000)) return null;
       return { path: repository.path, root: repository.root, fileCount: repository.fileCount,
-        truncated: repository.truncated, error: repository.error || null };
+        truncated: repository.truncated, error: repository.error || null,
+        ...(objectValue(repository.git) ? { git: repository.git } : {}) };
     });
     if (repositories.includes(null)) return null;
     const paths = new Set(repositories.map(repository => repository.path));
@@ -74,6 +75,7 @@ function listResponse(value) {
   } else if (value.files.some(file => file.repository != null)) return null;
   return { ok: true, root: value.root, revision: value.revision, truncated: value.truncated,
     message: value.message || null,
+    ...(objectValue(value.git) ? { git: value.git } : {}),
     ...(repositories ? { repositories } : {}),
     files: value.files.map(file => ({ section: file.section, path: file.path, status: file.status,
       ...(file.repository != null ? { repository: file.repository } : {}),
@@ -95,6 +97,7 @@ function detailResponse(value, file) {
     exists: value.exists, size: value.size, mime: value.mime || null, dataUrl: value.dataUrl || null
   };
   return { ok: true, root: value.root, revision: value.revision, path: value.path, section: value.section,
+    ...(objectValue(value.git) ? { git: value.git } : {}),
     ...(value.repository != null ? { repository: value.repository } : {}),
     kind: value.kind, diff: value.diff || "", truncated: value.truncated, message: value.message || null,
     before: side(value.before), after: side(value.after) };
@@ -135,9 +138,9 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
   const headingCopy = node("div", "session-tools-heading-copy");
   const pageTitle = node("h1", "", "变更");
   pageTitle.id = "session-tools-title";
-  const rootLabel = node("span", "session-tools-heading-path", "当前会话工作目录");
+  const rootLocation = createWorkspaceLocation("当前会话工作目录");
   const backToConversation = control("返回", "返回会话", requestBack, "text-button session-tools-back");
-  headingCopy.append(pageTitle, rootLabel);
+  headingCopy.append(pageTitle, rootLocation.element);
   heading.append(headingCopy, backToConversation);
   const pageBodies = new Map();
   for (const [name, label] of [["changes", "变更"]]) {
@@ -155,8 +158,8 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
   const detailHeadingCopy = node("div", "session-tools-heading-copy");
   const detailTitle = node("h1");
   detailTitle.id = "session-tools-file-title";
-  const detailPath = node("span", "session-tools-heading-path");
-  detailHeadingCopy.append(detailTitle, detailPath);
+  const detailLocation = createWorkspaceLocation();
+  detailHeadingCopy.append(detailTitle, detailLocation.element);
   const backToFiles = control("返回", "返回变更列表", requestBack, "text-button session-tools-back");
   detailHeading.append(detailHeadingCopy, backToFiles);
   const detail = node("div", "session-tools-detail");
@@ -442,7 +445,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     fileSearch.value = p.ui.query; wrapDiff = p.ui.wrap;
     wrapButton.setAttribute("aria-pressed", String(wrapDiff));
     detail.classList.toggle("session-tools-diff-wrap", wrapDiff);
-    rootLabel.textContent = p.list?.root || "当前会话工作目录"; rootLabel.title = p.list?.root || "";
+    rootLocation.set(p.list?.root || "当前会话工作目录", p.list?.git);
     if (displayedProject !== p) {
       fileList.replaceChildren(p.listView); displayedProject = p;
     }
@@ -478,7 +481,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     mutation(p, "workspace-list", p.id, "remove");
     if (project === p) {
       files = []; changesLoaded = false; fileTriggers.clear();
-      rootLabel.textContent = "当前会话工作目录"; rootLabel.title = "";
+      rootLocation.set("当前会话工作目录");
       status(changesStatus, message, true);
     }
   }
@@ -518,7 +521,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     if (project) attachList(project);
     else {
       fileSearch.value = ""; fileList.replaceChildren(); displayedProject = null; changesLoaded = false;
-      rootLabel.textContent = "当前会话工作目录"; rootLabel.title = "";
+      rootLocation.set("当前会话工作目录");
       status(changesStatus, unavailableChanges());
     }
     trimMemory();
@@ -660,9 +663,11 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
       let host = p.listView;
       if (repositories.length > 1 || repository.path || repository.error) {
         host = node("section", "session-tools-repository");
-        const heading = node("h2", "session-tools-repository-heading",
-          `${repository.path || repository.root.split(/[\\/]/).filter(Boolean).at(-1) || "当前仓库"} · ${repositoryFiles.length}`);
-        heading.title = repository.root;
+        const heading = node("h2", "session-tools-repository-heading");
+        heading.append(node("span", "session-tools-repository-label",
+          `${repository.path || repository.root.split(/[\\/]/).filter(Boolean).at(-1) || "当前仓库"} · ${repositoryFiles.length}`),
+        createWorkspaceBranch(repository.git));
+        heading.title = displayWorkspacePath(repository.root);
         host.append(heading);
         if (repository.error) host.append(node("p", "session-tools-status error-text", repository.error));
         else if (repository.truncated) host.append(node("p", "session-tools-warning", "此仓库仅显示部分变更。"));
@@ -734,6 +739,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
   function paintDetail(record, file) {
     if (detailRecord !== record) saveDetailScroll();
     record.used = Date.now();
+    if (record.response.git) setWorkspaceBranch(detailLocation.branch, record.response.git);
     if (!record.view) {
       const result = record.response, view = node("div", "session-tools-detail-content");
       if (result.truncated) view.append(node("p", "session-tools-warning", result.message || "文件较大，差异或预览已截断。"));
@@ -775,8 +781,9 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     selectedFile = file;
     const parts = fileParts(file);
     detailTitle.textContent = parts.name; detailTitle.title = displayedPath(file);
-    detailPath.textContent = file.repository ? `${file.repository} / ${parts.directory}` : parts.directory;
-    detailPath.title = displayedPath(file);
+    const repository = p.list?.repositories?.find(repository => repository.path === (file.repository || ""));
+    detailLocation.set(file.repository ? `${file.repository} / ${parts.directory}` : parts.directory,
+      repository?.git || p.list?.git);
     let cached = p.details.get(id);
     if (cached && cached.response.root !== p.list.root) {
       p.details.delete(id); p.detailIds.delete(id);
@@ -943,7 +950,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     opened = true; activePage = name;
     if (detailVisible) hideDetail({ focus: false });
     pageTitle.textContent = pageTitles[name];
-    rootLabel.hidden = name !== "changes";
+    rootLocation.element.hidden = name !== "changes";
     for (const [key, body] of pageBodies) body.hidden = key !== name;
     panel.hidden = false; panel.inert = false;
     suspendConversation();

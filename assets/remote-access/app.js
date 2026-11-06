@@ -4,6 +4,7 @@ import { configureAndroidDiagnostics, exportAndroidDiagnostics, receiveDiagnosti
 import { activateRemoteChannels, clearRemoteChannels, handleRemoteChannelEvent, observeChannelConfiguration, prepareRemoteTunnelAccess, raceRemoteRead, remoteChannelRoutes, remoteMediaUrl, requestRemote, setRemoteChannelMeasurements, validateRemoteReceipt } from "./channels.js";
 import { renderMessageActions } from "./message-actions.js";
 import { mountSessionTools } from "./session-tools.js";
+import { createWorkspaceBranch, setWorkspaceBranch } from "./session-files.js";
 import { mountSessionMenu } from "./session-menu.js";
 import { sha256Hex } from "./sha256.js";
 import {
@@ -141,6 +142,7 @@ const modelCatalogCacheVersion = 1;
 let modelDefaults = { model: "", reasoningEffort: "" };
 const newChatModels = new Map();
 let skillLoading = null, creationProject = "", threadReadVersion = 0, tokenUsageVersion = 0, notifiedTokenUsage = null;
+let creationBranchRead = null, creationBranchSnapshot = null;
 let skillRenderVersion = 0, messageSkillLoadScope = "";
 let recentLimit = 40;
 let recentPriorityIds = null;
@@ -3242,12 +3244,56 @@ function syncNewChatProjectPicker() {
   if (control) control.dataset.selected = String(!!select.value);
   if (clear) { clear.hidden = !select.value; clear.disabled = select.disabled; }
 }
+function resetNewChatBranch() {
+  creationBranchRead?.controller.abort();
+  creationBranchRead = creationBranchSnapshot = null;
+}
+function refreshNewChatBranch() {
+  const badge = $("#new-chat-branch");
+  if (!badge) return;
+  if (!creating || !session || !creationProject) {
+    resetNewChatBranch();
+    setWorkspaceBranch(badge, null, "未选择项目");
+    return;
+  }
+  // 用户要求新建页展示所选项目的当前分支；按授权、运行方式和本次选择隔离，晚到响应不能串到另一项目。
+  const key = JSON.stringify([privateInputScope(session), session.runtime?.revision ?? null, creationProject, selectionToken]);
+  if (creationBranchRead?.key === key && creationBranchRead.badge === badge) return creationBranchRead.promise;
+  // 与现有 15 秒连接/侧栏轮询同步刷新，不因输入、展开菜单或重复渲染而频繁启动 Git。
+  if (creationBranchSnapshot?.key === key && Date.now() - creationBranchSnapshot.loadedAt < 15000) {
+    setWorkspaceBranch(badge, creationBranchSnapshot.git);
+    return;
+  }
+  creationBranchRead?.controller.abort();
+  const record = { key, badge, controller: new AbortController(), promise: null };
+  creationBranchRead = record;
+  setWorkspaceBranch(badge, creationBranchSnapshot?.key === key ? creationBranchSnapshot.git : null, "读取分支…");
+  const current = () => creationBranchRead === record && !record.controller.signal.aborted
+    && creating && session && $("#new-chat-branch") === badge
+    && JSON.stringify([privateInputScope(session), session.runtime?.revision ?? null, creationProject, selectionToken]) === key;
+  record.promise = api("/api/workspace/context", { projectId: creationProject }, undefined, record.controller.signal)
+    .then(result => {
+      if (!current()) return;
+      const git = result?.ok === true && result.git && typeof result.git === "object"
+        ? result.git : { unavailable: true };
+      creationBranchSnapshot = { key, git, loadedAt: Date.now() };
+      setWorkspaceBranch(badge, git);
+    })
+    .catch(error => {
+      if (!current() || error.name === "AbortError") return;
+      creationBranchSnapshot = { key, git: { unavailable: true }, loadedAt: Date.now() };
+      setWorkspaceBranch(badge, creationBranchSnapshot.git);
+    })
+    .finally(() => { if (creationBranchRead === record) creationBranchRead = null; });
+  return record.promise;
+}
 function changeCreationProject() {
   syncNewChatProjectPicker();
   const project = $("#project-select").value;
-  if (!creating || project === creationProject) return;
+  if (!creating || project === creationProject) { void refreshNewChatBranch(); return; }
   rememberDraft();
   creationProject = project; ++selectionVersion; selectionToken = randomId();
+  void refreshNewChatBranch();
   sessionTools?.updateContext();
   restoreDraft(draftKey()); resetComposerOptions(); updateComposer();
 }
@@ -4745,7 +4791,7 @@ async function api(path, body, id, signal, { resourcePriority = "foreground", on
   // 16 KiB/s 包含 base64 上传；12 MiB 图片可等待约 18 分钟，仍有有限上限。
   const actionTimeout = path.startsWith("/api/action/")
     ? Math.min(20 * 60000, 90000 + Math.ceil(new TextEncoder().encode(encodedBody || "").length / 16384) * 1000) : 0;
-  const timeout = path === "/api/diagnostics" ? 45000 : path.startsWith("/api/read/") ? 60000
+  const timeout = ["/api/diagnostics", "/api/workspace/context"].includes(path) ? 45000 : path.startsWith("/api/read/") ? 60000
     : path === "/api/session" || path.startsWith("/api/receipts/") ? 15000 : actionTimeout;
   const controller = timeout ? new AbortController() : null;
   const abort = () => controller?.abort(signal?.reason);
@@ -5693,6 +5739,7 @@ async function resolvePending() {
 let loginPageCleanup = null;
 function showLogin() {
   loginPageCleanup?.();
+  resetNewChatBranch();
   resetRelatedSessions();
   sessionTools?.dispose(); sessionTools = null;
   stopGoalLiveTimer();
@@ -6162,10 +6209,11 @@ function shell() {
   clearProject.hidden = true;
   clearProject.append(icon("closeCircle"));
   projectControl.append(projectSelect, clearProject);
-  const executionHost = element("span", "new-chat-execution-host");
-  executionHost.title = "会话在本机执行";
-  executionHost.append(icon("laptop"), document.createTextNode("本地"));
-  projectPicker.append(projectControl, executionHost);
+  const branchBadge = createWorkspaceBranch(null, "未选择项目");
+  branchBadge.id = "new-chat-branch";
+  branchBadge.classList.add("new-chat-branch");
+  branchBadge.setAttribute("aria-live", "polite");
+  projectPicker.append(projectControl, branchBadge);
   $("#send").append(icon("arrowUp"));
   $("#logout").append(icon("logout"), element("span", "", "退出"));
   $("#appearance-button").append(icon("settings"), element("span", "", "设置"));
@@ -12423,9 +12471,7 @@ async function applyCompactionReceipt(id, receiptId, receipt) {
   }
   const acknowledged = setCompactionState(id, { ...current, acknowledged: true });
   if (receipt.result?.compaction) reconcileCompaction(id, receipt.result.compaction);
-  if (!(compactions.get(id)?.receiptId === receiptId && compactionLocked(id))) {
-    notice("上下文压缩已完成。");
-  }
+  // 用户要求远程压缩完成时不再弹出提示；仍核对回执、解除压缩状态并刷新会话。
   updateComposer();
   if (selectedId === id && compactions.get(id)?.receiptId === acknowledged.receiptId) await reloadThread();
 }
@@ -12617,7 +12663,8 @@ function receiveCompactionLifecycle(event, params) {
     updateComposer();
     if (completed) {
       const failed = items.some(item => item.status === "failed") || params.turn?.status === "failed";
-      notice(failed ? "上下文压缩失败，请查看原生会话。" : "上下文压缩已完成。", failed);
+      // 实时事件与回执保持一致：成功结束静默更新，失败仍显示错误，不能因去掉完成提示而隐藏异常。
+      if (failed) notice("上下文压缩失败，请查看原生会话。", true);
     }
   }
 }

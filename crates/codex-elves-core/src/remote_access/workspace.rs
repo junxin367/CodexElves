@@ -141,6 +141,33 @@ impl Side {
     }
 }
 
+pub(super) async fn context(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Result<Response, ApiError> {
+    let device = super::authorized(&state, &headers).await?;
+    let authorization = state.controller.authorization(device, None);
+    authorization
+        .check()
+        .await
+        .map_err(super::authorization_error)?;
+    // 新建会话只读取所选项目的真实分支；继续由原生项目身份确定目录，不接受客户端传入 cwd。
+    let cwd = super::workspace_context(&state, &payload, &authorization).await?;
+    let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
+        let root = resolve_workspace_root(cwd, &authorization).await?;
+        let git = branch_metadata(&root, &authorization).await;
+        Ok::<_, ApiError>(json!({"ok": true, "root": display_project_path(&root), "git": git}))
+    })
+    .await
+    .map_err(|_| ApiError::new(504, "读取项目分支超时，请稍后重试"))??;
+    authorization
+        .check()
+        .await
+        .map_err(super::authorization_error)?;
+    Ok(no_store(result))
+}
+
 pub(super) async fn changes(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -231,6 +258,7 @@ pub(super) async fn change(
             .find(|entry| entry.path == path && entry.section == section)
             .ok_or_else(|| ApiError::new(409, "该文件的变更状态已更新，请刷新变更列表"))?;
         let mut detail = repo.detail(&entry).await?;
+        detail["git"] = branch_metadata(&repo.root, &authorization).await;
         if let Some(root) = workspace_root {
             detail["root"] = json!(root.to_string_lossy());
             detail["repository"] = json!(repository);
@@ -408,23 +436,32 @@ async fn browse_workspace(
             cwd.clone()
         };
         let requested = requested.to_owned();
-        tokio::task::spawn_blocking(move || {
+        let (mut value, branch_directory) = tokio::task::spawn_blocking(move || {
             let root = std::fs::canonicalize(root)
                 .map_err(|_| ApiError::new(404, "当前项目目录已失效"))?;
             if !cwd.starts_with(&root) || !super::canonical_path_is_local(&root) {
                 return Err(ApiError::new(403, "项目目录与当前会话不一致"));
             }
             let path = project_relative_path(&root, &requested, !content)?;
-            if content {
-                project_file_content(&root, &path)
+            let value = if content {
+                project_file_content(&root, &path)?
             } else if !query.trim().is_empty() {
-                project_search(&root, &query)
+                project_search(&root, &query)?
             } else {
-                project_directory(&root, &path)
-            }
+                project_directory(&root, &path)?
+            };
+            // 文件可能属于独立子仓库，预览显示文件所在仓库的分支，不能借用外层项目分支。
+            let branch_directory = if content {
+                root.join(&path).parent().unwrap_or(&root).to_owned()
+            } else {
+                root.join(&path)
+            };
+            Ok::<_, ApiError>((value, branch_directory))
         })
         .await
-        .map_err(|_| ApiError::new(503, "读取项目文件失败"))?
+        .map_err(|_| ApiError::new(503, "读取项目文件失败"))??;
+        value["git"] = branch_metadata(&branch_directory, &authorization).await;
+        Ok::<_, ApiError>(value)
     })
     .await
     .map_err(|_| ApiError::new(504, "读取项目文件超时，请重试"))??;
@@ -440,6 +477,53 @@ fn display_project_path(path: &Path) -> String {
     path.strip_prefix(r"\\?\")
         .unwrap_or(&path)
         .replace('\\', "/")
+}
+
+async fn branch_metadata(root: &Path, authorization: &RemoteAuthorization) -> Value {
+    let result = async {
+        let branch = git(
+            root,
+            &["symbolic-ref", "--quiet", "--short", "HEAD"],
+            16 * 1024,
+            authorization,
+        )
+        .await?;
+        if branch.truncated {
+            return Err(ApiError::new(503, "Git 分支名称超过读取上限"));
+        }
+        if branch.success {
+            let name = String::from_utf8(branch.bytes)
+                .map_err(|_| ApiError::new(422, "Git 分支名称编码无法识别"))?;
+            let name = name.trim_end_matches(['\r', '\n']);
+            if name.is_empty() || name.chars().any(char::is_control) {
+                return Err(ApiError::new(503, "Git 分支名称无效"));
+            }
+            // symbolic-ref 也支持尚未产生首次提交的分支，不能将这类仓库误判为非 Git 目录。
+            return Ok(json!({"branch": name, "detachedHead": null}));
+        }
+        let head = git(
+            root,
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+            256,
+            authorization,
+        )
+        .await?;
+        if head.truncated {
+            return Err(ApiError::new(503, "Git HEAD 超过读取上限"));
+        }
+        let success = head.success;
+        let head = String::from_utf8_lossy(&head.bytes).trim().to_owned();
+        if success && !valid_oid(&head) {
+            return Err(ApiError::new(503, "Git HEAD 无效"));
+        }
+        Ok::<_, ApiError>(json!({
+            "branch": null,
+            "detachedHead": success.then_some(head),
+        }))
+    }
+    .await;
+    // 分支是补充展示信息，读取失败不能破坏原有文件和变更能力；外层仍须重新核对授权。
+    result.unwrap_or_else(|_| json!({"branch": null, "detachedHead": null, "unavailable": true}))
 }
 
 fn project_relative_path(
@@ -907,7 +991,9 @@ impl WorkspaceRepositories {
             async move {
                 let result = tokio::time::timeout_at(deadline, async {
                     let repository = repository_in_workspace(&root, &path, &authorization).await?;
-                    repository.snapshot().await
+                    let snapshot = repository.snapshot().await?;
+                    let git = branch_metadata(&repository.root, &authorization).await;
+                    Ok::<_, ApiError>((snapshot, git))
                 })
                 .await
                 .map_err(|_| ApiError::new(504, "仓库变更读取超时，请稍后刷新"))
@@ -928,7 +1014,8 @@ impl WorkspaceRepositories {
                 "error": null,
             });
             match snapshot {
-                Ok(snapshot) => {
+                Ok((snapshot, git)) => {
+                    repository["git"] = git;
                     repository["fileCount"] = json!(snapshot.files.len());
                     repository["truncated"] = json!(snapshot.truncated);
                     truncated |= snapshot.truncated;
@@ -946,14 +1033,22 @@ impl WorkspaceRepositories {
                 }
                 Err(error) => {
                     truncated = true;
+                    repository["git"] = json!({"unavailable": true});
                     repository["error"] = json!(error.message);
                 }
             }
             repositories.push(repository);
         }
+        let git = repositories
+            .iter()
+            .find(|repository| repository["path"] == "")
+            .and_then(|repository| repository.get("git"))
+            .cloned()
+            .unwrap_or_else(|| json!({"branch": null, "detachedHead": null}));
         Ok(json!({
             "ok": true,
             "root": self.root.to_string_lossy(),
+            "git": git,
             "repositories": repositories,
             "files": files,
             "truncated": truncated,
@@ -1108,9 +1203,11 @@ impl Repository {
 
     async fn listing(&self) -> Result<Value, ApiError> {
         let snapshot = self.snapshot().await?;
+        let git = branch_metadata(&self.root, &self.authorization).await;
         Ok(json!({
             "ok": true,
             "root": self.root.to_string_lossy(),
+            "git": git,
             "files": snapshot.files,
             "truncated": snapshot.truncated,
             "message": snapshot.truncated.then_some("部分文件因列表大小、路径安全或文件名编码限制未显示；请在电脑端查看完整列表。"),
@@ -2393,6 +2490,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_branch_context_tracks_unborn_switch_detached_and_authorization() {
+        let (_fixture, _state_dir, repo) = fixture_repo().await;
+        let (state, headers) = fixture_web_state(&repo);
+        let request = json!({"projectId": "branch-project"});
+        assert!(
+            git_unchecked(
+                &repo.root,
+                &["symbolic-ref", "HEAD", "refs/heads/feature/新建会话"],
+                16 * 1024,
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let current = fixture_response_json(
+            context(State(state.clone()), headers.clone(), Json(request.clone()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(current["root"], display_project_path(&repo.root));
+        assert_eq!(current["git"]["branch"], "feature/新建会话");
+        assert!(current["git"]["detachedHead"].is_null());
+        let listing = fixture_response_json(
+            changes(State(state.clone()), headers.clone(), Json(request.clone()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            git_unchecked(
+                &repo.root,
+                &["symbolic-ref", "HEAD", "refs/heads/release/next"],
+                16 * 1024,
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let mut conditional = request.clone();
+        conditional["ifRevision"] = listing["revision"].clone();
+        let changed = fixture_response_json(
+            changes(State(state.clone()), headers.clone(), Json(conditional))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(changed["git"]["branch"], "release/next");
+        assert_ne!(changed["revision"], listing["revision"]);
+        assert_ne!(changed["notModified"], true);
+
+        let tree = git_unchecked(&repo.root, &["write-tree"], 256)
+            .await
+            .unwrap();
+        assert!(tree.success);
+        let tree = String::from_utf8(tree.bytes).unwrap();
+        // 只在自动清理的夹具仓库创建提交对象，验证分离 HEAD，不提交当前工作仓库。
+        let commit = git_unchecked(
+            &repo.root,
+            &[
+                "-c",
+                "user.name=Workspace tests",
+                "-c",
+                "user.email=workspace@example.invalid",
+                "commit-tree",
+                tree.trim(),
+                "-m",
+                "Workspace branch fixture",
+            ],
+            256,
+        )
+        .await
+        .unwrap();
+        assert!(commit.success);
+        let commit = String::from_utf8(commit.bytes).unwrap().trim().to_owned();
+        assert!(
+            git_unchecked(
+                &repo.root,
+                &["update-ref", "--no-deref", "HEAD", &commit],
+                256,
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let detached = fixture_response_json(
+            context(State(state.clone()), headers.clone(), Json(request.clone()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(detached["git"]["branch"].is_null());
+        assert_eq!(detached["git"]["detachedHead"], commit);
+        // 普通夹具位于仓库内的 temp，会继承父仓库；本用例必须在仓库外创建真正的非 Git 目录。
+        let non_git = tempfile::Builder::new()
+            .prefix("codex-elves-non-git-")
+            .tempdir()
+            .unwrap();
+        assert!(
+            !git_unchecked(non_git.path(), &["rev-parse", "--show-toplevel"], 16 * 1024)
+                .await
+                .unwrap()
+                .success
+        );
+        assert_eq!(
+            branch_metadata(non_git.path(), &repo.authorization).await,
+            json!({"branch": null, "detachedHead": null})
+        );
+        assert_eq!(
+            context(State(state.clone()), HeaderMap::new(), Json(request))
+                .await
+                .unwrap_err()
+                .code,
+            401
+        );
+        assert_eq!(
+            context(
+                State(state),
+                headers,
+                Json(json!({"projectId": "branch-project", "cwd": "C:/outside"})),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            400
+        );
+    }
+
+    #[tokio::test]
     async fn workspace_multirepo_routes_include_ignored_children_and_scope_same_named_details() {
         let (_fixture, _state_dir, repo) = fixture_repo().await;
         std::fs::write(repo.root.join(".gitignore"), "web/\n").unwrap();
@@ -2400,6 +2626,22 @@ mod tests {
         fixture_child_repo(&repo.root, "web/alpha", "alpha contents\n").await;
         fixture_child_repo(&repo.root, "web/beta", "beta contents\n").await;
         fixture_child_repo(&repo.root, "web/alpha/vendor/nested", "nested contents\n").await;
+        for (relative, branch) in [
+            ("", "main"),
+            ("web/alpha", "feature/alpha"),
+            ("web/beta", "release/beta"),
+        ] {
+            assert!(
+                git_unchecked(
+                    &repo.root.join(relative),
+                    &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
+                    16 * 1024,
+                )
+                .await
+                .unwrap()
+                .success
+            );
+        }
         let (state, headers) = fixture_web_state(&repo);
         let request = json!({"threadId":"multi-repo-thread","allRepositories":true});
         let list = fixture_response_json(
@@ -2420,6 +2662,22 @@ mod tests {
         );
         assert_eq!(list["truncated"], false);
         assert_eq!(list["files"].as_array().unwrap().len(), 5);
+        assert_eq!(list["git"]["branch"], "main");
+        for (relative, branch) in [("web/alpha", "feature/alpha"), ("web/beta", "release/beta")] {
+            let repository = list["repositories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|repository| repository["path"] == relative)
+                .unwrap();
+            assert_eq!(repository["git"]["branch"], branch);
+            let preview = fixture_response_json(
+                file(State(state.clone()), headers.clone(),
+                    Json(json!({"threadId": "multi-repo-thread", "path": format!("{relative}/same.txt")})))
+                    .await.unwrap(),
+            ).await;
+            assert_eq!(preview["git"]["branch"], branch);
+        }
         for (repository, expected) in [
             ("", "outer repository"),
             ("web/alpha", "alpha contents"),
@@ -2442,6 +2700,12 @@ mod tests {
             assert_eq!(detail["root"], list["root"]);
             assert_eq!(detail["repository"], repository);
             assert!(detail["diff"].as_str().unwrap().contains(expected));
+            if repository == "web/alpha" {
+                assert_eq!(detail["git"]["branch"], "feature/alpha");
+            }
+            if repository == "web/beta" {
+                assert_eq!(detail["git"]["branch"], "release/beta");
+            }
         }
         let mut conditional = request.clone();
         conditional["ifRevision"] = list["revision"].clone();

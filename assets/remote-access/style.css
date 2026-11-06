@@ -312,8 +312,9 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .new-chat-project-clear svg path{stroke:var(--side)}
 .new-chat-project-control[data-selected=true]:is(:hover,:has(>:focus-visible))>.new-chat-project-clear{opacity:1;pointer-events:auto}
 .new-chat-project-control[data-selected=true]:is(:hover,:has(>:focus-visible))>#project-select>.ui-icon:first-child{opacity:0}
-.new-chat-execution-host{display:inline-flex;align-items:center;gap:5px;flex-shrink:0;margin-left:12px;color:var(--muted);font-size:.92857rem;white-space:nowrap}
-.new-chat-execution-host>.ui-icon{width:14px;height:14px}
+/* 用户要求新建会话显示真实分支；45% 给项目名保留余宽，24em 限制桌面长分支；8px 间距与标题路径行同步核对。 */
+.new-chat-project-control{flex-shrink:1}
+.new-chat-project>.new-chat-branch{margin-left:8px;max-width:min(45%,24em)}
 .project-picker-popup{border-radius:16px;padding:6px}
 .project-picker-popup .popup-search{width:calc(100% - 8px);min-height:36px;margin:2px 4px 6px;border-radius:9px}
 .project-picker-popup .popup-list{scrollbar-width:thin}
@@ -908,6 +909,14 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-tools-heading h1{margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:1.07143rem;font-weight:600;line-height:1.6}
 .session-tools-heading-copy{display:flex;flex:1;flex-direction:column;gap:2px;min-width:0}
 .session-tools-heading-path{color:var(--muted);font-size:.75rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 用户要求路径后单独显示分支：8px 间距、Git 图标和边框区分信息；45% 上限给路径留出余宽，22px 行高容纳标签，各自截断并保留 title。 */
+.session-tools-heading-location{display:flex;align-items:center;gap:8px;min-width:0;min-height:22px}
+.session-tools-heading-location>.session-tools-heading-path{min-width:0;flex:0 1 auto}
+.workspace-branch{display:inline-flex;align-items:center;flex:0 0 auto;gap:4px;min-width:0;max-width:45%;padding:2px 6px;border:1px solid var(--line);border-radius:5px;background:var(--side);color:var(--text);font-size:.75rem;line-height:1.4;vertical-align:middle;white-space:nowrap}
+.workspace-branch[hidden]{display:none}
+.workspace-branch-icon{display:inline-flex;flex-shrink:0;width:13px;height:13px;color:var(--muted)}
+.workspace-branch-icon>svg{width:100%;height:100%}
+.workspace-branch-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .session-tools-back{flex-shrink:0;min-width:48px;min-height:36px;padding:6px 8px;font-size:.85714rem}
 .session-tools-page{flex:1;min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .session-tools-changes{display:flex;flex-direction:column;overflow:hidden}
@@ -919,7 +928,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-tools-file-search{display:block;flex-shrink:0;width:calc(100% - 28px);margin:10px 14px 0;padding:8px 11px;background:var(--side);font-size:.85714rem}
 /* 多仓库按相对目录分组，仓库内继续保留暂存分区，手机端不横向挤压文件名。 */
 .session-tools-repository+.session-tools-repository{border-top:1px solid var(--line);padding-top:8px;margin-top:4px}
-.session-tools-repository-heading{margin:8px 14px;font-size:.85714rem;font-weight:600;overflow-wrap:anywhere}
+.session-tools-repository-heading{display:flex;align-items:center;gap:8px;min-width:0;margin:8px 14px;font-size:.85714rem;font-weight:600}
+.session-tools-repository-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .session-tools-file-group{padding:0 8px 8px}
 .session-tools-file-group h3{margin:0;font-size:.78571rem;font-weight:500;color:var(--muted)}
 .session-tools-group-toggle{display:flex;align-items:center;gap:6px;width:100%;min-width:0;min-height:36px;padding:6px;border:0;text-align:left;color:inherit;font:inherit}

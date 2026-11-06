@@ -2603,6 +2603,7 @@ pub fn web_router(
             post(diagnostics::upload).layer(DefaultBodyLimit::max(diagnostics::MAX_BODY_BYTES)),
         )
         .route("/api/read/{action}", post(read))
+        .route("/api/workspace/context", post(workspace::context))
         .route("/api/workspace/changes", post(workspace::changes))
         .route("/api/workspace/change", post(workspace::change))
         .route("/api/workspace/files", post(workspace::files))
@@ -8877,6 +8878,7 @@ call("send",{threadId:"isolated-thread",prompt:"隔离发送"})
             "/api/action/deleteThread",
             "/api/read/promptOptimization",
             "/api/read/models",
+            "/api/workspace/context",
             "/api/workspace/changes",
             "/api/workspace/change",
             "/api/workspace/files",

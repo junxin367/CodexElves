@@ -12,6 +12,52 @@ const control = (label, action, className = "text-button") => {
   result.type = "button"; result.addEventListener("click", action);
   return result;
 };
+// 用户要求去掉 Windows 长路径前缀；只处理展示文本，读取参数、目录边界和缓存身份仍使用原路径。
+export function displayWorkspacePath(value) {
+  const path = String(value || "");
+  if (/^(?:\\\\\?\\|\/\/\?\/)UNC[\\/]/iu.test(path))
+    return `\\\\${path.slice(8)}`;
+  return path.replace(/^(?:\\\\\?\\|\/\/\?\/)/u, "");
+}
+export function workspaceBranchLabel(git) {
+  if (!git || typeof git !== "object") return "";
+  if (git.unavailable === true) return "分支不可用";
+  if (typeof git.branch === "string" && git.branch.length > 0 && git.branch.length <= 16384
+      && !/[\u0000-\u001f\u007f]/u.test(git.branch)) return git.branch;
+  if (typeof git.detachedHead === "string" && /^(?:[a-f\d]{40}|[a-f\d]{64})$/iu.test(git.detachedHead))
+    return `分离 HEAD · ${git.detachedHead.slice(0, 8)}`;
+  return git.branch === null && git.detachedHead === null ? "无 Git 分支" : "分支不可用";
+}
+export function setWorkspaceBranch(badge, git, placeholder = "") {
+  const label = workspaceBranchLabel(git) || placeholder;
+  badge.hidden = !label;
+  badge.querySelector(".workspace-branch-label").textContent = label;
+  badge.title = git?.branch === label ? `当前分支：${label}` : label;
+  badge.setAttribute("aria-label", badge.title);
+}
+export function createWorkspaceBranch(git, placeholder = "") {
+  const badge = node("span", "workspace-branch");
+  const glyph = node("span", "workspace-branch-icon");
+  glyph.setAttribute("aria-hidden", "true");
+  glyph.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="3" r="1.5"/><circle cx="12" cy="4" r="1.5"/><circle cx="4" cy="13" r="1.5"/><path d="M4 4.5v7M12 5.5v1A3.5 3.5 0 0 1 8.5 10H4"/></svg>';
+  badge.append(glyph, node("span", "workspace-branch-label"));
+  setWorkspaceBranch(badge, git, placeholder);
+  return badge;
+}
+export function createWorkspaceLocation(initialPath = "") {
+  // 用户要求路径与分支清楚区分：路径和带图标、边框的分支标签使用独立元素，长文本分别省略。
+  const element = node("div", "session-tools-heading-location");
+  const path = node("span", "session-tools-heading-path");
+  const branch = createWorkspaceBranch();
+  element.append(path, branch);
+  const set = (value, git) => {
+    path.textContent = displayWorkspacePath(value);
+    path.title = path.textContent;
+    setWorkspaceBranch(branch, git);
+  };
+  set(initialPath);
+  return { element, path, branch, set };
+}
 const parentPath = path => path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
 const fileName = path => path.replaceAll("\\", "/").split("/").at(-1) || "文件";
 const revisionValid = value => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
@@ -291,12 +337,12 @@ export function mountSessionFiles({
     screen.id = id; screen.hidden = true; screen.inert = true;
     const heading = node("header", "session-tools-heading");
     const copy = node("div", "session-tools-heading-copy");
-    const label = node("h1", "", title), path = node("span", "session-tools-heading-path");
+    const label = node("h1", "", title), location = createWorkspaceLocation();
     label.id = `${id}-title`; screen.setAttribute("aria-labelledby", label.id);
-    copy.append(label, path);
+    copy.append(label, location.element);
     heading.append(copy, control("返回", back, "text-button session-tools-back"));
     screen.append(heading); workspace.append(screen); screens.push(screen);
-    return { screen, heading, label, path };
+    return { screen, heading, label, path: location.path, location };
   };
   const listing = createScreen("session-files-list", "文件");
   const content = createScreen("session-files-content", "文件");
@@ -349,6 +395,7 @@ export function mountSessionFiles({
     for (const controller of controllers) controller.abort();
     target = nextTarget; contextKey = nextKey; authorizationKey = nextAuthorization;
     responses.clear(); views.clear(); listResponse = contentResponse = null;
+    listing.location.set(""); content.location.set("");
     expanded = new Set(); pendingDirectories.clear(); searchMatches = null; search.value = "";
     currentDirectory = renderedFile = ""; list.replaceChildren(); body.replaceChildren();
   }
@@ -440,6 +487,7 @@ export function mountSessionFiles({
     searchMatches = null;
     if (search.value.trim()) {
       listResponse = responses.get("files::") || null;
+      listing.location.set(listResponse?.root || "当前会话工作目录", listResponse?.git);
       renderDirectory(); list.scrollTop = listView.scroll || 0;
       void searchProject(search.value);
       return;
@@ -447,18 +495,20 @@ export function mountSessionFiles({
     const cached = responses.get(`files:${path}:`);
     listResponse = cached || null; renderDirectory(); list.scrollTop = listView.scroll || 0;
     if (!cached) message(listStatus, "正在读取目录…");
-    listing.path.textContent = cached?.root ? `${cached.root}${path ? `/${path}` : ""}` : path;
+    listing.location.set(cached?.root ? `${cached.root}${path ? `/${path}` : ""}` : path || "当前会话工作目录", cached?.git);
     const epoch = ++listEpoch; listController?.abort(); listController = new AbortController();
     try {
       const value = await read(path, "files", listController, "");
       if (disposed || epoch !== listEpoch || route?.kind !== "list" || currentDirectory !== path) return;
       const scroll = list.scrollTop;
       if (value !== listResponse) { listResponse = value; renderDirectory(); list.scrollTop = scroll; }
-      listing.path.textContent = `${value.root}${path ? `/${path}` : ""}`; listing.path.title = listing.path.textContent;
+      listing.location.set(`${value.root}${path ? `/${path}` : ""}`, value.git);
       message(listStatus, value.truncated ? "目录较大，仅显示前 2000 项。" : value.files.length ? "" : "此目录为空。");
     } catch (error) {
       if (epoch !== listEpoch || error.name === "AbortError") return;
-      if ([401, 403, 404, 409, 422].includes(error.code)) { listResponse = null; list.replaceChildren(); }
+      if ([401, 403, 404, 409, 422].includes(error.code)) {
+        listResponse = null; list.replaceChildren(); listing.location.set("");
+      }
       message(listStatus, `${listResponse ? "正在显示上次内容：" : ""}${error.message}`, true);
       listStatus.append(control("重试", () => void openDirectory(path, { recordHistory: false })));
     }
@@ -533,6 +583,7 @@ export function mountSessionFiles({
     const cached = responses.get(`files::${normalized}`);
     if (cached?.root === listResponse?.root) {
       searchMatches = cached.files || [];
+      listing.location.set(cached.root, cached.git);
       renderDirectory();
       message(listStatus, cached.truncated
         ? "搜索结果较多，仅显示前 2000 项。" : `${searchMatches.length} 个匹配文件`);
@@ -542,6 +593,7 @@ export function mountSessionFiles({
       const value = await read("", "files", searchController, normalized);
       if (epoch !== searchEpoch || route?.kind !== "list") return;
       searchMatches = value.files || []; renderDirectory();
+      listing.location.set(value.root, value.git);
       message(listStatus, value.truncated ? "搜索结果较多，仅显示前 2000 项。" : `${searchMatches.length} 个匹配文件`);
     } catch (error) {
       if (epoch !== searchEpoch || error.name === "AbortError") return;
@@ -552,11 +604,12 @@ export function mountSessionFiles({
     if (disposed || typeof path !== "string") return;
     prepare({ kind: "file", path, line: Number.isSafeInteger(line) && line > 0 ? line : null }, recordHistory);
     ++listEpoch; listController?.abort(); listing.screen.inert = true;
-    show(content.screen); content.label.textContent = fileName(path); content.path.textContent = path;
+    show(content.screen); content.label.textContent = fileName(path);
     const saved = views.get(`file:${path}`);
     controlsScroll.reset();
     sourceMode = line ? true : saved?.sourceMode ?? !/\.mdx?$/iu.test(path); wrap = saved?.wrap || false;
     contentResponse = responses.get(`file:${path}`) || null; renderedFile = path;
+    content.location.set(contentResponse ? `${contentResponse.root}/${contentResponse.path}` : path, contentResponse?.git);
     renderContent(); body.scrollTop = saved?.scroll || 0;
     if (!contentResponse) message(fileStatus, "正在读取文件…");
     const epoch = ++fileEpoch; fileController?.abort(); fileController = new AbortController();
@@ -565,12 +618,14 @@ export function mountSessionFiles({
       if (disposed || epoch !== fileEpoch || route?.kind !== "file" || route.path !== path) return;
       const scroll = body.scrollTop;
       if (value !== contentResponse) { contentResponse = value; renderContent(); body.scrollTop = scroll; }
-      content.path.textContent = `${value.root}/${value.path}`; content.path.title = content.path.textContent;
+      content.location.set(`${value.root}/${value.path}`, value.git);
       message(fileStatus, value.message);
       if (line) body.querySelector(`[data-line="${line}"]`)?.scrollIntoView({ block: "center" });
     } catch (error) {
       if (epoch !== fileEpoch || error.name === "AbortError") return;
-      if ([401, 403, 404, 409, 422].includes(error.code)) { contentResponse = null; body.replaceChildren(); }
+      if ([401, 403, 404, 409, 422].includes(error.code)) {
+        contentResponse = null; body.replaceChildren(); content.location.set(path);
+      }
       message(fileStatus, `${contentResponse ? "正在显示上次内容：" : ""}${error.message}`, true);
       fileStatus.append(control("重试", () => void openFile(path, line, { recordHistory: false })));
     }
