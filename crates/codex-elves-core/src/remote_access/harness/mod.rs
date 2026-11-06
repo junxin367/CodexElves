@@ -1,7 +1,9 @@
 //! 远程会话服务：统一维护执行引擎、会话归属、队列、编辑事务、审批和事件。
 //! 用户要求关闭 CDP 后完整切换；本模块不包含 CDP、页面脚本或注入回退。
+mod catalog;
 mod commands;
 mod projection;
+mod read_cache;
 mod reads;
 mod runtime;
 mod store;
@@ -18,12 +20,14 @@ use tokio::sync::{Mutex, mpsc};
 
 use super::{ApiError, RemoteAccessController, RemoteAuthorization};
 use crate::codex_service::ServiceDispatchGuard;
+use catalog::Catalog;
 use projection::Projection;
 use runtime::Runtime;
 use store::{Queued, Store};
 
 pub(super) struct Harness {
-    runtime: Runtime,
+    runtime: Arc<Runtime>,
+    catalog: Arc<Catalog>,
     projection: Arc<Mutex<Projection>>,
     store: Mutex<Store>,
     controller: OnceLock<Weak<RemoteAccessController>>,
@@ -58,7 +62,8 @@ impl Harness {
     pub fn new(directory: &Path) -> anyhow::Result<Arc<Self>> {
         let (events, receiver) = mpsc::channel(512);
         Ok(Arc::new(Self {
-            runtime: Runtime::new(events),
+            runtime: Arc::new(Runtime::new(events)),
+            catalog: Arc::new(Catalog::default()),
             projection: Arc::new(Mutex::new(Projection::default())),
             store: Mutex::new(Store::open(directory)?),
             controller: OnceLock::new(),
@@ -89,6 +94,7 @@ impl Harness {
             *worker = Some(tokio::spawn(async move {
                 while let Some(frame) = receiver.recv().await {
                     let Some(service) = weak.upgrade() else { break };
+                    service.catalog.observe(&frame).await;
                     service.projection.lock().await.ingest(frame);
                 }
             }));
@@ -117,6 +123,36 @@ impl Harness {
 
     pub async fn prepare(self: &Arc<Self>) -> anyhow::Result<()> {
         self.start().await
+    }
+
+    pub async fn prewarm(self: &Arc<Self>) -> anyhow::Result<()> {
+        // 用户要求即使开启 CDP 也异步提前准备服务模式；这里只读共享目录，
+        // 不改设备开关、enabled 派发标志或会话归属，不调用 resume / turn/start。
+        self.start().await?;
+        let model_params = json!({});
+        let (sidebar, models) = tokio::join!(self.sidebar(), self.models(&model_params));
+        sidebar?;
+        models?;
+        Ok(())
+    }
+
+    pub async fn prewarm_for_listener(self: &Arc<Self>) -> anyhow::Result<()> {
+        // 普通监听器单测不能因自动预热访问本机真实会话；启动预热测试显式注入隔离引擎。
+        #[cfg(test)]
+        if !self.runtime.has_test_process() {
+            return Ok(());
+        }
+        self.prewarm().await
+    }
+
+    pub async fn stop_preparation(&self) {
+        // 停止远程服务时取消目录预热，释放仅用于预热的引擎；
+        // 已启用的服务任务保持原生命周期，不能因预热清理中断已有工作。
+        if !self.enabled.load(Ordering::Acquire) && self.idle().await {
+            self.release().await;
+        } else {
+            self.catalog.reset().await;
+        }
     }
 
     pub async fn can_leave(&self, device_id: &str) -> anyhow::Result<()> {
@@ -159,6 +195,7 @@ impl Harness {
     }
 
     pub async fn release(&self) {
+        self.catalog.reset().await;
         for (_, task) in self.owners.lock().await.drain() {
             task.abort();
         }
@@ -276,7 +313,7 @@ impl Harness {
             "events" => Ok(self.projection.lock().await.events(&payload)),
             "notifications" => Ok(self.projection.lock().await.notifications(&payload)),
             "sidebar" => self.sidebar().await,
-            "models" => self.models().await,
+            "models" => self.models(&payload).await,
             "skills" => self.skills(&payload).await,
             "thread" => self.thread(&payload).await,
             "history" => self.history(&payload).await,
@@ -519,6 +556,105 @@ fn sent_key(id: &str, payload: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore]
+    async fn installed_engine_prewarm_smoke() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Harness::new(directory.path()).unwrap();
+        let started = std::time::Instant::now();
+        service.prewarm().await.unwrap();
+        service
+            .catalog
+            .find(&service.runtime, &service.projection, |_| false)
+            .await
+            .unwrap();
+        let preparation_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let first_use = std::time::Instant::now();
+        let sidebar = service.call("sidebar", json!({}), None).await.unwrap();
+        println!(
+            "HARNESS_PREWARM_READY {}",
+            json!({
+                "preparationMs":preparation_ms,"firstUseMs":first_use.elapsed().as_secs_f64()*1000.0,
+                "complete":sidebar["complete"],"rows":sidebar["recent"].as_array().unwrap().len(),
+                "dispatchEnabled":service.enabled.load(Ordering::Acquire),
+                "ownedThreads":service.loaded.lock().await.len()
+            })
+        );
+        assert_eq!(sidebar["complete"], true);
+        assert!(!service.enabled.load(Ordering::Acquire));
+        assert!(service.loaded.lock().await.is_empty());
+        service.stop_preparation().await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn installed_engine_performance_smoke() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Harness::new(directory.path()).unwrap();
+        let started = std::time::Instant::now();
+        let first = service.call("sidebar", json!({}), None).await.unwrap();
+        let first_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let warm_started = std::time::Instant::now();
+        let warm = service.call("sidebar", json!({}), None).await.unwrap();
+        let warm_ms = warm_started.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(first["recent"], warm["recent"]);
+        println!(
+            "HARNESS_CATALOG_FIRST {}",
+            json!({
+                "firstMs":first_ms,"firstRows":first["recent"].as_array().unwrap().len(),
+                "firstComplete":first["complete"],"warmMs":warm_ms
+            })
+        );
+        let model_started = std::time::Instant::now();
+        service.call("models", json!({}), None).await.unwrap();
+        let model_ms = model_started.elapsed().as_secs_f64() * 1000.0;
+        let model_warm_started = std::time::Instant::now();
+        service.call("models", json!({}), None).await.unwrap();
+        println!(
+            "HARNESS_MODEL_READ {}",
+            json!({
+                "firstMs":model_ms,"warmMs":model_warm_started.elapsed().as_secs_f64()*1000.0
+            })
+        );
+        if let Some(project) = first["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|project| project["synthetic"] != true)
+        {
+            let context_started = std::time::Instant::now();
+            service
+                .workspace_context(&json!({"projectId":project["id"]}))
+                .await
+                .unwrap();
+            println!(
+                "HARNESS_PROJECT_CONTEXT {}",
+                json!({
+                    "milliseconds":context_started.elapsed().as_secs_f64()*1000.0
+                })
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let sidebar = service.call("sidebar", json!({}), None).await.unwrap();
+                if sidebar["complete"] == true {
+                    println!(
+                        "HARNESS_CATALOG_COMPLETE {}",
+                        json!({
+                            "totalMs":started.elapsed().as_secs_f64()*1000.0,
+                            "rows":sidebar["recent"].as_array().unwrap().len()
+                        })
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+        service.release().await;
+    }
 
     #[tokio::test]
     #[ignore]

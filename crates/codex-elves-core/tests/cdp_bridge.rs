@@ -346,6 +346,66 @@ h.api.clear();
     );
 }
 
+#[test]
+fn request_client_side_thread_context_recovers_after_late_intl() {
+    run_native_subagent_contract(
+        r#"
+const h=createHarness(),scans=[],intl={formatMessage(){return "侧边聊天";}};
+const root={__reactFiber$fixture:{memoizedProps:{value:null}}};
+h.threads.set("root",{id:"root",cwd:"/side-context-fixture",ephemeral:false});
+h.threads.set("side",{id:"side",ephemeral:true});
+h.env.sideThreadEntries=async()=>[{threadId:"side",parentThreadId:"root",title:"侧边",createdAtMs:10}];
+let enabled=true,created=0;
+Object.assign(h.env,{
+  window:{},document:{querySelectorAll(selector){scans.push(selector);return [root];}},
+  Node:class {},nativeIntl:null,nativeNavigate:()=>{},
+  isManager:value=>value?.__codexElvesRequestClientManager===true,isRequestClient:()=>false,
+  sideThreadsManager:h.env.manager,notificationManager:h.env.manager,
+  unsubscribe:[],sidebarUnsubscribe:[],ensureRequestClientEvents:()=>{},
+  validateCompactionQueueSendPayload:()=>{},validateGoalComposerPayload:()=>{},resetStaleManager:()=>{},
+  nativeReadActions:new Set(["relatedThreads","workspaceContext"]),
+  requestClientReadActions:new Set(["relatedThreads","createSideThread","workspaceContext"]),
+  guardThreadAction:h.api.guard,relatedThreads:h.api.related,
+  nativeSideFeatureEnabled:()=>enabled,reportNativeCompatibilityDiagnostic:()=>{},
+  createSideThread:async()=>{
+    assert.equal(h.env.nativeIntl,intl,"直接创建也须取得页面的真实格式化对象");
+    created++;return {ok:true,threadId:"created-side"};
+  }
+});
+const call=new Function("env",`with(env){
+  ${extract("function discover(","function blockingRequestsSnapshot(")}
+  ${extract("async function call(action,","window.__codexElvesRemoteAccess =")}
+  return call;
+}`)(h.env);
+let result=await call("workspaceContext",{threadId:"root"});
+assert.equal(result.ok,true,JSON.stringify(result));
+assert.equal(scans.length,0,"普通会话读取不能因侧边依赖缺失而扫描整页");
+result=await call("relatedThreads",{threadId:"root"});
+assert.equal(result.ok,true,JSON.stringify(result));
+assert.equal(result.canCreateSideThread,false,"依赖尚未出现时保留不可创建状态");
+assert.equal(result.sideThreads[0].id,"side","依赖缺失不能丢失已有侧边会话");
+assert(scans.length>0,"已有 request-client 管理器也必须补取缺失的侧边依赖");
+
+root.__reactFiber$fixture.memoizedProps.value=intl;
+result=await call("relatedThreads",{threadId:"root"});
+assert.equal(result.canCreateSideThread,true,"页面依赖稍后出现后，能力应自动恢复");
+assert.equal(h.env.nativeIntl,intl,"必须复用真实页面对象，不能伪造格式化器");
+const readyScans=scans.length;
+enabled=false;
+result=await call("relatedThreads",{threadId:"root"});
+assert.equal(result.canCreateSideThread,false,"原生功能关闭时仍按现有规则禁用");
+assert.equal(scans.length,readyScans,"依赖齐全后不重复扫描页面");
+
+enabled=true;h.env.nativeIntl=null;
+result=await call("createSideThread",{threadId:"root"});
+assert.equal(result.ok,true,JSON.stringify(result));
+assert.equal(created,1,"补取依赖后只派发一次创建");
+assert(scans.length>readyScans,"直接创建也不能依赖之前打开过关联菜单");
+h.api.clear();
+"#,
+    );
+}
+
 fn run_native_subagent_contract(scenario: &str) {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let harness = r#"
@@ -9515,8 +9575,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = include_str!("../../../assets/remote-access/native.js");
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 131"));
-    assert!(script.contains("version: 131"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 132"));
+    assert!(script.contains("version: 132"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));

@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 131) return;
+  if (window.__codexElvesRemoteAccess?.version === 132) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -6928,7 +6928,11 @@
       if (action === "dispose") { window.__codexElvesRemoteAccess.dispose(); return { ok: true }; }
       if (["send", "create", "setGoal"].includes(action)) validateGoalComposerPayload(action, payload);
       resetStaleManager();
-      if (!manager || !sidebarOnly && !manager.__codexElvesRequestClientManager
+      // 用户要求恢复 CDP 侧边会话能力并保留禁用规则；request-client 也须补取缺失的原生依赖。
+      // 仅侧边操作按需重找，依赖齐全后复用，避免普通读取反复扫描整页。
+      const needsSideContext = ["relatedThreads", "createSideThread", "closeSideThread"].includes(action)
+        && (!appScope || !nativeNavigate || typeof nativeIntl?.formatMessage !== "function");
+      if (!manager || needsSideContext || !sidebarOnly && !manager.__codexElvesRequestClientManager
           && (!unsubscribe.length || !appScope || !nativeNavigate
             || typeof nativeIntl?.formatMessage !== "function")) {
         try { discover(sidebarOnly); }
@@ -7402,7 +7406,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 131, call,
+    version: 132, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {

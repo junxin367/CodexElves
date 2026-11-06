@@ -18,7 +18,7 @@ impl Harness {
         let mut all = Vec::new();
         let mut seen = HashSet::new();
         loop {
-            let page = self.runtime.request(method, params.clone(), None).await?;
+            let page = self.runtime.read(method, params.clone()).await?;
             all.extend(page["data"].as_array().into_iter().flatten().cloned());
             let Some(cursor) = page["nextCursor"].as_str().filter(|s| !s.is_empty()) else {
                 break;
@@ -32,15 +32,12 @@ impl Harness {
     }
 
     pub(super) async fn sidebar(&self) -> anyhow::Result<Value> {
-        let rows = self
-            .list_all(
-                "thread/list",
-                json!({"limit":100,"archived":false,"sortKey":"updated_at"}),
-            )
-            .await?;
-        let mut projects: BTreeMap<String, Value> = self
-            .list_all("project/list", json!({"limit":100}))
-            .await?
+        // 会话与项目互不依赖；首屏只等最近一页，后续目录由服务后台补齐。
+        let ((rows, complete), project_rows) = tokio::try_join!(
+            self.catalog.snapshot(&self.runtime, &self.projection),
+            self.list_all("project/list", json!({"limit":100}))
+        )?;
+        let mut projects: BTreeMap<String, Value> = project_rows
             .into_iter()
             .filter_map(|mut project| {
                 let id = project["id"].as_str()?.to_owned();
@@ -55,8 +52,17 @@ impl Harness {
                 Some((id, project))
             })
             .collect();
-        let saved = self.store.lock().await.data.clone();
+        // 侧栏只需要置顶与排序，不能复制整份消息队列、图片和历史回执。
+        let (thread_pins, project_pins, preferences) = {
+            let store = self.store.lock().await;
+            (
+                store.data.thread_pins.clone(),
+                store.data.project_pins.clone(),
+                store.data.preferences.clone(),
+            )
+        };
         let mut recent = Vec::new();
+        let projection = self.projection.lock().await;
         for row in rows {
             let Ok(mut thread) = normalize_thread(&row) else {
                 continue;
@@ -78,31 +84,18 @@ impl Harness {
                         })
                         .map(|(id, _)| id.clone())
                 })
-                .unwrap_or_else(|| {
-                    format!(
-                        "workspace-{:x}",
-                        Sha256::digest(cwd.to_ascii_lowercase().as_bytes())
-                    )
-                });
+                .unwrap_or_else(|| workspace_id(&cwd));
             let project = projects.entry(project_id.clone()).or_insert_with(|| json!({
                 "id":project_id,"name":std::path::Path::new(&cwd).file_name().and_then(|s|s.to_str()).unwrap_or(&cwd),
                 "cwd":cwd,"roots":[cwd],"threads":[],"recencyAt":0,"synthetic":true
             }));
             thread["projectId"] = json!(&project_id);
-            thread["pinned"] = json!(
-                saved
-                    .thread_pins
-                    .contains(thread["id"].as_str().unwrap_or(""))
-            );
-            thread = self
-                .projection
-                .lock()
-                .await
-                .thread(thread["id"].as_str().unwrap_or(""), thread.clone());
+            thread["pinned"] = json!(thread_pins.contains(thread["id"].as_str().unwrap_or("")));
+            thread = projection.thread(thread["id"].as_str().unwrap_or(""), thread.clone());
             if let Some(entries) = project["threads"].as_array_mut() {
                 entries.push(thread.clone());
             }
-            project["pinned"] = json!(saved.project_pins.contains(&project_id));
+            project["pinned"] = json!(project_pins.contains(&project_id));
             project["recencyAt"] = json!(
                 project["recencyAt"]
                     .as_u64()
@@ -111,18 +104,22 @@ impl Harness {
             );
             recent.push(thread);
         }
+        drop(projection);
+        for (id, project) in &mut projects {
+            project["pinned"] = json!(project_pins.contains(id));
+        }
         let pins: Vec<_> = recent
             .iter()
             .filter(|t| t["pinned"] == true)
             .cloned()
             .collect();
-        let preferences = if saved.preferences.is_object() {
-            saved.preferences
+        let preferences = if preferences.is_object() {
+            preferences
         } else {
             json!({"mode":"project","chats":"updated_at","projects":"updated_at","pinned":"manual"})
         };
         Ok(
-            json!({"ok":true,"complete":true,"projects":projects.into_values().collect::<Vec<_>>(),
+            json!({"ok":true,"nativeBridge":"harness","complete":complete,"projects":projects.into_values().collect::<Vec<_>>(),
             "recent":recent,"pinnedThreads":pins,"nextCursor":null,"sideThreadIds":[],
             "unreadSideThreads":[],"creationAvailable":true,"preferences":preferences}),
         )
@@ -132,35 +129,46 @@ impl Harness {
         if let Some(id) = payload["threadId"].as_str() {
             let response = self
                 .runtime
-                .request(
-                    "thread/read",
-                    json!({"threadId":id,"includeTurns":false}),
-                    None,
-                )
+                .read("thread/read", json!({"threadId":id,"includeTurns":false}))
                 .await?;
             return Ok(
                 json!({"ok":true,"hostId":"local","threadId":id,"cwd":response["thread"]["cwd"]}),
             );
         }
         let id = required(payload, "projectId")?;
-        let sidebar = self.sidebar().await?;
-        let project = sidebar["projects"]
-            .as_array()
-            .and_then(|p| p.iter().find(|p| p["id"] == id))
+        // 项目文件、Skill 和新建会话只读项目根目录，不为获取路径重扫全部会话。
+        if !id.starts_with("workspace-") {
+            let projects = self.list_all("project/list", json!({"limit":100})).await?;
+            let project = projects
+                .iter()
+                .find(|project| project["id"] == id)
+                .ok_or_else(|| error(404, "项目不存在"))?;
+            let cwd = project["roots"]
+                .as_array()
+                .and_then(|roots| roots.first())
+                .and_then(|root| root["path"].as_str())
+                .ok_or_else(|| error(404, "项目没有可用工作目录"))?;
+            return Ok(json!({"ok":true,"hostId":"local","projectId":id,"cwd":cwd}));
+        }
+        let project = self
+            .catalog
+            .find(&self.runtime, &self.projection, |row| {
+                row["cwd"]
+                    .as_str()
+                    .is_some_and(|cwd| workspace_id(cwd) == id)
+            })
+            .await?
             .ok_or_else(|| error(404, "项目不存在"))?;
         Ok(json!({"ok":true,"hostId":"local","projectId":id,"cwd":project["cwd"]}))
     }
 
     pub(super) async fn thread(&self, payload: &Value) -> anyhow::Result<Value> {
         let id = required(payload, "threadId")?;
-        let response = self
-            .runtime
-            .request(
-                "thread/read",
-                json!({"threadId":id,"includeTurns":false}),
-                None,
-            )
-            .await?;
+        let (response, owner) = tokio::try_join!(
+            self.runtime
+                .read("thread/read", json!({"threadId":id,"includeTurns":false}),),
+            self.owner_snapshot(id)
+        )?;
         let mut thread = normalize_thread_response(&response)?;
         if let Some(settings) = self.store.lock().await.data.settings.get(id) {
             for key in ["model", "reasoningEffort", "serviceTier"] {
@@ -169,8 +177,8 @@ impl Harness {
                 }
             }
         }
-        let mut latest = None;
-        if let Some(snapshot) = self.owner_snapshot(id).await? {
+        let mut latest;
+        if let Some(snapshot) = owner {
             thread = normalize_owner_thread(&snapshot, Some(&thread))?;
             latest = crate::desktop_owner_ipc::snapshot_turns(&snapshot)
                 .into_iter()
@@ -178,26 +186,16 @@ impl Harness {
             self.follow_owner(id, snapshot).await;
         } else {
             thread = self.projection.lock().await.thread(id, thread);
-            let goal = self
-                .runtime
-                .request("thread/goal/get", json!({"threadId":id}), None)
-                .await?;
+            // 最近一轮与目标互不依赖，并行读取；控制和派发校验不使用短时读缓存。
+            let (goal, history) = tokio::try_join!(
+                self.runtime.read("thread/goal/get", json!({"threadId":id})),
+                self.latest_turn(id)
+            )?;
             thread["goal"] = goal["goal"].clone();
+            latest = history;
         }
         if latest.is_none() {
-            let history = self
-                .runtime
-                .request(
-                    "thread/turns/list",
-                    json!({"threadId":id,"limit":1,
-                "itemsView":"full","sortDirection":"desc"}),
-                    None,
-                )
-                .await?;
-            latest = history["data"]
-                .as_array()
-                .and_then(|turns| turns.first())
-                .cloned();
+            latest = self.latest_turn(id).await?;
         }
         thread["editableMessage"] = Value::Null;
         if let Some(turn) = &latest {
@@ -229,11 +227,16 @@ impl Harness {
                 }
             }
         }
-        let answered = self.store.lock().await.data.answered_questions.clone();
-        if let Some(requests) = thread["requests"].as_array_mut() {
-            requests.retain(|r| {
-                !answered.contains_key(&format!("{id}:{}", r["id"].as_str().unwrap_or("")))
-            });
+        {
+            let store = self.store.lock().await;
+            if let Some(requests) = thread["requests"].as_array_mut() {
+                requests.retain(|r| {
+                    !store
+                        .data
+                        .answered_questions
+                        .contains_key(&format!("{id}:{}", r["id"].as_str().unwrap_or("")))
+                });
+            }
         }
         let queue = self.queue(id).await;
         if queue["queuedMessages"]
@@ -256,6 +259,20 @@ impl Harness {
         Ok(json!({"ok":true,"thread":thread,"nativeBridge":"harness"}))
     }
 
+    async fn latest_turn(&self, id: &str) -> anyhow::Result<Option<Value>> {
+        let history = self
+            .runtime
+            .read(
+                "thread/turns/list",
+                json!({"threadId":id,"limit":1,"itemsView":"full","sortDirection":"desc"}),
+            )
+            .await?;
+        Ok(history["data"]
+            .as_array()
+            .and_then(|turns| turns.first())
+            .cloned())
+    }
+
     pub(super) async fn history(&self, payload: &Value) -> anyhow::Result<Value> {
         let id = required(payload, "threadId")?;
         if payload["cursor"].is_null() && payload["turnId"].is_null() {
@@ -269,11 +286,10 @@ impl Harness {
         if let Some(turn_id) = payload["turnId"].as_str() {
             let page = self
                 .runtime
-                .request(
+                .read(
                     "thread/items/list",
                     json!({"threadId":id,"turnId":turn_id,
                 "cursor":payload["cursor"],"limit":40,"sortDirection":"desc"}),
-                    None,
                 )
                 .await?;
             let mut items = page["data"].as_array().cloned().unwrap_or_default();
@@ -287,26 +303,27 @@ impl Harness {
         }
         let page = self
             .runtime
-            .request(
+            .read(
                 "thread/turns/list",
                 json!({"threadId":id,"cursor":payload["cursor"],
             "limit":3,"itemsView":"notLoaded","sortDirection":"desc"}),
-                None,
             )
             .await?;
         let mut turns = page["data"].as_array().cloned().unwrap_or_default();
         let mut pagination = serde_json::Map::new();
-        for turn in &mut turns {
-            let turn_id = required(turn, "id")?.to_owned();
-            let items = self
-                .runtime
-                .request(
+        // 每页最多 3 轮，最多并发 3 次内容读取；保留轮次和消息原有顺序。
+        let item_reads = turns.iter().map(|turn| async move {
+            let turn_id = required(turn, "id")?;
+            self.runtime
+                .read(
                     "thread/items/list",
-                    json!({"threadId":id,"turnId":turn_id,
-                "limit":40,"sortDirection":"desc"}),
-                    None,
+                    json!({"threadId":id,"turnId":turn_id,"limit":40,"sortDirection":"desc"}),
                 )
-                .await?;
+                .await
+        });
+        let items = futures_util::future::try_join_all(item_reads).await?;
+        for (turn, items) in turns.iter_mut().zip(items) {
+            let turn_id = required(turn, "id")?.to_owned();
             let mut rows = items["data"].as_array().cloned().unwrap_or_default();
             rows.reverse();
             turn["items"] = json!(rows);
@@ -320,21 +337,17 @@ impl Harness {
             "turnsComplete":page["nextCursor"].is_null(),"itemsPaginationByTurnId":pagination,"transcriptEvents":[]}))
     }
 
-    pub(super) async fn models(&self) -> anyhow::Result<Value> {
-        let models: Vec<_> = self
-            .list_all("model/list", json!({"limit":100,"includeHidden":false}))
-            .await?
-            .iter()
-            .filter_map(normalize_model)
-            .collect();
-        let config = self
-            .runtime
-            .request(
-                "config/read",
-                json!({"cwd":null,"includeLayers":false}),
-                None,
-            )
-            .await?;
+    pub(super) async fn models(&self, payload: &Value) -> anyhow::Result<Value> {
+        if payload["forceReload"] == true {
+            self.runtime.invalidate_read("model/list").await;
+            self.runtime.invalidate_read("config/read").await;
+        }
+        let (model_rows, config) = tokio::try_join!(
+            self.list_all("model/list", json!({"limit":100,"includeHidden":false})),
+            self.runtime
+                .read("config/read", json!({"cwd":null,"includeLayers":false}))
+        )?;
+        let models: Vec<_> = model_rows.iter().filter_map(normalize_model).collect();
         Ok(
             json!({"ok":true,"data":models,"ultraReasoningEnabled":models.iter().any(|m|
             m["supportedReasoningEfforts"].as_array().is_some_and(|efforts|
@@ -347,15 +360,13 @@ impl Harness {
     pub(super) async fn skills(&self, payload: &Value) -> anyhow::Result<Value> {
         let context = self.workspace_context(payload).await?;
         let cwd = required(&context, "cwd")?;
-        let response = self
-            .runtime
-            .request(
-                "skills/list",
-                json!({"cwds":[cwd],
-            "forceReload":payload["forceReload"]==true}),
-                None,
-            )
-            .await?;
+        let params = json!({"cwds":[cwd],"forceReload":payload["forceReload"]==true});
+        let response = if payload["forceReload"] == true {
+            self.runtime.invalidate_read("skills").await;
+            self.runtime.request("skills/list", params, None).await?
+        } else {
+            self.runtime.read("skills/list", params).await?
+        };
         let entry = response["data"]
             .as_array()
             .and_then(|entries| entries.iter().find(|e| e["cwd"] == cwd));
@@ -467,4 +478,11 @@ fn same_path(left: &str, right: &str) -> bool {
     } else {
         left == right
     }
+}
+
+fn workspace_id(cwd: &str) -> String {
+    format!(
+        "workspace-{:x}",
+        Sha256::digest(cwd.to_ascii_lowercase().as_bytes())
+    )
 }

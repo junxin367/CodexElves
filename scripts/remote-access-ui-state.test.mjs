@@ -1451,6 +1451,7 @@ function sidebarReadHarness() {
   };
   vm.createContext(context);
   vm.runInContext([
+    sourceSection("function mergeIncompleteSidebar(", "async function loadSidebar("),
     sourceSection("async function loadSidebar(", "function sidebarUpdatedAt("),
     sourceSection("async function changeSidebar(", "function confirmAction("),
   ].join("\n"), context);
@@ -3878,4 +3879,114 @@ test("升级后的远程页面拒绝恢复未按 Codex 配置过滤的旧模型�
     await context.restoreReadViews(context.session);
     assert.equal(context.models.length, version === 1 ? 1 : 0);
   }
+});
+
+function initialPageHarness({ cdp = false, readOnly = false, suppress = false } = {}) {
+  const h = sideCreationNavigationHarness(), sidebarRead = deferred();
+  const latest = { device: { id: "initial-device", createdAtMs: 1 }, readOnly,
+    capabilities: { projectlessCreation: true }, runtime: { cdpInjectionEnabled: cdp, revision: 1 } };
+  Object.assign(h.context, {
+    session: null, selectedId: null, thread: null, sidebar: null, creating: false,
+    recoveryGeneration: 0, recoveryStore: { observe: async () => null },
+    sessionRecoveryReads: new WeakMap(), restorePrivateInputs: async () => {},
+    restoreReadViews: async () => {}, setAuthenticationRequired() {}, restoreSmallInputRecoveries() {},
+    postPlatformMessage() {}, restoreGoalComposerDrafts() {}, setConnection() {}, openStream() {},
+    startConnectionPoll() {}, recoverQuestionReceipts() {}, resolvePending() {}, drainPendingNotificationOpen() {},
+    readConnectionSession: async () => latest, suppressAutomaticNewChat: suppress,
+    refreshRequest: null, foregroundReadGeneration: 0, clearComposerAttachments() {},
+    loadSidebar: () => sidebarRead.promise,
+    shell() {
+      h.context.$("#thread-title").textContent = "远程会话";
+      h.context.$("#project-select-slot").hidden = true;
+      h.context.updateComposer();
+    },
+    updateComposer() { h.prompt.disabled = readOnly || !h.context.creating && !h.context.selectedId; },
+    welcomeNode: () => ({ textContent: "欢迎页" }),
+  });
+  h.context.location.hash = "";
+  vm.runInContext([
+    sourceSection("async function refreshAll(", "function openStream("),
+    sourceSection("async function connectPage(", "function probeConnectionRecovery("),
+  ].join("\n"), h.context);
+  return { ...h, sidebarRead };
+}
+
+test("首次连接及恢复新建页时，慢侧栏不能阻塞标题、项目区、输入和已有草稿", async () => {
+  for (const cdp of [false, true]) {
+    const h = initialPageHarness({ cdp });
+    h.context.drafts.set("$new:", "尚未发送的新建草稿");
+    const connection = h.context.connectPage();
+    await h.settle();
+    assert.equal(h.context.creating, true);
+    assert.equal(h.context.$("#thread-title").textContent, "新建会话");
+    assert.equal(h.context.$("#project-select-slot").hidden, false);
+    assert.equal(h.prompt.disabled, false);
+    assert.equal(h.prompt.value, "尚未发送的新建草稿");
+    h.context.selectedId = "newer-selection";
+    h.context.creating = false;
+    h.context.$("#thread-title").textContent = "用户后来选择的会话";
+    h.sidebarRead.resolve();
+    await connection;
+    assert.equal(h.context.selectedId, "newer-selection");
+    assert.equal(h.context.$("#thread-title").textContent, "用户后来选择的会话");
+    assert.equal(h.writes.length, 0, "初始化只能恢复页面，不能实际新建或发送会话");
+  }
+});
+
+test("初始只读设备及明确禁止自动新建时保留欢迎页约束", async () => {
+  for (const options of [{ readOnly: true }, { suppress: true }]) {
+    const h = initialPageHarness(options);
+    const connection = h.context.connectPage();
+    await h.settle();
+    assert.equal(h.context.creating, false);
+    assert.equal(h.context.$("#project-select-slot").hidden, true);
+    assert.equal(h.prompt.disabled, true);
+    h.sidebarRead.resolve();
+    await connection;
+    assert.equal(h.writes.length, 0);
+  }
+});
+
+test("切换运行方式后，旧模型读取晚到不能覆盖新后端目录", async () => {
+  const reads = [];
+  const context = {
+    session: { device: { id: "model-device" }, runtime: { cdpInjectionEnabled: true, revision: 1 } },
+    models: [], modelsPromise: null, modelsLoadedAt: 0, modelsRetryAt: 0, modelDefaults: {},
+    modelCatalogCacheVersion: 1, catalogFallbackMs: 1000, catalogRetryMs: 1000,
+    privateInputScope: () => "model-device", catalogUsable: () => false,
+    api: (_path, payload) => { const response = deferred(); reads.push({ response, payload }); return response.promise; },
+    cacheDisplayData() {}, updateComposer() {}, scheduleCatalogRefresh() {}, $: () => null,
+  };
+  vm.createContext(context);
+  vm.runInContext(sourceSection("async function loadModels(", "function rememberedNewChatModel("), context);
+  const oldRead = context.loadModels(true);
+  context.session.runtime = { cdpInjectionEnabled: false, revision: 2 };
+  context.modelsPromise = null;
+  const newRead = context.loadModels(true);
+  reads[1].response.resolve({ data: [{ model: "service-model" }], defaultModel: "service-model" });
+  await newRead;
+  reads[0].response.resolve({ data: [{ model: "old-cdp-model" }], defaultModel: "old-cdp-model" });
+  await oldRead;
+  assert.equal(context.models[0].model, "service-model");
+  assert.equal(context.modelDefaults.model, "service-model");
+  assert.equal(reads[1].payload.forceReload, true);
+});
+
+test("服务部分侧栏保留旧会话展示，完整目录及其他后端不合并旧记录", () => {
+  const previous = { nativeBridge: "harness", recent: [{ id: "old" }, { id: "known", title: "旧名" }],
+    pinnedThreads: [{ id: "unpin" }, { id: "old-pin" }],
+    projects: [{ id: "p", threads: [{ id: "old" }, { id: "known", title: "旧名" }] }] };
+  const current = { nativeBridge: "harness", complete: false,
+    recent: [{ id: "known", title: "新名" }, { id: "unpin", pinned: false }], pinnedThreads: [],
+    projects: [{ id: "p", threads: [{ id: "known", title: "新名" }] }] };
+  const context = {};
+  vm.createContext(context);
+  vm.runInContext(sourceSection("function mergeIncompleteSidebar(", "async function loadSidebar("), context);
+  const merged = context.mergeIncompleteSidebar(previous, current);
+  assert.deepEqual(Array.from(merged.recent, row => row.id), ["known", "unpin", "old"]);
+  assert.equal(merged.recent[0].title, "新名");
+  assert.deepEqual(Array.from(merged.pinnedThreads, row => row.id), ["old-pin"]);
+  assert.deepEqual(Array.from(merged.projects[0].threads, row => row.id), ["known", "old"]);
+  for (const input of [{ ...current, complete: true }, { ...current, nativeBridge: "cdp" }])
+    assert.equal(context.mergeIncompleteSidebar(previous, input), input);
 });

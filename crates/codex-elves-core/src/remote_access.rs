@@ -1219,6 +1219,7 @@ impl RemoteAccessController {
         self.stop_frp(&mut live).await;
         self.native_connected.store(false, Ordering::SeqCst);
         self.service_connected.store(false, Ordering::SeqCst);
+        self.harness_connected.store(false, Ordering::SeqCst);
         self.native_write_available.store(false, Ordering::SeqCst);
         self.publish_event(json!({"method":"remote/disconnected"}));
         if let Some(handle) = live.handle.take() {
@@ -1235,6 +1236,7 @@ impl RemoteAccessController {
         live.settings = Some(settings.clone());
         live.error = None;
         if !settings.enabled {
+            self.harness.stop_preparation().await;
             live.ngrok.stop().await;
             live.zrok.reconcile(false, &zrok_target).await;
             if finished || was_enabled {
@@ -1245,6 +1247,7 @@ impl RemoteAccessController {
             return;
         }
         if let Some(error) = key_error {
+            self.harness.stop_preparation().await;
             live.ngrok.stop().await;
             live.error = Some(error);
             live.zrok.reconcile(false, &zrok_target).await;
@@ -1278,6 +1281,7 @@ impl RemoteAccessController {
         let listener = std::net::TcpListener::bind((settings.bind_host.as_str(), settings.port))
             .context("远程访问端口无法监听，请检查端口是否占用")?;
         listener.set_nonblocking(true)?;
+        let prewarm_enabled = settings.enabled;
         let router = web_router(self.clone(), settings);
         let handle = axum_server::Handle::new();
         let server_handle = handle.clone();
@@ -1291,6 +1295,18 @@ impl RemoteAccessController {
         });
         let controller = self.clone();
         let pump = tokio::spawn(async move {
+            let prewarm = async {
+                if prewarm_enabled {
+                    // 用户要求 CDP 开启时也提前准备慢目录；与两路事件循环并行，
+                    // 不能阻塞监听就绪、CDP 请求或把预热失败当作远程服务故障。
+                    if let Err(error) = controller.harness.prewarm_for_listener().await {
+                        let _ = crate::diagnostic_log::append_diagnostic_log(
+                            "remote_access.harness_prewarm_failed",
+                            json!({"message":format!("{error:#}")}),
+                        );
+                    }
+                }
+            };
             let native_pump = async {
                 let mut cursor = 0;
                 let mut epoch = String::new();
@@ -1437,7 +1453,7 @@ impl RemoteAccessController {
                     tokio::time::sleep(Duration::from_millis(650)).await;
                 }
             };
-            tokio::join!(native_pump, harness_pump);
+            tokio::join!(native_pump, harness_pump, prewarm);
         });
         Ok((handle, server, pump))
     }
@@ -1727,7 +1743,10 @@ impl RemoteAccessController {
             && self.harness.idle().await
         {
             self.harness.enabled.store(false, Ordering::Release);
-            self.harness.release().await;
+            // 用户要求开启 CDP 时继续保留预热；只有远程服务已停止才释放引擎。
+            if !self.running.load(Ordering::SeqCst) {
+                self.harness.release().await;
+            }
             self.harness_connected.store(false, Ordering::SeqCst);
         }
         self.publish_event(
@@ -5843,6 +5862,28 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 )
                 .await
                 .is_err()
+        );
+        controller.harness.prewarm().await.unwrap();
+        controller
+            .change_runtime_mode(
+                json!({"cdpInjectionEnabled":true,"expectedRevision":1}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert!(!controller.harness.enabled.load(Ordering::Acquire));
+        controller.harness.prewarm().await.unwrap();
+        let after_switch =
+            std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap();
+        assert_eq!(
+            after_switch
+                .lines()
+                .filter(|line| {
+                    serde_json::from_str::<Value>(line).unwrap()["method"] == "initialize"
+                })
+                .count(),
+            1,
+            "切回 CDP 不能释放并重新创建预热引擎"
         );
     }
 

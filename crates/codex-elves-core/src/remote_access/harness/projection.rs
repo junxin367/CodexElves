@@ -100,10 +100,39 @@ impl Projection {
                 }
             }
         }
+        if let Some(unread) = self
+            .threads
+            .get(thread_id)
+            .and_then(|snapshot| snapshot["hasUnreadTurn"].as_bool())
+        {
+            thread["hasUnreadTurn"] = json!(unread);
+        }
         thread["requests"] = json!(self.requests_for(thread_id));
         thread["requestsKnown"] = json!(true);
         thread["requestsEpoch"] = json!(&self.epoch);
         thread["requestsRevision"] = json!(self.sequence);
+        // 目录复用旧摘要时，活动/等待状态仍以本轮事件为准，不能沿用缓存中的 idle 优先级。
+        let status = thread["status"]
+            .as_str()
+            .or_else(|| thread["status"]["type"].as_str());
+        let active = matches!(status, Some("active" | "inProgress" | "running"))
+            || self.active.contains_key(thread_id);
+        let waiting = thread["requests"]
+            .as_array()
+            .is_some_and(|requests| !requests.is_empty())
+            || status == Some("waiting")
+            || thread["status"]["activeFlags"]
+                .as_array()
+                .is_some_and(|flags| {
+                    flags
+                        .iter()
+                        .any(|flag| flag == "waitingOnApproval" || flag == "waitingOnUserInput")
+                });
+        thread["priority"] = json!({
+            "status":thread["status"],"active":active,"eligible":true,
+            "attentionState":if waiting {"waiting"} else if active {"active"}
+                else if thread["hasUnreadTurn"] == true {"unread"} else {"idle"}
+        });
         thread["compaction"] = self
             .compactions
             .get(thread_id)
@@ -204,6 +233,12 @@ impl Projection {
                         thread[target] = value.clone();
                     }
                 }
+            }
+            "thread/readState/updated" => {
+                let thread = self.threads.entry(id.clone()).or_insert_with(|| json!({}));
+                thread["readState"] = frame["params"]["readState"].clone();
+                thread["hasUnreadTurn"] =
+                    json!(!frame["params"]["readState"]["firstUnread"].is_null());
             }
             "turn/started" => {
                 if let Some(turn_id) = frame["params"]["turn"]["id"].as_str() {
@@ -390,6 +425,41 @@ pub(super) fn async_question(thread_id: &str, turn_id: &Value, item: &Value) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harness_cached_summary_uses_live_activity_approval_and_read_state() {
+        let mut projection = Projection::default();
+        let cached = crate::codex_service::normalize_thread(&json!({
+            "id":"main","cwd":"test","status":{"type":"idle"},"hasUnreadTurn":true
+        }))
+        .unwrap();
+        projection.ingest(json!({"method":"turn/started","params":{
+            "threadId":"main","turn":{"id":"turn-a"}
+        }}));
+        assert_eq!(
+            projection.thread("main", cached.clone())["priority"]["active"],
+            true
+        );
+        projection.ingest(
+            json!({"id":7,"method":"item/commandExecution/requestApproval",
+            "params":{"threadId":"main","turnId":"turn-a"}}),
+        );
+        assert_eq!(
+            projection.thread("main", cached.clone())["priority"]["attentionState"],
+            "waiting"
+        );
+        projection.resolve(&request_key("", &json!(7)));
+        projection.ingest(json!({"method":"turn/completed","params":{
+            "threadId":"main","turn":{"id":"turn-a","status":"completed"}
+        }}));
+        projection.ingest(json!({"method":"thread/readState/updated","params":{
+            "threadId":"main","readState":{"firstUnread":null,"revision":"read"}
+        }}));
+        let idle = projection.thread("main", cached);
+        assert_eq!(idle["priority"]["active"], false);
+        assert_eq!(idle["priority"]["attentionState"], "idle");
+        assert_eq!(idle["hasUnreadTurn"], false);
+    }
 
     #[test]
     fn harness_projection_rejects_old_generations_and_preserves_terminal_order() {

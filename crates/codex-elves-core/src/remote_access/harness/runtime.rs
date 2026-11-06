@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
+use super::read_cache::ReadCache;
 use crate::codex_service::{ServiceDispatchGuard, spawn_service};
 use crate::desktop_owner_ipc::{WriteFrame, guarded_write};
 
@@ -20,6 +21,7 @@ pub(super) struct Runtime {
     events: mpsc::Sender<Value>,
     next_generation: AtomicU64,
     retry_after: Mutex<Option<Instant>>,
+    reads: Arc<ReadCache>,
     #[cfg(test)]
     test_process: Mutex<Option<crate::codex_service::RunningService>>,
     #[cfg(test)]
@@ -44,12 +46,18 @@ impl Drop for Connection {
 }
 
 impl Runtime {
+    #[cfg(test)]
+    pub fn has_test_process(&self) -> bool {
+        self.test_only.load(Ordering::Acquire)
+    }
+
     pub fn new(events: mpsc::Sender<Value>) -> Self {
         Self {
             connection: Mutex::new(None),
             events,
             next_generation: AtomicU64::new(1),
             retry_after: Mutex::new(None),
+            reads: Arc::new(ReadCache::default()),
             #[cfg(test)]
             test_process: Mutex::new(None),
             #[cfg(test)]
@@ -99,6 +107,8 @@ impl Runtime {
         let reader_alive = alive.clone();
         let events = self.events.clone();
         let reader_generation = generation.clone();
+        self.reads.clear().await;
+        let reader_reads = self.reads.clone();
         self.events
             .send(json!({"method":"harness/connected","_generation":generation,"_generationIndex":generation_index}))
             .await
@@ -112,6 +122,23 @@ impl Runtime {
                     continue;
                 };
                 if frame.get("method").is_some() {
+                    if let Some(id) = frame["params"]["threadId"]
+                        .as_str()
+                        .or_else(|| frame["params"]["thread"]["id"].as_str())
+                    {
+                        reader_reads.invalidate(id).await;
+                    }
+                    if frame["method"] == "skills/changed" {
+                        reader_reads.invalidate("skills").await;
+                    }
+                    let method = frame["method"].as_str().unwrap_or("");
+                    if method.starts_with("project/") {
+                        reader_reads.invalidate("project/list").await;
+                    }
+                    if method.starts_with("model/") || method.starts_with("config/") {
+                        reader_reads.invalidate("model/list").await;
+                        reader_reads.invalidate("config/read").await;
+                    }
                     frame["_generation"] = json!(&reader_generation);
                     frame["_generationIndex"] = json!(generation_index);
                     if events.send(frame).await.is_err() {
@@ -170,10 +197,53 @@ impl Runtime {
         params: Value,
         guard: Option<&dyn ServiceDispatchGuard>,
     ) -> anyhow::Result<Value> {
-        self.connection()
+        if guard.is_some()
+            && let Some(id) = params["threadId"].as_str()
+        {
+            self.reads.invalidate(id).await;
+        }
+        let thread_id = params["threadId"].as_str().map(str::to_owned);
+        let result = self
+            .connection()
             .await?
             .request(method, params, guard)
+            .await;
+        if guard.is_some()
+            && let Some(id) = thread_id
+        {
+            self.reads.invalidate(&id).await;
+        }
+        result
+    }
+
+    pub async fn read(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        let connection = self.connection().await?;
+        let scope = params["threadId"].as_str().unwrap_or_else(|| {
+            if method == "skills/list" {
+                "skills"
+            } else {
+                method
+            }
+        });
+        let max_age = match method {
+            "project/list" => Duration::from_secs(30),
+            "model/list" | "config/read" => Duration::from_secs(30),
+            "skills/list" => Duration::from_secs(5),
+            _ => Duration::from_millis(200),
+        };
+        let key = serde_json::to_string(&json!([connection.generation, method, params]))?;
+        self.reads
+            .read(
+                scope,
+                key,
+                max_age,
+                connection.request(method, params.clone(), None),
+            )
             .await
+    }
+
+    pub async fn invalidate_read(&self, scope: &str) {
+        self.reads.invalidate(scope).await;
     }
 
     pub async fn respond(
@@ -197,6 +267,7 @@ impl Runtime {
 
     pub async fn shutdown(&self) {
         self.connection.lock().await.take();
+        self.reads.clear().await;
     }
 
     #[cfg(test)]

@@ -611,7 +611,7 @@ function openAppearance() {
     <nav class="appearance-nav" aria-label="设置导航">
       <button type="button" id="appearance-general-entry" class="appearance-nav-item" aria-controls="appearance-general-page" aria-selected="true"><span class="appearance-nav-icon"></span><span>通用设置</span></button>
       <button type="button" id="appearance-customization-entry" class="appearance-nav-item" title="打开外观主题" aria-label="打开外观主题" aria-controls="appearance-customization-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>外观主题</span></button>
-      <button type="button" id="appearance-runtime-entry" class="appearance-nav-item" aria-controls="appearance-runtime-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>运行方式</span></button>
+      <button type="button" id="appearance-runtime-entry" class="appearance-nav-item" aria-controls="appearance-runtime-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>运行模式</span></button>
       <button type="button" id="appearance-notifications-entry" class="appearance-nav-item" title="打开通知事件" aria-label="打开通知事件" aria-controls="appearance-notifications-page" aria-selected="false" hidden><span class="appearance-nav-icon"></span><span>通知事件</span></button>
       <button type="button" id="appearance-diagnostics-entry" class="appearance-nav-item" title="打开诊断日志" aria-label="打开诊断日志" aria-controls="appearance-diagnostics-page" aria-selected="false" hidden><span class="appearance-nav-icon"></span><span>诊断日志</span></button>
     </nav>
@@ -638,8 +638,8 @@ function openAppearance() {
     <p id="appearance-diagnostics-status" class="appearance-notification-status" role="status" hidden></p>
     </section>
     <section id="appearance-runtime-page" class="appearance-body appearance-settings-page" hidden>
-    <h3 class="appearance-panel-title">运行方式</h3>
-    <label class="appearance-notification-row"><span>CDP 注入</span><input id="appearance-cdp-injection" class="appearance-notification-switch" type="checkbox" role="switch" aria-label="CDP 注入" checked disabled></label>
+    <h3 class="appearance-panel-title">运行模式</h3>
+    <label class="appearance-notification-row"><span id="appearance-runtime-mode" aria-live="polite">CDP 模式</span><input id="appearance-cdp-injection" class="appearance-notification-switch" type="checkbox" role="switch" aria-label="切换运行模式，当前为 CDP 模式" checked disabled></label>
     <p id="appearance-runtime-status" class="appearance-notification-status" role="status" hidden></p>
     </section>
     </div></div>
@@ -658,23 +658,32 @@ function openAppearance() {
   const runtimeEntry = $("#appearance-runtime-entry", dialog);
   const runtimePage = $("#appearance-runtime-page", dialog);
   const runtimeSwitch = $("#appearance-cdp-injection", dialog);
+  const runtimeMode = $("#appearance-runtime-mode", dialog);
   const runtimeStatus = $("#appearance-runtime-status", dialog);
-  let runtimeSettings = null, runtimeBusy = false;
+  let runtimeSettings = session?.runtime || null, runtimeBusy = false;
   const updateRuntimeSwitch = () => {
     if (!dialog.isConnected) return;
-    runtimeSwitch.checked = runtimeSettings?.cdpInjectionEnabled !== false;
+    const latest = session?.runtime;
+    if (typeof latest?.cdpInjectionEnabled === "boolean" && Number.isSafeInteger(latest.revision)
+        && latest.revision >= (runtimeSettings?.revision ?? -1)) runtimeSettings = latest;
+    // 用户要求开关表达两种模式的切换：名称始终跟随当前选择，保存失败后一起回退。
+    if (!runtimeBusy) runtimeSwitch.checked = runtimeSettings?.cdpInjectionEnabled !== false;
+    runtimeMode.textContent = runtimeSwitch.checked ? "CDP 模式" : "服务模式";
+    runtimeSwitch.setAttribute("aria-label", `切换运行模式，当前为 ${runtimeMode.textContent}`);
+    runtimeSwitch.setAttribute("aria-busy", String(runtimeBusy));
     // 未确认写入或正在编辑的草稿继续由原后端处理，避免切换后丢失编辑事务。
     runtimeSwitch.disabled = runtimeBusy || !runtimeSettings || !session || session.readOnly || !connected
       || busy || stopping || !!pending || !!editingMessage || !!editingQueuedMessage;
   };
   dialog.updateRemoteRuntimeSwitch = updateRuntimeSwitch;
+  updateRuntimeSwitch();
   const readRuntimeSettings = async () => {
     const deviceId = session?.device.id;
     try {
       const response = await api("/api/read/runtime", {});
       if (!dialog.isConnected || session?.device.id !== deviceId) return;
       if (typeof response.runtime?.cdpInjectionEnabled !== "boolean"
-          || !Number.isSafeInteger(response.runtime.revision)) throw new Error("运行方式数据无效，请重试。");
+          || !Number.isSafeInteger(response.runtime.revision)) throw new Error("运行模式数据无效，请重试。");
       if (response.runtime.revision < (runtimeSettings?.revision ?? -1)) return;
       runtimeSettings = response.runtime;
       updateRuntimeSwitch();
@@ -688,7 +697,7 @@ function openAppearance() {
   runtimeSwitch.onchange = async () => {
     if (runtimeBusy || !runtimeSettings) return;
     const enabled = runtimeSwitch.checked;
-    runtimeBusy = true; runtimeSwitch.disabled = true; runtimeStatus.hidden = true;
+    runtimeBusy = true; runtimeStatus.hidden = true; updateRuntimeSwitch();
     try {
       const result = await mutate("setRuntime", {
         cdpInjectionEnabled: enabled, expectedRevision: runtimeSettings.revision
@@ -849,7 +858,7 @@ function openAppearance() {
   };
   runtimeEntry.onclick = () => {
     if (!dialog.isConnected || !dialog.open) return;
-    showAppearancePage(runtimePage, "运行方式", runtimeEntry);
+    showAppearancePage(runtimePage, "运行模式", runtimeEntry);
     void readRuntimeSettings();
   };
   if (androidContainer) entryButton.onclick = () => {
@@ -3278,10 +3287,12 @@ async function loadModels(force = false) {
   }
   if (modelsPromise) return modelsPromise;
   const scope = privateInputScope(session);
+  const runtimeRevision = session?.runtime?.revision ?? 0;
   const previousModels = models;
   const request = (async () => {
-    const result = await api("/api/read/models", {});
-    if (!scope || privateInputScope(session) !== scope) return [];
+    const result = await api("/api/read/models", { forceReload: force });
+    if (!scope || privateInputScope(session) !== scope
+        || (session?.runtime?.revision ?? 0) !== runtimeRevision) return [];
     if (!Array.isArray(result.data) || !result.data.every(model => model && typeof model.model === "string"
         && (model.supportedReasoningEfforts == null || Array.isArray(model.supportedReasoningEfforts))))
       throw new Error("模型列表返回格式无效");
@@ -6383,6 +6394,28 @@ async function startNewChat(projectId, { focus = true, closeSidebar = true } = {
   rememberReadingPosition();
   if (focus) $("#prompt").focus();
 }
+function mergeIncompleteSidebar(previous, current) {
+  if (current.complete !== false || current.nativeBridge !== "harness"
+      || previous?.nativeBridge !== "harness") return current;
+  // 服务首批目录不完整时继续展示同一后端的已知会话；新数据优先，
+  // 完整目录返回后整体核对，不能把部分结果当作删除或取消置顶的证据。
+  const freshIds = new Set([...current.recent, ...current.pinnedThreads,
+    ...current.projects.flatMap(project => project.threads)].map(item => item.id));
+  const mergeRows = (old, fresh) => [...fresh, ...old.filter(item => !freshIds.has(item.id))];
+  const oldProjects = new Map(previous.projects.map(project => [project.id, project]));
+  const projectIds = new Set(current.projects.map(project => project.id));
+  return { ...current,
+    recent: mergeRows(previous.recent, current.recent),
+    pinnedThreads: mergeRows(previous.pinnedThreads, current.pinnedThreads),
+    projects: [
+      ...current.projects.map(project => ({ ...project,
+        threads: mergeRows(oldProjects.get(project.id)?.threads || [], project.threads) })),
+      ...previous.projects.filter(project => project.synthetic && !projectIds.has(project.id))
+        .map(project => ({ ...project, threads: project.threads.filter(item => !freshIds.has(item.id)) }))
+        .filter(project => project.threads.length)
+    ]
+  };
+}
 async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "foreground" } = {}) {
   if (pageLeaving || document.hidden) return;
   const generation = foregroundReadGeneration;
@@ -6437,6 +6470,8 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
         .filter(item => !sidebarReadRefreshSuppressions.has(item.id));
       filterDeletedSidebar(result, deviceId);
       filterSideThreadSidebar(result);
+      result = mergeIncompleteSidebar(sidebar, result);
+      filterDeletedSidebar(result, deviceId);
       if (JSON.stringify(sidebar) !== JSON.stringify(result)) {
         sidebar = result;
         cacheDisplayData("sidebar", "main", sidebarSnapshot(result));
@@ -12488,6 +12523,10 @@ function applyRemoteRuntime(runtime) {
   if (changed) {
     ++nativeConnectionVersion;
     cancelConnectionProbe();
+    retireForegroundReads("运行方式已切换");
+    // 切换后保留已有目录展示，静默读取新后端；旧后端的迟到响应不能回填。
+    modelsLoadedAt = 0; modelsPromise = null; modelsRetryAt = 0;
+    if ($("#model-button")) void loadModels(true).catch(() => {});
     sessionMenu?.close();
     sessionMenu?.invalidate();
     if ($("#messages")) renderMessages();
@@ -13031,13 +13070,15 @@ async function connectPage(signal) {
   const deviceId = session.device.id;
   startConnectionPoll(deviceId);
   void recoverQuestionReceipts();
-  try { await refreshAll(); }
-  catch (error) { if (session?.device.id === deviceId) notice(error.message, true); }
+  // 用户要求首次进入及上次停在新建时立即可编辑；侧栏读取不能阻塞新建页，
+  // 已有会话仍先恢复缓存和原会话身份，不在后台刷新结束后覆盖用户的新选择。
   if (session?.device.id === deviceId && !selectedId && !creating
       && !new URLSearchParams(location.hash.slice(1)).get("thread")) {
     const startNew = !suppressAutomaticNewChat;
     showWelcome({ startNew });
   }
+  try { await refreshAll(); }
+  catch (error) { if (session?.device.id === deviceId) notice(error.message, true); }
   updateComposer(); void resolvePending(); drainPendingNotificationOpen();
 }
 function probeConnectionRecovery() {

@@ -118,14 +118,16 @@ impl Harness {
                         Some(authorization),
                     )
                     .await?;
-                self.projection.lock().await.push(
-                    json!({"method":"thread/name/updated","params":{"threadId":id,"name":title}}),
-                );
+                let event =
+                    json!({"method":"thread/name/updated","params":{"threadId":id,"name":title}});
+                self.catalog.observe(&event).await;
+                self.projection.lock().await.push(event);
                 Ok(json!({"ok":true,"threadId":id}))
             }
             "markRead" => {
                 if let Some(revision) = identity["readState"]["revision"].as_str() {
-                    self.runtime
+                    let read = self
+                        .runtime
                         .request(
                             "thread/readState/update",
                             json!({"threadId":id,
@@ -133,6 +135,12 @@ impl Harness {
                             Some(authorization),
                         )
                         .await?;
+                    self.catalog
+                        .observe(&json!({
+                            "method":"thread/readState/updated",
+                            "params":{"threadId":id,"readState":read["readState"]}
+                        }))
+                        .await;
                 }
                 Ok(json!({"ok":true,"threadId":id}))
             }
@@ -147,10 +155,9 @@ impl Harness {
                     Ok(())
                 })?;
                 self.loaded.lock().await.remove(&id);
-                self.projection
-                    .lock()
-                    .await
-                    .push(json!({"method":"thread/deleted","params":{"threadId":id}}));
+                let event = json!({"method":"thread/deleted","params":{"threadId":id}});
+                self.catalog.observe(&event).await;
+                self.projection.lock().await.push(event);
                 Ok(json!({"ok":true,"threadId":id}))
             }
             "setGoal" => self.set_goal(&id, &payload, authorization).await,
@@ -432,6 +439,8 @@ impl Harness {
         inputs(payload)?;
         let (cwd, project_id) =
             if let Some(id) = payload["projectId"].as_str().filter(|s| !s.is_empty()) {
+                // 新建属于实际写入，提交前重新核对项目根目录，不能用展示缓存决定写入位置。
+                self.runtime.invalidate_read("project/list").await;
                 let context = self.workspace_context(&json!({"projectId":id})).await?;
                 (required(&context, "cwd")?.to_owned(), Some(id.to_owned()))
             } else {
@@ -454,6 +463,11 @@ impl Harness {
             .request("thread/start", params, Some(authorization))
             .await?;
         let id = required(&response["thread"], "id")?.to_owned();
+        self.catalog
+            .observe(&json!({
+                "method":"thread/started","params":{"thread":response["thread"]}
+            }))
+            .await;
         self.remember_settings(&id, &response).await?;
         self.loaded.lock().await.insert(
             id.clone(),
