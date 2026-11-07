@@ -44,6 +44,16 @@ export function createWorkspaceBranch(git, placeholder = "") {
   setWorkspaceBranch(badge, git, placeholder);
   return badge;
 }
+export function createWorkspaceRepository(repository) {
+  if (!repository || typeof repository.name !== "string" || !repository.name
+      || repository.name.length > 16384 || /[\u0000-\u001f\u007f]/u.test(repository.name)) return null;
+  const badge = createWorkspaceBranch(undefined, repository.name);
+  badge.classList.add("session-files-repository");
+  // 用户要求仓库文件夹右侧仅显示仓库名称和分支图标，不附带分支名称。
+  badge.title = `仓库：${repository.name}`;
+  badge.setAttribute("aria-label", badge.title);
+  return badge;
+}
 export function createWorkspaceLocation(initialPath = "") {
   // 用户要求路径与分支清楚区分：路径和带图标、边框的分支标签使用独立元素，长文本分别省略。
   const element = node("div", "session-tools-heading-location");
@@ -541,7 +551,8 @@ export function mountSessionFiles({
     const copy = node("span", "session-tools-file-copy");
     copy.append(node("strong", "session-tools-file-name", file.name));
     if (searchResult) copy.append(node("span", "session-tools-file-directory", parentPath(file.path) || "项目根目录"));
-    button.append(copy, node("span", "session-files-metadata",
+    const repository = isFolder ? createWorkspaceRepository(file.repository) : null;
+    button.append(copy, repository || node("span", "session-files-metadata",
       isFolder ? "文件夹" : file.kind === "unsupported" ? "不支持预览" : bytesLabel(file.size)));
     list.append(button);
     if (isFolder && isExpanded && !searchResult) {

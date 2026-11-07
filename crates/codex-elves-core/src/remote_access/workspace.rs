@@ -610,8 +610,13 @@ fn project_directory(root: &Path, relative: &str) -> Result<Value, ApiError> {
         } else {
             "unsupported"
         };
-        files.push(json!({"name": name, "path": child, "kind": kind,
-            "size": metadata.is_file().then_some(metadata.len())}));
+        let mut file = json!({"name": name, "path": child, "kind": kind,
+            "size": metadata.is_file().then_some(metadata.len())});
+        // 普通文件夹继续显示“文件夹”；.git 目录或文件才表示独立仓库，目录联接不参与识别。
+        if kind == "directory" && has_repository_marker(&entry.path()) {
+            file["repository"] = json!({"name": name});
+        }
+        files.push(file);
     }
     // Reject a directory replaced by a junction while it was being read.
     if !relative.is_empty() {
@@ -2794,6 +2799,24 @@ mod tests {
         assert_eq!(list["truncated"], true);
         assert!(list["repositories"][1]["error"].is_string());
         assert_eq!(list["repositories"][2]["error"], Value::Null);
+        let directory = fixture_response_json(
+            files(
+                State(state.clone()),
+                headers.clone(),
+                Json(json!({"threadId":"multi-repo-thread","path":"children"})),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        let worktree = directory["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["name"] == "worktree")
+            .unwrap();
+        assert_eq!(worktree["kind"], "directory");
+        assert_eq!(worktree["repository"]["name"], "worktree");
         let detail = fixture_response_json(
             change(
                 State(state),
@@ -2951,6 +2974,78 @@ mod tests {
         )
         .await;
         assert_eq!(empty["text"], "");
+    }
+
+    #[tokio::test]
+    async fn project_files_mark_repository_roots_and_invalidate_directory_cache() {
+        let (_fixture, _state, repo) = fixture_repo().await;
+        let core = fixture_child_repo(&repo.root, "core", "core file").await;
+        fixture_child_repo(&repo.root, "group/web", "web file").await;
+        std::fs::create_dir(repo.root.join("docs")).unwrap();
+        std::fs::create_dir(core.join("src")).unwrap();
+        let (state, headers) = fixture_web_state(&repo);
+        let request = json!({"threadId":"thread-1","path":""});
+        let root = fixture_response_json(
+            files(State(state.clone()), headers.clone(), Json(request.clone()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let entries = root["files"].as_array().unwrap();
+        let core_entry = entries.iter().find(|file| file["name"] == "core").unwrap();
+        assert_eq!(core_entry["kind"], "directory");
+        assert_eq!(core_entry["repository"], json!({"name": "core"}));
+        for name in ["docs", "group"] {
+            assert!(
+                entries
+                    .iter()
+                    .find(|file| file["name"] == name)
+                    .unwrap()
+                    .get("repository")
+                    .is_none()
+            );
+        }
+        for (path, name, expected) in [
+            ("group", "web", Some(json!({"name": "web"}))),
+            ("core", "src", None),
+            ("core", "same.txt", None),
+        ] {
+            let directory = fixture_response_json(
+                files(
+                    State(state.clone()),
+                    headers.clone(),
+                    Json(json!({"threadId":"thread-1","path":path})),
+                )
+                .await
+                .unwrap(),
+            )
+            .await;
+            let entry = directory["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|file| file["name"] == name)
+                .unwrap();
+            assert_eq!(entry.get("repository"), expected.as_ref());
+        }
+        fixture_child_repo(&repo.root, "docs", "new repository").await;
+        let mut conditional = request;
+        conditional["ifRevision"] = root["revision"].clone();
+        let updated = fixture_response_json(
+            files(State(state), headers, Json(conditional))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_ne!(updated["notModified"], true);
+        assert_ne!(updated["revision"], root["revision"]);
+        let docs = updated["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["name"] == "docs")
+            .unwrap();
+        assert_eq!(docs["repository"], json!({"name": "docs"}));
     }
 
     #[tokio::test]

@@ -476,6 +476,42 @@ test("路径仅在展示时去掉长路径前缀，分离 HEAD 与无分支状�
   assert.equal(context.workspaceBranchLabel({ branch: "\nmain" }), "分支不可用");
 });
 
+test("文件树仓库标识仅显示仓库名称和分支图标，普通目录不生成标识", () => {
+  const node = (tag, className = "", text = "") => {
+    const element = {
+      tag, className, textContent: text, children: [], attributes: new Map(),
+      append(...children) { this.children.push(...children); },
+      setAttribute(name, value) { this.attributes.set(name, value); },
+      querySelector(selector) {
+        const name = selector.slice(1);
+        for (const child of this.children) {
+          if (child.className.split(" ").includes(name)) return child;
+          const match = child.querySelector(selector);
+          if (match) return match;
+        }
+        return null;
+      },
+    };
+    element.classList = { add: name => { element.className += ` ${name}`; } };
+    return element;
+  };
+  const context = vm.createContext({ node });
+  vm.runInContext(sessionFiles.slice(sessionFiles.indexOf("export function workspaceBranchLabel("),
+    sessionFiles.indexOf("export function createWorkspaceLocation(")).replace(/^export /gm, ""), context);
+  for (const name of ["core", "sc-video-engine", "仓库-前端", "<img src=x>"]) {
+    const badge = context.createWorkspaceRepository({ name, git: { branch: "不应显示的分支" } });
+    assert.equal(badge.querySelector(".workspace-branch-label").textContent, name);
+    assert.equal(badge.querySelector(".workspace-branch-icon").attributes.get("aria-hidden"), "true");
+    assert.ok(badge.querySelector(".workspace-branch-icon").innerHTML.includes("<svg"));
+    assert.equal(badge.title, `仓库：${name}`);
+    assert.equal(badge.attributes.get("aria-label"), `仓库：${name}`);
+    assert.equal(badge.hidden, false);
+    assert.ok(badge.className.includes("session-files-repository"));
+  }
+  for (const input of [undefined, null, {}, { name: "" }, { name: "core\nmain" }])
+    assert.equal(context.createWorkspaceRepository(input), null);
+});
+
 async function connectionDiagnosticsHarness({ android = true } = {}) {
   const logs = [], documentListeners = new Map(), windowListeners = new Map(), timers = new Map();
   let now = 1000, nextTimer = 0;

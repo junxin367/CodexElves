@@ -1069,6 +1069,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-files-icon-data{color:#8e9fd2}
 .session-files-metadata{flex-shrink:0;max-width:7em;overflow:hidden;color:var(--muted);font-size:.71429rem;line-height:1;text-overflow:ellipsis;white-space:nowrap}
 .session-files-screen .session-files-metadata{margin-right:auto}
+/* 仓库标识替换右侧“文件夹”，最多占半行；长仓库名省略，完整内容保留在 title。 */
+.session-files-list .session-files-repository{max-width:50%;margin-left:auto;font-size:.71429rem}
 .session-files-screen .session-tools-status{margin:0;padding:8px 16px;font-size:.85714rem;white-space:pre-wrap}
 .session-files-screen .session-tools-status>button{margin-left:10px}
 .session-files-content{overflow:auto;min-height:0;flex:1;padding:0}

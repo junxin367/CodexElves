@@ -824,7 +824,14 @@ final class BrowserSession {
                     if (request.isForMainFrame()) { error = "仅支持 HTTP 和 HTTPS 网页"; changed(); }
                     return true;
                 }
-                if (request.isForMainFrame()) networkPageOrigin = webOrigin(target.toString());
+                if (request.isForMainFrame()) {
+                    // 用户要求首次打开内网站点即可显示登录页；HTTP 重定向可能先于首个 onPageStarted，
+                    // 仅让已允许的主框架跳转更新待加载地址，保留对子框架、非法地址和旧页面回调的隔离。
+                    pendingNavigationUrl = target.toString();
+                    networkPageOrigin = webOrigin(target.toString());
+                    diagnostic("native.browser.navigation", DiagnosticsPolicy.urlFields(target.toString(),
+                        "phase", "request", "routeName", "main-frame", "generation", pageGeneration));
+                }
                 return false;
             }
             @Override public WebResourceResponse shouldInterceptRequest(WebView webView, WebResourceRequest request) {
@@ -846,7 +853,11 @@ final class BrowserSession {
                     webView.setVisibility(View.INVISIBLE);
                     return;
                 }
-                if (!mainFrameStarted && !sameAddress(address, pendingNavigationUrl)) return;
+                if (!mainFrameStarted && !sameAddress(address, pendingNavigationUrl)) {
+                    diagnostic("native.browser.page", DiagnosticsPolicy.urlFields(address,
+                        "phase", "pending", "routeName", "stale-callback", "generation", pageGeneration));
+                    return;
+                }
                 mainFrameStarted = true;
                 mainFrameFinished = false;
                 pendingNavigationUrl = address;
