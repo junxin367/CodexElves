@@ -4618,9 +4618,11 @@ test("切换运行方式后，旧模型读取晚到不能覆盖新后端目录",
 });
 
 test("服务部分侧栏保留旧会话展示，完整目录及其他后端不合并旧记录", () => {
-  const previous = { nativeBridge: "harness", recent: [{ id: "old" }, { id: "known", title: "旧名" }],
+  const previous = { nativeBridge: "harness", recent: [{ id: "old" }, { id: "known", title: "旧名" },
+    { id: "loose", projectId: "workspace-old" }],
     pinnedThreads: [{ id: "unpin" }, { id: "old-pin" }],
-    projects: [{ id: "p", threads: [{ id: "old" }, { id: "known", title: "旧名" }] }] };
+    projects: [{ id: "p", threads: [{ id: "old" }, { id: "known", title: "旧名" }] },
+      { id: "workspace-old", synthetic: true, threads: [{ id: "loose", projectId: "workspace-old" }] }] };
   const current = { nativeBridge: "harness", complete: false,
     recent: [{ id: "known", title: "新名" }, { id: "unpin", pinned: false }], pinnedThreads: [],
     projects: [{ id: "p", threads: [{ id: "known", title: "新名" }] }] };
@@ -4628,12 +4630,53 @@ test("服务部分侧栏保留旧会话展示，完整目录及其他后端不�
   vm.createContext(context);
   vm.runInContext(sourceSection("function mergeIncompleteSidebar(", "async function loadSidebar("), context);
   const merged = context.mergeIncompleteSidebar(previous, current);
-  assert.deepEqual(Array.from(merged.recent, row => row.id), ["known", "unpin", "old"]);
+  assert.deepEqual(Array.from(merged.recent, row => row.id), ["known", "unpin", "old", "loose"]);
   assert.equal(merged.recent[0].title, "新名");
+  assert.equal(merged.recent[3].projectId, null);
   assert.deepEqual(Array.from(merged.pinnedThreads, row => row.id), ["old-pin"]);
+  assert.deepEqual(Array.from(merged.projects, project => project.id), ["p"]);
   assert.deepEqual(Array.from(merged.projects[0].threads, row => row.id), ["known", "old"]);
   for (const input of [{ ...current, complete: true }, { ...current, nativeBridge: "cdp" }])
     assert.equal(context.mergeIncompleteSidebar(previous, input), input);
+});
+
+test("旧服务缓存去除合成项目后仍保留无项目会话及已有项目名称和顺序", () => {
+  const context = {};
+  vm.createContext(context);
+  vm.runInContext(sourceSection("function sidebarSnapshot(", "function clearReadViews("), context);
+  const snapshot = context.sidebarSnapshot({
+    nativeBridge: "harness",
+    recent: [{ id: "loose", projectId: "workspace-old" }, { id: "assigned", projectId: "saved-z" }],
+    pinnedThreads: [{ id: "pinned-loose", projectId: "workspace-old" }],
+    projects: [
+      { id: "saved-z", name: "已保存项目", threads: [{ id: "assigned", projectId: "saved-z" }] },
+      { id: "workspace-old", name: "new-chat", synthetic: true, threads: [{ id: "loose" }] },
+      { id: "saved-a", name: "空项目", threads: [] }
+    ]
+  });
+  assert.deepEqual(Array.from(snapshot.projects, project => project.id), ["saved-z", "saved-a"]);
+  assert.equal(snapshot.recent[0].projectId, null);
+  assert.equal(snapshot.recent[1].projectId, "saved-z");
+  assert.equal(snapshot.pinnedThreads[0].projectId, null);
+  assert.equal(snapshot.projects[0].name, "已保存项目");
+});
+
+test("项目选择只保留已保存项目，真实同名项目显示路径，合成项目不参与重名判断", () => {
+  const context = {};
+  vm.createContext(context);
+  vm.runInContext(sourceSection("function newChatProjectOptions(", "function syncNewChatProjectPicker("), context);
+  const projects = [
+    { id: "saved-z", name: "同名项目", roots: ["C:\\repo\\one"] },
+    { id: "saved-a", name: "同名项目", roots: ["D:\\repo\\two"] },
+    { id: "saved-unique", name: "唯一项目", roots: ["E:\\repo\\unique"] },
+    { id: "workspace-old", name: "唯一项目", roots: ["C:\\tmp\\unique"], synthetic: true }
+  ];
+  const options = context.newChatProjectOptions(projects);
+  assert.deepEqual(Array.from(options, option => option.value), ["saved-z", "saved-a", "saved-unique", ""]);
+  assert.deepEqual(Array.from(options.slice(0, 3), option => option.description),
+    ["C:\\repo\\one", "D:\\repo\\two", ""]);
+  assert.equal(options.at(-1).label, "不在项目中工作");
+  assert.deepEqual(options, context.newChatProjectOptions(projects.filter(project => !project.synthetic)));
 });
 
 function workspaceChangeContract() {

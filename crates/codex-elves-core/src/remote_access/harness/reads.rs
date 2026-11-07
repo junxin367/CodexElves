@@ -1,15 +1,23 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use super::{Harness, error, required, sent_key};
+use super::projects::DesktopProjects;
 use crate::codex_service::{
     normalize_model, normalize_owner_thread, normalize_thread, normalize_thread_response,
     owner_snapshot_history,
 };
 
 impl Harness {
+    pub(super) async fn desktop_projects(&self) -> anyhow::Result<DesktopProjects> {
+        #[cfg(test)]
+        let home = self.project_codex_home.clone();
+        #[cfg(not(test))]
+        let home = crate::codex_home::default_codex_home_dir();
+        tokio::task::spawn_blocking(move || DesktopProjects::load(&home)).await?
+    }
+
     pub(super) async fn list_all(
         &self,
         method: &str,
@@ -33,14 +41,17 @@ impl Harness {
 
     pub(super) async fn sidebar(&self) -> anyhow::Result<Value> {
         // 会话与项目互不依赖；首屏只等最近一页，后续目录由服务后台补齐。
-        let ((rows, complete), project_rows) = tokio::try_join!(
+        let ((rows, complete), project_rows, desktop) = tokio::try_join!(
             self.catalog.snapshot(&self.runtime, &self.projection),
-            self.list_all("project/list", json!({"limit":100}))
+            self.list_all("project/list", json!({"limit":100})),
+            self.desktop_projects()
         )?;
-        let mut projects: BTreeMap<String, Value> = project_rows
+        // 用户要求项目效果对齐 CDP：只列出已保存项目，并保留 project/list 的桌面顺序；
+        // 会话工作目录不能补成项目，否则无项目会话和历史临时目录会进入新建选择器。
+        let mut projects: Vec<Value> = project_rows
             .into_iter()
             .filter_map(|mut project| {
-                let id = project["id"].as_str()?.to_owned();
+                project["id"].as_str()?;
                 let roots: Vec<_> = project["roots"]
                     .as_array()?
                     .iter()
@@ -49,15 +60,17 @@ impl Harness {
                 project["cwd"] = roots.first().map(|s| json!(s)).unwrap_or(Value::Null);
                 project["roots"] = json!(roots);
                 project["threads"] = json!([]);
-                Some((id, project))
+                desktop.display_project(&mut project);
+                Some(project)
             })
             .collect();
         // 侧栏只需要置顶与排序，不能复制整份消息队列、图片和历史回执。
-        let (thread_pins, project_pins, preferences) = {
+        let (thread_pins, project_pins, project_pin_overrides, preferences) = {
             let store = self.store.lock().await;
             (
                 store.data.thread_pins.clone(),
                 store.data.project_pins.clone(),
+                store.data.project_pin_overrides.clone(),
                 store.data.preferences.clone(),
             )
         };
@@ -67,47 +80,60 @@ impl Harness {
             let Ok(mut thread) = normalize_thread(&row) else {
                 continue;
             };
-            let cwd = thread["cwd"].as_str().unwrap_or("").to_owned();
-            let project_id = row["projectId"]
-                .as_str()
-                .filter(|id| projects.contains_key(*id))
-                .map(str::to_owned)
-                .or_else(|| {
-                    projects
-                        .iter()
-                        .find(|(_, p)| {
-                            p["roots"].as_array().is_some_and(|roots| {
-                                roots.iter().any(|root| {
-                                    root.as_str().is_some_and(|path| same_path(path, &cwd))
-                                })
-                            })
-                        })
-                        .map(|(id, _)| id.clone())
-                })
-                .unwrap_or_else(|| workspace_id(&cwd));
-            let project = projects.entry(project_id.clone()).or_insert_with(|| json!({
-                "id":project_id,"name":std::path::Path::new(&cwd).file_name().and_then(|s|s.to_str()).unwrap_or(&cwd),
-                "cwd":cwd,"roots":[cwd],"threads":[],"recencyAt":0,"synthetic":true
-            }));
-            thread["projectId"] = json!(&project_id);
+            let project_index = desktop.assigned_index(&row, &projects);
+            thread["projectId"] = project_index
+                .map(|index| projects[index]["id"].clone())
+                .unwrap_or(Value::Null);
             thread["pinned"] = json!(thread_pins.contains(thread["id"].as_str().unwrap_or("")));
             thread = projection.thread(thread["id"].as_str().unwrap_or(""), thread.clone());
-            if let Some(entries) = project["threads"].as_array_mut() {
-                entries.push(thread.clone());
+            if let Some(index) = project_index {
+                let project = &mut projects[index];
+                if let Some(entries) = project["threads"].as_array_mut() {
+                    entries.push(thread.clone());
+                }
+                project["recencyAt"] = json!(
+                    project["recencyAt"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .max(thread["recencyAt"].as_u64().unwrap_or(0))
+                );
             }
-            project["pinned"] = json!(project_pins.contains(&project_id));
-            project["recencyAt"] = json!(
-                project["recencyAt"]
-                    .as_u64()
-                    .unwrap_or(0)
-                    .max(thread["recencyAt"].as_u64().unwrap_or(0))
-            );
             recent.push(thread);
         }
         drop(projection);
-        for (id, project) in &mut projects {
-            project["pinned"] = json!(project_pins.contains(id));
+        for project in &mut projects {
+            let id = project["id"].as_str().unwrap_or("");
+            let server_id = project["serverProjectId"].as_str().unwrap_or(id);
+            let pinned = project_pin_overrides
+                .get(id)
+                .or_else(|| project_pin_overrides.get(server_id))
+                .copied()
+                .unwrap_or_else(|| {
+                    project_pins.contains(id)
+                        || project_pins.contains(server_id)
+                        || desktop
+                            .pinned
+                            .iter()
+                            .any(|pinned| pinned == id || pinned == server_id)
+                });
+            project["pinned"] = json!(pinned);
         }
+        // 与 CDP 一样先展示置顶项目，再按桌面项目顺序排列；未记录的新项目保留引擎顺序。
+        projects.sort_by_key(|project| {
+            let pinned = project["pinned"] == true;
+            let order = if pinned {
+                &desktop.pinned
+            } else {
+                &desktop.order
+            };
+            (
+                !pinned,
+                order
+                    .iter()
+                    .position(|id| project["id"] == *id || project["serverProjectId"] == *id)
+                    .unwrap_or(usize::MAX),
+            )
+        });
         let pins: Vec<_> = recent
             .iter()
             .filter(|t| t["pinned"] == true)
@@ -119,7 +145,7 @@ impl Harness {
             json!({"mode":"project","chats":"updated_at","projects":"updated_at","pinned":"manual"})
         };
         Ok(
-            json!({"ok":true,"nativeBridge":"harness","complete":complete,"projects":projects.into_values().collect::<Vec<_>>(),
+            json!({"ok":true,"nativeBridge":"harness","complete":complete,"projects":projects,
             "recent":recent,"pinnedThreads":pins,"nextCursor":null,"sideThreadIds":[],
             "unreadSideThreads":[],"creationAvailable":true,"preferences":preferences}),
         )
@@ -136,30 +162,23 @@ impl Harness {
             );
         }
         let id = required(payload, "projectId")?;
-        // 项目文件、Skill 和新建会话只读项目根目录，不为获取路径重扫全部会话。
-        if !id.starts_with("workspace-") {
-            let projects = self.list_all("project/list", json!({"limit":100})).await?;
-            let project = projects
-                .iter()
-                .find(|project| project["id"] == id)
-                .ok_or_else(|| error(404, "项目不存在"))?;
-            let cwd = project["roots"]
-                .as_array()
-                .and_then(|roots| roots.first())
-                .and_then(|root| root["path"].as_str())
-                .ok_or_else(|| error(404, "项目没有可用工作目录"))?;
-            return Ok(json!({"ok":true,"hostId":"local","projectId":id,"cwd":cwd}));
-        }
-        let project = self
-            .catalog
-            .find(&self.runtime, &self.projection, |row| {
-                row["cwd"]
-                    .as_str()
-                    .is_some_and(|cwd| workspace_id(cwd) == id)
-            })
-            .await?
+        // 用户要求与 CDP 的已保存项目一致；旧缓存的合成项目不能再用于文件、Skill 或新建，
+        // 无项目会话仍可通过 threadId 读取自己的工作目录，不为项目查询遍历会话。
+        let (projects, desktop) = tokio::try_join!(
+            self.list_all("project/list", json!({"limit":100})),
+            self.desktop_projects()
+        )?;
+        let server_id = desktop.server_id(id);
+        let project = projects
+            .iter()
+            .find(|project| project["id"] == server_id)
             .ok_or_else(|| error(404, "项目不存在"))?;
-        Ok(json!({"ok":true,"hostId":"local","projectId":id,"cwd":project["cwd"]}))
+        let cwd = project["roots"]
+            .as_array()
+            .and_then(|roots| roots.first())
+            .and_then(|root| root["path"].as_str())
+            .ok_or_else(|| error(404, "项目没有可用工作目录"))?;
+        Ok(json!({"ok":true,"hostId":"local","projectId":id,"serverProjectId":server_id,"cwd":cwd}))
     }
 
     pub(super) async fn thread(&self, payload: &Value) -> anyhow::Result<Value> {
@@ -468,21 +487,4 @@ impl Harness {
         snapshot["result"] = edit.map(|e| e.result.clone()).unwrap_or(Value::Null);
         Ok(snapshot)
     }
-}
-
-fn same_path(left: &str, right: &str) -> bool {
-    let left = left.trim_end_matches(['/', '\\']).replace('\\', "/");
-    let right = right.trim_end_matches(['/', '\\']).replace('\\', "/");
-    if cfg!(windows) {
-        left.eq_ignore_ascii_case(&right)
-    } else {
-        left == right
-    }
-}
-
-fn workspace_id(cwd: &str) -> String {
-    format!(
-        "workspace-{:x}",
-        Sha256::digest(cwd.to_ascii_lowercase().as_bytes())
-    )
 }

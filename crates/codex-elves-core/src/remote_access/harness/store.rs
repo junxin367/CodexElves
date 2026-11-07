@@ -77,6 +77,7 @@ pub(super) struct Data {
     pub sent_hashes: BTreeMap<String, String>,
     pub thread_pins: BTreeSet<String>,
     pub project_pins: BTreeSet<String>,
+    pub project_pin_overrides: BTreeMap<String, bool>,
     pub preferences: Value,
     pub settings: BTreeMap<String, Value>,
     pub answered_questions: BTreeMap<String, Value>,

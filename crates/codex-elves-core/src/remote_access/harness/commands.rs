@@ -240,6 +240,8 @@ impl Harness {
                     let id=required(payload,if action=="pinThread" {"threadId"} else {"projectId"})?;
                     let pins=if action=="pinThread" {&mut data.thread_pins} else {&mut data.project_pins};
                     if payload["pinned"]==true { pins.insert(id.to_owned()); } else { pins.remove(id); }
+                    // 初始置顶与桌面对齐；服务端明确取消置顶后，不能被桌面默认值重新覆盖。
+                    if action=="pinProject" { data.project_pin_overrides.insert(id.to_owned(),payload["pinned"]==true); }
                 }
                 "sort" => {
                     if !["manual","updated_at"].contains(&required(payload,"mode")?) { return Err(error(400,"不支持的排序方式")); }
@@ -442,7 +444,8 @@ impl Harness {
                 // 新建属于实际写入，提交前重新核对项目根目录，不能用展示缓存决定写入位置。
                 self.runtime.invalidate_read("project/list").await;
                 let context = self.workspace_context(&json!({"projectId":id})).await?;
-                (required(&context, "cwd")?.to_owned(), Some(id.to_owned()))
+                // 展示 ID 与 CDP 相同；实际创建必须使用已验证的引擎项目 ID。
+                (required(&context, "cwd")?.to_owned(), Some(required(&context, "serverProjectId")?.to_owned()))
             } else {
                 let settings = crate::settings::SettingsStore::default().load()?;
                 let directory = crate::codex_home::codex_home_dir_for_settings(&settings)
@@ -452,7 +455,7 @@ impl Harness {
                 (directory.to_string_lossy().into_owned(), None)
             };
         let mut params = json!({"cwd":cwd,"ephemeral":false,"threadSource":"user"});
-        if let Some(project_id) = project_id.filter(|id| !id.starts_with("workspace-")) {
+        if let Some(project_id) = project_id {
             params["projectId"] = json!(project_id);
         }
         if let Some(model) = payload["model"].as_str().filter(|s| !s.is_empty()) {

@@ -2804,14 +2804,19 @@ function cachedReadingPosition(snapshot, position) {
 }
 function sidebarSnapshot(value) {
   const { unreadSideThreads, ...snapshot } = value;
+  // 用户要求项目对齐 CDP；升级后的离线缓存也只保留已保存项目，旧合成项目的会话回到最近列表。
+  const projects = value.projects.filter(project => !project.synthetic);
+  const projectIds = new Set(projects.map(project => project.id));
   const displayThread = item => {
     const { status, priority, hasUnreadTurn, sideThreadAttention, requests, queuedMessages, queuedEdits, ...display } = item;
+    if (value.nativeBridge === "harness" && display.projectId && !projectIds.has(display.projectId))
+      display.projectId = null;
     return display;
   };
   return { ...snapshot,
     recent: value.recent.map(displayThread),
     pinnedThreads: value.pinnedThreads.map(displayThread),
-    projects: value.projects.map(project => ({ ...project, threads: project.threads.map(displayThread) })) };
+    projects: projects.map(project => ({ ...project, threads: project.threads.map(displayThread) })) };
 }
 function clearReadViews() {
   const previousScope = readScope;
@@ -3222,6 +3227,8 @@ async function activatePromptOptimization() {
   }
 }
 function newChatProjectOptions(projects = []) {
+  // 兼容旧服务及旧页面缓存：历史工作目录不能成为可选项目，也不能触发同名项目的路径提示。
+  projects = projects.filter(project => !project.synthetic);
   const names = new Map();
   for (const project of projects) names.set(project.name, (names.get(project.name) || 0) + 1);
   return [
@@ -6562,19 +6569,16 @@ function mergeIncompleteSidebar(previous, current) {
   // 完整目录返回后整体核对，不能把部分结果当作删除或取消置顶的证据。
   const freshIds = new Set([...current.recent, ...current.pinnedThreads,
     ...current.projects.flatMap(project => project.threads)].map(item => item.id));
-  const mergeRows = (old, fresh) => [...fresh, ...old.filter(item => !freshIds.has(item.id))];
   const oldProjects = new Map(previous.projects.map(project => [project.id, project]));
   const projectIds = new Set(current.projects.map(project => project.id));
+  const mergeRows = (old, fresh) => [...fresh, ...old.filter(item => !freshIds.has(item.id))]
+    .map(item => item.projectId && !projectIds.has(item.projectId) ? { ...item, projectId: null } : item);
   return { ...current,
     recent: mergeRows(previous.recent, current.recent),
     pinnedThreads: mergeRows(previous.pinnedThreads, current.pinnedThreads),
-    projects: [
-      ...current.projects.map(project => ({ ...project,
-        threads: mergeRows(oldProjects.get(project.id)?.threads || [], project.threads) })),
-      ...previous.projects.filter(project => project.synthetic && !projectIds.has(project.id))
-        .map(project => ({ ...project, threads: project.threads.filter(item => !freshIds.has(item.id)) }))
-        .filter(project => project.threads.length)
-    ]
+    // 项目目录始终完整，只有会话分页未完成；不能把旧服务合成的工作目录补回项目列表。
+    projects: current.projects.map(project => ({ ...project,
+      threads: mergeRows(oldProjects.get(project.id)?.threads || [], project.threads) }))
   };
 }
 async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "foreground" } = {}) {
@@ -12952,6 +12956,7 @@ function receive(event) {
     void refreshSkillCatalog().catch(() => {});
   }
   if (!suppressSidebarRefresh && ["thread/started", "turn/started", "turn/completed", "remote/sidebarChanged", "thread/name/updated", "thread/status/changed",
+    "project/changed", "thread/project/updated",
     "remote/requestsChanged", "serverRequest/resolved"].includes(event.method)) {
     scheduleSidebarRefresh();
   }

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 use anyhow::Context;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify};
@@ -258,14 +259,14 @@ impl Catalog {
         }));
     }
 
+    #[cfg(test)]
     pub async fn find(
         self: &Arc<Self>,
         runtime: &Arc<Runtime>,
         projection: &Arc<Mutex<Projection>>,
         matches: impl Fn(&Value) -> bool,
     ) -> anyhow::Result<Option<Value>> {
-        // 旧缓存中的合成项目可能不在首批目录；仅该明确目标等待后台分页，
-        // 不让普通项目、首屏和其他设备一起等待完整目录。
+        // 验证后台分页时仅让指定会话等待完整目录，不阻塞其他读取。
         tokio::time::timeout(Duration::from_secs(45), async {
             loop {
                 let changed = self.progress.notified();
@@ -287,7 +288,7 @@ impl Catalog {
             }
         })
         .await
-        .context("读取项目工作目录超时")?
+        .context("读取会话目录超时")?
     }
 
     pub async fn observe(&self, event: &Value) {
@@ -299,6 +300,7 @@ impl Catalog {
                 | "thread/deleted"
                 | "thread/archived"
                 | "thread/unarchived"
+                | "thread/project/updated"
                 | "thread/readState/updated"
         ) {
             return;
@@ -338,6 +340,13 @@ impl Catalog {
                 if let Some(thread) = state.rows.get_mut(id) {
                     thread["title"] = params["name"].clone();
                 }
+            }
+            "thread/project/updated" => {
+                // 桌面移动或移出项目后，服务目录同步显式归属，包括表示无项目的 null。
+                if let Some(thread) = state.rows.get_mut(id) {
+                    thread["projectId"] = params["projectId"].clone();
+                }
+                state.dirty |= !state.complete;
             }
             "thread/readState/updated" => {
                 if let Some(thread) = state.rows.get_mut(id) {
@@ -410,8 +419,9 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  const q=JSON.parse(line);if(q.method==='initialized')return;
  if(q.method==='initialize'){output({id:q.id,result:{}});return;}
  fs.appendFileSync(__dirname+'/reads.jsonl',JSON.stringify(q)+'\n');
+ const catalog=fs.existsSync(__dirname+'/catalog.json')?JSON.parse(fs.readFileSync(__dirname+'/catalog.json','utf8')):null;
  if(q.method==='project/list'){
-   output({id:q.id,result:{data:[{id:'project-a',name:'测试项目',roots:[{path:__dirname}]}],nextCursor:null}});return;
+   output({id:q.id,result:{data:catalog?.projects||[{id:'project-a',name:'测试项目',roots:[{path:__dirname}]}],nextCursor:null}});return;
  }
  if(q.method==='model/list'){
    if(fs.existsSync(__dirname+'/models-fail'))output({id:q.id,error:{code:-32601,message:'isolated model failure'}});
@@ -431,10 +441,10 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  }
  if(q.method!=='thread/list'){output({id:q.id,error:{code:-32601,message:'unsupported'}});return;}
  const removed=fs.existsSync(__dirname+'/deleted');
- const data=Array.from({length:250},(_,i)=>({
+ const data=(catalog?.threads||Array.from({length:250},(_,i)=>({
    id:'thread-'+i,cwd:__dirname,name:'会话 '+i,projectId:'project-a',updatedAt:250-i,createdAt:1,
    status:{type:'idle'},readState:{firstUnread:null,revision:'r1'}
- })).filter(row=>!removed||row.id!=='thread-125');
+ }))).filter(row=>!removed||row.id!=='thread-125');
  const start=Number(q.params.cursor||0),end=start+q.params.limit;
  const result={data:data.slice(start,end),nextCursor:end<data.length?String(end):null};
  const gate=start===0&&fs.existsSync(__dirname+'/hold-first')?'continue-first':start===100?'continue':null;
@@ -639,6 +649,236 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
+    }
+
+    #[tokio::test]
+    async fn harness_sidebar_preserves_saved_projects_and_explicit_projectless_membership() {
+        use sha2::{Digest, Sha256};
+
+        let (directory, process) = engine_fixture().await;
+        let service = super::super::Harness::new(directory.path()).unwrap();
+        service.install_test_process(process).await;
+        let fixture = json!({
+            "projects": [
+                {"id":"project-z","name":"同名项目","roots":[{"path":"/repo/z"},{"path":"/shared"}],"position":0},
+                {"id":"project-a","name":"同名项目","roots":[{"path":"/repo/a"},{"path":"/shared"}],"position":1},
+                {"id":"workspace-saved","name":"空项目","roots":[{"path":"/repo/empty"}],"position":2}
+            ],
+            "threads": [
+                {"id":"assigned","cwd":"/repo/z","projectId":"project-a","updatedAt":10},
+                {"id":"projectless","cwd":"/repo/z","projectId":null,"updatedAt":20},
+                {"id":"legacy","cwd":"/repo/z/","updatedAt":30},
+                {"id":"ambiguous","cwd":"/shared","updatedAt":40},
+                {"id":"deleted-project","cwd":"/repo/z","projectId":"removed","updatedAt":50},
+                {"id":"loose","cwd":"/tmp/new-chat","updatedAt":60},
+                {"id":"worktree","cwd":"/worktrees/feature","projectId":"project-z","updatedAt":70}
+            ]
+        });
+        std::fs::write(
+            directory.path().join("catalog.json"),
+            serde_json::to_vec(&fixture).unwrap(),
+        )
+        .unwrap();
+        let sidebar = service.sidebar().await.unwrap();
+        assert_eq!(sidebar["complete"], true);
+        let projects = sidebar["projects"].as_array().unwrap();
+        assert_eq!(
+            projects
+                .iter()
+                .map(|project| project["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["project-z", "project-a", "workspace-saved"],
+            "选择器保留项目顺序，不按 ID 排序或补入会话工作目录"
+        );
+        assert!(projects.iter().all(|project| project["synthetic"] != true));
+        let recent = sidebar["recent"].as_array().unwrap();
+        assert_eq!(recent.len(), 7, "无项目会话不能因移除合成项目而消失");
+        for id in ["projectless", "ambiguous", "deleted-project", "loose"] {
+            assert_eq!(
+                recent.iter().find(|thread| thread["id"] == id).unwrap()["projectId"],
+                Value::Null,
+                "{id} 应保留无项目归属"
+            );
+        }
+        assert_eq!(
+            projects[0]["threads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|thread| thread["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["legacy", "worktree"]
+        );
+        assert_eq!(projects[1]["threads"][0]["id"], "assigned");
+        assert_eq!(projects[2]["threads"], json!([]));
+        assert_eq!(
+            service
+                .workspace_context(&json!({"projectId":"workspace-saved"}))
+                .await
+                .unwrap()["cwd"],
+            "/repo/empty",
+            "已保存项目不根据 ID 前缀误判为合成项目"
+        );
+        let stale_id = format!("workspace-{:x}", Sha256::digest(b"/tmp/new-chat"));
+        let reads_before = requests(directory.path()).len();
+        assert!(
+            service
+                .workspace_context(&json!({"projectId":stale_id}))
+                .await
+                .is_err(),
+            "旧合成项目不能继续解析为可选工作目录"
+        );
+        assert_eq!(requests(directory.path()).len(), reads_before);
+        service
+            .store
+            .lock()
+            .await
+            .data
+            .project_pins
+            .insert("project-a".into());
+        let pinned = service.sidebar().await.unwrap();
+        assert_eq!(
+            pinned["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|project| project["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["project-a", "project-z", "workspace-saved"]
+        );
+        service.release().await;
+    }
+
+    #[tokio::test]
+    async fn project_membership_events_keep_explicit_null_and_reject_old_generations() {
+        let catalog = Catalog::default();
+        {
+            let mut state = catalog.state.lock().await;
+            state.generation = "current".into();
+            state.loaded = true;
+            state.complete = true;
+            state.rows.insert(
+                "thread-a".into(),
+                json!({"id":"thread-a","cwd":"/repo/a","projectId":"project-a"}),
+            );
+        }
+        for project_id in [Value::Null, json!("project-b")] {
+            catalog
+                .observe(&json!({
+                    "method":"thread/project/updated","_generation":"current",
+                    "params":{"threadId":"thread-a","projectId":project_id}
+                }))
+                .await;
+            assert_eq!(
+                catalog.state.lock().await.rows["thread-a"]["projectId"],
+                project_id
+            );
+        }
+        catalog
+            .observe(&json!({
+                "method":"thread/project/updated","_generation":"old",
+                "params":{"threadId":"thread-a","projectId":"project-a"}
+            }))
+            .await;
+        assert_eq!(
+            catalog.state.lock().await.rows["thread-a"]["projectId"],
+            "project-b"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrating_desktop_projects_keep_cdp_ids_memberships_order_and_pin_overrides() {
+        let (directory, process) = engine_fixture().await;
+        let service = super::super::Harness::new(directory.path()).unwrap();
+        service.install_test_process(process).await;
+        std::fs::write(
+            directory.path().join("catalog.json"),
+            serde_json::to_vec(&json!({
+                "projects":[
+                    {"id":"server-z","name":"引擎项目","roots":[{"path":"/repo/z"}]},
+                    {"id":"server-a","name":"另一项目","roots":[{"path":"/repo/a"}]}
+                ],
+                "threads":[
+                    {"id":"pending-assigned","cwd":"/different","projectId":null},
+                    {"id":"pending-projectless","cwd":"/repo/z","projectId":null},
+                    {"id":"pending-inferred","cwd":"/repo/z","projectId":null},
+                    {"id":"migrated-projectless","cwd":"/repo/z","projectId":null},
+                    {"id":"canonical","cwd":"/repo/a","projectId":"server-a"}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let scope = format!("local:{}", directory.path().display());
+        let mut desktop = json!({
+            "local-projects":{"desktop-z":{"name":"桌面项目"},"desktop-a":{"name":"另一项目"}},
+            "thread-project-assignments":{
+                "pending-assigned":{"projectKind":"local","projectId":"desktop-z"},
+                "migrated-projectless":{"projectKind":"local","projectId":"desktop-z"}
+            },
+            "projectless-thread-ids":["pending-projectless"],
+            "project-order":["desktop-z","desktop-a"],
+            "pinned-project-ids":["desktop-a"],
+            "app-server-project-id-by-legacy-project-id-by-host":{
+                "remote:other":{"desktop-z":"foreign-project"},
+                (scope.clone()):{"desktop-z":"server-z","desktop-a":"server-a"}
+            },
+            "app-server-projects-migration-by-host":{
+                (scope.clone()):{"projectsMigrated":true,"threadAssignmentsMigrated":false,
+                    "threadAssignmentsReadMigrated":true,
+                    "pendingThreadAssignmentIds":["pending-assigned","pending-projectless","pending-inferred"]}
+            }
+        });
+        let state_path = directory.path().join(".codex-global-state.json");
+        std::fs::write(&state_path, serde_json::to_vec(&desktop).unwrap()).unwrap();
+        let sidebar = service.sidebar().await.unwrap();
+        assert_eq!(sidebar["projects"][0]["id"], "desktop-a");
+        assert_eq!(sidebar["projects"][0]["pinned"], true);
+        assert_eq!(sidebar["projects"][1]["id"], "desktop-z");
+        assert_eq!(sidebar["projects"][1]["name"], "桌面项目");
+        let threads = sidebar["recent"].as_array().unwrap();
+        for (id, expected) in [
+            ("pending-assigned", json!("desktop-z")),
+            ("pending-inferred", json!("desktop-z")),
+            ("pending-projectless", Value::Null),
+            ("migrated-projectless", Value::Null),
+            ("canonical", json!("desktop-a")),
+        ] {
+            assert_eq!(
+                threads.iter().find(|thread| thread["id"] == id).unwrap()["projectId"],
+                expected
+            );
+        }
+        let context = service
+            .workspace_context(&json!({"projectId":"desktop-z"}))
+            .await
+            .unwrap();
+        assert_eq!(context["cwd"], "/repo/z");
+        assert_eq!(context["serverProjectId"], "server-z");
+        service
+            .store
+            .lock()
+            .await
+            .data
+            .project_pin_overrides
+            .insert("desktop-a".into(), false);
+        let unpinned = service.sidebar().await.unwrap();
+        assert_eq!(unpinned["projects"][0]["id"], "desktop-z");
+        assert_eq!(unpinned["projects"][1]["pinned"], false);
+        desktop["app-server-projects-migration-by-host"][&scope]["threadAssignmentsMigrated"] =
+            json!(true);
+        std::fs::write(&state_path, serde_json::to_vec(&desktop).unwrap()).unwrap();
+        let migrated = service.sidebar().await.unwrap();
+        assert_eq!(
+            migrated["recent"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|thread| thread["id"] == "pending-assigned")
+                .unwrap()["projectId"],
+            Value::Null
+        );
+        service.release().await;
     }
 
     #[tokio::test]

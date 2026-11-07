@@ -3,6 +3,7 @@
 mod catalog;
 mod commands;
 mod projection;
+mod projects;
 mod read_cache;
 mod reads;
 mod runtime;
@@ -30,6 +31,8 @@ pub(super) struct Harness {
     catalog: Arc<Catalog>,
     projection: Arc<Mutex<Projection>>,
     store: Mutex<Store>,
+    #[cfg(test)]
+    project_codex_home: std::path::PathBuf,
     controller: OnceLock<Weak<RemoteAccessController>>,
     receiver: Mutex<Option<mpsc::Receiver<Value>>>,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -66,6 +69,8 @@ impl Harness {
             catalog: Arc::new(Catalog::default()),
             projection: Arc::new(Mutex::new(Projection::default())),
             store: Mutex::new(Store::open(directory)?),
+            #[cfg(test)]
+            project_codex_home: directory.to_path_buf(),
             controller: OnceLock::new(),
             receiver: Mutex::new(Some(receiver)),
             worker: Mutex::new(None),
@@ -660,7 +665,9 @@ mod tests {
     #[ignore]
     async fn installed_engine_read_only_smoke() {
         let directory = tempfile::tempdir().unwrap();
-        let service = Harness::new(directory.path()).unwrap();
+        let mut service = Harness::new(directory.path()).unwrap();
+        Arc::get_mut(&mut service).unwrap().project_codex_home =
+            crate::codex_home::default_codex_home_dir();
         service.prepare().await.unwrap();
         let threads = service
             .runtime
@@ -668,12 +675,68 @@ mod tests {
             .await
             .unwrap();
         let projects = service
-            .runtime
-            .request("project/list", json!({"limit":1}), None)
+            .list_all("project/list", json!({"limit":100}))
             .await
             .unwrap();
-        assert!(projects["data"].is_array());
         assert!(threads["data"].is_array());
+        let sidebar = service.sidebar().await.unwrap();
+        let displayed_projects = sidebar["projects"].as_array().unwrap();
+        let project_ids = projects
+            .iter()
+            .map(|project| &project["id"])
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(displayed_projects.len(), project_ids.len());
+        assert!(
+            displayed_projects
+                .iter()
+                .all(|project| project_ids.contains(&project["serverProjectId"]))
+        );
+        assert!(
+            displayed_projects
+                .iter()
+                .all(|project| project["synthetic"] != true)
+        );
+        let desktop: Value =
+            std::fs::read(service.project_codex_home.join(".codex-global-state.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or(Value::Null);
+        let expected_order = ["pinned-project-ids", "project-order"]
+            .into_iter()
+            .flat_map(|key| desktop[key].as_array().into_iter().flatten())
+            .filter(|id| {
+                displayed_projects
+                    .iter()
+                    .any(|project| project["id"] == **id)
+            })
+            .collect::<Vec<_>>();
+        if !expected_order.is_empty() {
+            assert_eq!(
+                displayed_projects
+                    .iter()
+                    .take(expected_order.len())
+                    .map(|project| &project["id"])
+                    .collect::<Vec<_>>(),
+                expected_order,
+                "真实列表顺序应与 CDP 的桌面置顶和项目顺序一致"
+            );
+        }
+        let assigned = sidebar["recent"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|thread| thread["projectId"].is_string())
+            .count();
+        println!(
+            "HARNESS_SAVED_PROJECTS {}",
+            json!({
+                "savedProjects":projects.len(),"displayedProjects":displayed_projects.len(),
+                "firstPageThreads":sidebar["recent"].as_array().unwrap().len(),
+                "assignedThreads":assigned,
+                "projectlessThreads":sidebar["recent"].as_array().unwrap().iter()
+                    .filter(|thread|thread["projectId"].is_null()).count()
+            })
+        );
         if let Some(id) = threads["data"]
             .as_array()
             .and_then(|rows| rows.first())
@@ -697,4 +760,5 @@ mod tests {
         }
         service.release().await;
     }
+
 }
