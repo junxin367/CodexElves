@@ -436,7 +436,7 @@ async fn browse_workspace(
             cwd.clone()
         };
         let requested = requested.to_owned();
-        let (mut value, branch_directory) = tokio::task::spawn_blocking(move || {
+        let (mut value, root, branch_directory) = tokio::task::spawn_blocking(move || {
             let root = std::fs::canonicalize(root)
                 .map_err(|_| ApiError::new(404, "当前项目目录已失效"))?;
             if !cwd.starts_with(&root) || !super::canonical_path_is_local(&root) {
@@ -456,11 +456,15 @@ async fn browse_workspace(
             } else {
                 root.join(&path)
             };
-            Ok::<_, ApiError>((value, branch_directory))
+            Ok::<_, ApiError>((value, root, branch_directory))
         })
         .await
         .map_err(|_| ApiError::new(503, "读取项目文件失败"))??;
-        value["git"] = branch_metadata(&branch_directory, &authorization).await;
+        let (git, ()) = tokio::join!(
+            branch_metadata(&branch_directory, &authorization),
+            populate_directory_branches(&mut value, &root, &authorization),
+        );
+        value["git"] = git;
         Ok::<_, ApiError>(value)
     })
     .await
@@ -524,6 +528,51 @@ async fn branch_metadata(root: &Path, authorization: &RemoteAuthorization) -> Va
     .await;
     // 分支是补充展示信息，读取失败不能破坏原有文件和变更能力；外层仍须重新核对授权。
     result.unwrap_or_else(|_| json!({"branch": null, "detachedHead": null, "unavailable": true}))
+}
+
+async fn populate_directory_branches(
+    value: &mut Value,
+    root: &Path,
+    authorization: &RemoteAuthorization,
+) {
+    let Some(files) = value.get_mut("files").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut paths = Vec::new();
+    for (index, file) in files.iter_mut().enumerate() {
+        if !file.get("repository").is_some_and(Value::is_object) {
+            continue;
+        }
+        file["repository"]["git"] = json!({"unavailable": true});
+        if paths.len() < MAX_REPOSITORIES
+            && let Some(path) = file.get("path").and_then(Value::as_str)
+        {
+            paths.push((index, path.to_owned()));
+        }
+    }
+    // 用户要求每个仓库行显示自己的分支，分支变化也必须进入目录 revision。
+    // 复用 256 仓库上限、4 个并发及 GIT_TIMEOUT 共享预算；失败仅影响标签，不阻断文件列表。
+    let deadline = tokio::time::Instant::now() + GIT_TIMEOUT;
+    let reads = paths.into_iter().map(|(index, path)| async move {
+        let result = tokio::time::timeout_at(deadline, async {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ApiError::new(504, "仓库分支读取超时"));
+            }
+            // 复用目录边界与独立仓库校验，避免仓库被删除后借用父仓库的分支。
+            let repository = repository_in_workspace(root, &path, authorization).await?;
+            Ok::<_, ApiError>(branch_metadata(&repository.root, authorization).await)
+        })
+        .await;
+        let git = match result {
+            Ok(Ok(git)) => git,
+            _ => json!({"unavailable": true}),
+        };
+        (index, git)
+    });
+    let mut reads = stream::iter(reads).buffered(4);
+    while let Some((index, git)) = reads.next().await {
+        files[index]["repository"]["git"] = git;
+    }
 }
 
 fn project_relative_path(
@@ -2780,6 +2829,16 @@ mod tests {
             .success
         );
         assert!(child.join(".git").is_file());
+        assert!(
+            git_unchecked(
+                &child,
+                &["symbolic-ref", "HEAD", "refs/heads/worktree-current"],
+                16 * 1024,
+            )
+            .await
+            .unwrap()
+            .success
+        );
         std::fs::write(child.join("same.txt"), "worktree file\n").unwrap();
         let broken = repo.root.join("children/broken");
         std::fs::create_dir_all(&broken).unwrap();
@@ -2817,6 +2876,14 @@ mod tests {
             .unwrap();
         assert_eq!(worktree["kind"], "directory");
         assert_eq!(worktree["repository"]["name"], "worktree");
+        assert_eq!(worktree["repository"]["git"]["branch"], "worktree-current");
+        let broken = directory["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["name"] == "broken")
+            .unwrap();
+        assert_eq!(broken["repository"]["git"]["unavailable"], true);
         let detail = fixture_response_json(
             change(
                 State(state),
@@ -2980,7 +3047,19 @@ mod tests {
     async fn project_files_mark_repository_roots_and_invalidate_directory_cache() {
         let (_fixture, _state, repo) = fixture_repo().await;
         let core = fixture_child_repo(&repo.root, "core", "core file").await;
-        fixture_child_repo(&repo.root, "group/web", "web file").await;
+        let web = fixture_child_repo(&repo.root, "group/web", "web file").await;
+        for (path, branch) in [
+            (&repo.root, "refs/heads/workspace-main"),
+            (&core, "refs/heads/pre-production"),
+            (&web, "refs/heads/feature/web/界面"),
+        ] {
+            assert!(
+                git_unchecked(path, &["symbolic-ref", "HEAD", branch], 16 * 1024)
+                    .await
+                    .unwrap()
+                    .success
+            );
+        }
         std::fs::create_dir(repo.root.join("docs")).unwrap();
         std::fs::create_dir(core.join("src")).unwrap();
         let (state, headers) = fixture_web_state(&repo);
@@ -2994,7 +3073,11 @@ mod tests {
         let entries = root["files"].as_array().unwrap();
         let core_entry = entries.iter().find(|file| file["name"] == "core").unwrap();
         assert_eq!(core_entry["kind"], "directory");
-        assert_eq!(core_entry["repository"], json!({"name": "core"}));
+        assert_eq!(
+            core_entry["repository"],
+            json!({"name": "core", "git": {"branch": "pre-production", "detachedHead": null}})
+        );
+        assert_eq!(root["git"]["branch"], "workspace-main");
         for name in ["docs", "group"] {
             assert!(
                 entries
@@ -3006,7 +3089,13 @@ mod tests {
             );
         }
         for (path, name, expected) in [
-            ("group", "web", Some(json!({"name": "web"}))),
+            (
+                "group",
+                "web",
+                Some(
+                    json!({"name": "web", "git": {"branch": "feature/web/界面", "detachedHead": null}}),
+                ),
+            ),
             ("core", "src", None),
             ("core", "same.txt", None),
         ] {
@@ -3028,7 +3117,108 @@ mod tests {
                 .unwrap();
             assert_eq!(entry.get("repository"), expected.as_ref());
         }
-        fixture_child_repo(&repo.root, "docs", "new repository").await;
+        let mut conditional = request.clone();
+        conditional["ifRevision"] = root["revision"].clone();
+        let unchanged = fixture_response_json(
+            files(
+                State(state.clone()),
+                headers.clone(),
+                Json(conditional.clone()),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(unchanged["notModified"], true);
+        assert!(
+            git_unchecked(
+                &core,
+                &["symbolic-ref", "HEAD", "refs/heads/release/next"],
+                16 * 1024,
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let switched = fixture_response_json(
+            files(
+                State(state.clone()),
+                headers.clone(),
+                Json(conditional.clone()),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_ne!(switched["notModified"], true);
+        assert_ne!(switched["revision"], root["revision"]);
+        let core_entry = switched["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["name"] == "core")
+            .unwrap();
+        assert_eq!(core_entry["repository"]["git"]["branch"], "release/next");
+        assert_eq!(switched["git"]["branch"], "workspace-main");
+
+        // 仅在自动清理的夹具中生成提交对象，验证仓库行的分离 HEAD，不提交当前工作仓库。
+        let tree = git_unchecked(&core, &["write-tree"], 256).await.unwrap();
+        assert!(tree.success);
+        let tree = String::from_utf8(tree.bytes).unwrap();
+        let commit = git_unchecked(
+            &core,
+            &[
+                "-c",
+                "user.name=Workspace tests",
+                "-c",
+                "user.email=workspace@example.invalid",
+                "commit-tree",
+                tree.trim(),
+                "-m",
+                "Repository branch fixture",
+            ],
+            256,
+        )
+        .await
+        .unwrap();
+        assert!(commit.success);
+        let commit = String::from_utf8(commit.bytes).unwrap().trim().to_owned();
+        assert!(
+            git_unchecked(&core, &["update-ref", "--no-deref", "HEAD", &commit], 256,)
+                .await
+                .unwrap()
+                .success
+        );
+        conditional["ifRevision"] = switched["revision"].clone();
+        let detached = fixture_response_json(
+            files(State(state.clone()), headers.clone(), Json(conditional))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_ne!(detached["revision"], switched["revision"]);
+        let core_entry = detached["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["name"] == "core")
+            .unwrap();
+        assert_eq!(
+            core_entry["repository"]["git"],
+            json!({"branch": null, "detachedHead": commit})
+        );
+
+        let docs = fixture_child_repo(&repo.root, "docs", "new repository").await;
+        assert!(
+            git_unchecked(
+                &docs,
+                &["symbolic-ref", "HEAD", "refs/heads/docs-current"],
+                16 * 1024,
+            )
+            .await
+            .unwrap()
+            .success
+        );
         let mut conditional = request;
         conditional["ifRevision"] = root["revision"].clone();
         let updated = fixture_response_json(
@@ -3045,7 +3235,10 @@ mod tests {
             .iter()
             .find(|file| file["name"] == "docs")
             .unwrap();
-        assert_eq!(docs["repository"], json!({"name": "docs"}));
+        assert_eq!(
+            docs["repository"],
+            json!({"name": "docs", "git": {"branch": "docs-current", "detachedHead": null}})
+        );
     }
 
     #[tokio::test]

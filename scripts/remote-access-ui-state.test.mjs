@@ -476,7 +476,7 @@ test("路径仅在展示时去掉长路径前缀，分离 HEAD 与无分支状�
   assert.equal(context.workspaceBranchLabel({ branch: "\nmain" }), "分支不可用");
 });
 
-test("文件树仓库标识仅显示仓库名称和分支图标，普通目录不生成标识", () => {
+test("文件树右侧显示各仓库的分支和图标，缺失分支时不使用仓库名兜底", () => {
   const node = (tag, className = "", text = "") => {
     const element = {
       tag, className, textContent: text, children: [], attributes: new Map(),
@@ -498,15 +498,29 @@ test("文件树仓库标识仅显示仓库名称和分支图标，普通目录�
   const context = vm.createContext({ node });
   vm.runInContext(sessionFiles.slice(sessionFiles.indexOf("export function workspaceBranchLabel("),
     sessionFiles.indexOf("export function createWorkspaceLocation(")).replace(/^export /gm, ""), context);
-  for (const name of ["core", "sc-video-engine", "仓库-前端", "<img src=x>"]) {
-    const badge = context.createWorkspaceRepository({ name, git: { branch: "不应显示的分支" } });
-    assert.equal(badge.querySelector(".workspace-branch-label").textContent, name);
+  for (const [name, branch] of [
+    ["core", "pre-production"], ["sc-video-engine", "feature/render"],
+    ["仓库-前端", "feature/界面优化"], ["<img src=x>", "<img src=branch>"],
+  ]) {
+    const badge = context.createWorkspaceRepository({ name, git: { branch, detachedHead: null } });
+    assert.equal(badge.querySelector(".workspace-branch-label").textContent, branch);
     assert.equal(badge.querySelector(".workspace-branch-icon").attributes.get("aria-hidden"), "true");
     assert.ok(badge.querySelector(".workspace-branch-icon").innerHTML.includes("<svg"));
-    assert.equal(badge.title, `仓库：${name}`);
-    assert.equal(badge.attributes.get("aria-label"), `仓库：${name}`);
+    assert.equal(badge.title, `当前分支：${branch}`);
+    assert.equal(badge.attributes.get("aria-label"), badge.title);
     assert.equal(badge.hidden, false);
     assert.ok(badge.className.includes("session-files-repository"));
+  }
+  for (const [git, label] of [
+    [undefined, "分支不可用"], [{ unavailable: true }, "分支不可用"],
+    [{ branch: null, detachedHead: "a".repeat(40) }, "分离 HEAD · aaaaaaaa"],
+    [{ branch: "\nmain" }, "分支不可用"],
+  ]) {
+    const badge = context.createWorkspaceRepository({ name: "不能冒充当前分支的仓库名", git });
+    assert.equal(badge.querySelector(".workspace-branch-label").textContent, label);
+    assert.equal(badge.title, label);
+    assert.equal(badge.attributes.get("aria-label"), label);
+    assert.equal(badge.hidden, false);
   }
   for (const input of [undefined, null, {}, { name: "" }, { name: "core\nmain" }])
     assert.equal(context.createWorkspaceRepository(input), null);

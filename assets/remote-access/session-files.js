@@ -47,11 +47,9 @@ export function createWorkspaceBranch(git, placeholder = "") {
 export function createWorkspaceRepository(repository) {
   if (!repository || typeof repository.name !== "string" || !repository.name
       || repository.name.length > 16384 || /[\u0000-\u001f\u007f]/u.test(repository.name)) return null;
-  const badge = createWorkspaceBranch(undefined, repository.name);
+  // 用户要求仓库行右侧显示该仓库的真实分支，不能用仓库名或外层项目分支兜底。
+  const badge = createWorkspaceBranch(repository.git, "分支不可用");
   badge.classList.add("session-files-repository");
-  // 用户要求仓库文件夹右侧仅显示仓库名称和分支图标，不附带分支名称。
-  badge.title = `仓库：${repository.name}`;
-  badge.setAttribute("aria-label", badge.title);
   return badge;
 }
 export function createWorkspaceLocation(initialPath = "") {
@@ -336,7 +334,7 @@ export function mountSessionFiles({
   let navigationOwner = Math.random().toString(36).slice(2);
   const screens = [], controllers = new Set(), inertState = new Map();
   const responses = new Map(), views = new Map();
-  const pendingDirectories = new Set();
+  const pendingDirectories = new Map();
   let disposed = false, contextKey = "", authorizationKey = "", target = null, route = null;
   let listEpoch = 0, fileEpoch = 0, listController = null, fileController = null;
   let listResponse = null, contentResponse = null, currentDirectory = "", renderedFile = "";
@@ -489,6 +487,9 @@ export function mountSessionFiles({
     if (disposed) return;
     prepare({ kind: "list", path }, recordHistory);
     ++fileEpoch; fileController?.abort(); hide(content.screen);
+    const epoch = ++listEpoch; listController?.abort(); listController = new AbortController();
+    for (const controller of pendingDirectories.values()) controller.abort();
+    pendingDirectories.clear();
     show(listing.screen); currentDirectory = path;
     parentButton.hidden = true;
     const listView = views.get("list:root") || {};
@@ -506,12 +507,14 @@ export function mountSessionFiles({
     listResponse = cached || null; renderDirectory(); list.scrollTop = listView.scroll || 0;
     if (!cached) message(listStatus, "正在读取目录…");
     listing.location.set(cached?.root ? `${cached.root}${path ? `/${path}` : ""}` : path || "当前会话工作目录", cached?.git);
-    const epoch = ++listEpoch; listController?.abort(); listController = new AbortController();
     try {
       const value = await read(path, "files", listController, "");
       if (disposed || epoch !== listEpoch || route?.kind !== "list" || currentDirectory !== path) return;
       const scroll = list.scrollTop;
       if (value !== listResponse) { listResponse = value; renderDirectory(); list.scrollTop = scroll; }
+      // 重新进入文件页也须核对已展开子目录；根目录未变化不能代表子仓库分支未变化。
+      for (const row of list.querySelectorAll(".session-tools-file[aria-expanded='true']"))
+        void loadDirectoryChildren(row.dataset.path);
       listing.location.set(`${value.root}${path ? `/${path}` : ""}`, value.git);
       message(listStatus, value.truncated ? "目录较大，仅显示前 2000 项。" : value.files.length ? "" : "此目录为空。");
     } catch (error) {
@@ -568,23 +571,23 @@ export function mountSessionFiles({
   function toggleDirectory(path) {
     if (expanded.has(path)) expanded.delete(path); else expanded.add(path);
     renderDirectory();
-    if (expanded.has(path) && !responses.has(`files:${path}:`)) void loadDirectoryChildren(path);
+    if (expanded.has(path)) void loadDirectoryChildren(path);
   }
   async function loadDirectoryChildren(path) {
     if (pendingDirectories.has(path)) return;
-    pendingDirectories.add(path);
-    const controller = new AbortController();
+    const controller = new AbortController(), epoch = listEpoch;
+    pendingDirectories.set(path, controller);
     try {
       const value = await read(path, "files", controller, "");
-      if (value && route?.kind === "list" && !search.value.trim()) renderDirectory();
+      if (value && epoch === listEpoch && route?.kind === "list" && !search.value.trim()) renderDirectory();
     } catch (error) {
-      if (error.name !== "AbortError") {
+      if (epoch === listEpoch && route?.kind === "list" && error.name !== "AbortError") {
         const failure = node("p", "session-files-tree-status error-text", error.message);
         failure.style.setProperty("--file-depth", String(path.split("/").length + 1));
         list.append(failure);
       }
     } finally {
-      pendingDirectories.delete(path);
+      if (pendingDirectories.get(path) === controller) pendingDirectories.delete(path);
     }
   }
   async function searchProject(query) {
