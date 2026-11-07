@@ -905,18 +905,26 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .side-creation-status p{margin:0;overflow-wrap:anywhere}
 .side-creation-status>.spinner{flex-shrink:0}
 .session-tools-file-screen{z-index:301}
-.session-tools-heading{display:flex;align-items:center;justify-content:space-between;flex-shrink:0;gap:16px;min-height:56px;padding:10px 16px;border-bottom:1px solid var(--line)}
-.session-tools-heading h1{margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:1.07143rem;font-weight:600;line-height:1.6}
-.session-tools-heading-copy{display:flex;flex:1;flex-direction:column;gap:2px;min-width:0}
-.session-tools-heading-path{color:var(--muted);font-size:.75rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* 用户要求路径后单独显示分支：8px 间距、Git 图标和边框区分信息；45% 上限给路径留出余宽，22px 行高容纳标签，各自截断并保留 title。 */
-.session-tools-heading-location{display:flex;align-items:center;gap:8px;min-width:0;min-height:22px}
+.session-tools-heading{display:flex;align-items:center;justify-content:space-between;flex-shrink:0;gap:16px;padding-inline:16px;border-bottom:1px solid var(--line)}
+.session-tools-heading h1{margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.session-tools-heading-copy{display:flex;flex:1;flex-direction:column;min-width:0}
+.session-tools-heading-path{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 用户要求变更、文件及其详情页顶部栏与会话页等高：桌面最小 52px、上下各 6px，手机最小 48px、上下各 3px，均含原有 1px 底边框；
+   标题、路径字号及两行间距共用下列规则，随全局字号放大；手机断点须同步核对，分支标签不能额外撑高路径行。 */
+.conversation-header,.session-tools-heading{min-height:52px;padding-block:6px}
+.thread-heading,.session-tools-heading-copy{gap:5px}
+.thread-heading strong,.session-tools-heading h1{font-size:1rem;line-height:normal}
+.thread-heading>span,.session-tools-heading-path,.session-tools-heading-location{font-size:.71429rem}
+/* 路径与分支保留 8px 间距、Git 图标和边框，分支最多占 45%，各自省略长文本；取消原先固定 22px 行高以对齐会话副标题。 */
+.session-tools-heading-location{display:flex;align-items:center;gap:8px;min-width:0;min-height:0}
 .session-tools-heading-location>.session-tools-heading-path{min-width:0;flex:0 1 auto}
 .workspace-branch{display:inline-flex;align-items:center;flex:0 0 auto;gap:4px;min-width:0;max-width:45%;padding:2px 6px;border:1px solid var(--line);border-radius:5px;background:var(--side);color:var(--text);font-size:.75rem;line-height:1.4;vertical-align:middle;white-space:nowrap}
 .workspace-branch[hidden]{display:none}
 .workspace-branch-icon{display:inline-flex;flex-shrink:0;width:13px;height:13px;color:var(--muted)}
 .workspace-branch-icon>svg{width:100%;height:100%}
 .workspace-branch-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.session-tools-heading .workspace-branch{font-size:inherit;line-height:1;padding:0 4px}
+.session-tools-heading .workspace-branch-icon{width:.75em;height:.75em}
 .session-tools-back{flex-shrink:0;min-width:48px;min-height:36px;padding:6px 8px;font-size:.85714rem}
 .session-tools-page{flex:1;min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .session-tools-changes{display:flex;flex-direction:column;overflow:hidden}
@@ -979,7 +987,10 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-tools-image-link{display:block;border:1px solid var(--line);border-radius:8px;background:var(--side);overflow:hidden}
 .session-tools-image-link>img{display:block;max-width:100%;width:auto;max-height:240px;margin:auto;object-fit:contain}
 @media(max-width:760px){
-  .session-tools-heading{min-height:50px;padding:6px 12px}
+  .session-tools-heading{padding-inline:12px}
+  .conversation-header,.session-tools-heading{min-height:48px;padding-block:3px}
+  .thread-heading strong,.session-tools-heading h1{font-size:.85714rem}
+  .thread-heading>span,.session-tools-heading-path,.session-tools-heading-location{font-size:.64286rem}
 }
 @media(prefers-reduced-motion:reduce){.session-tools-screen{transition-duration:1ms}}
 @media(max-width:760px){
