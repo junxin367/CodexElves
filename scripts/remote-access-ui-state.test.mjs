@@ -969,6 +969,7 @@ function queueDeliveryHarness(messages) {
     ["function queueReorderAvailable()", "function moveQueueItem("],
     ["function applyQueuedSendResult(", "function queueMessageText("],
     ["function renderQueuedMessages(", "function renderQueueArea("],
+    ["function isActiveThread()", "function renderCompactionBanner("],
   ]) {
     const from = app.indexOf(start), to = app.indexOf(end, from);
     assert.ok(from >= 0 && to > from);
@@ -1036,6 +1037,26 @@ test("原生暂停的队列消息显示可用重试按钮，点击仍操作原�
     assert.equal(retry.disabled, false);
     retry.action();
     assert.deepEqual(calls, [{ threadId: "main", messageId: "original-queue" }]);
+  }
+});
+
+test("会话恢复执行后，暂停的队列消息显示引导并操作原消息", () => {
+  for (const status of ["active", "inProgress", "running", "pending", { type: "active" }, { status: { type: "running" } }]) {
+    const message = { id: "paused-queue", text: "保留的排队内容", pausedReason: "消息已暂停",
+      submission: { status: "queued" }, canSendNow: true };
+    const { context } = queueDeliveryHarness([message]), calls = [];
+    context.thread.status = status;
+    context.steerQueuedMessage = (threadId, messageId) => calls.push({ threadId, messageId });
+    const row = context.renderQueuedMessages([message]).children[0];
+    const action = row.children.find(node => node.className === "queued-steer-button");
+    assert.equal(action.children[1].text, "引导");
+    assert.equal(action.children[0].className, "steer");
+    assert.equal(action.attributes["aria-label"], "引导此队列消息");
+    assert.equal(action.disabled, false);
+    assert.equal(message.pausedReason, "消息已暂停", "显示更新不能伪造队列状态或自动重发");
+    assert.equal(calls.length, 0);
+    action.action();
+    assert.deepEqual(calls, [{ threadId: "main", messageId: message.id }]);
   }
 });
 
@@ -1582,6 +1603,38 @@ test("CDP 历史压缩投影保留完成时间与失败状态", () => {
   const projected = context.nativeTranscriptItem(item);
   assert.equal(projected.completedAtMs, 2000);
   assert.match(compactionRenderer()(projected).textContent, /失败/);
+});
+
+test("服务历史先补回继续消息，再翻页时保留顺序且不重复首条输入", () => {
+  const context = { turns: new Map(), transcriptEvents: new Map(), itemVersions: new Map(),
+    turnVersions: new Map(), turnFieldVersions: new Map(), partialItems: new Set() };
+  vm.createContext(context);
+  vm.runInContext([
+    sourceSection("const transcriptEventTypes =", "async function mutate("),
+    sourceSection("function mergeLiveText(", "async function reloadThread("),
+  ].join("\n"), context);
+  const items = Array.from({ length: 114 }, (_, index) => ({
+    id: `item-${String(index).padStart(3, "0")}`,
+    ...(index === 0 ? { type: "userMessage", content: [{ type: "text", text: "继续" }] }
+      : { type: "commandExecution", command: "echo check", status: "completed" }),
+  }));
+  let turn = context.mergeHistoryTurn({ id: "turn", status: "completed",
+    items: [{ ...items[0], remoteHistoryContext: true }, ...items.slice(74)],
+    itemsPageComplete: true, itemsComplete: false, itemsNextCursor: "page-2" }, 0);
+  context.turns.set(turn.id, turn);
+  assert.equal(turn.items[0].content[0].text, "继续");
+  assert.equal(turn.itemsCursorAnchor, "item-074");
+  for (const [pageItems, next] of [[items.slice(34, 74), "page-3"], [items.slice(0, 34), null]]) {
+    turn = context.mergeHistoryTurn({ id: "turn", items: pageItems,
+      itemsPageComplete: true, itemsComplete: next == null, itemsNextCursor: next },
+    0, { older: true, beforeId: turn.itemsCursorAnchor });
+    context.turns.set(turn.id, turn);
+  }
+  assert.equal(turn.items.length, 114);
+  assert.deepEqual(Array.from(turn.items, item => item.id), items.map(item => item.id));
+  assert.equal(turn.items.filter(item => item.type === "userMessage").length, 1);
+  assert.equal(turn.itemsComplete, true);
+  assert.equal(turn.itemsNextCursor, null);
 });
 
 test("工具证据未知时实际渲染状态未知，不能因父轮运行或结束显示完成勾号", () => {
@@ -4104,6 +4157,7 @@ function cachedControlsHarness() {
   vm.runInContext([
     sourceSection("function queueReorderAvailable()", "function applyQueueReorderResult("),
     sourceSection("function renderQueuedMessages(", "async function queuedEditFingerprint("),
+    sourceSection("function isActiveThread()", "function renderCompactionBanner("),
     sourceSection("const goalStatusLabels =", "function formatGoalTokens("),
     sourceSection("function renderGoalStatus()", "function blockingRequestState("),
   ].join("\n"), context);
@@ -4113,6 +4167,30 @@ function cachedControlsHarness() {
   const render = () => { context.renderGoalStatus(); context.renderQueueArea(); };
   return { context, persisted, goal, queue, display, render };
 }
+
+test("队列内容不变时，运行状态切换仍立即刷新重试和引导按钮", () => {
+  const { context, queue, display, render } = cachedControlsHarness();
+  display.queuedMessages[0].pausedReason = "消息已暂停";
+  display.queuedMessages[0].submission = { status: "queued" };
+  context.rememberThreadDisplay(display);
+  context.thread = { ...display, status: { type: "idle" } };
+  const action = () => queue.querySelector(".queued-steer-button");
+  render();
+  assert.equal(action().children[1].text, "重试");
+  const initial = queue.firstElementChild;
+  render();
+  assert.equal(queue.firstElementChild, initial, "状态未变时仍复用已有队列区域");
+  context.thread.status = { type: "active" };
+  render();
+  assert.notEqual(queue.firstElementChild, initial);
+  assert.equal(action().children[1].text, "引导");
+  assert.equal(action().children[0].className, "steer");
+  context.thread.status = { type: "idle" };
+  render();
+  assert.equal(action().children[1].text, "重试");
+  assert.equal(action().children[0].className, "retry");
+  assert.equal(context.thread.queuedMessages[0].pausedReason, "消息已暂停");
+});
 
 test("会话尚未返回时立即渲染缓存目标和队列，相同内容不重建区域", () => {
   const { context, goal, queue, display, render } = cachedControlsHarness();

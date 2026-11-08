@@ -5837,6 +5837,12 @@ const fs=require('node:fs'),readline=require('node:readline'),crypto=require('no
 const threads=new Map(),goals=new Map();let approval=null;
 const output=v=>process.stdout.write(JSON.stringify(v)+'\n');
 const event=(method,params)=>output({method,params});
+const pageRows=(rows,p,prefix)=>{
+  const ordered=p.sortDirection==='asc'?[...rows]:[...rows].reverse();
+  const start=p.cursor?Number(String(p.cursor).slice(prefix.length+1)):0,limit=p.limit||100;
+  const end=Math.min(start+limit,ordered.length);
+  return {data:ordered.slice(start,end),nextCursor:end<ordered.length?`${prefix}:${end}`:null};
+};
 const finish=(id,status='completed')=>{
   const t=threads.get(id),turn=t?.turns.at(-1);if(!turn)return;
   turn.status=status;t.status={type:'idle'};event('turn/completed',{threadId:id,turn});
@@ -5860,8 +5866,17 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  case 'thread/read': if(!t){output({id:q.id,error:{code:-32600,message:'unknown thread'}});return;}
    result={thread:t,readState:{firstUnread:null,revision:'r1'}};break;
  case 'thread/resume': result={thread:t,model:'gpt-test',reasoningEffort:'high'};break;
- case 'thread/turns/list':result={data:[...(t?.turns||[])].reverse(),nextCursor:null};break;
- case 'thread/items/list':result={data:[...(t.turns.find(turn=>turn.id===p.turnId)?.items||[])].reverse().map(item=>({turnId:p.turnId,item})),nextCursor:null};break;
+ case 'thread/turns/list':result=pageRows(t?.turns||[],p,'turns');break;
+ case 'thread/items/list':{
+   result=pageRows(t.turns.find(turn=>turn.id===p.turnId)?.items||[],p,'items');
+   result.data=result.data.map(item=>({turnId:t.foreignHistoryTurn?'unrelated-turn':p.turnId,item}));
+   if(t.historyCursorLoop&&p.cursor==='items:80')result.nextCursor='items:40';
+   break;
+ }
+ case 'test/seedHistory':
+   t.turns=p.turns;t.historyCursorLoop=p.cursorLoop===true;t.foreignHistoryTurn=p.foreignTurn===true;
+   t.status={type:t.turns.some(turn=>turn.status==='inProgress')?'active':'idle'};
+   event('thread/status/changed',{threadId:p.threadId,status:t.status});break;
  case 'thread/goal/get':result={goal:goals.get(p.threadId)||null};break;
  case 'thread/goal/set':{
    const goal={...(goals.get(p.threadId)||{createdAt:1,tokensUsed:0,timeUsedSeconds:0,tokenBudget:null}),...p,updatedAt:2};
@@ -6452,6 +6467,170 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         assert!(execution::is_cdp_forbidden(&error));
         let report = std::fs::read_to_string(directory.path().join("execution.log")).unwrap();
         assert!(report.contains("remote-background") && report.contains("target-discovery"));
+    }
+
+    #[tokio::test]
+    async fn harness_history_running_turn_restores_all_messages_without_cdp() {
+        let (directory, authorization, id) =
+            harness_history_fixture("inProgress", false, false).await;
+        let controller = &authorization.controller;
+        let history = controller
+            .call_authorized("history", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        let turn = &history["data"][0];
+        assert_eq!(turn["items"].as_array().unwrap().len(), 114);
+        assert_eq!(turn["items"][0]["content"][0]["text"], "继续");
+        assert_eq!(turn["items"][113]["id"], "item-113");
+        assert_eq!(turn["itemsView"], "full");
+        assert_eq!(turn["itemsComplete"], true);
+        assert_eq!(turn["itemsPageComplete"], true);
+        assert!(turn["itemsNextCursor"].is_null());
+        let requests = harness_history_requests(directory.path());
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[1]["params"]["cursor"], "items:40");
+        assert_eq!(requests[2]["params"]["cursor"], "items:80");
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        controller.harness.enabled.store(false, Ordering::Release);
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_history_finished_turn_keeps_input_and_advances_item_cursor() {
+        for status in ["completed", "interrupted"] {
+            let (directory, authorization, id) =
+                harness_history_fixture(status, false, false).await;
+            let controller = &authorization.controller;
+            let history = controller
+                .call_authorized("history", json!({"threadId":id}), &authorization)
+                .await
+                .unwrap();
+            let turn = &history["data"][0];
+            assert_eq!(turn["items"].as_array().unwrap().len(), 42);
+            assert_eq!(turn["items"][0]["content"][0]["text"], "继续");
+            assert_eq!(turn["items"][0]["remoteHistoryContext"], true);
+            assert_eq!(turn["itemsView"], "summary");
+            assert_eq!(turn["itemsComplete"], false);
+            assert_eq!(turn["itemsPageComplete"], true);
+            assert_eq!(turn["itemsNextCursor"], "items:40");
+            assert_eq!(turn["newestSnapshotItemId"], "item-113");
+            assert_eq!(
+                history["itemsPaginationByTurnId"]["history-turn"]["nextCursor"],
+                turn["itemsNextCursor"]
+            );
+            let mut ids: std::collections::HashSet<String> = turn["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["id"].as_str().unwrap().to_owned())
+                .collect();
+            let mut cursor = turn["itemsNextCursor"].clone();
+            for expected in ["items:80", ""] {
+                let page = controller.call_authorized("history",
+                    json!({"threadId":id,"turnId":"history-turn","itemCursor":cursor,"turnStatus":status}),
+                    &authorization).await.unwrap();
+                assert_ne!(page["itemsNextCursor"], cursor);
+                assert_eq!(page["itemsNextCursor"].as_str().unwrap_or(""), expected);
+                ids.extend(
+                    page["data"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|item| item["id"].as_str().unwrap().to_owned()),
+                );
+                cursor = page["itemsNextCursor"].clone();
+                assert_eq!(page["itemsComplete"], cursor.is_null());
+            }
+            assert_eq!(ids.len(), 114);
+            let requests = harness_history_requests(directory.path());
+            assert_eq!(requests.len(), 4, "终态轮次只补开头，较早过程仍按需翻页");
+            assert_eq!(requests[1]["params"]["sortDirection"], "asc");
+            assert_eq!(requests[2]["params"]["cursor"], "items:40");
+            assert_eq!(requests[3]["params"]["cursor"], "items:80");
+            controller.harness.enabled.store(false, Ordering::Release);
+            controller.harness.release().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn harness_history_rejects_cursor_cycles_and_invalid_client_cursor() {
+        let (directory, authorization, id) =
+            harness_history_fixture("inProgress", true, false).await;
+        let controller = &authorization.controller;
+        let error = controller
+            .call_authorized("history", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("游标循环"));
+        assert_eq!(harness_history_requests(directory.path()).len(), 3);
+        let error = controller
+            .call_authorized(
+                "history",
+                json!({"threadId":id,"turnId":"history-turn","itemCursor":42}),
+                &authorization,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.downcast_ref::<ApiError>().unwrap().code, 400);
+        assert_eq!(harness_history_requests(directory.path()).len(), 3);
+        controller.harness.enabled.store(false, Ordering::Release);
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_history_rejects_items_from_another_turn() {
+        let (_directory, authorization, id) =
+            harness_history_fixture("completed", false, true).await;
+        let controller = &authorization.controller;
+        let error = controller
+            .call_authorized("history", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("归属"));
+        controller.harness.enabled.store(false, Ordering::Release);
+        controller.harness.release().await;
+    }
+
+    async fn harness_history_fixture(
+        status: &str,
+        cursor_loop: bool,
+        foreign_turn: bool,
+    ) -> (tempfile::TempDir, RemoteAuthorization, String) {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let created = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"ready"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap().to_owned();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let items: Vec<_> = (0..114).map(|index| {
+            let item_id = format!("item-{index:03}");
+            if index == 0 {
+                json!({"id":item_id,"type":"userMessage","content":[{"type":"text","text":"继续"}]})
+            } else if index == 1 || index == 113 {
+                json!({"id":item_id,"type":"agentMessage","text":if index==1 {"开始处理"} else {"处理完成"}})
+            } else {
+                json!({"id":item_id,"type":"commandExecution","command":"echo check","status":"completed"})
+            }
+        }).collect();
+        controller.harness.seed_test_history(
+            json!({"threadId":id,"turns":[{"id":"history-turn","status":status,"startedAt":1000,"items":items}],
+                "cursorLoop":cursor_loop,"foreignTurn":foreign_turn})).await.unwrap();
+        (directory, authorization, id)
+    }
+
+    fn harness_history_requests(directory: &FsPath) -> Vec<Value> {
+        std::fs::read_to_string(directory.join("requests.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|frame| frame["method"] == "thread/items/list")
+            .collect()
     }
 
     #[tokio::test]

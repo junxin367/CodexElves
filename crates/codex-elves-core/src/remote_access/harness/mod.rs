@@ -64,6 +64,17 @@ impl Harness {
     pub async fn install_test_process(&self, process: crate::codex_service::RunningService) {
         self.runtime.install_test_process(process).await;
     }
+    #[cfg(test)]
+    pub async fn seed_test_history(&self, payload: Value) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.runtime.has_test_process(),
+            "只允许向隔离测试引擎写入历史样例"
+        );
+        self.runtime
+            .request("test/seedHistory", payload, None)
+            .await?;
+        Ok(())
+    }
     pub fn new(directory: &Path) -> anyhow::Result<Arc<Self>> {
         let (events, receiver) = mpsc::channel(512);
         let audit = Arc::new(execution::Audit::default());
@@ -654,6 +665,97 @@ fn sent_key(id: &str, payload: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "只读验证已安装引擎，需显式指定会话和轮次，并隔离 CDP 与桌面 IPC"]
+    async fn installed_engine_history_reentry_smoke() {
+        assert!(execution::cdp_disabled());
+        assert!(
+            std::env::var("CODEX_ELVES_TEST_IPC_PIPE")
+                .unwrap_or_default()
+                .starts_with(r"\\.\pipe\codex-elves-isolation-")
+        );
+        let id = std::env::var("CODEX_ELVES_HISTORY_CHECK_THREAD").expect("缺少待核对会话");
+        let turn_id = std::env::var("CODEX_ELVES_HISTORY_CHECK_TURN").expect("缺少待核对轮次");
+        let expected = std::env::var("CODEX_ELVES_HISTORY_CHECK_TEXT").expect("缺少待核对用户消息");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp");
+        std::fs::create_dir_all(&root).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("history-reentry-check-")
+            .tempdir_in(root)
+            .unwrap();
+        let service = Harness::new(directory.path()).unwrap();
+        let mut cursor = Value::Null;
+        let mut seen = std::collections::HashSet::new();
+        let turn = loop {
+            let history = service
+                .call("history", json!({"threadId":id,"cursor":cursor}), None)
+                .await
+                .unwrap();
+            if let Some(turn) = history["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|turn| turn["id"] == turn_id)
+            {
+                break turn.clone();
+            }
+            cursor = history["nextCursor"].clone();
+            assert!(
+                cursor.is_string() && seen.insert(cursor.to_string()),
+                "未找到指定轮次"
+            );
+        };
+        let first = turn["items"].as_array().unwrap();
+        assert!(first.iter().any(|item| {
+            item["type"] == "userMessage"
+                && item["content"]
+                    .as_array()
+                    .is_some_and(|parts| parts.iter().any(|part| part["text"] == expected))
+        }));
+        let mut ids: std::collections::HashSet<_> = first
+            .iter()
+            .map(|item| item["id"].as_str().unwrap().to_owned())
+            .collect();
+        let mut cursor = turn["itemsNextCursor"].clone();
+        let mut pages = 1;
+        while !cursor.is_null() {
+            let history = service
+                .call(
+                    "history",
+                    json!({"threadId":id,"turnId":turn_id,
+                "itemCursor":cursor,"turnStatus":turn["status"]}),
+                    None,
+                )
+                .await
+                .unwrap();
+            let before = ids.len();
+            ids.extend(
+                history["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|item| item["id"].as_str().unwrap().to_owned()),
+            );
+            assert!(ids.len() > before, "补页没有新增记录");
+            assert_ne!(history["itemsNextCursor"], cursor, "消息游标没有前进");
+            cursor = history["itemsNextCursor"].clone();
+            pages += 1;
+        }
+        assert!(
+            service.loaded.lock().await.is_empty(),
+            "只读核对不能接管或恢复用户会话"
+        );
+        let audit = service.audit.snapshot();
+        assert_eq!(audit["serviceCdpAttempts"], 0);
+        println!(
+            "HISTORY_REENTRY_VERIFIED {}",
+            json!({"initialItems":first.len(),
+            "uniqueItemsAfterPaging":ids.len(),"pages":pages,"inputVisibleOnReentry":true,
+            "serviceCdpAttempts":audit["serviceCdpAttempts"],"ownedThreads":0})
+        );
+        service.release().await;
+    }
 
     #[tokio::test]
     #[ignore]

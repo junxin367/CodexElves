@@ -9,6 +9,82 @@ use crate::codex_service::{
     owner_snapshot_history,
 };
 
+// 40 只限制一次引擎读取的条数；执行中的轮次必须读取全部分页，不能因此隐藏“继续”等开头输入。
+const HISTORY_ITEM_PAGE_LIMIT: usize = 40;
+
+struct HistoryItems {
+    items: Vec<Value>,
+    next_cursor: Option<String>,
+    newest_snapshot_item_id: Option<String>,
+}
+
+impl HistoryItems {
+    fn pagination(&self) -> Value {
+        json!({"nextCursor":self.next_cursor,"hasMore":self.next_cursor.is_some(),
+            "complete":self.next_cursor.is_none(),"pageComplete":true,"direction":"older","order":"asc",
+            "pageLimit":HISTORY_ITEM_PAGE_LIMIT,"newestSnapshotItemId":self.newest_snapshot_item_id})
+    }
+
+    fn apply_to(self, turn: &mut Value) {
+        let complete = self.next_cursor.is_none();
+        turn["items"] = json!(self.items);
+        // 网页直接读取每轮字段；不能只填写 itemsPaginationByTurnId，否则“加载更早”没有可用游标。
+        turn["itemsView"] = json!(if complete { "full" } else { "summary" });
+        turn["itemsPageComplete"] = json!(true);
+        turn["itemsComplete"] = json!(complete);
+        turn["itemsNextCursor"] = json!(self.next_cursor);
+        turn["newestSnapshotItemId"] = json!(self.newest_snapshot_item_id);
+    }
+
+    fn prepend_visible_context(&mut self, first: Self) {
+        let loaded: HashSet<_> = self
+            .items
+            .iter()
+            .filter_map(|item| item["id"].as_str())
+            .collect();
+        let first_user = first.items.iter().position(|item| {
+            item["type"] == "userMessage"
+                || item["type"] == "steeringUserMessage"
+                    && (item["status"] == "accepted" || item["serverUserMessageId"].is_string())
+        });
+        let mut context: Vec<_> = first
+            .items
+            .into_iter()
+            .enumerate()
+            .filter(|(index, item)| {
+                !loaded.contains(item["id"].as_str().unwrap_or(""))
+                    && (first_user.is_some_and(|first| *index <= first)
+                        || item["type"] == "agentMessage")
+            })
+            .map(|(_, mut item)| {
+                // 用户要求重进会话仍看见首条输入；补回的开头不是连续分页内容，不能充当下一页定位点。
+                item["remoteHistoryContext"] = json!(true);
+                item
+            })
+            .collect();
+        context.append(&mut self.items);
+        self.items = context;
+    }
+}
+
+fn history_cursor<'a>(value: &'a Value, label: &str) -> anyhow::Result<Option<&'a str>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_str()
+        .filter(|cursor| cursor.len() <= 4096)
+        .map(Some)
+        .ok_or_else(|| error(400, &format!("{label}无效")))
+}
+
+fn executing_history_turn(status: &Value) -> bool {
+    matches!(
+        status.as_str().or_else(|| status["type"].as_str()),
+        Some("active" | "inProgress" | "running" | "pending")
+    )
+}
+
 impl Harness {
     pub(super) async fn desktop_projects(&self) -> anyhow::Result<DesktopProjects> {
         #[cfg(test)]
@@ -299,7 +375,8 @@ impl Harness {
 
     pub(super) async fn history(&self, payload: &Value) -> anyhow::Result<Value> {
         let id = required(payload, "threadId")?;
-        if payload["cursor"].is_null() && payload["turnId"].is_null() {
+        let cursor = history_cursor(&payload["cursor"], "会话分页游标")?;
+        if cursor.is_none() && payload["turnId"].is_null() {
             if let Some(snapshot) = self.owner_snapshot(id).await? {
                 self.follow_owner(id, snapshot.clone()).await;
                 if let Some(history) = owner_snapshot_history(&snapshot, id) {
@@ -308,65 +385,159 @@ impl Harness {
             }
         }
         if let Some(turn_id) = payload["turnId"].as_str() {
+            // 用户要求服务模式可以实际翻页；网页沿用 CDP 契约发送 itemCursor，不能误读成轮次 cursor。
+            let item_cursor = history_cursor(&payload["itemCursor"], "消息分页游标")?;
             let page = self
-                .runtime
-                .read(
-                    "thread/items/list",
-                    json!({"threadId":id,"turnId":turn_id,
-                "cursor":payload["cursor"],"limit":40,"sortDirection":"desc"}),
-                )
+                .history_turn_items(id, turn_id, &payload["turnStatus"], item_cursor)
                 .await?;
-            // 用户要求无桌面依赖时历史仍可用；新版 CLI 的分页项包在 item 中，须与独立 CLI 读取统一展开。
-            let (items, next_cursor) = crate::codex_service::normalize_history_items_page(
-                &page,
-                payload["cursor"].as_str(),
-            )?;
-            let history = json!({"ok":true,"scope":"items","threadId":id,"turnId":turn_id,"data":items,
+            let history = json!({"ok":true,"scope":"items","threadId":id,"turnId":turn_id,"data":page.items,
                 "itemOrder":"asc","itemDirection":"older","itemsPageComplete":true,
-                "itemsComplete":next_cursor.is_none(),"itemsNextCursor":next_cursor,
-                "newestSnapshotItemId":null,"pageLimit":40,"transcriptEvents":[]});
+                "itemsComplete":page.next_cursor.is_none(),"itemsNextCursor":page.next_cursor,
+                "newestSnapshotItemId":page.newest_snapshot_item_id,"pageLimit":HISTORY_ITEM_PAGE_LIMIT,"transcriptEvents":[]});
             return Ok(self.projection.lock().await.history(id, history, false));
         }
         let page = self
             .runtime
             .read(
                 "thread/turns/list",
-                json!({"threadId":id,"cursor":payload["cursor"],
+                json!({"threadId":id,"cursor":cursor,
             "limit":3,"itemsView":"notLoaded","sortDirection":"desc"}),
             )
             .await?;
-        let mut turns = page["data"].as_array().cloned().unwrap_or_default();
+        let mut turns = page["data"]
+            .as_array()
+            .ok_or_else(|| error(503, "会话历史分页返回无效"))?
+            .clone();
+        let next_cursor = history_cursor(&page["nextCursor"], "引擎会话分页游标")
+            .map_err(|_| error(503, "引擎会话分页游标无效"))?;
+        if cursor.is_some() && next_cursor == cursor {
+            return Err(error(503, "会话历史分页游标未前进"));
+        }
         let mut pagination = serde_json::Map::new();
         // 每页最多 3 轮，最多并发 3 次内容读取；保留轮次和消息原有顺序。
         let item_reads = turns.iter().map(|turn| async move {
             let turn_id = required(turn, "id")?;
-            self.runtime
-                .read(
-                    "thread/items/list",
-                    json!({"threadId":id,"turnId":turn_id,"limit":40,"sortDirection":"desc"}),
-                )
+            self.history_turn_items(id, turn_id, &turn["status"], None)
                 .await
         });
         let items = futures_util::future::try_join_all(item_reads).await?;
         for (turn, items) in turns.iter_mut().zip(items) {
             let turn_id = required(turn, "id")?.to_owned();
-            // 首屏与单轮翻页必须使用相同的历史项结构；保留对旧版本裸 item 数组的兼容。
-            let (rows, next_cursor) =
-                crate::codex_service::normalize_history_items_page(&items, None)?;
-            turn["items"] = json!(rows);
-            pagination.insert(turn_id,json!({"nextCursor":next_cursor,
-                "hasMore":next_cursor.is_some(),"complete":next_cursor.is_none(),
-                "pageComplete":true,"direction":"older","order":"asc","pageLimit":40,"newestSnapshotItemId":null}));
+            pagination.insert(turn_id, items.pagination());
+            items.apply_to(turn);
         }
         let history = json!({"ok":true,"scope":"turns","threadId":id,"data":turns,
-            "nextCursor":page["nextCursor"],"backwardsCursor":page["backwardsCursor"],
+            "nextCursor":next_cursor,"backwardsCursor":page["backwardsCursor"],
             "turnOrder":"desc","itemOrder":"asc","turnsPageComplete":true,
-            "turnsComplete":page["nextCursor"].is_null(),"itemsPaginationByTurnId":pagination,"transcriptEvents":[]});
+            "turnsComplete":next_cursor.is_none(),"itemsPaginationByTurnId":pagination,"transcriptEvents":[]});
         Ok(self
             .projection
             .lock()
             .await
-            .history(id, history, payload["cursor"].is_null()))
+            .history(id, history, cursor.is_none()))
+    }
+
+    async fn history_items_page(
+        &self,
+        id: &str,
+        turn_id: &str,
+        cursor: Option<&str>,
+        direction: &str,
+    ) -> anyhow::Result<HistoryItems> {
+        let page = self
+            .runtime
+            .read(
+                "thread/items/list",
+                json!({"threadId":id,"turnId":turn_id,"cursor":cursor,
+                "limit":HISTORY_ITEM_PAGE_LIMIT,"sortDirection":direction}),
+            )
+            .await?;
+        let entries = page["data"]
+            .as_array()
+            .ok_or_else(|| error(503, "会话消息分页返回无效"))?;
+        history_cursor(&page["nextCursor"], "引擎消息分页游标")
+            .map_err(|_| error(503, "引擎消息分页游标无效"))?;
+        for entry in entries {
+            let item = entry.get("item").unwrap_or(entry);
+            if !item.is_object()
+                || item["id"].as_str().is_none_or(str::is_empty)
+                || entry.get("item").is_some()
+                    && entry.get("turnId").is_some_and(|value| value != turn_id)
+            {
+                return Err(error(503, "会话消息内容或分页归属无效"));
+            }
+        }
+        // 首屏、升序开头与单轮翻页共用新版包装解析，仍兼容旧版裸 item 数组。
+        let (mut items, next_cursor) =
+            crate::codex_service::normalize_history_items_page(&page, cursor)?;
+        for (item, entry) in items.iter_mut().zip(entries.iter().rev()) {
+            if entry.get("item").is_some() {
+                for field in ["startedAtMs", "completedAtMs"] {
+                    if item[field].is_null() && entry[field].is_number() {
+                        item[field] = entry[field].clone();
+                    }
+                }
+            }
+        }
+        if direction == "asc" {
+            items.reverse();
+        }
+        let newest_snapshot_item_id = items
+            .last()
+            .and_then(|item| item["id"].as_str())
+            .map(str::to_owned);
+        Ok(HistoryItems {
+            items,
+            next_cursor,
+            newest_snapshot_item_id,
+        })
+    }
+
+    async fn history_turn_items(
+        &self,
+        id: &str,
+        turn_id: &str,
+        status: &Value,
+        cursor: Option<&str>,
+    ) -> anyhow::Result<HistoryItems> {
+        let mut page = self.history_items_page(id, turn_id, cursor, "desc").await?;
+        if !executing_history_turn(status) {
+            if cursor.is_none() && page.next_cursor.is_some() {
+                let first = self.history_items_page(id, turn_id, None, "asc").await?;
+                page.prepend_visible_context(first);
+            }
+            return Ok(page);
+        }
+        // 用户要求停止后“继续”的输入在重开时可见；执行中读完全部页，终态轮次仍按原方式懒加载。
+        let newest_snapshot_item_id = page.newest_snapshot_item_id;
+        let mut pages = vec![page.items];
+        let mut next_cursor = page.next_cursor;
+        let mut seen = HashSet::new();
+        if let Some(cursor) = cursor {
+            seen.insert(cursor.to_owned());
+        }
+        while let Some(cursor) = next_cursor {
+            if !seen.insert(cursor.clone()) {
+                return Err(error(503, "会话消息分页游标循环"));
+            }
+            page = self
+                .history_items_page(id, turn_id, Some(&cursor), "desc")
+                .await?;
+            pages.push(page.items);
+            next_cursor = page.next_cursor;
+        }
+        let mut loaded = HashSet::new();
+        let items = pages
+            .into_iter()
+            .rev()
+            .flatten()
+            .filter(|item| loaded.insert(item["id"].as_str().unwrap_or("").to_owned()))
+            .collect();
+        Ok(HistoryItems {
+            items,
+            next_cursor: None,
+            newest_snapshot_item_id,
+        })
     }
 
     pub(super) async fn models(&self, payload: &Value) -> anyhow::Result<Value> {

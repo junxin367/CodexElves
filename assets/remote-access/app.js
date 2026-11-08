@@ -9322,7 +9322,7 @@ function renderQueuedMessages(messages, previous = null) {
   if (editingQueuedMessage?.threadId === selectedId && editingQueuedMessage.state === "editing")
     messages = messages?.filter(message => message?.id !== editingQueuedMessage.message.id);
   if (!Array.isArray(messages) || !messages.length) return null;
-  const threadId = selectedId;
+  const threadId = selectedId, active = isActiveThread();
   const previousAttachments = new Map([...previous?.querySelectorAll(".queued-message") || []]
     .map(row => [row.dataset.messageId, $(".queued-message-attachments", row)]));
   const queue = element("section", "queued-messages");
@@ -9340,7 +9340,8 @@ function renderQueuedMessages(messages, previous = null) {
     const awaitingReceipt = message.submission?.status === "outcome-unknown"
       || pending?.action === "steerQueued" && pending.payload?.threadId === threadId
         && pending.payload?.messageId === messageId;
-    const retryable = !accepted && !awaitingReceipt
+    // 用户要求按钮符合实际操作：暂停消息在会话恢复执行后用于引导，不能沿用旧 pausedReason 显示重试。
+    const retryable = !active && !accepted && !awaitingReceipt
       && typeof message.pausedReason === "string" && !!message.pausedReason.trim()
       && (!message.submission?.status || message.submission.status === "queued");
     const queueIcon = button("", "拖动调整排队顺序", event => event.preventDefault(), "queued-message-icon queued-drag-handle");
@@ -9432,7 +9433,8 @@ function renderQueueArea() {
   if (!root) return;
   const messages = currentThreadDisplay()?.queuedMessages;
   const ready = thread?.id === selectedId && Array.isArray(thread.queuedMessages);
-  const signature = JSON.stringify([selectedId, messages, ready, thread?.queuedEdits, session?.device.id, threadReadOnly(), connected,
+  // 队列内容可保持不变，但停止/恢复会改变按钮文案与图标，必须纳入刷新判断。
+  const signature = JSON.stringify([selectedId, messages, ready, isActiveThread(), thread?.queuedEdits, session?.device.id, threadReadOnly(), connected,
     compactionLocked(), [...queuedActionBusy], editingQueuedMessage?.message.id, editingQueuedMessage?.state,
     !!editingMessage, busy, stopping, pending?.id, queueReorder, queuedEditCheckVersion]);
   if (root.dataset.queueSignature === signature) return;
