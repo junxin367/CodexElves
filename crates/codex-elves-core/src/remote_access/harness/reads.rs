@@ -117,10 +117,11 @@ impl Harness {
 
     pub(super) async fn sidebar(&self) -> anyhow::Result<Value> {
         // 会话与项目互不依赖；首屏只等最近一页，后续目录由服务后台补齐。
-        let ((rows, complete), project_rows, desktop) = tokio::try_join!(
+        let ((mut rows, complete), project_rows, desktop, native_pins) = tokio::try_join!(
             self.catalog.snapshot(&self.runtime, &self.projection),
             self.list_all("project/list", json!({"limit":100})),
-            self.desktop_projects()
+            self.desktop_projects(),
+            self.native_pinned_threads()
         )?;
         // 用户要求项目效果对齐 CDP：只列出已保存项目，并保留 project/list 的桌面顺序；
         // 会话工作目录不能补成项目，否则无项目会话和历史临时目录会进入新建选择器。
@@ -141,7 +142,7 @@ impl Harness {
             })
             .collect();
         // 侧栏只需要置顶与排序，不能复制整份消息队列、图片和历史回执。
-        let (thread_pins, project_pins, project_pin_overrides, preferences) = {
+        let (mut thread_pins, project_pins, project_pin_overrides, preferences) = {
             let store = self.store.lock().await;
             (
                 store.data.thread_pins.clone(),
@@ -150,6 +151,21 @@ impl Harness {
                 store.data.preferences.clone(),
             )
         };
+        let pinned_threads_complete = native_pins.is_some() || complete;
+        let native_pin_order = native_pins.as_ref().map(|pins| {
+            pins.iter()
+                .map(|row| row["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        });
+        if let Some(pins) = native_pins {
+            thread_pins = pins
+                .iter()
+                .map(|row| row["id"].as_str().unwrap().to_owned())
+                .collect();
+            // 置顶会话不受最近列表分页影响；合并时使用原生置顶读取的最新元数据，并按 ID 去重。
+            rows.retain(|row| !thread_pins.contains(row["id"].as_str().unwrap_or("")));
+            rows.extend(pins);
+        }
         let mut recent = Vec::new();
         let projection = self.projection.lock().await;
         for row in rows {
@@ -210,11 +226,19 @@ impl Harness {
                     .unwrap_or(usize::MAX),
             )
         });
-        let pins: Vec<_> = recent
+        let mut pins: Vec<_> = recent
             .iter()
             .filter(|t| t["pinned"] == true)
             .cloned()
             .collect();
+        if let Some(order) = native_pin_order {
+            let positions: std::collections::HashMap<_, _> = order
+                .iter()
+                .enumerate()
+                .map(|(index, id)| (id.as_str(), index))
+                .collect();
+            pins.sort_by_key(|thread| positions[thread["id"].as_str().unwrap()]);
+        }
         let preferences = if preferences.is_object() {
             preferences
         } else {
@@ -222,7 +246,8 @@ impl Harness {
         };
         Ok(
             json!({"ok":true,"nativeBridge":"harness","complete":complete,"projects":projects,
-            "recent":recent,"pinnedThreads":pins,"nextCursor":null,"sideThreadIds":[],
+            "recent":recent,"pinnedThreads":pins,"pinnedThreadsComplete":pinned_threads_complete,
+            "nextCursor":null,"sideThreadIds":[],
             "unreadSideThreads":[],"creationAvailable":true,"preferences":preferences}),
         )
     }

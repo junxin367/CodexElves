@@ -17,6 +17,15 @@ use crate::desktop_owner_ipc::{WriteFrame, guarded_write};
 const TIMEOUT: Duration = Duration::from_secs(45);
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
 
+#[derive(Debug)]
+pub(super) struct UnsupportedMethod;
+
+impl std::fmt::Display for UnsupportedMethod {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("执行引擎不支持此方法")
+    }
+}
+
 pub(super) struct Runtime {
     audit: Arc<execution::Audit>,
     health: Mutex<Option<(Instant, String, Result<(), String>)>>,
@@ -139,6 +148,9 @@ impl Runtime {
                         reader_reads.invalidate("skills").await;
                     }
                     let method = frame["method"].as_str().unwrap_or("");
+                    if method == "thread/section/changed" {
+                        reader_reads.invalidate("thread/list").await;
+                    }
                     if method.starts_with("project/") {
                         reader_reads.invalidate("project/list").await;
                     }
@@ -367,15 +379,20 @@ impl Connection {
         if let Some(error) = frame.get("error") {
             let rejected = matches!(error["code"].as_i64(), Some(-32600 | -32601 | -32602));
             // 引擎内部错误可能出现在写入之后，不能当作“尚未发送”而允许重放。
-            return Err(super::super::ApiError {
+            let failure = anyhow::Error::from(super::super::ApiError {
                 code: if rejected { 409 } else { 503 },
                 message: format!(
                     "Codex 操作失败：{}",
                     error["message"].as_str().unwrap_or("未知错误")
                 ),
                 outcome_unknown: guard.is_some() && !rejected,
-            }
-            .into());
+            });
+            // 仅 -32601 允许兼容旧引擎；权限、参数、内部错误或超时不能伪装成不支持置顶。
+            return Err(if error["code"] == -32601 {
+                failure.context(UnsupportedMethod)
+            } else {
+                failure
+            });
         }
         Ok(frame.get("result").cloned().unwrap_or(Value::Null))
     }

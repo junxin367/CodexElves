@@ -2,6 +2,7 @@
 //! 用户要求关闭 CDP 后完整切换；本模块不包含 CDP、页面脚本或注入回退。
 mod catalog;
 mod commands;
+mod pins;
 mod projection;
 mod projects;
 mod read_cache;
@@ -42,6 +43,7 @@ pub(super) struct Harness {
     owners: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     loaded: Mutex<HashMap<String, String>>,
+    pin_capability: Mutex<Option<(String, bool)>>,
     pub enabled: AtomicBool,
 }
 
@@ -93,6 +95,7 @@ impl Harness {
             owners: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()),
             loaded: Mutex::new(HashMap::new()),
+            pin_capability: Mutex::new(None),
             enabled: AtomicBool::new(false),
         }))
     }
@@ -853,6 +856,42 @@ mod tests {
         })
         .await
         .unwrap();
+        service.release().await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn installed_engine_native_pins_read_only_smoke() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut service = Harness::new(directory.path()).unwrap();
+        Arc::get_mut(&mut service).unwrap().project_codex_home =
+            crate::codex_home::default_codex_home_dir();
+        service.prepare().await.unwrap();
+        let expected = service
+            .list_all(
+                "thread/list",
+                json!({
+                    "limit":100,"archived":false,"sectionId":"01984de2-8f74-7c91-a3b2-5c5e937cf318",
+                    "sortKey":"section_position","useStateDbOnly":true
+                }),
+            )
+            .await
+            .unwrap();
+        let sidebar = service.call("sidebar", json!({}), None).await.unwrap();
+        let ids = |rows: &[Value]| rows.iter().map(|row| row["id"].clone()).collect::<Vec<_>>();
+        assert_eq!(
+            ids(sidebar["pinnedThreads"].as_array().unwrap()),
+            ids(&expected)
+        );
+        assert_eq!(service.audit.snapshot()["serviceCdpAttempts"], 0);
+        println!(
+            "HARNESS_NATIVE_PINS {}",
+            json!({
+                "nativePinnedCount":expected.len(),
+                "displayedPinnedCount":sidebar["pinnedThreads"].as_array().unwrap().len(),
+                "serviceCdpAttempts":0,"readOnly":true
+            })
+        );
         service.release().await;
     }
 

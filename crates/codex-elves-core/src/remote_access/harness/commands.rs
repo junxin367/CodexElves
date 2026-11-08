@@ -12,6 +12,11 @@ impl Harness {
         payload: Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
+        if action == "pinThread"
+            && let Some(result) = self.pin_native_thread(&payload, authorization).await?
+        {
+            return Ok(result);
+        }
         if matches!(action, "pinProject" | "pinThread" | "sort") {
             return self.preference(action, &payload, authorization).await;
         }

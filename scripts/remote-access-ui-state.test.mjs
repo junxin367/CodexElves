@@ -4881,6 +4881,27 @@ test("服务部分侧栏保留旧会话展示，完整目录及其他后端不�
     assert.equal(context.mergeIncompleteSidebar(previous, input), input);
 });
 
+test("原生置顶完整时不被部分最近目录恢复，取消的旧会话仍保留在普通列表", () => {
+  const previous = { nativeBridge: "harness",
+    recent: [{ id: "unpin", projectId: "p", pinned: true }],
+    pinnedThreads: [{ id: "unpin", projectId: "p", pinned: true }, { id: "pin-only", pinned: true }],
+    projects: [{ id: "p", threads: [{ id: "unpin", projectId: "p", pinned: true }] }] };
+  const current = { nativeBridge: "harness", complete: false, pinnedThreadsComplete: true,
+    recent: [{ id: "new-pin", pinned: true }], pinnedThreads: [{ id: "new-pin", pinned: true }],
+    projects: [{ id: "p", threads: [] }] };
+  const context = {};
+  vm.createContext(context);
+  vm.runInContext(sourceSection("function mergeIncompleteSidebar(", "async function loadSidebar("), context);
+  const merged = context.mergeIncompleteSidebar(previous, current);
+  assert.deepEqual(Array.from(merged.pinnedThreads, row => row.id), ["new-pin"]);
+  assert.equal(merged.recent.find(row => row.id === "unpin").pinned, false);
+  assert.equal(merged.recent.find(row => row.id === "pin-only").pinned, false);
+  assert.equal(merged.projects[0].threads[0].pinned, false);
+  assert.equal(new Set(merged.recent.map(row => row.id)).size, merged.recent.length);
+  const empty = context.mergeIncompleteSidebar(previous, { ...current, recent: [], pinnedThreads: [] });
+  assert.equal(empty.pinnedThreads.length, 0, "原生取消全部置顶后不能复活旧置顶");
+});
+
 test("旧服务缓存去除合成项目后仍保留无项目会话及已有项目名称和顺序", () => {
   const context = {};
   vm.createContext(context);

@@ -341,6 +341,11 @@ impl Projection {
         if self.hidden_threads.contains(&id) {
             return;
         }
+        if method == "thread/section/changed" {
+            // 原生置顶或取消置顶后沿用网页现有侧栏刷新事件，不要求客户端借用 CDP 同步。
+            self.push(json!({"method":"remote/sidebarChanged","params":{"reason":"section"}}));
+            return;
+        }
         if frame.get("id").is_some() {
             // 请求与普通通知分开保存；审批必须回复原连接和原请求 ID。
             let key = request_key(&generation, &frame["id"]);

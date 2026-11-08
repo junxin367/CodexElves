@@ -6580,16 +6580,23 @@ function mergeIncompleteSidebar(previous, current) {
   if (current.complete !== false || current.nativeBridge !== "harness"
       || previous?.nativeBridge !== "harness") return current;
   // 服务首批目录不完整时继续展示同一后端的已知会话；新数据优先，
-  // 完整目录返回后整体核对，不能把部分结果当作删除或取消置顶的证据。
+  // 完整目录返回后整体核对，不能把部分结果当作删除证据；置顶目录独立判断完整性。
   const freshIds = new Set([...current.recent, ...current.pinnedThreads,
     ...current.projects.flatMap(project => project.threads)].map(item => item.id));
   const oldProjects = new Map(previous.projects.map(project => [project.id, project]));
   const projectIds = new Set(current.projects.map(project => project.id));
+  // 用户要求服务模式与桌面置顶一致：原生置顶已完整时立即接受取消，不能被未完成的最近分页补回。
+  const completePins = current.pinnedThreadsComplete === true;
+  const pinnedIds = new Set(current.pinnedThreads.map(item => item.id));
   const mergeRows = (old, fresh) => [...fresh, ...old.filter(item => !freshIds.has(item.id))]
-    .map(item => item.projectId && !projectIds.has(item.projectId) ? { ...item, projectId: null } : item);
+    .map(item => item.projectId && !projectIds.has(item.projectId) ? { ...item, projectId: null } : item)
+    .map(item => completePins ? { ...item, pinned: pinnedIds.has(item.id) } : item);
+  const oldRecent = completePins
+    ? [...new Map([...previous.pinnedThreads, ...previous.recent].map(item => [item.id, item])).values()]
+    : previous.recent;
   return { ...current,
-    recent: mergeRows(previous.recent, current.recent),
-    pinnedThreads: mergeRows(previous.pinnedThreads, current.pinnedThreads),
+    recent: mergeRows(oldRecent, current.recent),
+    pinnedThreads: completePins ? current.pinnedThreads : mergeRows(previous.pinnedThreads, current.pinnedThreads),
     // 项目目录始终完整，只有会话分页未完成；不能把旧服务合成的工作目录补回项目列表。
     projects: current.projects.map(project => ({ ...project,
       threads: mergeRows(oldProjects.get(project.id)?.threads || [], project.threads) }))

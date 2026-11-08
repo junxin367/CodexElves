@@ -907,7 +907,13 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             && call["params"]["cursor"].is_null()).count(), 1);
         assert!(calls.iter().all(|call| matches!(
             call["method"].as_str(),
-            Some("thread/list" | "project/list" | "model/list" | "config/read")
+            Some(
+                "thread/list"
+                    | "threadSection/list"
+                    | "project/list"
+                    | "model/list"
+                    | "config/read"
+            )
         )));
         service.stop_preparation().await;
         assert!(!service.catalog.state.lock().await.loaded);

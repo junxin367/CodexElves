@@ -5790,7 +5790,8 @@ mod tests {
                 token_hash: hash("isolated-service-dispatch-token"),
                 key_id: auth.access_key.as_ref().unwrap().id.clone(),
                 created_at_ms: now_ms(),
-                expires_at_ms: now_ms() + 120_000,
+                // 功能回归在 Windows 并发构建时可能排队超过两分钟；过期行为由专门用例显式设置。
+                expires_at_ms: now_ms() + 3_600_000,
                 last_seen_at_ms: now_ms(),
                 public_origin: None,
             };
@@ -5801,7 +5802,20 @@ mod tests {
     }
 
     async fn harness_fixture() -> (tempfile::TempDir, RemoteAuthorization) {
+        harness_fixture_with_store(None).await
+    }
+
+    async fn harness_fixture_with_store(
+        saved: Option<Value>,
+    ) -> (tempfile::TempDir, RemoteAuthorization) {
         let (directory, authorization) = service_dispatch_fixture().await;
+        if let Some(saved) = saved {
+            std::fs::write(
+                directory.path().join("remote-harness-state.json"),
+                serde_json::to_vec(&saved).unwrap(),
+            )
+            .unwrap();
+        }
         let mut git = std::process::Command::new("git");
         git.args(["init", "--quiet"]).current_dir(directory.path());
         #[cfg(windows)]
@@ -5852,11 +5866,33 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  const q=JSON.parse(line);fs.appendFileSync(__dirname+'/requests.jsonl',JSON.stringify(q)+'\n');
  if(!q.method){if(approval){finish(approval.threadId);approval=null;}return;}
  if(q.method==='initialized')return;
- const p=q.params||{},t=threads.get(p.threadId);let result={};
+ const p=q.params||{},pinPath=__dirname+'/native-pins.json';
+ const nativePins=fs.existsSync(pinPath)?JSON.parse(fs.readFileSync(pinPath,'utf8')):null;
+ const pinnedSection='01984de2-8f74-7c91-a3b2-5c5e937cf318';
+ const t=threads.get(p.threadId)||nativePins?.rows?.find(row=>row.id===p.threadId);let result={};
  switch(q.method){
  case 'initialize':result={userAgent:'isolated-fixture'};break;
  case 'project/list':result={data:[{id:'project-a',name:'隔离项目',roots:[{path:__dirname}],position:0,metadata:{}}],nextCursor:null};break;
- case 'thread/list':result={data:[...threads.values()],nextCursor:null};break;
+ case 'threadSection/list':
+   if(!nativePins){output({id:q.id,error:{code:-32601,message:'unsupported sections'}});return;}
+   if(nativePins.sectionError){output({id:q.id,error:{code:nativePins.sectionError,message:'section lookup failed'}});return;}
+   result={data:nativePins.missingSection?[]:[{id:pinnedSection,name:'已改名的置顶分区'}],nextCursor:null};break;
+ case 'thread/list':
+   if(p.sectionId&&nativePins){
+     const data=nativePins.ids.map(id=>threads.get(id)||nativePins.rows.find(row=>row.id===id))
+       .map(row=>({...row,section:{id:nativePins.wrongSection?'custom':pinnedSection,name:'Pinned'}}));
+     const start=Number(p.cursor||0),end=start+(nativePins.pageSize||100);
+     result={data:data.slice(start,end),nextCursor:nativePins.cursorLoop?'1':end<data.length?String(end):null};
+   }else result={data:[...threads.values(),...(nativePins?.recentIds||[]).map(id=>nativePins.rows.find(row=>row.id===id))],nextCursor:null};
+   break;
+ case 'thread/section/move':
+   if(!nativePins){output({id:q.id,error:{code:-32601,message:'unsupported sections'}});return;}
+   if(!t){output({id:q.id,error:{code:-32600,message:'unknown thread'}});return;}
+   nativePins.ids=nativePins.ids.filter(id=>id!==p.threadId);
+   if(p.sectionId===pinnedSection)nativePins.ids.push(p.threadId);
+   nativePins.sections={...nativePins.sections,[p.threadId]:p.sectionId};
+   nativePins.moved=true;fs.writeFileSync(pinPath,JSON.stringify(nativePins));
+   event('thread/section/changed',{threadId:p.threadId,sectionId:p.sectionId});break;
  case 'thread/start':{
    const id=crypto.randomUUID();const thread={id,cwd:p.cwd,name:'隔离会话',ephemeral:false,threadSource:'user',source:'appServer',
      projectId:p.projectId,status:{type:'idle'},turns:[],createdAt:1,updatedAt:1};
@@ -5864,7 +5900,10 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    event('thread/started',{thread});break;
  }
  case 'thread/read': if(!t){output({id:q.id,error:{code:-32600,message:'unknown thread'}});return;}
-   result={thread:t,readState:{firstUnread:null,revision:'r1'}};break;
+   if(nativePins?.confirmFailure&&nativePins.moved){output({id:q.id,error:{code:-32000,message:'confirmation failed'}});return;}
+   const sectionId=nativePins?.ids.includes(p.threadId)?pinnedSection:nativePins?.sections?.[p.threadId];
+   result={thread:nativePins?{...t,section:sectionId?{id:sectionId,name:'Section'}:null}:t,
+     readState:{firstUnread:null,revision:'r1'}};break;
  case 'thread/resume': result={thread:t,model:'gpt-test',reasoningEffort:'high'};break;
  case 'thread/turns/list':result=pageRows(t?.turns||[],p,'turns');break;
  case 'thread/items/list':{
@@ -7144,6 +7183,186 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 .any(|f| f.get("method").is_none() && f["result"]["decision"] == "accept")
         );
         assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+    }
+
+    async fn native_pin_fixture(options: Value) -> (tempfile::TempDir, RemoteAuthorization) {
+        let (directory, authorization) =
+            harness_fixture_with_store(Some(json!({"threadPins":["custom"]}))).await;
+        // 先保留旧服务自己的置顶，再提供与它不同的原生分区，验证升级不能复活旧记录。
+        let rows: Vec<_> = ["old-a", "old-b", "custom"]
+            .into_iter()
+            .map(|id| {
+                json!({
+                    "id":id,"cwd":directory.path(),"name":id,"ephemeral":false,
+                    "threadSource":"user","source":"appServer","projectId":"project-a",
+                    "status":{"type":"idle"},"turns":[],"createdAt":1,"updatedAt":1
+                })
+            })
+            .collect();
+        let mut config = json!({"rows":rows,"ids":["old-b","old-a"],"pageSize":1,
+            "recentIds":["custom"],"sections":{"custom":"custom-section"}});
+        config
+            .as_object_mut()
+            .unwrap()
+            .extend(options.as_object().unwrap().clone());
+        std::fs::write(
+            directory.path().join("native-pins.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        (directory, authorization)
+    }
+
+    #[tokio::test]
+    async fn harness_native_pins_restore_all_pages_and_share_desktop_mutations() {
+        let (directory, authorization) = native_pin_fixture(json!({})).await;
+        let controller = &authorization.controller;
+        let sidebar = controller
+            .call_authorized("sidebar", json!({}), &authorization)
+            .await
+            .unwrap();
+        let ids = |sidebar: &Value| {
+            sidebar["pinnedThreads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|thread| thread["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(&sidebar),
+            ["old-b", "old-a"],
+            "保留原生顺序并补齐最近目录之外的全部置顶页"
+        );
+        assert_eq!(sidebar["recent"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            sidebar["recent"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["id"] == "custom")
+                .unwrap()["pinned"],
+            false
+        );
+        let initial_moves = || {
+            std::fs::read_to_string(directory.path().join("requests.jsonl"))
+                .unwrap()
+                .lines()
+                .filter(|line| {
+                    serde_json::from_str::<Value>(line).unwrap()["method"] == "thread/section/move"
+                })
+                .count()
+        };
+        controller
+            .call_authorized(
+                "pinThread",
+                json!({"threadId":"old-a","pinned":true}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        controller
+            .call_authorized(
+                "pinThread",
+                json!({"threadId":"custom","pinned":false}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            initial_moves(),
+            0,
+            "重复置顶不重排；取消未置顶项不清除自定义分区"
+        );
+        controller
+            .call_authorized(
+                "pinThread",
+                json!({"threadId":"old-b","pinned":false}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let sidebar = controller
+            .call_authorized("sidebar", json!({}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(ids(&sidebar), ["old-a"], "取消后不能返回写入前的置顶缓存");
+        controller
+            .call_authorized(
+                "pinThread",
+                json!({"threadId":"old-b","pinned":true}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let sidebar = controller
+            .call_authorized("sidebar", json!({}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(ids(&sidebar), ["old-a", "old-b"]);
+        let canonical: Value =
+            read_json_or_default(&directory.path().join("native-pins.json")).unwrap();
+        assert_eq!(canonical["ids"], json!(["old-a", "old-b"]));
+        assert_eq!(canonical["sections"]["custom"], "custom-section");
+        assert_eq!(initial_moves(), 2);
+        let requests = std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap();
+        assert!(!requests.contains("\"thread/resume\"") && !requests.contains("\"turn/start\""));
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_native_pins_never_hide_lookup_errors_or_invalid_pages() {
+        for options in [
+            json!({"sectionError":-32000}),
+            json!({"sectionError":-32602}),
+            json!({"missingSection":true}),
+            json!({"cursorLoop":true}),
+            json!({"wrongSection":true}),
+            json!({"ids":["old-a","old-a"]}),
+        ] {
+            let (_directory, authorization) = native_pin_fixture(options.clone()).await;
+            assert!(
+                authorization
+                    .controller
+                    .call_authorized("sidebar", json!({}), &authorization)
+                    .await
+                    .is_err(),
+                "原生异常不能退回私有置顶或伪造空列表：{options}"
+            );
+            assert_eq!(
+                authorization.controller.harness.audit.snapshot()["serviceCdpAttempts"],
+                0
+            );
+            authorization.controller.harness.release().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn harness_native_pin_confirmation_failure_preserves_unknown_outcome() {
+        let (directory, authorization) = native_pin_fixture(json!({"confirmFailure":true})).await;
+        let error = authorization
+            .controller
+            .call_authorized(
+                "pinThread",
+                json!({"threadId":"old-b","pinned":false}),
+                &authorization,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<ApiError>().unwrap().outcome_unknown);
+        let canonical: Value =
+            read_json_or_default(&directory.path().join("native-pins.json")).unwrap();
+        assert_eq!(
+            canonical["ids"],
+            json!(["old-a"]),
+            "失败发生在写入后的确认，不能重放操作"
+        );
+        assert_eq!(
+            authorization.controller.harness.audit.snapshot()["serviceCdpAttempts"],
+            0
+        );
+        authorization.controller.harness.release().await;
     }
 
     #[tokio::test]
