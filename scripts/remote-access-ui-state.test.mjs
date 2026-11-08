@@ -719,20 +719,20 @@ test("主题切换保留前后真实光照及年龄，延迟采证不会提前�
   assert.equal([...h.timers.values()].filter(timer => !timer.interval).length, 0);
 });
 
-test("新增诊断保持夜间范围、10/45lux滞回和候选取消规则", async () => {
+test("自动主题使用20:00至次日08:00夜间范围，保留10/45lux滞回和候选取消规则", async () => {
   const h = await themeDiagnosticsHarness();
-  for (const hour of [7, 8, 20, 21]) {
+  for (const hour of [7, 8, 19, 20, 21]) {
     h.hour(hour);
     for (const lux of [null, 0, 10, 10.01, 44.99, 45, 100]) {
       h.context.ambientLightStatus = { supported: lux !== null, lux };
       for (const current of ["light", "dark"]) {
-        const expected = hour >= 8 && hour < 21 ? "light"
+        const expected = hour >= 8 && hour < 20 ? "light"
           : lux === null || lux <= 10 ? "dark" : lux >= 45 ? "light" : current;
         assert.equal(h.context.automaticAppearanceTheme(undefined, current), expected);
       }
     }
   }
-  h.hour(21); h.sensor(5); h.advance(3000); h.sensor(50);
+  h.hour(20); h.sensor(5); h.advance(3000); h.sensor(50);
   assert.equal(h.appearance.theme, "light");
   assert.equal(h.logs.find(event => event.fields.decision === "cancelled").fields.durationMs, 3000);
   const browser = await themeDiagnosticsHarness({ android: false });

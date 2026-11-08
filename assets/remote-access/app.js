@@ -534,8 +534,8 @@ function finishThemeDiagnosticTransition(transition) {
 }
 function automaticAppearanceTheme(date = new Date(), currentTheme = appearance.theme) {
   const hour = date.getHours();
-  // 用户要求夜间时段按设备本地时间从 21:00（含）到次日 08:00（不含），时段内保留原有光照判断。
-  if (hour < 8 || hour >= 21) {
+  // 用户要求夜间时段按设备本地时间从 20:00（含）到次日 08:00（不含），时段内保留原有光照判断。
+  if (hour < 8 || hour >= 20) {
     if (!ambientLightStatus.supported || ambientLightStatus.lux === null) return "dark";
     if (ambientLightStatus.lux <= automaticThemeDarkLux) return "dark";
     if (ambientLightStatus.lux >= automaticThemeLightLux) return "light";
