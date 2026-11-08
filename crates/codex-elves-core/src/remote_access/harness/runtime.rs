@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
+use super::execution;
 use super::read_cache::ReadCache;
 use crate::codex_service::{ServiceDispatchGuard, spawn_service};
 use crate::desktop_owner_ipc::{WriteFrame, guarded_write};
@@ -17,6 +18,8 @@ const TIMEOUT: Duration = Duration::from_secs(45);
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
 
 pub(super) struct Runtime {
+    audit: Arc<execution::Audit>,
+    health: Mutex<Option<(Instant, String, Result<(), String>)>>,
     connection: Mutex<Option<Arc<Connection>>>,
     events: mpsc::Sender<Value>,
     next_generation: AtomicU64,
@@ -36,12 +39,14 @@ pub(super) struct Connection {
     write_gate: Mutex<()>,
     pending: Pending,
     next_id: AtomicU64,
-    reader: tokio::task::JoinHandle<()>,
+    reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        self.reader.abort();
+        if let Some(reader) = self.reader.get_mut().take() {
+            reader.abort();
+        }
     }
 }
 
@@ -51,8 +56,10 @@ impl Runtime {
         self.test_only.load(Ordering::Acquire)
     }
 
-    pub fn new(events: mpsc::Sender<Value>) -> Self {
+    pub fn new(events: mpsc::Sender<Value>, audit: Arc<execution::Audit>) -> Self {
         Self {
+            audit,
+            health: Mutex::new(None),
             connection: Mutex::new(None),
             events,
             next_generation: AtomicU64::new(1),
@@ -113,7 +120,7 @@ impl Runtime {
             .send(json!({"method":"harness/connected","_generation":generation,"_generationIndex":generation_index}))
             .await
             .context("会话事件接收器已关闭")?;
-        let reader = tokio::spawn(async move {
+        let reader = execution::spawn_service(self.audit.clone(), "engine-reader", async move {
             // 持续接收事件，不能像请求兜底通道那样在等待响应时丢弃通知和审批。
             let mut child = service.child;
             let mut lines = service.stdout.lines();
@@ -167,7 +174,7 @@ impl Runtime {
             write_gate: Mutex::new(()),
             pending,
             next_id: AtomicU64::new(1),
-            reader,
+            reader: Mutex::new(Some(reader)),
         });
         let initialized = connection
             .request(
@@ -197,6 +204,7 @@ impl Runtime {
         params: Value,
         guard: Option<&dyn ServiceDispatchGuard>,
     ) -> anyhow::Result<Value> {
+        execution::transport("app-server-stdio", method, guard.is_some());
         if guard.is_some()
             && let Some(id) = params["threadId"].as_str()
         {
@@ -217,6 +225,7 @@ impl Runtime {
     }
 
     pub async fn read(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        execution::transport("app-server-stdio", method, false);
         let connection = self.connection().await?;
         let scope = params["threadId"].as_str().unwrap_or_else(|| {
             if method == "skills/list" {
@@ -253,6 +262,7 @@ impl Runtime {
         result: Value,
         guard: &dyn ServiceDispatchGuard,
     ) -> anyhow::Result<()> {
+        execution::transport("app-server-stdio", "approval-response", true);
         let connection = self
             .connection
             .lock()
@@ -266,8 +276,44 @@ impl Runtime {
     }
 
     pub async fn shutdown(&self) {
-        self.connection.lock().await.take();
+        let connection = self.connection.lock().await.take();
+        // 用户要求断开后能独立恢复；即使旧请求仍持有连接，也须先结束旧引擎，防止两个写入者并存。
+        if let Some(connection) = connection {
+            connection.alive.store(false, Ordering::Release);
+            connection.pending.lock().await.clear();
+            if let Some(reader) = connection.reader.lock().await.take() {
+                reader.abort();
+                let _ = reader.await;
+            }
+        }
         self.reads.clear().await;
+        self.health.lock().await.take();
+    }
+
+    pub async fn check_health(&self) -> anyhow::Result<()> {
+        let connection = self.connection().await?;
+        let mut health = self.health.lock().await;
+        // 用户要求服务健康不依赖 CDP；5 秒内复用探测结果，限制每分钟最多 12 次只读 RPC，
+        // 单次最多等 3 秒；不 resume 会话或发送消息，也不以普通读取缓存冒充引擎可用。
+        if let Some((at, generation, result)) = &*health
+            && generation == &connection.generation
+            && at.elapsed() < Duration::from_secs(5)
+        {
+            return result.clone().map_err(anyhow::Error::msg);
+        }
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            connection.request("thread/list", json!({"limit":1,"archived":false}), None),
+        )
+        .await
+        .map_err(|_| "远程会话引擎健康检查超时".to_owned())
+        .and_then(|result| result.map(|_| ()).map_err(|error| error.to_string()));
+        *health = Some((
+            Instant::now(),
+            connection.generation.clone(),
+            result.clone(),
+        ));
+        result.map_err(anyhow::Error::msg)
     }
 
     #[cfg(test)]

@@ -5270,7 +5270,10 @@ function reconcileCompaction(id, value) {
   return current;
 }
 const transcriptEventTypes = new Set(["modelChanged", "modelRerouted", "contextCompaction"]);
-function replaceTranscriptEvents(entries) {
+function replaceTranscriptEvents(entries, readVersion = null) {
+  // 用户要求切回/刷新不丢压缩记录；读取开始后收到的事件比这次快照新，不能被空列表清掉。
+  const live = Number.isFinite(readVersion) ? [...transcriptEvents.entries()]
+    .filter(([key]) => (itemVersions.get(key) || 0) > readVersion).map(([, entry]) => entry) : [];
   transcriptEvents.clear();
   for (const entry of entries || []) {
     const item = entry?.item;
@@ -5282,21 +5285,31 @@ function replaceTranscriptEvents(entries) {
       beforeItemId: typeof entry.beforeItemId === "string" ? entry.beforeItemId : null
     });
   }
+  mergeTranscriptEvents(live);
 }
 function mergeTranscriptEvents(entries) {
   for (const entry of entries || []) {
     const item = entry?.item;
     if (typeof entry?.turnId !== "string" || typeof item?.id !== "string"
         || !transcriptEventTypes.has(item.type)) continue;
-    transcriptEvents.set(`${entry.turnId}:${item.id}`, {
+    const key = `${entry.turnId}:${item.id}`, previous = transcriptEvents.get(key);
+    // 已收到的完成证据不能被迟到的进行中历史覆盖；失败和中断状态也随完成记录一起保留。
+    const merged = item.type === "contextCompaction" && completedItem(previous?.item) && !completedItem(item)
+      ? mergeItemProjection(item, previous.item) : item;
+    transcriptEvents.set(key, {
       turnId: entry.turnId,
-      item,
+      item: merged,
       beforeItemId: typeof entry.beforeItemId === "string" ? entry.beforeItemId : null
     });
   }
 }
 function enrichTurnTranscriptEvents(turn) {
   const items = [...(turn.items || [])];
+  const turnStatus = typeof turn.status === "string" ? turn.status : turn.status?.type;
+  // 切回时可能只读到压缩开始记录；终态轮次不能继续显示压缩中，已有条目完成证据仍优先。
+  const settledItems = values => values.map(item => item.type === "contextCompaction" && !completedItem(item)
+    && ["completed", "failed", "interrupted", "cancelled", "canceled"].includes(turnStatus)
+    ? { ...item, completed: true, status: turnStatus } : item);
   const pending = [];
   let initialCompaction = null;
   const events = [...transcriptEvents.values()].filter(entry => entry.turnId === turn.id);
@@ -5361,10 +5374,10 @@ function enrichTurnTranscriptEvents(turn) {
         const before = rest.findIndex(item => item.id === compaction.id);
         rest.splice(before, 0, input);
       }
-      return { ...turn, items: rest };
+      return { ...turn, items: settledItems(rest) };
     }
   }
-  return { ...turn, items };
+  return { ...turn, items: settledItems(items) };
 }
 function refreshTranscriptEvents() {
   for (const [id, turn] of turns) turns.set(id, enrichTurnTranscriptEvents(turn));
@@ -8090,17 +8103,24 @@ function renderTranscriptEvent(item, previous) {
   node.className = `transcript-event muted ${item.type === "contextCompaction" ? "context-compaction" : "model-change"}`;
   const symbol = icon(item.type === "contextCompaction" ? "compaction" : "model");
   symbol.classList.add("transcript-event-icon");
-  const compacting = item.type === "contextCompaction" && item.completed === false;
+  // 用户要求切回会话仍显示压缩状态；服务历史可能只有起止时间，不能等下一条实时消息补 completed。
+  const status = typeof item.status === "string" ? item.status : item.status?.type;
+  const ended = item.completed === true || Number.isFinite(item.completedAtMs)
+    || ["completed", "failed", "interrupted", "cancelled", "canceled"].includes(status);
+  const compacting = item.type === "contextCompaction" && !ended
+    && (item.completed === false || Number.isFinite(item.startedAtMs) || ["inProgress", "running"].includes(status));
   let label, description;
   if (item.type === "contextCompaction") {
-    const failed = item.status === "failed";
-    label = failed ? "上下文压缩失败" : compacting ? "正在压缩上下文 · 可能需要几分钟"
-      : item.completed === true && item.source === "automatic" ? "上下文已自动压缩"
-      : item.completed === true ? "上下文已压缩" : "上下文压缩状态已更新";
+    const failed = status === "failed", interrupted = ["interrupted", "cancelled", "canceled"].includes(status);
+    label = failed ? "上下文压缩失败" : interrupted ? "上下文压缩已中断"
+      : compacting ? "正在压缩上下文 · 可能需要几分钟"
+      : ended && item.source === "automatic" ? "上下文已自动压缩"
+      : ended ? "上下文已压缩" : "上下文压缩状态已更新";
     description = failed ? "上下文压缩未完成，请查看原生会话中的错误。"
+      : interrupted ? "上下文压缩已中断，未确认成功完成。"
       : compacting ? `Codex 正在缩短较早的会话上下文。${compactionQueueSendReason()
         || "可继续编辑并发送普通消息，消息会加入原生队列，在压缩完成后执行。"}`
-      : item.completed === true ? "Codex 已缩短较早的会话上下文，以便继续处理后续消息。"
+      : ended ? "Codex 已缩短较早的会话上下文，以便继续处理后续消息。"
       : "尚未收到明确的压缩完成状态，请以原生会话为准。";
   } else {
     const from = transcriptModelName(item.fromModel), to = transcriptModelName(item.toModel);
@@ -10250,7 +10270,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   restoreDraft(id); resetComposerOptions(); restoreQueuedMessageEdit();
   notifiedTokenUsage = null; notifiedGoal = null;
   notifiedQuestions = null;
-  const read = ++threadReadVersion, usageVersion = tokenUsageVersion, runtimeVersion = statusVersion,
+  const read = ++threadReadVersion, usageVersion = tokenUsageVersion, runtimeVersion = statusVersion, transcriptReadVersion = messageVersion,
     questionReadVersion = questionVersion,
     requestsReadVersion = blockingRequestState(id).generation,
     goalReadVersion = goalVersion, compactionReadVersion = compactionVersion, queueReadVersion = queueVersion;
@@ -10327,7 +10347,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     mergeBlockingRequestsRead(id, thread, requestsReadVersion);
     if (questionReadVersion !== questionVersion && notifiedQuestions)
       replaceAsyncQuestions(thread, notifiedQuestions);
-    replaceTranscriptEvents(thread.transcriptEvents);
+    replaceTranscriptEvents(thread.transcriptEvents, transcriptReadVersion);
     refreshTranscriptEvents();
     if (!$("#model-settings").hidden) renderModelMenu();
     if (usageVersion !== tokenUsageVersion) thread.tokenUsage = notifiedTokenUsage;
@@ -10772,7 +10792,7 @@ async function reloadThread() {
     do {
       if (generation !== foregroundReadGeneration || request.controller.signal.aborted) return;
       request.again = false;
-      const read = ++threadReadVersion, usageVersion = tokenUsageVersion,
+      const read = ++threadReadVersion, usageVersion = tokenUsageVersion, transcriptReadVersion = messageVersion,
         questionReadVersion = questionVersion, requestsReadVersion = blockingRequestState(id).generation,
         runtimeVersion = statusVersion, goalReadVersion = goalVersion, compactionReadVersion = compactionVersion,
         queueReadVersion = queueVersion;
@@ -10816,7 +10836,7 @@ async function reloadThread() {
       mergeBlockingRequestsRead(id, thread, requestsReadVersion);
       if (questionReadVersion !== questionVersion && notifiedQuestions)
         replaceAsyncQuestions(thread, notifiedQuestions);
-      replaceTranscriptEvents(thread.transcriptEvents);
+      replaceTranscriptEvents(thread.transcriptEvents, transcriptReadVersion);
       refreshTranscriptEvents();
       syncEditableMessageMetadata();
       if (!$("#model-settings").hidden) renderModelMenu();

@@ -19,6 +19,17 @@ const SNAPSHOT_VERSION: u64 = 11;
 #[cfg(windows)]
 const PIPE_PATH: &str = r"\\.\pipe\codex-ipc";
 
+#[cfg(windows)]
+fn pipe_path() -> String {
+    // 无 CDP 验收使用本轮专属且不存在的管道，保证真实引擎不能借用用户正在运行的桌面。
+    #[cfg(test)]
+    if let Ok(path) = std::env::var("CODEX_ELVES_TEST_IPC_PIPE") {
+        assert!(path.starts_with(r"\\.\pipe\codex-elves-isolation-"));
+        return path;
+    }
+    PIPE_PATH.to_owned()
+}
+
 pub(crate) enum OwnerSend {
     NoOwner,
     Handled(Value),
@@ -295,8 +306,9 @@ pub(crate) async fn request_owner(
     version: u64,
     guard: Option<&dyn ServiceDispatchGuard>,
 ) -> anyhow::Result<Option<Value>> {
+    crate::remote_access::execution::transport("desktop-ipc", method, true);
     use tokio::net::windows::named_pipe::ClientOptions;
-    let stream = match ClientOptions::new().open(PIPE_PATH) {
+    let stream = match ClientOptions::new().open(pipe_path()) {
         Ok(stream) => stream,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
@@ -358,7 +370,7 @@ pub(crate) async fn available() -> bool {
 
 #[cfg(windows)]
 pub(crate) async fn available() -> bool {
-    let Ok(stream) = tokio::net::windows::named_pipe::ClientOptions::new().open(PIPE_PATH) else {
+    let Ok(stream) = tokio::net::windows::named_pipe::ClientOptions::new().open(pipe_path()) else {
         return false;
     };
     Session::new(stream, "", RPC_TIMEOUT)
@@ -380,7 +392,7 @@ pub(crate) async fn watch_snapshots(
     thread_id: String,
     changes: mpsc::Sender<OwnerSnapshot>,
 ) -> anyhow::Result<()> {
-    let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(PIPE_PATH)?;
+    let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(pipe_path())?;
     watch_with_stream(stream, &thread_id, changes).await
 }
 
@@ -448,7 +460,7 @@ pub(crate) async fn read_snapshot(_thread_id: &str) -> anyhow::Result<Option<Val
 
 #[cfg(windows)]
 pub(crate) async fn read_snapshot(thread_id: &str) -> anyhow::Result<Option<Value>> {
-    let stream = match tokio::net::windows::named_pipe::ClientOptions::new().open(PIPE_PATH) {
+    let stream = match tokio::net::windows::named_pipe::ClientOptions::new().open(pipe_path()) {
         Ok(stream) => stream,
         Err(error)
             if matches!(
@@ -518,7 +530,7 @@ pub(crate) async fn try_send(
             false,
         ));
     }
-    let stream = match tokio::net::windows::named_pipe::ClientOptions::new().open(PIPE_PATH) {
+    let stream = match tokio::net::windows::named_pipe::ClientOptions::new().open(pipe_path()) {
         Ok(stream) => stream,
         Err(error)
             if matches!(

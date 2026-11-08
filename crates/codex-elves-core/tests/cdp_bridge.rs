@@ -9738,8 +9738,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = include_str!("../../../assets/remote-access/native.js");
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 134"));
-    assert!(script.contains("version: 134"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 135"));
+    assert!(script.contains("version: 135"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));

@@ -19,6 +19,7 @@ use anyhow::Context;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
 
+use super::execution;
 use super::{ApiError, RemoteAccessController, RemoteAuthorization};
 use crate::codex_service::ServiceDispatchGuard;
 use catalog::Catalog;
@@ -27,6 +28,7 @@ use runtime::Runtime;
 use store::{Queued, Store};
 
 pub(super) struct Harness {
+    pub audit: Arc<execution::Audit>,
     runtime: Arc<Runtime>,
     catalog: Arc<Catalog>,
     projection: Arc<Mutex<Projection>>,
@@ -64,8 +66,10 @@ impl Harness {
     }
     pub fn new(directory: &Path) -> anyhow::Result<Arc<Self>> {
         let (events, receiver) = mpsc::channel(512);
+        let audit = Arc::new(execution::Audit::default());
         Ok(Arc::new(Self {
-            runtime: Arc::new(Runtime::new(events)),
+            audit: audit.clone(),
+            runtime: Arc::new(Runtime::new(events, audit)),
             catalog: Arc::new(Catalog::default()),
             projection: Arc::new(Mutex::new(Projection::default())),
             store: Mutex::new(Store::open(directory)?),
@@ -96,25 +100,33 @@ impl Harness {
                 .take()
                 .context("会话事件接收器已关闭")?;
             let weak = Arc::downgrade(self);
-            *worker = Some(tokio::spawn(async move {
-                while let Some(frame) = receiver.recv().await {
-                    let Some(service) = weak.upgrade() else { break };
-                    service.catalog.observe(&frame).await;
-                    service.projection.lock().await.ingest(frame);
-                }
-            }));
-            let weak = Arc::downgrade(self);
-            *self.queue_worker.lock().await = Some(tokio::spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_millis(750));
-                loop {
-                    tick.tick().await;
-                    let Some(service) = weak.upgrade() else { break };
-                    // 派发与接收独立运行，长请求不会堵住流式输出或审批事件。
-                    if service.enabled.load(Ordering::Acquire) {
-                        service.drain_queues().await;
+            *worker = Some(execution::spawn_service(
+                self.audit.clone(),
+                "engine-events",
+                async move {
+                    while let Some(frame) = receiver.recv().await {
+                        let Some(service) = weak.upgrade() else { break };
+                        service.catalog.observe(&frame).await;
+                        service.projection.lock().await.ingest(frame);
                     }
-                }
-            }));
+                },
+            ));
+            let weak = Arc::downgrade(self);
+            *self.queue_worker.lock().await = Some(execution::spawn_service(
+                self.audit.clone(),
+                "queue-worker",
+                async move {
+                    let mut tick = tokio::time::interval(Duration::from_millis(750));
+                    loop {
+                        tick.tick().await;
+                        let Some(service) = weak.upgrade() else { break };
+                        // 派发与接收独立运行，长请求不会堵住流式输出或审批事件。
+                        if service.enabled.load(Ordering::Acquire) {
+                            service.drain_queues().await;
+                        }
+                    }
+                },
+            ));
         }
         drop(worker);
         let connection = self.runtime.connection().await?;
@@ -127,18 +139,24 @@ impl Harness {
     }
 
     pub async fn prepare(self: &Arc<Self>) -> anyhow::Result<()> {
-        self.start().await
+        execution::Scope::service(self.audit.clone(), "prepare", &json!({}), None)
+            .run(self.start())
+            .await
     }
 
     pub async fn prewarm(self: &Arc<Self>) -> anyhow::Result<()> {
         // 用户要求即使开启 CDP 也异步提前准备服务模式；这里只读共享目录，
         // 不改设备开关、enabled 派发标志或会话归属，不调用 resume / turn/start。
-        self.start().await?;
-        let model_params = json!({});
-        let (sidebar, models) = tokio::join!(self.sidebar(), self.models(&model_params));
-        sidebar?;
-        models?;
-        Ok(())
+        execution::Scope::service(self.audit.clone(), "prewarm", &json!({}), None)
+            .run(async {
+                self.start().await?;
+                let model_params = json!({});
+                let (sidebar, models) = tokio::join!(self.sidebar(), self.models(&model_params));
+                sidebar?;
+                models?;
+                Ok(())
+            })
+            .await
     }
 
     pub async fn prewarm_for_listener(self: &Arc<Self>) -> anyhow::Result<()> {
@@ -287,7 +305,23 @@ impl Harness {
         if self.locally_loaded(id).await? {
             return Ok(None);
         }
-        crate::desktop_owner_ipc::read_snapshot(id).await
+        let snapshot = crate::desktop_owner_ipc::read_snapshot(id)
+            .await
+            .map_err(|error| {
+                if error.downcast_ref::<ApiError>().is_some() {
+                    error
+                } else {
+                    super::ApiError::new(
+                        503,
+                        "当前会话的桌面连接暂时不可用，请确认桌面应用可响应后重试。",
+                    )
+                    .into()
+                }
+            })?;
+        if snapshot.is_some() {
+            execution::transport("desktop-ipc", "thread-snapshot", false);
+        }
+        Ok(snapshot)
     }
 
     async fn owner_request(
@@ -301,10 +335,42 @@ impl Harness {
         if self.locally_loaded(id).await? {
             return Ok(None);
         }
-        crate::desktop_owner_ipc::request_owner(id, method, params, version, guard).await
+        crate::desktop_owner_ipc::request_owner(id, method, params, version, guard)
+            .await
+            .map_err(|error| {
+                if error.downcast_ref::<ApiError>().is_some() {
+                    return error;
+                }
+                // 用户要求 IPC 故障不能冒充无持有者；未发送和已发送待核对必须分别保留，均不回退 CDP。
+                let dispatched = error
+                    .downcast_ref::<crate::desktop_owner_ipc::DispatchFailure>()
+                    .is_some_and(|failure| failure.dispatched);
+                ApiError {
+                    code: 503,
+                    message: if dispatched {
+                        "当前会话的桌面连接中断，操作结果待核对，请刷新会话确认，勿重复提交。"
+                    } else {
+                        "当前会话的桌面连接暂时不可用，操作未发送，请确认桌面应用可响应后重试。"
+                    }
+                    .into(),
+                    outcome_unknown: dispatched,
+                }
+                .into()
+            })
     }
 
     pub async fn call(
+        self: &Arc<Self>,
+        action: &str,
+        payload: Value,
+        authorization: Option<&RemoteAuthorization>,
+    ) -> anyhow::Result<Value> {
+        execution::Scope::service(self.audit.clone(), action, &payload, authorization)
+            .run(self.call_inner(action, payload, authorization))
+            .await
+    }
+
+    async fn call_inner(
         self: &Arc<Self>,
         action: &str,
         payload: Value,
@@ -315,7 +381,10 @@ impl Harness {
             authorization.check().await?;
         }
         let result = match action {
-            "events" => Ok(self.projection.lock().await.events(&payload)),
+            "events" => {
+                self.runtime.check_health().await?;
+                Ok(self.projection.lock().await.events(&payload))
+            }
             "notifications" => Ok(self.projection.lock().await.notifications(&payload)),
             "sidebar" => self.sidebar().await,
             "models" => self.models(&payload).await,
@@ -420,7 +489,31 @@ impl Harness {
             .find(|d| d.id == message.device_id && d.key_id == message.key_id)
             .cloned()
             .context("队列消息的设备授权已撤销")?;
-        let authorization = controller.authorization(device, Some("send"));
+        let mut authorization = controller.authorization(device, Some("send"));
+        authorization.request_id = message.request_id.clone();
+        execution::Scope::new(
+            self.audit.clone(),
+            true,
+            "queue-dispatch",
+            &json!({"threadId":id}),
+            Some(&authorization),
+            message.runtime_revision,
+        )
+        .recorded(async {
+            self.dispatch_queued_inner(id, message, &authorization)
+                .await?;
+            Ok(json!({"ok":true}))
+        })
+        .await
+        .map(|_| ())
+    }
+
+    async fn dispatch_queued_inner(
+        &self,
+        id: &str,
+        message: &Queued,
+        authorization: &RemoteAuthorization,
+    ) -> anyhow::Result<()> {
         authorization.check().await?;
         if let Some(snapshot) = self.owner_snapshot(id).await? {
             let active = crate::desktop_owner_ipc::snapshot_turns(&snapshot)
@@ -460,7 +553,7 @@ impl Harness {
             queued.state = "sending".into();
             Ok(())
         })?;
-        let result = self.start_turn(id, &message.payload, &authorization).await;
+        let result = self.start_turn(id, &message.payload, authorization).await;
         self.store.lock().await.commit(|data| {
             match &result {
                 Ok(response) => {
@@ -512,7 +605,7 @@ impl Harness {
         }
         let projection = self.projection.clone();
         let id_owned = id.to_owned();
-        owners.insert(id.to_owned(), tokio::spawn(async move {
+        owners.insert(id.to_owned(), execution::spawn_service(self.audit.clone(), "desktop-events", async move {
             let mut previous = baseline;
             let mut changes = crate::codex_service::ServiceProjection::new();
             let mut cursor = changes.events(&json!({}));
@@ -760,5 +853,4 @@ mod tests {
         }
         service.release().await;
     }
-
 }

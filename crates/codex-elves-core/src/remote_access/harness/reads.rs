@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use serde_json::{Value, json};
 
-use super::{Harness, error, required, sent_key};
 use super::projects::DesktopProjects;
+use super::{Harness, error, required, sent_key};
 use crate::codex_service::{
     normalize_model, normalize_owner_thread, normalize_thread, normalize_thread_response,
     owner_snapshot_history,
@@ -212,6 +212,11 @@ impl Harness {
             )?;
             thread["goal"] = goal["goal"].clone();
             latest = history;
+            // 读取历史期间也可能收到压缩完成事件，返回前重新合并当前投影，避免切回会话看到旧状态。
+            self.projection
+                .lock()
+                .await
+                .decorate_compaction(id, &mut thread);
         }
         if latest.is_none() {
             latest = self.latest_turn(id).await?;
@@ -298,7 +303,7 @@ impl Harness {
             if let Some(snapshot) = self.owner_snapshot(id).await? {
                 self.follow_owner(id, snapshot.clone()).await;
                 if let Some(history) = owner_snapshot_history(&snapshot, id) {
-                    return Ok(history);
+                    return Ok(self.projection.lock().await.history(id, history, true));
                 }
             }
         }
@@ -311,14 +316,16 @@ impl Harness {
                 "cursor":payload["cursor"],"limit":40,"sortDirection":"desc"}),
                 )
                 .await?;
-            let mut items = page["data"].as_array().cloned().unwrap_or_default();
-            items.reverse();
-            return Ok(
-                json!({"ok":true,"scope":"items","threadId":id,"turnId":turn_id,"data":items,
+            // 用户要求无桌面依赖时历史仍可用；新版 CLI 的分页项包在 item 中，须与独立 CLI 读取统一展开。
+            let (items, next_cursor) = crate::codex_service::normalize_history_items_page(
+                &page,
+                payload["cursor"].as_str(),
+            )?;
+            let history = json!({"ok":true,"scope":"items","threadId":id,"turnId":turn_id,"data":items,
                 "itemOrder":"asc","itemDirection":"older","itemsPageComplete":true,
-                "itemsComplete":page["nextCursor"].is_null(),"itemsNextCursor":page["nextCursor"],
-                "newestSnapshotItemId":null,"pageLimit":40,"transcriptEvents":[]}),
-            );
+                "itemsComplete":next_cursor.is_none(),"itemsNextCursor":next_cursor,
+                "newestSnapshotItemId":null,"pageLimit":40,"transcriptEvents":[]});
+            return Ok(self.projection.lock().await.history(id, history, false));
         }
         let page = self
             .runtime
@@ -343,17 +350,23 @@ impl Harness {
         let items = futures_util::future::try_join_all(item_reads).await?;
         for (turn, items) in turns.iter_mut().zip(items) {
             let turn_id = required(turn, "id")?.to_owned();
-            let mut rows = items["data"].as_array().cloned().unwrap_or_default();
-            rows.reverse();
+            // 首屏与单轮翻页必须使用相同的历史项结构；保留对旧版本裸 item 数组的兼容。
+            let (rows, next_cursor) =
+                crate::codex_service::normalize_history_items_page(&items, None)?;
             turn["items"] = json!(rows);
-            pagination.insert(turn_id,json!({"nextCursor":items["nextCursor"],
-                "hasMore":!items["nextCursor"].is_null(),"complete":items["nextCursor"].is_null(),
+            pagination.insert(turn_id,json!({"nextCursor":next_cursor,
+                "hasMore":next_cursor.is_some(),"complete":next_cursor.is_none(),
                 "pageComplete":true,"direction":"older","order":"asc","pageLimit":40,"newestSnapshotItemId":null}));
         }
-        Ok(json!({"ok":true,"scope":"turns","threadId":id,"data":turns,
+        let history = json!({"ok":true,"scope":"turns","threadId":id,"data":turns,
             "nextCursor":page["nextCursor"],"backwardsCursor":page["backwardsCursor"],
             "turnOrder":"desc","itemOrder":"asc","turnsPageComplete":true,
-            "turnsComplete":page["nextCursor"].is_null(),"itemsPaginationByTurnId":pagination,"transcriptEvents":[]}))
+            "turnsComplete":page["nextCursor"].is_null(),"itemsPaginationByTurnId":pagination,"transcriptEvents":[]});
+        Ok(self
+            .projection
+            .lock()
+            .await
+            .history(id, history, payload["cursor"].is_null()))
     }
 
     pub(super) async fn models(&self, payload: &Value) -> anyhow::Result<Value> {

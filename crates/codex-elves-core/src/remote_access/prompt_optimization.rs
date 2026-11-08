@@ -111,7 +111,7 @@ impl RemotePromptOptimization {
         let optimizer = self.optimizer.clone();
         let authorization = authorization.clone();
         let id = id.to_string();
-        tokio::spawn(async move {
+        super::execution::spawn_inherited(async move {
             let result = Abortable::new(
                 async {
                     authorization.check().await?;

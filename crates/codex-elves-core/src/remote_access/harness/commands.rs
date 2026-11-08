@@ -78,6 +78,7 @@ impl Harness {
                 Ok(json!({"ok":true,"threadId":id}))
             }
             "compact" => {
+                let revision = self.projection.lock().await.compaction_revision(&id);
                 if self
                     .owner_request(
                         &id,
@@ -98,12 +99,13 @@ impl Harness {
                         )
                         .await?;
                 }
-                let compaction = json!({"state":"pending","turnId":null,"itemId":"pending-manual-context-compaction"});
-                self.projection
-                    .lock()
-                    .await
-                    .compactions
-                    .insert(id.clone(), compaction.clone());
+                let mut projection = self.projection.lock().await;
+                // 用户要求切回仍恢复真实压缩状态；开始/完成事件可能早于 RPC 回执，不能再覆盖为 pending。
+                if projection.compaction_revision(&id) == revision {
+                    projection.compactions.insert(id.clone(),
+                        json!({"state":"pending","turnId":null,"itemId":"pending-manual-context-compaction"}));
+                }
+                let compaction = projection.compaction(&id);
                 Ok(json!({"ok":true,"threadId":id,"compaction":compaction}))
             }
             "rename" => {
@@ -158,7 +160,8 @@ impl Harness {
                 let event = json!({"method":"thread/deleted","params":{"threadId":id}});
                 self.catalog.observe(&event).await;
                 self.projection.lock().await.push(event);
-                Ok(json!({"ok":true,"threadId":id}))
+                // 用户要求成功删除不误报“未确认”；仅在引擎确认删除和本地清理成功后返回完整删除回执。
+                Ok(json!({"ok":true,"threadId":id,"deleted":true,"status":"local_deleted"}))
             }
             "setGoal" => self.set_goal(&id, &payload, authorization).await,
             "updateGoal" => self.update_goal(&id, &payload, authorization).await,
@@ -362,7 +365,7 @@ impl Harness {
                 params[target] = payload[source].clone();
             }
         }
-        let response = if let Some(response) = self
+        let (response, execution_transport) = if let Some(response) = self
             .owner_request(
                 id,
                 "thread-follower-start-turn",
@@ -373,12 +376,18 @@ impl Harness {
             )
             .await?
         {
-            response.get("result").cloned().unwrap_or(response)
+            (
+                response.get("result").cloned().unwrap_or(response),
+                "desktop-ipc",
+            )
         } else {
             self.ensure_loaded(id, authorization).await?;
-            self.runtime
-                .request("turn/start", params, Some(authorization))
-                .await?
+            (
+                self.runtime
+                    .request("turn/start", params, Some(authorization))
+                    .await?,
+                "app-server-stdio",
+            )
         };
         let turn_id = required(&response["turn"], "id")?;
         self.projection.lock().await.started(id, turn_id);
@@ -386,7 +395,8 @@ impl Harness {
         Ok(
             json!({"ok":true,"confirmed":true,"threadId":id,"turnId":turn_id,
             "clientUserMessageId":payload["clientUserMessageId"],"deliveryState":"accepted",
-            "status":response["turn"]["status"],"nativeBridge":"harness"}),
+            "status":response["turn"]["status"],"nativeBridge":"harness",
+            "executionTransport":execution_transport}),
         )
     }
 
@@ -445,7 +455,10 @@ impl Harness {
                 self.runtime.invalidate_read("project/list").await;
                 let context = self.workspace_context(&json!({"projectId":id})).await?;
                 // 展示 ID 与 CDP 相同；实际创建必须使用已验证的引擎项目 ID。
-                (required(&context, "cwd")?.to_owned(), Some(required(&context, "serverProjectId")?.to_owned()))
+                (
+                    required(&context, "cwd")?.to_owned(),
+                    Some(required(&context, "serverProjectId")?.to_owned()),
+                )
             } else {
                 let settings = crate::settings::SettingsStore::default().load()?;
                 let directory = crate::codex_home::codex_home_dir_for_settings(&settings)
@@ -656,6 +669,8 @@ impl Harness {
                 Some(authorization),
             )
             .await?;
+        // 回退后以新的原生历史为准，不能把已删除轮次中的压缩记录重新补回。
+        self.projection.lock().await.forget_compactions(id);
         let mut followup = payload.clone();
         followup["clientUserMessageId"] = json!(uuid::Uuid::new_v4().to_string());
         // 修改文字仍保留原消息的图片等输入，不能在回退后悄悄丢失附件。

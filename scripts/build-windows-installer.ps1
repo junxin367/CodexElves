@@ -41,7 +41,9 @@ function Resolve-ToolPath {
         return (Resolve-Path -LiteralPath $ExplicitPath).Path
     }
 
-    $command = Get-Command $Name -ErrorAction SilentlyContinue
+    # 多套 Node/npm 并存时按 PATH 顺序选择一个可执行文件，不能把路径数组传给构建命令。
+    $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
     if ($null -ne $command) {
         return $command.Path
     }

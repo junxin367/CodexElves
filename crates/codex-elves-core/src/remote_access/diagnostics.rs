@@ -728,6 +728,13 @@ fn prune_reports(directory: &FsPath, active: &[String]) -> anyhow::Result<()> {
 
 impl RemoteAccessController {
     pub(super) async fn diagnostics_admin(&self, payload: Value) -> anyhow::Result<Value> {
+        if payload["mode"] == "execution" {
+            return Ok(json!({
+                "status":"ok","processId":std::process::id(),"buildId":crate::assets::DIAGNOSTIC_BUILD_ID,
+                "serviceConnected":self.harness_connected.load(Ordering::SeqCst),
+                "execution":self.harness.audit.snapshot()
+            }));
+        }
         self.reload_access_key().await?;
         let auth = self.auth.lock().await;
         let active = auth

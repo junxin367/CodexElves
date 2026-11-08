@@ -11,13 +11,13 @@ if (!buildId) throw new Error("无法读取当前注入构建标识。");
 
 function verifyRemoteRuntimeSources({ backend, service, workspace, app, native }) {
   const failures = [];
-  // 用户要求新建、变更与文件页展示真实分支；协议 4 新增分支接口，桥接 134 仍须保留侧边和压缩恢复。
+  // 用户要求服务模式不依赖 CDP，且切回会话恢复压缩记录；保留协议 5，桥接 135 同步压缩生命周期字段。
   const protocol = Number(service.match(/const PROTOCOL_VERSION:\s*u32\s*=\s*(\d+);/)?.[1]);
   const bridge = Number(native.match(/window\.__codexElvesRemoteAccess\?\.version === (\d+)/)?.[1]);
   const readStart = backend.indexOf("async fn read(");
   const readEnd = backend.indexOf('return Err(ApiError::new(404, "不支持的读取操作"))', readStart);
-  if (!Number.isSafeInteger(protocol) || protocol < 4)
-    failures.push("后台协议不能低于 4，否则可能继续复用缺少分支接口的旧后台");
+  if (!Number.isSafeInteger(protocol) || protocol < 5)
+    failures.push("后台协议不能低于 5，否则可能继续复用缺少服务隔离的旧后台");
   if (readStart < 0 || readEnd <= readStart || !backend.slice(readStart, readEnd).includes('| "runtime"')
       || !backend.includes('if action == "runtime"') || !backend.includes('if action == "setRuntime"'))
     failures.push("后台缺少运行模式读取或切换接口");
@@ -27,7 +27,7 @@ function verifyRemoteRuntimeSources({ backend, service, workspace, app, native }
       || !workspace.includes("async fn branch_metadata(")
       || !app.includes('api("/api/workspace/context"'))
     failures.push("后台或新建页面缺少真实分支信息读取");
-  if (!Number.isSafeInteger(bridge) || bridge < 134 || !native.includes(`version: ${bridge}, call`)
+  if (!Number.isSafeInteger(bridge) || bridge < 135 || !native.includes(`version: ${bridge}, call`)
       || !native.includes("const needsSideContext =") || !native.includes("async function compactThreadContext("))
     failures.push("原生桥缺少已交付的侧边会话恢复或上下文压缩恢复");
   if (failures.length) throw new Error(`Windows 构建基线不完整：\n${failures.join("\n")}`);

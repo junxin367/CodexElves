@@ -369,15 +369,15 @@ test("Windows 打包拒绝缺少分支信息、运行模式或压缩恢复的旧
     readFile(new URL("../crates/codex-elves-core/src/remote_access/workspace.rs", import.meta.url), "utf8"),
   ]);
   const current = { backend, service, workspace, app, native };
-  assert.deepEqual(verify(current), { protocol: 4, bridge: 134 });
-  for (const obsolete of [2, 3])
-    assert.throws(() => verify({ ...current, service: service.replace("PROTOCOL_VERSION: u32 = 4", `PROTOCOL_VERSION: u32 = ${obsolete}`) }), /后台协议不能低于 4/);
+  assert.deepEqual(verify(current), { protocol: 5, bridge: 135 });
+  for (const obsolete of [2, 3, 4])
+    assert.throws(() => verify({ ...current, service: service.replace("PROTOCOL_VERSION: u32 = 5", `PROTOCOL_VERSION: u32 = ${obsolete}`) }), /后台协议不能低于 5/);
   assert.throws(() => verify({ ...current, workspace: workspace.replace("async fn branch_metadata(", "async fn obsolete_metadata(") }), /缺少真实分支/);
   assert.throws(() => verify({ ...current, app: app.replace('api("/api/workspace/context"', 'api("/api/workspace/obsolete"') }), /缺少真实分支/);
   assert.throws(() => verify({ ...current, backend: backend.replace('| "runtime"', "") }), /后台缺少运行模式/);
   assert.throws(() => verify({ ...current, backend: backend.replaceAll('"setRuntime"', '"legacyRuntime"') }), /后台缺少运行模式/);
   assert.throws(() => verify({ ...current, app: app.replace('"/api/read/runtime"', '"/api/read/legacyRuntime"') }), /远程页面缺少运行模式/);
-  assert.throws(() => verify({ ...current, native: native.replace("version === 134", "version === 132") }), /原生桥缺少/);
+  assert.throws(() => verify({ ...current, native: native.replace("version === 135", "version === 132") }), /原生桥缺少/);
   assert.throws(() => verify({ ...current, native: native.replace("async function compactThreadContext(", "async function obsoleteCompaction(") }), /原生桥缺少/);
 });
 
@@ -1510,6 +1510,80 @@ function toolRenderer() {
   return context.renderItem;
 }
 
+function compactionRenderer() {
+  function element(tag, className = "", text = "") {
+    return { tagName: tag, className, ownText: text, children: [], attributes: {},
+      classList: { add() {} }, append(...nodes) { this.children.push(...nodes); },
+      replaceChildren(...nodes) { this.children = nodes; },
+      setAttribute(name, value) { this.attributes[name] = value; },
+      get textContent() { return this.ownText + this.children.map(node => node.textContent || "").join(""); },
+    };
+  }
+  const context = { element, icon: () => element("svg"), button: () => element("button"),
+    compactionQueueSendReason: () => "", models: [] };
+  vm.createContext(context);
+  vm.runInContext(sourceSection("function transcriptModelName(", "function readableToolName("), context);
+  return context.renderTranscriptEvent;
+}
+
+test("压缩历史仅有时间字段时，切回会话即可显示进行中或已完成", () => {
+  const render = compactionRenderer();
+  // 真实服务历史没有 completed 字段，不能依赖下一次实时事件才补全显示状态。
+  const item = { type: "contextCompaction", id: "compact", startedAtMs: 1794147063807 };
+  assert.match(render(item).textContent, /正在压缩上下文/);
+  assert.match(render({ ...item, completedAtMs: 1794147151527 }).textContent, /上下文已压缩/);
+  assert.doesNotMatch(render({ ...item, completedAtMs: 1794147151527 }).textContent, /正在压缩|状态已更新/);
+});
+
+test("压缩失败、中断和未知历史不能显示为成功完成", () => {
+  const render = compactionRenderer(), item = { type: "contextCompaction", id: "compact" };
+  assert.match(render({ ...item, status: "failed", completedAtMs: 100 }).textContent, /失败/);
+  for (const status of ["interrupted", "cancelled", "canceled"]) {
+    assert.match(render({ ...item, status, completedAtMs: 100 }).textContent, /中断/);
+  }
+  assert.match(render(item).textContent, /状态已更新/);
+});
+
+test("切回会话的迟到快照不能抹掉压缩完成事件或把它恢复为进行中", () => {
+  const context = { transcriptEvents: new Map(), turns: new Map(), itemVersions: new Map() };
+  vm.createContext(context);
+  vm.runInContext([
+    sourceSection("const transcriptEventTypes =", "async function mutate("),
+    sourceSection("function completedItem(", "function mergeHistoryTurn("),
+  ].join("\n"), context);
+  const completed = { turnId: "compact-turn", item: {
+    type: "contextCompaction", id: "compact", completed: true, completedAtMs: 2000,
+  } };
+  context.mergeTranscriptEvents([completed]);
+  context.itemVersions.set("compact-turn:compact", 2);
+  context.replaceTranscriptEvents([], 1);
+  assert.equal(context.transcriptEvents.size, 1);
+  context.mergeTranscriptEvents([{ ...completed, item: { ...completed.item, completed: false, completedAtMs: undefined } }]);
+  const restored = context.enrichTurnTranscriptEvents({ id: "compact-turn", items: [] });
+  assert.equal(restored.items.length, 1);
+  assert.equal(restored.items[0].completed, true);
+  assert.match(compactionRenderer()(restored.items[0]).textContent, /上下文已压缩/);
+  // 新选择用另一会话的快照时仍必须隔离，不能把上一会话的事件带过去。
+  context.replaceTranscriptEvents([]);
+  assert.equal(context.transcriptEvents.size, 0);
+  const interrupted = context.enrichTurnTranscriptEvents({ id: "stopped", status: "interrupted",
+    items: [{ type: "contextCompaction", id: "unfinished", startedAtMs: 1000 }] });
+  assert.match(compactionRenderer()(interrupted.items[0]).textContent, /已中断/);
+  const finishedBeforeInterruption = context.enrichTurnTranscriptEvents({ id: "stopped", status: "interrupted",
+    items: [{ type: "contextCompaction", id: "finished", startedAtMs: 1000, completedAtMs: 2000 }] });
+  assert.match(compactionRenderer()(finishedBeforeInterruption.items[0]).textContent, /上下文已压缩/);
+});
+
+test("CDP 历史压缩投影保留完成时间与失败状态", () => {
+  const context = { transcriptEventTypes: new Set(["contextCompaction"]) };
+  vm.createContext(context);
+  vm.runInContext(nativeSourceSection("function nativeTranscriptItem(", "function nativeTranscriptEvents("), context);
+  const item = { type: "contextCompaction", id: "compact", startedAtMs: 1000, completedAtMs: 2000, status: "failed" };
+  const projected = context.nativeTranscriptItem(item);
+  assert.equal(projected.completedAtMs, 2000);
+  assert.match(compactionRenderer()(projected).textContent, /失败/);
+});
+
 test("工具证据未知时实际渲染状态未知，不能因父轮运行或结束显示完成勾号", () => {
   const render = toolRenderer();
   for (const type of ["sleep", "reasoning", "dynamicToolCall", "commandExecution"]) {
@@ -1749,7 +1823,7 @@ function queueReloadHarness() {
     selectedId: "main", selectionVersion: 1, foregroundReadGeneration: 0,
     thread: { id: "main", queuedMessages: [{ id: "queued-a", text: "引导消息" }] },
     threadRequest: null, threadReadVersion: 0,
-    tokenUsageVersion: 0, questionVersion: 0, statusVersion: 0, goalVersion: 0, compactionVersion: 0,
+    tokenUsageVersion: 0, questionVersion: 0, statusVersion: 0, goalVersion: 0, compactionVersion: 0, messageVersion: 0,
     queueVersion: 0, queueSnapshotVersion: null, retiredQueueEpochs: new Set(),
     notifiedQueue: null, notifiedQueueEdits: null, pendingSteer: null,
     connected: true, queuedActionBusy: new Set(), pending: null, busy: false, stopping: false,
@@ -2551,6 +2625,43 @@ test("删除尚无原生确认时迟到HTTP失败仍保留准确原回执unknown
   assert.equal(h.context.sidebar.recent.some(item => item.id === h.target.id), true);
   assert.deepEqual(h.notices, [{ message: "Failed to fetch", error: true }]);
   assert.equal(h.calls.length, 1);
+  h.assertControlRetained();
+});
+
+test("服务模式返回明确删除回执后立即清理目标，不提示未确认", async () => {
+  const h = sidebarDeletionHarness();
+  let refreshed = 0;
+  h.context.loadSidebar = async () => { refreshed++; };
+  const deletion = h.context.deleteSidebarThread(h.target);
+  await new Promise(resolve => setImmediate(resolve));
+  h.reply.resolve({ ok: true, threadId: h.target.id, deleted: true, status: "local_deleted",
+    executionTransport: "app-server-stdio" });
+  await deletion;
+  assert.equal(h.context.threadDeleted(h.target.id), true);
+  assert.equal(h.context.sidebar.recent.some(item => item.id === h.target.id), false);
+  assert.deepEqual(h.notices, [{ message: "会话已永久删除", error: false }]);
+  assert.equal(refreshed, 1);
+  assert.equal(h.calls.length, 1);
+  h.assertControlRetained();
+});
+
+test("旧服务删除回执恢复后只核对原回执，不再次派发删除", async () => {
+  const h = sidebarDeletionHarness(), reads = [];
+  h.context.threadDeletionChecks = new Set();
+  const record = { id: "original-delete-receipt", threadId: h.target.id, deviceId: "device-a", state: "unknown" };
+  h.context.threadDeletions.set(h.context.threadDeletionKey(h.target.id), record);
+  h.context.api = async path => {
+    reads.push(path);
+    return { state: "completed", result: {
+      ok: true, threadId: h.target.id, deleted: true, status: "local_deleted", executionTransport: "app-server-stdio",
+    } };
+  };
+  vm.runInContext(sourceSection("async function checkThreadDeletion(", "function restoreSidebarPreferences("), h.context);
+  await h.context.checkThreadDeletion(record);
+  assert.deepEqual(reads, ["/api/receipts/original-delete-receipt"]);
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.context.threadDeleted(h.target.id), true);
+  assert.deepEqual(h.notices, [{ message: "已确认会话永久删除", error: false }]);
   h.assertControlRetained();
 });
 
@@ -3457,7 +3568,7 @@ function sideCreationNavigationHarness() {
     threadRequest: null, historyRequest: null, threadReadFailed: false, latestHistoryReadFailed: false,
     transcriptChecking: false, historyError: "", sideThreadExpired: () => false,
     turns: new Map(), transcriptEvents: new Map(), threadReadVersion: 0,
-    tokenUsageVersion: 0, statusVersion: 0, questionVersion: 0, goalVersion: 0, compactionVersion: 0, queueVersion: 0,
+    tokenUsageVersion: 0, statusVersion: 0, questionVersion: 0, goalVersion: 0, compactionVersion: 0, queueVersion: 0, messageVersion: 0,
     drafts: new Map([["other", "C 的原有草稿"]]),
     skillDrafts: new Map([["other", [{ name: "C-skill", path: "/C/SKILL.md" }]]]),
     attachmentDrafts: new Map([["other", [{ name: "other.png" }]]]), goalDrafts: new Map(),

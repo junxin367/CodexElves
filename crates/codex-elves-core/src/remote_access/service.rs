@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 
 const ENDPOINT_FILE: &str = "remote-access-service.json";
 const LOCK_FILE: &str = "remote-access-service.lock";
-// 协议 4 增加项目分支元数据，保留协议 3 的运行模式接口；更新后不能复用缺少新接口的旧后台。
-const PROTOCOL_VERSION: u32 = 4;
+// 协议 5 增加服务模式的 CDP 硬隔离和执行诊断，不能复用仍允许无上下文 CDP 调用的旧后台。
+const PROTOCOL_VERSION: u32 = 5;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(windows)]
@@ -307,6 +307,7 @@ async fn save_frp(
 }
 
 pub async fn run() -> anyhow::Result<()> {
+    super::execution::require_explicit_cdp();
     let directory = crate::paths::default_app_state_dir();
     let Some(_lock) = acquire_service_lock(&directory)? else {
         return Ok(());

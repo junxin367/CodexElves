@@ -7,6 +7,13 @@ use super::super::now_ms;
 const MAX_EVENTS: usize = 2048;
 const MAX_NOTIFICATIONS: usize = 256;
 
+struct CompactionRecord {
+    thread_id: String,
+    turn_id: String,
+    item: Value,
+    sequence: u64,
+}
+
 pub(super) struct Projection {
     pub epoch: String,
     pub sequence: u64,
@@ -17,6 +24,7 @@ pub(super) struct Projection {
     pub requests: HashMap<String, Value>,
     pub active: HashMap<String, String>,
     pub compactions: HashMap<String, Value>,
+    compaction_records: VecDeque<CompactionRecord>,
     completed: VecDeque<String>,
     events: VecDeque<(u64, Value)>,
     notifications: VecDeque<Value>,
@@ -36,6 +44,7 @@ impl Default for Projection {
             requests: HashMap::new(),
             active: HashMap::new(),
             compactions: HashMap::new(),
+            compaction_records: VecDeque::new(),
             completed: VecDeque::new(),
             events: VecDeque::new(),
             notifications: VecDeque::new(),
@@ -47,6 +56,9 @@ impl Default for Projection {
 
 impl Projection {
     pub fn push(&mut self, event: Value) {
+        if event["method"] == "thread/deleted" {
+            self.forget_compactions(event["params"]["threadId"].as_str().unwrap_or(""));
+        }
         self.sequence += 1;
         self.events.push_back((self.sequence, event));
         while self.events.len() > MAX_EVENTS {
@@ -133,12 +145,163 @@ impl Projection {
             "attentionState":if waiting {"waiting"} else if active {"active"}
                 else if thread["hasUnreadTurn"] == true {"unread"} else {"idle"}
         });
-        thread["compaction"] = self
-            .compactions
-            .get(thread_id)
-            .cloned()
-            .unwrap_or_else(|| json!({"state":"idle"}));
+        self.decorate_compaction(thread_id, &mut thread);
         thread
+    }
+
+    pub fn compaction_revision(&self, id: &str) -> u64 {
+        self.compaction_records
+            .iter()
+            .rev()
+            .find(|record| record.thread_id == id)
+            .map_or(0, |record| record.sequence)
+    }
+
+    pub fn forget_compactions(&mut self, id: &str) {
+        self.compactions.remove(id);
+        self.compaction_records
+            .retain(|record| record.thread_id != id);
+    }
+
+    pub fn compaction(&self, id: &str) -> Value {
+        self.compactions.get(id).cloned().unwrap_or_else(|| {
+            self.compaction_records
+                .iter()
+                .rev()
+                .find(|record| record.thread_id == id)
+                .map_or_else(
+                    || json!({"state":"idle"}),
+                    |record| json!({"state":"idle","turnId":record.turn_id,"itemId":record.item["id"]}),
+                )
+        })
+    }
+
+    pub fn decorate_compaction(&self, id: &str, thread: &mut Value) {
+        if self.compactions.contains_key(id) || self.compaction_revision(id) > 0 {
+            thread["compaction"] = self.compaction(id);
+        } else if thread["compaction"].is_null() {
+            thread["compaction"] = json!({"state":"idle"});
+        }
+        let events = thread["transcriptEvents"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let mut events = events;
+        for record in self
+            .compaction_records
+            .iter()
+            .filter(|record| record.thread_id == id)
+        {
+            events.retain(|entry| {
+                entry["turnId"] != record.turn_id || entry["item"]["id"] != record.item["id"]
+            });
+            events.push(json!({"turnId":record.turn_id,"item":record.item}));
+        }
+        thread["transcriptEvents"] = json!(events);
+    }
+
+    fn remember_compaction(&mut self, id: &str, turn_id: &str, mut item: Value, completed: bool) {
+        if id.is_empty() || turn_id.is_empty() || item["id"].as_str().is_none_or(str::is_empty) {
+            return;
+        }
+        if let Some(index) = self.compaction_records.iter().position(|record| {
+            record.thread_id == id && record.turn_id == turn_id && record.item["id"] == item["id"]
+        }) {
+            let previous = self.compaction_records.remove(index).unwrap();
+            let mut merged = previous.item.clone();
+            for (key, value) in item.as_object().into_iter().flatten() {
+                merged[key] = value.clone();
+            }
+            if previous.item["completed"] == true && !completed {
+                item = previous.item;
+            } else {
+                item = merged;
+            }
+        }
+        item["completed"] = json!(completed || item["completed"] == true);
+        if item["startedAtMs"].as_u64().is_none() {
+            item["startedAtMs"] = json!(now_ms());
+        }
+        self.compaction_records.push_back(CompactionRecord {
+            thread_id: id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            item,
+            sequence: self.sequence + 1,
+        });
+        // 与实时事件队列同上限；只淘汰已结束记录，进行中的压缩不能因其它会话活动而丢失。
+        while self.compaction_records.len() > MAX_EVENTS {
+            let Some(index) = self
+                .compaction_records
+                .iter()
+                .position(|record| record.item["completed"] == true)
+            else {
+                break;
+            };
+            self.compaction_records.remove(index);
+        }
+    }
+
+    pub fn history(&self, id: &str, mut history: Value, latest: bool) -> Value {
+        let mut events = history["transcriptEvents"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let item_turn = history["turnId"].as_str().map(str::to_owned);
+        let mut turns = history["data"].as_array().cloned().unwrap_or_default();
+        let oldest = turns.iter().filter_map(turn_started_ms).min().unwrap_or(0);
+        for record in self
+            .compaction_records
+            .iter()
+            .filter(|record| record.thread_id == id)
+        {
+            let included = if let Some(turn_id) = &item_turn {
+                *turn_id == record.turn_id
+            } else {
+                let exists = turns.iter().any(|turn| turn["id"] == record.turn_id);
+                let started = record.item["startedAtMs"].as_u64().unwrap_or(0);
+                // 用户要求切回会话立即显示压缩；历史尚未落盘该轮时，以已收到的真实生命周期补齐。
+                if !exists && latest && (record.item["completed"] != true || started >= oldest) {
+                    let status = if record.item["completed"] != true {
+                        "inProgress"
+                    } else {
+                        record.item["status"]
+                            .as_str()
+                            .filter(|status| {
+                                matches!(
+                                    *status,
+                                    "failed" | "interrupted" | "cancelled" | "canceled"
+                                )
+                            })
+                            .unwrap_or("completed")
+                    };
+                    let index = turns
+                        .iter()
+                        .position(|turn| turn_started_ms(turn).unwrap_or(0) < started)
+                        .unwrap_or(turns.len());
+                    turns.insert(
+                        index,
+                        json!({"id":record.turn_id,"status":status,
+                        "startedAt":started / 1000,"turnStartedAtMs":started,"items":[],
+                        "itemsView":"summary","itemsPageComplete":false,"itemsComplete":false}),
+                    );
+                    history["itemsPaginationByTurnId"][&record.turn_id] = json!({
+                        "nextCursor":null,"hasMore":false,"complete":false,"pageComplete":false,
+                        "direction":"older","order":"asc"});
+                }
+                exists || turns.iter().any(|turn| turn["id"] == record.turn_id)
+            };
+            if included {
+                events.retain(|entry| {
+                    entry["turnId"] != record.turn_id || entry["item"]["id"] != record.item["id"]
+                });
+                events.push(json!({"turnId":record.turn_id,"item":record.item}));
+            }
+        }
+        if item_turn.is_none() {
+            history["data"] = json!(turns);
+        }
+        history["transcriptEvents"] = json!(events);
+        history
     }
 
     pub fn ingest(&mut self, mut frame: Value) {
@@ -159,6 +322,7 @@ impl Projection {
             self.notification_sequence = 0;
             self.active.clear();
             self.compactions.clear();
+            self.compaction_records.clear();
             self.completed.clear();
             self.hidden_threads.clear();
             self.push(json!({"method":"remote/resync"}));
@@ -263,7 +427,23 @@ impl Projection {
                 {
                     self.active.remove(&id);
                 }
-                self.compactions.remove(&id);
+                if self
+                    .compactions
+                    .get(&id)
+                    .is_some_and(|state| state["turnId"] == frame["params"]["turn"]["id"])
+                {
+                    self.compactions.remove(&id);
+                }
+                let turn_id = frame["params"]["turn"]["id"].as_str().unwrap_or("");
+                for record in self.compaction_records.iter_mut().filter(|record| {
+                    record.thread_id == id
+                        && record.turn_id == turn_id
+                        && record.item["completed"] != true
+                }) {
+                    record.item["completed"] = json!(true);
+                    record.item["status"] = frame["params"]["turn"]["status"].clone();
+                    record.sequence = self.sequence + 1;
+                }
                 self.notify(
                     &id,
                     if frame["params"]["turn"]["status"] == "failed" {
@@ -275,6 +455,16 @@ impl Projection {
                 );
             }
             "item/started" if frame["params"]["item"]["type"] == "contextCompaction" => {
+                let turn_id = frame["params"]["turnId"].as_str().unwrap_or("");
+                if self.compaction_records.iter().any(|record| {
+                    record.thread_id == id
+                        && record.turn_id == turn_id
+                        && record.item["id"] == frame["params"]["item"]["id"]
+                        && record.item["completed"] == true
+                }) {
+                    return;
+                }
+                self.remember_compaction(&id, turn_id, frame["params"]["item"].clone(), false);
                 self.compactions.insert(
                     id.clone(),
                     json!({"state":"running",
@@ -282,7 +472,13 @@ impl Projection {
                 );
             }
             "item/completed" if frame["params"]["item"]["type"] == "contextCompaction" => {
-                self.compactions.remove(&id);
+                let turn_id = frame["params"]["turnId"].as_str().unwrap_or("");
+                self.remember_compaction(&id, turn_id, frame["params"]["item"].clone(), true);
+                if self.compactions.get(&id).is_some_and(|state| {
+                    state["turnId"].is_null() || state["turnId"] == frame["params"]["turnId"]
+                }) {
+                    self.compactions.remove(&id);
+                }
             }
             "item/completed" if frame["params"]["item"]["type"] == "agentMessage" => {
                 if let Some(mut request) =
@@ -422,9 +618,81 @@ pub(super) fn async_question(thread_id: &str, turn_id: &Value, item: &Value) -> 
     )
 }
 
+fn turn_started_ms(turn: &Value) -> Option<u64> {
+    turn["turnStartedAtMs"].as_u64().or_else(|| {
+        turn["startedAt"].as_u64().map(|value| {
+            if value < 100_000_000_000 {
+                value.saturating_mul(1000)
+            } else {
+                value
+            }
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harness_compaction_survives_reentry_before_history_persistence_and_after_completion() {
+        let mut projection = Projection::default();
+        let item = json!({"id":"compact-item","type":"contextCompaction","startedAtMs":2000});
+        projection.ingest(json!({"method":"item/started","params":{
+            "threadId":"main","turnId":"compact-turn","item":item}}));
+        let history = json!({"scope":"turns","data":[{"id":"previous","startedAt":1,"items":[]}],
+            "itemsPaginationByTurnId":{},"transcriptEvents":[]});
+        let active = projection.history("main", history.clone(), true);
+        assert_eq!(active["data"][0]["id"], "compact-turn");
+        assert_eq!(active["data"][0]["status"], "inProgress");
+        assert_eq!(active["transcriptEvents"][0]["item"]["completed"], false);
+        assert_eq!(
+            active["itemsPaginationByTurnId"]["compact-turn"]["complete"],
+            false
+        );
+        let thread = projection.thread("main", json!({}));
+        assert_eq!(thread["compaction"]["state"], "running");
+        assert_eq!(thread["transcriptEvents"][0]["item"]["id"], "compact-item");
+        projection.ingest(json!({"method":"item/completed","params":{
+            "threadId":"main","turnId":"compact-turn","item":item}}));
+        let completed = projection.history("main", history, true);
+        assert_eq!(completed["transcriptEvents"][0]["item"]["completed"], true);
+        assert_eq!(projection.compaction("main")["state"], "idle");
+        // 迟到的开始事件不能把完成记录重新锁定，且不依赖发送新消息来恢复显示。
+        projection.ingest(json!({"method":"item/started","params":{
+            "threadId":"main","turnId":"compact-turn","item":item}}));
+        assert_eq!(projection.compaction("main")["state"], "idle");
+        assert_eq!(
+            projection.thread("main", json!({}))["transcriptEvents"][0]["item"]["completed"],
+            true
+        );
+    }
+
+    #[test]
+    fn harness_compaction_history_keeps_pagination_and_other_threads_isolated() {
+        let mut projection = Projection::default();
+        projection.ingest(
+            json!({"method":"item/started","params":{"threadId":"main","turnId":"compact-turn",
+            "item":{"id":"compact","type":"contextCompaction","startedAtMs":2000}}}),
+        );
+        let page = json!({"scope":"turns","data":[{"id":"older","startedAt":1,"items":[]}],
+            "itemsPaginationByTurnId":{},"transcriptEvents":[],"nextCursor":"older-cursor"});
+        let older = projection.history("main", page.clone(), false);
+        assert_eq!(older, page);
+        assert_eq!(projection.history("other", page.clone(), true), page);
+        let persisted = json!({"scope":"turns","data":[{"id":"compact-turn","startedAt":2,"items":[]}],
+            "itemsPaginationByTurnId":{},"transcriptEvents":[]});
+        assert_eq!(
+            projection.history("main", persisted, true)["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        projection
+            .ingest(json!({"method":"harness/connected","_generation":"new","_generationIndex":1}));
+        assert!(projection.compaction_records.is_empty());
+    }
 
     #[test]
     fn harness_cached_summary_uses_live_activity_approval_and_read_state() {

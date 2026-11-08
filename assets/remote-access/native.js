@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 134) return;
+  if (window.__codexElvesRemoteAccess?.version === 135) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -2858,6 +2858,9 @@
         type: item.type,
         ...(typeof item.completed === "boolean" ? { completed: item.completed } : {}),
         ...(Number.isFinite(item.startedAtMs) ? { startedAtMs: item.startedAtMs } : {}),
+        // 用户要求切回远程会话恢复压缩结果；CDP 历史也须保留完成时间和失败/中断状态。
+        ...(Number.isFinite(item.completedAtMs) ? { completedAtMs: item.completedAtMs } : {}),
+        ...(typeof item.status === "string" ? { status: item.status } : {}),
         ...(["manual", "automatic"].includes(item.source) ? { source: item.source } : {})
       };
     }
@@ -7453,7 +7456,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 134, call,
+    version: 135, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {

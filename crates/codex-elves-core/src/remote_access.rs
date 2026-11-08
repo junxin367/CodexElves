@@ -37,6 +37,7 @@ mod channels;
 mod context_usage;
 mod credentials;
 mod diagnostics;
+pub(crate) mod execution;
 mod frp_recovery;
 mod frp_tunnel;
 mod harness;
@@ -200,6 +201,7 @@ impl NativeCdpBridge {
         authorization: Option<&RemoteAuthorization>,
         command_timeout: Duration,
     ) -> anyhow::Result<Value> {
+        execution::check_cdp_allowed("native-dispatch")?;
         let status = status
             .filter(|status| matches!(status.status.as_str(), "running" | "running_degraded"))
             .context("请先通过 CodexElves 启动 Codex 桌面应用")
@@ -282,6 +284,7 @@ pub struct NativePreferredRemoteBridge {
 #[async_trait]
 impl NativeRemoteBridge for CodexCliService {
     async fn call(&self, action: &str, payload: Value) -> anyhow::Result<Value> {
+        execution::transport("app-server-stdio", action, service_write_action(action));
         CodexCliService::call(self, action, payload).await
     }
 
@@ -291,6 +294,7 @@ impl NativeRemoteBridge for CodexCliService {
         payload: Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
+        execution::transport("app-server-stdio", action, service_write_action(action));
         self.call_with_dispatch_guard(action, payload, authorization)
             .await
     }
@@ -305,6 +309,7 @@ impl NativePreferredRemoteBridge {
     }
 
     async fn call_service_or_cdp(&self, action: &str, payload: Value) -> anyhow::Result<Value> {
+        execution::check_cdp_allowed("native-router")?;
         if !service_action(action) {
             return self.cdp.call(action, payload).await;
         }
@@ -351,6 +356,7 @@ impl NativeRemoteBridge for NativePreferredRemoteBridge {
         payload: Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
+        execution::check_cdp_allowed("native-router")?;
         if !service_action(action) {
             return self
                 .cdp
@@ -462,9 +468,10 @@ fn native_request_rejected(value: &Value) -> bool {
 }
 
 fn native_error_rejected(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<ApiError>()
-        .is_some_and(|error| (400..500).contains(&error.code))
+    execution::is_cdp_forbidden(error)
+        || error
+            .downcast_ref::<ApiError>()
+            .is_some_and(|error| (400..500).contains(&error.code))
 }
 
 fn native_write_fallback_allowed(value: &Value) -> bool {
@@ -575,6 +582,7 @@ pub struct RemoteAuthorization {
     controller: Arc<RemoteAccessController>,
     device: Device,
     write_action: Option<String>,
+    request_id: Option<String>,
 }
 
 impl RemoteAuthorization {
@@ -787,6 +795,7 @@ struct LiveService {
 
 pub struct RemoteAccessController {
     native: Arc<dyn NativeRemoteBridge>,
+    native_started: AtomicBool,
     harness: Arc<harness::Harness>,
     runtime_modes: tokio::sync::RwLock<HashMap<String, RemoteRuntimeMode>>,
     harness_connected: AtomicBool,
@@ -823,7 +832,7 @@ impl Default for RemoteRuntimeMode {
     fn default() -> Self {
         // 用户要求默认开启；按当前设备授权保存，其他设备的开关保持独立。
         Self {
-            cdp_injection_enabled: true,
+            cdp_injection_enabled: !execution::cdp_disabled(),
             revision: 0,
         }
     }
@@ -871,13 +880,15 @@ impl RemoteAccessController {
             read_json_or_default(&state_dir.join("remote-access-device-runtimes.json"))?;
         let harness = harness::Harness::new(&state_dir)?;
         harness.enabled.store(
-            runtime_modes
-                .values()
-                .any(|mode| !mode.cdp_injection_enabled),
+            execution::cdp_disabled()
+                || runtime_modes
+                    .values()
+                    .any(|mode| !mode.cdp_injection_enabled),
             Ordering::Release,
         );
         let controller = Arc::new(Self {
             native,
+            native_started: AtomicBool::new(false),
             harness: harness.clone(),
             runtime_modes: tokio::sync::RwLock::new(runtime_modes),
             harness_connected: AtomicBool::new(false),
@@ -1117,6 +1128,7 @@ impl RemoteAccessController {
             controller: self.clone(),
             device,
             write_action: write_action.map(str::to_owned),
+            request_id: None,
         }
     }
 
@@ -1240,7 +1252,7 @@ impl RemoteAccessController {
             live.ngrok.stop().await;
             live.zrok.reconcile(false, &zrok_target).await;
             if finished || was_enabled {
-                let _ = self.call_backend("dispose", json!({}), None).await;
+                self.dispose_native_backend().await;
             }
             drop(live);
             self.prune_stale_public_devices().await;
@@ -1313,13 +1325,26 @@ impl RemoteAccessController {
                 let mut failure_since = None;
                 loop {
                     if !controller.needs_native_backend().await {
+                        controller.native_connected.store(false, Ordering::SeqCst);
+                        controller.service_connected.store(false, Ordering::SeqCst);
+                        controller
+                            .native_write_available
+                            .store(false, Ordering::SeqCst);
                         tokio::time::sleep(Duration::from_millis(650)).await;
                         continue;
                     }
                     let result = controller
-                        .call_backend("events", json!({"cursor":cursor, "epoch":epoch}), None)
+                        .call_native_events(json!({"cursor":cursor, "epoch":epoch}))
                         .await;
                     match &result {
+                        Ok(response) if response["inactive"] == true => {
+                            failure_since = None;
+                            controller.native_connected.store(false, Ordering::SeqCst);
+                            controller.service_connected.store(false, Ordering::SeqCst);
+                            controller
+                                .native_write_available
+                                .store(false, Ordering::SeqCst);
+                        }
                         Ok(response) if response["ok"] == true => {
                             failure_since = None;
                             let service_response = matches!(
@@ -1634,18 +1659,27 @@ impl RemoteAccessController {
             action,
             "optimizePrompt" | "promptOptimization" | "cancelPromptOptimize"
         ) {
-            return self
-                .prompt_optimization
-                .call(action, payload, &self.state_dir, authorization)
-                .await;
+            return execution::Scope::new(
+                self.harness.audit.clone(),
+                true,
+                action,
+                &payload,
+                Some(authorization),
+                None,
+            )
+            .recorded(async {
+                execution::transport("http-model", action, false);
+                self.prompt_optimization
+                    .call(action, payload, &self.state_dir, authorization)
+                    .await
+            })
+            .await;
         }
         let context_thread_id = payload["threadId"]
             .as_str()
             .filter(|_| action == "thread")
             .map(str::to_owned);
-        let value = self
-            .call_backend(action, payload, Some(authorization))
-            .await?;
+        let value = self.call_backend(action, payload, authorization).await?;
         if let Some(thread_id) = context_thread_id
             && context_usage::needs_usage(&value, &thread_id)
         {
@@ -1670,28 +1704,84 @@ impl RemoteAccessController {
         &self,
         action: &str,
         payload: Value,
-        authorization: Option<&RemoteAuthorization>,
+        authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
         // 读锁覆盖整次调用；关闭设备的请求只能进入自建服务，不能回退 CDP。
         let modes = self.runtime_modes.read().await;
-        let cdp_enabled = authorization
-            .and_then(|a| modes.get(&a.device.id))
-            .is_none_or(|mode| mode.cdp_injection_enabled);
+        let mode = modes
+            .get(&authorization.device.id)
+            .cloned()
+            .unwrap_or_default();
+        let cdp_enabled = mode.cdp_injection_enabled;
         let owned = if let Some(id) = payload["threadId"].as_str() {
             self.harness.owns(id).await
         } else {
             false
         };
-        if cdp_enabled && !owned {
-            if let Some(authorization) = authorization {
-                self.native
-                    .call_authorized(action, payload, authorization)
-                    .await
-            } else {
-                self.native.call(action, payload).await
-            }
-        } else {
-            self.harness.call(action, payload, authorization).await
+        let service_only = !cdp_enabled || owned;
+        let scope = execution::Scope::new(
+            self.harness.audit.clone(),
+            service_only,
+            action,
+            &payload,
+            Some(authorization),
+            Some(mode.revision),
+        );
+        scope
+            .recorded(async {
+                if !service_only {
+                    self.native_started.store(true, Ordering::Release);
+                    self.native
+                        .call_authorized(action, payload, authorization)
+                        .await
+                } else {
+                    self.harness
+                        .call(action, payload, Some(authorization))
+                        .await
+                }
+            })
+            .await
+    }
+
+    async fn call_native_events(&self, payload: Value) -> anyhow::Result<Value> {
+        let modes = self.runtime_modes.read().await;
+        let needed = self.auth.lock().await.devices.iter().any(|device| {
+            device.expires_at_ms > now_ms()
+                && modes
+                    .get(&device.id)
+                    .is_none_or(|mode| mode.cdp_injection_enabled)
+        });
+        if !needed {
+            return Ok(
+                json!({"ok":true,"inactive":true,"events":[],"cursor":payload["cursor"],"epoch":payload["epoch"]}),
+            );
+        }
+        self.native_started.store(true, Ordering::Release);
+        execution::Scope::new(
+            self.harness.audit.clone(),
+            false,
+            "events",
+            &payload,
+            None,
+            None,
+        )
+        .recorded(self.native.call("events", payload))
+        .await
+    }
+
+    async fn dispose_native_backend(&self) {
+        // 用户要求纯服务关闭不再探测 CDP；只释放本后台确实启动过的原生订阅。
+        if self.native_started.swap(false, Ordering::AcqRel) {
+            let _ = execution::Scope::new(
+                self.harness.audit.clone(),
+                false,
+                "dispose",
+                &json!({}),
+                None,
+                None,
+            )
+            .recorded(self.native.call("dispose", json!({})))
+            .await;
         }
     }
 
@@ -1703,6 +1793,9 @@ impl RemoteAccessController {
         let enabled = payload["cdpInjectionEnabled"]
             .as_bool()
             .ok_or_else(|| ApiError::new(400, "CDP 开关值无效"))?;
+        if enabled && execution::cdp_disabled() {
+            return Err(ApiError::new(409, "当前后台以无 CDP 验证模式启动，不能启用 CDP").into());
+        }
         let mut modes = self.runtime_modes.write().await;
         let mode = modes
             .get(&authorization.device.id)
@@ -1776,10 +1869,9 @@ impl RemoteAccessController {
             .map(|d| d.id.clone())
             .collect();
         let modes = self.runtime_modes.read().await;
-        devices.is_empty()
-            || devices
-                .iter()
-                .any(|id| modes.get(id).is_none_or(|m| m.cdp_injection_enabled))
+        devices
+            .iter()
+            .any(|id| modes.get(id).is_none_or(|m| m.cdp_injection_enabled))
     }
 
     fn publish_backend_event(&self, source: &str, mut event: Value) {
@@ -1832,7 +1924,8 @@ impl RemoteAccessController {
         action: String,
         payload: Value,
     ) -> Result<Value, ApiError> {
-        let authorization = self.authorization(device.clone(), Some(&action));
+        let mut authorization = self.authorization(device.clone(), Some(&action));
+        authorization.request_id = Some(request_id.clone());
         authorization.check().await.map_err(authorization_error)?;
         if request_id.is_empty()
             || request_id.len() > 100
@@ -1963,7 +2056,27 @@ impl RemoteAccessController {
 }
 
 fn receipt_value(receipt: &Receipt) -> Value {
-    json!({"requestId":receipt.request_id,"state":receipt.state,"result":receipt.result})
+    let mut result = receipt.result.clone().unwrap_or(Value::Null);
+    // 用户要求修复旧版服务模式删除误报；用操作摘要确认这确实是删除，不能把其它成功操作当成删除。
+    // 只补齐已成功的 stdio 删除回执，不重放删除，也不放宽 pending/unknown/failed 或显式未确认的结果。
+    if receipt.state == "completed"
+        && result["ok"] == true
+        && result["executionTransport"] == "app-server-stdio"
+        && result.get("deleted").is_none()
+        && result.get("status").is_none()
+        && result["outcomeUnknown"] != true
+    {
+        if let Some(id) = result["threadId"].as_str() {
+            let payload = json!({"threadId":id});
+            if validate_delete_thread_payload(&payload).is_ok()
+                && receipt.payload_hash == hash(&json!(["deleteThread", payload]).to_string())
+            {
+                result["deleted"] = json!(true);
+                result["status"] = json!("local_deleted");
+            }
+        }
+    }
+    json!({"requestId":receipt.request_id,"state":receipt.state,"result":result})
 }
 
 pub struct RemoteAccessMonitor {
@@ -3402,7 +3515,7 @@ async fn workspace_context(
     };
     let result = state
         .controller
-        .call_backend("workspaceContext", identity.clone(), Some(authorization))
+        .call_backend("workspaceContext", identity.clone(), authorization)
         .await
         .map_err(|error| {
             error
@@ -5748,7 +5861,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    result={thread:t,readState:{firstUnread:null,revision:'r1'}};break;
  case 'thread/resume': result={thread:t,model:'gpt-test',reasoningEffort:'high'};break;
  case 'thread/turns/list':result={data:[...(t?.turns||[])].reverse(),nextCursor:null};break;
- case 'thread/items/list':result={data:[...(t.turns.find(turn=>turn.id===p.turnId)?.items||[])].reverse(),nextCursor:null};break;
+ case 'thread/items/list':result={data:[...(t.turns.find(turn=>turn.id===p.turnId)?.items||[])].reverse().map(item=>({turnId:p.turnId,item})),nextCursor:null};break;
  case 'thread/goal/get':result={goal:goals.get(p.threadId)||null};break;
  case 'thread/goal/set':{
    const goal={...(goals.get(p.threadId)||{createdAt:1,tokensUsed:0,timeUsedSeconds:0,tokenBudget:null}),...p,updatedAt:2};
@@ -5775,7 +5888,9 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    setTimeout(()=>event('item/completed',{threadId:p.threadId,turnId:'compact',item:{id:'compact',type:'contextCompaction'}}),20);break;
  case 'thread/name/set':t.name=p.name;break;
  case 'thread/revert':t.turns=t.turns.filter(turn=>turn.id!==p.beforeTurnId);result={thread:t};break;
- case 'thread/delete':threads.delete(p.threadId);break;
+  case 'thread/delete':
+    if(t?.name==='reject-delete'){output({id:q.id,error:{code:-32001,message:'fixture deletion rejected'}});return;}
+    threads.delete(p.threadId);break;
  case 'thread/readState/update':result={readState:{firstUnread:null,revision:'r2'}};break;
  case 'skills/list':result={data:p.cwds.map(cwd=>({cwd,skills:[],errors:[]}))};break;
  case 'model/list':result={data:[{id:'gpt-test',model:'gpt-test',supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:null};break;
@@ -5810,6 +5925,761 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             .await
             .unwrap();
         (directory, authorization)
+    }
+
+    #[tokio::test]
+    #[ignore = "显式设置 CODEX_ELVES_SERVICE_CHECK_EXE 和 CODEX_ELVES_DISABLE_CDP=1 后运行独立真实引擎验收"]
+    async fn harness_real_app_server_without_cdp() {
+        use std::sync::atomic::AtomicU64;
+        assert!(execution::cdp_disabled(), "验收进程必须从启动时禁止 CDP");
+        assert!(
+            std::env::var("CODEX_ELVES_TEST_IPC_PIPE")
+                .unwrap_or_default()
+                .starts_with(r"\\.\pipe\codex-elves-isolation-"),
+            "验收必须隔离用户桌面 IPC"
+        );
+        execution::require_explicit_cdp();
+        let executable = PathBuf::from(
+            std::env::var_os("CODEX_ELVES_SERVICE_CHECK_EXE").expect("缺少独立引擎路径"),
+        );
+        assert!(executable.is_file());
+        let (directory, seed) = service_dispatch_fixture().await;
+        let home = directory.path().join("isolated-codex-home");
+        std::fs::create_dir_all(&home).unwrap();
+        struct SettingsGuard(Option<PathBuf>);
+        impl Drop for SettingsGuard {
+            fn drop(&mut self) {
+                crate::paths::set_settings_path_for_tests(self.0.take());
+            }
+        }
+        let settings_path = directory.path().join("settings.json");
+        let settings = crate::settings::BackendSettings {
+            codex_home_path: home.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+        let _settings = SettingsGuard(crate::paths::set_settings_path_for_tests(Some(
+            settings_path,
+        )));
+        let calls = Arc::new(AtomicU64::new(0));
+        let delay = Arc::new(AtomicU64::new(20));
+        let scenario = Arc::new(AtomicU64::new(0));
+        let model_state = (calls.clone(), delay.clone(), scenario.clone());
+        // 真实 app-server 连接受控 Responses 端点；不使用用户密钥，也不向外部模型发送测试内容。
+        let model_router = Router::new().route("/v1/responses", post(
+            |State((calls, delay, scenario)): State<(Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicU64>)>, Json(request): Json<Value>| async move {
+                let number = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let id = format!("response-isolation-{number}");
+                let item = json!({"id":format!("message-isolation-{number}"),"type":"message",
+                    "role":"assistant","status":"completed",
+                    "content":[{"type":"output_text","text":"ISOLATION_OK","annotations":[]}]});
+                let frames = if scenario.swap(0, Ordering::SeqCst) == 1 {
+                    let tools = request["tools"].as_array().expect("真实引擎未提供工具");
+                    let tool = tools.iter().find(|tool| matches!(tool["name"].as_str(), Some("exec_command" | "shell_command")))
+                        .unwrap_or_else(|| panic!("缺少可验证的命令工具：{}", json!(tools.iter().map(|t| &t["name"]).collect::<Vec<_>>())));
+                    let name = tool["name"].as_str().unwrap();
+                    let key = if name == "exec_command" { "cmd" } else { "command" };
+                    let mut arguments = json!({"sandbox_permissions":"require_escalated","justification":"无 CDP 验收，仅输出固定文字。"});
+                    arguments[key] = json!("Write-Output ISOLATION_APPROVED");
+                    let item = json!({"id":format!("tool-isolation-{number}"),"type":"function_call",
+                        "call_id":format!("call-isolation-{number}"),"name":name,
+                        "arguments":serde_json::to_string(&arguments).unwrap(),"status":"completed"});
+                    vec![
+                        json!({"type":"response.created","response":{"id":id,"status":"in_progress","output":[]}}),
+                        json!({"type":"response.output_item.added","output_index":0,"item":item}),
+                        json!({"type":"response.output_item.done","output_index":0,"item":item}),
+                        json!({"type":"response.completed","response":{"id":id,"status":"completed","output":[item],
+                            "usage":{"input_tokens":20,"output_tokens":4,"total_tokens":24}}}),
+                    ]
+                } else { vec![
+                    json!({"type":"response.created","response":{"id":id,"status":"in_progress","output":[]}}),
+                    json!({"type":"response.output_item.added","output_index":0,
+                        "item":{"id":item["id"],"type":"message","role":"assistant","status":"in_progress","content":[]}}),
+                    json!({"type":"response.content_part.added","item_id":item["id"],"output_index":0,
+                        "content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}),
+                    json!({"type":"response.output_text.delta","item_id":item["id"],"output_index":0,
+                        "content_index":0,"delta":"ISOLATION_"}),
+                    json!({"type":"response.output_text.delta","item_id":item["id"],"output_index":0,
+                        "content_index":0,"delta":"OK"}),
+                    json!({"type":"response.output_item.done","output_index":0,"item":item}),
+                    json!({"type":"response.completed","response":{"id":id,"status":"completed","output":[item],
+                        "usage":{"input_tokens":20,"output_tokens":4,"total_tokens":24}}}),
+                ] };
+                let delay_ms = delay.load(Ordering::SeqCst);
+                let body = stream::unfold(frames.into_iter(), move |mut frames| async move {
+                    let frame = frames.next()?;
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    Some((Ok::<_, Infallible>(format!("event: {}\ndata: {frame}\n\n", frame["type"].as_str().unwrap())), frames))
+                });
+                ([(header::CONTENT_TYPE, "text/event-stream")], Body::from_stream(body))
+            }
+        )).with_state(model_state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let model_server =
+            tokio::spawn(async move { axum::serve(listener, model_router).await.unwrap() });
+        std::fs::write(home.join("config.toml"), format!(
+            "model = \"gpt-5.4\"\nmodel_provider = \"isolation\"\nmodel_reasoning_effort = \"low\"\napproval_policy = \"on-request\"\nsandbox_mode = \"read-only\"\n\
+            [model_providers.isolation]\nname = \"本地隔离验收\"\nbase_url = \"http://{address}/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n"
+        )).unwrap();
+        async fn engine(
+            executable: &FsPath,
+            home: &FsPath,
+        ) -> crate::codex_service::RunningService {
+            let mut command = tokio::process::Command::new(executable);
+            command
+                .arg("app-server")
+                .env("CODEX_HOME", home)
+                .env("HOME", home)
+                .env("USERPROFILE", home)
+                .current_dir(home)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true);
+            #[cfg(windows)]
+            command.creation_flags(crate::windows_create_hidden_process());
+            crate::codex_service::RunningService::for_test(command.spawn().unwrap()).unwrap()
+        }
+        async fn controller(
+            directory: &FsPath,
+            device: Device,
+            process: crate::codex_service::RunningService,
+        ) -> RemoteAuthorization {
+            let controller = RemoteAccessController::new(
+                Arc::new(NativePreferredRemoteBridge::new()),
+                directory.to_owned(),
+            )
+            .unwrap();
+            controller.publish_access_policy(&RemoteAccessSettings {
+                enabled: true,
+                ..Default::default()
+            });
+            controller.running.store(true, Ordering::SeqCst);
+            if controller.auth.lock().await.devices.is_empty() {
+                controller.auth.lock().await.devices.push(device.clone());
+            }
+            controller.harness.install_test_process(process).await;
+            controller.harness.prepare().await.unwrap();
+            let auth = controller.auth.lock().await;
+            controller.save_devices(&auth).await.unwrap();
+            drop(auth);
+            controller.authorization(device, Some("send"))
+        }
+        async fn wait_turn(authorization: &RemoteAuthorization, id: &str, turn: &str) -> Value {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let history = match authorization
+                        .controller
+                        .call_authorized("history", json!({"threadId":id}), authorization)
+                        .await
+                    {
+                        Ok(history) => history,
+                        Err(error)
+                            if error.to_string().contains("rollout")
+                                && error.to_string().contains("is empty") =>
+                        {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
+                        Err(error) => panic!("真实引擎历史读取失败：{error:#}"),
+                    };
+                    if let Some(found) = history["data"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|item| item["id"] == turn)
+                    {
+                        assert_ne!(found["status"], "failed", "真实引擎执行失败：{found}");
+                        if found["status"] == "completed" {
+                            assert!(
+                                found["items"].as_array().unwrap().iter().any(|item| {
+                                    item["type"] == "agentMessage"
+                                        && item["text"]
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .contains("ISOLATION_OK")
+                                }),
+                                "助手历史内容未处于页面所需的 item 层级：{found}"
+                            );
+                            return history;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .expect("真实引擎未完成回复")
+        }
+        let mut device = seed.device.clone();
+        device.expires_at_ms = now_ms() + 600_000;
+        let authorization = controller(
+            directory.path(),
+            device.clone(),
+            engine(&executable, &home).await,
+        )
+        .await;
+        let prompt = "无 CDP 隔离验收：仅回复 ISOLATION_OK，然后结束。不要调用工具或修改文件。";
+        let created = authorization
+            .controller
+            .call_authorized(
+                "create",
+                json!({"prompt":prompt,"model":"gpt-5.4"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["ok"], true, "{created}");
+        assert_eq!(created["executionTransport"], "app-server-stdio");
+        let id = created["threadId"].as_str().unwrap().to_owned();
+        let first_turn = created["turnId"].as_str().unwrap().to_owned();
+        wait_turn(&authorization, &id, &first_turn).await;
+        for (action, payload) in [
+            ("models", json!({})),
+            ("sidebar", json!({})),
+            ("skills", json!({"threadId":id})),
+            ("thread", json!({"threadId":id})),
+            ("history", json!({"threadId":id,"turnId":first_turn})),
+            ("workspaceContext", json!({"threadId":id})),
+        ] {
+            let value = authorization
+                .controller
+                .call_authorized(action, payload, &authorization)
+                .await
+                .unwrap();
+            assert_eq!(value["ok"], true, "{action}: {value}");
+            if action == "history" {
+                assert!(
+                    value["data"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|item| item["type"].is_string())
+                );
+            }
+        }
+        scenario.store(1, Ordering::SeqCst);
+        let approval_turn = authorization.controller.call_authorized("create",
+            json!({"prompt":"无 CDP 审批验收：仅执行 Write-Output ISOLATION_APPROVED，再回复 ISOLATION_OK 后结束。不要读取或修改文件。","model":"gpt-5.4"}),
+            &authorization).await.unwrap();
+        let approval_id = approval_turn["threadId"].as_str().unwrap();
+        let approval = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let thread = authorization
+                    .controller
+                    .call_authorized("thread", json!({"threadId":approval_id}), &authorization)
+                    .await;
+                if let Ok(thread) = thread
+                    && let Some(request) = thread["thread"]["requests"]
+                        .as_array()
+                        .and_then(|requests| requests.first())
+                {
+                    return request.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("真实命令审批未出现");
+        assert_eq!(approval["method"], "item/commandExecution/requestApproval");
+        assert!(
+            approval["params"]
+                .to_string()
+                .contains("ISOLATION_APPROVED"),
+            "不能批准非本轮测试命令"
+        );
+        let approve_auth = authorization
+            .controller
+            .authorization(authorization.device.clone(), Some("approve"));
+        let approved = authorization.controller.call_authorized("approve",
+            json!({"threadId":approval_id,"requestId":approval["id"],"method":approval["method"],"decision":"accept"}),
+            &approve_auth).await.unwrap();
+        assert_eq!(approved["ok"], true);
+        let approval_history = wait_turn(
+            &authorization,
+            approval_id,
+            approval_turn["turnId"].as_str().unwrap(),
+        )
+        .await;
+        let approval_command = approval_history["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|turn| turn["items"].as_array().into_iter().flatten())
+            .find(|item| item["type"] == "commandExecution")
+            .expect("审批通过后必须出现实际命令执行记录");
+        assert_eq!(approval_command["exitCode"], 0, "{approval_command}");
+        assert!(
+            approval_command["aggregatedOutput"]
+                .as_str()
+                .unwrap_or("")
+                .contains("ISOLATION_APPROVED")
+        );
+        // 在流式生成期间保留一条待发消息，然后终止本轮独立引擎，验证恢复不会重发已接受消息。
+        let mut stream_cursor = authorization
+            .controller
+            .harness
+            .call("events", json!({}), None)
+            .await
+            .unwrap();
+        delay.store(800, Ordering::SeqCst);
+        let active = authorization
+            .controller
+            .call_authorized(
+                "send",
+                json!({"threadId":id,"prompt":prompt,"clientUserMessageId":"isolation-active"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(active["deliveryState"], "queued");
+        let active_sent = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let sent = authorization
+                    .controller
+                    .call_authorized(
+                        "sendState",
+                        json!({"threadId":id,"clientUserMessageId":"isolation-active"}),
+                        &authorization,
+                    )
+                    .await
+                    .unwrap();
+                if sent["deliveryState"] == "accepted" {
+                    assert_eq!(sent["executionTransport"], "app-server-stdio");
+                    break sent;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let queued = authorization.controller.call_authorized("send", json!({"threadId":id,"prompt":prompt,"clientUserMessageId":"isolation-after-restart"}), &authorization).await.unwrap();
+        assert_eq!(queued["deliveryState"], "queued");
+        // 必须观察到本轮增量后再断开引擎，避免把只返回接受回执误算成流式验证。
+        let stream_checkpoint = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let events = authorization
+                    .controller
+                    .harness
+                    .call(
+                        "events",
+                        json!({"epoch":stream_cursor["epoch"],"cursor":stream_cursor["cursor"]}),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(events["reset"], false, "验收中的事件游标不能被静默重置");
+                if let Some(delta) = events["events"].as_array().unwrap().iter().find(|event| {
+                    event["method"] == "item/agentMessage/delta"
+                        && event["params"]["turnId"] == active_sent["turnId"]
+                }) {
+                    assert!(
+                        !events["events"].as_array().unwrap().iter().any(|event| {
+                            event["method"] == "turn/completed"
+                                && event["params"]["turn"]["id"] == active_sent["turnId"]
+                        }),
+                        "引擎必须在本轮仍生成时终止，不能用已完成的会话冒充中断恢复"
+                    );
+                    break delta.clone();
+                }
+                stream_cursor = events;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("未观察到真实流式增量");
+        let before_restart = authorization.controller.harness.audit.snapshot();
+        assert_eq!(before_restart["serviceCdpAttempts"], 0);
+        authorization
+            .controller
+            .harness
+            .enabled
+            .store(false, Ordering::Release);
+        authorization.controller.harness.release().await;
+        authorization.controller.dispose_native_backend().await;
+        drop(authorization);
+        delay.store(20, Ordering::SeqCst);
+        let restored = controller(directory.path(), device, engine(&executable, &home).await).await;
+        let sent = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let sent = restored
+                    .controller
+                    .call_authorized(
+                        "sendState",
+                        json!({"threadId":id,"clientUserMessageId":"isolation-after-restart"}),
+                        &restored,
+                    )
+                    .await
+                    .unwrap();
+                if sent["deliveryState"] == "accepted" {
+                    return sent;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("重启后的待发消息未恢复");
+        assert_eq!(sent["executionTransport"], "app-server-stdio");
+        let history = wait_turn(&restored, &id, sent["turnId"].as_str().unwrap()).await;
+        assert_eq!(
+            history["data"].as_array().unwrap().len(),
+            3,
+            "不能重复发送任何已接受消息"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+        let audit = restored.controller.harness.audit.snapshot();
+        assert_eq!(audit["serviceCdpAttempts"], 0);
+        assert_eq!(audit["processCdpEntryAttempts"], 0);
+        let report = json!({
+            "status":"passed","engine":"real-codex-app-server","modelEndpoint":"local-controlled-responses",
+            "cdpDisabledFromProcessStart":true,"desktopIpc":"isolated-unavailable","threadId":id,"upstreamCalls":calls.load(Ordering::SeqCst),
+            "checks":["cold-start","create-send-stream","models-sidebar-skills-history-workspace","history-item-shape","real-command-approval","engine-restart-during-stream-queue-recovery","no-duplicate-send"],
+            "approvalCommand":approval_command,
+            "streamCheckpoint":stream_checkpoint,
+            "executionBeforeRestart":before_restart,"executionAfterRestart":audit
+        });
+        if let Some(path) = std::env::var_os("CODEX_ELVES_SERVICE_CHECK_REPORT") {
+            std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        }
+        restored
+            .controller
+            .harness
+            .enabled
+            .store(false, Ordering::Release);
+        restored.controller.harness.release().await;
+        model_server.abort();
+        let _ = model_server.await;
+        println!("真实 app-server 无 CDP 验收通过，5 次模型请求，没有重复发送。");
+    }
+
+    #[tokio::test]
+    async fn harness_cdp_guard_blocks_discovery_socket_and_fallback_before_network() {
+        let audit = Arc::new(execution::Audit::default());
+        let scope = || {
+            execution::Scope::new(
+                audit.clone(),
+                true,
+                "guard-verification",
+                &json!({"threadId":"guard-thread"}),
+                None,
+                Some(1),
+            )
+        };
+        let error = scope().run(crate::cdp::list_targets(1)).await.unwrap_err();
+        assert!(execution::is_cdp_forbidden(&error));
+        let error = scope()
+            .run(crate::bridge::evaluate_script(
+                "ws://127.0.0.1:1/",
+                "throw new Error('must not execute')",
+            ))
+            .await
+            .unwrap_err();
+        assert!(execution::is_cdp_forbidden(&error));
+        // CDP 不存在也不能进入旧的 CLI 兜底；必须在检查桌面状态之前拒绝错误路由。
+        let bridge = NativePreferredRemoteBridge::new();
+        let error = scope()
+            .run(bridge.call("models", json!({})))
+            .await
+            .unwrap_err();
+        assert!(execution::is_cdp_forbidden(&error));
+        assert_eq!(audit.snapshot()["serviceCdpAttempts"], 3);
+        let task = scope()
+            .run(async { execution::spawn_inherited(async { crate::cdp::list_targets(1).await }) })
+            .await;
+        assert!(execution::is_cdp_forbidden(
+            &task.await.unwrap().unwrap_err()
+        ));
+        assert_eq!(audit.snapshot()["serviceCdpAttempts"], 4);
+        let error = scope()
+            .run(
+                execution::Scope::new(
+                    audit.clone(),
+                    false,
+                    "nested-native",
+                    &json!({}),
+                    None,
+                    None,
+                )
+                .run(crate::cdp::list_targets(1)),
+            )
+            .await
+            .unwrap_err();
+        assert!(execution::is_cdp_forbidden(&error));
+    }
+
+    #[test]
+    fn service_process_rejects_background_tasks_that_lost_execution_scope() {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "remote_access::tests::execution_scope_worker",
+                "--nocapture",
+            ])
+            .env("CODEX_ELVES_EXECUTION_SCOPE_WORKER", "1");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(crate::windows_create_hidden_process());
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_scope_worker() {
+        if std::env::var("CODEX_ELVES_EXECUTION_SCOPE_WORKER").as_deref() != Ok("1") {
+            return;
+        }
+        let root = FsPath::new(env!("CARGO_MANIFEST_DIR")).join("../../temp");
+        std::fs::create_dir_all(&root).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("execution-scope-")
+            .tempdir_in(root)
+            .unwrap();
+        crate::diagnostic_log::set_diagnostic_log_path_for_tests(Some(
+            directory.path().join("execution.log"),
+        ));
+        execution::require_explicit_cdp();
+        let error = tokio::spawn(async { crate::cdp::list_targets(1).await })
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(execution::is_cdp_forbidden(&error));
+        let report = std::fs::read_to_string(directory.path().join("execution.log")).unwrap();
+        assert!(report.contains("remote-background") && report.contains("target-discovery"));
+    }
+
+    #[tokio::test]
+    async fn harness_delete_receipt_confirms_success_and_replays_without_deleting_again() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let created = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"ready"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let delete = || {
+            controller.execute(
+                authorization.device.clone(),
+                "delete-service".into(),
+                "deleteThread".into(),
+                json!({"threadId":id}),
+            )
+        };
+        let first = delete().await.unwrap();
+        assert_eq!(first["state"], "completed");
+        assert_eq!(first["result"]["ok"], true);
+        assert_eq!(first["result"]["threadId"], id);
+        assert_eq!(first["result"]["deleted"], true);
+        assert_eq!(first["result"]["status"], "local_deleted");
+        assert_eq!(delete().await.unwrap(), first);
+        let persisted: Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("remote-access-receipts.json")).unwrap(),
+        )
+        .unwrap();
+        let key = format!("{}:delete-service", authorization.device.id);
+        assert_eq!(persisted[&key]["result"]["deleted"], true);
+        let requests = std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap();
+        assert_eq!(
+            requests
+                .lines()
+                .filter(
+                    |line| serde_json::from_str::<Value>(line).unwrap()["method"]
+                        == "thread/delete"
+                )
+                .count(),
+            1
+        );
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        controller.harness.enabled.store(false, Ordering::Release);
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_delete_failure_is_not_upgraded_to_success() {
+        let (_directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let created = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"ready"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        controller
+            .call_authorized(
+                "rename",
+                json!({"threadId":id,"title":"reject-delete"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let receipt = controller
+            .execute(
+                authorization.device.clone(),
+                "delete-rejected".into(),
+                "deleteThread".into(),
+                json!({"threadId":id}),
+            )
+            .await
+            .unwrap();
+        assert_ne!(receipt["state"], "completed");
+        assert_ne!(receipt["result"]["deleted"], true);
+        let thread = controller
+            .call_authorized("thread", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(thread["thread"]["id"], id);
+        controller.harness.enabled.store(false, Ordering::Release);
+        controller.harness.release().await;
+    }
+
+    #[test]
+    fn service_legacy_delete_receipt_recovery_requires_exact_success_and_operation_identity() {
+        let id = "01234567-89ab-4cde-8123-456789abcdef";
+        let receipt = Receipt {
+            device_id: "device".into(),
+            request_id: "legacy-delete".into(),
+            payload_hash: hash(&json!(["deleteThread", {"threadId":id}]).to_string()),
+            created_at_ms: 1,
+            state: "completed".into(),
+            result: Some(json!({"ok":true,"threadId":id,"executionTransport":"app-server-stdio"})),
+        };
+        assert_eq!(receipt_value(&receipt)["result"]["deleted"], true);
+        assert_eq!(receipt_value(&receipt)["result"]["status"], "local_deleted");
+        assert!(
+            receipt.result.as_ref().unwrap().get("deleted").is_none(),
+            "保留原始持久化证据"
+        );
+        for state in ["pending", "unknown", "failed"] {
+            let mut changed = receipt.clone();
+            changed.state = state.into();
+            assert!(receipt_value(&changed)["result"].get("deleted").is_none());
+        }
+        for result in [
+            json!({"ok":false,"threadId":id,"executionTransport":"app-server-stdio"}),
+            json!({"ok":true,"threadId":id,"executionTransport":"app-server-stdio","outcomeUnknown":true}),
+            json!({"ok":true,"threadId":id,"executionTransport":"app-server-stdio","deleted":false}),
+            json!({"ok":true,"threadId":id,"executionTransport":"app-server-stdio","status":"partial"}),
+            json!({"ok":true,"threadId":id,"executionTransport":"cdp"}),
+            json!({"ok":true,"threadId":"fedcba98-7654-4321-8abc-0123456789ab","executionTransport":"app-server-stdio"}),
+        ] {
+            let mut changed = receipt.clone();
+            changed.result = Some(result);
+            assert_ne!(receipt_value(&changed)["result"]["deleted"], true);
+        }
+        let mut renamed = receipt;
+        renamed.payload_hash = hash(&json!(["rename", {"threadId":id}]).to_string());
+        assert!(receipt_value(&renamed)["result"].get("deleted").is_none());
+    }
+
+    #[tokio::test]
+    async fn harness_compaction_history_reopens_without_sending_another_message() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let created = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"ready"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        controller
+            .call_authorized("compact", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        let history = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                // 每次读取都模拟重新进入会话；fixture 的持久化历史没有压缩轮，必须从真实事件恢复。
+                let history = controller
+                    .call_authorized("history", json!({"threadId":id}), &authorization)
+                    .await
+                    .unwrap();
+                if history["transcriptEvents"][0]["item"]["completed"] == true {
+                    break history;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            history["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|turn| turn["id"] == "compact")
+        );
+        let thread = controller
+            .call_authorized("thread", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(thread["thread"]["compaction"]["state"], "idle");
+        assert_eq!(
+            thread["thread"]["transcriptEvents"][0]["item"]["completed"],
+            true
+        );
+        let requests = std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap();
+        let methods: Vec<_> = requests
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect();
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|frame| frame["method"] == "turn/start")
+                .count(),
+            1
+        );
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|frame| frame["method"] == "thread/compact/start")
+                .count(),
+            1
+        );
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        controller.harness.enabled.store(false, Ordering::Release);
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_service_only_startup_and_cleanup_do_not_touch_native_bridge() {
+        let (_directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        assert!(!controller.needs_native_backend().await);
+        controller
+            .call_native_events(json!({"cursor":0,"epoch":""}))
+            .await
+            .unwrap();
+        controller.dispose_native_backend().await;
+        assert!(!controller.native_started.load(Ordering::Acquire));
+        controller.auth.lock().await.devices.clear();
+        assert!(
+            !controller.needs_native_backend().await,
+            "没有设备时不能预先调用 CDP"
+        );
+        controller
+            .call_native_events(json!({"cursor":0,"epoch":""}))
+            .await
+            .unwrap();
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
     }
 
     #[tokio::test]
@@ -6094,6 +6964,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 .iter()
                 .any(|f| f.get("method").is_none() && f["result"]["decision"] == "accept")
         );
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
     }
 
     #[tokio::test]

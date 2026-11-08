@@ -509,6 +509,8 @@ async fn connect_cdp_websocket(
 ) -> anyhow::Result<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 > {
+    // 复用缓存地址可绕过目标发现，因此 WebSocket 直连也必须先核对服务模式约束。
+    crate::remote_access::execution::check_cdp_allowed("websocket-connect")?;
     let config = WebSocketConfig::default().max_frame_size(Some(64 << 20));
     let (socket, _) = tokio::time::timeout(
         CDP_CONNECT_TIMEOUT,

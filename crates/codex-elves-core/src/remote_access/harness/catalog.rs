@@ -146,7 +146,7 @@ impl Catalog {
         let weak = Arc::downgrade(self);
         let runtime = runtime.clone();
         let projection = projection.clone();
-        *worker = Some(tokio::spawn(async move {
+        *worker = Some(super::execution::spawn_inherited(async move {
             let Some(catalog) = weak.upgrade() else {
                 return;
             };
@@ -476,7 +476,10 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     ) {
         let (directory, service) = engine_fixture().await;
         let (events, receiver) = tokio::sync::mpsc::channel(512);
-        let runtime = Arc::new(Runtime::new(events));
+        let runtime = Arc::new(Runtime::new(
+            events,
+            Arc::new(super::super::execution::Audit::default()),
+        ));
         runtime.install_test_process(service).await;
         (
             directory,
@@ -1002,10 +1005,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 .load(std::sync::atomic::Ordering::Acquire)
         );
         assert_eq!(
-            controller
-                .call_backend("models", json!({}), None)
-                .await
-                .unwrap()["origin"],
+            controller.native.call("models", json!({})).await.unwrap()["origin"],
             "cdp"
         );
         let response = reqwest::Client::builder()
@@ -1073,10 +1073,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 wait_until(async || controller.harness.catalog.state.lock().await.complete).await;
             }
             assert_eq!(
-                controller
-                    .call_backend("models", json!({}), None)
-                    .await
-                    .unwrap()["origin"],
+                controller.native.call("models", json!({})).await.unwrap()["origin"],
                 "cdp"
             );
             assert!(controller.live.lock().await.error.is_none());

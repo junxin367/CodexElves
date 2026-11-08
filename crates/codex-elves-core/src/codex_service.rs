@@ -1263,11 +1263,10 @@ async fn spawn_candidate(
     let mut command = candidate_command(candidate);
 
     let working_directory = std::env::current_dir().context("读取 CodexElves 工作目录失败")?;
+    // 服务模式只指定 Codex 数据目录；保留真实 HOME/USERPROFILE，避免 Cargo、Git 等工具读错用户配置。
     command
         .current_dir(working_directory)
         .env("CODEX_HOME", codex_home)
-        .env("HOME", codex_home)
-        .env("USERPROFILE", codex_home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1643,7 +1642,7 @@ fn service_history_items_page(page: &Value) -> (Vec<Value>, Option<String>) {
     (items, next_cursor)
 }
 
-fn normalize_history_items_page(
+pub(crate) fn normalize_history_items_page(
     page: &Value,
     previous_cursor: Option<&str>,
 ) -> anyhow::Result<(Vec<Value>, Option<String>)> {
@@ -1921,6 +1920,46 @@ pub(crate) fn normalize_owner_thread(
     normalized["requestsKnown"] = json!(snapshot["requests"].is_array());
     normalized["goal"] = snapshot["threadGoal"].clone();
     normalized["tokenUsage"] = snapshot["latestTokenUsageInfo"].clone();
+    // 用户要求服务模式切回桌面持有的会话也恢复压缩；IPC 快照已有记录，不能在元数据转换时丢弃。
+    let mut turns = desktop_owner_ipc::snapshot_turns(snapshot);
+    turns.sort_by_key(|turn| turn["turnStartedAtMs"].as_u64().unwrap_or(0));
+    let events: Vec<_> = turns
+        .iter()
+        .flat_map(|turn| {
+            turn["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|item| item["type"] == "contextCompaction")
+                .map(|item| json!({"turnId":turn["turnId"],"item":item}))
+        })
+        .collect();
+    if let Some(event) = events.last() {
+        let item = &event["item"];
+        let turn_ended = turns
+            .iter()
+            .find(|turn| turn["turnId"] == event["turnId"])
+            .is_some_and(|turn| {
+                turn["status"].as_str().is_some_and(|status| {
+                    matches!(
+                        status,
+                        "completed" | "failed" | "interrupted" | "cancelled" | "canceled"
+                    )
+                })
+            });
+        let completed = item["completed"] == true
+            || item["completedAtMs"].as_u64().is_some()
+            || item["status"].as_str().is_some_and(|status| {
+                matches!(
+                    status,
+                    "completed" | "failed" | "interrupted" | "cancelled" | "canceled"
+                )
+            });
+        normalized["compaction"] = json!({
+            "state":if completed || turn_ended {"idle"} else if item["id"] == "pending-manual-context-compaction" {"pending"} else {"running"},
+            "turnId":event["turnId"],"itemId":item["id"]});
+    }
+    normalized["transcriptEvents"] = json!(events);
     Ok(normalized)
 }
 
@@ -2181,6 +2220,32 @@ mod tests {
         partial["turnHistory"]["history"]["entitiesByKey"]["tail"]["itemsPagination"] =
             json!({"hasLoadedOldest":false});
         assert!(owner_snapshot_history(&partial, "main").is_none());
+    }
+
+    #[test]
+    fn owner_compaction_snapshot_preserves_reentry_state_without_a_new_message() {
+        let mut snapshot = json!({"id":"main","cwd":"test","threadRuntimeStatus":{"type":"active"},"requests":[],
+            "turns":[{"turnId":"compact-turn","status":"inProgress","turnStartedAtMs":1000,
+                "items":[{"id":"compact","type":"contextCompaction","startedAtMs":1000}]}]});
+        let running = normalize_owner_thread(&snapshot, None).unwrap();
+        assert_eq!(running["compaction"]["state"], "running");
+        assert_eq!(running["transcriptEvents"][0]["item"]["startedAtMs"], 1000);
+        snapshot["turns"][0]["items"][0]["completedAtMs"] = json!(2000);
+        let completed = normalize_owner_thread(&snapshot, None).unwrap();
+        assert_eq!(completed["compaction"]["state"], "idle");
+        assert_eq!(
+            completed["transcriptEvents"][0]["item"]["completedAtMs"],
+            2000
+        );
+        snapshot["turns"][0]["items"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("completedAtMs");
+        snapshot["turns"][0]["status"] = json!("interrupted");
+        assert_eq!(
+            normalize_owner_thread(&snapshot, None).unwrap()["compaction"]["state"],
+            "idle"
+        );
     }
     #[test]
     fn normalize_model_keeps_ultra_and_drops_hidden_entries() {
