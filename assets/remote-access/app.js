@@ -3260,7 +3260,8 @@ function refreshNewChatBranch() {
   if (!badge) return;
   if (!creating || !session || !creationProject) {
     resetNewChatBranch();
-    setWorkspaceBranch(badge, null, "未选择项目");
+    // 用户要求“不在项目中工作”不显示分支标签；同时清空旧项目文字，避免切换时短暂残留。
+    setWorkspaceBranch(badge, null);
     return;
   }
   // 用户要求新建页展示所选项目的当前分支；按授权、运行方式和本次选择隔离，晚到响应不能串到另一项目。
@@ -6229,7 +6230,7 @@ function shell() {
   clearProject.hidden = true;
   clearProject.append(icon("closeCircle"));
   projectControl.append(projectSelect, clearProject);
-  const branchBadge = createWorkspaceBranch(null, "未选择项目");
+  const branchBadge = createWorkspaceBranch();
   branchBadge.id = "new-chat-branch";
   branchBadge.classList.add("new-chat-branch");
   branchBadge.setAttribute("aria-live", "polite");
@@ -6241,9 +6242,9 @@ function shell() {
   const workspace = $(".workspace"), sidebarPanel = $("#session-sidebar");
   const compactSidebarMedia = matchMedia("(max-width: 760px)");
   const sidebarBackdrop = $(".sidebar-backdrop");
-  // 用户要求避免手机侧栏刚展开即被遮罩误关：300ms = 200ms 滑入动画 + 100ms 触摸余量，
-  // 同步核对 style.css 的 --duration-popup；关闭只接受保护期后在遮罩开始并结束的独立手势。
-  const sidebarBackdropGuardMs = 300;
+  // 用户要求遮罩在展开 100ms 后即可关闭，不再等待完整滑入动画；
+  // 仍只接受保护期后在遮罩开始并结束的独立手势，避免展开时的同一次触摸误关。
+  const sidebarBackdropGuardMs = 100;
   let sidebarBackdropReadyAt = 0, sidebarBackdropPress = null;
   const sidebarIsOpen = () => compactSidebarMedia.matches
     ? workspace.classList.contains("sidebar-open") : desktopSidebarOpen;

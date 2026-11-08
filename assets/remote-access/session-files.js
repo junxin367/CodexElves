@@ -287,8 +287,9 @@ export function mountPreviewControlsScroll({ body, controls, isActive = () => tr
     // 上滑令正文向上、scrollTop 增加时收起，反向回滑展开；短文件和滚动到底后的继续上滑不收起。
     if (delta > 0 && (body.scrollHeight <= body.clientHeight + 1
         || body.scrollTop + body.clientHeight >= body.scrollHeight - 1)) return;
-    // 与会话输入区一致：用至少 160px 或工具行高度两倍的滚动距离完成展开/收起，CSS 同步使用 .18s ease-out。
-    const distance = Math.max(160, controls.scrollHeight * 2);
+    // 用户要求预览第二行更快收展：滚动距离减半为至少 80px 或一倍工具行高度；
+    // 文件与变更预览共用此处，style.css 同步缩短为 .10s，短文件、缩放及内层滚动保护保持有效。
+    const distance = Math.max(80, controls.scrollHeight);
     setReveal(reveal - delta / distance);
   };
   const onWheel = event => {

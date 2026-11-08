@@ -72,6 +72,55 @@ const eventsClient = await readFile(new URL("../assets/remote-access/events-clie
 const sessionTools = await readFile(new URL("../assets/remote-access/session-tools.js", import.meta.url), "utf8");
 const sessionFiles = await readFile(new URL("../assets/remote-access/session-files.js", import.meta.url), "utf8");
 
+test("手机侧栏遮罩100ms后接受独立点击，早期触摸和跨区域手势仍不会误关", () => {
+  const classes = new Set(), nodes = new Map();
+  for (const selector of [".workspace", "#session-sidebar", ".sidebar-backdrop", ".conversation", "#open-sidebar"]) {
+    nodes.set(selector, {
+      inert: false, setAttribute() {}, focus() {}, querySelector() { return this; },
+      classList: {
+        contains: name => classes.has(name),
+        remove: name => classes.delete(name),
+        toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name)
+      }
+    });
+  }
+  let now = 1000;
+  const context = vm.createContext({
+    $: selector => nodes.get(selector), performance: { now: () => now },
+    matchMedia: () => ({ matches: true, addEventListener() {}, removeEventListener() {} }),
+    desktopSidebarOpen: true, relatedSessionView: null,
+    closePopup() {}, closeComposerMenus() {}, renderSidebar() {}
+  });
+  const start = app.indexOf('  const workspace = $(".workspace"), sidebarPanel = $("#session-sidebar");');
+  const end = app.indexOf('  const searchInput = $("#sidebar-search")', start);
+  assert.ok(start >= 0 && end > start);
+  vm.runInContext(app.slice(start, end), context);
+  const backdrop = nodes.get(".sidebar-backdrop");
+  const event = (timeStamp, target = backdrop) => ({
+    timeStamp, target, pointerId: 1, button: 0, isPrimary: true,
+    preventDefault() {}, stopPropagation() {}
+  });
+  const open = () => nodes.get("#open-sidebar").onclick();
+  const click = (down, up = down) => {
+    backdrop.onpointerdown(down); backdrop.onpointerup(up); backdrop.onclick(up);
+  };
+  open();
+  click(event(1099), event(1101));
+  assert.equal(classes.has("sidebar-open"), true, "保护期内开始的触摸不能因晚松手而关闭");
+  click(event(1100));
+  assert.equal(classes.has("sidebar-open"), false, "100ms时独立点击即可关闭，不需等待300ms");
+  now = 2000; open();
+  backdrop.onclick(event(2200));
+  assert.equal(classes.has("sidebar-open"), true, "没有独立按下和松开记录时不能关闭");
+  click(event(2200), event(2201, nodes.get("#session-sidebar")));
+  assert.equal(classes.has("sidebar-open"), true);
+  backdrop.onpointerdown(event(2200)); backdrop.onpointercancel();
+  backdrop.onpointerup(event(2201)); backdrop.onclick(event(2201));
+  assert.equal(classes.has("sidebar-open"), true);
+  click(event(2202));
+  assert.equal(classes.has("sidebar-open"), false);
+});
+
 test("文件阅读字号默认12，旧配置和新设置都限制在6至14且独立于全局字号", () => {
   const disk = storage();
   const context = vm.createContext({ localStorage: disk, matchMedia: () => ({ matches: false }) });
@@ -135,14 +184,16 @@ function previewControlsScrollHarness() {
     active: value => { active = value; } };
 }
 
-test("文件预览第二行随上滑渐进收起和回滑展开，聚焦与重新打开恢复完整工具行", () => {
+test("文件预览第二行在80px手势内收展，聚焦与重新打开恢复完整工具行", () => {
   const h = previewControlsScrollHarness();
   h.wheel({ deltaY: 40 });
-  assert.equal(h.reveal(), .75);
+  assert.equal(h.reveal(), .5);
   h.wheel({ deltaY: 120 });
   assert.equal(h.reveal(), 0); assert.equal(h.shell.inert, true);
   h.wheel({ deltaY: -80 });
-  assert.equal(h.reveal(), .5); assert.equal(h.shell.inert, false);
+  assert.equal(h.reveal(), 1); assert.equal(h.shell.inert, false);
+  h.wheel({ deltaY: 80 });
+  assert.equal(h.reveal(), 0);
   h.controls.listeners.get("focusin")();
   assert.equal(h.reveal(), 1);
   assert.equal(h.shell.properties.has("--preview-controls-rows"), false);
@@ -170,11 +221,11 @@ test("文件预览只响应正文纵向手势，短文件、横向滚动、缩�
   h.active(true);
   h.body.listeners.get("touchstart")({ touches: [{ clientX: 100, clientY: 300 }] });
   h.body.listeners.get("touchmove")({ touches: [{ clientX: 100, clientY: 260 }], target: h.body });
-  assert.equal(h.reveal(), .75);
+  assert.equal(h.reveal(), .5);
   h.body.listeners.get("touchmove")({ touches: [{ clientX: 200, clientY: 250 }], target: h.body });
-  assert.equal(h.reveal(), .75);
+  assert.equal(h.reveal(), .5);
   h.body.scrollTop = 800;
-  assert.equal(h.reveal(), .75, "恢复滚动位置不应改变工具行展开比例");
+  assert.equal(h.reveal(), .5, "恢复滚动位置不应改变工具行展开比例");
   h.controller.dispose();
 });
 
@@ -455,7 +506,8 @@ test("分支随现有轮询刷新，未选项目、读取失败和重新打开�
   assert.equal(h.label.textContent, "分支不可用", "查询失败不能继续冒充当前分支");
   h.context.creationProject = "";
   h.context.refreshNewChatBranch();
-  assert.equal(h.label.textContent, "未选择项目");
+  assert.equal(h.label.textContent, "");
+  assert.equal(h.badge.hidden, true, "不在项目中工作时分支标签不占布局");
   assert.equal(h.reads.length, 3);
 });
 
