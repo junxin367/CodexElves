@@ -1062,6 +1062,7 @@ test("光照滑块仅在自动主题下显示，25至50可保存并在切换模�
   h.context.syncAppearanceThemeControls = sync;
   const input = host.children[0].children[1].children[0];
   const output = host.children[0].children[1].children[1];
+  const hint = host.children[1];
   assert.equal(host.hidden, true);
   assert.equal(input.disabled, true);
   assert.equal(input.min, "25"); assert.equal(input.max, "50"); assert.equal(input.step, "1");
@@ -1070,6 +1071,12 @@ test("光照滑块仅在自动主题下显示，25至50可保存并在切换模�
   assert.equal(host.hidden, false); assert.equal(input.disabled, false);
   assert.equal(input.value, "35"); assert.equal(output.textContent, "35 lux");
   assert.equal(input.style.values.get("--range-fill"), "40%");
+  assert.equal(hint.textContent, "光线达到此数值后切换为浅色，当前 -- lux");
+  for (const [lux, displayed] of [[26.544523, "26.54"], [79.308532, "79.31"], [0, "0"], [null, "--"]]) {
+    h.sensor(lux);
+    assert.equal(hint.textContent, `光线达到此数值后切换为浅色，当前 ${displayed} lux`);
+    assert.equal(input.value, "35", "实时光照不能覆盖设置的切换阈值");
+  }
   for (const value of [25, 50]) {
     input.value = String(value); input.oninput();
     assert.equal(output.textContent, `${value} lux`);

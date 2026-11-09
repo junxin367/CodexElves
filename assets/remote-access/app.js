@@ -616,15 +616,24 @@ function mountAutomaticThemeLightSetting(host) {
   input.setAttribute("aria-label", "切换浅色的光照阈值"); input.setAttribute("aria-describedby", "appearance-auto-light-hint");
   output.setAttribute("for", input.id);
   controls.append(input, output); row.append(element("span", "", "光照阈值"), controls);
-  const hint = element("p", "appearance-reading-font-hint", "光线达到此数值后切换为浅色。");
+  const hint = element("p", "appearance-reading-font-hint");
   hint.id = "appearance-auto-light-hint"; host.append(row, hint);
+  const lightReading = () => {
+    // 用户要求展示当前光照：保留最多两位小数，不套用阈值的 25～50 范围；缺少读数时不伪装成 0 lux。
+    const lux = ambientLightStatus.lux;
+    const current = ambientLightStatus.supported && Number.isFinite(lux) && lux >= 0 ? Number(lux.toFixed(2)) : "--";
+    const text = `光线达到此数值后切换为浅色，当前 ${current} lux`;
+    if (hint.textContent !== text) hint.textContent = text;
+  };
   const sync = () => {
     const automatic = appearance.themeMode === "auto", value = currentAutomaticThemeLightLux();
     host.hidden = !automatic; input.disabled = !automatic;
     input.value = String(value); output.textContent = `${value} lux`;
     input.style.setProperty("--range-fill",
       `${(value - automaticThemeLightLuxMin) / (automaticThemeLightLuxMax - automaticThemeLightLuxMin) * 100}%`);
+    lightReading();
   };
+  sync.lightReading = lightReading;
   input.oninput = () => setAutomaticThemeLightLux(Number(input.value));
   sync();
   return sync;
@@ -698,6 +707,7 @@ subscribeAndroidAmbientLight(status => {
   observeThemeLight(status);
   recordThemeDiagnostic("theme.ambient", { reason: "sensor" });
   applyAutomaticAppearance(true, { reason: "sensor" });
+  syncAppearanceThemeControls?.lightReading?.();
 });
 function currentFileBrowserThreadId() {
   const parentThreadId = relatedSessionView?.kind === "side"
@@ -1369,6 +1379,7 @@ function openAppearance() {
     $("#appearance-file-reading-font-value").textContent = `${readingFontSize}px`;
     $("#appearance-file-reading-font-reset").disabled = readingFontSize === fileReadingFontDefault;
   };
+  sync.lightReading = syncAutomaticLightSetting.lightReading;
   syncAppearanceThemeControls = sync;
   sync();
   $("#appearance-project-thread-limit").onchange = event => {
