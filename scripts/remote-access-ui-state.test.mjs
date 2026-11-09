@@ -3249,6 +3249,35 @@ function connectionRecoveryHarness() {
   };
 }
 
+test("CDP 自动切换保留原回执、编辑内容和草稿，只提示一次并拒绝旧模式回填", () => {
+  const h = connectionRecoveryHarness(), context = h.context;
+  const pending = context.pending, draft = context.drafts.get("main");
+  const edit = { threadId: "main", text: "正在编辑的内容" };
+  const queuedEdit = { threadId: "main", editId: "native-edit", text: "排队编辑草稿" };
+  Object.assign(context, {
+    session: { ...context.session, readOnly: true, runtime: { cdpInjectionEnabled: true, revision: 7 },
+      capabilities: { serviceSubagents: true, serviceSideThreads: true } },
+    relatedSessionView: null, modelsLoadedAt: 1, modelsPromise: null, modelsRetryAt: 0,
+    editingMessage: edit, editingQueuedMessage: queuedEdit, dismissSideCreation() {},
+  });
+  vm.runInContext(sourceSection("function runtimeFallbackMessage(", "function receive(event)"), context);
+  const next = { cdpInjectionEnabled: false, revision: 8, fallbackReason: "cdp-unavailable" };
+  context.applyRemoteRuntime(next);
+  context.applyRemoteRuntime(next);
+  context.applyRemoteRuntime({ cdpInjectionEnabled: true, revision: 7 });
+  assert.equal(context.session.runtime.cdpInjectionEnabled, false);
+  assert.equal(context.session.runtime.revision, 8);
+  assert.equal(context.session.readOnly, true);
+  assert.equal(context.pending, pending);
+  assert.equal(context.pending.state, "unknown");
+  assert.equal(context.editingMessage, edit);
+  assert.equal(context.editingQueuedMessage, queuedEdit);
+  assert.equal(context.drafts.get("main"), draft);
+  assert.equal(h.pendingWrite.signal.aborted, false);
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.notices.filter(message => message.includes("自动切换为服务模式")).length, 1);
+});
+
 function transportRecoveryHarness() {
   const h = connectionRecoveryHarness(), context = h.context;
   const calls = [], sockets = [], pending = [], catalogReads = [], refreshes = [], timers = new Map();

@@ -173,6 +173,35 @@ impl Harness {
             .await
     }
 
+    pub async fn prepare_auto_fallback(self: &Arc<Self>) -> anyhow::Result<()> {
+        // 普通监听器测试不得意外启动用户的 Codex；自动切换验收必须显式提供隔离引擎。
+        #[cfg(test)]
+        anyhow::ensure!(
+            self.runtime.has_test_process(),
+            "自动切换测试缺少隔离执行引擎"
+        );
+        execution::Scope::service(
+            self.audit.clone(),
+            "automatic-service-probe",
+            &json!({}),
+            None,
+        )
+        .run(async {
+            self.start().await?;
+            // 切换前重新做最多 3 秒的只读健康检查，不借用 CDP、目录缓存或 thread/resume。
+            let response = tokio::time::timeout(
+                Duration::from_secs(3),
+                self.runtime
+                    .request("thread/list", json!({"limit":1,"archived":false}), None),
+            )
+            .await
+            .context("服务模式健康检查超时")??;
+            anyhow::ensure!(response["data"].is_array(), "服务模式健康检查返回无效");
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn prewarm(self: &Arc<Self>) -> anyhow::Result<()> {
         // 用户要求即使开启 CDP 也异步提前准备服务模式；这里只读共享目录，
         // 不改设备开关、enabled 派发标志或会话归属，不调用 resume / turn/start。

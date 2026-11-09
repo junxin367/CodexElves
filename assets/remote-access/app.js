@@ -773,6 +773,12 @@ function openAppearance() {
     // 未确认写入或正在编辑的草稿继续由原后端处理，避免切换后丢失编辑事务。
     runtimeSwitch.disabled = runtimeBusy || !runtimeSettings || !session || session.readOnly || !connected
       || busy || stopping || !!pending || !!editingMessage || !!editingQueuedMessage;
+    if (!runtimeBusy && (runtimeStatus.hidden || runtimeStatus.dataset.runtimeFallback === "true")) {
+      const message = runtimeFallbackMessage(runtimeSettings);
+      runtimeStatus.textContent = message;
+      runtimeStatus.hidden = !message;
+      runtimeStatus.dataset.runtimeFallback = message ? "true" : "";
+    }
   };
   dialog.updateRemoteRuntimeSwitch = updateRuntimeSwitch;
   updateRuntimeSwitch();
@@ -788,6 +794,7 @@ function openAppearance() {
       updateRuntimeSwitch();
     } catch (error) {
       if (!dialog.isConnected) return;
+      delete runtimeStatus.dataset.runtimeFallback;
       runtimeStatus.textContent = error.message;
       runtimeStatus.hidden = false;
     }
@@ -796,7 +803,7 @@ function openAppearance() {
   runtimeSwitch.onchange = async () => {
     if (runtimeBusy || !runtimeSettings) return;
     const enabled = runtimeSwitch.checked;
-    runtimeBusy = true; runtimeStatus.hidden = true; updateRuntimeSwitch();
+    runtimeBusy = true; runtimeStatus.hidden = true; delete runtimeStatus.dataset.runtimeFallback; updateRuntimeSwitch();
     try {
       const result = await mutate("setRuntime", {
         cdpInjectionEnabled: enabled, expectedRevision: runtimeSettings.revision
@@ -805,7 +812,10 @@ function openAppearance() {
       applyRemoteRuntime(result.runtime);
       await refreshConnectedSession();
     } catch (error) {
-      if (dialog.isConnected) { runtimeStatus.textContent = error.message; runtimeStatus.hidden = false; }
+      if (dialog.isConnected) {
+        delete runtimeStatus.dataset.runtimeFallback;
+        runtimeStatus.textContent = error.message; runtimeStatus.hidden = false;
+      }
       await readRuntimeSettings();
     } finally {
       runtimeBusy = false;
@@ -12746,6 +12756,10 @@ function scheduleSidebarRefresh() {
   clearTimeout(sidebarTimer);
   sidebarTimer = setTimeout(() => void loadSidebar(null, { fresh: true }).catch(() => {}), 1200);
 }
+function runtimeFallbackMessage(runtime) {
+  return runtime?.cdpInjectionEnabled === false && runtime.fallbackReason === "cdp-unavailable"
+    ? "电脑端 CDP 暂不可用，已自动切换为服务模式；恢复后可手动切回。" : "";
+}
 function applyRemoteRuntime(runtime) {
   if (!session || typeof runtime?.cdpInjectionEnabled !== "boolean"
       || !Number.isSafeInteger(runtime.revision)
@@ -12772,8 +12786,12 @@ function applyRemoteRuntime(runtime) {
         void returnToParentSession().catch(() => {});
       else scheduleRelatedSessionCheck();
     }
+    // 自动切换只退役旧读取，原发送回执和编辑草稿继续保留；同一版本只提示一次，不自动切回 CDP。
+    const message = runtimeFallbackMessage(runtime);
+    if (message) notice(message);
   }
   sessionMenu?.updateContext();
+  $("#appearance-dialog")?.updateRemoteRuntimeSwitch?.();
 }
 function receive(event) {
   if (handleRemoteChannelEvent(event)) return;
