@@ -16,8 +16,14 @@ const control = (label, action, className = "text-button") => {
 export function displayWorkspacePath(value) {
   const path = String(value || "");
   if (/^(?:\\\\\?\\|\/\/\?\/)UNC[\\/]/iu.test(path))
-    return `\\\\${path.slice(8)}`;
-  return path.replace(/^(?:\\\\\?\\|\/\/\?\/)/u, "");
+    return displayWorkspaceName(`\\\\${path.slice(8)}`);
+  return displayWorkspaceName(path.replace(/^(?:\\\\\?\\|\/\/\?\/)/u, ""));
+}
+export function displayWorkspaceName(value) {
+  // 用户要求文件名不显示方框：还原 WSL/DrvFS 的 8 类可打印保留字符（U+F000 + ASCII）。
+  // 只处理显示文本，不转换其他私用字符；目录分层、请求、缓存和选中身份始终使用原始路径。
+  return String(value || "").replace(/[\uf022\uf02a\uf03a\uf03c\uf03e\uf03f\uf05c\uf07c]/gu,
+    character => String.fromCharCode(character.charCodeAt(0) - 0xf000));
 }
 export function workspaceBranchLabel(git) {
   if (!git || typeof git !== "object") return "";
@@ -542,7 +548,7 @@ export function mountSessionFiles({
     const isFolder = file.kind === "directory";
     const isExpanded = expanded.has(file.path);
     const button = control("", () => isFolder ? toggleDirectory(file.path) : void openFile(file.path), "session-tools-file");
-    button.title = file.path; button.disabled = file.kind === "unsupported";
+    button.title = displayWorkspacePath(file.path); button.disabled = file.kind === "unsupported";
     button.style.setProperty("--file-depth", String(depth));
     button.dataset.path = file.path;
     button.dataset.depth = String(depth);
@@ -553,8 +559,8 @@ export function mountSessionFiles({
     button.classList.toggle("session-files-selected", !isFolder && renderedFile === file.path);
     button.append(fileTwisty(isFolder, isExpanded), fileIcon(isFolder ? "folder" : fileIconKind(file.path)));
     const copy = node("span", "session-tools-file-copy");
-    copy.append(node("strong", "session-tools-file-name", file.name));
-    if (searchResult) copy.append(node("span", "session-tools-file-directory", parentPath(file.path) || "项目根目录"));
+    copy.append(node("strong", "session-tools-file-name", displayWorkspaceName(file.name)));
+    if (searchResult) copy.append(node("span", "session-tools-file-directory", displayWorkspacePath(parentPath(file.path)) || "项目根目录"));
     const repository = isFolder ? createWorkspaceRepository(file.repository) : null;
     button.append(copy, repository || node("span", "session-files-metadata",
       isFolder ? "文件夹" : file.kind === "unsupported" ? "不支持预览" : bytesLabel(file.size)));
@@ -619,7 +625,7 @@ export function mountSessionFiles({
     if (disposed || typeof path !== "string") return;
     prepare({ kind: "file", path, line: Number.isSafeInteger(line) && line > 0 ? line : null }, recordHistory);
     ++listEpoch; listController?.abort(); listing.screen.inert = true;
-    show(content.screen); content.label.textContent = fileName(path);
+    show(content.screen); content.label.textContent = displayWorkspaceName(fileName(path));
     const saved = views.get(`file:${path}`);
     controlsScroll.reset();
     sourceMode = line ? true : saved?.sourceMode ?? !/\.mdx?$/iu.test(path); wrap = saved?.wrap || false;
@@ -712,7 +718,7 @@ export function mountSessionFiles({
         return;
       }
       const link = node("a", "session-files-image"); link.href = source;
-      const image = node("img"); image.src = source; image.alt = fileName(value.path);
+      const image = node("img"); image.src = source; image.alt = displayWorkspaceName(fileName(value.path));
       link.append(image); link.onclick = event => { event.preventDefault(); openImagePreview?.(link, image); };
       body.append(link);
     }

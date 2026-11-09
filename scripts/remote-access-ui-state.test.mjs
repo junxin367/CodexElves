@@ -667,12 +667,69 @@ test("路径仅在展示时去掉长路径前缀，分离 HEAD 与无分支状�
     ["//?/E:/workspace/project", "E:/workspace/project"],
     [String.raw`\\?\UNC\server\share\project`, String.raw`\\server\share\project`],
     ["/home/workspace/project", "/home/workspace/project"],
+    ["E\uf03a\uf05cAppData\uf05cLocal\uf05cnpm-cache", String.raw`E:\AppData\Local\npm-cache`],
+    ["C:/项目/中文\uf03a缓存/报告\uf03f.md", "C:/项目/中文:缓存/报告?.md"],
+    ["\\\\?\\C:\\项目\\E\uf03a\uf05ccache", String.raw`C:\项目\E:\cache`],
+    ["图标\ue000\uf000\uf009\uf020\uf02f\uf8ff", "图标\ue000\uf000\uf009\uf020\uf02f\uf8ff"],
   ]) assert.equal(context.displayWorkspacePath(input), expected);
+  assert.equal(context.displayWorkspaceName("\uf022\uf02a\uf03a\uf03c\uf03e\uf03f\uf05c\uf07c"), '"*:<>?\\|');
   assert.equal(context.workspaceBranchLabel({ branch: null, detachedHead: "a".repeat(40) }), "分离 HEAD · aaaaaaaa");
   assert.equal(context.workspaceBranchLabel({ branch: null, detachedHead: null }), "无 Git 分支");
   assert.equal(context.workspaceBranchLabel({ unavailable: true }), "分支不可用");
   assert.equal(context.workspaceBranchLabel(undefined), "", "旧后台没有分支字段时不能伪造分支");
   assert.equal(context.workspaceBranchLabel({ branch: "\nmain" }), "分支不可用");
+});
+
+test("WSL 映射文件名只在界面还原，展开目录与打开文件仍保留原始路径和目录层级", () => {
+  const node = (tag, className = "", text = "") => ({
+    tag, className, textContent: text, children: [], dataset: {}, attributes: new Map(),
+    style: { setProperty() {} }, classList: { toggle() {} },
+    append(...children) { this.children.push(...children); },
+    setAttribute(name, value) { this.attributes.set(name, value); },
+  });
+  const list = node("div"), opened = [];
+  const context = vm.createContext({
+    node, list, expanded: new Set(), renderedFile: "",
+    control: (_label, action, className) => Object.assign(node("button", className), { click: action }),
+    fileTwisty: () => node("span"), fileIcon: () => node("span"), fileIconKind: () => "text",
+    createWorkspaceRepository: () => null, bytesLabel: size => `${size} B`,
+    toggleDirectory: path => opened.push(["directory", path]),
+    openFile: path => opened.push(["file", path]),
+  });
+  vm.runInContext(sessionFiles.slice(sessionFiles.indexOf("export function displayWorkspacePath("),
+    sessionFiles.indexOf("export function workspaceBranchLabel(")).replace(/^export /gm, "")
+    + "\n" + sessionFiles.slice(sessionFiles.indexOf("const parentPath ="), sessionFiles.indexOf("const revisionValid ="))
+    + "\n" + sessionFiles.slice(sessionFiles.indexOf("  function renderTreeRow("), sessionFiles.indexOf("  function toggleDirectory("))
+    + "\n" + sessionTools.slice(sessionTools.indexOf("  function fileParts("), sessionTools.indexOf("  function setDetailNotice(")), context);
+
+  const rawDirectory = "E\uf03a\uf05cAppData\uf05cLocal\uf05cnpm-cache";
+  const readableDirectory = String.raw`E:\AppData\Local\npm-cache`;
+  context.renderTreeRow({ name: rawDirectory, path: rawDirectory, kind: "directory" }, 0, false);
+  const directoryButton = list.children[0];
+  assert.equal(directoryButton.children[2].children[0].textContent, readableDirectory);
+  assert.equal(directoryButton.title, readableDirectory);
+  assert.equal(directoryButton.dataset.path, rawDirectory);
+  assert.equal(directoryButton.attributes.get("aria-level"), "1");
+  directoryButton.click();
+  assert.deepEqual(opened[0], ["directory", rawDirectory]);
+
+  const rawName = "报告\uf05c第一版\uf03f.md", rawPath = `${rawDirectory}/${rawName}`;
+  context.renderTreeRow({ name: rawName, path: rawPath, kind: "file", size: 128 }, 1, true);
+  const fileButton = list.children[1];
+  assert.equal(fileButton.children[2].children[0].textContent, String.raw`报告\第一版?.md`);
+  assert.equal(fileButton.children[2].children[1].textContent, readableDirectory);
+  assert.equal(fileButton.dataset.path, rawPath);
+  assert.equal(fileButton.attributes.get("aria-level"), "2");
+  fileButton.click();
+  assert.deepEqual(opened[1], ["file", rawPath]);
+
+  const parts = context.fileParts({ path: rawPath });
+  assert.equal(parts.name, String.raw`报告\第一版?.md`);
+  assert.equal(parts.directory, readableDirectory, "显示用的反斜杠不能被重新拆成真实目录");
+  const changes = workspaceChangeContract();
+  const change = { repository: "tools", path: rawPath, section: "unstaged" };
+  assert.equal(changes.displayedPath(change), `tools/${readableDirectory}/报告\\第一版?.md`);
+  assert.equal(JSON.parse(changes.detailKey(change))[2], rawPath, "变更详情的身份不能使用显示路径");
 });
 
 test("文件树右侧显示各仓库的分支和图标，缺失分支时不使用仓库名兜底", () => {
@@ -5119,7 +5176,9 @@ test("项目选择只保留已保存项目，真实同名项目显示路径，�
 
 function workspaceChangeContract() {
   const context = vm.createContext({});
-  vm.runInContext(sessionTools.slice(sessionTools.indexOf("const sections ="), sessionTools.indexOf("export function mountSessionTools"))
+  vm.runInContext(sessionFiles.slice(sessionFiles.indexOf("export function displayWorkspacePath("),
+    sessionFiles.indexOf("export function workspaceBranchLabel(")).replace(/^export /gm, "")
+    + "\n" + sessionTools.slice(sessionTools.indexOf("const sections ="), sessionTools.indexOf("export function mountSessionTools"))
     + "\nglobalThis.contract = { detailKey, displayedPath, listResponse, detailResponse, uiState };", context);
   return context.contract;
 }

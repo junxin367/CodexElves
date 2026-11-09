@@ -1,5 +1,5 @@
 import { requestRemote } from "./channels.js";
-import { createWorkspaceBranch, createWorkspaceLocation, displayWorkspacePath, mountPreviewControlsScroll, mountSessionFiles, setWorkspaceBranch } from "./session-files.js";
+import { createWorkspaceBranch, createWorkspaceLocation, displayWorkspaceName, displayWorkspacePath, mountPreviewControlsScroll, mountSessionFiles, setWorkspaceBranch } from "./session-files.js";
 import { safeInlineImageSource } from "./attachments.js";
 
 const sections = [
@@ -44,7 +44,7 @@ const validRepository = value => safeString(value, 16384) && (value === "" || !/
   && value.split("/").every(part => part && part !== "." && part !== ".." && part.toLowerCase() !== ".git" && !/[ .]$/.test(part)));
 // 用户要求多仓库全部可查：列表、详情缓存和历史导航都包含仓库身份，隔离各仓库的同名文件。
 const detailKey = file => JSON.stringify([file.repository || "", file.section, file.path]);
-const displayedPath = file => file.repository ? `${file.repository}/${file.path}` : file.path;
+const displayedPath = file => displayWorkspacePath(file.repository ? `${file.repository}/${file.path}` : file.path);
 const groupKey = (repository, section) => repository ? JSON.stringify([repository, section]) : section;
 function fileEntry(value) {
   return objectValue(value) && sections.some(([section]) => section === value.section)
@@ -654,7 +654,8 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     const scrollTop = !restoreScroll && project === p && displayedProject === p ? fileList.scrollTop : p.ui.scrollTop;
     p.rendered = signature; p.listView.replaceChildren(); p.buttons.clear(); p.groups.clear();
     const source = p.list?.files || [];
-    const visible = source.filter(file => !query || `${displayedPath(file)} ${file.oldPath || ""}`.toLocaleLowerCase().includes(query));
+    const visible = source.filter(file => !query
+      || `${displayedPath(file)} ${displayWorkspacePath(file.oldPath)} ${file.path} ${file.oldPath || ""}`.toLocaleLowerCase().includes(query));
     if (source.length && !visible.length) p.listView.append(node("p", "session-tools-empty", "没有匹配的变更文件。"));
     const repositories = p.list?.repositories || [{ path: "", root: p.list?.root || "" }];
     for (const repository of repositories) {
@@ -665,7 +666,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
         host = node("section", "session-tools-repository");
         const heading = node("h2", "session-tools-repository-heading");
         heading.append(node("span", "session-tools-repository-label",
-          `${repository.path || repository.root.split(/[\\/]/).filter(Boolean).at(-1) || "当前仓库"} · ${repositoryFiles.length}`),
+          `${displayWorkspaceName(repository.path || repository.root.split(/[\\/]/).filter(Boolean).at(-1)) || "当前仓库"} · ${repositoryFiles.length}`),
         createWorkspaceBranch(repository.git));
         heading.title = displayWorkspacePath(repository.root);
         host.append(heading);
@@ -696,9 +697,9 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
         for (const file of entries) {
           const button = control("", `${label}：${displayedPath(file)}`, () => void loadDetail(file), "session-tools-file");
           const parts = fileParts(file), copy = node("span", "session-tools-file-copy");
-          const directory = file.oldPath ? `${parts.directory} · 原路径：${file.oldPath}` : parts.directory;
+          const directory = file.oldPath ? `${parts.directory} · 原路径：${displayWorkspacePath(file.oldPath)}` : parts.directory;
           copy.append(node("strong", "session-tools-file-name", parts.name), node("span", "session-tools-file-directory", directory));
-          copy.title = file.oldPath ? `${file.oldPath} → ${displayedPath(file)}` : displayedPath(file);
+          copy.title = file.oldPath ? `${displayWorkspacePath(file.oldPath)} → ${displayedPath(file)}` : displayedPath(file);
           const badge = node("span", "session-tools-file-status", statusLabel(file.status)); badge.setAttribute("data-status", file.status);
           button.append(node("span", "session-tools-file-icon", "▤"), copy, badge, node("span", "session-tools-file-chevron", "›"));
           p.buttons.set(detailKey(file), button); body.append(button);
@@ -710,8 +711,9 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     if (project === p) attachList(p);
   }
   function fileParts(file) {
+    // 与文件树保持一致：先按真实分隔符分层，再还原显示字符，不能把文件名中的映射反斜杠拆成目录。
     const parts = String(file.path).split(/[\\/]/);
-    return { name: parts.pop() || file.path, directory: parts.join("/") || "项目根目录" };
+    return { name: displayWorkspaceName(parts.pop() || file.path), directory: displayWorkspacePath(parts.join("/")) || "项目根目录" };
   }
   function setDetailNotice(message, failed = false) {
     status(detailNotice, message, failed); detailNotice.hidden = !message;
@@ -893,7 +895,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
         const link = node("a", "session-tools-image-link");
         link.href = source;
         const image = node("img");
-        image.alt = `${file.path} · ${label}`; image.src = source;
+        image.alt = `${displayWorkspacePath(file.path)} · ${label}`; image.src = source;
         link.append(image);
         link.addEventListener("click", event => {
           event.preventDefault(); event.stopPropagation();
