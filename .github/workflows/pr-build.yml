@@ -168,7 +168,8 @@ jobs:
             runner: macos-15-intel
             target: x86_64-apple-darwin
           - arch: arm64
-            runner: macos-14
+            # 与正式发布同步使用受支持的 ARM 环境，避免已退役的 macos-14 取消构建。
+            runner: macos-15
             target: aarch64-apple-darwin
     steps:
       - name: Checkout

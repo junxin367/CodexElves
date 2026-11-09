@@ -143,7 +143,8 @@ jobs:
             runner: macos-15-intel
             target: x86_64-apple-darwin
           - arch: arm64
-            runner: macos-14
+            # 完整发布需保留 Apple Silicon；macos-14 已退役，使用受支持的 macos-15 ARM 环境。
+            runner: macos-15
             target: aarch64-apple-darwin
     steps:
       - name: Checkout release tag
