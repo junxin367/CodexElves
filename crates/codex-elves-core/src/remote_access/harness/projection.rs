@@ -21,6 +21,7 @@ pub(super) struct Projection {
     generation_index: u64,
     hidden_threads: HashSet<String>,
     pub threads: HashMap<String, Value>,
+    pub subagents: super::subagents::SubagentState,
     pub requests: HashMap<String, Value>,
     pub active: HashMap<String, String>,
     pub compactions: HashMap<String, Value>,
@@ -41,6 +42,7 @@ impl Default for Projection {
             generation_index: 0,
             hidden_threads: HashSet::new(),
             threads: HashMap::new(),
+            subagents: super::subagents::SubagentState::default(),
             requests: HashMap::new(),
             active: HashMap::new(),
             compactions: HashMap::new(),
@@ -325,6 +327,7 @@ impl Projection {
             self.compaction_records.clear();
             self.completed.clear();
             self.hidden_threads.clear();
+            self.subagents = super::subagents::SubagentState::default();
             self.push(json!({"method":"remote/resync"}));
             return;
         }
@@ -338,6 +341,19 @@ impl Projection {
             .or_else(|| frame["params"]["thread"]["id"].as_str())
             .unwrap_or("")
             .to_owned();
+        let (subagent, parents) = self.subagents.observe(&frame);
+        for parent in parents {
+            self.push(
+                json!({"method":"remote/relatedThreadsChanged","params":{"threadId":parent}}),
+            );
+        }
+        if subagent {
+            // 子智能体事件只用于只读展示，不加入主会话队列、审批或通知集合。
+            if frame.get("id").is_none() {
+                self.push(frame);
+            }
+            return;
+        }
         if self.hidden_threads.contains(&id) {
             return;
         }
@@ -775,6 +791,50 @@ mod tests {
         assert_eq!(updated["pending"], json!([]));
         assert_eq!(updated["events"][0]["action"], "dismiss");
         assert!(projection.requests.is_empty());
+    }
+
+    #[test]
+    fn harness_subagent_events_refresh_parents_without_adding_writable_requests() {
+        let mut projection = Projection::default();
+        projection
+            .ingest(json!({"method":"harness/connected","_generation":"one","_generationIndex":1}));
+        projection.ingest(
+            json!({"method":"thread/started","_generation":"one","params":{
+            "thread":{"id":"child","cwd":"test","parentThreadId":"parent","ephemeral":true,
+                "agentNickname":"测试子智能体","status":{"type":"active"}}}}),
+        );
+        assert!(projection.subagents.threads.contains_key("child"));
+        assert!(!projection.threads.contains_key("child"));
+        projection.ingest(
+            json!({"id":17,"method":"item/commandExecution/requestApproval","_generation":"one",
+            "params":{"threadId":"child","turnId":"turn"}}),
+        );
+        projection.ingest(
+            json!({"method":"item/agentMessage/delta","_generation":"one",
+            "params":{"threadId":"child","turnId":"turn","itemId":"reply","delta":"片段"}}),
+        );
+        assert!(projection.requests.is_empty());
+        assert!(projection.notifications.is_empty());
+        assert!(projection.events.iter().any(|(_, event)| event["method"]
+            == "remote/relatedThreadsChanged"
+            && event["params"]["threadId"] == "parent"));
+        assert!(
+            projection
+                .events
+                .iter()
+                .any(|(_, event)| event["method"] == "item/agentMessage/delta"
+                    && event["params"]["threadId"] == "child")
+        );
+        projection
+            .ingest(json!({"method":"harness/connected","_generation":"two","_generationIndex":2}));
+        projection.ingest(
+            json!({"method":"thread/started","_generation":"one","params":{
+            "thread":{"id":"old-child","cwd":"test","parentThreadId":"parent","ephemeral":true}}}),
+        );
+        assert!(
+            projection.subagents.threads.is_empty(),
+            "旧连接的临时子会话不能在重连后复活"
+        );
     }
 
     #[test]

@@ -3420,7 +3420,7 @@ async fn session(
         "promptOptimization":true,"messageEditModelSettings":native_write_available,
         "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
         "sendText":native_write_available || service_connected,
-        "sideThreads":related_available,"subagents":related_available}}),
+        "sideThreads":related_available,"subagents":true,"serviceSubagents":true}}),
     ))
 }
 
@@ -5848,7 +5848,7 @@ mod tests {
         let script = directory.path().join("engine.cjs");
         std::fs::write(&script,r#"
 const fs=require('node:fs'),readline=require('node:readline'),crypto=require('node:crypto');
-const threads=new Map(),goals=new Map();let approval=null;
+const threads=new Map(),goals=new Map();let approval=null,related={rows:[],loaded:[]};
 const output=v=>process.stdout.write(JSON.stringify(v)+'\n');
 const event=(method,params)=>output({method,params});
 const pageRows=(rows,p,prefix)=>{
@@ -5869,7 +5869,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  const p=q.params||{},pinPath=__dirname+'/native-pins.json';
  const nativePins=fs.existsSync(pinPath)?JSON.parse(fs.readFileSync(pinPath,'utf8')):null;
  const pinnedSection='01984de2-8f74-7c91-a3b2-5c5e937cf318';
- const t=threads.get(p.threadId)||nativePins?.rows?.find(row=>row.id===p.threadId);let result={};
+ const t=threads.get(p.threadId)||nativePins?.rows?.find(row=>row.id===p.threadId)||related.rows.find(row=>row.id===p.threadId);let result={};
  switch(q.method){
  case 'initialize':result={userAgent:'isolated-fixture'};break;
  case 'project/list':result={data:[{id:'project-a',name:'隔离项目',roots:[{path:__dirname}],position:0,metadata:{}}],nextCursor:null};break;
@@ -5878,12 +5878,25 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    if(nativePins.sectionError){output({id:q.id,error:{code:nativePins.sectionError,message:'section lookup failed'}});return;}
    result={data:nativePins.missingSection?[]:[{id:pinnedSection,name:'已改名的置顶分区'}],nextCursor:null};break;
  case 'thread/list':
-   if(p.sectionId&&nativePins){
+   if(p.ancestorThreadId){
+     if(related.listFailure){output({id:q.id,error:{code:-32000,message:'related lookup failed'}});return;}
+     const all=new Map([...threads.values(),...related.rows].map(row=>[row.id,row]));
+     const belongs=row=>{const seen=new Set([row.id]);for(let parent=row.parentThreadId;parent&&!seen.has(parent);parent=all.get(parent)?.parentThreadId){if(parent===p.ancestorThreadId)return true;seen.add(parent);}return false;};
+     const data=related.rows.filter(row=>!row.ephemeral&&!!row.archived===!!p.archived&&(belongs(row)||related.injectUnrelated));
+     const start=Number(p.cursor||0),end=start+(related.pageSize||100);
+     result={data:data.slice(start,end),nextCursor:related.cursorLoop?'1':end<data.length?String(end):null};
+   }else if(p.sectionId&&nativePins){
      const data=nativePins.ids.map(id=>threads.get(id)||nativePins.rows.find(row=>row.id===id))
        .map(row=>({...row,section:{id:nativePins.wrongSection?'custom':pinnedSection,name:'Pinned'}}));
      const start=Number(p.cursor||0),end=start+(nativePins.pageSize||100);
      result={data:data.slice(start,end),nextCursor:nativePins.cursorLoop?'1':end<data.length?String(end):null};
    }else result={data:[...threads.values(),...(nativePins?.recentIds||[]).map(id=>nativePins.rows.find(row=>row.id===id))],nextCursor:null};
+   break;
+ case 'thread/loaded/list':result={data:related.loaded,nextCursor:null};break;
+ case 'test/seedSubagents':
+   related={rows:[],loaded:[],...p};
+   for(const row of related.rows)if(related.emitStarted&&row.parentThreadId)event('thread/started',{thread:row});
+   for(const e of related.events||[])output(e);
    break;
  case 'thread/section/move':
    if(!nativePins){output({id:q.id,error:{code:-32601,message:'unsupported sections'}});return;}
@@ -5901,11 +5914,15 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  }
  case 'thread/read': if(!t){output({id:q.id,error:{code:-32600,message:'unknown thread'}});return;}
    if(nativePins?.confirmFailure&&nativePins.moved){output({id:q.id,error:{code:-32000,message:'confirmation failed'}});return;}
+   if(t.ephemeral&&p.includeTurns&&related.snapshotError){output({id:q.id,error:related.snapshotError});return;}
    const sectionId=nativePins?.ids.includes(p.threadId)?pinnedSection:nativePins?.sections?.[p.threadId];
-   result={thread:nativePins?{...t,section:sectionId?{id:sectionId,name:'Section'}:null}:t,
+   const readThread=related.rows.includes(t)?{...t,turns:p.includeTurns?t.turns||[]:[]}:t;
+   result={thread:nativePins?{...readThread,section:sectionId?{id:sectionId,name:'Section'}:null}:readThread,
      readState:{firstUnread:null,revision:'r1'}};break;
  case 'thread/resume': result={thread:t,model:'gpt-test',reasoningEffort:'high'};break;
- case 'thread/turns/list':result=pageRows(t?.turns||[],p,'turns');break;
+ case 'thread/turns/list':
+   if(t?.ephemeral&&related.ephemeralHistoryUnavailable){output({id:q.id,error:{code:-32600,message:'ephemeral threads do not support thread/turns/list'}});return;}
+   result=pageRows(t?.turns||[],p,'turns');break;
  case 'thread/items/list':{
    result=pageRows(t.turns.find(turn=>turn.id===p.turnId)?.items||[],p,'items');
    result.data=result.data.map(item=>({turnId:t.foreignHistoryTurn?'unrelated-turn':p.turnId,item}));
@@ -7183,6 +7200,249 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 .any(|f| f.get("method").is_none() && f["result"]["decision"] == "accept")
         );
         assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+    }
+
+    async fn subagent_fixture() -> (tempfile::TempDir, RemoteAuthorization, String, Value) {
+        let (directory, authorization) = harness_fixture().await;
+        let created = authorization.controller.call_authorized("create", json!({
+            "projectId":"project-a","prompt":"wait parent","model":"gpt-test","reasoningEffort":"high"
+        }), &authorization).await.unwrap();
+        let root = created["threadId"].as_str().unwrap().to_owned();
+        let row = |id: &str, parent: &str, ephemeral: bool, status: &str| {
+            json!({
+                "id":id,"parentThreadId":parent,"cwd":directory.path(),"ephemeral":ephemeral,
+                "source":"appServer","threadSource":"subagent","agentNickname":id,
+                "createdAt":1,"updatedAt":1,"status":{"type":status},"turns":[]
+            })
+        };
+        let mut done = row("agent-done", &root, false, "notLoaded");
+        let items: Vec<_> = (0..95).map(|i| if i == 0 {
+            json!({"id":"child-user","type":"userMessage","content":[{"type":"text","text":"子任务"}]})
+        } else { json!({"id":format!("child-item-{i}"),"type":"agentMessage","text":format!("结果 {i}")}) }).collect();
+        done["turns"] =
+            json!([{"id":"child-turn","status":"completed","startedAt":1,"items":items}]);
+        let mut nested = row("agent-nested", "agent-done", false, "idle");
+        nested["archived"] = json!(true);
+        nested["turns"] = json!([{"id":"nested-turn","status":"failed","startedAt":2,"items":[]}]);
+        let mut live = row("agent-live", &root, true, "active");
+        live["turns"] = json!([{"id":"live-turn","status":"inProgress","startedAt":3,
+            "items":[{"id":"live-message","type":"agentMessage","text":"运行中的输出"}]}]);
+        let unrelated = row("agent-other", "other-parent", false, "active");
+        let other = json!({"id":"other-parent","cwd":directory.path(),"ephemeral":false,
+            "source":"appServer","threadSource":"user","status":{"type":"idle"},"turns":[]});
+        let seed = json!({"rows":[done,nested,live,unrelated,other],"loaded":["agent-live","agent-other"],
+            "pageSize":1,"ephemeralHistoryUnavailable":true,"emitStarted":true,
+            "events":[{"method":"turn/started","params":{"threadId":"agent-live",
+                "turn":{"id":"live-turn","status":"inProgress","startedAt":3}}}]});
+        authorization
+            .controller
+            .harness
+            .seed_test_subagents(seed.clone())
+            .await
+            .unwrap();
+        (directory, authorization, root, seed)
+    }
+
+    #[tokio::test]
+    async fn harness_subagents_restore_nested_archived_and_ephemeral_children_read_only() {
+        let (directory, authorization, root, _) = subagent_fixture().await;
+        let controller = &authorization.controller;
+        let list = controller
+            .call_authorized("relatedThreads", json!({"threadId":root}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(list["subagents"].as_array().unwrap().len(), 1);
+        assert_eq!(list["subagents"][0]["id"], "agent-live");
+        assert_eq!(list["subagents"][0]["status"], "active");
+        assert_eq!(list["completedSubagentCount"], 2);
+        assert_eq!(list["subagentsComplete"], true);
+        assert_eq!(list["sideThreads"], json!([]));
+        assert_eq!(list["canCreateSideThread"], false);
+        assert!(!list.to_string().contains("agent-other"));
+        for id in ["agent-done", "agent-live"] {
+            let detail = controller
+                .call_authorized("thread", json!({"threadId":id}), &authorization)
+                .await
+                .unwrap();
+            assert_eq!(detail["thread"]["readOnly"], true);
+            assert_eq!(detail["thread"]["viewKind"], "subagent");
+            assert_eq!(detail["thread"]["parentThreadId"], root);
+            assert_eq!(detail["thread"]["requests"], json!([]));
+            assert_eq!(detail["thread"]["queuedMessages"], json!([]));
+            assert!(detail["thread"]["editableMessage"].is_null());
+        }
+        let main = controller
+            .call_authorized("thread", json!({"threadId":root}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(main["thread"]["viewKind"], "main");
+        assert_eq!(main["thread"]["readOnly"], false);
+        let log = std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap();
+        assert!(
+            log.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|q| q["method"] == "thread/list" && q["params"]["ancestorThreadId"] == root)
+                .count()
+                >= 2
+        );
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_subagent_history_pages_and_all_write_guards_remain_separate() {
+        let (directory, authorization, root, _) = subagent_fixture().await;
+        let controller = &authorization.controller;
+        let first = controller
+            .call_authorized("history", json!({"threadId":"agent-done"}), &authorization)
+            .await
+            .unwrap();
+        assert!(
+            first["data"][0]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == "child-user")
+        );
+        let cursor = &first["data"][0]["itemsNextCursor"];
+        assert!(cursor.is_string());
+        let next = controller.call_authorized("history", json!({
+            "threadId":"agent-done","turnId":"child-turn","turnStatus":"completed","itemCursor":cursor
+        }), &authorization).await.unwrap();
+        assert_eq!(next["scope"], "items");
+        assert_eq!(next["data"].as_array().unwrap().len(), 40);
+        let ephemeral = controller
+            .call_authorized("history", json!({"threadId":"agent-live"}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(ephemeral["data"][0]["items"][0]["text"], "运行中的输出");
+        assert_eq!(ephemeral["turnsComplete"], true);
+        assert_eq!(ephemeral["data"][0]["itemsComplete"], true);
+        for action in [
+            "send",
+            "stop",
+            "rename",
+            "compact",
+            "pinThread",
+            "approve",
+            "answer",
+            "editMessage",
+            "deleteThread",
+            "setGoal",
+            "updateGoal",
+            "markRead",
+            "removeQueued",
+            "reorderQueued",
+            "beginQueuedEdit",
+            "editQueued",
+            "cancelQueuedEdit",
+            "dismissQueuedEdit",
+            "steerQueued",
+            "createSideThread",
+            "closeSideThread",
+        ] {
+            assert!(controller.call_authorized(action, json!({
+                "threadId":"agent-live","prompt":"禁止发送","name":"禁止改名","pinned":true
+            }), &authorization).await.is_err(), "{action} 不能对只读子智能体执行");
+        }
+        let requests = std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap();
+        let child_writes: Vec<_> = requests
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|q| {
+                q["params"]["threadId"] != root
+                    && matches!(
+                        q["method"].as_str(),
+                        Some(
+                            "thread/resume"
+                                | "turn/start"
+                                | "turn/interrupt"
+                                | "thread/name/set"
+                                | "thread/compact/start"
+                                | "thread/section/move"
+                                | "thread/delete"
+                                | "thread/goal/set"
+                                | "thread/goal/update"
+                                | "thread/readState/update"
+                        )
+                    )
+            })
+            .collect();
+        assert!(child_writes.is_empty(), "{child_writes:?}");
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_subagent_snapshot_unavailable_does_not_expire_an_active_child() {
+        let (_directory, authorization, _root, mut seed) = subagent_fixture().await;
+        let controller = &authorization.controller;
+        for (code, message) in [
+            (-32600, "ephemeral threads do not support includeTurns"),
+            (-32000, "snapshot read temporarily failed"),
+        ] {
+            seed["snapshotError"] = json!({"code":code,"message":message});
+            controller
+                .harness
+                .seed_test_subagents(seed.clone())
+                .await
+                .unwrap();
+            let failure = controller
+                .call_authorized("history", json!({"threadId":"agent-live"}), &authorization)
+                .await
+                .unwrap_err();
+            assert_eq!(failure.downcast_ref::<ApiError>().unwrap().code, 503);
+            let detail = controller
+                .call_authorized("thread", json!({"threadId":"agent-live"}), &authorization)
+                .await
+                .unwrap();
+            assert_eq!(detail["thread"]["readOnly"], true);
+            assert_eq!(detail["thread"]["status"]["type"], "active");
+        }
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_subagents_expiry_and_lookup_failures_do_not_restart_or_fake_empty() {
+        let (_directory, authorization, root, mut seed) = subagent_fixture().await;
+        let controller = &authorization.controller;
+        controller
+            .call_authorized("relatedThreads", json!({"threadId":root}), &authorization)
+            .await
+            .unwrap();
+        seed["rows"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|row| row["id"] != "agent-live");
+        seed["loaded"] = json!([]);
+        seed["events"] = json!([{"method":"thread/closed","params":{"threadId":"agent-live"}}]);
+        controller
+            .harness
+            .seed_test_subagents(seed.clone())
+            .await
+            .unwrap();
+        let failure = controller
+            .call_authorized("thread", json!({"threadId":"agent-live"}), &authorization)
+            .await
+            .unwrap_err();
+        assert_eq!(failure.downcast_ref::<ApiError>().unwrap().code, 410);
+        seed["listFailure"] = json!(true);
+        controller.harness.seed_test_subagents(seed).await.unwrap();
+        assert!(
+            controller
+                .call_authorized("relatedThreads", json!({"threadId":root}), &authorization)
+                .await
+                .is_err()
+        );
+        assert!(
+            controller
+                .call_authorized("thread", json!({"threadId":root}), &authorization)
+                .await
+                .is_ok()
+        );
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        controller.harness.release().await;
     }
 
     async fn native_pin_fixture(options: Value) -> (tempfile::TempDir, RemoteAuthorization) {

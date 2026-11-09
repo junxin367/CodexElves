@@ -81,9 +81,14 @@ export function mountSessionMenu({
     const threadId = nonempty(value.threadId) ? value.threadId : "";
     return { deviceId, cacheScope, threadId, readOnly: value.readOnly === true,
       relatedEnabled: value.relatedEnabled !== false,
+      subagentsEnabled: value.subagentsEnabled ?? value.relatedEnabled !== false,
+      sideThreadsEnabled: value.sideThreadsEnabled ?? value.relatedEnabled !== false,
+      serviceMode: value.serviceMode === true,
       createPending: value.createPending === true,
       authorization: JSON.stringify([deviceId, cacheScope]),
-      connected: value.connected === true, owner: JSON.stringify([deviceId, cacheScope, threadId, value.relatedEnabled !== false]) };
+      connected: value.connected === true, owner: JSON.stringify([deviceId, cacheScope, threadId,
+        value.subagentsEnabled ?? value.relatedEnabled !== false,
+        value.sideThreadsEnabled ?? value.relatedEnabled !== false, value.relatedScope || ""]) };
   }
   function syncContext() {
     if (suspended) return context;
@@ -103,8 +108,9 @@ export function mountSessionMenu({
     if (changed && cached) onData?.(cached.data);
     return next;
   }
-  const canRead = value => !!(value?.deviceId && value.cacheScope && value.threadId && value.relatedEnabled !== false);
-  const canMutate = value => canRead(value) && value.connected && !value.readOnly;
+  const canRead = value => !!(value?.deviceId && value.cacheScope && value.threadId
+    && (value.subagentsEnabled || value.sideThreadsEnabled));
+  const canMutate = value => canRead(value) && value.sideThreadsEnabled && value.connected && !value.readOnly;
   function entryFor(value = syncContext()) {
     if (!canRead(value)) return null;
     let entry = entries.get(value.owner);
@@ -236,7 +242,8 @@ export function mountSessionMenu({
     for (const { node, item, loadedAtMs } of times) {
       const elapsed = finiteTime(item.elapsedMs) ? item.elapsedMs + Math.max(0, now - loadedAtMs)
         : finiteTime(item.startedAtMs) ? Math.max(0, now - item.startedAtMs) : 0;
-      const text = duration(elapsed);
+      const text = item.status === "unknown" ? "状态暂不可用"
+        : item.status === "waiting" ? `等待 · ${duration(elapsed)}` : duration(elapsed);
       if (node.textContent !== text) node.textContent = text;
     }
   }
@@ -291,8 +298,8 @@ export function mountSessionMenu({
     files.dataset.menuKey = "files"; tools.append(files);
     const browser = itemButton("浏览器", openBrowser, []);
     browser.dataset.menuKey = "browser"; tools.append(browser);
-    // 用户要求：服务模式第一期只将这两个入口置灰，不展示说明、提示或旧缓存内容。
-    if (context?.relatedEnabled === false) {
+    // 旧后台未声明独立能力时继续置灰；新后台的子智能体和侧边会话分别受控，不展示禁用能力的旧缓存。
+    if (context?.subagentsEnabled === false && context?.sideThreadsEnabled === false) {
       const subagents = section("子智能体");
       subagents.classList.add("session-related-menu-disabled");
       subagents.setAttribute("aria-disabled", "true");
@@ -309,6 +316,7 @@ export function mountSessionMenu({
       return;
     }
     const data = cached?.data, entry = entries.get(owner), expected = owner;
+    if (context?.subagentsEnabled !== false) {
     const toggleSubagents = element("button", "session-related-menu-item session-related-menu-heading-action session-related-menu-heading-toggle");
     toggleSubagents.type = "button"; toggleSubagents.tabIndex = -1;
     toggleSubagents.setAttribute("role", "menuitem");
@@ -374,7 +382,8 @@ export function mountSessionMenu({
         const button = itemButton(nonempty(item.name) ? item.name : "子智能体", openSubagent, [item]);
         button.classList.add("session-related-menu-thread");
         button.dataset.menuKey = `subagent:${item.id}`;
-        button.append(element("span", "session-related-menu-time", "已完成"));
+        button.append(element("span", "session-related-menu-time",
+          item.outcome === "failed" ? "失败" : ["interrupted", "cancelled", "canceled"].includes(item.outcome) ? "已停止" : "已完成"));
         subagentContents.append(button);
       }
     }
@@ -386,13 +395,23 @@ export function mountSessionMenu({
       status.setAttribute("role", "status");
       subagentContents.append(status);
     }
+    } else {
+      const disabled = section("子智能体");
+      disabled.classList.add("session-related-menu-disabled");
+      disabled.setAttribute("aria-disabled", "true");
+    }
     const create = itemButton("新建侧边会话", createSideThread, [], "create", null, { keepMenu: true });
     create.dataset.menuKey = "create";
     create.classList.add("session-related-menu-heading-action");
     create.setAttribute("aria-label", "新建侧边会话"); create.title = "新建侧边会话";
     create.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
     const sides = section("侧边会话", create);
-    for (const item of data?.sideThreads || []) {
+    // 用户只恢复子智能体查看；服务模式仍不展示旧侧边会话缓存，也不开放创建或关闭。
+    if (context?.sideThreadsEnabled === false) {
+      sides.classList.add("session-related-menu-disabled");
+      sides.setAttribute("aria-disabled", "true");
+    }
+    for (const item of context?.sideThreadsEnabled === false ? [] : data?.sideThreads || []) {
       const button = itemButton(nonempty(item.title) ? item.title : "新建侧边会话", openSideThread, [item], "", item, { keepMenu: true });
       button.classList.add("session-related-menu-thread");
       if (item.running === true) {
@@ -508,7 +527,8 @@ export function mountSessionMenu({
       return Promise.resolve(cached?.data || null);
     }
     if (entry.request) return entry.request.promise;
-    if (entry.snapshot && !entry.dirty && Date.now() - entry.snapshot.loadedAtMs < refreshAgeMs)
+    // 服务模式每秒检查一次，快照最多复用 2 秒；与正文的 2 秒补读一起覆盖桌面持有会话的状态变化。
+    if (entry.snapshot && !entry.dirty && Date.now() - entry.snapshot.loadedAtMs < (value.serviceMode ? 2000 : refreshAgeMs))
       return Promise.resolve(entry.snapshot.data);
     const version = entry.revision, job = { promise: null };
     entry.dirty = false; entry.again = false;
@@ -523,8 +543,15 @@ export function mountSessionMenu({
       if (accepts(entry, version)) {
         entry.dirty = true;
         if (owns(value.owner)) {
-          message = cached ? "" : "相关会话读取失败，请重新打开菜单";
-          if (opened && !cached) render();
+          if (value.serviceMode && cached) {
+            // 子智能体查询失败时保留可查看的旧结果，但必须标明未同步，不能继续显示为完整的最新列表。
+            applySnapshot(entry, { ...cached, data: { ...cached.data,
+              subagentsComplete: false, subagentsLoading: false, subagentsStale: true,
+              subagentsError: error?.message || "暂时无法读取，请稍后重试" } });
+          } else {
+            message = cached ? "" : "相关会话读取失败，请重新打开菜单";
+            if (opened && !cached) render();
+          }
           if (!background && !cached) report(error);
         }
       }
@@ -554,7 +581,11 @@ export function mountSessionMenu({
     if (!opened) return Promise.resolve(null);
     ticker = setInterval(() => {
       syncContext();
-      if (opened) { updatePermissions(); updateTimes(); }
+      if (opened) {
+        updatePermissions(); updateTimes();
+        if (context?.serviceMode && context.connected && !document.hidden && !suspended)
+          void refresh({ background: true });
+      }
     }, 1000);
     return refresh();
   }

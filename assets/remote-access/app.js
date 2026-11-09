@@ -1955,6 +1955,10 @@ function normalizeRelatedView(value, id = value?.threadId) {
       ...(value.returnToParent === true ? { returnToParent: true } : {}),
       ...(value.owner === relatedNavigationOwner ? { owner: value.owner } : {}) } : null;
 }
+function subagentsEnabled() {
+  // 用户要求服务模式恢复子智能体；独立能力字段避免旧后台或侧边会话被一起解禁。
+  return session?.runtime?.cdpInjectionEnabled !== false || session?.capabilities?.serviceSubagents === true;
+}
 function threadReadOnly(id = selectedId) {
   return !!session?.readOnly || !!id && (
     thread?.id === id && (thread.readOnly === true || thread.viewKind === "subagent")
@@ -2167,6 +2171,20 @@ function scheduleRelatedSessionCheck() {
   clearTimeout(relatedSessionCheckTimer);
   relatedSessionCheckTimer = null;
   const view = normalizeRelatedView(relatedSessionView, selectedId);
+  if (view?.kind === "subagent" && session?.runtime?.cdpInjectionEnabled === false
+      && subagentsEnabled() && connected && !document.hidden) {
+    const id = selectedId, scope = privateInputScope(session), version = selectionVersion;
+    // 服务事件提供实时刷新；2 秒只读补读用于桌面持有的子会话及断线恢复，不触发 resume 或写操作。
+    relatedSessionCheckTimer = setTimeout(async () => {
+      relatedSessionCheckTimer = null;
+      if (scope !== privateInputScope(session) || selectedId !== id || version !== selectionVersion
+          || document.hidden || !connected || relatedSessionView?.kind !== "subagent") return;
+      try { await reloadThread(); } catch {}
+      if (scope === privateInputScope(session) && selectedId === id && version === selectionVersion)
+        scheduleRelatedSessionCheck();
+    }, 2000);
+    return;
+  }
   if (!view || view.kind !== "side" || !selectedId || !session || sideThreadExpired(selectedId) || !connected) return;
   const id = selectedId, scope = privateInputScope(session), version = selectionVersion;
   relatedSessionCheckTimer = setTimeout(async () => {
@@ -2252,6 +2270,12 @@ async function clearMissingThreadSelection(id) {
   if (id !== selectedId || !session) return false;
   if (normalizeRelatedView(relatedSessionView, id)?.kind === "side")
     return retireExpiredSideThread(id);
+  if (normalizeRelatedView(relatedSessionView, id)?.kind === "subagent") {
+    // 只读子智能体已释放时回到原主会话，不能为查看历史重新运行或遗留可编辑输入框。
+    await returnToParentSession();
+    notice("子智能体已不可读取，已返回主会话", true);
+    return true;
+  }
   suppressAutomaticNewChat = true;
   resetRelatedSessions();
   showWelcome({ startNew: false, clearHash: true });
@@ -2274,7 +2298,7 @@ function resetRelatedSessions({ persisted = false } = {}) {
   if (persisted) try { sessionStorage.removeItem(relatedOperationStorageKey); } catch {}
 }
 async function loadRelatedThreads(parentThreadId) {
-  if (session?.runtime?.cdpInjectionEnabled === false) return {
+  if (!subagentsEnabled()) return {
     ok: true, threadId: parentThreadId, subagents: [], sideThreads: [],
     completedSubagents: [], completedSubagentCount: 0, subagentsComplete: true, canCreateSideThread: false
   };
@@ -2350,7 +2374,7 @@ async function openRelatedThread(item, kind, parentThreadId = selectedId, {
   owner = relatedNavigationOwner, initialThread = null, replaceHistory = false,
   preparedView = false, onViewReady = null
 } = {}) {
-  if (session?.runtime?.cdpInjectionEnabled === false) return;
+  if (kind === "subagent" ? !subagentsEnabled() : session?.runtime?.cdpInjectionEnabled === false) return;
   if (relatedSessionView || !validRelatedThreadId(item?.id) || parentThreadId !== selectedId) return;
   const view = rememberRelatedView(item.id, kind, null, item.name || item.title || "",
     { openedFromThreadId: parentThreadId, ephemeral: item.ephemeral });
@@ -6376,7 +6400,10 @@ function shell() {
         ? relatedSessionView.openedFromThreadId || relatedSessionView.parentThreadId : null;
       return { deviceId: session?.device.id, cacheScope: privateInputScope(session),
         threadId: !creating ? parentThreadId || selectedId : null, readOnly: threadReadOnly(), connected,
-        relatedEnabled: session?.runtime?.cdpInjectionEnabled !== false,
+        subagentsEnabled: subagentsEnabled(),
+        sideThreadsEnabled: session?.runtime?.cdpInjectionEnabled !== false,
+        serviceMode: session?.runtime?.cdpInjectionEnabled === false,
+        relatedScope: JSON.stringify(session?.runtime),
         createPending: [...relatedThreadOperations.values()].some(record => ownsRelatedOperation(record)
           && record.parentThreadId === (parentThreadId || selectedId) && record.action === "createSideThread") };
     },
@@ -8085,7 +8112,7 @@ function renderSubagentItem(item, previous, running = false) {
   node.setAttribute("aria-label", `${name}，${presentation.label}`);
   if (presentation.active) node.setAttribute("role", "status"); else node.removeAttribute("role");
   const ids = subagentThreadIds(item).filter(id => validRelatedThreadId(id) && id !== selectedId);
-  const disabled = session?.runtime?.cdpInjectionEnabled === false;
+  const disabled = !subagentsEnabled();
   node.classList.toggle("subagent-item-disabled", disabled);
   if (disabled) node.setAttribute("aria-disabled", "true"); else node.removeAttribute("aria-disabled");
   const canOpen = !disabled && !relatedSessionView && ids.length === 1, parentThreadId = selectedId;
@@ -10006,7 +10033,7 @@ function renderMessages(keepScroll = true) {
       const editing = item.type === "userMessage" && editingMessage?.threadId === selectedId && editingMessage.messageId === item.id;
       const skillKey = userMessageHasSkills(item)
         ? JSON.stringify([skillRenderVersion, (item.content || []).filter(part => part.type === "skill")]) : "";
-      const relatedEnabled = session?.runtime?.cdpInjectionEnabled !== false;
+      const relatedEnabled = subagentsEnabled();
       const node = cached?.item === item && cached.inActivity === inActivity && cached.running === running
         && cached.editing === editing && cached.skillKey === skillKey && cached.markdownVersion === markdownRenderVersion
         && cached.relatedViewKind === relatedViewKind && cached.relatedEnabled === relatedEnabled
@@ -10214,7 +10241,8 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   suppressAutomaticNewChat = false;
   const navigationVersion = ++relatedSelectionVersion;
   const nextRelatedView = relatedView === undefined ? relatedViewForThread(id) : normalizeRelatedView(relatedView, id);
-  if (session.runtime?.cdpInjectionEnabled === false && nextRelatedView) {
+  if (session.runtime?.cdpInjectionEnabled === false && nextRelatedView
+      && (nextRelatedView.kind === "side" || !subagentsEnabled())) {
     const parent = nextRelatedView.openedFromThreadId || nextRelatedView.parentThreadId;
     if (validRelatedThreadId(parent) && parent !== id)
       return selectThread(parent, { closeSidebar, force, relatedView: null, replaceHistory: true });
@@ -12713,7 +12741,8 @@ function applyRemoteRuntime(runtime) {
   const changed = session.runtime?.cdpInjectionEnabled !== runtime.cdpInjectionEnabled;
   session.runtime = runtime;
   session.capabilities = { ...session.capabilities,
-    sideThreads: runtime.cdpInjectionEnabled, subagents: runtime.cdpInjectionEnabled };
+    sideThreads: runtime.cdpInjectionEnabled,
+    subagents: runtime.cdpInjectionEnabled || session.capabilities?.serviceSubagents === true };
   if (changed) {
     ++nativeConnectionVersion;
     cancelConnectionProbe();
@@ -12727,7 +12756,9 @@ function applyRemoteRuntime(runtime) {
     if (!runtime.cdpInjectionEnabled) {
       stopRelatedSessionTimers();
       dismissSideCreation({ canceled: true });
-      if (relatedSessionView) void returnToParentSession().catch(() => {});
+      if (relatedSessionView?.kind === "side" || relatedSessionView && !subagentsEnabled())
+        void returnToParentSession().catch(() => {});
+      else scheduleRelatedSessionCheck();
     }
   }
   sessionMenu?.updateContext();
@@ -13405,6 +13436,7 @@ document.addEventListener("visibilitychange", () => {
   if (pageLeaving) { resumePage(); return; }
   syncActivityTimer();
   syncGoalLiveTimer();
+  scheduleRelatedSessionCheck();
   if (session) startConnectionPoll(session.device.id);
   retryConnectionRecovery({ suppressStreamErrors: true });
 });

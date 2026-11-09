@@ -18,13 +18,26 @@ impl Harness {
             return Ok(result);
         }
         if matches!(action, "pinProject" | "pinThread" | "sort") {
+            if action == "pinThread" {
+                // 子智能体只读约束也覆盖旧引擎的本地置顶回退，不能绕过主会话身份校验。
+                let id = required(&payload, "threadId")?;
+                let identity = self
+                    .runtime
+                    .request(
+                        "thread/read",
+                        json!({"threadId":id,"includeTurns":false}),
+                        None,
+                    )
+                    .await?;
+                normalize_thread_response(&identity)?;
+            }
             return self.preference(action, &payload, authorization).await;
         }
         if action == "create" {
             return self.create(&payload, authorization).await;
         }
         let id = required(&payload, "threadId")?.to_owned();
-        // 所有写入口先核对持久主会话；不能通过自行构造请求绕过第一期的置灰边界。
+        // 所有写入口先核对持久主会话；子智能体只读查看不能通过自行构造请求变成写入或接管。
         let identity = self
             .runtime
             .request(

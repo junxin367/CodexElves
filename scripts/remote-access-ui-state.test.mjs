@@ -71,6 +71,143 @@ const platform = await readFile(new URL("../assets/remote-access/platform.js", i
 const eventsClient = await readFile(new URL("../assets/remote-access/events-client.js", import.meta.url), "utf8");
 const sessionTools = await readFile(new URL("../assets/remote-access/session-tools.js", import.meta.url), "utf8");
 const sessionFiles = await readFile(new URL("../assets/remote-access/session-files.js", import.meta.url), "utf8");
+const sessionMenuSource = await readFile(new URL("../assets/remote-access/session-menu.js", import.meta.url), "utf8");
+
+test("服务子智能体按独立能力启用，旧后台保持禁用且子会话始终只读", () => {
+  const context = { session: { readOnly: false, runtime: { cdpInjectionEnabled: false }, capabilities: {} },
+    selectedId: "child", thread: { id: "child", viewKind: "subagent", readOnly: true },
+    relatedThreadViews: new Map(), relatedSessionView: null, normalizeRelatedView: value => value };
+  vm.createContext(context);
+  vm.runInContext(app.slice(app.indexOf("function subagentsEnabled("), app.indexOf("function threadReadOnlyMessage(")), context);
+  assert.equal(context.subagentsEnabled(), false);
+  context.session.capabilities.serviceSubagents = true;
+  assert.equal(context.subagentsEnabled(), true);
+  assert.equal(context.threadReadOnly(), true);
+  assert.equal(context.threadReadOnly("main"), false);
+  context.session.runtime.cdpInjectionEnabled = true;
+  delete context.session.capabilities.serviceSubagents;
+  assert.equal(context.subagentsEnabled(), true);
+});
+
+test("会话菜单分离子智能体读取和侧边写入，并按运行方式退役旧请求", () => {
+  let current = { deviceId: "device", cacheScope: "scope", threadId: "parent", connected: true,
+    subagentsEnabled: true, sideThreadsEnabled: false, serviceMode: true, relatedScope: "service:1" };
+  const context = vm.createContext({ getContext: () => current, nonempty: value => typeof value === "string" && !!value });
+  vm.runInContext(sessionMenuSource.slice(sessionMenuSource.indexOf("  function readContext("),
+    sessionMenuSource.indexOf("  function syncContext(")) + sessionMenuSource.slice(
+      sessionMenuSource.indexOf("  const canRead ="), sessionMenuSource.indexOf("  function entryFor("))
+      + "\nglobalThis.permissions = value => [canRead(value), canMutate(value)];", context);
+  const service = context.readContext();
+  assert.deepEqual(Array.from(context.permissions(service)), [true, false]);
+  current = { ...current, sideThreadsEnabled: true, relatedScope: "cdp:2", serviceMode: false };
+  const cdp = context.readContext();
+  assert.deepEqual(Array.from(context.permissions(cdp)), [true, true]);
+  assert.notEqual(cdp.owner, service.owner);
+  current = { ...current, subagentsEnabled: false, sideThreadsEnabled: false };
+  assert.deepEqual(Array.from(context.permissions(context.readContext())), [false, false]);
+});
+
+test("服务子智能体刷新失败保留旧列表并明确标记未同步", async () => {
+  const previous = { loadedAtMs: 1, data: { threadId: "parent", subagentsComplete: true,
+    subagents: [{ id: "child", status: "active" }], completedSubagents: [], completedSubagentCount: 0 } };
+  const entry = { snapshot: previous, dirty: true, revision: 1, request: null, again: false };
+  const value = { threadId: "parent", owner: "owner", connected: true, serviceMode: true };
+  let applied;
+  const context = vm.createContext({
+    disposed: false, opened: true, cached: previous, context: value, message: "", refreshAgeMs: 30000,
+    syncContext: () => value, entryFor: () => entry, restore() {}, updatePermissions() {}, render() {},
+    accepts: () => true, owns: () => true,
+    load: async () => { throw new Error("引擎暂时不可用"); },
+    applySnapshot: (_entry, snapshot) => { applied = snapshot; },
+    report: () => assert.fail("后台刷新不弹出重复通知"),
+  });
+  vm.runInContext(sessionMenuSource.slice(sessionMenuSource.indexOf("  function refresh("),
+    sessionMenuSource.indexOf("  function open(")), context);
+  await context.refresh({ background: true });
+  assert.equal(applied.data.subagents[0].id, "child");
+  assert.equal(applied.data.subagentsComplete, false);
+  assert.equal(applied.data.subagentsStale, true);
+  assert.equal(applied.data.subagentsError, "引擎暂时不可用");
+  assert.equal(entry.dirty, true);
+  assert.equal(entry.request, null);
+});
+
+test("服务子智能体补读只在当前可见只读页运行，返回主会话后旧定时器不再读取", async () => {
+  const timers = [], reads = [];
+  const context = vm.createContext({
+    relatedSessionCheckTimer: null, relatedSessionView: { kind: "subagent", threadId: "child" },
+    selectedId: "child", selectionVersion: 1, session: { runtime: { cdpInjectionEnabled: false } },
+    document: { hidden: false }, connected: true, privateInputScope: () => "scope",
+    subagentsEnabled: () => true, normalizeRelatedView: value => value,
+    clearTimeout() {}, setTimeout: (callback, delay) => { timers.push({ callback, delay }); return timers.length; },
+    reloadThread: async () => { reads.push(context.selectedId); },
+  });
+  vm.runInContext(app.slice(app.indexOf("function scheduleRelatedSessionCheck("), app.indexOf("function isMissingThreadError(")), context);
+  context.scheduleRelatedSessionCheck();
+  assert.equal(timers[0].delay, 2000);
+  await timers[0].callback();
+  assert.deepEqual(reads, ["child"]);
+  context.selectedId = "main"; context.selectionVersion++;
+  await timers[1].callback();
+  assert.deepEqual(reads, ["child"]);
+  context.selectedId = "child"; context.document.hidden = true;
+  context.scheduleRelatedSessionCheck();
+  assert.equal(timers.length, 2);
+});
+
+test("服务菜单实际展示子智能体并继续禁用侧边会话，旧侧边缓存不渲染", () => {
+  class MenuNode {
+    constructor(text = "") {
+      this.textContent = text; this.children = []; this.dataset = {}; this.attributes = new Map();
+      const classes = new Set();
+      this.classList = { add: (...values) => values.forEach(value => classes.add(value)),
+        toggle: (value, enabled) => enabled ? classes.add(value) : classes.delete(value) };
+    }
+    append(...nodes) { this.children.push(...nodes); }
+    replaceChildren(...nodes) { this.children = [...nodes]; }
+    contains() { return false; }
+    setAttribute(name, value) { this.attributes.set(name, value); }
+    addEventListener() {}
+    querySelector() { return this.header; }
+    get childElementCount() { return this.children.length; }
+  }
+  const groups = new Map(), buttons = [], mutationButtons = new Map(), menu = new MenuNode();
+  const element = (_tag, _className, text = "") => new MenuNode(text);
+  const itemButton = (label, callback, _args, kind) => {
+    const button = new MenuNode(label); button.disabled = typeof callback !== "function";
+    if (kind) mutationButtons.set(button, kind);
+    buttons.push(button); return button;
+  };
+  const section = (label, action) => {
+    const node = new MenuNode(label); node.header = new MenuNode(label);
+    node.append(node.header); if (action) node.header.append(action);
+    groups.set(label, node); menu.append(node); return node;
+  };
+  const context = vm.createContext({
+    menu, groups, mutationButtons, element, itemButton, section, times: [], document: { activeElement: null },
+    context: { subagentsEnabled: true, sideThreadsEnabled: false, connected: true, threadId: "parent" },
+    cached: { loadedAtMs: 1, data: { subagents: [{ id: "child", name: "工作中的子智能体", status: "active" }],
+      completedSubagentCount: 1, completedSubagents: [{ id: "done", name: "已结束子智能体", outcome: "failed" }],
+      sideThreads: [{ id: "old-side", title: "旧侧边缓存" }], canCreateSideThread: false, subagentsComplete: true } },
+    entries: new Map([["owner", { subagentsExpanded: true, completedSubagentsExpanded: true }]]),
+    owner: "owner", id: "menu", opened: false, message: "",
+    closeAction: new MenuNode(), createSideThread() {}, closeSideThread() {}, openSideThread() {}, openSubagent() {},
+    openChanges() {}, openFiles() {}, openBrowser() {}, renderSubagentIcon: () => null,
+    nonempty: value => typeof value === "string" && !!value,
+    cancelPress() {}, hideContext() {}, fit() {}, updateTimes() {}, canRead: () => true,
+    canMutate: value => value.sideThreadsEnabled && value.connected && !value.readOnly,
+  });
+  vm.runInContext(sessionMenuSource.slice(sessionMenuSource.indexOf("  function updatePermissions("),
+    sessionMenuSource.indexOf("  function updateTimes("))
+    + sessionMenuSource.slice(sessionMenuSource.indexOf("  function render()"), sessionMenuSource.indexOf("  function viewport(")), context);
+  context.render();
+  assert.ok(buttons.some(button => button.textContent === "工作中的子智能体" && !button.disabled));
+  assert.ok(buttons.some(button => button.textContent === "已结束子智能体" && !button.disabled));
+  assert.equal(buttons.some(button => button.textContent === "旧侧边缓存"), false);
+  assert.equal(groups.get("侧边会话").attributes.get("aria-disabled"), "true");
+  assert.equal(groups.get("子智能体").attributes.has("aria-disabled"), false);
+  assert.ok([...mutationButtons.keys()].every(button => button.disabled));
+});
 
 test("手机侧栏遮罩100ms后接受独立点击，早期触摸和跨区域手势仍不会误关", () => {
   const classes = new Set(), nodes = new Map();
@@ -3046,7 +3183,7 @@ function connectionRecoveryHarness() {
     mutate: async (...args) => { writes.push(args); assert.fail("恢复连接不得自动重新派发写操作"); },
     recoverQuestionReceipts: async () => {},
     refreshCachedCatalogs() {}, ensureStream() {}, stopCatalogRefresh() {}, showConnectionRecovery() {},
-    syncGoalLiveTimer() {}, scheduleRelatedOperationCheck() {}, drainPendingNotificationOpen() {},
+    syncGoalLiveTimer() {}, scheduleRelatedOperationCheck() {}, scheduleRelatedSessionCheck() {}, drainPendingNotificationOpen() {},
     clearPendingFeedbackTimer() {},
     syncActivityTimer() {}, stopActivityTimer() {}, stopGoalLiveTimer() {}, finishQueueDrag() {},
     closeContextUsageTip() {}, rememberDraft() {}, rememberTranscript() {}, rememberReadingPosition() {},

@@ -439,6 +439,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    }
    return;
  }
+ if(q.method==='thread/read'){output({id:q.id,result:{thread:{id:q.params.threadId,cwd:__dirname,ephemeral:false,source:'appServer',threadSource:'user'}}});return;}
  if(q.method!=='thread/list'){output({id:q.id,error:{code:-32601,message:'unsupported'}});return;}
  const removed=fs.existsSync(__dirname+'/deleted');
  const data=(catalog?.threads||Array.from({length:250},(_,i)=>({

@@ -1964,11 +1964,6 @@ pub(crate) fn normalize_owner_thread(
 }
 
 pub(crate) fn normalize_thread(thread: &Value) -> anyhow::Result<Value> {
-    let id = thread
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .context("Codex CLI service 返回了无效会话 ID")?;
     let ephemeral = thread
         .get("ephemeral")
         .and_then(Value::as_bool)
@@ -1993,6 +1988,50 @@ pub(crate) fn normalize_thread(thread: &Value) -> anyhow::Result<Value> {
     {
         bail!("Codex CLI service 只提供主会话元数据");
     }
+    normalize_thread_metadata(thread)
+}
+
+pub(crate) fn subagent_parent_id(thread: &Value) -> Option<&str> {
+    thread["parentThreadId"]
+        .as_str()
+        .or_else(|| thread["source"]["subAgent"]["thread_spawn"]["parent_thread_id"].as_str())
+        .or_else(|| thread["source"]["subagent"]["thread_spawn"]["parent_thread_id"].as_str())
+        .filter(|parent| !parent.is_empty() && thread["id"] != *parent)
+}
+
+pub(crate) fn normalize_subagent_thread(thread: &Value) -> anyhow::Result<Value> {
+    let parent = subagent_parent_id(thread).context("子智能体缺少有效父会话关系")?;
+    anyhow::ensure!(
+        thread["sideConversation"] != true,
+        "侧边会话不能作为子智能体读取"
+    );
+    let mut value = normalize_thread_metadata(thread)?;
+    // 用户要求服务模式恢复子智能体只读查看；此专用转换不改变普通会话和所有写入口的校验。
+    value["readOnly"] = json!(true);
+    value["viewKind"] = json!("subagent");
+    value["parentThreadId"] = json!(parent);
+    value["agentName"] = thread["agentNickname"]
+        .as_str()
+        .or_else(|| thread["source"]["subAgent"]["thread_spawn"]["agent_nickname"].as_str())
+        .or_else(|| thread["source"]["subagent"]["thread_spawn"]["agent_nickname"].as_str())
+        .or_else(|| thread["agentRole"].as_str())
+        .map(|name| json!(name))
+        .unwrap_or_else(|| value["title"].clone());
+    value["priority"]["eligible"] = json!(false);
+    value["requests"] = json!([]);
+    value["requestsKnown"] = json!(true);
+    value["queuedMessages"] = json!([]);
+    value["queuedEdits"] = json!([]);
+    value["editableMessage"] = Value::Null;
+    Ok(value)
+}
+
+fn normalize_thread_metadata(thread: &Value) -> anyhow::Result<Value> {
+    let id = thread["id"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .context("Codex CLI service 返回了无效会话 ID")?;
+    let thread_source = thread["threadSource"].as_str();
     let cwd = thread
         .get("cwd")
         .and_then(Value::as_str)

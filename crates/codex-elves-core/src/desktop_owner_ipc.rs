@@ -460,6 +460,43 @@ pub(crate) async fn read_snapshot(_thread_id: &str) -> anyhow::Result<Option<Val
 
 #[cfg(windows)]
 pub(crate) async fn read_snapshot(thread_id: &str) -> anyhow::Result<Option<Value>> {
+    read_snapshot_kind(thread_id, false).await
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn read_view_snapshot(_thread_id: &str) -> anyhow::Result<Option<Value>> {
+    Ok(None)
+}
+
+#[cfg(windows)]
+pub(crate) async fn read_view_snapshot(thread_id: &str) -> anyhow::Result<Option<Value>> {
+    read_snapshot_kind(thread_id, true).await
+}
+
+fn require_view_snapshot(
+    snapshot: &Value,
+    thread_id: &str,
+    allow_subagents: bool,
+) -> anyhow::Result<()> {
+    if allow_subagents && crate::codex_service::subagent_parent_id(snapshot).is_some() {
+        // 用户只恢复子智能体查看：仅扩展此读取校验，发送、审批和 owner 监听仍使用 require_main_thread。
+        ensure!(snapshot["id"] == thread_id, "子智能体快照身份已变化");
+        ensure!(
+            snapshot.get("hostId").is_none_or(|host| host == "local"),
+            "只支持读取本机子智能体快照"
+        );
+        crate::codex_service::normalize_subagent_thread(snapshot)?;
+        Ok(())
+    } else {
+        require_main_thread(snapshot, thread_id)
+    }
+}
+
+#[cfg(windows)]
+async fn read_snapshot_kind(
+    thread_id: &str,
+    allow_subagents: bool,
+) -> anyhow::Result<Option<Value>> {
     let stream = match tokio::net::windows::named_pipe::ClientOptions::new().open(pipe_path()) {
         Ok(stream) => stream,
         Err(error)
@@ -472,6 +509,14 @@ pub(crate) async fn read_snapshot(thread_id: &str) -> anyhow::Result<Option<Valu
         }
         Err(error) => return Err(error.into()),
     };
+    read_snapshot_with_stream(stream, thread_id, allow_subagents).await
+}
+
+async fn read_snapshot_with_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    stream: S,
+    thread_id: &str,
+    allow_subagents: bool,
+) -> anyhow::Result<Option<Value>> {
     let mut session = Session::new(stream, thread_id, RPC_TIMEOUT);
     let result = async {
         session.initialize().await?;
@@ -480,7 +525,7 @@ pub(crate) async fn read_snapshot(thread_id: &str) -> anyhow::Result<Option<Valu
         };
         session.owner = Some(owner);
         let snapshot = session.fresh_snapshot().await?;
-        require_main_thread(&snapshot, thread_id)?;
+        require_view_snapshot(&snapshot, thread_id, allow_subagents)?;
         Ok(Some(snapshot))
     }
     .await;
@@ -1440,6 +1485,78 @@ mod tests {
         let mut unloaded_main = snapshot();
         unloaded_main["canAcceptDirectInput"] = Value::Null;
         assert!(require_main_thread(&unloaded_main, THREAD).is_ok());
+    }
+
+    #[tokio::test]
+    async fn harness_subagent_owner_snapshot_reads_without_enabling_write_qualification() {
+        let mut child = snapshot();
+        child["cwd"] = json!("test");
+        child["parentThreadId"] = json!("root-thread");
+        child["threadSource"] = json!("subagent");
+        child["ephemeral"] = json!(true);
+        child["canAcceptDirectInput"] = json!(false);
+        child["turnHistory"] = Value::Null;
+        child["turnsPagination"] = json!({"hasLoadedOldest":true});
+        child["turns"] = json!([{"turnId":"child-turn","status":"completed","items":[
+            {"id":"answer","type":"agentMessage","text":"临时子智能体的桌面快照"}]}]);
+        assert!(require_view_snapshot(&child, THREAD, true).is_ok());
+        assert!(require_view_snapshot(&child, THREAD, false).is_err());
+        assert!(require_main_thread(&child, THREAD).is_err());
+        for (field, value) in [
+            ("id", json!("another-thread")),
+            ("sideConversation", json!(true)),
+            ("hostId", json!("remote-host")),
+            ("parentThreadId", json!(THREAD)),
+        ] {
+            let mut invalid = child.clone();
+            invalid[field] = value;
+            assert!(
+                require_view_snapshot(&invalid, THREAD, true).is_err(),
+                "{field}"
+            );
+        }
+        let (client, mut peer) = tokio::io::duplex(128 * 1024);
+        let expected = child.clone();
+        let peer_task = tokio::spawn(async move {
+            for method in ["initialize", "thread-owner-discovery"] {
+                let message = read_peer(&mut peer).await.unwrap();
+                assert_eq!(message["method"], method);
+                let (owner, result) = if method == "initialize" {
+                    (CLIENT, json!({"clientId":CLIENT}))
+                } else {
+                    (OWNER, json!({"supportsUntrustedAppInput":true}))
+                };
+                write_peer(
+                    &mut peer,
+                    json!({
+                        "type":"response","method":method,"requestId":message["requestId"],
+                        "resultType":"success","handledByClientId":owner,"result":result
+                    }),
+                )
+                .await
+                .unwrap();
+            }
+            let following = read_peer(&mut peer).await.unwrap();
+            assert_eq!(following["method"], "thread-stream-following-changed");
+            assert_eq!(following["params"]["following"], true);
+            write_peer(&mut peer, watch_broadcast(child, 1))
+                .await
+                .unwrap();
+            let following = read_peer(&mut peer).await.unwrap();
+            assert_eq!(following["method"], "thread-stream-following-changed");
+            assert_eq!(following["params"]["following"], false);
+        });
+        let observed = read_snapshot_with_stream(client, THREAD, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed, expected);
+        let history = crate::codex_service::owner_snapshot_history(&observed, THREAD).unwrap();
+        assert_eq!(
+            history["data"][0]["items"][0]["text"],
+            "临时子智能体的桌面快照"
+        );
+        peer_task.await.unwrap();
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@ mod read_cache;
 mod reads;
 mod runtime;
 mod store;
+mod subagents;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -75,6 +76,19 @@ impl Harness {
         self.runtime
             .request("test/seedHistory", payload, None)
             .await?;
+        Ok(())
+    }
+    #[cfg(test)]
+    pub async fn seed_test_subagents(&self, payload: Value) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.runtime.has_test_process(),
+            "只允许配置隔离子智能体样例"
+        );
+        self.runtime
+            .request("test/seedSubagents", payload, None)
+            .await?;
+        self.runtime.invalidate_read("thread/list").await;
+        self.runtime.invalidate_read("thread/loaded/list").await;
         Ok(())
     }
     pub fn new(directory: &Path) -> anyhow::Result<Arc<Self>> {
@@ -316,22 +330,37 @@ impl Harness {
     }
 
     async fn owner_snapshot(&self, id: &str) -> anyhow::Result<Option<Value>> {
+        self.owner_snapshot_kind(id, false).await
+    }
+
+    async fn owner_view_snapshot(&self, id: &str) -> anyhow::Result<Option<Value>> {
+        self.owner_snapshot_kind(id, true).await
+    }
+
+    async fn owner_snapshot_kind(
+        &self,
+        id: &str,
+        allow_subagents: bool,
+    ) -> anyhow::Result<Option<Value>> {
         if self.locally_loaded(id).await? {
             return Ok(None);
         }
-        let snapshot = crate::desktop_owner_ipc::read_snapshot(id)
-            .await
-            .map_err(|error| {
-                if error.downcast_ref::<ApiError>().is_some() {
-                    error
-                } else {
-                    super::ApiError::new(
-                        503,
-                        "当前会话的桌面连接暂时不可用，请确认桌面应用可响应后重试。",
-                    )
-                    .into()
-                }
-            })?;
+        let snapshot = if allow_subagents {
+            crate::desktop_owner_ipc::read_view_snapshot(id).await
+        } else {
+            crate::desktop_owner_ipc::read_snapshot(id).await
+        }
+        .map_err(|error| {
+            if error.downcast_ref::<ApiError>().is_some() {
+                error
+            } else {
+                super::ApiError::new(
+                    503,
+                    "当前会话的桌面连接暂时不可用，请确认桌面应用可响应后重试。",
+                )
+                .into()
+            }
+        })?;
         if snapshot.is_some() {
             execution::transport("desktop-ipc", "thread-snapshot", false);
         }
@@ -409,11 +438,7 @@ impl Harness {
             "queue" => Ok(self.queue(required(&payload, "threadId")?).await),
             "queueEdit" => self.queue_edit(&payload).await,
             "sendState" => self.send_state(&payload).await,
-            "relatedThreads" => Ok(
-                json!({"ok":true,"threadId":payload["threadId"],"subagents":[],
-                "completedSubagents":[],"completedSubagentCount":0,"sideThreads":[],
-                "canCreateSideThread":false,"subagentsComplete":true}),
-            ),
+            "relatedThreads" => self.related_subagents(&payload).await,
             "createSideThread" | "closeSideThread" => Err(error(409, "不支持的会话操作")),
             "dispose" => Ok(json!({"ok":true})),
             _ => {

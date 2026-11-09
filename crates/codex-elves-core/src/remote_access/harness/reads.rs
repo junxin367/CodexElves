@@ -284,11 +284,29 @@ impl Harness {
 
     pub(super) async fn thread(&self, payload: &Value) -> anyhow::Result<Value> {
         let id = required(payload, "threadId")?;
-        let (response, owner) = tokio::try_join!(
+        let (response, owner) = tokio::join!(
             self.runtime
                 .read("thread/read", json!({"threadId":id,"includeTurns":false}),),
-            self.owner_snapshot(id)
-        )?;
+            self.owner_view_snapshot(id)
+        );
+        let owner = owner?;
+        let response = match response {
+            Ok(response) => response,
+            Err(failure) => {
+                if super::subagents::missing_thread_read(&failure)
+                    && let Some(snapshot) = owner.as_ref()
+                    && crate::codex_service::normalize_subagent_thread(snapshot).is_ok()
+                {
+                    return self.subagent_detail(id, snapshot, Some(snapshot)).await;
+                }
+                return Err(self.subagent_read_error(id, failure).await);
+            }
+        };
+        if crate::codex_service::subagent_parent_id(&response["thread"]).is_some() {
+            return self
+                .subagent_detail(id, &response["thread"], owner.as_ref())
+                .await;
+        }
         let mut thread = normalize_thread_response(&response)?;
         if let Some(settings) = self.store.lock().await.data.settings.get(id) {
             for key in ["model", "reasoningEffort", "serviceTier"] {
@@ -384,7 +402,7 @@ impl Harness {
         Ok(json!({"ok":true,"thread":thread,"nativeBridge":"harness"}))
     }
 
-    async fn latest_turn(&self, id: &str) -> anyhow::Result<Option<Value>> {
+    pub(super) async fn latest_turn(&self, id: &str) -> anyhow::Result<Option<Value>> {
         let history = self
             .runtime
             .read(
@@ -400,12 +418,52 @@ impl Harness {
 
     pub(super) async fn history(&self, payload: &Value) -> anyhow::Result<Value> {
         let id = required(payload, "threadId")?;
+        let identity = match self
+            .runtime
+            .read("thread/read", json!({"threadId":id,"includeTurns":false}))
+            .await
+        {
+            Ok(identity) => identity,
+            Err(failure) => {
+                if super::subagents::missing_thread_read(&failure)
+                    && let Some(owner) = self.owner_view_snapshot(id).await?
+                    && crate::codex_service::normalize_subagent_thread(&owner).is_ok()
+                {
+                    if payload["cursor"].is_null()
+                        && payload["turnId"].is_null()
+                        && payload["itemCursor"].is_null()
+                    {
+                        if let Some(history) = owner_snapshot_history(&owner, id) {
+                            return Ok(history);
+                        }
+                    }
+                    return Err(error(503, "子智能体的桌面历史快照尚未完整，请稍后重试"));
+                }
+                return Err(self.subagent_read_error(id, failure).await);
+            }
+        };
+        anyhow::ensure!(identity["thread"]["id"] == id, "会话历史身份不匹配");
+        let subagent = crate::codex_service::subagent_parent_id(&identity["thread"]).is_some();
+        if subagent {
+            crate::codex_service::normalize_subagent_thread(&identity["thread"])?;
+            if identity["thread"]["ephemeral"] == true {
+                return self.ephemeral_subagent_history(id, payload).await;
+            }
+        } else {
+            normalize_thread_response(&identity)?;
+        }
         let cursor = history_cursor(&payload["cursor"], "会话分页游标")?;
         if cursor.is_none() && payload["turnId"].is_null() {
-            if let Some(snapshot) = self.owner_snapshot(id).await? {
-                self.follow_owner(id, snapshot.clone()).await;
+            if let Some(snapshot) = self.owner_view_snapshot(id).await? {
+                if !subagent {
+                    self.follow_owner(id, snapshot.clone()).await;
+                }
                 if let Some(history) = owner_snapshot_history(&snapshot, id) {
-                    return Ok(self.projection.lock().await.history(id, history, true));
+                    return Ok(if subagent {
+                        history
+                    } else {
+                        self.projection.lock().await.history(id, history, true)
+                    });
                 }
             }
         }
