@@ -55,6 +55,7 @@ let session = null, sidebar = null, selectedId = null, thread = null, historyCur
 let pendingNotificationOpen = null;
 let stream = null, connected = false, selectionVersion = 0, busy = false, creating = false, historyLoadingVersion = -1;
 let sending = null;
+const directSendPreviews = new Map();
 let composerDiagnosticState = "";
 let turns = new Map(), collapsed = new Set(), search = "", sidebarTimer = null, refreshTimer = null;
 let historyInitialized = false;
@@ -360,8 +361,15 @@ const appearancePresets = {
 const projectThreadLimits = [5, 10, 20, 50];
 // 用户要求文件阅读字号统一控制变更预览和文件查看，范围 6～14px、默认 12px、步长 1px；文件列表继续使用原字号。
 const fileReadingFontMin = 6, fileReadingFontMax = 14, fileReadingFontDefault = 12;
+// 用户要求自动主题切回浅色的阈值默认 35 lux，可按 1 lux 在 25～50 调节；默认值、存储和滑块共用此范围。
+const automaticThemeLightLuxMin = 25, automaticThemeLightLuxMax = 50, automaticThemeLightLuxDefault = 35;
+function normalizeAutomaticThemeLightLux(value) {
+  return Number.isInteger(value)
+    ? Math.min(automaticThemeLightLuxMax, Math.max(automaticThemeLightLuxMin, value)) : automaticThemeLightLuxDefault;
+}
 function defaultAppearance(theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") {
-  return { theme, themeMode: "manual", fontSize: 13, fileReadingFontSize: fileReadingFontDefault, projectThreadLimit: 5, backgroundOpacity: 35, backgroundFit: "cover",
+  return { theme, themeMode: "manual", automaticThemeLightLux: automaticThemeLightLuxDefault,
+    fontSize: 13, fileReadingFontSize: fileReadingFontDefault, projectThreadLimit: 5, backgroundOpacity: 35, backgroundFit: "cover",
     colors: { light: { ...appearancePresets.light }, dark: { ...appearancePresets.dark } } };
 }
 function readAppearance() {
@@ -371,6 +379,7 @@ function readAppearance() {
     if (!saved || typeof saved !== "object") return value;
     if (["light", "dark"].includes(saved.theme)) value.theme = saved.theme;
     if (["auto", "manual"].includes(saved.themeMode)) value.themeMode = saved.themeMode;
+    value.automaticThemeLightLux = normalizeAutomaticThemeLightLux(saved.automaticThemeLightLux);
     if (Number.isInteger(saved.backgroundOpacity)) value.backgroundOpacity = Math.min(100, Math.max(1, saved.backgroundOpacity));
     if (["cover", "contain"].includes(saved.backgroundFit)) value.backgroundFit = saved.backgroundFit;
     if (Number.isInteger(saved.fontSize)) value.fontSize = Math.min(20, Math.max(10, saved.fontSize));
@@ -386,6 +395,9 @@ function readAppearance() {
 function currentFileReadingFontSize() {
   // 用户已将默认值改为固定 12px；兼容旧版保存的 null，旧范围内的 15/16px 则收敛到 14px。
   return Math.min(fileReadingFontMax, Math.max(fileReadingFontMin, appearance.fileReadingFontSize ?? fileReadingFontDefault));
+}
+function currentAutomaticThemeLightLux() {
+  return normalizeAutomaticThemeLightLux(appearance.automaticThemeLightLux);
 }
 let ambientLightStatus = { supported: false, lux: null };
 let syncAppearanceThemeControls = null;
@@ -465,7 +477,6 @@ function readRemoteBackgroundFile(file) {
 }
 const automaticThemeStableMs = 5000;
 const automaticThemeDarkLux = 10;
-const automaticThemeLightLux = 45;
 let automaticThemeCandidate = null;
 // 用户要求先记录切换前后光照，不调整主题规则。最多留 8 个观测点，回看最近 30 秒；无近期点时标注旧读数年龄。
 const themeLightSamples = [];
@@ -538,7 +549,7 @@ function automaticAppearanceTheme(date = new Date(), currentTheme = appearance.t
   if (hour < 8 || hour >= 20) {
     if (!ambientLightStatus.supported || ambientLightStatus.lux === null) return "dark";
     if (ambientLightStatus.lux <= automaticThemeDarkLux) return "dark";
-    if (ambientLightStatus.lux >= automaticThemeLightLux) return "light";
+    if (ambientLightStatus.lux >= currentAutomaticThemeLightLux()) return "light";
   } else return "light";
   return currentTheme;
 }
@@ -584,6 +595,39 @@ function setAppearanceThemeMode(mode) {
   syncAppearanceThemeControls?.();
   finishThemeDiagnosticTransition(transition);
   recordThemeDiagnostic("theme.snapshot", { reason: "manual" });
+}
+function setAutomaticThemeLightLux(value) {
+  if (!Number.isInteger(value) || value < automaticThemeLightLuxMin || value > automaticThemeLightLuxMax) return false;
+  if (appearance.automaticThemeLightLux === value) return true;
+  appearance.automaticThemeLightLux = value;
+  // 用户调整阈值后重新累计 5 秒稳定时间，不能沿用旧阈值的候选；暗色阈值和昼夜范围继续沿用原规则。
+  automaticThemeCandidate = null;
+  applyAutomaticAppearance(false, { reason: "manual" });
+  applyAppearance(true);
+  syncAppearanceThemeControls?.();
+  recordThemeDiagnostic("theme.snapshot", { reason: "manual" });
+  return true;
+}
+function mountAutomaticThemeLightSetting(host) {
+  const row = element("label", "appearance-field"), controls = element("span", "appearance-font");
+  const input = element("input"), output = element("output");
+  input.id = "appearance-auto-light-lux"; input.type = "range";
+  input.min = String(automaticThemeLightLuxMin); input.max = String(automaticThemeLightLuxMax); input.step = "1";
+  input.setAttribute("aria-label", "切换浅色的光照阈值"); input.setAttribute("aria-describedby", "appearance-auto-light-hint");
+  output.setAttribute("for", input.id);
+  controls.append(input, output); row.append(element("span", "", "光照阈值"), controls);
+  const hint = element("p", "appearance-reading-font-hint", "光线达到此数值后切换为浅色。");
+  hint.id = "appearance-auto-light-hint"; host.append(row, hint);
+  const sync = () => {
+    const automatic = appearance.themeMode === "auto", value = currentAutomaticThemeLightLux();
+    host.hidden = !automatic; input.disabled = !automatic;
+    input.value = String(value); output.textContent = `${value} lux`;
+    input.style.setProperty("--range-fill",
+      `${(value - automaticThemeLightLuxMin) / (automaticThemeLightLuxMax - automaticThemeLightLuxMin) * 100}%`);
+  };
+  input.oninput = () => setAutomaticThemeLightLux(Number(input.value));
+  sync();
+  return sync;
 }
 function mixColor(left, right, weight) {
   return "#" + [1, 3, 5].map(index => Math.round(
@@ -716,6 +760,7 @@ function openAppearance() {
     <section id="appearance-general-page" class="appearance-body appearance-settings-page">
     <h3 class="appearance-panel-title">通用设置</h3>
     <div class="appearance-field"><span id="appearance-theme-label">主题</span><div id="appearance-theme-slot" class="appearance-theme-options" role="group" aria-labelledby="appearance-theme-label"></div></div>
+    <div id="appearance-auto-light-setting" hidden></div>
     <div class="appearance-field appearance-thread-limit-field"><span>每个项目显示会话数</span><div id="appearance-project-thread-limit-slot"></div></div>
     <div class="appearance-field appearance-background-field"><span>背景图片</span><div class="appearance-background-actions"><input id="appearance-background-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden><button type="button" id="appearance-background-action"></button></div></div>
     <div id="appearance-background-preview" class="appearance-background-preview" hidden><img id="appearance-background-thumbnail" alt=""><span id="appearance-background-name"></span></div>
@@ -774,7 +819,8 @@ function openAppearance() {
     runtimeSwitch.disabled = runtimeBusy || !runtimeSettings || !session || session.readOnly || !connected
       || busy || stopping || !!pending || !!editingMessage || !!editingQueuedMessage;
     if (!runtimeBusy && (runtimeStatus.hidden || runtimeStatus.dataset.runtimeFallback === "true")) {
-      const message = runtimeFallbackMessage(runtimeSettings);
+      // 设置初始化和运行中刷新共用自动降级、恢复文案，避免旧函数名使整个设置窗口无法打开。
+      const message = runtimeAutomaticMessage(runtimeSettings);
       runtimeStatus.textContent = message;
       runtimeStatus.hidden = !message;
       runtimeStatus.dataset.runtimeFallback = message ? "true" : "";
@@ -1233,6 +1279,7 @@ function openAppearance() {
     modeButtons.set(mode, modeButton); modeGroup.append(modeButton);
   }
   $("#appearance-theme-slot").append(themeButton, modeGroup);
+  const syncAutomaticLightSetting = mountAutomaticThemeLightSetting($("#appearance-auto-light-setting"));
   $("#appearance-project-thread-limit-slot").append(selectControl("appearance-project-thread-limit", "每个项目显示会话数",
     projectThreadLimits.map(value => ({ value: String(value), label: `${value}个` })), String(appearance.projectThreadLimit)));
   const backgroundAction = $("#appearance-background-action");
@@ -1285,6 +1332,7 @@ function openAppearance() {
     themeButton.replaceChildren(icon(isLightTheme ? "sun" : "moon"));
     themeButton.disabled = automatic;
     for (const [mode, control] of modeButtons) control.setAttribute("aria-pressed", String(mode === appearance.themeMode));
+    syncAutomaticLightSetting();
     setSelectValue($("#appearance-project-thread-limit"), String(appearance.projectThreadLimit));
     const hasBackground = !!remoteBackground.dataUrl;
     backgroundAction.disabled = remoteBackgroundBusy;
@@ -2772,6 +2820,7 @@ function rememberBackgroundThreadDisplay(event, params) {
         && params.queueRevision <= previous.queueRevision)) return;
     rememberThreadDisplay({ id, queuedMessages: params.queuedMessages,
       queueSnapshotVersion: versioned ? { queueEpoch: params.queueEpoch, queueRevision: params.queueRevision } : null });
+    reconcileDirectSendPreviews(id, params.queuedMessages);
   }
   if (goalChanged)
     rememberThreadDisplay({ id, goal: event.method === "thread/goal/cleared" ? null : params.goal });
@@ -2953,6 +3002,7 @@ function clearPrivateInputs({ persisted = true } = {}) {
   drafts.clear(); skillDrafts.clear(); attachmentDrafts.clear(); goalDrafts.clear();
   draftWrites.clear(); failedInputRecoveries.clear(); goalComposerRecoveries.clear();
   queuedEdits.clear(); questionDrafts.clear(); questionReplyReceipts.clear(); questionReceiptChecks.clear(); compactions.clear();
+  directSendPreviews.clear();
   blockingRequestStates.clear(); approvalReplies.clear(); approvalDrafts.clear(); threadDeletions.clear();
   pending = null; pendingSendRequest = null; editingQueuedMessage = null; editingMessage = null;
   if (sending) { sending = null; busy = false; }
@@ -8259,7 +8309,9 @@ function renderItem(item, previous, inActivity = false, running = false) {
     reconcileChildren(attachments, images);
     bindMessageVideos(attachments, prepareRemoteTunnelAccess);
     reconcileChildren(node, [...(images.length ? [attachments] : []),
-      ...(editing ? [messageEditor()] : display.text.trim() || display.questionReplies ? [bubble] : [])]);
+      ...(editing ? [messageEditor()] : display.text.trim() || display.questionReplies ? [bubble] : []),
+      ...(item.remoteDirectSend ? [element("small", "muted",
+        item.remoteDirectSendState === "accepted" ? "已发送，等待同步…" : "发送中…")] : [])]);
     return node;
   }
   if (item.type === "agentMessage" || item.type === "plan") {
@@ -9112,6 +9164,7 @@ function queueReorderAvailable() {
     && editingQueuedMessage?.state !== "starting"
     && Array.isArray(messages) && messages.length > 1
     && messages.every(message => message?.id && message.remoteDeliveryState !== "accepted"
+      && !directSendPreviewFor(message)
       && (!message.submission?.status || message.submission.status === "queued"));
 }
 function moveQueueItem(ids, messageId, index) {
@@ -9119,14 +9172,101 @@ function moveQueueItem(ids, messageId, index) {
   order.splice(Math.max(0, Math.min(index, order.length)), 0, messageId);
   return order;
 }
+function beginDirectSendPreview(payload) {
+  // 用户要求 CDP 和服务模式在提交时空闲就直接显示发送；执行、压缩或已有等待消息时仍显示真实队列。
+  // 这里只记录展示意图，后台排队、原请求标识及送达回执不变，不能据此重发或提前声称已送达。
+  if (session?.capabilities?.queueSendRecovery !== true || !payload.clientUserMessageId
+      || payload.queueOnly || thread?.id !== payload.threadId || !thread.status || isActiveThread() || compactionLocked()
+      || !Array.isArray(thread.queuedMessages)
+      || thread.queuedMessages.some(message => message.remoteDeliveryState !== "accepted")
+      || thread.queuedEdits?.length) return null;
+  const record = {
+    payload, threadId: payload.threadId, clientId: payload.clientUserMessageId,
+    scope: privateInputScope(session), lastTurnId: [...turns.keys()].at(-1), seen: false, demoted: false
+  };
+  directSendPreviews.set(record.clientId, record);
+  // 与 rememberThreadDisplay 的 32 项展示缓存保持同一上限；超出后回到真实队列，不删除任何消息。
+  while (directSendPreviews.size > 32) directSendPreviews.delete(directSendPreviews.keys().next().value);
+  return record;
+}
+function directSendPreviewFor(message, id = selectedId) {
+  const record = directSendPreviews.get(queueMessageIdentity(message));
+  if (!record || record.threadId !== id || record.scope !== privateInputScope(session) || record.demoted) return null;
+  if (typeof message.pausedReason === "string" && message.pausedReason.trim()
+      || message.remoteDeliveryState === "outcome-unknown"
+      || message.submission?.status === "outcome-unknown") record.demoted = true;
+  const delivered = id === selectedId
+    && !!acceptedSendItem([...turns.values()].flatMap(turn => turn.items || []), record.clientId);
+  if (id === selectedId && compactionLocked(id) && !delivered) record.demoted = true;
+  // 空闲快照之后若另一条消息抢先启动，当前输入确实需要等待，必须恢复队列操作而非持续冒充直发。
+  if (id === selectedId && isActiveThread() && !delivered) {
+    const turn = [...turns.values()].reverse().find(turn => turn.status === "inProgress");
+    if (turn && turn.id !== record.lastTurnId) {
+      const input = (turn.items || []).find(item => item.type === "userMessage" && !item.remotePendingInput);
+      const clientId = input?.clientId ?? input?.clientUserMessageId;
+      if (clientId && clientId !== record.clientId) record.demoted = true;
+    }
+  }
+  return record.demoted ? null : record;
+}
+function reconcileDirectSendPreviews(id, messages, { removeMissing = true } = {}) {
+  if (!directSendPreviews.size || !Array.isArray(messages)) return false;
+  let changed = false;
+  const byIdentity = new Map(messages.map(message => [queueMessageIdentity(message), message]));
+  for (const [clientId, record] of directSendPreviews) {
+    if (record.threadId !== id || record.scope !== privateInputScope(session)) continue;
+    if (byIdentity.has(clientId)) {
+      if (!record.seen) { record.seen = true; changed = true; }
+      const wasDemoted = record.demoted;
+      directSendPreviewFor(byIdentity.get(clientId), id);
+      if (record.demoted !== wasDemoted) changed = true;
+    } else if (record.seen && removeMissing) {
+      directSendPreviews.delete(clientId); changed = true;
+    }
+  }
+  return changed;
+}
+function pendingDirectSendTurns() {
+  const items = [...turns.values()].flatMap(turn => turn.items || []);
+  return (currentThreadDisplay()?.queuedMessages || []).flatMap(message => {
+    const record = directSendPreviewFor(message);
+    if (!record || acceptedSendItem(items, record.clientId)) return [];
+    const payload = record.payload;
+    const state = message.remoteDeliveryState === "accepted" ? "accepted" : "sending";
+    if (!record.preview || record.previewState !== state) {
+      record.previewState = state;
+      record.preview = {
+        id: `remote-direct-turn:${record.clientId}`, status: "pending",
+        items: [{
+          id: `remote-direct-input:${record.clientId}`, type: "userMessage", clientId: record.clientId,
+          remotePendingInput: true, remoteDirectSend: true, remoteDirectSendState: state,
+          content: [
+            ...(payload.prompt ? [{ type: "text", text: payload.prompt }] : []),
+            ...(payload.images || []).map(image => ({ type: "image", url: image.dataUrl })),
+            ...(payload.skills || []).map(skill => ({ type: "skill", name: skill.name, path: skill.path }))
+          ]
+        }]
+      };
+    }
+    return [record.preview];
+  });
+}
+function finishDirectSendPreview(record, failed = false) {
+  if (!record || directSendPreviews.get(record.clientId) !== record) return;
+  if (failed || !record.seen) directSendPreviews.delete(record.clientId);
+  if (record.threadId === selectedId && record.scope === privateInputScope(session)) {
+    renderQueueArea(); renderMessages();
+  }
+}
 function queueDisplayMessages(messages) {
   if (!Array.isArray(messages)) return messages;
   const reorder = queueReorder?.deviceId === session?.device.id ? queueReorder
     : pending?.action === "reorderQueued" && pending.deviceId === session?.device.id ? pending.payload : null;
   if (reorder?.threadId !== selectedId
-      || !sameQueueOrder(messages.map(message => message.id), reorder.expectedMessageIds)) return messages;
+      || !sameQueueOrder(messages.map(message => message.id), reorder.expectedMessageIds))
+    return messages.filter(message => !directSendPreviewFor(message));
   const byId = new Map(messages.map(message => [message.id, message]));
-  return reorder.messageIds.map(id => byId.get(id)).filter(Boolean);
+  return reorder.messageIds.map(id => byId.get(id)).filter(message => message && !directSendPreviewFor(message));
 }
 function applyQueueReorderResult(id, result, readVersion) {
   if (id !== selectedId || thread?.id !== id) return;
@@ -9304,7 +9444,9 @@ function applyQueueSnapshot(id, messages, edits, snapshot = null, { authoritativ
     if (Array.isArray(edits)) thread.queuedEdits = edits;
   }
   rememberThreadDisplay({ id, queuedMessages: messages, queueSnapshotVersion });
+  const directSendChanged = reconcileDirectSendPreviews(id, messages);
   renderQueueArea();
+  if (directSendChanged || messages.some(message => directSendPreviewFor(message))) renderMessages();
   if (removedMessage) scheduleReload();
   return true;
 }
@@ -9343,6 +9485,7 @@ async function reloadQueue() {
 function applyQueuedSendResult(id, result, readVersion) {
   if (!id || (result?.threadId && result.threadId !== id)
       || !Array.isArray(result?.queuedMessages) && !result?.queueSyncPending) return false;
+  if (id !== selectedId) reconcileDirectSendPreviews(id, result.queuedMessages, { removeMissing: false });
   if (id === selectedId) {
     if (!Array.isArray(result.queuedMessages)
         || readVersion !== queueVersion && !queueSnapshotIsVersioned(result)
@@ -9491,7 +9634,8 @@ function renderQueueArea() {
   // 队列内容可保持不变，但停止/恢复会改变按钮文案与图标，必须纳入刷新判断。
   const signature = JSON.stringify([selectedId, messages, ready, isActiveThread(), thread?.queuedEdits, session?.device.id, threadReadOnly(), connected,
     compactionLocked(), [...queuedActionBusy], editingQueuedMessage?.message.id, editingQueuedMessage?.state,
-    !!editingMessage, busy, stopping, pending?.id, queueReorder, queuedEditCheckVersion]);
+    !!editingMessage, busy, stopping, pending?.id, queueReorder, queuedEditCheckVersion,
+    queueDisplayMessages(messages)?.map(message => message.id)]);
   if (root.dataset.queueSignature === signature) return;
   const previous = root.dataset.queueThread === selectedId && root.dataset.queueDevice === session?.device.id
     ? root.querySelector(".queued-messages") : null;
@@ -10024,6 +10168,8 @@ function renderMessages(keepScroll = true) {
   }
   const lastRealTurn = pendingTurn
     ? [...sorted].reverse().find(turn => turn.id !== pendingTurn.id) : sorted.at(-1);
+  if (reconcileDirectSendPreviews(selectedId, currentThreadDisplay()?.queuedMessages)) renderQueueArea();
+  sorted.push(...pendingDirectSendTurns());
   loadMessageSkillChoices(sorted.flatMap(turn => turn.items || []));
   if (historyError && sorted.length)
     children.push(historyLoadButton("最新记录加载失败，重试", () => void loadHistory()));
@@ -10066,7 +10212,7 @@ function renderMessages(keepScroll = true) {
         renderMessageActions(node, item, {
           threadId, inActivity, readOnly: threadReadOnly(threadId) || !threadSentMessageEditAllowed(threadId),
           turnInProgress: isActiveThread(),
-          editSupported: thread?.id === selectedId && connected && !busy && !stopping && !pending
+          editSupported: !item.remoteDirectSend && thread?.id === selectedId && connected && !busy && !stopping && !pending
             && !editingMessage && !editingQueuedMessage && !compactionLocked()
             && threadSentMessageEditAllowed(threadId),
           completed: turn.status !== "inProgress" || item.status === "completed"
@@ -12465,6 +12611,7 @@ async function sendMessage() {
     deviceId: session.device.id, selectionToken, time: Date.now()
   } : null;
   const submission = { payload, phase: "sending" };
+  const directPreview = action === "send" ? beginDirectSendPreview(payload) : null;
   sending = submission;
   busy = true; updateComposer();
   try {
@@ -12495,6 +12642,7 @@ async function sendMessage() {
     }
   } catch (error) {
     if (!currentAuthorization()) return;
+    finishDirectSendPreview(directPreview, true);
     if (goalMode) {
       const record = pending?.id === goalRecord.id ? pending : goalRecord;
       const outcome = await applyGoalComposerReceipt(record, error.goalReceipt || {
@@ -12513,6 +12661,7 @@ async function sendMessage() {
     });
     else notice(error.message, true);
   } finally {
+    finishDirectSendPreview(directPreview);
     if (sending === submission) { sending = null; busy = false; updateComposer(); }
   }
 }
@@ -12756,9 +12905,11 @@ function scheduleSidebarRefresh() {
   clearTimeout(sidebarTimer);
   sidebarTimer = setTimeout(() => void loadSidebar(null, { fresh: true }).catch(() => {}), 1200);
 }
-function runtimeFallbackMessage(runtime) {
-  return runtime?.cdpInjectionEnabled === false && runtime.fallbackReason === "cdp-unavailable"
-    ? "电脑端 CDP 暂不可用，已自动切换为服务模式；恢复后可手动切回。" : "";
+function runtimeAutomaticMessage(runtime) {
+  if (runtime?.cdpInjectionEnabled === false && runtime.fallbackReason === "cdp-unavailable")
+    return "电脑端 CDP 暂不可用，已自动切换为服务模式；CDP 恢复稳定且服务任务结束后会自动切回。";
+  return runtime?.cdpInjectionEnabled === true && runtime.fallbackReason === "cdp-recovered"
+    ? "电脑端 CDP 已恢复，已自动切回 CDP 模式。" : "";
 }
 function applyRemoteRuntime(runtime) {
   if (!session || typeof runtime?.cdpInjectionEnabled !== "boolean"
@@ -12786,8 +12937,8 @@ function applyRemoteRuntime(runtime) {
         void returnToParentSession().catch(() => {});
       else scheduleRelatedSessionCheck();
     }
-    // 自动切换只退役旧读取，原发送回执和编辑草稿继续保留；同一版本只提示一次，不自动切回 CDP。
-    const message = runtimeFallbackMessage(runtime);
+    // 用户要求故障后自动切回：两种自动切换都只退役旧读取，原发送回执和编辑草稿继续保留，同一版本只提示一次。
+    const message = runtimeAutomaticMessage(runtime);
     if (message) notice(message);
   }
   sessionMenu?.updateContext();

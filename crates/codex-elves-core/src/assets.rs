@@ -21,7 +21,7 @@ const COMPOSER_FAST_SCRIPT: &str = include_str!("../../../assets/inject/composer
 const NATIVE_RPC_COMPAT_SCRIPT: &str = include_str!("../../../assets/inject/native-rpc-compat.js");
 // 保留主线缓存修复、Token 编号解析与侧边 Fast；
 // 分支信息、多仓库变更、运行模式和压缩恢复使用同一构建标识，便于核对网页和后台是否来自同一包。
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261109-workspace-path-display-r12";
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261109-settings-runtime-init-r15";
 
 pub fn statsig_cache_script() -> String {
     // 缓存修复必须在 SDK 首次读取前执行；压缩库不污染宿主模块加载器或全局对象。

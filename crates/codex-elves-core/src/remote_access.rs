@@ -842,6 +842,13 @@ impl Default for RemoteRuntimeMode {
     }
 }
 
+impl RemoteRuntimeMode {
+    fn awaits_automatic_cdp_recovery(&self) -> bool {
+        // 只恢复因 CDP 故障自动降级的设备；手动服务模式和旧配置中来源不明的服务模式保持不变。
+        !self.cdp_injection_enabled && self.fallback_reason.as_deref() == Some("cdp-unavailable")
+    }
+}
+
 impl RemoteAccessController {
     pub fn new(
         native: Arc<dyn NativeRemoteBridge>,
@@ -1328,10 +1335,13 @@ impl RemoteAccessController {
                 let mut epoch = String::new();
                 let mut failure_since = None;
                 let mut fallback_watch = runtime_fallback::FallbackWatch::default();
+                let mut recovery_watch = runtime_fallback::RecoveryWatch::default();
                 loop {
                     let fallback_candidates = controller.cdp_fallback_candidates().await;
-                    if fallback_candidates.is_empty() {
+                    let recovery_candidates = controller.cdp_recovery_candidates().await;
+                    if fallback_candidates.is_empty() && recovery_candidates.is_empty() {
                         fallback_watch.observe(&[], true, Instant::now());
+                        recovery_watch.observe(&[], false, Instant::now());
                         failure_since = None;
                         controller.native_connected.store(false, Ordering::SeqCst);
                         controller.service_connected.store(false, Ordering::SeqCst);
@@ -1455,6 +1465,17 @@ impl RemoteAccessController {
                         {
                             let _ = crate::diagnostic_log::append_diagnostic_log(
                                 "remote_access.automatic_service_fallback_failed",
+                                json!({"message":failure.to_string()}),
+                            );
+                        }
+                    }
+                    let recovered = result.as_ref().is_ok_and(runtime_fallback::cdp_ready);
+                    if recovery_watch.observe(&recovery_candidates, recovered, Instant::now()) {
+                        if let Err(failure) =
+                            controller.automatically_use_cdp(&recovery_candidates).await
+                        {
+                            let _ = crate::diagnostic_log::append_diagnostic_log(
+                                "remote_access.automatic_cdp_recovery_failed",
                                 json!({"message":failure.to_string()}),
                             );
                         }
@@ -1771,12 +1792,13 @@ impl RemoteAccessController {
 
     async fn call_native_events(&self, payload: Value) -> anyhow::Result<Value> {
         let modes = self.runtime_modes.read().await;
-        let needed = self.auth.lock().await.devices.iter().any(|device| {
-            device.expires_at_ms > now_ms()
-                && modes
-                    .get(&device.id)
-                    .is_none_or(|mode| mode.cdp_injection_enabled)
-        });
+        let needed = !execution::cdp_disabled()
+            && self.auth.lock().await.devices.iter().any(|device| {
+                device.expires_at_ms > now_ms()
+                    && modes.get(&device.id).is_none_or(|mode| {
+                        mode.cdp_injection_enabled || mode.awaits_automatic_cdp_recovery()
+                    })
+            });
         if !needed {
             return Ok(
                 json!({"ok":true,"inactive":true,"events":[],"cursor":payload["cursor"],"epoch":payload["epoch"]}),
@@ -1839,16 +1861,30 @@ impl RemoteAccessController {
         if payload["expectedRevision"].as_u64() != Some(mode.revision) {
             return Err(ApiError::new(409, "当前设备的运行方式已变化，请重新读取").into());
         }
-        if enabled == mode.cdp_injection_enabled {
+        let same_transport = enabled == mode.cdp_injection_enabled;
+        if same_transport && (fallback_reason.is_some() || mode.fallback_reason.is_none()) {
             return Ok(json!({"ok":true,"runtime":mode}));
         }
-        if enabled {
-            self.harness.can_leave(&authorization.device.id).await?;
-        } else if fallback_reason.is_some() {
-            // 等待原 CDP 请求退出期间，服务也可能变化；持有模式写锁后再次只读确认，保存成功才公布可用。
-            self.prepare_automatic_service().await?;
-        } else {
-            self.harness.prepare().await?;
+        // 用户明确选择当前模式也会清除自动恢复标记并递增版本，迟到的健康观察不能改回其手动选择。
+        if !same_transport {
+            if enabled {
+                self.harness.can_leave(&authorization.device.id).await?;
+                if fallback_reason == Some("cdp-recovered") {
+                    authorization.check().await?;
+                    if self.auth.lock().await.receipts.values().any(|receipt| {
+                        receipt.device_id == authorization.device.id && receipt.state == "pending"
+                    }) {
+                        return Err(ApiError::new(409, "服务操作仍在进行，稍后自动恢复 CDP").into());
+                    }
+                    // 模式写锁已等到原后端请求退出；再做一次真实只读 CDP 探测，不能用等待前的旧健康状态切回。
+                    self.prepare_automatic_cdp().await?;
+                }
+            } else if fallback_reason.is_some() {
+                // 等待原 CDP 请求退出期间，服务也可能变化；持有模式写锁后再次只读确认，保存成功才公布可用。
+                self.prepare_automatic_service().await?;
+            } else {
+                self.harness.prepare().await?;
+            }
         }
         let next = RemoteRuntimeMode {
             cdp_injection_enabled: enabled,
@@ -7388,9 +7424,290 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         }
     }
 
+    async fn automatic_recovery_fixture() -> (
+        tempfile::TempDir,
+        RemoteAuthorization,
+        Arc<FallbackProbeNative>,
+    ) {
+        let native = Arc::new(FallbackProbeNative {
+            mode: std::sync::atomic::AtomicUsize::new(2),
+            probes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (directory, authorization) = harness_fixture_with_native(None, native.clone()).await;
+        let controller = &authorization.controller;
+        controller
+            .change_runtime_mode(
+                json!({"cdpInjectionEnabled":true,"expectedRevision":1}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let candidates = controller.cdp_fallback_candidates().await;
+        assert_eq!(
+            controller
+                .automatically_use_service(&candidates)
+                .await
+                .unwrap(),
+            1
+        );
+        (directory, authorization, native)
+    }
+
     #[tokio::test]
-    async fn runtime_fallback_event_pump_switches_missing_cdp_and_read_only_fallback_without_switching_back()
-     {
+    async fn runtime_recovery_restores_only_automatic_devices_and_preserves_read_only_policy() {
+        let (directory, authorization, native) = automatic_recovery_fixture().await;
+        let controller = &authorization.controller;
+        let mut manual = authorization.device.clone();
+        manual.id = "manual-service-device".into();
+        controller.auth.lock().await.devices.push(manual.clone());
+        controller
+            .change_runtime_mode(
+                json!({"cdpInjectionEnabled":false,"expectedRevision":0}),
+                &controller.authorization(manual.clone(), None),
+            )
+            .await
+            .unwrap();
+        controller.publish_access_policy(&RemoteAccessSettings {
+            enabled: true,
+            read_only: true,
+            ..Default::default()
+        });
+        let candidates = controller.cdp_recovery_candidates().await;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            controller.automatically_use_cdp(&candidates).await.unwrap(),
+            1
+        );
+        let recovered = controller.runtime_for(&authorization.device.id).await;
+        assert!(recovered.cdp_injection_enabled);
+        assert_eq!(recovered.revision, 4);
+        assert_eq!(recovered.fallback_reason.as_deref(), Some("cdp-recovered"));
+        let unchanged = controller.runtime_for(&manual.id).await;
+        assert!(!unchanged.cdp_injection_enabled);
+        assert!(unchanged.fallback_reason.is_none());
+        assert_eq!(unchanged.revision, 1);
+        assert_eq!(
+            authorization
+                .check()
+                .await
+                .unwrap_err()
+                .downcast_ref::<ApiError>()
+                .unwrap()
+                .code,
+            403
+        );
+        assert_eq!(native.probes.load(Ordering::SeqCst), 1);
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        let requests = std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap();
+        assert!(!requests.contains("turn/start"));
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_recovery_manual_service_confirmation_cancels_automatic_intent() {
+        let (_directory, authorization, native) = automatic_recovery_fixture().await;
+        let controller = &authorization.controller;
+        let stale = controller.cdp_recovery_candidates().await;
+        controller
+            .change_runtime_mode(
+                json!({"cdpInjectionEnabled":false,"expectedRevision":3}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let manual = controller.runtime_for(&authorization.device.id).await;
+        assert!(!manual.cdp_injection_enabled);
+        assert_eq!(manual.revision, 4);
+        assert!(manual.fallback_reason.is_none());
+        assert!(controller.cdp_recovery_candidates().await.is_empty());
+        assert_eq!(controller.automatically_use_cdp(&stale).await.unwrap(), 0);
+        let response = controller
+            .call_native_events(json!({"cursor":0,"epoch":""}))
+            .await
+            .unwrap();
+        assert_eq!(response["inactive"], true);
+        assert_eq!(native.probes.load(Ordering::SeqCst), 0);
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_recovery_waits_for_service_work_and_keeps_old_unknown_receipts() {
+        let (directory, authorization, native) = automatic_recovery_fixture().await;
+        let controller = &authorization.controller;
+        let candidates = controller.cdp_recovery_candidates().await;
+        let created = controller
+            .call_authorized(
+                "create",
+                json!({"prompt":"wait for recovery","model":"gpt-test"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let thread_id = created["threadId"].as_str().unwrap();
+        assert_eq!(
+            controller.automatically_use_cdp(&candidates).await.unwrap(),
+            0
+        );
+        controller
+            .call_authorized("stop", json!({"threadId":thread_id}), &authorization)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                controller
+                    .harness
+                    .call("events", json!({"cursor":0,"epoch":""}), None)
+                    .await
+                    .unwrap();
+                if controller
+                    .harness
+                    .can_leave(&authorization.device.id)
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let queued = controller
+            .call_authorized(
+                "send",
+                json!({"threadId":thread_id,"prompt":"must not replay","clientUserMessageId":"stable-input"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            controller.automatically_use_cdp(&candidates).await.unwrap(),
+            0
+        );
+        let queue = controller
+            .call_authorized("queue", json!({"threadId":thread_id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(queue["queuedMessages"][0]["id"], queued["messageId"]);
+        controller
+            .call_authorized(
+                "removeQueued",
+                json!({"threadId":thread_id,"messageId":queued["messageId"]}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        {
+            let mut auth = controller.auth.lock().await;
+            for state in ["pending", "unknown"] {
+                auth.receipts.insert(
+                    state.into(),
+                    Receipt {
+                        device_id: authorization.device.id.clone(),
+                        request_id: state.into(),
+                        payload_hash: "fixture".into(),
+                        created_at_ms: 1,
+                        state: state.into(),
+                        result: None,
+                    },
+                );
+            }
+        }
+        assert_eq!(
+            controller.automatically_use_cdp(&candidates).await.unwrap(),
+            0
+        );
+        assert_eq!(native.probes.load(Ordering::SeqCst), 0);
+        controller
+            .auth
+            .lock()
+            .await
+            .receipts
+            .get_mut("pending")
+            .unwrap()
+            .state = "completed".into();
+        assert_eq!(
+            controller.automatically_use_cdp(&candidates).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            controller.auth.lock().await.receipts["unknown"].state,
+            "unknown"
+        );
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        let requests = std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap();
+        assert_eq!(
+            requests.matches("\"turn/start\"").count(),
+            1,
+            "自动恢复不能重复派发已经停止或移除的输入"
+        );
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_recovery_rechecks_health_after_waiting_for_inflight_requests() {
+        let (_directory, authorization, native) = automatic_recovery_fixture().await;
+        let controller = &authorization.controller;
+        let candidates = controller.cdp_recovery_candidates().await;
+        let reader = controller.runtime_modes.read().await;
+        let recovery_controller = controller.clone();
+        let recovery =
+            tokio::spawn(
+                async move { recovery_controller.automatically_use_cdp(&candidates).await },
+            );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!recovery.is_finished());
+        native.mode.store(0, Ordering::SeqCst);
+        drop(reader);
+        assert!(recovery.await.unwrap().is_err());
+        let unchanged = controller.runtime_for(&authorization.device.id).await;
+        assert!(!unchanged.cdp_injection_enabled);
+        assert_eq!(unchanged.revision, 3);
+        native.mode.store(2, Ordering::SeqCst);
+        let candidates = controller.cdp_recovery_candidates().await;
+        assert_eq!(
+            controller.automatically_use_cdp(&candidates).await.unwrap(),
+            1
+        );
+        assert_eq!(native.probes.load(Ordering::SeqCst), 2);
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_recovery_keeps_automatic_origin_across_service_restart() {
+        let (directory, authorization, native) = automatic_recovery_fixture().await;
+        let controller = &authorization.controller;
+        std::fs::write(
+            directory.path().join("remote-access-devices.json"),
+            serde_json::to_vec(&controller.auth.lock().await.devices).unwrap(),
+        )
+        .unwrap();
+        let restarted = RemoteAccessController::new(native, directory.path().to_owned()).unwrap();
+        restarted.publish_access_policy(&RemoteAccessSettings {
+            enabled: true,
+            ..Default::default()
+        });
+        restarted.running.store(true, Ordering::SeqCst);
+        let candidates = restarted.cdp_recovery_candidates().await;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            restarted.automatically_use_cdp(&candidates).await.unwrap(),
+            1
+        );
+        assert!(
+            restarted
+                .runtime_for(&authorization.device.id)
+                .await
+                .cdp_injection_enabled
+        );
+        controller.harness.release().await;
+        restarted.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_fallback_event_pump_switches_missing_cdp_and_read_only_fallback_then_recovers()
+    {
         for initial in [0, 1] {
             let native = Arc::new(FallbackProbeNative {
                 mode: std::sync::atomic::AtomicUsize::new(initial),
@@ -7455,27 +7772,26 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                     .await
                     .cdp_injection_enabled
             );
-            assert_eq!(native.probes.load(Ordering::SeqCst), probes);
-            controller
-                .change_runtime_mode(
-                    json!({"cdpInjectionEnabled":true,"expectedRevision":3}),
-                    &authorization,
-                )
-                .await
-                .unwrap();
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while !controller.native_connected.load(Ordering::SeqCst) {
+            tokio::time::timeout(Duration::from_secs(12), async {
+                while !controller
+                    .runtime_for(&authorization.device.id)
+                    .await
+                    .cdp_injection_enabled
+                {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
             })
             .await
             .unwrap();
-            assert!(
+            assert!(native.probes.load(Ordering::SeqCst) > probes);
+            assert!(controller.native_connected.load(Ordering::SeqCst));
+            assert_eq!(
                 controller
                     .runtime_for(&authorization.device.id)
                     .await
                     .fallback_reason
-                    .is_none()
+                    .as_deref(),
+                Some("cdp-recovered")
             );
             pump.abort();
             server.abort();
