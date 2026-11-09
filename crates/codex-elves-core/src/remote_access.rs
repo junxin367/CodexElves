@@ -3407,7 +3407,6 @@ async fn session(
             let online = state.controller.harness_connected.load(Ordering::SeqCst);
             (false, online, online)
         };
-    let related_available = runtime.cdp_injection_enabled;
     Ok(Json(
         json!({"ok":true,"device":device.public(),"nativeConnected":native_connected,
         "serviceConnected":service_connected,"nativeWriteAvailable":native_write_available,
@@ -3420,7 +3419,7 @@ async fn session(
         "promptOptimization":true,"messageEditModelSettings":native_write_available,
         "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
         "sendText":native_write_available || service_connected,
-        "sideThreads":related_available,"subagents":true,"serviceSubagents":true}}),
+        "sideThreads":true,"serviceSideThreads":true,"subagents":true,"serviceSubagents":true}}),
     ))
 }
 
@@ -5912,6 +5911,16 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    threads.set(id,thread);result={thread,model:'gpt-test',reasoningEffort:'high',cwd:p.cwd};
    event('thread/started',{thread});break;
  }
+ case 'thread/fork':{
+   if(!t||t.ephemeral){output({id:q.id,error:{code:-32600,message:'invalid fork parent'}});return;}
+   const id=crypto.randomUUID(),thread={...t,id,ephemeral:true,path:null,forkedFromId:p.threadId,
+     parentThreadId:null,turns:[],status:{type:'idle'}};
+   threads.set(id,thread);result={thread,model:'gpt-test',reasoningEffort:'high',cwd:t.cwd};
+   event('thread/started',{thread});break;
+ }
+ case 'thread/unsubscribe':
+   if(!t){result={status:'notLoaded'};break;}
+   threads.delete(p.threadId);event('thread/closed',{threadId:p.threadId});result={status:'unsubscribed'};break;
  case 'thread/read': if(!t){output({id:q.id,error:{code:-32600,message:'unknown thread'}});return;}
    if(nativePins?.confirmFailure&&nativePins.moved){output({id:q.id,error:{code:-32000,message:'confirmation failed'}});return;}
    if(t.ephemeral&&p.includeTurns&&related.snapshotError){output({id:q.id,error:related.snapshotError});return;}
@@ -7257,7 +7266,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         assert_eq!(list["completedSubagentCount"], 2);
         assert_eq!(list["subagentsComplete"], true);
         assert_eq!(list["sideThreads"], json!([]));
-        assert_eq!(list["canCreateSideThread"], false);
+        assert_eq!(list["canCreateSideThread"], true);
         assert!(!list.to_string().contains("agent-other"));
         for id in ["agent-done", "agent-live"] {
             let detail = controller
@@ -7429,12 +7438,13 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         assert_eq!(failure.downcast_ref::<ApiError>().unwrap().code, 410);
         seed["listFailure"] = json!(true);
         controller.harness.seed_test_subagents(seed).await.unwrap();
-        assert!(
-            controller
-                .call_authorized("relatedThreads", json!({"threadId":root}), &authorization)
-                .await
-                .is_err()
-        );
+        let partial = controller
+            .call_authorized("relatedThreads", json!({"threadId":root}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(partial["subagentsComplete"], false);
+        assert!(partial["subagentsError"].is_string());
+        assert_eq!(partial["canCreateSideThread"], true);
         assert!(
             controller
                 .call_authorized("thread", json!({"threadId":root}), &authorization)
@@ -7443,6 +7453,427 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         );
         assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
         controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_service_side_create_send_steer_stop_close_stays_in_memory() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let main = controller
+            .call_authorized(
+                "create",
+                json!({
+                    "projectId":"project-a","prompt":"wait parent","model":"gpt-test"
+                }),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let parent = main["threadId"].as_str().unwrap();
+        let created = controller
+            .call_authorized(
+                "createSideThread",
+                json!({"threadId":parent}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        assert_ne!(id, parent);
+        assert_eq!(created["thread"]["viewKind"], "side");
+        assert_eq!(created["thread"]["readOnly"], false);
+        assert_eq!(created["thread"]["ephemeral"], true);
+        let empty = controller
+            .call_authorized("history", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(empty["data"], json!([]));
+        let payload = json!({"threadId":id,"prompt":"wait 侧边专属内容","clientUserMessageId":"side-message-1"});
+        let first = controller
+            .call_authorized("send", payload.clone(), &authorization)
+            .await
+            .unwrap();
+        let retry = controller
+            .call_authorized("send", payload.clone(), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(first, retry);
+        assert_eq!(first["deliveryState"], "accepted");
+        assert!(controller.call_authorized("send",json!({
+            "threadId":id,"prompt":"执行中改模型","model":"different-model","clientUserMessageId":"side-model-change"
+        }),&authorization).await.is_err());
+        let history = controller
+            .call_authorized("history", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert!(history.to_string().contains("侧边专属内容"));
+        assert!(!history.to_string().contains("wait parent"));
+        assert_eq!(history["sideHistoryVersion"], 1);
+        assert!(
+            controller
+                .change_runtime_mode(
+                    json!({"cdpInjectionEnabled":true,"expectedRevision":1}),
+                    &authorization
+                )
+                .await
+                .is_err()
+        );
+        controller
+            .call_authorized(
+                "send",
+                json!({
+                    "threadId":id,"prompt":"追加要求","clientUserMessageId":"side-message-2"
+                }),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        for action in [
+            "createSideThread",
+            "deleteThread",
+            "pinThread",
+            "setGoal",
+            "editMessage",
+        ] {
+            assert!(
+                controller
+                    .call_authorized(action, json!({"threadId":id,"pinned":true}), &authorization)
+                    .await
+                    .is_err(),
+                "{action}"
+            );
+        }
+        assert!(
+            controller
+                .call_authorized(
+                    "closeSideThread",
+                    json!({
+                        "threadId":id,"parentThreadId":"wrong-parent"
+                    }),
+                    &authorization
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            controller
+                .call_authorized(
+                    "closeSideThread",
+                    json!({
+                        "threadId":parent,"parentThreadId":"wrong-parent"
+                    }),
+                    &authorization
+                )
+                .await
+                .is_err()
+        );
+        controller
+            .call_authorized("stop", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        let list = controller
+            .call_authorized("relatedThreads", json!({"threadId":parent}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(list["sideThreads"][0]["id"], id);
+        assert_eq!(list["sideThreads"][0]["title"], "wait 侧边专属内容");
+        let closed = controller
+            .call_authorized(
+                "closeSideThread",
+                json!({
+                    "threadId":id,"parentThreadId":parent
+                }),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(closed["closed"], true);
+        assert_eq!(
+            controller
+                .call_authorized("history", json!({"threadId":id}), &authorization)
+                .await
+                .unwrap_err()
+                .downcast_ref::<ApiError>()
+                .unwrap()
+                .code,
+            410
+        );
+        assert!(
+            controller
+                .call_authorized("thread", json!({"threadId":parent}), &authorization)
+                .await
+                .is_ok()
+        );
+        let state =
+            std::fs::read_to_string(directory.path().join("remote-harness-state.json")).unwrap();
+        assert!(!state.contains(id));
+        assert!(!state.contains("侧边专属内容"));
+        let calls: Vec<Value> = std::fs::read_to_string(directory.path().join("requests.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call["method"] == "thread/fork")
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call["method"] == "turn/start" && call["params"]["threadId"] == id)
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call["method"] == "turn/steer" && call["params"]["threadId"] == id)
+                .count(),
+            1
+        );
+        assert!(!calls.iter().any(|call| call["params"]["threadId"] == id
+            && matches!(
+                call["method"].as_str(),
+                Some("thread/resume" | "thread/turns/list" | "thread/items/list")
+            )));
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_service_side_unknown_send_is_not_replayed_and_approval_is_bound() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let main = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"wait parent"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let created = controller
+            .call_authorized(
+                "createSideThread",
+                json!({"threadId":main["threadId"]}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        let payload =
+            json!({"threadId":id,"prompt":"uncertain side","clientUserMessageId":"unknown-side"});
+        assert!(
+            controller
+                .call_authorized("send", payload.clone(), &authorization)
+                .await
+                .is_err()
+        );
+        let retry = controller
+            .call_authorized("send", payload, &authorization)
+            .await
+            .unwrap();
+        assert_eq!(retry["outcomeUnknown"], true);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        controller
+            .call_authorized(
+                "send",
+                json!({
+                    "threadId":id,"prompt":"approval side","clientUserMessageId":"approval-side"
+                }),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let detail = controller
+            .call_authorized("thread", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        let request = &detail["thread"]["requests"][0];
+        assert!(request["id"].is_number());
+        controller.call_authorized("approve",json!({
+            "threadId":id,"method":request["method"],"requestId":request["id"],"decision":"accept"
+        }),&authorization).await.unwrap();
+        let log = std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap();
+        assert_eq!(
+            log.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|call| call["method"] == "turn/start"
+                    && call["params"]["clientUserMessageId"] == "unknown-side")
+                .count(),
+            1
+        );
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "显式提供隔离原生引擎与禁用 CDP 环境后验收服务侧边会话"]
+    async fn harness_service_side_real_app_server_lifecycle() {
+        assert!(execution::cdp_disabled());
+        assert!(
+            std::env::var("CODEX_ELVES_TEST_IPC_PIPE")
+                .unwrap_or_default()
+                .starts_with(r"\\.\pipe\codex-elves-isolation-")
+        );
+        let executable = std::env::var_os("CODEX_ELVES_SERVICE_CHECK_EXE").unwrap();
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        controller.harness.release().await;
+        let home = directory.path().join("side-codex-home");
+        std::fs::create_dir_all(&home).unwrap();
+        struct SettingsGuard(Option<PathBuf>);
+        impl Drop for SettingsGuard {
+            fn drop(&mut self) {
+                crate::paths::set_settings_path_for_tests(self.0.take());
+            }
+        }
+        let settings_path = directory.path().join("settings.json");
+        let settings = crate::settings::BackendSettings {
+            codex_home_path: home.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+        let _settings = SettingsGuard(crate::paths::set_settings_path_for_tests(Some(
+            settings_path,
+        )));
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::<Value>::new()));
+        let delay = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let router = Router::new().route("/v1/responses", post(
+            |State((requests, delay)):State<(Arc<tokio::sync::Mutex<Vec<Value>>>,Arc<std::sync::atomic::AtomicU64>)>,
+             Json(request):Json<Value>| async move {
+                let mut rows=requests.lock().await; rows.push(request);
+                let id=format!("side-native-{}",rows.len()); drop(rows);
+                tokio::time::sleep(Duration::from_millis(delay.load(Ordering::SeqCst))).await;
+                let item=json!({"id":id,"type":"message","role":"assistant","phase":"final_answer",
+                    "content":[{"type":"output_text","text":"SIDE_NATIVE_REPLY","annotations":[]}]});
+                let frames=[
+                    json!({"type":"response.created","response":{"id":id,"status":"in_progress","output":[]}}),
+                    json!({"type":"response.output_item.added","output_index":0,"item":item}),
+                    json!({"type":"response.output_text.delta","output_index":0,"item_id":id,"content_index":0,"delta":"SIDE_NATIVE_REPLY"}),
+                    json!({"type":"response.output_item.done","output_index":0,"item":item}),
+                    json!({"type":"response.completed","response":{"id":id,"status":"completed","output":[item],
+                        "usage":{"input_tokens":10,"output_tokens":10,"total_tokens":20}}}),
+                ];
+                ([("content-type","text/event-stream")],frames.iter().map(|frame|
+                    format!("event: {}\ndata: {frame}\n\n",frame["type"].as_str().unwrap())).collect::<String>())
+            }
+        )).with_state((requests.clone(),delay.clone()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        std::fs::write(home.join("config.toml"),format!(
+            "model=\"gpt-6-astra\"\nmodel_provider=\"side-test\"\napproval_policy=\"never\"\nsandbox_mode=\"read-only\"\n[model_providers.side-test]\nname=\"Isolated side test\"\nbase_url=\"http://127.0.0.1:{port}/v1\"\nwire_api=\"responses\"\nrequires_openai_auth=false\nsupports_websockets=false\n"
+        )).unwrap();
+        let mut command = tokio::process::Command::new(executable);
+        command
+            .args(["app-server", "--stdio"])
+            .env("CODEX_HOME", &home)
+            .current_dir(directory.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(crate::windows_create_hidden_process());
+        controller
+            .harness
+            .install_test_process(
+                crate::codex_service::RunningService::for_test(command.spawn().unwrap()).unwrap(),
+            )
+            .await;
+        controller.harness.prepare().await.unwrap();
+        async fn completed(auth: &RemoteAuthorization, id: &str) -> Value {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    if let Ok(history) = auth
+                        .controller
+                        .call_authorized("history", json!({"threadId":id}), auth)
+                        .await
+                    {
+                        if history["data"][0]["status"] == "completed" {
+                            return history;
+                        }
+                        assert_ne!(history["data"][0]["status"], "failed", "{history}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("隔离会话未完成")
+        }
+        let main = controller
+            .call_authorized(
+                "create",
+                json!({"prompt":"PARENT_NATIVE_CONTEXT","model":"gpt-6-astra"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let parent = main["threadId"].as_str().unwrap();
+        completed(&authorization, parent).await;
+        let created = controller
+            .call_authorized(
+                "createSideThread",
+                json!({"threadId":parent}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        controller.call_authorized("send",json!({"threadId":id,"prompt":"SIDE_NATIVE_INPUT","clientUserMessageId":"native-side-send"}),&authorization).await.unwrap();
+        let history = completed(&authorization, id).await;
+        assert!(history.to_string().contains("SIDE_NATIVE_INPUT"));
+        assert!(history.to_string().contains("SIDE_NATIVE_REPLY"));
+        assert!(!history.to_string().contains("PARENT_NATIVE_CONTEXT"));
+        assert!(requests.lock().await.iter().any(|request| {
+            let input = request["input"].to_string();
+            input.contains("SIDE_NATIVE_INPUT") && input.contains("PARENT_NATIVE_CONTEXT")
+        }));
+        controller
+            .call_authorized("compact", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        controller
+            .call_authorized("history", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        delay.store(5000, Ordering::SeqCst);
+        controller.call_authorized("send",json!({"threadId":id,"prompt":"CLOSE_RUNNING_SIDE","clientUserMessageId":"native-side-stop"}),&authorization).await.unwrap();
+        let closed = controller
+            .call_authorized(
+                "closeSideThread",
+                json!({"threadId":id,"parentThreadId":parent}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(closed["closed"], true);
+        assert_eq!(
+            controller
+                .call_authorized("thread", json!({"threadId":id}), &authorization)
+                .await
+                .unwrap_err()
+                .downcast_ref::<ApiError>()
+                .unwrap()
+                .code,
+            410
+        );
+        assert!(
+            controller
+                .call_authorized("thread", json!({"threadId":parent}), &authorization)
+                .await
+                .is_ok()
+        );
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        controller.harness.release().await;
+        server.abort();
     }
 
     async fn native_pin_fixture(options: Value) -> (tempfile::TempDir, RemoteAuthorization) {

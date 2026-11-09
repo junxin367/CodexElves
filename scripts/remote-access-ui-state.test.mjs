@@ -82,6 +82,9 @@ test("服务子智能体按独立能力启用，旧后台保持禁用且子会�
   assert.equal(context.subagentsEnabled(), false);
   context.session.capabilities.serviceSubagents = true;
   assert.equal(context.subagentsEnabled(), true);
+  assert.equal(context.sideThreadsEnabled(), false);
+  context.session.capabilities.serviceSideThreads = true;
+  assert.equal(context.sideThreadsEnabled(), true);
   assert.equal(context.threadReadOnly(), true);
   assert.equal(context.threadReadOnly("main"), false);
   context.session.runtime.cdpInjectionEnabled = true;
@@ -207,6 +210,13 @@ test("服务菜单实际展示子智能体并继续禁用侧边会话，旧侧�
   assert.equal(groups.get("侧边会话").attributes.get("aria-disabled"), "true");
   assert.equal(groups.get("子智能体").attributes.has("aria-disabled"), false);
   assert.ok([...mutationButtons.keys()].every(button => button.disabled));
+  context.context.sideThreadsEnabled = true;
+  context.cached.data.canCreateSideThread = true;
+  context.cached.data.sideThreads = [{ id: "service-side", title: "服务侧边会话" }];
+  buttons.length = 0;
+  context.render();
+  assert.ok(buttons.some(button => button.textContent === "服务侧边会话" && !button.disabled));
+  assert.ok([...mutationButtons.keys()].every(button => !button.disabled));
 });
 
 test("手机侧栏遮罩100ms后接受独立点击，早期触摸和跨区域手势仍不会误关", () => {

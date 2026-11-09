@@ -406,7 +406,7 @@ export function mountSessionMenu({
     create.setAttribute("aria-label", "新建侧边会话"); create.title = "新建侧边会话";
     create.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
     const sides = section("侧边会话", create);
-    // 用户只恢复子智能体查看；服务模式仍不展示旧侧边会话缓存，也不开放创建或关闭。
+    // 只展示当前运行方式明确支持的侧边会话；旧后台或切换模式后的旧缓存不能开放写操作。
     if (context?.sideThreadsEnabled === false) {
       sides.classList.add("session-related-menu-disabled");
       sides.setAttribute("aria-disabled", "true");

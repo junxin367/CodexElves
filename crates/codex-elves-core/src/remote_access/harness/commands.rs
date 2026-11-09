@@ -12,6 +12,16 @@ impl Harness {
         payload: Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
+        if action == "createSideThread" {
+            return self.create_side(&payload, authorization).await;
+        }
+        if action == "closeSideThread"
+            || self
+                .known_side(payload["threadId"].as_str().unwrap_or(""))
+                .await
+        {
+            return self.side_command(action, &payload, authorization).await;
+        }
         if action == "pinThread"
             && let Some(result) = self.pin_native_thread(&payload, authorization).await?
         {
@@ -700,7 +710,7 @@ impl Harness {
         result
     }
 
-    async fn respond(
+    pub(super) async fn respond(
         &self,
         id: &str,
         action: &str,
@@ -798,39 +808,10 @@ impl Harness {
                 })
             })
             .ok_or_else(|| error(409, "此问题已结束或状态已变化"))?;
-        let response = &payload["response"];
-        let skip = response["skip"] == true;
-        let mut replies = Vec::new();
-        if skip {
-            if response.as_object().is_none_or(|o| o.len() != 1) {
-                return Err(error(400, "跳过问题不能同时提交回答"));
-            }
-        } else {
-            let answers = response["answers"]
-                .as_object()
-                .ok_or_else(|| error(400, "询问答案无效"))?;
-            let questions = request["params"]["questions"]
-                .as_array()
-                .ok_or_else(|| error(400, "问题内容无效"))?;
-            if answers.len() != questions.len() {
-                return Err(error(400, "请回答所有问题"));
-            }
-            for question in questions {
-                let question_id = required(question, "id")?;
-                let values = answers
-                    .get(question_id)
-                    .and_then(|a| a["answers"].as_array())
-                    .filter(|a| a.len() == 1)
-                    .ok_or_else(|| error(400, "请回答所有问题"))?;
-                let answer = values[0]
-                    .as_str()
-                    .filter(|s| !s.trim().is_empty())
-                    .ok_or_else(|| error(400, "回答不能为空"))?;
-                replies.push(json!({"questionItemId":question_id,"question":question["question"],"answer":answer.trim()}));
-            }
-        }
-        let message = json!({"prompt":format!("<send_user_message_question_reply>\n{}\n</send_user_message_question_reply>",serde_json::to_string(&replies)?),
-            "clientUserMessageId":uuid::Uuid::new_v4().to_string()});
+        let reply = async_reply_message(request, payload)?;
+        let skip = reply.is_none();
+        let message = reply
+            .unwrap_or_else(|| json!({"clientUserMessageId":uuid::Uuid::new_v4().to_string()}));
         let mut store = self.store.lock().await;
         let permit = authorization.prepare_dispatch().await?;
         crate::bridge::CdpDispatchPermit::commit(permit, || {
@@ -1044,6 +1025,48 @@ pub(super) fn payload_hash(payload: &Value) -> String {
     super::super::hash(&serde_json::to_string(payload).unwrap_or_default())
 }
 
+pub(super) fn async_reply_message(
+    request: &Value,
+    payload: &Value,
+) -> anyhow::Result<Option<Value>> {
+    let response = &payload["response"];
+    if response["skip"] == true {
+        if response.as_object().is_none_or(|object| object.len() != 1) {
+            return Err(error(400, "跳过问题不能同时提交回答"));
+        }
+        return Ok(None);
+    }
+    let answers = response["answers"]
+        .as_object()
+        .ok_or_else(|| error(400, "询问答案无效"))?;
+    let questions = request["params"]["questions"]
+        .as_array()
+        .ok_or_else(|| error(400, "问题内容无效"))?;
+    if answers.len() != questions.len() {
+        return Err(error(400, "请回答所有问题"));
+    }
+    let mut replies = Vec::new();
+    for question in questions {
+        let id = required(question, "id")?;
+        let values = answers
+            .get(id)
+            .and_then(|answer| answer["answers"].as_array())
+            .filter(|answers| answers.len() == 1)
+            .ok_or_else(|| error(400, "请回答所有问题"))?;
+        let answer = values[0]
+            .as_str()
+            .filter(|answer| !answer.trim().is_empty())
+            .ok_or_else(|| error(400, "回答不能为空"))?;
+        replies.push(
+            json!({"questionItemId":id,"question":question["question"],"answer":answer.trim()}),
+        );
+    }
+    Ok(Some(
+        json!({"prompt":format!("<send_user_message_question_reply>\n{}\n</send_user_message_question_reply>",serde_json::to_string(&replies)?),
+        "clientUserMessageId":uuid::Uuid::new_v4().to_string()}),
+    ))
+}
+
 fn image_source(image: &Value) -> String {
     use sha2::{Digest, Sha256};
     image["dataUrl"]
@@ -1055,7 +1078,7 @@ fn image_source(image: &Value) -> String {
         .unwrap_or_default()
 }
 
-fn inputs(payload: &Value) -> anyhow::Result<Vec<Value>> {
+pub(super) fn inputs(payload: &Value) -> anyhow::Result<Vec<Value>> {
     let mut input = Vec::new();
     if let Some(text) = payload["prompt"].as_str().filter(|s| !s.trim().is_empty()) {
         input.push(json!({"type":"text","text":text,"text_elements":[]}));

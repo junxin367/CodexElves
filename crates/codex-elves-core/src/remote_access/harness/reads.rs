@@ -168,6 +168,28 @@ impl Harness {
         }
         let mut recent = Vec::new();
         let projection = self.projection.lock().await;
+        let mut side_ids = Vec::new();
+        let mut unread_sides = Vec::new();
+        let mut side_attention = std::collections::HashMap::<String, Value>::new();
+        for (id, side) in &projection.sides.threads {
+            if side.closed {
+                continue;
+            }
+            let summary = projection.thread(id, side.view()?);
+            let active = summary["priority"]["active"] == true;
+            let waiting = summary["priority"]["attentionState"] == "waiting";
+            let unread = side.unread && !active && !waiting;
+            side_ids.push(id.clone());
+            if unread {
+                unread_sides.push(json!({"id":id,"parentThreadId":side.parent}));
+            }
+            let flags = side_attention
+                .entry(side.parent.clone())
+                .or_insert_with(|| json!({"active":false,"waiting":false,"unread":false}));
+            flags["active"] = json!(flags["active"] == true || active);
+            flags["waiting"] = json!(flags["waiting"] == true || waiting);
+            flags["unread"] = json!(flags["unread"] == true || unread);
+        }
         for row in rows {
             let Ok(mut thread) = normalize_thread(&row) else {
                 continue;
@@ -178,6 +200,9 @@ impl Harness {
                 .unwrap_or(Value::Null);
             thread["pinned"] = json!(thread_pins.contains(thread["id"].as_str().unwrap_or("")));
             thread = projection.thread(thread["id"].as_str().unwrap_or(""), thread.clone());
+            if let Some(attention) = side_attention.get(thread["id"].as_str().unwrap_or("")) {
+                thread["sideThreadAttention"] = attention.clone();
+            }
             if let Some(index) = project_index {
                 let project = &mut projects[index];
                 if let Some(entries) = project["threads"].as_array_mut() {
@@ -247,8 +272,8 @@ impl Harness {
         Ok(
             json!({"ok":true,"nativeBridge":"harness","complete":complete,"projects":projects,
             "recent":recent,"pinnedThreads":pins,"pinnedThreadsComplete":pinned_threads_complete,
-            "nextCursor":null,"sideThreadIds":[],
-            "unreadSideThreads":[],"creationAvailable":true,"preferences":preferences}),
+            "nextCursor":null,"sideThreadIds":side_ids,
+            "unreadSideThreads":unread_sides,"creationAvailable":true,"preferences":preferences}),
         )
     }
 
@@ -284,6 +309,9 @@ impl Harness {
 
     pub(super) async fn thread(&self, payload: &Value) -> anyhow::Result<Value> {
         let id = required(payload, "threadId")?;
+        if self.known_side(id).await {
+            return self.side_detail(id).await;
+        }
         let (response, owner) = tokio::join!(
             self.runtime
                 .read("thread/read", json!({"threadId":id,"includeTurns":false}),),
@@ -418,6 +446,9 @@ impl Harness {
 
     pub(super) async fn history(&self, payload: &Value) -> anyhow::Result<Value> {
         let id = required(payload, "threadId")?;
+        if self.known_side(id).await {
+            return self.side_history(payload).await;
+        }
         let identity = match self
             .runtime
             .read("thread/read", json!({"threadId":id,"includeTurns":false}))
@@ -665,6 +696,35 @@ impl Harness {
     pub(super) async fn send_state(&self, payload: &Value) -> anyhow::Result<Value> {
         let id = required(payload, "threadId")?;
         required(payload, "clientUserMessageId")?;
+        if self.known_side(id).await {
+            let mut projection = self.projection.lock().await;
+            let side = projection.sides.threads.get_mut(id).unwrap();
+            let client = payload["clientUserMessageId"].as_str().unwrap();
+            let evidence = side.turns.iter().find_map(|turn| {
+                turn["items"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|item| {
+                        (item["type"] == "userMessage"
+                            || item["type"] == "steeringUserMessage"
+                                && item["status"] == "accepted")
+                            && (item["clientUserMessageId"] == client || item["clientId"] == client)
+                    })
+                    .map(|item| {
+                        json!({"ok":true,"confirmed":true,"deliveryState":"accepted","threadId":id,
+                        "clientUserMessageId":client,"turnId":turn["id"],"messageId":item["id"]})
+                    })
+            });
+            if let Some(result) = evidence {
+                if let Some(sent) = side.sent.get_mut(client) {
+                    sent.1 = result.clone();
+                }
+                return Ok(result);
+            }
+            return Ok(side.sent.get(client).map(|(_, result)| result.clone()).unwrap_or_else(||
+                json!({"ok":true,"confirmed":false,"deliveryState":"unknown","threadId":id,"clientUserMessageId":client})));
+        }
         let key = sent_key(id, payload);
         if let Some(result) = self.store.lock().await.data.sent.get(&key).cloned() {
             return Ok(result);

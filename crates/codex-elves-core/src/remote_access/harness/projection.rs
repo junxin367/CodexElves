@@ -22,6 +22,7 @@ pub(super) struct Projection {
     hidden_threads: HashSet<String>,
     pub threads: HashMap<String, Value>,
     pub subagents: super::subagents::SubagentState,
+    pub sides: super::sides::SideState,
     pub requests: HashMap<String, Value>,
     pub active: HashMap<String, String>,
     pub compactions: HashMap<String, Value>,
@@ -43,6 +44,7 @@ impl Default for Projection {
             hidden_threads: HashSet::new(),
             threads: HashMap::new(),
             subagents: super::subagents::SubagentState::default(),
+            sides: super::sides::SideState::default(),
             requests: HashMap::new(),
             active: HashMap::new(),
             compactions: HashMap::new(),
@@ -57,6 +59,42 @@ impl Default for Projection {
 }
 
 impl Projection {
+    pub fn register_side(&mut self, id: String, side: super::sides::SideThread, view: Value) {
+        self.hidden_threads.remove(&id);
+        self.sides.threads.insert(id.clone(), side);
+        self.threads.insert(id.clone(), view);
+        self.side_changed(&id);
+    }
+
+    pub fn side_changed(&mut self, id: &str) {
+        if let Some(side) = self.sides.threads.get(id) {
+            self.push(json!({"method":"remote/relatedThreadsChanged","params":{
+                "threadId":side.parent,"closedThreadIds":if side.closed {json!([id])} else {json!([])}}}));
+        }
+    }
+
+    pub fn close_side(&mut self, id: &str) {
+        if let Some(side) = self.sides.threads.get_mut(id) {
+            side.closed = true;
+            side.closing = false;
+            side.turns.clear();
+            side.sent.clear();
+        }
+        self.active.remove(id);
+        self.threads.remove(id);
+        self.forget_compactions(id);
+        let requests: Vec<_> = self
+            .requests
+            .iter()
+            .filter(|(_, request)| request["params"]["threadId"] == id)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in requests {
+            self.resolve(&key);
+        }
+        self.side_changed(id);
+    }
+
     pub fn push(&mut self, event: Value) {
         if event["method"] == "thread/deleted" {
             self.forget_compactions(event["params"]["threadId"].as_str().unwrap_or(""));
@@ -118,6 +156,7 @@ impl Projection {
             .threads
             .get(thread_id)
             .and_then(|snapshot| snapshot["hasUnreadTurn"].as_bool())
+            .filter(|_| thread["serviceSide"] != true)
         {
             thread["hasUnreadTurn"] = json!(unread);
         }
@@ -328,6 +367,7 @@ impl Projection {
             self.completed.clear();
             self.hidden_threads.clear();
             self.subagents = super::subagents::SubagentState::default();
+            self.sides.expire();
             self.push(json!({"method":"remote/resync"}));
             return;
         }
@@ -341,6 +381,17 @@ impl Projection {
             .or_else(|| frame["params"]["thread"]["id"].as_str())
             .unwrap_or("")
             .to_owned();
+        let side = self.sides.threads.contains_key(&id);
+        if let Some((_, closed)) = self.sides.observe(&frame) {
+            if closed {
+                self.close_side(&id);
+            } else {
+                self.side_changed(&id);
+            }
+        }
+        if side && self.sides.threads[&id].closed {
+            return;
+        }
         let (subagent, parents) = self.subagents.observe(&frame);
         for parent in parents {
             self.push(
@@ -384,6 +435,10 @@ impl Projection {
         }
         match method.as_str() {
             "thread/started" => {
+                if side {
+                    self.push(frame);
+                    return;
+                }
                 if let Ok(mut thread) =
                     crate::codex_service::normalize_thread(&frame["params"]["thread"])
                 {
@@ -522,6 +577,10 @@ impl Projection {
                 self.resolve(&key);
             }
             "harness/disconnected" => {
+                let sides: Vec<_> = self.sides.threads.keys().cloned().collect();
+                for id in sides {
+                    self.close_side(&id);
+                }
                 self.requests.clear();
                 self.pending_notifications.clear();
                 for thread in self.threads.values_mut() {

@@ -2026,7 +2026,7 @@ pub(crate) fn normalize_subagent_thread(thread: &Value) -> anyhow::Result<Value>
     Ok(value)
 }
 
-fn normalize_thread_metadata(thread: &Value) -> anyhow::Result<Value> {
+pub(crate) fn normalize_thread_metadata(thread: &Value) -> anyhow::Result<Value> {
     let id = thread["id"]
         .as_str()
         .filter(|id| !id.trim().is_empty())

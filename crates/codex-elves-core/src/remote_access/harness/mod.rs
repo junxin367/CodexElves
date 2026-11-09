@@ -8,6 +8,7 @@ mod projects;
 mod read_cache;
 mod reads;
 mod runtime;
+mod sides;
 mod store;
 mod subagents;
 
@@ -207,6 +208,17 @@ impl Harness {
     }
 
     pub async fn can_leave(&self, device_id: &str) -> anyhow::Result<()> {
+        if self
+            .projection
+            .lock()
+            .await
+            .sides
+            .threads
+            .values()
+            .any(|side| !side.closed && side.device == device_id)
+        {
+            return Err(error(409, "请先关闭服务模式侧边会话后再切换"));
+        }
         let state = self.store.lock().await;
         if state
             .data
@@ -235,14 +247,18 @@ impl Harness {
     }
 
     pub async fn idle(&self) -> bool {
-        self.store
+        let queues_empty = self
+            .store
             .lock()
             .await
             .data
             .queues
             .values()
-            .all(Vec::is_empty)
-            && self.projection.lock().await.active.is_empty()
+            .all(Vec::is_empty);
+        let projection = self.projection.lock().await;
+        queues_empty
+            && projection.active.is_empty()
+            && projection.sides.threads.values().all(|side| side.closed)
     }
 
     pub async fn release(&self) {
@@ -438,8 +454,7 @@ impl Harness {
             "queue" => Ok(self.queue(required(&payload, "threadId")?).await),
             "queueEdit" => self.queue_edit(&payload).await,
             "sendState" => self.send_state(&payload).await,
-            "relatedThreads" => self.related_subagents(&payload).await,
-            "createSideThread" | "closeSideThread" => Err(error(409, "不支持的会话操作")),
+            "relatedThreads" => self.related_sides(&payload).await,
             "dispose" => Ok(json!({"ok":true})),
             _ => {
                 let authorization = authorization.context("会话写操作缺少设备授权")?;

@@ -1956,8 +1956,15 @@ function normalizeRelatedView(value, id = value?.threadId) {
       ...(value.owner === relatedNavigationOwner ? { owner: value.owner } : {}) } : null;
 }
 function subagentsEnabled() {
-  // 用户要求服务模式恢复子智能体；独立能力字段避免旧后台或侧边会话被一起解禁。
+  // 子智能体与侧边会话使用独立能力字段，兼容旧后台并分别约束只读与写入入口。
   return session?.runtime?.cdpInjectionEnabled !== false || session?.capabilities?.serviceSubagents === true;
+}
+function sideThreadsEnabled() {
+  // 用户选择服务独立管理临时侧边会话；只有新后台声明能力时开放，旧后台仍保持禁用。
+  return session?.runtime?.cdpInjectionEnabled !== false || session?.capabilities?.serviceSideThreads === true;
+}
+function serviceSideThread() {
+  return session?.runtime?.cdpInjectionEnabled === false && thread?.id === selectedId && thread?.serviceSide === true;
 }
 function threadReadOnly(id = selectedId) {
   return !!session?.readOnly || !!id && (
@@ -2171,14 +2178,15 @@ function scheduleRelatedSessionCheck() {
   clearTimeout(relatedSessionCheckTimer);
   relatedSessionCheckTimer = null;
   const view = normalizeRelatedView(relatedSessionView, selectedId);
-  if (view?.kind === "subagent" && session?.runtime?.cdpInjectionEnabled === false
-      && subagentsEnabled() && connected && !document.hidden) {
+  if (view && session?.runtime?.cdpInjectionEnabled === false
+      && (view.kind === "subagent" ? subagentsEnabled() : sideThreadsEnabled() && !sideThreadExpired())
+      && connected && !document.hidden) {
     const id = selectedId, scope = privateInputScope(session), version = selectionVersion;
     // 服务事件提供实时刷新；2 秒只读补读用于桌面持有的子会话及断线恢复，不触发 resume 或写操作。
     relatedSessionCheckTimer = setTimeout(async () => {
       relatedSessionCheckTimer = null;
       if (scope !== privateInputScope(session) || selectedId !== id || version !== selectionVersion
-          || document.hidden || !connected || relatedSessionView?.kind !== "subagent") return;
+          || document.hidden || !connected || relatedSessionView?.kind !== view.kind) return;
       try { await reloadThread(); } catch {}
       if (scope === privateInputScope(session) && selectedId === id && version === selectionVersion)
         scheduleRelatedSessionCheck();
@@ -2298,7 +2306,7 @@ function resetRelatedSessions({ persisted = false } = {}) {
   if (persisted) try { sessionStorage.removeItem(relatedOperationStorageKey); } catch {}
 }
 async function loadRelatedThreads(parentThreadId) {
-  if (!subagentsEnabled()) return {
+  if (!subagentsEnabled() && !sideThreadsEnabled()) return {
     ok: true, threadId: parentThreadId, subagents: [], sideThreads: [],
     completedSubagents: [], completedSubagentCount: 0, subagentsComplete: true, canCreateSideThread: false
   };
@@ -2374,7 +2382,7 @@ async function openRelatedThread(item, kind, parentThreadId = selectedId, {
   owner = relatedNavigationOwner, initialThread = null, replaceHistory = false,
   preparedView = false, onViewReady = null
 } = {}) {
-  if (kind === "subagent" ? !subagentsEnabled() : session?.runtime?.cdpInjectionEnabled === false) return;
+  if (kind === "subagent" ? !subagentsEnabled() : !sideThreadsEnabled()) return;
   if (relatedSessionView || !validRelatedThreadId(item?.id) || parentThreadId !== selectedId) return;
   const view = rememberRelatedView(item.id, kind, null, item.name || item.title || "",
     { openedFromThreadId: parentThreadId, ephemeral: item.ephemeral });
@@ -2574,7 +2582,7 @@ async function resolveRelatedOperation(record, { allowSelection = false } = {}) 
   return record.request;
 }
 async function runRelatedOperation(action, item = null) {
-  if (session?.runtime?.cdpInjectionEnabled === false) return;
+  if (!sideThreadsEnabled()) return;
   const parentThreadId = selectedId, scope = privateInputScope(session);
   if (!session || relatedSessionView || !validRelatedThreadId(parentThreadId) || thread?.id !== parentThreadId
       || threadReadOnly(parentThreadId) || !connected) return;
@@ -3715,6 +3723,7 @@ function unfinishedGoal(goal = thread?.goal) {
 function goalComposerReason({ submitting = false } = {}) {
   if (!session || !creating && (!selectedId || thread?.id !== selectedId)) return "请先打开会话或新建会话";
   if (threadReadOnly()) return threadReadOnlyMessage();
+  if (serviceSideThread()) return "临时侧边会话不创建持续目标，请返回主会话设置";
   if (session.capabilities?.goalComposer !== true) return "当前服务尚不支持创建目标，请更新远程服务；目标草稿会保留";
   if (editingMessage || editingQueuedMessage) return "请先完成消息或队列编辑";
   if (threadDeletionLocked() || threadDeleted(selectedId)) return "会话正在删除或已删除，请先核对删除结果";
@@ -5224,6 +5233,7 @@ function compactionLocked(id = selectedId) {
   return ["pending", "running", "unknown"].includes(currentCompaction(id).state);
 }
 function compactionQueueSendReason(id = selectedId) {
+  if (serviceSideThread()) return "临时侧边会话压缩期间不能排队发送，请等待压缩完成";
   const current = currentCompaction(id);
   if (!compactionLocked(id)) return "";
   if (current.deviceId && current.deviceId !== session?.device.id)
@@ -6401,7 +6411,7 @@ function shell() {
       return { deviceId: session?.device.id, cacheScope: privateInputScope(session),
         threadId: !creating ? parentThreadId || selectedId : null, readOnly: threadReadOnly(), connected,
         subagentsEnabled: subagentsEnabled(),
-        sideThreadsEnabled: session?.runtime?.cdpInjectionEnabled !== false,
+        sideThreadsEnabled: sideThreadsEnabled(),
         serviceMode: session?.runtime?.cdpInjectionEnabled === false,
         relatedScope: JSON.stringify(session?.runtime),
         createPending: [...relatedThreadOperations.values()].some(record => ownsRelatedOperation(record)
@@ -10242,7 +10252,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   const navigationVersion = ++relatedSelectionVersion;
   const nextRelatedView = relatedView === undefined ? relatedViewForThread(id) : normalizeRelatedView(relatedView, id);
   if (session.runtime?.cdpInjectionEnabled === false && nextRelatedView
-      && (nextRelatedView.kind === "side" || !subagentsEnabled())) {
+      && (nextRelatedView.kind === "side" ? !sideThreadsEnabled() : !subagentsEnabled())) {
     const parent = nextRelatedView.openedFromThreadId || nextRelatedView.parentThreadId;
     if (validRelatedThreadId(parent) && parent !== id)
       return selectThread(parent, { closeSidebar, force, relatedView: null, replaceHistory: true });
@@ -12282,7 +12292,7 @@ function updateComposer() {
   $("#prompt").disabled = threadReadOnly() || deleting || compacting && editing || !!editingMessage || editing && (busy || !!pending)
     || editingQueuedMessage?.state === "starting" || (!creating && !selectedId);
   $("#new-chat").disabled = threadReadOnly() || !connected;
-  $("#model-button").disabled = threadReadOnly() || deleting || !!editingQueuedMessage
+  $("#model-button").disabled = threadReadOnly() || deleting || serviceSideThread() && active || !!editingQueuedMessage
     || !!editingMessage && (busy || stopping || !!pending || !connected);
   $("#sidebar-view-toggle").disabled = !sidebar;
   syncNewChatProjectPicker();
@@ -12291,7 +12301,9 @@ function updateComposer() {
   fitPopup();
   $("#prompt").placeholder = threadReadOnly() ? threadReadOnlyMessage() : compacting && !editing && !goalMode
     ? queueOnly ? "继续输入，发送后会排队等待压缩完成…" : "可继续编辑草稿，压缩期间暂不能发送…"
-    : editingQueuedMessage ? "修改排队消息…" : goalMode ? goalComposerPlaceholder : active ? "补充要求，会使用原生消息队列…" : "给 Codex 发送消息，输入 / 选择命令或 Skill…";
+    : editingQueuedMessage ? "修改排队消息…" : goalMode ? goalComposerPlaceholder
+    : active ? serviceSideThread() ? "补充要求，发送后引导当前任务…" : "补充要求，会使用原生消息队列…"
+    : "给 Codex 发送消息，输入 / 选择命令或 Skill…";
   const model = currentModel(), effort = currentEffort();
   const name = model?.displayName || currentModelId()
     || (modelsPromise || selectedId && !thread ? "正在读取模型…" : "模型信息暂不可用");
@@ -12741,7 +12753,7 @@ function applyRemoteRuntime(runtime) {
   const changed = session.runtime?.cdpInjectionEnabled !== runtime.cdpInjectionEnabled;
   session.runtime = runtime;
   session.capabilities = { ...session.capabilities,
-    sideThreads: runtime.cdpInjectionEnabled,
+    sideThreads: runtime.cdpInjectionEnabled || session.capabilities?.serviceSideThreads === true,
     subagents: runtime.cdpInjectionEnabled || session.capabilities?.serviceSubagents === true };
   if (changed) {
     ++nativeConnectionVersion;

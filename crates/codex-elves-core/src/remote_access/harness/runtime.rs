@@ -263,6 +263,28 @@ impl Runtime {
             .await
     }
 
+    pub async fn request_in_generation(
+        &self,
+        generation: &str,
+        method: &str,
+        params: Value,
+        guard: &dyn ServiceDispatchGuard,
+    ) -> anyhow::Result<Value> {
+        execution::transport("app-server-stdio", method, true);
+        let connection = self.connection().await?;
+        // 临时侧边会话只属于创建它的引擎，断线后不能把旧写入交给新进程或自动 resume。
+        if connection.generation != generation {
+            return Err(super::error(410, "侧边会话所属的服务连接已结束"));
+        }
+        let id = params["threadId"].as_str().unwrap_or("");
+        self.reads.invalidate(id).await;
+        let result = connection
+            .request(method, params.clone(), Some(guard))
+            .await;
+        self.reads.invalidate(id).await;
+        result
+    }
+
     pub async fn invalidate_read(&self, scope: &str) {
         self.reads.invalidate(scope).await;
     }
