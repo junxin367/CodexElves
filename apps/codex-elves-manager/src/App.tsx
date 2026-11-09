@@ -1984,33 +1984,34 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     case "startup_options":
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
+      // 浏览器预览随桌面发布版本同步，保持更新说明和安装包名一致。
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.6.1",
-        latestVersion: "0.6.1",
+        currentVersion: "0.7.0",
+        latestVersion: "0.7.0",
         releaseSummary: [
-          "CodexElves 0.6.1",
+          "CodexElves 0.7.0",
           "",
-          "- 兼容新版 Codex，修复远程会话主流程与侧边会话",
-          "- 优化手机端前后台恢复、排队和目标交互",
-          "- 版本更新只作提醒，模型测速改用完整糖果题",
+          "- 新增独立服务模式，CDP 持续不可用时自动切换",
+          "- 支持服务侧边会话与子智能体只读查看，完善历史及状态恢复",
+          "- 改善多仓库文件预览、Fast 会话隔离及手机端交互",
         ].join("\n"),
-        assetName: "CodexElves-0.6.1-windows-x64-setup.exe",
-        assetUrl: "https://example.test/CodexElves-0.6.1-windows-x64-setup.exe",
+        assetName: "CodexElves-0.7.0-windows-x64-setup.exe",
+        assetUrl: "https://example.test/CodexElves-0.7.0-windows-x64-setup.exe",
         updateAvailable: false,
       }, "发现可用更新。") as T);
     case "perform_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.6.1",
-        latestVersion: "0.6.1",
+        currentVersion: "0.7.0",
+        latestVersion: "0.7.0",
         releaseSummary: "浏览器预览不会下载真实安装包。",
-        installedPath: "C:\\Temp\\CodexElves-0.6.1-windows-x64-setup.exe",
+        installedPath: "C:\\Temp\\CodexElves-0.7.0-windows-x64-setup.exe",
         launched: true,
       }, "浏览器预览已模拟启动安装包。") as T);
     case "copy_diagnostics":
       return Promise.resolve(browserPreviewResult({
         report: [
           "CodexElves 诊断报告",
-          "版本: 0.6.1",
+          "版本: 0.7.0",
           "平台: windows-x64",
           "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
           "配置目录: C:\\Users\\junes\\.codex",
@@ -2031,7 +2032,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.6.1",
+        current_version: "0.7.0",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",

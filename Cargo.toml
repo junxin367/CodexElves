@@ -8,7 +8,8 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.1"
+# 桌面统一发布为 0.7.0；npm、Tauri 与预览元数据同步，Android 保持独立版本。
+version = "0.7.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/junxin367/CodexElves"
