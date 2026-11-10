@@ -281,13 +281,13 @@ test("文件阅读字号默认12，旧配置和新设置都限制在6至14且独
   assert.equal(context.defaultAppearance().fileReadingFontSize, 12);
 });
 
-test("自动主题浅色阈值默认35，旧设置兼容且保存值收敛至25至50", () => {
+test("自动主题浅色阈值默认35，旧设置兼容且保存值收敛至5至40", () => {
   const disk = storage();
   const context = vm.createContext({ localStorage: disk, matchMedia: () => ({ matches: false }) });
   vm.runInContext(app.slice(app.indexOf("const appearancePresets ="), app.indexOf("let ambientLightStatus =")), context);
   for (const [saved, expected] of [
-    [undefined, 35], [null, 35], [25, 25], [35, 35], [45, 45], [50, 50],
-    [24, 25], [51, 50], ["50", 35], [35.5, 35],
+    [undefined, 35], [null, 35], [5, 5], [25, 25], [35, 35], [40, 40],
+    [4, 5], [24, 24], [41, 40], [45, 40], [50, 40], ["40", 35], [35.5, 35],
   ]) {
     disk.setItem("codex-elves-web-appearance", JSON.stringify({ themeMode: "auto", automaticThemeLightLux: saved }));
     context.appearance = context.readAppearance();
@@ -1017,10 +1017,11 @@ test("自动主题使用20:00至次日08:00夜间范围，默认10/35lux滞回�
 
 test("自定义光照阈值按所选数值切回浅色，修改后重新累计五秒稳定时间", async () => {
   const h = await themeDiagnosticsHarness();
-  for (const threshold of [25, 35, 50]) {
+  for (const threshold of [5, 10, 25, 35, 40]) {
     h.appearance.automaticThemeLightLux = threshold;
+    const darkLux = Math.min(10, threshold - 1);
     for (const [lux, current, expected] of [
-      [10, "light", "dark"], [10.01, "light", "light"],
+      [darkLux, "light", "dark"], [darkLux + .01, "light", "light"],
       [threshold - .01, "dark", "dark"], [threshold - .01, "light", "light"],
       [threshold, "dark", "light"], [threshold + .01, "dark", "light"],
     ]) {
@@ -1029,8 +1030,8 @@ test("自定义光照阈值按所选数值切回浅色，修改后重新累计�
     }
   }
   h.appearance.theme = "dark"; h.appearance.automaticThemeLightLux = 35;
-  h.sensor(40); h.advance(4000);
-  assert.equal(h.context.setAutomaticThemeLightLux(50), true);
+  h.sensor(37); h.advance(4000);
+  assert.equal(h.context.setAutomaticThemeLightLux(40), true);
   h.advance(5000); h.context.applyAutomaticAppearance(true);
   assert.equal(h.appearance.theme, "dark", "升高阈值后原有切亮候选必须失效");
   assert.equal(h.context.setAutomaticThemeLightLux(35), true);
@@ -1038,13 +1039,13 @@ test("自定义光照阈值按所选数值切回浅色，修改后重新累计�
   assert.equal(h.appearance.theme, "dark");
   h.advance(1); h.context.applyAutomaticAppearance(true);
   assert.equal(h.appearance.theme, "light");
-  for (const invalid of [24, 51, 35.5, NaN, "50", null]) {
+  for (const invalid of [4, 41, 35.5, NaN, "40", null]) {
     assert.equal(h.context.setAutomaticThemeLightLux(invalid), false);
     assert.equal(h.appearance.automaticThemeLightLux, 35);
   }
 });
 
-test("光照滑块仅在自动主题下显示，25至50可保存并在切换模式后保留", async () => {
+test("光照滑块仅在自动主题下显示，5至40可保存并在切换模式后保留", async () => {
   const h = await themeDiagnosticsHarness(), disk = storage();
   const element = (tag, className = "", textContent = "") => ({
     tag, className, textContent, children: [], attributes: new Map(), properties: new Map(),
@@ -1065,29 +1066,29 @@ test("光照滑块仅在自动主题下显示，25至50可保存并在切换模�
   const hint = host.children[1];
   assert.equal(host.hidden, true);
   assert.equal(input.disabled, true);
-  assert.equal(input.min, "25"); assert.equal(input.max, "50"); assert.equal(input.step, "1");
+  assert.equal(input.min, "5"); assert.equal(input.max, "40"); assert.equal(input.step, "1");
   assert.equal(output.attributes.get("for"), input.id);
   h.context.setAppearanceThemeMode("auto");
   assert.equal(host.hidden, false); assert.equal(input.disabled, false);
   assert.equal(input.value, "35"); assert.equal(output.textContent, "35 lux");
-  assert.equal(input.style.values.get("--range-fill"), "40%");
+  assert.equal(input.style.values.get("--range-fill"), `${30 / 35 * 100}%`);
   assert.equal(hint.textContent, "光线达到此数值后切换为浅色，当前 -- lux");
   for (const [lux, displayed] of [[26.544523, "26.54"], [79.308532, "79.31"], [0, "0"], [null, "--"]]) {
     h.sensor(lux);
     assert.equal(hint.textContent, `光线达到此数值后切换为浅色，当前 ${displayed} lux`);
     assert.equal(input.value, "35", "实时光照不能覆盖设置的切换阈值");
   }
-  for (const value of [25, 50]) {
+  for (const value of [5, 40]) {
     input.value = String(value); input.oninput();
     assert.equal(output.textContent, `${value} lux`);
     assert.equal(h.context.readAppearance().automaticThemeLightLux, value);
-    assert.equal(input.style.values.get("--range-fill"), value === 25 ? "0%" : "100%");
+    assert.equal(input.style.values.get("--range-fill"), value === 5 ? "0%" : "100%");
   }
   h.context.setAppearanceThemeMode("manual");
   assert.equal(host.hidden, true); assert.equal(input.disabled, true);
-  assert.equal(h.context.readAppearance().automaticThemeLightLux, 50);
+  assert.equal(h.context.readAppearance().automaticThemeLightLux, 40);
   h.context.setAppearanceThemeMode("auto");
-  assert.equal(input.value, "50");
+  assert.equal(input.value, "40");
   Object.assign(h.appearance, h.context.defaultAppearance());
   sync();
   assert.equal(input.value, "35");

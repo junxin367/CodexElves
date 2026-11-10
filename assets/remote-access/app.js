@@ -361,8 +361,8 @@ const appearancePresets = {
 const projectThreadLimits = [5, 10, 20, 50];
 // 用户要求文件阅读字号统一控制变更预览和文件查看，范围 6～14px、默认 12px、步长 1px；文件列表继续使用原字号。
 const fileReadingFontMin = 6, fileReadingFontMax = 14, fileReadingFontDefault = 12;
-// 用户要求自动主题切回浅色的阈值默认 35 lux，可按 1 lux 在 25～50 调节；默认值、存储和滑块共用此范围。
-const automaticThemeLightLuxMin = 25, automaticThemeLightLuxMax = 50, automaticThemeLightLuxDefault = 35;
+// 用户要求光照阈值改为 5～40 lux，保留默认 35 lux、步长 1 lux；存储校验和滑块共用此范围。
+const automaticThemeLightLuxMin = 5, automaticThemeLightLuxMax = 40, automaticThemeLightLuxDefault = 35;
 function normalizeAutomaticThemeLightLux(value) {
   return Number.isInteger(value)
     ? Math.min(automaticThemeLightLuxMax, Math.max(automaticThemeLightLuxMin, value)) : automaticThemeLightLuxDefault;
@@ -548,8 +548,12 @@ function automaticAppearanceTheme(date = new Date(), currentTheme = appearance.t
   // 用户要求夜间时段按设备本地时间从 20:00（含）到次日 08:00（不含），时段内保留原有光照判断。
   if (hour < 8 || hour >= 20) {
     if (!ambientLightStatus.supported || ambientLightStatus.lux === null) return "dark";
-    if (ambientLightStatus.lux <= automaticThemeDarkLux) return "dark";
-    if (ambientLightStatus.lux >= currentAutomaticThemeLightLux()) return "light";
+    const lightLux = currentAutomaticThemeLightLux();
+    // 浅色阈值已扩展到 5 lux；低于原 10 lux 暗色阈值时保留至少 1 lux 间隔（与滑块步长一致），
+    // 避免 5～10 lux 的选择被暗色条件覆盖；其余设置继续沿用 10 lux 暗色边界。
+    const darkLux = Math.min(automaticThemeDarkLux, lightLux - 1);
+    if (ambientLightStatus.lux <= darkLux) return "dark";
+    if (ambientLightStatus.lux >= lightLux) return "light";
   } else return "light";
   return currentTheme;
 }
@@ -619,7 +623,7 @@ function mountAutomaticThemeLightSetting(host) {
   const hint = element("p", "appearance-reading-font-hint");
   hint.id = "appearance-auto-light-hint"; host.append(row, hint);
   const lightReading = () => {
-    // 用户要求展示当前光照：保留最多两位小数，不套用阈值的 25～50 范围；缺少读数时不伪装成 0 lux。
+    // 用户要求展示当前光照：保留最多两位小数，不套用阈值的 5～40 范围；缺少读数时不伪装成 0 lux。
     const lux = ambientLightStatus.lux;
     const current = ambientLightStatus.supported && Number.isFinite(lux) && lux >= 0 ? Number(lux.toFixed(2)) : "--";
     const text = `光线达到此数值后切换为浅色，当前 ${current} lux`;
