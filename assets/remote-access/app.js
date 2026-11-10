@@ -361,8 +361,8 @@ const appearancePresets = {
 const projectThreadLimits = [5, 10, 20, 50];
 // 用户要求文件阅读字号统一控制变更预览和文件查看，范围 6～14px、默认 12px、步长 1px；文件列表继续使用原字号。
 const fileReadingFontMin = 6, fileReadingFontMax = 14, fileReadingFontDefault = 12;
-// 用户要求光照阈值改为 5～40 lux，保留默认 35 lux、步长 1 lux；存储校验和滑块共用此范围。
-const automaticThemeLightLuxMin = 5, automaticThemeLightLuxMax = 40, automaticThemeLightLuxDefault = 35;
+// 用户要求光照阈值范围为 5～40 lux、默认 10 lux、步长 1 lux；存储校验和滑块共用此范围，已保存的有效选择继续保留。
+const automaticThemeLightLuxMin = 5, automaticThemeLightLuxMax = 40, automaticThemeLightLuxDefault = 10;
 function normalizeAutomaticThemeLightLux(value) {
   return Number.isInteger(value)
     ? Math.min(automaticThemeLightLuxMax, Math.max(automaticThemeLightLuxMin, value)) : automaticThemeLightLuxDefault;

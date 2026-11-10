@@ -281,20 +281,20 @@ test("文件阅读字号默认12，旧配置和新设置都限制在6至14且独
   assert.equal(context.defaultAppearance().fileReadingFontSize, 12);
 });
 
-test("自动主题浅色阈值默认35，旧设置兼容且保存值收敛至5至40", () => {
+test("自动主题浅色阈值默认10，旧设置兼容且保存值收敛至5至40", () => {
   const disk = storage();
   const context = vm.createContext({ localStorage: disk, matchMedia: () => ({ matches: false }) });
   vm.runInContext(app.slice(app.indexOf("const appearancePresets ="), app.indexOf("let ambientLightStatus =")), context);
   for (const [saved, expected] of [
-    [undefined, 35], [null, 35], [5, 5], [25, 25], [35, 35], [40, 40],
-    [4, 5], [24, 24], [41, 40], [45, 40], [50, 40], ["40", 35], [35.5, 35],
+    [undefined, 10], [null, 10], [5, 5], [10, 10], [25, 25], [35, 35], [40, 40],
+    [4, 5], [24, 24], [41, 40], [45, 40], [50, 40], ["40", 10], [35.5, 10],
   ]) {
     disk.setItem("codex-elves-web-appearance", JSON.stringify({ themeMode: "auto", automaticThemeLightLux: saved }));
     context.appearance = context.readAppearance();
     assert.equal(context.currentAutomaticThemeLightLux(), expected);
     assert.equal(context.appearance.themeMode, "auto");
   }
-  assert.equal(context.defaultAppearance().automaticThemeLightLux, 35);
+  assert.equal(context.defaultAppearance().automaticThemeLightLux, 10);
 });
 
 function previewControlsScrollHarness() {
@@ -963,7 +963,7 @@ async function themeDiagnosticsHarness({ android = true } = {}) {
 test("主题切换保留前后真实光照及年龄，延迟采证不会提前应用下一次切换", async () => {
   const h = await themeDiagnosticsHarness();
   h.sensor(60.25);
-  h.advance(2000); h.sensor(9.5);
+  h.advance(2000); h.sensor(8.5);
   assert.equal(h.appearance.theme, "light");
   assert.equal([...h.timers.values()].filter(timer => !timer.interval).length, 0);
   h.advance(4999); h.context.applyAutomaticAppearance(true);
@@ -971,10 +971,10 @@ test("主题切换保留前后真实光照及年龄，延迟采证不会提前�
   h.advance(1); h.context.applyAutomaticAppearance(true);
   assert.equal(h.appearance.theme, "dark");
   const before = h.logs.filter(event => event.name === "theme.sample" && event.fields.phase === "before");
-  assert.deepEqual(before.map(event => event.fields.lux), [60.25, 9.5]);
+  assert.deepEqual(before.map(event => event.fields.lux), [60.25, 8.5]);
   const after = h.logs.find(event => event.name === "theme.transition" && event.fields.phase === "after").fields;
   assert.deepEqual({ ...after }, {
-    theme: "dark", themeMode: "auto", themeSequence: 1, supported: true, lux: 9.5, previousLux: 60.25,
+    theme: "dark", themeMode: "auto", themeSequence: 1, supported: true, lux: 8.5, previousLux: 60.25,
     sampleAgeMs: 5000, localHour: 21, timezoneOffsetMinutes: -480, visible: true,
     previousTheme: "light", targetTheme: "dark", reason: "timer", phase: "after"
   });
@@ -992,15 +992,15 @@ test("主题切换保留前后真实光照及年龄，延迟采证不会提前�
   assert.equal([...h.timers.values()].filter(timer => !timer.interval).length, 0);
 });
 
-test("自动主题使用20:00至次日08:00夜间范围，默认10/35lux滞回并保留候选取消规则", async () => {
+test("自动主题使用20:00至次日08:00夜间范围，默认9/10lux滞回并保留候选取消规则", async () => {
   const h = await themeDiagnosticsHarness();
   for (const hour of [7, 8, 19, 20, 21]) {
     h.hour(hour);
-    for (const lux of [null, 0, 10, 10.01, 34.99, 35, 100]) {
+    for (const lux of [null, 0, 9, 9.01, 9.99, 10, 35, 100]) {
       h.context.ambientLightStatus = { supported: lux !== null, lux };
       for (const current of ["light", "dark"]) {
         const expected = hour >= 8 && hour < 20 ? "light"
-          : lux === null || lux <= 10 ? "dark" : lux >= 35 ? "light" : current;
+          : lux === null || lux <= 9 ? "dark" : lux >= 10 ? "light" : current;
         assert.equal(h.context.automaticAppearanceTheme(undefined, current), expected);
       }
     }
@@ -1070,13 +1070,13 @@ test("光照滑块仅在自动主题下显示，5至40可保存并在切换模�
   assert.equal(output.attributes.get("for"), input.id);
   h.context.setAppearanceThemeMode("auto");
   assert.equal(host.hidden, false); assert.equal(input.disabled, false);
-  assert.equal(input.value, "35"); assert.equal(output.textContent, "35 lux");
-  assert.equal(input.style.values.get("--range-fill"), `${30 / 35 * 100}%`);
+  assert.equal(input.value, "10"); assert.equal(output.textContent, "10 lux");
+  assert.equal(input.style.values.get("--range-fill"), `${5 / 35 * 100}%`);
   assert.equal(hint.textContent, "光线达到此数值后切换为浅色，当前 -- lux");
   for (const [lux, displayed] of [[26.544523, "26.54"], [79.308532, "79.31"], [0, "0"], [null, "--"]]) {
     h.sensor(lux);
     assert.equal(hint.textContent, `光线达到此数值后切换为浅色，当前 ${displayed} lux`);
-    assert.equal(input.value, "35", "实时光照不能覆盖设置的切换阈值");
+    assert.equal(input.value, "10", "实时光照不能覆盖设置的切换阈值");
   }
   for (const value of [5, 40]) {
     input.value = String(value); input.oninput();
@@ -1091,7 +1091,7 @@ test("光照滑块仅在自动主题下显示，5至40可保存并在切换模�
   assert.equal(input.value, "40");
   Object.assign(h.appearance, h.context.defaultAppearance());
   sync();
-  assert.equal(input.value, "35");
+  assert.equal(input.value, "10");
 });
 
 test("主题诊断限制前序采样数量，缓存及旧APK缺少的采样时间不会伪装成新读数", async () => {
