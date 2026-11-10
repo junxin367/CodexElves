@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 137) return;
+  if (window.__codexElvesRemoteAccess?.version === 138) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -3384,7 +3384,7 @@
       },
       execution: {
         prepare,
-        async queuedEditInputs(message) {
+        async queuedEditInputs(message, previousSubmission = null, preparedInputs = []) {
           const initial = await nativeModuleSnapshot("initial");
           let pending = nativeQueuedEditInputContracts.get(initial.module);
           if (!pending) {
@@ -3395,10 +3395,23 @@
                   && source.includes("responseItems:"), "队列原始输入序列化");
                 const digest = await crypto.subtle.digest("SHA-256",
                   new TextEncoder().encode(Function.prototype.toString.call(serialize)));
-                // 新版仍须核准完整输入合同，不能仅凭函数名放开队列编辑后恢复原始输入。
-                if (hexBytes(new Uint8Array(digest)) !== "2a2d0476f375de66982e2f69cd0fab6c6ccff56c55f8a8a75f9c57a305f5cbf5")
+                const serializerHash = hexBytes(new Uint8Array(digest));
+                // 保留此前已核版本；新版同时核准序列化器与原输入合并器，不能只改摘要或凭函数名放开编辑。
+                if (serializerHash === "2a2d0476f375de66982e2f69cd0fab6c6ccff56c55f8a8a75f9c57a305f5cbf5")
+                  return { serialize, merge: null };
+                if (serializerHash !== "fe8f00e53e1baed72cc3ece6d4b3d18208a186f66aa78d4d626522a1e6bed70c")
                   throw failure(503, "当前 Codex 版本的队列取消输入合成合同尚未核准");
-                return serialize;
+                const merge = nativeFunction(initial.module, source => source.includes("previousSubmission:")
+                  && source.includes("preserveSerializedContext:") && source.includes("localAudio"), "队列原始输入合并");
+                const mergeDigest = await crypto.subtle.digest("SHA-256",
+                  new TextEncoder().encode(Function.prototype.toString.call(merge)));
+                if (hexBytes(new Uint8Array(mergeDigest)) !== "98eae70dc9b22ff289fb4e9abead809020472c357647075277716e21c68d6c97")
+                  throw failure(503, "当前 Codex 版本的队列取消输入合成合同尚未核准");
+                if (!initial.records?.some(record => {
+                  try { const values = Object.values(record.module); return values.includes(serialize) && values.includes(merge); }
+                  catch { return false; }
+                })) throw failure(503, "原生队列输入接口不属于同一版本模块，请重新读取会话");
+                return { serialize, merge };
               }
               const from = initial.source.indexOf("function w8t(");
               const to = initial.source.indexOf("function ", from + 13);
@@ -3407,9 +3420,10 @@
               if (!digest || hexBytes(new Uint8Array(digest))
                   !== "d81d805c7b3d8cccb567d8a1c4a0db3a7372608e1a5f70a369527820d7cabafc")
                 throw failure(503, "当前 Codex 版本的队列取消输入合成合同尚未核准");
-              return nativeFunction(initial.module, source => source.includes("isRemoteHost:")
+              const serialize = nativeFunction(initial.module, source => source.includes("isRemoteHost:")
                 && source.includes("localTurnMetadata:") && source.includes("promptContextWithoutReviewedMessages:")
                 && source.includes("responseItems:"), "队列原始输入序列化");
+              return { serialize, merge: null };
             })();
             nativeQueuedEditInputContracts.set(initial.module, pending);
             pending.catch(() => {
@@ -3417,10 +3431,18 @@
                 nativeQueuedEditInputContracts.delete(initial.module);
             });
           }
-          const serialize = await pending;
-          return [false, true].map(isDurableThread => serialize({
-            context: message.context, isRemoteHost: false, isDurableThread, callId: `untrusted_input_${message.id}`
-          }));
+          const { serialize, merge } = await pending;
+          return [false, true].map(isDurableThread => {
+            const serialized = serialize({
+              context: message.context, isRemoteHost: false, isDurableThread, callId: `untrusted_input_${message.id}`
+            });
+            // 使用当前原生纯函数逐条预演取消合成，不删除队列、不写历史；真实派发仍走原生协调器。
+            if (!merge || !previousSubmission) return serialized;
+            const restore = input => merge({ input, context: message.context, previousSubmission,
+              preserveSerializedContext: true, isDurableThread });
+            return { ...serialized, mergedInput: restore(serialized.input),
+              mergedPreparedInputs: preparedInputs.map(restore) };
+          });
         }
       },
       async assertQueuedEditContext(id) {
@@ -5909,6 +5931,12 @@
         || texts.some(item => item.text_elements?.length || unsupported.test(item.text))
         || context.workPermissions != null || context.worktreeRecovery != null || context.collaborationMode != null)
       throw failure(409, "此队列消息的原生输入或权限暂不支持安全取消，请在 Codex 桌面恢复");
+    // 这些内容由新版原生 prepare 放在 input 之外；仅比较 input 无法证明无损恢复，普通空值仍允许。
+    if (context.additionalContext != null && Object.keys(context.additionalContext).length
+        || request.message.writingBlockAdditionalContext != null
+        || context.commentAttachments?.length || context.mcpAppModelContextAttachments?.length
+        || request.message.multiUserMessageSender != null || context.messageSender != null)
+      throw failure(409, "此队列消息带有额外原生上下文，请在 Codex 桌面编辑");
     const options = request.message.submissionOptions;
     if (options && (options.executionHostId != null && options.executionHostId !== "local"
         || options.agentMode != null && options.agentMode !== "auto" || options.permissionProfileId != null
@@ -5938,6 +5966,7 @@
     };
     verify(prepared.steer.input);
     if (prepared.start) verify(prepared.start.request.input);
+    if (prepared.steer.userMessageAdmissionStart) verify(prepared.steer.userMessageAdmissionStart.request.input);
   }
   async function prepareNativeQueuedCancel(entry, token, coordinator, assertCurrent) {
     assertCurrent();
@@ -5949,10 +5978,20 @@
     await coordinator.assertQueuedEditContext(entry.threadId);
     const prepared = await prepareNativeQueuedEdit(request, "start", coordinator, assertCurrent);
     assertNativeQueuedCancelInput(request, prepared);
-    for (const serialized of await coordinator.execution.queuedEditInputs(request.message)) {
-      if (serialized.responseItems?.length)
+    // 当前原生派发会分别合成 steer、start 和 admission start；全部预演，不能只证明 serializer 的输出。
+    const preparedInputs = [prepared.steer.input,
+      ...(prepared.start ? [prepared.start.request.input] : []),
+      ...(prepared.steer.userMessageAdmissionStart ? [prepared.steer.userMessageAdmissionStart.request.input] : [])];
+    for (const serialized of await coordinator.execution.queuedEditInputs(
+      request.message, request.editPosition.serverSubmission, preparedInputs)) {
+      if (!Array.isArray(serialized.responseItems) || serialized.responseItems.length)
         throw failure(409, "此队列消息包含额外原生响应输入，不能安全取消");
       assertNativeQueuedCancelInput(request, { steer: { input: serialized.input } });
+      if (Object.hasOwn(serialized, "mergedInput") && (!sameQueuedUserInput(
+          serialized.mergedInput, request.editPosition.serverSubmission.input)
+          || !Array.isArray(serialized.mergedPreparedInputs) || serialized.mergedPreparedInputs.length !== preparedInputs.length
+          || serialized.mergedPreparedInputs.some(input => !sameQueuedUserInput(input, request.editPosition.serverSubmission.input))))
+        throw failure(409, "原生取消合成与原队列完整输入不一致，不能安全编辑");
     }
     assertCurrent();
     return request;
@@ -7518,7 +7557,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 137, call,
+    version: 138, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {

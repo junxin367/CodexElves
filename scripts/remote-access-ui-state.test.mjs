@@ -130,7 +130,7 @@ test("CSV、TSV、ODS 的空布局数组可预览，缺省列宽与完整列宽�
       { number: 2, cells: ["示例", "001234", "换行\n逗号,引号"] }, { number: 3, cells: ["短行"] }],
   }] };
   assert.equal(h.context.validRichFilePreview(value), true);
-  const root = h.context.renderRichFilePreview(value), nodes = h.all(root);
+  const root = h.context.renderRichFilePreview(value, { layout: "original" }), nodes = h.all(root);
   assert.equal(nodes.find(node => node.tag === "table").style.width, "calc(360px + var(--sheet-row-number-width,44px))");
   assert.deepEqual(nodes.filter(node => node.tag === "col").map(node => node.style.width),
     ["var(--sheet-row-number-width,44px)", "120px", "120px", "120px"]);
@@ -198,7 +198,7 @@ test("Excel 合并范围保留横纵跨度、固定列宽和跨页左上角内�
     ] };
   const value = { kind: "spreadsheet", sheets: [sheet] };
   assert.equal(h.context.validRichFilePreview(value), true);
-  const root = h.context.renderRichFilePreview(value);
+  const root = h.context.renderRichFilePreview(value, { layout: "original" });
   let cells = h.all(root).filter(node => node.tag === "td");
   const heading = cells.find(node => node.textContent === "横向标题");
   assert.equal(heading.colSpan, 2); assert.equal(heading.rowSpan, 1);
@@ -823,7 +823,7 @@ test("Windows 打包拒绝缺少分支信息、运行模式或压缩恢复的旧
     readFile(new URL("../crates/codex-elves-core/src/remote_access/workspace.rs", import.meta.url), "utf8"),
   ]);
   const current = { backend, service, workspace, app, native };
-  assert.deepEqual(verify(current), { protocol: 5, bridge: 137 });
+  assert.deepEqual(verify(current), { protocol: 5, bridge: 138 });
   for (const obsolete of [2, 3, 4])
     assert.throws(() => verify({ ...current, service: service.replace("PROTOCOL_VERSION: u32 = 5", `PROTOCOL_VERSION: u32 = ${obsolete}`) }), /后台协议不能低于 5/);
   assert.throws(() => verify({ ...current, workspace: workspace.replace("async fn branch_metadata(", "async fn obsolete_metadata(") }), /缺少真实分支/);

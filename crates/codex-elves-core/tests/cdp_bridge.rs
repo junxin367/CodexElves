@@ -2954,7 +2954,8 @@ for(const scenario of ["connection-switch","snapshot-failure","both","ack-lost"]
 fn queued_edit_cancel_restores_original_input_without_a_ghost_and_allows_the_next_idle_send() {
     run_native_queue_edit_consumption_contract(
         r#"
-const h=await createFullNativeQueueHarness(),a=h.adapter(),b=h.adapter();
+for(const rspack of [false,true]){
+const h=await createFullNativeQueueHarness({rspack}),a=h.adapter(),b=h.adapter();
 const image={id:"original-image",src:"https://fixture.invalid/original.png",filename:"original.png"};
 delete a.coordinator.restoreQueuedMessage;
 const originalInput=[{type:"text",text:"原文\n",text_elements:[]},
@@ -2988,6 +2989,7 @@ assert.equal(sent.ok,true,JSON.stringify(sent));
 assert.notEqual(sent.deliveryState,"queued");
 assert.deepEqual(h.accepted().map(item=>item.clientId),["base-client","original-logical","after-cancel"]);
 assert.deepEqual(h.native.readMessages("thread"),[]);
+}
 "#,
     );
 }
@@ -2996,7 +2998,8 @@ assert.deepEqual(h.native.readMessages("thread"),[]);
 fn queued_edit_busy_cancel_preserves_original_input_and_drains_real_left_queue_right_fifo() {
     run_native_queue_edit_consumption_contract(
         r#"
-const h=await createFullNativeQueueHarness(),a=h.adapter(),b=h.adapter();
+for(const rspack of [false,true]){
+const h=await createFullNativeQueueHarness({rspack}),a=h.adapter(),b=h.adapter();
 const entry=await h.beginEdit(a,{leftAnchor:true,rightAnchor:true});
 const token=entry.token,originalToken=structuredClone(token);
 assert.equal(token.previousMessageId,"left-anchor");
@@ -3017,6 +3020,7 @@ assert.deepEqual(h.accepted().map(item=>item.clientId),
 assert.deepEqual(h.native.readMessages("thread"),[]);
 assert.equal(h.calls.restore,0);
 assert.equal(h.calls.delete,1,"只有 begin remove 原 Q，取消后不得补偿删除");
+}
 "#,
     );
 }
@@ -3048,8 +3052,9 @@ for(const action of ["commit","cancel"]){
 fn queued_edit_native_cancel_retains_ack_until_read_only_history_confirmation_recovers() {
     run_native_queue_edit_consumption_contract(
         r#"
+for(const rspack of [false,true]){
 for(const snapshotFailureAfterHistory of [false,true]){
-  const h=await createFullNativeQueueHarness(),a=h.adapter();
+  const h=await createFullNativeQueueHarness({rspack}),a=h.adapter();
   const entry=await h.beginEdit(a);h.finishBase();
   h.failHistoryAfterStart=true;
   const payload={threadId:"thread",editId:"edit"};
@@ -3076,6 +3081,7 @@ for(const snapshotFailureAfterHistory of [false,true]){
   assert.equal(h.calls.start,1,"确认恢复只读完整历史，不能再次 start");
   assert.equal(h.calls.restore,0);
   assert.deepEqual(h.native.readMessages("thread"),[]);
+}
 }
 "#,
     );
@@ -3180,6 +3186,144 @@ assert.equal(a.env.nativeQueuedEditInputContracts.has(h.nativeModule),false);
 }
 
 #[test]
+fn queued_edit_rspack_contract_requires_known_unique_serializer_and_matching_module_merger() {
+    run_native_queue_edit_consumption_contract(
+        r#"
+for(const failure of ["serializer-hash","merger-hash","two-serializers","two-mergers","missing-merger","split-modules"]){
+  const h=await createFullNativeQueueHarness({rspack:true}),a=h.adapter();
+  if(failure==="serializer-hash")h.nativeModule=h.createRspackModule({
+    serializerSource:rspackQueueFixture.serializer.source.replace("function(","function (")});
+  if(failure==="merger-hash")h.nativeModule=h.createRspackModule({
+    mergerSource:rspackQueueFixture.merger.source.replace("function(","function (")});
+  if(failure==="two-serializers"){
+    h.nativeModule.secondSerializer=h.createRspackModule().pJ;
+    assert.notEqual(h.nativeModule.secondSerializer,h.nativeModule.pJ,"必须是两个真实函数候选");
+  }
+  if(failure==="two-mergers"){
+    h.nativeModule.secondMerger=h.createRspackModule().rc;
+    assert.notEqual(h.nativeModule.secondMerger,h.nativeModule.rc,"不能靠伪造 toString 制造歧义");
+  }
+  if(failure==="missing-merger")delete h.nativeModule.rc;
+  if(failure==="split-modules")h.nativeRecords=[
+    {module:{pJ:h.nativeModule.pJ}},{module:{rc:h.nativeModule.rc}}
+  ];
+  const input=[{type:"text",text:"原文\n",text_elements:[]}];
+  const result=await h.beginEdit(a,{input,expectBeginOk:false});
+  assert.equal(result.code,503,JSON.stringify({failure,result}));
+  assert.equal(result.outcomeUnknown,undefined);
+  assert.equal(a.env.queuedEditStore.sessions.size,0);
+  assert.deepEqual(h.serverItems,[{id:"original-physical",clientUserMessageId:"original-logical",input}],
+    failure+" 必须保留服务器原消息");
+  assert.equal(h.calls.delete+h.calls.add+h.calls.start+h.calls.steer+h.calls.restore,0);
+  assert.equal(a.env.nativeQueuedEditInputContracts.has(h.nativeModule),false,
+    "失败合同不能写入可复用的核准缓存");
+}
+const h=await createFullNativeQueueHarness({rspack:true}),a=h.adapter();
+const message={id:"original-physical",context:{prompt:"原文",imageAttachments:[],addedFiles:[],fileAttachments:[]}};
+const previous={input:[{type:"text",text:"原文\n",text_elements:[]},
+  {type:"skill",name:"只出现一次",path:"/skills/fixture/SKILL.md"}]};
+const prepared=[[previous.input[0]],[previous.input[0]],[previous.input[0]]];
+const results=await a.coordinator.execution.queuedEditInputs(message,previous,prepared);
+assert.deepEqual(h.rspackDependencies.durableSerializations,[false,true]);
+assert.equal(results.length,2);
+for(const result of results){
+  assert.deepEqual(result.mergedInput,previous.input);
+  assert.deepEqual(result.mergedPreparedInputs,[previous.input,previous.input,previous.input]);
+}
+const approvedModule=h.nativeModule;
+assert.equal(a.env.nativeQueuedEditInputContracts.has(approvedModule),true);
+h.nativeModule=h.createRspackModule({
+  mergerSource:rspackQueueFixture.merger.source.replace("function(","function (")});
+await assert.rejects(()=>a.coordinator.execution.queuedEditInputs(message,previous,prepared),{code:503},
+  "更换模块对象必须重新核准 serializer/merger 对，不能复用旧实例的成功");
+assert.equal(a.env.nativeQueuedEditInputContracts.has(h.nativeModule),false);
+assert.equal(a.env.nativeQueuedEditInputContracts.has(approvedModule),true);
+"#,
+    );
+}
+
+#[test]
+fn queued_edit_rspack_rejects_each_non_equivalent_native_merge_before_removal() {
+    run_native_queue_edit_consumption_contract(
+        r#"
+for(const changed of ["serialized","steer","start","admission"]){
+  const h=await createFullNativeQueueHarness({rspack:true}),a=h.adapter();
+  const original=[{type:"text",text:"原文\n",text_elements:[]},
+    {type:"skill",name:"保留技能",path:"/skills/fixture/SKILL.md"}];
+  // 故障注入只改变受控 helper 对某一对象的解码结果；原文 pJ/rc、真实谓词和原始输入校验均继续执行。
+  // 用不同对象区分三条 prepared 输入，防止只检查其中一条也让用例通过。
+  if(changed==="serialized")h.rspackDependencies.serializedDecodedText="发生漂移的解码正文";
+  h.transformPrepared=submission=>{
+    const prepared=structuredClone(submission);
+    prepared.steer.input=structuredClone(submission.steer.input);
+    prepared.start.request.input=structuredClone(submission.start.request.input);
+    prepared.steer.userMessageAdmissionStart={
+      request:structuredClone(prepared.start.request),context:structuredClone(prepared.start.context)};
+    const selected={steer:prepared.steer.input,start:prepared.start.request.input,
+      admission:prepared.steer.userMessageAdmissionStart.request.input}[changed];
+    if(selected)h.rspackDependencies.decodedText.set(selected[0],"发生漂移的解码正文");
+    return prepared;
+  };
+  const result=await h.beginEdit(a,{input:original,expectBeginOk:false});
+  assert.equal(result.code,409,JSON.stringify({changed,result}));
+  assert.match(result.message,/原生取消合成与原队列完整输入不一致/,
+    "纯 serializer/prepare 的旧核验应通过，必须由真实 merger 的完整结果拒绝");
+  assert.equal(result.outcomeUnknown,undefined);
+  assert.equal(a.env.queuedEditStore.sessions.size,0);
+  assert.deepEqual(h.serverItems[0].input,original);
+  assert.equal(h.calls.delete+h.calls.add+h.calls.start+h.calls.steer+h.calls.restore,0);
+}
+const h=await createFullNativeQueueHarness({rspack:true}),a=h.adapter();
+const mention={type:"mention",name:"旧附件",path:"/references/prior-file"};
+// 真实 rc 会移除已经不在当前 fileAttachments 中的旧文件 mention；不能按“所有隐藏项必定追加”放行。
+h.rspackDependencies.previousAttachments=[{path:mention.path}];
+const result=await h.beginEdit(a,{input:[{type:"text",text:"原文\n",text_elements:[]},mention],
+  expectBeginOk:false});
+assert.equal(result.code,409,JSON.stringify(result));
+assert.match(result.message,/原生取消合成与原队列完整输入不一致/);
+assert.equal(h.calls.delete,0);
+assert.deepEqual(h.serverItems[0].input.at(-1),mention);
+"#,
+    );
+}
+
+#[test]
+fn queued_edit_rspack_rejects_hidden_context_and_keeps_empty_context_compatible() {
+    run_native_queue_edit_consumption_contract(
+        r#"
+for(const options of [
+  {context:{additionalContext:{instructions:"隐藏工作说明"}}},
+  {messageFields:{writingBlockAdditionalContext:"隐藏写作上下文"}},
+  {context:{commentAttachments:[{text:"隐藏评论"}]}},
+  {context:{mcpAppModelContextAttachments:[{kind:"context",text:"隐藏应用上下文"}]}},
+  {messageFields:{multiUserMessageSender:{name:"另一个发言者"}}},
+  {context:{messageSender:{name:"另一个发言者"}}}
+]){
+  const h=await createFullNativeQueueHarness({rspack:true}),a=h.adapter();
+  const input=[{type:"text",text:"原文\n",text_elements:[]}];
+  const result=await h.beginEdit(a,{...options,input,expectBeginOk:false});
+  assert.equal(result.code,409,JSON.stringify({options,result}));
+  assert.equal(result.outcomeUnknown,undefined);
+  assert.equal(a.env.queuedEditStore.sessions.size,0);
+  assert.deepEqual(h.serverItems[0].input,input);
+  assert.equal(h.calls.delete+h.calls.add+h.calls.start+h.calls.steer+h.calls.restore,0);
+}
+const h=await createFullNativeQueueHarness({rspack:true}),a=h.adapter();
+await h.beginEdit(a,{context:{additionalContext:{},commentAttachments:[],
+  mcpAppModelContextAttachments:[],messageSender:null},
+  messageFields:{writingBlockAdditionalContext:null,multiUserMessageSender:null}});
+const result=await a.api.finish({threadId:"thread",editId:"edit"},"cancel");
+assert.equal(result.ok,true,JSON.stringify(result));
+await h.completeBaseAndDrain();
+assert.deepEqual(h.accepted().filter(item=>item.clientId==="original-logical").map(item=>item.content),
+  [[{type:"text",text:"原文\n",text_elements:[]}]]);
+assert.equal(h.calls.delete,1);
+assert.deepEqual(h.native.readMessages("thread"),[]);
+"#,
+    );
+}
+
+#[test]
 fn queued_edit_legacy_manager_cancel_still_restores_original_input_and_position() {
     run_native_queue_edit_consumption_contract(
         r#"
@@ -3252,9 +3396,10 @@ for(const imageOnly of [false,true]){
 fn queued_edit_native_save_preserves_image_detail_and_hidden_inputs_when_images_change() {
     run_native_queue_edit_consumption_contract(
         r#"
+for(const rspack of [false,true]){
 for(const busy of [false,true]){
   for(const imageChange of ["retain","remove","append"]){
-    const h=await createFullNativeQueueHarness(),a=h.adapter();
+    const h=await createFullNativeQueueHarness({rspack}),a=h.adapter();
     const canonical=input=>input.map(item=>item.type==="image"&&item.detail==null?{...item,detail:null}:item);
     const image={id:"old-image",src:"https://fixture.invalid/original.png",filename:"original.png"};
     const skill={type:"skill",name:"原文",path:"/skills/原文/SKILL.md"};
@@ -3290,6 +3435,7 @@ for(const busy of [false,true]){
     assert.deepEqual(h.native.readMessages("thread"),[]);
     assert.equal(h.calls.restore,0);
   }
+}
 }
 "#,
     );
@@ -3992,6 +4138,7 @@ fn run_native_queue_edit_consumption_contract(scenario: &str) {
         r#"
 const assert=require("node:assert/strict"),nodeCrypto=require("node:crypto");
 const source=require("node:fs").readFileSync(process.argv[2],"utf8");
+const rspackQueueFixture=JSON.parse(require("node:fs").readFileSync(process.argv[3],"utf8"));
 function extract(start,end){
   const from=source.indexOf(start),to=source.indexOf(end,from);
   assert(from>=0&&to>from,start);return source.slice(from,to);
@@ -4041,9 +4188,63 @@ function w8t({input:e,context:t,previousSubmission:n,preserveSerializedContext:r
 function Uhn({isRemoteHost:e,isDurableThread:t},n,r,i=!1){let a=C8t({context:n.multiUserMessageSender==null?n.context:{...n.context,messageSender:n.multiUserMessageSender},isRemoteHost:e,isDurableThread:t,callId:`untrusted_input_${n.id}`}),{input:o}=a;return Kmn(n.context,o),r==null||(a.input=w8t({input:o,context:n.context,previousSubmission:r,preserveSerializedContext:i,isDurableThread:t})),a}
 const nativeSubmissionHashes=[NativeCoordinator.toString(),Imn.toString(),w8t.toString(),Uhn.toString()].map(value=>nodeCrypto.createHash("sha256").update(value).digest("hex"));
 assert.deepEqual(nativeSubmissionHashes,["466f8dd989ba31f8bd5bbb668b9e73a4743dbeb2c16280a3259aea5153ce7e6a","7149373cf98147bd8b2b1c32f303abbf68d649592207240002fd750a5e5e1499","d81d805c7b3d8cccb567d8a1c4a0db3a7372608e1a5f70a369527820d7cabafc","b6600862d6548567b3a7f650756bd2a6fc90209deb44ac91d64466a047500b85"]);
-async function createFullNativeQueueHarness({ephemeral=false}={}){
+// 新版只冻结 YLui.pJ/rc；纯文本、图片、附件解析等依赖均是受控内存替身。
+// 不伪造 Function.toString，不把这里的 prepare、平台 helper 或旧协调器称作新版平台的完整实现。
+function createRspackQueuedInputModule(h,prepare,{serializerSource=rspackQueueFixture.serializer.source,
+    mergerSource=rspackQueueFixture.merger.source}={}){
+  const state=h.rspackDependencies;
+  const dependencies={
+    i:()=>require("node:util").isDeepStrictEqual,
+    a:{x:()=>false},
+    s:{g5:attachments=>{
+      assert.equal(attachments?.length??0,0,"fixture 不实现 MCP app 上下文");
+      return{user:[],untrusted:[]};
+    }},
+    f:{E5:files=>files??[]},
+    _:{Zp:()=>"",Ry:(context,durable)=>{
+      state.durableSerializations.push(durable);
+      return context.prompt+"\n";
+    }},
+    l:{
+      yU:({prompt,message,sender,modelContextAttachments,reviewedMessageAttachments})=>{
+        assert.equal(message??null,null);assert.equal(sender??null,null);
+        assert.equal(modelContextAttachments.length+reviewedMessageAttachments.length,0);
+        const input={type:"text",text:prompt,text_elements:[]};
+        if(state.serializedDecodedText!=null)state.decodedText.set(input,state.serializedDecodedText);
+        return{input,responseItems:[]};
+      },
+      OA:()=>null,aU:(input,text)=>({...input,text})
+    },
+    h:{v:context=>(context.imageAttachments??[]).map(image=>({type:"image",url:image.src,detail:null}))},
+    u:{Y:attachments=>attachments},c:{K:()=>[]},
+    d:{mi:()=>state.previousAttachments,oW:()=>false},
+    p:{R:input=>state.decodedText.get(input)??input.text,
+      p:text=>({type:"text",text,text_elements:[]})},
+    o:{nt:()=>null,o_:(text)=>text,Y5:(text)=>text},
+    m:{Dh:text=>text.trimEnd(),m5:(_previous,text)=>text}
+  };
+  const compile=body=>new Function("dependencies",`with(dependencies){return (${body});}`)(dependencies);
+  const module={pJ:compile(serializerSource),rc:compile(mergerSource),
+    async prepareQueuedMessage(options,phase){
+      const inheritNativeWorkspacePermissions=options.inheritNativeWorkspacePermissions;
+      const prepared=await prepare({...options,inheritNativeWorkspacePermissions},phase);
+      return{...prepared,allowStartAfterNoActiveTurn:prepared.allowStartAfterNoActiveTurn};
+    }};
+  assert.equal(Function.prototype.toString.call(module.pJ),serializerSource);
+  assert.equal(Function.prototype.toString.call(module.rc),mergerSource);
+  return module;
+}
+assert.equal(nodeCrypto.createHash("sha256").update(rspackQueueFixture.serializer.source).digest("hex"),
+  "fe8f00e53e1baed72cc3ece6d4b3d18208a186f66aa78d4d626522a1e6bed70c");
+assert.equal(nodeCrypto.createHash("sha256").update(rspackQueueFixture.merger.source).digest("hex"),
+  "98eae70dc9b22ff289fb4e9abead809020472c357647075277716e21c68d6c97");
+const frozenQueueFunctions={coordinator:NativeCoordinator.toString(),submission:Imn.toString(),
+  serverQueue:Vhn.toString(),serializeQueued:Uhn.toString()};
+async function createFullNativeQueueHarness({ephemeral=false,rspack=false}={}){
   const h={serverItems:[],active:"base",calls:{add:0,delete:0,reorder:0,start:0,restore:0,steer:0},sequence:0,
-    projectedMessages:new Map(),prepared:[],requests:[]};
+    projectedMessages:new Map(),prepared:[],requests:[],
+    rspackDependencies:{decodedText:new WeakMap(),previousAttachments:[],durableSerializations:[]}};
+  const serializeInput=options=>rspack?h.nativeModule.pJ(options):C8t(options);
   const history=h.history={id:"thread",ephemeral,historyMode:"paginated",turns:[{id:"base",status:"inProgress",itemsView:"full",
     items:[{type:"userMessage",id:"base-user",clientId:"base-client",
       content:[{type:"text",text:"base",text_elements:[]}]}]}]};
@@ -4141,7 +4342,8 @@ async function createFullNativeQueueHarness({ephemeral=false}={}){
   };
   const prepare=async(options,phase)=>{
     if(h.beforePrepare)await h.beforePrepare({options,phase});
-    const input=[...C8t({context:options.context}).input,...(h.prepareExtraInput??[])];
+    const input=[...serializeInput({context:options.context,isRemoteHost:false,isDurableThread:true}).input,
+      ...(h.prepareExtraInput??[])];
     h.prepared.push({phase,input:structuredClone(input),clientUserMessageId:options.clientUserMessageId});
     const submission={conversationId:"thread",executionHostId:"local",resume:{conversationId:"thread"},
       allowStartAfterNoActiveTurn:true,steer:{input,clientUserMessageId:options.clientUserMessageId,
@@ -4160,7 +4362,19 @@ async function createFullNativeQueueHarness({ephemeral=false}={}){
       context:message.context,restoreMessage:message,
       clientUserMessageId:message.clientUserMessageId??message.id},phase)};}
   };
-  const native=h.native=new NativeCoordinator({
+  let Coordinator=NativeCoordinator,createServerQueue=Vhn;
+  if(rspack){
+    h.createRspackModule=options=>createRspackQueuedInputModule(h,prepare,options);
+    h.nativeModule=h.createRspackModule();
+    // 复用逐字冻结的旧协调器，只将其纯输入依赖绑定到当前 pJ/rc；
+    // 如此取消与保存实际消耗新版合成结果，默认旧 harness 的函数与摘要不变。
+    const C8t=options=>h.nativeModule.pJ(options),w8t=options=>h.nativeModule.rc(options);
+    const Imn=eval("("+frozenQueueFunctions.submission+")");
+    const Uhn=eval("("+frozenQueueFunctions.serializeQueued+")");
+    Coordinator=eval("("+frozenQueueFunctions.coordinator+")");
+    createServerQueue=eval("("+frozenQueueFunctions.serverQueue+")");
+  }
+  const native=h.native=new Coordinator({
     hostId:"local",getStreamRole:()=>({role:"owner"}),isDurableThread:()=>true,
     createMessageThreadId:()=>undefined,canSend:()=>true,getMessageQueueMode:async()=>h.queueMode??"queue",
     submissionHost:host,execution:()=>execution,
@@ -4170,7 +4384,7 @@ async function createFullNativeQueueHarness({ephemeral=false}={}){
       update:async update=>{state=update(state);}},
     onQueueChanged:()=>{},logger:{warning(){},error(){}}
   });
-  const serverQueue=Vhn({manager:nativeManager,isCloudQueue:false,isRemoteHost:false,isDurableThread:true,
+  const serverQueue=createServerQueue({manager:nativeManager,isCloudQueue:false,isRemoteHost:false,isDurableThread:true,
     enabled:()=>true,assertQueueAdmission:async()=>{},createMessageId:()=>"unused",logger:{warning(){}}});
   native.setServerQueue(serverQueue);native.registerReplayAdmission(async()=>{});
   await native.executionReady;
@@ -4203,7 +4417,8 @@ async function createFullNativeQueueHarness({ephemeral=false}={}){
     const env={manager:null,appScope:{},requestClientQueues:new Map(),requestClientQueuePrepare:null,
       requestClientNativeRpc:async()=>rpc,
       nativeModuleSnapshot:async()=>({module:h.nativeModule??=Object.create(null),
-        source:h.moduleSource??w8t.toString()+"function nextFixtureFunction(){}"}),
+        source:h.moduleSource??w8t.toString()+"function nextFixtureFunction(){}",rspack,
+        records:h.nativeRecords??[{module:h.nativeModule}]}),
       nativeQueuedEditInputContracts:new WeakMap(),
       nativeFunction:(_module,_predicate,label)=>label==="队列原始输入序列化"
         ?(options=>h.queueSerializer?h.queueSerializer(options):C8t(options)):prepare,
@@ -4224,6 +4439,10 @@ async function createFullNativeQueueHarness({ephemeral=false}={}){
       retryExecutionConfigLoading:fn=>fn(),notifications:[],
       pushNotification:event=>env.notifications.push(structuredClone(event)),reportNativeCallbackFailure:()=>{}
     };
+    if(rspack)env.nativeFunction=new Function("env",`with(env){
+      ${extract("function nativeFunction(","function nativeExport(")}
+      return nativeFunction;
+    }`)(env);
     const functions=extract("function requestClientTurnCoordinator(","function nativeSideHistoryPage(")
       +extract("function queuedEditSummaries(","async function queueSnapshot(")
       +extract("async function removeQueued(","function queuedOrderIds(")
@@ -4269,11 +4488,12 @@ async function createFullNativeQueueHarness({ephemeral=false}={}){
     return{env,api,coordinator};
   };
   h.beginEdit=async(adapter,{leftAnchor=false,rightAnchor=false,nativeLocal=false,prompt="原文",images=[],input=null,
-      context={},pausedReason=null,submissionOptions=null,interrupted=false,expectBeginOk=true}={})=>{
+      context={},messageFields={},pausedReason=null,submissionOptions=null,interrupted=false,expectBeginOk=true}={})=>{
     const message={id:"original-physical",clientUserMessageId:"original-logical",text:prompt,createdAt:0,
       ...pausedReason==null?{}:{pausedReason,submission:{status:"queued",hostId:"local"}},
       ...submissionOptions==null?{}:{submissionOptions},
-      cwd:"/memory-fixture",context:{prompt,imageAttachments:structuredClone(images),addedFiles:[],fileAttachments:[],
+      cwd:"/memory-fixture",...messageFields,
+      context:{prompt,imageAttachments:structuredClone(images),addedFiles:[],fileAttachments:[],
         ...context,...nativeLocal?{localSubmitPrepared:true}:{}}};
     h.serverItems=[];
     if(nativeLocal){
@@ -4290,7 +4510,7 @@ async function createFullNativeQueueHarness({ephemeral=false}={}){
     }else{
       h.projectedMessages.set(message.id,message);
       h.serverItems=[{id:message.id,clientUserMessageId:message.clientUserMessageId,
-        input:structuredClone(input??C8t({context:message.context}).input)}];
+        input:structuredClone(input??serializeInput({context:message.context}).input)}];
     }
     if(leftAnchor&&!nativeLocal)h.serverItems.unshift({id:"left-anchor",clientUserMessageId:"left-client",
       input:[{type:"text",text:"左侧未发送消息\n",text_elements:[]}]});
@@ -4455,14 +4675,18 @@ function createLegacyQueueRestoreHarness({ghost=true,acceptImmediately=true}={})
 "#,
         format!("{scenario}\n}})().catch(error=>{{console.error(error);process.exitCode=1}});")
     );
-    let mut child = Command::new("node")
-        .arg("-")
-        .arg(repo.join("assets/remote-access/native.js"))
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child =
+        Command::new("node")
+            .arg("-")
+            .arg(repo.join("assets/remote-access/native.js"))
+            .arg(repo.join(
+                "crates/codex-elves-core/tests/fixtures/codex-26.1103.7773-queued-input.json",
+            ))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
     child
         .stdin
         .take()
@@ -9884,8 +10108,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = include_str!("../../../assets/remote-access/native.js");
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 137"));
-    assert!(script.contains("version: 137, call"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 138"));
+    assert!(script.contains("version: 138, call"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));

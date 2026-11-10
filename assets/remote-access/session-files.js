@@ -218,7 +218,7 @@ function applySpreadsheetStyle(cell, style) {
 }
 function previewTable(rows, columnCount, {
   numbered = false, page = 0, onPage = null, merges = [], columnWidths = [], styles = [], onRange = null,
-  layout = "original", wrap = false, defaultRowHeight = 20
+  layout = "compact", wrap = false, defaultRowHeight = 20
 } = {}) {
   // 每页最多渲染 100 行；与后台每表 1000 行上限区分，手机翻页不会一次创建整张大表的 DOM。
   const pageSize = 100, pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
@@ -362,7 +362,7 @@ export function renderRichFilePreview(value, state = {}, onNavigate = null, { on
       panel.append(previewTable(sheet.rows, sheet.columnCount, {
         numbered: true, page: state.page, merges: sheet.merges || [], columnWidths: sheet.columnWidths || [],
         styles: sheet.styles || [], onRange, defaultRowHeight: sheet.defaultRowHeight ?? 20,
-        layout: state.layout === "compact" ? "compact" : "original", wrap: state.wrap === true,
+        layout: state.layout === "original" ? "original" : "compact", wrap: state.wrap === true,
         onPage: page => { state.page = page; onNavigate?.(); }
       }));
       root.append(tabs, panel);
@@ -692,12 +692,14 @@ export function mountSessionFiles({
       richView.wrap = richView.wrap !== true; renderSpreadsheetControlsChange();
     } else { wrap = !wrap; renderContent(); }
   });
-  // 用户要求信息栏右侧为“自动换行 → 原始/紧凑布局”；布局按钮显示当前状态，点击互斥切换。
-  // 初次使用原始尺寸且关闭换行；换行开启后允许行高扩展。选择跟随文件页缓存，切换会话/授权时清空。
+  // 用户要求信息栏右侧为“自动换行 → 原始/紧凑布局”；参照 Markdown 源码/预览按钮，文字表示点击后的目标模式，不使用选中高亮。
+  // 用户要求表格默认紧凑布局且保留手动切换；缺省状态按紧凑处理，第一次点击切换原始布局。
+  // 自动换行默认关闭；选择跟随文件页缓存，切换会话/授权时清空。
   const layoutButton = control("原始布局", () => {
-    richView.layout = richView.layout === "compact" ? "original" : "compact";
+    richView.layout = richView.layout === "original" ? "compact" : "original";
     renderSpreadsheetControlsChange();
   });
+  layoutButton.setAttribute("aria-label", "切换原始布局和紧凑布局");
   contentControls.append(metadata, richRange, wrapButton, layoutButton, modeButton);
   const fileStatus = node("p", "session-tools-status"); fileStatus.setAttribute("role", "status");
   const body = node("div", "session-tools-detail session-files-content");
@@ -992,15 +994,14 @@ export function mountSessionFiles({
     body.replaceChildren(); body.classList.toggle("session-files-wrap", wrap);
     richRange.replaceChildren(); richRange.hidden = true;
     const value = contentResponse;
-    const isSpreadsheet = value?.kind === "spreadsheet", compact = richView.layout === "compact";
+    const isSpreadsheet = value?.kind === "spreadsheet", compact = richView.layout !== "original";
     contentControls.classList.toggle("session-files-spreadsheet-controls", isSpreadsheet);
     contentControls.hidden = !value;
     modeButton.hidden = value?.kind !== "text" || !/\.mdx?$/iu.test(value.path);
     wrapButton.hidden = !isSpreadsheet && (value?.kind !== "text" || !sourceMode);
     layoutButton.hidden = !isSpreadsheet;
-    layoutButton.textContent = compact ? "紧凑布局" : "原始布局";
-    layoutButton.title = compact ? "切换为文件原始行列尺寸" : "按内容自动调整行列尺寸";
-    layoutButton.setAttribute("aria-pressed", String(compact));
+    layoutButton.textContent = compact ? "原始布局" : "紧凑布局";
+    layoutButton.title = compact ? "切换到原始布局" : "切换到紧凑布局";
     modeButton.textContent = sourceMode ? "预览" : "源码";
     modeButton.title = sourceMode ? "切换到预览" : "切换到源码";
     wrapButton.setAttribute("aria-pressed", String(isSpreadsheet ? richView.wrap === true : wrap));
