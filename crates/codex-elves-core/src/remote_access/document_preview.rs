@@ -26,6 +26,10 @@ const MAX_CELL_TEXT: usize = 16 * 1024;
 const MAX_SECTIONS: usize = 100;
 const MAX_BLOCKS: usize = 2000;
 const MAX_MERGES: usize = 10_000;
+const DEFAULT_COLUMN_WIDTH: u16 = 120;
+const MAX_COLUMN_WIDTH: u16 = 480;
+const DEFAULT_ROW_HEIGHT: u16 = 20;
+const MAX_ROW_HEIGHT: u16 = 2048;
 type PreviewResult<T> = Result<T, &'static str>;
 type OfficeZip<'a> = ZipArchive<Cursor<&'a [u8]>>;
 
@@ -60,6 +64,8 @@ struct Sheet {
     merges: Vec<MergeRange>,
     // 无原始列宽（CSV/TSV/ODS）序列化为 []，前端按默认列宽读取；非空时每列必须对应一个宽度。
     column_widths: Vec<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_row_height: Option<u16>,
     styles: Vec<CellStyle>,
     truncated: bool,
 }
@@ -77,12 +83,16 @@ struct MergeRange {
 struct SheetLayout {
     merges: Vec<MergeRange>,
     widths: Vec<u16>,
+    default_row_height: Option<u16>,
+    row_heights: HashMap<u32, u16>,
 }
 
 #[derive(Serialize)]
 struct Row {
     number: u32,
     cells: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    height: Option<u16>,
     #[serde(rename = "styleIds", skip_serializing_if = "Vec::is_empty")]
     style_ids: Vec<usize>,
 }
@@ -172,12 +182,14 @@ impl SheetBuilder {
                 .map(|(number, cells)| Row {
                     number,
                     cells,
+                    height: None,
                     style_ids: Vec::new(),
                 })
                 .collect(),
             column_count,
             merges: Vec::new(),
             column_widths: Vec::new(),
+            default_row_height: None,
             styles: Vec::new(),
             truncated: self.truncated,
         }
@@ -326,6 +338,35 @@ fn cell_position(reference: &str) -> PreviewResult<(u32, usize)> {
     Ok((row, column - 1))
 }
 
+fn spreadsheet_column_width(value: Option<&str>) -> Option<u16> {
+    let width = value?
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)?;
+    // 用户要求原始布局保留窄列：字符宽按 7px 加 5px 边距近似，限制 1–480px；
+    // 紧凑布局的 48px 最小值由前端单独处理，须与 session-files.js 的尺寸校验同步。
+    let max_characters = (f64::from(MAX_COLUMN_WIDTH) - 5.0) / 7.0;
+    Some(
+        (width.min(max_characters) * 7.0 + 5.0)
+            .round()
+            .clamp(1.0, f64::from(MAX_COLUMN_WIDTH)) as u16,
+    )
+}
+
+fn spreadsheet_row_height(value: Option<&str>) -> Option<u16> {
+    let height = value?
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)?;
+    // 用户要求原始布局保留文件行高：Excel 的 pt 按 96/72 转 px，最大 2048px；
+    // 先限制源数值再换算，避免异常大值溢出；前端须同步允许 1–2048px。
+    Some(
+        (height.min(f64::from(MAX_ROW_HEIGHT) * 0.75) * 4.0 / 3.0)
+            .round()
+            .clamp(1.0, f64::from(MAX_ROW_HEIGHT)) as u16,
+    )
+}
+
 fn spreadsheet_layouts(zip: &mut OfficeZip<'_>) -> PreviewResult<HashMap<String, SheetLayout>> {
     let root = xml_entry(zip, "_rels/.rels")?;
     let root = xml(&root)?;
@@ -401,7 +442,15 @@ fn spreadsheet_layouts(zip: &mut OfficeZip<'_>) -> PreviewResult<HashMap<String,
                 end_column,
             });
         }
-        layout.widths.resize(MAX_COLUMNS, 120);
+        let format = tree
+            .descendants()
+            .find(|node| element(*node, "sheetFormatPr"));
+        layout.default_row_height =
+            spreadsheet_row_height(format.and_then(|node| node.attribute("defaultRowHeight")));
+        let default_width =
+            spreadsheet_column_width(format.and_then(|node| node.attribute("defaultColWidth")))
+                .unwrap_or(DEFAULT_COLUMN_WIDTH);
+        layout.widths.resize(MAX_COLUMNS, default_width);
         for column in tree.descendants().filter(|node| element(*node, "col")) {
             let start = column
                 .attribute("min")
@@ -412,19 +461,29 @@ fn spreadsheet_layouts(zip: &mut OfficeZip<'_>) -> PreviewResult<HashMap<String,
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(0)
                 .min(MAX_COLUMNS);
-            let Some(width) = column
-                .attribute("width")
-                .and_then(|value| value.parse::<f64>().ok())
-                .filter(|value| value.is_finite() && *value >= 0.0)
-            else {
+            let Some(width) = spreadsheet_column_width(column.attribute("width")) else {
                 continue;
             };
-            // Excel 列宽以字符计；按常用 7px 数字宽度加 5px 边距近似，手机限制 48–480px。
-            let width = (width * 7.0 + 5.0).round().clamp(48.0, 480.0) as u16;
             if start > 0 && start <= end {
                 for value in &mut layout.widths[start - 1..end] {
                     *value = width;
                 }
+            }
+        }
+        // 行高按真实行号稀疏记录，不能按百万行声明展开；元数据数量也受总格数上限约束。
+        for row in tree.descendants().filter(|node| element(*node, "row")) {
+            let number = row
+                .attribute("r")
+                .and_then(|value| value.parse::<u32>().ok())
+                .filter(|number| (1..=1_048_576).contains(number));
+            let height = spreadsheet_row_height(row.attribute("ht"));
+            if let (Some(number), Some(height)) = (number, height) {
+                if layout.row_heights.len() >= MAX_CELLS
+                    && !layout.row_heights.contains_key(&number)
+                {
+                    return Err("Excel 行高定义过多，暂不提供在线预览");
+                }
+                layout.row_heights.insert(number, height);
             }
         }
         layouts.insert(name.to_owned(), layout);
@@ -487,12 +546,21 @@ fn apply_sheet_layout(
         .map(|(number, cells)| Row {
             number,
             cells,
+            height: layout.row_heights.get(&number).copied(),
             style_ids: Vec::new(),
         })
         .collect();
     sheet.column_widths = (0..sheet.column_count)
-        .map(|index| layout.widths.get(index).copied().unwrap_or(120))
+        .map(|index| {
+            layout
+                .widths
+                .get(index)
+                .copied()
+                .unwrap_or(DEFAULT_COLUMN_WIDTH)
+        })
         .collect();
+    // XLSX 缺省行高按 15pt = 20px 还原；CSV/TSV/ODS 仍省略行高字段，由前端选择默认布局。
+    sheet.default_row_height = Some(layout.default_row_height.unwrap_or(DEFAULT_ROW_HEIGHT));
     budget.truncated |= sheet.truncated;
     Ok(())
 }

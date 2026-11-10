@@ -92,9 +92,12 @@ export function validRichFilePreview(value) {
   const numberedRows = sheet => Array.isArray(sheet.rows) && sheet.rows.length <= 1000
     && sheet.rows.every((row, index) => Number.isSafeInteger(row?.number) && row.number > 0
       && row.number <= 4294967295 && (!index || row.number > sheet.rows[index - 1].number)
+      && (row.height == null || Number.isFinite(row.height) && row.height >= 1 && row.height <= 2048)
       && Array.isArray(row.cells) && row.cells.length <= sheet.columnCount
       && (cells += row.cells.length) <= 100000 && row.cells.every(value => text(value, 16 * 1024)));
   const layout = sheet => {
+    if (sheet.defaultRowHeight != null && (!Number.isFinite(sheet.defaultRowHeight)
+        || sheet.defaultRowHeight < 1 || sheet.defaultRowHeight > 2048)) return false;
     if (sheet.styles != null && (!Array.isArray(sheet.styles) || sheet.styles.length > 4096
         || sheet.styles.some(style => !style
           || [style.color, style.background].some(color => color != null && !/^#[0-9a-f]{6}$/iu.test(color))
@@ -105,10 +108,10 @@ export function validRichFilePreview(value) {
     if (sheet.rows.some(row => row.styleIds != null && (!Array.isArray(row.styleIds)
         || row.styleIds.length !== sheet.columnCount
         || row.styleIds.some(id => !Number.isSafeInteger(id) || id < 0 || id >= (sheet.styles?.length || 0))))) return false;
-    // CSV/TSV/ODS 没有原始列宽时后台返回 []，沿用 120px 默认列宽；非空数组仍须逐列完整且有界。
+    // CSV/TSV/ODS 没有原始列宽时后台返回 []，原始布局回退 120px；非空宽度允许窄列，仍须逐列完整且不超过 480px。
     if (sheet.columnWidths != null && (!Array.isArray(sheet.columnWidths)
         || sheet.columnWidths.length !== 0 && sheet.columnWidths.length !== sheet.columnCount
-        || sheet.columnWidths.some(width => !Number.isSafeInteger(width) || width < 48 || width > 480))) return false;
+        || sheet.columnWidths.some(width => !Number.isSafeInteger(width) || width < 1 || width > 480))) return false;
     if (sheet.merges == null) return true;
     if (!Array.isArray(sheet.merges) || sheet.merges.length > 10000) return false;
     const rowNumbers = new Set(sheet.rows.map(row => row.number)), occupied = new Set();
@@ -145,6 +148,60 @@ function spreadsheetColumn(index) {
     label = String.fromCharCode(65 + (value - 1) % 26) + label;
   return label;
 }
+function spreadsheetTextMeasurer() {
+  const context = typeof document !== "undefined" ? document.createElement("canvas").getContext?.("2d") : null;
+  const family = typeof getComputedStyle === "function" ? getComputedStyle(document.documentElement).fontFamily : "sans-serif";
+  return (text, style) => {
+    const size = style?.fontSize ? style.fontSize * 4 / 3 : 12;
+    if (context) {
+      context.font = `${style?.italic ? "italic " : ""}${style?.bold ? "700" : "400"} ${size}px ${family}`;
+      return Math.max(0, ...text.split(/\r\n?|\n/u).map(line => context.measureText(line).width));
+    }
+    // 无 Canvas 的环境保留有界估算；正常网页使用真实字体测量，不按文件的宽列猜紧凑宽度。
+    return Math.max(0, ...text.split(/\r\n?|\n/u).map(line =>
+      Array.from(line).reduce((sum, character) => sum + (/[^\x00-\xff]/u.test(character) ? size : size * .65), 0)));
+  };
+}
+export function compactSpreadsheetWidths(rows, columnCount, styles = [], merges = [], measure = spreadsheetTextMeasurer()) {
+  const widths = Array(columnCount).fill(0), covered = new Set(), merged = [], sourceRows = new Map(rows.map(row => [row.number, row]));
+  for (const merge of merges) {
+    for (let row = merge.startRow; row <= merge.endRow; row++)
+      for (let column = merge.startColumn; column <= merge.endColumn; column++)
+        if (row !== merge.startRow || column !== merge.startColumn || merge.endColumn > merge.startColumn)
+          covered.add(`${row}:${column}`);
+    if (merge.endColumn > merge.startColumn) merged.push(merge);
+  }
+  // 按整张已读取工作表计算，翻页不改变列宽；合并标题约束整体跨度，不能单独撑宽第一列。
+  const cache = new Map();
+  const textWidth = (row, column) => {
+    const text = row?.cells[column] || "", id = row?.styleIds?.[column], key = `${id ?? ""}:${text}`;
+    if (!cache.has(key)) cache.set(key, Math.ceil(measure(text, styles[id])));
+    return cache.get(key);
+  };
+  for (const row of rows)
+    for (let column = 0; column < row.cells.length; column++)
+      if (!covered.has(`${row.number}:${column}`)) widths[column] = Math.max(widths[column], textWidth(row, column));
+  for (const merge of merged) {
+    const count = merge.endColumn - merge.startColumn + 1;
+    const available = widths.slice(merge.startColumn, merge.endColumn + 1).reduce((sum, width) =>
+      sum + Math.max(48, Math.min(480, width + 10)), 0);
+    const needed = Math.min(count * 480, textWidth(sourceRows.get(merge.startRow), merge.startColumn) + 10);
+    let remaining = needed - available;
+    let expandable = Array.from({ length: count }, (_, index) => merge.startColumn + index)
+      .filter(column => widths[column] + 10 < 480);
+    while (remaining > .01 && expandable.length) {
+      const share = remaining / expandable.length;
+      for (const column of expandable) {
+        const before = Math.max(48, widths[column] + 10), extra = Math.min(480 - before, share);
+        widths[column] = before + extra - 10; remaining -= extra;
+      }
+      expandable = expandable.filter(column => widths[column] + 10 < 479.99);
+    }
+  }
+  // 最小 48px、最大 480px；10px 包含左右各 4px、1px 边框及 1px 测量余量。
+  // 文本宽度以阅读字号 12px 为基准，CSS 按阅读字号缩放后再封顶；内容再长也不会突破最大列宽。
+  return widths.map(width => `clamp(48px,calc(${Math.ceil(width) / 12} * var(--file-reading-font-size,12px) + 10px),480px)`);
+}
 function applySpreadsheetStyle(cell, style) {
   if (!style) return;
   if (style.background) cell.style.backgroundColor = style.background;
@@ -160,12 +217,20 @@ function applySpreadsheetStyle(cell, style) {
   cell.style.overflow = "hidden";
 }
 function previewTable(rows, columnCount, {
-  numbered = false, page = 0, onPage = null, merges = [], columnWidths = [], styles = [], onRange = null
+  numbered = false, page = 0, onPage = null, merges = [], columnWidths = [], styles = [], onRange = null,
+  layout = "original", wrap = false, defaultRowHeight = 20
 } = {}) {
   // 每页最多渲染 100 行；与后台每表 1000 行上限区分，手机翻页不会一次创建整张大表的 DOM。
   const pageSize = 100, pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
   page = Math.min(Math.max(0, page), pageCount - 1);
   const root = node("div", "session-files-table-group");
+  const compactWidths = numbered && layout === "compact" ? compactSpreadsheetWidths(rows, columnCount, styles, merges) : null;
+  const rowHeight = row => row.height ?? defaultRowHeight;
+  const sizeCell = (element, height) => {
+    if (layout !== "original") return;
+    // 原始布局使用文件行高；主动开启自动换行时，以原行高为下限增高，避免宽列封顶后正文被裁掉。
+    element.style[wrap ? "minHeight" : "height"] = `${Math.max(0, height - 1)}px`;
+  };
   const draw = () => {
     root.replaceChildren();
     if (!rows.length || !columnCount) {
@@ -174,11 +239,16 @@ function previewTable(rows, columnCount, {
     }
     const start = page * pageSize, visible = rows.slice(start, start + pageSize);
     const pagination = node("div", "session-files-table-pagination");
-    pagination.append(node("span", "", `${start + 1}–${start + visible.length} / ${rows.length} 行`));
+    const rangeText = node("span", "", `${start + 1}–${start + visible.length} / ${rows.length} 行`);
+    rangeText.title = rangeText.textContent; pagination.append(rangeText);
     if (pageCount > 1) {
       const change = next => { page = next; onPage?.(page); draw(); };
-      const previous = control("上一页", () => change(page - 1));
-      const next = control("下一页", () => change(page + 1));
+      const previous = control(numbered ? "‹" : "上一页", () => change(page - 1));
+      const next = control(numbered ? "›" : "下一页", () => change(page + 1));
+      for (const [button, label] of [[previous, "上一页"], [next, "下一页"]]) {
+        button.title = label; button.setAttribute("aria-label", label);
+        if (numbered) button.className += " session-files-page-button";
+      }
       previous.disabled = page === 0; next.disabled = page === pageCount - 1;
       pagination.append(previous, next);
     }
@@ -192,16 +262,17 @@ function previewTable(rows, columnCount, {
     const covered = new Set(), anchors = new Map();
     if (numbered) {
       // 用户要求合并单元格与稳定首列：按原文件列宽固定网格，合并标题不参与单列自动撑宽。
-      const widths = Array.from({ length: columnCount }, (_, index) => columnWidths[index] || 120);
+      const widths = Array.from({ length: columnCount }, (_, index) => Math.min(480, columnWidths[index] || 120));
       table.className += " session-files-spreadsheet";
+      table.setAttribute("data-layout", layout); table.setAttribute("data-wrap", String(wrap));
       // 用户要求手机行号栏紧凑：实际宽度交给 CSS；总宽与行号 col 共用变量，旋转后不挤压数据列。
       // 按整张工作表最大行号的位数预留空间，长行号完整显示，翻页时宽度不跳变。
       table.style.setProperty("--sheet-row-number-digits", String(String(rows.at(-1).number).length));
-      table.style.width = `calc(${widths.reduce((sum, width) => sum + width, 0)}px + var(--sheet-row-number-width,44px))`;
+      table.style.width = `calc(${compactWidths ? compactWidths.join(" + ") : `${widths.reduce((sum, width) => sum + width, 0)}px`} + var(--sheet-row-number-width,44px))`;
       const columns = node("colgroup"), rowNumbers = node("col");
       rowNumbers.style.width = "var(--sheet-row-number-width,44px)"; columns.append(rowNumbers);
-      for (const width of widths) {
-        const column = node("col"); column.style.width = `${width}px`; columns.append(column);
+      for (const [index, width] of widths.entries()) {
+        const column = node("col"); column.style.width = compactWidths?.[index] || `${width}px`; columns.append(column);
       }
       table.append(columns);
       const sourceRows = new Map(rows.map(row => [row.number, row]));
@@ -212,6 +283,7 @@ function previewTable(rows, columnCount, {
         // 跨页纵向合并在每页可见段延续；内容始终取原始左上角，不能从被覆盖的空格猜值。
         anchors.set(key, { rows: included.length, columns: merge.endColumn - merge.startColumn + 1,
           text: sourceRows.get(merge.startRow)?.cells[merge.startColumn] || "",
+          height: included.reduce((sum, row) => sum + rowHeight(row), 0),
           styleId: sourceRows.get(merge.startRow)?.styleIds?.[merge.startColumn] });
         for (const row of included)
           for (let column = merge.startColumn; column <= merge.endColumn; column++)
@@ -231,17 +303,27 @@ function previewTable(rows, columnCount, {
     for (const value of visible) {
       const row = node("tr"), cells = numbered ? value.cells : value;
       if (numbered) {
-        const number = node("th", "session-files-row-number", String(value.number));
+        const number = node("th", "session-files-row-number");
+        const label = node("div", "session-files-row-number-label", String(value.number));
+        sizeCell(label, rowHeight(value)); number.append(label);
+        if (layout === "original") row.style.height = `${rowHeight(value)}px`;
         number.scope = "row"; row.append(number);
       }
       for (let column = 0; column < columnCount; column++) {
         const key = `${value.number}:${column}`;
         if (numbered && covered.has(key)) continue;
         const merge = numbered && anchors.get(key);
-        const cell = node("td", "", merge ? merge.text : cells[column] || "");
+        const text = merge ? merge.text : cells[column] || "";
+        const cell = node("td", "", numbered ? "" : text);
         if (merge) { cell.rowSpan = merge.rows; cell.colSpan = merge.columns; }
         if (numbered) {
           applySpreadsheetStyle(cell, styles[merge ? merge.styleId : value.styleIds?.[column]]);
+          cell.style.whiteSpace = wrap ? "pre-wrap" : "pre";
+          const content = node("div", "session-files-cell-content", text);
+          sizeCell(content, merge ? merge.height : rowHeight(value));
+          const vertical = styles[merge ? merge.styleId : value.styleIds?.[column]]?.vertical;
+          content.style.justifyContent = vertical === "middle" ? "center" : vertical === "bottom" ? "flex-end" : "flex-start";
+          cell.append(content);
           cell.setAttribute("data-row", String(value.number));
           cell.setAttribute("data-column", String(column));
         }
@@ -279,7 +361,8 @@ export function renderRichFilePreview(value, state = {}, onNavigate = null, { on
       if (sheet.truncated) panel.append(node("p", "session-files-empty", "此工作表仅显示限额内的内容"));
       panel.append(previewTable(sheet.rows, sheet.columnCount, {
         numbered: true, page: state.page, merges: sheet.merges || [], columnWidths: sheet.columnWidths || [],
-        styles: sheet.styles || [], onRange,
+        styles: sheet.styles || [], onRange, defaultRowHeight: sheet.defaultRowHeight ?? 20,
+        layout: state.layout === "compact" ? "compact" : "original", wrap: state.wrap === true,
         onPage: page => { state.page = page; onNavigate?.(); }
       }));
       root.append(tabs, panel);
@@ -604,8 +687,18 @@ export function mountSessionFiles({
   const richRange = node("div", "session-files-range"); richRange.hidden = true;
   const modeButton = control("源码", () => { sourceMode = !sourceMode; renderContent(); });
   modeButton.setAttribute("aria-label", "切换源码和预览");
-  const wrapButton = control("自动换行", () => { wrap = !wrap; renderContent(); });
-  contentControls.append(metadata, richRange, wrapButton, modeButton);
+  const wrapButton = control("自动换行", () => {
+    if (contentResponse?.kind === "spreadsheet") {
+      richView.wrap = richView.wrap !== true; renderSpreadsheetControlsChange();
+    } else { wrap = !wrap; renderContent(); }
+  });
+  // 用户要求信息栏右侧为“自动换行 → 原始/紧凑布局”；布局按钮显示当前状态，点击互斥切换。
+  // 初次使用原始尺寸且关闭换行；换行开启后允许行高扩展。选择跟随文件页缓存，切换会话/授权时清空。
+  const layoutButton = control("原始布局", () => {
+    richView.layout = richView.layout === "compact" ? "original" : "compact";
+    renderSpreadsheetControlsChange();
+  });
+  contentControls.append(metadata, richRange, wrapButton, layoutButton, modeButton);
   const fileStatus = node("p", "session-tools-status"); fileStatus.setAttribute("role", "status");
   const body = node("div", "session-tools-detail session-files-content");
   content.screen.append(contentControls, fileStatus, body);
@@ -899,12 +992,18 @@ export function mountSessionFiles({
     body.replaceChildren(); body.classList.toggle("session-files-wrap", wrap);
     richRange.replaceChildren(); richRange.hidden = true;
     const value = contentResponse;
+    const isSpreadsheet = value?.kind === "spreadsheet", compact = richView.layout === "compact";
+    contentControls.classList.toggle("session-files-spreadsheet-controls", isSpreadsheet);
     contentControls.hidden = !value;
     modeButton.hidden = value?.kind !== "text" || !/\.mdx?$/iu.test(value.path);
-    wrapButton.hidden = value?.kind !== "text" || !sourceMode;
+    wrapButton.hidden = !isSpreadsheet && (value?.kind !== "text" || !sourceMode);
+    layoutButton.hidden = !isSpreadsheet;
+    layoutButton.textContent = compact ? "紧凑布局" : "原始布局";
+    layoutButton.title = compact ? "切换为文件原始行列尺寸" : "按内容自动调整行列尺寸";
+    layoutButton.setAttribute("aria-pressed", String(compact));
     modeButton.textContent = sourceMode ? "预览" : "源码";
     modeButton.title = sourceMode ? "切换到预览" : "切换到源码";
-    wrapButton.setAttribute("aria-pressed", String(wrap));
+    wrapButton.setAttribute("aria-pressed", String(isSpreadsheet ? richView.wrap === true : wrap));
     if (!value) return;
     metadata.textContent = bytesLabel(value.size);
     message(fileStatus, value.message);
@@ -959,6 +1058,14 @@ export function mountSessionFiles({
       link.append(image); link.onclick = event => { event.preventDefault(); openImagePreview?.(link, image); };
       body.append(link);
     }
+  }
+  function renderSpreadsheetControlsChange() {
+    const previous = body.querySelector(".session-files-table-scroll");
+    const top = previous?.scrollTop || 0, left = previous?.scrollLeft || 0;
+    renderContent();
+    const next = body.querySelector(".session-files-table-scroll");
+    if (next) { next.scrollTop = top; next.scrollLeft = left; }
+    saveView();
   }
   function finishExit() {
     if (route || disposed) return;

@@ -75,10 +75,12 @@ const sessionMenuSource = await readFile(new URL("../assets/remote-access/sessio
 
 function richFileHarness() {
   const node = (tag, className = "", textContent = "") => ({
-    tag, className, textContent, children: [], attributes: {},
+    tag, className, text: textContent, children: [], attributes: {},
+    get textContent() { return this.text + this.children.map(child => child.textContent).join(""); },
+    set textContent(value) { this.text = value; this.children = []; },
     style: { setProperty(name, value) { this[name] = value; } }, disabled: false,
     append(...children) { this.children.push(...children); },
-    replaceChildren(...children) { this.children = children; },
+    replaceChildren(...children) { this.text = ""; this.children = children; },
     setAttribute(name, value) { this.attributes[name] = value; },
   });
   const context = vm.createContext({
@@ -134,12 +136,12 @@ test("CSV、TSV、ODS 的空布局数组可预览，缺省列宽与完整列宽�
     ["var(--sheet-row-number-width,44px)", "120px", "120px", "120px"]);
   assert.equal(nodes.some(node => node.tag === "td" && node.textContent === "001234"), true);
   assert.equal(nodes.some(node => node.tag === "td" && node.textContent === "换行\n逗号,引号"), true);
-  for (const columnWidths of [undefined, null, [], [54, 120, 180]]) {
+  for (const columnWidths of [undefined, null, [], [1, 32, 480], [54, 120, 180]]) {
     const compatible = structuredClone(value);
     compatible.sheets[0].columnWidths = columnWidths;
     assert.equal(h.context.validRichFilePreview(compatible), true);
   }
-  for (const columnWidths of [[120], [120, 120, 120, 120], [120, 47, 120],
+  for (const columnWidths of [[120], [120, 120, 120, 120], [120, 0, 120],
     [120, 481, 120], [120, 120.5, 120], ["120", 120, 120], ""]) {
     const invalid = structuredClone(value);
     invalid.sheets[0].columnWidths = columnWidths;
@@ -159,7 +161,7 @@ test("Excel 多表切换和每页100行保留页码，空表与稀疏行号可�
   const find = predicate => h.all(root).filter(predicate);
   assert.equal(find(node => node.tag === "td").length, 200);
   assert.equal(find(node => node.tag === "th" && node.scope === "row")[0].textContent, "1000");
-  find(node => node.tag === "button" && node.textContent === "下一页")[0].click();
+  find(node => node.tag === "button" && node.attributes["aria-label"] === "下一页")[0].click();
   assert.equal(state.page, 1);
   assert.equal(find(node => node.tag === "td")[0].textContent, "row-100");
   const restored = h.context.renderRichFilePreview(value, { ...state });
@@ -167,7 +169,7 @@ test("Excel 多表切换和每页100行保留页码，空表与稀疏行号可�
   find(node => node.attributes.role === "tab" && node.textContent === "空表")[0].click();
   assert.equal(state.sheet, 1);
   assert.equal(state.page, 0);
-  assert.equal(find(node => node.textContent === "此表格为空").length, 1);
+  assert.equal(find(node => node.tag === "p" && node.textContent === "此表格为空").length, 1);
   assert.equal(changes, 2);
   assert.equal(h.context.spreadsheetColumn(26), "AA");
 });
@@ -206,7 +208,7 @@ test("Excel 合并范围保留横纵跨度、固定列宽和跨页左上角内�
   assert.equal(h.all(root).find(node => node.tag === "table").style.width, "calc(280px + var(--sheet-row-number-width,44px))");
   assert.deepEqual(h.all(root).filter(node => node.tag === "col").map(node => node.style.width),
     ["var(--sheet-row-number-width,44px)", "54px", "96px", "130px"]);
-  h.all(root).find(node => node.tag === "button" && node.textContent === "下一页").click();
+  h.all(root).find(node => node.tag === "button" && node.attributes["aria-label"] === "下一页").click();
   cells = h.all(root).filter(node => node.tag === "td");
   const continued = cells.find(node => node.textContent === "纵向合并");
   assert.equal(continued.rowSpan, 3);
@@ -256,6 +258,59 @@ test("Excel 原始背景字号和文字效果按样式索引应用，行数交�
     const invalid = structuredClone(value); change(invalid);
     assert.equal(h.context.validRichFilePreview(invalid), false);
   }
+});
+
+test("原始布局使用文件行高，自动换行允许增高，紧凑布局解除文件固定高度", () => {
+  const h = richFileHarness(), value = { kind: "spreadsheet", sheets: [{
+    name: "尺寸", columnCount: 2, columnWidths: [480, 200], defaultRowHeight: 24, truncated: false,
+    rows: [{ number: 1, height: 80, cells: ["短", "一行\n第二行"] }, { number: 2, cells: ["末行", "值"] }],
+  }] };
+  assert.equal(h.context.validRichFilePreview(value), true);
+  const fixed = h.context.renderRichFilePreview(value, { layout: "original", wrap: false });
+  const fixedCells = h.all(fixed).filter(node => node.className === "session-files-cell-content");
+  assert.equal(fixedCells[0].style.height, "79px");
+  assert.equal(fixedCells[2].style.height, "23px");
+  assert.equal(h.all(fixed).find(node => node.tag === "td").style.whiteSpace, "pre");
+  const wrapped = h.context.renderRichFilePreview(value, { layout: "original", wrap: true });
+  assert.equal(h.all(wrapped).find(node => node.className === "session-files-cell-content").style.minHeight, "79px");
+  assert.equal(h.all(wrapped).find(node => node.tag === "td").style.whiteSpace, "pre-wrap");
+  const compact = h.context.renderRichFilePreview(value, { layout: "compact", wrap: true });
+  assert.equal(h.all(compact).find(node => node.className === "session-files-cell-content").style.height, undefined);
+  assert.equal(h.all(compact).find(node => node.className === "session-files-cell-content").style.minHeight, undefined);
+  assert.equal(h.all(compact).find(node => node.tag === "table").attributes["data-layout"], "compact");
+  assert.equal(h.all(compact).filter(node => node.tag === "col")[1].style.width.startsWith("clamp(48px,"), true);
+  for (const change of [
+    value => value.sheets[0].rows[0].height = 0,
+    value => value.sheets[0].rows[0].height = Infinity,
+    value => value.sheets[0].rows[0].height = "80",
+    value => value.sheets[0].defaultRowHeight = 2049,
+    value => value.sheets[0].defaultRowHeight = -1,
+  ]) {
+    const invalid = structuredClone(value); change(invalid);
+    assert.equal(h.context.validRichFilePreview(invalid), false);
+  }
+});
+
+test("紧凑列宽测量整张表且有上限，合并标题分摊宽度，翻页不跳变", () => {
+  const h = richFileHarness(), measure = text => text.length * 10;
+  const rows = [{ number: 1, cells: ["合并标题".repeat(10), "", "短"] },
+    { number: 2, cells: ["A", "B", "多".repeat(100)] }];
+  const widths = h.context.compactSpreadsheetWidths(rows, 3, [],
+    [{ startRow: 1, endRow: 1, startColumn: 0, endColumn: 1 }], measure);
+  assert.equal(widths[0], widths[1], "合并标题不能只撑宽 A 列");
+  assert.match(widths[0], /^clamp\(48px,calc\(/);
+  assert.match(widths[2], /,480px\)$/);
+  const value = { kind: "spreadsheet", sheets: [{
+    name: "跨页", columnCount: 1, columnWidths: [480], truncated: false,
+    rows: Array.from({ length: 105 }, (_, index) => ({ number: index + 1, cells: [index === 104 ? "很长的末页内容".repeat(30) : "短"] })),
+  }] }, state = { layout: "compact", wrap: false };
+  const root = h.context.renderRichFilePreview(value, state);
+  const firstWidth = h.all(root).find(node => node.tag === "table").style.width;
+  h.all(root).find(node => node.attributes["aria-label"] === "下一页").click();
+  assert.equal(h.all(root).find(node => node.tag === "table").style.width, firstWidth);
+  assert.equal(state.layout, "compact");
+  assert.equal(state.wrap, false);
+  assert.equal(state.page, 1);
 });
 
 test("服务子智能体按独立能力启用，旧后台保持禁用且子会话始终只读", () => {

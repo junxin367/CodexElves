@@ -3417,7 +3417,7 @@ mod tests {
             ),
             (
                 "xl/worksheets/sheet1.xml",
-                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:C1048576"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>手机号</t></is></c></row><row r="2"><c r="A2" t="s"><v>0</v></c><c r="B2" s="1"><v>45943.5</v></c><c r="C2"><f>1+25</f><v>26</v></c></row><row r="1048576"><c r="A1048576" t="inlineStr"><is><t>尾行</t></is></c></row></sheetData></worksheet>"#,
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:C1048576"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>手机号</t></is></c></row><row r="2"><c r="A2" t="s"><v>0</v></c><c r="B2" s="1"><v>45943.5</v></c><c r="C2"><f>1+25</f><v>26</v></c></row><row r="1048576" ht="45"><c r="A1048576" t="inlineStr"><is><t>尾行</t></is></c></row></sheetData></worksheet>"#,
             ),
             (
                 "xl/worksheets/sheet2.xml",
@@ -3435,7 +3435,12 @@ mod tests {
         );
         assert_eq!(result["sheets"][0]["rows"][1]["cells"][2], "26");
         assert_eq!(result["sheets"][0]["rows"][2]["number"], 1048576);
+        assert_eq!(result["sheets"][0]["rows"][2]["height"], 60);
+        assert_eq!(result["sheets"][0]["rows"].as_array().unwrap().len(), 3);
+        assert_eq!(result["sheets"][0]["defaultRowHeight"], 20);
+        assert!(result["sheets"][0]["rows"][0].get("height").is_none());
         assert_eq!(result["sheets"][1]["rows"], json!([]));
+        assert_eq!(result["sheets"][1]["defaultRowHeight"], 20);
         assert_eq!(result["truncated"], false);
     }
 
@@ -3443,7 +3448,7 @@ mod tests {
     fn project_files_office_merged_layout_keeps_blank_rows_widths_and_rejects_overlap() {
         use super::super::document_preview::preview;
         let workbook = r#"<workbook xmlns:r="urn:r"><sheets><sheet name="合并表" r:id="r1"/></sheets></workbook>"#;
-        let worksheet = r#"<worksheet><cols><col min="1" max="1" width="7"/><col min="2" max="2" width="18"/></cols><sheetData><row r="1"><c r="A1" s="1" t="inlineStr"><is><t>横向标题</t></is></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>纵向内容</t></is></c><c r="B4"><v>26</v></c></row></sheetData><mergeCells><mergeCell ref="A1:B1"/><mergeCell ref="A4:A6"/></mergeCells></worksheet>"#;
+        let worksheet = r#"<worksheet><sheetFormatPr defaultRowHeight="18"/><cols><col min="1" max="1" width="7"/><col min="2" max="2" width="18"/></cols><sheetData><row r="1" ht="30"><c r="A1" s="1" t="inlineStr"><is><t>横向标题</t></is></c></row><row r="2" ht="24"/><row r="4"><c r="A4" t="inlineStr"><is><t>纵向内容</t></is></c><c r="B4"><v>26</v></c></row><row r="6" ht="15"/></sheetData><mergeCells><mergeCell ref="A1:B1"/><mergeCell ref="A4:A6"/></mergeCells></worksheet>"#;
         let make = |source: &str| {
             office_fixture(&[
                 (
@@ -3467,9 +3472,14 @@ mod tests {
         let sheet = &result["sheets"][0];
         assert_eq!(sheet["columnCount"], 2);
         assert_eq!(sheet["columnWidths"], json!([54, 131]));
+        assert_eq!(sheet["defaultRowHeight"], 24);
         assert_eq!(sheet["rows"].as_array().unwrap().len(), 6);
+        assert_eq!(sheet["rows"][0]["height"], 40);
+        assert_eq!(sheet["rows"][1]["height"], 32);
         assert_eq!(sheet["rows"][2]["number"], 3);
+        assert!(sheet["rows"][2].get("height").is_none());
         assert_eq!(sheet["rows"][3]["cells"], json!(["纵向内容", "26"]));
+        assert_eq!(sheet["rows"][5]["height"], 20);
         assert_eq!(
             sheet["merges"][0],
             json!({"startRow":1,"endRow":1,"startColumn":0,"endColumn":1})
@@ -3487,6 +3497,84 @@ mod tests {
             preview("overlap.xlsx", &make(&overlap)).unwrap()["kind"],
             "unsupported"
         );
+    }
+
+    #[test]
+    fn project_files_office_spreadsheet_dimensions_use_defaults_and_bound_invalid_values() {
+        use super::super::document_preview::preview;
+        let make = |format: &str, columns: &str, rows: &str| {
+            let worksheet = format!(
+                "<worksheet>{format}<cols>{columns}</cols><sheetData>{rows}</sheetData></worksheet>"
+            );
+            office_fixture(&[
+                (
+                    "_rels/.rels",
+                    r#"<Relationships><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+                ),
+                (
+                    "xl/workbook.xml",
+                    r#"<workbook xmlns:r="urn:r"><sheets><sheet name="尺寸" r:id="r1"/></sheets></workbook>"#,
+                ),
+                (
+                    "xl/_rels/workbook.xml.rels",
+                    r#"<Relationships><Relationship Id="r1" Type="urn:relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+                ),
+                ("xl/worksheets/sheet1.xml", &worksheet),
+            ])
+        };
+        let result = preview(
+            "dimensions.xlsx",
+            &make(
+                r#"<sheetFormatPr defaultRowHeight="18" defaultColWidth="9.5"/>"#,
+                r#"<col min="1" max="1" width="1"/><col min="3" max="3" width="1e308"/><col min="4" max="4" width="NaN"/><col min="5" max="5" width="-3"/><col min="6" max="6" width="0"/><col min="7" max="7" width="inf"/>"#,
+                r#"<row r="1" ht="0.1"><c r="H1"><v>1</v></c></row><row r="2" ht="1e308"><c r="A2"><v>2</v></c></row><row r="3" ht="NaN"><c r="A3"><v>3</v></c></row>"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(result["kind"], "spreadsheet", "{result}");
+        let sheet = &result["sheets"][0];
+        assert_eq!(
+            sheet["columnWidths"],
+            json!([12, 72, 480, 72, 72, 72, 72, 72])
+        );
+        assert_eq!(sheet["defaultRowHeight"], 24);
+        assert_eq!(sheet["rows"][0]["height"], 1);
+        assert_eq!(sheet["rows"][1]["height"], 2048);
+        assert!(sheet["rows"][2].get("height").is_none());
+        assert_eq!(sheet["rows"][0]["cells"][7], "1");
+        assert_eq!(sheet["rows"].as_array().unwrap().len(), 3);
+
+        // 非有限值、负数、零与错误文本不能进入尺寸协议；有效的超大值必须封顶。
+        for invalid in ["NaN", "inf", "-1", "0", "1e999", "bad"] {
+            let result = preview(
+                "invalid-dimensions.xlsx",
+                &make(
+                    &format!(
+                        r#"<sheetFormatPr defaultRowHeight="{invalid}" defaultColWidth="{invalid}"/>"#
+                    ),
+                    &format!(r#"<col min="1" max="2" width="{invalid}"/>"#),
+                    &format!(r#"<row r="1" ht="{invalid}"><c r="B1"><v>1</v></c></row>"#),
+                ),
+            )
+            .unwrap();
+            assert_eq!(result["kind"], "spreadsheet", "{invalid}: {result}");
+            let sheet = &result["sheets"][0];
+            assert_eq!(sheet["defaultRowHeight"], 20, "{invalid}");
+            assert_eq!(sheet["columnWidths"], json!([120, 120]), "{invalid}");
+            assert!(sheet["rows"][0].get("height").is_none(), "{invalid}");
+        }
+        let result = preview(
+            "large-defaults.xlsx",
+            &make(
+                r#"<sheetFormatPr defaultRowHeight="1e308" defaultColWidth="1e308"/>"#,
+                "",
+                r#"<row r="1"><c r="A1"><v>1</v></c></row>"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(result["kind"], "spreadsheet", "{result}");
+        assert_eq!(result["sheets"][0]["defaultRowHeight"], 2048);
+        assert_eq!(result["sheets"][0]["columnWidths"], json!([480]));
     }
 
     fn office_fixture(entries: &[(&str, &str)]) -> Vec<u8> {
@@ -3552,9 +3640,11 @@ mod tests {
             assert_eq!(value["kind"], "spreadsheet");
             let sheet = &value["sheets"][0];
             assert_eq!(sheet["columnWidths"], json!([]));
+            assert!(sheet.get("defaultRowHeight").is_none());
             assert_eq!(sheet["merges"], json!([]));
             assert_eq!(sheet["styles"], json!([]));
             for row in sheet["rows"].as_array().unwrap() {
+                assert!(row.get("height").is_none());
                 assert!(row.get("styleIds").is_none());
             }
         };

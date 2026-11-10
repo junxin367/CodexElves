@@ -21,8 +21,8 @@ const COMPOSER_FAST_SCRIPT: &str = include_str!("../../../assets/inject/composer
 const NATIVE_RPC_COMPAT_SCRIPT: &str = include_str!("../../../assets/inject/native-rpc-compat.js");
 // 保留主线缓存修复、Token 编号解析与侧边 Fast；
 // 分支信息、多仓库变更、运行模式和压缩恢复使用同一构建标识，便于核对网页和后台是否来自同一包。
-// 保留侧边过期、问答识别、CSV 兼容及可视区域修复；手机表格行号栏按最终要求从 40px 起自适应。
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261110-spreadsheet-row-width-r24";
+// 保留侧边过期、问答识别及 CSV 兼容；原始/紧凑布局与换行共用新尺寸协议，手机行号栏从 35px 起自适应。
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261111-spreadsheet-modes-r25";
 
 pub fn statsig_cache_script() -> String {
     // 缓存修复必须在 SDK 首次读取前执行；压缩库不污染宿主模块加载器或全局对象。
