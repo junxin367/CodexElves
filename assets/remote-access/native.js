@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 136) return;
+  if (window.__codexElvesRemoteAccess?.version === 137) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -4304,17 +4304,40 @@
     };
     const draftSetter = unique(({ source }) => source.length < 500
       && source.includes(".draft!==") && source.includes("draft:"));
-    const selectQuestion = unique(({ source }) => source.length < 700
-      && [".selectedQuestionKey.entityKey", ".questionIds.includes(", "selectedQuestionKey:"]
-        .every(marker => source.includes(marker)));
+    const key = { hostId: "__remote_question_probe__", threadId: "__remote_question_probe__",
+      entityKey: "__remote_question_probe__", itemId: "__remote_question_probe__" };
+    const isolatedReads = (fn, ...args) => {
+      const reads = [];
+      let writes = 0;
+      try {
+        fn({
+          get(family, fieldKey) { reads.push({ family, key: fieldKey }); return null; },
+          set() { writes++; throw new Error("原生问答隔离探针禁止写入"); }
+        }, ...args);
+      } catch { return null; }
+      return writes ? null : reads;
+    };
+    const questionReads = isolatedReads(draftSetter, key, "");
+    if (questionReads?.length !== 1 || !questionReads[0].family || questionReads[0].key !== key)
+      throw failure(503, "当前 Codex 版本的原生问答状态接口验证失败");
+    // 用户要求远程回答兼容当前原生问答：切换题目与重开面板可有相同文本标记。
+    // 只认在隔离空状态下依次读取面板与同一逐题 family 的入口；不写桌面，真实歧义仍拒绝。
+    const selectQuestion = unique(({ value, source }) => {
+      if (source.length >= 700
+          || ![".selectedQuestionKey.entityKey", ".questionIds.includes(", "selectedQuestionKey:"]
+            .every(marker => source.includes(marker))) return false;
+      const reads = isolatedReads(value, key);
+      return reads?.length === 2 && !!reads[0].family
+        && reads[0].family !== questionReads[0].family
+        && reads[0].key?.hostId === key.hostId && reads[0].key?.threadId === key.threadId
+        && reads[1].family === questionReads[0].family && reads[1].key === key;
+    });
     const panelSetters = functions.filter(({ value, source }) => value.length === 3 && source.length < 600
       && [".threadId", "new Map(", ".delete(", ".get(", ".set("]
         .every(marker => source.includes(marker)));
     let setPanel = panelSetters.length === 1 ? panelSetters[0].value : null;
     const skipQuestion = unique(({ source }) => source.length < 900
       && ["isSkipped:!0", ".get(", ".set("].every(marker => source.includes(marker)));
-    const key = { hostId: "__remote_question_probe__", threadId: "__remote_question_probe__",
-      entityKey: "__remote_question_probe__", itemId: "__remote_question_probe__" };
     if (!setPanel && panelSetters.length === 0 && manager.__codexElvesRequestClientManager) {
       // 新版隐藏了面板 setter，关闭单题入口仍导出。用隔离 scope 捕获其实际 Map family，
       // 不写入桌面，也不把只读的派生 panel reader 当成可写状态。
@@ -7495,7 +7518,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 136, call,
+    version: 137, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {

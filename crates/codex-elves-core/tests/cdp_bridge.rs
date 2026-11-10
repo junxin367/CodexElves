@@ -4985,6 +4985,56 @@ for(const status of ["inProgress","completed"])for(const resolved of ["answered"
 }
 
 #[test]
+fn async_questions_resolve_selection_by_isolated_state_reads_and_reject_real_ambiguity() {
+    run_native_async_question_contract(
+        r#"
+for(const action of ["answer","skip"]){
+  const h=createQuestionHarness(),{questionFamily,panelFamily,panelMapFamily}=h.families;
+  // 当前原生模块同时导出切换问题和重开面板，两者都包含旧定位器的三个文本标记。
+  h.module.reopenQuestion=function(s,k){
+    const q=s.get(questionFamily,k);
+    if(q==null||q.isSkipped||q.lastSubmission!=null)return;
+    const p=s.get(panelFamily,{hostId:k.hostId,threadId:k.threadId});
+    const current=p?.selectedQuestionKey.entityKey===k.entityKey&&p.questionIds.includes(k.itemId)?p:null;
+    s.set(panelMapFamily,k.hostId,new Map([[k.threadId,{selectedQuestionKey:k,
+      questionIds:current?.questionIds??[k.itemId]}]]));
+  };
+  h.rebind();
+  assert.equal(h.writes,0,"识别阶段只能读取隔离状态");
+  const payload=h.payload();
+  if(action==="skip")payload.response={skip:true};
+  const result=await h.api.answerAsyncQuestion(payload);
+  assert.equal(result.ok,true,JSON.stringify(result));
+  assert.equal(h.dispatches.length,action==="answer"?1:0);
+  assert.equal(h.panel(),null);
+  assert.equal(h.state(0).isSkipped,action==="skip");
+  assert.equal(h.state(0).lastSubmission,action==="answer"?"蓝色":null);
+}
+for(const kind of ["same-family","wrong-family","probe-write"]){
+  const h=createQuestionHarness(),{questionFamily,panelFamily,panelMapFamily}=h.families;
+  const duplicate=new Function("questionFamily","panelFamily","panelMapFamily",
+    `return ${h.module.selectQuestion.toString()}`)(
+      kind==="wrong-family"?{}:questionFamily,panelFamily,panelMapFamily);
+  if(kind==="probe-write")h.module.selectQuestion=function(s,k){
+    const p=s.get(panelFamily,{hostId:k.hostId,threadId:k.threadId});s.get(questionFamily,k);
+    s.set(panelMapFamily,k.hostId,{selectedQuestionKey:k,
+      valid:p?.selectedQuestionKey.entityKey===k.entityKey&&p.questionIds.includes(k.itemId)});
+  };
+  else h.module.selectQuestionDuplicate=duplicate;
+  if(kind==="same-family"||kind==="probe-write")
+    assert.throws(()=>h.rebind(),error=>error.code===503,
+      "真正重复的接口或需要写入才能识别的接口必须拒绝");
+  else h.rebind();
+  assert.equal(h.writes,0,"候选探针不能写入真实问题");
+  assert.equal(h.dispatches.length,0);
+  assert.equal(h.state(0).lastSubmission,null);
+  assert.equal(h.state(0).isSkipped,false);
+}
+"#,
+    );
+}
+
+#[test]
 fn async_questions_remain_pending_after_completion_without_selecting_the_desktop_thread() {
     run_native_async_question_contract(
         r#"
@@ -5250,7 +5300,8 @@ function createQuestionHarness(){
     assert(options.isSubmissionCurrent());
     return h.env.manager.getTurnCoordinator().sendMessage(options,submissionOptions);
   }
-  const module={setDraft,selectQuestion,setPanel,skipQuestion,submit};
+  const module=h.module={setDraft,selectQuestion,setPanel,skipQuestion,submit};
+  h.families={questionFamily,panelFamily,panelMapFamily};
   const coordinator={async sendMessage(options,submissionOptions){
     assert.equal(options.targetConversationId,"thread");
     assert.equal(options.turnTrigger,"send_user_message_async_question");
@@ -5288,7 +5339,11 @@ function createQuestionHarness(){
     asyncQuestionRecoveryCandidates,recoverAsyncQuestionDesktop,nativeAsyncQuestionState,
     syncPendingNotifications,refreshPendingNotifications
   };}`)(env);
-  h.api.nativeAsyncQuestionState(module);
+  h.rebind=()=>{
+    env.asyncQuestionNativeBindings=null;env.asyncQuestionStateModules=new WeakMap();
+    return h.api.nativeAsyncQuestionState(module);
+  };
+  h.rebind();
   h.requests=()=>h.api.asyncQuestionRequests("thread");
   h.payload=()=>({threadId:"thread",requestId:JSON.stringify(["async-question","question-turn","question-item"]),
     response:{answers:Object.fromEntries(h.questionIds.map((id,index)=>[id,{answers:[index?"圆形":"蓝色"]}]))}});
@@ -9829,8 +9884,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = include_str!("../../../assets/remote-access/native.js");
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 136"));
-    assert!(script.contains("version: 135"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 137"));
+    assert!(script.contains("version: 137, call"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));
