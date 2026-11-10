@@ -77,6 +77,229 @@ const fileName = path => path.replaceAll("\\", "/").split("/").at(-1) || "文件
 const revisionValid = value => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
 const imageValid = value => typeof value === "string"
   && /^data:image\/(?:png|jpeg|gif|webp|svg\+xml);base64,[a-zA-Z0-9+/=]+$/u.test(value);
+// 与 document_preview.rs 同步：只接收结构化文字，不把办公文档的 HTML、宏或链接作为可执行内容。
+export function validRichFilePreview(value) {
+  let characters = 0, cells = 0, blocks = 0;
+  const text = (value, maximum = 1024 * 1024) => {
+    if (typeof value !== "string" || value.length > maximum) return false;
+    characters += value.length;
+    return characters <= 1024 * 1024 + 60 * 1024;
+  };
+  const rows = values => Array.isArray(values) && values.length <= 1000
+    && values.every(row => Array.isArray(row) && row.length <= 100
+      && (cells += row.length) <= 100000 && row.every(value => text(value, 16 * 1024)));
+  // 行号递增检查独立于单元格数组，避免将稀疏表格的真实行号误作连续下标。
+  const numberedRows = sheet => Array.isArray(sheet.rows) && sheet.rows.length <= 1000
+    && sheet.rows.every((row, index) => Number.isSafeInteger(row?.number) && row.number > 0
+      && row.number <= 4294967295 && (!index || row.number > sheet.rows[index - 1].number)
+      && Array.isArray(row.cells) && row.cells.length <= sheet.columnCount
+      && (cells += row.cells.length) <= 100000 && row.cells.every(value => text(value, 16 * 1024)));
+  const layout = sheet => {
+    if (sheet.styles != null && (!Array.isArray(sheet.styles) || sheet.styles.length > 4096
+        || sheet.styles.some(style => !style
+          || [style.color, style.background].some(color => color != null && !/^#[0-9a-f]{6}$/iu.test(color))
+          || style.fontSize != null && (!Number.isFinite(style.fontSize) || style.fontSize < 6 || style.fontSize > 72)
+          || ["bold", "italic", "underline", "strike", "wrap"].some(key => typeof style[key] !== "boolean")
+          || !["left", "center", "right", "justify"].includes(style.horizontal)
+          || !["top", "middle", "bottom"].includes(style.vertical)))) return false;
+    if (sheet.rows.some(row => row.styleIds != null && (!Array.isArray(row.styleIds)
+        || row.styleIds.length !== sheet.columnCount
+        || row.styleIds.some(id => !Number.isSafeInteger(id) || id < 0 || id >= (sheet.styles?.length || 0))))) return false;
+    // CSV/TSV/ODS 没有原始列宽时后台返回 []，沿用 120px 默认列宽；非空数组仍须逐列完整且有界。
+    if (sheet.columnWidths != null && (!Array.isArray(sheet.columnWidths)
+        || sheet.columnWidths.length !== 0 && sheet.columnWidths.length !== sheet.columnCount
+        || sheet.columnWidths.some(width => !Number.isSafeInteger(width) || width < 48 || width > 480))) return false;
+    if (sheet.merges == null) return true;
+    if (!Array.isArray(sheet.merges) || sheet.merges.length > 10000) return false;
+    const rowNumbers = new Set(sheet.rows.map(row => row.number)), occupied = new Set();
+    return sheet.merges.every(merge => {
+      if (!merge || ![merge.startRow, merge.endRow, merge.startColumn, merge.endColumn].every(Number.isSafeInteger)
+          || merge.startRow < 1 || merge.endRow > 4294967295 || merge.startRow > merge.endRow
+          || merge.endRow - merge.startRow >= 1000 || merge.startColumn < 0
+          || merge.startColumn > merge.endColumn || merge.endColumn >= sheet.columnCount) return false;
+      for (let row = merge.startRow; row <= merge.endRow; row++) {
+        if (!rowNumbers.has(row)) return false;
+        for (let column = merge.startColumn; column <= merge.endColumn; column++) {
+          const key = `${row}:${column}`;
+          if (occupied.has(key) || occupied.size >= 100000) return false;
+          occupied.add(key);
+        }
+      }
+      return true;
+    });
+  };
+  if (value?.kind === "spreadsheet") return Array.isArray(value.sheets) && value.sheets.length <= 20
+    && value.sheets.every(sheet => sheet && text(sheet.name, 512)
+      && Number.isSafeInteger(sheet.columnCount) && sheet.columnCount >= 0 && sheet.columnCount <= 100
+      && typeof sheet.truncated === "boolean" && numberedRows(sheet) && layout(sheet));
+  if (value?.kind === "document") return Array.isArray(value.sections) && value.sections.length <= 100
+    && value.sections.every(section => section && text(section.title, 512) && Array.isArray(section.blocks)
+      && section.blocks.every(block => ++blocks <= 2000 && block
+        && (["paragraph", "heading"].includes(block.kind) ? text(block.text)
+          : block.kind === "table" && rows(block.rows))));
+  return false;
+}
+function spreadsheetColumn(index) {
+  let label = "";
+  for (let value = index + 1; value > 0; value = Math.floor((value - 1) / 26))
+    label = String.fromCharCode(65 + (value - 1) % 26) + label;
+  return label;
+}
+function applySpreadsheetStyle(cell, style) {
+  if (!style) return;
+  if (style.background) cell.style.backgroundColor = style.background;
+  if (style.color) cell.style.color = style.color;
+  // 原文件字号以 pt 记录：默认阅读字号 12px 时按 1pt=4/3px 还原，调整阅读字号时同比缩放。
+  if (style.fontSize != null) cell.style.fontSize = `calc(var(--file-reading-font-size,12px) * ${style.fontSize / 9})`;
+  cell.style.fontWeight = style.bold ? "700" : "400";
+  cell.style.fontStyle = style.italic ? "italic" : "normal";
+  cell.style.textDecoration = [style.underline && "underline", style.strike && "line-through"].filter(Boolean).join(" ") || "none";
+  cell.style.textAlign = style.horizontal;
+  cell.style.verticalAlign = style.vertical;
+  cell.style.whiteSpace = style.wrap ? "pre-wrap" : "pre";
+  cell.style.overflow = "hidden";
+}
+function previewTable(rows, columnCount, {
+  numbered = false, page = 0, onPage = null, merges = [], columnWidths = [], styles = [], onRange = null
+} = {}) {
+  // 每页最多渲染 100 行；与后台每表 1000 行上限区分，手机翻页不会一次创建整张大表的 DOM。
+  const pageSize = 100, pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  page = Math.min(Math.max(0, page), pageCount - 1);
+  const root = node("div", "session-files-table-group");
+  const draw = () => {
+    root.replaceChildren();
+    if (!rows.length || !columnCount) {
+      if (onRange) onRange(node("span", "", "0 / 0 行"));
+      root.append(node("p", "session-files-empty", "此表格为空")); return;
+    }
+    const start = page * pageSize, visible = rows.slice(start, start + pageSize);
+    const pagination = node("div", "session-files-table-pagination");
+    pagination.append(node("span", "", `${start + 1}–${start + visible.length} / ${rows.length} 行`));
+    if (pageCount > 1) {
+      const change = next => { page = next; onPage?.(page); draw(); };
+      const previous = control("上一页", () => change(page - 1));
+      const next = control("下一页", () => change(page + 1));
+      previous.disabled = page === 0; next.disabled = page === pageCount - 1;
+      pagination.append(previous, next);
+    }
+    // 用户要求行数与文件大小同一行；文档的小表不再另占一行，长表翻页控件仍可用。
+    if (onRange) onRange(pagination);
+    else if (numbered || pageCount > 1) root.append(pagination);
+    const scroller = node("div", "session-files-table-scroll");
+    scroller.tabIndex = 0; scroller.setAttribute("role", "region");
+    scroller.setAttribute("aria-label", "表格内容，可横向滚动");
+    const table = node("table", "session-files-table");
+    const covered = new Set(), anchors = new Map();
+    if (numbered) {
+      // 用户要求合并单元格与稳定首列：按原文件列宽固定网格，合并标题不参与单列自动撑宽。
+      const widths = Array.from({ length: columnCount }, (_, index) => columnWidths[index] || 120);
+      table.className += " session-files-spreadsheet";
+      // 用户要求手机行号栏紧凑：实际宽度交给 CSS；总宽与行号 col 共用变量，旋转后不挤压数据列。
+      // 按整张工作表最大行号的位数预留空间，长行号完整显示，翻页时宽度不跳变。
+      table.style.setProperty("--sheet-row-number-digits", String(String(rows.at(-1).number).length));
+      table.style.width = `calc(${widths.reduce((sum, width) => sum + width, 0)}px + var(--sheet-row-number-width,44px))`;
+      const columns = node("colgroup"), rowNumbers = node("col");
+      rowNumbers.style.width = "var(--sheet-row-number-width,44px)"; columns.append(rowNumbers);
+      for (const width of widths) {
+        const column = node("col"); column.style.width = `${width}px`; columns.append(column);
+      }
+      table.append(columns);
+      const sourceRows = new Map(rows.map(row => [row.number, row]));
+      for (const merge of merges) {
+        const included = visible.filter(row => row.number >= merge.startRow && row.number <= merge.endRow);
+        if (!included.length) continue;
+        const firstRow = included[0].number, key = `${firstRow}:${merge.startColumn}`;
+        // 跨页纵向合并在每页可见段延续；内容始终取原始左上角，不能从被覆盖的空格猜值。
+        anchors.set(key, { rows: included.length, columns: merge.endColumn - merge.startColumn + 1,
+          text: sourceRows.get(merge.startRow)?.cells[merge.startColumn] || "",
+          styleId: sourceRows.get(merge.startRow)?.styleIds?.[merge.startColumn] });
+        for (const row of included)
+          for (let column = merge.startColumn; column <= merge.endColumn; column++)
+            if (`${row.number}:${column}` !== key) covered.add(`${row.number}:${column}`);
+      }
+    }
+    if (numbered) {
+      const heading = node("tr"), head = node("thead");
+      const corner = node("th", "session-files-row-number", "");
+      corner.scope = "col"; heading.append(corner);
+      for (let column = 0; column < columnCount; column++) {
+        const label = node("th", "", spreadsheetColumn(column)); label.scope = "col"; heading.append(label);
+      }
+      head.append(heading); table.append(head);
+    }
+    const body = node("tbody");
+    for (const value of visible) {
+      const row = node("tr"), cells = numbered ? value.cells : value;
+      if (numbered) {
+        const number = node("th", "session-files-row-number", String(value.number));
+        number.scope = "row"; row.append(number);
+      }
+      for (let column = 0; column < columnCount; column++) {
+        const key = `${value.number}:${column}`;
+        if (numbered && covered.has(key)) continue;
+        const merge = numbered && anchors.get(key);
+        const cell = node("td", "", merge ? merge.text : cells[column] || "");
+        if (merge) { cell.rowSpan = merge.rows; cell.colSpan = merge.columns; }
+        if (numbered) {
+          applySpreadsheetStyle(cell, styles[merge ? merge.styleId : value.styleIds?.[column]]);
+          cell.setAttribute("data-row", String(value.number));
+          cell.setAttribute("data-column", String(column));
+        }
+        row.append(cell);
+      }
+      body.append(row);
+    }
+    table.append(body); scroller.append(table); root.append(scroller);
+  };
+  draw(); return root;
+}
+export function renderRichFilePreview(value, state = {}, onNavigate = null, { onRange = null } = {}) {
+  const root = node("div", "session-files-rich-preview");
+  if (value.kind === "spreadsheet") {
+    root.className += " session-files-spreadsheet-preview";
+    if (!value.sheets.length) {
+      root.append(node("p", "session-files-empty", "此文件没有可读取的工作表")); return root;
+    }
+    const draw = () => {
+      root.replaceChildren();
+      state.sheet = Number.isSafeInteger(state.sheet) ? Math.min(Math.max(0, state.sheet), value.sheets.length - 1) : 0;
+      state.page = Number.isSafeInteger(state.page) ? Math.max(0, state.page) : 0;
+      const tabs = node("div", "session-files-sheet-tabs"); tabs.setAttribute("role", "tablist");
+      tabs.setAttribute("aria-label", "工作表");
+      const panel = node("div", "session-files-sheet-panel"); panel.setAttribute("role", "tabpanel");
+      value.sheets.forEach((sheet, index) => {
+        const button = control(displayWorkspaceName(sheet.name || `工作表 ${index + 1}`), () => {
+          state.sheet = index; state.page = 0; onNavigate?.(); draw();
+        });
+        button.setAttribute("role", "tab"); button.setAttribute("aria-selected", String(index === state.sheet));
+        button.title = button.textContent; tabs.append(button);
+      });
+      const sheet = value.sheets[state.sheet];
+      panel.setAttribute("aria-label", displayWorkspaceName(sheet.name || "工作表"));
+      if (sheet.truncated) panel.append(node("p", "session-files-empty", "此工作表仅显示限额内的内容"));
+      panel.append(previewTable(sheet.rows, sheet.columnCount, {
+        numbered: true, page: state.page, merges: sheet.merges || [], columnWidths: sheet.columnWidths || [],
+        styles: sheet.styles || [], onRange,
+        onPage: page => { state.page = page; onNavigate?.(); }
+      }));
+      root.append(tabs, panel);
+    };
+    draw();
+  } else {
+    if (!value.sections.length) root.append(node("p", "session-files-empty", "此文档没有可读取的正文"));
+    for (const section of value.sections) {
+      const page = node("section", "session-files-document-section");
+      if (section.title) page.append(node("h2", "", section.title));
+      for (const block of section.blocks) {
+        if (block.kind === "table")
+          page.append(previewTable(block.rows, Math.max(0, ...block.rows.map(row => row.length))));
+        else page.append(node(block.kind === "heading" ? "h3" : "p", "", block.text));
+      }
+      root.append(page);
+    }
+  }
+  return root;
+}
 const bytesLabel = size => size < 1024 ? `${size} B`
   : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KiB` : `${(size / 1024 / 1024).toFixed(1)} MiB`;
 const fileSort = (left, right) => {
@@ -94,7 +317,9 @@ const fileIconKind = path => {
       || name === "cargo.lock") return "lock";
   if (name === "dockerfile" || name.startsWith(".dockerfile")) return "docker";
   if (name === ".gitignore" || name === ".gitattributes" || name === ".editorconfig") return "git";
-  if (/\.(?:md|mdx|rst|txt|log)$/u.test(lower)) return "document";
+  if (/\.(?:md|mdx|rst|txt|log|docx?|odt|pdf)$/u.test(lower)) return "document";
+  if (/\.(?:xlsx?|xlsm|xltx|ods|csv|tsv)$/u.test(lower)) return "spreadsheet";
+  if (/\.(?:pptx?)$/u.test(lower)) return "presentation";
   if (/\.(?:png|jpe?g|gif|webp|avif|bmp|ico|svg)$/u.test(lower)) return "image";
   if (/\.(?:css|scss|sass|less|styl)$/u.test(lower)) return "style";
   if (/\.(?:html?|xhtml)$/u.test(lower)) return "html";
@@ -232,6 +457,8 @@ function highlightSourceLine(source, language, state) {
 const fileIconPaths = {
   folder: '<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h4.5A1.5 1.5 0 0 1 17 8.5v7A1.5 1.5 0 0 1 15.5 17h-11A1.5 1.5 0 0 1 3 15.5Z"/>',
   document: '<path d="M5 2.5h6l4 4v11H5z"/><path d="M11 2.5v4h4M7.5 11h5M7.5 14h4"/>',
+  spreadsheet: '<path d="M3 3h14v14H3zM3 7h14M3 11h14M3 14h14M7 3v14M12 3v14"/>',
+  presentation: '<path d="M3 4h14v10H3zM10 14v4M6 18l4-4 4 4M6 8h3M6 11h7"/>',
   file: '<path d="M5 2.5h6l4 4v11H5z"/><path d="M11 2.5v4h4"/>',
   image: '<path d="M4 3h12v14H4z"/><circle cx="8" cy="8" r="1.2"/><path d="m5.5 14 3.5-3 2.2 2 1.5-1.5 2.3 2.5"/>',
   javascript: '<path d="M4 3h12v14H4z"/><path d="M8 13.5c.5 1 2.5 1 2.5-.2 0-1.6-2.5-.8-2.5-2.4 0-1.2 2-1.5 2.8-.5M12.5 10.5h2M13.5 10.5v4"/>',
@@ -346,7 +573,7 @@ export function mountSessionFiles({
   let listEpoch = 0, fileEpoch = 0, listController = null, fileController = null;
   let listResponse = null, contentResponse = null, currentDirectory = "", renderedFile = "";
   let expanded = new Set(), searchMatches = null, searchEpoch = 0, searchController = null;
-  let sourceMode = false, wrap = false, returnView = null, exitTimer = null;
+  let sourceMode = false, wrap = false, richView = {}, returnView = null, exitTimer = null;
   const createScreen = (id, title) => {
     const screen = node("section", "session-tools-screen session-files-screen");
     screen.id = id; screen.hidden = true; screen.inert = true;
@@ -374,10 +601,11 @@ export function mountSessionFiles({
   listingBody.append(search, parentButton, listStatus, list); listing.screen.append(listingBody);
   const contentControls = node("div", "session-tools-detail-controls");
   const metadata = node("span", "session-files-metadata");
+  const richRange = node("div", "session-files-range"); richRange.hidden = true;
   const modeButton = control("源码", () => { sourceMode = !sourceMode; renderContent(); });
   modeButton.setAttribute("aria-label", "切换源码和预览");
   const wrapButton = control("自动换行", () => { wrap = !wrap; renderContent(); });
-  contentControls.append(metadata, wrapButton, modeButton);
+  contentControls.append(metadata, richRange, wrapButton, modeButton);
   const fileStatus = node("p", "session-tools-status"); fileStatus.setAttribute("role", "status");
   const body = node("div", "session-tools-detail session-files-content");
   content.screen.append(contentControls, fileStatus, body);
@@ -391,7 +619,9 @@ export function mountSessionFiles({
     if (route?.kind === "list") views.set("list:root", {
       query: search.value, scroll: list.scrollTop, expanded: [...expanded]
     });
-    if (route?.kind === "file") views.set(`file:${route.path}`, { scroll: body.scrollTop, sourceMode, wrap });
+    if (route?.kind === "file") views.set(`file:${route.path}`, {
+      scroll: body.scrollTop, sourceMode, wrap, richView: { ...richView }
+    });
     while (views.size > 64) views.delete(views.keys().next().value);
   }
   function updateContext() {
@@ -454,8 +684,9 @@ export function mountSessionFiles({
           || kind === "files" && (!Array.isArray(value.files) || value.files.length > 2000
             || value.files.some(file => !file || typeof file.name !== "string" || typeof file.path !== "string"
               || !["directory", "file", "unsupported"].includes(file.kind)))
-          || kind === "file" && (!["text", "image", "binary", "unsupported"].includes(value.kind)
+          || kind === "file" && (!["text", "image", "binary", "unsupported", "spreadsheet", "document"].includes(value.kind)
             || value.kind === "text" && (typeof value.text !== "string" || value.text.length > 4 * 1024 * 1024)
+            || ["spreadsheet", "document"].includes(value.kind) && !validRichFilePreview(value)
             || value.kind === "image" && !imageValid(value.dataUrl))) throw new Error("文件响应格式无效");
       retain(key, value); return value;
     } catch (error) {
@@ -629,6 +860,7 @@ export function mountSessionFiles({
     const saved = views.get(`file:${path}`);
     controlsScroll.reset();
     sourceMode = line ? true : saved?.sourceMode ?? !/\.mdx?$/iu.test(path); wrap = saved?.wrap || false;
+    richView = { ...saved?.richView };
     contentResponse = responses.get(`file:${path}`) || null; renderedFile = path;
     content.location.set(contentResponse ? `${contentResponse.root}/${contentResponse.path}` : path, contentResponse?.git);
     renderContent(); body.scrollTop = saved?.scroll || 0;
@@ -665,6 +897,7 @@ export function mountSessionFiles({
   }
   function renderContent() {
     body.replaceChildren(); body.classList.toggle("session-files-wrap", wrap);
+    richRange.replaceChildren(); richRange.hidden = true;
     const value = contentResponse;
     contentControls.hidden = !value;
     modeButton.hidden = value?.kind !== "text" || !/\.mdx?$/iu.test(value.path);
@@ -675,7 +908,11 @@ export function mountSessionFiles({
     if (!value) return;
     metadata.textContent = bytesLabel(value.size);
     message(fileStatus, value.message);
-    if (value.kind === "text" && !sourceMode) {
+    if (["spreadsheet", "document"].includes(value.kind)) {
+      body.append(renderRichFilePreview(value, richView, saveView, {
+        onRange: pagination => { richRange.replaceChildren(pagination); richRange.hidden = false; }
+      }));
+    } else if (value.kind === "text" && !sourceMode) {
       const document = node("div", "markdown session-files-markdown");
       document.innerHTML = markdown(value.text);
       for (const copy of document.querySelectorAll(".copy-code")) {

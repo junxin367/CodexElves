@@ -958,9 +958,10 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-tools-file-chevron{color:var(--muted);flex-shrink:0;font-size:1.35rem}
 .session-tools-detail{flex:1;min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;padding-bottom:20px;scrollbar-width:thin}
 .session-tools-detail:empty{display:none}
-/* 用户要求阅读时第二行更紧凑：默认约 33px = 按钮最小 26px + 上下各 3px + 底边框 1px；文件与变更共用，
-   文件名/返回首行继续沿用原高度，大字号或换行时允许工具行自然增高。 */
-.session-tools-detail-controls{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;flex-shrink:0;gap:6px 12px;padding:3px 14px;border-bottom:1px solid var(--line);font-size:.78571rem}
+/* 用户要求文件/变更信息行统一 30px = 25px 控件 + 上下各 2px + 底边框 1px；
+   表格、文档、PDF、源码与变更共用，长内容横向滚动而不撑高，首行标题高度保持独立。 */
+.session-tools-detail-controls{display:flex;align-items:center;justify-content:space-between;flex-wrap:nowrap;flex-shrink:0;height:30px;min-height:30px;max-height:30px;gap:6px 12px;padding:2px 14px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;border-bottom:1px solid var(--line);font-size:.78571rem}
+.session-tools-detail-controls::-webkit-scrollbar{display:none}
 /* 用户要求第二行收展更快：过渡从 180ms 缩短到 100ms，并与 session-files.js 的半程滚动距离同步。 */
 .session-preview-controls{display:grid;grid-template-rows:minmax(0,var(--preview-controls-rows,1fr));flex-shrink:0;opacity:var(--preview-controls-reveal,1);transition:grid-template-rows .10s ease-out,opacity .10s ease-out}
 /* 内层裁切包住工具行的内边距和边框，0fr 时第二行完整收起，不留下空白条。 */
@@ -969,7 +970,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-tools-diff-stats{display:flex;gap:10px;font-variant-numeric:tabular-nums}
 .session-tools-additions{color:var(--green)}
 .session-tools-deletions{color:var(--danger)}
-.session-tools-detail-controls>.text-button{min-height:26px;padding:3px 8px;font-size:inherit}
+.session-tools-detail-controls>.text-button{height:25px;min-height:25px;flex-shrink:0;padding:2px 8px;font-size:inherit;white-space:nowrap}
 .session-tools-detail-controls button[aria-pressed=true]{background:var(--hover)}
 .session-tools-cache-note{flex-shrink:0;margin:7px 14px}
 /* 文件阅读字号仅作用于预览正文及继承字号的行号，文件列表不读取该变量。 */
@@ -1115,6 +1116,59 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .session-files-selected-line{background:color-mix(in srgb,#3b82f6 16%,var(--bg))}
 .session-files-image{display:flex;align-items:flex-start;justify-content:center;padding:16px}
 .session-files-image>img{display:block;max-width:100%;height:auto}
+/* 用户要求手机在线读表格、文档：表格只在自身容器横向滚动，不能撑宽文件页；字号沿用文件阅读设置。 */
+/* 用户要求预览左右及工作表选择与数据之间均为 2px，文档/PDF 使用相同外边距；行数放入文件大小行。 */
+.session-files-rich-preview{min-width:0;padding:2px;font-size:var(--file-reading-font-size,12px);line-height:1.6}
+.session-files-sheet-tabs{display:flex;gap:2px;max-width:100%;overflow-x:auto;scrollbar-width:none;margin:0;padding:0 0 2px}
+.session-files-sheet-tabs::-webkit-scrollbar{display:none}
+.session-files-sheet-tabs>button{flex-shrink:0;max-width:18em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--line);border-radius:7px;padding:6px 12px;font:inherit}
+.session-files-sheet-tabs>button[aria-selected=true]{background:color-mix(in srgb,var(--skill) 12%,var(--bg));color:var(--skill);border-color:var(--skill)}
+.session-files-sheet-panel,.session-files-table-group{min-width:0;max-width:100%}
+.session-files-table-pagination{display:flex;align-items:center;gap:8px;min-height:34px;color:var(--muted);font-size:.95em}
+.session-files-table-pagination>span{margin-right:auto}
+.session-files-table-pagination>button{font:inherit;padding:4px 8px}
+.session-files-table-pagination>button:disabled{opacity:.4;cursor:default}
+.session-files-screen .session-tools-detail-controls:has(.session-files-range:not([hidden])){flex-wrap:nowrap;gap:6px}
+.session-files-range{min-width:0;display:flex;align-items:center;flex:1}
+.session-files-range[hidden]{display:none}
+.session-files-range .session-files-table-pagination{width:100%;min-width:0;height:25px;min-height:25px;font-size:inherit;white-space:nowrap;gap:4px}
+.session-files-range .session-files-table-pagination>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.session-files-range .session-files-table-pagination>button{flex-shrink:0}
+.session-files-range .session-files-table-pagination>button{height:25px;min-height:25px;padding:2px 6px;font-size:inherit}
+.session-files-table-scroll{max-width:100%;max-height:min(65dvh,720px);overflow:auto;position:relative;isolation:isolate;border:1px solid var(--line);border-radius:7px;overscroll-behavior:contain;overflow-anchor:none}
+/* 用户要求表格按实际可视区域预览：由文件页分配标题、30px 信息行、工作表标签及提示之外的剩余高度，
+   不再对独立表格套用 65dvh/720px 上限；旋转、窗口缩放及信息行变化时自动重排，保留 2px 边距和单一双向滚动区。 */
+.session-files-content:has(>.session-files-spreadsheet-preview){display:flex;flex-direction:column;overflow:hidden}
+.session-files-spreadsheet-preview,.session-files-spreadsheet-preview .session-files-sheet-panel,.session-files-spreadsheet-preview .session-files-table-group{display:flex;flex-direction:column;flex:1;min-height:0}
+.session-files-spreadsheet-preview .session-files-sheet-tabs,.session-files-spreadsheet-preview .session-files-empty{flex-shrink:0}
+.session-files-spreadsheet-preview .session-files-table-scroll{flex:1;min-height:0;max-height:none}
+.session-files-table{min-width:100%;width:max-content;border-collapse:separate;border-spacing:0;font:inherit;background:color-mix(in srgb,var(--bg) 90%,transparent)}
+.session-files-spreadsheet{--sheet-index-font-size:var(--file-reading-font-size,12px);--sheet-row-number-width:max(44px,calc(var(--sheet-row-number-digits,3) * .65 * var(--sheet-index-font-size) + 21px));table-layout:fixed;min-width:0;background:#fff;color:#1f1f1f}
+.session-files-table.session-files-spreadsheet td,.session-files-table.session-files-spreadsheet th{min-width:0;max-width:none}
+.session-files-table td,.session-files-table th{min-width:72px;max-width:360px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);padding:7px 10px;white-space:pre-wrap;overflow-wrap:anywhere;text-align:left;vertical-align:top}
+.session-files-table tr>:last-child{border-right:0}
+.session-files-table tbody>tr:last-child>*{border-bottom:0}
+/* 首列与表头共用一个双向滚动容器，并固定交叉角 > 表头 > 行号 > 正文的层级，避免纵向滚动后互相盖住。 */
+.session-files-table thead th{position:sticky;top:0;z-index:3;background:var(--side);font-weight:600;text-align:center;color:var(--muted)}
+.session-files-table .session-files-row-number{position:sticky;left:0;z-index:2;min-width:3em;max-width:none;background:var(--side);color:var(--muted);text-align:right;font-weight:400;white-space:nowrap;overflow-wrap:normal;font-variant-numeric:tabular-nums}
+.session-files-table thead .session-files-row-number{z-index:4}
+/* 用户要求手机列标/行号紧凑且保持冻结：列标高 26px、字号 11px、行高 16px；行号栏最小宽 40px 且居中。
+   长行号按位数 × 字号 × .65 加左右各 3px 与 1px 边框预留宽度，桌面保留 44px 起步及原 10px 内边距。
+   只缩减坐标栏；数据列宽、内容行高、合并和原始样式继续独立计算。与 JS 的总宽/col 变量保持同步。 */
+@media(pointer:coarse),(max-width:760px){
+  .session-files-spreadsheet{--sheet-index-font-size:11px;--sheet-row-number-width:max(40px,calc(var(--sheet-row-number-digits,3) * .65 * var(--sheet-index-font-size) + 7px))}
+  .session-files-table.session-files-spreadsheet thead th{height:26px;padding:2px 3px;font-size:var(--sheet-index-font-size);line-height:16px;white-space:nowrap;vertical-align:middle}
+  .session-files-table.session-files-spreadsheet .session-files-row-number{padding:0 3px;font-size:var(--sheet-index-font-size);line-height:16px;vertical-align:middle;text-align:center}
+}
+.session-files-document-section{content-visibility:auto;contain-intrinsic-size:auto 200px;min-width:0;padding:0}
+.session-files-document-section+.session-files-document-section{border-top:1px solid var(--line)}
+.session-files-document-section>p{white-space:pre-wrap;overflow-wrap:anywhere;margin:0 0 2px}
+.session-files-document-section>h2{font-size:1.25em;margin:0 0 2px}
+.session-files-document-section>h3{font-size:1.15em;margin:2px 0}
+.session-files-document-section>.session-files-table-group{margin:2px 0}
+.session-files-empty{color:var(--muted);margin:8px 0;white-space:pre-wrap}
+.session-files-icon-spreadsheet{color:#29945d}
+.session-files-icon-presentation{color:#ca7141}
 @media(pointer:coarse),(max-width:760px){
   .session-files-list .session-tools-file{min-height:30px;height:30px}
 }

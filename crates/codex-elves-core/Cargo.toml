@@ -12,14 +12,18 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["json", "tokio", "http1", "ws"], default-features = false }
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"], default-features = false }
 base64.workspace = true
+calamine = { version = "0.38", default-features = false }
+csv = "1"
 directories.workspace = true
 flate2.workspace = true
 futures-util = "0.3"
 fs2.workspace = true
 if-addrs.workspace = true
 image.workspace = true
+pdf-extract = "0.12"
 reqwest.workspace = true
 ring = "0.17"
+roxmltree = "0.21"
 rustls = { version = "0.23", features = ["ring", "std"], default-features = false }
 rusqlite.workspace = true
 serde.workspace = true

@@ -789,6 +789,11 @@ fn project_file_content(root: &Path, path: &str) -> Result<Value, ApiError> {
         ));
     } else if is_svg_path(path) {
         result["message"] = json!("SVG 包含不安全内容，暂不提供预览");
+    } else if let Some(preview) = super::document_preview::preview(path, &side.bytes) {
+        // 用户要求表格、文档可在线读取；复用相同的目录边界、4 MiB 限额和授权复核，不上传第三方。
+        for (key, value) in preview.as_object().expect("document preview object") {
+            result[key] = value.clone();
+        }
     } else if is_text(&side.bytes) {
         let text = std::str::from_utf8(&side.bytes).expect("validated UTF-8");
         let mut end = text.len().min(MAX_TEXT_BYTES);
@@ -3378,6 +3383,332 @@ mod tests {
             .unwrap_err()
             .code,
             401
+        );
+    }
+
+    #[test]
+    fn project_files_office_spreadsheet_reads_sheets_values_dates_and_sparse_rows() {
+        let fixture = fixture_dir();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let archive = office_fixture(&[
+            (
+                "_rels/.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="root" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "[Content_Types].xml",
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="数据" sheetId="1" r:id="r1"/><sheet name="空表" sheetId="2" r:id="r2"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="r2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/styles.xml",
+                r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="22"/></cellXfs></styleSheet>"#,
+            ),
+            (
+                "xl/sharedStrings.xml",
+                r#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>00123456789</t></si></sst>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:C1048576"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>手机号</t></is></c></row><row r="2"><c r="A2" t="s"><v>0</v></c><c r="B2" s="1"><v>45943.5</v></c><c r="C2"><f>1+25</f><v>26</v></c></row><row r="1048576"><c r="A1048576" t="inlineStr"><is><t>尾行</t></is></c></row></sheetData></worksheet>"#,
+            ),
+            (
+                "xl/worksheets/sheet2.xml",
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#,
+            ),
+        ]);
+        std::fs::write(root.join("report.xlsx"), archive).unwrap();
+        let result = project_file_content(&root, "report.xlsx").unwrap();
+        assert_eq!(result["kind"], "spreadsheet", "{result}");
+        assert_eq!(result["sheets"].as_array().unwrap().len(), 2);
+        assert_eq!(result["sheets"][0]["rows"][1]["cells"][0], "00123456789");
+        assert_eq!(
+            result["sheets"][0]["rows"][1]["cells"][1],
+            "2025-10-13 12:00:00"
+        );
+        assert_eq!(result["sheets"][0]["rows"][1]["cells"][2], "26");
+        assert_eq!(result["sheets"][0]["rows"][2]["number"], 1048576);
+        assert_eq!(result["sheets"][1]["rows"], json!([]));
+        assert_eq!(result["truncated"], false);
+    }
+
+    #[test]
+    fn project_files_office_merged_layout_keeps_blank_rows_widths_and_rejects_overlap() {
+        use super::super::document_preview::preview;
+        let workbook = r#"<workbook xmlns:r="urn:r"><sheets><sheet name="合并表" r:id="r1"/></sheets></workbook>"#;
+        let worksheet = r#"<worksheet><cols><col min="1" max="1" width="7"/><col min="2" max="2" width="18"/></cols><sheetData><row r="1"><c r="A1" s="1" t="inlineStr"><is><t>横向标题</t></is></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>纵向内容</t></is></c><c r="B4"><v>26</v></c></row></sheetData><mergeCells><mergeCell ref="A1:B1"/><mergeCell ref="A4:A6"/></mergeCells></worksheet>"#;
+        let make = |source: &str| {
+            office_fixture(&[
+                (
+                    "_rels/.rels",
+                    r#"<Relationships><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+                ),
+                ("xl/workbook.xml", workbook),
+                (
+                    "xl/_rels/workbook.xml.rels",
+                    r#"<Relationships><Relationship Id="r1" Type="urn:relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+                ),
+                ("xl/worksheets/sheet1.xml", source),
+                (
+                    "xl/styles.xml",
+                    r#"<styleSheet><fonts count="2"><font><sz val="11"/></font><font><sz val="16"/><b/><i/><color rgb="00FFFFFF"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="0017365D"/></patternFill></fill></fills><cellXfs count="2"><xf fontId="0" fillId="0" numFmtId="0"/><xf fontId="1" fillId="1" numFmtId="0"><alignment horizontal="center" vertical="center" wrapText="1"/></xf></cellXfs></styleSheet>"#,
+                ),
+            ])
+        };
+        let result = preview("merged.xlsx", &make(worksheet)).unwrap();
+        assert_eq!(result["kind"], "spreadsheet", "{result}");
+        let sheet = &result["sheets"][0];
+        assert_eq!(sheet["columnCount"], 2);
+        assert_eq!(sheet["columnWidths"], json!([54, 131]));
+        assert_eq!(sheet["rows"].as_array().unwrap().len(), 6);
+        assert_eq!(sheet["rows"][2]["number"], 3);
+        assert_eq!(sheet["rows"][3]["cells"], json!(["纵向内容", "26"]));
+        assert_eq!(
+            sheet["merges"][0],
+            json!({"startRow":1,"endRow":1,"startColumn":0,"endColumn":1})
+        );
+        assert_eq!(sheet["merges"][1]["endRow"], 6);
+        let style = &sheet["styles"][sheet["rows"][0]["styleIds"][0].as_u64().unwrap() as usize];
+        assert_eq!(style["background"], "#17365D");
+        assert_eq!(style["color"], "#FFFFFF");
+        assert_eq!(style["fontSize"], 16.0);
+        assert_eq!(style["bold"], true);
+        assert_eq!(style["italic"], true);
+        assert_eq!(style["horizontal"], "center");
+        let overlap = worksheet.replace("A4:A6", "A1:A6");
+        assert_eq!(
+            preview("overlap.xlsx", &make(&overlap)).unwrap()["kind"],
+            "unsupported"
+        );
+    }
+
+    fn office_fixture(entries: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::{Cursor, Write};
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (path, text) in entries {
+            zip.start_file(
+                path,
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated),
+            )
+            .unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn project_files_office_documents_preserve_paragraphs_tables_and_slide_order() {
+        let fixture = fixture_dir();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let word = office_fixture(&[(
+            "word/document.xml",
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>标题</w:t></w:r></w:p><w:p><w:r><w:t>段落 &lt;script&gt; &amp; 文字</w:t><w:br/><w:t>换行</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>姓名</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>测试</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#,
+        )]);
+        std::fs::write(root.join("read.docx"), word).unwrap();
+        let result = project_file_content(&root, "read.docx").unwrap();
+        assert_eq!(result["kind"], "document", "{result}");
+        let blocks = &result["sections"][0]["blocks"];
+        assert_eq!(blocks[0]["kind"], "heading");
+        assert_eq!(blocks[1]["text"], "段落 <script> & 文字\n换行");
+        assert_eq!(blocks[2]["rows"][0], json!(["姓名", "测试"]));
+        let ppt = office_fixture(&[
+            (
+                "ppt/presentation.xml",
+                r#"<p:presentation xmlns:p="urn:p" xmlns:r="urn:r"><p:sldIdLst><p:sldId id="1" r:id="second"/><p:sldId id="2" r:id="first"/></p:sldIdLst></p:presentation>"#,
+            ),
+            (
+                "ppt/_rels/presentation.xml.rels",
+                r#"<Relationships><Relationship Id="first" Type="urn:relationships/slide" Target="slides/slide1.xml"/><Relationship Id="second" Type="urn:relationships/slide" Target="slides/slide2.xml"/></Relationships>"#,
+            ),
+            (
+                "ppt/slides/slide1.xml",
+                "<slide><p><t>第一页文件</t></p></slide>",
+            ),
+            (
+                "ppt/slides/slide2.xml",
+                "<slide><p><t>实际第一张</t></p></slide>",
+            ),
+        ]);
+        std::fs::write(root.join("slides.pptx"), ppt).unwrap();
+        let result = project_file_content(&root, "slides.pptx").unwrap();
+        assert_eq!(result["sections"][0]["blocks"][0]["text"], "实际第一张");
+        assert_eq!(result["sections"][1]["blocks"][0]["text"], "第一页文件");
+    }
+
+    #[test]
+    fn project_files_office_delimited_and_open_document_formats_are_bounded() {
+        let fixture = fixture_dir();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        // 与网页兼容性用例同步验证真实序列化形状：无原始布局的文件必须仍可按默认列宽预览。
+        let assert_default_layout = |value: &Value| {
+            assert_eq!(value["kind"], "spreadsheet");
+            let sheet = &value["sheets"][0];
+            assert_eq!(sheet["columnWidths"], json!([]));
+            assert_eq!(sheet["merges"], json!([]));
+            assert_eq!(sheet["styles"], json!([]));
+            for row in sheet["rows"].as_array().unwrap() {
+                assert!(row.get("styleIds").is_none());
+            }
+        };
+        std::fs::write(
+            root.join("data.csv"),
+            "\u{feff}名称,号码,说明\n测试,001234,\"换行\n逗号,引号\"",
+        )
+        .unwrap();
+        let result = project_file_content(&root, "data.csv").unwrap();
+        assert_default_layout(&result);
+        assert_eq!(
+            result["sheets"][0]["rows"][1]["cells"],
+            json!(["测试", "001234", "换行\n逗号,引号"])
+        );
+        std::fs::write(root.join("data.tsv"), "名称\t值\n测试\t00123").unwrap();
+        let result = project_file_content(&root, "data.tsv").unwrap();
+        assert_default_layout(&result);
+        assert_eq!(result["sheets"][0]["rows"][1]["cells"][1], "00123");
+        let ods = office_fixture(&[(
+            "content.xml",
+            r#"<office:document-content xmlns:office="urn:office" xmlns:table="urn:table" xmlns:text="urn:text"><office:body><office:spreadsheet><table:table table:name="中文表"><table:table-row><table:table-cell><text:p>第一行</text:p></table:table-cell><table:table-cell table:number-columns-repeated="1000000000"/></table:table-row><table:table-row><table:table-cell><text:p>第二行</text:p></table:table-cell></table:table-row><table:table-row table:number-rows-repeated="1000000000"/></table:table></office:spreadsheet></office:body></office:document-content>"#,
+        )]);
+        std::fs::write(root.join("data.ods"), ods).unwrap();
+        let result = project_file_content(&root, "data.ods").unwrap();
+        assert_default_layout(&result);
+        assert_eq!(result["sheets"][0]["name"], "中文表");
+        assert_eq!(result["sheets"][0]["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(result["sheets"][0]["rows"][1]["cells"][0], "第二行");
+        let odt = office_fixture(&[(
+            "content.xml",
+            r#"<office:document-content xmlns:office="urn:office" xmlns:text="urn:text"><office:body><office:text><text:h>文档</text:h><text:p>正文</text:p></office:text></office:body></office:document-content>"#,
+        )]);
+        std::fs::write(root.join("data.odt"), odt).unwrap();
+        assert_eq!(
+            project_file_content(&root, "data.odt").unwrap()["sections"][0]["blocks"][1]["text"],
+            "正文"
+        );
+        std::fs::write(root.join("many.csv"), "a,b\n".repeat(1100)).unwrap();
+        let result = project_file_content(&root, "many.csv").unwrap();
+        assert_eq!(result["sheets"][0]["rows"].as_array().unwrap().len(), 1000);
+        assert_eq!(result["truncated"], true);
+    }
+
+    #[test]
+    fn project_files_office_pdf_extracts_readable_pages() {
+        use pdf_extract::{Dictionary, Document, Object, Stream};
+        let fixture = fixture_dir();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let mut doc = Document::with_version("1.5");
+        let pages = doc.new_object_id();
+        let mut font = Dictionary::new();
+        font.set("Type", "Font");
+        font.set("Subtype", "Type1");
+        font.set("BaseFont", "Helvetica");
+        let font = doc.add_object(font);
+        let mut fonts = Dictionary::new();
+        fonts.set("F1", font);
+        let mut resources = Dictionary::new();
+        resources.set("Font", fonts);
+        let content = doc.add_object(Stream::new(
+            Dictionary::new(),
+            b"BT /F1 12 Tf 40 40 Td (Online preview) Tj ET".to_vec(),
+        ));
+        let mut page = Dictionary::new();
+        page.set("Type", "Page");
+        page.set("Parent", pages);
+        page.set("Resources", resources);
+        page.set("MediaBox", vec![0.into(), 0.into(), 600.into(), 800.into()]);
+        page.set("Contents", content);
+        let page = doc.add_object(page);
+        let mut page_tree = Dictionary::new();
+        page_tree.set("Type", "Pages");
+        page_tree.set("Count", 1);
+        page_tree.set("Kids", vec![Object::Reference(page)]);
+        doc.objects.insert(pages, page_tree.into());
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", "Catalog");
+        catalog.set("Pages", pages);
+        let catalog = doc.add_object(catalog);
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        std::fs::write(root.join("read.pdf"), bytes).unwrap();
+        let result = project_file_content(&root, "read.pdf").unwrap();
+        assert_eq!(result["kind"], "document", "{result}");
+        assert!(
+            result["sections"][0]["blocks"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Online preview")
+        );
+    }
+
+    #[tokio::test]
+    async fn project_files_office_keep_authorization_revisions_and_safe_failures() {
+        let (_fixture, _state, repo) = fixture_repo().await;
+        std::fs::write(repo.root.join("read.csv"), "A,B\n00123,测试").unwrap();
+        let (state, headers) = fixture_web_state(&repo);
+        let value = fixture_response_json(
+            file(
+                State(state.clone()),
+                headers.clone(),
+                Json(json!({"threadId":"thread-1","path":"read.csv"})),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(value["kind"], "spreadsheet");
+        let revision = value["revision"].as_str().unwrap();
+        let unchanged = fixture_response_json(
+            file(
+                State(state.clone()),
+                headers.clone(),
+                Json(json!({"threadId":"thread-1","path":"read.csv","ifRevision":revision})),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(unchanged["notModified"], true);
+        assert_eq!(
+            file(
+                State(state),
+                HeaderMap::new(),
+                Json(json!({"threadId":"thread-1","path":"read.csv"}))
+            )
+            .await
+            .unwrap_err()
+            .code,
+            401
+        );
+        for name in ["broken.xlsx", "broken.docx", "broken.pdf", "old.doc"] {
+            std::fs::write(repo.root.join(name), b"\0broken").unwrap();
+            assert_eq!(
+                project_file_content(&repo.root, name).unwrap()["kind"],
+                "unsupported"
+            );
+        }
+        let entity = office_fixture(&[(
+            "word/document.xml",
+            r#"<!DOCTYPE document [<!ENTITY secret SYSTEM "file:///private.txt">]><document><body><p>&secret;</p></body></document>"#,
+        )]);
+        std::fs::write(repo.root.join("entity.docx"), entity).unwrap();
+        assert_eq!(
+            project_file_content(&repo.root, "entity.docx").unwrap()["kind"],
+            "unsupported"
+        );
+        let huge = "x".repeat(16 * 1024 * 1024 + 1);
+        let archive = office_fixture(&[("word/document.xml", &huge)]);
+        std::fs::write(repo.root.join("large.docx"), archive).unwrap();
+        assert_eq!(
+            project_file_content(&repo.root, "large.docx").unwrap()["kind"],
+            "unsupported"
         );
     }
 

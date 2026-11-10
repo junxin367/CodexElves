@@ -73,6 +73,191 @@ const sessionTools = await readFile(new URL("../assets/remote-access/session-too
 const sessionFiles = await readFile(new URL("../assets/remote-access/session-files.js", import.meta.url), "utf8");
 const sessionMenuSource = await readFile(new URL("../assets/remote-access/session-menu.js", import.meta.url), "utf8");
 
+function richFileHarness() {
+  const node = (tag, className = "", textContent = "") => ({
+    tag, className, textContent, children: [], attributes: {},
+    style: { setProperty(name, value) { this[name] = value; } }, disabled: false,
+    append(...children) { this.children.push(...children); },
+    replaceChildren(...children) { this.children = children; },
+    setAttribute(name, value) { this.attributes[name] = value; },
+  });
+  const context = vm.createContext({
+    node, displayWorkspaceName: value => value,
+    control: (label, click) => Object.assign(node("button", "", label), { click }),
+  });
+  const from = sessionFiles.indexOf("export function validRichFilePreview(");
+  const to = sessionFiles.indexOf("const bytesLabel =", from);
+  vm.runInContext(sessionFiles.slice(from, to).replace(/^export /gm, ""), context);
+  const all = root => [root, ...root.children.flatMap(all)];
+  return { context, all };
+}
+
+test("表格文档预览验证结构与总量，拒绝错误行号、越界列和未知内容块", () => {
+  const h = richFileHarness();
+  const value = { kind: "spreadsheet", sheets: [{
+    name: "中文表", columnCount: 2, truncated: false,
+    rows: [{ number: 1, cells: ["号码", "说明"] }, { number: 1048576, cells: ["00123", "<script>"] }],
+  }] };
+  assert.equal(h.context.validRichFilePreview(value), true);
+  for (const change of [
+    value => value.sheets[0].rows[1].number = 1,
+    value => value.sheets[0].rows[1].number = -1,
+    value => value.sheets[0].columnCount = 101,
+    value => value.sheets[0].rows[1].cells = [1],
+    value => value.sheets[0].rows[1].cells = ["x".repeat(16385)],
+    value => value.sheets = Array.from({ length: 21 }, () => value.sheets[0]),
+  ]) {
+    const invalid = structuredClone(value); change(invalid);
+    assert.equal(h.context.validRichFilePreview(invalid), false);
+  }
+  const document = { kind: "document", sections: [{ title: "第 1 页", blocks: [
+    { kind: "heading", text: "标题" }, { kind: "paragraph", text: "正文" },
+    { kind: "table", rows: [["单元格"]] },
+  ] }] };
+  assert.equal(h.context.validRichFilePreview(document), true);
+  document.sections[0].blocks.push({ kind: "html", text: "<script>" });
+  assert.equal(h.context.validRichFilePreview(document), false);
+});
+
+test("CSV、TSV、ODS 的空布局数组可预览，缺省列宽与完整列宽兼容，残缺列宽仍拒绝", () => {
+  const h = richFileHarness();
+  // 对齐 SheetBuilder::finish 实际序列化：无原始列宽时返回 []，不能只测省略字段的手写响应。
+  const value = { kind: "spreadsheet", sheets: [{
+    name: "工作表", columnCount: 3, truncated: false, merges: [], columnWidths: [], styles: [],
+    rows: [{ number: 1, cells: ["名称", "号码", "说明"] },
+      { number: 2, cells: ["示例", "001234", "换行\n逗号,引号"] }, { number: 3, cells: ["短行"] }],
+  }] };
+  assert.equal(h.context.validRichFilePreview(value), true);
+  const root = h.context.renderRichFilePreview(value), nodes = h.all(root);
+  assert.equal(nodes.find(node => node.tag === "table").style.width, "calc(360px + var(--sheet-row-number-width,44px))");
+  assert.deepEqual(nodes.filter(node => node.tag === "col").map(node => node.style.width),
+    ["var(--sheet-row-number-width,44px)", "120px", "120px", "120px"]);
+  assert.equal(nodes.some(node => node.tag === "td" && node.textContent === "001234"), true);
+  assert.equal(nodes.some(node => node.tag === "td" && node.textContent === "换行\n逗号,引号"), true);
+  for (const columnWidths of [undefined, null, [], [54, 120, 180]]) {
+    const compatible = structuredClone(value);
+    compatible.sheets[0].columnWidths = columnWidths;
+    assert.equal(h.context.validRichFilePreview(compatible), true);
+  }
+  for (const columnWidths of [[120], [120, 120, 120, 120], [120, 47, 120],
+    [120, 481, 120], [120, 120.5, 120], ["120", 120, 120], ""]) {
+    const invalid = structuredClone(value);
+    invalid.sheets[0].columnWidths = columnWidths;
+    assert.equal(h.context.validRichFilePreview(invalid), false);
+  }
+});
+
+test("Excel 多表切换和每页100行保留页码，空表与稀疏行号可以阅读", () => {
+  const h = richFileHarness(), state = {};
+  const value = { kind: "spreadsheet", sheets: [
+    { name: "数据", columnCount: 2, truncated: false,
+      rows: Array.from({ length: 215 }, (_, index) => ({ number: index + 1000, cells: [`row-${index}`, "00123"] })) },
+    { name: "空表", columnCount: 0, truncated: false, rows: [] },
+  ] };
+  let changes = 0;
+  const root = h.context.renderRichFilePreview(value, state, () => changes++);
+  const find = predicate => h.all(root).filter(predicate);
+  assert.equal(find(node => node.tag === "td").length, 200);
+  assert.equal(find(node => node.tag === "th" && node.scope === "row")[0].textContent, "1000");
+  find(node => node.tag === "button" && node.textContent === "下一页")[0].click();
+  assert.equal(state.page, 1);
+  assert.equal(find(node => node.tag === "td")[0].textContent, "row-100");
+  const restored = h.context.renderRichFilePreview(value, { ...state });
+  assert.equal(h.all(restored).find(node => node.tag === "td").textContent, "row-100");
+  find(node => node.attributes.role === "tab" && node.textContent === "空表")[0].click();
+  assert.equal(state.sheet, 1);
+  assert.equal(state.page, 0);
+  assert.equal(find(node => node.textContent === "此表格为空").length, 1);
+  assert.equal(changes, 2);
+  assert.equal(h.context.spreadsheetColumn(26), "AA");
+});
+
+test("文档正文和表格中的HTML只作为文字，不创建脚本、图片或外链", () => {
+  const h = richFileHarness();
+  const source = '<img src="https://example.invalid" onerror="alert(1)"><script>bad()</script>';
+  const value = { kind: "document", sections: [{ title: "文档", blocks: [
+    { kind: "paragraph", text: source }, { kind: "table", rows: [[source, "00123"]] },
+  ] }] };
+  const root = h.context.renderRichFilePreview(value), nodes = h.all(root);
+  assert.equal(nodes.filter(node => ["img", "script", "iframe", "a"].includes(node.tag)).length, 0);
+  assert.equal(nodes.filter(node => node.textContent === source).length, 2);
+  assert.equal(nodes.some(node => node.tag === "td" && node.textContent === "00123"), true);
+});
+
+test("Excel 合并范围保留横纵跨度、固定列宽和跨页左上角内容，不复制被覆盖的空格", () => {
+  const h = richFileHarness(), rows = Array.from({ length: 105 }, (_, index) => ({
+    number: index + 1, cells: index === 0 ? ["横向标题", "", "第三列"]
+      : index === 98 ? ["纵向合并", "", "值"] : ["", "", `row-${index + 1}`],
+  }));
+  const sheet = { name: "合并表", columnCount: 3, truncated: false,
+    columnWidths: [54, 96, 130], rows, merges: [
+      { startRow: 1, endRow: 1, startColumn: 0, endColumn: 1 },
+      { startRow: 99, endRow: 103, startColumn: 0, endColumn: 1 },
+    ] };
+  const value = { kind: "spreadsheet", sheets: [sheet] };
+  assert.equal(h.context.validRichFilePreview(value), true);
+  const root = h.context.renderRichFilePreview(value);
+  let cells = h.all(root).filter(node => node.tag === "td");
+  const heading = cells.find(node => node.textContent === "横向标题");
+  assert.equal(heading.colSpan, 2); assert.equal(heading.rowSpan, 1);
+  assert.equal(cells.filter(node => node.attributes["data-row"] === "1").length, 2);
+  const merged = cells.find(node => node.textContent === "纵向合并");
+  assert.equal(merged.rowSpan, 2); assert.equal(merged.colSpan, 2);
+  assert.equal(h.all(root).find(node => node.tag === "table").style.width, "calc(280px + var(--sheet-row-number-width,44px))");
+  assert.deepEqual(h.all(root).filter(node => node.tag === "col").map(node => node.style.width),
+    ["var(--sheet-row-number-width,44px)", "54px", "96px", "130px"]);
+  h.all(root).find(node => node.tag === "button" && node.textContent === "下一页").click();
+  cells = h.all(root).filter(node => node.tag === "td");
+  const continued = cells.find(node => node.textContent === "纵向合并");
+  assert.equal(continued.rowSpan, 3);
+  assert.equal(continued.attributes["data-row"], "101");
+  assert.equal(cells.filter(node => node.attributes["data-row"] === "102").length, 1);
+  assert.equal(sheet.rows[100].cells[0], "", "分页渲染不能改写原始数据");
+  for (const change of [
+    sheet => sheet.merges.push({ ...sheet.merges[0] }),
+    sheet => sheet.merges[0].endColumn = 3,
+    sheet => sheet.merges[0].endRow = 10000,
+    sheet => sheet.columnWidths[0] = -1,
+    sheet => sheet.rows = sheet.rows.filter(row => row.number !== 100),
+  ]) {
+    const invalid = structuredClone(value); change(invalid.sheets[0]);
+    assert.equal(h.context.validRichFilePreview(invalid), false);
+  }
+});
+
+test("Excel 原始背景字号和文字效果按样式索引应用，行数交给文件大小信息行", () => {
+  const h = richFileHarness(), style = {
+    background: "#17365D", color: "#FFFFFF", fontSize: 16,
+    bold: true, italic: true, underline: true, strike: false,
+    horizontal: "center", vertical: "middle", wrap: true,
+  };
+  const value = { kind: "spreadsheet", sheets: [{ name: "样式", columnCount: 2, truncated: false,
+    rows: [{ number: 1, cells: ["标题", ""], styleIds: [0, 0] }],
+    styles: [style], merges: [{ startRow: 1, endRow: 1, startColumn: 0, endColumn: 1 }],
+  }] };
+  assert.equal(h.context.validRichFilePreview(value), true);
+  let range;
+  const root = h.context.renderRichFilePreview(value, {}, null, { onRange: value => { range = value; } });
+  const cell = h.all(root).find(node => node.tag === "td");
+  assert.equal(cell.style.backgroundColor, "#17365D");
+  assert.equal(cell.style.color, "#FFFFFF");
+  assert.match(cell.style.fontSize, /file-reading-font-size/);
+  assert.equal(cell.style.fontWeight, "700");
+  assert.equal(cell.style.fontStyle, "italic");
+  assert.equal(cell.style.textAlign, "center");
+  assert.equal(cell.style.verticalAlign, "middle");
+  assert.equal(h.all(range).some(node => node.textContent === "1–1 / 1 行"), true);
+  assert.equal(h.all(root).some(node => node.textContent === "1–1 / 1 行"), false);
+  for (const change of [
+    value => value.sheets[0].styles[0].background = "url(https://example.invalid)",
+    value => value.sheets[0].styles[0].fontSize = 1000,
+    value => value.sheets[0].rows[0].styleIds = [10, 0],
+  ]) {
+    const invalid = structuredClone(value); change(invalid);
+    assert.equal(h.context.validRichFilePreview(invalid), false);
+  }
+});
+
 test("服务子智能体按独立能力启用，旧后台保持禁用且子会话始终只读", () => {
   const context = { session: { readOnly: false, runtime: { cdpInjectionEnabled: false }, capabilities: {} },
     selectedId: "child", thread: { id: "child", viewKind: "subagent", readOnly: true },
@@ -583,7 +768,7 @@ test("Windows 打包拒绝缺少分支信息、运行模式或压缩恢复的旧
     readFile(new URL("../crates/codex-elves-core/src/remote_access/workspace.rs", import.meta.url), "utf8"),
   ]);
   const current = { backend, service, workspace, app, native };
-  assert.deepEqual(verify(current), { protocol: 5, bridge: 136 });
+  assert.deepEqual(verify(current), { protocol: 5, bridge: 137 });
   for (const obsolete of [2, 3, 4])
     assert.throws(() => verify({ ...current, service: service.replace("PROTOCOL_VERSION: u32 = 5", `PROTOCOL_VERSION: u32 = ${obsolete}`) }), /后台协议不能低于 5/);
   assert.throws(() => verify({ ...current, workspace: workspace.replace("async fn branch_metadata(", "async fn obsolete_metadata(") }), /缺少真实分支/);

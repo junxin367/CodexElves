@@ -37,6 +37,7 @@ mod channels;
 mod context_usage;
 mod credentials;
 mod diagnostics;
+mod document_preview;
 pub(crate) mod execution;
 mod frp_recovery;
 mod frp_tunnel;
