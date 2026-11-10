@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 138) return;
+  if (window.__codexElvesRemoteAccess?.version === 139) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -23,6 +23,7 @@
   const queuedSendSubmissions = new Map();
   const queuedEditAcceptanceProofs = new WeakMap();
   const queuedAcceptanceByManager = new WeakMap();
+  const queuedSteerSubmissionsByManager = new WeakMap();
   const asyncQuestionSignatures = new Map();
   const blockingRequestSnapshots = new Map();
   const observedRequestThreads = new Set();
@@ -6409,6 +6410,13 @@
     let submitted = false;
     let threadId = null, messageId = null;
     let preDispatchError = null;
+    let attempts = null, verifiedClientId = null;
+    const attempt = { state: "pending" }, attemptKeys = new Set();
+    const finishAttempt = state => {
+      attempt.state = state;
+      if (state === "not-sent")
+        for (const key of attemptKeys) if (attempts?.get(key) === attempt) attempts.delete(key);
+    };
     // RPC 会重建回调抛出的 Error，不能依赖它保留 notSent 等自定义字段。
     const beforeDispatch = callback => async (...args) => {
       preDispatchError = null;
@@ -6423,6 +6431,36 @@
         if (manager !== sourceManager || sourceManager.disposed || isDeletedThread(threadId))
           throw failure(409, "会话连接已变化或会话已删除，请重新核对后引导");
       };
+      // 用户要求引导不再拉取全量历史防重：这里只读取已加载消息的 ID 和已知接受记录，
+      // 原生协调器继续负责 owner、队列版本和发送锁；没有命中不等于完整历史证明。
+      // 发送记录只存物理/逻辑 ID 与状态，不复制正文；成功或未知不能因快照滞后而再次派发。
+      attempts = queuedSteerSubmissionsByManager.get(sourceManager);
+      if (!attempts) queuedSteerSubmissionsByManager.set(sourceManager, attempts = new Map());
+      const assertUnaccepted = message => {
+        assertCurrent();
+        const clientId = requiredId(verifiedClientId ?? message.clientUserMessageId
+          ?? message.submissionOptions?.clientUserMessageId ?? message.id);
+        const keys = [JSON.stringify([threadId, "queue", messageId]), JSON.stringify([threadId, "client", clientId])];
+        for (const key of keys) {
+          const previous = attempts.get(key);
+          if (previous && previous !== attempt)
+            throw failure(409, previous.state === "sent"
+              ? "此队列消息已引导到会话，不能重复引导"
+              : "此队列消息正在引导或结果尚未确认，请查回执，不要重复提交", { notSent: true });
+        }
+        const conversation = sourceManager.getConversation(threadId);
+        if (array(conversation?.unconfirmedTurnSubmissions).some(submission => submission?.terminal === true
+            && (submission.serverQueuedMessageId === messageId || submission.clientUserMessageId === clientId)))
+          throw failure(409, "此队列消息的提交状态尚未确认，不能重复引导", { notSent: true });
+        if (queuedAcceptanceByManager.get(sourceManager)?.get(threadId)?.has(clientId)
+            || nativeConversationTurns(conversation).some(turn => nativeTurnId(turn)
+              && !turn.pendingUserMessageAdmission && array(turn.items).some(item =>
+                (item?.type === "userMessage" || item?.type === "steeringUserMessage" && item.status === "accepted")
+                && !item.remotePendingInput && !item.remoteCompactionInput
+                && (item.clientId === clientId || item.clientUserMessageId === clientId))))
+          throw failure(409, "此逻辑消息已进入原生会话，不能再次引导本地副本", { notSent: true });
+        return keys;
+      };
       await readThread(threadId);
       assertCurrent();
       if (runtimeCompaction(threadId).state !== "idle")
@@ -6433,13 +6471,15 @@
           || typeof coordinator.execution?.prepare !== "function")
         throw failure(503, "当前 Codex 版本不支持原生队列引导");
       const nativeFinalAdmission = sourceManager.__codexElvesRequestClientManager === true;
+      const initial = array(coordinator.readMessages(threadId)).find(message => message?.id === messageId);
+      if (!initial) throw failure(409, "此队列消息已变化，请重新核对", { notSent: true });
+      if (initial.submission?.status && initial.submission.status !== "queued")
+        throw failure(409, "此队列消息正在发送或结果尚未确认，不能重复引导", { notSent: true });
+      assertUnaccepted(initial);
       const prepare = async (request, phase) => {
         if (request?.conversationId !== threadId || request?.message?.id !== messageId)
           throw failure(409, "队列消息身份已变化，请刷新会话");
         const message = request.message;
-        // aEs 会先恢复工作树再构造 submission，此分支仍须在原生 prepare 前核验接受状态。
-        if (!nativeFinalAdmission || message.context?.worktreeRecovery?.creationRequest != null)
-          await assertQueuedMessagesUnaccepted(threadId, [message], sourceManager);
         assertCurrent();
         const serverQueuedMessage = message.serverQueuedMessageId != null;
         let clientUserMessageId = requiredId(message.clientUserMessageId
@@ -6466,6 +6506,9 @@
             && request.options.clientUserMessageId !== clientUserMessageId) {
           throw failure(409, "队列消息身份与原生准备参数不一致，请刷新会话");
         }
+        // 服务端核准的逻辑 ID 优先于恢复前的 submissionOptions；工作树恢复也先做轻量准入。
+        verifiedClientId = clientUserMessageId;
+        assertUnaccepted(message);
         const baseline = structuredClone(message);
         const targetTurnIds = [request.options?.expectedTurnId, request.options?.targetTurnId, message.targetTurnId]
           .filter(value => value != null).map(requiredId);
@@ -6543,29 +6586,36 @@
         assertCurrent();
         const current = array(coordinator.readMessages(threadId)).find(message => message?.id === messageId);
         if (!current) throw failure(409, "此队列消息已变化，请重新核对", { notSent: true });
-        await assertQueuedMessagesUnaccepted(threadId, [current], sourceManager);
-        assertCurrent();
+        const keys = assertUnaccepted(current);
+        // 原生在 prepare、resume、无活动轮降级后可能多次准入；本次记录可以重入。
+        // 此时本地队列可能已被原生标为 pending/sending，不能把自己的状态当成重复提交。
+        for (const key of keys) { attempts.set(key, attempt); attemptKeys.add(key); }
       };
       // request-client 的第五参由原生服务端队列和本地队列在锁内、派发前调用；
-      // 完整历史接受核验保留在该最终回调，普通消息避免外层和 prepare 前的重复全量读取。
+      // 最终回调只核对轻量状态，不再把全量历史 I/O 放进发送锁。
       if (!nativeFinalAdmission) await assertAdmission();
       submitted = true;
       const result = await coordinator.sendQueuedMessageNow(threadId, messageId, undefined,
         beforeDispatch(prepare), beforeDispatch(assertAdmission));
       if (result?.status !== "sent") throw failure(409, "此队列消息当前无法引导，请刷新会话");
+      finishAttempt("sent");
       return { ok: true, threadId, messageId, turnId: result.turnId,
         ...(result.queueSyncPending === true ? { queueSyncPending: true }
           : queueSnapshotFields(threadId, coordinator.readMessages(threadId))) };
     } catch (error) {
       const acknowledged = error.queueMutationAcknowledged && error.queueMutationResult;
       if (acknowledged?.status === "sent" && typeof acknowledged.turnId === "string"
-          && (acknowledged.messageId == null || acknowledged.messageId === messageId))
+          && (acknowledged.messageId == null || acknowledged.messageId === messageId)) {
+        finishAttempt("sent");
         return { ok: true, threadId, messageId, turnId: acknowledged.turnId,
           queueSyncPending: true, message: "引导已完成，但队列快照暂不可用，请刷新会话" };
+      }
       if (preDispatchError) error = preDispatchError;
+      finishAttempt(preDispatchError || error.notSent === true || error.remoteValidationFailure ? "not-sent" : "unknown");
       return { ok: false, code: error.code || 503,
         ...(preDispatchError || error.notSent === true ? { notSent: true } : {}),
-        ...(submitted && !preDispatchError && !error.remoteValidationFailure ? { outcomeUnknown: true } : {}),
+        ...(submitted && !preDispatchError && error.notSent !== true && !error.remoteValidationFailure
+          ? { outcomeUnknown: true } : {}),
         message: error.message || "引导结果未确认，请查看原生队列，不要重复操作" };
     }
   }
@@ -7557,7 +7607,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 138, call,
+    version: 139, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {

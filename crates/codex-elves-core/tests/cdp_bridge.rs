@@ -2094,6 +2094,7 @@ const nativeCoordinator={
 const rpc={getTurnCoordinator:async()=>nativeCoordinator,
   getFollowUpContext:async()=>({cwd:"/test"})};
 const env={manager:null,appScope:{},requestClientQueuePrepare:null,
+  queuedAcceptanceByManager:new WeakMap(),queuedSteerSubmissionsByManager:new WeakMap(),
   requestClientNativeRpc:async()=>rpc,nativeModuleSnapshot:async()=>{moduleReads++;return{module:{}};},
   nativeFunction:()=>nativePrepare,readRequestClientQueue:async()=>{
     queueRefreshes++;
@@ -2101,12 +2102,10 @@ const env={manager:null,appScope:{},requestClientQueuePrepare:null,
     return [];
   },
   requestClientQueues:new Map([["thread",{messages:[baseline]}]]),
-  assertQueuedMessagesUnaccepted:async()=>{
-    if(scenario.acceptedAtFinal)throw Object.assign(new Error("already accepted"),{
-      code:409,remoteValidationFailure:true,notSent:true});
-  },requiredId:v=>v,array:v=>Array.isArray(v)?v:[],
+  requiredId:v=>v,array:v=>Array.isArray(v)?v:[],
   isDeletedThread:()=>false,readThread:async()=>({id:"thread"}),
-  nativeConversationTurns:()=>[{turnId:"active-turn",status:"inProgress"}],
+  nativeConversationTurns:()=>[{turnId:"active-turn",status:"inProgress",items:scenario.acceptedAtFinal
+    ?[{type:"userMessage",clientId:"logical-client"}]:[]}],
   nativeTurnId:v=>v.turnId,nativeTurnStatus:v=>v.status,
   runtimeCompaction:()=>({state:"idle"}),retryExecutionConfigLoading:fn=>fn(),
   queueSnapshotFields:()=>{queueSnapshots++;return{queuedMessages:[]};},
@@ -2126,7 +2125,11 @@ const api=new Function("env",`with(env){
 const manager={__codexElvesRequestClientManager:true,getConversation:()=>({}),
   getTurnCoordinator:async()=>api.coordinator(manager)};
 env.manager=manager;env.messageActionManager=()=>manager;
-const steer=()=>api.steer({threadId:"thread",messageId:"server-queued"});
+// 每个身份变体是独立发送场景；重复点击与丢回执的同一状态由完整协调器夹具覆盖。
+const steer=()=>{
+  env.queuedSteerSubmissionsByManager=new WeakMap();
+  return api.steer({threadId:"thread",messageId:"server-queued"});
+};
 (async()=>{
   let result=await steer();
   assert.equal(result.ok,true,JSON.stringify(result));
@@ -2228,15 +2231,20 @@ async function setup(kind){
     h.serverItems=[{id:message.id,clientUserMessageId:message.clientUserMessageId,input}];
   }
   a.env.requestClientQueues.set("thread",{messages:[message]});
-  const historyReads=[],send=a.env.manager.requestClient.sendRequest;
+  const historyReads=[],stateReads=[],send=a.env.manager.requestClient.sendRequest;
   a.env.manager.requestClient.sendRequest=async(method,params)=>{
-    if(method==="thread/read")historyReads.push({locked:h.sendLockHeld,prepared:h.prepared.length});
+    if(method==="thread/read"&&params.includeTurns===true)historyReads.push(params);
     return await send(method,params);
   };
-  return{h,a,message,input,historyReads};
+  const getConversation=a.env.manager.getConversation;
+  a.env.manager.getConversation=(...args)=>{
+    stateReads.push({locked:h.sendLockHeld,prepared:h.prepared.length});
+    return getConversation(...args);
+  };
+  return{h,a,message,input,historyReads,stateReads};
 }
 for(const kind of ["server","local"]){
-  const {h,a,message,input,historyReads}=await setup(kind);
+  const {h,a,message,input,historyReads,stateReads}=await setup(kind);
   const sent=await a.api.steer({threadId:"thread",messageId:message.id});
   await new Promise(setImmediate);
   assert.equal(sent.ok,true,JSON.stringify({kind,sent}));
@@ -2244,12 +2252,12 @@ for(const kind of ["server","local"]){
   const accepted=h.history.turns.find(turn=>turn.id==="base").items.filter(item=>item.type==="steeringUserMessage");
   assert.equal(accepted.length,1);assert.equal(accepted[0].clientUserMessageId,message.clientUserMessageId);
   assert.deepEqual(accepted[0].input,input);
-  assert(historyReads.length>0&&historyReads.every(read=>read.locked&&read.prepared>0),
-    "成功派发也必须通过原生锁内的完整历史核验");
+  assert.equal(historyReads.length,0,"引导不能重新拉取完整历史");
+  assert(stateReads.some(read=>read.locked&&read.prepared>0),"派发前仍须在原生锁内核对已加载状态");
 }
 for(const kind of ["server","local"]){
   for(const timing of ["already-accepted","during-prepare"]){
-    const {h,a,message,input,historyReads}=await setup(kind);
+    const {h,a,message,input,historyReads,stateReads}=await setup(kind);
     let preparationStarted,releasePreparation;
     const started=new Promise(resolve=>{preparationStarted=resolve;});
     const release=new Promise(resolve=>{releasePreparation=resolve;});
@@ -2270,9 +2278,9 @@ for(const kind of ["server","local"]){
     assert.equal(h.calls.steer,0,"已接受的 logical 副本不能在当前轮重复引导");
     assert.equal(h.calls.delete,0,"拒绝时不能删除原服务器队列消息");
     assert.equal(h.accepted().filter(item=>item.clientId===message.clientUserMessageId).length,1);
-    assert(historyReads.length>0,"必须通过真实完整历史执行最终接受核验");
-    assert(historyReads.every(read=>read.locked&&read.prepared>0),
-      "完整历史核验必须落在原生锁内并发生于异步准备之后");
+    assert.equal(historyReads.length,0,"已有接受证据可以直接拒绝，无须加载完整历史");
+    if(timing==="during-prepare")
+      assert(stateReads.some(read=>read.locked&&read.prepared>0),"异步准备后须在锁内重新检查接受状态");
   }
 }
 const idle=await setup("server");
@@ -2281,7 +2289,150 @@ const rejected=await idle.a.api.steer({threadId:"thread",messageId:idle.message.
 assert.equal(rejected.ok,false,JSON.stringify(rejected));
 assert.equal(idle.h.calls.start,0,"空闲服务器队列也必须在 thread/queue/start 前执行最终接受核验");
 assert.equal(idle.h.calls.delete,0);
-assert(idle.historyReads.length>0&&idle.historyReads.every(read=>read.locked));
+assert.equal(idle.historyReads.length,0);
+"#,
+    );
+}
+
+#[test]
+fn request_client_steer_does_not_read_large_history_or_message_bodies() {
+    run_native_queue_edit_consumption_contract(
+        r#"
+const h=await createFullNativeQueueHarness(),a=h.adapter();
+h.allowSteer=true;
+const message={id:"queued-physical",clientUserMessageId:"queued-logical",createdAt:123,
+  text:"轻量引导",cwd:"/memory-fixture",context:{prompt:"轻量引导",imageAttachments:[],addedFiles:[],fileAttachments:[]}};
+h.native.messages.set("thread",{messages:[message],refreshing:false});
+a.env.requestClientQueues.set("thread",{messages:[message]});
+// 用户现场有20轮1544项；正文属性不可读取，确保检查只访问消息身份，不搬运工具输出或正文。
+const loaded={id:"thread",turns:Array.from({length:20},(_,i)=>({
+  id:i===19?"base":"old-"+i,status:i===19?"inProgress":"completed",
+  items:Array.from({length:i===19?81:77},(_,j)=>{
+    const item={id:`item-${i}-${j}`,type:j===0?"userMessage":"commandExecution",clientId:`old-client-${i}-${j}`};
+    for(const key of ["content","text","output"])
+      Object.defineProperty(item,key,{get(){throw new Error("不能读取历史正文 "+key);}});
+    return item;
+  })
+}))};
+a.env.manager.getConversation=()=>loaded;
+a.env.nativeConversationTurns=conversation=>conversation?.turns??[];
+let historyReads=0;
+a.env.manager.readThread=async()=>{historyReads++;throw new Error("完整历史接口不可用");};
+const result=await a.api.steer({threadId:"thread",messageId:message.id});
+assert.equal(result.ok,true,JSON.stringify(result));
+assert.equal(h.calls.steer,1);
+assert.equal(historyReads,0,"历史接口不可用不应阻塞队列引导");
+assert.equal(loaded.turns.reduce((n,turn)=>n+turn.items.length,0),1544);
+"#,
+    );
+}
+
+#[test]
+fn request_client_steer_keeps_sent_and_unknown_ids_when_history_snapshot_is_stale() {
+    run_native_queue_edit_consumption_contract(
+        r#"
+for(const kind of ["server","local"]){
+  for(const receipt of ["sent","lost","acknowledged-error"]){
+    const h=await createFullNativeQueueHarness(),a=h.adapter();
+    h.allowSteer=true;
+    const message={id:"queued-physical",clientUserMessageId:"queued-logical",createdAt:123,
+      text:"不重复引导",cwd:"/memory-fixture",context:{prompt:"不重复引导",imageAttachments:[],addedFiles:[],fileAttachments:[]}};
+    const input=[{type:"text",text:"不重复引导\n",text_elements:[]}];
+    const seed=message=>{
+      if(kind==="local")h.native.messages.set("thread",{messages:[message],refreshing:false});
+      else{
+        h.projectedMessages.set(message.id,message);
+        h.serverItems=[{id:message.id,clientUserMessageId:message.clientUserMessageId,input}];
+      }
+      a.env.requestClientQueues.set("thread",{messages:[message]});
+    };
+    seed(message);
+    // 固定独立副本，避免夹具与原生历史共享数组，掩盖生产中订阅滞后的情况。
+    const loaded=structuredClone(a.env.manager.getConversation());
+    a.env.manager.getConversation=()=>loaded;
+    a.env.nativeConversationTurns=conversation=>conversation?.turns??[];
+    a.env.manager.readThread=async()=>{throw new Error("不得补读完整历史");};
+    const send=h.native.sendQueuedMessageNow.bind(h.native);
+    let dispatchAttempts=0;
+    h.native.sendQueuedMessageNow=async(...args)=>{
+      dispatchAttempts++;
+      const result=await send(...args);
+      if(receipt==="lost")throw new Error("native acknowledgement lost");
+      if(receipt==="acknowledged-error")
+        throw Object.assign(new Error("queue snapshot failed"),{queueMutationAcknowledged:true,queueMutationResult:result});
+      return result;
+    };
+    const result=await a.api.steer({threadId:"thread",messageId:message.id});
+    assert.equal(result.ok,receipt!=="lost",JSON.stringify({kind,receipt,result}));
+    assert.equal(result.outcomeUnknown,receipt==="lost"?true:undefined);
+    assert.equal(h.calls.steer,1);
+    for(const restoredId of [message.id,"restored-physical"]){
+      const restored={...message,id:restoredId};
+      seed(restored);
+      const repeated=await a.api.steer({threadId:"thread",messageId:restored.id});
+      assert.equal(repeated.ok,false,JSON.stringify({kind,receipt,repeated}));
+      assert.equal(repeated.notSent,true);
+      assert.equal(repeated.outcomeUnknown,undefined);
+      assert.equal(dispatchAttempts,1,"同物理ID或恢复后的同逻辑ID都必须在派发前拒绝");
+      assert.equal(h.calls.steer,1);
+    }
+  }
+}
+"#,
+    );
+}
+
+#[test]
+fn request_client_steer_allows_own_reentry_and_releases_only_definite_failures() {
+    run_native_queue_edit_consumption_contract(
+        r#"
+for(const outcome of ["concurrent","not-sent","deferred"]){
+  const h=await createFullNativeQueueHarness(),a=h.adapter();
+  h.allowSteer=true;
+  const message={id:"queued-physical",clientUserMessageId:"queued-logical",createdAt:123,
+    text:"原生准入重入",cwd:"/memory-fixture",context:{prompt:"原生准入重入",imageAttachments:[],addedFiles:[],fileAttachments:[]}};
+  h.native.messages.set("thread",{messages:[message],refreshing:false});
+  a.env.requestClientQueues.set("thread",{messages:[message]});
+  const loaded=structuredClone(a.env.manager.getConversation());
+  a.env.manager.getConversation=()=>loaded;
+  a.env.nativeConversationTurns=conversation=>conversation?.turns??[];
+  const send=h.native.sendQueuedMessageNow.bind(h.native);
+  let entered,release;
+  const admissionEntered=new Promise(resolve=>{entered=resolve;});
+  const blocked=new Promise(resolve=>{release=resolve;});
+  h.native.sendQueuedMessageNow=async(id,messageId,options,prepare,admission)=>{
+    if(outcome!=="concurrent"){
+      await admission();
+      if(outcome==="deferred")return{status:"deferred"};
+      throw Object.assign(new Error("definitely not dispatched"),{notSent:true});
+    }
+    return await send(id,messageId,options,prepare,async()=>{
+      // 自己的 pending/sending 和未接受占位不能挡住原生多次准入。
+      message.submission={status:"sending"};
+      loaded.turns.push({id:null,pendingUserMessageAdmission:true,items:[
+        {type:"userMessage",clientId:message.clientUserMessageId,remotePendingInput:true}
+      ]});
+      await admission();entered();await blocked;await admission();
+    });
+  };
+  const operation=a.api.steer({threadId:"thread",messageId:message.id});
+  if(outcome==="concurrent"){
+    await admissionEntered;
+    delete message.submission;
+    const competing=await a.api.steer({threadId:"thread",messageId:message.id});
+    assert.equal(competing.ok,false);
+    assert.equal(competing.notSent,true);
+    release();
+  }
+  const result=await operation;
+  assert.equal(result.ok,outcome==="concurrent",JSON.stringify({outcome,result}));
+  assert.equal(result.outcomeUnknown,undefined);
+  if(outcome==="not-sent")assert.equal(result.notSent,true);
+  h.native.sendQueuedMessageNow=send;
+  const repeated=await a.api.steer({threadId:"thread",messageId:message.id});
+  assert.equal(repeated.ok,outcome!=="concurrent",JSON.stringify({outcome,repeated}));
+  assert.equal(h.calls.steer,1,"明确未发可以重试；并发拒绝不能清掉首个调用的发送记录");
+}
 "#,
     );
 }
@@ -2406,7 +2557,7 @@ for(const ephemeral of [false,true]){
 fn request_client_steer_callback_rejection_survives_rpc_error_serialization() {
     run_native_queue_edit_consumption_contract(
         r#"
-for(const failureAt of ["history","prepare","identity"]){
+for(const failureAt of ["accepted","prepare","identity"]){
   const h=await createFullNativeQueueHarness(),a=h.adapter();
   h.allowSteer=true;
   const message={id:"queued-physical",clientUserMessageId:"queued-logical",createdAt:123,
@@ -2415,8 +2566,8 @@ for(const failureAt of ["history","prepare","identity"]){
   await h.native.sendMessage({conversationId:"thread",message,acceptLocally:false,queueModeOverride:"queue"},
     async(request,phase)=>(await h.native.execution.prepare("thread",request.message,phase)).submission);
   a.env.requestClientQueues.set("thread",{messages:h.native.readMessages("thread")});
-  if(failureAt==="history")a.env.manager.readThread=async()=>{
-    throw Object.assign(new Error("ephemeral threads do not support includeTurns"),{code:-32600});
+  if(failureAt==="accepted")h.beforePrepare=async()=>{
+    h.accept([{type:"text",text:"原队列消息\n",text_elements:[]}],message.clientUserMessageId);
   };
   if(failureAt==="prepare")h.beforePrepare=async()=>{throw new Error("native preparation unavailable");};
   if(failureAt==="identity")h.transformPrepared=submission=>({...submission,conversationId:"wrong-thread"});
@@ -2475,7 +2626,7 @@ for(const loseAcknowledgement of [false,true]){
   assert.deepEqual(accepted[0].input,[
     {type:"text",text:"侧边图文引导\n",text_elements:[]},{type:"image",url:image.src,detail:null}
   ]);
-  assert(h.sideHistoryReads>0);
+  assert.equal(h.sideHistoryReads??0,0,"临时会话引导也不能额外读取完整内存历史");
   if(loseAcknowledgement){
     assert.equal(result.ok,false);
     assert.equal(result.outcomeUnknown,true,"真正派发后的丢回包必须保持未知，不能伪装为未发送");
@@ -4426,7 +4577,8 @@ async function createFullNativeQueueHarness({ephemeral=false,rspack=false}={}){
       crypto:nodeCrypto.webcrypto,epoch:"full-native",queueSequence:0,
       failure:(code,message,details={})=>Object.assign(new Error(message),{code,remoteValidationFailure:true,...details}),
       queuedEditStore:{sessions:new Map()},queuedEditAcceptanceProofs:new WeakMap(),
-      queuedAcceptanceByManager:new WeakMap(),queuedSendSubmissions:new Map(),queuedReorders:new Set(),
+      queuedAcceptanceByManager:new WeakMap(),queuedSteerSubmissionsByManager:new WeakMap(),
+      queuedSendSubmissions:new Map(),queuedReorders:new Set(),
       isDeletedThread:()=>false,readThread:async()=>conversation,runtimeCompaction:()=>({state:"idle"}),
       nativeTurnId:turn=>turn?.turnId??turn?.id??null,nativeTurnStatus:turn=>turn?.status,
       nativeConversationTurns:()=>h.hidePendingTurnsFromAdapter
@@ -4612,7 +4764,7 @@ function createLegacyQueueRestoreHarness({ghost=true,acceptImmediately=true}={})
     requiredId:v=>v,array:v=>Array.isArray(v)?v:[],TextEncoder,Uint8Array,crypto:nodeCrypto.webcrypto,
     failure:(code,message,details={})=>Object.assign(new Error(message),{code,remoteValidationFailure:true,...details}),
     queuedEditStore:{sessions:new Map()},queuedEditAcceptanceProofs:new WeakMap(),
-    queuedAcceptanceByManager:new WeakMap(),
+    queuedAcceptanceByManager:new WeakMap(),queuedSteerSubmissionsByManager:new WeakMap(),
     messageActionManager:()=>env.manager,loadNativeQueue:async()=>{},
     readThread:async()=>history,isDeletedThread:()=>false,pushNotification:()=>{},
     queuedReorders:new Set(),retryExecutionConfigLoading:fn=>fn(),
@@ -10108,8 +10260,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = include_str!("../../../assets/remote-access/native.js");
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 138"));
-    assert!(script.contains("version: 138, call"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 139"));
+    assert!(script.contains("version: 139, call"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));
