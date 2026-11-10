@@ -763,7 +763,11 @@ fn is_search_skipped_directory(name: &str) -> bool {
 }
 
 fn project_file_content(root: &Path, path: &str) -> Result<Value, ApiError> {
-    let side = read_local(root, path)?;
+    let log = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("log"));
+    let side = read_local_with_prefix(root, path, log)?;
     if !side.exists {
         return Err(ApiError::new(404, "文件不存在或已被删除"));
     }
@@ -771,6 +775,26 @@ fn project_file_content(root: &Path, path: &str) -> Result<Value, ApiError> {
         "size": side.size, "kind": "unsupported", "truncated": side.truncated});
     if side.unsupported {
         result["message"] = json!("符号链接和特殊文件不提供内容预览");
+    } else if log {
+        // 用户要求 .log 可读取预览：沿用目录边界和 4 MiB 读取上限，大日志仅取前缀，
+        // 兼容 UTF-8 与带 BOM 的 UTF-16；不能仅因日志扩展名就把二进制强制当正文。
+        if let Some(text) = log_preview_text(&side.bytes, side.truncated) {
+            let mut end = text.len().min(MAX_TEXT_BYTES);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            let truncated = side.truncated || end < text.len();
+            result["kind"] = json!("text");
+            result["text"] = json!(&text[..end]);
+            result["truncated"] = json!(truncated);
+            if truncated {
+                result["message"] = json!("日志较大，仅显示前 4 MiB 内容");
+            }
+        } else {
+            result["kind"] = json!("binary");
+            result["message"] =
+                json!("日志内容无法按文本读取，请使用 UTF-8 或带 BOM 的 UTF-16 编码");
+        }
     } else if side.truncated {
         result["message"] = json!("文件超过 4 MiB，暂不提供内容预览");
     } else if let Some(mime) = raster_mime(&side.bytes) {
@@ -811,6 +835,46 @@ fn project_file_content(root: &Path, path: &str) -> Result<Value, ApiError> {
         result["message"] = json!("此文件为二进制格式，暂不支持内容预览");
     }
     Ok(result)
+}
+
+fn log_preview_text(bytes: &[u8], truncated: bool) -> Option<String> {
+    let text = if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
+        let little_endian = bytes[0] == 0xff;
+        let source = &bytes[2..];
+        if source.len() % 2 != 0 && !truncated {
+            return None;
+        }
+        let mut units: Vec<u16> = source
+            .chunks_exact(2)
+            .map(|pair| {
+                if little_endian {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                }
+            })
+            .collect();
+        // 有界读取可能切在代理对中间，只允许丢弃截断前缀末尾的不完整字符。
+        if truncated
+            && units
+                .last()
+                .is_some_and(|unit| (0xd800..=0xdbff).contains(unit))
+        {
+            units.pop();
+        }
+        String::from_utf16(&units).ok()?
+    } else {
+        let source = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+        let text = match std::str::from_utf8(source) {
+            Ok(text) => text,
+            Err(error) if truncated && error.error_len().is_none() => {
+                std::str::from_utf8(&source[..error.valid_up_to()]).ok()?
+            }
+            Err(_) => return None,
+        };
+        text.to_owned()
+    };
+    (!text.contains('\0')).then_some(text)
 }
 
 fn no_store(value: Value) -> Response {
@@ -2152,6 +2216,14 @@ fn stamp(metadata: &Metadata) -> FileStamp {
 }
 
 fn read_local(root: &Path, relative: &str) -> Result<Side, ApiError> {
+    read_local_with_prefix(root, relative, false)
+}
+
+fn read_local_with_prefix(
+    root: &Path,
+    relative: &str,
+    allow_prefix: bool,
+) -> Result<Side, ApiError> {
     let file = match open_local(root, relative) {
         Ok(file) => file,
         Err(error) if error.code == 422 => {
@@ -2180,13 +2252,23 @@ fn read_local(root: &Path, relative: &str) -> Result<Side, ApiError> {
         unsupported: !metadata.is_file(),
         stamp: Some(stamp(&metadata)),
     };
-    if !side.truncated && !side.unsupported {
+    if (!side.truncated || allow_prefix) && !side.unsupported {
+        let limit = if side.truncated {
+            MAX_IMAGE_BYTES
+        } else {
+            MAX_IMAGE_BYTES + 1
+        };
         file.by_ref()
-            .take(MAX_IMAGE_BYTES as u64 + 1)
+            .take(limit as u64)
             .read_to_end(&mut side.bytes)
             .map_err(|_| ApiError::new(503, "无法读取工作目录文件内容"))?;
         if side.bytes.len() > MAX_IMAGE_BYTES
-            || side.bytes.len() as u64 != metadata.len()
+            || side.bytes.len() as u64
+                != if side.truncated {
+                    MAX_IMAGE_BYTES as u64
+                } else {
+                    metadata.len()
+                }
             || stamp(
                 &file
                     .metadata()
@@ -3603,6 +3685,7 @@ mod tests {
         std::fs::write(root.join("read.docx"), word).unwrap();
         let result = project_file_content(&root, "read.docx").unwrap();
         assert_eq!(result["kind"], "document", "{result}");
+        assert!(result["message"].is_null());
         let blocks = &result["sections"][0]["blocks"];
         assert_eq!(blocks[0]["kind"], "heading");
         assert_eq!(blocks[1]["text"], "段落 <script> & 文字\n换行");
@@ -3730,6 +3813,7 @@ mod tests {
         std::fs::write(root.join("read.pdf"), bytes).unwrap();
         let result = project_file_content(&root, "read.pdf").unwrap();
         assert_eq!(result["kind"], "document", "{result}");
+        assert!(result["message"].is_null());
         assert!(
             result["sections"][0]["blocks"][0]["text"]
                 .as_str()
@@ -3800,6 +3884,101 @@ mod tests {
             project_file_content(&repo.root, "large.docx").unwrap()["kind"],
             "unsupported"
         );
+    }
+
+    #[test]
+    fn project_files_log_preview_reads_utf8_utf16_and_rejects_binary() {
+        let fixture = fixture_dir();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let text = "2026-11-11 INFO 日志预览 😀\r\n第二行\n";
+        let utf16 = |little_endian: bool| {
+            let mut bytes = if little_endian {
+                vec![0xff, 0xfe]
+            } else {
+                vec![0xfe, 0xff]
+            };
+            for unit in text.encode_utf16() {
+                bytes.extend(if little_endian {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            bytes
+        };
+        for (name, bytes) in [
+            ("utf8.log", text.as_bytes().to_vec()),
+            (
+                "bom.LOG",
+                [b"\xef\xbb\xbf".as_slice(), text.as_bytes()].concat(),
+            ),
+            ("utf16-le.log", utf16(true)),
+            ("utf16-be.log", utf16(false)),
+            ("empty.log", Vec::new()),
+        ] {
+            std::fs::write(root.join(name), &bytes).unwrap();
+            let result = project_file_content(&root, name).unwrap();
+            assert_eq!(result["kind"], "text", "{name}: {result}");
+            assert_eq!(result["text"], if bytes.is_empty() { "" } else { text });
+            assert_eq!(result["size"], bytes.len());
+            assert_eq!(result["truncated"], false);
+        }
+        for (name, bytes) in [
+            ("binary.log", b"a\0b".as_slice()),
+            ("invalid.log", b"\xff\x00".as_slice()),
+            ("broken-utf16.log", b"\xff\xfe\x41".as_slice()),
+            ("broken-surrogate.log", b"\xff\xfe\x3d\xd8".as_slice()),
+        ] {
+            std::fs::write(root.join(name), bytes).unwrap();
+            let result = project_file_content(&root, name).unwrap();
+            assert_eq!(result["kind"], "binary", "{name}: {result}");
+            assert!(result.get("text").is_none());
+        }
+    }
+
+    #[test]
+    fn project_files_log_preview_bounds_large_files_and_keeps_character_boundaries() {
+        let fixture = fixture_dir();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let text = format!("{}中文", "a".repeat(MAX_TEXT_BYTES - 1));
+        std::fs::write(root.join("large.log"), &text).unwrap();
+        let result = project_file_content(&root, "large.log").unwrap();
+        assert_eq!(result["kind"], "text");
+        assert_eq!(result["size"], text.len());
+        assert_eq!(result["truncated"], true);
+        assert_eq!(
+            result["text"].as_str().unwrap(),
+            &text[..MAX_TEXT_BYTES - 1]
+        );
+        assert!(result["message"].as_str().unwrap().contains("4 MiB"));
+
+        // UTF-16 前缀恰好切在 emoji 的高代理之后，不能补乱码或拒绝整份日志。
+        let unit_count = (MAX_TEXT_BYTES - 4) / 2;
+        let mut utf16 = vec![0xff, 0xfe];
+        for _ in 0..unit_count {
+            utf16.extend([b'A', 0]);
+        }
+        utf16.extend([0x3d, 0xd8, 0x00, 0xde]);
+        std::fs::write(root.join("large-utf16.log"), &utf16).unwrap();
+        let result = project_file_content(&root, "large-utf16.log").unwrap();
+        assert_eq!(result["kind"], "text");
+        assert_eq!(result["truncated"], true);
+        assert_eq!(result["text"].as_str().unwrap(), "A".repeat(unit_count));
+
+        // UTF-16 转成 UTF-8 后也受 4 MiB 展示上限约束，不能超过网页允许的正文总量。
+        let mut utf16 = vec![0xff, 0xfe];
+        for _ in 0..MAX_TEXT_BYTES / 3 + 1 {
+            utf16.extend([0x2d, 0x4e]);
+        }
+        std::fs::write(root.join("expanded.log"), &utf16).unwrap();
+        let result = project_file_content(&root, "expanded.log").unwrap();
+        assert_eq!(result["kind"], "text");
+        assert_eq!(result["truncated"], true);
+        assert_eq!(
+            result["text"].as_str().unwrap().len(),
+            MAX_TEXT_BYTES / 3 * 3
+        );
+        assert!(read_local(&root, "large.log").unwrap().bytes.is_empty());
     }
 
     #[test]

@@ -1068,9 +1068,10 @@ fn pdf(bytes: &[u8]) -> PreviewResult<Value> {
 }
 
 fn document_value(sections: Vec<Section>, truncated: bool) -> Value {
+    // 用户要求移除常驻正文预览说明；仍保留超限提示，PDF 无可提取文字时另行说明。
     json!({
         "kind": "document", "sections": sections, "truncated": truncated,
         "message": if truncated { Some("文档较长，仅显示限额内的正文内容") }
-            else { Some("正文预览：保留文字与表格，不还原原文件排版和嵌入图片") }
+            else { None }
     })
 }
