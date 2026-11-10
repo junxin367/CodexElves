@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 135) return;
+  if (window.__codexElvesRemoteAccess?.version === 136) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -1626,6 +1626,13 @@
     try { response = await readThreadMetadata(id); }
     catch (error) {
       if (isDeletedThread(id)) throw failure(404, "会话已永久删除");
+      const missing = typeof error?.message === "string"
+        ? [...error.message.matchAll(/(?:thread not loaded:|unknown thread:|no rollout found for thread id )\s*["']?([A-Za-z0-9_-]+)/gi)] : [];
+      if (sourceManager.__codexElvesRequestClientManager && (error.code ?? error.jsonRpcCode) === -32600
+          && missing.some(match => match[1] === id) && missing.every(match => match[1] === id)) {
+        const retained = await readRetainedSideThread(id, sourceManager);
+        if (retained) return retained;
+      }
       if (knownSideThread && sideThreadLoadError(error)) {
         const entries = await sideThreadEntries().catch(() => null);
         if (entries && !entries.some(entry => entry.threadId === id)) {
@@ -1686,6 +1693,31 @@
       if (!side) throw failure(404, "原生临时侧边会话已关闭或不存在");
     }
     return thread;
+  }
+  async function readRetainedSideThread(id, sourceManager) {
+    const assertCurrent = () => {
+      if (manager !== sourceManager || sourceManager.disposed)
+        throw failure(409, "原生会话连接已变化，请重新读取");
+      if (isDeletedThread(id)) throw failure(404, "会话已永久删除");
+    };
+    const rpc = await requestClientNativeRpc();
+    assertCurrent();
+    const request = rpc.getConversation(id);
+    try {
+      const conversation = await request;
+      assertCurrent();
+      if (conversation?.id !== id || conversation.ephemeral !== true
+          || conversation.sideConversation !== true || subagentIdentity(conversation)) return null;
+      const entries = await sideThreadEntries();
+      assertCurrent();
+      const entry = entries.find(entry => entry.threadId === id && !entry.closed
+        && typeof entry.parentThreadId === "string" && entry.parentThreadId.length > 0
+        && entry.parentThreadId !== id && conversation.forkedFromId === entry.parentThreadId);
+      if (!entry) return null;
+      // 用户要求 CDP 侧边过期后仍可读取最新正文：桌面快照及原生标签共同确认身份，仅开放只读和已读。
+      // 不调用 resume，不采用 thread/read 残留元数据推断身份；正文仍由桌面 canonical history 提供。
+      return { ...conversation, readOnly: true, sideThreadExpired: true };
+    } finally { request?.[Symbol.dispose]?.(); }
   }
   async function readThreadMetadata(id) {
     const sourceManager = manager;
@@ -1771,6 +1803,8 @@
       throw failure(403, "子代理会话仅支持只读查看");
     const thread = await readThread(id);
     if (subagentIdentity(thread)) throw failure(403, "子代理会话仅支持只读查看");
+    if (thread.sideThreadExpired === true)
+      throw failure(403, "侧边会话已过期，仅支持查看和确认已读", { nativeOnly: true });
     return thread;
   }
   const nativeReadActions = new Set(["events", "notifications", "sidebar", "history", "thread",
@@ -1787,6 +1821,8 @@
     if (payload?.threadId == null || nativeReadActions.has(action) || action === "dispose") return null;
     const id = requiredId(payload.threadId);
     const thread = await readThread(id);
+    if (thread.sideThreadExpired === true && action !== "markRead")
+      throw failure(403, "侧边会话已过期，仅支持查看和确认已读", { nativeOnly: true });
     const identity = subagentIdentity(thread) || subagentIdentity(manager.getConversation(id));
     if (!identity) return null;
     if (action === "markRead") return { ok: true, threadId: id, skipped: true, readOnly: true };
@@ -2280,8 +2316,9 @@
     const entry = entries.find(entry => entry.threadId === thread.id);
     if (!entry) return null;
     if (manager.__codexElvesRequestClientManager) {
-      return { readOnly: false, viewKind: "side", parentThreadId: entry.parentThreadId,
+      return { readOnly: thread.sideThreadExpired === true, viewKind: "side", parentThreadId: entry.parentThreadId,
         title: entry.title, ephemeral: true, sideThreadClosed: false,
+        ...(thread.sideThreadExpired === true ? { sideThreadExpired: true } : {}),
         sideHistoryVersion: 1, inheritedTurnIds: [] };
     }
     const conversation = manager.getConversation(thread.id);
@@ -2316,6 +2353,8 @@
       }
       const side = nativeSideIdentity(thread, entries);
       if (side) return side;
+      if (thread.sideThreadExpired === true)
+        throw failure(410, "侧边会话已关闭或父关系已变化", { reason: "side_thread_expired", threadId: thread.id });
       const confirmed = requestClientSideThreads.get(thread.id);
       if (thread.ephemeral === true && confirmed)
         return requestClientSideView(thread.id, confirmed.parentThreadId, confirmed.title);
@@ -3454,7 +3493,7 @@
   async function historyPage(payload = {}) {
     const threadId = requiredId(payload.threadId);
     const nativeThread = await readThread(threadId);
-    const readOnly = !!subagentIdentity(nativeThread)
+    const readOnly = nativeThread.sideThreadExpired === true || !!subagentIdentity(nativeThread)
       || !!subagentIdentity(manager.getConversation(threadId));
     if (nativeThreadEphemeral(nativeThread) === true) {
       try {
@@ -7456,7 +7495,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 135, call,
+    version: 136, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {

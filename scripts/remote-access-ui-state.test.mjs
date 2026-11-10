@@ -583,7 +583,7 @@ test("Windows 打包拒绝缺少分支信息、运行模式或压缩恢复的旧
     readFile(new URL("../crates/codex-elves-core/src/remote_access/workspace.rs", import.meta.url), "utf8"),
   ]);
   const current = { backend, service, workspace, app, native };
-  assert.deepEqual(verify(current), { protocol: 5, bridge: 135 });
+  assert.deepEqual(verify(current), { protocol: 5, bridge: 136 });
   for (const obsolete of [2, 3, 4])
     assert.throws(() => verify({ ...current, service: service.replace("PROTOCOL_VERSION: u32 = 5", `PROTOCOL_VERSION: u32 = ${obsolete}`) }), /后台协议不能低于 5/);
   assert.throws(() => verify({ ...current, workspace: workspace.replace("async fn branch_metadata(", "async fn obsolete_metadata(") }), /缺少真实分支/);
@@ -591,7 +591,7 @@ test("Windows 打包拒绝缺少分支信息、运行模式或压缩恢复的旧
   assert.throws(() => verify({ ...current, backend: backend.replace('| "runtime"', "") }), /后台缺少运行模式/);
   assert.throws(() => verify({ ...current, backend: backend.replaceAll('"setRuntime"', '"legacyRuntime"') }), /后台缺少运行模式/);
   assert.throws(() => verify({ ...current, app: app.replace('"/api/read/runtime"', '"/api/read/legacyRuntime"') }), /远程页面缺少运行模式/);
-  assert.throws(() => verify({ ...current, native: native.replace("version === 135", "version === 132") }), /原生桥缺少/);
+  assert.throws(() => verify({ ...current, native: native.replace(/version === \d+/, "version === 132") }), /原生桥缺少/);
   assert.throws(() => verify({ ...current, native: native.replace("async function compactThreadContext(", "async function obsoleteCompaction(") }), /原生桥缺少/);
 });
 
@@ -2047,7 +2047,8 @@ function transportClient(fetchResponse) {
   vm.runInContext(channels.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""), context);
   const apiFrom = app.indexOf("async function api("), apiTo = app.indexOf("function promoteReadPriority(", apiFrom);
   assert.ok(apiFrom >= 0 && apiTo > apiFrom);
-  vm.runInContext(app.slice(apiFrom, apiTo), context);
+  vm.runInContext(sourceSection("function threadActionReadOnly(", "function threadReadOnlyMessage(")
+    + app.slice(apiFrom, apiTo), context);
   return { context, calls };
 }
 
@@ -2357,6 +2358,7 @@ function queuedReceiptHarness({ disk = storage(), refresh = async () => {} } = {
   };
   vm.createContext(context);
   vm.runInContext([
+    sourceSection("function threadActionReadOnly(", "function threadReadOnlyMessage("),
     sourceSection("const pendingFeedbackDelayMs =", "function clearPendingFeedbackTimer("),
     sourceSection("function savePending(", "function updateGoalComposerPending("),
     sourceSection("function ordinaryInputRecord(", "function rememberDraft("),
@@ -2745,7 +2747,7 @@ function sideExpiryHarness(response) {
     relatedSessionCheckTimer: null, refreshTimer: null, foregroundReadGeneration: 0,
     threadRequest: null, threadReadVersion: 0, tokenUsageVersion: 0, questionVersion: 0, statusVersion: 0,
     goalVersion: 0, compactionVersion: 0, queueVersion: 0, blockingRequestState: () => ({ generation: 0 }),
-    loadHistory: async () => {}, threadDeleted: () => false,
+    loadHistory: async () => {}, markVisibleThreadRead: async () => {}, threadDeleted: () => false,
     historyLoading: false, historyLoadingVersion: 0, historyLoadingTurnId: null, historyLoadingOlder: false,
     historyAutoFailed: false, historyCursor: null, historyController: null, messageVersion: 0,
     recoveryErrorSilenceDepth: 0, syncHistoryButtons() {},
@@ -2802,6 +2804,97 @@ test("准确侧边的中文404和原始119缺失证据进入已有过期态，�
       assertRetained();
     }
   }
+});
+
+test("侧边过期后仍读取服务保留的最新历史和较早消息", async () => {
+  const fixture = sideExpiryHarness(() => jsonResponse({
+    ok: true, data: [{ id: "latest-turn", status: "completed",
+      items: [{ id: "latest-answer", type: "agentMessage", text: "过期前的最终回复" }] }],
+    nextCursor: null, ephemeral: true, sideHistoryVersion: 1
+  }));
+  const { context, id, calls } = fixture;
+  await context.retireExpiredSideThread(id);
+  Object.assign(context, {
+    transcriptEvents: new Map(), mergeHistoryTurn: turn => turn, mergeTranscriptEvents() {},
+    syncEditableMessageMetadata() {}, rememberTranscript() {}, discardPersistentThreadDisplay() {}
+  });
+  await context.readHistoryPage(false, context.selectionVersion);
+  assert.equal(calls.length, 1, "执行过期不能阻断只读补读");
+  assert.equal(context.turns.get("latest-turn").items[0].text, "过期前的最终回复");
+  assert.equal(context.historyError, "");
+  assert.equal(context.latestHistoryReadFailed, false);
+  assert.equal(context.sideThreadExpired(id), true, "历史补读不恢复写入能力");
+  context.historyCursor = "side-turn:latest-turn";
+  await context.readHistoryPage(true, context.selectionVersion);
+  assert.equal(calls.length, 2, "过期后仍可向前翻页");
+  assert.equal(calls.every(call => call.path === "/api/read/history"), true);
+});
+
+test("过期侧边阅读后提交已读，清除父会话蓝点并保留其它侧边未读", async () => {
+  const acknowledgements = [], timers = [];
+  const transport = transportClient(({ path, options }) => {
+    acknowledgements.push({ action: path.split("/").at(-1), payload: JSON.parse(options.body) });
+    return jsonResponse({ requestId: options.headers.get("Idempotency-Key"),
+      state: "completed", result: { ok: true } });
+  });
+  const parent = { id: "parent", hasUnreadTurn: false, sideThreadAttention: { unread: true } };
+  const otherParent = { id: "other-parent", sideThreadAttention: { unread: true } };
+  const context = Object.assign(transport.context, {
+    session: { device: { id: "device" }, readOnly: false }, selectedId: "side",
+    thread: { id: "side", viewKind: "side", readOnly: true, sideThreadExpired: true, hasUnreadTurn: true },
+    relatedSessionView: { threadId: "side", kind: "side" }, relatedThreadViews: new Map(),
+    normalizeRelatedView: value => value, connected: true, historyInitialized: true, historyError: "",
+    transcriptChecking: false, document: { hidden: false }, followMessages: true,
+    threadDeletionLocked: () => false, threadDeleted: () => false,
+    readMarkRequests: new Map(), recentPrioritySelectionSuppressions: new Set(),
+    sidebarReadRefreshSuppressions: new Set(), setTimeout: callback => timers.push(callback),
+    selectionVersion: 1, messageVersion: 0, recoveryGeneration: 0, randomId: () => "read-receipt",
+    privateInputScope: value => value.device.id, goalComposerAction: () => false,
+    sidebar: { recent: [parent, otherParent], pinnedThreads: [], projects: [],
+      unreadSideThreads: [{ id: "side", parentThreadId: "parent" },
+        { id: "other-side", parentThreadId: "other-parent" }] },
+    sessionMenu: { markSideThreadRead() {} }, syncSideThreadUnread() {}, renderSidebar() {}
+  });
+  vm.runInContext([
+    sourceSection("function threadReadOnly(", "function threadReadOnlyMessage("),
+    sourceSection("async function mutate(", "function reportMutationError("),
+    sourceSection("function markSidebarThreadReadLocally(", "function sidebarAttentionState("),
+    sourceSection("async function markVisibleThreadRead(", "function beginMessageEdit(")
+  ].join("\n"), context);
+  await context.markVisibleThreadRead();
+  assert.equal(acknowledgements.length, 1, "侧边只读不应禁止已读回执");
+  assert.equal(acknowledgements[0].action, "markRead");
+  assert.equal(acknowledgements[0].payload.threadId, "side");
+  assert.equal(transport.calls.length, 1, "已读须通过真实 api 和传输层，不得被中间的只读检查拦截");
+  assert.equal(context.thread.hasUnreadTurn, false);
+  assert.equal(parent.sideThreadAttention.unread, false);
+  assert.equal(otherParent.sideThreadAttention.unread, true);
+  assert.deepEqual(context.sidebar.unreadSideThreads.map(item => item.id), ["other-side"]);
+  parent.sideThreadAttention.unread = true;
+  context.sidebar.unreadSideThreads.push({ id: "side", parentThreadId: "parent" },
+    { id: "same-parent-side", parentThreadId: "parent" });
+  context.markSidebarThreadReadLocally("side");
+  assert.equal(parent.sideThreadAttention.unread, true, "同父会话仍有未读侧边时保留蓝点");
+  context.markSidebarThreadReadLocally("same-parent-side");
+  assert.equal(parent.sideThreadAttention.unread, false);
+  context.session.readOnly = true;
+  await context.markVisibleThreadRead();
+  assert.equal(acknowledgements.length, 1, "设备只读授权仍不允许提交已读");
+  await assert.rejects(context.mutate("markRead", { threadId: "side" }), error => error.code === 403);
+  context.session.readOnly = false;
+  await assert.rejects(context.mutate("send", { threadId: "side" }), error => error.code === 403);
+  context.thread.viewKind = "subagent";
+  await assert.rejects(context.mutate("markRead", { threadId: "side" }), error => error.code === 403);
+});
+
+test("侧边过期且从未读到正文时显示读取失败，不伪装成空会话或提交已读", async () => {
+  const h = sideExpiryHarness(() => jsonResponse({
+    ok: false, message: `thread not loaded: ${expiredSideProbe.threadId}`
+  }, 503));
+  h.context.turns.clear();
+  await h.context.readHistoryPage(false, h.context.selectionVersion);
+  assert.match(h.context.historyError, /历史暂时不可读取/);
+  assert.equal(h.calls.some(call => call.path.startsWith("/api/action/")), false);
 });
 
 test("缺失错误归属原请求ID和授权，网络503、权限403、他人ID或无缺失原因均不判过期", async () => {
@@ -3135,6 +3228,7 @@ function sendRecoveryHarness() {
   context.drafts.set("main", originalText);
   vm.createContext(context);
   vm.runInContext([
+    sourceSection("function threadActionReadOnly(", "function threadReadOnlyMessage("),
     sourceSection("function privateInputScope(", "function validRelatedThreadId("),
     sourceSection("function clearPrivateInputs(", "async function restorePrivateInputs("),
     sourceSection("function deleteDraft(", "function inputDraftEmpty("),
@@ -3797,6 +3891,7 @@ function transportRecoveryHarness() {
   context.document.removeEventListener = () => {};
   vm.runInContext(channels.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""), context);
   vm.runInContext([
+    sourceSection("function threadActionReadOnly(", "function threadReadOnlyMessage("),
     sourceSection("async function api(", "async function refreshConnectedSession("),
     sourceSection("function currentChannelMeasurements(", "function scheduleReload("),
   ].join("\n"), context);

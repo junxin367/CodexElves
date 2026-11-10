@@ -80,6 +80,19 @@ impl Projection {
             side.turns.clear();
             side.sent.clear();
         }
+        self.clear_side_runtime(id);
+        self.side_changed(id);
+    }
+
+    pub fn expire_side(&mut self, id: &str) {
+        if let Some(side) = self.sides.threads.get_mut(id) {
+            side.expire();
+        }
+        self.clear_side_runtime(id);
+        self.side_changed(id);
+    }
+
+    fn clear_side_runtime(&mut self, id: &str) {
         self.active.remove(id);
         self.threads.remove(id);
         self.forget_compactions(id);
@@ -92,7 +105,6 @@ impl Projection {
         for key in requests {
             self.resolve(&key);
         }
-        self.side_changed(id);
     }
 
     pub fn push(&mut self, event: Value) {
@@ -138,6 +150,17 @@ impl Projection {
     }
 
     pub fn thread(&self, thread_id: &str, mut thread: Value) -> Value {
+        // 过期侧边保留最终内容，但不能沿用旧快照的运行、审批或压缩状态。
+        if thread["sideThreadExpired"] == true {
+            thread["status"] = json!({"type":"idle"});
+            thread["requests"] = json!([]);
+            thread["requestsKnown"] = json!(true);
+            thread["requestsEpoch"] = json!(&self.epoch);
+            thread["requestsRevision"] = json!(self.sequence);
+            thread["priority"] = json!({"status":thread["status"],"active":false,"eligible":true,
+                "attentionState":if thread["hasUnreadTurn"] == true {"unread"} else {"idle"}});
+            return thread;
+        }
         if let Some(snapshot) = self.threads.get(thread_id) {
             for field in [
                 "status",
@@ -385,11 +408,13 @@ impl Projection {
         if let Some((_, closed)) = self.sides.observe(&frame) {
             if closed {
                 self.close_side(&id);
+            } else if self.sides.threads[&id].expired {
+                self.expire_side(&id);
             } else {
                 self.side_changed(&id);
             }
         }
-        if side && self.sides.threads[&id].closed {
+        if side && (self.sides.threads[&id].closed || self.sides.threads[&id].expired) {
             return;
         }
         let (subagent, parents) = self.subagents.observe(&frame);
@@ -579,7 +604,7 @@ impl Projection {
             "harness/disconnected" => {
                 let sides: Vec<_> = self.sides.threads.keys().cloned().collect();
                 for id in sides {
-                    self.close_side(&id);
+                    self.expire_side(&id);
                 }
                 self.requests.clear();
                 self.pending_notifications.clear();

@@ -464,9 +464,24 @@ impl Harness {
         payload: Value,
         authorization: Option<&RemoteAuthorization>,
     ) -> anyhow::Result<Value> {
-        self.start().await?;
         if let Some(authorization) = authorization {
             authorization.check().await?;
+        }
+        // 用户要求过期后仍能查看和确认已读；已保留的侧边只处理本地内存，不等待失效引擎重连。
+        let retained_side = if matches!(
+            action,
+            "thread" | "history" | "markRead" | "closeSideThread"
+        ) {
+            let projection = self.projection.lock().await;
+            payload["threadId"]
+                .as_str()
+                .and_then(|id| projection.sides.threads.get(id))
+                .is_some_and(|side| side.expired || side.closed)
+        } else {
+            false
+        };
+        if !retained_side {
+            self.start().await?;
         }
         let result = match action {
             "events" => {

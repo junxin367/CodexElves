@@ -6685,6 +6685,95 @@ for (const operation of ["read", "writable", "thread", "send"]) {
 }
 
 #[test]
+fn request_client_unloaded_side_reads_retained_desktop_history_without_resuming() {
+    run_thread_metadata_read_contract(
+        r#"
+const h=createThreadReadHarness();
+h.env.readThreadMetadata=async()=>{throw h.env.failure(-32600,`thread not loaded: ${h.id}`);};
+h.liveValue={id:h.id,ephemeral:true,sideConversation:true,forkedFromId:"parent",
+  parentThreadId:null,hasUnreadTurn:true,turns:[]};
+h.entries=[{threadId:h.id,parentThreadId:"parent",title:"编译安装包"}];
+h.env.domSideThreadEntries=()=>[];
+const retained=await h.api.read(h.id);
+assert.equal(retained.sideThreadExpired,true);
+assert.equal(retained.ephemeral,true);
+assert.equal(retained.id,h.id);
+assert.equal(h.liveValue.sideThreadExpired,undefined,"读取不能改写桌面保存的原始对象");
+const detail=await h.api.call("thread",{threadId:h.id});
+assert.equal(detail.ok,true,JSON.stringify(detail));
+assert.equal(detail.thread.viewKind,"side");
+assert.equal(detail.thread.parentThreadId,"parent");
+assert.equal(detail.thread.readOnly,true);
+assert.equal(detail.thread.sideThreadExpired,true);
+h.env.requestClientSideHistory=async id=>({id,ephemeral:true,
+  turns:[{id:"retained-turn",items:[{id:"final-answer",type:"agentMessage",text:"最终保留回复"}]}]});
+h.env.nativeSideHistoryPage=(payload,readOnly,conversation)=>{
+  assert.equal(payload.threadId,h.id);assert.equal(readOnly,true);
+  return {ok:true,data:conversation.turns};
+};
+const history=await h.api.call("history",{threadId:h.id});
+assert.equal(history.ok,true,JSON.stringify(history));
+assert.equal(history.data[0].items[0].text,"最终保留回复");
+assert.deepEqual(h.effects,[],"读取过期侧边不能恢复执行、读取可写队列或发送");
+await assert.rejects(h.api.writable(h.id),error=>error.code===403);
+for (const action of ["send","stop","compact","rename","approve"]) {
+  const result=await h.api.call(action,{threadId:h.id,prompt:"禁止重新执行"});
+  assert.equal(result.ok,false,action);
+  assert.equal(result.code,403,action);
+  assert.equal(result.outcomeUnknown,undefined,action);
+}
+h.env.manager.markConversationAsRead=async id=>{
+  assert.equal(id,h.id);h.effects.push("mark-read");h.liveValue.hasUnreadTurn=false;
+};
+const marked=await h.api.call("markRead",{threadId:h.id});
+assert.equal(marked.ok,true,JSON.stringify(marked));
+assert.equal(h.liveValue.hasUnreadTurn,false);
+assert.deepEqual(h.effects,["mark-read"]);
+assert.equal(h.disposedReads,h.liveReads.length,"保留快照读取也必须释放原生请求");
+"#,
+    );
+}
+
+#[test]
+fn request_client_unloaded_side_rejects_missing_wrong_or_unconfirmed_desktop_identity() {
+    run_thread_metadata_read_contract(
+        r#"
+for (const change of ["missing","other-id","persistent","not-side","other-parent","no-tab","subagent"]) {
+  const h=createThreadReadHarness();
+  h.env.readThreadMetadata=async()=>{throw h.env.failure(-32600,`thread not loaded: ${h.id}`);};
+  h.liveValue={id:h.id,ephemeral:true,sideConversation:true,forkedFromId:"parent",parentThreadId:null};
+  h.entries=[{threadId:h.id,parentThreadId:"parent",title:"侧边"}];
+  if(change==="missing")h.liveValue=null;
+  if(change==="other-id")h.liveValue.id="other-id";
+  if(change==="persistent")h.liveValue.ephemeral=false;
+  if(change==="not-side")h.liveValue.sideConversation=false;
+  if(change==="other-parent")h.liveValue.forkedFromId="other-parent";
+  if(change==="no-tab")h.entries=[];
+  if(change==="subagent")h.liveValue.source={subAgent:{thread_spawn:{parent_thread_id:"parent"}}};
+  await assert.rejects(h.api.read(h.id),error=>error.message.includes("thread not loaded"),change);
+  assert.deepEqual(h.effects,[],change);
+  assert.equal(h.disposedReads,h.liveReads.length,change);
+}
+for (const [code,message] of [[403,"无权限"],[503,"连接失败"],[-32600,"thread not loaded: another-thread"]]) {
+  const h=createThreadReadHarness();
+  h.env.readThreadMetadata=async()=>{throw h.env.failure(code,message);};
+  await assert.rejects(h.api.read(h.id));
+  assert.deepEqual(h.liveReads,[],"权限、网络或其他会话的错误不能触发侧边回退");
+}
+const changed=createThreadReadHarness(),pending=deferred();
+changed.env.readThreadMetadata=async()=>{throw changed.env.failure(-32600,`thread not loaded: ${changed.id}`);};
+changed.live=()=>pending.promise;
+const reading=changed.api.read(changed.id);
+await tick();
+changed.env.manager={...changed.env.manager};
+pending.resolve({id:changed.id,ephemeral:true,sideConversation:true,forkedFromId:"parent"});
+await assert.rejects(reading,error=>error.code===409);
+assert.equal(changed.disposedReads,1);
+"#,
+    );
+}
+
+#[test]
 fn request_client_ephemeral_metadata_guard_preserves_main_side_and_subagent_fast_paths() {
     run_thread_metadata_read_contract(
         r#"
@@ -6833,8 +6922,10 @@ function createThreadReadHarness() {
   const api=new Function("env",`with(env){
     ${extract("function readNativeSideTab(","function isEphemeralSideThread(")}
     ${extract("async function readThread(id)","async function readThreadMetadata(")}
+    ${extract("function missingThreadError(","function subagentIdentity(")}
     ${extract("function subagentIdentity(","async function nativeResource(")}
     ${extract("function nativeSideIdentity(","function disposeRequestClientSubagentState(")}
+    ${extract("async function historyPage(","function runtimeGoal(")}
     ${extract("async function call(action,","window.__codexElvesRemoteAccess =")}
     return {read:readThread,writable:assertWritableThread,call};
   }`)(env);
@@ -9738,7 +9829,7 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = include_str!("../../../assets/remote-access/native.js");
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 135"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 136"));
     assert!(script.contains("version: 135"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));

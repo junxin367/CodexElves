@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use super::super::{ApiError, RemoteAuthorization, now_ms};
 use super::{Harness, error, required};
 
-// 用户选择服务独立管理临时侧边会话：最多 16 个同时打开，每个正文最多 16 MiB，
+// 用户要求服务独立管理且过期后仍可读取：最多保留 16 个未关闭会话（含过期），每个正文最多 16 MiB，
 // 合计正文上限约 256 MiB；达到上限明确停止接受新输入，不静默截断或落盘恢复。
 const MAX_OPEN_SIDES: usize = 16;
 const MAX_HISTORY_BYTES: usize = 16 * 1024 * 1024;
@@ -17,6 +17,7 @@ pub(super) struct SideThread {
     pub metadata: Value,
     pub turns: Vec<Value>,
     pub closed: bool,
+    pub expired: bool,
     pub closing: bool,
     pub incomplete: bool,
     pub unread: bool,
@@ -36,6 +37,7 @@ mod tests {
             metadata: json!({"id":"side","cwd":"test","name":"侧边聊天","ephemeral":true,"status":{"type":"idle"}}),
             turns: Vec::new(),
             closed: false,
+            expired: false,
             closing: false,
             incomplete: false,
             unread: false,
@@ -78,7 +80,7 @@ mod tests {
     }
 
     #[test]
-    fn harness_service_side_stream_and_generation_expiry_do_not_restore_old_messages() {
+    fn harness_service_side_stream_and_generation_expiry_preserve_read_only_history() {
         let mut state = SideState::default();
         state.threads.insert("side".into(), side());
         for frame in [
@@ -94,8 +96,65 @@ mod tests {
         assert_eq!(history["data"][0]["items"][0]["text"], "实时片段");
         state.expire();
         state.observe(&json!({"method":"turn/started","params":{"threadId":"side","turn":{"id":"late","items":[]}}}));
-        assert!(state.threads["side"].closed);
-        assert!(state.threads["side"].turns.is_empty());
+        let retained = &state.threads["side"];
+        assert!(!retained.closed);
+        assert_eq!(retained.view().unwrap()["sideThreadExpired"], true);
+        assert_eq!(retained.view().unwrap()["readOnly"], true);
+        assert_eq!(retained.turns.len(), 1, "过期后拒绝迟到事件，保留最后正文");
+        assert_eq!(
+            retained.history(&json!({"threadId":"side"})).unwrap()["data"][0]["items"][0]["text"],
+            "实时片段"
+        );
+    }
+
+    #[test]
+    fn harness_service_side_expiry_events_keep_history_until_explicit_close() {
+        for method in [
+            "thread/unloaded",
+            "thread/closed",
+            "harness/disconnected",
+            "harness/connected",
+        ] {
+            let mut projection = super::super::projection::Projection::default();
+            projection.ingest(
+                json!({"method":"harness/connected","_generation":"engine","_generationIndex":1}),
+            );
+            let mut side = side();
+            side.unread = true;
+            side.turns.push(json!({"id":"turn","status":"completed",
+                "items":[{"id":"reply","type":"agentMessage","text":"最终正文"}]}));
+            projection.register_side("side".into(), side, json!({}));
+            projection.active.insert("side".into(), "turn".into());
+            projection
+                .compactions
+                .insert("side".into(), json!({"state":"running"}));
+            projection.requests.insert(
+                "request".into(),
+                json!({"id":1,"method":"item/tool/requestUserInput","params":{"threadId":"side"}}),
+            );
+            let generation = if method == "harness/connected" {
+                "new"
+            } else {
+                "engine"
+            };
+            projection.ingest(json!({"method":method,"_generation":generation,
+                "_generationIndex":2,"params":{"threadId":"side"}}));
+            let retained = &projection.sides.threads["side"];
+            assert!(retained.expired, "{method}");
+            assert!(!retained.closed, "{method}");
+            assert_eq!(retained.turns[0]["items"][0]["text"], "最终正文");
+            let view = projection.thread("side", retained.view().unwrap());
+            assert_eq!(view["readOnly"], true);
+            assert_eq!(view["priority"]["active"], false);
+            assert_eq!(view["priority"]["attentionState"], "unread");
+            assert_eq!(view["requests"], json!([]));
+            projection.ingest(json!({"method":"turn/started","_generation":generation,
+                "params":{"threadId":"side","turn":{"id":"late","status":"inProgress"}}}));
+            assert_eq!(projection.sides.threads["side"].turns.len(), 1);
+            projection.close_side("side");
+            assert!(projection.sides.threads["side"].turns.is_empty());
+            assert!(projection.sides.threads["side"].closed);
+        }
     }
 }
 
@@ -115,13 +174,30 @@ impl SideThread {
         view["sideHistoryVersion"] = json!(1);
         view["inheritedTurnIds"] = json!([]);
         view["sideThreadClosed"] = json!(self.closed);
+        view["sideThreadExpired"] = json!(self.expired);
         view["hasUnreadTurn"] = json!(self.unread);
-        view["readOnly"] = json!(self.closed || self.closing);
+        view["readOnly"] = json!(self.closed || self.closing || self.expired);
         view["editableMessage"] = Value::Null;
         view["goal"] = Value::Null;
         view["queuedMessages"] = json!([]);
         view["queuedEdits"] = json!([]);
         Ok(view)
+    }
+
+    pub fn expire(&mut self) {
+        if self.closed {
+            return;
+        }
+        // 用户要求过期后可补读最终内容并确认已读；保留有界内存正文，禁止恢复执行或落盘。
+        self.expired = true;
+        self.closing = false;
+        self.sent.clear();
+        self.metadata["status"] = json!({"type":"idle"});
+        for turn in &mut self.turns {
+            if turn["status"] == "inProgress" {
+                turn["status"] = json!("interrupted");
+            }
+        }
     }
 
     fn upsert_item(&mut self, turn_id: &str, item: Value) {
@@ -155,11 +231,15 @@ impl SideThread {
         let params = &frame["params"];
         match frame["method"].as_str().unwrap_or("") {
             "thread/closed" | "thread/unloaded" => {
-                self.closed = true;
-                self.closing = false;
-                self.turns.clear();
-                self.sent.clear();
-                self.bytes = 0;
+                if self.closing {
+                    self.closed = true;
+                    self.closing = false;
+                    self.turns.clear();
+                    self.sent.clear();
+                    self.bytes = 0;
+                } else {
+                    self.expire();
+                }
             }
             "thread/status/changed" => self.metadata["status"] = params["status"].clone(),
             "turn/started" | "turn/completed" => {
@@ -348,11 +428,7 @@ fn item_page(turn: &Value, cursor: &Value) -> anyhow::Result<(Vec<Value>, Option
 impl SideState {
     pub fn expire(&mut self) {
         for side in self.threads.values_mut() {
-            side.closed = true;
-            side.closing = false;
-            side.turns.clear();
-            side.sent.clear();
-            side.bytes = 0;
+            side.expire();
         }
     }
 
@@ -361,7 +437,7 @@ impl SideState {
             .as_str()
             .or_else(|| frame["params"]["thread"]["id"].as_str())?;
         let side = self.threads.get_mut(id)?;
-        if side.closed {
+        if side.closed || side.expired {
             return None;
         }
         side.observe(frame);
@@ -392,24 +468,30 @@ impl Harness {
             .threads
             .get(id)
             .ok_or_else(|| error(409, "此会话不是服务创建的侧边会话"))?;
-        if side.closed || side.generation != connection.generation {
+        if side.closed || side.expired || side.generation != connection.generation {
             return Err(error(410, "侧边会话已过期，不能恢复或重新执行"));
         }
         Ok(side.generation.clone())
     }
 
     pub(super) async fn side_detail(&self, id: &str) -> anyhow::Result<Value> {
-        self.side_generation(id).await?;
         let projection = self.projection.lock().await;
         let side = &projection.sides.threads[id];
+        if side.closed {
+            return Err(error(410, "侧边会话已关闭，内容已释放"));
+        }
         let thread = projection.thread(id, side.view()?);
         Ok(json!({"ok":true,"thread":thread,"nativeBridge":"harness"}))
     }
 
     pub(super) async fn side_history(&self, payload: &Value) -> anyhow::Result<Value> {
         let id = required(payload, "threadId")?;
-        self.side_generation(id).await?;
-        self.projection.lock().await.sides.threads[id].history(payload)
+        let projection = self.projection.lock().await;
+        let side = &projection.sides.threads[id];
+        if side.closed {
+            return Err(error(410, "侧边会话已关闭，内容已释放"));
+        }
+        side.history(payload)
     }
 
     pub(super) async fn related_sides(&self, payload: &Value) -> anyhow::Result<Value> {
@@ -528,6 +610,7 @@ impl Harness {
             metadata,
             turns: Vec::new(),
             closed: false,
+            expired: false,
             closing: false,
             incomplete: false,
             unread: false,
@@ -543,7 +626,7 @@ impl Harness {
             }
             .into());
         }
-        // 只保留最近 512 个已关闭 ID 用于明确过期；正文与回执在关闭时即释放。
+        // 只保留最近 512 个条目；过期但未关闭的正文仍计入 16 个会话上限，主动关闭才释放正文。
         if projection.sides.threads.len() >= 512 {
             if let Some(old) = projection
                 .sides
@@ -572,19 +655,41 @@ impl Harness {
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
         let id = required(payload, "threadId")?;
-        if action == "closeSideThread" {
-            let parent = required(payload, "parentThreadId")?;
-            let projection = self.projection.lock().await;
+        if matches!(action, "markRead" | "closeSideThread") {
+            let mut projection = self.projection.lock().await;
             let side = projection
                 .sides
                 .threads
                 .get(id)
                 .ok_or_else(|| error(409, "此会话不是服务创建的侧边会话"))?;
+            if action == "markRead" {
+                if side.closed {
+                    return Err(error(410, "侧边会话已关闭，内容已释放"));
+                }
+                // 已读只修改当前保留正文的标记，不依赖已过期的引擎连接，也不恢复临时会话。
+                let permit = authorization.prepare_dispatch().await?;
+                return crate::bridge::CdpDispatchPermit::commit(permit, || {
+                    let side = projection.sides.threads.get_mut(id).unwrap();
+                    if side.unread {
+                        side.unread = false;
+                        projection.side_changed(id);
+                    }
+                    Ok(json!({"ok":true,"threadId":id}))
+                });
+            }
+            let parent = required(payload, "parentThreadId")?;
             if side.parent != parent || parent == id {
                 return Err(error(409, "侧边会话父子关系不匹配"));
             }
             if side.closed {
                 return Ok(json!({"ok":true,"threadId":id,"parentThreadId":parent,"closed":true}));
+            }
+            if side.expired {
+                let permit = authorization.prepare_dispatch().await?;
+                return crate::bridge::CdpDispatchPermit::commit(permit, || {
+                    projection.close_side(id);
+                    Ok(json!({"ok":true,"threadId":id,"parentThreadId":parent,"closed":true}))
+                });
             }
         }
         let generation = self.side_generation(id).await?;
@@ -658,16 +763,6 @@ impl Harness {
                     .await?;
                 Ok(json!({"ok":true,"threadId":id}))
             }
-            "markRead" => {
-                let mut projection = self.projection.lock().await;
-                let permit = authorization.prepare_dispatch().await?;
-                crate::bridge::CdpDispatchPermit::commit(permit, || {
-                    projection.sides.threads.get_mut(id).unwrap().unread = false;
-                    projection.side_changed(id);
-                    Ok(())
-                })?;
-                Ok(json!({"ok":true,"threadId":id}))
-            }
             _ => Err(error(409, "此操作不适用于临时侧边会话")),
         }
     }
@@ -691,7 +786,7 @@ impl Harness {
             ));
         }
         let side = projection.sides.threads.get_mut(id).unwrap();
-        if side.closed || side.generation != generation {
+        if side.closed || side.expired || side.generation != generation {
             return Err(error(410, "侧边会话已过期，不能恢复或重新执行"));
         }
         if side.closing || side.incomplete {
@@ -769,7 +864,7 @@ impl Harness {
             .to_owned();
         let result = json!({"ok":true,"confirmed":true,"threadId":id,"turnId":turn,"clientUserMessageId":client,
             "deliveryState":"accepted","nativeBridge":"harness","executionTransport":"app-server-stdio"});
-        if side.closed || side.generation != generation {
+        if side.closed || side.expired || side.generation != generation {
             return Ok(result);
         }
         if let Some(sent) = side.sent.get_mut(client) {

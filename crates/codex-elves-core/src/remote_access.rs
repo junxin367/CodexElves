@@ -6024,6 +6024,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    break;
  }
  case 'test/seedHistory':
+   for(const frame of p.events||[])output(frame);
+   if(!p.turns)break;
    t.turns=p.turns;t.historyCursorLoop=p.cursorLoop===true;t.foreignHistoryTurn=p.foreignTurn===true;
    t.status={type:t.turns.some(turn=>turn.status==='inProgress')?'active':'idle'};
    event('thread/status/changed',{threadId:p.threadId,status:t.status});break;
@@ -8356,6 +8358,151 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 Some("thread/resume" | "thread/turns/list" | "thread/items/list")
             )));
         assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_service_side_expiry_keeps_final_history_and_allows_read_ack_and_close() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let main = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"parent","model":"gpt-test"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let parent = main["threadId"].as_str().unwrap();
+        let created = controller
+            .call_authorized(
+                "createSideThread",
+                json!({"threadId":parent}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        controller
+            .call_authorized(
+                "send",
+                json!({"threadId":id,"prompt":"wait side",
+                "clientUserMessageId":"expiry-input"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let history = controller
+            .call_authorized("history", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        let turn = history["data"][0]["id"].as_str().unwrap();
+        controller.harness.seed_test_history(json!({"threadId":id,"events":[
+            {"method":"item/completed","params":{"threadId":id,"turnId":turn,
+                "item":{"id":"final-answer","type":"agentMessage","text":"过期前的最终回复"}}},
+            {"method":"turn/completed","params":{"threadId":id,"turn":{"id":turn,"status":"completed","items":[]}}},
+            {"method":"thread/unloaded","params":{"threadId":id}}
+        ]})).await.unwrap();
+        let mut detail = Value::Null;
+        for _ in 0..100 {
+            detail = controller
+                .call_authorized("thread", json!({"threadId":id}), &authorization)
+                .await
+                .unwrap();
+            if detail["thread"]["sideThreadExpired"] == true {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(detail["thread"]["sideThreadExpired"], true);
+        assert_eq!(detail["thread"]["readOnly"], true);
+        assert_eq!(detail["thread"]["priority"]["active"], false);
+        let retained = controller
+            .call_authorized("history", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert!(retained.to_string().contains("过期前的最终回复"));
+        assert!(retained.to_string().contains("wait side"));
+        assert_eq!(detail["thread"]["hasUnreadTurn"], true);
+        let list = controller
+            .call_authorized("relatedThreads", json!({"threadId":parent}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(list["sideThreads"][0]["id"], id);
+        assert_eq!(list["sideThreads"][0]["hasUnreadTurn"], true);
+        assert!(
+            controller
+                .call_authorized(
+                    "send",
+                    json!({"threadId":id,"prompt":"不能重启",
+            "clientUserMessageId":"expired-send"}),
+                    &authorization
+                )
+                .await
+                .is_err()
+        );
+        controller
+            .call_authorized("markRead", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        let list = controller
+            .call_authorized("relatedThreads", json!({"threadId":parent}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(list["sideThreads"][0]["hasUnreadTurn"], false);
+        let sidebar = controller
+            .call_authorized("sidebar", json!({}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(sidebar["unreadSideThreads"], json!([]));
+        // 引擎已退出时仍须读回同一份最终正文，已读与主动关闭都不能等待或重启引擎。
+        controller.harness.release().await;
+        let offline_history = controller
+            .call_authorized("history", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(offline_history, retained);
+        let offline_detail = controller
+            .call_authorized("thread", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(offline_detail["thread"]["sideThreadExpired"], true);
+        controller
+            .call_authorized("markRead", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        let closed = controller
+            .call_authorized(
+                "closeSideThread",
+                json!({"threadId":id,"parentThreadId":parent}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(closed["closed"], true);
+        assert!(
+            controller
+                .call_authorized("history", json!({"threadId":id}), &authorization)
+                .await
+                .is_err()
+        );
+        let calls = std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap();
+        let calls: Vec<Value> = calls
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call["method"] == "turn/start" && call["params"]["threadId"] == id)
+                .count(),
+            1
+        );
+        assert!(!calls.iter().any(|call| call["params"]["threadId"] == id
+            && matches!(
+                call["method"].as_str(),
+                Some("thread/resume" | "thread/unsubscribe")
+            )));
         controller.harness.release().await;
     }
 

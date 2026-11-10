@@ -2042,6 +2042,12 @@ function threadReadOnly(id = selectedId) {
     || relatedSessionView?.threadId === id && relatedSessionView.kind === "subagent"
   );
 }
+function threadActionReadOnly(action, id = selectedId) {
+  if (!threadReadOnly(id)) return false;
+  // 用户要求过期侧边阅读后可确认已读；三个操作入口共用此判断，设备只读授权和子代理仍禁止提交。
+  return !(action === "markRead" && !session?.readOnly && thread?.id === id
+    && thread.viewKind === "side" && thread.sideThreadExpired === true);
+}
 function threadReadOnlyMessage() {
   return session?.readOnly ? "当前设备为只读模式" : "当前会话仅支持只读查看";
 }
@@ -2247,11 +2253,11 @@ function scheduleRelatedSessionCheck() {
   clearTimeout(relatedSessionCheckTimer);
   relatedSessionCheckTimer = null;
   const view = normalizeRelatedView(relatedSessionView, selectedId);
-  if (view && session?.runtime?.cdpInjectionEnabled === false
-      && (view.kind === "subagent" ? subagentsEnabled() : sideThreadsEnabled() && !sideThreadExpired())
+  if (view && (session?.runtime?.cdpInjectionEnabled === false || sideThreadExpired())
+      && (view.kind === "subagent" ? subagentsEnabled() : sideThreadsEnabled())
       && connected && !document.hidden) {
     const id = selectedId, scope = privateInputScope(session), version = selectionVersion;
-    // 服务事件提供实时刷新；2 秒只读补读用于桌面持有的子会话及断线恢复，不触发 resume 或写操作。
+    // 用户要求过期后仍能补读最后内容；只读刷新不恢复执行，服务模式每 2 秒、CDP 过期页每 10 秒核对。
     relatedSessionCheckTimer = setTimeout(async () => {
       relatedSessionCheckTimer = null;
       if (scope !== privateInputScope(session) || selectedId !== id || version !== selectionVersion
@@ -2259,7 +2265,7 @@ function scheduleRelatedSessionCheck() {
       try { await reloadThread(); } catch {}
       if (scope === privateInputScope(session) && selectedId === id && version === selectionVersion)
         scheduleRelatedSessionCheck();
-    }, 2000);
+    }, session?.runtime?.cdpInjectionEnabled === false ? 2000 : 10000);
     return;
   }
   if (!view || view.kind !== "side" || !selectedId || !session || sideThreadExpired(selectedId) || !connected) return;
@@ -2337,7 +2343,8 @@ async function retireExpiredSideThread(id) {
   }
   historyInitialized = true;
   transcriptChecking = false;
-  historyError = "";
+  // 读取失败且本页没有保留正文时，不能将“未读到历史”显示成“此会话暂无消息”。
+  historyError = turns.size ? "" : "此侧边会话的历史暂时不可读取，请刷新重试。";
   renderMessages();
   syncRelatedSessionLayout();
   renderSidebar();
@@ -4893,7 +4900,8 @@ function notice(message, error = false) {
   }, 6500);
 }
 async function api(path, body, id, signal, { resourcePriority = "foreground", onChannelLatency = null, recoveryProbe = false } = {}) {
-  if (path.startsWith("/api/action/") && body?.threadId && threadReadOnly(body.threadId))
+  if (path.startsWith("/api/action/") && body?.threadId
+      && threadActionReadOnly(path.slice("/api/action/".length), body.threadId))
     throw Object.assign(new Error("此会话仅供查看，不能提交操作。"), { code: 403, notSubmitted: true });
   if (path.startsWith("/api/action/") && path !== "/api/action/deleteThread" && body?.threadId
       && (threadDeletionLocked(body.threadId) || threadDeleted(body.threadId)))
@@ -5489,7 +5497,7 @@ function refreshTranscriptEvents() {
   for (const [id, turn] of turns) turns.set(id, enrichTurnTranscriptEvents(turn));
 }
 async function mutate(action, payload, { reliable = false, receiptId = null } = {}) {
-  if (payload?.threadId && threadReadOnly(payload.threadId))
+  if (payload?.threadId && threadActionReadOnly(action, payload.threadId))
     throw Object.assign(new Error("此会话仅供查看，不能提交操作。"), { code: 403, notSubmitted: true });
   const queueAction = ["steerQueued", "removeQueued"].includes(action);
   if (queueAction && pending)
@@ -6760,8 +6768,8 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
       result.pinnedThreads = applyReadSuppressions(result.pinnedThreads.filter(isMainThread));
       for (const project of result.projects)
         project.threads = applyReadSuppressions(project.threads.filter(isMainThread));
-      result.unreadSideThreads = (result.unreadSideThreads || [])
-        .filter(item => !sidebarReadRefreshSuppressions.has(item.id));
+      result.unreadSideThreads = result.unreadSideThreads || [];
+      for (const id of sidebarReadRefreshSuppressions) markSidebarThreadReadLocally(id, result);
       filterDeletedSidebar(result, deviceId);
       filterSideThreadSidebar(result);
       result = mergeIncompleteSidebar(sidebar, result);
@@ -6787,20 +6795,26 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
 function sidebarUpdatedAt(item) {
   return item.updatedAt || item.recencyAt || item.createdAt || 0;
 }
-function markSidebarThreadReadLocally(id) {
-  if (!sidebar || typeof id !== "string" || !id) return;
+function markSidebarThreadReadLocally(id, value = sidebar) {
+  if (!value || typeof id !== "string" || !id) return;
+  const parents = new Set((value.unreadSideThreads || [])
+    .filter(item => item.id === id).map(item => item.parentThreadId));
+  if (Array.isArray(value.unreadSideThreads))
+    value.unreadSideThreads = value.unreadSideThreads.filter(item => item.id !== id);
   const update = item => {
+    // 用户要求读完侧边后消除所属主会话的蓝点；同一父会话还有其它未读侧边时继续保留。
+    if (item && parents.has(item.id) && item.sideThreadAttention)
+      item.sideThreadAttention = { ...item.sideThreadAttention,
+        unread: value.unreadSideThreads.some(side => side.parentThreadId === item.id) };
     if (!item || item.id !== id) return;
     item.hasUnreadTurn = false;
     if (item.priority?.attentionState === "unread") {
       item.priority = { ...item.priority, attentionState: item.priority.active === true ? "active" : "idle" };
     }
   };
-  sidebar.recent.forEach(update);
-  sidebar.pinnedThreads.forEach(update);
-  sidebar.projects.forEach(project => project.threads.forEach(update));
-  if (Array.isArray(sidebar.unreadSideThreads))
-    sidebar.unreadSideThreads = sidebar.unreadSideThreads.filter(item => item.id !== id);
+  value.recent.forEach(update);
+  value.pinnedThreads.forEach(update);
+  value.projects.forEach(project => project.threads.forEach(update));
 }
 function sidebarAttentionState(item) {
   const side = item.sideThreadAttention;
@@ -7213,11 +7227,11 @@ function loadMessageSkillChoices(items) {
   void loadSkillChoices(scope, { threadId: selectedId }).catch(() => {});
 }
 async function markVisibleThreadRead(id = selectedId, { opened = false } = {}) {
-  if (!id || id !== selectedId || thread?.id !== id || threadReadOnly(id) || !connected
+  if (!id || id !== selectedId || thread?.id !== id || threadActionReadOnly("markRead", id) || !connected
       || !historyInitialized || historyError || transcriptChecking
       || threadDeletionLocked(id) || threadDeleted(id) || document.hidden || !opened && !followMessages) return;
   if (readMarkRequests.has(id)) return readMarkRequests.get(id);
-  const deviceId = session.device.id;
+  const deviceId = session.device.id, readVersion = messageVersion;
   recentPrioritySelectionSuppressions.add(id);
   sidebarReadRefreshSuppressions.add(id);
   setTimeout(() => sidebarReadRefreshSuppressions.delete(id), 5_000);
@@ -7233,6 +7247,8 @@ async function markVisibleThreadRead(id = selectedId, { opened = false } = {}) {
       recentPrioritySelectionSuppressions.delete(id);
       return;
     }
+    if (selectedId === id && thread?.id === id && readVersion === messageVersion)
+      thread.hasUnreadTurn = false;
     sessionMenu?.markSideThreadRead(id);
     markSidebarThreadReadLocally(id);
     syncSideThreadUnread();
@@ -10685,7 +10701,7 @@ async function loadHistory(older = false, version = selectionVersion, itemsTurnI
 async function readHistoryPage(older, version, itemsTurnId, generation = foregroundReadGeneration) {
   if (pageLeaving || document.hidden || generation !== foregroundReadGeneration
       || version !== selectionVersion || !selectedId || threadDeleted(selectedId)) return;
-  if (sideThreadExpired(selectedId)) return;
+  // 执行过期不等于历史不可读取；仍从后台补齐最终回复和分页内容，不恢复发送能力。
   const itemTurn = itemsTurnId ? turns.get(itemsTurnId) : null;
   if ((itemsTurnId && !itemTurn?.itemsNextCursor) || (older && !itemsTurnId && !historyCursor)) return;
   historyLoading = true; historyLoadingVersion = version;
@@ -10773,6 +10789,9 @@ async function readHistoryPage(older, version, itemsTurnId, generation = foregro
       phase: "complete", durationMs: performance.now() - historyStartedAt
     });
     rememberTranscript();
+    if (latestPage && sideThreadExpired(id) && (thread?.hasUnreadTurn === true
+        || sidebar?.unreadSideThreads?.some(item => item.id === id)))
+      void markVisibleThreadRead(id).catch(error => notice(error.message, true));
   } catch (error) {
     if (controller.signal.aborted || generation !== foregroundReadGeneration) return;
     recordDiagnostic("remote.history", {
