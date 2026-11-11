@@ -108,6 +108,20 @@
 
 ## 构建约定
 
+### 正式远程服务更新
+
+用户要求“热更新正式远程服务”或更新正式远程入口时，先阅读 `docs/remote-service-update.md`，
+优先使用 `scripts/update-remote-service.ps1` 的 Prepare / Apply / Verify / Rollback 流程。
+网页资源有变化时递增 `assets/remote-access/resource-revision.txt`，只做与改动相关的检查；
+独立预览更新不能代替正式入口更新，非必要不主动构建安装包。
+
+当前网页资源内嵌在程序中，Apply 需要短暂切换远程服务。
+必须保留正在运行的管理器、launcher 和本地代理，通过原 launcher 的本机管理接口启动新后台，
+并保留设置、密钥及原有设备授权。脚本默认只准备；用户明确要求更新正式服务时再应用。
+仅编写脚本、文档或读取状态的任务，不执行 Apply / Rollback。
+
+### Windows 安装包编译
+
 用户仅要求“编译”或“编译安装包”时，默认只编译 Windows 管理端安装包，执行：
 
 ```powershell
