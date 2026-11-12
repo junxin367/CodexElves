@@ -131,7 +131,7 @@ impl Catalog {
         Ok(result)
     }
 
-    fn refresh_in_background(
+    pub(super) fn refresh_in_background(
         self: &Arc<Self>,
         runtime: &Arc<Runtime>,
         projection: &Arc<Mutex<Projection>>,

@@ -1,6 +1,6 @@
 (() => {
   // 用户要求兼容新版子代理列表及队列编辑；守卫与底部版本同步递增，先清理旧桥接，保留队列及图片约束。
-  if (window.__codexElvesRemoteAccess?.version === 146) return;
+  if (window.__codexElvesRemoteAccess?.version === 148) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -1811,10 +1811,10 @@
     return thread;
   }
   const nativeReadActions = new Set(["events", "notifications", "sidebar", "history", "thread",
-    "models", "skills", "queue", "queueEdit", "sendState", "promptOptimization",
+    "models", "fast", "skills", "queue", "queueEdit", "sendState", "promptOptimization",
     "workspaceContext", "relatedThreads"]);
   const requestClientReadActions = new Set([
-    "events", "notifications", "sidebar", "history", "thread", "models", "skills", "workspaceContext",
+    "events", "notifications", "sidebar", "history", "thread", "models", "fast", "setFast", "skills", "workspaceContext",
     "relatedThreads", "createSideThread", "closeSideThread", "queue", "send", "sendState", "markRead", "sort",
     "removeQueued", "reorderQueued", "beginQueuedEdit", "editQueued", "cancelQueuedEdit",
     "queueEdit", "dismissQueuedEdit", "steerQueued", "create", "stop", "compact",
@@ -3770,12 +3770,14 @@
       throw failure(400, "目标提交参数无效");
     if (Object.prototype.hasOwnProperty.call(payload, "goalMode") && typeof payload.goalMode !== "boolean")
       throw failure(400, "目标模式参数无效");
+    if (Object.prototype.hasOwnProperty.call(payload, "fastMode") && typeof payload.fastMode !== "boolean")
+      throw failure(400, "Fast 模式参数无效");
     if (action === "send" && payload.goalMode === true)
       throw failure(400, "目标必须通过目标提交入口发送");
     if (action !== "setGoal" && !(action === "create" && payload.goalMode === true)) return;
     if (payload.goalMode !== true) throw failure(400, "目标提交需要启用目标模式");
     const fields = ["prompt", "goalMode", "skills", "images", "model", "reasoningEffort",
-      action === "setGoal" ? "threadId" : "projectId"];
+      ...(action === "create" ? ["fastMode"] : []), action === "setGoal" ? "threadId" : "projectId"];
     if (Object.keys(payload).some(key => !fields.includes(key)))
       throw failure(400, "目标提交包含不支持的字段");
     if (typeof payload.prompt !== "string"
@@ -5015,26 +5017,42 @@
   }
   async function readQueuedSendState(payload) {
     const threadId = requiredId(payload.threadId), clientUserMessageId = requiredId(payload.clientUserMessageId);
+    // 用户要求主消息流程优先：已有同一原生消息的接受证据直接确认，避免重复传输整段历史。
+    const accepted = acceptedQueuedSend(threadId, clientUserMessageId);
+    if (accepted) return accepted;
     if (manager?.__codexElvesRequestClientManager) {
+      const sourceManager = manager;
+      let historyRequest;
+      const current = () => manager === sourceManager && !sourceManager.disposed;
       try {
-        const response = await (await requestClientNativeRpc()).getLoadedConversationHistory(threadId);
+        const rpc = await requestClientNativeRpc();
+        if (!current()) throw failure(409, "原生连接已变化，请重新核对送达");
+        historyRequest = rpc.getLoadedConversationHistory(threadId);
+        const response = await historyRequest;
+        if (!current()) throw failure(409, "原生连接已变化，请重新核对送达");
         const turns = array(response?.turns);
         for (const turn of turns) {
+          if (!nativeTurnId(turn) || turn.pendingUserMessageAdmission) continue;
           const item = array(turn?.items).find(item =>
             (item?.type === "userMessage" || item?.type === "steeringUserMessage"
               && item?.status === "accepted")
+            && !item.remotePendingInput && !item.remoteCompactionInput
             && (item.clientUserMessageId === clientUserMessageId || item.clientId === clientUserMessageId));
           if (!item) continue;
           return {
             ok: true, confirmed: true, deliveryState: "accepted", threadId, clientUserMessageId,
-            messageId: item.id, turnId: nativeTurnId(turn)
+            messageId: item.serverUserMessageId || item.id, turnId: nativeTurnId(turn)
           };
         }
       } catch {}
+      finally { historyRequest?.[Symbol.dispose]?.(); }
+      if (!current()) throw failure(409, "原生连接已变化，请重新核对送达");
       try {
         const submissions = await readRequestClientQueue(threadId);
+        if (!current()) throw failure(409, "原生连接已变化，请重新核对送达");
         const queued = submissions.find(value =>
-          (value?.clientUserMessageId ?? value?.submissionOptions?.clientUserMessageId ?? value?.id) === clientUserMessageId);
+          (value?.clientUserMessageId ?? value?.submissionOptions?.clientUserMessageId ?? value?.id) === clientUserMessageId
+          && !["pending", "sending", "outcome-unknown"].includes(value?.submission?.status));
         if (queued) {
           return {
             ok: true, confirmed: true, deliveryState: "queued", threadId, clientUserMessageId,
@@ -5042,10 +5060,9 @@
           };
         }
       } catch {}
+      if (!current()) throw failure(409, "原生连接已变化，请重新核对送达");
       return { ok: true, confirmed: false, deliveryState: "unknown", threadId, clientUserMessageId };
     }
-    const accepted = acceptedQueuedSend(threadId, clientUserMessageId);
-    if (accepted) return accepted;
     const coordinator = await manager.getTurnCoordinator?.();
     const queued = coordinator?.readMessages?.(threadId);
     const message = array(queued?.messages || queued).find(message =>
@@ -7345,6 +7362,29 @@
       const skipped = await guardThreadAction(action, payload);
       if (skipped) return skipped;
       switch (action) {
+        case "fast":
+        case "setFast": {
+          const fast = window.__codexElvesComposerFast;
+          const id = payload.threadId == null ? null : requiredId(payload.threadId);
+          const model = typeof payload.model === "string" ? payload.model.trim() : "";
+          if (!model || model.length > 256 || action === "setFast" && (!id || typeof payload.enabled !== "boolean"))
+            throw failure(400, "Fast 会话或模型参数无效");
+          const context = { hostId: "local", ...(id ? { threadId: id } : {}) };
+          if (!fast?.remoteState || action === "setFast" && !fast.setRemoteState) {
+            if (action === "setFast") throw failure(503, "请更新桌面 Fast 增强后重试");
+            return { ok: true, threadId: id, model, supported: false, enabled: false, reason: "请更新桌面 Fast 增强" };
+          }
+          const sourceManager = manager;
+          const assertCurrent = () => {
+            if (manager !== sourceManager || sourceManager.disposed || id && isDeletedThread(id))
+              throw failure(409, "会话连接已变化，Fast 设置未保存");
+          };
+          const state = action === "setFast"
+            ? await fast.setRemoteState(context, model, payload.enabled, assertCurrent)
+            : await fast.remoteState(context, model);
+          assertCurrent();
+          return { ok: true, threadId: id, model, ...state };
+        }
         case "optimizePrompt":
         case "promptOptimization":
         case "cancelPromptOptimize": {
@@ -7476,7 +7516,6 @@
         case "sendState": return await queueSendState(payload);
         case "send": {
           const id = requiredId(payload.threadId);
-          const loaded = await readThread(id);
           const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
           const imageAttachments = remoteImageAttachments(payload, "send-validation");
           if (!prompt && !imageAttachments.length) throw failure(400, "消息不能为空");
@@ -7490,8 +7529,8 @@
             return { ok: false, code: 503, message: error?.message || "原生发送准备能力不可用",
               nativeDispatch: { status: "not-dispatched", phase: "send-preparation" } };
           }
-          return await queueMessage({ ...payload, threadId: id },
-            !nativeSendIsRunning(id, manager, loaded));
+          // guard 已校验会话，提交内部还会读取并在原生准入时复核；这里不再重复一次串行读取。
+          return await queueMessage({ ...payload, threadId: id });
         }
         case "create": {
           let startConversationSubmitted = false;
@@ -7526,6 +7565,12 @@
               submission.phase = "firstTurn";
             }
             const submittedPrompt = goalMode ? `/goal ${materialized.objective}` : prompt;
+            const fast = window.__codexElvesComposerFast;
+            if (payload.fastMode === true && !fast?.createRemoteContext)
+              throw failure(503, "请更新桌面 Fast 增强后重试");
+            const fastContext = await fast?.createRemoteContext?.(goalSettings?.model ?? payload.model, payload.fastMode === true);
+            if (manager !== sourceManager || sourceManager.disposed)
+              throw failure(409, "原生会话连接已变化，请重新创建");
             startConversationSubmitted = true;
             const result = await manager.startConversation({
               input: [
@@ -7549,7 +7594,10 @@
                     developer_instructions: null }
                 }
               } : {})
-            }, { readThreadCreationInputs: (params, mode) => provider.readCreationInputs(params, mode) });
+            }, {
+              readThreadCreationInputs: (params, mode) => provider.readCreationInputs(params, mode),
+              ...(fastContext ? { codexElvesFastContext: fastContext } : {})
+            });
             if (goalMode) {
               submission.threadId = typeof result.conversationId === "string" ? result.conversationId : null;
               submission.firstTurnAccepted = result.status === "created" && result.firstTurn?.status === "accepted";
@@ -7770,7 +7818,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 146, call,
+    version: 148, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {

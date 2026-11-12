@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -150,6 +150,27 @@ impl ServiceProjection {
     }
 
     pub(crate) fn project_changes(&mut self, thread_id: &str, before: &Value, after: &Value) {
+        for mut event in Self::snapshot_changes(thread_id, before, after) {
+            if event["method"] == "remote/requestsChanged" {
+                event["params"]["requestsEpoch"] = json!(&self.epoch);
+                event["params"]["requestsRevision"] = json!(self.sequence + 1);
+            }
+            let terminal = (event["method"] == "turn/completed"
+                && matches!(
+                    event["params"]["turn"]["status"].as_str(),
+                    Some("completed" | "failed")
+                ))
+            .then(|| event["params"]["turn"].clone());
+            self.push(event);
+            if let Some(turn) = terminal {
+                self.notify_terminal(thread_id, &turn);
+            }
+        }
+    }
+
+    pub(crate) fn snapshot_changes(thread_id: &str, before: &Value, after: &Value) -> Vec<Value> {
+        // 桌面观察只计算本次差异；回放历史由统一服务通道保存，不能每个订阅再缓存 2,048 条正文事件。
+        let mut events = Vec::new();
         for (field, method, parameter) in [
             ("threadRuntimeStatus", "thread/status/changed", "status"),
             (
@@ -161,20 +182,19 @@ impl ServiceProjection {
             if before.get(field) != after.get(field) && after.get(field).is_some() {
                 let mut params = json!({"threadId":thread_id});
                 params[parameter] = after[field].clone();
-                self.push(json!({"method":method,"params":params}));
+                events.push(json!({"method":method,"params":params}));
             }
         }
         if before["title"] != after["title"] && after["title"].as_str().is_some() {
-            self.push(json!({"method":"thread/name/updated","params":{
+            events.push(json!({"method":"thread/name/updated","params":{
                 "threadId":thread_id,"name":after["title"]}}));
         }
         if before["requests"] != after["requests"] && after["requests"].is_array() {
-            self.push(json!({"method":"remote/requestsChanged","params":{
-                "threadId":thread_id,"requests":after["requests"],
-                "requestsEpoch":self.epoch,"requestsRevision":self.sequence+1}}));
+            events.push(json!({"method":"remote/requestsChanged","params":{
+                "threadId":thread_id,"requests":after["requests"]}}));
         }
         if before["threadGoal"] != after["threadGoal"] {
-            self.push(if after["threadGoal"].is_null() {
+            events.push(if after["threadGoal"].is_null() {
                 json!({"method":"thread/goal/cleared","params":{"threadId":thread_id}})
             } else {
                 json!({"method":"thread/goal/updated","params":{
@@ -195,11 +215,18 @@ impl ServiceProjection {
                     .map(|id| (id, turn))
             })
             .collect();
-        for mut turn in desktop_owner_ipc::snapshot_turns(after) {
+        let mut observed_turns = desktop_owner_ipc::snapshot_turns(after);
+        // 桌面完整快照按原生轮次时间发布，避免对象键顺序让新轮次开始后又显示旧轮次完成。
+        observed_turns.sort_by_key(|turn| turn["turnStartedAtMs"].as_u64().unwrap_or(0));
+        for mut turn in observed_turns {
             let Some(turn_id) = turn["turnId"].as_str().map(str::to_string) else {
                 continue;
             };
             let previous = old_turns.get(&turn_id);
+            // 长会话只处理有变化的轮次，避免每个流式快照重复遍历已经稳定的历史内容。
+            if previous == Some(&turn) {
+                continue;
+            }
             let new_live_turn = previous.is_some()
                 || turn["status"] == "inProgress"
                 || turn["turnStartedAtMs"].as_u64().is_some_and(|started| {
@@ -228,24 +255,32 @@ impl ServiceProjection {
                 } else {
                     "turn/started"
                 };
-                self.push(json!({"method":method,"params":{"threadId":thread_id,
+                events.push(json!({"method":method,"params":{"threadId":thread_id,
                     "turnId":turn_id,"turn":turn}}));
-                if terminal && matches!(status, "completed" | "failed") {
-                    self.notify_terminal(thread_id, &turn);
-                }
                 continue;
             }
+            let old_items = previous.and_then(|old| old["items"].as_array());
+            let mut old_by_id = HashMap::new();
+            for item in old_items.into_iter().flatten() {
+                if let Some(id) = item["id"].as_str() {
+                    old_by_id.entry(id).or_insert(item);
+                }
+            }
             for item in turn["items"].as_array().into_iter().flatten() {
-                let old_item = previous
-                    .and_then(|old| old["items"].as_array())
-                    .and_then(|items| items.iter().find(|old| old["id"] == item["id"]));
+                // 稳定消息 ID 建立一次索引，避免长轮次的每次更新进行平方次数的逐项查找。
+                let old_item = if let Some(id) = item["id"].as_str() {
+                    old_by_id.get(id).copied()
+                } else {
+                    old_items.and_then(|items| items.iter().find(|old| old["id"] == item["id"]))
+                };
                 if old_item != Some(item) {
                     // Exact observed item state, not invented deltas or completion.
-                    self.push(json!({"method":"item/updated","params":{
+                    events.push(json!({"method":"item/updated","params":{
                         "threadId":thread_id,"turnId":turn_id,"item":item}}));
                 }
             }
         }
+        events
     }
 
     fn notify_terminal(&mut self, thread_id: &str, turn: &Value) {
@@ -736,7 +771,9 @@ impl CodexCliService {
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
         {
-            let (items, next_cursor) = self.history_items(thread_id, turn_id, None).await?;
+            // 图片恢复按所属轮次逐页重读；必须透传消息游标，避免总是返回第一页而找不到旧图片。
+            let item_cursor = payload.get("itemCursor").and_then(Value::as_str);
+            let (items, next_cursor) = self.history_items(thread_id, turn_id, item_cursor).await?;
             return Ok(json!({
                 "ok": true,
                 "scope": "items",

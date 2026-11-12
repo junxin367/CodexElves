@@ -44,19 +44,12 @@
               const prepare = args[index];
               if (typeof prepare !== "function") return original[key](...args);
               const next = [...args];
-              const operation = {};
               next[index] = async (...prepareArgs) => {
                 const submission = await prepare(...prepareArgs);
-                return handlers.prepareSubmission ? await handlers.prepareSubmission(submission, operation) : submission;
+                return handlers.prepareSubmission ? await handlers.prepareSubmission(submission) : submission;
               };
-              try {
-                const result = await original[key](...next);
-                await handlers.finishSubmission?.(operation, result);
-                return result;
-              } catch (error) {
-                await handlers.finishSubmission?.(operation, null);
-                throw error;
-              }
+              // 用户要求主流程不受附属功能影响；原生回执不再经过额外完成处理。
+              return await original[key](...next);
             };
           }
           return forward(original, key);

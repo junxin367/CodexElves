@@ -811,10 +811,7 @@ impl BridgeDataService for LauncherDataService {
             .map_err(|error| anyhow::anyhow!("thread sort keys task failed: {error}"))
     }
 
-    async fn workspace_checkpoint_session_context(
-        &self,
-        session: SessionRef,
-    ) -> anyhow::Result<Value> {
+    async fn session_workspace_context(&self, session: SessionRef) -> anyhow::Result<Value> {
         let db_paths = self.candidate_db_paths();
         let requested_session_id = session.session_id.clone();
         tokio::task::spawn_blocking(move || {
@@ -841,9 +838,7 @@ impl BridgeDataService for LauncherDataService {
             })
         })
         .await
-        .map_err(|error| {
-            anyhow::anyhow!("workspace checkpoint session context task failed: {error}")
-        })?
+        .map_err(|error| anyhow::anyhow!("session workspace context task failed: {error}"))?
     }
 
     async fn task_board_session_catalog(&self) -> anyhow::Result<TaskBoardSessionCatalog> {

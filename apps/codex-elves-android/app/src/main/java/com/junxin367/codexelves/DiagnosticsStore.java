@@ -31,12 +31,13 @@ import java.util.function.BooleanSupplier;
 
 /** All file work, including snapshots and exports, stays on its own bounded IO queue. */
 final class DiagnosticsStore {
-    // 用户要求切换光照不被 HTTP 日志挤掉：主题独占 64 KiB，两份普通日志各让出 32 KiB，合计仍不超过 512 KiB。
-    static final int MAX_FILE_BYTES = 224 * 1024 - 64;
+    // 用户要求延长故障前日志的留存：普通日志两份各 4 MiB 轮转，主题仍独占 64 KiB，沿用独立后台 IO 队列。
+    static final int MAX_FILE_BYTES = 4 * 1024 * 1024;
     static final int MAX_THEME_BYTES = 64 * 1024;
     private static final int MAX_THEME_GROUP_EVENTS = 64;
-    static final int MAX_SNAPSHOT_BYTES = 256 * 1024;
-    static final int MAX_SNAPSHOT_EVENTS = 400;
+    // 上报同时受 10,000 条和 4 MiB 限制；须同步网页 diagnostics.js 与服务端 diagnostics.rs，避免中途截断或拒收。
+    static final int MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024;
+    static final int MAX_SNAPSHOT_EVENTS = 10000;
     private final File directory;
     private final File exports;
     private final ThreadPoolExecutor io = new ThreadPoolExecutor(
@@ -208,7 +209,7 @@ final class DiagnosticsStore {
         }
         for (StoredEvent event : themeTransitions.events) transitions.add(event);
         for (StoredEvent event : themeObservations.events) observations.add(event);
-        // 快照仍限 400 条 / 256 KiB；先保留最多 128 条主题证据，其余留给最新普通事件。
+        // 扩大后的快照限 10,000 条 / 4 MiB；仍先保留最多 128 条主题证据，其余留给最新普通事件。
         observations.trim(MAX_THEME_GROUP_EVENTS, Math.max(0, budget - transitions.bytes));
         transitions.trim(MAX_THEME_GROUP_EVENTS, Math.max(0, budget));
         regular.trim(MAX_SNAPSHOT_EVENTS - transitions.events.size() - observations.events.size(),

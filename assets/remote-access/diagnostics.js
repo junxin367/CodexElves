@@ -6,6 +6,10 @@ const handledRequests = new Set();
 const requestPattern = /^[A-Za-z0-9_-]{1,80}$/;
 const threadPattern = /^[A-Za-z0-9_-]{1,120}(?![\s\S])/;
 const tokenPattern = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
+// 用户要求扩大日志留存；与 Android DiagnosticsStore、服务端 diagnostics.rs 的 10,000 条 / 4 MiB 同步。
+const maxSnapshotEvents = 10000;
+// 原生快照按 UTF-8 限 4 MiB；桥消息额外预留 64 KiB 给 type、requestId 等封装，仍兼容旧 APK 的小快照。
+const maxBridgeResponseChars = 4 * 1024 * 1024 + 64 * 1024;
 // 用户要求上传日志后能追踪前后台断连；字段须与 Android DiagnosticsPolicy 和电脑端 diagnostics.rs 同步。
 const numericFields = new Set(["status", "durationMs", "bytes", "sdk", "generation", "readyState",
   "expectedBytes", "loadedBytes", "line", "width", "height", "stableMs", "sampleAgeMs", "themeSequence"]);
@@ -80,7 +84,12 @@ function safeFields(value) {
   for (const [key, field] of Object.entries(value || {})) {
     if (key === "errorCode" && Number.isSafeInteger(field) && field >= -1000 && field <= 1000) result[key] = field;
     // 用户要求先记录真实光照再判断；保留 lux 小数，不把阈值附近的测量四舍五入成另一侧。
-    else if (["lux", "previousLux"].includes(key) && Number.isFinite(field) && field >= 0 && field <= Number.MAX_SAFE_INTEGER)
+    else if (["lux", "previousLux", "effectiveLightLux"].includes(key) && Number.isFinite(field) && field >= 0 && field <= Number.MAX_SAFE_INTEGER)
+      result[key] = field;
+    // 自动主题诊断补齐原阈值、实测偏移和有效阈值；有符号小数边界须与 Android、服务端同步。
+    else if (key === "themeLuxShift" && Number.isFinite(field) && Math.abs(field) <= Number.MAX_SAFE_INTEGER)
+      result[key] = field;
+    else if (["lightLux", "darkLux"].includes(key) && Number.isInteger(field) && field >= 0 && field <= 40)
       result[key] = field;
     else if (key === "localHour" && Number.isInteger(field) && field >= 0 && field <= 23) result[key] = field;
     else if (key === "timezoneOffsetMinutes" && Number.isInteger(field) && field >= -840 && field <= 840) result[key] = field;
@@ -190,7 +199,7 @@ function ensureBridgeListener() {
   const bridge = globalThis.CodexElvesAndroid;
   if (typeof bridge?.addEventListener !== "function") return false;
   bridge.addEventListener("message", event => {
-    if (typeof event.data !== "string" || event.data.length > 384 * 1024) return;
+    if (typeof event.data !== "string" || event.data.length > maxBridgeResponseChars) return;
     let data;
     try { data = JSON.parse(event.data); } catch { return; }
     const request = pending.get(data?.requestId);
@@ -200,7 +209,7 @@ function ensureBridgeListener() {
     } else if (data.type === "diagnostics-export" && data.ok === true) {
       finishBridgeRequest(data.requestId, true);
     } else if (data.type === "diagnostics-snapshot" && data.bundle?.schemaVersion === 1
-        && Array.isArray(data.bundle.events) && data.bundle.events.length <= 400) {
+        && Array.isArray(data.bundle.events) && data.bundle.events.length <= maxSnapshotEvents) {
       finishBridgeRequest(data.requestId, data.bundle);
     }
   });

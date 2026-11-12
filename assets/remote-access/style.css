@@ -146,11 +146,22 @@ html{scrollbar-color:var(--muted) transparent}
 .claude-usage-dot{color:var(--muted)}
 .claude-usage-tooltip.ui-popup{display:block;gap:0;padding:14px;border-color:var(--menu-divider,var(--line));border-radius:10px;background:var(--control-bg,var(--side));color:var(--text);font-size:12px;line-height:1.5;overflow:auto}
 .claude-usage-title{margin-bottom:12px;font-size:13px;font-weight:600}
-.claude-usage-detail-row{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-variant-numeric:tabular-nums}
+.claude-usage-section+.claude-usage-section{margin-top:16px}
+.claude-usage-detail-row{display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.claude-usage-remaining{font-size:11px}
 .claude-usage-track{height:3px;margin-top:6px;overflow:hidden;border-radius:2px;background:color-mix(in srgb,var(--text) 18%,transparent)}
 .claude-usage-fill{height:100%;background:color-mix(in srgb,var(--text) 70%,transparent)}
-.claude-usage-reset{margin:3px 0 12px;color:var(--muted);font-size:11px}
-.claude-usage-reset:last-child{margin-bottom:0}
+/* 用户确认：数字、预测及右侧重置时间保持一行，手机不缩字号；只按内容拓展原 244px 最小宽度。 */
+.claude-usage-metrics{display:grid;grid-template-columns:max-content max-content;justify-content:space-between;align-items:center;column-gap:12px;margin-top:8px;font-size:11px;font-variant-numeric:tabular-nums;color:color-mix(in srgb,var(--text) 75%,var(--muted));white-space:nowrap}
+.claude-usage-stats{display:flex;align-items:center;gap:10px}
+.claude-usage-metric{display:inline-flex;align-items:center;gap:4px}
+.claude-usage-metric>.ui-icon{display:inline-flex;align-items:center;justify-content:center;flex:0 0 16px;width:16px;height:16px;padding:2px;border-radius:4px}
+/* 用户参考图：消耗为蓝色折线，预测为紫色上升箭头，均保留淡色圆角底。 */
+.claude-usage-consumed>.ui-icon{color:#4998e3;background:color-mix(in srgb,#4998e3 16%,transparent)}
+.claude-usage-forecast>.ui-icon{color:#ae86e8;background:color-mix(in srgb,#ae86e8 16%,transparent)}
+.claude-usage-metric>.ui-icon svg{width:12px;height:12px;stroke-width:1.8}
+.claude-usage-slash,.claude-usage-reset{color:var(--muted)}
+.claude-usage-reset{margin:0;font-size:11px;text-align:right}
 /* 用户要求问答弹层贴近输入栏并叠在排队信息上方；8px 间隔与 fitApprovalArea 同步，权限审批保留原避让抬升。 */
 .composer-anchor>.approval-area{position:absolute;left:0;right:0;bottom:calc(100% + 8px + var(--approval-lift,0px));z-index:10;max-height:min(35dvh,var(--approval-available-height,35dvh));padding:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;border-radius:12px;background:var(--side);box-shadow:0 8px 28px #0002}
 .composer-anchor>.approval-area:empty{display:none}
@@ -166,6 +177,9 @@ html{scrollbar-color:var(--muted) transparent}
 .composer-context{--composer-context-row-height:max(34px,calc(1.4rem + 8px));display:flex;flex-direction:column;max-height:min(32dvh,260px);overflow:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .composer-controls{flex:1;min-width:0;display:flex;align-items:center;justify-content:flex-start;gap:8px;flex-wrap:nowrap;overflow:hidden}
 .composer-toolbar>.composer-controls{gap:8px;align-items:center}
+/* 用户要求仅「＋」留在最左侧，其余编辑区按钮靠近发送按钮右对齐。
+ * 自动外边距吸收中间空白，桌面和手机共用；空间不足时继续由模型名称收缩，按钮顺序保持一致。 */
+.composer-toolbar>.composer-controls>.composer-add-button{margin-inline-end:auto}
 .context-info{position:relative;display:flex;align-items:center;justify-content:center;flex:0 0 28px;width:28px;height:28px;min-width:0;padding:0;border:0;border-radius:6px;font-size:calc(var(--font-size)*.78);white-space:nowrap}
 .context-info[aria-expanded=true]{color:var(--text)}
 .prompt-optimize-button{display:grid;place-items:center;flex:0 0 24px;width:24px;height:28px;padding:0;border-radius:6px;color:var(--muted);font:16px/1 "Segoe UI Emoji",system-ui,sans-serif}
@@ -182,6 +196,24 @@ html{scrollbar-color:var(--muted) transparent}
 @media(pointer:coarse){.context-info{flex-basis:32px;width:32px;height:36px}}
 .context-percent{border:0;padding:0;color:var(--text)}
 .composer-toolbar .model-button{font-size:calc(var(--font-size)*.85);padding:5px 7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px;min-width:0;flex:0 1 auto}
+/* 用户要求 Fast 紧靠模型名称左侧，关闭为空心、开启为实心蓝色渐变流光。
+ * 28px 点击区与上下文按钮对齐，手机沿用模型按钮的 36px 高度；18px 闪电保持两端布局一致。
+ * 2.6s 为一轮扫光周期，250% 渐变背景让亮部平滑掠过，动画不改变图标或按钮尺寸。 */
+.composer-toolbar .fast-button{display:grid;place-items:center;flex:0 0 28px;width:28px;height:28px;min-width:0;padding:0;border:0;border-radius:6px;background:transparent;color:var(--muted)}
+/* 桌面工具栏 gap 为 8px，模型前回收 6px 得到 2px；手机原 gap 已是 2px，必须取消回收，避免点击区重叠。 */
+.composer-toolbar .fast-button:not([hidden])+.model-button{margin-left:-6px}
+.fast-bolt{position:relative;display:block;width:18px;height:18px}
+.fast-bolt svg{display:block;width:100%;height:100%}
+.fast-button[aria-pressed=true]{color:#3b82f6}
+.fast-button[aria-pressed=true] .fast-bolt svg{fill:currentColor}
+.fast-button[aria-pressed=true] .fast-bolt::after{content:"";position:absolute;inset:0;background:linear-gradient(115deg,#1d4ed8 0%,#3b82f6 24%,#a5edff 40%,#38bdf8 50%,#2563eb 66%,#1d4ed8 100%);background-size:250% 100%;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='white' d='M13 2 3 14h8l-1 8 11-12h-8V2Z'/%3E%3C/svg%3E") center/contain no-repeat;animation:fast-flow 2.6s linear infinite;pointer-events:none}
+.fast-button:disabled .fast-bolt::after{animation-play-state:paused}
+.fast-button:focus-visible{outline:2px solid var(--accent);outline-offset:2px;background:var(--composer-hover,var(--hover))}
+@media(hover:hover) and (pointer:fine){.composer-toolbar .fast-button:hover:not(:disabled){background:var(--composer-hover,var(--hover))}}
+@media(max-width:760px),(pointer:coarse){.composer-toolbar .fast-button{height:36px;flex-basis:32px;width:32px}}
+@media(max-width:760px){.composer-toolbar .fast-button:not([hidden])+.model-button{margin-left:0}}
+/* 减少动态效果时只停流光，开启态仍保留实心渐变；不增加 JS 定时器或布局动画。 */
+@keyframes fast-flow{from{background-position:125% 50%}to{background-position:-125% 50%}}
 /* 模型按钮在自己的输入框底色上高亮；菜单打开和键盘聚焦使用同色，触屏不保留鼠标 hover。 */
 .composer-toolbar .model-button:is(:focus-visible,[aria-expanded=true]){background:var(--composer-hover,var(--hover))}
 @media(hover:hover) and (pointer:fine){.composer-toolbar .model-button:hover:not(:disabled){background:var(--composer-hover,var(--hover))}}

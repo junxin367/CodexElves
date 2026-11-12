@@ -173,10 +173,55 @@ def native_setting_command(row):
     return {"name": match[1], "value": match[2].strip()} if match else None
 
 
+def native_control_command(row):
+    # 只识别原生 CLI 控制记录；用户引用相同 XML 不能被解释为目标或压缩操作。
+    if not native_setting_source(row):
+        return None
+    content = row.get("message", {}).get("content")
+    if not isinstance(content, str):
+        return None
+    match = re.fullmatch(r"\s*<command-name>/(goal|compact)</command-name>\s*"
+                        r"<command-message>\1</command-message>\s*"
+                        r"<command-args>([\s\S]*)</command-args>\s*", content)
+    return {"name": match[1], "value": match[2].strip()} if match else None
+
+
+def native_agent_notification(row):
+    # 子代理完成通知是原生控制消息；只认原生来源和完整结构，用户引用相同 XML 仍按普通正文显示。
+    origin = row.get("origin") or {}
+    if (row.get("type") != "user" or not isinstance(origin, dict) or origin.get("kind") != "task-notification"
+            or origin.get("producer") != "session-task"):
+        return None
+    content = row.get("message", {}).get("content")
+    if (isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict)
+            and content[0].get("type") == "text"):
+        content = content[0].get("text")
+    if not isinstance(content, str) or not re.fullmatch(r"\s*<task-notification>[\s\S]*</task-notification>\s*", content):
+        return None
+    def field(name):
+        match = re.search(rf"<{name}>([^<]*)</{name}>", content)
+        return html.unescape(match[1]).strip() if match else ""
+    identity, status = field("task-id"), field("status")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", identity) or status not in ("completed", "failed", "stopped"):
+        return None
+    value = {"agentId": identity, "status": status, "toolUseId": field("tool-use-id"),
+             "completedAtMs": native_time(row.get("timestamp"))}
+    for tag, key in (("subagent_tokens", "totalTokens"), ("tool_uses", "totalToolUseCount"),
+                     ("duration_ms", "totalDurationMs")):
+        text = field(tag)
+        if text.isdigit():
+            value[key] = int(text)
+    return value
+
+
 def real_user(row):
     if any(row.get(key) is True for key in ("isMeta", "isSidechain", "isCompactSummary", "isVisibleInTranscriptOnly")):
         return False
-    if native_interruption(row) or native_setting_command(row) \
+    command = row.get("nativeControlCommand") or native_control_command(row)
+    if command:
+        return command["name"] == "goal" and command["value"].lower() not in ("", "clear", "stop", "off", "reset", "none", "cancel")
+    if native_interruption(row) or native_agent_notification(row) or row.get("nativeAgentNotification") \
+            or native_setting_command(row) or row.get("nativeControlOutput") \
             or row.get("nativeSettingCommand") or row.get("nativeSettingOutput"):
         return False
     if row.get("type") == "attachment":
@@ -226,6 +271,218 @@ def preview_text_key(value):
     value = re.sub(r"(?m)^\s{0,3}(?:#{1,6}\s+|>+\s*)", "", value)
     value = re.sub(r"[`*_~<>]", "", value)
     return "".join(value.split())
+
+
+class NativeSubagents:
+    """只在列表/详情读取时观察原生子代理文件，不进入主会话的发送、250ms 轮询或权限处理。"""
+    def __init__(self, root, native_id):
+        self.projects = (root / "projects").resolve()
+        self.native_id = str(uuid.UUID(native_id))
+        self.logs = {}
+
+    @staticmethod
+    def valid_id(value):
+        return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value) is not None
+
+    def path(self):
+        path = next(self.projects.glob(f"*/{self.native_id}.jsonl"), None)
+        if path is None or not path.resolve().is_relative_to(self.projects):
+            raise RuntimeError("原生主会话记录暂不可读取")
+        return path
+
+    def rows(self, path, agent_id=None):
+        if not path.exists():
+            return []
+        if not path.resolve().is_relative_to(self.projects):
+            raise RuntimeError("原生子代理记录不在所属会话目录内")
+        stat = path.stat()
+        cached = self.logs.setdefault(str(path), {"offset": 0, "rows": [], "seen": set(), "signature": None})
+        identity = (stat.st_dev, stat.st_ino)
+        signature = (identity, stat.st_size, stat.st_mtime_ns)
+        previous = cached["signature"]
+        if previous and (previous[0] != identity or stat.st_size < cached["offset"]
+                         or previous[1] == stat.st_size and previous[2] != stat.st_mtime_ns):
+            cached.update(offset=0, rows=[], seen=set())
+        if signature == previous:
+            return cached["rows"]
+        with path.open("rb") as stream:
+            stream.seek(cached["offset"])
+            while True:
+                position = stream.tell()
+                line = stream.readline()
+                if not line.endswith(b"\n"):
+                    cached["offset"] = position
+                    break
+                cached["offset"] = stream.tell()
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if (not isinstance(row, dict) or not row.get("uuid")
+                        or row.get("type") not in ("user", "assistant", "system")
+                        or row.get("sessionId", self.native_id) != self.native_id
+                        or agent_id and row.get("agentId", agent_id) != agent_id
+                        or not agent_id and row.get("isSidechain")
+                        or row["uuid"] in cached["seen"]):
+                    continue
+                if row["type"] in ("user", "assistant") and not isinstance(row.get("message"), dict):
+                    continue
+                value = {key: row[key] for key in ("type", "uuid", "parentUuid", "timestamp", "subtype",
+                         "agentId", "parentAgentId", "isMeta", "isApiErrorMessage", "isCompactSummary",
+                         "isVisibleInTranscriptOnly", "apiBlockIndex", "requestedModel", "effort",
+                         "interruptedMessageId") if key in row}
+                value["timestampMs"] = native_time(row.get("timestamp"))
+                if (agent_id and row["type"] == "user"
+                        and isinstance(row.get("origin"), dict) and row["origin"].get("kind") == "coordinator"):
+                    # 已写入子代理原生记录的主代理消息是该子视图的真实输入；只调整只读投影，不参与主会话准入。
+                    value["isMeta"] = False
+                    value["nativeSubagentInput"] = True
+                if "message" in row:
+                    message = row["message"]
+                    value["message"] = {key: message[key] for key in
+                                        ("role", "id", "model", "content", "usage", "stop_reason") if key in message}
+                    content = value["message"].get("content")
+                    if isinstance(content, list):
+                        value["message"]["content"] = [{key: item for key, item in part.items()
+                            if key not in ("signature", "data")} if part.get("type") == "thinking" else part
+                            for part in content if isinstance(part, dict) and part.get("type") != "redacted_thinking"]
+                result = row.get("toolUseResult")
+                if isinstance(result, dict) and self.valid_id(result.get("agentId") or result.get("resumedAgentId")):
+                    value["toolUseResult"] = {key: result[key] for key in
+                        ("agentId", "resumedAgentId", "status", "description", "resolvedModel", "totalDurationMs",
+                         "totalTokens", "totalToolUseCount") if key in result}
+                notification = native_agent_notification(row)
+                if notification:
+                    value["nativeAgentNotification"] = notification
+                cached["seen"].add(row["uuid"])
+                cached["rows"].append(value)
+        cached["signature"] = signature
+        return cached["rows"]
+
+    def collect(self, requested=None, include_messages=False):
+        if requested is not None and not self.valid_id(requested):
+            raise RuntimeError("原生子代理 ID 无效")
+        parent = self.path()
+        directory = parent.with_suffix("") / "subagents"
+        if directory.exists() and directory.resolve() != parent.parent.resolve() / self.native_id / "subagents":
+            raise RuntimeError("原生子代理目录不属于当前会话")
+        calls, agents, notifications, resumes = {}, {}, {}, {}
+        for row in self.rows(parent):
+            content = row.get("message", {}).get("content", [])
+            if isinstance(content, list):
+                for part in content:
+                    if part.get("type") == "tool_use" and part.get("name") in ("Agent", "Task"):
+                        calls[part["id"]] = {"input": part.get("input", {}), "at": row["timestampMs"]}
+                    if part.get("type") == "tool_result" and part.get("tool_use_id") in calls:
+                        result = row.get("toolUseResult", {})
+                        if self.valid_id(result.get("agentId")):
+                            agents[result["agentId"]] = {**result, "toolUseId": part["tool_use_id"]}
+            notification = row.get("nativeAgentNotification")
+            if notification:
+                notifications[notification["agentId"]] = notification
+            resumed_id = row.get("toolUseResult", {}).get("resumedAgentId")
+            if self.valid_id(resumed_id):
+                resumes[resumed_id] = row["timestampMs"]
+        identities = set(agents)
+        for path in directory.glob("agent-*"):
+            match = re.fullmatch(r"agent-([A-Za-z0-9_-]{1,64})\.(?:jsonl|meta\.json)", path.name)
+            if match:
+                identities.add(match[1])
+        if requested is not None and requested not in identities:
+            raise NativeError("ENOENT", "当前主会话没有该原生子代理记录")
+        result = []
+        for identity in sorted(identities):
+            if requested is not None and requested != identity:
+                continue
+            metadata_path = directory / f"agent-{identity}.meta.json"
+            metadata = {}
+            if metadata_path.exists():
+                if not metadata_path.resolve().is_relative_to(directory.resolve()):
+                    raise RuntimeError("原生子代理元数据不属于当前会话")
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except ValueError:
+                    pass
+                if not isinstance(metadata, dict):
+                    metadata = {}
+            native = agents.get(identity, {})
+            tool_id = metadata.get("toolUseId") or native.get("toolUseId", "")
+            call = calls.get(tool_id, {})
+            task = call.get("input", {})
+            path = directory / f"agent-{identity}.jsonl"
+            if include_messages and not path.is_file():
+                # 记录暂不可读时沿用现有读取失败处理，不能用空历史撤掉网页已经确认并显示的消息。
+                raise RuntimeError("原生子代理记录暂不可读取")
+            if path.exists() and not path.resolve().is_relative_to(directory.resolve()):
+                raise RuntimeError("原生子代理记录不属于当前会话")
+            rows = self.rows(path, identity)
+            if not call and metadata.get("isFork"):
+                # 嵌套 fork 或父会话压缩后，启动调用仍保存在该 fork 文件中；只按原生 toolUseId 取回任务。
+                for row in rows:
+                    content = row.get("message", {}).get("content", [])
+                    if not isinstance(content, list):
+                        continue
+                    block = next((part for part in content if part.get("type") == "tool_use"
+                                  and part.get("id") == tool_id and part.get("name") in ("Agent", "Task")), None)
+                    if block:
+                        call = {"input": block.get("input", {}), "at": row["timestampMs"]}
+                        task = call["input"]
+                        break
+            # fork 文件开头是启动调用及继承说明，不属于子代理再次执行 Agent；用原始任务替换该原生启动说明。
+            if metadata.get("isFork"):
+                boundary = next((index for index, row in enumerate(rows)
+                    if row.get("type") == "user" and isinstance(row.get("message", {}).get("content"), list)
+                    and any(part.get("type") == "tool_result" and part.get("tool_use_id") == tool_id
+                            for part in row["message"]["content"])), None)
+                rows = rows[boundary + 1:] if boundary is not None else []
+                if task.get("prompt"):
+                    rows = [{"type": "user", "uuid": f"task-{identity}", "timestampMs": call.get("at", 0),
+                             "message": {"role": "user", "content": task["prompt"]}}, *rows]
+            notification = notifications.get(identity, {})
+            model, effort, updated, started = native.get("resolvedModel", ""), "", 0, call.get("at", 0)
+            latest_prompt, latest_final = 0, 0
+            for row in rows:
+                updated = max(updated, row["timestampMs"])
+                started = started or row["timestampMs"]
+                if real_user(row):
+                    latest_prompt = max(latest_prompt, row["timestampMs"])
+                message = row.get("message", {})
+                if row.get("type") == "assistant" and message.get("model") not in (None, "", "<synthetic>"):
+                    model = message["model"]
+                    if message.get("stop_reason") in ("end_turn", "stop_sequence"):
+                        latest_final = max(latest_final, row["timestampMs"])
+                if row.get("effort"):
+                    effort = row["effort"]
+            # 同 ID 续跑会移除 finished 而非写 false；新的原生输入使上次完成通知失效，不能继续归入已完成列表。
+            current_input = max(latest_prompt, resumes.get(identity, 0))
+            resumed = bool(notification.get("completedAtMs") and current_input > notification["completedAtMs"])
+            status = notification.get("status") or native.get("status")
+            if metadata.get("finished") is False or resumed and latest_final < current_input:
+                status = "active"
+            elif metadata.get("finished") is True:
+                status = "completed" if resumed or status not in ("failed", "stopped") else status
+            elif resumed:
+                status = "active"
+            elif status not in ("completed", "failed", "stopped"):
+                status = "active" if status in ("active", "async_launched", "running") else "unknown"
+            if resumed and status == "active":
+                started = current_input
+            outcome = status if status in ("completed", "failed", "stopped") else None
+            entry = {"nativeId": identity, "toolUseId": tool_id,
+                     "name": task.get("description") or metadata.get("description") or identity,
+                     "agentType": metadata.get("agentType") or task.get("subagent_type", ""),
+                     "model": model, "reasoningEffort": effort, "status": status, "outcome": outcome,
+                     "startedAtMs": started or None, "updatedAtMs": updated or None,
+                     "parentAgentId": next((row["parentAgentId"] for row in rows if row.get("parentAgentId")), None)}
+            for key in ("totalDurationMs", "totalTokens", "totalToolUseCount"):
+                if not resumed and isinstance(notification.get(key, native.get(key)), (int, float)):
+                    entry[key] = notification.get(key, native.get(key))
+            if outcome:
+                entry["completedAtMs"] = (None if resumed else notification.get("completedAtMs")) or updated or None
+            if include_messages:
+                entry["messages"] = rows
+            result.append(entry)
+        return result
 
 
 class NativeDiscovery:
@@ -284,7 +541,8 @@ class NativeDiscovery:
                                 cached["real"] = True
                                 if not cached["title"]:
                                     content = row.get("message", {}).get("content", row.get("attachment", {}).get("prompt", ""))
-                                    text = content if isinstance(content, str) else " ".join(part.get("text", "") for part in content if part.get("type") == "text")
+                                    control = native_control_command(row)
+                                    text = control["value"] if control else content if isinstance(content, str) else " ".join(part.get("text", "") for part in content if part.get("type") == "text")
                                     cached["title"] = " ".join(text.split())[:60] or "图片会话"
                                 if not cached["cwd"] and isinstance(row.get("cwd"), str) and row["cwd"].startswith("/"):
                                     cached["cwd"] = row["cwd"]
@@ -361,7 +619,7 @@ class NativeDiscovery:
             return {}
         if subtype == "discover":
             return {"sessions": self.scan(force=True)}
-        if subtype != "read_history":
+        if subtype not in ("read_history", "read_subagents", "read_subagent"):
             raise RuntimeError("只读发现连接不接受执行操作")
         native = str(uuid.UUID(request["native_id"]))
         self.scan()
@@ -375,15 +633,30 @@ class NativeDiscovery:
             # 只缓存最近四条打开的完整历史，发现索引本身只保存非敏感元数据和偏移。
             if len(self.readers) > 4:
                 self.readers.pop(next(iter(self.readers)))
+        if subtype in ("read_subagents", "read_subagent"):
+            if reader.subagents is None:
+                reader.subagents = NativeSubagents(self.root, native)
+            if subtype == "read_subagents":
+                return {"agents": reader.subagents.collect()}
+            identity = request.get("agent_id")
+            if not NativeSubagents.valid_id(identity):
+                raise RuntimeError("原生子代理 ID 无效")
+            return {"agent": reader.subagents.collect(identity, request.get("include_messages") is True)[0]}
         reader.clients.update(request.get("clients", {}))
         reader.pending = request.get("pending", [])
+        reader.native_commands = (request.get("native_control") or {}).get("commands", [])
+        previous_compaction = (request.get("native_control") or {}).get("compaction") or {}
+        if previous_compaction.get("state") in ("pending", "running", "unknown"):
+            reader.compaction = {**previous_compaction, "state": "unknown"}
+        reader.restore_compaction_events(request.get("native_control") or {})
         reader.model = request.get("model", "")
         reader.read_messages()
         row = self.rows[native]
         return {"type": "shared_snapshot", "native_id": native, "job_id": row["jobId"],
                 "native_status": self.status(row["nativeStatus"], reader.messages), "messages": reader.messages,
                 "clients": reader.clients, "pending": reader.pending, "requests": {},
-                "context_configuration": reader.context_configuration(), "updated_at": row["updatedAt"]}
+                "context_configuration": reader.context_configuration(), "updated_at": row["updatedAt"],
+                "native_control": reader.control_projection()}
 
     def poll(self, force=False):
         pass
@@ -426,6 +699,253 @@ class NativeSession:
         self.preview_at = 0
         self.context_files = {}
         self.native_context = {}
+        self.goal = None
+        self.goal_revision = ""
+        self.goal_notice = ""
+        self.compaction = {"state": "idle"}
+        self.native_commands = []
+        self.native_capabilities = {}
+        self.control_screen_before = ""
+        self.compaction_screen_active = False
+        self.compaction_events = {}
+        self.compaction_event_id = ""
+        self.subagents = None
+
+    def control_projection(self):
+        current = self.compaction_events.get(self.compaction_event_id)
+        if current and current.get("afterUuid") is None and not current.get("_anchorResolved") and self.messages:
+            current["afterUuid"] = self.compaction_anchor(current.get("startedAtMs", current.get("completedAtMs")))
+            current["_anchorResolved"] = True
+        return {"goal": self.goal, "goalRevision": self.goal_revision, "goalNotice": self.goal_notice,
+                "compaction": self.compaction, "commands": self.native_commands,
+                "capabilities": self.native_capabilities, "compactionEvents": list(self.compaction_events.values()),
+                "compactionEventId": self.compaction_event_id}
+
+    def restore_compaction_events(self, control):
+        # 正文状态行属于已观察到的原生活动；重连和下一条命令不能删除已确认的中断、失败记录。
+        for event in control.get("compactionEvents", []):
+            if isinstance(event, dict) and isinstance(event.get("id"), str):
+                self.compaction_events.setdefault(event["id"], dict(event))
+        self.compaction_event_id = control.get("compactionEventId") or self.compaction_event_id
+        event = self.compaction_events.get(self.compaction_event_id)
+        if event and event.get("status") == "inProgress" and self.compaction.get("state") == "unknown":
+            event["status"] = "unknown"
+
+    def compaction_anchor(self, before=None):
+        return next((row["uuid"] for row in reversed(self.messages)
+                     if row.get("uuid") and (before is None or native_time(row.get("timestamp")) <= before)
+                     and (real_user(row) or row.get("type") == "assistant"
+                                            or row.get("subtype") == "turn_duration")), None)
+
+    def record_compaction_event(self, identity, status, at=None, **fields):
+        event = self.compaction_events.setdefault(identity, {
+            "id": identity, "afterUuid": self.compaction_anchor(), "source": "manual"})
+        event.update(status=status, **fields)
+        observed_at = int(time.time() * 1000) if at is None else at
+        if status == "inProgress":
+            event.setdefault("startedAtMs", observed_at)
+        elif status in ("completed", "failed", "interrupted"):
+            event["completedAtMs"] = observed_at
+            event.pop("phase", None)
+        return event
+
+    def observe_control_record(self, row):
+        version = row.get("version", "")
+        if not self.native_capabilities and isinstance(version, str) and re.fullmatch(r"\d+\.\d+\.\d+", version):
+            # 只读历史不启动 CLI；2.1.322 已实测，执行前仍用 initialize.commands 核对当前实例。
+            supported = tuple(map(int, version.split("."))) >= (2, 1, 322)
+            self.native_capabilities = {"goal": supported, "compact": supported}
+        attachment = row.get("attachment")
+        if not isinstance(attachment, dict):
+            attachment = {}
+        at = native_time(row.get("timestamp"))
+        if row.get("type") == "attachment" and attachment.get("type") == "goal_status":
+            condition, met = attachment.get("condition"), attachment.get("met")
+            if not isinstance(condition, str) or not condition.strip() or type(met) is not bool:
+                return
+            self.goal_revision = row["uuid"]
+            if attachment.get("sentinel") is True:
+                if not met:
+                    self.goal_notice = ""
+                    self.goal = {"objective": condition, "status": "active", "createdAt": at // 1000,
+                                 "updatedAt": at // 1000, "nativeId": row["uuid"], "source": "claude"}
+                elif not self.goal or self.goal.get("status") != "completed":
+                    # 原生 clear 也写 met=true 的 sentinel；它仅表示结束，不能冒充目标已达成。
+                    self.goal = None
+                    self.goal_notice = ""
+            elif self.goal and self.goal["objective"] == condition:
+                self.goal["status"] = "completed" if met else "active"
+                if met:
+                    self.goal_notice = ""
+                self.goal["updatedAt"] = at // 1000
+                if isinstance(attachment.get("reason"), str):
+                    self.goal["reason"] = attachment["reason"][:4000]
+                # 只映射原生显式统计；不估算 Token、轮次或等待中的耗时，新目标从空统计开始。
+                for source, target in (("tokens", "tokensUsed"), ("iterations", "iterations"), ("durationMs", "timeUsedSeconds")):
+                    value = attachment.get(source)
+                    if type(value) is int and 0 <= value <= 9007199254740991:
+                        self.goal[target] = value / 1000 if source == "durationMs" else value
+            for command in self.native_commands:
+                if (command["name"] == "goal" and command["state"] in ("pending", "unknown")
+                        and at >= command["issuedAt"] and row["uuid"] != command.get("baseline")
+                        and (command["argument"] == condition and not met
+                             or command["argument"] == "clear" and met and attachment.get("sentinel") is True)):
+                    command["state"], command["nativeId"] = "completed", row["uuid"]
+        elif row.get("type") == "system" and row.get("subtype") == "informational":
+            text = row.get("content")
+            if isinstance(text, str) and text.startswith(("Goal paused", "Goal still active", "Goal cleared after an unrecoverable error")):
+                # 只投影原生目标通知，不返回 hook stderr、认证信息或请求诊断。
+                self.goal_notice = text[:2000]
+                if self.goal and text.startswith("Goal paused"):
+                    self.goal["status"] = "blocked"
+                elif self.goal and text.startswith("Goal still active"):
+                    self.goal["status"] = "active"
+        elif row.get("type") == "system" and row.get("subtype") == "compact_boundary":
+            active = next((command for command in self.native_commands
+                           if command["name"] == "compact" and command["state"] in ("pending", "running", "stopping", "unknown")), None)
+            current = self.compaction_events.get(self.compaction_event_id)
+            stale = active and (at < active["issuedAt"] or row["uuid"] == active.get("baseline"))
+            if not active and current and current.get("status") in ("inProgress", "unknown"):
+                stale = at < current.get("startedAtMs", 0)
+            known = next((event for event in self.compaction_events.values() if event.get("nativeId") == row["uuid"]), None)
+            identity = known["id"] if known else active["id"] if active and not stale \
+                else current["id"] if current and not stale and current.get("status") in ("inProgress", "unknown") else row["uuid"]
+            metadata = row.get("compactMetadata") or {}
+            fields = {key: metadata[key] for key in ("preTokens", "postTokens", "durationMs")
+                      if type(metadata.get(key)) is int and 0 <= metadata[key] <= 9007199254740991}
+            if "durationMs" in fields and at >= fields["durationMs"]:
+                fields["startedAtMs"] = at - fields["durationMs"]
+            self.record_compaction_event(identity, "completed", at, nativeId=row["uuid"],
+                                         source="automatic" if metadata.get("trigger") in ("auto", "automatic") else "manual",
+                                         **fields)
+            if stale:
+                return
+            self.compaction_event_id = identity
+            self.compaction = {"state": "idle", "itemId": row["uuid"]}
+            for command in self.native_commands:
+                if (command["name"] == "compact" and command["state"] in ("pending", "running", "stopping", "unknown")
+                        and at >= command["issuedAt"] and row["uuid"] != command.get("baseline")):
+                    command["state"], command["nativeId"] = "completed", row["uuid"]
+
+    def native_command(self, request):
+        name, argument = request.get("name"), request.get("argument", "").strip()
+        self.delivery_started = False
+        if name not in ("goal", "compact") or not self.native_capabilities.get(name):
+            raise NativeError("EUNSUPPORTED", "当前 Claude CLI 未提供此原生命令")
+        if name == "goal" and (not argument or len(argument.encode("utf-16-le")) // 2 > 4000):
+            raise NativeError("EINVAL", "Claude 目标需要 1–4000 个字符")
+        if name == "compact" and not self.native_id:
+            raise NativeError("EINVAL", "请先创建会话并产生对话，再压缩上下文")
+        self.read_messages()
+        expected = request.get("expectedGoal")
+        if expected is not None and (not self.goal or any(
+                self.goal.get(key) != expected.get(key) for key in ("nativeId", "objective", "status"))):
+            raise NativeError("EBUSY", "原生目标已变化，请重新读取后操作")
+        if any(command["name"] == name and command["state"] in ("pending", "running", "stopping", "unknown")
+               for command in self.native_commands):
+            raise NativeError("EBUSY", "上一条同类原生命令尚未确认，请先核对状态")
+        live = self.lookup() if self.native_id else None
+        if live:
+            self.bind(live)
+        if self.native_id and self.short and (not live or live.get("outcome")):
+            live = self.restore_job()
+        command = {"id": request["id"], "name": name, "argument": argument,
+                   "state": "pending", "issuedAt": int(time.time() * 1000),
+                   "baseline": self.goal_revision if name == "goal" else self.compaction.get("itemId"),
+                   "beforeOutput": hashlib.sha256(self.compact_output().encode()).hexdigest()}
+        # 只保留每类最近一次操作；已接收操作重连后仅核对，绝不重新发送。
+        self.native_commands = [value for value in self.native_commands if value["name"] != name] + [command]
+        self.control_screen_before = "\n".join(self.screen.text())
+        if name == "compact":
+            self.compaction_event_id = ""
+            self.compaction = {"state": "pending", "itemId": command["id"]}
+        emit({"type": "shared_native_command_intent", "native_control": self.control_projection()})
+        self.delivery_started = True
+        try:
+            text = f"/{name}" + (f" {argument}" if argument else "")
+            if live and not live.get("outcome"):
+                self.reply(text, next_turn=False)
+            else:
+                self.start(text)
+        except NativeError:
+            self.delivery_started = False
+            command["state"] = "failed"
+            if name == "compact":
+                self.compaction = {"state": "idle", "itemId": command["id"]}
+            self.poll(force=True)
+            raise
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            command["state"] = "unknown"
+            if name == "compact":
+                self.compaction["state"] = "unknown"
+                event = self.compaction_events.get(self.compaction_event_id)
+                if event and event.get("status") == "inProgress":
+                    event["status"] = "unknown"
+            self.poll(force=True)
+            raise
+        self.poll(force=True)
+        return {"accepted": True, "nativeId": self.native_id, "jobId": self.short,
+                "nativeCommand": {key: command[key] for key in ("id", "name", "state")},
+                "nativeControl": self.control_projection()}
+
+    def compact_output(self):
+        lines = self.screen.text()
+        starts = [index for index, line in enumerate(lines) if re.match(r"^\s*❯\s*/compact\s*$", line)]
+        return " ".join(lines[starts[-1] + 1:starts[-1] + 6]) if starts else ""
+
+    def observe_control_screen(self):
+        lines = self.screen.text()
+        text = "\n".join(lines)
+        compacting = bool(re.search(r"(?m)^[✶✻✽✢·*]\s+Compacting conversation", text))
+        ended_display = self.compaction_screen_active and not compacting
+        if compacting and not self.compaction_screen_active:
+            self.compaction = {**self.compaction, "state": "running"}
+            command = next((command for command in self.native_commands if command["name"] == "compact"
+                            and command["state"] in ("pending", "running", "unknown")), None)
+            previous = self.compaction_events.get(self.compaction_event_id)
+            identity = command["id"] if command else previous["id"] if previous and previous.get("status") == "unknown" else str(uuid.uuid4())
+            self.compaction_event_id = identity
+            self.record_compaction_event(identity, "inProgress")
+            for command in self.native_commands:
+                if command["name"] == "compact" and command["state"] in ("pending", "unknown"):
+                    command["state"] = "running"
+        if self.compaction_screen_active and not compacting:
+            event = self.compaction_events.get(self.compaction_event_id)
+            if event and event.get("phase") == "stopping":
+                self.record_compaction_event(event["id"], "interrupted")
+                self.compaction = {"state": "idle", "itemId": event["id"]}
+            for command in self.native_commands:
+                if command["name"] == "compact" and command["state"] == "stopping":
+                    command.update(state="completed", message="压缩已停止")
+                    self.record_compaction_event(command["id"], "interrupted")
+                    self.compaction = {"state": "idle", "itemId": command["id"]}
+        self.compaction_screen_active = compacting
+        # 无历史/失败可能只有原生终端回显。仅关联本次 /compact 行后的回显，不按旧错误或用户引用判断。
+        if text != self.control_screen_before:
+            for command in self.native_commands:
+                if command["name"] != "compact" or command["state"] not in ("pending", "running"):
+                    continue
+                output = self.compact_output()
+                if command["state"] == "pending" and hashlib.sha256(output.encode()).hexdigest() == command.get("beforeOutput"):
+                    continue
+                if re.search(r"Nothing to compact|Not enough messages|Conversation too short", output, re.I):
+                    command.update(state="completed", message="当前历史无需压缩")
+                    self.record_compaction_event(command["id"], "completed", outcome="noop")
+                    self.compaction_event_id = command["id"]
+                    self.compaction = {"state": "idle", "itemId": command["id"]}
+                elif re.search(r"Error:|Failed to compact|Compaction failed", output, re.I):
+                    command.update(state="failed", message="原生压缩未完成，请在 CLI 中核对错误")
+                    self.record_compaction_event(command["id"], "failed")
+                    self.compaction_event_id = command["id"]
+                    self.compaction = {"state": "idle", "itemId": command["id"]}
+        event = self.compaction_events.get(self.compaction_event_id)
+        if ended_display and event and event.get("status") == "inProgress":
+            # 原生画面已结束但还没有终态证据时保留同一行待核对，不无限显示“压缩中”或猜测成功。
+            event["status"] = "unknown"
+            self.compaction["state"] = "unknown"
+            for command in self.native_commands:
+                if command["name"] == "compact" and command["state"] == "running":
+                    command["state"] = "unknown"
 
     def context_configuration(self):
         # 用户要求容量与压缩设置分开：这里只传配置来源，不能把任何配置值当作原生容量。
@@ -544,8 +1064,8 @@ class NativeSession:
                 for line in connection.makefile("rb"):
                     value = json.loads(line)
                     if value.get("type") == "snapshot":
-                        for chunk in value.get("streamTail", []):
-                            self.incoming.put({"_stream": chunk})
+                        # 一次性读取完整终端快照，避免历史压缩画面的中间帧被识别成新的压缩开始。
+                        self.incoming.put({"_stream": "".join(value.get("streamTail", []))})
                     elif value.get("type") == "stream":
                         self.incoming.put({"_stream": value.get("line", "")})
         except (OSError, ValueError):
@@ -679,6 +1199,8 @@ class NativeSession:
         if live:
             self.bind(live)
         status = NativeDiscovery.status(live or {}, self.messages)
+        if self.compaction.get("state") == "running":
+            status.update(tempo="active", state="compacting")
         active_at_admission = status.get("tempo") == "active"
         # 自动续发必须以实时原生状态为准；CLI 恰好开始新任务时继续等，不能抢先把下一条塞入原生队列。
         if request.get("idle_only") and live:
@@ -862,6 +1384,13 @@ class NativeSession:
                 and stat.st_mtime_ns != self.log_mtime):
             self.messages, self.log_offset, self.seen = [], 0, set()
             self.native_context = {}
+            self.goal, self.goal_revision = None, ""
+            self.goal_notice = ""
+            active_compact = next((command for command in self.native_commands
+                                   if command["name"] == "compact" and command["state"] in ("pending", "running", "stopping", "unknown")), None)
+            self.compaction = {"state": active_compact["state"] if active_compact["state"] in ("pending", "unknown")
+                               else "running" if self.compaction_screen_active else "unknown",
+                               "itemId": active_compact["id"]} if active_compact else {"state": "idle"}
             self.signature = None
         self.log_identity, self.log_mtime = identity, stat.st_mtime_ns
         with self.log_path.open("rb") as stream:
@@ -887,9 +1416,16 @@ class NativeSession:
                     continue
                 if row["uuid"] in self.seen:
                     continue
+                self.observe_control_record(row)
+                notification = native_agent_notification(row)
+                if notification:
+                    row["nativeAgentNotification"] = notification
                 if row.get("type") == "attachment":
                     attachment = row.get("attachment", {})
-                    if (attachment.get("type") == "queued_command"
+                    if attachment.get("type") == "goal_status":
+                        row = {**row, "attachment": {key: attachment[key] for key in
+                               ("type", "condition", "met", "sentinel", "reason") if key in attachment}}
+                    elif (attachment.get("type") == "queued_command"
                             and attachment.get("commandMode") == "prompt"
                             and attachment.get("humanTurn") is True
                             and attachment.get("origin", {}).get("kind") == "human"
@@ -912,8 +1448,19 @@ class NativeSession:
                                    f"data:{source['type']};base64,{source['base64']}"}]}}
                 if row.get("type") not in ("user", "assistant", "system", "attachment"):
                     continue
-                if row.get("type") == "system" and row.get("subtype") != "turn_duration":
+                if row.get("type") == "system" and row.get("subtype") not in ("turn_duration", "compact_boundary"):
                     continue
+                control = native_control_command(row)
+                if control:
+                    row["nativeControlCommand"] = control
+                elif row.get("type") == "user" and isinstance(row.get("message", {}).get("content"), str):
+                    output = re.fullmatch(r"\s*<local-command-stdout>([\s\S]*)</local-command-stdout>\s*",
+                                          row["message"]["content"])
+                    parent = next((message for message in reversed(self.messages)
+                                   if message.get("uuid") == row.get("parentUuid")
+                                   and message.get("nativeControlCommand")), None)
+                    if output and parent:
+                        row["nativeControlOutput"] = parent["nativeControlCommand"]
                 setting = native_setting_command(row)
                 if setting:
                     row["nativeSettingCommand"] = setting
@@ -934,8 +1481,20 @@ class NativeSession:
                                        "isCompactSummary", "isVisibleInTranscriptOnly",
                                        "isApiErrorMessage", "isUnmetered", "apiBlockIndex", "durationMs",
                                        "requestedModel", "effort", "filename", "remote_upload",
-                                       "nativeSettingCommand", "nativeSettingOutput")
+                                       "nativeSettingCommand", "nativeSettingOutput", "nativeControlCommand",
+                                       "nativeControlOutput", "attachment", "compactMetadata")
                                       if key in row})
+                if notification:
+                    self.messages[-1]["nativeAgentNotification"] = notification
+                result = row.get("toolUseResult")
+                if isinstance(result, dict) and NativeSubagents.valid_id(result.get("agentId") or result.get("resumedAgentId")):
+                    # 原生 Agent 的受理回执足以关联卡片；不为更新主会话卡片扫描子代理文件或复制工具输出。
+                    self.messages[-1]["nativeAgentResult"] = {key: result[key] for key in
+                        ("agentId", "status", "resolvedModel", "totalDurationMs", "totalTokens",
+                         "totalToolUseCount") if key in result}
+                    if result.get("resumedAgentId"):
+                        self.messages[-1]["nativeAgentResult"].update(
+                            agentId=result["resumedAgentId"], status="async_launched", resumed=True)
                 if isinstance(row.get("message"), dict):
                     message = {key: row["message"][key] for key in
                                # 用户要求显示最后实际请求用量；保留原生 usage（含缓存和 iterations），不读取 job 累计 tokens。
@@ -1045,7 +1604,11 @@ class NativeSession:
             return
         body = []
         for line in region:
-            if re.match(r"^[✻✽✶✢·*]\s|^[─╌]{8}|^\s*⎿|^\s*ctrl\+|^\s*Running \d+ (?:shell commands?|tools?)(?:\.{3}|…)\s*$", line):
+            # 用户要求执行进度不能混入回复正文；CLI 的耗时后缀同属状态行，
+            # 必须在追加预览前截断，否则后续真实回复会被“仅接受前缀增长”的保护拒绝。
+            if re.match(r"^[✻✽✶✢·*]\s|^[─╌]{8}|^\s*⎿|^\s*ctrl\+|"
+                        r"^\s*Running \d+ (?:shell commands?|tools?)"
+                        r"(?:\s*[·•]\s*(?:\d+(?:\.\d+)?(?:ms|[hms])\s*)+)?(?:\.{3}|…)?\s*$", line):
                 break
             body.append(line)
         text = "\n".join(body).strip()
@@ -1076,10 +1639,14 @@ class NativeSession:
             path = self.root / "jobs" / self.short / "state.json"
             if path.exists():
                 self.job = {**self.job, **json.loads(path.read_text())}
+        self.observe_control_screen()
         self.read_messages()
         job = self.job
         # 正常连接与只读发现共用完成状态判断，done 不能因旧 tempo 继续显示执行中。
         status = NativeDiscovery.status(job, self.messages)
+        # /compact 是本地原生命令，daemon 可能仍报 idle；只在原生画面明确显示压缩时补充执行状态。
+        if self.compaction.get("state") == "running":
+            status.update(tempo="active", state="compacting")
         self.requests = {}
         if status.get("tempo") == "blocked":
             uses = {}
@@ -1100,14 +1667,15 @@ class NativeSession:
         context = self.context_configuration()
         preview = self.preview_context()
         signature = (self.log_identity, self.log_mtime, self.log_offset, json.dumps(status, sort_keys=True),
-                     json.dumps(self.pending, sort_keys=True), json.dumps(context, sort_keys=True))
+                     json.dumps(self.pending, sort_keys=True), json.dumps(context, sort_keys=True),
+                     json.dumps(self.control_projection(), sort_keys=True))
         if force or signature != self.signature:
             self.signature = signature
             emit({"type": "shared_snapshot", "native_id": self.native_id, "job_id": self.short,
                   "native_status": status, "messages": self.messages,
                   "clients": self.clients, "pending": self.pending, "requests": self.requests,
                   "preview_basis": preview[1] if preview else None,
-                  "context_configuration": context})
+                  "context_configuration": context, "native_control": self.control_projection()})
 
     def control(self, request):
         subtype = request.get("subtype")
@@ -1116,10 +1684,19 @@ class NativeSession:
             self.effort = request.get("effort", "")
             self.clients = request.get("clients", {})
             self.pending = request.get("pending", [])
+            self.native_commands = (request.get("native_control") or {}).get("commands", [])
+            previous_compaction = (request.get("native_control") or {}).get("compaction") or {}
+            if previous_compaction.get("state") in ("pending", "running", "unknown"):
+                self.compaction = {**previous_compaction, "state": "unknown"}
+            self.restore_compaction_events(request.get("native_control") or {})
+            commands = {command.get("name") for command in request["catalog"].get("commands", [])}
+            self.native_capabilities = {name: name in commands for name in ("goal", "compact")}
             self.initialized = True
             return {**request["catalog"], "contextConfiguration": self.context_configuration()}
         if subtype == "shared_send":
             return self.send(request)
+        if subtype == "shared_native_command":
+            return self.native_command(request)
         if subtype == "shared_sync":
             self.poll(force=True)
         elif subtype == "shared_queue_now":
@@ -1130,6 +1707,13 @@ class NativeSession:
             self.change_setting("effort", request.get("settings", {}).get("effortLevel") or "")
         elif subtype == "interrupt":
             self.terminal_input(b"\x1b")
+            if self.compaction.get("state") == "running":
+                event = self.compaction_events.get(self.compaction_event_id)
+                if event and event.get("status") == "inProgress":
+                    event["phase"] = "stopping"
+                for command in self.native_commands:
+                    if command["name"] == "compact" and command["state"] == "running":
+                        command["state"] = "stopping"
         elif subtype == "shared_answer":
             self.answer({"response": request["response"]})
         else:
@@ -1186,7 +1770,7 @@ def main():
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as failure:
             # 用户要求接收确认不能倒退为未发送；shared_send 里的后续状态查询也可能返回 NativeError。
             # 只有发送函数明确保留“尚未准入”标记才可判为未投递，已开始或已接收后的错误只能待核对。
-            not_sent = not native.delivery_started if frame["request"].get("subtype") == "shared_send" \
+            not_sent = not native.delivery_started if frame["request"].get("subtype") in ("shared_send", "shared_native_command") \
                 else isinstance(failure, NativeError)
             response = {"subtype": "error", "request_id": request_id, "error": str(failure),
                         "not_sent": not_sent}

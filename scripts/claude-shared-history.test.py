@@ -20,6 +20,174 @@ exec(compile(trust_source.read_text(encoding="utf-8"), str(trust_source), "exec"
 
 
 class SharedQueueHistoryTests(unittest.TestCase):
+    def test_goal_statistics_use_only_native_numbers_and_reset_on_replacement(self):
+        start = {"type": "attachment", "uuid": "goal", "timestamp": 1000,
+                 "attachment": {"type": "goal_status", "condition": "目标", "met": False, "sentinel": True}}
+        verdict = {"type": "attachment", "uuid": "verdict", "timestamp": 30000,
+                   "attachment": {"type": "goal_status", "condition": "目标", "met": True,
+                                  "tokens": 134, "durationMs": 28290, "iterations": 1}}
+        native = self.read([start, verdict])
+        self.assertEqual((native.goal["tokensUsed"], native.goal["timeUsedSeconds"], native.goal["iterations"]),
+                         (134, 28.29, 1))
+        native.observe_control_record({**start, "uuid": "replacement"})
+        self.assertNotIn("tokensUsed", native.goal)
+        native.observe_control_record({**verdict, "attachment": {**verdict["attachment"],
+            "tokens": True, "durationMs": -1, "iterations": 9007199254740992}})
+        self.assertNotIn("tokensUsed", native.goal)
+        self.assertNotIn("timeUsedSeconds", native.goal)
+        self.assertNotIn("iterations", native.goal)
+
+    def test_compaction_timeline_waits_for_native_start_and_keeps_identity_on_completion(self):
+        native = self.native_active()
+        native.native_commands = [{"id": "operation", "name": "compact", "state": "pending",
+                                   "issuedAt": 1000, "baseline": None}]
+        self.assertEqual(native.control_projection()["compactionEvents"], [])
+        with patch.object(namespace["time"], "time", return_value=2):
+            native.screen.feed("✶ Compacting conversation…")
+            native.observe_control_screen()
+        running = native.control_projection()["compactionEvents"]
+        self.assertEqual(len(running), 1)
+        self.assertEqual((running[0]["id"], running[0]["status"], running[0]["afterUuid"]),
+                         ("operation", "inProgress", "active-user"))
+        native.observe_control_record({"type": "system", "subtype": "compact_boundary",
+            "uuid": "boundary", "timestamp": 3000,
+            "compactMetadata": {"trigger": "auto", "preTokens": 2000, "postTokens": 500, "durationMs": 1000}})
+        event = native.control_projection()["compactionEvents"][0]
+        self.assertEqual((event["id"], event["nativeId"], event["status"], event["source"]),
+                         ("operation", "boundary", "completed", "automatic"))
+        restored = NativeSession("unused", "test-session")
+        restored.restore_compaction_events(native.control_projection())
+        restored.observe_control_record({"type": "system", "subtype": "compact_boundary",
+            "uuid": "boundary", "timestamp": 3000, "compactMetadata": {"trigger": "auto"}})
+        self.assertEqual(len(restored.compaction_events), 1)
+        self.assertEqual(next(iter(restored.compaction_events)), "operation")
+
+    def test_compaction_terminal_results_survive_next_command_and_reconnect(self):
+        native = self.native_active()
+        native.native_commands = [{"id": "stopped-operation", "name": "compact", "state": "pending", "issuedAt": 0}]
+        native.screen.feed("✶ Compacting conversation…")
+        native.observe_control_screen()
+        native.terminal_input = lambda data: None
+        native.control({"subtype": "interrupt"})
+        native.screen = namespace["Screen"]()
+        native.observe_control_screen()
+        self.assertEqual(native.compaction_events["stopped-operation"]["status"], "interrupted")
+        native.native_commands = [{"id": "new-operation", "name": "compact", "state": "pending", "issuedAt": 0}]
+        native.screen.feed("✶ Compacting conversation…")
+        native.observe_control_screen()
+        self.assertEqual(len(native.compaction_events), 2)
+        restored = NativeSession("unused", "test-session")
+        restored.compaction = {"state": "unknown"}
+        restored.restore_compaction_events(native.control_projection())
+        self.assertEqual(restored.compaction_events["stopped-operation"]["status"], "interrupted")
+        self.assertEqual(restored.compaction_events["new-operation"]["status"], "unknown")
+
+    def test_compaction_missing_terminal_evidence_keeps_same_row_unknown_until_boundary_arrives(self):
+        native = self.native_active()
+        with patch.object(namespace["time"], "time", return_value=1):
+            native.screen.feed("✶ Compacting conversation…")
+            native.observe_control_screen()
+        identity = native.compaction_event_id
+        native.screen = namespace["Screen"]()
+        native.observe_control_screen()
+        self.assertEqual(native.compaction_events[identity]["status"], "unknown")
+        self.assertEqual(native.compaction["state"], "unknown")
+        native.observe_control_record({"type": "system", "subtype": "compact_boundary",
+                                      "uuid": "done", "timestamp": 2000})
+        self.assertEqual(native.compaction_events[identity]["status"], "completed")
+        self.assertEqual(len(native.compaction_events), 1)
+
+    def test_native_goal_records_distinguish_clear_from_evaluated_completion(self):
+        def goal(identity, at, met=False, sentinel=True):
+            return {"type": "attachment", "uuid": identity, "timestamp": at,
+                    "version": "2.1.322", "attachment": {"type": "goal_status",
+                    "condition": "完成验收", "met": met, "sentinel": sentinel}}
+        native = self.read([goal("start", 1000), goal("clear", 2000, True)])
+        self.assertIsNone(native.goal, "clear 的 met=true sentinel 不能显示目标已完成")
+        self.assertEqual(native.goal_revision, "clear")
+        native = self.read([goal("start", 1000), goal("verdict", 2000, True, False),
+                            goal("end", 2001, True)])
+        self.assertEqual(native.goal["status"], "completed")
+        self.assertEqual(native.goal["nativeId"], "start")
+        self.assertTrue(native.native_capabilities["goal"])
+
+    def test_native_control_records_preserve_real_quotes_and_clean_command_output(self):
+        command = {"type": "user", "uuid": "command", "entrypoint": "cli",
+                   "message": {"content": "<command-name>/goal</command-name><command-message>goal</command-message><command-args>完成验收</command-args>"}}
+        native = self.read([command, {"type": "user", "uuid": "output", "parentUuid": "command",
+                            "turnOrigin": "human", "message": {"content": "<local-command-stdout>Goal set: 完成验收</local-command-stdout>"}},
+                            {**command, "uuid": "quote", "origin": {"kind": "human"}, "promptSource": "typed"}])
+        self.assertEqual(native.messages[0]["nativeControlCommand"]["value"], "完成验收")
+        self.assertTrue(namespace["real_user"](native.messages[0]))
+        self.assertFalse(namespace["real_user"](native.messages[1]))
+        self.assertNotIn("nativeControlCommand", native.messages[2])
+        self.assertTrue(namespace["real_user"](native.messages[2]))
+
+    def test_compaction_boundary_survives_and_only_finishes_a_newer_native_operation(self):
+        native = self.read([{"type": "user", "uuid": "u", "message": {"content": "问题"}}])
+        native.native_commands = [{"id": "request", "name": "compact", "argument": "",
+                                   "state": "pending", "issuedAt": 2000, "baseline": "old"}]
+        native.compaction = {"state": "pending", "itemId": "request"}
+        old = {"type": "system", "subtype": "compact_boundary", "uuid": "old", "timestamp": 1000}
+        native.observe_control_record(old)
+        self.assertEqual(native.native_commands[0]["state"], "pending")
+        self.assertEqual(native.compaction["state"], "pending", "旧边界不能清掉正在等待的新请求")
+        native.observe_control_record({**old, "uuid": "new", "timestamp": 3000})
+        self.assertEqual(native.native_commands[0]["state"], "completed")
+        self.assertEqual(native.compaction, {"state": "idle", "itemId": "new"})
+        reader = self.read([old])
+        self.assertEqual(reader.messages[0]["subtype"], "compact_boundary")
+
+    def test_native_command_acceptance_does_not_claim_goal_or_compaction_completion(self):
+        native = self.native_active()
+        native.native_capabilities = {"goal": True, "compact": True}
+        replies = []
+        native.reply = lambda text, **kwargs: replies.append((text, kwargs))
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.native_command({"id": "goal-request", "name": "goal", "argument": "完成验收"})
+        self.assertEqual(replies, [("/goal 完成验收", {"next_turn": False})])
+        self.assertEqual(result["nativeCommand"]["state"], "pending")
+        self.assertIsNone(native.goal)
+        self.assertEqual(native.pending, [], "控制命令不能进入普通消息确认队列")
+        with self.assertRaisesRegex(RuntimeError, "尚未确认"):
+            native.native_command({"id": "duplicate", "name": "goal", "argument": "完成验收"})
+        self.assertEqual(len(replies), 1)
+
+    def test_native_goal_errors_are_not_success_and_concurrent_replacement_blocks_only_the_stale_control(self):
+        native = self.native_active()
+        native.native_capabilities = {"goal": True}
+        native.goal = {"nativeId": "current", "objective": "当前目标", "status": "active"}
+        native.observe_control_record({"type": "system", "subtype": "informational",
+                                      "content": "Goal paused · the goal check could not complete"})
+        self.assertEqual(native.goal["status"], "blocked")
+        self.assertIn("Goal paused", native.goal_notice)
+        native.reply = MagicMock()
+        with self.assertRaisesRegex(RuntimeError, "目标已变化"):
+            native.native_command({"id": "edit", "name": "goal", "argument": "替换",
+                                   "expectedGoal": {"nativeId": "older", "objective": "旧目标", "status": "active"}})
+        native.reply.assert_not_called()
+        native.observe_control_record({"type": "attachment", "uuid": "cleared", "timestamp": 1000,
+                                      "attachment": {"type": "goal_status", "condition": "当前目标",
+                                                     "met": True, "sentinel": True}})
+        self.assertIsNone(native.goal)
+        self.assertEqual(native.goal_notice, "")
+
+    def test_running_compaction_is_active_for_native_send_and_stale_screen_does_not_revive_completion(self):
+        native = self.native_active()
+        native.screen.feed("✶ Compacting conversation…")
+        native.observe_control_screen()
+        self.assertEqual(native.compaction["state"], "running")
+        native.observe_control_record({"type": "system", "subtype": "compact_boundary",
+                                      "uuid": "completed", "timestamp": int(namespace["time"].time() * 1000) + 1})
+        native.observe_control_screen()
+        self.assertEqual(native.compaction["state"], "idle")
+        native.compaction["state"] = "running"
+        native.lookup = lambda: {"short": "saved-job", "sessionId": "test-session", "tempo": "idle"}
+        native.reply = MagicMock()
+        self.assertTrue(native.send({"client_id": "next", "idle_only": True,
+                        "content": [{"type": "text", "text": "下一条"}]})["deferred"])
+        native.reply.assert_not_called()
+
     def test_completed_native_job_clears_stale_working_and_permission_states(self):
         native = NativeSession("unused", "test-session", "saved-job")
         native.initialized = True
@@ -244,6 +412,32 @@ class SharedQueueHistoryTests(unittest.TestCase):
             "id": "reply", "content": [{"type": "text", "text": "A **partial** response continues"}]}})
         self.assertEqual(self.preview_frames(native,
             "❯ fixture prompt\n● A partial response continues\n"), [])
+
+    def test_elapsed_terminal_status_never_blocks_the_following_real_response(self):
+        for status in ("Running 1 shell command · 2s…",
+                       "Running 3 shell commands · 1m 2s...",
+                       "Running 1 tool · 0.5s",
+                       "Running 2 tools • 250ms…"):
+            with self.subTest(status=status):
+                native = self.native_active()
+                native.messages[0]["message"]["content"] = "fixture prompt"
+                self.assertEqual(self.preview_frames(native, f"❯ fixture prompt\n● {status}\n"), [])
+                self.assertEqual(native.preview, "", "终端状态不能占据后续预览的正文前缀")
+                first = self.preview_frames(native, "❯ fixture prompt\n● Actual response\n")
+                grown = self.preview_frames(native, "❯ fixture prompt\n● Actual response continues\n")
+                self.assertEqual(first[-1]["text"], "Actual response")
+                self.assertEqual(grown[-1]["text"], "Actual response continues")
+                self.assertEqual(first[-1]["preview_basis"], grown[-1]["preview_basis"])
+
+    def test_elapsed_status_after_real_text_is_trimmed_without_hiding_normal_sentences(self):
+        native = self.native_active()
+        native.messages[0]["message"]["content"] = "fixture prompt"
+        frames = self.preview_frames(native,
+            "❯ fixture prompt\n● Actual response\n  Running 1 shell command · 2s…\n")
+        self.assertEqual(frames[-1]["text"], "Actual response")
+        frames = self.preview_frames(native,
+            "❯ fixture prompt\n● Actual response continues: Running 1 shell command is an example.\n")
+        self.assertEqual(frames[-1]["text"], "Actual response continues: Running 1 shell command is an example.")
 
     def test_preview_identity_is_scoped_to_the_current_native_user(self):
         native = self.native_active()
@@ -824,6 +1018,154 @@ class SharedQueueHistoryTests(unittest.TestCase):
         self.assertEqual(frame["clients"]["absorbed-user"], "web-client")
 
 
+class NativeSubagentHistoryTests(unittest.TestCase):
+    """原生子代理协议的回归：使用真实格式的合成记录，不启动模型或读取用户日志。"""
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+        self.native = "00000000-0000-4000-8000-000000000001"
+        self.agent = "agent_fixture"
+        self.parent = self.root / "projects" / "project" / f"{self.native}.jsonl"
+        self.children = self.parent.with_suffix("") / "subagents"
+        self.children.mkdir(parents=True)
+        self.child = self.children / f"agent-{self.agent}.jsonl"
+        self.meta = self.child.with_suffix(".meta.json")
+        self.index = namespace["NativeSubagents"](self.root, self.native)
+        self.user = {"type": "user", "uuid": "human", "sessionId": self.native, "timestamp": 1000,
+                     "cwd": "/fixture", "message": {"role": "user", "content": "检查文件"}}
+        self.spawn = {"type": "assistant", "uuid": "spawn", "sessionId": self.native, "timestamp": 1100,
+                      "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "spawn-call",
+                      "name": "Agent", "input": {"description": "读取文件", "subagent_type": "fork", "prompt": "读取测试文件"}}]}}
+        self.accepted = {"type": "user", "uuid": "accepted", "sessionId": self.native, "timestamp": 1200,
+                         "toolUseResult": {"agentId": self.agent, "status": "async_launched", "resolvedModel": "test-gpt"},
+                         "message": {"content": [{"type": "tool_result", "tool_use_id": "spawn-call", "content": "已启动"}]}}
+        self.write(self.parent, [self.user, self.spawn, self.accepted])
+        self.meta.write_text(json.dumps({"isFork": True, "toolUseId": "spawn-call", "finished": False}), encoding="utf-8")
+        self.write(self.child, [{**self.spawn, "isSidechain": True, "agentId": self.agent},
+                   {**self.accepted, "isSidechain": True, "agentId": self.agent},
+                   {"type": "assistant", "uuid": "read", "timestamp": 1300, "sessionId": self.native,
+                    "agentId": self.agent, "isSidechain": True, "message": {"role": "assistant",
+                    "id": "read-message", "model": "test-gpt", "content": [{"type": "tool_use",
+                    "id": "read-call", "name": "Read", "input": {"file_path": "/fixture/input.txt"}}]}}])
+
+    @staticmethod
+    def write(path, rows, append=False):
+        with path.open("a" if append else "w", encoding="utf-8") as stream:
+            for row in rows:
+                stream.write(json.dumps(row) + "\n")
+
+    def notification(self, status="completed"):
+        return {"type": "user", "uuid": "notice", "sessionId": self.native, "timestamp": 1800,
+                "origin": {"kind": "task-notification", "producer": "session-task"},
+                "message": {"content": f"<task-notification><task-id>{self.agent}</task-id>"
+                    f"<tool-use-id>spawn-call</tool-use-id><status>{status}</status>"
+                    "<usage><subagent_tokens>42</subagent_tokens><tool_uses>1</tool_uses>"
+                    "<duration_ms>500</duration_ms></usage></task-notification>"}}
+
+    def test_active_then_completed_fork_keeps_its_id_task_and_own_tools_only(self):
+        active = self.index.collect()[0]
+        self.assertEqual(active["status"], "active", "async_launched 不代表已完成")
+        self.write(self.child, [{"type": "assistant", "uuid": "answer", "timestamp": 1600,
+            "sessionId": self.native, "agentId": self.agent, "isSidechain": True,
+            "message": {"role": "assistant", "id": "final-message", "model": "test-gpt",
+                        "content": [{"type": "text", "text": "FILE_OK"}], "stop_reason": "end_turn"}}], append=True)
+        self.meta.write_text(json.dumps({"isFork": True, "toolUseId": "spawn-call", "finished": True}), encoding="utf-8")
+        self.write(self.parent, [self.notification()], append=True)
+        completed = self.index.collect(self.agent, True)[0]
+        self.assertEqual(completed["nativeId"], active["nativeId"])
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["totalToolUseCount"], 1)
+        self.assertEqual(completed["totalTokens"], 42)
+        self.assertEqual(completed["messages"][0]["message"]["content"], "读取测试文件")
+        tools = [part["name"] for row in completed["messages"]
+                 for part in row.get("message", {}).get("content", []) if isinstance(part, dict) and part.get("type") == "tool_use"]
+        self.assertEqual(tools, ["Read"], "继承的启动 Agent 调用不能重复显示成子代理执行")
+        self.assertEqual(self.index.collect(self.agent, True), [completed], "重读不得重复正文或切换原生身份")
+
+    def test_partial_append_is_not_consumed_and_same_id_recovers_after_reader_restart(self):
+        first = self.index.collect(self.agent, True)[0]
+        row = {"type": "assistant", "uuid": "partial", "timestamp": 1700, "agentId": self.agent,
+               "sessionId": self.native, "message": {"content": [{"type": "text", "text": "完成"}]}}
+        encoded = json.dumps(row)
+        with self.child.open("a", encoding="utf-8") as stream:
+            stream.write(encoded[:20])
+        self.assertEqual(self.index.collect(self.agent, True)[0]["messages"], first["messages"])
+        with self.child.open("a", encoding="utf-8") as stream:
+            stream.write(encoded[20:] + "\n")
+        updated = self.index.collect(self.agent, True)[0]
+        self.assertEqual(updated["messages"][-1]["uuid"], "partial")
+        reopened = namespace["NativeSubagents"](self.root, self.native)
+        self.assertEqual(reopened.collect(self.agent, True), [updated])
+
+    def test_notification_is_control_but_human_quote_and_other_parent_id_cannot_be_misclassified(self):
+        row = self.notification("failed")
+        self.assertFalse(namespace["real_user"](row))
+        self.assertTrue(namespace["real_user"]({**row, "origin": {"kind": "human"}}))
+        self.assertIsNone(namespace["native_agent_notification"]({**row, "origin": {"kind": "human"}}))
+        for identity in ("../agent_fixture", "", "x" * 65):
+            with self.assertRaisesRegex(RuntimeError, "ID 无效"):
+                self.index.collect(identity)
+        with self.assertRaises(namespace["NativeError"]):
+            self.index.collect("another-agent")
+        another = namespace["NativeSubagents"](self.root, "00000000-0000-4000-8000-000000000002")
+        with self.assertRaisesRegex(RuntimeError, "主会话记录"):
+            another.collect(self.agent)
+
+    def test_resume_acknowledgement_invalidates_old_completion_before_new_child_records_arrive(self):
+        self.meta.write_text(json.dumps({"isFork": True, "toolUseId": "spawn-call", "finished": True}), encoding="utf-8")
+        self.write(self.parent, [self.notification()], append=True)
+        self.assertEqual(self.index.collect()[0]["status"], "completed")
+        self.write(self.parent, [{"type": "user", "uuid": "resumed", "sessionId": self.native,
+            "timestamp": 2000, "toolUseResult": {"success": True, "resumedAgentId": self.agent},
+            "message": {"content": [{"type": "tool_result", "tool_use_id": "send-call", "content": "Resuming agent"}]}}], append=True)
+        active = self.index.collect()[0]
+        self.assertEqual(active["status"], "active")
+        self.assertIsNone(active["outcome"])
+        self.assertNotIn("totalDurationMs", active, "不能把上次已完成的耗时当成本次执行时间")
+        self.assertEqual(active["startedAtMs"], 2000)
+        self.meta.write_text(json.dumps({"isFork": True, "toolUseId": "spawn-call"}), encoding="utf-8")
+        self.assertEqual(self.index.collect()[0]["status"], "active", "原生删除 finished 字段仍表示此次续跑中")
+        self.write(self.parent, [{**self.notification(), "uuid": "again", "timestamp": 2400}], append=True)
+        self.assertEqual(self.index.collect()[0]["status"], "completed")
+        self.assertEqual(len(self.index.collect()), 1, "续聊继续使用同一原生 ID")
+
+    def test_nested_fork_recovers_its_task_from_native_bootstrap_after_parent_call_is_compacted(self):
+        self.write(self.parent, [self.user])
+        detail = self.index.collect(self.agent, True)[0]
+        self.assertEqual(detail["messages"][0]["message"]["content"], "读取测试文件")
+        self.assertEqual(detail["name"], "读取文件")
+        self.assertEqual(detail["messages"][1]["message"]["content"][0]["name"], "Read")
+
+    def test_coordinator_input_is_visible_only_in_the_read_only_child_projection(self):
+        row = {"type": "user", "uuid": "coordinator", "sessionId": self.native, "agentId": self.agent,
+               "timestamp": 2000, "isMeta": True, "origin": {"kind": "coordinator"},
+               "message": {"content": "继续读取"}}
+        self.write(self.child, [row], append=True)
+        projected = self.index.collect(self.agent, True)[0]["messages"][-1]
+        self.assertFalse(projected["isMeta"])
+        self.assertTrue(projected["nativeSubagentInput"])
+        self.assertEqual(projected["message"]["content"], "继续读取")
+        self.assertTrue(json.loads(self.child.read_text().splitlines()[-1])["isMeta"], "原生日志不能被改写")
+        self.assertFalse(namespace["real_user"](row), "该投影不能改变主会话的真实用户准入规则")
+
+    def test_a_symlink_cannot_redirect_subagent_reads_into_another_parent_session(self):
+        native = "00000000-0000-4000-8000-000000000002"
+        other = self.parent.with_name(native + ".jsonl")
+        self.write(other, [{**self.user, "sessionId": native}])
+        other.with_suffix("").mkdir()
+        (other.with_suffix("") / "subagents").symlink_to(self.children, target_is_directory=True)
+        reader = namespace["NativeSubagents"](self.root, native)
+        with self.assertRaisesRegex(RuntimeError, "不属于当前会话"):
+            reader.collect(self.agent)
+
+    def test_unavailable_child_transcript_cannot_be_reported_as_an_empty_success(self):
+        self.assertTrue(self.index.collect(self.agent, True)[0]["messages"])
+        self.child.unlink()
+        with self.assertRaisesRegex(RuntimeError, "暂不可读取"):
+            self.index.collect(self.agent, True)
+
+
 class ProjectTrustTests(unittest.TestCase):
     def fixture(self):
         folder = tempfile.TemporaryDirectory()
@@ -928,6 +1270,203 @@ class ProjectTrustTests(unittest.TestCase):
             self.assertTrue(trust_namespace["confirm"](str(managed), checked["trustPath"],
                                                        managed=True, file=config)["trusted"])
             self.assertTrue(managed.is_dir())
+
+
+usage_source = source.with_name("claude_usage_stats.py")
+usage_namespace = {"__name__": "claude_usage_stats_test"}
+exec(compile(usage_source.read_text(encoding="utf-8"), str(usage_source), "exec"), usage_namespace)
+
+
+class LocalUsageLedgerTests(unittest.TestCase):
+    """数值账本的长期回归；全部输入与价格为合成数据，不读取真实 Claude 日志。"""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name) / "projects"
+        self.root.mkdir()
+        self.log = self.root / "session.jsonl"
+        self.cache = Path(self.directory.name) / "usage.sqlite"
+        self.now = int(usage_namespace["time"].time() * 1000)
+        self.request = {"nowMs": self.now, "windows": [
+            {"key": "fiveHour", "durationMs": 18000000, "resetsAt": self.now + 9000000},
+            {"key": "sevenDay", "durationMs": 604800000, "resetsAt": self.now + 302400000}],
+            "prices": {"test-model": {"input_cost_per_token": 0.000001,
+                "output_cost_per_token": 0.000005, "cache_read_input_token_cost": 0.0000001,
+                "cache_creation_input_token_cost": 0.00000125,
+                "cache_creation_input_token_cost_above_1hr": 0.000002,
+                "provider_specific_entry": {"fast": 2, "us": 1.1}}}}
+
+    def row(self, identity="msg_one", at=None, **usage):
+        return {"type": "assistant", "uuid": identity + "-line", "timestamp": at or self.now - 1000,
+                "message": {"id": identity, "model": "test-model", "usage": {
+                    "input_tokens": 100, "output_tokens": 10, **usage}}}
+
+    def write(self, *rows, append=False, path=None):
+        with (path or self.log).open("a" if append else "w", encoding="utf-8") as stream:
+            for row in rows:
+                stream.write(json.dumps(row) + "\n")
+
+    def collect(self):
+        return usage_namespace["collect"](self.request, root=self.root, cache_path=self.cache)
+
+    def test_deleted_session_and_reopened_ledger_keep_recorded_consumption(self):
+        self.write(self.row())
+        original = self.collect()
+        self.log.unlink()
+        self.assertEqual(self.collect(), original, "删除日志后消费不回落")
+        fresh = {"__name__": "usage_reopened"}
+        exec(compile(usage_source.read_text(encoding="utf-8"), str(usage_source), "exec"), fresh)
+        self.assertEqual(fresh["collect"](self.request, root=self.root, cache_path=self.cache), original)
+        database = usage_namespace["sqlite3"].connect(self.cache)
+        try:
+            rows = database.execute("SELECT data FROM events").fetchall()
+            self.assertNotIn("message", rows[0][0], "账本不保存对话正文")
+        finally:
+            database.close()
+
+    def test_streaming_fork_and_subagent_replays_are_counted_once(self):
+        initial = self.row(output_tokens=1)
+        final = self.row(output_tokens=20, speed="fast")
+        self.write(initial, final, initial)
+        subagent = self.root / "subagents"
+        subagent.mkdir()
+        self.write(final, self.row("msg_child", output_tokens=30), path=subagent / "agent.jsonl")
+        result = self.collect()["fiveHour"]
+        self.assertEqual(result["usedTokens"], 250)
+        self.assertAlmostEqual(result["usedCostUsd"], (100e-6 + 20 * 5e-6) * 2 + 100e-6 + 30 * 5e-6)
+        self.assertEqual(self.collect()["fiveHour"], result)
+
+    def test_appends_truncation_and_replacement_preserve_previous_requests(self):
+        self.write(self.row())
+        self.assertEqual(self.collect()["fiveHour"]["usedTokens"], 110)
+        self.write(self.row("msg_two"), append=True)
+        self.assertEqual(self.collect()["fiveHour"]["usedTokens"], 220)
+        self.write(self.row("msg_three"))
+        self.assertEqual(self.collect()["fiveHour"]["usedTokens"], 330)
+        replacement = self.log.with_suffix(".replacement")
+        self.write(self.row("msg_four"), path=replacement)
+        replacement.replace(self.log)
+        self.assertEqual(self.collect()["fiveHour"]["usedTokens"], 440)
+
+    def test_compaction_iterations_replace_outer_usage_and_include_cache_ttl(self):
+        self.write(self.row(input_tokens=999999, iterations=[
+            {"type": "compaction", "input_tokens": 200, "output_tokens": 20},
+            {"type": "message", "input_tokens": 100, "output_tokens": 10,
+             "cache_read_input_tokens": 300, "cache_creation_input_tokens": 80,
+             "cache_creation": {"ephemeral_1h_input_tokens": 50}}]))
+        result = self.collect()["fiveHour"]
+        self.assertEqual(result["usedTokens"], 710)
+        self.assertAlmostEqual(result["usedCostUsd"], 300e-6 + 30 * 5e-6 + 300e-7 + 30 * 1.25e-6 + 50 * 2e-6)
+        self.assertEqual(result["forecastTokens"], 1420)
+
+    def test_unknown_prices_do_not_hide_tokens_or_invent_cost(self):
+        self.write(self.row())
+        self.request["prices"] = {}
+        result = self.collect()["fiveHour"]
+        self.assertEqual(result["usedTokens"], 110)
+        self.assertIsNone(result["usedCostUsd"])
+        self.assertIsNone(result["forecastCostUsd"])
+
+    def test_window_boundaries_and_replay_timestamp_do_not_move_spend(self):
+        start = self.now - 9000000
+        self.write(self.row("msg_old", at=start - 1), self.row("msg_edge", at=start),
+                   self.row("msg_future", at=self.now + 1000))
+        result = self.collect()
+        self.assertEqual(result["fiveHour"]["usedTokens"], 110)
+        self.assertEqual(result["sevenDay"]["usedTokens"], 220)
+        self.write(self.row("msg_old"), append=True)
+        self.assertEqual(self.collect()["fiveHour"]["usedTokens"], 110)
+        self.request["nowMs"] += 8 * 86400000
+        self.request["windows"] = [{"key": "fiveHour", "durationMs": 18000000,
+                                   "resetsAt": self.request["nowMs"] + 9000000}]
+        self.assertEqual(self.collect()["fiveHour"]["usedTokens"], 0)
+
+    def test_partial_line_is_unknown_until_complete_without_double_counting(self):
+        row = json.dumps(self.row())
+        self.log.write_text(row[:80], encoding="utf-8")
+        self.assertIsNone(self.collect()["fiveHour"]["usedTokens"])
+        with self.log.open("a", encoding="utf-8") as stream:
+            stream.write(row[80:] + "\n")
+        self.assertEqual(self.collect()["fiveHour"]["usedTokens"], 110)
+
+    def test_scan_budget_resumes_incrementally_and_unreadable_directory_is_not_zero(self):
+        self.write(self.row(), self.row("msg_two"))
+        with patch.object(usage_namespace["time"], "monotonic", side_effect=[0, 0, 0, 13]):
+            self.assertIsNone(self.collect()["fiveHour"]["usedTokens"])
+        self.assertEqual(self.collect()["fiveHour"]["usedTokens"], 220)
+        def denied_walk(root, **options):
+            options["onerror"](PermissionError("fixture"))
+            return []
+        with patch.object(usage_namespace["os"], "walk", side_effect=denied_walk):
+            self.assertIsNone(self.collect()["fiveHour"]["usedTokens"])
+        self.assertEqual(self.collect()["fiveHour"]["usedTokens"], 220)
+
+    def test_invalid_usage_can_be_repaired_and_never_becomes_fake_zero(self):
+        incomplete = self.row()
+        incomplete["message"]["usage"] = {}
+        self.write(incomplete)
+        self.assertIsNone(self.collect()["fiveHour"]["usedTokens"])
+        self.write(self.row(), append=True)
+        self.assertEqual(self.collect()["fiveHour"]["usedTokens"], 110)
+        self.write(self.row(output_tokens=-1), self.row("msg_bad", output_tokens=True))
+        self.assertIsNone(self.collect()["fiveHour"]["usedTokens"])
+        self.write(self.row("msg_bad"))
+        self.assertEqual(self.collect()["fiveHour"]["usedTokens"], 220)
+
+    def test_synthetic_errors_and_nonassistant_rows_are_not_billed(self):
+        synthetic = self.row("msg_synthetic")
+        synthetic["message"]["model"] = "<synthetic>"
+        api_error = self.row("msg_error")
+        api_error["isApiErrorMessage"] = True
+        self.write(synthetic, api_error, {"type": "user", "message": "assistant"},
+                   ["assistant"], self.row())
+        self.assertEqual(self.collect()["fiveHour"]["usedTokens"], 110)
+
+    def test_malformed_line_stays_unknown_until_rewrite_repairs_it(self):
+        self.log.write_text('{"type":"assistant",broken\n', encoding="utf-8")
+        self.assertIsNone(self.collect()["fiveHour"]["usedTokens"])
+        self.write(self.row())
+        self.assertEqual(self.collect()["fiveHour"]["usedTokens"], 110)
+
+    def test_large_numbers_and_unrecognized_tiers_remain_safe(self):
+        self.assertFalse(usage_namespace["number"](10 ** 1000))
+        self.write(self.row(service_tier={"invalid": True}))
+        result = self.collect()["fiveHour"]
+        self.assertEqual(result["usedTokens"], 110)
+        self.assertIsNone(result["usedCostUsd"])
+
+    def test_prices_update_without_rescanning_or_changing_tokens(self):
+        self.write(self.row())
+        original = self.collect()["fiveHour"]
+        self.request["prices"]["test-model"]["input_cost_per_token"] *= 2
+        with patch.dict(usage_namespace, {"read_events": MagicMock(side_effect=AssertionError("无需重新读正文"))}):
+            result = self.collect()["fiveHour"]
+        self.assertEqual(result["usedTokens"], original["usedTokens"])
+        self.assertAlmostEqual(result["usedCostUsd"], original["usedCostUsd"] + 100e-6)
+
+    def test_table_driven_long_context_tier_fast_and_geo_prices(self):
+        row = self.row(input_tokens=150000, service_tier="priority", inference_geo="us")
+        self.write(row)
+        self.request["prices"]["test-model"].update({
+            "input_cost_per_token_above_100k_tokens_priority": 0.000004,
+            "output_cost_per_token_above_100k_tokens_priority": 0.00002})
+        self.assertAlmostEqual(self.collect()["fiveHour"]["usedCostUsd"], (150000 * 4e-6 + 10 * 2e-5) * 1.1)
+
+    def test_only_valid_windows_are_exported_and_parallel_ledger_updates_are_serialized(self):
+        self.write(self.row())
+        self.collect()
+        database = usage_namespace["sqlite3"].connect(self.cache)
+        try:
+            database.execute("BEGIN IMMEDIATE")
+            with self.assertRaises(usage_namespace["sqlite3"].OperationalError):
+                self.collect()
+            database.rollback()
+        finally:
+            database.close()
+        self.assertEqual(self.collect()["fiveHour"]["usedTokens"], 110)
+        self.request["windows"] = [{"key": "expired", "durationMs": 18000000, "resetsAt": self.now - 1}]
+        self.assertEqual(self.collect(), {})
 
 
 if __name__ == "__main__":

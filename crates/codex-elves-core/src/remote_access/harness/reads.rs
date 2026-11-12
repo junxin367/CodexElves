@@ -346,9 +346,10 @@ impl Harness {
         let mut latest;
         if let Some(snapshot) = owner {
             thread = normalize_owner_thread(&snapshot, Some(&thread))?;
+            // 桌面规范历史以对象保存，最新执行轮次按原生时间选择，不能依赖对象键顺序。
             latest = crate::desktop_owner_ipc::snapshot_turns(&snapshot)
                 .into_iter()
-                .last();
+                .max_by_key(|turn| turn["turnStartedAtMs"].as_u64().unwrap_or(0));
             self.follow_owner(id, snapshot).await;
         } else {
             thread = self.projection.lock().await.thread(id, thread);

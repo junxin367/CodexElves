@@ -132,10 +132,21 @@ final class DiagnosticsPolicy {
 
     private static boolean validField(String key, Object value) {
         // 主题诊断须与网页、电脑端同步；只允许光照与固定枚举，不放开任意消息或设备信息。
-        if ("lux".equals(key) || "previousLux".equals(key)) {
+        if ("lux".equals(key) || "previousLux".equals(key) || "effectiveLightLux".equals(key)) {
             if (!(value instanceof Number)) return false;
             double number = ((Number) value).doubleValue();
             return Double.isFinite(number) && number >= 0 && number <= 9_007_199_254_740_991d;
+        }
+        // 自动主题补偿允许有符号小数；原阈值只放行 0～40 整数，与网页及服务端同步。
+        if ("themeLuxShift".equals(key)) {
+            if (!(value instanceof Number)) return false;
+            double number = ((Number) value).doubleValue();
+            return Double.isFinite(number) && Math.abs(number) <= 9_007_199_254_740_991d;
+        }
+        if ("lightLux".equals(key) || "darkLux".equals(key)) {
+            if (!(value instanceof Number)) return false;
+            double number = ((Number) value).doubleValue();
+            return Double.isFinite(number) && number == Math.floor(number) && number >= 0 && number <= 40;
         }
         if ("localHour".equals(key) || "timezoneOffsetMinutes".equals(key)) {
             if (!(value instanceof Number)) return false;

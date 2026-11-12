@@ -339,7 +339,7 @@ export function RemoteAccessScreen({
             <CardDescription>通过手机浏览器安全访问本机会话；修改监听地址或端口会断开当前连接。</CardDescription>
           </div>
           <div className="panel-head-actions">
-            <button type="button" role="switch" aria-label="启用远程会话网页" aria-checked={settings.enabled} disabled={busy} className={`context-enabled-switch checkpoint-enabled-switch ${settings.enabled ? "active" : ""}`} onClick={() => void toggleWebService()}>
+            <button type="button" role="switch" aria-label="启用远程会话网页" aria-checked={settings.enabled} disabled={busy} className={`context-enabled-switch compact-enabled-switch ${settings.enabled ? "active" : ""}`} onClick={() => void toggleWebService()}>
               <span className="context-switch-track" aria-hidden="true"><span className="context-switch-thumb" /></span>
               <span>{settings.enabled ? "已启用" : "已停用"}</span>
             </button>
@@ -517,7 +517,7 @@ export function RemoteAccessScreen({
                   aria-label="启用 ngrok 第二线路"
                   aria-checked={settings.ngrokEnabled}
                   disabled={busy}
-                  className={`context-enabled-switch checkpoint-enabled-switch ${settings.ngrokEnabled ? "active" : ""}`}
+                  className={`context-enabled-switch compact-enabled-switch ${settings.ngrokEnabled ? "active" : ""}`}
                   onClick={() => void toggleNgrok()}
                 >
                   <span className="context-switch-track" aria-hidden="true"><span className="context-switch-thumb" /></span>

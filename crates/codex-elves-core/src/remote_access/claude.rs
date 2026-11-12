@@ -24,6 +24,12 @@ use remote_queue::RemoteQueue;
 #[path = "claude_usage.rs"]
 mod subscription_usage;
 
+#[path = "claude_controls.rs"]
+mod native_controls;
+
+#[path = "claude_subagents.rs"]
+mod subagents;
+
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 // 同一会话类型实例的完整模型目录缓存五分钟；新建与历史会话共用此期限。
 const MODEL_CATALOG_TTL: Duration = Duration::from_secs(300);
@@ -119,6 +125,9 @@ struct Conversation {
     // 用户要求重连与首次读取仍显示原生最后请求用量；旧存档缺字段时保持未知，不填固定容量。
     #[serde(default)]
     token_usage: Value,
+    // 目标、压缩和命令回执均来自同一原生会话；重启只恢复观察，不重发命令。
+    #[serde(default)]
+    native_control: Value,
     #[serde(default)]
     native_clients: BTreeMap<String, String>,
     #[serde(default)]
@@ -203,13 +212,24 @@ impl Conversation {
 
     fn view(&self) -> Value {
         // 用户要求实例显示名统一简化；wslUser、实例 ID 和实际运行用户保持原用途。
+        // 子代理沿用原生身份和只读详情，侧边会话仍独立保持未适配；不能据此开放子代理写操作。
+        let capabilities = json!({"sideThreads":false,"subagents":true,
+            "goalComposer":self.shared && self.native_control["capabilities"]["goal"] == true,
+            "goalPause":false,"goalResume":false,
+            "messageEdit":false,"queue":self.shared,"queueSendNow":false,
+            "remoteQueue":self.shared,"queueEditRecovery":self.shared,
+            "queuedImageEditing":self.shared,"queuedImageRemoval":self.shared,
+            "compact":self.shared && self.native_control["capabilities"]["compact"] == true});
         json!({"id":self.id,"backend":self.backend,"title":self.title,"cwd":self.cwd,
             "projectId":self.project_id,"model":self.model,"reasoningEffort":self.effort,
             "createdAt":self.created_at,"updatedAt":self.updated_at,"recencyAt":self.updated_at,
             "pinned":self.pinned,"hasUnreadTurn":self.unread,"hostId":"local","ephemeral":false,
             "status":{"type":if self.active() {"active"} else {"idle"}},
             "editableMessage":null,"queuedMessages":self.remote_queue.messages(&self.queued_messages),
-            "queuedEdits":self.remote_queue.edits(),"goal":null,"tokenUsage":self.token_usage,
+            "queuedEdits":self.remote_queue.edits(),"goal":self.native_control["goal"],"tokenUsage":self.token_usage,
+            "compaction":self.native_control["compaction"],
+            "nativeCommands":self.native_control["commands"],
+            "goalNotice":self.native_control["goalNotice"],
             "nativeId":self.native_id,"nativeJobId":self.native_job_id,
             "wslDistribution":self.config.distribution,
             "instanceId":self.config.instance_id(),
@@ -221,10 +241,7 @@ impl Conversation {
                     self.config.user.replace('\'', "''"),
                     self.config.executable.replace('\'', "''"), self.native_job_id)
             } else {String::new()},
-            "capabilities":{"sideThreads":false,"subagents":false,"goalComposer":false,
-                "messageEdit":false,"queue":self.shared,"queueSendNow":false,
-                "remoteQueue":self.shared,"queueEditRecovery":self.shared,
-                "queuedImageEditing":self.shared,"queuedImageRemoval":self.shared,"compact":false}})
+            "capabilities":capabilities})
     }
 }
 
@@ -323,6 +340,8 @@ pub(super) struct Claude {
     metadata: Mutex<HashMap<String, (Instant, Value)>>,
     // 用户要求账号额度按 WSL 实例隔离；只缓存白名单百分比与重置时间，不保存登录凭据。
     subscription_usage_cache: Mutex<HashMap<String, subscription_usage::CachedUsage>>,
+    local_usage_cache: Mutex<HashMap<String, subscription_usage::CachedLocalUsage>>,
+    usage_prices: Mutex<subscription_usage::PriceCache>,
     requests: Mutex<HashMap<String, BTreeMap<String, Value>>>,
     observed: Mutex<HashMap<String, String>>,
     controller: OnceLock<Weak<RemoteAccessController>>,
@@ -376,6 +395,8 @@ impl Claude {
             locks: Mutex::new(HashMap::new()),
             metadata: Mutex::new(HashMap::new()),
             subscription_usage_cache: Mutex::new(HashMap::new()),
+            local_usage_cache: Mutex::new(HashMap::new()),
+            usage_prices: Mutex::new(subscription_usage::PriceCache::default()),
             requests: Mutex::new(HashMap::new()),
             observed: Mutex::new(HashMap::new()),
             controller: OnceLock::new(),
@@ -459,7 +480,12 @@ impl Claude {
     }
 
     pub async fn instance_id(&self, thread_id: &str) -> anyhow::Result<String> {
-        Ok(self.conversation(thread_id).await?.config.instance_id())
+        let parent = subagents::parse_id(thread_id).map(|(parent, _)| parent);
+        Ok(self
+            .conversation(parent.as_deref().unwrap_or(thread_id))
+            .await?
+            .config
+            .instance_id())
     }
 
     pub async fn add_known_instances(&self, instances: &mut Vec<super::instances::Instance>) {
@@ -596,12 +622,19 @@ impl Claude {
     }
 
     pub fn owns_id(id: &str) -> bool {
-        id.strip_prefix("claude-")
-            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+        subagents::parse_id(id).is_some()
+            || id
+                .strip_prefix("claude-")
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+    }
+
+    pub fn is_subagent_id(id: &str) -> bool {
+        subagents::parse_id(id).is_some()
     }
 
     pub async fn workspace(&self, id: &str) -> anyhow::Result<Value> {
-        let c = self.conversation(id).await?;
+        let parent = subagents::parse_id(id).map(|(parent, _)| parent);
+        let c = self.conversation(parent.as_deref().unwrap_or(id)).await?;
         Ok(
             json!({"ok":true,"threadId":id,"cwd":c.cwd,"linuxCwd":c.linux_cwd,
             "wslDistribution":c.config.distribution,"instanceId":c.config.instance_id(),"hostId":"local","backend":"claude"}),
@@ -661,6 +694,7 @@ impl Claude {
             native_job_id: String::new(),
             native_status: Value::Null,
             token_usage: Value::Null,
+            native_control: Value::Null,
             native_clients: BTreeMap::new(),
             queued_messages: vec![],
             remote_queue: RemoteQueue::default(),
@@ -871,6 +905,7 @@ impl Claude {
                 native_job_id: row["jobId"].as_str().unwrap_or("").into(),
                 native_status: row["nativeStatus"].clone(),
                 token_usage: Value::Null,
+                native_control: Value::Null,
                 native_clients: BTreeMap::new(),
                 queued_messages: vec![],
                 remote_queue: RemoteQueue::default(),
@@ -892,7 +927,17 @@ impl Claude {
         let lock = self.lock(id).await;
         let _guard = lock.lock().await;
         let c = self.conversation(id).await?;
-        if !c.discovered
+        let pending_control = c.native_control["commands"]
+            .as_array()
+            .is_some_and(|commands| {
+                commands.iter().any(|command| {
+                    matches!(
+                        command["state"].as_str(),
+                        Some("pending" | "running" | "unknown")
+                    )
+                })
+            });
+        if (!c.discovered && !pending_control)
             || self
                 .processes
                 .lock()
@@ -908,7 +953,7 @@ impl Claude {
         let frame = process
             .control(
                 json!({"subtype":"read_history","native_id":c.native_id,
-            "clients":c.native_clients,"pending":pending,"model":c.model}),
+            "clients":c.native_clients,"pending":pending,"model":c.model,"native_control":c.native_control}),
                 None,
             )
             .await?;
@@ -964,6 +1009,9 @@ impl Claude {
     }
 
     pub async fn detail(self: &Arc<Self>, id: &str) -> anyhow::Result<Value> {
+        if Self::is_subagent_id(id) {
+            return self.subagent_detail(id).await;
+        }
         self.sync_discovered(id).await?;
         let c = self.conversation(id).await?;
         let mut thread = c.view();
@@ -989,6 +1037,9 @@ impl Claude {
         let id = payload["threadId"]
             .as_str()
             .context("缺少 Claude 会话 ID")?;
+        if Self::is_subagent_id(id) {
+            return self.subagent_history(payload).await;
+        }
         self.sync_discovered(id).await?;
         let c = self.conversation(id).await?;
         let end = match &payload["cursor"] {
@@ -1014,6 +1065,11 @@ impl Claude {
     }
 
     pub async fn queue(&self, id: &str) -> anyhow::Result<Value> {
+        if let Some((parent, _)) = subagents::parse_id(id) {
+            self.conversation(&parent).await?;
+            return Ok(json!({"ok":true,"threadId":id,"queueEpoch":self.epoch,
+                "queueRevision":0,"queuedMessages":[],"queuedEdits":[],"queuePaused":false}));
+        }
         let conversation = self.conversation(id).await?;
         Ok(conversation.queue_snapshot(&self.epoch))
     }
@@ -1155,10 +1211,11 @@ impl Claude {
                             } else {
                                 let message = format!("Claude 控制请求失败：{}", response["error"]);
                                 let failure = ApiError::new(
-                                    if response["code"] == "EBUSY" {
-                                        409
-                                    } else {
-                                        503
+                                    match response["code"].as_str() {
+                                        Some("EBUSY" | "EUNSUPPORTED") => 409,
+                                        Some("EINVAL") => 400,
+                                        Some("ENOENT") => 404,
+                                        _ => 503,
                                     },
                                     message,
                                 );
@@ -1220,7 +1277,7 @@ impl Claude {
                 let mut pending = c.queued_messages.clone();
                 pending.extend(c.remote_queue.native_intents());
                 json!({"subtype":"initialize","catalog":catalog,"model":c.model,"effort":c.effort,
-                    "clients":c.native_clients,"pending":pending})
+                    "clients":c.native_clients,"pending":pending,"native_control":c.native_control})
             } else {json!({"subtype":"initialize"})}, None)
             .await?;
         Ok(Arc::new(process))
@@ -1270,6 +1327,7 @@ impl Claude {
             native_job_id: String::new(),
             native_status: Value::Null,
             token_usage: Value::Null,
+            native_control: Value::Null,
             native_clients: BTreeMap::new(),
             queued_messages: vec![],
             remote_queue: RemoteQueue::default(),
@@ -1297,6 +1355,9 @@ impl Claude {
         include_available: bool,
         force: bool,
     ) -> anyhow::Result<Value> {
+        if Self::is_subagent_id(id) {
+            return self.subagent_models(id).await;
+        }
         let c = self.conversation(id).await?;
         let key = c.config.instance_id();
         if let Some((at, data)) = self.metadata.lock().await.get(&key)
@@ -1442,7 +1503,13 @@ impl Claude {
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
         config.validate()?;
-        let content = input_content(payload)?;
+        let goal = payload["goalMode"] == true;
+        let content = if goal {
+            native_controls::goal_argument(payload)?;
+            vec![]
+        } else {
+            input_content(payload)?
+        };
         // 用户要求在远程页面确认目录信任；先检查/保存，再启动 CLI 或登记会话，拒绝和取消不留下空会话。
         if payload
             .get("trustProject")
@@ -1512,6 +1579,7 @@ impl Claude {
             native_job_id: String::new(),
             native_status: Value::Null,
             token_usage: Value::Null,
+            native_control: Value::Null,
             native_clients: BTreeMap::new(),
             queued_messages: vec![],
             remote_queue: RemoteQueue::default(),
@@ -1534,10 +1602,21 @@ impl Claude {
         self.publish(
             json!({"method":"thread/started","params":{"threadId":c.id,"thread":c.view()}}),
         );
-        match self
-            .start_turn(&c.id, &process, content, payload, authorization)
+        let started = if goal {
+            self.dispatch_native_command(
+                &c,
+                &process,
+                "goal",
+                native_controls::goal_argument(payload)?,
+                None,
+                authorization,
+            )
             .await
-        {
+        } else {
+            self.start_turn(&c.id, &process, content, payload, authorization)
+                .await
+        };
+        match started {
             Ok(value) => Ok(value),
             Err(failure) => {
                 // 创建记录与发送是两步；失败回执保留原会话 ID，不能让网页盲目重建另一条会话。
@@ -1568,6 +1647,10 @@ impl Claude {
             return Err(error(409, "已创建的 Claude 会话不能切换后端"));
         }
         match action {
+            "compact" | "setGoal" | "updateGoal" => {
+                self.native_command_action(&mut c, action, payload, authorization)
+                    .await
+            }
             "send" => {
                 if c.active() && !c.shared {
                     return Err(error(409, "请等待 Claude 完成本轮或先停止生成"));
@@ -1803,6 +1886,26 @@ impl Claude {
         if frame["type"] == "shared_preview" {
             return self.ingest_shared_preview(id, generation, &frame).await;
         }
+        if frame["type"] == "shared_native_command_intent" {
+            if self
+                .processes
+                .lock()
+                .await
+                .get(id)
+                .is_some_and(|p| p.channel.generation == generation)
+            {
+                self.change(|saved| {
+                    saved
+                        .conversations
+                        .get_mut(id)
+                        .context("Claude 会话不存在")?
+                        .native_control = frame["native_control"].clone();
+                    Ok(())
+                })
+                .await?;
+            }
+            return Ok(());
+        }
         if frame["type"] == "shared_delivery_intent" {
             if self
                 .processes
@@ -1994,6 +2097,9 @@ impl Claude {
                 );
                 let initial_import = c.discovered && c.turns.is_empty();
                 let previous_view = c.view();
+                if frame["native_control"].is_object() {
+                    c.native_control = frame["native_control"].clone();
+                }
                 let previous_queue = c.queue_snapshot(&self.epoch);
                 c.native_id = native_id.into();
                 c.native_job_id = job_id.into();
@@ -2013,6 +2119,7 @@ impl Claude {
                 c.queued_messages = accepted;
                 c.resumed = true;
                 let mut projected = project_shared_history(frame, generation);
+                subagents::decorate_turns(id, &mut projected);
                 restore_shared_images(&c.turns, &mut projected);
                 for turn in &mut projected {
                     if c.turns
@@ -2487,7 +2594,10 @@ fn shared_history_has_new_content(previous: &[Value], current: &[Value]) -> bool
             for item in turn["items"].as_array().into_iter().flatten() {
                 let kind = item["type"].as_str().unwrap_or("");
                 // 补回历史配置变更提示不算新回复；CLI 重复同步同一配置也不能制造未读消息。
-                if kind == "modelChanged" && item["source"] == "claude" {
+                if kind == "modelChanged" && item["source"] == "claude"
+                    || item["remoteCompactionLifecycle"] == true
+                {
+                    // 原生压缩的状态变化不是新回复；重连补回状态行不能让已读会话反复变成未读。
                     continue;
                 }
                 let id = if kind == "userMessage" {
@@ -2657,7 +2767,16 @@ fn model_context_capacity(model: &str, initialization: &Value) -> (Option<u64>, 
 }
 
 fn native_token_usage(messages: &[Value], initialization: &Value) -> Value {
+    let mut compacted = None;
     for row in messages.iter().rev() {
+        if compacted.is_none()
+            && row["subtype"] == "compact_boundary"
+            && let Some(tokens) = row["compactMetadata"]["postTokens"]
+                .as_u64()
+                .filter(|value| *value > 0 && *value <= 9007199254740991)
+        {
+            compacted = Some((tokens, row["uuid"].clone()));
+        }
         let message = &row["message"];
         if row["type"] != "assistant"
             || row["isUnmetered"] == true
@@ -2770,6 +2889,13 @@ fn native_token_usage(messages: &[Value], initialization: &Value) -> Value {
             {
                 result["compaction"] = compaction;
             }
+        }
+        if let Some((tokens, id)) = compacted {
+            // 压缩后沿用原生 postTokens；下一次真实请求自然接替，不继续显示压缩前的输入占用或捏造细分用量。
+            result["last"] = json!({"totalTokens":tokens});
+            result["messageId"] = id;
+            result["source"] = json!("claude-native-compaction");
+            result.as_object_mut().unwrap().remove("usedPercentage");
         }
         return result;
     }
@@ -2965,8 +3091,50 @@ fn project_shared_setting_changes(
 fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
     let mut turns: Vec<Value> = vec![];
     let mut native_owners: HashMap<&str, usize> = HashMap::new();
+    let mut native_positions = HashMap::new();
+    let compactions = frame["native_control"]["compactionEvents"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     let mut web_image_paths = std::collections::HashSet::new();
     for row in frame["messages"].as_array().into_iter().flatten() {
+        if subagents::observe_notification(&mut turns, row) {
+            continue;
+        }
+        if row["nativeControlOutput"].is_object() || row["attachment"]["type"] == "goal_status" {
+            continue;
+        }
+        if row["subtype"] == "compact_boundary" {
+            let mut event = compactions
+                .iter()
+                .find(|event| event["nativeId"] == row["uuid"])
+                .cloned()
+                .unwrap_or_else(|| json!({"id":row["uuid"]}));
+            event["status"] = json!("completed");
+            event["nativeId"] = row["uuid"].clone();
+            event["completedAtMs"] = row["timestampMs"].clone();
+            event["source"] = row["compactMetadata"]["trigger"].clone();
+            for key in ["preTokens", "postTokens", "durationMs"] {
+                event[key] = row["compactMetadata"][key].clone();
+            }
+            let Some(item) = native_controls::compaction_item(&event) else {
+                continue;
+            };
+            let item_id = item["id"].as_str().unwrap().to_owned();
+            if let Some(turn) = turns.last_mut() {
+                turn["items"].as_array_mut().unwrap().push(item);
+            } else {
+                turns.push(
+                    json!({"id":format!("compact-{}",row["uuid"].as_str().unwrap_or("")),
+                    "_nativeUserId":row["uuid"],"_nativeDone":true,"status":"completed",
+                    "itemsComplete":true,"items":[item]}),
+                );
+            }
+            if let Some(id) = row["uuid"].as_str() {
+                native_positions.insert(id.to_owned(), (turns.len() - 1, item_id));
+            }
+            continue;
+        }
         // 连接端按原生控制记录标记模型/等级命令和成对回显；用户手写相同标签仍是普通消息。
         if native_setting_control(row) {
             continue;
@@ -3012,6 +3180,19 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
             continue;
         }
         let mut content = row["message"]["content"].clone();
+        if row["nativeControlCommand"].is_object() {
+            let command = &row["nativeControlCommand"];
+            let value = command["value"].as_str().unwrap_or("");
+            if command["name"] != "goal"
+                || value.is_empty()
+                || ["clear", "stop", "off", "reset", "none", "cancel"]
+                    .contains(&value.to_ascii_lowercase().as_str())
+            {
+                continue;
+            }
+            // 原生接受后只展示一条目标正文，控制 XML 与回显不制造重复用户消息。
+            content = json!(value);
+        }
         if let Some(text) = content.as_str() {
             content = json!([{"type":"text","text":text}]);
         }
@@ -3098,6 +3279,18 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
                 let mut native_frame = row.clone();
                 native_frame["message"]["content"] = content;
                 project_frame(turn, &native_frame);
+                subagents::observe_result(turn, &native_frame);
+                if frame["subagentReadOnly"] == true
+                    && row["type"] == "assistant"
+                    && matches!(
+                        row["message"]["stop_reason"].as_str(),
+                        Some("end_turn" | "stop_sequence")
+                    )
+                {
+                    // 子代理原生 end_turn 结束的是本次输入轮次；不得把多次续聊合并，或将等待下一次输入计入执行耗时。
+                    turn["_nativeDone"] = json!(true);
+                    turn["turnCompletedAtMs"] = row["timestampMs"].clone();
+                }
                 if row["isApiErrorMessage"] == true {
                     turn["status"] = json!("failed");
                 }
@@ -3106,6 +3299,13 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
         if let Some(index) = turns.len().checked_sub(1) {
             if let Some(id) = row["uuid"].as_str() {
                 native_owners.insert(id, index);
+                if let Some(item_id) = turns[index]["items"]
+                    .as_array()
+                    .and_then(|items| items.last())
+                    .and_then(|item| item["id"].as_str())
+                {
+                    native_positions.insert(id.to_owned(), (index, item_id.to_owned()));
+                }
             }
             if row["type"] == "assistant"
                 && let Some(id) = row["message"]["id"].as_str()
@@ -3160,6 +3360,7 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
     if let (Some(turn), Some(basis)) = (turns.last_mut(), shared_preview_basis(frame)) {
         turn["_nativePreviewBasis"] = json!(basis);
     }
+    native_controls::project_compactions(compactions, &mut turns, &native_positions);
     turns
 }
 
@@ -3273,7 +3474,13 @@ fn normalize_models(initialization: &Value) -> Value {
         .first()
         .map(|m| m["model"].clone())
         .unwrap_or(Value::Null);
-    json!({"ok":true,"backend":"claude","data":rows,"catalogComplete":true,"defaultModel":default,"defaultReasoningEffort":""})
+    let has_command = |name: &str| {
+        initialization["commands"]
+            .as_array()
+            .is_some_and(|commands| commands.iter().any(|command| command["name"] == name))
+    };
+    json!({"ok":true,"backend":"claude","data":rows,"catalogComplete":true,"defaultModel":default,"defaultReasoningEffort":"",
+        "nativeCapabilities":{"goal":has_command("goal"),"compact":has_command("compact")}})
 }
 
 pub(super) fn input_content(payload: &Value) -> anyhow::Result<Vec<Value>> {
@@ -3402,8 +3609,14 @@ fn project_frame(turn: &mut Value, frame: &Value) -> Vec<Value> {
                     json!({"id":id,"type":"reasoning","summary":[block["thinking"]],"status":"completed"})
                 }
                 Some("tool_use") => {
-                    json!({"id":block["id"],"type":"dynamicToolCall","tool":block["name"],
-                    "arguments":block["input"],"status":"inProgress","contentItems":[]})
+                    if matches!(block["name"].as_str(), Some("Agent" | "Task")) {
+                        json!({"id":block["id"],"type":"collabAgentToolCall","tool":"spawn_agent",
+                            "displayName":block["input"]["description"],"arguments":block["input"],
+                            "status":"inProgress","contentItems":[]})
+                    } else {
+                        json!({"id":block["id"],"type":"dynamicToolCall","tool":block["name"],
+                            "arguments":block["input"],"status":"inProgress","contentItems":[]})
+                    }
                 }
                 _ => continue,
             };
@@ -3560,6 +3773,7 @@ mod tests {
             native_job_id: String::new(),
             native_status: Value::Null,
             token_usage: Value::Null,
+            native_control: Value::Null,
             native_clients: BTreeMap::new(),
             queued_messages: vec![],
             remote_queue: RemoteQueue::default(),
@@ -5006,6 +5220,113 @@ mod tests {
                 .flat_map(|turn| turn["items"].as_array().unwrap())
                 .all(|item| item["type"] != "modelChanged"),
             "缺失旧配置时只建立基线，不猜造切换"
+        );
+    }
+
+    #[test]
+    fn native_controls_preserve_goal_text_and_compaction_without_command_echo_duplicates() {
+        let frame = json!({"native_status":{"tempo":"idle"},"messages":[
+            {"type":"attachment","uuid":"goal-state","attachment":{"type":"goal_status","condition":"完成验收","met":false,"sentinel":true}},
+            {"type":"user","uuid":"goal-input","timestampMs":1000,
+                "nativeControlCommand":{"name":"goal","value":"完成验收"},"message":{"content":"原生控制 XML"}},
+            {"type":"user","uuid":"goal-output","nativeControlOutput":{"name":"goal","value":"完成验收"},"message":{"content":"Goal set"}},
+            {"type":"assistant","uuid":"reply","message":{"id":"reply","content":[{"type":"text","text":"开始执行"}]}},
+            {"type":"system","uuid":"compact-done","subtype":"compact_boundary","timestampMs":2000,
+                "compactMetadata":{"trigger":"manual","preTokens":10000,"postTokens":2000}},
+            {"type":"user","uuid":"next","message":{"content":"下一条"}}
+        ]});
+        let turns = project_shared_history(&frame, "generation");
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0]["items"][0]["content"][0]["text"], "完成验收");
+        let events: Vec<_> = turns[0]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["type"] == "contextCompaction")
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["postTokens"], 2000);
+        assert_eq!(turns[1]["items"][0]["content"][0]["text"], "下一条");
+    }
+
+    #[test]
+    fn native_controls_validate_goal_limits_and_preserve_native_state_across_serialization() {
+        for prompt in ["", "CLEAR", "stop"] {
+            assert!(native_controls::goal_argument(&json!({"prompt":prompt})).is_err());
+        }
+        assert!(native_controls::goal_argument(&json!({"prompt":"😀".repeat(2000)})).is_ok());
+        assert!(native_controls::goal_argument(&json!({"prompt":"😀".repeat(2001)})).is_err());
+        assert!(native_controls::goal_argument(&json!({"prompt":"目标","images":[{}]})).is_err());
+        let (_directory, _service, mut c) = fixture();
+        c.shared = true;
+        c.native_control = json!({"goal":{"objective":"目标","status":"active","createdAt":100},
+            "capabilities":{"goal":true,"compact":true},"compaction":{"state":"unknown","itemId":"operation"},
+            "commands":[{"id":"operation","name":"compact","state":"unknown"}]});
+        let reopened: Conversation =
+            serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
+        assert_eq!(reopened.view()["goal"], c.view()["goal"]);
+        assert_eq!(reopened.view()["compaction"]["state"], "unknown");
+        assert_eq!(reopened.view()["capabilities"]["goalComposer"], true);
+        assert_eq!(reopened.view()["capabilities"]["goalPause"], false);
+    }
+
+    #[test]
+    fn native_controls_compaction_lifecycle_reuses_one_row_at_the_original_position() {
+        let mut frame = json!({"messages":[
+            {"type":"user","uuid":"question","message":{"content":"问题"}},
+            {"type":"assistant","uuid":"before-row","message":{"id":"before","content":[{"type":"text","text":"先前回复"}]}},
+            {"type":"system","uuid":"turn-end","subtype":"turn_duration"},
+            {"type":"assistant","uuid":"after-row","message":{"id":"after","content":[{"type":"text","text":"继续回复"}]}}
+        ],"native_control":{"compactionEvents":[
+            {"id":"operation","status":"inProgress","afterUuid":"turn-end","startedAtMs":1000}
+        ]}});
+        let running = project_shared_history(&frame, "generation");
+        let items = running[0]["items"].as_array().unwrap();
+        assert_eq!(items[2]["id"], "operation");
+        assert_eq!(items[2]["status"], "inProgress");
+        assert_eq!(items[2]["remoteCompactionLifecycle"], true);
+        assert_eq!(items[3]["text"], "继续回复");
+        frame["native_control"]["compactionEvents"][0]["status"] = json!("interrupted");
+        let stopped = project_shared_history(&frame, "reconnect");
+        assert_eq!(stopped[0]["items"][2]["status"], "interrupted");
+        assert!(!shared_history_has_new_content(&running, &stopped));
+        frame["native_control"]["compactionEvents"][0] = json!({
+            "id":"operation","status":"completed","nativeId":"boundary","afterUuid":"turn-end","startedAtMs":1000});
+        frame["messages"].as_array_mut().unwrap().insert(3, json!({
+            "type":"system","uuid":"boundary","subtype":"compact_boundary","timestampMs":2000,
+            "compactMetadata":{"trigger":"auto","preTokens":2000,"postTokens":500,"durationMs":1000}}));
+        let completed = project_shared_history(&frame, "completed");
+        let items = completed[0]["items"].as_array().unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item["type"] == "contextCompaction")
+                .count(),
+            1
+        );
+        assert_eq!(items[2]["id"], "operation");
+        assert_eq!(items[2]["source"], "automatic");
+        assert_eq!(items[2]["durationMs"], 1000);
+        assert_eq!(items[3]["text"], "继续回复");
+    }
+
+    #[test]
+    fn native_controls_compaction_usage_is_replaced_only_by_a_later_real_request() {
+        let request = json!({"type":"assistant","message":{"id":"before","model":"fixture",
+            "usage":{"input_tokens":10000,"output_tokens":12}}});
+        let boundary = json!({"type":"system","subtype":"compact_boundary","uuid":"boundary",
+            "compactMetadata":{"postTokens":2200}});
+        let mut rows = vec![request.clone(), boundary];
+        let compacted = native_token_usage(&rows, &json!({}));
+        assert_eq!(compacted["last"]["totalTokens"], 2200);
+        assert!(compacted["last"]["inputTokens"].is_null());
+        rows.push(
+            json!({"type":"assistant","message":{"id":"after","model":"fixture",
+            "usage":{"input_tokens":2300,"output_tokens":10}}}),
+        );
+        assert_eq!(
+            native_token_usage(&rows, &json!({}))["last"]["totalTokens"],
+            2300
         );
     }
 

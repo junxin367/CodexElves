@@ -10,7 +10,6 @@ use crate::settings::{BackendSettings, SettingsStore};
 use crate::status::StatusStore;
 use crate::task_board::{FileTaskBoardStore, TaskBoardSessionCatalog, TaskBoardStore};
 use crate::user_scripts::UserScriptManager;
-use crate::workspace_checkpoint::WorkspaceCheckpointService;
 
 pub mod task_board;
 
@@ -23,7 +22,6 @@ pub struct BridgeContext {
     runtime: Arc<dyn BridgeRuntimeService>,
     data: Arc<dyn BridgeDataService>,
     task_board_store: Arc<dyn TaskBoardStore>,
-    workspace_checkpoints: WorkspaceCheckpointService,
 }
 
 impl BridgeContext {
@@ -37,20 +35,11 @@ impl BridgeContext {
             runtime,
             data,
             task_board_store: Arc::new(FileTaskBoardStore::from_default_paths()),
-            workspace_checkpoints: WorkspaceCheckpointService::default(),
         }
     }
 
     pub fn with_task_board_store(mut self, store: Arc<dyn TaskBoardStore>) -> Self {
         self.task_board_store = store;
-        self
-    }
-
-    pub fn with_workspace_checkpoint_service(
-        mut self,
-        service: WorkspaceCheckpointService,
-    ) -> Self {
-        self.workspace_checkpoints = service;
         self
     }
 
@@ -127,14 +116,11 @@ pub trait BridgeDataService: Send + Sync {
     ) -> anyhow::Result<Value>;
     async fn thread_sort_key(&self, session: SessionRef) -> anyhow::Result<Value>;
     async fn thread_sort_keys(&self, sessions: Vec<SessionRef>) -> anyhow::Result<Value>;
-    async fn workspace_checkpoint_session_context(
-        &self,
-        session: SessionRef,
-    ) -> anyhow::Result<Value> {
+    async fn session_workspace_context(&self, session: SessionRef) -> anyhow::Result<Value> {
         Ok(json!({
             "status": "failed",
             "session_id": session.session_id,
-            "message": "Workspace checkpoint session context service is unavailable"
+            "message": "Session workspace context service is unavailable"
         }))
     }
 
@@ -216,74 +202,10 @@ pub async fn handle_bridge_request(
         task_board::TASK_BOARD_MOVE_PATH => {
             Ok(task_board::handle_move(ctx.task_board_store.clone(), payload.clone()).await)
         }
-        crate::workspace_checkpoint::CREATE_PATH => {
-            match active_workspace_checkpoint_service(&ctx).await {
-                Ok(service) => {
-                    Ok(crate::workspace_checkpoint::handle_create(service, payload.clone()).await)
-                }
-                Err(error) => Err(error),
-            }
-        }
-        crate::workspace_checkpoint::SESSION_CONTEXT_PATH => {
+        "/session/workspace-context" => {
             ctx.data
-                .workspace_checkpoint_session_context(session_from_payload(&payload))
+                .session_workspace_context(session_from_payload(&payload))
                 .await
-        }
-        crate::workspace_checkpoint::BIND_TURN_PATH => {
-            match active_workspace_checkpoint_service(&ctx).await {
-                Ok(service) => Ok(crate::workspace_checkpoint::handle_bind_turn(
-                    service,
-                    payload.clone(),
-                )
-                .await),
-                Err(error) => Err(error),
-            }
-        }
-        crate::workspace_checkpoint::COMPLETE_TURN_PATH => {
-            match active_workspace_checkpoint_service(&ctx).await {
-                Ok(service) => Ok(crate::workspace_checkpoint::handle_complete_turn(
-                    service,
-                    payload.clone(),
-                )
-                .await),
-                Err(error) => Err(error),
-            }
-        }
-        crate::workspace_checkpoint::LIST_PATH => {
-            match active_workspace_checkpoint_service(&ctx).await {
-                Ok(service) => {
-                    Ok(crate::workspace_checkpoint::handle_list(service, payload.clone()).await)
-                }
-                Err(error) => Err(error),
-            }
-        }
-        crate::workspace_checkpoint::RESTORE_PATH => {
-            match active_workspace_checkpoint_service(&ctx).await {
-                Ok(service) => {
-                    Ok(crate::workspace_checkpoint::handle_restore(service, payload.clone()).await)
-                }
-                Err(error) => Err(error),
-            }
-        }
-        crate::workspace_checkpoint::PREVIEW_REVERT_PATH => {
-            match active_workspace_checkpoint_service(&ctx).await {
-                Ok(service) => Ok(crate::workspace_checkpoint::handle_preview_revert(
-                    service,
-                    payload.clone(),
-                )
-                .await),
-                Err(error) => Err(error),
-            }
-        }
-        crate::workspace_checkpoint::RESTORE_FOR_REVERT_PATH => {
-            match active_workspace_checkpoint_service(&ctx).await {
-                Ok(service) => Ok(crate::workspace_checkpoint::handle_restore_for_revert(
-                    service,
-                    payload.clone(),
-                )
-                .await),
-                Err(error) => Err(error),
-            }
         }
         "/settings/get" => settings_value(&ctx, ctx.settings.get_settings().await).await,
         "/settings/set" => {
@@ -449,16 +371,6 @@ pub async fn handle_bridge_request(
         }),
     );
     response
-}
-
-async fn active_workspace_checkpoint_service(
-    ctx: &BridgeContext,
-) -> anyhow::Result<WorkspaceCheckpointService> {
-    let settings = ctx.settings.get_settings().await?;
-    if !settings.enhancements_enabled || !settings.codex_app_workspace_checkpoint {
-        anyhow::bail!("Checkpoint 功能已关闭");
-    }
-    ctx.workspace_checkpoints.for_settings(&settings)
 }
 
 #[derive(Default)]
@@ -791,14 +703,11 @@ impl BridgeDataService for UnavailableDataService {
         }))
     }
 
-    async fn workspace_checkpoint_session_context(
-        &self,
-        session: SessionRef,
-    ) -> anyhow::Result<Value> {
+    async fn session_workspace_context(&self, session: SessionRef) -> anyhow::Result<Value> {
         Ok(json!({
             "status": "failed",
             "session_id": session.session_id,
-            "message": "Workspace checkpoint session context service is not wired in core launcher hooks"
+            "message": "Session workspace context service is not wired in core launcher hooks"
         }))
     }
 

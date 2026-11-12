@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "110";
+  const codexDeleteStyleVersion = "112";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -50,7 +50,7 @@
   const codexStatsigModelVisibilityPatchVersion = "1";
   const codexStatsigModelVisibilityRetryDelayMs = 50;
   const codexStatsigModelVisibilityMaxWaitMs = 60000;
-  const codexPluginMarketplaceUnlockVersion = "19";
+  const codexPluginMarketplaceUnlockVersion = "20";
   const codexPluginApiKeyUnsupportedMarketplaceKinds = new Set(["created-by-me-remote"]);
   const codexBackendHeartbeatIntervalMs = 30000;
   const codexBackendBridgeReadyTimeoutMs = 2000;
@@ -94,19 +94,10 @@
   const codexPromptOptimizeCompactCollisionMaxWidth = 140;
   const codexPromptOptimizeCompactCollisionMaxHeight = 84;
   const codexPromptOptimizeMaxRecentContextChars = 100000;
-  const codexWorkspaceCheckpointVersion = "10";
-  const codexWorkspaceCheckpointButtonAttribute = "data-codex-workspace-checkpoint-button";
-  const codexWorkspaceCheckpointButtonGap = 6;
-  const codexWorkspaceCheckpointDialogClass = "codex-workspace-checkpoint-dialog";
-  const codexWorkspaceCheckpointEditButtonAttribute = "data-codex-workspace-checkpoint-edit-button";
-  const codexWorkspaceCheckpointWorkspaceCacheTtlMs = 15 * 1000;
-  const codexWorkspaceCheckpointIntentTtlMs = 2 * 60 * 1000;
-  const codexWorkspaceCheckpointCompletionHintTtlMs = 10 * 1000;
-  const codexWorkspaceCheckpointPatchRetryBaseMs = 1000;
-  const codexWorkspaceCheckpointPatchRetryMaxMs = 30000;
-  const codexWorkspaceCheckpointBridgeTimeoutMs = 2000;
-  const codexWorkspaceCheckpointNativeContextTimeoutMs = 2000;
-  const codexWorkspaceCheckpointRequestTimeoutMs = 60000;
+
+
+  // 用户要求会话信息流程优先：自动快照从目录解析到回包最多占用发送前 1 秒，
+  // 与后端 AUTO_CAPTURE_BUDGET_MS 同步；超时不绑定迟到快照，主动文件恢复仍严格校验。
   const taskBoardRuntimeVersion = "64";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
   const taskBoardNativeCreateBusyMessage = "另一个窗口正在创建原生会话，请稍后重试";
@@ -296,7 +287,7 @@
           `.${codexPromptOptimizePortalClass}`,
           `.${codexPromptOptimizeSettingsOverlayClass}`,
           `[${codexPromptOptimizeButtonAttribute}="true"]`,
-          `[${codexWorkspaceCheckpointButtonAttribute}="true"]`,
+
         ].join(","),
       )
       .forEach((element) => element.remove?.());
@@ -324,7 +315,7 @@
     window.__codexElvesRuntimeDeleteVersion === codexDeleteVersion &&
     window.__codexElvesRuntimeManagerDiscoveryVersion === codexAppServerManagerDiscoveryVersion &&
     window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion &&
-    window.__codexElvesWorkspaceCheckpointRuntimeVersion === codexWorkspaceCheckpointVersion &&
+
     typeof window.__codexElvesRefreshRuntime === "function" &&
     taskBoardRuntimeCanRefresh() &&
     promptOptimizeRuntimeCanRefresh()
@@ -1639,383 +1630,6 @@
       .codex-elves-toggle[data-relay-unneeded="true"] { width: 72px; cursor: default; background: rgba(16,163,127,.16); color: #6ee7b7; }
       .codex-elves-toggle[data-relay-unneeded="true"] span { display: none; }
       .codex-elves-toggle[data-relay-unneeded="true"]::after { content: "无需开启"; font-size: 12px; font-weight: 650; line-height: 1; }
-      .codex-workspace-checkpoint-edit-button {
-        border: 1px solid rgba(245,158,11,.52) !important;
-        background: rgba(245,158,11,.12) !important;
-        color: #fbbf24 !important;
-        white-space: nowrap;
-      }
-      .codex-workspace-checkpoint-edit-button:hover { background: rgba(245,158,11,.2) !important; }
-      .codex-workspace-checkpoint-edit-button:disabled { opacity: .62; }
-      .codex-workspace-checkpoint-edit-button[data-checkpoint-availability="checking"]:disabled { cursor: wait; }
-      .codex-workspace-checkpoint-edit-button[data-checkpoint-availability="no_changes"]:disabled,
-      .codex-workspace-checkpoint-edit-button[data-checkpoint-availability="no_changes"]:disabled:hover {
-        cursor: not-allowed;
-        pointer-events: auto !important;
-        border-color: rgba(148,163,184,.38) !important;
-        background: rgba(148,163,184,.1) !important;
-        color: rgba(203,213,225,.7) !important;
-      }
-      .codex-workspace-checkpoint-overlay {
-        position: fixed;
-        inset: 0;
-        z-index: 2147483646;
-        display: grid;
-        place-items: center;
-        padding: 24px;
-        background: rgba(0,0,0,.62);
-        pointer-events: auto;
-        -webkit-app-region: no-drag;
-      }
-      .codex-workspace-checkpoint-dialog {
-        width: min(640px, calc(100vw - 48px));
-        max-height: min(790px, calc(100vh - 48px));
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-        border: 1px solid rgba(255,255,255,.13);
-        border-radius: 16px;
-        background: #202123;
-        color: #f3f4f6;
-        box-shadow: 0 28px 100px rgba(0,0,0,.5);
-        font: 13px/1.5 "Segoe UI Variable Text", "Microsoft YaHei UI", system-ui, sans-serif;
-      }
-      .codex-workspace-checkpoint-header,
-      .codex-workspace-checkpoint-footer {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        flex: 0 0 auto;
-      }
-      .codex-workspace-checkpoint-header {
-        padding: 13px 18px;
-        border-bottom: 1px solid rgba(255,255,255,.1);
-      }
-      .codex-workspace-checkpoint-footer {
-        padding: 12px 14px;
-        border-top: 1px solid rgba(255,255,255,.1);
-        background: rgba(0,0,0,.1);
-      }
-      .codex-workspace-checkpoint-title {
-        letter-spacing: -.01em;
-        font-size: 17px;
-        font-weight: 620;
-      }
-      .codex-workspace-checkpoint-list {
-        min-width: 0;
-        min-height: 120px;
-        flex: 1 1 auto;
-        overflow-x: hidden;
-        overflow-y: auto;
-        display: grid;
-        grid-template-columns: minmax(0, 1fr);
-        grid-auto-rows: max-content;
-        align-content: start;
-        gap: 10px;
-        padding: 12px 14px 14px;
-        background: #1b1c1e;
-        scrollbar-color: rgba(255,255,255,.24) transparent;
-        scrollbar-width: thin;
-      }
-      .codex-workspace-checkpoint-item {
-        min-width: 0;
-        max-width: 100%;
-        box-sizing: border-box;
-        overflow: hidden;
-        padding: 13px;
-        border: 1px solid rgba(255,255,255,.09);
-        border-radius: 11px;
-        background: rgba(255,255,255,.025);
-      }
-      .codex-workspace-checkpoint-item:hover {
-        border-color: rgba(255,255,255,.15);
-        background: rgba(255,255,255,.04);
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-item-main,
-      .codex-workspace-checkpoint-dialog .checkpoint-footer-actions {
-        display: flex;
-        align-items: center;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-stage {
-        display: inline-flex;
-        align-items: center;
-        min-height: 20px;
-        flex: 0 0 auto;
-        border: 1px solid rgba(96,165,250,.22);
-        border-radius: 999px;
-        background: rgba(59,130,246,.1);
-        color: #93c5fd;
-        padding: 0 7px;
-        font-size: 10.5px;
-        font-weight: 580;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-stage[data-kind="safety"] {
-        border-color: rgba(245,158,11,.24);
-        background: rgba(245,158,11,.1);
-        color: #fbbf24;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-stage[data-kind="incomplete"] {
-        border-color: rgba(161,161,170,.2);
-        background: rgba(161,161,170,.08);
-        color: #c4c4cc;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-stage[data-kind="failed"] {
-        border-color: rgba(248,113,113,.24);
-        background: rgba(239,68,68,.1);
-        color: #fca5a5;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-stage[data-kind="interrupted"] {
-        border-color: rgba(251,191,36,.22);
-        background: rgba(245,158,11,.08);
-        color: #fcd34d;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-stage[data-kind="legacy"],
-      .codex-workspace-checkpoint-dialog .checkpoint-stage[data-kind="unsynced"] {
-        border-color: rgba(161,161,170,.2);
-        background: rgba(161,161,170,.08);
-        color: #c4c4cc;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-stage[data-kind="initialization"] {
-        border-color: rgba(52,211,153,.24);
-        background: rgba(16,185,129,.1);
-        color: #6ee7b7;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-time {
-        flex: 0 0 auto;
-        color: #8f8f98;
-        font-size: 11.5px;
-        font-variant-numeric: tabular-nums;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-title-line {
-        width: 100%;
-        min-width: 0;
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        overflow: hidden;
-      }
-      .codex-workspace-checkpoint-item-title {
-        display: block;
-        min-width: 0;
-        max-width: 100%;
-        flex: 1 1 auto;
-        overflow: hidden;
-        color: #f1f1f3;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        letter-spacing: -.005em;
-        font-size: 13.5px;
-        font-weight: 590;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-item-main { gap: 10px; }
-      .codex-workspace-checkpoint-dialog .checkpoint-item-copy {
-        min-width: 0;
-        flex: 1 1 auto;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-summary {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        align-items: center;
-        gap: 10px;
-        margin-top: 10px;
-        padding-right: 16px;
-        color: #b7b7be;
-        font-size: 11.5px;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-summary strong {
-        color: #d8d8dc;
-        font-weight: 580;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-change-stat {
-        display: grid;
-        grid-template-columns: 38px 38px;
-        column-gap: 4px;
-        justify-content: end;
-        font-family: "Cascadia Mono", Consolas, monospace;
-        font-size: 11.5px;
-        font-variant-numeric: tabular-nums;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-change-stat > span {
-        min-width: 0;
-        text-align: right;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-added { color: #6ee7a8; }
-      .codex-workspace-checkpoint-dialog .checkpoint-deleted { color: #fda4af; }
-      .codex-workspace-checkpoint-dialog .checkpoint-file-list {
-        --checkpoint-file-row-height: 18px;
-        --checkpoint-file-row-gap: 6px;
-        --checkpoint-file-scrollbar-size: 6px;
-        margin-top: 7px;
-        padding: 8px 9px;
-        border: 1px solid rgba(255,255,255,.06);
-        border-radius: 8px;
-        background: rgba(0,0,0,.16);
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-file-viewport {
-        display: grid;
-        gap: var(--checkpoint-file-row-gap);
-        max-height: calc(
-          var(--checkpoint-file-row-height) * 10 +
-          var(--checkpoint-file-row-gap) * 9
-        );
-        margin-right: calc(-1 * var(--checkpoint-file-scrollbar-size));
-        overflow-x: hidden;
-        overflow-y: auto;
-        overscroll-behavior: contain;
-        scrollbar-color: rgba(255,255,255,.2) transparent;
-        scrollbar-gutter: stable;
-        scrollbar-width: thin;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-file-viewport::-webkit-scrollbar {
-        width: var(--checkpoint-file-scrollbar-size);
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-file-viewport::-webkit-scrollbar-track {
-        background: transparent;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-file-viewport::-webkit-scrollbar-thumb {
-        border-radius: 999px;
-        background: rgba(255,255,255,.2);
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-file-list[data-expanded="false"] .checkpoint-file-row:nth-child(n+6) {
-        display: none;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-file-row {
-        display: grid;
-        grid-template-columns: 17px minmax(0, 1fr) auto;
-        align-items: center;
-        min-height: var(--checkpoint-file-row-height);
-        min-width: 0;
-        column-gap: 7px;
-        padding-right: 6px;
-        color: #c8c8ce;
-        font-size: 11.5px;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-file-status {
-        width: 17px;
-        flex: 0 0 17px;
-        color: #a5b4fc;
-        font-family: "Cascadia Mono", Consolas, monospace;
-        font-weight: 650;
-        text-align: center;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-file-status[data-status="A"] { color: #6ee7a8; }
-      .codex-workspace-checkpoint-dialog .checkpoint-file-status[data-status="D"] { color: #fda4af; }
-      .codex-workspace-checkpoint-dialog .checkpoint-file-path {
-        min-width: 0;
-        flex: 1 1 auto;
-        overflow: hidden;
-        direction: rtl;
-        text-align: left;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        unicode-bidi: plaintext;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-file-toggle {
-        width: 100%;
-        min-height: 25px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 5px;
-        margin-top: 5px;
-        padding: 4px 0 1px;
-        border: 0;
-        border-top: 1px solid rgba(255,255,255,.055);
-        background: transparent;
-        color: #92929b;
-        cursor: pointer;
-        font: 11px "Segoe UI Variable Text", "Microsoft YaHei UI", system-ui, sans-serif;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-file-toggle:hover { color: #c8c8ce; }
-      .codex-workspace-checkpoint-dialog .checkpoint-file-toggle-chevron {
-        width: 12px;
-        height: 12px;
-        display: block;
-        flex: 0 0 12px;
-        color: #7f7f89;
-        stroke: currentColor;
-        stroke-linecap: round;
-        stroke-linejoin: round;
-        stroke-width: 1.5;
-        transition: transform .14s ease;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-file-list[data-expanded="true"] .checkpoint-file-toggle-chevron {
-        transform: rotate(180deg);
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-no-change {
-        margin-top: 9px;
-        padding: 7px 9px;
-        border-radius: 8px;
-        background: rgba(255,255,255,.035);
-        color: #8f8f98;
-        font-size: 11.5px;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-footer-note {
-        color: #8f8f98;
-        font-size: 11px;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-footer-actions { gap: 7px; }
-      .codex-workspace-checkpoint-dialog .codex-elves-modal-close {
-        width: 30px;
-        height: 30px;
-        border-radius: 7px;
-        font-size: 19px;
-      }
-      .codex-workspace-checkpoint-dialog .codex-elves-modal-close:hover {
-        background: rgba(255,255,255,.07);
-      }
-      .codex-workspace-checkpoint-dialog button:not(:disabled) { cursor: pointer; }
-      .codex-workspace-checkpoint-dialog button:disabled { cursor: not-allowed; }
-      .codex-workspace-checkpoint-dialog .codex-elves-action-button {
-        padding: 6px 9px;
-        font: 11.5px "Segoe UI Variable Text", "Microsoft YaHei UI", system-ui, sans-serif;
-      }
-      .codex-workspace-checkpoint-dialog .codex-elves-action-button:not(:disabled):hover {
-        border-color: rgba(255,255,255,.3);
-        background: #4a4a51;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-restore-button {
-        flex: 0 0 auto;
-        white-space: nowrap;
-        border-color: rgba(96,165,250,.25);
-        background: rgba(59,130,246,.11);
-        color: #bfdbfe;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-restore-button:not(:disabled):hover {
-        border-color: rgba(96,165,250,.4);
-        background: rgba(59,130,246,.18);
-      }
-      @media (max-width: 640px) {
-        .codex-workspace-checkpoint-dialog .checkpoint-item-main {
-          display: grid;
-          grid-template-columns: minmax(0, 1fr) auto;
-        }
-        .codex-workspace-checkpoint-dialog .checkpoint-item-copy {
-          grid-column: 1 / -1;
-        }
-        .codex-workspace-checkpoint-dialog .codex-workspace-checkpoint-footer {
-          flex-wrap: wrap;
-        }
-        .codex-workspace-checkpoint-dialog .checkpoint-footer-note {
-          flex-basis: 100%;
-        }
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-undo-button {
-        border-color: rgba(245,158,11,.28);
-        background: rgba(245,158,11,.1);
-        color: #fcd34d;
-      }
-      .codex-workspace-checkpoint-dialog .checkpoint-undo-button:not(:disabled):hover {
-        border-color: rgba(245,158,11,.45);
-        background: rgba(245,158,11,.18);
-      }
-      .codex-workspace-checkpoint-empty {
-        align-self: center;
-        padding: 28px 0;
-        color: #a1a1aa;
-        text-align: center;
-      }
       .codex-elves-width-control { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 176px; align-self: center; }
       .codex-elves-width-input {
         width: 78px;
@@ -2087,8 +1701,7 @@
         z-index: 2147483001;
         pointer-events: none;
       }
-      [${codexPromptOptimizeButtonAttribute}="true"],
-      [${codexWorkspaceCheckpointButtonAttribute}="true"] {
+      [${codexPromptOptimizeButtonAttribute}="true"] {
         position: fixed;
         display: inline-flex;
         align-items: center;
@@ -2113,28 +1726,13 @@
         -webkit-app-region: no-drag;
       }
       [${codexPromptOptimizeButtonAttribute}="true"]:hover,
-      [${codexPromptOptimizeButtonAttribute}="true"]:focus-visible,
-      [${codexWorkspaceCheckpointButtonAttribute}="true"]:hover,
-      [${codexWorkspaceCheckpointButtonAttribute}="true"]:focus-visible {
+      [${codexPromptOptimizeButtonAttribute}="true"]:focus-visible {
         transform: translateZ(0) scale(1.08);
       }
-      [${codexPromptOptimizeButtonAttribute}="true"]:focus-visible,
-      [${codexWorkspaceCheckpointButtonAttribute}="true"]:focus-visible {
+      [${codexPromptOptimizeButtonAttribute}="true"]:focus-visible {
         outline: 2px solid color-mix(in srgb, currentColor 45%, transparent);
         outline-offset: 1px;
         border-radius: 7px;
-      }
-      [${codexWorkspaceCheckpointButtonAttribute}="true"] {
-        color: color-mix(in srgb, currentColor 76%, #3b82f6 24%);
-      }
-      [${codexWorkspaceCheckpointButtonAttribute}="true"] svg {
-        width: 14px;
-        height: 14px;
-        fill: none;
-        stroke: currentColor;
-        stroke-linecap: round;
-        stroke-linejoin: round;
-        stroke-width: 1.8;
       }
       [${codexPromptOptimizeButtonAttribute}="true"][data-state="loading"] {
         animation: codex-prompt-optimize-pulse 1s ease-in-out infinite;
@@ -4363,7 +3961,6 @@
       projectMove: true,
       conversationView: false,
       tokenUsage: false,
-      workspaceCheckpoint: true,
       conversationViewMaxWidth: conversationViewDefaultWidth,
       upstreamWorktreeCreate: true,
       nativeMenuPlacement: true,
@@ -4382,7 +3979,6 @@
     projectMove: "codexAppProjectMove",
     conversationView: "codexAppConversationView",
     tokenUsage: "codexAppTokenUsage",
-    workspaceCheckpoint: "codexAppWorkspaceCheckpoint",
 
     upstreamWorktreeCreate: "codexAppUpstreamWorktreeCreate",
     nativeMenuPlacement: "codexAppNativeMenuPlacement",
@@ -4414,7 +4010,6 @@
       projectMove: false,
       conversationView: false,
       tokenUsage: false,
-      workspaceCheckpoint: false,
       conversationViewMaxWidth: conversationViewDefaultWidth,
       upstreamWorktreeCreate: false,
       nativeMenuPlacement: false,
@@ -4472,9 +4067,6 @@
         removeCodexOpenInControls();
       }
     }
-    if (key === "workspaceCheckpoint") {
-      refreshCodexWorkspaceCheckpointFeatureState();
-    }
     renderCodexElvesMenu();
     scan(scanDirtyForSetting(key));
   }
@@ -4501,7 +4093,7 @@
       dirty.conversation = true;
       return dirty;
     }
-    if (key === "tokenUsage" || key === "nativeFastUnlock" || key === "workspaceCheckpoint") {
+    if (key === "tokenUsage" || key === "nativeFastUnlock") {
       dirty.header = true;
       dirty.conversation = true;
       return dirty;
@@ -4565,7 +4157,6 @@
     enhancementsEnabled: true,
     launchMode: "patch",
     codexAppVersion: "",
-    codexAppWorkspaceCheckpoint: false,
     codexAppActivityViewCompact: false,
   };
   const codexPluginLegacyEntryUnlockBeforeVersion = "26.601.2237";
@@ -4792,7 +4383,6 @@
     return codexAppServicesModule.appServices;
   }
 
-  const codexNativeCheckpointOperations = new Map();
   function copyCodexNativeValue(value, changes) {
     // 原生准备结果携带不可枚举的 dispose；复制时保留 RPC 资源释放语义。
     const descriptors = Object.getOwnPropertyDescriptors(value);
@@ -4806,82 +4396,13 @@
     return await window.__codexElvesComposerFast?.patchTurnRequest?.(params, context) || params;
   }
 
-  async function beginCodexNativeCheckpoint(operation, params) {
-    if (!codexWorkspaceCheckpointFeatureEnabled()) return;
-    if (operation.creation) return await operation.creation;
-    const threadId = codexWorkspaceCheckpointRequestThreadId(params);
-    if (!threadId) throw new Error("未识别到原生发送的会话 ID");
-    operation.threadId = threadId;
-    operation.params = params;
-    operation.done = new Promise((resolve) => { operation.resolve = resolve; });
-    const pending = codexNativeCheckpointOperations.get(threadId) || new Set();
-    pending.add(operation.done);
-    codexNativeCheckpointOperations.set(threadId, pending);
-    operation.timeout = setTimeout(() => { void finishCodexNativeCheckpoint(operation, null); }, 60000);
-    operation.timeout?.unref?.();
-    operation.creation = (async () => {
-      clearCodexWorkspaceCheckpointCompletionHint(threadId);
-      installCodexWorkspaceCheckpointTurnCompletionListener();
-      try {
-        operation.created = await createCodexWorkspaceCheckpoint({ hostId: "local" }, params);
-      } catch (error) {
-        if (!["checkpoint_bridge_unavailable", "checkpoint_request_timeout"].includes(error?.code)) {
-          showToast(`${error?.message || "创建 Checkpoint 失败"}；本轮发送已取消`);
-          throw error;
-        }
-        operation.created = { skipped: true };
-        showToast("Checkpoint 暂不可用，本轮未保存快照，继续发送");
-      }
-    })();
-    return await operation.creation;
-  }
 
-  async function finishCodexNativeCheckpoint(operation, result) {
-    if (!operation.creation || operation.finished) return;
-    // 新建会话可能先返回 outcome-unknown，最终回执由 onSettled 提供，不能提前绑定。
-    if (result?.status === "outcome-unknown" || result?.firstTurn?.status === "outcome-unknown") return;
-    operation.finished = true;
-    clearTimeout(operation.timeout);
-    try {
-      await operation.creation;
-      let turnId = codexWorkspaceCheckpointTurnId(result?.firstTurn || result);
-      if (!turnId && result != null && operation.params?.clientUserMessageId) {
-        const rpc = findCodexAppServerManagerRpcInScopedSignals();
-        const history = await rpc?.getLoadedConversationHistory(operation.threadId);
-        const matches = history?.turns?.filter((turn) =>
-          turn.params?.clientUserMessageId === operation.params.clientUserMessageId && turn.turnId
-        ) || [];
-        if (matches.length === 1) turnId = matches[0].turnId;
-      }
-      if (turnId && !operation.created?.skipped) {
-        await trackCodexWorkspaceCheckpointBinding(operation.created, { turnId },
-          bindCodexWorkspaceCheckpoint(operation.created, { turnId }));
-      }
-    } catch (error) {
-      // 原生回执已经成功，绑定失败不能让用户误以为消息未发送而重复提交。
-      sendCodexElvesDiagnostic("workspace_checkpoint_native_bind_failed", {
-        errorMessage: error?.message || String(error),
-      });
-    } finally {
-      operation.resolve?.();
-      const pending = codexNativeCheckpointOperations.get(operation.threadId);
-      pending?.delete(operation.done);
-      if (!pending?.size) codexNativeCheckpointOperations.delete(operation.threadId);
-    }
-  }
-
-  async function prepareCodexNativeSubmission(submission, operation, threadId) {
+  // 用户要求移除工作区快照：原生提交只补充 Fast 参数，不注入前置快照或回执后的存储等待。
+  async function prepareCodexNativeSubmission(submission, _operation, threadId) {
     if (submission?.executionHostId !== "local" || !submission.start?.request) return submission;
     const start = submission.start;
     const request = await patchCodexNativeTurnParams(start.request, { threadId });
-    const context = {
-      ...start.context,
-      beforeSendRequest: async (...args) => {
-        await start.context?.beforeSendRequest?.(...args);
-        await beginCodexNativeCheckpoint(operation, request);
-      },
-    };
-    const nextStart = copyCodexNativeValue(start, { request, context });
+    const nextStart = copyCodexNativeValue(start, { request });
     return copyCodexNativeValue(submission, {
       start: nextStart,
       resume: submission.resume ? { ...submission.resume, serviceTier: request.serviceTier } : submission.resume,
@@ -4894,90 +4415,26 @@
 
   async function invokeCodexNativeTurn(rpc, method, args) {
     const next = [...args];
-    const operation = {};
-    try {
-      if (method === "startConversation") {
-        // 新建页的 Fast 选择在提交时固定；只有这次创建拿到真实 ID 后才保存，不能影响另一个草稿。
-        const fast = window.__codexElvesComposerFast;
-        const fastContext = fast?.captureContext?.();
-        next[0] = await patchCodexNativeTurnParams(args[0], fastContext);
-        const options = args[1] || {};
-        next[1] = {
-          ...options,
-          beforeFirstTurn: async (context) => {
-            fast?.bindConversation?.(fastContext, context.conversationId);
-            await options.beforeFirstTurn?.(context);
-            await beginCodexNativeCheckpoint(operation, { ...next[0], threadId: context.conversationId });
-          },
-          onSettled: async (result) => {
-            await finishCodexNativeCheckpoint(operation, result);
-            return await options.onSettled?.(result);
-          },
-        };
-      } else if (method === "startTurn" || method === "startTurnWithOutcome") {
-        const start = args[1];
-        if (!start?.request) return await rpc[method](...args);
-        const prepared = await prepareCodexNativeSubmission({
-          executionHostId: "local", start,
-        }, operation, args[0]);
-        next[1] = prepared.start;
-        // startTurn 的第四个参数优先于 context 中的回调。
-        if (typeof args[3] === "function") {
-          next[3] = async (...values) => {
-            await args[3](...values);
-            await beginCodexNativeCheckpoint(operation, prepared.start.request);
-          };
-        }
-      } else if (method === "editLastUserTurn") {
-        const history = codexWorkspaceCheckpointFeatureEnabled()
-          ? await rpc.getLoadedConversationHistory(args[0]) : null;
-        const intent = codexWorkspaceCheckpointIntentForRequest({ threadId: args[0] });
-        if (intent && codexWorkspaceCheckpointFeatureEnabled()) {
-          const turnId = args[1]?.turnId;
-          if (!turnId) throw new Error("未识别到待编辑轮次，文件未改变");
-          const turn = history?.turns?.find((item) => item.turnId === turnId);
-          const laterTurns = history?.turns?.slice(history.turns.indexOf(turn) + 1) || [];
-          if (!turn || history.turns.some((item) => item.status === "inProgress")
-            || (!args[1]?.allowEarlierMessages && laterTurns.some((item) => item.params?.input?.length))) {
-            throw new Error("无法确认待编辑轮次或会话仍在运行，文件未改变");
-          }
-          intent.phase = "restoring";
-          try {
-            await restoreCodexWorkspaceCheckpointForNativeRevert({ hostId: "local" }, "thread/revert",
-              { threadId: args[0], beforeTurnId: turnId }, intent);
-          } finally {
-            clearCodexWorkspaceCheckpointRestoreIntent(intent);
-          }
-        }
-        next[1] = await patchCodexNativeTurnParams(args[1] || {}, { threadId: args[0] });
-        if (history) {
-          operation.previousTurnIds = new Set(history.turns.map((turn) => turn.turnId).filter(Boolean));
-          await beginCodexNativeCheckpoint(operation, {
-            threadId: args[0], cwd: history.cwd, input: [{ type: "text", text: args[1]?.message || "" }],
-          });
-        }
-      } else {
-        // 空轮次/后续消息的原生返回值不保证有 turnId，保留原流程及参数契约。
-        next[1] = await patchCodexNativeTurnParams(args[1] || {}, { threadId: args[0] });
-      }
-      const result = await rpc[method](...next);
-      let checkpointResult = result;
-      if (operation.previousTurnIds) {
-        // 原生编辑返回 void；只在前后历史中恰好新增一个轮次时绑定，不能猜“最后一轮”。
-        try {
-          const history = await rpc.getLoadedConversationHistory(args[0]);
-          const added = history?.turns?.filter((turn) => turn.turnId && !operation.previousTurnIds.has(turn.turnId)) || [];
-          if (added.length === 1) checkpointResult = { turnId: added[0].turnId };
-        } catch (error) {
-          sendCodexElvesDiagnostic("workspace_checkpoint_native_history_failed", { errorMessage: error?.message || String(error) });
-        }
-      }
-      await finishCodexNativeCheckpoint(operation, checkpointResult);
-      return result;
-    } catch (error) {
-      await finishCodexNativeCheckpoint(operation, null);
-      throw error;
+    if (method === "startConversation") {
+      const fast = window.__codexElvesComposerFast;
+      const options = args[1] || {};
+      // 远程新建显式携带自己的 Fast 草稿；本地选项在 RPC 前移除，避免套用当前桌面会话。
+      const { codexElvesFastContext, ...nativeOptions } = options;
+      const context = codexElvesFastContext || fast?.captureContext?.();
+      next[0] = await patchCodexNativeTurnParams(args[0], context);
+      next[1] = { ...nativeOptions, beforeFirstTurn: async (created) => {
+        fast?.bindConversation?.(context, created.conversationId);
+        return await options.beforeFirstTurn?.(created);
+      } };
+    } else if (method === "startTurn" || method === "startTurnWithOutcome") {
+      if (!args[1]?.request) return await rpc[method](...args);
+      next[1] = (await prepareCodexNativeSubmission({
+        executionHostId: "local", start: args[1],
+      }, null, args[0])).start;
+    } else {
+      next[1] = await patchCodexNativeTurnParams(args[1] || {}, { threadId: args[0] });
     }
+    return await rpc[method](...next);
   }
 
   let codexNativeRpcInstallPromise = null;
@@ -4989,17 +4446,16 @@
       runtime.configure({
         enabled: () => codexElvesBackendSettings.enhancementsEnabled === true,
         prepareSubmission: prepareCodexNativeSubmission,
-        finishSubmission: finishCodexNativeCheckpoint,
+
         invokeTurn: invokeCodexNativeTurn,
         sendRequest: async (rpc, [method, params, options]) => {
           // 在普通适配对象上复用旧拦截，绝不向 RPC Stub 写入或删除属性。
           // 用户要求注入后不阻断 Windows 沙盒检查；新版 RPC 的 bind/call 会被解析为远程路径，
-          // 必须用普通函数转发，让插件市场与 Checkpoint 两条分支只绑定本地函数。
+          // 必须用普通函数转发，让插件市场分支只绑定本地函数。
           const sendRequest = (...values) => rpc.sendRequest(...values);
           const adapter = { hostId: "local", sendRequest };
           if (codexElvesSettings().pluginMarketplaceUnlock) patchPluginMarketplaceRequestClient(adapter);
-          else adapter.sendRequest = (...values) =>
-            codexWorkspaceCheckpointSendRequest(sendRequest, adapter, ...values);
+
           const nextParams = method === "turn/start" ? await patchCodexNativeTurnParams(params) : params;
           return adapter.sendRequest(method, nextParams, options);
         },
@@ -5288,2094 +4744,6 @@
       || codexServiceTierModelFromValue(codexModelCatalog.default_model);
   }
 
-  function codexWorkspaceCheckpointPatchRetryDelay(failureCount) {
-    return Math.min(
-      codexWorkspaceCheckpointPatchRetryMaxMs,
-      codexWorkspaceCheckpointPatchRetryBaseMs * (2 ** Math.min(Math.max(failureCount - 1, 0), 5))
-    );
-  }
-
-  function clearCodexWorkspaceCheckpointPatchRetry(resetFailure = false) {
-    clearTimeout(window.__codexWorkspaceCheckpointPatchRetryTimer);
-    window.__codexWorkspaceCheckpointPatchRetryTimer = null;
-    if (resetFailure) {
-      window.__codexWorkspaceCheckpointPatchFailureCount = 0;
-      window.__codexWorkspaceCheckpointPatchNextAttemptAt = 0;
-    }
-  }
-
-  function scheduleCodexWorkspaceCheckpointPatchRetry(failureCount) {
-    clearCodexWorkspaceCheckpointPatchRetry();
-    if (!codexElvesSettings().workspaceCheckpoint) return false;
-    const delayMs = codexWorkspaceCheckpointPatchRetryDelay(failureCount);
-    window.__codexWorkspaceCheckpointPatchRetryTimer = setTimeout(() => {
-      window.__codexWorkspaceCheckpointPatchRetryTimer = null;
-      void installCodexWorkspaceCheckpointRequestClientPatch();
-    }, delayMs);
-    return true;
-  }
-
-  function codexWorkspaceCheckpointRequestThreadId(params) {
-    return validThreadSessionKey(
-      params?.threadId ||
-      params?.conversationId ||
-      params?.targetConversationId ||
-      activeConversationIdFromDom() ||
-      currentSessionRef()?.session_id
-    );
-  }
-
-  function codexWorkspaceCheckpointConversation(threadId, preferredManager = null) {
-    if (!threadId) return null;
-    const managers = [
-      preferredManager,
-      window.__codexElvesConversationStateManager,
-    ];
-    try {
-      managers.push(findCodexConversationManagerInReactTree()?.manager || null);
-    } catch {
-    }
-    const seen = new Set();
-    let firstConversation = null;
-    let firstHostConversation = null;
-    for (const manager of managers) {
-      if (!manager || seen.has(manager) || typeof manager.getConversation !== "function") continue;
-      seen.add(manager);
-      try {
-        const conversation = manager.getConversation(threadId);
-        if (!conversation) continue;
-        firstConversation ||= conversation;
-        if (codexWorkspaceCheckpointConversationCwd(conversation)) {
-          return conversation;
-        }
-        if (!firstHostConversation && String(conversation?.hostId || "").trim()) {
-          firstHostConversation = conversation;
-        }
-      } catch {
-      }
-    }
-    return firstHostConversation || firstConversation;
-  }
-
-  function codexWorkspaceCheckpointConversationBusy(threadId) {
-    const conversation = codexWorkspaceCheckpointConversation(threadId);
-    const runtimeType = String(
-      conversation?.threadRuntimeStatus?.type ||
-      conversation?.runtimeStatus?.type ||
-      conversation?.status ||
-      ""
-    ).toLowerCase();
-    if (["inprogress", "in_progress", "running", "active", "working"].includes(runtimeType)) {
-      return true;
-    }
-    let turns = [];
-    try {
-      turns = codexAppServerConversationTurns(conversation);
-    } catch {
-      turns = Array.isArray(conversation?.turns)
-        ? conversation.turns
-        : Array.isArray(conversation?.turnHistory?.turns)
-          ? conversation.turnHistory.turns
-          : [];
-    }
-    return turns.some((turn) =>
-      ["inprogress", "in_progress", "running", "active"]
-        .includes(String(turn?.status || "").toLowerCase())
-    );
-  }
-
-  async function codexWorkspaceCheckpointConversationBusyAsync(threadId) {
-    if (codexWorkspaceCheckpointConversation(threadId)) {
-      return codexWorkspaceCheckpointConversationBusy(threadId);
-    }
-    // 新版 manager 在宿主端：恢复文件前读取真实执行状态，不能把“未发现 manager”
-    // 当作空闲。查询失败或状态未知时保持恢复入口不执行。
-    const rpc = findCodexAppServerManagerRpcInScopedSignals();
-    if (!rpc) return null;
-    let timer;
-    try {
-      const state = await Promise.race([
-        rpc.getThreadExecutionState(threadId),
-        new Promise((resolve) => { timer = setTimeout(() => resolve(null), 2000); }),
-      ]);
-      return typeof state?.inProgress === "boolean" ? state.inProgress : null;
-    } catch {
-      return null;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  function codexWorkspaceCheckpointClientHostId(client) {
-    try {
-      const direct = String(client?.hostId || "").trim();
-      if (direct) return direct;
-      const resolved = String(client?.getHostId?.() || "").trim();
-      if (resolved) return resolved;
-    } catch {
-    }
-    return "";
-  }
-
-  function codexWorkspaceCheckpointAbsoluteCwd(value) {
-    const cwd = String(value || "").trim();
-    return /^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(cwd) ? cwd : "";
-  }
-
-  function codexWorkspaceCheckpointConversationCwd(conversation) {
-    return [
-      conversation?.cwd,
-      conversation?.workdir,
-      conversation?.workingDirectory,
-      conversation?.workspacePath,
-      conversation?.worktreePath,
-      conversation?.project?.cwd,
-      conversation?.project?.path,
-      conversation?.workspace?.cwd,
-      conversation?.workspace?.path,
-      conversation?.metadata?.cwd,
-      conversation?.metadata?.workdir,
-      conversation?.metadata?.workspacePath,
-      conversation?.metadata?.worktreePath,
-      conversation?.metadata?.workspace?.cwd,
-      conversation?.metadata?.workspace?.path,
-      conversation?.context?.cwd,
-      conversation?.context?.workdir,
-      conversation?.context?.workspacePath,
-      conversation?.thread?.cwd,
-      conversation?.thread?.workspace?.cwd,
-    ]
-      .map(codexWorkspaceCheckpointAbsoluteCwd)
-      .find(Boolean) || "";
-  }
-
-  function codexWorkspaceCheckpointDomCwd(threadId) {
-    const attributeNames = [
-      "data-codex-workspace-path",
-      "data-codex-worktree-path",
-      "data-workspace-path",
-      "data-worktree-path",
-      "data-working-directory",
-      "data-workdir",
-      "data-cwd",
-    ];
-    const readNode = (node) => {
-      for (const name of attributeNames) {
-        const cwd = codexWorkspaceCheckpointAbsoluteCwd(node?.getAttribute?.(name));
-        if (cwd) return cwd;
-      }
-      return "";
-    };
-    const readAncestors = (node) => {
-      let current = node;
-      for (let depth = 0; current && depth < 6; depth += 1) {
-        const cwd = readNode(current);
-        if (cwd) return cwd;
-        current = current.parentElement;
-      }
-      return "";
-    };
-
-    try {
-      const signal = document.querySelector?.("[data-above-composer-conversation-id]");
-      const signalId = String(
-        signal?.getAttribute?.("data-above-composer-conversation-id") || ""
-      ).trim();
-      if (
-        threadId &&
-        signalId &&
-        codexWorkspaceCheckpointSessionKey(signalId) ===
-          codexWorkspaceCheckpointSessionKey(threadId)
-      ) {
-        const cwd = readAncestors(signal);
-        if (cwd) return cwd;
-      }
-    } catch {
-    }
-
-    try {
-      const rows = document.querySelectorAll?.("[data-app-action-sidebar-thread-id]") || [];
-      for (const row of Array.from(rows)) {
-        const rowId = String(row?.getAttribute?.("data-app-action-sidebar-thread-id") || "").trim();
-        if (
-          !rowId ||
-          codexWorkspaceCheckpointSessionKey(rowId) !==
-            codexWorkspaceCheckpointSessionKey(threadId)
-        ) {
-          continue;
-        }
-        const cwd = readAncestors(row);
-        if (cwd) return cwd;
-        const projectRow = row.closest?.("[data-app-action-sidebar-project-row]");
-        const projectCwd = readAncestors(projectRow);
-        if (projectCwd) return projectCwd;
-      }
-    } catch {
-    }
-    return "";
-  }
-
-  function codexWorkspaceCheckpointCachedWorkspace(threadId, expectedHostId = "") {
-    const cached = window.__codexWorkspaceCheckpointLastWorkspace;
-    if (!threadId || !cached || cached.threadId !== threadId) return null;
-    const normalizedExpectedHostId = String(expectedHostId || "").trim();
-    if (
-      normalizedExpectedHostId &&
-      cached.hostId &&
-      cached.hostId !== normalizedExpectedHostId
-    ) {
-      return null;
-    }
-    if (
-      !cached.at ||
-      Date.now() - finiteNonNegativeNumber(cached.at) > codexWorkspaceCheckpointWorkspaceCacheTtlMs
-    ) {
-      window.__codexWorkspaceCheckpointLastWorkspace = null;
-      return null;
-    }
-    const cwd = codexWorkspaceCheckpointAbsoluteCwd(cached.cwd);
-    return cwd ? { cwd, hostId: String(cached.hostId || "local").trim() || "local" } : null;
-  }
-
-  function rememberCodexWorkspaceCheckpointWorkspace(threadId, cwd, hostId = "local") {
-    const normalizedThreadId = validThreadSessionKey(threadId);
-    const normalizedCwd = codexWorkspaceCheckpointAbsoluteCwd(cwd);
-    if (!normalizedThreadId || !normalizedCwd) return;
-    window.__codexWorkspaceCheckpointLastWorkspace = {
-      threadId: normalizedThreadId,
-      cwd: normalizedCwd,
-      hostId: String(hostId || "local").trim() || "local",
-      at: Date.now(),
-    };
-  }
-
-  function codexWorkspaceCheckpointSessionKey(value) {
-    return String(value || "").trim().replace(/^local:/i, "").toLowerCase();
-  }
-
-  function codexWorkspaceCheckpointDirectCwd(params) {
-    const candidates = [
-      params?.cwd,
-      params?.workdir,
-      params?.workspacePath,
-      params?.worktreePath,
-      params?.context?.cwd,
-      params?.context?.workdir,
-      params?.context?.workspacePath,
-      params?.context?.worktreePath,
-    ];
-    for (const value of candidates) {
-      if (value === undefined || value === null || String(value).trim() === "") continue;
-      return {
-        provided: true,
-        cwd: codexWorkspaceCheckpointAbsoluteCwd(value),
-      };
-    }
-    return { provided: false, cwd: "" };
-  }
-
-  function codexWorkspaceCheckpointHasExplicitThread(params) {
-    return Boolean(
-      params?.threadId ||
-      params?.conversationId ||
-      params?.targetConversationId
-    );
-  }
-
-  async function postCodexWorkspaceCheckpointJson(path, payload) {
-    const unavailable = (message) => Object.assign(
-      new Error(message || "Checkpoint 桥接暂不可用"),
-      { code: "checkpoint_bridge_unavailable" }
-    );
-    const bridge = window.__codexSessionDeleteBridge;
-    if (typeof bridge !== "function") {
-      throw unavailable("Checkpoint 桥接暂不可用");
-    }
-    let settled = false;
-    let requestTimer;
-    let probeTimer;
-    let probeTimeout;
-    try {
-      const result = await Promise.race([
-        postJson(path, payload),
-        new Promise((_, reject) => {
-          requestTimer = setTimeout(
-            () => reject(Object.assign(new Error("Checkpoint 处理超时"), {
-              code: "checkpoint_request_timeout",
-            })),
-            codexWorkspaceCheckpointRequestTimeoutMs
-          );
-          // 快照可能需要数秒；用独立请求检测桥接，不能把快照耗时当作断线。
-          const probe = async () => {
-            if (settled) return;
-            try {
-              if (window.__codexSessionDeleteBridge !== bridge) {
-                throw unavailable("Checkpoint 桥接已切换");
-              }
-              const health = await Promise.race([
-                bridge("/backend/status", {}),
-                new Promise((_, rejectProbe) => {
-                  probeTimeout = setTimeout(
-                    () => rejectProbe(unavailable("Checkpoint 桥接检查超时")),
-                    codexWorkspaceCheckpointBridgeTimeoutMs
-                  );
-                }),
-              ]);
-              if (settled) return;
-              if (health?.status !== "ok") {
-                throw unavailable(health?.message);
-              }
-              probeTimer = setTimeout(probe, codexWorkspaceCheckpointBridgeTimeoutMs);
-            } catch (error) {
-              if (!settled) reject(unavailable(error?.message || String(error)));
-            } finally {
-              clearTimeout(probeTimeout);
-            }
-          };
-          probeTimer = setTimeout(probe, codexWorkspaceCheckpointBridgeTimeoutMs);
-        }),
-      ]);
-      if (
-        result?.bridgeMissing ||
-        result?.code === "bridge_unavailable" ||
-        result?.code === "bridge_timeout" ||
-        result?.message === "CodexElves Bridge 已重启，请重试" ||
-        result?.message === "桥接不可用，请重启启动器"
-      ) {
-        throw unavailable(result?.message);
-      }
-      return result;
-    } catch (error) {
-      if (error?.code === "checkpoint_request_timeout") throw error;
-      throw unavailable(error?.message || String(error));
-    } finally {
-      settled = true;
-      clearTimeout(requestTimer);
-      clearTimeout(probeTimer);
-      clearTimeout(probeTimeout);
-    }
-  }
-
-  function codexWorkspaceCheckpointSessionContext(threadId) {
-    const key = codexWorkspaceCheckpointSessionKey(threadId);
-    if (!key) return Promise.resolve(null);
-    if (!(window.__codexWorkspaceCheckpointSessionContextPromises instanceof Map)) {
-      window.__codexWorkspaceCheckpointSessionContextPromises = new Map();
-    }
-    const promises = window.__codexWorkspaceCheckpointSessionContextPromises;
-    const existing = promises.get(key);
-    if (existing) return existing;
-    const promise = postCodexWorkspaceCheckpointJson("/workspace-checkpoint/session-context", {
-      session_id: threadId,
-    })
-      .then((result) => {
-        const responseThreadId = result?.sessionId || result?.session_id || threadId;
-        if (
-          result?.status !== "ok" ||
-          codexWorkspaceCheckpointSessionKey(responseThreadId) !== key
-        ) {
-          return null;
-        }
-        const cwd = codexWorkspaceCheckpointAbsoluteCwd(result?.cwd);
-        return cwd
-          ? {
-              cwd,
-              hostId: String(result?.hostId || result?.host_id || "local").trim() || "local",
-            }
-          : null;
-      })
-      .catch((bridgeError) => ({ bridgeError }))
-      .finally(() => {
-        if (promises.get(key) === promise) promises.delete(key);
-      });
-    promises.set(key, promise);
-    return promise;
-  }
-
-  async function codexWorkspaceCheckpointNativeSessionContext(threadId) {
-    const id = validThreadSessionKey(threadId);
-    if (!id) return null;
-    let request;
-    let timer;
-    try {
-      const rpc = findCodexAppServerManagerRpcInScopedSignals();
-      if (!rpc) return null;
-      // 用户要求侧边会话正常发送：临时会话未必写入本地记录，须按目标 ID 读取原生目录。
-      // 原生读取最多等待 2 秒；只接受同一连接、同一会话的绝对路径，不借用父会话或当前页面目录。
-      request = rpc.getConversation(id);
-      const conversation = await Promise.race([
-        request,
-        new Promise((resolve) => {
-          timer = setTimeout(() => resolve(null), codexWorkspaceCheckpointNativeContextTimeoutMs);
-        }),
-      ]);
-      if (
-        !conversation ||
-        findCodexAppServerManagerRpcInScopedSignals() !== rpc ||
-        codexWorkspaceCheckpointSessionKey(conversation.id || conversation.conversationId) !==
-          codexWorkspaceCheckpointSessionKey(id) ||
-        (conversation.hostId && conversation.hostId !== "local")
-      ) {
-        return null;
-      }
-      const cwd = codexWorkspaceCheckpointConversationCwd(conversation);
-      return cwd ? { cwd, hostId: "local" } : null;
-    } catch {
-      return null;
-    } finally {
-      clearTimeout(timer);
-      try {
-        request?.[Symbol.dispose]?.();
-      } catch {
-      }
-    }
-  }
-
-  function codexWorkspaceCheckpointContext(client, params = {}) {
-    const threadId = codexWorkspaceCheckpointRequestThreadId(params);
-    const previousWorkspace = window.__codexWorkspaceCheckpointLastWorkspace;
-    if (
-      threadId &&
-      previousWorkspace?.threadId &&
-      previousWorkspace.threadId !== threadId
-    ) {
-      window.__codexWorkspaceCheckpointLastWorkspace = null;
-    }
-    const conversation = codexWorkspaceCheckpointConversation(threadId, client);
-    const direct = codexWorkspaceCheckpointDirectCwd(params);
-    const directCwd = direct.cwd;
-    const conversationCwd = codexWorkspaceCheckpointConversationCwd(conversation);
-    let openInContext = null;
-    if (!direct.provided && !conversationCwd) {
-      try {
-        openInContext = codexOpenInContext();
-      } catch {
-        openInContext = null;
-      }
-    }
-    const openInContextForThread = openInContext &&
-      (!threadId ||
-        !openInContext.conversationId ||
-        codexWorkspaceCheckpointSessionKey(openInContext.conversationId) ===
-          codexWorkspaceCheckpointSessionKey(threadId))
-      ? openInContext
-      : null;
-    const knownHostId = String(
-      params?.hostId ||
-      codexWorkspaceCheckpointClientHostId(client) ||
-      conversation?.hostId ||
-      openInContextForThread?.hostId ||
-      ""
-    ).trim();
-    const cachedWorkspace = codexWorkspaceCheckpointCachedWorkspace(threadId, knownHostId);
-    const domCwd = cachedWorkspace?.cwd
-      ? ""
-      : codexWorkspaceCheckpointDomCwd(threadId);
-    let cwd = "";
-    let cwdSource = "";
-    if (direct.provided) {
-      cwd = directCwd;
-      cwdSource = directCwd ? "direct" : "invalid";
-    } else if (conversationCwd) {
-      cwd = conversationCwd;
-      cwdSource = "conversation";
-    } else if (codexWorkspaceCheckpointAbsoluteCwd(openInContextForThread?.cwd)) {
-      cwd = codexWorkspaceCheckpointAbsoluteCwd(openInContextForThread.cwd);
-      cwdSource = "open_in";
-    } else if (cachedWorkspace?.cwd) {
-      cwd = cachedWorkspace.cwd;
-      cwdSource = "cache";
-    } else if (domCwd) {
-      cwd = domCwd;
-      cwdSource = "dom";
-    }
-    const hostId = String(
-      params?.hostId ||
-      codexWorkspaceCheckpointClientHostId(client) ||
-      conversation?.hostId ||
-      openInContextForThread?.hostId ||
-      knownHostId ||
-      cachedWorkspace?.hostId ||
-      "local"
-    ).trim();
-    if (cwd && threadId) rememberCodexWorkspaceCheckpointWorkspace(threadId, cwd, hostId);
-    return {
-      cwd,
-      threadId,
-      hostId,
-      local: !hostId || hostId === "local",
-      cwdSource,
-      invalidCwd: direct.provided && !directCwd,
-    };
-  }
-
-  async function codexWorkspaceCheckpointContextAsync(client, params = {}) {
-    const context = codexWorkspaceCheckpointContext(client, params);
-    const direct = codexWorkspaceCheckpointDirectCwd(params);
-    if (
-      !context.local ||
-      !context.threadId ||
-      context.invalidCwd ||
-      direct.provided
-    ) {
-      return context;
-    }
-    let resolved = context;
-    const sessionContext = await codexWorkspaceCheckpointSessionContext(context.threadId);
-    if (sessionContext?.bridgeError) {
-      resolved = { ...context, bridgeError: sessionContext.bridgeError };
-    }
-    if (sessionContext?.cwd) {
-      rememberCodexWorkspaceCheckpointWorkspace(
-        context.threadId,
-        sessionContext.cwd,
-        sessionContext.hostId || context.hostId
-      );
-      resolved = {
-        ...context,
-        cwd: sessionContext.cwd,
-        hostId: sessionContext.hostId || context.hostId,
-        local: (sessionContext.hostId || context.hostId || "local") === "local",
-        cwdSource: "session",
-      };
-    }
-    if (!resolved.cwd && !resolved.bridgeError) {
-      const nativeContext = await codexWorkspaceCheckpointNativeSessionContext(context.threadId);
-      if (nativeContext?.cwd) {
-        resolved = {
-          ...context,
-          ...nativeContext,
-          local: true,
-          cwdSource: "native",
-        };
-        rememberCodexWorkspaceCheckpointWorkspace(
-          context.threadId,
-          nativeContext.cwd,
-          nativeContext.hostId
-        );
-      }
-    }
-    if (!codexWorkspaceCheckpointHasExplicitThread(params)) {
-      const current = codexWorkspaceCheckpointContext(client, {});
-      const hostMatches = !resolved.hostId ||
-        !current.hostId ||
-        resolved.hostId === current.hostId;
-      if (
-        !codexWorkspaceCheckpointFeatureEnabled() ||
-        !current.threadId ||
-        current.threadId !== resolved.threadId ||
-        !hostMatches
-      ) {
-        return {
-          ...current,
-          cwd: "",
-          cwdSource: "",
-          stale: true,
-        };
-      }
-    }
-    return resolved;
-  }
-
-  function codexWorkspaceCheckpointContextMatchesCurrent(client, context) {
-    if (!context?.threadId) return false;
-    const current = codexWorkspaceCheckpointContext(client, {});
-    return current.threadId === context.threadId &&
-      current.local === context.local &&
-      (!context.hostId || !current.hostId || context.hostId === current.hostId);
-  }
-
-  async function codexWorkspaceCheckpointFreshCurrentContext(context) {
-    const current = await codexWorkspaceCheckpointContextAsync(null, {});
-    if (
-      current.stale ||
-      !current.threadId ||
-      current.threadId !== context?.threadId ||
-      current.local !== context?.local ||
-      (context?.hostId && current.hostId && context.hostId !== current.hostId) ||
-      !current.cwd ||
-      (context?.cwd && !sameWorkspacePath(current.cwd, context.cwd))
-    ) {
-      return null;
-    }
-    return current;
-  }
-
-  function codexWorkspaceCheckpointPromptPreview(params) {
-    const fragments = [];
-    const append = (value) => {
-      const text = String(value || "").trim();
-      if (text) fragments.push(text);
-    };
-    if (typeof params?.input === "string") {
-      append(params.input);
-    } else if (Array.isArray(params?.input)) {
-      params.input.forEach((item) => {
-        if (typeof item === "string") append(item);
-        else if (item?.type === "text" || typeof item?.text === "string") append(item?.text);
-      });
-    }
-    append(params?.prompt);
-    return fragments.join("\n").slice(0, 280);
-  }
-
-  function codexWorkspaceCheckpointRequestId(params) {
-    const nativeId = String(
-      params?.clientUserMessageId ||
-      params?.client_user_message_id ||
-      params?.requestId ||
-      ""
-    ).trim();
-    if (nativeId) return nativeId;
-    if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
-    return `checkpoint-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  }
-
-  function codexWorkspaceCheckpointTurnId(result) {
-    return String(
-      result?.turn?.id ||
-      result?.turn?.turnId ||
-      result?.turnId ||
-      ""
-    ).trim();
-  }
-
-  async function createCodexWorkspaceCheckpoint(client, params) {
-    const context = await codexWorkspaceCheckpointContextAsync(client, params);
-    if (context.stale) throw new Error("会话已切换，请重试");
-    if (!context.local) return { skipped: true, reason: "remote_host", context };
-    if (context.bridgeError) throw context.bridgeError;
-    if (!context.cwd) throw new Error("未识别到当前会话工作目录");
-    if (!context.threadId) throw new Error("未识别到当前 thread");
-    const result = await postCodexWorkspaceCheckpointJson("/workspace-checkpoint/create", {
-      cwd: context.cwd,
-      threadId: context.threadId,
-      requestId: codexWorkspaceCheckpointRequestId(params),
-      promptPreview: codexWorkspaceCheckpointPromptPreview(params),
-    });
-    if (result?.status !== "ok" || !result?.checkpoint?.id) {
-      throw new Error(result?.message || "创建工作区 Checkpoint 失败");
-    }
-    return { skipped: false, context, checkpoint: result.checkpoint };
-  }
-
-  async function bindCodexWorkspaceCheckpoint(created, turnResult) {
-    if (created?.skipped || !created?.checkpoint?.id) return;
-    const result = await postCodexWorkspaceCheckpointJson("/workspace-checkpoint/bind-turn", {
-      cwd: created.context.cwd,
-      checkpointId: created.checkpoint.id,
-      threadId: created.context.threadId,
-      turnId: codexWorkspaceCheckpointTurnId(turnResult),
-    });
-    if (result?.status !== "ok") {
-      throw new Error(result?.message || "绑定工作区 Checkpoint 失败");
-    }
-  }
-
-  function codexWorkspaceCheckpointBindingKey(threadId, turnId) {
-    const normalizedThreadId = String(threadId || "").trim();
-    const normalizedTurnId = String(turnId || "").trim();
-    return normalizedThreadId && normalizedTurnId
-      ? `${normalizedThreadId}\u0000${normalizedTurnId}`
-      : "";
-  }
-
-  function codexWorkspaceCheckpointBindings() {
-    if (!(window.__codexWorkspaceCheckpointBindings instanceof Map)) {
-      window.__codexWorkspaceCheckpointBindings = new Map();
-    }
-    return window.__codexWorkspaceCheckpointBindings;
-  }
-
-  function trackCodexWorkspaceCheckpointBinding(created, turnResult, bindingPromise) {
-    const key = codexWorkspaceCheckpointBindingKey(
-      created?.context?.threadId,
-      codexWorkspaceCheckpointTurnId(turnResult)
-    );
-    if (!key) return bindingPromise;
-    const bindings = codexWorkspaceCheckpointBindings();
-    const tracked = Promise.resolve(bindingPromise).finally(() => {
-      if (bindings.get(key) === tracked) bindings.delete(key);
-    });
-    bindings.set(key, tracked);
-    return tracked;
-  }
-
-  async function waitForCodexWorkspaceCheckpointBinding(threadId, turnId) {
-    const key = codexWorkspaceCheckpointBindingKey(threadId, turnId);
-    const binding = key ? codexWorkspaceCheckpointBindings().get(key) : null;
-    if (!binding) return;
-    try {
-      await binding;
-    } catch {
-    }
-  }
-
-  function codexWorkspaceCheckpointCompletionHints() {
-    if (!(window.__codexWorkspaceCheckpointCompletionHints instanceof Map)) {
-      window.__codexWorkspaceCheckpointCompletionHints = new Map();
-    }
-    return window.__codexWorkspaceCheckpointCompletionHints;
-  }
-
-  function pruneCodexWorkspaceCheckpointCompletionHints(now = Date.now()) {
-    const hints = codexWorkspaceCheckpointCompletionHints();
-    for (const [threadId, hint] of hints) {
-      if (
-        Number(hint?.settledAt || 0) > 0 &&
-        now - Number(hint.settledAt) > codexWorkspaceCheckpointCompletionHintTtlMs
-      ) {
-        hints.delete(threadId);
-      }
-    }
-    return hints;
-  }
-
-  function clearCodexWorkspaceCheckpointCompletionHint(threadId = "") {
-    const hints = codexWorkspaceCheckpointCompletionHints();
-    const normalizedThreadId = String(threadId || "").trim();
-    if (normalizedThreadId) {
-      hints.delete(normalizedThreadId);
-    } else {
-      hints.clear();
-    }
-  }
-
-  function trackCodexWorkspaceCheckpointCompletion(notification, completionPromise) {
-    const completion = codexWorkspaceCheckpointCompletionPayload(notification);
-    if (!completion?.threadId) return Promise.resolve(completionPromise);
-    const hints = pruneCodexWorkspaceCheckpointCompletionHints();
-    const hint = {
-      threadId: completion.threadId,
-      turnId: completion.turnId,
-      startedAt: Date.now(),
-      settledAt: 0,
-      value: null,
-      promise: null,
-    };
-    const tracked = Promise.resolve(completionPromise).then(
-      (value) => {
-        hint.value = value;
-        hint.settledAt = Date.now();
-        return value;
-      },
-      (error) => {
-        hint.settledAt = Date.now();
-        throw error;
-      }
-    );
-    hint.promise = tracked;
-    hints.set(completion.threadId, hint);
-    return tracked;
-  }
-
-  function codexWorkspaceCheckpointCompletionValueHasNoChanges(value, context) {
-    if (
-      !value ||
-      value.threadId !== context?.threadId ||
-      String(value.cwd || "").trim() !== String(context?.cwd || "").trim()
-    ) {
-      return false;
-    }
-    const result = value.result;
-    if (result?.status !== "ok") return false;
-    if (result?.omitted === true) return true;
-    const checkpoint = result?.checkpoint;
-    if (checkpoint?.changeScope !== "turn") return false;
-    const changedFileCount = Number(checkpoint?.changedFileCount);
-    const changedFiles = Array.isArray(checkpoint?.changedFiles) ? checkpoint.changedFiles : [];
-    return Number.isFinite(changedFileCount) &&
-      changedFileCount === 0 &&
-      changedFiles.length === 0;
-  }
-
-  async function codexWorkspaceCheckpointRecentCompletionHasNoChanges(context) {
-    const hints = pruneCodexWorkspaceCheckpointCompletionHints();
-    const hint = hints.get(context?.threadId);
-    if (!hint?.promise) return false;
-    let value;
-    try {
-      value = await hint.promise;
-    } catch {
-      return false;
-    }
-    if (hints.get(context.threadId) !== hint) return false;
-    if (
-      !hint.settledAt ||
-      Date.now() - hint.settledAt > codexWorkspaceCheckpointCompletionHintTtlMs
-    ) {
-      hints.delete(context.threadId);
-      return false;
-    }
-    return codexWorkspaceCheckpointCompletionValueHasNoChanges(value, context);
-  }
-
-  function codexWorkspaceCheckpointCompletionStatus(value) {
-    const status = String(value || "").trim().toLowerCase();
-    if (status === "completed") return "completed";
-    if (status === "interrupted" || status === "cancelled" || status === "canceled") {
-      return "interrupted";
-    }
-    if (status === "failed") return "failed";
-    return "";
-  }
-
-  function codexWorkspaceCheckpointCompletionPayload(notification) {
-    const params = notification?.params && typeof notification.params === "object"
-      ? notification.params
-      : notification;
-    const threadId = validThreadSessionKey(params?.threadId);
-    const turnId = String(params?.turn?.id || params?.turnId || "").trim();
-    const status = codexWorkspaceCheckpointCompletionStatus(
-      params?.turn?.status || params?.status
-    );
-    if (!threadId || !turnId || !status) return null;
-    return { threadId, turnId, status, params };
-  }
-
-  function codexWorkspaceCheckpointConversationManager() {
-    const activeManager = window.__codexElvesConversationStateManager || null;
-    if (typeof activeManager?.addNotificationCallback === "function") return activeManager;
-    const rpc = findCodexAppServerManagerRpcInScopedSignals();
-    if (!rpc) {
-      try {
-        const manager = findCodexConversationManagerInReactTree()?.manager || null;
-        if (typeof manager?.addNotificationCallback === "function") return manager;
-      } catch {
-      }
-      return null;
-    }
-    const cached = window.__codexWorkspaceCheckpointRpcAdapter;
-    if (cached?.rpc === rpc) return cached;
-    // 新版会话 manager 已迁到宿主 RPC，完成通知通过它订阅；不能只挂在 renderer 的
-    // mcp-notification 上，否则原生聊天结束时不会封存 Checkpoint。
-    const adapter = {
-      rpc,
-      hostId: "local",
-      addNotificationCallback(method, callback) {
-        let disposed = false;
-        let subscription = null;
-        const pending = rpc.subscribe({
-          type: "notification", key: { hostId: "local" }, methods: [method],
-          listener: (notification) => { if (!disposed) return callback(notification); },
-        });
-        pending.then((value) => {
-          if (disposed) value?.[Symbol.dispose]?.();
-          else subscription = value;
-        }, (error) => {
-          if (!disposed) sendCodexElvesDiagnostic("workspace_checkpoint_completion_listener_failed", {
-            errorMessage: error?.message || String(error),
-          });
-        });
-        return () => {
-          disposed = true;
-          subscription?.[Symbol.dispose]?.();
-          pending?.[Symbol.dispose]?.();
-        };
-      },
-    };
-    window.__codexWorkspaceCheckpointRpcAdapter = adapter;
-    return adapter;
-  }
-
-  function refreshOpenCodexWorkspaceCheckpointDialog(threadId) {
-    document.querySelectorAll(".codex-workspace-checkpoint-overlay").forEach((dialog) => {
-      const context = dialog.__codexWorkspaceCheckpointContext;
-      if (context?.threadId === threadId) {
-        void loadCodexWorkspaceCheckpointDialogList(dialog, context);
-      }
-    });
-  }
-
-  async function completeCodexWorkspaceCheckpointTurn(manager, notification) {
-    if (!codexWorkspaceCheckpointFeatureEnabled()) return false;
-    const completion = codexWorkspaceCheckpointCompletionPayload(notification);
-    if (!completion) return false;
-    const context = await codexWorkspaceCheckpointContextAsync(manager, completion.params);
-    if (context.stale) return false;
-    const cwd = String(context.cwd || "").trim();
-    const hostId = String(context.hostId || manager?.hostId || "local").trim();
-    if (!context.local || (hostId && hostId !== "local")) return false;
-    if (!cwd) throw new Error("未识别到已完成轮次的工作目录");
-
-    await Promise.all([...(codexNativeCheckpointOperations.get(completion.threadId) || [])]);
-    await waitForCodexWorkspaceCheckpointBinding(
-      completion.threadId,
-      completion.turnId
-    );
-    const result = await postJson("/workspace-checkpoint/complete-turn", {
-      cwd,
-      threadId: completion.threadId,
-      turnId: completion.turnId,
-      status: completion.status,
-    });
-    if (
-      result?.status !== "ok" ||
-      (result?.omitted !== true && !result?.checkpoint?.id)
-    ) {
-      throw new Error(result?.message || "完成工作区 Checkpoint 失败");
-    }
-    refreshOpenCodexWorkspaceCheckpointDialog(completion.threadId);
-    return {
-      cwd,
-      threadId: completion.threadId,
-      turnId: completion.turnId,
-      result,
-    };
-  }
-
-  function removeCodexWorkspaceCheckpointTurnCompletionListener() {
-    const unsubscribe = window.__codexWorkspaceCheckpointCompletionUnsubscribe;
-    window.__codexWorkspaceCheckpointCompletionUnsubscribe = null;
-    window.__codexWorkspaceCheckpointCompletionManager = null;
-    window.__codexWorkspaceCheckpointCompletionVersion = "";
-    try {
-      unsubscribe?.();
-    } catch {
-    }
-  }
-
-  function installCodexWorkspaceCheckpointTurnCompletionListener() {
-    if (!codexWorkspaceCheckpointFeatureEnabled()) {
-      removeCodexWorkspaceCheckpointTurnCompletionListener();
-      return false;
-    }
-    const manager = codexWorkspaceCheckpointConversationManager();
-    if (!manager) return false;
-    if (
-      window.__codexWorkspaceCheckpointCompletionManager === manager &&
-      window.__codexWorkspaceCheckpointCompletionVersion === codexWorkspaceCheckpointVersion &&
-      typeof window.__codexWorkspaceCheckpointCompletionUnsubscribe === "function"
-    ) {
-      return true;
-    }
-
-    removeCodexWorkspaceCheckpointTurnCompletionListener();
-    const callback = (notification) => {
-      try {
-        return trackCodexWorkspaceCheckpointCompletion(
-          notification,
-          completeCodexWorkspaceCheckpointTurn(manager, notification)
-        ).catch((error) => {
-          sendCodexElvesDiagnostic("workspace_checkpoint_complete_turn_failed", {
-            threadId: String(notification?.params?.threadId || ""),
-            turnId: String(notification?.params?.turn?.id || ""),
-            errorName: error?.name || "",
-            errorMessage: error?.message || String(error),
-          });
-          return false;
-        });
-      } catch (error) {
-        sendCodexElvesDiagnostic("workspace_checkpoint_complete_turn_failed", {
-          threadId: String(notification?.params?.threadId || ""),
-          turnId: String(notification?.params?.turn?.id || ""),
-          errorName: error?.name || "",
-          errorMessage: error?.message || String(error),
-        });
-        return false;
-      }
-    };
-    let unsubscribe = null;
-    try {
-      unsubscribe = manager.addNotificationCallback("turn/completed", callback);
-    } catch (error) {
-      sendCodexElvesDiagnostic("workspace_checkpoint_completion_listener_failed", {
-        errorName: error?.name || "",
-        errorMessage: error?.message || String(error),
-      });
-      return false;
-    }
-    window.__codexWorkspaceCheckpointCompletionManager = manager;
-    window.__codexWorkspaceCheckpointCompletionVersion = codexWorkspaceCheckpointVersion;
-    window.__codexWorkspaceCheckpointCompletionUnsubscribe =
-      typeof unsubscribe === "function" ? unsubscribe : () => {};
-    return true;
-  }
-
-  function codexWorkspaceCheckpointRestoreIntent() {
-    const intent = window.__codexWorkspaceCheckpointRestoreIntent;
-    if (!intent) return null;
-    if (Date.now() - Number(intent.createdAt || 0) > codexWorkspaceCheckpointIntentTtlMs) {
-      window.__codexWorkspaceCheckpointRestoreIntent = null;
-      resetCodexWorkspaceCheckpointEditButtons();
-      return null;
-    }
-    return intent;
-  }
-
-  function resetCodexWorkspaceCheckpointEditButtons() {
-    document.querySelectorAll(`[${codexWorkspaceCheckpointEditButtonAttribute}="true"]`).forEach((button) => {
-      button.dataset.busy = "false";
-      button.textContent = "发送并恢复文件";
-      const form = button.closest?.("form");
-      const nativeSubmit = form?.querySelector?.('button[type="submit"]');
-      syncCodexWorkspaceCheckpointEditButton(button, nativeSubmit);
-    });
-  }
-
-  function clearCodexWorkspaceCheckpointRestoreIntent(intent = null) {
-    if (!intent || window.__codexWorkspaceCheckpointRestoreIntent === intent) {
-      window.__codexWorkspaceCheckpointRestoreIntent = null;
-    }
-    resetCodexWorkspaceCheckpointEditButtons();
-  }
-
-  function codexWorkspaceCheckpointIntentForRequest(params) {
-    const intent = codexWorkspaceCheckpointRestoreIntent();
-    if (!intent) return null;
-    const threadId = codexWorkspaceCheckpointRequestThreadId(params);
-    if (intent.threadId && threadId && intent.threadId !== threadId) return null;
-    return intent;
-  }
-
-  async function restoreCodexWorkspaceCheckpointForNativeRevert(client, method, params, intent) {
-    const context = await codexWorkspaceCheckpointContextAsync(client, params);
-    if (context.stale) throw new Error("会话已切换，请重试");
-    const intentThreadId = validThreadSessionKey(intent?.threadId);
-    const contextThreadId = validThreadSessionKey(context?.threadId);
-    if (
-      !intentThreadId ||
-      !contextThreadId ||
-      codexWorkspaceCheckpointSessionKey(intentThreadId) !==
-        codexWorkspaceCheckpointSessionKey(contextThreadId)
-    ) {
-      throw new Error("会话已切换，请重试");
-    }
-    const intentHostId = String(intent?.hostId || "").trim();
-    if (intentHostId && context.hostId && intentHostId !== context.hostId) {
-      throw new Error("会话已切换，请重试");
-    }
-    const cwd = String(context.cwd || "").trim();
-    if (!cwd) throw new Error("未识别到当前会话工作目录");
-    const threadId = contextThreadId;
-    if (!context.local) throw new Error("远程会话暂不支持工作区 Checkpoint");
-    const result = await postJson("/workspace-checkpoint/restore-for-revert", {
-      cwd,
-      threadId,
-      beforeTurnId: method === "thread/revert" ? String(params?.beforeTurnId || "") : "",
-      numTurns: method === "thread/rollback" ? Number(params?.numTurns || 0) : undefined,
-    });
-    if (result?.status !== "ok") {
-      throw new Error(result?.message || "撤销 AI 文件修改失败");
-    }
-    const changedCount = Array.isArray(result.changedPaths) ? result.changedPaths.length : 0;
-    if (result.partial) {
-      showToast(`已恢复 ${changedCount} 个文件，但部分嵌套仓库或并发写入未能处理`);
-    } else {
-      showToast(`已撤销 ${changedCount} 个文件修改，正在发送编辑后的消息`);
-    }
-    return result;
-  }
-
-  function codexWorkspaceCheckpointActiveParams() {
-    if (!(window.__codexWorkspaceCheckpointActiveParams instanceof WeakSet)) {
-      window.__codexWorkspaceCheckpointActiveParams = new WeakSet();
-    }
-    return window.__codexWorkspaceCheckpointActiveParams;
-  }
-
-  async function codexWorkspaceCheckpointSendRequest(original, client, method, params, options) {
-    const methodName = String(method || "");
-    const objectParams = params && typeof params === "object" ? params : null;
-    const activeParams = codexWorkspaceCheckpointActiveParams();
-    if (objectParams && activeParams.has(objectParams)) {
-      return await original.call(client, method, params, options);
-    }
-    if (objectParams) activeParams.add(objectParams);
-    try {
-      if (
-        codexElvesSettings().workspaceCheckpoint &&
-        (methodName === "thread/revert" || methodName === "thread/rollback")
-      ) {
-        const intent = codexWorkspaceCheckpointIntentForRequest(params);
-        if (intent) {
-          try {
-            intent.phase = "restoring";
-            await restoreCodexWorkspaceCheckpointForNativeRevert(client, methodName, params, intent);
-            intent.phase = "restored";
-            clearCodexWorkspaceCheckpointRestoreIntent(intent);
-          } catch (error) {
-            clearCodexWorkspaceCheckpointRestoreIntent(intent);
-            showToast(error?.message || "撤销 AI 文件修改失败，消息未发送");
-            sendCodexElvesDiagnostic("workspace_checkpoint_restore_for_revert_failed", {
-              method: methodName,
-              errorName: error?.name || "",
-              errorMessage: error?.message || String(error),
-            });
-            throw error;
-          }
-          try {
-            return await original.call(client, method, params, options);
-          } catch (error) {
-            showToast("文件已恢复，但 Codex 消息回退失败；可从 Checkpoint 历史恢复安全快照");
-            throw error;
-          }
-        }
-      }
-      if (codexElvesSettings().workspaceCheckpoint && methodName === "turn/start") {
-        clearCodexWorkspaceCheckpointCompletionHint(
-          codexWorkspaceCheckpointRequestThreadId(params)
-        );
-        installCodexWorkspaceCheckpointTurnCompletionListener();
-        let created;
-        try {
-          created = await createCodexWorkspaceCheckpoint(client, params);
-        } catch (error) {
-          if (
-            error?.code === "checkpoint_bridge_unavailable" ||
-            error?.code === "checkpoint_request_timeout"
-          ) {
-            const timedOut = error.code === "checkpoint_request_timeout";
-            created = { skipped: true, reason: timedOut ? "request_timeout" : "bridge_unavailable" };
-            showToast(timedOut
-              ? "Checkpoint 处理超时，本轮跳过快照，继续发送"
-              : "Checkpoint 暂不可用，本轮未保存快照，继续发送");
-            sendCodexElvesDiagnostic("workspace_checkpoint_create_skipped", {
-              reason: created.reason,
-              errorCode: error.code,
-              errorMessage: error.message,
-            });
-          } else {
-            showToast(`${error?.message || "创建工作区 Checkpoint 失败"}；本轮发送已取消`);
-            sendCodexElvesDiagnostic("workspace_checkpoint_create_failed", {
-              errorName: error?.name || "",
-              errorMessage: error?.message || String(error),
-            });
-            throw error;
-          }
-        }
-        const result = await original.call(client, method, params, options);
-        if (created?.skipped) return result;
-        installCodexWorkspaceCheckpointTurnCompletionListener();
-        // 原生发送已成功；绑定在后台完成，轮次完成处理仍通过 bindings 等待它。
-        void trackCodexWorkspaceCheckpointBinding(
-          created,
-          result,
-          bindCodexWorkspaceCheckpoint(created, result)
-        ).catch((error) => {
-          sendCodexElvesDiagnostic("workspace_checkpoint_bind_failed", {
-            checkpointId: created?.checkpoint?.id || "",
-            errorName: error?.name || "",
-            errorMessage: error?.message || String(error),
-          });
-        });
-        return result;
-      }
-      return await original.call(client, method, params, options);
-    } finally {
-      if (objectParams) activeParams.delete(objectParams);
-    }
-  }
-
-  function patchCodexWorkspaceCheckpointRequestClientPrototype(requestClientClass) {
-    const prototype = requestClientClass?.prototype;
-    if (!prototype || typeof prototype.sendRequest !== "function") return false;
-    if (prototype.__codexWorkspaceCheckpointPatchVersion === codexWorkspaceCheckpointVersion) return true;
-    const original = typeof prototype.__codexWorkspaceCheckpointOriginalSendRequest === "function"
-      ? prototype.__codexWorkspaceCheckpointOriginalSendRequest
-      : prototype.sendRequest;
-    prototype.__codexWorkspaceCheckpointOriginalSendRequest = original;
-    prototype.sendRequest = function codexWorkspaceCheckpointPatchedSendRequest(method, params, options) {
-      return codexWorkspaceCheckpointSendRequest(original, this, method, params, options);
-    };
-    prototype.__codexWorkspaceCheckpointPatchVersion = codexWorkspaceCheckpointVersion;
-    return true;
-  }
-
-  function installCodexWorkspaceCheckpointRequestClientPatch() {
-    if (!codexElvesSettings().workspaceCheckpoint) return Promise.resolve(false);
-    if (window.__codexWorkspaceCheckpointRequestClientPatchInstalled === codexWorkspaceCheckpointVersion) {
-      clearCodexWorkspaceCheckpointPatchRetry(true);
-      return Promise.resolve(true);
-    }
-    if (window.__codexWorkspaceCheckpointRequestClientPatchPromise) {
-      return window.__codexWorkspaceCheckpointRequestClientPatchPromise;
-    }
-    const now = Date.now();
-    const nextAttemptAt = Number(window.__codexWorkspaceCheckpointPatchNextAttemptAt || 0);
-    if (now < nextAttemptAt) return Promise.resolve(false);
-    const patch = async () => {
-      try {
-        if (await installCodexNativeRpcCompat()) {
-          window.__codexWorkspaceCheckpointRequestClientPatchInstalled = codexWorkspaceCheckpointVersion;
-          clearCodexWorkspaceCheckpointPatchRetry(true);
-          return true;
-        }
-        let requestClientClass = findCodexAppServerRequestClientInScopedSignals()?.constructor || null;
-        let requestClientSource = requestClientClass ? "local_scoped_client" : "";
-        let lastError = null;
-        for (const namePart of codexServiceTierRequestClientModuleParts) {
-          if (requestClientClass) break;
-          try {
-            const module = await loadCodexAppModule(namePart);
-            requestClientClass = codexServiceTierRequestClientClassFromModule(module);
-            if (requestClientClass) {
-              requestClientSource = `module:${namePart}`;
-              break;
-            }
-            lastError = new Error(`Codex AppServerRequestClient unavailable: ${namePart}`);
-          } catch (error) {
-            lastError = error;
-          }
-        }
-        if (!requestClientClass) {
-          requestClientClass = codexServiceTierRequestClientClassFromConversationManager();
-          if (requestClientClass) requestClientSource = "conversation_manager";
-        }
-        if (!requestClientClass) throw lastError || new Error("Codex AppServerRequestClient unavailable");
-        if (!patchCodexWorkspaceCheckpointRequestClientPrototype(requestClientClass)) {
-          throw new Error("Codex AppServerRequestClient Checkpoint patch rejected");
-        }
-        window.__codexWorkspaceCheckpointRequestClientPatchInstalled = codexWorkspaceCheckpointVersion;
-        clearCodexWorkspaceCheckpointPatchRetry(true);
-        sendCodexElvesDiagnostic("workspace_checkpoint_request_client_patch_installed", {
-          source: requestClientSource,
-        });
-        return true;
-      } catch (error) {
-        const failureCount = Number(window.__codexWorkspaceCheckpointPatchFailureCount || 0) + 1;
-        const retryAfterMs = codexWorkspaceCheckpointPatchRetryDelay(failureCount);
-        window.__codexWorkspaceCheckpointPatchFailureCount = failureCount;
-        window.__codexWorkspaceCheckpointPatchNextAttemptAt = Date.now() + retryAfterMs;
-        scheduleCodexWorkspaceCheckpointPatchRetry(failureCount);
-        sendCodexElvesDiagnostic("workspace_checkpoint_request_client_patch_failed", {
-          errorName: error?.name || "",
-          errorMessage: error?.message || String(error),
-          failureCount,
-          retryAfterMs,
-        });
-        return false;
-      } finally {
-        if (window.__codexWorkspaceCheckpointRequestClientPatchPromise === patchPromise) {
-          window.__codexWorkspaceCheckpointRequestClientPatchPromise = null;
-        }
-      }
-    };
-    const patchPromise = patch();
-    window.__codexWorkspaceCheckpointRequestClientPatchPromise = patchPromise;
-    return patchPromise;
-  }
-
-  function removeCodexWorkspaceCheckpointEditButtons() {
-    document.querySelectorAll(`[${codexWorkspaceCheckpointEditButtonAttribute}="true"]`)
-      .forEach((button) => button.remove());
-  }
-
-  function codexWorkspaceCheckpointEditFormFromEditor(editor) {
-    const form = editor?.closest?.("form");
-    if (!form) return null;
-    const submit = form.querySelector('button[type="submit"]');
-    if (!submit) return null;
-    const cancel = Array.from(form.querySelectorAll("button")).find((button) =>
-      /^(取消|Cancel)$/i.test(String(button.textContent || "").trim())
-    );
-    return cancel ? { form, submit } : null;
-  }
-
-  function codexWorkspaceCheckpointEditForms() {
-    const editors = Array.from(document.querySelectorAll([
-      '[aria-label="编辑消息"]',
-      '[aria-label="Edit message"]',
-      '[placeholder="编辑消息"]',
-      '[placeholder="Edit message"]',
-    ].join(", ")));
-    const seen = new Set();
-    return editors
-      .map(codexWorkspaceCheckpointEditFormFromEditor)
-      .filter((entry) => {
-        if (!entry || seen.has(entry.form)) return false;
-        seen.add(entry.form);
-        return true;
-      });
-  }
-
-  function syncCodexWorkspaceCheckpointEditButton(button, nativeSubmit) {
-    if (!button || button.dataset.busy === "true") return;
-    const availability = String(button.dataset.checkpointAvailability || "unknown");
-    button.disabled = !!nativeSubmit?.disabled ||
-      availability === "checking" ||
-      availability === "no_changes";
-  }
-
-  function setCodexWorkspaceCheckpointEditButtonAvailability(button, nativeSubmit, availability) {
-    if (!button) return;
-    button.dataset.checkpointAvailability = availability;
-    if (availability === "no_changes") {
-      button.title = "无文件变化";
-      button.setAttribute("aria-label", "发送并恢复文件：无文件变化");
-    } else {
-      button.title = "";
-      button.removeAttribute("title");
-      button.setAttribute("aria-label", "发送并恢复文件");
-    }
-    syncCodexWorkspaceCheckpointEditButton(button, nativeSubmit);
-  }
-
-  async function refreshCodexWorkspaceCheckpointEditButtonAvailability(button, nativeSubmit) {
-    const previewToken = String(Number(button.dataset.checkpointPreviewToken || 0) + 1);
-    button.dataset.checkpointPreviewToken = previewToken;
-    setCodexWorkspaceCheckpointEditButtonAvailability(button, nativeSubmit, "checking");
-    let context = await codexWorkspaceCheckpointContextAsync(null, {});
-    if (context.stale) return;
-    if (!context.local || !context.cwd || !context.threadId) {
-      setCodexWorkspaceCheckpointEditButtonAvailability(button, nativeSubmit, "unknown");
-      return;
-    }
-    let hintedNoChanges = false;
-    try {
-      hintedNoChanges = await codexWorkspaceCheckpointRecentCompletionHasNoChanges(context);
-      if (
-        !button.isConnected ||
-        button.dataset.checkpointPreviewToken !== previewToken
-      ) {
-        return;
-      }
-      if (
-        !codexWorkspaceCheckpointFeatureEnabled() ||
-        !codexWorkspaceCheckpointContextMatchesCurrent(null, context)
-      ) {
-        return;
-      }
-      const freshContext = await codexWorkspaceCheckpointFreshCurrentContext(context);
-      if (!freshContext) return;
-      context = freshContext;
-      if (hintedNoChanges) {
-        setCodexWorkspaceCheckpointEditButtonAvailability(button, nativeSubmit, "no_changes");
-      }
-      const result = await postJson("/workspace-checkpoint/preview-revert", {
-        cwd: context.cwd,
-        threadId: context.threadId,
-        beforeTurnId: "",
-        numTurns: 1,
-      });
-      if (
-        !button.isConnected ||
-        button.dataset.checkpointPreviewToken !== previewToken
-      ) {
-        return;
-      }
-      if (
-        !codexWorkspaceCheckpointFeatureEnabled() ||
-        !codexWorkspaceCheckpointContextMatchesCurrent(null, context)
-      ) {
-        return;
-      }
-      if (result?.status !== "ok") {
-        throw new Error(result?.message || "检查上一轮文件变化失败");
-      }
-      const changedPaths = Array.isArray(result.changedPaths) ? result.changedPaths : [];
-      const hasChanges = result.hasChanges === true || changedPaths.length > 0;
-      setCodexWorkspaceCheckpointEditButtonAvailability(
-        button,
-        nativeSubmit,
-        hasChanges ? "has_changes" : "no_changes"
-      );
-    } catch (error) {
-      if (
-        button.isConnected &&
-        button.dataset.checkpointPreviewToken === previewToken
-      ) {
-        setCodexWorkspaceCheckpointEditButtonAvailability(
-          button,
-          nativeSubmit,
-          hintedNoChanges ? "no_changes" : "unknown"
-        );
-      }
-      sendCodexElvesDiagnostic("workspace_checkpoint_preview_revert_failed", {
-        errorName: error?.name || "",
-        errorMessage: error?.message || String(error),
-      });
-    }
-  }
-
-  async function beginCodexWorkspaceCheckpointEditSubmit(button, nativeSubmit) {
-    if (!codexElvesSettings().workspaceCheckpoint) {
-      showToast("请先在功能增强中开启 Checkpoint");
-      return;
-    }
-    if (
-      button.dataset.busy === "true" ||
-      nativeSubmit.disabled ||
-      button.dataset.checkpointAvailability === "checking" ||
-      button.dataset.checkpointAvailability === "no_changes"
-    ) {
-      return;
-    }
-    let context = await codexWorkspaceCheckpointContextAsync(null, {});
-    if (context.stale) return;
-    if (!context.local) {
-      showToast("远程会话暂不支持工作区 Checkpoint");
-      return;
-    }
-    if (!context.cwd || !context.threadId) {
-      showToast("未识别到当前会话工作目录或 thread");
-      return;
-    }
-    const freshContext = await codexWorkspaceCheckpointFreshCurrentContext(context);
-    if (!freshContext) return;
-    context = freshContext;
-    const intent = {
-      cwd: context.cwd,
-      threadId: context.threadId,
-      hostId: context.hostId,
-      createdAt: Date.now(),
-      phase: "waiting",
-    };
-    window.__codexWorkspaceCheckpointRestoreIntent = intent;
-    button.dataset.busy = "true";
-    button.disabled = true;
-    button.textContent = "正在撤销并发送…";
-    nativeSubmit.click();
-    setTimeout(() => {
-      if (
-        window.__codexWorkspaceCheckpointRestoreIntent === intent &&
-        intent.phase === "waiting"
-      ) {
-        clearCodexWorkspaceCheckpointRestoreIntent(intent);
-        showToast("Codex 未触发消息回退，文件未改变");
-      }
-    }, 15000);
-  }
-
-  function installCodexWorkspaceCheckpointEditButtons() {
-    if (!codexElvesSettings().workspaceCheckpoint) {
-      removeCodexWorkspaceCheckpointEditButtons();
-      return;
-    }
-    codexWorkspaceCheckpointEditForms().forEach(({ form, submit }) => {
-      let button = form.querySelector(`[${codexWorkspaceCheckpointEditButtonAttribute}="true"]`);
-      if (!button) {
-        button = document.createElement("button");
-        button.type = "button";
-        button.className = `${submit.className || ""} codex-workspace-checkpoint-edit-button`.trim();
-        button.setAttribute(codexWorkspaceCheckpointEditButtonAttribute, "true");
-        button.setAttribute("aria-label", "发送并恢复文件");
-        button.dataset.busy = "false";
-        button.textContent = "发送并恢复文件";
-        button.addEventListener("click", (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          void beginCodexWorkspaceCheckpointEditSubmit(button, submit);
-        }, true);
-        submit.parentElement?.insertBefore(button, submit);
-        void refreshCodexWorkspaceCheckpointEditButtonAvailability(button, submit);
-      } else if (!button.dataset.checkpointAvailability) {
-        void refreshCodexWorkspaceCheckpointEditButtonAvailability(button, submit);
-      }
-      syncCodexWorkspaceCheckpointEditButton(button, submit);
-    });
-  }
-
-  function closeCodexWorkspaceCheckpointDialog() {
-    document.querySelectorAll(".codex-workspace-checkpoint-overlay").forEach((node) => {
-      dismissCodexElvesActionConfirmations(node);
-      node.remove();
-    });
-  }
-
-  function codexWorkspaceCheckpointFeatureEnabled() {
-    return codexElvesSettings().workspaceCheckpoint === true;
-  }
-
-  function codexWorkspaceCheckpointTurnState(checkpoint) {
-    // Native history can recover the status, but only a persisted completion
-    // provides reliable file statistics for that turn.
-    const recordedStatus = codexWorkspaceCheckpointCompletionStatus(checkpoint?.turnStatus);
-    if (recordedStatus) return { status: recordedStatus, recorded: true };
-    const turnId = String(checkpoint?.turnId || "").trim();
-    if (!turnId || !checkpoint?.threadId) return { status: "", recorded: false };
-    let turns = [];
-    try {
-      turns = codexAppServerConversationTurns(
-        codexWorkspaceCheckpointConversation(
-          checkpoint.threadId,
-          window.__codexWorkspaceCheckpointCompletionManager
-        )
-      );
-    } catch {
-    }
-    const matchingTurns = turns.filter((turn) =>
-      String(turn?.turnId || turn?.id || "").trim() === turnId
-    );
-    const terminalStatus = matchingTurns
-      .map((turn) => codexWorkspaceCheckpointCompletionStatus(turn?.status))
-      .find(Boolean);
-    if (terminalStatus) return { status: terminalStatus, recorded: false };
-    const running = matchingTurns.some((turn) =>
-      ["inprogress", "in_progress", "running", "active"]
-        .includes(String(turn?.status || "").toLowerCase())
-    );
-    return { status: running ? "running" : "", recorded: false };
-  }
-
-  function codexWorkspaceCheckpointRestoreLabel(checkpoint) {
-    return checkpoint?.kind === "restoreSafety"
-      ? "恢复此安全快照"
-      : "恢复到本轮开始前";
-  }
-
-  function codexWorkspaceCheckpointStage(checkpoint, turnState = codexWorkspaceCheckpointTurnState(checkpoint)) {
-    if (checkpoint?.kind === "restoreSafety") {
-      return { kind: "safety", label: "安全快照" };
-    }
-    if (checkpoint?.initialization === true) {
-      return { kind: "initialization", label: "初始化" };
-    }
-    if (checkpoint?.accepted === false) {
-      return { kind: "incomplete", label: "发送未完成" };
-    }
-    if (checkpoint?.changeScope === "turn") {
-      switch (turnState.status) {
-        case "completed":
-          return { kind: "turn", label: "本轮完成" };
-        case "failed":
-          return { kind: "failed", label: "本轮失败" };
-        case "interrupted":
-          return { kind: "interrupted", label: "本轮已中断" };
-        case "running":
-          return { kind: "turn", label: "本轮执行中" };
-        default:
-          return { kind: "unsynced", label: "状态未同步" };
-      }
-    }
-    return { kind: "legacy", label: "旧版·发送前差异" };
-  }
-
-  function codexWorkspaceCheckpointItemTitle(checkpoint) {
-    if (checkpoint?.kind === "restoreSafety") return "恢复前自动保存的工作区";
-    const preview = String(checkpoint?.promptPreview || "").replace(/\s+/g, " ").trim();
-    if (preview) return preview;
-    if (checkpoint?.accepted === false) return "未完成的发送请求";
-    return checkpoint?.changeScope === "turn" ? "本轮工作区变化" : "发送前工作区备份";
-  }
-
-  function codexWorkspaceCheckpointTimeLabel(createdAtMs, nowMs = Date.now()) {
-    const value = Number(createdAtMs);
-    if (!Number.isFinite(value) || value <= 0) return "时间未知";
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "时间未知";
-    const nowValue = Number(nowMs);
-    const now = new Date(Number.isFinite(nowValue) ? nowValue : Date.now());
-    const time = date
-      .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
-      .replace(/^24:/, "00:");
-    const dateStart = new Date(date);
-    const nowStart = new Date(now);
-    dateStart.setHours(0, 0, 0, 0);
-    nowStart.setHours(0, 0, 0, 0);
-    const dayOffset = Math.round((nowStart.getTime() - dateStart.getTime()) / 86400000);
-    if (dayOffset === 0) return `今天 ${time}`;
-    if (dayOffset === 1) return `昨天 ${time}`;
-    if (date.getFullYear() === now.getFullYear()) {
-      return `${date.getMonth() + 1}月${date.getDate()}日 ${time}`;
-    }
-    return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${time}`;
-  }
-
-  function codexWorkspaceCheckpointLineCount(value) {
-    if (value === null || value === undefined || value === "") return null;
-    const number = Number(value);
-    return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : null;
-  }
-
-  function codexWorkspaceCheckpointChangedFiles(checkpoint) {
-    const files = Array.isArray(checkpoint?.changedFiles) ? checkpoint.changedFiles : [];
-    return files.flatMap((file) => {
-      const path = String(file?.path || "").trim();
-      if (!path) return [];
-      const status = String(file?.status || "M").trim().toUpperCase().slice(0, 1) || "M";
-      return [{
-        path,
-        status,
-        additions: codexWorkspaceCheckpointLineCount(file?.additions),
-        deletions: codexWorkspaceCheckpointLineCount(file?.deletions),
-      }];
-    });
-  }
-
-  function codexWorkspaceCheckpointChangeStatHtml(additions, deletions) {
-    const additionLabel = additions === null ? "—" : `+${additions}`;
-    const deletionLabel = deletions === null ? "—" : `-${deletions}`;
-    return `
-      <span class="checkpoint-change-stat">
-        <span class="checkpoint-added">${escapeHtml(additionLabel)}</span>
-        <span class="checkpoint-deleted">${escapeHtml(deletionLabel)}</span>
-      </span>
-    `;
-  }
-
-  function codexWorkspaceCheckpointFileListHtml(files) {
-    if (!files.length) return "";
-    const rows = files.map((file) => `
-      <div class="checkpoint-file-row">
-        <span class="checkpoint-file-status" data-status="${escapeHtml(file.status)}">${escapeHtml(file.status)}</span>
-        <span class="checkpoint-file-path" title="${escapeHtml(file.path)}">${escapeHtml(file.path)}</span>
-        ${codexWorkspaceCheckpointChangeStatHtml(file.additions, file.deletions)}
-      </div>
-    `).join("");
-    const hiddenCount = Math.max(0, files.length - 5);
-    const toggle = hiddenCount > 0 ? `
-      <button type="button" class="checkpoint-file-toggle" data-codex-workspace-checkpoint-file-toggle="true" aria-expanded="false">
-        <span data-codex-workspace-checkpoint-file-toggle-label="true">展开其余 ${hiddenCount} 个文件</span>
-        <svg class="checkpoint-file-toggle-chevron" viewBox="0 0 16 16" aria-hidden="true">
-          <path d="m3.5 5.75 4.5 4.5 4.5-4.5" fill="none"></path>
-        </svg>
-      </button>
-    ` : "";
-    return `
-      <div class="checkpoint-file-list" data-codex-workspace-checkpoint-file-list="true" data-expanded="false">
-        <div class="checkpoint-file-viewport">${rows}</div>
-        ${toggle}
-      </div>
-    `;
-  }
-
-  function codexWorkspaceCheckpointItemHtml(checkpoint) {
-    const turnState = codexWorkspaceCheckpointTurnState(checkpoint);
-    const stage = codexWorkspaceCheckpointStage(checkpoint, turnState);
-    const title = codexWorkspaceCheckpointItemTitle(checkpoint);
-    const files = codexWorkspaceCheckpointChangedFiles(checkpoint);
-    const recordedCount = codexWorkspaceCheckpointLineCount(checkpoint?.changedFileCount) || 0;
-    const changedFileCount = Math.max(recordedCount, files.length);
-    const completeStats = files.length > 0 &&
-      files.length >= changedFileCount &&
-      files.every((file) => file.additions !== null && file.deletions !== null);
-    const additions = completeStats
-      ? files.reduce((total, file) => total + file.additions, 0)
-      : null;
-    const deletions = completeStats
-      ? files.reduce((total, file) => total + file.deletions, 0)
-      : null;
-    const turnScoped = checkpoint?.accepted !== false && checkpoint?.changeScope === "turn";
-    const turnTerminal = turnScoped && turnState.recorded;
-    const pendingLabel = turnState.status === "running"
-      ? "正在记录本轮文件变化…"
-      : turnState.status
-        ? "本轮已结束，但完成时的文件统计未同步，无法确认是否有文件改动。"
-        : "尚未获取到本轮完成状态，文件变化统计暂不可用。";
-    const initialization = checkpoint?.initialization === true;
-    const initialFileCount = codexWorkspaceCheckpointLineCount(checkpoint?.initialFileCount);
-    const initializationTurnLabel = checkpoint?.accepted === false
-      ? "发送未完成"
-      : !turnTerminal
-        ? pendingLabel
-        : checkpoint?.turnStatus === "failed"
-          ? `本轮失败${changedFileCount > 0 ? `，${changedFileCount} 个文件发生变化` : "，无文件变化"}`
-          : checkpoint?.turnStatus === "interrupted"
-            ? `本轮已中断${changedFileCount > 0 ? `，${changedFileCount} 个文件发生变化` : "，无文件变化"}`
-            : changedFileCount > 0
-              ? `本轮完成，${changedFileCount} 个文件发生变化`
-              : "本轮完成，无文件变化";
-    const changeDetails = initialization
-      ? `
-        <div class="checkpoint-summary checkpoint-initialization-summary">
-          <strong>已建立工作区初始基线 · ${initialFileCount === null ? "文件总数未知" : `共 ${initialFileCount} 个文件`} · ${initializationTurnLabel}</strong>
-          ${turnTerminal && changedFileCount > 0 && completeStats
-            ? codexWorkspaceCheckpointChangeStatHtml(additions, deletions)
-            : ""}
-        </div>
-      `
-      : turnScoped && !turnTerminal
-        ? `<div class="checkpoint-no-change">${escapeHtml(pendingLabel)}</div>`
-        : changedFileCount === 0
-          ? `<div class="checkpoint-no-change">${turnTerminal ? "本轮无文件变化" : "无文件变化"}</div>`
-        : `
-          <div class="checkpoint-summary">
-            <strong>${changedFileCount} 个文件发生变化</strong>
-            ${codexWorkspaceCheckpointChangeStatHtml(additions, deletions)}
-          </div>
-          ${files.length
-            ? codexWorkspaceCheckpointFileListHtml(files)
-            : '<div class="checkpoint-no-change">文件明细不可用</div>'}
-        `;
-    const checkpointId = String(checkpoint?.id || "").trim();
-    return `
-      <div class="codex-workspace-checkpoint-item" data-codex-workspace-checkpoint-id="${escapeHtml(checkpointId)}">
-        <div class="checkpoint-item-main">
-          <div class="checkpoint-item-copy">
-            <div class="checkpoint-title-line">
-              <span class="checkpoint-stage" data-kind="${escapeHtml(stage.kind)}">${escapeHtml(stage.label)}</span>
-              <div class="codex-workspace-checkpoint-item-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
-            </div>
-          </div>
-          <span class="checkpoint-time">${escapeHtml(codexWorkspaceCheckpointTimeLabel(checkpoint?.createdAtMs))}</span>
-          <button type="button" class="codex-elves-action-button checkpoint-restore-button" data-codex-workspace-checkpoint-restore="${escapeHtml(checkpointId)}" data-codex-workspace-checkpoint-kind="${escapeHtml(checkpoint?.kind || "")}"${checkpointId ? "" : " disabled"}>${codexWorkspaceCheckpointRestoreLabel(checkpoint)}</button>
-        </div>
-        ${checkpoint?.kind === "restoreSafety" ? '<div class="checkpoint-no-change">系统在恢复文件前自动保存，可用此快照找回恢复操作前的文件状态。</div>' : ""}
-        ${changeDetails}
-      </div>
-    `;
-  }
-
-  function codexWorkspaceCheckpointOmitsEmptyTurn(checkpoint) {
-    if (
-      checkpoint?.kind === "restoreSafety" ||
-      checkpoint?.initialization === true ||
-      checkpoint?.accepted === false ||
-      checkpoint?.changeScope !== "turn"
-    ) {
-      return false;
-    }
-    const turnStatus = String(checkpoint?.turnStatus || "");
-    if (!["completed", "failed", "interrupted"].includes(turnStatus)) {
-      return false;
-    }
-    const recordedCount = codexWorkspaceCheckpointLineCount(checkpoint?.changedFileCount) || 0;
-    const changedFiles = codexWorkspaceCheckpointChangedFiles(checkpoint);
-    return recordedCount === 0 && changedFiles.length === 0;
-  }
-
-  function codexWorkspaceCheckpointListHtml(checkpoints) {
-    return checkpoints
-      .filter((checkpoint) => !codexWorkspaceCheckpointOmitsEmptyTurn(checkpoint))
-      .map((checkpoint) => codexWorkspaceCheckpointItemHtml(checkpoint))
-      .join("");
-  }
-
-  function setCodexWorkspaceCheckpointFileListExpanded(list, expanded) {
-    if (!list) return false;
-    const rows = list.querySelectorAll(".checkpoint-file-row");
-    const toggle = list.querySelector("[data-codex-workspace-checkpoint-file-toggle]");
-    const label = list.querySelector("[data-codex-workspace-checkpoint-file-toggle-label]");
-    const hiddenCount = Math.max(0, rows.length - 5);
-    const nextExpanded = hiddenCount > 0 && expanded === true;
-    list.dataset.expanded = String(nextExpanded);
-    list.setAttribute("data-expanded", String(nextExpanded));
-    toggle?.setAttribute("aria-expanded", String(nextExpanded));
-    if (label) {
-      label.textContent = nextExpanded
-        ? "收起，仅显示前 5 个文件"
-        : `展开其余 ${hiddenCount} 个文件`;
-    }
-    return nextExpanded;
-  }
-
-  async function loadCodexWorkspaceCheckpointDialogList(dialog, context) {
-    const list = dialog.querySelector("[data-codex-workspace-checkpoint-list]");
-    if (!list) return;
-    if (
-      !codexWorkspaceCheckpointFeatureEnabled() ||
-      !codexWorkspaceCheckpointContextMatchesCurrent(null, context)
-    ) {
-      dialog.closest(".codex-workspace-checkpoint-overlay")?.remove();
-      return;
-    }
-    const freshContext = await codexWorkspaceCheckpointFreshCurrentContext(context);
-    if (!freshContext) {
-      dialog.closest(".codex-workspace-checkpoint-overlay")?.remove();
-      return;
-    }
-    context = freshContext;
-    await installCodexWorkspaceCheckpointRequestClientPatch();
-    const requestId = Number(dialog.__codexWorkspaceCheckpointListRequestId || 0) + 1;
-    dialog.__codexWorkspaceCheckpointListRequestId = requestId;
-    list.innerHTML = '<div class="codex-workspace-checkpoint-empty">正在读取 Checkpoint…</div>';
-    let result;
-    try {
-      result = await postJson("/workspace-checkpoint/list", {
-        cwd: context.cwd,
-        threadId: context.threadId,
-        limit: 100,
-      });
-    } catch (error) {
-      result = { status: "failed", message: error?.message || "读取 Checkpoint 失败，请重试。" };
-    }
-    if (dialog.__codexWorkspaceCheckpointListRequestId !== requestId) return;
-    if (
-      !codexWorkspaceCheckpointFeatureEnabled() ||
-      !codexWorkspaceCheckpointContextMatchesCurrent(null, context)
-    ) {
-      dialog.closest(".codex-workspace-checkpoint-overlay")?.remove();
-      return;
-    }
-    const latestContext = await codexWorkspaceCheckpointFreshCurrentContext(context);
-    if (!latestContext) {
-      dialog.closest(".codex-workspace-checkpoint-overlay")?.remove();
-      return;
-    }
-    context = latestContext;
-    if (result?.status !== "ok") {
-      list.innerHTML = `<div class="codex-workspace-checkpoint-empty">${escapeHtml(result?.message || "读取 Checkpoint 失败")}</div>`;
-      return;
-    }
-    const checkpoints = Array.isArray(result.checkpoints) ? result.checkpoints : [];
-    const checkpointHtml = codexWorkspaceCheckpointListHtml(checkpoints);
-    if (!checkpointHtml) {
-      if (checkpoints.length) {
-        list.innerHTML = '<div class="codex-workspace-checkpoint-empty">已完成轮次均无文件变化，已隐藏；发送前的快照仍保留。</div>';
-        return;
-      }
-      const ready = window.__codexWorkspaceCheckpointRequestClientPatchInstalled ===
-        codexWorkspaceCheckpointVersion;
-      list.innerHTML = `<div class="codex-workspace-checkpoint-empty">${
-        ready
-          ? "当前会话还没有工作区 Checkpoint。下一次发送消息前会自动保存；此前未保存的轮次无法补建。"
-          : "Checkpoint 自动保存尚未就绪，请稍后刷新。此前未保存的轮次无法恢复。"
-      }</div>`;
-      return;
-    }
-    list.innerHTML = checkpointHtml;
-  }
-
-  async function restoreCodexWorkspaceCheckpointFromDialog(button, dialog, context) {
-    if (!codexWorkspaceCheckpointFeatureEnabled()) {
-      closeCodexWorkspaceCheckpointDialog();
-      showToast("Checkpoint 已关闭");
-      return;
-    }
-    const checkpointId = String(button.getAttribute("data-codex-workspace-checkpoint-restore") || "").trim();
-    if (!checkpointId) return;
-    const safety = button.getAttribute("data-codex-workspace-checkpoint-kind") === "restoreSafety";
-    const restoreLabel = codexWorkspaceCheckpointRestoreLabel({ kind: safety ? "restoreSafety" : "turnStart" });
-    const busy = codexWorkspaceCheckpointConversation(context.threadId)
-      ? codexWorkspaceCheckpointConversationBusy(context.threadId)
-      : await codexWorkspaceCheckpointConversationBusyAsync(context.threadId);
-    if (busy !== false) {
-      showToast(busy ? "AI 正在运行，结束后才能恢复 Checkpoint" : "暂时无法确认会话状态，请稍后恢复 Checkpoint");
-      return;
-    }
-    const confirmed = await confirmCodexElvesAction({
-      title: `${restoreLabel}？`,
-      message: safety
-        ? "将工作区文件恢复为此安全快照保存的状态。当前文件会先另存为安全快照；Git 提交和聊天记录不变。"
-        : "将工作区文件恢复到本轮开始前，此后文件改动也会被回退。恢复前会自动保存安全快照；Git 提交和聊天记录不变。",
-      confirmLabel: "继续恢复",
-      tone: "warning",
-      mount: dialog.closest(".codex-workspace-checkpoint-overlay"),
-      background: dialog.querySelector(".codex-workspace-checkpoint-dialog"),
-    });
-    if (!confirmed) return;
-    if (
-      !codexWorkspaceCheckpointFeatureEnabled() ||
-      !codexWorkspaceCheckpointContextMatchesCurrent(null, context)
-    ) {
-      closeCodexWorkspaceCheckpointDialog();
-      return;
-    }
-    const freshContext = await codexWorkspaceCheckpointFreshCurrentContext(context);
-    if (!freshContext) {
-      closeCodexWorkspaceCheckpointDialog();
-      return;
-    }
-    context = freshContext;
-    button.disabled = true;
-    button.textContent = "恢复中…";
-    try {
-      const result = await postJson("/workspace-checkpoint/restore", {
-        cwd: context.cwd,
-        threadId: context.threadId,
-        checkpointId,
-      });
-      if (result?.status !== "ok") throw new Error(result?.message || "恢复 Checkpoint 失败");
-      const changedCount = Array.isArray(result.changedPaths) ? result.changedPaths.length : 0;
-      showToast(result.partial ? `已恢复 ${changedCount} 个文件，部分文件未处理` : `已恢复 ${changedCount} 个文件`);
-      await loadCodexWorkspaceCheckpointDialogList(dialog, context);
-    } catch (error) {
-      showToast(error?.message || "恢复 Checkpoint 失败");
-      button.disabled = false;
-      button.textContent = restoreLabel;
-    }
-  }
-
-  async function undoLatestCodexWorkspaceCheckpoint(button = null, context = null) {
-    if (!codexWorkspaceCheckpointFeatureEnabled()) {
-      showToast("请先在功能增强中开启 Checkpoint");
-      return;
-    }
-    context = context || await codexWorkspaceCheckpointContextAsync(null, {});
-    if (context.stale) return;
-    if (!context.local) {
-      showToast("远程会话暂不支持工作区 Checkpoint");
-      return;
-    }
-    if (!context.cwd || !context.threadId) {
-      showToast("未识别到当前会话工作目录或 thread");
-      return;
-    }
-    const busy = codexWorkspaceCheckpointConversation(context.threadId)
-      ? codexWorkspaceCheckpointConversationBusy(context.threadId)
-      : await codexWorkspaceCheckpointConversationBusyAsync(context.threadId);
-    if (busy !== false) {
-      showToast(busy ? "AI 正在运行，结束后才能撤销文件修改" : "暂时无法确认会话状态，请稍后撤销文件修改");
-      return;
-    }
-    const confirmed = await confirmCodexElvesAction({
-      title: "撤销上一轮修改？",
-      message: "将撤销上一轮 AI 的文件修改，当前状态会先保存为安全 Checkpoint。",
-      confirmLabel: "继续撤销",
-      tone: "warning",
-      mount: button?.closest?.(".codex-workspace-checkpoint-overlay"),
-      background: button?.closest?.(".codex-workspace-checkpoint-dialog"),
-    });
-    if (!confirmed) return;
-    if (
-      !codexWorkspaceCheckpointFeatureEnabled() ||
-      !codexWorkspaceCheckpointContextMatchesCurrent(null, context)
-    ) {
-      closeCodexWorkspaceCheckpointDialog();
-      return;
-    }
-    const freshContext = await codexWorkspaceCheckpointFreshCurrentContext(context);
-    if (!freshContext) {
-      closeCodexWorkspaceCheckpointDialog();
-      return;
-    }
-    context = freshContext;
-    if (button) {
-      button.disabled = true;
-      button.textContent = "撤销中…";
-    }
-    try {
-      const result = await postJson("/workspace-checkpoint/restore-for-revert", {
-        cwd: context.cwd,
-        threadId: context.threadId,
-        beforeTurnId: "",
-        numTurns: 1,
-      });
-      if (result?.status !== "ok") throw new Error(result?.message || "撤销上一轮文件修改失败");
-      const changedCount = Array.isArray(result.changedPaths) ? result.changedPaths.length : 0;
-      showToast(result.partial ? `已撤销 ${changedCount} 个文件，部分文件未处理` : `已撤销上一轮的 ${changedCount} 个文件修改`);
-    } catch (error) {
-      showToast(error?.message || "撤销上一轮文件修改失败");
-    } finally {
-      if (button?.isConnected) {
-        button.disabled = false;
-        button.textContent = "撤销上一轮";
-      }
-    }
-  }
-
-  async function openCodexWorkspaceCheckpointDialog() {
-    if (!codexWorkspaceCheckpointFeatureEnabled()) {
-      showToast("请先在功能增强中开启 Checkpoint");
-      return;
-    }
-    const context = await codexWorkspaceCheckpointContextAsync(null, {});
-    if (context.stale) return;
-    if (!codexWorkspaceCheckpointFeatureEnabled()) return;
-    if (!context.local) {
-      showToast("远程会话暂不支持工作区 Checkpoint");
-      return;
-    }
-    if (!context.cwd || !context.threadId) {
-      showToast("未识别到当前会话工作目录或 thread");
-      return;
-    }
-    closeCodexWorkspaceCheckpointDialog();
-    const overlay = document.createElement("div");
-    overlay.className = "codex-workspace-checkpoint-overlay";
-    overlay.setAttribute("data-codex-elves-dialog", "true");
-    overlay.__codexWorkspaceCheckpointContext = context;
-    overlay.innerHTML = `
-      <div class="${codexWorkspaceCheckpointDialogClass}" role="dialog" aria-modal="true" aria-label="工作区 Checkpoint">
-        <div class="codex-workspace-checkpoint-header">
-          <div class="codex-workspace-checkpoint-title">工作区 Checkpoint</div>
-          <button type="button" class="codex-elves-modal-close" data-codex-workspace-checkpoint-close="true" aria-label="关闭">×</button>
-        </div>
-        <div class="codex-workspace-checkpoint-list" data-codex-workspace-checkpoint-list="true"></div>
-        <div class="codex-workspace-checkpoint-footer">
-          <span class="checkpoint-footer-note">恢复前自动生成“安全快照”，可用于找回恢复前状态</span>
-          <div class="checkpoint-footer-actions">
-            <button type="button" class="codex-elves-action-button checkpoint-undo-button" data-codex-workspace-checkpoint-undo-latest="true">撤销上一轮</button>
-            <button type="button" class="codex-elves-action-button" data-codex-workspace-checkpoint-refresh="true">刷新</button>
-            <button type="button" class="codex-elves-action-button" data-codex-workspace-checkpoint-close="true">关闭</button>
-          </div>
-        </div>
-      </div>
-    `;
-    overlay.addEventListener("click", (event) => {
-      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-      if (event.target === overlay || target?.closest("[data-codex-workspace-checkpoint-close]")) {
-        closeCodexWorkspaceCheckpointDialog();
-        return;
-      }
-      const fileToggle = target?.closest("[data-codex-workspace-checkpoint-file-toggle]");
-      if (fileToggle) {
-        const fileList = fileToggle.closest("[data-codex-workspace-checkpoint-file-list]");
-        setCodexWorkspaceCheckpointFileListExpanded(
-          fileList,
-          fileList?.dataset.expanded !== "true",
-        );
-        return;
-      }
-      if (target?.closest("[data-codex-workspace-checkpoint-refresh]")) {
-        void loadCodexWorkspaceCheckpointDialogList(overlay, context);
-        return;
-      }
-      const undoLatestButton = target?.closest("[data-codex-workspace-checkpoint-undo-latest]");
-      if (undoLatestButton) {
-        void undoLatestCodexWorkspaceCheckpoint(undoLatestButton, context)
-          .then(() => loadCodexWorkspaceCheckpointDialogList(overlay, context));
-        return;
-      }
-      const restoreButton = target?.closest("[data-codex-workspace-checkpoint-restore]");
-      if (restoreButton) {
-        void restoreCodexWorkspaceCheckpointFromDialog(restoreButton, overlay, context);
-      }
-    }, true);
-    document.body.appendChild(overlay);
-    void loadCodexWorkspaceCheckpointDialogList(overlay, context);
-  }
-
-  function refreshCodexWorkspaceCheckpointFeatureState() {
-    if (codexWorkspaceCheckpointFeatureEnabled()) {
-      void installCodexWorkspaceCheckpointRequestClientPatch();
-      installCodexWorkspaceCheckpointTurnCompletionListener();
-      installCodexWorkspaceCheckpointEditButtons();
-    } else {
-      clearCodexWorkspaceCheckpointPatchRetry(true);
-      removeCodexWorkspaceCheckpointTurnCompletionListener();
-      clearCodexWorkspaceCheckpointCompletionHint();
-      clearCodexWorkspaceCheckpointRestoreIntent();
-      closeCodexWorkspaceCheckpointDialog();
-      removeCodexWorkspaceCheckpointEditButtons();
-      promptOptimizeRemoveCheckpointButton();
-    }
-    promptOptimizeSchedulePlacement({ hideImmediately: false });
-  }
-
-  if (window.__CODEX_ELVES_TEST_WORKSPACE_CHECKPOINT__) {
-    window.__codexWorkspaceCheckpointTest = {
-      context: (client, params) => codexWorkspaceCheckpointContext(client, params),
-      resolveContext: (client, params) => codexWorkspaceCheckpointContextAsync(client, params),
-      openDialog: () => openCodexWorkspaceCheckpointDialog(),
-      promptPreview: (params) => codexWorkspaceCheckpointPromptPreview(params),
-      sendRequest: (original, client, method, params, options) =>
-        codexWorkspaceCheckpointSendRequest(original, client, method, params, options),
-      patchRequestClientPrototype: (klass) =>
-        patchCodexWorkspaceCheckpointRequestClientPrototype(klass),
-      installRequestClientPatch: () =>
-        installCodexWorkspaceCheckpointRequestClientPatch(),
-      installCompletionListener: () =>
-        installCodexWorkspaceCheckpointTurnCompletionListener(),
-      installEditButtons: () => installCodexWorkspaceCheckpointEditButtons(),
-      editForms: () => codexWorkspaceCheckpointEditForms(),
-      listHtml: (checkpoints) =>
-        codexWorkspaceCheckpointListHtml(Array.isArray(checkpoints) ? checkpoints : []),
-      timeLabel: (createdAtMs, nowMs) =>
-        codexWorkspaceCheckpointTimeLabel(createdAtMs, nowMs),
-      setFileListExpanded: (list, expanded) =>
-        setCodexWorkspaceCheckpointFileListExpanded(list, expanded),
-      restoreFromDialog: (button, dialog, context) =>
-        restoreCodexWorkspaceCheckpointFromDialog(button, dialog, context),
-      undoLatest: (button, context) =>
-        undoLatestCodexWorkspaceCheckpoint(button, context),
-      featureEnabled: () => codexWorkspaceCheckpointFeatureEnabled(),
-      setRestoreIntent: (intent) => {
-        window.__codexWorkspaceCheckpointRestoreIntent = {
-          createdAt: Date.now(),
-          phase: "waiting",
-          ...(intent || {}),
-        };
-      },
-      restoreIntent: () => codexWorkspaceCheckpointRestoreIntent(),
-      setBackendSettingsForTest: (settings = {}) => {
-        codexElvesBackendSettings = { ...codexElvesBackendSettings, ...settings };
-        invalidateCodexElvesSettingsCache();
-      },
-    };
-  }
-
   function applyLoadedBackendSettings(settings, reason = "settings-loaded") {
     codexElvesBackendSettings = { ...codexElvesBackendSettings, ...settings };
     invalidateCodexElvesSettingsCache();
@@ -7383,7 +4751,6 @@
     refreshCodexElvesBackendToggles();
     refreshCodexNativeFastUnlockState();
     refreshCodexTokenUsageFeatureState();
-    refreshCodexWorkspaceCheckpointFeatureState();
     refreshCodexActivitySessionLayout();
     refreshUpstreamBranchDropdownAdapter();
     syncChatsSortVisibilityListener();
@@ -7438,9 +4805,6 @@
       }
       if (key === codexElvesBackendSettingMap.tokenUsage) {
         refreshCodexTokenUsageFeatureState();
-      }
-      if (key === codexElvesBackendSettingMap.workspaceCheckpoint) {
-        refreshCodexWorkspaceCheckpointFeatureState();
       }
       const localKey = Object.entries(codexElvesBackendSettingMap)
         .find(([, backendKey]) => backendKey === key)?.[0] || "";
@@ -7747,10 +5111,6 @@
             <div class="codex-elves-row">
               <div><div class="codex-elves-row-title">会话 Token 统计</div><div class="codex-elves-row-description">在右上角置顶摘要底部紧凑显示当前会话（含递归子代理）的总消耗和最近一轮输入、输出、缓存；默认关闭。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="tokenUsage"><span></span></button>
-            </div>
-            <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">Checkpoint</div><div class="codex-elves-row-description">在提示词优化图标旁显示 Checkpoint 入口；开启后保存每轮工作区快照，关闭后不显示入口且不创建或恢复快照。</div></div>
-              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="workspaceCheckpoint"><span></span></button>
             </div>
             <div class="codex-elves-row">
               <div><div class="codex-elves-row-title">Upstream worktree</div><div class="codex-elves-row-description">Create a Git worktree from a fresh upstream branch, equivalent to git worktree add -b branch path upstream/base.</div></div>
@@ -8387,13 +5747,7 @@
       }
     };
     client.sendRequest = function codexPluginMarketplacePatchedSendRequest(method, params, options) {
-      return codexWorkspaceCheckpointSendRequest(
-        sendPluginMarketplaceRequest,
-        this,
-        method,
-        params,
-        options
-      );
+      return sendPluginMarketplaceRequest(method, params, options);
     };
     client.__codexPluginMarketplaceUnlockPatch = codexPluginMarketplaceUnlockVersion;
     return true;
@@ -8966,7 +6320,7 @@
   // 用它校正临时 id，避免后端按临时 id 查不到会话。
   function activeConversationIdFromDom() {
     // 用户要求 Token 用量读取真实会话：编号标记可能因 empty:hidden 不显示，
-    // 应检查其所属主页面；隐藏会话及侧边面板仍不能作为 Token、Open in、Checkpoint 的来源。
+    // 应检查其所属主页面；隐藏会话及侧边面板仍不能作为 Token 和 Open in 的来源。
     const raw = Array.from(document.querySelectorAll("[data-above-composer-conversation-id]"))
       .filter(codexServiceTierIsMainComposerElement)
       .find((marker) => {
@@ -10140,7 +7494,6 @@
   let codexModelCatalogPromise = null;
   let codexStatsigModelVisibilityPatchPromise = null;
   let codexSessionPrewarmManager = window.__codexElvesSessionPrewarmManager || null;
-
 
 
   function isCodexSessionPrewarmManager(candidate) {
@@ -14933,7 +12286,6 @@
   const promptOptimizePositionState = {
     portal: null,
     button: null,
-    checkpointButton: null,
     composer: null,
     anchor: null,
     observer: null,
@@ -15942,33 +13294,12 @@
       !!button.style.top;
   }
 
-  function promptOptimizeCheckpointButtonEnabled() {
-    return promptOptimizeFeatureEnabled() &&
-      codexElvesSettings().workspaceCheckpoint === true;
-  }
-
-  function promptOptimizeHideCheckpointButton() {
-    const button = promptOptimizePositionState.checkpointButton;
-    if (!button?.style) return;
-    button.style.visibility = "hidden";
-    button.style.opacity = "0";
-    button.style.pointerEvents = "none";
-    promptOptimizeClearButtonCoordinates(button);
-  }
-
-  function promptOptimizeRemoveCheckpointButton() {
-    promptOptimizePositionState.checkpointButton?.remove?.();
-    promptOptimizePositionState.checkpointButton = null;
-  }
 
   function promptOptimizeSuspendButton() {
     const button = promptOptimizePositionState.button;
     if (!promptOptimizeButtonHasPlacement(button)) return false;
     button.style.pointerEvents = "none";
-    const checkpointButton = promptOptimizePositionState.checkpointButton;
-    if (promptOptimizeButtonHasPlacement(checkpointButton)) {
-      checkpointButton.style.pointerEvents = "none";
-    }
+
     return true;
   }
 
@@ -15981,7 +13312,6 @@
       button.style.pointerEvents = "none";
       promptOptimizeClearButtonCoordinates(button);
     }
-    promptOptimizeHideCheckpointButton();
     if (clearAnchor) {
       promptOptimizePositionState.composer = null;
       promptOptimizePositionState.anchor = null;
@@ -16020,45 +13350,6 @@
     return true;
   }
 
-  function promptOptimizeSyncCheckpointButton(portal) {
-    if (!promptOptimizeCheckpointButtonEnabled()) {
-      promptOptimizeRemoveCheckpointButton();
-      return null;
-    }
-    const existingButton = promptOptimizePositionState.checkpointButton;
-    if (
-      portal &&
-      existingButton &&
-      portal.isConnected !== false &&
-      existingButton.isConnected !== false
-    ) {
-      return existingButton;
-    }
-    promptOptimizeRemoveCheckpointButton();
-    if (!portal || typeof document.createElement !== "function") return null;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.innerHTML = `
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path>
-        <path d="M3 3v5h5"></path>
-        <path d="M12 7v5l3 2"></path>
-      </svg>
-    `;
-    button.setAttribute?.(codexWorkspaceCheckpointButtonAttribute, "true");
-    button.setAttribute?.("aria-label", "打开 Checkpoint");
-    button.setAttribute?.("aria-haspopup", "dialog");
-    button.title = "打开 Checkpoint";
-    button.addEventListener?.("click", (event) => {
-      event.preventDefault?.();
-      event.stopImmediatePropagation?.();
-      void openCodexWorkspaceCheckpointDialog();
-    });
-    portal.appendChild?.(button);
-    promptOptimizePositionState.checkpointButton = button;
-    promptOptimizeHideCheckpointButton();
-    return button;
-  }
 
   function promptOptimizeEnsurePortal() {
     if (!promptOptimizeRuntimeCurrent()) return null;
@@ -16070,13 +13361,11 @@
       existingPortal.isConnected !== false &&
       existingButton.isConnected !== false
     ) {
-      promptOptimizeSyncCheckpointButton(existingPortal);
       return existingButton;
     }
     existingPortal?.remove?.();
     promptOptimizePositionState.portal = null;
     promptOptimizePositionState.button = null;
-    promptOptimizePositionState.checkpointButton = null;
     if (!document.body || typeof document.createElement !== "function") return null;
 
     const portal = document.createElement("div");
@@ -16103,7 +13392,6 @@
     document.body.appendChild(portal);
     promptOptimizePositionState.portal = portal;
     promptOptimizePositionState.button = button;
-    promptOptimizeSyncCheckpointButton(portal);
     promptOptimizeHideButton();
     return button;
   }
@@ -16346,35 +13634,6 @@
     return promptOptimizePlacementIsClear(anchor, position) ? position : null;
   }
 
-  function promptOptimizeCheckpointPosition(anchor, promptPosition) {
-    if (!promptOptimizeCheckpointButtonEnabled() || !promptPosition) return null;
-    const position = {
-      left:
-        promptPosition.left -
-        codexWorkspaceCheckpointButtonGap -
-        codexPromptOptimizeButtonSize,
-      top: promptPosition.top,
-    };
-    if (position.left < 0) return null;
-    return promptOptimizePlacementIsClear(anchor, position) ? position : null;
-  }
-
-  function promptOptimizePlaceCheckpointButton(anchor, promptPosition) {
-    const button = promptOptimizePositionState.checkpointButton;
-    if (!button) return false;
-    const position = promptOptimizeCheckpointPosition(anchor, promptPosition);
-    if (!position) {
-      promptOptimizeHideCheckpointButton();
-      return false;
-    }
-    promptOptimizeClearButtonCoordinates(button);
-    button.style.left = `${position.left}px`;
-    button.style.top = `${position.top}px`;
-    button.style.visibility = "visible";
-    button.style.opacity = "1";
-    button.style.pointerEvents = "auto";
-    return true;
-  }
 
   function promptOptimizeRefreshButtonState() {
     const button = promptOptimizePositionState.button;
@@ -16438,7 +13697,6 @@
     button.style.visibility = "visible";
     button.style.opacity = "1";
     button.style.pointerEvents = "auto";
-    promptOptimizePlaceCheckpointButton(anchor, position);
     promptOptimizePositionState.composer = composer;
     promptOptimizePositionState.anchor = anchor;
     promptOptimizeClearTransientHideTimer();
@@ -17086,7 +14344,6 @@
     promptOptimizePositionState.portal?.remove?.();
     promptOptimizePositionState.portal = null;
     promptOptimizePositionState.button = null;
-    promptOptimizePositionState.checkpointButton = null;
     promptOptimizeThreadStates.clear();
     pendingRequestIds.forEach((requestId) => {
       void postJson("/prompt-optimize/cancel", { requestId }).catch(() => {});
@@ -17098,7 +14355,6 @@
 
   function promptOptimizeTestSnapshot() {
     const button = promptOptimizePositionState.button;
-    const checkpointButton = promptOptimizePositionState.checkpointButton;
     return {
       exists: !!button,
       visibility: String(button?.style?.visibility || ""),
@@ -17112,16 +14368,6 @@
       title: String(button?.title || ""),
       composerMatched: promptOptimizePositionState.composer === promptOptimizeTestDom?.composer,
       anchorMatched: promptOptimizePositionState.anchor === promptOptimizeTestDom?.anchor,
-      checkpoint: {
-        exists: !!checkpointButton,
-        visibility: String(checkpointButton?.style?.visibility || ""),
-        opacity: String(checkpointButton?.style?.opacity || ""),
-        pointerEvents: String(checkpointButton?.style?.pointerEvents || ""),
-        left: String(checkpointButton?.style?.left || ""),
-        top: String(checkpointButton?.style?.top || ""),
-        title: String(checkpointButton?.title || ""),
-        ariaLabel: String(checkpointButton?.getAttribute?.("aria-label") || ""),
-      },
     };
   }
 
@@ -25870,7 +23116,7 @@
       badge.setAttribute("role", "img");
       badge.tabIndex = 0;
       // 用户要求恢复上下文入口：保持原生 16px 容器、12px 圆环和 5px 半径，
-      // 使用同一排的普通布局；放在模型左侧，提示词优化与 Checkpoint 随容器避让。
+      // 使用同一排的普通布局；放在模型左侧，提示词优化随容器避让。
       badge.style.cssText = "display:inline-flex;align-items:center;justify-content:center;flex:0 0 16px;width:16px;height:16px;color:var(--color-text-tertiary,currentColor);cursor:help";
       badge.innerHTML = '<svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="2" fill="none" opacity=".16"/><circle data-context-progress cx="6" cy="6" r="5" stroke="currentColor" stroke-width="2" fill="none" pathLength="100" stroke-dasharray="100" transform="rotate(-90 6 6)"/></svg>';
     }
@@ -26491,9 +23737,12 @@
     ) {
       return codexOpenInSessionContextCache.context;
     }
-    // 新版 Codex 不保证 React 树中暴露会话管理器，按当前会话 ID 从后端读取目录。
-    // 此接口只读会话元数据，与工作区检查点开关无关。
-    const sessionContext = await codexWorkspaceCheckpointSessionContext(conversationId);
+    // 目录查询独立于已移除的快照功能，只读取当前会话元数据。
+    const result = await postJson("/session/workspace-context", { session_id: conversationId });
+    const responseId = String(result?.sessionId || result?.session_id || "").replace(/^local:/i, "");
+    const cwd = typeof result?.cwd === "string" ? result.cwd.trim() : "";
+    const sessionContext = result?.status === "ok" && responseId === conversationId.replace(/^local:/i, "") && cwd
+      ? { cwd, hostId: String(result.hostId || result.host_id || "local") } : null;
     if (!isCodexOpenInContextCurrent({ conversationId })) return null;
     const resolved = sessionContext?.cwd
       ? { conversationId, cwd: sessionContext.cwd, hostId: sessionContext.hostId }
@@ -27154,8 +24403,7 @@
     if (window.__codexElvesRuntimeOnceInstalled === codexElvesBuild) return;
     cleanupLegacyCodexComposerOverflowGuards();
     void loadCodexModelCatalog();
-    installCodexWorkspaceCheckpointRequestClientPatch();
-    installCodexWorkspaceCheckpointTurnCompletionListener();
+
     installSuppressedThreadObserver();
     scheduleBackendHeartbeat();
     installConversationViewRouteHooks();
@@ -27219,8 +24467,7 @@
       refreshConversationView();
       refreshCodexComposerContextUsage();
       installCodexAppServerRestartButtons();
-      installCodexWorkspaceCheckpointTurnCompletionListener();
-      installCodexWorkspaceCheckpointEditButtons();
+
     }
     if (headerDirty || conversationDirty) {
       if (headerDirty) installCodexElvesMenu();
@@ -27348,7 +24595,7 @@
     if (node?.closest?.("[data-codex-context-usage]")) return true;
     if (node?.closest?.("[data-codex-elves-fast]")) return true;
     if (node?.closest?.("[data-codex-elves-fast-status], [data-codex-elves-fast-session]")) return true;
-    return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-elves-modal-overlay, .codex-workspace-checkpoint-overlay, [${codexWorkspaceCheckpointEditButtonAttribute}="true"], [${codexWorkspaceCheckpointButtonAttribute}="true"], .${projectMoveOverlayClass}, .codex-conversation-timeline, .${codexTokenUsageCardClass}, .${codexAppServerRestartButtonClass}, .${codexAppServerRestartDialogClass}, .${taskBoardMainHostClass}, .${taskBoardEntryContextMenuClass}, [${taskBoardEntryAttribute}="true"], .${codexOpenInMenuClass}, [${codexOpenInButtonAttribute}="true"], .${codexPromptOptimizePortalClass}, .${codexPromptOptimizeSettingsOverlayClass}, [${codexPromptOptimizeButtonAttribute}="true"], #codex-elves-menu`);
+    return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-elves-modal-overlay, .${projectMoveOverlayClass}, .codex-conversation-timeline, .${codexTokenUsageCardClass}, .${codexAppServerRestartButtonClass}, .${codexAppServerRestartDialogClass}, .${taskBoardMainHostClass}, .${taskBoardEntryContextMenuClass}, [${taskBoardEntryAttribute}="true"], .${codexOpenInMenuClass}, [${codexOpenInButtonAttribute}="true"], .${codexPromptOptimizePortalClass}, .${codexPromptOptimizeSettingsOverlayClass}, [${codexPromptOptimizeButtonAttribute}="true"], #codex-elves-menu`);
   }
 
   function scanRelevantSelectorForDomain(domain) {
@@ -27632,7 +24879,7 @@
   window.__codexElvesRuntimeDeleteVersion = codexDeleteVersion;
   window.__codexElvesRuntimeManagerDiscoveryVersion = codexAppServerManagerDiscoveryVersion;
   window.__codexElvesOpenInRuntimeVersion = codexOpenInVersion;
-  window.__codexElvesWorkspaceCheckpointRuntimeVersion = codexWorkspaceCheckpointVersion;
+
   window.__codexElvesTaskBoardRuntimeVersion = taskBoardRuntimeVersion;
   window.__codexElvesPromptOptimizeCleanup = cleanupPromptOptimizeFeature;
   window.__codexElvesPromptOptimizeRefreshRuntime = installPromptOptimizeFeature;

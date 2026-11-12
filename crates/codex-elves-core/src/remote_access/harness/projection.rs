@@ -14,6 +14,13 @@ struct CompactionRecord {
     sequence: u64,
 }
 
+struct DesktopState {
+    connected: bool,
+    requests_known: bool,
+    requests: Vec<Value>,
+    active_turn: Option<String>,
+}
+
 pub(super) struct Projection {
     pub epoch: String,
     pub sequence: u64,
@@ -25,6 +32,7 @@ pub(super) struct Projection {
     pub sides: super::sides::SideState,
     pub requests: HashMap<String, Value>,
     pub active: HashMap<String, String>,
+    desktop: HashMap<String, DesktopState>,
     pub compactions: HashMap<String, Value>,
     compaction_records: VecDeque<CompactionRecord>,
     completed: VecDeque<String>,
@@ -47,6 +55,7 @@ impl Default for Projection {
             sides: super::sides::SideState::default(),
             requests: HashMap::new(),
             active: HashMap::new(),
+            desktop: HashMap::new(),
             compactions: HashMap::new(),
             compaction_records: VecDeque::new(),
             completed: VecDeque::new(),
@@ -59,6 +68,97 @@ impl Default for Projection {
 }
 
 impl Projection {
+    pub fn observe_desktop(&mut self, id: &str, snapshot: &Value, events: &Value) {
+        let Ok(thread) =
+            crate::codex_service::normalize_owner_thread(snapshot, self.threads.get(id))
+        else {
+            return;
+        };
+        let reconnected = self.desktop.get(id).is_none_or(|state| !state.connected);
+        let runtime_active = matches!(
+            thread["status"]
+                .as_str()
+                .or_else(|| thread["status"]["type"].as_str()),
+            Some("active" | "inProgress" | "running" | "waiting")
+        );
+        let active_turn = crate::desktop_owner_ipc::snapshot_turns(snapshot)
+            .into_iter()
+            .filter(|turn| runtime_active && turn["status"] == "inProgress")
+            .max_by_key(|turn| turn["turnStartedAtMs"].as_u64().unwrap_or(0))
+            .and_then(|turn| turn["turnId"].as_str().map(str::to_owned));
+        let requests_known = snapshot["requests"].is_array();
+        let requests = snapshot["requests"].as_array().cloned().unwrap_or_else(|| {
+            self.desktop
+                .get(id)
+                .map(|state| state.requests.clone())
+                .unwrap_or_default()
+        });
+        self.desktop.insert(
+            id.to_owned(),
+            DesktopState {
+                connected: true,
+                requests_known,
+                requests,
+                active_turn: active_turn.clone(),
+            },
+        );
+        self.threads.insert(id.to_owned(), thread.clone());
+        let mut turn_changed = false;
+        for event in events.as_array().into_iter().flatten() {
+            if event["method"] == "remote/notification" {
+                continue;
+            }
+            let mut event = event.clone();
+            if event["method"] == "remote/requestsChanged" {
+                // 桌面审批使用同一网页状态版本；不能混用临时快照转换器的 epoch。
+                event["params"]["requestsEpoch"] = json!(&self.epoch);
+                event["params"]["requestsRevision"] = json!(self.sequence + 1);
+            }
+            turn_changed |= matches!(
+                event["method"].as_str(),
+                Some("turn/started" | "turn/completed")
+            );
+            self.ingest(event);
+        }
+        match active_turn {
+            Some(turn) => {
+                self.active.insert(id.to_owned(), turn);
+            }
+            None => {
+                self.active.remove(id);
+            }
+        }
+        self.threads.insert(id.to_owned(), thread.clone());
+        if reconnected || turn_changed {
+            // 同一快照可能同时结束旧轮次并开始新轮次，最后必须恢复桌面的实际运行状态。
+            self.push(json!({"method":"thread/status/changed","params":{"threadId":id,"status":thread["status"]}}));
+        }
+        if reconnected {
+            self.push(json!({"method":"remote/resync","params":{"threadId":id}}));
+        }
+    }
+
+    pub fn desktop_disconnected(&mut self, id: &str) {
+        let Some(state) = self.desktop.get_mut(id).filter(|state| state.connected) else {
+            return;
+        };
+        state.connected = false;
+        state.active_turn = None;
+        self.active.remove(id);
+        if let Some(thread) = self.threads.get_mut(id) {
+            // 丢失桌面连接只能标为未知，不能把仍可能执行的会话宣告为空闲或已停止。
+            thread["status"] = json!({"type":"unknown"});
+        }
+        self.push(json!({"method":"thread/status/changed","params":{"threadId":id,"status":{"type":"unknown"}}}));
+        self.push(json!({"method":"remote/resync","params":{"threadId":id}}));
+    }
+
+    pub fn forget_desktop(&mut self, id: &str) {
+        if self.desktop.remove(id).is_some() {
+            self.active.remove(id);
+        }
+    }
+
     pub fn register_side(&mut self, id: String, side: super::sides::SideThread, view: Value) {
         self.hidden_threads.remove(&id);
         self.sides.threads.insert(id.clone(), side);
@@ -137,6 +237,9 @@ impl Projection {
     }
 
     pub fn requests_for(&self, thread_id: &str) -> Vec<Value> {
+        if let Some(desktop) = self.desktop.get(thread_id) {
+            return desktop.requests.clone();
+        }
         self.requests
             .values()
             .filter(|r| r["params"]["threadId"] == thread_id)
@@ -184,7 +287,11 @@ impl Projection {
             thread["hasUnreadTurn"] = json!(unread);
         }
         thread["requests"] = json!(self.requests_for(thread_id));
-        thread["requestsKnown"] = json!(true);
+        thread["requestsKnown"] = json!(
+            self.desktop
+                .get(thread_id)
+                .is_none_or(|state| state.connected && state.requests_known)
+        );
         thread["requestsEpoch"] = json!(&self.epoch);
         thread["requestsRevision"] = json!(self.sequence);
         // 目录复用旧摘要时，活动/等待状态仍以本轮事件为准，不能沿用缓存中的 idle 优先级。
@@ -385,6 +492,15 @@ impl Projection {
             self.notifications.clear();
             self.notification_sequence = 0;
             self.active.clear();
+            // app-server 重连不等于桌面 IPC 断开，桌面的执行与审批状态独立保留。
+            self.active
+                .extend(self.desktop.iter().filter_map(|(id, state)| {
+                    state
+                        .active_turn
+                        .as_ref()
+                        .filter(|_| state.connected)
+                        .map(|turn| (id.clone(), turn.clone()))
+                }));
             self.compactions.clear();
             self.compaction_records.clear();
             self.completed.clear();
@@ -608,8 +724,10 @@ impl Projection {
                 }
                 self.requests.clear();
                 self.pending_notifications.clear();
-                for thread in self.threads.values_mut() {
-                    thread["status"] = json!({"type":"notLoaded"});
+                for (id, thread) in &mut self.threads {
+                    if !self.desktop.contains_key(id) {
+                        thread["status"] = json!({"type":"notLoaded"});
+                    }
                 }
                 self.push(json!({"method":"remote/resync"}));
                 return;
@@ -738,6 +856,89 @@ fn turn_started_ms(turn: &Value) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_edges_incomplete_approvals_do_not_claim_known_empty() {
+        let mut projection = Projection::default();
+        let mut snapshot = json!({"id":"desktop","cwd":"C:\\repo","source":"vscode",
+            "threadSource":"user","ephemeral":false,"forkedFromId":null,
+            "threadRuntimeStatus":{"type":"active"},"turns":[],
+            "requests":[{"id":17,"method":"item/commandExecution/requestApproval","params":{"threadId":"desktop"}}]});
+        projection.observe_desktop("desktop", &snapshot, &json!([]));
+        snapshot.as_object_mut().unwrap().remove("requests");
+        projection.observe_desktop("desktop", &snapshot, &json!([]));
+        let thread = projection.thread("desktop", json!({"id":"desktop"}));
+        assert_eq!(
+            thread["requestsKnown"], false,
+            "字段缺失不能当作审批已全部处理"
+        );
+        assert_eq!(
+            thread["requests"][0]["id"], 17,
+            "未取得完整快照前保留上次审批"
+        );
+        snapshot["requests"] = json!([]);
+        projection.observe_desktop("desktop", &snapshot, &json!([]));
+        let thread = projection.thread("desktop", json!({"id":"desktop"}));
+        assert_eq!(thread["requestsKnown"], true);
+        assert_eq!(thread["requests"], json!([]));
+    }
+
+    #[test]
+    fn desktop_projection_keeps_approvals_and_running_state_across_engine_reconnect() {
+        let mut projection = Projection::default();
+        let snapshot = json!({"id":"desktop","cwd":"C:\\repo","source":"vscode",
+            "threadSource":"user","ephemeral":false,"forkedFromId":null,
+            "threadRuntimeStatus":{"type":"active","activeFlags":["waitingOnApproval"]},
+            "requests":[{"id":17,"method":"item/commandExecution/requestApproval","params":{"threadId":"desktop"}}],
+            "turns":[{"turnId":"turn","status":"inProgress","turnStartedAtMs":1,"items":[]}]});
+        projection.observe_desktop("desktop", &snapshot, &json!([]));
+        let thread = projection.thread("desktop", json!({"id":"desktop"}));
+        assert_eq!(thread["requests"][0]["id"], 17);
+        assert_eq!(thread["requestsKnown"], true);
+        assert_eq!(thread["priority"]["attentionState"], "waiting");
+        projection.ingest(
+            json!({"method":"harness/connected","_generation":"engine-2","_generationIndex":2}),
+        );
+        projection.ingest(json!({"method":"harness/disconnected","_generation":"engine-2"}));
+        let thread = projection.thread("desktop", json!({"id":"desktop"}));
+        assert_eq!(thread["status"]["type"], "active");
+        assert_eq!(projection.active["desktop"], "turn");
+        assert_eq!(thread["requests"][0]["id"], 17);
+        projection.desktop_disconnected("desktop");
+        let thread = projection.thread("desktop", json!({"id":"desktop"}));
+        assert_eq!(thread["status"]["type"], "unknown");
+        assert_eq!(thread["requestsKnown"], false);
+        assert!(!projection.active.contains_key("desktop"));
+        projection.observe_desktop("desktop", &snapshot, &json!([]));
+        assert_eq!(
+            projection.thread("desktop", json!({}))["requestsKnown"],
+            true
+        );
+        projection.forget_desktop("desktop");
+        assert!(projection.requests_for("desktop").is_empty());
+    }
+
+    #[test]
+    fn desktop_projection_restores_authoritative_status_after_a_turn_rollover() {
+        let mut projection = Projection::default();
+        let snapshot = json!({"id":"desktop","cwd":"C:\\repo","source":"vscode",
+            "threadSource":"user","ephemeral":false,"forkedFromId":null,
+            "threadRuntimeStatus":{"type":"active"},"requests":[],
+            "turns":[{"turnId":"new","status":"inProgress","turnStartedAtMs":2,"items":[]}]});
+        projection.observe_desktop("desktop", &snapshot, &json!([
+            {"method":"turn/started","params":{"threadId":"desktop","turn":{"id":"new","status":"inProgress"}}},
+            {"method":"turn/completed","params":{"threadId":"desktop","turn":{"id":"old","status":"completed"}}}
+        ]));
+        assert_eq!(projection.active["desktop"], "new");
+        assert_eq!(projection.threads["desktop"]["status"]["type"], "active");
+        let last_status = projection
+            .events
+            .iter()
+            .rev()
+            .find(|(_, event)| event["method"] == "thread/status/changed")
+            .unwrap();
+        assert_eq!(last_status.1["params"]["status"]["type"], "active");
+    }
 
     #[test]
     fn harness_compaction_survives_reentry_before_history_persistence_and_after_completion() {

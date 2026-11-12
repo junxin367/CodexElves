@@ -199,6 +199,7 @@ impl NativeCdpBridge {
             action,
             payload,
             authorization,
+            // 用户要求会话主流程优先：已移除工作区快照依赖，保持原有 45 秒回执边界。
             Duration::from_secs(45),
         )
         .await
@@ -1715,6 +1716,22 @@ impl RemoteAccessController {
                 json!({"ok":true,"runtime":self.runtime_for(&authorization.device.id).await}),
             );
         }
+        if action == "observeThreads" {
+            authorization.check().await?;
+            // 用户要求服务模式同步桌面执行：此入口只续期只读观察，CDP 设备不建立第二条同步线路。
+            let modes = self.runtime_modes.read().await;
+            let mode = modes
+                .get(&authorization.device.id)
+                .cloned()
+                .unwrap_or_default();
+            if !mode.cdp_injection_enabled {
+                return self
+                    .harness
+                    .call(action, payload, Some(authorization))
+                    .await;
+            }
+            return Ok(json!({"ok":true}));
+        }
         if action == "setRuntime" {
             return self.change_runtime_mode(payload, authorization).await;
         }
@@ -1826,6 +1843,8 @@ impl RemoteAccessController {
             }
         }
         if action == "claudeUsage" {
+            // 本地消费扫描只在用户展开额度详情时按需执行，不进入默认额度轮询或消息发送链路。
+            let include_local = payload["includeLocal"] == true;
             let allow_probe = !self
                 .access_policy
                 .read()
@@ -1834,7 +1853,7 @@ impl RemoteAccessController {
             // 用户要求只能经会话所属 WSL 的 Claude 读取额度；已有会话始终使用保存的实例身份。
             return if claude_thread {
                 self.claude
-                    .session_subscription_usage(thread_id.unwrap(), allow_probe)
+                    .session_subscription_usage(thread_id.unwrap(), allow_probe, include_local)
                     .await
             } else if requested == Some("claude") {
                 let config = if let Some(id) = &instance_id {
@@ -1842,7 +1861,9 @@ impl RemoteAccessController {
                 } else {
                     self.claude.config()?
                 };
-                self.claude.subscription_usage(config, allow_probe).await
+                self.claude
+                    .subscription_usage(config, allow_probe, include_local)
+                    .await
             } else {
                 Err(ApiError::new(400, "额度读取仅支持 Claude 实例").into())
             };
@@ -1863,6 +1884,23 @@ impl RemoteAccessController {
         }
         if claude_thread {
             let id = thread_id.unwrap();
+            // Claude 子代理只复用现有查看页；任何发送、停止、审批或设置写入都不能改投其主会话。
+            if claude::Claude::is_subagent_id(id)
+                && !matches!(
+                    action,
+                    "thread"
+                        | "history"
+                        | "workspaceContext"
+                        | "models"
+                        | "skills"
+                        | "queue"
+                        | "relatedThreads"
+                )
+            {
+                return Err(
+                    ApiError::new(403, "Claude 子代理仅支持只读查看，请返回主会话操作").into(),
+                );
+            }
             return execution::Scope::new(
                 self.harness.audit.clone(),
                 true,
@@ -1890,10 +1928,7 @@ impl RemoteAccessController {
                     "queue" => self.claude.queue(id).await,
                     "queueEdit" => self.claude.queue_edit_state(&payload).await,
                     "sendState" => self.claude.queue_send_state(&payload).await,
-                    "relatedThreads" => Ok(
-                        json!({"ok":true,"threadId":id,"subagents":[],"sideThreads":[],
-                    "completedSubagents":[],"completedSubagentCount":0,"subagentsComplete":true}),
-                    ),
+                    "relatedThreads" => self.claude.related_threads(id).await,
                     _ => self.claude.command(action, &payload, authorization).await,
                 }
             })
@@ -3915,9 +3950,11 @@ async fn session(
         "queuedImageEditing":native_write_available,"queueEditRecovery":native_write_available,
         "queueSendRecovery":native_write_available,"projectlessCreation":native_write_available,
         "promptOptimization":true,"messageEditModelSettings":native_write_available,
+        "fastMode":runtime.cdp_injection_enabled && native_write_available,
         "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
         "sendText":native_write_available || service_connected,
         "sideThreads":true,"serviceSideThreads":true,"subagents":true,"serviceSubagents":true,
+        "desktopSessionSync":true,
         "claudeSessions":true,"claudeProjectTrust":true,"claudeSubscriptionUsage":true}}),
     ))
 }
@@ -4085,10 +4122,12 @@ async fn read(
     if !matches!(
         action.as_str(),
         "sidebar"
+            | "observeThreads"
             | "runtime"
             | "history"
             | "thread"
             | "models"
+            | "fast"
             | "claudeUsage"
             | "projectTrust"
             | "skills"
@@ -4101,6 +4140,19 @@ async fn read(
     ) {
         return Err(ApiError::new(404, "不支持的读取操作"));
     }
+    if action == "observeThreads" {
+        // 128 与 app.js 的可见列表采集上限一致；不接收路径、正文或执行指令。
+        let ids = payload["threadIds"]
+            .as_array()
+            .filter(|ids| ids.len() <= 128)
+            .ok_or_else(|| ApiError::new(400, "会话观察列表无效"))?;
+        if ids.iter().any(|id| {
+            notification_thread_id(id).is_none() || id.as_str().is_some_and(claude::Claude::owns_id)
+        }) {
+            return Err(ApiError::new(400, "会话观察标识无效"));
+        }
+        payload = json!({"threadIds":ids});
+    }
     if matches!(action.as_str(), "queue" | "queueEdit" | "sendState") {
         validate_queued_action_payload(&action, &payload)?;
     }
@@ -4109,6 +4161,9 @@ async fn read(
     }
     if action == "relatedThreads" {
         validate_related_threads_payload(&action, &payload)?;
+    }
+    if action == "fast" {
+        validate_fast_payload(&action, &payload)?;
     }
     if action == "promptOptimization" {
         payload = json!({"requestId": prompt_optimization_request_id(&device.id, payload["requestId"].as_str().unwrap_or(""))?});
@@ -4444,6 +4499,50 @@ fn validate_compaction_queue_send_payload(action: &str, payload: &Value) -> Resu
     Ok(())
 }
 
+fn validate_fast_payload(action: &str, payload: &Value) -> Result<(), ApiError> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| ApiError::new(400, "Fast 参数无效"))?;
+    if matches!(action, "send" | "create") {
+        // 用户要求 Fast 只改变当前会话的发送档位；拒绝字符串等隐式真值，不能误开启。
+        if object
+            .get("fastMode")
+            .is_some_and(|enabled| !enabled.is_boolean())
+        {
+            return Err(ApiError::new(400, "Fast 开关参数无效"));
+        }
+        return Ok(());
+    }
+    if object
+        .get("model")
+        .and_then(Value::as_str)
+        .is_none_or(|model| model.trim().is_empty() || model.len() > 256)
+    {
+        return Err(ApiError::new(400, "Fast 模型参数无效"));
+    }
+    // 新建页只读取模型能力，不伪造会话 ID；写入必须使用原生会话身份，和 native requiredId 保持一致。
+    if object.get("threadId").is_some_and(|id| {
+        id.as_str().is_none_or(|id| {
+            id.is_empty()
+                || id.len() > 120
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+    }) || action == "setFast" && !object.contains_key("threadId")
+    {
+        return Err(ApiError::new(400, "Fast 会话 ID 无效"));
+    }
+    if action == "setFast"
+        && object
+            .get("enabled")
+            .is_none_or(|enabled| !enabled.is_boolean())
+    {
+        return Err(ApiError::new(400, "Fast 开关参数无效"));
+    }
+    Ok(())
+}
+
 fn validate_goal_composer_payload(action: &str, payload: &Value) -> Result<(), ApiError> {
     let object = payload
         .as_object()
@@ -4482,6 +4581,10 @@ fn validate_goal_composer_payload(action: &str, payload: &Value) -> Result<(), A
             "instanceId",
         ]
         .contains(&key.as_str())
+            && !(action == "create" && key == "fastMode")
+            && !(action == "create"
+                && payload["backend"] == "claude"
+                && matches!(key.as_str(), "trustProject" | "expectedProjectPath"))
     }) {
         return Err(ApiError::new(400, "目标提交包含不支持的字段"));
     }
@@ -4922,6 +5025,7 @@ async fn action(
     if !matches!(
         action.as_str(),
         "send"
+            | "setFast"
             | "setRuntime"
             | "stop"
             | "compact"
@@ -4958,6 +5062,9 @@ async fn action(
         validate_related_threads_payload(&action, &payload)?;
     }
     validate_compaction_queue_send_payload(&action, &payload)?;
+    if matches!(action.as_str(), "fast" | "setFast" | "send" | "create") {
+        validate_fast_payload(&action, &payload)?;
+    }
     if matches!(action.as_str(), "send" | "create" | "setGoal") {
         validate_goal_composer_payload(&action, &payload)?;
     }
@@ -6052,6 +6159,36 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn claude_subagent_write_actions_are_rejected_before_any_engine_dispatch() {
+        let (_directory, authorization) = service_dispatch_fixture().await;
+        let child = "claude-agent-00000000-0000-4000-8000-000000000001-agent_fixture";
+        for action in [
+            "sendText",
+            "stop",
+            "setModel",
+            "setReasoningEffort",
+            "respond",
+            "rename",
+            "delete",
+        ] {
+            let failure = authorization
+                .controller
+                .call_backend(
+                    action,
+                    json!({"threadId":child,"text":"不能发送","model":"test-model"}),
+                    &authorization,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                failure.downcast_ref::<ApiError>().unwrap().code,
+                403,
+                "{action}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn claude_read_only_model_metadata_does_not_start_wsl_or_codex() {
@@ -7954,6 +8091,97 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             1,
             "切回 CDP 不能释放并重新创建预热引擎"
         );
+    }
+
+    #[tokio::test]
+    async fn desktop_observation_http_is_read_only_validated_and_mode_scoped() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let state = WebState {
+            controller: controller.clone(),
+            settings: RemoteAccessSettings::default(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("codex_elves_device=isolated-service-dispatch-token"),
+        );
+        assert_eq!(
+            read(
+                State(state.clone()),
+                Path("observeThreads".into()),
+                HeaderMap::new(),
+                Json(json!({"threadIds":[]}))
+            )
+            .await
+            .unwrap_err()
+            .code,
+            401
+        );
+        for payload in [
+            json!({"threadIds":["../outside"]}),
+            json!({"threadIds":["claude-11111111-2222-3333-4444-555555555555"]}),
+            json!({"threadIds":vec!["thread";129]}),
+            json!({"threadIds":"thread"}),
+        ] {
+            assert_eq!(
+                read(
+                    State(state.clone()),
+                    Path("observeThreads".into()),
+                    headers.clone(),
+                    Json(payload)
+                )
+                .await
+                .unwrap_err()
+                .code,
+                400
+            );
+        }
+        let response = read(
+            State(state.clone()),
+            Path("observeThreads".into()),
+            headers.clone(),
+            Json(json!({"threadIds":[]})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let current = session(State(state.clone()), headers.clone())
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(current["capabilities"]["desktopSessionSync"], true);
+        controller
+            .runtime_modes
+            .write()
+            .await
+            .get_mut(&authorization.device.id)
+            .unwrap()
+            .cdp_injection_enabled = true;
+        // CDP 模式中的迟到登记直接忽略，不能调用原生注入桥或建立桌面 IPC 订阅。
+        assert_eq!(
+            read(
+                State(state),
+                Path("observeThreads".into()),
+                headers,
+                Json(json!({"threadIds":["unopened"]}))
+            )
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::OK
+        );
+        let requests = std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap();
+        assert!(requests.lines().all(|line| {
+            let frame: Value = serde_json::from_str(line).unwrap();
+            !matches!(
+                frame["method"].as_str(),
+                Some("thread/resume" | "turn/start" | "turn/interrupt")
+            )
+        }));
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        controller.harness.enabled.store(false, Ordering::Release);
+        controller.harness.release().await;
     }
 
     #[tokio::test]
@@ -11835,6 +12063,250 @@ call("send",{threadId:"isolated-thread",prompt:"隔离发送"})
     }
 
     #[test]
+    fn remote_fast_payload_requires_model_identity_and_explicit_boolean() {
+        for payload in [
+            json!({"model":"gpt-fixture"}),
+            json!({"model":"gpt-fixture","threadId":"thread-1"}),
+            json!({"model":"x".repeat(256),"threadId":"x".repeat(120)}),
+        ] {
+            assert!(validate_fast_payload("fast", &payload).is_ok());
+        }
+        for payload in [
+            Value::Null,
+            json!([]),
+            json!({}),
+            json!({"model":null}),
+            json!({"model":true}),
+            json!({"model":""}),
+            json!({"model":" "}),
+            json!({"model":"x".repeat(257)}),
+            json!({"model":"gpt-fixture","threadId":null}),
+            json!({"model":"gpt-fixture","threadId":false}),
+            json!({"model":"gpt-fixture","threadId":""}),
+            json!({"model":"gpt-fixture","threadId":"../other"}),
+            json!({"model":"gpt-fixture","threadId":"local:thread-1"}),
+            json!({"model":"gpt-fixture","threadId":"x".repeat(121)}),
+        ] {
+            assert_eq!(
+                validate_fast_payload("fast", &payload).unwrap_err().code,
+                400,
+                "payload: {payload}"
+            );
+        }
+        for enabled in [false, true] {
+            assert!(
+                validate_fast_payload(
+                    "setFast",
+                    &json!({"model":"gpt-fixture","threadId":"thread-1","enabled":enabled})
+                )
+                .is_ok()
+            );
+        }
+        for payload in [
+            json!({"model":"gpt-fixture","enabled":true}),
+            json!({"model":"gpt-fixture","threadId":"thread-1"}),
+            json!({"model":"gpt-fixture","threadId":"thread-1","enabled":null}),
+            json!({"model":"gpt-fixture","threadId":"thread-1","enabled":"true"}),
+            json!({"model":"gpt-fixture","threadId":"thread-1","enabled":1}),
+        ] {
+            assert_eq!(
+                validate_fast_payload("setFast", &payload).unwrap_err().code,
+                400
+            );
+        }
+        for action in ["send", "create"] {
+            assert!(validate_fast_payload(action, &json!({})).is_ok());
+            for enabled in [false, true] {
+                assert!(validate_fast_payload(action, &json!({"fastMode":enabled})).is_ok());
+            }
+            for enabled in [Value::Null, json!("false"), json!(1), json!({})] {
+                assert_eq!(
+                    validate_fast_payload(action, &json!({"fastMode":enabled}))
+                        .unwrap_err()
+                        .code,
+                    400
+                );
+            }
+        }
+        let goal = json!({"projectId":null,"prompt":"新目标","goalMode":true,"fastMode":true});
+        assert!(validate_fast_payload("create", &goal).is_ok());
+        assert!(validate_goal_composer_payload("create", &goal).is_ok());
+    }
+
+    #[tokio::test]
+    async fn remote_fast_routes_preserve_authorization_read_only_and_idempotency() {
+        let temp_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp");
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let state_dir = tempfile::Builder::new()
+            .prefix("fast-route-")
+            .tempdir_in(temp_root)
+            .unwrap();
+        configure_access_key(state_dir.path(), "fast-test-key").unwrap();
+        let native = Arc::new(RecordingActionBridge {
+            calls: Mutex::new(Vec::new()),
+            result: Mutex::new(json!({"ok":true,"threadId":"thread-1",
+                "model":"gpt-fixture","supported":true,"enabled":true})),
+        });
+        let controller =
+            RemoteAccessController::new(native.clone(), state_dir.path().to_path_buf()).unwrap();
+        controller.publish_access_policy(&RemoteAccessSettings {
+            enabled: true,
+            ..RemoteAccessSettings::default()
+        });
+        controller.running.store(true, Ordering::SeqCst);
+        {
+            let mut auth = controller.auth.lock().await;
+            let key_id = auth.access_key.as_ref().unwrap().id.clone();
+            auth.devices.push(Device {
+                id: "fast-device".into(),
+                name: "Fast 隔离验证".into(),
+                token_hash: hash("fast-cookie"),
+                client_id_hash: String::new(),
+                created_at_ms: now_ms(),
+                expires_at_ms: now_ms() + 60_000,
+                last_seen_at_ms: now_ms(),
+                key_id,
+                public_origin: None,
+            });
+        }
+        let state = WebState {
+            controller: controller.clone(),
+            settings: RemoteAccessSettings::default(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("codex_elves_device=fast-cookie"),
+        );
+        headers.insert("idempotency-key", HeaderValue::from_static("fast-1"));
+        let payload = json!({"threadId":"thread-1","model":"gpt-fixture","enabled":true});
+        let invoke = |state, headers, payload| {
+            action(State(state), Path("setFast".into()), headers, Json(payload))
+        };
+        assert_eq!(
+            invoke(state.clone(), HeaderMap::new(), payload.clone())
+                .await
+                .unwrap_err()
+                .code,
+            401
+        );
+        assert_eq!(
+            read(
+                State(state.clone()),
+                Path("fast".into()),
+                HeaderMap::new(),
+                Json(json!({"model":"gpt-fixture"}))
+            )
+            .await
+            .unwrap_err()
+            .code,
+            401
+        );
+        let mut read_only = state.clone();
+        read_only.settings.read_only = true;
+        assert_eq!(
+            invoke(read_only.clone(), headers.clone(), payload.clone())
+                .await
+                .unwrap_err()
+                .code,
+            403
+        );
+        let mut no_id = headers.clone();
+        no_id.remove("idempotency-key");
+        assert_eq!(
+            invoke(state.clone(), no_id, payload.clone())
+                .await
+                .unwrap_err()
+                .code,
+            400
+        );
+        assert_eq!(
+            invoke(
+                state.clone(),
+                headers.clone(),
+                json!({"threadId":"thread-1","model":"gpt-fixture","enabled":"true"})
+            )
+            .await
+            .unwrap_err()
+            .code,
+            400
+        );
+        assert_eq!(
+            read(
+                State(state.clone()),
+                Path("fast".into()),
+                headers.clone(),
+                Json(json!({"model":"gpt-fixture","threadId":"../other"}))
+            )
+            .await
+            .unwrap_err()
+            .code,
+            400
+        );
+        assert!(native.calls.lock().await.is_empty());
+        assert_eq!(
+            read(
+                State(read_only),
+                Path("fast".into()),
+                headers.clone(),
+                Json(json!({"model":"gpt-fixture"}))
+            )
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::OK
+        );
+        controller.publish_access_policy(&RemoteAccessSettings {
+            enabled: true,
+            read_only: true,
+            ..RemoteAccessSettings::default()
+        });
+        assert_eq!(
+            invoke(state.clone(), headers.clone(), payload.clone())
+                .await
+                .unwrap_err()
+                .code,
+            403,
+            "运行时只读策略也必须阻止 Fast 写入"
+        );
+        assert_eq!(native.calls.lock().await.len(), 1);
+        controller.publish_access_policy(&RemoteAccessSettings {
+            enabled: true,
+            ..RemoteAccessSettings::default()
+        });
+        let first = invoke(state.clone(), headers.clone(), payload.clone())
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(first["state"], "completed");
+        assert_eq!(
+            invoke(state.clone(), headers.clone(), payload.clone())
+                .await
+                .unwrap()
+                .0,
+            first
+        );
+        assert_eq!(
+            invoke(
+                state.clone(),
+                headers.clone(),
+                json!({"threadId":"thread-1","model":"gpt-fixture","enabled":false})
+            )
+            .await
+            .unwrap_err()
+            .code,
+            409
+        );
+        let calls = native.calls.lock().await.clone();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "fast");
+        assert_eq!(calls[1], ("setFast".into(), payload.clone()));
+        controller.auth.lock().await.devices.clear();
+        assert_eq!(invoke(state, headers, payload).await.unwrap_err().code, 401);
+        assert_eq!(native.calls.lock().await.len(), 2);
+    }
+
+    #[test]
     fn image_preview_preserves_alpha_and_bounded_cache() {
         use image::GenericImageView;
         let original = image::RgbaImage::from_fn(1200, 800, |x, y| {
@@ -11992,6 +12464,29 @@ call("send",{threadId:"isolated-thread",prompt:"隔离发送"})
             assert_eq!(changed.status(), reqwest::StatusCode::OK);
             assert_ne!(changed.headers()[reqwest::header::ETAG], etags[index]);
         }
+        // 服务重启会丢失内存媒体 ID；原图存在时，旧 URL 的重试也不能代替按消息重新注册。
+        *controller.images.write().unwrap() = ImageRegistry::default();
+        assert!(source_path.is_file());
+        for url in [base.clone(), format!("{base}/thumbnail")] {
+            let expired = request(url).send().await.unwrap();
+            assert_eq!(expired.status(), reqwest::StatusCode::NOT_FOUND);
+        }
+        let mut reread = json!({"scope":"items","data":[{
+            "type":"agentMessage","id":"preview-message",
+            "text":format!("![预览](<{}>)", source_path.display())
+        }]});
+        controller.attach_history_images(&mut reread);
+        let fresh_path = reread["data"][0]["remoteImages"][0]["url"]
+            .as_str()
+            .expect("重读原消息应登记新的受鉴权图片地址");
+        let base = format!("http://127.0.0.1:{port}{fresh_path}");
+        let image_id = fresh_path.rsplit('/').next().unwrap().to_owned();
+        let restored = request(base.clone()).send().await.unwrap();
+        assert_eq!(restored.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            restored.bytes().await.unwrap().as_ref(),
+            std::fs::read(&source_path).unwrap()
+        );
         std::fs::remove_file(&source_path).unwrap();
         let missing = request(base.clone()).send().await.unwrap();
         assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);

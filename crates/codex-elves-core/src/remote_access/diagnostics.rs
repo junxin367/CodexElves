@@ -1,8 +1,10 @@
 use super::*;
 
-pub(super) const MAX_BODY_BYTES: usize = 512 * 1024;
-const MAX_BUNDLE_BYTES: usize = 256 * 1024;
-const MAX_EVENTS: usize = 400;
+// 用户要求延长手机日志留存；与 Android DiagnosticsStore 和网页 diagnostics.js 同步为 10,000 条 / 4 MiB。
+const MAX_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_EVENTS: usize = 10_000;
+// 上传请求另留 64 KiB 给 requestId 和 JSON 封装；只扩大诊断路由，不改变会话发送限制。
+pub(super) const MAX_BODY_BYTES: usize = MAX_BUNDLE_BYTES + 64 * 1024;
 const REQUEST_LIFETIME_MS: u64 = 120_000;
 const MIN_UPLOAD_INTERVAL_MS: u64 = 5_000;
 const MAX_JSON_INTEGER: u64 = 9_007_199_254_740_991;
@@ -497,13 +499,20 @@ fn field(key: &str, value: &Value) -> Option<Value> {
             .as_i64()
             .filter(|value| (-1000..=1000).contains(value))
             .map(Value::from),
-        "durationMs" | "lux" | "previousLux" => value
+        "durationMs" | "lux" | "previousLux" | "effectiveLightLux" => value
             .as_f64()
             .filter(|number| {
                 number.is_finite() && *number >= 0.0 && *number <= MAX_JSON_INTEGER as f64
             })
             .and_then(serde_json::Number::from_f64)
             .map(Value::Number),
+        // 自动主题偏移保留有符号小数，原阈值共用 0～40 整数边界；与网页、Android 同步。
+        "themeLuxShift" => value
+            .as_f64()
+            .filter(|number| number.is_finite() && number.abs() <= MAX_JSON_INTEGER as f64)
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number),
+        "lightLux" | "darkLux" => value.as_u64().filter(|value| *value <= 40).map(Value::from),
         "readyState" if value.is_number() => {
             value.as_u64().filter(|value| *value <= 4).map(Value::from)
         }
@@ -551,14 +560,14 @@ fn sanitize_bundle(value: &Value) -> Result<Value, ApiError> {
         .len()
         > MAX_BUNDLE_BYTES
     {
-        return Err(ApiError::new(413, "诊断报告超过 256 KiB"));
+        return Err(ApiError::new(413, "诊断报告超过 4 MiB"));
     }
     let captured_at =
         integer(&value["capturedAtMs"]).ok_or_else(|| ApiError::new(400, "诊断采集时间无效"))?;
     let events = value["events"]
         .as_array()
         .filter(|events| events.len() <= MAX_EVENTS)
-        .ok_or_else(|| ApiError::new(400, "诊断事件最多 400 条"))?;
+        .ok_or_else(|| ApiError::new(400, "诊断事件最多 10000 条"))?;
     let app = value["app"]
         .as_object()
         .ok_or_else(|| ApiError::new(400, "诊断应用信息无效"))?;
@@ -645,6 +654,10 @@ fn sanitize_bundle(value: &Value) -> Result<Value, ApiError> {
                             // 用户要求从上报还原切换光照；名称与值校验必须同时放行，不能只扩展 field()。
                             | "lux"
                             | "previousLux"
+                            | "lightLux"
+                            | "darkLux"
+                            | "effectiveLightLux"
+                            | "themeLuxShift"
                             | "sampleAgeMs"
                             | "stableMs"
                             | "themeSequence"
@@ -671,7 +684,7 @@ fn sanitize_bundle(value: &Value) -> Result<Value, ApiError> {
         .len()
         > MAX_BUNDLE_BYTES
     {
-        return Err(ApiError::new(413, "诊断报告超过 256 KiB"));
+        return Err(ApiError::new(413, "诊断报告超过 4 MiB"));
     }
     Ok(bundle)
 }
@@ -967,7 +980,8 @@ mod tests {
                 "theme":"dark","previousTheme":"light","targetTheme":"dark","themeMode":"auto",
                 "themeSequence":1,"decision":"applied","reason":"sensor","phase":"after",
                 "lux":9.75,"previousLux":45.125,"supported":true,"sampleAgeMs":2000,
-                "stableMs":5000,"localHour":21,"timezoneOffsetMinutes":-480,"visible":true
+                "stableMs":5000,"localHour":21,"timezoneOffsetMinutes":-480,"visible":true,
+                "lightLux":40,"darkLux":10,"effectiveLightLux":41.25,"themeLuxShift":1.25
             }}),
             json!({"timeMs":125,"source":"native","name":"theme.sensor","fields":{
                 "supported":true,"registered":true,"lux":10.01,"sampleAgeMs":500,
@@ -1245,6 +1259,14 @@ mod tests {
         invalid = bundle();
         let mut small_event = invalid["events"][0].clone();
         small_event["fields"] = json!({});
+        for count in [400, MAX_EVENTS] {
+            invalid["events"] = json!(vec![small_event.clone(); count]);
+            let clean = sanitize_bundle(&invalid).unwrap();
+            assert_eq!(clean["events"].as_array().unwrap().len(), count);
+            if count == MAX_EVENTS {
+                assert!(serde_json::to_vec(&invalid).unwrap().len() > 256 * 1024);
+            }
+        }
         invalid["events"] = json!(vec![small_event; MAX_EVENTS + 1]);
         assert_eq!(sanitize_bundle(&invalid).unwrap_err().code, 400);
         invalid = bundle();
@@ -1303,7 +1325,7 @@ mod tests {
         assert_eq!(clean["events"][1], input["events"][1]);
         assert_eq!(clean["events"][2], input["events"][2]);
         assert_eq!(sanitize_bundle(&clean).unwrap(), clean);
-        for key in ["lux", "previousLux"] {
+        for key in ["lux", "previousLux", "effectiveLightLux"] {
             for valid in [0.0, 9.99, 10.01, 44.99, 45.125, MAX_JSON_INTEGER as f64] {
                 assert_eq!(field(key, &json!(valid)), Some(json!(valid)));
             }
@@ -1335,6 +1357,8 @@ mod tests {
             ("localHour", 0, 23),
             ("timezoneOffsetMinutes", -840, 840),
             ("count", 0, 10_000),
+            ("lightLux", 0, 40),
+            ("darkLux", 0, 40),
         ] {
             for valid in [minimum, maximum] {
                 assert_eq!(field(key, &json!(valid)), Some(json!(valid)));
@@ -1348,6 +1372,24 @@ mod tests {
             ] {
                 assert!(field(key, &invalid).is_none());
             }
+        }
+        for valid in [
+            -(MAX_JSON_INTEGER as f64),
+            -8.125,
+            0.0,
+            8.125,
+            MAX_JSON_INTEGER as f64,
+        ] {
+            assert_eq!(field("themeLuxShift", &json!(valid)), Some(json!(valid)));
+        }
+        for invalid in [
+            json!(-(MAX_JSON_INTEGER as f64) - 1.0),
+            json!(MAX_JSON_INTEGER + 1),
+            json!("8"),
+            json!(true),
+            Value::Null,
+        ] {
+            assert!(field("themeLuxShift", &invalid).is_none());
         }
         for key in ["supported", "registered"] {
             assert_eq!(field(key, &json!(true)), Some(json!(true)));
@@ -1631,12 +1673,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(oversized.status().as_u16(), 413);
+        let mut retained = bundle();
+        retained["events"] = json!(
+            (0..MAX_EVENTS)
+                .map(|index| json!({
+                    "timeMs":index,"source":"web","name":"http.complete",
+                    "fields":{"path":"/api/read/history","phase":"complete","status":200}
+                }))
+                .collect::<Vec<_>>()
+        );
+        assert!(serde_json::to_vec(&retained).unwrap().len() > 512 * 1024);
         let response = client
             .post(&url)
             .header("Host", "diagnostics.ngrok-free.app")
             .header("Origin", "https://diagnostics.shares.zrok.io")
             .bearer_auth(discovery["token"].as_str().unwrap())
-            .json(&json!({"requestId":"http-manual","bundle":bundle()}))
+            .json(&json!({"requestId":"http-manual","bundle":retained}))
             .send()
             .await
             .unwrap();
@@ -1647,6 +1699,15 @@ mod tests {
         );
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(response.json::<Value>().await.unwrap()["ok"], true);
+        let stored = state
+            .controller
+            .admin("diagnostics", json!({"mode":"read","deviceId":"device-a"}))
+            .await
+            .unwrap();
+        let stored_events = stored["report"]["bundle"]["events"].as_array().unwrap();
+        assert_eq!(stored_events.len(), MAX_EVENTS);
+        assert_eq!(stored_events[0]["timeMs"], 0);
+        assert_eq!(stored_events[MAX_EVENTS - 1]["timeMs"], MAX_EVENTS - 1);
         assert!(!channels::read_path(
             &axum::http::Method::POST,
             "/api/diagnostics"

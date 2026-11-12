@@ -2,6 +2,7 @@
 //! 用户要求关闭 CDP 后完整切换；本模块不包含 CDP、页面脚本或注入回退。
 mod catalog;
 mod commands;
+mod desktop;
 mod pins;
 mod projection;
 mod projects;
@@ -42,7 +43,7 @@ pub(super) struct Harness {
     receiver: Mutex<Option<mpsc::Receiver<Value>>>,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     queue_worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    owners: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    desktop: desktop::DesktopObservers,
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     loaded: Mutex<HashMap<String, String>>,
     pin_capability: Mutex<Option<(String, bool)>>,
@@ -56,9 +57,6 @@ impl Drop for Harness {
         }
         if let Some(worker) = self.queue_worker.get_mut().take() {
             worker.abort();
-        }
-        for (_, task) in self.owners.get_mut().drain() {
-            task.abort();
         }
     }
 }
@@ -95,11 +93,12 @@ impl Harness {
     pub fn new(directory: &Path) -> anyhow::Result<Arc<Self>> {
         let (events, receiver) = mpsc::channel(512);
         let audit = Arc::new(execution::Audit::default());
+        let projection = Arc::new(Mutex::new(Projection::default()));
         Ok(Arc::new(Self {
             audit: audit.clone(),
-            runtime: Arc::new(Runtime::new(events, audit)),
+            runtime: Arc::new(Runtime::new(events, audit.clone())),
             catalog: Arc::new(Catalog::default()),
-            projection: Arc::new(Mutex::new(Projection::default())),
+            projection: projection.clone(),
             store: Mutex::new(Store::open(directory)?),
             #[cfg(test)]
             project_codex_home: directory.to_path_buf(),
@@ -107,7 +106,7 @@ impl Harness {
             receiver: Mutex::new(Some(receiver)),
             worker: Mutex::new(None),
             queue_worker: Mutex::new(None),
-            owners: Mutex::new(HashMap::new()),
+            desktop: desktop::DesktopObservers::new(projection, audit),
             locks: Mutex::new(HashMap::new()),
             loaded: Mutex::new(HashMap::new()),
             pin_capability: Mutex::new(None),
@@ -135,6 +134,19 @@ impl Harness {
                 async move {
                     while let Some(frame) = receiver.recv().await {
                         let Some(service) = weak.upgrade() else { break };
+                        // 执行权随引擎加载生命周期变化；已释放的旧标记不能永久屏蔽桌面观察。
+                        let generation = frame["_generation"].as_str().unwrap_or("");
+                        if frame["method"] == "thread/closed"
+                            || frame["method"] == "thread/status/changed"
+                                && frame["params"]["status"]["type"] == "notLoaded"
+                        {
+                            if let Some(id) = frame["params"]["threadId"].as_str() {
+                                let mut loaded = service.loaded.lock().await;
+                                if loaded.get(id).is_some_and(|value| value == generation) {
+                                    loaded.remove(id);
+                                }
+                            }
+                        }
                         service.catalog.observe(&frame).await;
                         service.projection.lock().await.ingest(frame);
                     }
@@ -292,9 +304,7 @@ impl Harness {
 
     pub async fn release(&self) {
         self.catalog.reset().await;
-        for (_, task) in self.owners.lock().await.drain() {
-            task.abort();
-        }
+        self.desktop.reset().await;
         self.runtime.shutdown().await;
         self.loaded.lock().await.clear();
     }
@@ -333,15 +343,15 @@ impl Harness {
             }
         }
         self.remember_settings(id, &response).await?;
+        // 与列表观察的登记共用归属锁：取消旧订阅到登记服务执行权之间不能插入新桌面订阅。
+        let mut loaded = self.loaded.lock().await;
+        self.desktop.forget(id).await;
         self.projection
             .lock()
             .await
             .threads
             .insert(id.to_owned(), thread);
-        self.loaded
-            .lock()
-            .await
-            .insert(id.to_owned(), connection.generation.clone());
+        loaded.insert(id.to_owned(), connection.generation.clone());
         Ok(())
     }
 
@@ -486,7 +496,28 @@ impl Harness {
         let result = match action {
             "events" => {
                 self.runtime.check_health().await?;
+                // 服务模式有可见页面时沿用 3 秒目录缓存补齐桌面新会话；后台发现不阻塞事件推送。
+                if self.desktop.catalog_refresh_due() {
+                    self.catalog
+                        .refresh_in_background(&self.runtime, &self.projection);
+                }
                 Ok(self.projection.lock().await.events(&payload))
+            }
+            "observeThreads" => {
+                self.desktop.renew_catalog_interest();
+                let generation = self.runtime.connection().await?.generation.clone();
+                let loaded = self.loaded.lock().await;
+                for id in payload["threadIds"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    if loaded.get(id) != Some(&generation) {
+                        self.desktop.observe(id, None).await;
+                    }
+                }
+                Ok(json!({"ok":true}))
             }
             "notifications" => Ok(self.projection.lock().await.notifications(&payload)),
             "sidebar" => self.sidebar().await,
@@ -614,9 +645,11 @@ impl Harness {
     ) -> anyhow::Result<()> {
         authorization.check().await?;
         if let Some(snapshot) = self.owner_snapshot(id).await? {
-            let active = crate::desktop_owner_ipc::snapshot_turns(&snapshot)
-                .iter()
-                .any(|t| t["status"] == "inProgress");
+            // 桌面已明确执行中时，历史尚未载入当前轮次也必须等待，不能提前派发队列。
+            let active = desktop::executing(&snapshot)
+                || crate::desktop_owner_ipc::snapshot_turns(&snapshot)
+                    .iter()
+                    .any(|t| t["status"] == "inProgress");
             if active {
                 self.follow_owner(id, snapshot).await;
                 return Ok(());
@@ -690,46 +723,13 @@ impl Harness {
     }
 
     async fn follow_owner(&self, id: &str, baseline: Value) {
-        let mut owners = self.owners.lock().await;
-        if owners.get(id).is_some_and(|task| !task.is_finished()) {
+        let Ok(connection) = self.runtime.connection().await else {
             return;
+        };
+        let loaded = self.loaded.lock().await;
+        if loaded.get(id) != Some(&connection.generation) {
+            self.desktop.observe(id, Some(baseline)).await;
         }
-        if owners.len() >= 8 {
-            if let Some(key) = owners.keys().next().cloned() {
-                if let Some(task) = owners.remove(&key) {
-                    task.abort();
-                }
-            }
-        }
-        let projection = self.projection.clone();
-        let id_owned = id.to_owned();
-        owners.insert(id.to_owned(), execution::spawn_service(self.audit.clone(), "desktop-events", async move {
-            let mut previous = baseline;
-            let mut changes = crate::codex_service::ServiceProjection::new();
-            let mut cursor = changes.events(&json!({}));
-            let (sender, mut receiver) = mpsc::channel(8);
-            let watch = crate::desktop_owner_ipc::watch_snapshots(id_owned.clone(), sender);
-            tokio::pin!(watch);
-            loop {
-                tokio::select! {
-                    Some(observation) = receiver.recv() => {
-                        changes.project_changes(&id_owned, &previous, &observation.snapshot);
-                        cursor = changes.events(&cursor);
-                        let mut state = projection.lock().await;
-                        for event in cursor["events"].as_array().into_iter().flatten() {
-                    if event["method"]=="remote/notification" {continue;}
-                            state.ingest(event.clone());
-                        }
-                        if let Ok(thread) = crate::codex_service::normalize_owner_thread(&observation.snapshot, None) {
-                            state.threads.insert(id_owned.clone(), thread);
-                        }
-                        previous = observation.snapshot;
-                    }
-                    _ = &mut watch => break,
-                }
-            }
-            projection.lock().await.push(json!({"method":"remote/resync"}));
-        }));
     }
 }
 

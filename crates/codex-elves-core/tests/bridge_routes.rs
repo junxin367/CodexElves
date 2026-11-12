@@ -16,7 +16,6 @@ use codex_elves_core::routes::{
 use codex_elves_core::settings::BackendSettings;
 use codex_elves_core::status::StatusStore;
 use codex_elves_core::user_scripts::UserScriptManager;
-use codex_elves_core::workspace_checkpoint::WorkspaceCheckpointService;
 use serde_json::{Value, json};
 use support::DiagnosticLogCapture;
 
@@ -54,17 +53,7 @@ async fn bridge_routes_cover_all_current_paths() {
             "/upstream-worktree/create",
             json!({"repoPath": "/repo", "branchName": "feature/demo"}),
         ),
-        ("/workspace-checkpoint/create", json!({})),
-        (
-            "/workspace-checkpoint/session-context",
-            json!({"session_id": "s1", "title": "First"}),
-        ),
-        ("/workspace-checkpoint/bind-turn", json!({})),
-        ("/workspace-checkpoint/complete-turn", json!({})),
-        ("/workspace-checkpoint/list", json!({})),
-        ("/workspace-checkpoint/restore", json!({})),
-        ("/workspace-checkpoint/preview-revert", json!({})),
-        ("/workspace-checkpoint/restore-for-revert", json!({})),
+        ("/session/workspace-context", json!({"session_id":"s1"})),
         ("/delete", json!({"session_id": "s1", "title": "First"})),
         (
             "/export-markdown",
@@ -115,12 +104,6 @@ async fn settings_get_includes_runtime_codex_app_version() {
     assert_eq!(result["codexAppVersion"], json!("26.601.21317"));
     assert_eq!(result["codexAppPluginEntryUnlock"], json!(true));
     assert_eq!(result["codexAppPluginMarketplaceUnlock"], json!(true));
-    assert_eq!(result["codexAppWorkspaceCheckpoint"], json!(false));
-    assert_eq!(result["codexAppWorkspaceCheckpointStoragePath"], json!(""));
-    assert_eq!(
-        result["codexAppWorkspaceCheckpointRetentionRounds"],
-        json!(20)
-    );
     assert!(result.get("codexAppForcePluginInstall").is_none());
     assert!(result.get("codexAppConversationTimeline").is_none());
     assert!(result.get("codexAppThreadIdBadge").is_none());
@@ -245,10 +228,46 @@ async fn unknown_bridge_path_preserves_empty_session_id_shape() {
 }
 
 #[tokio::test]
-async fn workspace_checkpoint_session_context_route_uses_exact_thread_cwd() {
+async fn removed_workspace_snapshot_routes_and_settings_cannot_reenable_capture() {
+    let settings: BackendSettings = serde_json::from_value(json!({
+        "codexAppWorkspaceCheckpoint": true,
+        "codexAppWorkspaceCheckpointStoragePath": "unused-private-snapshots",
+        "codexAppWorkspaceCheckpointRetentionRounds": 20
+    }))
+    .unwrap();
+    let serialized = serde_json::to_value(settings).unwrap();
+    assert!(
+        serialized
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|key| !key.contains("WorkspaceCheckpoint"))
+    );
+    for action in [
+        "create",
+        "bind-turn",
+        "complete-turn",
+        "list",
+        "restore",
+        "preview-revert",
+        "restore-for-revert",
+        "session-context",
+    ] {
+        let result = handle_bridge_request(
+            test_context(),
+            &format!("/workspace-checkpoint/{action}"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(result["message"], "Unknown bridge path", "{action}");
+    }
+}
+
+#[tokio::test]
+async fn session_workspace_context_route_uses_exact_thread_cwd() {
     let result = handle_bridge_request(
         test_context(),
-        "/workspace-checkpoint/session-context",
+        "/session/workspace-context",
         json!({"session_id": "thread-1", "title": "First"}),
     )
     .await;
@@ -266,7 +285,7 @@ async fn settings_routes_use_settings_service() {
     let updated = handle_bridge_request(
         ctx.clone(),
         "/settings/set",
-        json!({"providerSyncEnabled": true, "codexAppSessionDelete": false, "codexAppNativeFastUnlock": true, "codexAppWorkspaceCheckpoint": false, "cliWrapperApiKeyEnv": ""}),
+        json!({"providerSyncEnabled": true, "codexAppSessionDelete": false, "codexAppNativeFastUnlock": true, "cliWrapperApiKeyEnv": ""}),
     )
     .await;
     let loaded = handle_bridge_request(ctx, "/settings/get", json!({})).await;
@@ -274,258 +293,8 @@ async fn settings_routes_use_settings_service() {
     assert_eq!(updated["providerSyncEnabled"], true);
     assert_eq!(updated["codexAppSessionDelete"], false);
     assert_eq!(updated["codexAppNativeFastUnlock"], true);
-    assert_eq!(updated["codexAppWorkspaceCheckpoint"], false);
     assert_eq!(updated["cliWrapperApiKeyEnv"], "CUSTOM_OPENAI_API_KEY");
     assert_eq!(loaded, updated);
-}
-
-#[tokio::test]
-async fn workspace_checkpoint_routes_create_bind_complete_list_and_restore() {
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(&workspace).unwrap();
-    std::fs::write(workspace.join("value.txt"), "before").unwrap();
-    let ctx = test_context().with_workspace_checkpoint_service(WorkspaceCheckpointService::new(
-        temp.path().join("checkpoint-state"),
-    ));
-    let enabled = handle_bridge_request(
-        ctx.clone(),
-        "/settings/set",
-        json!({"codexAppWorkspaceCheckpoint": true}),
-    )
-    .await;
-    assert_eq!(enabled["codexAppWorkspaceCheckpoint"], json!(true));
-
-    let created = handle_bridge_request(
-        ctx.clone(),
-        "/workspace-checkpoint/create",
-        json!({
-            "cwd": workspace,
-            "threadId": "thread-1",
-            "requestId": "request-1",
-            "promptPreview": "prompt"
-        }),
-    )
-    .await;
-    assert_eq!(created["status"], "ok");
-    assert_eq!(created["checkpoint"]["initialization"], true);
-    assert_eq!(created["checkpoint"]["initialFileCount"], 1);
-    assert_eq!(created["checkpoint"]["changeScope"], "turn");
-    assert_eq!(created["checkpoint"]["changedFileCount"], 0);
-    assert_eq!(created["checkpoint"]["changedFiles"], json!([]));
-    let checkpoint_id = created["checkpoint"]["id"].as_str().unwrap().to_string();
-
-    let bound = handle_bridge_request(
-        ctx.clone(),
-        "/workspace-checkpoint/bind-turn",
-        json!({
-            "cwd": workspace,
-            "checkpointId": checkpoint_id,
-            "threadId": "thread-1",
-            "turnId": "turn-1"
-        }),
-    )
-    .await;
-    assert_eq!(bound["checkpoint"]["turnId"], "turn-1");
-    assert_eq!(bound["checkpoint"]["accepted"], true);
-
-    let unchanged = handle_bridge_request(
-        ctx.clone(),
-        "/workspace-checkpoint/preview-revert",
-        json!({
-            "cwd": workspace,
-            "threadId": "thread-1",
-            "beforeTurnId": "",
-            "numTurns": 1
-        }),
-    )
-    .await;
-    assert_eq!(unchanged["status"], "ok");
-    assert_eq!(unchanged["hasChanges"], false);
-    assert_eq!(unchanged["changedPaths"], json!([]));
-
-    std::fs::write(workspace.join("value.txt"), "after").unwrap();
-    let completed = handle_bridge_request(
-        ctx.clone(),
-        "/workspace-checkpoint/complete-turn",
-        json!({
-            "cwd": workspace,
-            "threadId": "thread-1",
-            "turnId": "turn-1",
-            "status": "completed"
-        }),
-    )
-    .await;
-    assert_eq!(completed["status"], "ok");
-    assert_eq!(completed["checkpoint"]["id"], checkpoint_id);
-    assert_eq!(completed["checkpoint"]["turnStatus"], "completed");
-    assert_eq!(completed["checkpoint"]["changedFileCount"], 1);
-    assert_eq!(
-        completed["checkpoint"]["changedFiles"][0]["path"],
-        "value.txt"
-    );
-    assert_eq!(completed["checkpoint"]["changedFiles"][0]["status"], "M");
-
-    let listed = handle_bridge_request(
-        ctx.clone(),
-        "/workspace-checkpoint/list",
-        json!({
-            "cwd": workspace,
-            "threadId": "thread-1"
-        }),
-    )
-    .await;
-    assert_eq!(listed["checkpoints"][0], completed["checkpoint"]);
-
-    let changed = handle_bridge_request(
-        ctx.clone(),
-        "/workspace-checkpoint/preview-revert",
-        json!({
-            "cwd": workspace,
-            "threadId": "thread-1",
-            "beforeTurnId": "",
-            "numTurns": 1
-        }),
-    )
-    .await;
-    assert_eq!(changed["status"], "ok");
-    assert_eq!(changed["hasChanges"], true);
-    assert_eq!(changed["changedPaths"], json!(["value.txt"]));
-
-    let restored = handle_bridge_request(
-        ctx,
-        "/workspace-checkpoint/restore",
-        json!({
-            "cwd": workspace,
-            "checkpointId": checkpoint_id,
-            "threadId": "thread-1"
-        }),
-    )
-    .await;
-    assert_eq!(restored["status"], "ok");
-    assert_eq!(
-        std::fs::read_to_string(workspace.join("value.txt")).unwrap(),
-        "before"
-    );
-}
-
-#[tokio::test]
-async fn workspace_checkpoint_routes_use_configured_storage_retention_and_feature_gate() {
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    let checkpoint_root = temp.path().join("checkpoint-state");
-    std::fs::create_dir_all(&workspace).unwrap();
-    std::fs::write(workspace.join("value.txt"), "before").unwrap();
-    let settings = Arc::new(FakeSettings::default());
-    let ctx = BridgeContext::new(
-        settings,
-        Arc::new(FakeRuntime::default()),
-        Arc::new(FakeData::default()),
-    );
-
-    let configured = handle_bridge_request(
-        ctx.clone(),
-        "/settings/set",
-        json!({
-            "codexAppWorkspaceCheckpoint": true,
-            "codexAppWorkspaceCheckpointStoragePath": checkpoint_root,
-            "codexAppWorkspaceCheckpointRetentionRounds": 1
-        }),
-    )
-    .await;
-    assert_eq!(
-        configured["codexAppWorkspaceCheckpointRetentionRounds"],
-        json!(1)
-    );
-
-    let mut first_checkpoint_id = String::new();
-    for (index, value) in ["before", "after"].into_iter().enumerate() {
-        std::fs::write(workspace.join("value.txt"), value).unwrap();
-        let created = handle_bridge_request(
-            ctx.clone(),
-            "/workspace-checkpoint/create",
-            json!({
-                "cwd": workspace,
-                "threadId": "thread-1",
-                "requestId": format!("request-{}", index + 1),
-                "promptPreview": value
-            }),
-        )
-        .await;
-        assert_eq!(created["status"], "ok");
-        let checkpoint_id = created["checkpoint"]["id"].as_str().unwrap().to_string();
-        if index == 0 {
-            first_checkpoint_id = checkpoint_id.clone();
-        }
-        let bound = handle_bridge_request(
-            ctx.clone(),
-            "/workspace-checkpoint/bind-turn",
-            json!({
-                "cwd": workspace,
-                "checkpointId": checkpoint_id,
-                "threadId": "thread-1",
-                "turnId": format!("turn-{}", index + 1)
-            }),
-        )
-        .await;
-        assert_eq!(bound["status"], "ok");
-    }
-
-    let listed = handle_bridge_request(
-        ctx.clone(),
-        "/workspace-checkpoint/list",
-        json!({
-            "cwd": workspace,
-            "threadId": "thread-1"
-        }),
-    )
-    .await;
-    assert_eq!(listed["checkpoints"].as_array().unwrap().len(), 1);
-    assert_ne!(listed["checkpoints"][0]["id"], first_checkpoint_id);
-    assert!(checkpoint_root.is_dir());
-
-    handle_bridge_request(
-        ctx.clone(),
-        "/settings/set",
-        json!({"codexAppWorkspaceCheckpoint": false}),
-    )
-    .await;
-    let disabled = handle_bridge_request(
-        ctx.clone(),
-        "/workspace-checkpoint/list",
-        json!({"cwd": workspace, "threadId": "thread-1"}),
-    )
-    .await;
-    assert_eq!(disabled["status"], "failed");
-    assert!(
-        disabled["message"]
-            .as_str()
-            .unwrap()
-            .contains("Checkpoint 功能已关闭")
-    );
-
-    handle_bridge_request(
-        ctx.clone(),
-        "/settings/set",
-        json!({
-            "codexAppWorkspaceCheckpoint": true,
-            "enhancementsEnabled": false
-        }),
-    )
-    .await;
-    let master_disabled = handle_bridge_request(
-        ctx,
-        "/workspace-checkpoint/list",
-        json!({"cwd": workspace, "threadId": "thread-1"}),
-    )
-    .await;
-    assert_eq!(master_disabled["status"], "failed");
-    assert!(
-        master_disabled["message"]
-            .as_str()
-            .unwrap()
-            .contains("Checkpoint 功能已关闭")
-    );
 }
 
 #[tokio::test]
@@ -1212,7 +981,6 @@ impl BridgeSettingsService for FakeSettings {
             "codexAppProjectMove",
             "codexAppConversationView",
             "codexAppTokenUsage",
-            "codexAppWorkspaceCheckpoint",
             "codexAppUpstreamWorktreeCreate",
             "codexAppNativeMenuPlacement",
             "codexAppNativeFastUnlock",
@@ -1238,24 +1006,6 @@ impl BridgeSettingsService for FakeSettings {
                 } else {
                     value
                 }),
-            );
-        }
-        if let Some(value) = payload
-            .get("codexAppWorkspaceCheckpointStoragePath")
-            .and_then(Value::as_str)
-        {
-            raw.insert(
-                "codexAppWorkspaceCheckpointStoragePath".to_string(),
-                json!(value),
-            );
-        }
-        if let Some(value) = payload
-            .get("codexAppWorkspaceCheckpointRetentionRounds")
-            .and_then(Value::as_u64)
-        {
-            raw.insert(
-                "codexAppWorkspaceCheckpointRetentionRounds".to_string(),
-                json!(value),
             );
         }
         let updated: BackendSettings = serde_json::from_value(Value::Object(raw.clone())).unwrap();
@@ -1496,10 +1246,7 @@ impl BridgeDataService for FakeData {
         }))
     }
 
-    async fn workspace_checkpoint_session_context(
-        &self,
-        session: SessionRef,
-    ) -> anyhow::Result<Value> {
+    async fn session_workspace_context(&self, session: SessionRef) -> anyhow::Result<Value> {
         Ok(json!({
             "status": "ok",
             "session_id": session.session_id,

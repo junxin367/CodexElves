@@ -100,9 +100,16 @@ const vm = {
         { id: "claude:wsl:test", backend: "claude", label: "Claude · WSL · test", ready: true, legacyDefault: true }],
       drafts: new Map(), attachmentDrafts: new Map(),
       session: null, stream: null, EventSource: { OPEN: 1 }, modelsScope: "codex", modelLoadError: "",
+      modelDefaults: {}, goalVersion: 0, notifiedGoal: null,
+      renderClaudeControlNotices() {},
       selectionVersion: 0,
+      selectedDraftFast: false, remoteFastState: null, remoteFastRead: null, remoteFastWriting: null,
+      remoteFastKey: () => "", updateRemoteFast() {},
+      messageImageMediaReads: new WeakMap(), messageImageRefreshes: new Map(), messageImageReadSequence: 0,
       syncBackendModels() {}, setConnection() {},
       claudeUsageState: null, resetClaudeUsage() {}, syncClaudeUsage() {}, fitClaudeUsageTip() {},
+      desktopObservationTimer: null, desktopObservationRequest: null, desktopObservationLast: null,
+      scheduleDesktopObservation() {}, resetDesktopObservation() {},
       appearance: { sessionTypes: { codex: true, claude: false }, sessionFilter: "all" },
       transcriptEvents: new Map(), claudeHistoryOrder: null,
     })) if (!Object.hasOwn(context, key)) context[key] = value;
@@ -117,6 +124,119 @@ const vm = {
     return result;
   },
 };
+
+function desktopObservationHarness() {
+  const requests = [], scheduled = [];
+  const rows = [
+    { dataset: { threadId: "visible" }, getBoundingClientRect: () => ({ top: 20, bottom: 40, height: 20 }) },
+    { dataset: { threadId: "offscreen" }, getBoundingClientRect: () => ({ top: 300, bottom: 320, height: 20 }) },
+    { dataset: { threadId: "claude-11111111-2222-3333-4444-555555555555" }, getBoundingClientRect: () => ({ top: 60, bottom: 80, height: 20 }) },
+  ];
+  const root = { querySelectorAll: () => rows,
+    getBoundingClientRect: () => ({ top: 0, bottom: 200, left: 0, right: 250, width: 250 }) };
+  const context = vm.createContext({
+    AbortController, Date, pageLeaving: false, document: { hidden: false }, window: { innerWidth: 1000 },
+    session: { device: { id: "device" }, runtime: { cdpInjectionEnabled: false, revision: 1 },
+      capabilities: { desktopSessionSync: true } },
+    selectedId: "selected", relatedSessionView: null, foregroundReadGeneration: 1,
+    $: selector => selector === "#sidebar-content" ? root : null,
+    setTimeout: callback => { scheduled.push(callback); return scheduled.length; }, clearTimeout() {},
+    api: async (path, payload, _, signal, options) => {
+      const request = { ...deferred(), path, payload, signal, options };
+      requests.push(request);
+      return request.promise;
+    },
+  });
+  vm.runInContext(sourceSection("function desktopObservationIds()", "function renderSidebar()"), context);
+  return { context, requests, scheduled, root };
+}
+
+test("桌面同步只观察当前会话与可见 Codex 列表项，关联详情沿用主会话", () => {
+  const { context, root } = desktopObservationHarness();
+  assert.deepEqual([...context.desktopObservationIds()], ["selected", "visible"]);
+  context.relatedSessionView = { parentThreadId: "parent", threadId: "child" };
+  assert.deepEqual([...context.desktopObservationIds()], ["parent", "visible"]);
+  root.getBoundingClientRect = () => ({ top: 0, bottom: 200, left: -250, right: 0, width: 250 });
+  assert.deepEqual([...context.desktopObservationIds()], ["parent"]);
+  context.creating = true;
+  assert.deepEqual([...context.desktopObservationIds()], []);
+});
+
+test("桌面同步复用同一批观察，变更选择后续读；CDP、旧后台和后台页面不发请求", async () => {
+  const { context, requests, scheduled } = desktopObservationHarness();
+  const first = context.syncDesktopObservation();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, "/api/read/observeThreads");
+  assert.equal(requests[0].options.resourcePriority, "background");
+  context.selectedId = "next";
+  await context.syncDesktopObservation();
+  assert.equal(requests.length, 1);
+  requests[0].resolve({ ok: true }); await first;
+  assert.equal(scheduled.length, 1);
+  const next = context.syncDesktopObservation();
+  assert.equal(requests.length, 2);
+  assert.deepEqual([...requests[1].payload.threadIds], ["next", "visible"]);
+  requests[1].resolve({ ok: true }); await next;
+  await context.syncDesktopObservation();
+  assert.equal(requests.length, 2);
+  context.session.runtime.cdpInjectionEnabled = true;
+  await context.syncDesktopObservation();
+  context.session.runtime.cdpInjectionEnabled = false;
+  context.session.capabilities.desktopSessionSync = false;
+  await context.syncDesktopObservation();
+  context.session.capabilities.desktopSessionSync = true;
+  context.document.hidden = true;
+  await context.syncDesktopObservation();
+  assert.equal(requests.length, 2);
+});
+
+test("桌面观察迟到回执不能确认新运行模式或新授权下的订阅", async () => {
+  const { context, requests } = desktopObservationHarness();
+  const first = context.syncDesktopObservation();
+  context.session.runtime.revision++;
+  requests[0].resolve({ ok: true }); await first;
+  assert.equal(context.desktopObservationLast, null);
+  const second = context.syncDesktopObservation();
+  context.session.device.id = "other";
+  requests[1].resolve({ ok: true }); await second;
+  assert.equal(context.desktopObservationLast, null);
+});
+
+test("桌面边界：取消观察后立即重建，旧 promise 不阻塞也不撤销新请求", async () => {
+  const { context, requests } = desktopObservationHarness();
+  const first = context.syncDesktopObservation();
+  context.session.runtime.cdpInjectionEnabled = true;
+  context.scheduleDesktopObservation();
+  assert.equal(requests[0].signal.aborted, true);
+  context.session.runtime = { cdpInjectionEnabled: false, revision: 3 };
+  const next = context.syncDesktopObservation();
+  assert.equal(requests.length, 2, "不等待已取消请求的旧 promise 才恢复观察");
+  requests[0].resolve({ ok: true }); await first;
+  assert.equal(context.desktopObservationRequest.controller.signal, requests[1].signal);
+  assert.equal(context.desktopObservationLast, null);
+  requests[1].resolve({ ok: true }); await next;
+  assert.equal(context.desktopObservationRequest, null);
+});
+
+test("桌面单会话重连只补对应正文与列表，不重复刷新整个连接", () => {
+  let reloads = 0, sidebars = 0, connections = 0, resets = 0, observations = 0;
+  const context = vm.createContext({
+    selectedId: "selected", handleRemoteChannelEvent: () => false, scheduleRelatedMenuRefresh() {},
+    sidebarReadRefreshSuppressions: new Set(),
+    scheduleReload: () => reloads++, scheduleSidebarRefresh: () => sidebars++,
+    withRecoveryErrorSilence: async run => run(), refreshConnectedSession: async () => connections++,
+    resetDesktopObservation: () => resets++, scheduleDesktopObservation: () => observations++,
+  });
+  vm.runInContext(`${sourceSection("function receive(event) {", "  const params = { ...event.params || {} };")}\n}`, context);
+  context.receive({ method: "remote/resync", params: { threadId: "background" } });
+  assert.equal(reloads, 0); assert.equal(sidebars, 1); assert.equal(connections, 0);
+  context.receive({ method: "remote/resync", params: { threadId: "selected" } });
+  assert.equal(reloads, 1); assert.equal(sidebars, 2); assert.equal(connections, 0);
+  assert.equal(resets, 0); assert.equal(observations, 0);
+  context.receive({ method: "remote/resync", params: {} });
+  assert.equal(connections, 1);
+  assert.equal(resets, 1); assert.equal(observations, 1);
+});
 
 test("Codex/Claude 图片添加和草稿/队列恢复完整保留八张，第九张拒绝且不丢原图", async () => {
   const source = await readFile(new URL("../assets/remote-access/attachments.js", import.meta.url), "utf8");
@@ -184,6 +304,98 @@ test("桥接版本升级清理旧实例，守卫与公布版本一致", () => {
   }
 });
 
+function remoteFastHarness() {
+  const attributes = new Map(), reads = [], writes = [], notices = [];
+  const control = { disabled: true, hidden: true, setAttribute: (key, value) => attributes.set(key, value) };
+  const context = nodeVm.createContext({
+    session: { device: { id: "fast-device" }, capabilities: { fastMode: true }, runtime: { revision: 1 } },
+    selectedId: "thread-fast-a", creating: false, selectionVersion: 1, connected: true,
+    busy: false, stopping: false, pending: null, editingMessage: null, editingQueuedMessage: null,
+    selectedDraftFast: false, remoteFastState: null, remoteFastRead: null, remoteFastWriting: null,
+    model: "gpt-fast", claude: false, readOnly: false,
+    $: selector => selector === "#fast-button" ? control : null,
+    privateInputScope: value => value.device.id,
+    activeInstanceId: () => "codex:local",
+    currentModelId: () => context.model,
+    draftKey: () => context.selectedId || "$new:project",
+    modelContext: () => ({ ...(context.selectedId ? { threadId: context.selectedId } : { projectId: "project" }) }),
+    isClaude: () => context.claude,
+    threadReadOnly: () => context.readOnly, threadDeletionLocked: () => false, sessionInstanceEnabled: () => true,
+    api: (path, payload) => { const result = deferred(); reads.push({ path, payload, ...result }); return result.promise; },
+    mutate: (action, payload) => { const result = deferred(); writes.push({ action, payload, ...result }); return result.promise; },
+    notice: message => notices.push(message),
+  });
+  nodeVm.runInContext(app.slice(app.indexOf("function remoteFastKey("), app.indexOf("function renderModelMenu(")), context);
+  context.updateComposer = () => context.updateRemoteFast();
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  return { context, control, attributes, reads, writes, notices, flush };
+}
+
+test("远程 Fast 读取按会话和模型隔离，重复重绘不重复请求，迟到状态不污染新会话", async () => {
+  const h = remoteFastHarness(), { context, attributes, control, reads } = h;
+  for (let i = 0; i < 5; ++i) context.updateRemoteFast();
+  assert.equal(reads.length, 1);
+  assert.equal(attributes.get("aria-pressed"), "false");
+  assert.equal(control.disabled, true);
+  context.selectedId = "thread-fast-b"; ++context.selectionVersion;
+  context.updateRemoteFast();
+  assert.equal(reads.length, 2);
+  reads[1].resolve({ supported: true, enabled: false });
+  await h.flush();
+  reads[0].resolve({ supported: true, enabled: true });
+  await h.flush();
+  assert.equal(attributes.get("aria-pressed"), "false");
+  assert.equal(control.disabled, false);
+  for (let i = 0; i < 10; ++i) context.updateRemoteFast();
+  assert.equal(reads.length, 2, "消息和输入重绘不能额外探测 Fast");
+  context.model = "unsupported-model"; context.updateRemoteFast();
+  reads[2].resolve({ supported: false, enabled: false, reason: "当前模型未声明 Fast 能力" });
+  await h.flush();
+  assert.equal(control.disabled, true);
+  assert.match(control.title, /未声明 Fast/);
+  context.claude = true; context.updateRemoteFast();
+  assert.equal(control.hidden, true, "Claude 不借用 Codex 的 Fast 档位");
+});
+
+test("远程 Fast 只在保存确认后点亮，防止连点且迟到写入不改变新会话", async () => {
+  const h = remoteFastHarness(), { context, attributes, control, reads, writes } = h;
+  context.updateRemoteFast();
+  reads[0].resolve({ supported: true, enabled: false }); await h.flush();
+  const first = context.toggleRemoteFast();
+  await context.toggleRemoteFast();
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].action, "setFast");
+  assert.equal(writes[0].payload.threadId, "thread-fast-a");
+  assert.equal(writes[0].payload.enabled, true);
+  assert.equal(attributes.get("aria-pressed"), "false", "请求开始不能冒充保存成功");
+  assert.equal(control.disabled, true);
+  context.selectedId = "thread-fast-b"; ++context.selectionVersion; context.updateRemoteFast();
+  reads[1].resolve({ supported: true, enabled: false }); await h.flush();
+  writes[0].resolve({ threadId: "thread-fast-a", model: "gpt-fast", supported: true, enabled: true });
+  await first;
+  assert.equal(attributes.get("aria-pressed"), "false");
+  assert.equal(control.disabled, false);
+  const second = context.toggleRemoteFast();
+  writes[1].resolve({ threadId: "thread-fast-b", model: "gpt-fast", supported: true, enabled: true });
+  await second;
+  assert.equal(attributes.get("aria-pressed"), "true");
+  context.readOnly = true; context.updateRemoteFast();
+  assert.equal(control.disabled, true);
+});
+
+test("远程新会话 Fast 默认关闭，草稿开关不修改其他原生会话或提前提交", async () => {
+  const h = remoteFastHarness(), { context, attributes, reads, writes } = h;
+  context.selectedId = null; context.creating = true; context.updateRemoteFast();
+  reads[0].resolve({ supported: true, enabled: true }); await h.flush();
+  assert.equal(attributes.get("aria-pressed"), "false", "服务返回旧会话状态也不能开启新草稿");
+  await context.toggleRemoteFast();
+  assert.equal(attributes.get("aria-pressed"), "true");
+  assert.equal(context.selectedDraftFast, true);
+  assert.equal(writes.length, 0);
+  await context.toggleRemoteFast();
+  assert.equal(attributes.get("aria-pressed"), "false");
+});
+
 test("Claude 完整历史同步移除旧摘要轮次，迟到的历史响应不能复活摘要", async () => {
   const id = "claude-00000000-0000-4000-8000-000000000001", summary = { id: "compact", _nativeUserId: "summary-native", items: [{ id: "summary-item" }] };
   const turns = new Map([[summary.id, summary], ["real", { id: "real", _nativeUserId: "native-real", items: [] }], ["pending", { id: "pending", items: [] }]]);
@@ -243,6 +455,7 @@ function claudeUsageHarness() {
     activeInstanceId: () => context.instance, isClaude: () => context.backend === "claude",
     sessionInstanceEnabled: () => context.enabled,
     $: selector => selector === "#claude-usage" ? trigger : null, element: makeElement,
+    icon: name => makeElement("span", `ui-icon ${name}`),
     closePopup() {}, closeComposerMenus() {},
     setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
@@ -267,8 +480,8 @@ test("Claude 额度区分缺失、真实 0%、非法和过期窗口，秒数与 
   let windows = context.claudeUsageWindows(usage(0));
   assert.equal(windows.length, 2);
   assert.equal(windows[0].used, 0);
-  assert.equal(context.claudeUsageResetText(windows[0].resetAt), "2 小时 18 分钟后重置");
-  assert.equal(context.claudeUsageResetText(windows[1].resetAt), "3 天 6 小时后重置");
+  assert.equal(context.claudeUsageResetText(windows[0].resetAt), "2小时后");
+  assert.equal(context.claudeUsageResetText(windows[1].resetAt), "3天后");
   for (const invalid of [-1, 101, NaN, Infinity, true, "24", null]) {
     const value = usage();
     value.fiveHour.usedPercentage = invalid;
@@ -280,7 +493,7 @@ test("Claude 额度区分缺失、真实 0%、非法和过期窗口，秒数与 
   }
   const value = usage(); value.fiveHour.resetsAt = null;
   assert.equal(context.claudeUsageWindows(value).length, 2);
-  assert.equal(context.claudeUsageResetText(null), "重置时间尚未提供");
+  assert.equal(context.claudeUsageResetText(null), "时间未知");
   const stale = usage();
   advance(180001);
   assert.equal(context.claudeUsageWindows(stale).length, 0, "后台停留过久不能继续显示旧额度");
@@ -339,17 +552,80 @@ test("Claude 额度详情支持鼠标与点击，数据失效时关闭浮层并�
   assert.equal(nodes.length, 1);
   assert.equal(trigger.attributes["aria-expanded"], "true");
   assert.equal(nodes[0].children[0].textContent, "Claude 订阅额度");
-  assert.equal(nodes[0].children[3].textContent, "2 小时 18 分钟后重置");
+  const first = nodes[0].children[1];
+  assert.equal(first.children[0].children[1].textContent, "剩余 76%");
+  assert.equal(first.children[1].children[0].style.width, "76%");
+  assert.equal(first.children[2].children[1].textContent, "2小时后");
+  assert.equal(requests[1].payload.includeLocal, true, "仅打开弹窗时加载本地统计");
   trigger.onclick();
   assert.equal(context.claudeUsageState.tip.pinned, true);
   trigger.onclick();
   assert.equal(trigger.attributes["aria-expanded"], "false");
+  assert.equal(requests[1].signal.aborted, true, "关闭弹窗取消客户端读取");
   assert.equal(nodes[0].isConnected, false);
   trigger.onclick();
   advance(180001);
   context.renderClaudeUsage();
   assert.equal(trigger.hidden, true);
   assert.equal(context.claudeUsageState.tip, null);
+});
+
+test("Claude 本地详情独立加载，不替换原生百分比，并按窗口校验金额和预测", async () => {
+  const { context, trigger, requests, nodes, usage, advance } = claudeUsageHarness();
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  context.mountClaudeUsage(); context.syncClaudeUsage();
+  requests[0].resolve({ ok: true, backend: "claude", instanceId: context.instance, usage: usage() });
+  await flush();
+  assert.equal(requests.length, 1, "默认入口不扫描日志");
+  trigger.onclick();
+  const response = usage(99), reset = Date.parse(response.fiveHour.resetsAt);
+  response.fiveHour.metrics = { source: "claude-wsl-local-journal", observedAtMs: context.Date.now(),
+    windowStartMs: reset - 18000000, windowEndMs: reset,
+    usedCostUsd: 12.84, usedTokens: 684200, forecastCostUsd: 18.60, forecastTokens: 991100 };
+  requests[1].resolve({ ok: true, backend: "claude", instanceId: context.instance, usage: response });
+  await flush();
+  assert.equal(context.claudeUsageState.value.fiveHour.usedPercentage, 24);
+  const metric = nodes[0].children[1].children[2].children[0].children;
+  assert.equal(metric[0].children[1].textContent, "$12.84");
+  assert.equal(metric[0].children[3].textContent, "684.2k");
+  assert.equal(metric[1].children[1].textContent, "$18.60");
+  assert.equal(metric[1].children[3].textContent, "991.1k");
+  const windows = context.claudeUsageWindows(context.claudeUsageState.value);
+  assert.equal(context.claudeUsageMetrics(windows[0]).usedTokens, 684200);
+  context.claudeUsageState.details.value.fiveHour.windowEndMs++;
+  assert.equal(context.claudeUsageMetrics(windows[0]), null, "不能复用上一额度窗口的数字");
+  context.claudeUsageState.details.value.fiveHour.windowEndMs--;
+  advance(180001);
+  assert.equal(context.claudeUsageMetrics(windows[0]), null, "不显示过期本地数据");
+  for (const invalid of [null, undefined, NaN, Infinity, -1, true, "100", 1e20])
+    assert.equal(context.claudeUsageCompact(invalid), "—");
+  assert.equal(context.claudeUsageCompact(0, true), "$0.00");
+  assert.equal(context.claudeUsageCompact(7900000), "7.90M");
+  assert.equal(context.claudeUsageResetText(context.Date.now() + 25 * 60000), "25分钟后");
+});
+
+test("Claude 详情关闭、实例和授权切换时忽略迟到结果，失败只影响本地数字", async () => {
+  const { context, trigger, requests, usage } = claudeUsageHarness();
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  context.mountClaudeUsage(); context.syncClaudeUsage();
+  requests[0].resolve({ ok: true, backend: "claude", instanceId: context.instance, usage: usage() });
+  await flush();
+  trigger.onclick(); trigger.onclick();
+  requests[1].resolve({ ok: true, backend: "claude", instanceId: context.instance, usage: usage() });
+  await flush();
+  assert.equal(context.claudeUsageState.details, null, "已关闭的弹窗不接受迟到数字");
+  assert.equal(trigger.hidden, false);
+  trigger.onclick();
+  requests[2].resolve({ ok: false });
+  await flush();
+  assert.equal(context.claudeUsageState.value.fiveHour.usedPercentage, 24);
+  assert.equal(context.claudeUsageState.details.value.fiveHour, null);
+  trigger.onclick(); trigger.onclick();
+  assert.equal(requests.length, 3, "详情失败同样缓存一分钟，反复点击不重复扫描");
+  context.instance = "claude:wsl:other";
+  context.syncClaudeUsage();
+  assert.equal(context.claudeUsageState.details, null);
+  assert.equal(trigger.hidden, true);
 });
 
 test("上下文容量缺失时显示真实最后请求用量，不伪造百分比", () => {
@@ -746,6 +1022,49 @@ test("会话菜单分离子智能体读取和侧边写入，并按运行方式�
   assert.notEqual(cdp.owner, service.owner);
   current = { ...current, subagentsEnabled: false, sideThreadsEnabled: false };
   assert.deepEqual(Array.from(context.permissions(context.readContext())), [false, false]);
+});
+
+test("Claude 原生子代理身份走本类型路由，读取能力独立于侧边会话且详情保持只读", () => {
+  const parent = "claude-00000000-0000-4000-8000-000000000001";
+  const child = "claude-agent-00000000-0000-4000-8000-000000000001-agent_fixture";
+  const context = vm.createContext({ selectedId: child,
+    session: { runtime: { cdpInjectionEnabled: true }, capabilities: { serviceSubagents: true } },
+    thread: { id: child, backend: "claude", viewKind: "subagent", readOnly: true, capabilities: {} },
+    relatedThreadViews: new Map(), relatedSessionView: null, normalizeRelatedView: value => value });
+  vm.runInContext(sourceSection("function subagentsEnabled(", "function threadReadOnlyMessage("), context);
+  assert.equal(context.claudeThreadId(child), true);
+  assert.equal(context.conversationBackend({ id: child }), "claude");
+  assert.equal(context.claudeThreadId("claude-agent-invalid-parent-agent_fixture"), false);
+  assert.equal(context.subagentsEnabled(), false, "Codex 的 CDP 和能力不能替代 Claude 自己的能力声明");
+  context.thread.capabilities.subagents = true;
+  assert.equal(context.subagentsEnabled(), true);
+  assert.equal(context.sideThreadsEnabled(), false);
+  assert.equal(context.threadReadOnly(), true);
+  context.thread = { id: parent, backend: "claude", capabilities: { subagents: true } };
+  context.selectedId = parent;
+  assert.equal(context.threadReadOnly(), false);
+  assert.equal(context.subagentsEnabled(), true);
+});
+
+test("Claude 子代理即使在 CDP 模式也每两秒只读补齐，离开后旧请求不继续刷新", async () => {
+  const timers = [], reads = [];
+  const child = "claude-agent-00000000-0000-4000-8000-000000000001-agent_fixture";
+  const context = vm.createContext({
+    relatedSessionCheckTimer: null, relatedSessionView: { kind: "subagent", threadId: child },
+    selectedId: child, selectionVersion: 1, thread: { backend: "claude" },
+    session: { runtime: { cdpInjectionEnabled: true } }, document: { hidden: false }, connected: true,
+    privateInputScope: () => "scope", subagentsEnabled: () => true, normalizeRelatedView: value => value,
+    clearTimeout() {}, setTimeout: (callback, delay) => { timers.push({ callback, delay }); return timers.length; },
+    reloadThread: async () => reads.push(context.selectedId),
+  });
+  vm.runInContext(sourceSection("function scheduleRelatedSessionCheck(", "function isMissingThreadError("), context);
+  context.scheduleRelatedSessionCheck();
+  assert.equal(timers[0].delay, 2000);
+  await timers[0].callback();
+  assert.deepEqual(reads, [child]);
+  context.selectedId = "parent"; context.selectionVersion++; context.relatedSessionView = null;
+  await timers[1].callback();
+  assert.deepEqual(reads, [child]);
 });
 
 test("服务子智能体刷新失败保留旧列表并明确标记未同步", async () => {
@@ -2288,6 +2607,7 @@ test("文件树右侧显示各仓库的分支和图标，缺失分支时不使�
 
 async function connectionDiagnosticsHarness({ android = true } = {}) {
   const logs = [], documentListeners = new Map(), windowListeners = new Map(), timers = new Map();
+  const bridgeMessages = [], bridgeListeners = new Map();
   let now = 1000, nextTimer = 0;
   const context = {
     URL, Headers, Response, AbortController, DOMException, TextEncoder, queueMicrotask,
@@ -2311,19 +2631,64 @@ async function connectionDiagnosticsHarness({ android = true } = {}) {
     clearTimeout: id => timers.delete(id), clearInterval: id => timers.delete(id),
     isAndroidContainer: () => android,
     getAndroidAppInfo: async () => ({ diagnosticsVersion: 1, requestRoutingVersion: 2 }),
-    CodexElvesAndroid: { postMessage: text => {
-      const message = JSON.parse(text);
-      if (message.type === "diagnostics-log") logs.push(message.event);
-    } }
+    CodexElvesAndroid: {
+      addEventListener: (type, callback) => bridgeListeners.set(type, callback),
+      postMessage: text => {
+        const message = JSON.parse(text);
+        if (message.type === "diagnostics-log") logs.push(message.event);
+        else bridgeMessages.push(message);
+      }
+    }
   };
   context.window = context;
   vm.createContext(context);
   const load = source => vm.runInContext(source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""), context);
   load(diagnostics);
   await Promise.resolve();
-  return { context, logs, timers, documentListeners, windowListeners, load,
+  return { context, logs, timers, documentListeners, windowListeners, bridgeMessages, bridgeListeners, load,
     advance: milliseconds => { now += milliseconds; } };
 }
+
+test("诊断快照兼容旧APK并接收一万条日志，拒绝超量和超大桥消息", async () => {
+  const h = await connectionDiagnosticsHarness();
+  await vm.runInContext("support", h.context);
+  const events = Array.from({ length: 10000 }, (_, index) => ({
+    timeMs: index, source: "web", name: "http.complete",
+    fields: { path: "/api/read/history", requestId: `history-${index}`, phase: "complete", status: 200 }
+  }));
+  const snapshot = (requestId, value) => JSON.stringify({
+    type: "diagnostics-snapshot", requestId,
+    bundle: { schemaVersion: 1, capturedAtMs: 10000, app: {}, events: value }
+  });
+  for (const count of [400, 10000]) {
+    const operation = h.context.nativeRequest("diagnostics-snapshot");
+    await new Promise(resolve => setImmediate(resolve));
+    const { requestId } = h.bridgeMessages.at(-1);
+    const data = snapshot(requestId, events.slice(0, count));
+    if (count === 10000) assert.ok(data.length > 384 * 1024, "大快照不能再被旧桥消息上限丢弃");
+    h.bridgeListeners.get("message")({ data });
+    const result = await operation;
+    assert.equal(result.events.length, count);
+    assert.equal(result.events[0].timeMs, 0);
+    assert.equal(result.events.at(-1).timeMs, count - 1);
+  }
+  for (const kind of ["count", "bytes"]) {
+    let completed = false;
+    const operation = h.context.nativeRequest("diagnostics-snapshot").then(result => {
+      completed = true; return result;
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    const { requestId } = h.bridgeMessages.at(-1);
+    const data = kind === "count" ? snapshot(requestId, [...events, events[0]])
+      : snapshot(requestId, []) + " ".repeat(4 * 1024 * 1024 + 64 * 1024);
+    h.bridgeListeners.get("message")({ data });
+    await Promise.resolve();
+    assert.equal(completed, false, "超限桥消息不能作为成功快照交付");
+    h.bridgeListeners.get("message")({ data: snapshot(requestId, []) });
+    assert.equal((await operation).events.length, 0);
+  }
+  assert.equal(h.timers.size, 0);
+});
 
 test("连接诊断关联标识只附加到状态探测，保留业务请求和既有查询参数", async () => {
   const h = await connectionDiagnosticsHarness(), origin = h.context.location.origin;
@@ -2371,17 +2736,20 @@ test("主题日志保留小数光照和固定判断字段，未知文本及非�
     lux: 44.99, previousLux: 10.01, theme: "dark", previousTheme: "light", targetTheme: "dark",
     themeMode: "auto", decision: "applied", reason: "sensor", phase: "after",
     sampleAgeMs: 2100, stableMs: 5000, themeSequence: 1, localHour: 21, timezoneOffsetMinutes: -480,
+    lightLux: 5, darkLux: 4, effectiveLightLux: 13.125, themeLuxShift: 8.125,
     supported: true, registered: false, token: "private", message: "private"
   });
   assert.deepEqual(h.logs[0].fields, {
     lux: 44.99, previousLux: 10.01, theme: "dark", previousTheme: "light", targetTheme: "dark",
     themeMode: "auto", decision: "applied", reason: "sensor", phase: "after",
     sampleAgeMs: 2100, stableMs: 5000, themeSequence: 1, localHour: 21, timezoneOffsetMinutes: -480,
+    lightLux: 5, darkLux: 4, effectiveLightLux: 13.125, themeLuxShift: 8.125,
     supported: true, registered: false
   });
   h.context.recordDiagnostic("theme.sample", {
     lux: Infinity, previousLux: -1, sampleAgeMs: -1, themeSequence: NaN, localHour: 24,
-    timezoneOffsetMinutes: -841, theme: "private", themeMode: "private", phase: "private", reason: "private"
+    timezoneOffsetMinutes: -841, theme: "private", themeMode: "private", phase: "private", reason: "private",
+    lightLux: 41, darkLux: -1, effectiveLightLux: -1, themeLuxShift: Infinity
   });
   assert.deepEqual(h.logs[1].fields, {});
 });
@@ -2464,6 +2832,7 @@ test("主题切换保留前后真实光照及年龄，延迟采证不会提前�
   assert.deepEqual({ ...after }, {
     theme: "dark", themeMode: "auto", themeSequence: 1, supported: true, lux: 8.5, previousLux: 60.25,
     sampleAgeMs: 5000, localHour: 21, timezoneOffsetMinutes: -480, visible: true,
+    lightLux: 10, darkLux: 9, effectiveLightLux: 10, themeLuxShift: 0,
     previousTheme: "light", targetTheme: "dark", reason: "timer", phase: "after"
   });
   h.advance(2000); h.sensor(12.25); h.runAfter(2000);
@@ -2530,6 +2899,78 @@ test("自定义光照阈值按所选数值切回浅色，修改后重新累计�
   for (const invalid of [4, 41, 35.5, NaN, "40", null]) {
     assert.equal(h.context.setAutomaticThemeLightLux(invalid), false);
     assert.equal(h.appearance.automaticThemeLightLux, 35);
+  }
+});
+
+function enterAutomaticDarkTheme(h, beforeLux = 0, afterLux = 8) {
+  h.appearance.automaticThemeLightLux = 5;
+  h.sensor(beforeLux); h.advance(5000); h.sensor(beforeLux);
+  assert.equal(h.appearance.theme, "dark");
+  h.advance(1000); h.sensor(afterLux);
+  h.advance(2001); h.sensor(afterLux);
+}
+
+test("自动主题从第一次切换补偿0到8lux偏移，环境继续变亮仍按原五秒切回浅色", async () => {
+  const h = await themeDiagnosticsHarness();
+  enterAutomaticDarkTheme(h);
+  for (let sample = 0; sample < 40; sample++) {
+    h.advance(2000); h.sensor(8);
+  }
+  const applied = h.logs.filter(event => event.name === "theme.decision" && event.fields.decision === "applied");
+  assert.deepEqual(applied.map(event => event.fields.theme), ["dark"]);
+  assert.equal(h.appearance.theme, "dark");
+  assert.equal(h.appearance.automaticThemeLightLux, 5, "补偿不能改写用户保存的浅色阈值");
+  const calibration = h.logs.filter(event => event.name === "theme.calibration");
+  assert.equal(calibration.length, 1, "稳定读数不重复校准或刷日志");
+  assert.equal(calibration[0].fields.previousLux, 0);
+  assert.equal(calibration[0].fields.themeLuxShift, 8);
+  assert.equal(calibration[0].fields.effectiveLightLux, 13);
+  h.sensor(12.99); h.advance(6000); h.sensor(12.99);
+  assert.equal(h.appearance.theme, "dark");
+  h.sensor(13);
+  h.advance(4999); h.sensor(13);
+  assert.equal(h.appearance.theme, "dark");
+  h.advance(1); h.sensor(13);
+  assert.equal(h.appearance.theme, "light");
+});
+
+test("自动主题偏移按变化量计算，正负及零偏移都保留原阈值间隔", async () => {
+  for (const [before, after, expectedShift] of [[4, 12, 8], [4, 0, -4], [0, 0, 0]]) {
+    const h = await themeDiagnosticsHarness();
+    enterAutomaticDarkTheme(h, before, after);
+    assert.equal(h.appearance.theme, "dark");
+    assert.equal(h.logs.find(event => event.name === "theme.calibration").fields.themeLuxShift, expectedShift);
+    const target = 5 + expectedShift;
+    h.sensor(target - .01); h.advance(6000); h.sensor(target - .01);
+    assert.equal(h.appearance.theme, "dark");
+    h.sensor(target); h.advance(5000); h.sensor(target);
+    assert.equal(h.appearance.theme, "light");
+  }
+});
+
+test("自动主题校准排除切换前缓存，三秒后环境变化不再归为界面偏移，手动和白天可重置", async () => {
+  const cached = await themeDiagnosticsHarness();
+  cached.appearance.automaticThemeLightLux = 5;
+  cached.sensor(0); cached.advance(5000); cached.sensor(0);
+  cached.advance(1000); cached.sensor(8, 6000);
+  assert.equal(cached.logs.filter(event => event.name === "theme.calibration").length, 0);
+  cached.advance(500); cached.sensor(8);
+  assert.equal(cached.logs.find(event => event.name === "theme.calibration").fields.themeLuxShift, 8);
+  cached.advance(2000); cached.sensor(9);
+  assert.equal(cached.logs.filter(event => event.name === "theme.calibration").length, 1);
+  for (const action of ["manual", "threshold", "daytime"]) {
+    const h = await themeDiagnosticsHarness();
+    enterAutomaticDarkTheme(h);
+    if (action === "manual") h.context.setAppearanceThemeMode("manual", { theme: "light" });
+    else if (action === "threshold") {
+      h.context.setAutomaticThemeLightLux(6);
+      h.sensor(8); h.advance(5000); h.sensor(8);
+    } else {
+      h.hour(8);
+      h.context.applyAutomaticAppearance(true, { immediate: true });
+    }
+    assert.equal(h.appearance.theme, "light", action);
+    assert.equal(h.logs.at(-1).fields.themeLuxShift, 0, action);
   }
 });
 
@@ -2715,6 +3156,60 @@ function goalControlHarness({ status = "active", readOnly = false } = {}) {
   return { context, calls, notices, disk,
     pending: () => vm.runInContext("goalEditPending", context) };
 }
+
+test("Claude 目标回执只确认原生命令受理，不提前改写目标或正文", async () => {
+  const h = goalControlHarness(), before = JSON.stringify(h.context.thread);
+  h.context.respond = (_path, _payload, receiptId) => ({ requestId: receiptId, state: "completed",
+    result: { ok: true, backend: "claude", threadId: "main",
+      nativeCommand: { id: "native-clear", name: "goal", state: "pending" }, goal: null } });
+  await h.context.changeGoalState("delete", h.context.thread.goal);
+  assert.equal(JSON.stringify(h.context.thread), before, "受理不能冒充已经清除原生目标");
+  assert.equal(h.pending(), null);
+  assert.equal(h.calls.length, 1);
+  assert.match(h.notices.at(-1), /状态将随原生执行更新/);
+});
+
+test("Claude 新目标已受理后读取失败不恢复发送锁，也不提前展示目标正文", async () => {
+  const notices = [], cleared = [];
+  const context = vm.createContext({ session: { device: { id: "device" } },
+    selectedId: "claude-fixture", thread: { id: "claude-fixture", goal: null },
+    selectionToken: "selection", pending: { id: "receipt" },
+    goalComposerAction: () => true, validRelatedThreadId: id => id === "claude-fixture",
+    draftKey: () => "claude-fixture", clearSubmittedDraft: (...value) => cleared.push(value),
+    goalComposerRecoveries: new Map(), persistGoalComposerRecoveries() {},
+    savePending: value => { context.pending = value; },
+    reloadThread: async () => { throw new Error("暂时离线"); }, loadSidebar: async () => {},
+    notice: value => notices.push(value), updateComposer() {},
+  });
+  vm.runInContext(sourceSection("async function applyGoalComposerReceipt(", "async function manuallyResolveGoalComposer("), context);
+  const result = await context.applyGoalComposerReceipt({ id: "receipt", deviceId: "device",
+    action: "setGoal", selectionToken: "selection", payload: { threadId: "claude-fixture", goalMode: true } },
+    { state: "completed", result: { ok: true, backend: "claude", threadId: "claude-fixture",
+      nativeCommand: { id: "native-goal", name: "goal", state: "pending" } } });
+  assert.equal(result, "succeeded");
+  assert.equal(context.pending, null);
+  assert.equal(context.thread.goal, null);
+  assert.equal(cleared.length, 1);
+  assert.match(notices.at(-1), /等待原生执行/);
+});
+
+test("Claude 原生命令能力按实例目录读取，压缩回执未知也不强制排队普通消息", () => {
+  const context = vm.createContext({ thread: { id: "claude-fixture", backend: "claude",
+    instanceId: "claude:wsl:test", capabilities: { goalComposer: true, compact: true, queue: true } },
+    selectedId: "claude-fixture", modelsScope: "claude:wsl:test",
+    modelDefaults: { nativeCapabilities: { goal: true, compact: false } },
+    currentCompaction: () => ({ state: "unknown" }) });
+  assert.equal(context.claudeCommandSupported("goal"), true);
+  assert.equal(context.claudeCommandSupported("compact"), false, "新目录明确不支持时不借用历史能力");
+  context.modelsScope = "codex";
+  assert.equal(context.claudeCommandSupported("compact"), true, "其他实例目录不能覆盖此会话");
+  vm.runInContext(sourceSection("function compactionQueueSendReason(", "function persistCompactions("), context);
+  assert.equal(context.compactionQueueSendReason(), "");
+  assert.equal(context.compactionInProgress({ state: "pending", acknowledged: true }), false);
+  assert.equal(context.compactionInProgress({ state: "running" }), true);
+  context.thread.capabilities.queue = false;
+  assert.equal(context.claudeCommandSupported("goal"), false, "旧 print 会话不能借用目录能力开放控制入口");
+});
 
 test("目标暂停、开始、删除提交准确目标，保留计数、预算和会话消息", async () => {
   const { context, calls } = goalControlHarness();
@@ -3223,8 +3718,12 @@ function compactionComposerHarness() {
 
 test("已确认压缩先于线程执行状态到达时，空输入显示可用停止按钮，有内容仍可排队发送", () => {
   const h = compactionComposerHarness();
+  h.context.remoteFastWriting = { key: "current-fast" };
+  h.context.remoteFastKey = () => "current-fast";
+  h.context.updateComposer();
   assert.equal(h.send.dataset.action, "stop");
-  assert.equal(h.send.disabled, false, "排队发送能力缺失不能禁用停止压缩");
+  assert.equal(h.send.disabled, false, "Fast 保存和排队发送能力缺失均不能禁用停止压缩");
+  h.context.remoteFastWriting = null;
   assert.ok(h.send.querySelector(".stop"));
   assert.equal(h.send.attributes["aria-label"], "停止压缩");
   assert.equal(h.send.title, "停止压缩");
@@ -3533,6 +4032,92 @@ function compactionRenderer() {
   vm.runInContext(sourceSection("function transcriptModelName(", "function readableToolName("), context);
   return context.renderTranscriptEvent;
 }
+
+test("Claude 压缩沿用同一正文行，状态和说明不写死执行器且保留原生统计", () => {
+  const render = compactionRenderer();
+  const base = { id: "operation", type: "contextCompaction", remoteCompactionLifecycle: true,
+    status: "inProgress", startedAtMs: 1000 };
+  const node = render(base);
+  assert.match(node.textContent, /正在压缩上下文/);
+  assert.doesNotMatch(node.attributes["aria-label"], /Codex|Claude/);
+  assert.equal(render({ ...base, phase: "stopping" }, node), node);
+  assert.match(node.textContent, /正在停止压缩/);
+  render({ ...base, status: "unknown" }, node);
+  assert.match(node.textContent, /压缩结果待确认/);
+  assert.equal(node.attributes.role, "note");
+  render({ ...base, status: "completed", completed: true, source: "automatic",
+    preTokens: 21279, postTokens: 5086, durationMs: 105521 }, node);
+  assert.match(node.textContent, /上下文已自动压缩/);
+  assert.match(node.attributes["aria-label"], /21,279.*5,086.*105.521/);
+  render({ ...base, status: "interrupted", completed: true }, node);
+  assert.match(node.textContent, /已中断/);
+  render({ ...base, status: "failed", completed: true }, node);
+  assert.match(node.textContent, /失败/);
+  render({ ...base, status: "completed", completed: true, outcome: "noop" }, node);
+  assert.match(node.textContent, /无需压缩/);
+});
+
+test("已结束的回复不能提前结束其后正在执行的 Claude 压缩", () => {
+  const context = vm.createContext({ transcriptEvents: new Map(), itemVersions: new Map() });
+  vm.runInContext(sourceSection("const transcriptEventTypes =", "async function mutate(")
+    + sourceSection("function completedItem(", "function mergeHistoryTurn("), context);
+  const native = { id: "native", type: "contextCompaction", status: "inProgress",
+    remoteCompactionLifecycle: true, startedAtMs: 1000 };
+  const old = { id: "old", type: "contextCompaction", status: "inProgress", startedAtMs: 1000 };
+  const projected = context.enrichTurnTranscriptEvents({ id: "turn", status: "completed", items: [native, old] });
+  assert.equal(projected.items[0].status, "inProgress");
+  assert.equal(projected.items[1].status, "completed", "原有 Codex 终态兜底保持不变");
+});
+
+test("Claude 目标统计只显示显式返回值，等待期间不自行累计耗时", () => {
+  const rows = new Map(["tokens-used", "token-budget", "tokens-remaining", "iterations", "duration"]
+    .map(key => [key, { hidden: false, output: {}, querySelector() { return this.output; } }]));
+  const metrics = {};
+  const root = { querySelector: selector => selector === ".goal-metrics" ? metrics : rows.get(selector.replace(".goal-metric-", "")) };
+  const context = vm.createContext({ Intl, updateGoalDurationView: (_root, goal) =>
+    Number.isFinite(goal.timeUsedSeconds) ? `${goal.timeUsedSeconds}s` : null, syncGoalLiveTimer() {} });
+  vm.runInContext(sourceSection("function formatGoalTokens(", "let goalLiveTimer =")
+    + sourceSection("function goalDurationSeconds(", "function stopGoalLiveTimer(")
+    + sourceSection("function updateGoalLiveView(", "function renderGoalStatus("), context);
+  const goal = { source: "claude", status: "active", updatedAt: 100, tokensUsed: 134, timeUsedSeconds: 28.29, iterations: 1 };
+  assert.equal(context.goalDurationSeconds(goal, 200000), 28.29);
+  context.updateGoalLiveView(root, goal);
+  assert.equal(rows.get("tokens-used").output.textContent, "134");
+  assert.equal(rows.get("iterations").output.textContent, "1");
+  assert.equal(rows.get("token-budget").hidden, true);
+  context.updateGoalLiveView(root, { source: "claude", status: "active" });
+  assert.equal(metrics.hidden, true);
+});
+
+test("Claude 压缩输入区只保留一处待确认，目标原文折叠展示并保留展开状态", () => {
+  const element = (tag, className = "", text = "") => ({ tag, className, text, children: [],
+    append(...children) { this.children.push(...children); } });
+  const context = vm.createContext({ element, button: (text, label) => element("button", "", text),
+    session: { device: { id: "device" } }, selectedId: "claude-fixture",
+    thread: { id: "claude-fixture", backend: "claude", capabilities: { queue: true },
+      nativeCommands: [{ name: "compact", state: "unknown" }] },
+    compactionLocked: () => true, compactionQueueSendReason: () => "", pendingFeedbackReady: () => true,
+    privateInputScope: () => "auth", expandedClaudeGoalNotice: "", connected: true });
+  vm.runInContext(sourceSection("function renderClaudeControlNotices(", "function dismissGoalComposerRecovery("), context);
+  const root = element("div");
+  context.renderClaudeControlNotices(root);
+  context.renderCompactionBanner(root, "claude-fixture", { state: "unknown", receiptId: "receipt" });
+  assert.equal(root.children.length, 1);
+  context.thread.nativeCommands = [{ name: "compact", state: "completed", message: "压缩已停止" }];
+  const stopped = element("div");
+  context.renderClaudeControlNotices(stopped);
+  assert.equal(stopped.children.length, 0, "终态不能长期残留输入区");
+  context.thread.goalNotice = "Goal still active · the goal check could not complete";
+  const notice = element("div");
+  context.renderClaudeControlNotices(notice);
+  const details = notice.children[0];
+  assert.match(details.children[0].text, /^目标评估暂未完成/);
+  assert.equal(details.children[1].text, context.thread.goalNotice);
+  details.open = true; details.ontoggle();
+  const redrawn = element("div");
+  context.renderClaudeControlNotices(redrawn);
+  assert.equal(redrawn.children[0].open, true);
+});
 
 test("Claude 模型和等级变化沿用 Codex 变更行，纯等级调整不显示假模型切换", () => {
   const render = compactionRenderer();
@@ -3887,6 +4472,138 @@ function sourceSection(start, end) {
   return app.slice(from, to);
 }
 
+function messageImageRefreshHarness() {
+  const oldUrl = `/api/images/${"a".repeat(64)}`, newUrl = `/api/images/${"b".repeat(64)}`;
+  const source = "C:/workspace/images/default.png", otherSource = "C:/workspace/images/details.png";
+  const item = { id: "old-answer", type: "agentMessage", text: "已确认的完整正文",
+    remoteItemCompleted: true, remoteImages: [{ source, url: oldUrl }, { source: otherSource, url: oldUrl }] };
+  const turn = { id: "old-turn", status: "completed", items: [item], itemsNextCursor: "retained-cursor" };
+  const calls = [], h = { oldUrl, newUrl, source, otherSource, item, turn, calls, renders: 0, remembered: 0 };
+  const context = vm.createContext({
+    session: { device: { id: "image-device", createdAtMs: 1 } }, selectedId: "thread-images",
+    selectionVersion: 3, pageLeaving: false, AbortController,
+    turns: new Map([[turn.id, turn]]), renderedItems: new Map(),
+    itemVersions: new Map(), turnVersions: new Map(), turnFieldVersions: new Map(), partialItems: new Set(),
+    enrichTurnTranscriptEvents: value => value,
+    renderMessages: () => ++h.renders, rememberTranscript: () => ++h.remembered,
+    api: async (path, payload, id, signal) => {
+      calls.push({ path, payload, signal });
+      return await h.respond(payload);
+    },
+  });
+  vm.runInContext([
+    sourceSection("function privateInputScope(", "function validRelatedThreadId("),
+    sourceSection("function completedItem(", "function mergeItemProjection("),
+    sourceSection("function messageImageOwner(", "function bindMessageImages("),
+  ].join("\n"), context);
+  h.context = context;
+  h.owner = (imageSource = source) => ({ threadId: context.selectedId, turnId: turn.id, itemId: item.id,
+    source: imageSource, scope: context.privateInputScope(context.session), selection: context.selectionVersion });
+  h.page = (images = [{ source, url: newUrl }, { source: otherSource, url: newUrl }]) => ({
+    ok: true, scope: "items", threadId: "thread-images", turnId: turn.id,
+    data: [{ id: item.id, type: item.type, text: "分页中的旧正文不得改写现有内容", remoteImages: images }],
+    itemsNextCursor: null
+  });
+  h.respond = async () => h.page();
+  return h;
+}
+
+test("完成正文继续保护内容，新历史可恢复同源图片且旧缓存和迟到历史不能退回媒体 URL", () => {
+  const h = messageImageRefreshHarness(), c = h.context;
+  vm.runInContext(sourceSection("function mergeLiveText(", "async function reloadThread("), c);
+  const history = { id: h.turn.id, status: "completed", items: [{
+    id: h.item.id, type: h.item.type, text: "较早的不完整正文", completed: true,
+    remoteImages: [{ source: h.source, url: h.newUrl }]
+  }] };
+  const restored = c.mergeHistoryTurn(history, 0, { mediaReadVersion: 2 });
+  assert.equal(restored.items[0].text, h.item.text);
+  assert.equal(restored.items[0].remoteItemCompleted, true);
+  assert.equal(restored.items[0].remoteImages[0].url, h.newUrl);
+  c.turns.set(h.turn.id, restored);
+  const stale = { ...history, items: [{ ...history.items[0], text: h.item.text,
+    remoteImages: [{ source: h.source, url: h.oldUrl }] }] };
+  for (const options of [{ mediaReadVersion: 1 }, { cached: true }, {}]) {
+    const current = c.turns.get(h.turn.id);
+    c.turns.set(h.turn.id, { ...current, items: current.items.map(item => ({ ...item })) });
+    const next = c.mergeHistoryTurn(stale, 0, options);
+    assert.equal(next.items[0].remoteImages[0].url, h.newUrl);
+    c.turns.set(h.turn.id, next);
+  }
+  const event = c.mergeItemProjection(c.turns.get(h.turn.id).items[0], stale.items[0]);
+  assert.equal(event.remoteImages[0].url, h.newUrl, "迟到单条投影同样不能撤回已刷新图片");
+});
+
+test("旧轮图片重试按真实轮次和消息重读，同轮多图与重复进入复用读取且只更新媒体映射", async () => {
+  const h = messageImageRefreshHarness(), c = h.context;
+  let respond;
+  h.respond = () => new Promise(resolve => { respond = resolve; });
+  const message = { dataset: { key: `${h.turn.id}:${h.item.id}` },
+    closest: () => ({ dataset: { turnId: h.turn.id } }) };
+  c.renderedItems.set(message.dataset.key, { item: h.item });
+  const owner = c.messageImageOwner({ closest: () => message }, h.oldUrl);
+  assert.equal(owner.itemId, h.item.id);
+  const one = c.refreshMessageImageAsset(owner), repeated = c.refreshMessageImageAsset(owner),
+    two = c.refreshMessageImageAsset(h.owner(h.otherSource));
+  await Promise.resolve();
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].path, "/api/read/history");
+  assert.equal(h.calls[0].payload.threadId, "thread-images");
+  assert.equal(h.calls[0].payload.turnId, "old-turn");
+  assert.equal(h.calls[0].payload.itemCursor, null);
+  assert.equal(Object.hasOwn(h.calls[0].payload, "source"), false, "不能发送任意文件路径");
+  respond(h.page());
+  const result = await Promise.all([one, repeated, two]);
+  assert.ok(result.every(asset => asset.url === h.newUrl));
+  const current = c.turns.get(h.turn.id);
+  assert.equal(current.items[0].text, h.item.text);
+  assert.equal(current.items[0].remoteItemCompleted, true);
+  assert.equal(current.status, h.turn.status);
+  assert.equal(current.itemsNextCursor, h.turn.itemsNextCursor);
+  assert.equal(current.items.length, 1);
+  assert.equal(h.renders, 1);
+  assert.equal(h.remembered, 1);
+  assert.equal(c.messageImageRefreshes.size, 0);
+});
+
+test("图片重试沿本轮分页找到原图，重复游标和没有新增条目时停止并保留已有内容", async () => {
+  const h = messageImageRefreshHarness();
+  h.respond = async payload => payload.itemCursor == null
+    ? { ...h.page([]), data: [{ id: "later-item" }], itemsNextCursor: "older-images" } : h.page();
+  assert.equal((await h.context.refreshMessageImageAsset(h.owner())).url, h.newUrl);
+  assert.deepEqual(h.calls.map(call => call.payload.itemCursor), [null, "older-images"]);
+  for (const mode of ["repeated-cursor", "repeated-items", "page-limit"]) {
+    const missing = messageImageRefreshHarness(), before = JSON.stringify([...missing.context.turns]);
+    missing.respond = async () => ({ ...missing.page([]),
+      data: [{ id: mode === "repeated-items" ? "same-item" : `unrelated-${missing.calls.length}` }],
+      itemsNextCursor: mode === "repeated-cursor" ? "same-cursor" : `cursor-${missing.calls.length}` });
+    assert.equal(await missing.context.refreshMessageImageAsset(missing.owner()), null);
+    assert.equal(missing.calls.length, mode === "page-limit" ? 12 : 2);
+    assert.equal(JSON.stringify([...missing.context.turns]), before);
+    assert.equal(missing.renders, 0);
+    assert.equal(missing.remembered, 0);
+  }
+});
+
+test("图片重读期间切换会话、重新进入或授权变化后丢弃迟到结果", async () => {
+  for (const change of [
+    c => { c.selectedId = "another-thread"; },
+    c => { ++c.selectionVersion; },
+    c => { c.session = { device: { id: "image-device", createdAtMs: 2 } }; },
+    c => { c.session = null; },
+  ]) {
+    const h = messageImageRefreshHarness(), c = h.context;
+    let respond;
+    h.respond = () => new Promise(resolve => { respond = resolve; });
+    const before = JSON.stringify([...c.turns]), pending = c.refreshMessageImageAsset(h.owner());
+    await Promise.resolve();
+    change(c); respond(h.page());
+    assert.equal(await pending, null);
+    assert.equal(JSON.stringify([...c.turns]), before);
+    assert.equal(h.renders, 0);
+    assert.equal(h.remembered, 0);
+  }
+});
+
 function independentPromptOptimizationHarness(backend = "claude") {
   const control = { hidden: true, dataset: {}, attributes: {},
     setAttribute(name, value) { this.attributes[name] = value; } };
@@ -3910,6 +4627,7 @@ function independentPromptOptimizationHarness(backend = "claude") {
     isClaude: () => context.backend === "claude",
     currentThreadDisplay: () => ({ tokenUsage: null }), contextUsage: () => null,
     compactUsageDescription: () => "", compactCommandAvailable: () => false, compactContext() {},
+    claudeCommandSupported: () => false,
     goalComposerReason: () => "当前原生会话不提供目标", selectGoalCommand() {},
     deleting: false, composerCanAddImages: () => true, chooseComposerImages() {},
     activePopup: null, renderPopup() {}, closePopup() {}, closeComposerMenus() {},
@@ -4362,6 +5080,85 @@ function nativeSteerHistoryHarness() {
       native.indexOf("  async function editLastMessage(")), context);
   return context;
 }
+
+test("已收到原生消息时回执立即确认，慢查询、旧授权和发送占位不能误判", async () => {
+  const reads = [], late = deferred();
+  const current = { action: "send", deviceId: "device-a",
+    payload: { threadId: "thread-a", clientUserMessageId: "client-a" } };
+  const context = vm.createContext({
+    session: { device: { id: "device-a" }, capabilities: { queueSendRecovery: true } },
+    selectedId: "thread-a", turns: new Map(), pendingSendRequest: null,
+    api: async (...args) => { reads.push(args); return late.promise; },
+  });
+  vm.runInContext(sourceSection("function acceptedSendItem(", "async function resolvePending("), context);
+  const waiting = context.confirmPendingSend(current);
+  assert.equal(reads.length, 1);
+  context.turns.set("turn", { id: "turn", items: [
+    { type: "userMessage", id: "server-user", clientId: "client-a" },
+  ] });
+  const accepted = await context.confirmPendingSend(current);
+  assert.equal(accepted.deliveryState, "accepted");
+  assert.equal(accepted.messageId, "server-user");
+  assert.equal(reads.length, 1, "无需再查询已确认的原生消息");
+  assert.equal(await context.confirmPendingSend({ ...current, deviceId: "other-device" }), null);
+  assert.equal(await context.confirmPendingSend(current, { threadId: "other-thread" }), null);
+  late.resolve({ confirmed: false });
+  await waiting;
+  for (const patch of [
+    { pendingUserMessageAdmission: true },
+    { id: null },
+    { items: [{ type: "userMessage", clientId: "client-a", remotePendingInput: true }] },
+    { items: [{ type: "steeringUserMessage", clientId: "client-a", status: "pending" }] },
+  ]) {
+    context.turns.set("turn", { id: "turn", items: [
+      { type: "userMessage", id: "server-user", clientId: "client-a" },
+    ], ...patch });
+    assert.equal(await context.confirmPendingSend(current), null);
+  }
+});
+
+test("原生送达核对排除未准入记录，释放历史资源并拒绝跨连接迟到证据", async () => {
+  const payload = { threadId: "thread", clientUserMessageId: "client" };
+  let loaded = [], queued = [], releases = 0, reads = 0;
+  const context = vm.createContext({
+    Symbol, manager: { __codexElvesRequestClientManager: true, getConversation: () => ({ turns: [] }) },
+    requiredId: value => value, array: value => Array.isArray(value) ? value : [],
+    nativeConversationTurns: conversation => conversation?.turns || [],
+    nativeTurnId: turn => turn.turnId || turn.id,
+    failure: (code, message) => Object.assign(new Error(message), { code }),
+    queuedSendSubmissions: new Map(), queueSnapshotFields: () => ({}),
+    readRequestClientQueue: async () => queued,
+    requestClientNativeRpc: async () => ({ getLoadedConversationHistory: () => {
+      reads++;
+      return Object.assign(Promise.resolve({ turns: loaded }), { [Symbol.dispose]: () => releases++ });
+    } }),
+  });
+  vm.runInContext(nativeSourceSection("function acceptedQueuedSend(", "async function loadNativeQueue("), context);
+  const item = { type: "userMessage", id: "accepted", clientId: "client" };
+  for (const turn of [
+    { items: [item] },
+    { id: "turn", pendingUserMessageAdmission: true, items: [item] },
+    { id: "turn", items: [{ ...item, remotePendingInput: true }] },
+  ]) {
+    loaded = [turn]; queued = [{ id: "client", submission: { status: "sending" } }];
+    assert.equal((await context.queueSendState(payload)).confirmed, false);
+  }
+  loaded = [{ id: "turn", items: [item] }];
+  assert.equal((await context.queueSendState(payload)).confirmed, true);
+  assert.equal(releases, reads);
+  context.manager.getConversation = () => ({ turns: loaded });
+  const before = reads;
+  assert.equal((await context.queueSendState(payload)).confirmed, true);
+  assert.equal(reads, before, "已有真实接受证据不再拉取整段历史");
+  context.manager.getConversation = () => ({ turns: [] });
+  const late = deferred();
+  context.requestClientNativeRpc = async () => ({ getLoadedConversationHistory: () => late.promise });
+  const pending = context.queueSendState(payload);
+  await Promise.resolve();
+  context.manager = { ...context.manager };
+  late.resolve({ turns: loaded });
+  await assert.rejects(pending, /连接已变化/);
+});
 
 test("侧边引导正文与确认共用 ID 时，执行中、结束后分页及重建读取都保留一份图文", () => {
   const h = nativeSteerHistoryHarness();
@@ -5350,6 +6147,45 @@ function sendRecoveryHarness() {
   });
   return { context, actions, draftRemovals, notices, reads, prompt, originalText, complete };
 }
+
+test("远程新建首条携带草稿 Fast 布尔值，开启时明确默认模型，发送不再额外查询能力", async () => {
+  for (const enabled of [false, true]) {
+    const h = sendRecoveryHarness(), { context } = h;
+    context.selectedId = null; context.creating = true;
+    context.session.capabilities.fastMode = true;
+    context.selectedDraftFast = enabled;
+    context.remoteFastKey = () => "fast-new";
+    context.remoteFastState = { key: "fast-new", supported: true };
+    context.currentModelId = () => "gpt-default";
+    context.selectCreatedThread = async () => {};
+    const query = context.$;
+    context.$ = (selector, root) => selector === "#project-select" ? { value: "project" } : query(selector, root);
+    const sending = context.sendMessage();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.actions.length, 1);
+    assert.equal(h.actions[0].path, "/api/action/create");
+    assert.equal(h.actions[0].payload.fastMode, enabled);
+    if (enabled) assert.equal(h.actions[0].payload.model, "gpt-default");
+    h.complete(0); await sending;
+    assert.equal(h.actions.length, 1, "Fast 能力展示不成为每次发送的串行前置请求");
+  }
+});
+
+test("仅当前会话保存 Fast 期间阻止抢先发送，其他会话的保存不阻塞输入", async () => {
+  const h = sendRecoveryHarness(), { context } = h;
+  context.remoteFastKey = () => "fast-current";
+  context.remoteFastWriting = { key: "fast-current" };
+  await context.sendMessage();
+  assert.equal(h.actions.length, 0);
+  assert.match(h.notices.at(-1), /正在保存 Fast/);
+  assert.equal(h.prompt.value, h.originalText);
+  context.remoteFastWriting = { key: "fast-other" };
+  const sending = context.sendMessage();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.actions.length, 1);
+  assert.equal(Object.hasOwn(h.actions[0].payload, "fastMode"), false, "旧会话直接复用原生偏好");
+  h.complete(0); await sending;
+});
 
 test("Claude 目录信任检查只在明确确认后附加精确目录，取消和已信任均不写确认参数", async () => {
   for (const state of ["trusted", "confirm", "cancel"]) {
@@ -7890,6 +8726,76 @@ test("Claude 类型跟随已有会话身份，新建草稿和能力与 Codex 分
   assert.equal(context.approvalsAllowed(), true);
   context.selectedId = "codex-existing";
   assert.equal(context.activeBackend(), "codex");
+});
+
+function claudeExecutionFeedbackHarness(turn) {
+  const makeNode = (textContent = "") => ({ dataset: {}, children: [], textContent,
+    scrollTop: 0, scrollHeight: 0, querySelector: () => null, append(...children) { this.children.push(...children); } });
+  const root = makeNode(), activities = [];
+  const context = nodeVm.createContext({
+    selectedId: "claude-fixture", thread: { id: "claude-fixture", status: { type: "idle" } },
+    turns: new Map([[turn.id, turn]]), renderedItems: new Map(), renderedTurns: new Map(), renderedActivities: new Map(),
+    messageFrame: null, followMessages: true, composerScroll: null, relatedSessionView: null,
+    editingMessage: null, editingQueuedMessage: null, pending: null, busy: false, stopping: false, connected: true,
+    historyError: "", historyCursor: null, historyInitialized: true, historyScrollTop: 0, markdownRenderVersion: 0,
+    textContent: item => item.text || "", $: selector => selector === "#messages" ? root : null,
+    element: (_tag, _className, text = "") => makeNode(text), icon: () => makeNode(),
+    cancelAnimationFrame() {}, scheduleMermaidBlocks() {}, reconcileSentMessageDisplays: () => false,
+    currentThreadDisplay: () => context.thread, withSentMessageDisplays: () => [...context.turns.values()],
+    loadMessageSkillChoices() {}, visibleMessageAnchor: () => null,
+    historyGapIndex: () => 0, userMessageHasSkills: () => false, subagentsEnabled: () => false,
+    isSubagentItem: () => false, transcriptEventTypes: new Set(), reasoningPreviewText: () => "",
+    isActiveThread: () => context.thread.status.type === "active",
+    threadReadOnly: () => false, threadSentMessageEditAllowed: () => false, compactionLocked: () => false,
+    renderItem: item => makeNode(item.text || item.type), renderMessageActions() {}, renderEditedFiles: () => null,
+    renderActivity: (value, work, running) => {
+      const presentation = context.activityPresentation(value, running);
+      activities.push({ ...presentation, running, work: Array.from(work, item => item.id) });
+      const node = makeNode(presentation.text); node.dataset.activityKey = `${value.id}:activity`;
+      return node;
+    },
+    reconcileChildren: (node, children) => { node.children = children; },
+    resizeEditorInput() {}, syncActivityTimer() {}, syncHistoryButtons() {}, updateScrollControl() {}, scheduleHistoryLoad() {},
+  });
+  nodeVm.runInContext(sourceSection("function finalMessageIndex(", "function updateActivitySummary(")
+    + sourceSection("function renderMessages(", "function rememberTranscript("), context);
+  return { context, activities, render() { activities.length = 0; context.renderMessages(); return activities; } };
+}
+
+test("Claude 已接收但未启动时显示等待提示，执行与完成后自然接替，不改变真实执行状态", () => {
+  const turn = { id: "accepted", _nativeUserId: "native-accepted", status: "pending",
+    turnStartedAtMs: Date.now() - 3000, items: [{ id: "input", type: "userMessage" }] };
+  const h = claudeExecutionFeedbackHarness(turn);
+  assert.deepEqual(h.render(), [{ text: "已接收，等待 Claude 开始", ticking: false, live: false, running: false, work: [] }]);
+  assert.equal(h.context.thread.status.type, "idle", "等待提示不能把未知/空闲改为执行或入队依据");
+  assert.equal(turn.status, "pending");
+  turn.status = "inProgress"; h.context.thread.status.type = "active";
+  assert.match(h.render()[0].text, /^已处理 /);
+  assert.equal(h.activities[0].running, true);
+  assert.equal(h.activities[0].ticking, true);
+  turn.items.push({ id: "reply", type: "agentMessage", text: "已完成", phase: "final_answer" });
+  turn.status = "completed"; turn._nativeDone = true; h.context.thread.status.type = "idle";
+  assert.equal(h.render().length, 0, "已完成后不能继续保留待启动占位");
+});
+
+test("Claude 等待提示只属于最新已接收轮次，不将旧历史、未知状态或未确认占位显示为等待执行", () => {
+  const accepted = { id: "accepted", _nativeUserId: "native-accepted", status: "pending",
+    items: [{ id: "input", type: "userMessage" }] };
+  for (const value of [
+    { ...accepted, _nativeUserId: undefined },
+    { ...accepted, status: "unknown" },
+    { ...accepted, _nativeDone: true },
+    { ...accepted, items: [{ id: "input", type: "userMessage", remotePendingInput: true }] },
+    { ...accepted, items: [...accepted.items, { id: "reply", type: "agentMessage", text: "已到达的回复" }] },
+  ]) {
+    const h = claudeExecutionFeedbackHarness(value);
+    assert.equal(h.context.claudeTurnAwaitingStart(value), false);
+    assert.equal(h.render().some(value => value.text.includes("等待 Claude")), false);
+  }
+  const h = claudeExecutionFeedbackHarness(accepted);
+  h.context.turns.set("latest", { id: "latest", status: "completed",
+    items: [{ id: "latest-reply", type: "agentMessage", text: "新轮次已结束" }] });
+  assert.equal(h.render().length, 0, "旧轮次不能恢复为当前等待提示");
 });
 
 test("Claude 原生队列允许执行中继续发送，仅提交期间防重复", () => {

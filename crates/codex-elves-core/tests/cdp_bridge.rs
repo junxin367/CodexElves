@@ -270,9 +270,6 @@ fn remote_native_callbacks_are_isolated_from_codex_ui_errors() {
     assert!(script.contains("const emitUnsafe = event =>"));
     assert!(script.contains("const pushNotificationUnsafe = event =>"));
     assert!(script.contains("request_notification_microtask"));
-    assert!(
-        assets::renderer_features_script().contains("workspace_checkpoint_complete_turn_failed")
-    );
 }
 
 #[test]
@@ -8373,102 +8370,6 @@ fn renderer_task_board_lifecycle_keeps_the_native_main_surface_recoverable() {
 }
 
 #[test]
-fn renderer_workspace_checkpoint_wraps_turns_and_native_message_edits() {
-    let script = assets::renderer_features_script();
-
-    assert!(script.contains("workspaceCheckpoint: true"));
-    assert!(script.contains("workspaceCheckpoint: \"codexAppWorkspaceCheckpoint\""));
-    assert!(script.contains("\"/workspace-checkpoint/create\""));
-    assert!(script.contains("\"/workspace-checkpoint/session-context\""));
-    assert!(script.contains("\"/workspace-checkpoint/bind-turn\""));
-    assert!(script.contains("\"/workspace-checkpoint/complete-turn\""));
-    assert!(script.contains("\"/workspace-checkpoint/list\""));
-    assert!(script.contains("\"/workspace-checkpoint/restore\""));
-    assert!(script.contains("\"/workspace-checkpoint/preview-revert\""));
-    assert!(script.contains("\"/workspace-checkpoint/restore-for-revert\""));
-    assert!(script.contains("methodName === \"turn/start\""));
-    assert!(script.contains("\"turn/completed\""));
-    assert!(script.contains("methodName === \"thread/revert\""));
-    assert!(script.contains("params?.beforeTurnId"));
-    assert!(script.contains("params?.numTurns"));
-    assert!(script.contains("发送并恢复文件"));
-    assert!(script.contains("无文件变化"));
-    assert!(script.contains("撤销上一轮"));
-    assert!(script.contains("本轮执行中"));
-    assert!(script.contains("本轮完成"));
-    assert!(script.contains("本轮失败"));
-    assert!(script.contains("本轮已中断"));
-    assert!(script.contains("旧版·发送前差异"));
-    assert!(script.contains("安全快照"));
-    assert!(script.contains("发送未完成"));
-    assert!(script.contains("恢复到本轮开始前"));
-    assert!(script.contains("恢复此安全快照"));
-    assert!(script.contains("恢复前会自动保存安全快照"));
-    assert!(
-        script.contains(
-            ".codex-workspace-checkpoint-dialog button:not(:disabled) { cursor: pointer; }"
-        )
-    );
-    assert!(
-        script.contains(
-            ".codex-workspace-checkpoint-dialog button:disabled { cursor: not-allowed; }"
-        )
-    );
-    assert!(script.contains(".codex-workspace-checkpoint-dialog .checkpoint-undo-button {"));
-    assert!(script.contains(
-        "class=\"codex-elves-action-button checkpoint-undo-button\" data-codex-workspace-checkpoint-undo-latest=\"true\""
-    ));
-    assert!(script.contains(
-        "background: transparent;\n        color: #92929b;\n        cursor: pointer;\n        font: 11px"
-    ));
-    assert!(script.contains("data-codex-workspace-checkpoint-file-toggle=\"true\""));
-    assert!(script.contains(".checkpoint-file-row:nth-child(n+6)"));
-    assert!(script.contains("var(--checkpoint-file-row-height) * 10 +"));
-    assert!(script.contains("scrollbar-gutter: stable"));
-    assert!(script.contains("width: var(--codex-elves-modal-width-large)"));
-    assert!(script.contains(
-        ".codex-workspace-checkpoint-list {\n        min-width: 0;\n        min-height: 120px;"
-    ));
-    let checkpoint_list = script
-        .split_once(".codex-workspace-checkpoint-list {")
-        .and_then(|(_, rest)| rest.split_once('}'))
-        .map(|(rule, _)| rule)
-        .expect("missing checkpoint list rule");
-    assert!(checkpoint_list.contains("overflow-x: hidden;"));
-    assert!(checkpoint_list.contains("overflow-y: auto;"));
-    assert!(checkpoint_list.contains("display: grid;"));
-    assert!(checkpoint_list.contains("grid-auto-rows: max-content;"));
-    assert!(checkpoint_list.contains("align-content: start;"));
-    assert!(script.contains(
-        ".codex-workspace-checkpoint-item {\n        min-width: 0;\n        max-width: 100%;"
-    ));
-    assert!(script.contains(
-        ".codex-workspace-checkpoint-dialog .checkpoint-title-line {\n        width: 100%;\n        min-width: 0;"
-    ));
-    assert!(script.contains(
-        ".codex-workspace-checkpoint-item-title {\n        display: block;\n        min-width: 0;\n        max-width: 100%;\n        flex: 1 1 auto;\n        overflow: hidden;"
-    ));
-    assert!(script.contains("data-codex-workspace-checkpoint-button"));
-    assert!(script.contains("button.setAttribute?.(\"aria-label\", \"打开 Checkpoint\")"));
-    assert!(script.contains(r#"const codexWorkspaceCheckpointVersion = "10";"#));
-    assert!(script.contains(
-        "window.__codexElvesWorkspaceCheckpointRuntimeVersion === codexWorkspaceCheckpointVersion"
-    ));
-    assert!(script.contains(
-        "window.__codexElvesWorkspaceCheckpointRuntimeVersion = codexWorkspaceCheckpointVersion;"
-    ));
-    assert!(script.contains("function codexWorkspaceCheckpointFeatureEnabled()"));
-    assert!(script.contains("promptOptimizeRemoveCheckpointButton();"));
-    assert!(script.contains("在提示词优化图标旁显示 Checkpoint 入口"));
-    assert!(!script.contains("data-codex-workspace-checkpoint-open=\"true\""));
-    assert!(script.contains("function installCodexWorkspaceCheckpointEditButtons()"));
-    assert!(script.contains("function openCodexWorkspaceCheckpointDialog()"));
-    assert!(script.contains("codexWorkspaceCheckpointContextAsync(null, {})"));
-    assert!(script.contains("void openCodexWorkspaceCheckpointDialog();"));
-    assert!(script.contains("patchCodexWorkspaceCheckpointRequestClientPrototype"));
-}
-
-#[test]
 fn renderer_modal_shell_preserves_each_dialog_visual_contract() {
     let script = assets::renderer_features_script();
 
@@ -8484,7 +8385,6 @@ fn renderer_modal_shell_preserves_each_dialog_visual_contract() {
         ".codex-project-move-panel {",
         ".codex-delete-confirm-content {",
         ".codex-elves-modal-content {",
-        ".codex-workspace-checkpoint-dialog {",
         ".codex-prompt-optimize-settings {",
         ".codex-task-board-create-modal {",
         ".codex-task-board-board-manager {",
@@ -8504,22 +8404,6 @@ fn renderer_modal_shell_preserves_each_dialog_visual_contract() {
     assert!(script.matches("backdrop-filter: none;").count() >= 4);
     assert!(!script.contains("backdrop-filter: blur(4px)"));
     assert!(!script.contains("background: rgba(0,0,0,.58)"));
-    let checkpoint_overlay = script
-        .split_once(".codex-workspace-checkpoint-overlay {")
-        .and_then(|(_, rest)| rest.split_once('}'))
-        .map(|(rule, _)| rule)
-        .expect("missing checkpoint overlay rule");
-    assert!(checkpoint_overlay.contains("background: rgba(0,0,0,.62);"));
-    assert!(!checkpoint_overlay.contains("--codex-elves-modal-overlay-background"));
-
-    let checkpoint_dialog = script
-        .split_once(".codex-workspace-checkpoint-dialog {")
-        .and_then(|(_, rest)| rest.split_once('}'))
-        .map(|(rule, _)| rule)
-        .expect("missing checkpoint dialog rule");
-    assert!(checkpoint_dialog.contains("background: #202123;"));
-    assert!(checkpoint_dialog.contains("border-radius: 16px;"));
-
     let prompt_overlay = script
         .split_once(".${codexPromptOptimizeSettingsOverlayClass} {")
         .and_then(|(_, rest)| rest.split_once('}'))
@@ -8543,1509 +8427,6 @@ fn renderer_modal_shell_preserves_each_dialog_visual_contract() {
             "max-height: min(520px, calc(100vh - var(--codex-elves-modal-viewport-gap)))"
         )
     );
-}
-
-#[test]
-fn renderer_workspace_checkpoint_request_contract_degrades_bridge_failures_and_restores_first() {
-    let result = run_workspace_checkpoint_contract_harness();
-
-    assert_eq!(
-        result["turnOrder"],
-        json!([
-            "bridge:/workspace-checkpoint/create",
-            "original:turn/start",
-            "bridge:/workspace-checkpoint/bind-turn"
-        ])
-    );
-    assert_eq!(result["boundTurnId"], "turn-1");
-    assert_eq!(result["promptPreview"], "first line\nsecond line");
-    assert_eq!(
-        result["revertOrder"],
-        json!([
-            "bridge:/workspace-checkpoint/restore-for-revert",
-            "original:thread/revert"
-        ])
-    );
-    assert_eq!(result["revertBeforeTurnId"], "turn-1");
-    assert_eq!(result["createFailureBlockedOriginal"], true);
-    assert_eq!(result["slowHealthyCheckpointWaited"], true);
-    assert_eq!(result["slowHealthyCheckpointBound"], true);
-    assert_eq!(result["slowHealthyCheckpointSkipped"], false);
-    assert_eq!(result["slowHealthyBridgeProbes"], 3);
-    for case in result["bridgeFailureCases"].as_array().unwrap() {
-        assert_eq!(case["nativeCalls"], 1, "{case}");
-        assert_eq!(case["preservedRequest"], true, "{case}");
-        assert_eq!(case["preservedResult"], true, "{case}");
-        assert_eq!(case["lateResponseIgnored"], true, "{case}");
-        assert_eq!(case["skipDiagnosed"], true, "{case}");
-        assert_eq!(case["correctReason"], true, "{case}");
-    }
-    assert_eq!(result["bridgeFailureCases"].as_array().unwrap().len(), 8);
-    assert_eq!(result["nativeFailurePreserved"], true);
-    assert_eq!(result["bindTimeoutDidNotBlockSend"], true);
-    assert_eq!(result["bindTimeoutDiagnosed"], true);
-    assert_eq!(result["restoreBridgeFailureBlockedOriginal"], true);
-    assert_eq!(result["nativeRevertWithoutRestoreContinued"], true);
-    assert_eq!(result["remoteSkippedCheckpoint"], true);
-    assert_eq!(result["disabledSkippedCheckpoint"], true);
-    assert_eq!(result["activeManagerFallbackInstalled"], true);
-    assert_eq!(
-        result["activeManagerFallbackTurnOrder"],
-        json!([
-            "bridge:/workspace-checkpoint/create",
-            "manager-original:turn/start",
-            "bridge:/workspace-checkpoint/bind-turn"
-        ])
-    );
-    assert_eq!(result["activeManagerFallbackBoundTurnId"], "manager-turn");
-    assert_eq!(result["requestClientUpgradeInstalled"], true);
-    assert_eq!(result["requestClientUpgradeNativeCalls"], 1);
-    assert_eq!(result["requestClientUpgradeLegacyCalls"], 0);
-    assert_eq!(result["completionListenerInstalled"], true);
-    assert_eq!(result["completionListenerSubscriptionCount"], 1);
-    assert_eq!(
-        result["completedTurnPayload"],
-        json!({
-            "cwd": "C:\\manager-repo",
-            "threadId": "thread-manager",
-            "turnId": "manager-turn",
-            "status": "completed"
-        })
-    );
-    assert_eq!(result["completionWaitedForBind"], true);
-    assert_eq!(
-        result["raceCompletedTurnPayload"],
-        json!({
-            "cwd": "C:\\race-repo",
-            "threadId": "thread-race",
-            "turnId": "race-turn",
-            "status": "failed"
-        })
-    );
-    assert_eq!(
-        result["fastCompletionPayload"],
-        json!({
-            "cwd": "C:\\repo",
-            "threadId": "thread-12345678",
-            "turnId": "fast-turn",
-            "status": "completed"
-        })
-    );
-    assert_eq!(result["editButtonText"], "发送并恢复文件");
-    assert_eq!(result["editButtonType"], "button");
-    assert_eq!(result["editButtonDisabledFromCompletionHint"], true);
-    assert_eq!(result["editButtonTitleFromCompletionHint"], "无文件变化");
-    assert_eq!(result["editButtonPreviewPendingAfterHint"], true);
-    assert_eq!(result["editButtonDisabledWhenNoChanges"], true);
-    assert_eq!(result["editButtonTitle"], "无文件变化");
-    assert_eq!(result["editButtonPreviewNumTurns"], 1);
-    assert_eq!(result["checkpointDialogHasStages"], true);
-    assert_eq!(result["checkpointDialogRestoreButtonCount"], 7);
-    assert_eq!(result["checkpointDialogFileRowCount"], 7);
-    assert_eq!(result["checkpointDialogHasInitialization"], true);
-    assert_eq!(result["checkpointDialogHidesInitializationFileRows"], true);
-    assert_eq!(result["checkpointDialogEscapesContent"], true);
-    assert_eq!(result["checkpointDialogHasTotalStat"], true);
-    assert_eq!(result["checkpointDialogOmitsCompletedNoChange"], true);
-    assert_eq!(result["checkpointDialogHasPendingChangeCapture"], true);
-    assert_eq!(result["checkpointDialogUsesNativeCompletedState"], true);
-    assert_eq!(result["checkpointDialogUsesNativeInterruptedState"], true);
-    assert_eq!(result["checkpointDialogUnknownStateIsNotRunning"], true);
-    assert_eq!(
-        result["checkpointDialogDoesNotBorrowOtherThreadState"],
-        true
-    );
-    assert_eq!(result["checkpointDialogDistinguishesSafetyRestore"], true);
-    assert_eq!(result["checkpointDialogHasLegacyFallback"], true);
-    assert_eq!(result["checkpointDialogHasDefaultCollapse"], true);
-    assert_eq!(result["checkpointDialogHasToggle"], true);
-    assert_eq!(result["checkpointDialogTimeLabels"], true);
-    assert_eq!(result["checkpointDialogExpanded"], true);
-    assert_eq!(
-        result["checkpointDialogExpandedLabel"],
-        "收起，仅显示前 5 个文件"
-    );
-    assert_eq!(result["checkpointDialogCollapsed"], true);
-    assert_eq!(
-        result["checkpointDialogCollapsedLabel"],
-        "展开其余 2 个文件"
-    );
-}
-
-#[test]
-fn renderer_workspace_checkpoint_custom_confirmation_gates_restore_and_undo() {
-    let result = run_workspace_checkpoint_contract_harness();
-
-    assert_eq!(result["checkpointCustomConfirmationAvailable"], true);
-    assert_eq!(result["checkpointRestoreCancelBlocked"], true);
-    assert_eq!(result["checkpointRestoreConfirmRan"], true);
-    assert_eq!(result["checkpointRestoreConfirmationExplainsTarget"], true);
-    assert_eq!(result["checkpointSafetyConfirmationExplainsTarget"], true);
-    assert_eq!(result["checkpointFailedRestoreResetsLabels"], true);
-    assert_eq!(result["checkpointEmptyTurnsExplained"], true);
-    assert_eq!(result["checkpointListFailureExplained"], true);
-    assert_eq!(result["checkpointUndoCancelBlocked"], true);
-    assert_eq!(result["checkpointUndoConfirmRan"], true);
-    assert_eq!(result["checkpointConfirmationUsesWarningSurface"], true);
-    assert_eq!(result["checkpointConfirmationInitialFocus"], true);
-    assert_eq!(result["checkpointConfirmationTabLoop"], true);
-    assert_eq!(result["checkpointConfirmationShiftTabLoop"], true);
-    assert_eq!(result["checkpointConfirmationEscapeBlocked"], true);
-    assert_eq!(result["checkpointConfirmationRestoresFocus"], true);
-    assert_eq!(result["checkpointConfirmationBackgroundLocked"], true);
-    assert_eq!(result["checkpointConfirmationBackgroundRestored"], true);
-    assert_eq!(result["checkpointRepeatedConfirmationSettled"], true);
-    assert_eq!(result["checkpointNativeConfirmCalls"], 0);
-}
-
-#[test]
-fn renderer_workspace_checkpoint_icon_resolves_exact_cwd_without_cross_thread_cache_leak() {
-    let result = run_workspace_checkpoint_contract_harness();
-
-    assert_eq!(result["catalogContext"]["cwd"], "C:\\catalog-repo");
-    assert_eq!(result["catalogContext"]["threadId"], "thread-catalog");
-    assert_eq!(result["catalogContext"]["hostId"], "local");
-    assert_eq!(result["catalogContext"]["local"], true);
-    assert_eq!(result["catalogContextCached"], "C:\\catalog-repo");
-    assert_eq!(result["iconDialogContext"]["cwd"], "C:\\icon-repo");
-    assert_eq!(result["iconDialogContext"]["threadId"], "thread-icon");
-    assert_eq!(result["iconDialogContext"]["hostId"], "local");
-    assert_eq!(result["iconDialogContext"]["local"], true);
-    assert_eq!(result["catalogContextAfterThreadSwitch"], "");
-}
-
-fn run_workspace_checkpoint_contract_harness() -> serde_json::Value {
-    let temp = tempfile::tempdir().expect("temp dir should be created");
-    let script_path = temp.path().join("renderer-features.js");
-    let harness_path = temp.path().join("workspace-checkpoint-harness.cjs");
-    std::fs::write(&script_path, assets::renderer_features_script())
-        .expect("renderer features should be written");
-    let mut harness = std::fs::File::create(&harness_path).expect("harness should be created");
-    write!(
-        harness,
-        r#"
-const scriptPath = {script_path};
-const store = new Map();
-let editorQueryEnabled = false;
-let insertedEditButton = null;
-let nativeConfirmCalls = 0;
-let activeConversationId = "thread-12345678";
-function node() {{
-  return {{
-    getBoundingClientRect() {{ return {{ left: 0, top: 0, right: 300, bottom: 40, width: 300, height: 40 }}; }},
-    appendChild(child) {{
-      child.parentElement = this;
-      child.isConnected = true;
-      this.children.push(child);
-    }},
-    prepend() {{}},
-    remove() {{
-      this.removed = true;
-      this.isConnected = false;
-    }},
-    focus() {{
-      if (globalThis.document) globalThis.document.activeElement = this;
-    }},
-    setAttribute(name, value) {{ this.attributes = this.attributes || {{}}; this.attributes[name] = String(value); }},
-    getAttribute(name) {{ return this.attributes?.[name] ?? null; }},
-    hasAttribute(name) {{ return this.attributes?.[name] !== undefined; }},
-    removeAttribute(name) {{
-      if (this.attributes) delete this.attributes[name];
-    }},
-    addEventListener(type, listener) {{ this.listeners = this.listeners || {{}}; this.listeners[type] = listener; }},
-    querySelector(selector) {{
-      const markup = String(this.innerHTML || "");
-      if (
-        selector === "[data-codex-confirm-cancel]" &&
-        markup.includes("data-codex-confirm-cancel")
-      ) {{
-        if (!this.confirmCancel) {{
-          this.confirmCancel = node();
-          this.confirmCancel.parentElement = this;
-        }}
-        return this.confirmCancel;
-      }}
-      if (
-        selector === "[data-codex-confirm-accept]" &&
-        markup.includes("data-codex-confirm-accept")
-      ) {{
-        if (!this.confirmAccept) {{
-          this.confirmAccept = node();
-          this.confirmAccept.parentElement = this;
-        }}
-        return this.confirmAccept;
-      }}
-      return null;
-    }},
-    querySelectorAll(selector) {{
-      if (
-        selector === "button:not(:disabled)" &&
-        String(this.innerHTML || "").includes("data-codex-confirm-cancel")
-      ) {{
-        return [
-          this.querySelector("[data-codex-confirm-cancel]"),
-          this.querySelector("[data-codex-confirm-accept]"),
-        ];
-      }}
-      return [];
-    }},
-    closest() {{ return null; }},
-    classList: {{ add() {{}}, remove() {{}}, toggle() {{}}, contains() {{ return false; }} }},
-    dataset: {{}},
-    style: {{}},
-    children: [],
-    isConnected: true,
-    textContent: "",
-    innerHTML: "",
-  }};
-}}
-const submit = {{
-  ...node(),
-  className: "native-send",
-  disabled: false,
-  type: "submit",
-  parentElement: {{
-    insertBefore(button) {{
-      insertedEditButton = button;
-    }},
-  }},
-  click() {{}},
-}};
-const cancel = {{ ...node(), textContent: "取消" }};
-const form = {{
-  ...node(),
-  querySelector(selector) {{
-    if (selector === 'button[type="submit"]') return submit;
-    if (selector.includes("data-codex-workspace-checkpoint-edit-button")) return insertedEditButton;
-    return null;
-  }},
-  querySelectorAll(selector) {{
-    return selector === "button" ? [cancel, submit] : [];
-  }},
-}};
-const editor = {{ ...node(), closest(selector) {{ return selector === "form" ? form : null; }} }};
-const conversationSignal = {{
-  ...node(),
-  getAttribute(name) {{
-    return name === "data-above-composer-conversation-id" ? activeConversationId : null;
-  }},
-}};
-globalThis.HTMLElement = Object;
-globalThis.Element = Object;
-globalThis.MutationObserver = class MutationObserver {{
-  observe() {{}}
-  disconnect() {{}}
-}};
-globalThis.getComputedStyle = () => ({{
-  display: "block",
-  visibility: "visible",
-  pointerEvents: "auto",
-}});
-globalThis.window = globalThis;
-window.__CODEX_ELVES_TEST_SERVICE_TIER__ = true;
-window.__CODEX_ELVES_TEST_WORKSPACE_CHECKPOINT__ = true;
-window.__CODEX_ELVES_TEST_APP_SERVER_RESTART__ = true;
-window.dispatchEvent = () => true;
-window.confirm = () => {{
-  nativeConfirmCalls += 1;
-  return true;
-}};
-globalThis.CustomEvent = class CustomEvent {{
-  constructor(type, options = {{}}) {{
-    this.type = type;
-    this.detail = options.detail;
-  }}
-}};
-globalThis.Event = class Event {{
-  constructor(type) {{
-    this.type = type;
-  }}
-}};
-globalThis.document = {{
-  scripts: [],
-  visibilityState: "visible",
-  activeElement: null,
-  documentElement: node(),
-  body: node(),
-  createElement: () => node(),
-  getElementById: () => null,
-  querySelector: (selector) =>
-    selector === "[data-above-composer-conversation-id]"
-      ? conversationSignal
-      : null,
-  querySelectorAll: (selector) =>
-    selector === "[data-above-composer-conversation-id]" ? [conversationSignal]
-      : selector === "main" && document.querySelector("main") ? [document.querySelector("main")]
-      : editorQueryEnabled && String(selector).includes('[aria-label="编辑消息"]') ? [editor] : [],
-  addEventListener() {{}},
-  removeEventListener() {{}},
-}};
-globalThis.localStorage = {{
-  getItem: (key) => store.has(key) ? store.get(key) : null,
-  setItem: (key, value) => store.set(key, String(value)),
-  removeItem: (key) => store.delete(key),
-}};
-globalThis.location = {{
-  href: "https://codex.test/local/thread-12345678",
-  pathname: "/local/thread-12345678",
-  protocol: "https:",
-  search: "",
-  hash: "",
-}};
-window.location = globalThis.location;
-globalThis.navigator = {{ userAgent: "node-test" }};
-globalThis.performance = {{ getEntriesByType: () => [] }};
-
-let bridgeMode = "ok";
-let activeOrder = [];
-let lastBindPayload = null;
-let lastCompletePayload = null;
-let lastRevertPayload = null;
-let lastPreviewPayload = null;
-let delayedBindStarted = null;
-let releaseDelayedBind = null;
-let holdPreview = false;
-let markPreviewStarted = null;
-let releasePreview = null;
-window.__codexSessionDeleteBridge = async (path, payload) => {{
-  if (path === "/settings/get") {{
-    return {{
-      launchMode: "patch",
-      enhancementsEnabled: true,
-      providerSyncEnabled: false,
-      codexAppWorkspaceCheckpoint: false,
-    }};
-  }}
-  if (path === "/session/suppressed") return {{ status: "ok", ids: [] }};
-  if (path === "/backend/status") return {{ status: "ok" }};
-  if (path === "/workspace-checkpoint/session-context") {{
-    if (payload.session_id === "thread-icon") {{
-      return {{
-        status: "ok",
-        session_id: "thread-icon",
-        cwd: "C:\\icon-repo",
-        host_id: "local",
-      }};
-    }}
-    if (payload.session_id === "thread-catalog") {{
-      return {{
-        status: "ok",
-        session_id: "thread-catalog",
-        cwd: "C:\\catalog-repo",
-        host_id: "local",
-      }};
-    }}
-    return {{ status: "not_found", session_id: payload.session_id, cwd: "", host_id: "local" }};
-  }}
-  if (path.startsWith("/workspace-checkpoint/")) activeOrder.push(`bridge:${{path}}`);
-  if (path === "/workspace-checkpoint/create") {{
-    if (bridgeMode === "create-failed") return {{ status: "failed", message: "snapshot failed" }};
-    return {{ status: "ok", checkpoint: {{ id: "checkpoint-1" }} }};
-  }}
-  if (path === "/workspace-checkpoint/bind-turn") {{
-    lastBindPayload = payload;
-    if (payload.turnId === "race-turn") {{
-      delayedBindStarted?.();
-      await new Promise((resolve) => {{
-        releaseDelayedBind = resolve;
-      }});
-    }}
-    return {{ status: "ok", checkpoint: {{ id: "checkpoint-1", accepted: true }} }};
-  }}
-  if (path === "/workspace-checkpoint/complete-turn") {{
-    lastCompletePayload = payload;
-    const noChanges = payload.turnId === "fast-turn";
-    return {{
-      status: "ok",
-      omitted: noChanges,
-      checkpoint: {{
-        id: "checkpoint-1",
-        workspace: payload.cwd,
-        accepted: true,
-        changeScope: "turn",
-        turnStatus: payload.status,
-        changedFileCount: noChanges ? 0 : 1,
-        changedFiles: noChanges ? [] : [{{ path: "a.txt" }}],
-      }},
-    }};
-  }}
-  if (path === "/workspace-checkpoint/preview-revert") {{
-    lastPreviewPayload = payload;
-    markPreviewStarted?.();
-    if (holdPreview) {{
-      await new Promise((resolve) => {{
-        releasePreview = resolve;
-      }});
-    }}
-    return {{ status: "ok", hasChanges: false, changedPaths: [] }};
-  }}
-  if (path === "/workspace-checkpoint/restore-for-revert") {{
-    lastRevertPayload = payload;
-    return {{ status: "ok", changedPaths: ["a.txt"], partial: false }};
-  }}
-  if (path === "/workspace-checkpoint/restore" && bridgeMode === "restore-failed") {{
-    return {{ status: "failed", message: "mock restore failure" }};
-  }}
-  if (path === "/workspace-checkpoint/list") {{
-    if (bridgeMode === "list-failed") throw new Error("mock list failure");
-    return {{
-      status: "ok",
-      checkpoints: bridgeMode === "list-empty-turns" ? [{{
-        id: "empty-turn", accepted: true, changeScope: "turn",
-        turnStatus: "completed", changedFileCount: 0, changedFiles: [],
-      }}] : [],
-    }};
-  }}
-  return {{ status: "ok" }};
-}};
-
-require(scriptPath);
-const api = window.__codexWorkspaceCheckpointTest;
-if (!api) throw new Error("workspace checkpoint test api unavailable");
-api.setBackendSettingsForTest({{
-  enhancementsEnabled: true,
-  codexAppWorkspaceCheckpoint: true,
-}});
-
-(async () => {{
-  let requestClientUpgradeNativeCalls = 0;
-  let requestClientUpgradeLegacyCalls = 0;
-  class UpgradeRequestClient {{}}
-  const upgradeNativeSendRequest = async () => {{
-    requestClientUpgradeNativeCalls += 1;
-    return {{}};
-  }};
-  UpgradeRequestClient.prototype.sendRequest = async function(...args) {{
-    requestClientUpgradeLegacyCalls += 1;
-    return upgradeNativeSendRequest.apply(this, args);
-  }};
-  UpgradeRequestClient.prototype.__codexWorkspaceCheckpointOriginalSendRequest =
-    upgradeNativeSendRequest;
-  UpgradeRequestClient.prototype.__codexWorkspaceCheckpointPatchVersion = "1";
-  const requestClientUpgradeInstalled =
-    api.patchRequestClientPrototype(UpgradeRequestClient);
-  await new UpgradeRequestClient().sendRequest("thread/read", {{}});
-
-  const client = {{ hostId: "local" }};
-  const turnParams = {{
-    threadId: "thread-12345678",
-    cwd: "C:\\repo",
-    input: [
-      {{ type: "text", text: "first line" }},
-      {{ type: "text", text: "second line" }},
-    ],
-  }};
-  activeOrder = [];
-  const turnOriginal = async function(method) {{
-    activeOrder.push(`original:${{method}}`);
-    return {{ turn: {{ id: "turn-1" }} }};
-  }};
-  await api.sendRequest(turnOriginal, client, "turn/start", turnParams);
-  const turnOrder = [...activeOrder];
-  const boundTurnId = lastBindPayload?.turnId || "";
-
-  activeOrder = [];
-  api.setRestoreIntent({{ cwd: "C:\\repo", threadId: "thread-12345678" }});
-  const revertOriginal = async function(method) {{
-    activeOrder.push(`original:${{method}}`);
-    return {{ thread: {{ cwd: "C:\\repo" }} }};
-  }};
-  await api.sendRequest(revertOriginal, client, "thread/revert", {{
-    threadId: "thread-12345678",
-    beforeTurnId: "turn-1",
-  }});
-  const revertOrder = [...activeOrder];
-  const revertBeforeTurnId = lastRevertPayload?.beforeTurnId || "";
-
-  bridgeMode = "create-failed";
-  let failedOriginalCalls = 0;
-  let createFailureBlockedOriginal = false;
-  try {{
-    await api.sendRequest(async () => {{
-      failedOriginalCalls += 1;
-      return {{}};
-    }}, client, "turn/start", {{
-      threadId: "thread-12345678",
-      cwd: "C:\\repo",
-      input: [{{ type: "text", text: "blocked" }}],
-    }});
-  }} catch {{
-    createFailureBlockedOriginal = failedOriginalCalls === 0;
-  }}
-
-  bridgeMode = "ok";
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  const healthyCheckpointBridge = window.__codexSessionDeleteBridge;
-  const realSetTimeout = globalThis.setTimeout;
-  let checkSlowRequest = null;
-  let finishSlowSnapshot = null;
-  let slowNativeCalls = 0;
-  let slowHealthyBridgeProbes = 0;
-  const slowDiagnosticStart = window.__codexElvesServiceTierTestDiagnostics.length;
-  globalThis.setTimeout = (callback, delay, ...args) => {{
-    if (delay === 2000) {{
-      checkSlowRequest = callback;
-      return undefined;
-    }}
-    return realSetTimeout(callback, delay, ...args);
-  }};
-  window.__codexSessionDeleteBridge = (path, payload) => {{
-    if (path === "/backend/status") slowHealthyBridgeProbes += 1;
-    return path === "/workspace-checkpoint/create"
-      ? new Promise((resolve) => {{ finishSlowSnapshot = resolve; }})
-      : healthyCheckpointBridge(path, payload);
-  }};
-  const slowSend = api.sendRequest(async () => {{
-    slowNativeCalls += 1;
-    return {{ turn: {{ id: "slow-healthy-turn" }} }};
-  }}, client, "turn/start", turnParams);
-  for (let step = 0; step < 30 && !checkSlowRequest; step += 1) await Promise.resolve();
-  if (!checkSlowRequest || !finishSlowSnapshot) throw new Error("slow checkpoint did not start");
-  for (let tick = 0; tick < 3; tick += 1) {{
-    checkSlowRequest();
-    await new Promise((resolve) => realSetTimeout(resolve, 0));
-  }}
-  const slowHealthyCheckpointWaited = slowNativeCalls === 0;
-  finishSlowSnapshot({{ status: "ok", checkpoint: {{ id: "slow-healthy-checkpoint" }} }});
-  await slowSend;
-  await new Promise((resolve) => realSetTimeout(resolve, 0));
-  // 请求完成后，即使旧定时回调已排队，也不能继续发起桥接检查。
-  checkSlowRequest();
-  await new Promise((resolve) => realSetTimeout(resolve, 0));
-  const slowHealthyCheckpointBound = slowNativeCalls === 1 &&
-    lastBindPayload?.checkpointId === "slow-healthy-checkpoint" &&
-    lastBindPayload?.turnId === "slow-healthy-turn";
-  const slowHealthyCheckpointSkipped = window.__codexElvesServiceTierTestDiagnostics
-    .slice(slowDiagnosticStart).some((item) => item.event === "workspace_checkpoint_create_skipped");
-  globalThis.setTimeout = realSetTimeout;
-  window.__codexSessionDeleteBridge = healthyCheckpointBridge;
-  const bridgeFailureCases = [];
-  for (const kind of [
-    "missing", "restarted", "unavailable", "throw", "rejected",
-    "create-timeout", "context-timeout", "request-timeout",
-  ]) {{
-    let nativeCalls = 0;
-    let preservedRequest = false;
-    let expireRequest = null;
-    let expireOperation = null;
-    let releaseLateResponse = null;
-    const calls = [];
-    const diagnosticStart = window.__codexElvesServiceTierTestDiagnostics.length;
-    const params = {{
-      threadId: "thread-12345678",
-      ...(kind === "context-timeout" ? {{}} : {{ cwd: "C:\\repo" }}),
-      input: [{{ type: "text", text: "bridge fallback" }}],
-    }};
-    const options = {{ timeout: 12345 }};
-    const expected = {{ turn: {{ id: `fallback-${{kind}}` }} }};
-    globalThis.setTimeout = (callback, delay, ...args) => {{
-      if (delay === 2000) {{
-        expireRequest = callback;
-        return undefined;
-      }}
-      if (delay === 60000) {{
-        expireOperation = callback;
-        return undefined;
-      }}
-      return realSetTimeout(callback, delay, ...args);
-    }};
-    window.__codexSessionDeleteBridge = (path, payload) => {{
-      if (path === "/backend/status" &&
-          (kind === "create-timeout" || kind === "context-timeout")) {{
-        return new Promise(() => {{}});
-      }}
-      if (!path.startsWith("/workspace-checkpoint/")) {{
-        return healthyCheckpointBridge(path, payload);
-      }}
-      calls.push(path);
-      if (kind === "restarted") {{
-        return Promise.resolve({{ status: "failed", message: "CodexElves Bridge 已重启，请重试" }});
-      }}
-      if (kind === "unavailable") {{
-        return Promise.resolve({{ status: "failed", code: "bridge_unavailable" }});
-      }}
-      if (kind === "throw") throw new Error("binding unavailable");
-      if (kind === "rejected") return Promise.reject(new Error("bridge disconnected"));
-      return new Promise((resolve) => {{ releaseLateResponse = resolve; }});
-    }};
-    if (kind === "missing") delete window.__codexSessionDeleteBridge;
-    const send = api.sendRequest(function(method, actualParams, actualOptions) {{
-      nativeCalls += 1;
-      preservedRequest = this === client &&
-        method === "turn/start" && actualParams === params && actualOptions === options;
-      return Promise.resolve(expected);
-    }}, client, "turn/start", params, options);
-    // 分别推进连通性探测和处理总时限；晚到的快照不得绑定到已发送轮次。
-    if (kind.endsWith("-timeout")) {{
-      for (let step = 0; step < 30 && !expireRequest; step += 1) await Promise.resolve();
-      if (!expireRequest) throw new Error(`checkpoint timeout was not scheduled: ${{kind}}`);
-      expireRequest();
-      await new Promise((resolve) => realSetTimeout(resolve, 0));
-      if (kind === "request-timeout") {{
-        if (!expireOperation) throw new Error("checkpoint operation deadline was not scheduled");
-        expireOperation();
-      }} else {{
-        expireRequest();
-      }}
-    }}
-    const actual = await send;
-    releaseLateResponse?.({{
-      status: "ok", session_id: params.threadId, cwd: "C:\\repo", host_id: "local",
-      checkpoint: {{ id: "late-checkpoint" }},
-    }});
-    await new Promise((resolve) => realSetTimeout(resolve, 0));
-    const expectedCalls = kind === "missing" ? [] : [
-      kind === "context-timeout" ? "/workspace-checkpoint/session-context" : "/workspace-checkpoint/create",
-    ];
-    bridgeFailureCases.push({{
-      kind, nativeCalls, preservedRequest,
-      preservedResult: actual === expected,
-      lateResponseIgnored: JSON.stringify(calls) === JSON.stringify(expectedCalls),
-      skipDiagnosed: window.__codexElvesServiceTierTestDiagnostics
-        .slice(diagnosticStart).some((item) => item.event === "workspace_checkpoint_create_skipped"),
-      correctReason: window.__codexElvesServiceTierTestDiagnostics
-        .slice(diagnosticStart).some((item) =>
-          item.event === "workspace_checkpoint_create_skipped" &&
-          item.detail.reason === (kind === "request-timeout" ? "request_timeout" : "bridge_unavailable")),
-    }});
-    globalThis.setTimeout = realSetTimeout;
-    window.__codexSessionDeleteBridge = healthyCheckpointBridge;
-  }}
-
-  delete window.__codexSessionDeleteBridge;
-  const nativeError = new Error("native turn failed");
-  let nativeFailurePreserved = false;
-  try {{
-    await api.sendRequest(async () => {{ throw nativeError; }}, client, "turn/start", turnParams);
-  }} catch (error) {{
-    nativeFailurePreserved = error === nativeError;
-  }}
-  let nativeRevertWithoutRestoreContinued = false;
-  await api.sendRequest(async () => {{
-    nativeRevertWithoutRestoreContinued = true;
-  }}, client, "thread/revert", {{ threadId: "thread-12345678" }});
-  window.__codexSessionDeleteBridge = healthyCheckpointBridge;
-
-  let expireBind = null;
-  let bindTimeoutDidNotBlockSend = false;
-  const bindDiagnosticStart = window.__codexElvesServiceTierTestDiagnostics.length;
-  globalThis.setTimeout = (callback, delay, ...args) => {{
-    if (delay === 60000) {{
-      expireBind = callback;
-      return undefined;
-    }}
-    if (delay === 2000) return undefined;
-    return realSetTimeout(callback, delay, ...args);
-  }};
-  window.__codexSessionDeleteBridge = (path, payload) =>
-    path === "/workspace-checkpoint/bind-turn"
-      ? new Promise(() => {{}})
-      : healthyCheckpointBridge(path, payload);
-  const bindTurn = {{ turn: {{ id: "bind-timeout-turn" }} }};
-  const bindSend = api.sendRequest(async () => bindTurn, client, "turn/start", turnParams);
-  bindTimeoutDidNotBlockSend = await Promise.race([
-    bindSend.then((result) => result === bindTurn),
-    new Promise((resolve) => realSetTimeout(() => resolve(false), 100)),
-  ]);
-  expireBind?.();
-  await bindSend;
-  await new Promise((resolve) => realSetTimeout(resolve, 0));
-  const bindTimeoutDiagnosed = window.__codexElvesServiceTierTestDiagnostics
-    .slice(bindDiagnosticStart).some((item) => item.event === "workspace_checkpoint_bind_failed");
-  globalThis.setTimeout = realSetTimeout;
-  window.__codexSessionDeleteBridge = (path, payload) =>
-    path === "/workspace-checkpoint/restore-for-revert"
-      ? Promise.resolve({{ status: "failed", message: "CodexElves Bridge 已重启，请重试" }})
-      : healthyCheckpointBridge(path, payload);
-  api.setRestoreIntent({{ cwd: "C:\\repo", threadId: "thread-12345678" }});
-  let restoreNativeCalls = 0;
-  let restoreBridgeFailureBlockedOriginal = false;
-  try {{
-    await api.sendRequest(async () => {{ restoreNativeCalls += 1; }}, client, "thread/revert", {{
-      threadId: "thread-12345678", beforeTurnId: "turn-1",
-    }});
-  }} catch {{
-    restoreBridgeFailureBlockedOriginal = restoreNativeCalls === 0;
-  }}
-  window.__codexSessionDeleteBridge = healthyCheckpointBridge;
-
-  activeOrder = [];
-  await api.sendRequest(async function(method) {{
-    activeOrder.push(`original:${{method}}`);
-    return {{ turn: {{ id: "remote-turn" }} }};
-  }}, {{ hostId: "remote-host" }}, "turn/start", {{
-    threadId: "thread-remote",
-    cwd: "/remote/repo",
-    input: [{{ type: "text", text: "remote" }}],
-  }});
-  const remoteSkippedCheckpoint =
-    activeOrder.length === 1 && activeOrder[0] === "original:turn/start";
-
-  api.setBackendSettingsForTest({{
-    enhancementsEnabled: true,
-    codexAppWorkspaceCheckpoint: false,
-  }});
-  activeOrder = [];
-  await api.sendRequest(async function(method) {{
-    activeOrder.push(`original:${{method}}`);
-    return {{ turn: {{ id: "disabled-turn" }} }};
-  }}, client, "turn/start", {{
-    threadId: "thread-disabled",
-    cwd: "C:\\disabled-repo",
-    input: [{{ type: "text", text: "disabled" }}],
-  }});
-  const disabledSkippedCheckpoint =
-    api.featureEnabled() === false &&
-    activeOrder.length === 1 &&
-    activeOrder[0] === "original:turn/start";
-  api.setBackendSettingsForTest({{
-    codexAppWorkspaceCheckpoint: true,
-  }});
-
-  class ActiveManagerRequestClient {{
-    constructor() {{
-      this.hostId = "local";
-    }}
-    createRequest() {{}}
-    prewarmThreadStart() {{}}
-    async sendRequest(method, params) {{
-      activeOrder.push(`manager-original:${{method}}`);
-      return {{
-        turn: {{
-          id: params?.threadId === "thread-race" ? "race-turn" : "manager-turn",
-        }},
-      }};
-    }}
-  }}
-  const activeManagerRequestClient = new ActiveManagerRequestClient();
-  const signalManager = {{
-    hostId: "local",
-    getCachedConversations() {{ return []; }},
-    getConversation() {{ return null; }},
-    updateConversationState() {{}},
-    threadStore: {{}},
-    requestClient: activeManagerRequestClient,
-  }};
-  // 当前 Codex 不导出客户端类，manager 藏在上层 scope 的已绑定 signal 中。
-  const managerAtom = {{}};
-  const scopedStore = {{ get(atom) {{
-    if (atom !== managerAtom) throw new Error("unexpected atom read");
-    return signalManager;
-  }} }};
-  const scopedFamilies = new Map();
-  for (let index = 0; index < 300; index += 1) {{
-    scopedFamilies.set({{}}, new Map([["remote", {{ value: {{}} }}]]));
-  }}
-  scopedFamilies.set({{}}, new Map([["local", {{
-    value: {{ atom: managerAtom, store: scopedStore }},
-  }}]]));
-  const ancestorScope = {{ familyBindings: scopedFamilies }};
-  const providerFiber = {{
-    memoizedProps: {{ value: new Map([["scope", {{ parent: ancestorScope }}]]) }},
-  }};
-  const mainFiberNode = {{ ...node(), __reactFiberCheckpointTest: {{ return: providerFiber }} }};
-  const originalQuerySelector = document.querySelector;
-  document.querySelector = (selector) =>
-    selector === "main" ? mainFiberNode : originalQuerySelector(selector);
-  window.__codexElvesConversationStateManager = null;
-  window.__codexElvesServiceTierTest.setModuleLoader(async () => ({{}}));
-  activeOrder = [];
-  lastBindPayload = null;
-  const activeManagerFallbackInstalled = await api.installRequestClientPatch();
-  await activeManagerRequestClient.sendRequest("turn/start", {{
-    threadId: "thread-manager",
-    cwd: "C:\\manager-repo",
-    input: [{{ type: "text", text: "manager fallback" }}],
-  }});
-  const activeManagerFallbackTurnOrder = [...activeOrder];
-  const activeManagerFallbackBoundTurnId = lastBindPayload?.turnId || "";
-  document.querySelector = originalQuerySelector;
-  window.__codexElvesServiceTierTest.setModuleLoader(null);
-
-  let turnCompletedCallback = null;
-  let completionListenerSubscriptionCount = 0;
-  const checkpointManager = {{
-    hostId: "local",
-    getCachedConversations() {{ return []; }},
-    getConversation(threadId) {{
-      return {{
-        id: threadId,
-        cwd: threadId === "thread-catalog" ||
-          threadId === "thread-icon" ||
-          threadId === "thread-other"
-          ? ""
-          : threadId === "thread-confirm"
-            ? "C:\\confirm-repo"
-          : threadId === "thread-manager"
-            ? "C:\\manager-repo"
-            : threadId === "thread-race"
-              ? "C:\\race-repo"
-              : "C:\\repo",
-        hostId: "local",
-        turns: [],
-        turnHistory: threadId === "thread-dialog" ? {{
-          kind: "canonical",
-          history: {{ entitiesByKey: new Map([
-            ["running", {{ turnId: "running-turn", status: "inProgress" }}],
-            ["completed", {{ turnId: "ended-turn", status: "completed" }}],
-            ["interrupted", {{ turnId: "interrupted-turn", status: "interrupted" }}],
-          ]) }},
-        }} : undefined,
-      }};
-    }},
-    addNotificationCallback(method, callback) {{
-      if (method === "turn/completed") {{
-        completionListenerSubscriptionCount += 1;
-        turnCompletedCallback = callback;
-      }}
-      return () => {{
-        if (turnCompletedCallback === callback) turnCompletedCallback = null;
-      }};
-    }},
-    updateConversationState() {{}},
-    threadStore: {{}},
-    requestClient: activeManagerRequestClient,
-  }};
-  window.__codexElvesAppServerRestartTest.setConversationManager(checkpointManager);
-  const completionListenerInstalled =
-    api.installCompletionListener() && api.installCompletionListener();
-  if (typeof turnCompletedCallback !== "function") {{
-    throw new Error("turn/completed callback unavailable");
-  }}
-  await turnCompletedCallback({{
-    method: "turn/completed",
-    params: {{
-      threadId: "thread-manager",
-      turn: {{ id: "manager-turn", status: "completed" }},
-    }},
-  }});
-  const completedTurnPayload = lastCompletePayload;
-
-  activeConversationId = "thread-catalog";
-  const catalogContext = await api.resolveContext(null, {{}});
-  const catalogContextCached = api.context(null, {{}}).cwd;
-  activeConversationId = "thread-icon";
-  await api.openDialog();
-  const iconDialog = document.body.children.find((child) =>
-    child?.__codexWorkspaceCheckpointContext?.threadId === "thread-icon"
-  );
-  const iconDialogContext = iconDialog?.__codexWorkspaceCheckpointContext || null;
-  activeConversationId = "thread-other";
-  const catalogContextAfterThreadSwitch = api.context(null, {{}}).cwd;
-  activeConversationId = "thread-12345678";
-
-  let markDelayedBindStarted = null;
-  const delayedBindStartedPromise = new Promise((resolve) => {{
-    markDelayedBindStarted = resolve;
-  }});
-  delayedBindStarted = markDelayedBindStarted;
-  lastCompletePayload = null;
-  const raceSendPromise = activeManagerRequestClient.sendRequest("turn/start", {{
-    threadId: "thread-race",
-    cwd: "C:\\race-repo",
-    input: [{{ type: "text", text: "race" }}],
-  }});
-  await delayedBindStartedPromise;
-  const raceCompletionPromise = turnCompletedCallback({{
-    method: "turn/completed",
-    params: {{
-      threadId: "thread-race",
-      turn: {{ id: "race-turn", status: "failed" }},
-    }},
-  }});
-  await Promise.resolve();
-  await Promise.resolve();
-  const completionWaitedForBind = lastCompletePayload === null;
-  releaseDelayedBind?.();
-  await raceSendPromise;
-  await raceCompletionPromise;
-  const raceCompletedTurnPayload = lastCompletePayload;
-
-  lastCompletePayload = null;
-  await turnCompletedCallback({{
-    method: "turn/completed",
-    params: {{
-      threadId: "thread-12345678",
-      turn: {{ id: "fast-turn", status: "completed" }},
-    }},
-  }});
-  const fastCompletionPayload = lastCompletePayload;
-
-  const previewStartedPromise = new Promise((resolve) => {{
-    markPreviewStarted = resolve;
-  }});
-  holdPreview = true;
-  editorQueryEnabled = true;
-  api.installEditButtons();
-  await previewStartedPromise;
-  const editButtonDisabledFromCompletionHint = insertedEditButton?.disabled === true;
-  const editButtonTitleFromCompletionHint = insertedEditButton?.title || "";
-  const editButtonPreviewPendingAfterHint = typeof releasePreview === "function";
-  holdPreview = false;
-  releasePreview?.();
-  await Promise.resolve();
-  await Promise.resolve();
-
-  const checkpointDialogHtml = api.listHtml([
-    {{
-      id: "safety&1",
-      kind: "restoreSafety",
-      accepted: true,
-      changeScope: "snapshot",
-      createdAtMs: Date.now(),
-      promptPreview: "ignored <title>",
-      changedFileCount: 6,
-      changedFiles: [
-        {{ path: "src/<unsafe>.rs", status: "M", additions: 12, deletions: 3 }},
-        {{ path: "src/added.rs", status: "A", additions: 4, deletions: 2 }},
-        {{ path: "src/third.rs", status: "M", additions: 1, deletions: 0 }},
-        {{ path: "src/deleted.rs", status: "D", additions: 0, deletions: 1 }},
-        {{ path: "src/fifth.rs", status: "M", additions: 2, deletions: 0 }},
-        {{ path: "src/sixth.rs", status: "M", additions: 3, deletions: 1 }},
-      ],
-    }},
-    {{
-      id: "incomplete-1",
-      accepted: false,
-      createdAtMs: Date.now(),
-      promptPreview: "未完成请求",
-      changedFileCount: 0,
-      changedFiles: [],
-    }},
-    {{
-      id: "normal-1",
-      threadId: "thread-dialog",
-      turnId: "running-turn",
-      accepted: true,
-      changeScope: "turn",
-      turnStatus: null,
-      createdAtMs: Date.now(),
-      promptPreview: "执行中的请求",
-      changedFileCount: 0,
-      changedFiles: [],
-    }},
-    {{
-      id: "completed-1",
-      accepted: true,
-      changeScope: "turn",
-      turnStatus: "completed",
-      createdAtMs: Date.now(),
-      promptPreview: "不应显示的空轮次",
-      changedFileCount: 0,
-      changedFiles: [],
-    }},
-    {{
-      id: "initialization-1",
-      accepted: true,
-      initialization: true,
-      initialFileCount: 1234,
-      changeScope: "turn",
-      turnStatus: "completed",
-      createdAtMs: Date.now(),
-      promptPreview: "初始化请求",
-      changedFileCount: 2,
-      changedFiles: [
-        {{ path: "src/initial-hidden-a.rs", status: "A", additions: 10, deletions: 0 }},
-        {{ path: "src/initial-hidden-b.rs", status: "M", additions: 2, deletions: 1 }},
-      ],
-    }},
-    {{
-      id: "failed-1",
-      accepted: true,
-      changeScope: "turn",
-      turnStatus: "failed",
-      createdAtMs: Date.now(),
-      promptPreview: "<unsafe prompt>",
-      changedFileCount: 1,
-      changedFiles: [
-        {{ path: "src/failed.rs", status: "M", additions: 2, deletions: 1 }},
-      ],
-    }},
-    {{
-      id: "interrupted-1",
-      accepted: true,
-      changeScope: "turn",
-      turnStatus: "interrupted",
-      createdAtMs: Date.now(),
-      promptPreview: "中断请求",
-      changedFileCount: 1,
-      changedFiles: [],
-    }},
-    {{
-      id: "legacy-1",
-      accepted: true,
-      createdAtMs: Date.now(),
-      promptPreview: "旧记录",
-      changedFileCount: 2,
-    }},
-  ]);
-  const missingCompletionHtml = (turnId, threadId = "thread-dialog") => api.listHtml([{{
-    id: "missing-completion", threadId, turnId, accepted: true,
-    changeScope: "turn", turnStatus: null, changedFileCount: 0, changedFiles: [],
-  }}]);
-  const nativeCompletedHtml = missingCompletionHtml("ended-turn");
-  const nativeInterruptedHtml = missingCompletionHtml("interrupted-turn");
-  const unknownTurnHtml = missingCompletionHtml("unknown-turn");
-  const otherThreadHtml = missingCompletionHtml("running-turn", "thread-other");
-  const checkpointDialogRestoreButtonCount =
-    (checkpointDialogHtml.match(/data-codex-workspace-checkpoint-restore=/g) || []).length;
-  const checkpointDialogFileRowCount =
-    (checkpointDialogHtml.match(/class="checkpoint-file-row"/g) || []).length;
-  const labelNode = {{ textContent: "" }};
-  const toggleNode = {{
-    ariaExpanded: "",
-    setAttribute(name, value) {{
-      if (name === "aria-expanded") this.ariaExpanded = String(value);
-    }},
-  }};
-  const fileListNode = {{
-    dataset: {{ expanded: "false" }},
-    expandedAttribute: "false",
-    setAttribute(name, value) {{
-      if (name === "data-expanded") this.expandedAttribute = String(value);
-    }},
-    querySelectorAll(selector) {{
-      return selector === ".checkpoint-file-row" ? Array.from({{ length: 7 }}, () => ({{}})) : [];
-    }},
-    querySelector(selector) {{
-      if (selector === "[data-codex-workspace-checkpoint-file-toggle]") return toggleNode;
-      if (selector === "[data-codex-workspace-checkpoint-file-toggle-label]") return labelNode;
-      return null;
-    }},
-  }};
-  const checkpointDialogExpanded =
-    api.setFileListExpanded(fileListNode, true) === true &&
-    fileListNode.dataset.expanded === "true" &&
-    fileListNode.expandedAttribute === "true" &&
-    toggleNode.ariaExpanded === "true";
-  const checkpointDialogExpandedLabel = labelNode.textContent;
-  const checkpointDialogCollapsed =
-    api.setFileListExpanded(fileListNode, false) === false &&
-    fileListNode.dataset.expanded === "false" &&
-    fileListNode.expandedAttribute === "false" &&
-    toggleNode.ariaExpanded === "false";
-  const checkpointDialogCollapsedLabel = labelNode.textContent;
-  const checkpointNow = new Date(2026, 8, 2, 13, 50).getTime();
-  const checkpointToday = new Date(2026, 8, 2, 13, 42).getTime();
-  const checkpointYesterday = new Date(2026, 8, 1, 13, 42).getTime();
-  const checkpointBridgeCallCount = (path) =>
-    activeOrder.filter((entry) => entry === `bridge:${{path}}`).length;
-  let lastCheckpointConfirmationOverlay = null;
-  const checkpointConfirmationMount = {{
-    ...node(),
-    appendChild(child) {{
-      lastCheckpointConfirmationOverlay = child;
-      child.parentElement = this;
-    }},
-    querySelectorAll(selector) {{
-      return selector === '[data-codex-elves-confirm-action="true"]' &&
-        lastCheckpointConfirmationOverlay &&
-        !lastCheckpointConfirmationOverlay.removed
-        ? [lastCheckpointConfirmationOverlay]
-        : [];
-    }},
-  }};
-  const checkpointConfirmationTarget = (selector) => ({{
-    blur() {{}},
-    closest(candidate) {{
-      return candidate === selector ? this : null;
-    }},
-  }});
-  const clickCheckpointConfirmation = (selector) => {{
-    const overlay = lastCheckpointConfirmationOverlay;
-    if (!overlay?.listeners?.click) {{
-      throw new Error(`checkpoint confirmation overlay unavailable for ${{selector}}`);
-    }}
-    overlay.listeners.click({{
-      target: checkpointConfirmationTarget(selector),
-      preventDefault() {{}},
-      stopPropagation() {{}},
-    }});
-  }};
-  const keydownCheckpointConfirmation = (key, shiftKey = false) => {{
-    const overlay = lastCheckpointConfirmationOverlay;
-    if (!overlay?.listeners?.keydown) {{
-      throw new Error(`checkpoint confirmation overlay unavailable for ${{key}}`);
-    }}
-    overlay.listeners.keydown({{
-      key,
-      shiftKey,
-      preventDefault() {{}},
-      stopPropagation() {{}},
-      stopImmediatePropagation() {{}},
-    }});
-  }};
-  const checkpointCustomConfirmationAvailable =
-    typeof api.restoreFromDialog === "function" &&
-    typeof api.undoLatest === "function";
-  let checkpointRestoreCancelBlocked = false;
-  let checkpointRestoreConfirmRan = false;
-  let checkpointRestoreConfirmationExplainsTarget = false;
-  let checkpointSafetyConfirmationExplainsTarget = false;
-  let checkpointFailedRestoreResetsLabels = true;
-  let checkpointEmptyTurnsExplained = false;
-  let checkpointListFailureExplained = false;
-  let checkpointUndoCancelBlocked = false;
-  let checkpointUndoConfirmRan = false;
-  let checkpointConfirmationUsesWarningSurface = false;
-  let checkpointConfirmationInitialFocus = false;
-  let checkpointConfirmationTabLoop = false;
-  let checkpointConfirmationShiftTabLoop = false;
-  let checkpointConfirmationEscapeBlocked = false;
-  let checkpointConfirmationRestoresFocus = false;
-  let checkpointConfirmationBackgroundLocked = false;
-  let checkpointConfirmationBackgroundRestored = false;
-  let checkpointRepeatedConfirmationSettled = false;
-  if (checkpointCustomConfirmationAvailable) {{
-    const checkpointPreviousConversationId = activeConversationId;
-    activeConversationId = "thread-confirm";
-    const checkpointContext = {{
-      cwd: "C:\\confirm-repo",
-      threadId: "thread-confirm",
-      local: true,
-    }};
-    const checkpointListNode = node();
-    const checkpointDialogSurface = node();
-    const checkpointDialog = {{
-      ...node(),
-      closest(selector) {{
-        return selector === ".codex-workspace-checkpoint-overlay"
-          ? checkpointConfirmationMount
-          : null;
-      }},
-      querySelector(selector) {{
-        return selector === "[data-codex-workspace-checkpoint-list]"
-          ? checkpointListNode
-          : selector === ".codex-workspace-checkpoint-dialog"
-            ? checkpointDialogSurface
-            : null;
-      }},
-    }};
-    const checkpointRestoreButton = () => {{
-      const button = node();
-      button.setAttribute(
-        "data-codex-workspace-checkpoint-restore",
-        "checkpoint-confirm"
-      );
-      return button;
-    }};
-    const restoreBeforeCancel = checkpointBridgeCallCount(
-      "/workspace-checkpoint/restore"
-    );
-    lastCheckpointConfirmationOverlay = null;
-    const restoreCancelButton = checkpointRestoreButton();
-    document.activeElement = restoreCancelButton;
-    const restoreCancelPromise = api.restoreFromDialog(
-      restoreCancelButton,
-      checkpointDialog,
-      checkpointContext
-    );
-    checkpointRestoreConfirmationExplainsTarget =
-      lastCheckpointConfirmationOverlay?.innerHTML?.includes("恢复到本轮开始前？") &&
-      lastCheckpointConfirmationOverlay?.innerHTML?.includes("此后文件改动也会被回退");
-    checkpointConfirmationUsesWarningSurface =
-      lastCheckpointConfirmationOverlay?.parentElement ===
-        checkpointConfirmationMount &&
-      lastCheckpointConfirmationOverlay?.innerHTML?.includes(
-        'data-codex-confirm-tone="warning"'
-      ) &&
-      lastCheckpointConfirmationOverlay?.innerHTML?.includes(
-        "继续恢复"
-      );
-    const confirmationCancel =
-      lastCheckpointConfirmationOverlay?.querySelector?.(
-        "[data-codex-confirm-cancel]"
-      );
-    const confirmationAccept =
-      lastCheckpointConfirmationOverlay?.querySelector?.(
-        "[data-codex-confirm-accept]"
-      );
-    checkpointConfirmationInitialFocus =
-      document.activeElement === confirmationCancel;
-    checkpointConfirmationBackgroundLocked =
-      checkpointDialogSurface.inert === true &&
-      checkpointDialogSurface.hasAttribute("inert") &&
-      checkpointDialogSurface.getAttribute("aria-hidden") === "true";
-    confirmationAccept?.focus?.();
-    keydownCheckpointConfirmation("Tab");
-    checkpointConfirmationTabLoop =
-      document.activeElement === confirmationCancel;
-    confirmationCancel?.focus?.();
-    keydownCheckpointConfirmation("Tab", true);
-    checkpointConfirmationShiftTabLoop =
-      document.activeElement === confirmationAccept;
-    keydownCheckpointConfirmation("Escape");
-    await restoreCancelPromise;
-    checkpointRestoreCancelBlocked =
-      checkpointBridgeCallCount("/workspace-checkpoint/restore") ===
-      restoreBeforeCancel;
-    checkpointConfirmationEscapeBlocked = checkpointRestoreCancelBlocked;
-    checkpointConfirmationRestoresFocus =
-      document.activeElement === restoreCancelButton;
-    checkpointConfirmationBackgroundRestored =
-      checkpointDialogSurface.inert !== true &&
-      checkpointDialogSurface.getAttribute("aria-hidden") === null;
-
-    const restoreBeforeConfirm = checkpointBridgeCallCount(
-      "/workspace-checkpoint/restore"
-    );
-    lastCheckpointConfirmationOverlay = null;
-    const restoreConfirmPromise = api.restoreFromDialog(
-      checkpointRestoreButton(),
-      checkpointDialog,
-      checkpointContext
-    );
-    clickCheckpointConfirmation("[data-codex-confirm-accept]");
-    await restoreConfirmPromise;
-    checkpointRestoreConfirmRan =
-      checkpointBridgeCallCount("/workspace-checkpoint/restore") ===
-      restoreBeforeConfirm + 1;
-
-    bridgeMode = "restore-failed";
-    for (const kind of ["turnStart", "restoreSafety"]) {{
-      const failedButton = checkpointRestoreButton();
-      failedButton.setAttribute("data-codex-workspace-checkpoint-kind", kind);
-      const failedPromise = api.restoreFromDialog(
-        failedButton, checkpointDialog, checkpointContext
-      );
-      if (kind === "restoreSafety") {{
-        checkpointSafetyConfirmationExplainsTarget =
-          lastCheckpointConfirmationOverlay?.innerHTML?.includes("恢复此安全快照？") &&
-          lastCheckpointConfirmationOverlay?.innerHTML?.includes("此安全快照保存的状态");
-      }}
-      clickCheckpointConfirmation("[data-codex-confirm-accept]");
-      await failedPromise;
-      checkpointFailedRestoreResetsLabels &&=
-        failedButton.disabled === false &&
-        failedButton.textContent === (kind === "restoreSafety" ? "恢复此安全快照" : "恢复到本轮开始前");
-    }}
-    for (const mode of ["list-empty-turns", "list-failed"]) {{
-      bridgeMode = mode;
-      const loadPromise = api.restoreFromDialog(
-        checkpointRestoreButton(), checkpointDialog, checkpointContext
-      );
-      clickCheckpointConfirmation("[data-codex-confirm-accept]");
-      await loadPromise;
-      if (mode === "list-empty-turns") {{
-        checkpointEmptyTurnsExplained =
-          checkpointListNode.innerHTML.includes("已完成轮次均无文件变化，已隐藏");
-      }} else {{
-        checkpointListFailureExplained =
-          checkpointListNode.innerHTML.includes("mock list failure") &&
-          !checkpointListNode.innerHTML.includes("正在读取");
-      }}
-    }}
-    bridgeMode = "ok";
-
-    const repeatedFirstButton = checkpointRestoreButton();
-    document.activeElement = repeatedFirstButton;
-    const repeatedFirstPromise = api.restoreFromDialog(
-      repeatedFirstButton,
-      checkpointDialog,
-      checkpointContext
-    );
-    const repeatedSecondButton = checkpointRestoreButton();
-    document.activeElement = repeatedSecondButton;
-    const repeatedSecondPromise = api.restoreFromDialog(
-      repeatedSecondButton,
-      checkpointDialog,
-      checkpointContext
-    );
-    checkpointRepeatedConfirmationSettled = await Promise.race([
-      repeatedFirstPromise.then(() => true),
-      new Promise((resolve) => setTimeout(() => resolve(false), 20)),
-    ]);
-    clickCheckpointConfirmation("[data-codex-confirm-cancel]");
-    await repeatedSecondPromise;
-
-    const checkpointUndoButton = () => {{
-      const button = node();
-      button.closest = (selector) => {{
-        if (selector === ".codex-workspace-checkpoint-overlay") {{
-          return checkpointConfirmationMount;
-        }}
-        if (selector === ".codex-workspace-checkpoint-dialog") {{
-          return checkpointDialogSurface;
-        }}
-        return null;
-      }};
-      return button;
-    }};
-    const undoBeforeCancel = checkpointBridgeCallCount(
-      "/workspace-checkpoint/restore-for-revert"
-    );
-    lastCheckpointConfirmationOverlay = null;
-    const undoCancelPromise = api.undoLatest(
-      checkpointUndoButton(),
-      checkpointContext
-    );
-    clickCheckpointConfirmation("[data-codex-confirm-cancel]");
-    await undoCancelPromise;
-    checkpointUndoCancelBlocked =
-      checkpointBridgeCallCount("/workspace-checkpoint/restore-for-revert") ===
-      undoBeforeCancel;
-
-    const undoBeforeConfirm = checkpointBridgeCallCount(
-      "/workspace-checkpoint/restore-for-revert"
-    );
-    lastCheckpointConfirmationOverlay = null;
-    const undoConfirmPromise = api.undoLatest(
-      checkpointUndoButton(),
-      checkpointContext
-    );
-    clickCheckpointConfirmation("[data-codex-confirm-accept]");
-    await undoConfirmPromise;
-    checkpointUndoConfirmRan =
-      checkpointBridgeCallCount("/workspace-checkpoint/restore-for-revert") ===
-      undoBeforeConfirm + 1;
-    activeConversationId = checkpointPreviousConversationId;
-  }}
-
-  process.stdout.write(JSON.stringify({{
-    turnOrder,
-    boundTurnId,
-    promptPreview: api.promptPreview(turnParams),
-    revertOrder,
-    revertBeforeTurnId,
-    createFailureBlockedOriginal,
-    slowHealthyCheckpointWaited,
-    slowHealthyCheckpointBound,
-    slowHealthyCheckpointSkipped,
-    slowHealthyBridgeProbes,
-    bridgeFailureCases,
-    nativeFailurePreserved,
-    bindTimeoutDidNotBlockSend,
-    bindTimeoutDiagnosed,
-    restoreBridgeFailureBlockedOriginal,
-    nativeRevertWithoutRestoreContinued,
-    remoteSkippedCheckpoint,
-    disabledSkippedCheckpoint,
-    activeManagerFallbackInstalled,
-    activeManagerFallbackTurnOrder,
-    activeManagerFallbackBoundTurnId,
-    requestClientUpgradeInstalled,
-    requestClientUpgradeNativeCalls,
-    requestClientUpgradeLegacyCalls,
-    completionListenerInstalled,
-    completionListenerSubscriptionCount,
-    completedTurnPayload,
-    catalogContext,
-    catalogContextCached,
-    iconDialogContext,
-    catalogContextAfterThreadSwitch,
-    completionWaitedForBind,
-    raceCompletedTurnPayload,
-    fastCompletionPayload,
-    editButtonText: insertedEditButton?.textContent || "",
-    editButtonType: insertedEditButton?.type || "",
-    editButtonDisabledFromCompletionHint,
-    editButtonTitleFromCompletionHint,
-    editButtonPreviewPendingAfterHint,
-    editButtonDisabledWhenNoChanges: insertedEditButton?.disabled === true,
-    editButtonTitle: insertedEditButton?.title || "",
-    editButtonPreviewNumTurns: lastPreviewPayload?.numTurns || 0,
-    checkpointDialogHasStages:
-      checkpointDialogHtml.includes("本轮执行中") &&
-      checkpointDialogHtml.includes("本轮完成") &&
-      checkpointDialogHtml.includes("本轮失败") &&
-      checkpointDialogHtml.includes("本轮已中断") &&
-      checkpointDialogHtml.includes("旧版·发送前差异") &&
-      checkpointDialogHtml.includes("安全快照") &&
-      checkpointDialogHtml.includes("发送未完成"),
-    checkpointDialogRestoreButtonCount,
-    checkpointDialogFileRowCount,
-    checkpointDialogHasInitialization:
-      checkpointDialogHtml.includes(">初始化<") &&
-      checkpointDialogHtml.includes("已建立工作区初始基线") &&
-      checkpointDialogHtml.includes("共 1234 个文件"),
-    checkpointDialogHidesInitializationFileRows:
-      !checkpointDialogHtml.includes("src/initial-hidden-a.rs") &&
-      !checkpointDialogHtml.includes("src/initial-hidden-b.rs"),
-    checkpointDialogEscapesContent:
-      checkpointDialogHtml.includes("src/&lt;unsafe&gt;.rs") &&
-      checkpointDialogHtml.includes("&lt;unsafe prompt&gt;") &&
-      !checkpointDialogHtml.includes("src/<unsafe>.rs") &&
-      !checkpointDialogHtml.includes("<unsafe prompt>"),
-    checkpointDialogHasTotalStat:
-      checkpointDialogHtml.includes("+22") && checkpointDialogHtml.includes("-7"),
-    checkpointDialogOmitsCompletedNoChange:
-      !checkpointDialogHtml.includes("completed-1") &&
-      !checkpointDialogHtml.includes("不应显示的空轮次") &&
-      !checkpointDialogHtml.includes("本轮无文件变化"),
-    checkpointDialogHasPendingChangeCapture:
-      checkpointDialogHtml.includes("正在记录本轮文件变化…"),
-    checkpointDialogUsesNativeCompletedState:
-      nativeCompletedHtml.includes("本轮完成") &&
-      nativeCompletedHtml.includes("文件统计未同步") &&
-      !nativeCompletedHtml.includes("本轮执行中") &&
-      !nativeCompletedHtml.includes("本轮无文件变化"),
-    checkpointDialogUsesNativeInterruptedState:
-      nativeInterruptedHtml.includes("本轮已中断") &&
-      nativeInterruptedHtml.includes("文件统计未同步"),
-    checkpointDialogUnknownStateIsNotRunning:
-      unknownTurnHtml.includes("状态未同步") &&
-      !unknownTurnHtml.includes("本轮执行中"),
-    checkpointDialogDoesNotBorrowOtherThreadState:
-      otherThreadHtml.includes("状态未同步") &&
-      !otherThreadHtml.includes("本轮执行中"),
-    checkpointDialogDistinguishesSafetyRestore:
-      checkpointDialogHtml.includes("恢复到本轮开始前") &&
-      checkpointDialogHtml.includes("恢复此安全快照") &&
-      checkpointDialogHtml.includes("恢复前自动保存的工作区") &&
-      checkpointDialogHtml.includes("系统在恢复文件前自动保存"),
-    checkpointDialogHasLegacyFallback: checkpointDialogHtml.includes("文件明细不可用"),
-    checkpointDialogHasDefaultCollapse: checkpointDialogHtml.includes('data-expanded="false"'),
-    checkpointDialogHasToggle: checkpointDialogHtml.includes("展开其余 1 个文件"),
-    checkpointDialogTimeLabels:
-      api.timeLabel(checkpointToday, checkpointNow).startsWith("今天 ") &&
-      api.timeLabel(checkpointYesterday, checkpointNow).startsWith("昨天 "),
-    checkpointDialogExpanded,
-    checkpointDialogExpandedLabel,
-    checkpointDialogCollapsed,
-    checkpointDialogCollapsedLabel,
-    checkpointCustomConfirmationAvailable,
-    checkpointRestoreCancelBlocked,
-    checkpointRestoreConfirmRan,
-    checkpointRestoreConfirmationExplainsTarget,
-    checkpointSafetyConfirmationExplainsTarget,
-    checkpointFailedRestoreResetsLabels,
-    checkpointEmptyTurnsExplained,
-    checkpointListFailureExplained,
-    checkpointUndoCancelBlocked,
-    checkpointUndoConfirmRan,
-    checkpointConfirmationUsesWarningSurface,
-    checkpointConfirmationInitialFocus,
-    checkpointConfirmationTabLoop,
-    checkpointConfirmationShiftTabLoop,
-    checkpointConfirmationEscapeBlocked,
-    checkpointConfirmationRestoresFocus,
-    checkpointConfirmationBackgroundLocked,
-    checkpointConfirmationBackgroundRestored,
-    checkpointRepeatedConfirmationSettled,
-    checkpointNativeConfirmCalls: nativeConfirmCalls,
-  }}));
-  process.exit(0);
-}})().catch((error) => {{
-  console.error(error);
-  process.exit(1);
-}});
-"#,
-        script_path = serde_json::to_string(&script_path.to_string_lossy()).unwrap(),
-    )
-    .expect("workspace checkpoint harness should be written");
-
-    let output = Command::new("node")
-        .arg(&harness_path)
-        .output()
-        .expect("node should run workspace checkpoint harness");
-    assert!(
-        output.status.success(),
-        "node workspace checkpoint harness failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout)
-        .expect("workspace checkpoint harness stdout should be JSON")
 }
 
 #[test]
@@ -10558,8 +8939,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = include_str!("../../../assets/remote-access/native.js");
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 146"));
-    assert!(script.contains("version: 146, call"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 148"));
+    assert!(script.contains("version: 148, call"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));
@@ -11061,7 +9442,7 @@ fn injection_script_does_not_unlock_disabled_plugin_install_buttons() {
 fn injection_script_preserves_official_marketplace_literal_names() {
     let script = assets::injection_script(45221);
 
-    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"19\""));
+    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"20\""));
     // 不再重命名官方 marketplace，保留字面名以恢复原生浏览器 / 电脑操控面板。
     assert!(!script.contains("codexPluginMarketplaceAliasForName"));
     assert!(!script.contains("marketplace.name = alias"));
@@ -11072,7 +9453,7 @@ fn injection_script_preserves_official_marketplace_literal_names() {
 fn injection_script_does_not_bypass_plugin_marketplace_search_filters() {
     let script = assets::injection_script(45221);
 
-    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"19\""));
+    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"20\""));
     assert!(!script.contains("Array.prototype.filter = patchedFilter"));
     assert!(!script.contains("Object.defineProperty(items, \"filter\""));
 }
@@ -11082,7 +9463,7 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
     let script = assets::injection_script(45221);
     let cases = run_renderer_compatibility_harness();
 
-    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"19\""));
+    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"20\""));
     assert!(script.contains("installPluginMarketplaceRequestPatch"));
     assert!(script.contains("installPluginMarketplaceBridgePatch"));
     assert!(script.contains("return \"client\";"));
@@ -11625,7 +10006,7 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("codex-open-in-menu"));
     assert!(script.contains(r#"const codexOpenInVersion = "14";"#));
     assert!(script.contains("window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion"));
-    assert!(script.contains(r#"const codexDeleteStyleVersion = "110";"#));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "112";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
     assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
     assert!(script.contains("width: 30px !important;"));
@@ -11855,9 +10236,7 @@ fn injection_script_open_in_resolves_workspace_from_conversation_manager() {
         .split("\n  }")
         .next()
         .unwrap();
-    assert!(
-        resolver_block.contains("await codexWorkspaceCheckpointSessionContext(conversationId)")
-    );
+
     assert!(
         resolver_block
             .contains("if (!isCodexOpenInContextCurrent({ conversationId })) return null;")
@@ -12501,6 +10880,24 @@ const turn=(threadId,model="gpt-6.1-sol",serviceTier="priority")=>({threadId,mod
  assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true");
  delete options.getComposers;Object.assign(options,originalGetters);model="gpt-6.1-sol";
 
+ const remoteContext={hostId:"local",threadId:"remote-thread-ffffffff"},desktopFast=api.status().fast;
+ assert.equal((await api.remoteState(remoteContext,"gpt-6.1-sol")).enabled,false);
+ assert.equal((await api.setRemoteState(remoteContext,"gpt-6.1-sol",true)).enabled,true);
+ assert.equal(api.status().fast,desktopFast,"远程写入不能读取或修改当前桌面会话");
+ assert.equal((await api.patchTurnRequest(turn(remoteContext.threadId))).serviceTier,"priority","远程开关覆盖真实会话的直接和出队发送");
+ assert.equal((await api.patchTurnRequest(turn("remote-other-ffffffff"))).serviceTier,"default","远程会话之间隔离");
+ await assert.rejects(api.setRemoteState(remoteContext,"claude-opus",true),/Fast/);
+ await assert.rejects(api.setRemoteState({hostId:"remote",threadId:remoteContext.threadId},"gpt-6.1-sol",true),/参数无效/);
+ await assert.rejects(api.setRemoteState(remoteContext,"gpt-6.1-sol",false,()=>{throw Error("连接已变化");}),/连接已变化/);
+ assert.equal((await api.remoteState(remoteContext,"gpt-6.1-sol")).enabled,true,"连接变化后不保存迟到设置");
+ const remoteDraft=await api.createRemoteContext("gpt-6.1-sol",true);
+ assert.equal((await api.patchTurnRequest(turn(undefined),remoteDraft)).serviceTier,"priority");
+ api.bindConversation(remoteDraft,"remote-created-ffffffff");
+ assert.equal((await api.patchTurnRequest(turn("remote-created-ffffffff"))).serviceTier,"priority");
+ const remoteDefault=await api.createRemoteContext("gpt-6.1-sol");
+ assert.equal((await api.patchTurnRequest(turn(undefined),remoteDefault)).serviceTier,"default","远程新建默认关闭，不能继承桌面草稿");
+ assert.equal(api.status().fast,desktopFast);
+
  context={hostId:"local",draftId:"draft-first"};await api.refresh();
  assert.equal(api.status().fast,false);
  await toggle();const captured=api.captureContext();
@@ -12529,6 +10926,7 @@ const turn=(threadId,model="gpt-6.1-sol",serviceTier="priority")=>({threadId,mod
  assert.equal(await api.patchTurnRequest(nonGpt),nonGpt);
  const denied=turn("thread-aaaaaaaa");
  assert.equal(await api.patchTurnRequest(denied),denied,"保留管理员限制");
+ await assert.rejects(api.setRemoteState(remoteContext,"gpt-6.1-sol",true),/未开放 Fast/);
  responses["configRequirements/read"]={requirements:null};
  options.isCopilotActive=async()=>true;
  await api.configure(options);
@@ -13237,13 +11635,7 @@ fn injection_script_includes_builtin_prompt_optimization_without_edge_fallbacks(
     assert!(feature.contains("const promptOptimizeSettingsVersion = 4;"));
     assert!(script.contains("const codexPromptOptimizeButtonSize = 16;"));
     assert!(script.contains("const codexPromptOptimizeAnchorGap = 8;"));
-    assert!(script.contains(
-        r#"const codexWorkspaceCheckpointButtonAttribute = "data-codex-workspace-checkpoint-button";"#
-    ));
-    assert!(script.contains("const codexWorkspaceCheckpointButtonGap = 6;"));
-    assert!(feature.contains("function promptOptimizeSyncCheckpointButton(portal)"));
-    assert!(feature.contains("function promptOptimizeCheckpointPosition(anchor, promptPosition)"));
-    assert!(feature.contains("openCodexWorkspaceCheckpointDialog();"));
+
     assert!(script.contains(r#"font: 14px/1 "Segoe UI Emoji", system-ui, sans-serif;"#));
     assert!(feature.contains(r#"postJson("/prompt-optimize", {"#));
     assert!(feature.contains(r#"postJson("/prompt-optimize/cancel", { requestId })"#));
@@ -13537,41 +11929,7 @@ fn prompt_optimization_renderer_contract_handles_anchor_rebuild_write_restore_an
     assert_eq!(cases["position"]["initial"]["top"], "112px");
     assert_eq!(cases["position"]["initial"]["right"], "");
     assert_eq!(cases["position"]["initial"]["bottom"], "");
-    assert_eq!(cases["position"]["initial"]["checkpoint"]["exists"], true);
-    assert_eq!(
-        cases["position"]["initial"]["checkpoint"]["visibility"],
-        "visible"
-    );
-    assert_eq!(cases["position"]["initial"]["checkpoint"]["left"], "134px");
-    assert_eq!(cases["position"]["initial"]["checkpoint"]["top"], "112px");
-    assert_eq!(
-        cases["position"]["initial"]["checkpoint"]["title"],
-        "打开 Checkpoint"
-    );
-    assert_eq!(
-        cases["position"]["initial"]["checkpoint"]["ariaLabel"],
-        "打开 Checkpoint"
-    );
-    assert_eq!(
-        cases["position"]["checkpointDisabled"]["checkpoint"]["exists"],
-        false
-    );
-    assert_eq!(
-        cases["position"]["checkpointReenabled"]["checkpoint"]["exists"],
-        true
-    );
-    assert_eq!(
-        cases["position"]["checkpointReenabled"]["checkpoint"]["visibility"],
-        "visible"
-    );
-    assert_eq!(
-        cases["position"]["checkpointReenabled"]["checkpoint"]["left"],
-        "134px"
-    );
-    assert_eq!(
-        cases["position"]["checkpointReenabled"]["checkpoint"]["top"],
-        "112px"
-    );
+
     assert_eq!(cases["position"]["unrelatedMutationScheduledFrame"], false);
     assert_eq!(cases["position"]["taskBoardActive"]["visibility"], "hidden");
     assert_eq!(cases["position"]["taskBoardActive"]["left"], "");
@@ -14074,7 +12432,6 @@ const api = window.__codexElvesPromptOptimizeForTest;
 if (!api) throw new Error("prompt optimization test API was not installed");
 api.setBackendSettings({
   enhancementsEnabled: true,
-  codexAppWorkspaceCheckpoint: true,
 });
 
 const flush = (delay = 40) => new Promise((resolve) => setTimeout(resolve, delay));
@@ -14364,18 +12721,6 @@ function element(tag, rect) {
   await flush(1100);
   await flush(1);
   const initial = api.snapshot();
-  api.setBackendSettings({
-    codexAppWorkspaceCheckpoint: false,
-  });
-  api.schedule({ hideImmediately: false });
-  await flush();
-  const checkpointDisabled = api.snapshot();
-  api.setBackendSettings({
-    codexAppWorkspaceCheckpoint: true,
-  });
-  api.schedule({ hideImmediately: false });
-  await flush();
-  const checkpointReenabled = api.snapshot();
   const unrelatedMutationTarget = element("div", {
     left: 0,
     top: 0,
@@ -14701,8 +13046,6 @@ function element(tag, rect) {
     newSessionFallback,
     position: {
       initial,
-      checkpointDisabled,
-      checkpointReenabled,
       unrelatedMutationScheduledFrame,
       taskBoardActive,
       afterTaskBoard,
@@ -17423,38 +15766,6 @@ fn manager_ui_exposes_default_enabled_open_in_quick_access_page_enhancement() {
 }
 
 #[test]
-fn manager_ui_exposes_default_disabled_workspace_checkpoint_management() {
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("core crate should live under crates/codex-elves-core");
-    let source =
-        std::fs::read_to_string(repo.join("apps/codex-elves-manager/src/App.tsx")).unwrap();
-    let commands =
-        std::fs::read_to_string(repo.join("apps/codex-elves-manager/src-tauri/src/commands.rs"))
-            .unwrap();
-
-    assert!(source.contains("codexAppWorkspaceCheckpoint: boolean"));
-    assert!(source.contains("codexAppWorkspaceCheckpoint: false"));
-    assert!(source.contains("codexAppWorkspaceCheckpointStoragePath: string"));
-    assert!(source.contains("codexAppWorkspaceCheckpointRetentionRounds: number"));
-    assert!(source.contains("function WorkspaceCheckpointScreen"));
-    assert!(source.contains("储存与保留策略"));
-    assert!(source.contains("save_workspace_checkpoint_settings"));
-    assert!(source.contains("set_workspace_checkpoint_enabled"));
-    assert!(source.contains("cleanup_workspace_checkpoint_storage"));
-    assert!(source.contains("delete_workspace_checkpoint_data"));
-    assert!(source.contains("releaseWorkspaceCheckpointStorage"));
-    assert!(source.contains("释放空间"));
-    assert!(!source.contains("立即清理"));
-    assert!(source.contains("aria-label=\"启用 Checkpoint\""));
-    assert!(!source.contains("在提示词优化图标旁显示 Checkpoint 入口"));
-    assert!(!source.contains("compact_workspace_checkpoint_storage"));
-    assert!(commands.contains("Checkpoint 空间释放完成"));
-    assert!(commands.contains("已清空全部 Checkpoint"));
-}
-
-#[test]
 fn manager_ui_exposes_remote_plugin_marketplace_controls() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -19397,8 +17708,8 @@ function build(text, env, expression) {
   services.appServerManagers=provider;
   runtime.configure({
     enabled:()=>enabled,
-    prepareSubmission:async (r, operation) => {operation.prepared=true;return {...r,patched:true};},
-    finishSubmission:async (operation,result) => {assert(operation.prepared);events.push(result.turnId);},
+    prepareSubmission:async r => ({...r,patched:true}),
+    finishSubmission:()=>{throw Error("原生回执不得再等待附属存储");},
     invokeTurn:(original,key,args)=>original[key](...args,"wrapped"),
     sendRequest:(original,args)=>original.sendRequest(...args,"wrapped"),
     prepareWorktree:r=>({...r,branch:"refs/remotes/upstream/main"}),
@@ -19419,7 +17730,7 @@ function build(text, env, expression) {
   await c.sendMessage({}, async()=>({start:{}}));
   await c.sendQueuedMessageNow("thread","msg",{},async()=>({start:{}}));
   assert(calls.every(r=>r.patched)); c[Symbol.dispose]();
-  assert.deepEqual(events,["turn","queued-turn","dispose"]);
+  assert.deepEqual(events,["dispose"]);
   assert.equal((await services.managedWorktrees.pending.create({id:"one"})).branch,"refs/remotes/upstream/main");
   enabled=false;
   assert.deepEqual(await client.rpc.startTurn(1),[1]);
@@ -19439,9 +17750,9 @@ function build(text, env, expression) {
   assert.equal(String(forwarded), "disposed", "原型上的 RPC 生命周期方法必须使用原接收者");
 
   // Windows 就绪检查与其他原生请求共用此入口；动态 RPC 属性必须按远程路径处理，
-  // 不能仅用带有本地 bind/call 的普通函数验证安装后的插件市场和 Checkpoint 包装。
-  for (const marketplace of [false,true]) for (const checkpoint of [false,true]) {
-    const requestCalls=[], checkpointCalls=[], failure=new Error("request denied");
+  // 不能仅用带有本地 bind/call 的普通函数验证安装后的插件市场包装。
+  for (const marketplace of [false,true]) {
+    const requestCalls=[], failure=new Error("request denied");
     function nativeRequest(...args) {
       requestCalls.push(args);
       if (args[0]==="diagnostic/failure") return Promise.reject(failure);
@@ -19468,9 +17779,8 @@ function build(text, env, expression) {
     const requestEnv={
       window:{__codexElvesNativeRpcCompat:requestRuntime},
       codexElvesBackendSettings:{enhancementsEnabled:true},
-      codexElvesSettings:()=>({pluginMarketplaceUnlock:marketplace,workspaceCheckpoint:checkpoint}),
+      codexElvesSettings:()=>({pluginMarketplaceUnlock:marketplace}),
       prepareCodexNativeSubmission:async value=>value,
-      finishCodexNativeCheckpoint:async()=>{},
       invokeCodexNativeTurn:()=>{throw Error("request must not become a turn");},
       resolveCodexAppServices:async()=>({}),
       findCodexLocalRuntimeInScopedSignals:predicate=>[requestRegistry,binding].find(predicate),
@@ -19482,18 +17792,10 @@ function build(text, env, expression) {
       unsupportedPluginMarketplaceKinds:()=>[],
       patchPluginMarketplaceRequestParams:(method,params)=>params,
       patchPluginMarketplaceResult:(method,result)=>result,
-      codexWorkspaceCheckpointRequestThreadId:params=>params?.threadId || "",
-      clearCodexWorkspaceCheckpointCompletionHint:()=>{},
-      installCodexWorkspaceCheckpointTurnCompletionListener:()=>{},
-      createCodexWorkspaceCheckpoint:async(client,params)=>{
-        checkpointCalls.push(params);
-        return {skipped:true};
-      },
       sendCodexElvesDiagnostic:(name,value)=>{throw Error(`${name}: ${JSON.stringify(value)}`);},
     };
     const installed=build(
-      section("  function codexWorkspaceCheckpointActiveParams()", "\n  function patchCodexWorkspaceCheckpointRequestClientPrototype(")
-      + section("  function patchPluginMarketplaceRequestClient(", "\n  function patchPluginMarketplaceRequestMessage(")
+      section("  function patchPluginMarketplaceRequestClient(", "\n  function patchPluginMarketplaceRequestMessage(")
       + section("  let codexNativeRpcInstallPromise", "\n  async function findCodexServiceTierDispatcher("),
       requestEnv,"installCodexNativeRpcCompat"
     );
@@ -19510,7 +17812,6 @@ function build(text, env, expression) {
       assert.equal(requestCalls.at(-1)[2],options,"超时选项必须原样转发");
     }
     assert.equal(requestCalls.length,methods.length,"每个请求只转发一次");
-    assert.equal(checkpointCalls.length,checkpoint ? 1 : 0);
     await assert.rejects(installedManager.sendRequest("diagnostic/failure",params,options),error=>error===failure);
     assert.deepEqual(await installedManager.sendRequest("config/read",params,options),{status:"ready"});
     assert.equal(requestCalls.length,methods.length+2,"错误不得重发请求或阻断后续读取");
@@ -19522,52 +17823,49 @@ function build(text, env, expression) {
     assert.equal(requestRegistry.forHost("local"),requestRpc);
   }
 
-  const nativeSource = section("  const codexNativeCheckpointOperations", "  let codexNativeRpcInstallPromise");
-  const checkpoints=[], bindings=[], fastContexts=[], fastBindings=[], draft={hostId:"local",draftId:"native-draft",fast:true}, env = {
+  const nativeSource = section("  function copyCodexNativeValue(", "  let codexNativeRpcInstallPromise");
+  const fastContexts=[], fastBindings=[], draft={hostId:"local",draftId:"native-draft",fast:true}, env = {
     window:{__codexElvesComposerFast:{
       captureContext:()=>draft,
       bindConversation:(context,id)=>fastBindings.push([context,id]),
       patchTurnRequest:async (p,context)=>{fastContexts.push(context);return{...p,serviceTier:"priority"};}
     }},
-    codexWorkspaceCheckpointFeatureEnabled:()=>true,
-    codexWorkspaceCheckpointRequestThreadId:p=>p.threadId,
-    clearCodexWorkspaceCheckpointCompletionHint:()=>{},
-    installCodexWorkspaceCheckpointTurnCompletionListener:()=>{},
-    createCodexWorkspaceCheckpoint:async (client,params)=>{
-      checkpoints.push(params);return {context:{threadId:params.threadId},checkpoint:{id:"checkpoint"}};
-    },
-    codexWorkspaceCheckpointTurnId:r=>r?.turnId||r?.turn?.id||"",
-    bindCodexWorkspaceCheckpoint:async (created,result)=>bindings.push([created.context.threadId,result.turnId]),
-    trackCodexWorkspaceCheckpointBinding:(created,result,promise)=>promise,
     sendCodexElvesDiagnostic:(name,value)=>{throw Error(`${name}: ${JSON.stringify(value)}`);},
     showToast:()=>{},
   };
-  const helpers=build(nativeSource,env,"({prepare:prepareCodexNativeSubmission,finish:finishCodexNativeCheckpoint,invoke:invokeCodexNativeTurn})");
+  const helpers=build(nativeSource,env,"({prepare:prepareCodexNativeSubmission,invoke:invokeCodexNativeTurn})");
   const operation={}, original={executionHostId:"local",start:{request:{threadId:id,model:"gpt-5.5"},context:{beforeSendRequest:async()=>events.push("native-before")}}};
   Object.defineProperty(original,Symbol.dispose,{value:()=>events.push("prepared-dispose")});
   const prepared=await helpers.prepare(original,operation);
   assert.equal(prepared.start.request.serviceTier,"priority");
-  assert.equal(checkpoints.length,0,"准备阶段不能提前保存，队列可能尚未发送");
   assert.equal(prepared[Symbol.dispose],original[Symbol.dispose]);
+  assert.equal(prepared.start.context,original.start.context,"不再替换原生前置回调");
   await prepared.start.context.beforeSendRequest();
-  await prepared.start.context.beforeSendRequest();
-  assert.equal(checkpoints.length,1,"重复原生回调只保存一次");
-  await helpers.finish(operation,{status:"sent",turnId:"turn"});
-  await helpers.finish(operation,{status:"sent",turnId:"turn"});
-  assert.deepEqual(bindings,[[id,"turn"]]);
   const remote={...original,executionHostId:"remote"};
   assert.equal(await helpers.prepare(remote,{}),remote);
   const createRpc={startConversation:async(params,options)=>{
     await options.beforeFirstTurn({conversationId:id});
     const result={status:"created",conversationId:id,firstTurn:{status:"accepted",turnId:"first"}};
-    await options.onSettled(result);
+    await options.onSettled?.(result);
     return result;
   }};
   const result=await helpers.invoke(createRpc,"startConversation",[{cwd:"E:/repo",model:"gpt-5.5"},{}]);
   assert.equal(result.firstTurn.turnId,"first");
-  assert.deepEqual(bindings.at(-1),[id,"first"]);
   assert.equal(fastContexts.at(-1),draft);
   assert.deepEqual(fastBindings,[[draft,id]],"首轮前把本次草稿选择绑定到真实会话");
+  const remoteDraft={hostId:"local",draftId:"remote-first",fast:false};
+  let originalBefore=0;
+  await helpers.invoke({startConversation:async(params,options)=>{
+    assert.equal(Object.hasOwn(options,"codexElvesFastContext"),false,"本地远程上下文不能泄漏给原生 RPC");
+    assert.equal(options.keep,"native-option");
+    await options.beforeFirstTurn({conversationId:"remote-created"});
+    return {status:"created",conversationId:"remote-created"};
+  }},"startConversation",[{cwd:"E:/remote",model:"gpt-5.5"},{
+    codexElvesFastContext:remoteDraft,keep:"native-option",beforeFirstTurn:async()=>{++originalBefore;}
+  }]);
+  assert.equal(fastContexts.at(-1),remoteDraft,"远程新建必须显式选择自己的草稿");
+  assert.deepEqual(fastBindings.at(-1),[remoteDraft,"remote-created"]);
+  assert.equal(originalBefore,1,"保留原生创建回调");
   const direct={startTurn:async(id,start)=>({status:"accepted",turnId:"direct"}),
     startEmptyTurn:async()=>null,sendFollowUpMessage:async()=>null};
   await helpers.invoke(direct,"startTurn",[id,{request:{model:"gpt-5.5"},context:{}}]);
@@ -19610,7 +17908,7 @@ function build(text, env, expression) {
   const before=moveCalls.length;
   await assert.rejects(moveApi.project({session_id:id},{path:"E:/unknown"}),/目标原生项目/);
   assert.equal(moveCalls.length,before,"目标无法确认时不得先移动工作目录");
-  console.log("新版删除、RPC 不可写代理、队列、禁用、资源释放、首轮 Checkpoint 合约通过");
+  console.log("新版删除、RPC 不可写代理、队列、禁用、资源释放及 Fast 参数合约通过");
 })().catch(error=>{console.error(error);process.exitCode=1;});
 "###)
         .output()
