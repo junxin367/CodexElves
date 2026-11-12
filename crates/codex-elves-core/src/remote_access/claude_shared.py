@@ -3,6 +3,7 @@ import argparse
 import base64
 from datetime import datetime
 import hashlib
+import html
 import json
 import os
 from pathlib import Path
@@ -199,6 +200,34 @@ def real_user(row):
         for part in content)
 
 
+def native_turn_finished(messages):
+    # 用户要求只有执行中才排队；原生完成、中断后仍可能用 blocked/needs 保存等待用户答复的说明。
+    # 只认当前真实用户轮次的结束记录，不按回复文本猜测；后续新输入或工具调用使旧结束记录失效。
+    for row in reversed(messages):
+        if native_interruption(row) or row.get("isApiErrorMessage") is True:
+            return True
+        if real_user(row):
+            return False
+        message = row.get("message")
+        content = message.get("content", []) if isinstance(message, dict) else []
+        if row.get("type") == "assistant" and isinstance(content, list) \
+                and any(part.get("type") == "tool_use" for part in content if isinstance(part, dict)):
+            return False
+        if row.get("type") == "system" and row.get("subtype") == "turn_duration":
+            return True
+    return False
+
+
+def preview_text_key(value):
+    # 只用于排除终端预览重复，正式 Markdown 原文不改写；终端已去掉代码、强调、链接等显示标记。
+    value = html.unescape(value)
+    value = re.sub(r"!\[([^\]]*)\]\([^\n)]*\)|\[([^\]]*)\]\([^\n)]*\)",
+                   lambda match: match.group(1) if match.group(1) is not None else match.group(2), value)
+    value = re.sub(r"(?m)^\s{0,3}(?:#{1,6}\s+|>+\s*)", "", value)
+    value = re.sub(r"[`*_~<>]", "", value)
+    return "".join(value.split())
+
+
 class NativeDiscovery:
     """只读原生目录；不调用 CLI、守护进程或模型，也不使用网页登记文件作为发现来源。"""
     def __init__(self, root=None):
@@ -318,9 +347,11 @@ class NativeDiscovery:
         return list(rows.values())
 
     @staticmethod
-    def status(job):
+    def status(job, messages=None):
         status = {key: job.get(key) for key in ("tempo", "state", "needs", "detail", "outcome")}
         if not job or job.get("state") in ("done", "stopped", "failed", "ended") or job.get("outcome"):
+            status["tempo"] = "idle"
+        elif status.get("tempo") == "blocked" and messages is not None and native_turn_finished(messages):
             status["tempo"] = "idle"
         return status
 
@@ -350,7 +381,7 @@ class NativeDiscovery:
         reader.read_messages()
         row = self.rows[native]
         return {"type": "shared_snapshot", "native_id": native, "job_id": row["jobId"],
-                "native_status": row["nativeStatus"], "messages": reader.messages,
+                "native_status": self.status(row["nativeStatus"], reader.messages), "messages": reader.messages,
                 "clients": reader.clients, "pending": reader.pending, "requests": {},
                 "context_configuration": reader.context_configuration(), "updated_at": row["updatedAt"]}
 
@@ -387,6 +418,8 @@ class NativeSession:
         self.observed_short = ""
         self.screen = Screen()
         self.preview_user = ""
+        self.preview_basis = ""
+        self.preview_context_cache = None
         self.delivery_started = False
         self.preview = ""
         self.preview_emitted = ""
@@ -645,12 +678,14 @@ class NativeSession:
         live = self.lookup() if self.native_id else None
         if live:
             self.bind(live)
+        status = NativeDiscovery.status(live or {}, self.messages)
+        active_at_admission = status.get("tempo") == "active"
         # 自动续发必须以实时原生状态为准；CLI 恰好开始新任务时继续等，不能抢先把下一条塞入原生队列。
-        if request.get("idle_only") and live and not live.get("outcome"):
-            if live.get("tempo") == "active" or live.get("tempo") == "blocked" and live.get("needs"):
+        if request.get("idle_only") and live:
+            if active_at_admission or status.get("tempo") == "blocked" and status.get("needs"):
                 self.poll(force=True)
                 return {"deferred": True, "accepted": False}
-        if request.get("steer") and live and live.get("tempo") == "blocked" and live.get("needs"):
+        if request.get("steer") and status.get("tempo") == "blocked" and status.get("needs"):
             raise NativeError("EBUSY")
         text = self.prepare_text(content, client_id)
         if self.native_id and self.short and (not live or live.get("outcome")):
@@ -675,8 +710,11 @@ class NativeSession:
         intent["deliveryConfirmed"] = True
         self.poll(force=True)
         steered = False
-        if request.get("steer") and intent in self.pending and self.job.get("tempo") == "active":
+        current_user = next((row.get("uuid", "") for row in reversed(self.messages) if real_user(row)), "")
+        if request.get("steer") and active_at_admission and active_user and active_user == current_user \
+                and intent in self.pending and self.job.get("tempo") == "active":
             # 只投递用户选中的一条；必要时使用 Esc 提前交给原生，保留 CLI 草稿，不提交其他远程待发项。
+            # 空闲时直接发送不能中断刚启动的新轮次；投递期间原生已切换用户轮次时也不补发 Esc。
             try:
                 self.terminal_input(b"\x1b", require_active=True)
                 steered = True
@@ -938,26 +976,63 @@ class NativeSession:
             elif "web_images" not in row:
                 self.retain_web_images(row)
 
+    def preview_context(self):
+        # 绑定当前原生用户和已落盘正文；工具状态、用量及 pending 变化不更换预览身份。
+        # 按日志身份、修改时间及偏移缓存，避免每个终端片段重复扫描长历史。
+        key = (self.native_id, self.log_identity, self.log_mtime, self.log_offset, len(self.messages))
+        if self.preview_context_cache and self.preview_context_cache[0] == key:
+            return self.preview_context_cache[1]
+        start = next((index for index in range(len(self.messages) - 1, -1, -1)
+                      if real_user(self.messages[index])), None)
+        result = None
+        if start is not None:
+            user, records, known = self.messages[start], [], []
+            for row in self.messages[start + 1:]:
+                message = row.get("message")
+                if row.get("type") != "assistant" or not isinstance(message, dict):
+                    continue
+                content = message.get("content", [])
+                if not isinstance(content, list):
+                    continue
+                texts = [part["text"] for part in content
+                         if isinstance(part, dict) and part.get("type") == "text"
+                         and isinstance(part.get("text"), str) and part["text"]]
+                # 与正式投影一致：明确的原生合成占位不是正文，不能让它退役仍有效的预览。
+                if message.get("model") == "<synthetic>" and row.get("isApiErrorMessage") is False \
+                        and len(content) == 1 and len(texts) == 1 and texts[0].strip() == "No response requested.":
+                    continue
+                if texts:
+                    records.append([row.get("uuid"), message.get("id"), row.get("apiBlockIndex"), texts])
+                    known.extend(preview_text_key(text) for text in texts)
+            basis = hashlib.sha256(json.dumps([user["uuid"], records], ensure_ascii=False,
+                                               separators=(",", ":")).encode("utf-8")).hexdigest()
+            result = (user, basis, known)
+        self.preview_context_cache = (key, result)
+        return result
+
     def stream_preview(self, chunk):
         self.screen.feed(chunk)
         if self.job.get("tempo") != "active" or time.monotonic() - self.preview_at < 0.12:
             return
-        users = [index for index, row in enumerate(self.messages) if real_user(row)]
-        if not users:
+        context = self.preview_context()
+        if context is None:
             return
-        start = users[-1]
-        user = self.messages[start]
-        if any(row.get("subtype") == "turn_duration" for row in self.messages[start + 1:]):
-            return
-        if self.preview_user != user["uuid"]:
+        user, basis, known = context
+        if self.preview_user != user["uuid"] or self.preview_basis != basis:
             self.preview_user = user["uuid"]
+            self.preview_basis = basis
             self.preview = self.preview_emitted = ""
+        if native_turn_finished(self.messages):
+            return
         content = user["message"]["content"]
         prompt = content if isinstance(content, str) else "\n".join(
             part.get("text", "") for part in content if part.get("type") == "text")
         lines = self.screen.text()
         anchor = next((index for index in range(len(lines) - 1, -1, -1)
                        if lines[index].startswith("❯ ") and prompt[:20] in lines[index]), -1)
+        # 无法确认归属的终端片段不能当正文；失去 prompt/回复标记时保留已有预览，等待正式历史接替。
+        if anchor < 0:
+            return
         end = next((index for index in range(anchor + 1, len(lines))
                     if lines[index].startswith("❯ ")), len(lines))
         region = lines[anchor + 1:end]
@@ -966,39 +1041,30 @@ class NativeSession:
         if marker >= 0:
             region = [region[marker][2:]] + [line[2:] if line.startswith("  ") else line
                                           for line in region[marker + 1:]]
-        elif anchor >= 0:
-            return
         else:
-            if not self.preview and (not region or not region[0].startswith("  ")):
-                return
-            region = [line[2:] if line.startswith("  ") else line for line in region]
+            return
         body = []
         for line in region:
-            if re.match(r"^[✻✽✶✢·*]\s|^[─╌]{8}|^\s*⎿|^\s*ctrl\+", line):
+            if re.match(r"^[✻✽✶✢·*]\s|^[─╌]{8}|^\s*⎿|^\s*ctrl\+|^\s*Running \d+ (?:shell commands?|tools?)(?:\.{3}|…)\s*$", line):
                 break
             body.append(line)
         text = "\n".join(body).strip()
-        if not text or re.match(r"^[A-Z][A-Za-z0-9_]+\(", text):
+        # 64 KiB 与服务端临时预览限额一致，过大的终端片段由正式原生历史完整展示。
+        if not text or len(text.encode("utf-8")) > 64 * 1024 or re.match(r"^[A-Z][A-Za-z0-9_]+\(", text):
             return
-        known = [part.get("text", "") for row in self.messages
-                 if row["type"] == "assistant"
-                 for part in row.get("message", {}).get("content", [])
-                 if part.get("type") == "text"]
-        compact = lambda value: " ".join(value.split())
-        compact_text = compact(text)
-        if compact_text in compact(prompt) or any(compact_text in compact(value) for value in known):
+        compact_text = preview_text_key(text)
+        if not compact_text or compact_text in preview_text_key(prompt) \
+                or any(value and (compact_text in value or compact_text.startswith(value)) for value in known):
             return
-        if not self.preview or text.startswith(self.preview) or anchor >= 0:
-            self.preview = text
-        elif not self.preview.startswith(text):
-            for size in range(min(len(self.preview), len(text)), 7, -1):
-                if self.preview.endswith(text[:size]):
-                    self.preview += text[size:]
-                    break
+        previous = preview_text_key(self.preview)
+        if previous and (not compact_text.startswith(previous) or compact_text == previous):
+            return
+        self.preview = text
         if self.preview and self.preview != self.preview_emitted:
             self.preview_emitted = self.preview
             self.preview_at = time.monotonic()
-            emit({"type": "shared_preview", "native_user_id": user["uuid"], "text": self.preview})
+            emit({"type": "shared_preview", "native_user_id": user["uuid"],
+                  "preview_basis": basis, "text": self.preview})
 
     def poll(self, force=False):
         if not self.initialized or not self.native_id:
@@ -1013,7 +1079,7 @@ class NativeSession:
         self.read_messages()
         job = self.job
         # 正常连接与只读发现共用完成状态判断，done 不能因旧 tempo 继续显示执行中。
-        status = NativeDiscovery.status(job)
+        status = NativeDiscovery.status(job, self.messages)
         self.requests = {}
         if status.get("tempo") == "blocked":
             uses = {}
@@ -1032,13 +1098,15 @@ class NativeSession:
                                              "input": tool.get("input", {}),
                                              "decision_reason": job.get("needs", "")}
         context = self.context_configuration()
-        signature = (self.log_offset, json.dumps(status, sort_keys=True),
+        preview = self.preview_context()
+        signature = (self.log_identity, self.log_mtime, self.log_offset, json.dumps(status, sort_keys=True),
                      json.dumps(self.pending, sort_keys=True), json.dumps(context, sort_keys=True))
         if force or signature != self.signature:
             self.signature = signature
             emit({"type": "shared_snapshot", "native_id": self.native_id, "job_id": self.short,
                   "native_status": status, "messages": self.messages,
                   "clients": self.clients, "pending": self.pending, "requests": self.requests,
+                  "preview_basis": preview[1] if preview else None,
                   "context_configuration": context})
 
     def control(self, request):
@@ -1116,9 +1184,12 @@ def main():
             value = native.control(frame["request"])
             response = {"subtype": "success", "request_id": request_id, "response": value}
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as failure:
+            # 用户要求接收确认不能倒退为未发送；shared_send 里的后续状态查询也可能返回 NativeError。
+            # 只有发送函数明确保留“尚未准入”标记才可判为未投递，已开始或已接收后的错误只能待核对。
+            not_sent = not native.delivery_started if frame["request"].get("subtype") == "shared_send" \
+                else isinstance(failure, NativeError)
             response = {"subtype": "error", "request_id": request_id, "error": str(failure),
-                        "not_sent": isinstance(failure, NativeError)
-                        or frame["request"].get("subtype") == "shared_send" and not native.delivery_started}
+                        "not_sent": not_sent}
             if isinstance(failure, NativeError):
                 response["code"] = failure.code
         emit({"type": "control_response", "response": response})

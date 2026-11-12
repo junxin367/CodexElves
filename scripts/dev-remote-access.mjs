@@ -294,7 +294,8 @@ const server = createServer(async (req, res) => {
     res.writeHead(204, securityHeaders); res.end(); return;
   }
   if (!["GET", "HEAD"].includes(req.method)) { fail(res, 404, "调试入口不存在"); return; }
-  const file = files.get(url.pathname) || recoveryFiles.get(url.pathname);
+  const sideThreadPanel = url.pathname === "/side-thread";
+  const file = files.get(sideThreadPanel ? "/" : url.pathname) || recoveryFiles.get(url.pathname);
   if (!file && url.pathname !== "/app-resources.json") { fail(res, 404, "调试入口不存在"); return; }
   try {
     const body = url.pathname === "/app-resources.json"
@@ -303,7 +304,11 @@ const server = createServer(async (req, res) => {
     const contentType = url.pathname === "/app-resources.json"
       ? "application/json; charset=utf-8"
       : file[1];
-    res.writeHead(200, { ...securityHeaders, "content-type": contentType, "content-length": body.length });
+    const panelHeaders = sideThreadPanel ? {
+      "x-frame-options": "SAMEORIGIN",
+      "content-security-policy": securityHeaders["content-security-policy"].replace("frame-ancestors 'none'", "frame-ancestors 'self'"),
+    } : {};
+    res.writeHead(200, { ...securityHeaders, ...panelHeaders, "content-type": contentType, "content-length": body.length });
     res.end(req.method === "HEAD" ? undefined : body);
   } catch {
     fail(res, 500, "无法读取网页源码，请确认在完整的 CodexElves 工作区中运行");

@@ -119,7 +119,7 @@ function responseBytes(value) {
 export function mountSessionTools(options) {
   const { workspace, trigger, getContext, beforeOpen } = options;
   const desktopMedia = window.matchMedia("(min-width:761px)");
-  const desktop = () => desktopMedia.matches && !isAndroidContainer();
+  const desktop = () => desktopMedia.matches && !isAndroidContainer() && !options.sidePanel;
   const tabs = new Map();
   const owner = `workspace-reader-${Math.random().toString(36).slice(2)}`;
   const widthKey = "codexElvesWorkspacePanelWidth";
@@ -132,18 +132,18 @@ export function mountSessionTools(options) {
   } catch {}
   const dock = node("aside", "workspace-reader");
   dock.hidden = true; dock.inert = true;
-  dock.setAttribute("aria-label", "文件与变更");
+  dock.setAttribute("aria-label", "文件、变更与侧边会话");
   const separator = node("div", "workspace-reader-resize");
   separator.tabIndex = 0;
   separator.setAttribute("role", "separator");
-  separator.setAttribute("aria-label", "调整文件与变更面板宽度");
+  separator.setAttribute("aria-label", "调整右侧标签面板宽度");
   separator.setAttribute("aria-orientation", "vertical");
   const toolbar = node("header", "workspace-reader-toolbar");
   const tablist = node("div", "workspace-reader-tabs");
   tablist.setAttribute("role", "tablist");
-  tablist.setAttribute("aria-label", "文件与变更标签页");
+  tablist.setAttribute("aria-label", "文件、变更与侧边会话标签页");
   const add = control("+", "打开文件", () => openTab({ kind: "files" }), "workspace-reader-add");
-  const close = control("×", "关闭文件与变更面板", () => clearTabs(true), "workspace-reader-close");
+  const close = control("×", "关闭右侧标签面板", () => clearTabs(true), "workspace-reader-close");
   const views = node("div", "workspace-reader-views");
   toolbar.append(tablist, add, close); dock.append(separator, toolbar, views); workspace.append(dock);
 
@@ -181,10 +181,12 @@ export function mountSessionTools(options) {
     const visible = desktop() && tabs.size > 0;
     dock.hidden = !visible; dock.inert = !visible;
     workspace.classList.toggle("workspace-reader-open", visible);
+    for (const record of tabs.values()) record.renderer.setVisible?.(visible && record.key === active);
     if (visible) { mobile?.hide(); resize(); }
     else finishDrag(false);
   }
   function tabKey(item) {
+    if (item.kind === "side") return JSON.stringify(["side", item.threadId]);
     if (item.kind === "file") return JSON.stringify(["file", item.path.replaceAll("\\", "/")]);
     if (item.kind === "change") return JSON.stringify(["change", detailKey(item.file)]);
     return item.kind;
@@ -239,7 +241,7 @@ export function mountSessionTools(options) {
       return;
     }
     const id = `${owner}-${++sequence}`;
-    const label = item.kind === "changes" ? "变更" : item.kind === "files" ? "打开文件"
+    const label = item.kind === "side" ? item.title : item.kind === "changes" ? "变更" : item.kind === "files" ? "打开文件"
       : `${displayWorkspaceName((item.path || item.file.path).split(/[\\/]/).at(-1))}${item.kind === "change" ? " · 变更" : ""}`;
     const title = item.kind === "change" ? `${sections.find(([name]) => name === item.file.section)?.[1] || "变更"}：${displayedPath(item.file)}`
       : item.path ? displayWorkspacePath(item.path) : label;
@@ -250,7 +252,9 @@ export function mountSessionTools(options) {
     button.setAttribute("aria-controls", id);
     const symbol = node("span", "workspace-reader-tab-icon");
     symbol.innerHTML = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">${
-      item.kind === "changes" || item.kind === "change"
+      item.kind === "side"
+        ? '<path d="M3 3.5h14v10H8l-4 3v-3H3z"/><path d="M6 7h8M6 10h5"/>'
+        : item.kind === "changes" || item.kind === "change"
         ? '<rect x="4" y="2.5" width="12" height="15" rx="2"/><path d="M7 7h6M10 4v6M7 13h6"/>'
         : '<path d="M11.5 2.5H5a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7z"/><path d="M11 2.5V7h5"/>'}</svg>`;
     symbol.setAttribute("aria-hidden", "true");
@@ -266,12 +270,14 @@ export function mountSessionTools(options) {
       onOpenChange: (file, list) => { if (ownsTab()) openTab({ kind: "change", file, list }); } };
     const rendererOptions = { ...options, workspace: view, beforeOpen: undefined, embedded };
     // 每个标签保留自己的阅读 DOM、滚动和请求；详情不重复写变更列表的持久缓存。
-    const renderer = item.kind === "changes" || item.kind === "change"
+    const renderer = item.kind === "side" ? mountWorkspaceSideThread(view, item)
+      : item.kind === "changes" || item.kind === "change"
       ? mountSessionToolPages({ ...rendererOptions, cache: item.kind === "changes" ? options.cache : null })
       : mountSessionFiles(rendererOptions);
     const record = { key, item, tab, button, view, renderer };
     tabs.set(key, record); selectTab(record);
-    if (item.kind === "changes") renderer.open("changes");
+    if (item.kind === "side") renderer.open();
+    else if (item.kind === "changes") renderer.open("changes");
     else if (item.kind === "change") void renderer.openChange(item.file, item.list);
     else if (item.kind === "files") void renderer.open();
     else void renderer.openFile(item.path, item.line);
@@ -287,6 +293,14 @@ export function mountSessionTools(options) {
     updateContext();
     if (desktop()) openTab({ kind: "file", path, line });
     else mobilePages().openFile(path, line);
+  }
+  function openSideThread(item) {
+    if (!desktop() || disposed || typeof item?.id !== "string" || !/^[A-Za-z0-9_-]{1,120}$/.test(item.id)) return false;
+    const parentThreadId = getContext()?.threadId;
+    if (!parentThreadId || item.id === parentThreadId) return false;
+    // 用户要求 PC 侧边会话与主聊天并排，共用文件/变更标签栏；重复点击只选中已有标签，不重载或重发。
+    openTab({ kind: "side", threadId: item.id, title: String(item.title || item.name || "侧边会话") });
+    return true;
   }
   function finishDrag(persist) {
     if (!drag) return;
@@ -340,7 +354,7 @@ export function mountSessionTools(options) {
   desktopMedia.addEventListener("change", syncLayout);
   updateContext();
   return {
-    open, openFile, updateContext,
+    open, openFile, openSideThread, updateContext,
     close: () => desktop() ? closeTab(active) : mobile?.close(),
     dispose() {
       if (disposed) return;
@@ -350,6 +364,24 @@ export function mountSessionTools(options) {
       workspace.style.removeProperty("--workspace-reader-width");
     }
   };
+}
+
+function mountWorkspaceSideThread(workspace, item) {
+  // 每个侧边会话使用独立页面上下文，隔离输入、选中会话、滚动和实时连接，不能借用主聊天的全局发送状态。
+  // 专用入口仅允许同源嵌入，不修改普通首页的禁止嵌入策略；关闭标签只卸载页面，不关闭服务端会话。
+  const frame = node("iframe", "workspace-side-thread");
+  const address = new URL("/side-thread", window.location.href);
+  address.hash = new URLSearchParams({ thread: item.threadId }).toString();
+  frame.src = address.href; frame.title = item.title;
+  frame.referrerPolicy = "no-referrer";
+  let visible = false;
+  const sync = () => frame.contentWindow?.postMessage({
+    type: "codex-elves-side-panel-visibility", visible,
+  }, address.origin);
+  frame.addEventListener("load", sync);
+  workspace.append(frame);
+  return { open() {}, setVisible(value) { if (visible !== value) { visible = value; sync(); } },
+    dispose() { frame.removeEventListener("load", sync); frame.remove(); } };
 }
 
 function mountSessionToolPages({ workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, copyText, cache, embedded = null, isAvailable = () => true, request: transport = requestRemote }) {

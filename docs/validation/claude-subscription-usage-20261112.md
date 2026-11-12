@@ -1,0 +1,44 @@
+# Claude 账号订阅额度验收
+
+日期：2026-11-12。用户确认效果后开发；用户另行明确要求额度读取不得绕过 WSL 中的 Claude。
+
+## 读取边界
+
+- 只执行实例绑定的 WSL、用户和原生 Claude 可执行文件，发送 `initialize`、`get_usage` 两个控制请求；后者带 `skip_behaviors: true`。
+- 不发送模型消息，不恢复任务，不读取 OAuth 凭据，不直接请求额度 HTTP 接口或第三方服务；没有原生控制能力时隐藏，不采用绕过方案。
+- 专用元数据进程使用 `--no-session-persistence`。关闭 Hooks/MCP 的参数只对该进程生效，用户设置、statusline 和正在运行的原生会话不变。
+- 原生返回的 `rate_limits_available` 和 `subscription_type` 决定是否适用，只导出 5 小时、7 天的有效使用率与重置时间。API 模式、缺失或无效数据不显示伪造的 0%。
+- 服务端按实例缓存一分钟，并合并同实例并发请求；只读设备只能读新鲜缓存。客户端按授权和实例退役旧响应，后台、断线或离开页面停止读取；窗口到期或快照超过三分钟时隐藏。
+
+## 原生控制实测
+
+仅在独立 `codex-elves-claude-test`、用户 `elves-test` 中使用 Claude Code 2.1.322 验证；没有向用户账号实例发送测试消息。
+
+同生产读取参数的原生控制请求均成功，API 认证下原生返回 `rate_limits_available: false`、`rate_limits: null`；`behaviors: null` 证实跳过历史行为分析。模型消息发送数为 0。不将这个 API 模式实测冒称为真实订阅账号的额度实测。
+
+## 自动检查
+
+- `cargo test -p codex-elves-core --profile release-fast --lib claude --no-default-features`：65 项通过，1 项既有模型调用端到端用例按其标记忽略。
+- `node --test scripts/remote-access-ui-state.test.mjs scripts/workspace-tabs.test.mjs scripts/windows-remote-titlebar.test.mjs scripts/windows-remote-cache.test.mjs`：344 项通过。
+- 管理器 `npm run check`：远程资源语法、import、路由和 TypeScript 通过。
+- `cargo fmt --check` 通过。
+
+新增回归覆盖账号模式过滤、真实 0%、缺失与非法数据、时间到期、原生控制错误、私有字段剔除、实例/程序路径/缓存期限隔离、只读不启动 CLI、授权切换和迟到响应、后台停止读取，以及详情交互。
+
+## 浏览器验收
+
+隔离页面加载实际额度函数、实际输入框结构和完整正式样式，使用明确标记的演示数据，不调用真实账号接口或会话写入接口。
+
+- 桌面显示前后，输入区、工具栏、发送按钮及整个输入框区域的几何信息完全相同。
+- 手机断点下进行同样比较，几何信息也完全相同。额度复用已有 20px 底部空位，不增加 margin、padding 或布局高度。
+- 真实 0%、只有 7 天窗口、5 小时窗口到期、API/无额度场景显示正确。
+- 点击及键盘打开详情、Escape 关闭通过；手机详情完整落在视口内。
+- 临时视口已恢复。额度截图为演示值，不代表用户账号实际额度。
+
+## 正式更新
+
+正式资源号 `2026111258`，服务 PID `41012`。标准 `Prepare / Apply / Verify` 流程均完成，本地与公网资源核验通过；原管理器、launcher、设置、访问密钥及 6 条原设备授权均保留。
+
+构建期间共享工作区资源推进到 58，旧清单和程序内容不一致的两次准备均被标准脚本拒绝，未应用；随后按当前源码重建并完成校验。最终可回滚记录位于 `temp/remote-service-updates/20261112-claude-quota-final-c423f32e/plan.json`，保留该记录及备份。
+
+正式入口在新的浏览器上下文正常显示登录页。该上下文没有现有设备授权，因此没有读取密钥、新增授权或登录真实订阅账号做额度实测；界面内容和交互按上文的隔离验收覆盖。关闭同源旧页面并重新打开后加载新版。

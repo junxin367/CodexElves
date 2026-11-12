@@ -7,7 +7,7 @@ const source = await readFile(new URL("../assets/remote-access/session-tools.js"
 const wrapper = source.slice(source.indexOf("export function mountSessionTools("),
   source.indexOf("function mountSessionToolPages(")).replace(/^export /gm, "");
 
-function harness({ desktop = true, android = false } = {}) {
+function harness({ desktop = true, android = false, sidePanel = false } = {}) {
   const renderers = [], disk = new Map(), observers = [];
   const document = { activeElement: null, querySelector: () => null };
   class Element {
@@ -35,6 +35,7 @@ function harness({ desktop = true, android = false } = {}) {
     setAttribute(key, value) { this.attributes.set(key, String(value)); }
     getAttribute(key) { return this.attributes.get(key) ?? null; }
     addEventListener(name, action) { this.events.set(name, action); }
+    removeEventListener(name) { this.events.delete(name); }
     querySelector(selector) {
       const name = selector.replace(":scope > ", "").slice(1);
       return this.children.find(child => child.classList.contains(name)) || null;
@@ -78,7 +79,8 @@ function harness({ desktop = true, android = false } = {}) {
     disconnect() { this.disconnected = true; }
   }
   const context = vm.createContext({
-    node, control, document, window: { matchMedia: () => media }, ResizeObserver: Observer,
+    node, control, document, URL, URLSearchParams,
+    window: { matchMedia: () => media, location: { href: "http://127.0.0.1:45222/" } }, ResizeObserver: Observer,
     localStorage: { getItem: key => disk.get(key), setItem: (key, value) => disk.set(key, value) },
     isAndroidContainer: () => android, displayWorkspaceName: value => value,
     displayWorkspacePath: value => value,
@@ -89,7 +91,7 @@ function harness({ desktop = true, android = false } = {}) {
     mountSessionFiles: options => renderer(options, "files"),
   });
   vm.runInContext(wrapper, context);
-  const api = context.mountSessionTools({ workspace, trigger, getContext: () => state });
+  const api = context.mountSessionTools({ workspace, trigger, getContext: () => state, sidePanel });
   const dock = workspace.children.at(-1), [separator, toolbar, views] = dock.children;
   const [tablist, add, close] = toolbar.children;
   const selected = () => tablist.children.find(tab => tab.children[0].getAttribute("aria-selected") === "true");
@@ -212,4 +214,64 @@ test("窄屏和 Android 沿用原工具页，桌面标签缩窄后仍可恢复",
   assert.equal(android.dock.hidden, true);
   assert.equal(android.renderers[0].options.embedded, undefined);
   android.api.dispose();
+});
+
+test("PC 侧边会话与文件共用标签，重复打开不重载，主聊天和滚动状态独立", () => {
+  const h = harness();
+  h.api.openFile("notes.md");
+  assert.equal(h.api.openSideThread({ id: "side-a", title: "侧边 A" }), true);
+  const sideView = h.views.children[1], frame = sideView.children[0];
+  assert.equal(frame.tag, "iframe");
+  assert.equal(new URL(frame.src).pathname, "/side-thread");
+  assert.equal(new URL(frame.src).hash, "#thread=side-a");
+  assert.equal(h.state.threadId, "thread-a");
+  assert.equal(h.conversation.inert, false);
+  frame.savedDraft = "侧边独立输入";
+  h.tablist.children[0].children[0].emit("click");
+  assert.equal(sideView.hidden, true);
+  h.api.openSideThread({ id: "side-a", title: "侧边 A" });
+  assert.equal(h.tablist.children.length, 2);
+  assert.equal(h.views.children[1].children[0], frame);
+  assert.equal(frame.savedDraft, "侧边独立输入");
+  assert.equal(sideView.hidden, false);
+  h.api.openSideThread({ id: "side-b", title: "侧边 B" });
+  assert.equal(h.tablist.children.length, 3);
+  h.api.close();
+  assert.equal(h.tablist.children.length, 2);
+  h.state.threadId = "thread-b"; h.api.updateContext();
+  assert.equal(h.tablist.children.length, 0);
+  assert.equal(frame.isConnected, false);
+  h.api.dispose();
+});
+
+test("侧边标签向独立页面同步显示状态，隐藏标签不会继续作为可见页面", () => {
+  const h = harness();
+  h.api.openSideThread({ id: "side-a" });
+  const frame = h.views.children[0].children[0], visibility = [];
+  frame.contentWindow = { postMessage: (message, origin) => visibility.push({ ...message, origin }) };
+  frame.emit("load");
+  assert.deepEqual(visibility.at(-1), { type: "codex-elves-side-panel-visibility", visible: true,
+    origin: "http://127.0.0.1:45222" });
+  h.api.open("files");
+  assert.equal(visibility.at(-1).visible, false);
+  h.api.openSideThread({ id: "side-a" });
+  assert.equal(visibility.at(-1).visible, true);
+  h.media.matches = false; h.media.change();
+  assert.equal(visibility.at(-1).visible, false);
+  h.api.dispose();
+  assert.equal(frame.events.has("load"), false);
+});
+
+test("手机、Android 和侧边页面本身不嵌套会话标签，非法目标不创建页面", () => {
+  for (const options of [{ desktop: false }, { android: true }, { sidePanel: true }]) {
+    const h = harness(options);
+    assert.equal(h.api.openSideThread({ id: "side-a" }), false);
+    assert.equal(h.tablist.children.length, 0);
+    h.api.dispose();
+  }
+  const h = harness();
+  assert.equal(h.api.openSideThread({ id: "thread-a" }), false);
+  assert.equal(h.api.openSideThread({ id: "../outside" }), false);
+  assert.equal(h.tablist.children.length, 0);
+  h.api.dispose();
 });

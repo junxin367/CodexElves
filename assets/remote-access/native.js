@@ -1,6 +1,6 @@
 (() => {
-  // 用户要求旧页面也修复带图队列引导；守卫与底部版本同步递增，先清理旧桥接再安装，并保留 8 张图片限制。
-  if (window.__codexElvesRemoteAccess?.version === 144) return;
+  // 用户要求兼容新版子代理列表及队列编辑；守卫与底部版本同步递增，先清理旧桥接，保留队列及图片约束。
+  if (window.__codexElvesRemoteAccess?.version === 146) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -1844,8 +1844,7 @@
       },
       background: {
         expression: /^app:\/\/-\/assets\/local-conversation-background-agents-signals-[A-Za-z0-9_-]+\.js$/,
-        matches: source => source.includes("getIndexedSubagentProgress:")
-          && source.includes("sourceLinkedThreadsDiscoveryComplete:"),
+        matches: source => nativeSubagentRowsSource(source),
       },
       side: {
         expression: /^app:\/\/-\/assets\/local-conversation-side-chat-(?!tab-)[A-Za-z0-9_-]+\.js$/,
@@ -1929,6 +1928,10 @@
     }
     return await pending;
   }
+  function nativeSubagentRowsSource(source) {
+    return source.includes("sourceLinkedThreadsDiscoveryComplete:")
+      && (source.includes("getIndexedSubagentProgress:") || source.includes("getIndexedSubagentItems:"));
+  }
   async function nativeRuntimeSnapshot() {
     // 用户要求兼容新版 Codex：Rspack 不再保留 app-initial 等文件名。
     // 仅导入页面已经加载的同源入口、读取已执行模块缓存；禁止执行未加载的模块工厂。
@@ -2003,8 +2006,7 @@
     const runtime = await nativeRuntimeSnapshot();
     if (runtime) {
       if (name === "background") return nativeRuntimeRecord(runtime, source =>
-        source.includes("sourceLinkedThreadsDiscoveryComplete:") && source.includes("getIndexedSubagentProgress:")
-        && source.includes(".rpc.discoverSubagentDescendantSnapshot("),
+        nativeSubagentRowsSource(source) && source.includes(".rpc.discoverSubagentDescendantSnapshot("),
       "子代理列表");
       return runtime;
     }
@@ -2032,11 +2034,21 @@
       throw failure(503, "原生关联会话接口标识无效");
     const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     if (snapshot.rspack) {
-      const names = [...snapshot.source.matchAll(new RegExp(
-        `(?:[,{])\\s*([\\w$]+):\\(\\)=>${escaped}(?=[,}])`, "g"))].map(match => match[1]);
-      if (names.length !== 1 || snapshot.module[names[0]] == null)
+      const names = new Set([...snapshot.source.matchAll(new RegExp(
+        `(?:[,{])\\s*([\\w$]+):\\(\\)=>${escaped}(?=[,}])`, "g"))].map(match => match[1]));
+      // 新版 Rspack 将固定导出放到 require.d(exports, getters, values) 的第三个参数。
+      // 只解析本模块加载器对本模块 exports 的声明，不能把内部对象或其他模块的同名字段当作导出。
+      const parameters = snapshot.source.match(/^[^(]*\(\s*[\w$]+\s*,\s*([\w$]+)\s*,\s*([\w$]+)\s*\)\s*\{/);
+      if (parameters) {
+        const [exportsName, loaderName] = parameters.slice(1).map(value => value.replace(/\$/g, "\\$"));
+        const calls = snapshot.source.matchAll(new RegExp(
+          `(?:^|[^\\w$])${loaderName}\\.d\\(${exportsName},\\{[^{}]*\\},\\{([^{}]*)\\}\\)`, "g"));
+        for (const call of calls) for (const match of call[1].matchAll(new RegExp(
+          `(?:^|,)\\s*([\\w$]+):${escaped}(?=,|$)`, "g"))) names.add(match[1]);
+      }
+      if (names.size !== 1 || snapshot.module[[...names][0]] == null)
         throw failure(503, "当前 Codex 版本的原生状态接口无法唯一识别");
-      return snapshot.module[names[0]];
+      return snapshot.module[[...names][0]];
     }
     const exports = [...snapshot.source.matchAll(/\bexport\s*\{([^{}]*)\}/g)].at(-1)?.[1] ?? "";
     const name = exports.match(new RegExp(`(?:^|,)\\s*${escaped}\\s+as\\s+([\\w$]+)\\s*(?=,|$)`))?.[1];
@@ -2044,14 +2056,35 @@
       throw failure(503, "当前 Codex 版本的原生关联会话接口未导出");
     return snapshot.module[name];
   }
+  function nativeFamilyDefinitions(source) {
+    return [...source.matchAll(
+      /([\w$]+)=(?:[\w$]+|\(0,[\w$]+\.[\w$]+\))\([\w$]+(?:\.[\w$]+)?,\(([\w$]+),\{get:([\w$]+)(?:,scope:[\w$]+)?\}\)=>/g)];
+  }
   function nativeFamilyBefore(source, marker) {
     const index = source.lastIndexOf(marker);
     if (index < 0) throw failure(503, "原生关联会话状态标记缺失");
-    const assignments = [...source.slice(0, index).matchAll(
-      /([\w$]+)=(?:[\w$]+|\(0,[\w$]+\.[\w$]+\))\([\w$]+(?:\.[\w$]+)?,\([\w$]+,\{get:[\w$]+(?:,scope:[\w$]+)?\}\)=>/g)];
+    const assignments = nativeFamilyDefinitions(source.slice(0, index));
     const symbol = assignments.at(-1)?.[1];
     if (!symbol) throw failure(503, "当前 Codex 版本的原生关联会话状态无法识别");
     return symbol;
+  }
+  function nativeSubagentRowsFamily(snapshot, detailsSymbol) {
+    if (!snapshot.rspack || !snapshot.source.includes("getIndexedSubagentItems:"))
+      return nativeExport(snapshot, detailsSymbol);
+    // 新版详情信号返回 {rows, conversations, parentActivity}，本身不导出。
+    // 只读取引用该详情且解包这三个字段的公开行信号；不能拿父轮次 key 列表或私有详情冒充子代理行。
+    const definitions = nativeFamilyDefinitions(snapshot.source), families = new Set();
+    const escape = value => value.replace(/\$/g, "\\$");
+    for (let index = 0; index < definitions.length; index++) {
+      const definition = definitions[index];
+      const expression = snapshot.source.slice(definition.index, definitions[index + 1]?.index);
+      if (!new RegExp(`\\{rows:[\\w$]+,conversations:[\\w$]+,parentActivity:[\\w$]+\\}=${escape(definition[3])}\\(${escape(detailsSymbol)},`)
+        .test(expression)) continue;
+      const family = nativeExport(snapshot, definition[1]);
+      if (typeof family?.read === "function") families.add(family);
+    }
+    if (families.size !== 1) throw failure(503, "当前 Codex 版本的原生子代理行接口无法唯一识别");
+    return [...families][0];
   }
   async function nativeRelatedState() {
     if (!appScope) discover();
@@ -2065,7 +2098,7 @@
         const background = await nativeModuleSnapshot("background").catch(() => null);
         const rowsMarker = "sourceLinkedThreadsDiscoveryComplete:";
         const rowsSnapshot = [background, primary].find(snapshot =>
-          snapshot?.source?.includes(rowsMarker) && snapshot.source.includes("getIndexedSubagentProgress:"));
+          snapshot?.source && nativeSubagentRowsSource(snapshot.source));
         if (!rowsSnapshot) throw failure(503, "当前 Codex 版本的原生子代理列表无法识别");
         const beforeRows = rowsSnapshot.source.slice(0, rowsSnapshot.source.lastIndexOf(rowsMarker));
         const initializer = [...beforeRows.matchAll(/function\s+([\w$]+)\(\)\{return\(\1=/g)].at(-1);
@@ -2078,9 +2111,13 @@
           if (typeof initializeRows !== "function") throw failure(503, "原生子代理列表初始化接口无效");
           initializeRows();
         }
-        const rowsFamily = nativeExport(rowsSnapshot, rowsSymbol);
+        const rowsFamily = nativeSubagentRowsFamily(rowsSnapshot, rowsSymbol);
         if (typeof rowsFamily?.read !== "function") throw failure(503, "原生子代理列表状态无效");
-        const sortRows = nativeFunction(rowsSnapshot.rspack ? initial.module : rowsSnapshot.module, source => source.length < 240
+        const sortModule = rowsSnapshot.rspack && rowsSnapshot.source.includes("getIndexedSubagentItems:")
+          ? nativeRuntimeRecord(initial, source => nativeSubagentRowsSource(source)
+            && !source.includes(".rpc.discoverSubagentDescendantSnapshot("), "子代理行计算").module
+          : rowsSnapshot.rspack ? initial.module : rowsSnapshot.module;
+        const sortRows = nativeFunction(sortModule, source => source.length < 240
           && source.includes(".sort(") && source.includes("recencyAtMs"), "子代理排序");
         const formatAgentPath = nativeFunction(initial.module, source => source.length < 500
           && /\.split\(["'`]\/["'`]\)/.test(source) && /["'`]root["'`]/.test(source)
@@ -3400,17 +3437,24 @@
                 const digest = await crypto.subtle.digest("SHA-256",
                   new TextEncoder().encode(Function.prototype.toString.call(serialize)));
                 const serializerHash = hexBytes(new Uint8Array(digest));
-                // 保留此前已核版本；新版同时核准序列化器与原输入合并器，不能只改摘要或凭函数名放开编辑。
+                // 用户反馈升级 Codex 后编辑队列被拦截；只加入已逐项核对的同版本函数对，保留旧版本。
+                // 26.1106.6628.0 的 YLui.pJ/rc 仅改变压缩绑定名；冻结原文回归继续验证正文、图片、隐藏输入和取消恢复。
                 if (serializerHash === "2a2d0476f375de66982e2f69cd0fab6c6ccff56c55f8a8a75f9c57a305f5cbf5")
                   return { serialize, merge: null };
-                if (serializerHash !== "fe8f00e53e1baed72cc3ece6d4b3d18208a186f66aa78d4d626522a1e6bed70c")
-                  throw failure(503, "当前 Codex 版本的队列取消输入合成合同尚未核准");
+                const approvedMerger = {
+                  fe8f00e53e1baed72cc3ece6d4b3d18208a186f66aa78d4d626522a1e6bed70c:
+                    "98eae70dc9b22ff289fb4e9abead809020472c357647075277716e21c68d6c97",
+                  d0abe2920bab437f85dd38e0bc30c9cda9f8fecf0177ebccf9f287b4662740ac:
+                    "4cb9749fc973e40ef88bef9899bea104ce4252efd890176a8fc20eb1d1b472af"
+                }[serializerHash];
+                if (!approvedMerger)
+                  throw failure(503, "当前 Codex 版本的队列编辑暂未适配，请更新 CodexElves 后重试");
                 const merge = nativeFunction(initial.module, source => source.includes("previousSubmission:")
                   && source.includes("preserveSerializedContext:") && source.includes("localAudio"), "队列原始输入合并");
                 const mergeDigest = await crypto.subtle.digest("SHA-256",
                   new TextEncoder().encode(Function.prototype.toString.call(merge)));
-                if (hexBytes(new Uint8Array(mergeDigest)) !== "98eae70dc9b22ff289fb4e9abead809020472c357647075277716e21c68d6c97")
-                  throw failure(503, "当前 Codex 版本的队列取消输入合成合同尚未核准");
+                if (hexBytes(new Uint8Array(mergeDigest)) !== approvedMerger)
+                  throw failure(503, "当前 Codex 版本的队列编辑暂未适配，请更新 CodexElves 后重试");
                 if (!initial.records?.some(record => {
                   try { const values = Object.values(record.module); return values.includes(serialize) && values.includes(merge); }
                   catch { return false; }
@@ -3423,7 +3467,7 @@
                 new TextEncoder().encode(initial.source.slice(from, to)));
               if (!digest || hexBytes(new Uint8Array(digest))
                   !== "d81d805c7b3d8cccb567d8a1c4a0db3a7372608e1a5f70a369527820d7cabafc")
-                throw failure(503, "当前 Codex 版本的队列取消输入合成合同尚未核准");
+                throw failure(503, "当前 Codex 版本的队列编辑暂未适配，请更新 CodexElves 后重试");
               const serialize = nativeFunction(initial.module, source => source.includes("isRemoteHost:")
                 && source.includes("localTurnMetadata:") && source.includes("promptContextWithoutReviewedMessages:")
                 && source.includes("responseItems:"), "队列原始输入序列化");
@@ -7726,7 +7770,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 144, call,
+    version: 146, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {

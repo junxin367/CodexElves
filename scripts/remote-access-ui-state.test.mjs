@@ -102,6 +102,7 @@ const vm = {
       session: null, stream: null, EventSource: { OPEN: 1 }, modelsScope: "codex", modelLoadError: "",
       selectionVersion: 0,
       syncBackendModels() {}, setConnection() {},
+      claudeUsageState: null, resetClaudeUsage() {}, syncClaudeUsage() {}, fitClaudeUsageTip() {},
       appearance: { sessionTypes: { codex: true, claude: false }, sessionFilter: "all" },
       transcriptEvents: new Map(), claudeHistoryOrder: null,
     })) if (!Object.hasOwn(context, key)) context[key] = value;
@@ -217,6 +218,140 @@ test("Claude 完整历史同步移除旧摘要轮次，迟到的历史响应不�
   assert.equal(context.recentHistoryPage.turns.some(turn => turn.id === "compact"), false);
 });
 
+function claudeUsageHarness() {
+  const requests = [], timers = new Map(), nodes = [];
+  let tick = Date.parse("2026-11-12T08:00:00Z"), timerId = 0;
+  const makeElement = (tag, className = "", textContent = "") => ({
+    tag, className, textContent, dataset: {}, style: {}, attributes: {}, children: [], hidden: false, isConnected: true,
+    append(...values) { this.children.push(...values); },
+    replaceChildren(...values) { this.children = values; },
+    setAttribute(name, value) { this.attributes[name] = value; },
+    removeAttribute(name) { delete this.attributes[name]; },
+    hasAttribute(name) { return Object.hasOwn(this.attributes, name); },
+    remove() { this.isConnected = false; },
+  });
+  const trigger = makeElement("button");
+  const context = nodeVm.createContext({
+    claudeUsageState: null, connected: true, creating: false, selectedId: "claude-session",
+    thread: { id: "claude-session" }, session: { device: { id: "device-a", createdAtMs: 1 },
+      capabilities: { claudeSubscriptionUsage: true } },
+    instance: "claude:wsl:a", backend: "claude", enabled: true, pageLeaving: false,
+    document: { hidden: false, activeElement: null, documentElement: { dataset: { inputModality: "pointer" } },
+      body: { append: node => nodes.push(node) } },
+    Date: class extends Date { static now() { return tick; } }, AbortController,
+    privateInputScope: value => JSON.stringify([value?.device?.id, value?.device?.createdAtMs]),
+    activeInstanceId: () => context.instance, isClaude: () => context.backend === "claude",
+    sessionInstanceEnabled: () => context.enabled,
+    $: selector => selector === "#claude-usage" ? trigger : null, element: makeElement,
+    closePopup() {}, closeComposerMenus() {},
+    setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    api(path, payload, id, signal, options) {
+      let resolve;
+      const promise = new Promise(done => { resolve = done; });
+      requests.push({ path, payload, signal, options, resolve });
+      return promise;
+    },
+  });
+  nodeVm.runInContext(sourceSection("function claudeUsageContext(", "function tokenCount("), context);
+  context.fitClaudeUsageTip = () => {};
+  const usage = (percent = 24) => ({ source: "claude-native-usage", observedAtMs: tick,
+    fiveHour: { usedPercentage: percent, resetsAt: new Date(tick + 2 * 3600000 + 18 * 60000).toISOString() },
+    sevenDay: { usedPercentage: 52, resetsAt: (tick + 3 * 86400000 + 6 * 3600000) / 1000 } });
+  return { context, trigger, timers, requests, nodes, usage, advance: milliseconds => { tick += milliseconds; } };
+}
+
+test("Claude 额度区分缺失、真实 0%、非法和过期窗口，秒数与 ISO 重置时间一致", () => {
+  const { context, usage, advance } = claudeUsageHarness();
+  assert.equal(context.claudeUsageWindows(null).length, 0);
+  let windows = context.claudeUsageWindows(usage(0));
+  assert.equal(windows.length, 2);
+  assert.equal(windows[0].used, 0);
+  assert.equal(context.claudeUsageResetText(windows[0].resetAt), "2 小时 18 分钟后重置");
+  assert.equal(context.claudeUsageResetText(windows[1].resetAt), "3 天 6 小时后重置");
+  for (const invalid of [-1, 101, NaN, Infinity, true, "24", null]) {
+    const value = usage();
+    value.fiveHour.usedPercentage = invalid;
+    assert.equal(context.claudeUsageWindows(value).length, 1);
+  }
+  for (const invalid of ["not-a-date", true, 1]) {
+    const value = usage(); value.fiveHour.resetsAt = invalid;
+    assert.equal(context.claudeUsageWindows(value).length, 1);
+  }
+  const value = usage(); value.fiveHour.resetsAt = null;
+  assert.equal(context.claudeUsageWindows(value).length, 2);
+  assert.equal(context.claudeUsageResetText(null), "重置时间尚未提供");
+  const stale = usage();
+  advance(180001);
+  assert.equal(context.claudeUsageWindows(stale).length, 0, "后台停留过久不能继续显示旧额度");
+  const expired = usage();
+  expired.fiveHour.resetsAt = "2026-11-12T08:00:00Z";
+  assert.equal(context.claudeUsageWindows(expired).length, 1, "窗口到期不能自动推断已用 0%");
+});
+
+test("Claude 额度按授权和实例隔离，切换后拒绝迟到响应，停用或后台页面不读取", async () => {
+  const { context, trigger, requests, timers, usage } = claudeUsageHarness();
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  context.syncClaudeUsage();
+  for (let index = 0; index < 5; index++) context.syncClaudeUsage();
+  assert.equal(requests.length, 1, "输入框反复更新不重复读取");
+  assert.equal(requests[0].path, "/api/read/claudeUsage");
+  assert.equal(requests[0].payload.instanceId, "claude:wsl:a");
+  assert.equal(requests[0].options.resourcePriority, "background");
+  context.instance = "claude:wsl:b";
+  context.syncClaudeUsage();
+  assert.equal(requests[0].signal.aborted, true);
+  requests[1].resolve({ ok: true, backend: "claude", instanceId: "claude:wsl:b", usage: usage(52) });
+  await flush();
+  requests[0].resolve({ ok: true, backend: "claude", instanceId: "claude:wsl:a", usage: usage(99) });
+  await flush();
+  assert.equal(context.claudeUsageState.value.fiveHour.usedPercentage, 52);
+  assert.equal(trigger.hidden, false);
+  assert.equal(timers.size, 1);
+  context.session.device.createdAtMs = 2;
+  context.syncClaudeUsage();
+  assert.equal(trigger.hidden, true, "同设备重新授权也不能沿用旧账号快照");
+  assert.equal(requests.length, 3);
+  context.document.hidden = true;
+  context.syncClaudeUsage();
+  assert.equal(requests[2].signal.aborted, true);
+  assert.equal(timers.size, 0);
+  assert.equal(context.claudeUsageState, null);
+  context.document.hidden = false;
+  context.backend = "codex";
+  context.syncClaudeUsage();
+  assert.equal(requests.length, 3);
+  context.backend = "claude"; context.enabled = false;
+  context.syncClaudeUsage();
+  assert.equal(requests.length, 3);
+});
+
+test("Claude 额度详情支持鼠标与点击，数据失效时关闭浮层并保留未知状态", async () => {
+  const { context, trigger, requests, nodes, usage, advance } = claudeUsageHarness();
+  context.mountClaudeUsage();
+  context.syncClaudeUsage();
+  requests[0].resolve({ ok: true, backend: "claude", instanceId: "claude:wsl:a", usage: usage() });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(trigger.attributes["aria-label"], /5 小时已用 24%.*7 天已用 52%/);
+  trigger.onpointerenter({ pointerType: "touch" });
+  assert.equal(nodes.length, 0);
+  trigger.onpointerenter({ pointerType: "mouse" });
+  assert.equal(nodes.length, 1);
+  assert.equal(trigger.attributes["aria-expanded"], "true");
+  assert.equal(nodes[0].children[0].textContent, "Claude 订阅额度");
+  assert.equal(nodes[0].children[3].textContent, "2 小时 18 分钟后重置");
+  trigger.onclick();
+  assert.equal(context.claudeUsageState.tip.pinned, true);
+  trigger.onclick();
+  assert.equal(trigger.attributes["aria-expanded"], "false");
+  assert.equal(nodes[0].isConnected, false);
+  trigger.onclick();
+  advance(180001);
+  context.renderClaudeUsage();
+  assert.equal(trigger.hidden, true);
+  assert.equal(context.claudeUsageState.tip, null);
+});
+
 test("上下文容量缺失时显示真实最后请求用量，不伪造百分比", () => {
   let info = { modelContextWindow: null, last: { totalTokens: 1300 } };
   const context = vm.createContext({ currentThreadDisplay: () => ({ tokenUsage: info }) });
@@ -316,6 +451,7 @@ test("Claude 与 Codex 共用单行容量弹层，不显示配置、比例或来
   context.showContextUsageTip(true);
   const node = nodes[0];
   assert.equal(node.children.length, 1, "实际弹层只创建一行");
+  assert.equal(node.firstElementChild.className, "context-usage-value", "用量使用正文色，不能再次套用 muted");
   assert.equal(node.firstElementChild.textContent, "215.5k / 36%，600k");
   assert.equal(ring.textContent, "36%");
   assert.doesNotMatch(attributes["aria-label"], /配置压缩|提前压缩|原生报告|实际触发/);
@@ -882,7 +1018,10 @@ test("会话实例筛选分别显示同类型 WSL 选项，精确匹配实例并
   assert.deepEqual(rows.map(row => context.sessionTypeVisible(row)), [false, false, true, true]);
   appearance.sessionInstances["claude:wsl:b"] = false;
   assert.deepEqual(rows.map(row => context.sessionTypeVisible(row)), [false, false, false, false]);
-  assert.equal(context.sessionFilterOptions().find(option => option.value === "claude:wsl:b").disabled, true);
+  assert.equal(context.sessionFilterOptions().some(option => option.value === "claude:wsl:b"), false,
+    "未开启的实例直接隐藏，不能只置灰");
+  appearance.sessionFilter = ["codex:local", "claude:wsl:a"];
+  assert.deepEqual(rows.map(row => context.sessionTypeVisible(row)), [true, true, false, false]);
   appearance.sessionFilter = "all";
   assert.deepEqual(rows.map(row => context.sessionTypeVisible(row)), [true, true, false, false]);
   assert.equal(rows.length, 4, "筛选不能改写原列表快照");
@@ -902,19 +1041,181 @@ test("实例筛选可持久保存，旧类型选择迁到启用的默认实例�
   const preferences = context.readAppearance();
   assert.equal(preferences.sessionFilter, "claude:wsl:b");
   preferences.sessionFilter = "claude";
-  assert.equal(context.sessionFilterValue(preferences), "claude:wsl:a");
+  assert.deepEqual(Array.from(context.sessionFilterValue(preferences)), ["claude:wsl:a"]);
   preferences.sessionInstances["claude:wsl:a"] = false;
-  assert.equal(context.sessionFilterValue(preferences), "claude:wsl:b");
+  assert.deepEqual(Array.from(context.sessionFilterValue(preferences)), ["claude:wsl:b"]);
   preferences.sessionInstances["claude:wsl:b"] = false;
-  assert.equal(context.sessionFilterValue(preferences), "claude:wsl:a");
+  assert.deepEqual(Array.from(context.sessionFilterValue(preferences)), ["claude:wsl:a"]);
   assert.equal(context.sessionTypeVisible({ instanceId: "codex:local" }, preferences), false);
+});
+
+function sessionFilterPopupHarness({ enabled = ["codex:local", "claude:wsl:a", "claude:wsl:b"], filter = "all" } = {}) {
+  const listeners = new Map(), saved = [], nodes = new Map();
+  let document;
+  class PopupNode {
+    constructor(tag, className = "", text = "") {
+      this.tag = tag; this.className = className; this.textContent = text; this.children = [];
+      this.dataset = {}; this.attributes = new Map(); this.disabled = false; this.isConnected = true;
+      this.classList = { toggle() {} };
+    }
+    append(...children) { for (const child of children) { child.parentElement = this; this.children.push(child); } }
+    replaceChildren(...children) {
+      for (const child of this.children) child.parentElement = null;
+      this.children = []; this.append(...children);
+    }
+    contains(node) { return this === node || this.children.some(child => child.contains(node)); }
+    setAttribute(name, value) { this.attributes.set(name, String(value)); }
+    getAttribute(name) { return this.attributes.get(name) ?? null; }
+    removeAttribute(name) { this.attributes.delete(name); }
+    hasAttribute(name) { return this.attributes.has(name); }
+    closest() { return null; }
+    focus() { document.activeElement = this; this.onfocus?.(); }
+    click() { if (!this.disabled) this.onclick?.(); }
+    scrollIntoView() {}
+    remove() {
+      if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(child => child !== this);
+      this.parentElement = null; this.isConnected = false;
+    }
+    querySelectorAll(selector) {
+      const descendants = [];
+      const visit = node => { for (const child of node.children) { descendants.push(child); visit(child); } };
+      visit(this);
+      return descendants.filter(node => selector.split(",").some(part => {
+        if (part.startsWith("button") && node.tag !== "button") return false;
+        if (part.includes(":not(:disabled)") && node.disabled) return false;
+        const checked = part.match(/\[(aria-selected|aria-checked)="true"\]/);
+        return !checked || node.getAttribute(checked[1]) === "true";
+      }));
+    }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+  }
+  const element = (tag, className, text) => new PopupNode(tag, className, text);
+  document = { activeElement: null, body: element("body"), documentElement: { dataset: {} },
+    addEventListener: (name, callback) => listeners.set(name, callback) };
+  const trigger = element("button"); nodes.set("#sidebar-type-filter", trigger);
+  const instances = [
+    { id: "codex:local", backend: "codex", label: "Codex", ready: true, legacyDefault: true },
+    { id: "claude:wsl:a", backend: "claude", label: "Claude · A", ready: true, legacyDefault: true },
+    { id: "claude:wsl:b", backend: "claude", label: "Claude · B", ready: true },
+    { id: "claude:wsl:off", backend: "claude", label: "Claude · 未开启", ready: true },
+  ];
+  const context = vm.createContext({
+    document, element, icon: name => element("span", "ui-icon", name),
+    $: selector => nodes.get(selector) || null,
+    button(text, label, callback, className) {
+      const node = element("button", className, text); node.title = label; node.onclick = callback; return node;
+    },
+    sessionInstances: instances, appearance: { sessionFilter: filter,
+      sessionInstances: Object.fromEntries(instances.map(instance => [instance.id, enabled.includes(instance.id)])) },
+    activePopup: null, contextUsageTip: null, recentLimit: 100, projectVisibleThreadCounts: new Map(),
+    fitPopup() {}, closeComposerMenus() {}, closeContextUsageTip() {}, closeModelMenu() {},
+    applyAppearance(save) { assert.equal(save, true); saved.push(JSON.parse(JSON.stringify(context.appearance))); },
+    renderSidebar: () => context.renderSessionFilter(), updateComposer() {}, notice() {}, loadSidebar: async () => {},
+  });
+  vm.runInContext(sourceSection("function closePopup(", "function fitPopup("), context);
+  const filterStart = app.indexOf('  const typeFilter = $("#sidebar-type-filter");');
+  const outsideStart = app.indexOf('document.addEventListener("pointerdown", event => {');
+  vm.runInContext(app.slice(filterStart, app.indexOf("  const setSidebarSearchOpen =", filterStart))
+    + app.slice(outsideStart, app.indexOf("function checkModelMenuFocus()", outsideStart)), context);
+  const options = () => context.activePopup?.list.querySelectorAll("button") || [];
+  const find = value => options().find(node => node.dataset.value === value);
+  return { context, trigger, instances, saved, nodes, element, options, find,
+    open: () => trigger.onclick(),
+    click(value) { const node = find(value); assert.ok(node, `菜单缺少 ${value}`); node.focus(); node.click(); },
+    checked: () => options().filter(node => node.getAttribute("aria-checked") === "true").map(node => node.dataset.value),
+    outside: () => listeners.get("pointerdown")({ target: element("button") }),
+    focusOutside: () => listeners.get("focusin")({ target: element("input") }),
+  };
+}
+
+test("实例多选菜单连续选择并显示勾选，全部会话同步清除其它项且迟到旧节点不覆盖", () => {
+  const h = sessionFilterPopupHarness(); h.open();
+  assert.deepEqual(h.options().map(node => node.dataset.value),
+    ["all", "codex:local", "claude:wsl:a", "claude:wsl:b"]);
+  assert.ok(h.options().every(node => node.getAttribute("role") === "menuitemcheckbox"));
+  assert.deepEqual(h.checked(), ["all"]);
+  const popup = h.context.activePopup.node;
+  const originalOption = h.find("codex:local");
+  h.context.renderSidebar();
+  assert.equal(h.find("codex:local"), originalOption, "普通会话刷新不能替换正被点击的菜单项");
+  h.click("codex:local"); h.click("claude:wsl:a");
+  assert.equal(h.context.activePopup.node, popup);
+  assert.deepEqual(h.checked(), ["codex:local", "claude:wsl:a"]);
+  assert.match(h.trigger.getAttribute("aria-label"), /已选 2 个会话实例/);
+  const stale = h.find("claude:wsl:b"), writes = h.saved.length;
+  h.click("all");
+  assert.equal(h.context.appearance.sessionFilter, "all");
+  assert.deepEqual(h.checked(), ["all"]);
+  stale.onclick();
+  assert.equal(h.saved.length, writes + 1, "重绘前节点的迟到点击必须忽略");
+  assert.deepEqual(h.checked(), ["all"]);
+  h.click("claude:wsl:b");
+  assert.deepEqual(h.checked(), ["claude:wsl:b"], "从全部切换具体实例时不能恢复之前的多选");
+  h.click("claude:wsl:b");
+  assert.deepEqual(h.checked(), ["all"], "取消最后一个实例后恢复全部");
+  h.outside(); assert.equal(h.context.activePopup, null);
+});
+
+test("只有一个已开启实例时点击关闭菜单，多个实例时留到点击或聚焦外部再关闭", () => {
+  for (const enabled of [[], ["claude:wsl:a"], ["codex:local", "claude:wsl:a"]]) {
+    for (const choice of ["all", enabled[0]].filter(Boolean)) {
+      const h = sessionFilterPopupHarness({ enabled }); h.open(); h.click(choice);
+      assert.equal(!!h.context.activePopup, enabled.length > 1);
+      if (h.context.activePopup) { h.focusOutside(); assert.equal(h.context.activePopup, null); }
+    }
+  }
+});
+
+test("实例开关变化保留其余多选，菜单立即隐藏关闭的实例并更新选择后的收起规则", () => {
+  const h = sessionFilterPopupHarness({ filter: ["claude:wsl:a", "claude:wsl:b"] });
+  const root = h.element("div"); h.nodes.set("#appearance-session-instances", root);
+  h.context.renderSessionInstances(); h.open();
+  const controls = root.querySelectorAll("input");
+  const disable = id => {
+    const control = controls.find(node => node.dataset.instanceId === id);
+    assert.ok(control); control.checked = false; control.onchange();
+  };
+  disable("claude:wsl:a");
+  assert.deepEqual(h.checked(), ["claude:wsl:b"]);
+  assert.equal(h.find("claude:wsl:a"), undefined);
+  assert.equal(h.context.toggleSessionFilter("claude:wsl:a"), false, "已关闭的旧目标不能被迟到事件重新选中");
+  disable("claude:wsl:b");
+  assert.deepEqual(h.options().map(node => node.dataset.value), ["all", "codex:local"]);
+  assert.deepEqual(h.checked(), ["all"]);
+  h.click("codex:local"); assert.equal(h.context.activePopup, null);
+});
+
+test("实例目录的迟到读取使用当前多选状态，不能在选择全部后恢复旧筛选", () => {
+  const h = sessionFilterPopupHarness(); h.open(); h.click("codex:local"); h.click("claude:wsl:a");
+  const result = { instances: h.instances, types: [{ id: "codex", label: "Codex" }, { id: "claude", label: "Claude" }] };
+  h.click("all"); h.context.applySessionCatalog(result); h.context.renderSessionFilter();
+  assert.deepEqual(h.checked(), ["all"]);
+  h.click("claude:wsl:b"); h.context.applySessionCatalog(result); h.context.renderSessionFilter();
+  assert.deepEqual(h.checked(), ["claude:wsl:b"]);
+  assert.equal(h.context.sessionTypeVisible({ instanceId: "codex:local" }), false);
+  assert.equal(h.context.sessionTypeVisible({ instanceId: "claude:wsl:b" }), true);
+});
+
+test("多选筛选持久恢复时去重，混入全部项时以全部为准，损坏项不能进入筛选", () => {
+  const disk = storage(), context = vm.createContext({ localStorage: disk, matchMedia: () => ({ matches: false }) });
+  vm.runInContext(app.slice(app.indexOf("const appearancePresets ="), app.indexOf("let ambientLightStatus =")), context);
+  for (const [saved, expected] of [
+    [["codex:local", "claude:wsl:test", "codex:local"], ["codex:local", "claude:wsl:test"]],
+    [["codex:local", "all", "claude:wsl:test"], "all"],
+    [[{}, null, 1, "../other", "claude:wsl:test"], ["claude:wsl:test"]],
+    [[], "all"],
+  ]) {
+    disk.setItem("codex-elves-web-appearance", JSON.stringify({ sessionFilter: saved }));
+    const filter = context.readAppearance().sessionFilter;
+    assert.deepEqual(Array.isArray(filter) ? Array.from(filter) : filter, expected);
+  }
 });
 
 test("PC 会话菜单仅图标切换或生命周期清理会关闭，手机普通关闭行为保留", async () => {
   for (const desktop of [true, false]) {
     const context = vm.createContext({
       opened: true, suspended: false, ticker: null, cached: null,
-      pinned: () => desktop, clearInterval() {}, cancelPress() {}, hideContext() {},
+      pinned: () => desktop, clearInterval() {}, cancelPress() {}, hideContext() {}, stopPositionTracking() {},
       trigger: { isConnected: true, disabled: false, setAttribute() {}, focus() {} },
       layer: { hidden: false, hasAttribute: () => false, classList: { remove() {} } },
       open: async () => { context.opened = true; context.layer.hidden = false; },
@@ -932,6 +1233,162 @@ test("PC 会话菜单仅图标切换或生命周期清理会关闭，手机普�
     context.close(false, true);
     assert.equal(context.opened, false, "授权变化或销毁必须清理菜单");
   }
+});
+
+function sessionMenuPositionHarness({ width = 1200, height = 800, related = false } = {}) {
+  let anchor = { left: width - 62, top: 20, width: 32, height: 32 }, frameId = 0;
+  const frames = new Map(), listeners = new Map(), writes = [], attributes = new Map();
+  const rectangle = box => ({ ...box, right: box.left + box.width, bottom: box.top + box.height });
+  const menu = { style: new Proxy({}, { set(target, name, value) {
+    writes.push([name, value]); target[name] = value; return true;
+  } }) };
+  const context = nodeVm.createContext({
+    opened: true, suspended: false, disposed: false, ticker: null, cached: null,
+    positionFrame: null, positionSignature: "", contextSource: null, contextItem: null, contextPosition: null,
+    menu, context: {}, owns: () => true, canMutate: () => true, closeSideThread() {},
+    pinned: () => width > 760, desktop: () => width > 760,
+    clearInterval() {}, cancelPress() {}, focusEdge() {},
+    document: { hidden: false, body: { append() {} } },
+    window: { innerWidth: width, innerHeight: height,
+      requestAnimationFrame(callback) { frames.set(++frameId, callback); return frameId; },
+      cancelAnimationFrame(id) { frames.delete(id); } },
+    trigger: { isConnected: true, disabled: false, hidden: false,
+      getBoundingClientRect: () => rectangle(anchor),
+      closest: selector => related && selector === ".related-session-view" ? {} : null,
+      setAttribute: (name, value) => attributes.set(name, value), focus() {} },
+    layer: { hidden: false, hasAttribute: () => false, classList: { add() {}, remove() {} } },
+    actionMenu: { hidden: true, style: {}, getBoundingClientRect: () => ({ width: 180, height: 40 }) },
+    closeAction: { disabled: false, focus() {} },
+    listen(_target, name, handler) { listeners.set(name, handler); },
+  });
+  const visibilityStart = sessionMenuSource.indexOf('  listen(document, "visibilitychange"');
+  nodeVm.runInContext(sessionMenuSource.slice(sessionMenuSource.indexOf("  function hideContext("),
+    sessionMenuSource.indexOf("  function updatePermissions("))
+    + sessionMenuSource.slice(sessionMenuSource.indexOf("  function stopPositionTracking("),
+      sessionMenuSource.indexOf("  function bindSideThread("))
+    + sessionMenuSource.slice(visibilityStart, sessionMenuSource.indexOf("  syncContext();", visibilityStart)), context);
+  return { context, frames, writes, attributes,
+    move(box) { anchor = { ...anchor, ...box }; },
+    frame() { const pending = [...frames.values()]; frames.clear(); for (const callback of pending) callback(); },
+    visibility(hidden) { context.document.hidden = hidden; listeners.get("visibilitychange")(); },
+  };
+}
+
+test("会话菜单跟随侧栏、右侧面板及关联页动画移动，静止时不重复写定位样式", () => {
+  for (const related of [false, true]) {
+    const h = sessionMenuPositionHarness({ related }), { context, frames, writes } = h;
+    context.fit(); context.startPositionTracking(); context.startPositionTracking();
+    assert.equal(context.menu.style.left, "870px");
+    assert.equal(context.menu.style.top, "62px");
+    assert.equal(frames.size, 1, "重复启动不能累积跟踪任务");
+    const initialWrites = writes.length;
+    h.frame();
+    assert.equal(writes.length, initialWrites, "布局不变时只读锚点，不反复写样式");
+    for (const [left, top] of [[1000, 24], [850, 28], [1138, 20]]) {
+      h.move({ left, top }); h.frame();
+      assert.equal(context.menu.style.left, `${left + 32 - 300}px`);
+      assert.equal(context.menu.style.top, `${top + 32 + 10}px`);
+      assert.equal(frames.size, 1, "没有 resize 或 scroll 事件也持续跟随");
+    }
+    context.close(false, true);
+    assert.equal(frames.size, 0);
+  }
+});
+
+test("会话菜单保持 PC 短窗口宽度、手机比例及可视视口边界", () => {
+  const desktop = sessionMenuPositionHarness({ height: 500 });
+  desktop.context.fit();
+  assert.equal(desktop.context.menu.style.width, "300px");
+  const phone = sessionMenuPositionHarness({ width: 390, height: 844 });
+  phone.context.fit();
+  assert.equal(phone.context.menu.style.width, "253.5px");
+  const h = sessionMenuPositionHarness(), { context } = h;
+  context.fit(); context.startPositionTracking();
+  context.window.visualViewport = { offsetLeft: 100, offsetTop: 40, width: 700, height: 400 };
+  h.move({ left: 780, top: 50 }); h.frame();
+  assert.equal(context.menu.style.left, "492px", "右侧保留 8px");
+  assert.equal(context.menu.style.top, "92px");
+  assert.equal(context.menu.style.maxHeight, "320px");
+  h.move({ left: 104, top: 400 }); h.frame();
+  assert.equal(context.menu.style.left, "108px", "左侧保留 8px");
+  assert.equal(context.menu.style.top, "432px");
+  assert.equal(context.menu.style.maxHeight, "0px", "底边空间不足时不溢出视口");
+  context.close(false, true);
+});
+
+test("会话菜单挂起、后台和强制关闭会取消跟踪，恢复后重新对齐", () => {
+  const h = sessionMenuPositionHarness(), { context, frames } = h;
+  context.fit(); context.startPositionTracking();
+  context.close();
+  assert.equal(frames.size, 1, "PC 普通关闭仍保留菜单及跟踪");
+  context.suspend();
+  assert.equal(frames.size, 0);
+  h.move({ left: 900 });
+  context.resume(); h.frame();
+  assert.equal(context.menu.style.left, "632px");
+  assert.equal(frames.size, 1);
+  h.visibility(true);
+  assert.equal(context.opened, true, "PC 菜单在后台保留打开状态");
+  assert.equal(frames.size, 0);
+  h.move({ left: 800 });
+  h.visibility(false);
+  assert.equal(context.menu.style.left, "532px");
+  assert.equal(frames.size, 1);
+  context.close(false, true);
+  assert.equal(frames.size, 0);
+  assert.equal(context.layer.hidden, true);
+});
+
+test("会话菜单锚点隐藏、移除、禁用或移出视口时，即使 PC 固定显示也会清理", () => {
+  for (const invalidate of [
+    h => { h.context.trigger.hidden = true; },
+    h => { h.context.trigger.isConnected = false; },
+    h => { h.context.trigger.disabled = true; },
+    h => h.move({ left: 0, top: 0, width: 0, height: 0 }),
+    h => h.move({ left: -40 }),
+    h => h.move({ top: 800 }),
+  ]) {
+    const h = sessionMenuPositionHarness(), { context, frames } = h;
+    context.fit(); context.startPositionTracking();
+    invalidate(h); h.frame();
+    assert.equal(context.opened, false);
+    assert.equal(context.layer.hidden, true);
+    assert.equal(h.attributes.get("aria-expanded"), "false");
+    assert.equal(frames.size, 0, "失去锚点后不能留下重试帧");
+  }
+});
+
+test("首次打开时锚点不可见，不会在定位清理后重新显示弹层", async () => {
+  const h = sessionMenuPositionHarness(), { context } = h;
+  context.opened = false; context.layer.hidden = true; context.trigger.hidden = true;
+  Object.assign(context, { beforeOpen: null, syncContext: () => ({}), entryFor: () => ({}), restore() {},
+    render: () => context.fit(), refresh: async () => null, focusEdge: () => assert.fail("隐藏菜单不能聚焦"),
+    setInterval: () => assert.fail("隐藏菜单不能启动刷新"), report: error => { throw error; } });
+  nodeVm.runInContext(sessionMenuSource.slice(sessionMenuSource.indexOf("  function open("),
+    sessionMenuSource.indexOf("  function toggle()")), context);
+  await context.open();
+  assert.equal(context.opened, false);
+  assert.equal(context.layer.hidden, true);
+  assert.equal(h.attributes.get("aria-expanded"), "false");
+  assert.equal(h.frames.size, 0);
+});
+
+test("侧边会话操作子菜单随所属菜单行移动，保留右键位置的行内偏移", () => {
+  const h = sessionMenuPositionHarness(), { context } = h;
+  context.fit(); context.startPositionTracking();
+  const row = { setAttribute() {}, getBoundingClientRect: () => {
+    const left = parseFloat(context.menu.style.left) + 16, top = parseFloat(context.menu.style.top) + 240;
+    return { left, top, right: left + 268, bottom: top + 32 };
+  } };
+  const original = row.getBoundingClientRect();
+  context.showContext(row, { id: "side" }, "owner", { x: original.left + 12, y: original.top + 8 });
+  assert.equal(context.actionMenu.style.left, "898px");
+  assert.equal(context.actionMenu.style.top, "310px");
+  h.move({ left: 900, top: 30 }); h.frame();
+  assert.equal(context.actionMenu.style.left, "660px");
+  assert.equal(context.actionMenu.style.top, "320px");
+  context.close(false, true);
+  assert.equal(context.actionMenu.hidden, true);
 });
 
 test("三个 Claude 与两个 Codex 实例独立迁移、启用和筛选，新类型沿用同一逻辑", () => {
@@ -1610,8 +2067,10 @@ test("Windows 打包拒绝缺少分支信息、运行模式或压缩恢复的旧
     readFile(new URL("../crates/codex-elves-core/src/remote_access/workspace.rs", import.meta.url), "utf8"),
   ]);
   const current = { backend, service, workspace, app, native };
-  // 普通发送仅在明确执行中入队，桥接升级到 144，打包正例同步；下方旧协议和能力缺失的拒绝断言保留。
-  assert.deepEqual(verify(current), { protocol: 5, bridge: 144 });
+  // 普通发送入队边界要求桥接至少为 144；允许后续版本递增，仍核对当前声明并保留下方旧协议和能力缺失的拒绝断言。
+  const currentBridge = Number(native.match(/window\.__codexElvesRemoteAccess\?\.version === (\d+)/)?.[1]);
+  assert.ok(Number.isSafeInteger(currentBridge) && currentBridge >= 144);
+  assert.deepEqual(verify(current), { protocol: 5, bridge: currentBridge });
   for (const obsolete of [2, 3, 4])
     assert.throws(() => verify({ ...current, service: service.replace("PROTOCOL_VERSION: u32 = 5", `PROTOCOL_VERSION: u32 = ${obsolete}`) }), /后台协议不能低于 5/);
   assert.throws(() => verify({ ...current, workspace: workspace.replace("async fn branch_metadata(", "async fn obsolete_metadata(") }), /缺少真实分支/);
@@ -6232,6 +6691,65 @@ function sideCreationNavigationHarness() {
     async complete(operation) { creationReply.resolve(result); await operation.promise; await settle(); } };
 }
 
+test("PC 打开侧边会话交给右侧标签，不切换主会话、不改主草稿和历史", async () => {
+  const h = sideCreationNavigationHarness(), opened = [];
+  const beforeHistory = JSON.stringify(h.historyEntries), beforeDraft = h.prompt.value;
+  h.context.sessionTools = { openSideThread: item => { opened.push(item); return true; } };
+  let ready = false;
+  await h.context.openRelatedThread({ id: "side-one", title: "侧边一" }, "side", "main",
+    { onViewReady: () => { ready = true; } });
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].id, "side-one");
+  assert.equal(h.context.selectedId, "main");
+  assert.equal(h.context.relatedSessionView, null);
+  assert.equal(h.prompt.value, beforeDraft);
+  assert.equal(JSON.stringify(h.historyEntries), beforeHistory);
+  assert.equal(ready, true);
+});
+
+test("隐藏的侧边标签即使请求打开确认也不标记已读，显示后沿用原确认流程", async () => {
+  const calls = [], document = { hidden: false, documentElement: { dataset: { workspaceSidePanelVisible: "false" } } };
+  const context = nodeVm.createContext({
+    document, selectedId: "side-a", thread: { id: "side-a", hasUnreadTurn: true }, connected: true,
+    historyInitialized: true, historyError: "", transcriptChecking: false, followMessages: true,
+    threadActionReadOnly: () => false, threadDeletionLocked: () => false, threadDeleted: () => false,
+    readMarkRequests: new Map(), recentPrioritySelectionSuppressions: new Set(), sidebarReadRefreshSuppressions: new Set(),
+    session: { device: { id: "fixture-device" } }, messageVersion: 1, setTimeout() {},
+    mutate: async (...args) => calls.push(args), sessionMenu: { markSideThreadRead() {} },
+    markSidebarThreadReadLocally() {}, syncSideThreadUnread() {}, renderSidebar() {},
+  });
+  nodeVm.runInContext(sourceSection("async function markVisibleThreadRead(", "function beginMessageEdit("), context);
+  await context.markVisibleThreadRead("side-a", { opened: true });
+  assert.equal(calls.length, 0);
+  assert.equal(context.thread.hasUnreadTurn, true);
+  document.documentElement.dataset.workspaceSidePanelVisible = "true";
+  await context.markVisibleThreadRead("side-a");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "markRead");
+  assert.equal(context.thread.hasUnreadTurn, false);
+});
+
+test("侧边页面只接收同源父页面的可见状态，其他来源不能触发已读", async () => {
+  const parent = {}, handlers = new Map(), marked = [], document = { documentElement: { dataset: {} } };
+  const context = nodeVm.createContext({
+    workspaceSidePanel: true, window: { parent, addEventListener: (name, fn) => handlers.set(name, fn) },
+    location: { origin: "http://127.0.0.1:45222" }, document,
+    markVisibleThreadRead: async () => marked.push(true),
+  });
+  nodeVm.runInContext(sourceSection('window.addEventListener("message", event => {\n  if (!workspaceSidePanel',
+    'window.addEventListener("storage", event => {'), context);
+  const listener = handlers.get("message"), data = { type: "codex-elves-side-panel-visibility", visible: true };
+  listener({ source: {}, origin: context.location.origin, data });
+  listener({ source: parent, origin: "https://other.example", data });
+  assert.equal(marked.length, 0);
+  listener({ source: parent, origin: context.location.origin, data });
+  assert.equal(marked.length, 1);
+  assert.equal(document.documentElement.dataset.workspaceSidePanelVisible, "true");
+  listener({ source: parent, origin: context.location.origin, data: { ...data, visible: false } });
+  assert.equal(marked.length, 1);
+  assert.equal(document.documentElement.dataset.workspaceSidePanelVisible, "false");
+});
+
 test("自动进入新建页保留用户已经展开的侧栏，显式新建仍关闭侧栏", async () => {
   const h = sideCreationNavigationHarness();
   h.context.selectedId = null;
@@ -6404,7 +6922,7 @@ test("离开创建父会话仅清理本页本记录的历史键，不删除其�
   }
 });
 
-function approvalAreaHarness(preceding = [], viewport = { offsetTop: 0, height: 900 }) {
+function approvalAreaHarness(preceding = [], viewport = { offsetTop: 0, height: 900 }, question = true) {
   const styles = new Map(), anchor = { previousElementSibling: null,
     getBoundingClientRect: () => ({ top: 735 }) };
   for (const box of preceding) {
@@ -6413,7 +6931,8 @@ function approvalAreaHarness(preceding = [], viewport = { offsetTop: 0, height: 
       getBoundingClientRect: () => box,
     };
   }
-  const root = { parentElement: anchor, childElementCount: 1,
+  const root = { parentElement: anchor, childElementCount: 1, questionCard: question,
+    querySelector: selector => selector === ".question-card" && root.questionCard ? {} : null,
     style: { setProperty: (key, value) => styles.set(key, value) } };
   const context = { $: () => root, window: { visualViewport: viewport, innerHeight: 900 } };
   vm.createContext(context);
@@ -6422,28 +6941,30 @@ function approvalAreaHarness(preceding = [], viewport = { offsetTop: 0, height: 
     bottom: () => anchor.getBoundingClientRect().top - 8 - parseFloat(styles.get("--approval-lift")) };
 }
 
-test("问答卡底部避让真实队列容器，不能覆盖队列菜单按钮", () => {
-  // queue-dequeue-race/question-queue-overlap-before.json：队列 top=702、按钮中心 y=719、旧卡片 bottom=727。
+test("问答卡紧贴输入栏上沿并覆盖队列，不再为队列菜单抬升", () => {
+  // 用户新要求参考原生问答：输入栏 top=735，卡片保留 8px 间隔，允许叠在队列 top=701 上方。
   const queueContext = { top: 701, width: 760, height: 36 };
   const h = approvalAreaHarness([queueContext]);
   h.fit();
-  assert.equal(h.styles.get("--approval-lift"), "34px");
-  assert.equal(h.styles.get("--approval-available-height"), "685px");
-  assert.equal(h.bottom(), 693);
-  assert.ok(h.bottom() <= queueContext.top - 8, "卡片必须整体位于队列容器上方并保留间隔");
-  assert.ok(h.bottom() < 719, "队列菜单按钮中心不能落入浮动问答卡");
+  assert.equal(h.styles.get("--approval-lift"), "0px");
+  assert.equal(h.styles.get("--approval-available-height"), "719px");
+  assert.equal(h.bottom(), 727);
+  assert.ok(h.bottom() > queueContext.top, "问答弹层覆盖排队区域，不能抬到队列上方");
 });
 
-test("问答卡同时避让目标、pending 条和项目选择，采用最上方可见内容", () => {
+test("问答卡不因目标、pending 条或项目选择抬升，普通权限审批仍避让", () => {
   for (const preceding of [
     [{ top: 560, width: 760, height: 100 }, { top: 660, width: 760, height: 30 }],
     [{ top: 640, width: 760, height: 40, childElementCount: 0 }],
     [{ top: 610, width: 760, height: 80 }],
   ]) {
-    const h = approvalAreaHarness(preceding), firstTop = preceding[0].top;
+    const h = approvalAreaHarness(preceding);
     h.fit();
-    assert.equal(h.bottom(), firstTop - 8);
-    assert.equal(h.styles.get("--approval-available-height"), `${firstTop - 16}px`);
+    assert.equal(h.bottom(), 727);
+    assert.equal(h.styles.get("--approval-available-height"), "719px");
+    h.root.questionCard = false; h.fit();
+    assert.equal(h.bottom(), preceding[0].top - 8);
+    assert.equal(h.styles.get("--approval-available-height"), `${preceding[0].top - 16}px`);
   }
 });
 
@@ -6471,13 +6992,16 @@ test("无前置内容、空容器或隐藏元素保留原问答卡位置与视�
   }
 });
 
-test("队列目标区域展开、收起或隐藏后重新定位问答卡，不留下旧抬升高度", () => {
-  const content = { top: 701, width: 760, height: 36 }, h = approvalAreaHarness([content]);
+test("权限审批切换为问答后清理旧抬升，队列目标展开或收起都贴住输入栏", () => {
+  const content = { top: 701, width: 760, height: 36 }, h = approvalAreaHarness([content], undefined, false);
   h.fit();
   assert.equal(h.styles.get("--approval-lift"), "34px");
   content.top = 560; content.height = 177;
   h.fit();
   assert.equal(h.styles.get("--approval-lift"), "175px");
+  h.root.questionCard = true; h.fit();
+  assert.equal(h.styles.get("--approval-lift"), "0px");
+  assert.equal(h.bottom(), 727);
   content.height = 0;
   h.fit();
   assert.equal(h.styles.get("--approval-lift"), "0px");
@@ -6490,9 +7014,10 @@ test("队列目标区域展开、收起或隐藏后重新定位问答卡，不�
 
 test("问答卡无内容或没有定位锚点时不写布局，无可用视口空间时高度为零", () => {
   const h = approvalAreaHarness([{ top: 100, width: 760, height: 80 }], { offsetTop: 200, height: 300 });
+  h.anchor.getBoundingClientRect = () => ({ top: 208 });
   h.fit();
   assert.equal(h.styles.get("--approval-available-height"), "0px");
-  assert.equal(h.bottom(), 92);
+  assert.equal(h.bottom(), 200);
   h.styles.clear(); h.root.childElementCount = 0;
   h.fit();
   assert.equal(h.styles.size, 0);
@@ -7417,6 +7942,84 @@ test("Claude 实时历史投影接收 CLI 消息，重复快照不产生重复�
   assert.equal(context.turns.size, 1);
 });
 
+test("Claude 终端预览只更新当前临时气泡，迟到或缩短的片段不能覆盖正式正文", () => {
+  let renders = 0, cached = 0, sidebarReads = 0;
+  const context = vm.createContext({
+    selectedId: "claude-preview", selectionVersion: 1, thread: { id: "claude-preview", backend: "claude" },
+    turns: new Map(), turnVersions: new Map(), itemVersions: new Map(), partialItems: new Set(),
+    messageVersion: 0, statusVersion: 0, queueVersion: 0,
+    normalizeDisplayedTurnItems: value => value, enrichTurnTranscriptEvents: value => value,
+    rememberThreadDisplay() {}, rememberTranscript() { cached++; }, reconcileSentMessageDisplays() {},
+    updateComposer() {}, scheduleMessages() { renders++; }, scheduleSidebarRefresh() { sidebarReads++; },
+    markVisibleThreadRead: async () => {},
+  });
+  vm.runInContext(sourceSection("function receiveClaudeHistory(", "function receive(event)"), context);
+  const canonical = { id: "turn", _nativeUserId: "native-user", _process: "generation",
+    _nativePreviewBasis: "b".repeat(64), status: "inProgress", items: [
+      { id: "user", type: "userMessage", text: "question" },
+      { id: "official", type: "agentMessage", text: "正式 **Markdown** 正文" },
+    ] };
+  const event = { threadId: "claude-preview", thread: { id: "claude-preview", status: { type: "active" },
+    queuedMessages: [], queuedEdits: [] }, turns: [canonical], turnIds: ["turn"] };
+  context.receiveClaudeHistory(event);
+  const previews = (basis, text) => context.receiveClaudeHistory({ ...event, preview: true,
+    turns: [{ ...canonical, _nativePreviewBasis: basis, items: [
+      { id: "user", type: "userMessage", text: "迟到副本不能覆盖的旧内容" },
+      { id: "native-live-native-user", type: "agentMessage", text, status: "inProgress", _nativePreview: true },
+    ] }] });
+  previews("a".repeat(64), "旧的终端片段");
+  assert.equal(context.turns.get("turn").items.length, 2);
+  assert.equal(context.turns.get("turn").items[1].id, "official", "迟到预览不能把正式回复替换掉");
+  assert.equal(renders, 1, "无效预览不触发页面重绘");
+  previews("b".repeat(64), "下一段回复");
+  assert.equal(context.turns.get("turn").items[0].text, "question");
+  assert.equal(context.turns.get("turn").items[1].text, "正式 **Markdown** 正文");
+  assert.equal(context.turns.get("turn").items[2].text, "下一段回复");
+  assert.equal(context.itemVersions.get("turn:official"), 1, "预览不能把旧正式正文标成比 HTTP 读取更新");
+  previews("b".repeat(64), "下一段");
+  assert.equal(context.turns.get("turn").items[2].text, "下一段回复");
+  assert.equal(cached, 1, "终端预览不写正式正文缓存");
+  context.receiveClaudeHistory({ ...event, turns: [{ ...canonical, _nativePreviewBasis: "c".repeat(64),
+    items: [...canonical.items, { id: "official-next", type: "agentMessage", text: "下一段**回复**" }] }] });
+  previews("b".repeat(64), "下一段回复的迟到片段");
+  assert.deepEqual(Array.from(context.turns.get("turn").items, item => item.id),
+    ["user", "official", "official-next"]);
+  const before = sidebarReads;
+  context.receiveClaudeHistory({ ...event, threadId: "another", preview: true });
+  assert.equal(sidebarReads, before, "其他会话的预览不触发重复侧栏读取");
+});
+
+test("Claude HTTP 完整历史接替预览且迟到读取不能复活旧预览", () => {
+  const context = vm.createContext({
+    turns: new Map(), itemVersions: new Map(), turnVersions: new Map(), turnFieldVersions: new Map(),
+    partialItems: new Set(), enrichTurnTranscriptEvents: value => value,
+  });
+  vm.runInContext(sourceSection("function mergeLiveText(", "async function reloadThread("), context);
+  const base = { id: "turn", _nativeUserId: "native-user", _process: "generation",
+    _nativePreviewBasis: "a".repeat(64), status: "inProgress", itemsComplete: true, itemsView: "full",
+    items: [{ id: "user", type: "userMessage", text: "question" }] };
+  const preview = { id: "native-live-native-user", type: "agentMessage", text: "partial reply",
+    status: "inProgress", _nativePreview: true };
+  context.turns.set("turn", { ...base, items: [...base.items, preview] });
+  context.itemVersions.set("turn:native-live-native-user", 2);
+  const metadata = context.mergeHistoryTurn(base, 1);
+  assert.equal(metadata.items.at(-1).text, preview.text, "正文基线未变时保留已显示预览");
+  const official = { ...base, _nativePreviewBasis: "b".repeat(64), items: [
+    ...base.items, { id: "official", type: "agentMessage", text: "partial **reply**", status: "completed" },
+  ] };
+  const replaced = context.mergeHistoryTurn(official, 1);
+  assert.deepEqual(Array.from(replaced.items, item => item.id), ["user", "official"],
+    "即使预览晚于 HTTP 发起，正式正文基线变化也必须使其退役");
+  context.turns.set("turn", replaced);
+  context.turnVersions.set("turn", 3);
+  const stale = context.mergeHistoryTurn({ ...base, items: [...base.items, preview] }, 1);
+  assert.deepEqual(Array.from(stale.items, item => item.id), ["user", "official"]);
+  assert.equal(stale._nativePreviewBasis, official._nativePreviewBasis);
+  context.turns.set("turn", { ...base, items: [...base.items, preview] });
+  context.turnVersions.set("turn", 0);
+  assert.equal(context.mergeHistoryTurn({ ...base, status: "completed", _nativeDone: true }, 0).items.length, 1);
+});
+
 test("Claude 长历史按原生顺序补齐实时快照，零散缓存不能跳过中间分页", () => {
   const id = "claude-01234567-89ab-4cde-8fab-0123456789ab";
   const ids = Array.from({ length: 30 }, (_, index) => `turn-${index + 1}`);
@@ -8031,4 +8634,193 @@ test("长时间编辑仅保留最近一百次独立修改，淘汰旧记录后�
   assert.equal(h.prompt.text, "50");
   while (h.prompt.editHistory.redo()) {}
   assert.equal(h.prompt.text, "150");
+});
+
+test("外观表面与原生 Codex 默认调色一致，并区分输入框、控件及浅色普通提示", () => {
+  const context = nodeVm.createContext();
+  nodeVm.runInContext(sourceSection("function mixColor(", "function applyAppearance("), context);
+  const dark = context.appearanceSurfaceColors("dark", { background: "#181818", foreground: "#ffffff" });
+  assert.equal(dark["composer-bg"], "#363636");
+  assert.equal(dark["control-bg"], "#2d2d2d");
+  assert.equal(dark["control-hover"], "#3d3d3d");
+  assert.equal(dark["tooltip-bg"], dark["control-bg"]);
+  assert.equal(dark["tooltip-text"], "#ffffff");
+  const light = context.appearanceSurfaceColors("light", { background: "#ffffff", foreground: "#1a1c1f" });
+  assert.equal(light["composer-bg"], "#ffffff");
+  assert.equal(light["control-bg"], "#ffffff");
+  assert.equal(light["tooltip-bg"], "#1a1c1f");
+  assert.equal(light["tooltip-text"], "#ffffff");
+});
+
+test("自定义背景和前景分别参与明暗调色，不复用默认主题色或透明表面", () => {
+  const context = nodeVm.createContext();
+  nodeVm.runInContext(sourceSection("function mixColor(", "function applyAppearance("), context);
+  const dark = context.appearanceSurfaceColors("dark", { background: "#102030", foreground: "#f0e0d0" });
+  assert.equal(dark["control-bg"], "#24313e");
+  assert.equal(dark["composer-bg"], "#2d3944");
+  assert.equal(dark["control-hover"], "#343f49");
+  const light = context.appearanceSurfaceColors("light", { background: "#f0e0d0", foreground: "#182838" });
+  assert.equal(light["control-bg"], "#f2e3d5");
+  assert.equal(light["composer-bg"], "#f3e7da");
+  assert.equal(light["tooltip-bg"], "#182838");
+  assert.equal(light["tooltip-text"], "#f0e0d0");
+  for (const value of [...Object.values(dark), ...Object.values(light)]) assert.match(value, /^#[0-9a-f]{6}$/);
+});
+
+test("模型按钮 hover 在输入框上合成，深色分组线增强，浅色仍沿用原线色", () => {
+  const context = nodeVm.createContext();
+  nodeVm.runInContext(sourceSection("function mixColor(", "function applyAppearance("), context);
+  const dark = context.appearanceSurfaceColors("dark", { background: "#1e1e1e", foreground: "#d4d4d4" });
+  assert.equal(dark["composer-bg"], "#353535");
+  assert.equal(dark["composer-hover"], "#414141", "模型按钮应高亮，不能变成更暗的页面 hover");
+  assert.equal(dark["control-bg"], "#2e2e2e");
+  assert.equal(dark["menu-divider"], "#484848");
+  assert.notEqual(dark["composer-hover"], dark["control-hover"], "按钮和弹出菜单有不同的底色");
+  const light = context.appearanceSurfaceColors("light", { background: "#ffffff", foreground: "#1f1f1f" });
+  assert.equal(light["composer-hover"], "#f3f3f3");
+  assert.equal(light["menu-divider"], "#e0e0e0", "浅色不附带加深分组线");
+  const custom = context.appearanceSurfaceColors("dark", { background: "#102030", foreground: "#f0e0d0" });
+  assert.notEqual(custom["composer-hover"], dark["composer-hover"]);
+  assert.notEqual(custom["menu-divider"], dark["menu-divider"]);
+});
+
+test("设置 HEX 可独立编辑，非法草稿不保存，失焦或 Escape 恢复实际颜色", () => {
+  let color = "#16a34a", saves = 0;
+  const attributes = new Map(), document = { activeElement: null };
+  const input = { value: "", setAttribute: (key, value) => attributes.set(key, value),
+    getAttribute: key => attributes.get(key) ?? null,
+    blur() { document.activeElement = null; this.onblur(); } };
+  const context = nodeVm.createContext({ document });
+  nodeVm.runInContext(sourceSection("function bindAppearanceColorValue(", "function appearanceHexToHsv("), context);
+  const sync = context.bindAppearanceColorValue(input, () => color, value => { color = value; saves++; sync(); });
+  sync();
+  assert.equal(input.value, "#16A34A");
+  document.activeElement = input; input.value = "#12"; input.oninput();
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+  assert.equal(color, "#16a34a"); assert.equal(saves, 0);
+  sync(); assert.equal(input.value, "#12", "同步其它设置不能覆盖正在编辑的颜色草稿");
+  input.onblur(); assert.equal(input.value, "#16A34A");
+  input.value = "#ABCDEF"; input.oninput();
+  assert.equal(color, "#abcdef"); assert.equal(saves, 1);
+  input.value = "#bad";
+  const event = { key: "Escape", preventDefault() { this.prevented = true; }, stopPropagation() {} };
+  input.onkeydown(event);
+  assert.equal(event.prevented, true);
+  assert.equal(input.value, "#ABCDEF");
+  assert.equal(saves, 1);
+  color = "#2563eb"; document.activeElement = null; sync();
+  assert.equal(input.value, "#2563EB", "换主题或通过取色器选择后显示当前真实色值");
+});
+
+test("三类字号输入在确认后保存整数，空值、小数和越界值恢复，重复失焦不重复保存", () => {
+  const context = nodeVm.createContext();
+  nodeVm.runInContext(sourceSection("function bindAppearanceFontSize(", "function appearanceHexToHsv("), context);
+  for (const [min, max, initial] of [[10, 20, 14], [8, 24, 14], [6, 14, 12]]) {
+    let size = initial, saves = 0;
+    const attributes = new Map(), input = { value: String(initial),
+      setAttribute: (key, value) => attributes.set(key, value),
+      getAttribute: key => attributes.get(key) ?? null, blur() { this.onblur(); } };
+    context.bindAppearanceFontSize(input, min, max, () => size, value => { size = value; saves++; });
+    for (const invalid of ["", "not-a-number", "12.5", String(min - 1), String(max + 1)]) {
+      input.value = invalid; input.oninput();
+      assert.equal(input.getAttribute("aria-invalid"), "true");
+      assert.equal(size, initial);
+      input.onblur();
+      assert.equal(input.value, String(initial));
+      assert.equal(saves, 0);
+    }
+    input.value = String(max); input.oninput();
+    assert.equal(size, initial, "输入过程中不应用半成品数字");
+    input.onchange(); input.onblur();
+    assert.equal(size, max); assert.equal(saves, 1);
+    input.value = String(min);
+    input.onkeydown({ key: "Enter", preventDefault() {}, stopPropagation() {} });
+    assert.equal(size, min); assert.equal(saves, 2);
+    input.value = String(max);
+    input.onkeydown({ key: "Escape", preventDefault() {}, stopPropagation() {} });
+    assert.equal(input.value, String(min));
+    assert.equal(size, min); assert.equal(saves, 2);
+  }
+});
+
+test("外观切换会重新写入全部表面变量，保存时不修改用户选定的颜色", () => {
+  const styles = new Map(), saved = [];
+  const appearance = { theme: "dark", colors: {
+    dark: { background: "#102030", foreground: "#f0e0d0", accent: "#339cff" },
+    light: { background: "#f0e0d0", foreground: "#182838", accent: "#0078d4" },
+  } };
+  const initial = JSON.stringify(appearance.colors);
+  const context = nodeVm.createContext({
+    appearance, appearanceTransitionTimer: null, editingMessage: null, document: {
+      documentElement: { dataset: {}, style: { setProperty: (name, value) => styles.set(name, value) },
+        classList: { add() {}, remove() {} } },
+    },
+    $: () => null, fontStack: () => "fixture", defaultUiFont: "", defaultCodeFont: "",
+    currentFileReadingFontSize: () => 14, syncRemoteBackground() {}, resizeComposerInput() {},
+    resizeEditorInput() {}, refitComposerMenus() {}, clearTimeout() {}, setTimeout: () => 1,
+    localStorage: { setItem: (_key, value) => saved.push(JSON.parse(value)) },
+  });
+  nodeVm.runInContext(sourceSection("function mixColor(", "\napplyAutomaticAppearance(false,"), context);
+  context.applyAppearance(true);
+  assert.equal(styles.get("--control-bg"), "#24313e");
+  appearance.theme = "light";
+  context.applyAppearance(true);
+  assert.equal(styles.get("--control-bg"), "#f2e3d5");
+  assert.equal(styles.get("--tooltip-bg"), "#182838");
+  assert.equal(styles.get("--tooltip-text"), "#f0e0d0");
+  assert.equal(JSON.stringify(appearance.colors), initial);
+  assert.equal(saved.length, 2);
+  assert.deepEqual(saved[1].colors, appearance.colors);
+});
+
+test("编辑区主题提示接管并恢复 title，保留无障碍说明，触屏不弹出，隐藏目标后清理", () => {
+  const listeners = new Map(), timers = new Map(), nodes = [], observers = [];
+  let timerId = 0;
+  function element(_tag, className = "", textContent = "") {
+    const attrs = new Map();
+    return { id: "", className, textContent, style: {}, isConnected: true, inScope: true, hidden: false,
+      setAttribute: (name, value) => attrs.set(name, value),
+      getAttribute: name => attrs.get(name) ?? null,
+      hasAttribute: name => attrs.has(name), removeAttribute: name => attrs.delete(name),
+      contains(other) { return other === this; },
+      closest(selector) { return selector === "[title]" ? attrs.has("title") ? this : null
+        : selector === "[hidden],[inert]" ? this.hidden ? this : null : this.inScope ? this : null; },
+      getBoundingClientRect: () => ({ left: 100, top: 200, bottom: 228, width: 120, height: 28 }),
+      showPopover() {}, remove() { const index = nodes.indexOf(this); if (index >= 0) nodes.splice(index, 1); },
+    };
+  }
+  const document = { documentElement: { dataset: { inputModality: "pointer" } },
+    body: { append: node => nodes.push(node) },
+    addEventListener: (name, handler) => listeners.set(name, handler) };
+  const context = nodeVm.createContext({ document, element,
+    window: { innerWidth: 800, innerHeight: 600, addEventListener() {} },
+    setTimeout: fn => { timers.set(++timerId, fn); return timerId; }, clearTimeout: id => timers.delete(id),
+    MutationObserver: class {
+      constructor(callback) { this.callback = callback; observers.push(this); }
+      observe() {} disconnect() {}
+    },
+  });
+  nodeVm.runInContext(sourceSection("function installComposerTooltips(", "\nlet composerTooltips ="), context);
+  context.installComposerTooltips();
+  const trigger = element("button");
+  trigger.setAttribute("title", "选择模型"); trigger.setAttribute("aria-describedby", "existing-help");
+  listeners.get("pointerover")({ target: trigger, pointerType: "touch" });
+  assert.equal(timers.size, 0);
+  listeners.get("pointerover")({ target: trigger, pointerType: "mouse" });
+  assert.equal(trigger.hasAttribute("title"), false, "等待期间也不出现浏览器原生提示");
+  const flush = () => { const callbacks = [...timers.values()]; timers.clear(); for (const callback of callbacks) callback(); };
+  flush();
+  assert.equal(nodes.length, 1);
+  assert.equal(nodes[0].textContent, "选择模型");
+  assert.equal(trigger.getAttribute("aria-describedby"), "existing-help composer-hover-tooltip");
+  listeners.get("pointerout")({ target: trigger, relatedTarget: null });
+  assert.equal(nodes.length, 0);
+  assert.equal(trigger.getAttribute("title"), "选择模型");
+  assert.equal(trigger.getAttribute("aria-describedby"), "existing-help");
+  document.documentElement.dataset.inputModality = "keyboard";
+  listeners.get("focusin")({ target: trigger }); flush();
+  assert.equal(nodes.length, 1);
+  trigger.hidden = true; observers.at(-1).callback();
+  assert.equal(nodes.length, 0);
+  assert.equal(trigger.getAttribute("title"), "选择模型");
 });

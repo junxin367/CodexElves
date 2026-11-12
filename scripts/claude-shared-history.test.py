@@ -4,6 +4,7 @@ import contextlib
 import io
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -112,6 +113,164 @@ class SharedQueueHistoryTests(unittest.TestCase):
         self.assertEqual(replies, [])
         self.assertEqual(native.pending, [])
         self.assertFalse(native.delivery_started)
+
+    def test_completed_turn_waiting_for_user_reply_sends_directly(self):
+        native = self.native_active()
+        native.messages.append({"type": "system", "subtype": "turn_duration"})
+        job = {"short": "saved-job", "sessionId": "test-session",
+               "tempo": "blocked", "state": "blocked", "needs": "Waiting for the user's next answer"}
+        native.lookup = lambda: job
+        replies = []
+        native.reply = lambda text, **kwargs: replies.append(text)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "after-completion", "idle_only": True,
+                                  "content": [{"type": "text", "text": "continue"}]})
+        self.assertTrue(result.get("accepted"), "完成后的澄清等待不能被误判为执行中")
+        self.assertEqual(replies, ["continue"])
+        self.assertEqual(NativeDiscovery.status(job, native.messages)["tempo"], "idle")
+
+    def test_new_user_after_completion_still_keeps_real_permission_wait_blocked(self):
+        native = self.native_active()
+        native.messages.extend([
+            {"type": "system", "subtype": "turn_duration"},
+            {"type": "user", "uuid": "new-native", "message": {"content": "new task"}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "permission-tool", "name": "Bash", "input": {}}]}},
+        ])
+        job = {"short": "saved-job", "sessionId": "test-session",
+               "tempo": "blocked", "needs": "permission"}
+        native.lookup = lambda: job
+        native.reply = MagicMock()
+        result = native.send({"client_id": "waiting", "idle_only": True,
+                              "content": [{"type": "text", "text": "next"}]})
+        self.assertTrue(result["deferred"])
+        native.reply.assert_not_called()
+
+    def test_steering_an_idle_queue_does_not_interrupt_the_new_turn(self):
+        native = self.native_active()
+        native.lookup = lambda: {"short": "saved-job", "sessionId": "test-session", "tempo": "idle"}
+        replies, keys = [], []
+        def reply(text, **kwargs):
+            replies.append(text)
+            native.job["tempo"] = "active"
+        native.reply = reply
+        native.terminal_input = lambda data, **kwargs: keys.append(data)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "idle-steer", "steer": True,
+                                  "content": [{"type": "text", "text": "start new work"}]})
+        self.assertTrue(result["accepted"])
+        self.assertFalse(result["steered"])
+        self.assertEqual(replies, ["start new work"])
+        self.assertEqual(keys, [], "不能把本次发送启动的轮次当成需要中断的旧轮次")
+
+    def test_steer_does_not_interrupt_a_different_turn_started_during_delivery(self):
+        native = self.native_active()
+        def reply(text, **kwargs):
+            native.messages.append({"type": "user", "uuid": "other-turn", "message": {"content": "another input"}})
+        native.reply = reply
+        native.terminal_input = MagicMock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "selected", "steer": True,
+                                  "content": [{"type": "text", "text": "selected input"}]})
+        self.assertTrue(result["accepted"])
+        self.assertFalse(result["steered"])
+        native.terminal_input.assert_not_called()
+
+    def test_interrupted_turn_waiting_for_user_can_accept_a_new_message(self):
+        native = self.native_active()
+        native.messages.append({"type": "user", "uuid": "interrupt", "interruptedMessageId": "response",
+                                "message": {"content": [{"type": "text", "text": "[Request interrupted by user]"}]}})
+        native.lookup = lambda: {"short": "saved-job", "sessionId": "test-session",
+                                 "tempo": "blocked", "needs": "Waiting for a new instruction"}
+        native.reply = MagicMock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "after-stop", "idle_only": True,
+                                  "content": [{"type": "text", "text": "new instruction"}]})
+        self.assertTrue(result.get("accepted"))
+        native.reply.assert_called_once()
+
+    def test_status_error_after_native_acceptance_cannot_claim_not_sent(self):
+        native = self.native_active()
+        native.reply = MagicMock()
+        native.poll = lambda **kwargs: (_ for _ in ()).throw(namespace["NativeError"]("ESTATUS"))
+        incoming = namespace["queue"].Queue()
+        incoming.put(json.dumps({"type": "control_request", "request_id": "fixture",
+                                 "request": {"subtype": "shared_send", "client_id": "accepted-before-status",
+                                             "content": [{"type": "text", "text": "one input"}]}}))
+        incoming.put(None)
+        output = io.StringIO()
+        with patch.dict(namespace, {"NativeSession": lambda *args: native}), \
+                patch.object(namespace["argparse"].ArgumentParser, "parse_args",
+                             return_value=SimpleNamespace(cli="unused", native_id="", job_id="", discover=False)), \
+                patch.object(namespace["queue"], "Queue", return_value=incoming), \
+                patch.object(namespace["threading"], "Thread"), contextlib.redirect_stdout(output):
+            namespace["main"]()
+        response = [json.loads(line) for line in output.getvalue().splitlines()
+                    if json.loads(line).get("type") == "control_response"][-1]["response"]
+        self.assertFalse(response["not_sent"], "已经被原生接收后，状态查询失败只能待核对，不能允许作为未发送重试")
+        native.reply.assert_called_once()
+        self.assertTrue(native.pending[0]["deliveryConfirmed"])
+
+    def preview_frames(self, native, screen):
+        native.preview_at = 0
+        native.job.setdefault("tempo", "active")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            native.stream_preview("\x1b[2J\x1b[H" + screen.replace("\n", "\r\n"))
+        return [json.loads(line) for line in output.getvalue().splitlines()
+                if json.loads(line).get("type") == "shared_preview"]
+
+    def test_terminal_preview_does_not_repeat_markdown_or_render_tool_status(self):
+        native = self.native_active()
+        native.messages[0]["message"]["content"] = "fixture prompt"
+        native.messages.append({"type": "assistant", "uuid": "reply-row", "message": {
+            "id": "reply", "content": [{"type": "text", "text": "Use `Example <dev@example.test>` now."}]}})
+        self.assertEqual(self.preview_frames(native,
+            "❯ fixture prompt\n● Use Example dev@example.test now.\n  Running 3 shell commands...\n"), [])
+        self.assertEqual(self.preview_frames(native,
+            "❯ fixture prompt\n● Running 3 shell commands...\n"), [])
+        self.assertEqual(self.preview_frames(native, "  An unrelated terminal fragment\n"), [])
+
+    def test_terminal_preview_never_shrinks_on_redraw_and_retires_after_native_text_arrives(self):
+        native = self.native_active()
+        native.messages[0]["message"]["content"] = "fixture prompt"
+        first = self.preview_frames(native, "❯ fixture prompt\n● A partial response\n")
+        self.assertEqual(first[-1]["text"], "A partial response")
+        self.assertEqual(self.preview_frames(native, "❯ fixture prompt\n● A partial\n"), [])
+        grown = self.preview_frames(native, "❯ fixture prompt\n● A partial response continues\n")
+        self.assertEqual(grown[-1]["text"], "A partial response continues")
+        self.assertEqual(first[-1]["preview_basis"], grown[-1]["preview_basis"])
+        native.messages.append({"type": "assistant", "uuid": "reply-row", "message": {
+            "id": "reply", "content": [{"type": "text", "text": "A **partial** response continues"}]}})
+        self.assertEqual(self.preview_frames(native,
+            "❯ fixture prompt\n● A partial response continues\n"), [])
+
+    def test_preview_identity_is_scoped_to_the_current_native_user(self):
+        native = self.native_active()
+        native.messages.extend([
+            {"type": "assistant", "message": {"id": "old-reply", "content": [
+                {"type": "text", "text": "Repeated answer"}]}},
+            {"type": "system", "subtype": "turn_duration"},
+            {"type": "user", "uuid": "next-user", "message": {"content": "next question"}},
+        ])
+        frames = self.preview_frames(native, "❯ next question\n● Repeated answer\n")
+        self.assertEqual(frames[-1]["native_user_id"], "next-user")
+        self.assertEqual(frames[-1]["text"], "Repeated answer")
+
+    def test_preview_basis_changes_for_real_text_not_tool_metadata_or_synthetic_placeholders(self):
+        native = self.native_active()
+        basis = native.preview_context()[1]
+        native.messages.append({"type": "assistant", "uuid": "tool-row", "message": {
+            "id": "tool-call", "content": [{"type": "tool_use", "id": "tool", "name": "Read", "input": {}}]}})
+        self.assertEqual(native.preview_context()[1], basis)
+        native.messages.append({"type": "assistant", "uuid": "placeholder", "isApiErrorMessage": False,
+                                "message": {"id": "placeholder", "model": "<synthetic>",
+                                            "content": [{"type": "text", "text": "No response requested."}]}})
+        self.assertEqual(native.preview_context()[1], basis)
+        native.messages.append({"type": "assistant", "uuid": "real-text", "message": {
+            "id": "real-text", "model": "real-model",
+            "content": [{"type": "text", "text": "No response requested."}]}})
+        self.assertNotEqual(native.preview_context()[1], basis, "真实正文不能按同名文本隐藏")
 
     def test_single_steer_delivers_only_selected_message_and_preserves_draft(self):
         native = self.native_active()
@@ -283,9 +442,11 @@ class SharedQueueHistoryTests(unittest.TestCase):
         self.assertEqual(native.clients, {})
         self.assertEqual(len(native.pending), 1)
         native.job = {"tempo": "active"}
-        with contextlib.redirect_stdout(io.StringIO()):
+        preview_output = io.StringIO()
+        with contextlib.redirect_stdout(preview_output):
             native.stream_preview("正在处理\n新回复")
         self.assertEqual(native.preview_user, "real-user")
+        self.assertEqual(preview_output.getvalue(), "", "真实中断之后不再显示终端残留预览")
 
     def test_native_interruption_does_not_hide_human_quotes_or_unmarked_identical_text(self):
         marker = "[Request interrupted by user]"

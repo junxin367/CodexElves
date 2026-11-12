@@ -193,7 +193,9 @@ function applySessionCatalog(result) {
     && typeof instance.label === "string" && sessionTypes.some(kind => kind.id === instance.backend));
   let changed = migrateSessionInstances(appearance, sessionInstances);
   const filter = sessionFilterValue();
-  if (appearance.sessionFilter !== filter) { appearance.sessionFilter = filter; changed = true; }
+  if (JSON.stringify(appearance.sessionFilter) !== JSON.stringify(filter)) {
+    appearance.sessionFilter = filter; changed = true;
+  }
   if (changed) applyAppearance(true);
   if (!sessionInstanceEnabled(creationInstanceId)) {
     const next = newChatBackendOptions()[0];
@@ -235,8 +237,12 @@ function renderSessionInstances() {
       control.onchange = () => {
         migrateSessionInstances(appearance, availableSessionInstances());
         appearance.sessionInstances = { ...appearance.sessionInstances, [instance.id]: control.checked };
-        if (appearance.sessionFilter !== "all" && !sessionInstanceEnabled(sessionFilterValue()))
-          appearance.sessionFilter = "all";
+        const filter = sessionFilterValue();
+        if (filter !== "all") {
+          // 关闭实例只移除该实例的筛选，保留其它多选项；全部移除后恢复“全部会话”。
+          const selected = filter.filter(id => sessionInstanceEnabled(id));
+          appearance.sessionFilter = selected.length ? selected : "all";
+        }
         if (!sessionInstanceEnabled(creationInstanceId)) {
           const next = newChatBackendOptions()[0];
           if (next && creating) setCreationBackend(next.value);
@@ -262,9 +268,8 @@ function newChatBackendOptions() {
       icon: ["codex", "claude"].includes(instance.backend) ? instance.backend : "allSessions" }));
 }
 function threadLocation(value) {
-  const cwd = value?.cwd || "";
-  const distribution = value?.wslDistribution;
-  return distribution ? `WSL · ${distribution}${cwd ? ` · ${cwd}` : ""}` : cwd;
+  // 用户要求会话顶部路径省略 WSL 环境名称，仅显示工作目录；实例识别仍使用原有环境字段。
+  return value?.cwd || "";
 }
 function claudeNativeQueue() { return isClaude() && thread?.capabilities?.queue === true; }
 function queueCapability(name, id = selectedId) {
@@ -319,6 +324,7 @@ const queuedEditActions = new Set(["beginQueuedEdit", "editQueued", "cancelQueue
 const queuedEditChecks = new Map();
 let queuedEditCheckVersion = 0;
 let activePopup = null, contextUsageTip = null, sidebarBusy = false;
+let claudeUsageState = null;
 const threadDeletions = new Map(), threadDeletionChecks = new Set();
 const threadDeletionStorageKey = "codex-elves-thread-deletions";
 try {
@@ -529,6 +535,12 @@ function remoteLoginClientId() {
   return loginClientId;
 }
 const relatedNavigationOwner = randomId();
+// PC 右侧侧边会话使用独立页面；面板内隐藏主侧栏和返回入口，文件工具在本面板内打开，避免嵌套第二个标签面板。
+const workspaceSidePanel = location.pathname === "/side-thread";
+if (workspaceSidePanel) {
+  document.documentElement.dataset.workspaceSidePanel = "true";
+  document.documentElement.dataset.workspaceSidePanelVisible = "false";
+}
 let selectionToken = randomId();
 const appearancePresets = {
   light: { background: "#ffffff", foreground: "#1f1f1f", accent: "#171717" },
@@ -554,25 +566,71 @@ function conversationBackend(item) {
 }
 function sessionFilterValue(preferences = appearance) {
   const filter = preferences.sessionFilter;
-  if (!filter || filter === "all") return "all";
-  if (filter.includes(":")) return filter;
-  // 用户要求按实例筛选；旧类型选择优先迁到已启用的原默认实例，其次同类型首个已启用实例。
-  // 同类型全部关闭时保留默认实例筛选为空，不能退成“全部”而意外显示其他类型。
-  const instances = availableSessionInstances().filter(instance => instance.backend === filter);
-  const enabled = instances.filter(instance => sessionInstanceEnabled(instance.id, preferences));
-  return (enabled.find(instance => instance.legacyDefault) || enabled[0]
-    || instances.find(instance => instance.legacyDefault) || instances[0])?.id || "all";
+  const values = Array.isArray(filter) ? filter : [filter];
+  // 用户要求“全部会话”与实例多选互斥：以 all 或实例 ID 数组保存，旧的单选字符串仍可迁移。
+  if (values.includes("all")) return "all";
+  const selected = [];
+  for (const value of values) {
+    if (typeof value !== "string" || !/^[a-z][a-z0-9:-]{0,255}$/.test(value)) continue;
+    if (value.includes(":")) { selected.push(value); continue; }
+    // 旧类型选择优先迁到已启用的原默认实例，其次同类型首个已启用实例。
+    // 同类型全部关闭时保留默认实例筛选为空，不能意外扩大到其它类型。
+    const instances = availableSessionInstances().filter(instance => instance.backend === value);
+    const enabled = instances.filter(instance => sessionInstanceEnabled(instance.id, preferences));
+    const id = (enabled.find(instance => instance.legacyDefault) || enabled[0]
+      || instances.find(instance => instance.legacyDefault) || instances[0])?.id;
+    if (id) selected.push(id);
+  }
+  return selected.length ? [...new Set(selected)] : "all";
 }
 function sessionFilterOptions() {
+  // 用户要求未开启的实例不出现在筛选菜单中；“全部会话”也只涵盖已开启实例。
   return [{ value: "all", label: "全部会话", icon: "allSessions" },
-    ...availableSessionInstances().map(instance => ({ value: instance.id, label: instance.label,
-      icon: ["codex", "claude"].includes(instance.backend) ? instance.backend : "allSessions",
-      disabled: !sessionInstanceEnabled(instance.id) }))];
+    ...availableSessionInstances().filter(instance => sessionInstanceEnabled(instance.id))
+      .map(instance => ({ value: instance.id, label: instance.label,
+        icon: ["codex", "claude"].includes(instance.backend) ? instance.backend : "allSessions" }))];
+}
+function toggleSessionFilter(value, preferences = appearance) {
+  if (value === "all") { preferences.sessionFilter = "all"; return true; }
+  if (!availableSessionInstances().some(instance => instance.id === value
+      && sessionInstanceEnabled(value, preferences))) return false;
+  // 每次操作读取当前状态，不使用菜单打开时的选择快照；选择 all 同步清空其它项，避免快速点击互相覆盖。
+  const filter = sessionFilterValue(preferences);
+  const selected = new Set(filter === "all" ? [] : filter.filter(id => sessionInstanceEnabled(id, preferences)));
+  if (selected.has(value)) selected.delete(value); else selected.add(value);
+  preferences.sessionFilter = selected.size ? [...selected] : "all";
+  return true;
+}
+function renderSessionFilter() {
+  const trigger = $("#sidebar-type-filter"); if (!trigger) return;
+  const filter = sessionFilterValue(), options = sessionFilterOptions();
+  const instance = filter !== "all" && filter.length === 1
+    ? availableSessionInstances().find(value => value.id === filter[0]) : null;
+  const label = filter === "all" ? "全部会话" : filter.length === 1
+    ? instance?.label || "实例暂不可用" : `已选 ${filter.length} 个会话实例`;
+  // 会话状态刷新不重建未变化的多选菜单，避免替换用户正在点击的节点或打断键盘焦点。
+  const signature = JSON.stringify([filter, options, label, instance?.backend]);
+  if (trigger.sessionFilterSignature === signature) return;
+  trigger.sessionFilterSignature = signature;
+  trigger.replaceChildren(icon(instance && ["codex", "claude"].includes(instance.backend) ? instance.backend : "allSessions"));
+  trigger.dataset.backend = instance?.backend || "all"; trigger.title = label;
+  trigger.setAttribute("aria-label", `筛选会话实例：${label}`);
+  trigger.value = filter === "all" ? "all" : filter[0];
+  trigger.menuOptions = options.map(option => ({
+    ...option, checkable: true, selected: filter === "all" ? option.value === "all" : filter.includes(option.value),
+    // 用户要求仅一个已开启实例时点击关闭，多个时保留；options 含“全部会话”，故超过两项才表示多个实例。
+    keepOpen: options.length > 2,
+    action: () => {
+      if (!toggleSessionFilter(option.value)) return;
+      applyAppearance(true); recentLimit = 40; projectVisibleThreadCounts.clear(); renderSidebar();
+    },
+  }));
+  if (activePopup?.trigger === trigger) renderPopup();
 }
 function sessionTypeVisible(item, preferences = appearance) {
   const instanceId = conversationInstanceId(item), filter = sessionFilterValue(preferences);
   // 最近、项目、置顶和搜索共用实例 ID 过滤，同类型的不同 WSL 实例不能互相混入。
-  return sessionInstanceEnabled(instanceId, preferences) && (filter === "all" || filter === instanceId);
+  return sessionInstanceEnabled(instanceId, preferences) && (filter === "all" || filter.includes(instanceId));
 }
 const projectThreadLimits = [5, 10, 20, 50];
 // 用户要求文件阅读字号统一控制变更预览和文件查看，范围 6～14px、默认 12px、步长 1px；文件列表继续使用原字号。
@@ -605,6 +663,11 @@ function readAppearance() {
       value.conversationWidth = Math.min(conversationWidthMax, Math.max(conversationWidthMin, saved.conversationWidth));
     if (typeof saved.sessionFilter === "string" && /^[a-z][a-z0-9:-]{0,255}$/.test(saved.sessionFilter))
       value.sessionFilter = saved.sessionFilter;
+    else if (Array.isArray(saved.sessionFilter)) {
+      const selected = [...new Set(saved.sessionFilter.filter(id =>
+        typeof id === "string" && /^[a-z][a-z0-9:-]{0,255}$/.test(id)))];
+      value.sessionFilter = !selected.length || selected.includes("all") ? "all" : selected;
+    }
     if (saved.sessionTypes && typeof saved.sessionTypes === "object") {
       value.sessionTypes = { codex: saved.sessionTypes.codex !== false, claude: saved.sessionTypes.claude === true };
     }
@@ -889,6 +952,26 @@ function mixColor(left, right, weight) {
     parseInt(left.slice(index, index + 2), 16) * (1 - weight) + parseInt(right.slice(index, index + 2), 16) * weight
   ).toString(16).padStart(2, "0")).join("");
 }
+function appearanceSurfaceColors(theme, { background, foreground }) {
+  // 用户要求排队、菜单和 hover 按 Codex 外观派生，不能把某个主题的 HEX 值作为其他主题的固定背景。
+  // 远程端没有对比度选项，沿用原生默认深色 60%、浅色 45%；两种表面分别使用原生控件和输入框公式。
+  const dark = theme === "dark", contrast = dark ? .6 : .45;
+  const control = mixColor(background, dark ? foreground : "#ffffff", dark ? .06 + .05 * contrast : .09 + .04 * contrast);
+  const composer = mixColor(background, dark ? foreground : "#ffffff", dark ? .08 + .08 * contrast : .16 + .12 * contrast);
+  const hoverStrength = dark ? .06 + .03 * contrast : .04 + .03 * contrast;
+  return {
+    "composer-bg": composer,
+    // 用户要求模型按钮 hover 参考 Codex：在输入框表面叠加默认深色 7.8%／浅色 5.35% 的文字基色，不能使用更暗的页面 hover。
+    "composer-hover": mixColor(composer, foreground, hoverStrength),
+    "control-bg": control,
+    "control-hover": mixColor(control, foreground, hoverStrength),
+    // 用户要求深色模型／推理分组线更清晰：沿用原生重边框比例 .12 + .06 * .6 = .156；浅色保留原页面线色。
+    "menu-divider": dark ? mixColor(control, foreground, .12 + .06 * contrast) : mixColor(background, foreground, .14),
+    // 普通文字提示在浅色下反色；上下文等详细提示沿用控件表面，不使用这组普通 tooltip 颜色。
+    "tooltip-bg": dark ? control : foreground,
+    "tooltip-text": dark ? foreground : background,
+  };
+}
 function applyAppearance(save = false) {
   const root = document.documentElement;
   const themeChanged = root.dataset.theme && root.dataset.theme !== appearance.theme;
@@ -898,15 +981,9 @@ function applyAppearance(save = false) {
   root.style.colorScheme = appearance.theme;
   const brightness = [1, 3, 5].map(index => parseInt(accent.slice(index, index + 2), 16));
   const onAccent = brightness[0] * .299 + brightness[1] * .587 + brightness[2] * .114 > 150 ? "#171717" : "#ffffff";
-  // 用户要求远程输入框参考原生 Codex，单独派生不透明表面色，不能降低文字或工具栏透明度。
-  // 远程端没有对比度设置，沿用原生默认值：深色 60% 得到 .08 + .08 * .6 = .128，
-  // 浅色 45% 得到 .16 + .12 * .45 = .214；深色混入当前前景，浅色混入白色。
-  // 默认深色结果 #323232 须与 style.css 的加载前回退色一致；自定义颜色和主题切换均重新计算。
-  const composerBackground = appearance.theme === "dark"
-    ? mixColor(background, foreground, .128) : mixColor(background, "#ffffff", .214);
   const values = {
     bg: background, text: foreground, accent, "on-accent": onAccent,
-    "composer-bg": composerBackground,
+    ...appearanceSurfaceColors(appearance.theme, { background, foreground }),
     side: mixColor(background, foreground, .035), code: mixColor(background, foreground, .05),
     hover: mixColor(background, foreground, .075), line: mixColor(background, foreground, .14),
     muted: mixColor(background, foreground, .58), "font-size": `${appearance.fontSize}px`,
@@ -1169,6 +1246,47 @@ function appearanceFontOptions(current = "") {
   return [{ value: "", label: "系统" },
     ...[...fonts].sort((left, right) => left.localeCompare(right)).map(family => ({ value: family, label: family }))];
 }
+// 用户要求恢复之前的预设颜色，保留原有 12 个值，放在取色器的色相条下方。
+const appearanceColorPresets = ["#171717", "#3f3f46", "#71717a", "#d4d4d8", "#f4f4f5", "#ffffff",
+  "#2563eb", "#7c3aed", "#db2777", "#dc2626", "#ea580c", "#16a34a"];
+function bindAppearanceColorValue(input, getColor, onChange) {
+  // 用户要求 HEX 可直接修改、只有色块打开取色器；不保存输入到一半或非法的颜色，失焦时恢复实际色值。
+  const reset = () => { input.value = getColor().toUpperCase(); input.setAttribute("aria-invalid", "false"); };
+  input.oninput = () => {
+    const value = input.value.trim(), valid = /^#[0-9a-f]{6}$/i.test(value);
+    input.setAttribute("aria-invalid", String(!valid));
+    if (valid) onChange(value.toLowerCase());
+  };
+  input.onblur = reset;
+  input.onkeydown = event => {
+    if (!["Enter", "Escape"].includes(event.key)) return;
+    event.preventDefault(); event.stopPropagation();
+    if (event.key === "Escape") reset();
+    if (input.getAttribute("aria-invalid") !== "true") input.blur();
+  };
+  return () => { if (document.activeElement !== input) reset(); };
+}
+function bindAppearanceFontSize(input, min, max, getValue, onChange) {
+  // 用户要求所有字号统一为数字输入框；保留原滑条/输入框的范围，Enter 或失焦才应用，不能把空值或小数写入设置。
+  input.setAttribute("aria-description", `输入 ${min}～${max}px，按 Enter 或离开输入框应用`);
+  const valid = () => input.value.trim() !== "" && Number.isInteger(Number(input.value))
+    && Number(input.value) >= min && Number(input.value) <= max;
+  const reset = () => { input.value = String(getValue()); input.setAttribute("aria-invalid", "false"); };
+  const commit = () => {
+    if (valid() && Number(input.value) !== getValue()) onChange(Number(input.value));
+    reset();
+  };
+  input.oninput = () => input.setAttribute("aria-invalid", String(!valid()));
+  input.onchange = commit;
+  input.onblur = commit;
+  input.onkeydown = event => {
+    if (!["Enter", "Escape"].includes(event.key)) return;
+    event.preventDefault(); event.stopPropagation();
+    if (event.key === "Escape") reset();
+    else commit();
+    input.blur();
+  };
+}
 function appearanceHexToHsv(hex) {
   if (!/^#[0-9a-f]{6}$/i.test(hex)) return null;
   const [r, g, b] = [1, 3, 5].map(index => parseInt(hex.slice(index, index + 2), 16) / 255);
@@ -1186,7 +1304,7 @@ function appearanceHsvToHex({ h, s, v }) {
 function openAppearanceColorPicker(trigger, label, color, onChange) {
   if (activePopup?.trigger === trigger) { closePopup(true); return; }
   closePopup(); closeComposerMenus();
-  // 用户要求色点＋色值触发浮层，使用连续饱和度/亮度面板与色相条；复用菜单的顶层、边界定位和关闭逻辑。
+  // 用户要求只点击色块触发浮层；连续取色、色相条与预设色共用保存逻辑，HEX 字段可独立编辑。
   const node = element("div", "ui-popup appearance-color-picker");
   node.id = "active-popup"; node.setAttribute("role", "dialog"); node.setAttribute("aria-label", `${label}颜色选择`);
   const plane = element("div", "appearance-color-plane"), cursor = element("span", "appearance-color-cursor");
@@ -1200,8 +1318,19 @@ function openAppearanceColorPicker(trigger, label, color, onChange) {
   hex.type = "text"; hex.maxLength = 7; hex.spellcheck = false; hex.autocomplete = "off";
   hex.setAttribute("aria-label", `${label}色值`);
   const footer = element("div", "appearance-color-footer"), swatch = element("span", "appearance-color-dot");
-  footer.append(swatch, hex); node.append(plane, hue, footer);
+  const presets = element("div", "appearance-color-presets");
+  presets.setAttribute("role", "group"); presets.setAttribute("aria-label", `${label}预设颜色`);
+  footer.append(swatch, hex); node.append(plane, hue, presets, footer);
   let hsv = appearanceHexToHsv(color), currentColor = color.toLowerCase();
+  const presetButtons = appearanceColorPresets.map(value => {
+    const preset = button("", `${label} ${value.toUpperCase()}`, () => {
+      const next = appearanceHexToHsv(value);
+      hsv = { ...next, h: next.s ? next.h : hsv.h }; commit();
+    }, "appearance-color-preset");
+    preset.dataset.color = value; preset.style.setProperty("--swatch", value);
+    presets.append(preset);
+    return preset;
+  });
   const render = () => {
     plane.style.setProperty("--color-hue", hsv.h);
     cursor.style.left = `${hsv.s * 100}%`; cursor.style.top = `${(1 - hsv.v) * 100}%`;
@@ -1209,6 +1338,7 @@ function openAppearanceColorPicker(trigger, label, color, onChange) {
     plane.setAttribute("aria-valuenow", String(Math.round(hsv.s * 100)));
     plane.setAttribute("aria-valuetext", `饱和度 ${Math.round(hsv.s * 100)}%，亮度 ${Math.round(hsv.v * 100)}%`);
     hue.value = String(hsv.h);
+    for (const preset of presetButtons) preset.setAttribute("aria-pressed", String(preset.dataset.color === currentColor));
     if (document.activeElement !== hex) { hex.value = currentColor.toUpperCase(); hex.setAttribute("aria-invalid", "false"); }
   };
   const commit = () => {
@@ -1272,10 +1402,11 @@ function openAppearance() {
   dialog.innerHTML = `<div class="appearance-heading"><h2 id="appearance-title">设置</h2><button type="button" class="icon-button" title="关闭设置" aria-label="关闭设置"></button></div>
     <div class="appearance-layout">
     <nav class="appearance-nav" aria-label="设置导航">
+      <!-- 用户要求“外观”紧随“会话”作为第二项，其余导航保持原相对顺序。 -->
       <button type="button" id="appearance-general-entry" class="appearance-nav-item" aria-controls="appearance-general-page" aria-selected="true"><span class="appearance-nav-icon"></span><span>会话</span></button>
+      <button type="button" id="appearance-customization-entry" class="appearance-nav-item" title="打开外观" aria-label="打开外观" aria-controls="appearance-customization-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>外观</span></button>
       <button type="button" id="appearance-types-entry" class="appearance-nav-item" aria-controls="appearance-types-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>会话实例</span></button>
       <button type="button" id="appearance-instructions-entry" class="appearance-nav-item" aria-controls="appearance-instructions-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>自定义指令</span></button>
-      <button type="button" id="appearance-customization-entry" class="appearance-nav-item" title="打开外观" aria-label="打开外观" aria-controls="appearance-customization-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>外观</span></button>
       <button type="button" id="appearance-runtime-entry" class="appearance-nav-item" aria-controls="appearance-runtime-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>运行模式</span></button>
       <button type="button" id="appearance-notifications-entry" class="appearance-nav-item" title="打开通知事件" aria-label="打开通知事件" aria-controls="appearance-notifications-page" aria-selected="false" hidden><span class="appearance-nav-icon"></span><span>通知事件</span></button>
       <button type="button" id="appearance-diagnostics-entry" class="appearance-nav-item" title="打开诊断日志" aria-label="打开诊断日志" aria-controls="appearance-diagnostics-page" aria-selected="false" hidden><span class="appearance-nav-icon"></span><span>诊断日志</span></button>
@@ -1327,14 +1458,15 @@ function openAppearance() {
     </div></section>
     <details class="appearance-advanced"><summary>高级<span aria-hidden="true">›</span></summary>
     <section class="appearance-section"><h4>字体与排版</h4><div class="appearance-card">
-    <label class="appearance-field"><span>程序字号</span><span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="程序字号"><output id="appearance-font-value"></output></span></label>
+    <!-- 用户要求字号均改为数值输入；程序 10～20、代码 8～24、阅读 6～14 的原有范围与校验同步保留。 -->
+    <label class="appearance-field"><span>程序字号</span><span class="appearance-number"><input id="appearance-font" type="number" inputmode="numeric" min="10" max="20" step="1" aria-label="程序字号"><span>px</span></span></label>
     <div class="appearance-field"><span>程序字重</span><div id="appearance-ui-font-weight-slot"></div></div>
     <p class="appearance-font-preview">CodexElves · 你好，开始新的会话 Aa 012345</p>
     <div class="appearance-field"><span>代码字体</span><div id="appearance-code-font-slot"></div></div>
-    <label class="appearance-field"><span>代码字号</span><span class="appearance-number"><input id="appearance-code-font-size" type="number" min="8" max="24" step="1" aria-label="代码字号"><span>px</span></span></label>
+    <label class="appearance-field"><span>代码字号</span><span class="appearance-number"><input id="appearance-code-font-size" type="number" inputmode="numeric" min="8" max="24" step="1" aria-label="代码字号"><span>px</span></span></label>
     <div class="appearance-field"><span>代码字重</span><div id="appearance-code-font-weight-slot"></div></div>
     <pre class="appearance-code-preview">const greeting = "Hello, 你好";\n0123456789  () [] {} =&gt;</pre>
-    <label class="appearance-field"><span>文件阅读字号</span><span class="appearance-font"><input id="appearance-file-reading-font" type="range" min="${fileReadingFontMin}" max="${fileReadingFontMax}" step="1" aria-label="文件阅读字号" aria-describedby="appearance-file-reading-font-hint"><output id="appearance-file-reading-font-value" for="appearance-file-reading-font"></output></span></label>
+    <label class="appearance-field"><span>文件阅读字号</span><span class="appearance-number"><input id="appearance-file-reading-font" type="number" inputmode="numeric" min="${fileReadingFontMin}" max="${fileReadingFontMax}" step="1" aria-label="文件阅读字号" aria-describedby="appearance-file-reading-font-hint"><span>px</span></span></label>
     <div id="appearance-file-reading-font-hint" class="appearance-reading-font-hint"><span>用于变更预览与文件查看。</span><button type="button" id="appearance-file-reading-font-reset" class="text-button" title="恢复为 ${fileReadingFontDefault}px">恢复默认</button></div>
     </div><p class="appearance-hint">选择“系统”使用当前设备默认字体；程序和代码默认均为 14px。</p></section>
     </details>
@@ -1898,14 +2030,21 @@ function openAppearance() {
   ], appearance.backgroundFit));
   const colorFields = [["accent", "强调色"], ["background", "背景"], ["foreground", "前景"]];
   const setColor = (name, color) => { appearance.colors[appearance.theme][name] = color; applyAppearance(true); sync(); };
+  const colorValueSync = new Map();
   for (const [name, label] of colorFields) {
     const row = element("div", "appearance-field");
+    const control = element("div", "appearance-color-control");
     const swatch = button("", `${label}颜色`, () => openAppearanceColorPicker(swatch, label,
       appearance.colors[appearance.theme][name], color => setColor(name, color)), "color-swatch");
     swatch.id = `appearance-${name}`;
     swatch.setAttribute("aria-haspopup", "dialog"); swatch.setAttribute("aria-expanded", "false");
-    swatch.append(element("span", "appearance-color-dot"), element("span", "appearance-color-value"));
-    row.append(element("span", "", label), swatch); $("#appearance-colors").append(row);
+    swatch.append(element("span", "appearance-color-dot"));
+    const hex = element("input", "color-hex appearance-color-value");
+    hex.id = `appearance-${name}-hex`; hex.type = "text"; hex.maxLength = 7;
+    hex.spellcheck = false; hex.autocomplete = "off"; hex.setAttribute("aria-label", `${label}色值`);
+    colorValueSync.set(name, bindAppearanceColorValue(hex, () => appearance.colors[appearance.theme][name], color => setColor(name, color)));
+    control.append(swatch, hex);
+    row.append(element("span", "", label), control); $("#appearance-colors").append(row);
   }
   const sync = () => {
     const selectedMode = appearance.themeMode === "auto" ? "auto" : appearance.theme;
@@ -1933,13 +2072,11 @@ function openAppearance() {
     for (const [name] of colorFields) {
       const color = appearance.colors[appearance.theme][name], swatch = $(`#appearance-${name}`);
       swatch.style.setProperty("--swatch", color);
-      $(".appearance-color-value", swatch).textContent = color.toUpperCase();
+      colorValueSync.get(name)?.();
       swatch.setAttribute("aria-description", color.toUpperCase());
       if (activePopup?.trigger === swatch) activePopup.syncColor?.(color);
     }
-    $("#appearance-font").value = appearance.fontSize;
-    $("#appearance-font").style.setProperty("--range-fill", `${(appearance.fontSize - 10) * 10}%`);
-    $("#appearance-font-value").textContent = `${appearance.fontSize}px`;
+    if (document.activeElement !== $("#appearance-font")) $("#appearance-font").value = appearance.fontSize;
     setSelectValue($("#appearance-preset"), appearance.themePreset);
     for (const [id, value] of [["ui-font", appearance.uiFont], ["code-font", appearance.codeFont]])
       setSelectValue($(`#appearance-${id}`, dialog), value);
@@ -1951,10 +2088,7 @@ function openAppearance() {
     setSelectValue($("#appearance-code-font-weight", dialog), appearance.codeFontWeight);
     renderSessionInstances();
     const readingFontSize = currentFileReadingFontSize();
-    $("#appearance-file-reading-font").value = readingFontSize;
-    $("#appearance-file-reading-font").style.setProperty("--range-fill",
-      `${(readingFontSize - fileReadingFontMin) / (fileReadingFontMax - fileReadingFontMin) * 100}%`);
-    $("#appearance-file-reading-font-value").textContent = `${readingFontSize}px`;
+    if (document.activeElement !== $("#appearance-file-reading-font")) $("#appearance-file-reading-font").value = readingFontSize;
     $("#appearance-file-reading-font-reset").disabled = readingFontSize === fileReadingFontDefault;
   };
   sync.lightReading = syncAutomaticLightSetting.lightReading;
@@ -1980,10 +2114,10 @@ function openAppearance() {
       if (!validFontFamily(value)) { event.target.value = appearance[key]; return; }
       appearance[key] = value; applyAppearance(true);
     };
-  for (const [id, key] of [["ui-font-weight", "uiFontWeight"], ["code-font-weight", "codeFontWeight"],
-    ["code-font-size", "codeFontSize"]]) $(`#appearance-${id}`, dialog).onchange = event => {
+  for (const [id, key] of [["ui-font-weight", "uiFontWeight"], ["code-font-weight", "codeFontWeight"]])
+    $(`#appearance-${id}`, dialog).onchange = event => {
     const value = Number(event.target.value);
-    if (key === "codeFontSize" ? !Number.isInteger(value) || value < 8 || value > 24 : ![400, 500, 600].includes(value)) {
+    if (![400, 500, 600].includes(value)) {
       event.target.value = appearance[key]; return;
     }
     appearance[key] = value; applyAppearance(true);
@@ -2045,12 +2179,12 @@ function openAppearance() {
     appearance.backgroundFit = event.target.value;
     applyAppearance(true); sync();
   };
-  $("#appearance-font").oninput = event => { appearance.fontSize = Number(event.target.value); applyAppearance(true); sync(); };
-  $("#appearance-file-reading-font").oninput = event => {
-    const size = Number(event.target.value);
-    if (!Number.isInteger(size) || size < fileReadingFontMin || size > fileReadingFontMax) return;
-    appearance.fileReadingFontSize = size; applyAppearance(true); sync();
-  };
+  for (const [id, key, min, max] of [["font", "fontSize", 10, 20], ["code-font-size", "codeFontSize", 8, 24],
+    ["file-reading-font", "fileReadingFontSize", fileReadingFontMin, fileReadingFontMax]]) {
+    bindAppearanceFontSize($(`#appearance-${id}`, dialog), min, max,
+      () => key === "fileReadingFontSize" ? currentFileReadingFontSize() : appearance[key],
+      value => { appearance[key] = value; applyAppearance(true); sync(); });
+  }
   $("#appearance-file-reading-font-reset").onclick = () => {
     appearance.fileReadingFontSize = fileReadingFontDefault; applyAppearance(true); sync();
   };
@@ -3178,6 +3312,10 @@ async function openRelatedThread(item, kind, parentThreadId = selectedId, {
 } = {}) {
   if (kind === "subagent" ? !subagentsEnabled() : !sideThreadsEnabled()) return;
   if (relatedSessionView || !validRelatedThreadId(item?.id) || parentThreadId !== selectedId) return;
+  if (kind === "side" && sessionTools?.openSideThread?.(item)) {
+    onViewReady?.();
+    return;
+  }
   const view = rememberRelatedView(item.id, kind, null, item.name || item.title || "",
     { openedFromThreadId: parentThreadId, ephemeral: item.ephemeral });
   if (!view) return;
@@ -4201,6 +4339,198 @@ function closeComposerMenus({ keepContextUsage = false } = {}) {
   closeSkillMenu();
   if (!keepContextUsage) closeContextUsageTip();
 }
+function claudeUsageContext() {
+  const owner = privateInputScope(session), instanceId = activeInstanceId();
+  if (!owner || !isClaude() || !instanceId || !sessionInstanceEnabled(instanceId)
+      || session?.capabilities?.claudeSubscriptionUsage !== true || !connected || pageLeaving || document.hidden
+      || !creating && (!selectedId || thread?.id !== selectedId)) return null;
+  return { key: JSON.stringify([owner, instanceId]), instanceId,
+    payload: { backend: "claude", instanceId, ...(!creating ? { threadId: selectedId } : {}) } };
+}
+function claudeUsageWindows(value, now = Date.now()) {
+  // 用户要求真实账号额度；缺失、过期或非法字段不能显示成 0%，窗口到期后也不推测已恢复的额度。
+  if (value?.source !== "claude-native-usage" || typeof value.observedAtMs !== "number"
+      || !Number.isFinite(value.observedAtMs) || value.observedAtMs <= 0
+      || value.observedAtMs > now + 30000 || now - value.observedAtMs > 180000) return [];
+  return [["fiveHour", "5h", "5 小时"], ["sevenDay", "7d", "7 天"]].flatMap(([key, short, label]) => {
+    const data = value[key], used = data?.usedPercentage;
+    if (typeof used !== "number" || !Number.isFinite(used) || used < 0 || used > 100) return [];
+    const reset = data.resetsAt == null ? null : typeof data.resetsAt === "string" ? Date.parse(data.resetsAt)
+      : typeof data.resetsAt === "number" ? data.resetsAt * (data.resetsAt < 1e12 ? 1000 : 1) : NaN;
+    if (reset != null && (!Number.isFinite(reset) || reset <= now || reset > 8640000000000000)) return [];
+    return [{ key, short, label, used: Math.round(used), resetAt: reset }];
+  });
+}
+function claudeUsageResetText(resetAt, now = Date.now()) {
+  if (resetAt == null) return "重置时间尚未提供";
+  const minutes = Math.ceil(Math.max(0, resetAt - now) / 60000);
+  if (minutes <= 1) return "不到 1 分钟后重置";
+  const days = Math.floor(minutes / 1440), hours = Math.floor(minutes / 60) % 24, rest = minutes % 60;
+  return days ? `${days} 天${hours ? ` ${hours} 小时` : ""}后重置`
+    : `${hours ? `${hours} 小时` : ""}${rest ? ` ${rest} 分钟` : ""}后重置`.trim();
+}
+function closeClaudeUsageTip() {
+  const tip = claudeUsageState?.tip;
+  if (!tip) return;
+  claudeUsageState.tip = null;
+  clearTimeout(tip.closeTimer);
+  tip.trigger.setAttribute("aria-expanded", "false");
+  tip.trigger.removeAttribute("aria-describedby");
+  if (tip.node.hasAttribute("popover") && tip.node.matches(":popover-open")) tip.node.hidePopover();
+  tip.node.remove();
+}
+function resetClaudeUsage() {
+  closeClaudeUsageTip();
+  if (claudeUsageState) {
+    clearTimeout(claudeUsageState.timer);
+    claudeUsageState.controller?.abort();
+  }
+  claudeUsageState = null;
+  const trigger = $("#claude-usage");
+  if (trigger) trigger.hidden = true;
+}
+function fitClaudeUsageTip() {
+  const tip = claudeUsageState?.tip;
+  if (!tip) return;
+  if (!tip.trigger.isConnected || tip.trigger.hidden) { closeClaudeUsageTip(); return; }
+  const viewport = window.visualViewport, padding = 8, gap = 4;
+  const left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0;
+  const width = viewport?.width || window.innerWidth, height = viewport?.height || window.innerHeight;
+  const box = tip.trigger.getBoundingClientRect();
+  if (box.bottom <= top || box.top >= top + height || box.right <= left || box.left >= left + width) {
+    closeClaudeUsageTip(); return;
+  }
+  tip.node.style.width = `${Math.min(244, Math.max(0, width - padding * 2))}px`;
+  const above = Math.max(0, box.top - top - gap - padding);
+  const below = Math.max(0, top + height - box.bottom - gap - padding);
+  const upwards = above >= tip.node.getBoundingClientRect().height || above >= below;
+  tip.node.style.maxHeight = `${Math.min(height * .8, upwards ? above : below)}px`;
+  const actual = tip.node.getBoundingClientRect();
+  tip.node.style.left = `${Math.max(left + padding, Math.min(box.right - actual.width, left + width - actual.width - padding))}px`;
+  tip.node.style.top = `${Math.max(top + padding, Math.min(upwards ? box.top - gap - actual.height : box.bottom + gap,
+    top + height - actual.height - padding))}px`;
+}
+function renderClaudeUsageTip(windows) {
+  const tip = claudeUsageState?.tip;
+  if (!tip) return;
+  if (!windows.length) { closeClaudeUsageTip(); return; }
+  const content = [element("div", "claude-usage-title", "Claude 订阅额度")];
+  for (const window of windows) {
+    const row = element("div", "claude-usage-detail-row");
+    row.append(element("span", "", `${window.label}额度`),
+      element("span", "", `已用 ${window.used}% · 剩余 ${100 - window.used}%`));
+    const track = element("div", "claude-usage-track"), fill = element("div", "claude-usage-fill");
+    track.setAttribute("aria-hidden", "true"); fill.style.width = `${window.used}%`; track.append(fill);
+    const reset = element("div", "claude-usage-reset", claudeUsageResetText(window.resetAt));
+    if (window.resetAt != null) reset.title = new Date(window.resetAt).toLocaleString("zh-CN", { hour12: false });
+    content.push(row, track, reset);
+  }
+  tip.node.replaceChildren(...content);
+  fitClaudeUsageTip();
+}
+function renderClaudeUsage() {
+  const trigger = $("#claude-usage");
+  if (!trigger) return;
+  const windows = claudeUsageWindows(claudeUsageState?.value);
+  trigger.hidden = !windows.length;
+  if (!windows.length) { closeClaudeUsageTip(); return; }
+  const signature = JSON.stringify(windows.map(window => [window.key, window.used]));
+  if (trigger.dataset.usage !== signature) {
+    trigger.dataset.usage = signature;
+    const nodes = [element("span", "", "已用")];
+    for (const [index, window] of windows.entries()) {
+      if (index) nodes.push(element("span", "claude-usage-dot", "·"));
+      const row = element("span", "claude-usage-window");
+      row.append(element("span", "", window.short), element("span", "claude-usage-percent", `${window.used}%`));
+      nodes.push(row);
+    }
+    trigger.replaceChildren(...nodes);
+    trigger.setAttribute("aria-label", `Claude 订阅额度，${windows.map(window => `${window.label}已用 ${window.used}%`).join("，")}，查看重置时间`);
+  }
+  renderClaudeUsageTip(windows);
+}
+function scheduleClaudeUsageUpdate() {
+  const state = claudeUsageState;
+  if (!state || state.pending || state.timer != null) return;
+  const now = Date.now(), windows = claudeUsageWindows(state.value, now);
+  const deadlines = [state.checkedAt + 60000,
+    ...windows.filter(window => window.resetAt != null).map(window => window.resetAt)];
+  state.timer = setTimeout(() => {
+    if (claudeUsageState !== state) return;
+    state.timer = null; syncClaudeUsage();
+  }, Math.max(250, Math.min(...deadlines) - now + 5));
+}
+function syncClaudeUsage() {
+  if (!$("#claude-usage")) return;
+  const context = claudeUsageContext();
+  if (!context) { resetClaudeUsage(); return; }
+  if (claudeUsageState?.key !== context.key) {
+    resetClaudeUsage();
+    claudeUsageState = { key: context.key, value: null, checkedAt: 0, pending: false, controller: null, timer: null, tip: null };
+  }
+  const state = claudeUsageState;
+  renderClaudeUsage();
+  if (!state.pending && Date.now() - state.checkedAt >= 60000) {
+    state.pending = true;
+    state.controller = new AbortController();
+    // 用户要求额度按账号所属实例显示；授权或实例切换后丢弃迟到响应，后台页不轮询。
+    void api("/api/read/claudeUsage", context.payload, undefined, state.controller.signal, { resourcePriority: "background" })
+      .then(result => {
+        if (claudeUsageState !== state) return;
+        state.value = result?.ok === true && result.backend === "claude" && result.instanceId === context.instanceId
+          ? result.usage : null;
+      })
+      .catch(() => { if (claudeUsageState === state) state.value = null; })
+      .finally(() => {
+        if (claudeUsageState !== state) return;
+        state.checkedAt = Date.now(); state.pending = false; state.controller = null;
+        renderClaudeUsage(); scheduleClaudeUsageUpdate();
+      });
+  }
+  scheduleClaudeUsageUpdate();
+}
+function showClaudeUsageTip(pinned = false) {
+  const state = claudeUsageState, trigger = $("#claude-usage"), windows = claudeUsageWindows(state?.value);
+  if (!trigger?.isConnected || trigger.hidden || !windows.length) return;
+  if (state.tip) {
+    clearTimeout(state.tip.closeTimer); state.tip.pinned ||= pinned;
+    renderClaudeUsageTip(windows); return;
+  }
+  closePopup(); closeComposerMenus();
+  const node = element("div", "ui-popup claude-usage-tooltip");
+  node.id = "claude-usage-tooltip"; node.setAttribute("role", "tooltip");
+  if (typeof node.showPopover === "function") node.setAttribute("popover", "manual");
+  state.tip = { trigger, node, pinned, closeTimer: null };
+  trigger.setAttribute("aria-expanded", "true"); trigger.setAttribute("aria-describedby", node.id);
+  document.body.append(node);
+  if (node.hasAttribute("popover")) node.showPopover();
+  renderClaudeUsageTip(windows);
+  node.onpointerenter = () => clearTimeout(state.tip?.closeTimer);
+  node.onpointerleave = scheduleClaudeUsageTipClose;
+}
+function scheduleClaudeUsageTipClose() {
+  const state = claudeUsageState, tip = state?.tip;
+  if (!tip || tip.pinned || document.activeElement === tip.trigger
+      && document.documentElement.dataset.inputModality === "keyboard") return;
+  clearTimeout(tip.closeTimer);
+  tip.closeTimer = setTimeout(() => { if (claudeUsageState === state && state.tip === tip) closeClaudeUsageTip(); }, 120);
+}
+function mountClaudeUsage() {
+  const trigger = $("#claude-usage");
+  trigger.onclick = () => {
+    if (claudeUsageState?.tip?.pinned) closeClaudeUsageTip();
+    else showClaudeUsageTip(true);
+  };
+  trigger.onpointerenter = event => { if (event.pointerType === "mouse") showClaudeUsageTip(); };
+  trigger.onpointerleave = scheduleClaudeUsageTipClose;
+  trigger.onfocus = () => {
+    if (document.documentElement.dataset.inputModality === "keyboard") showClaudeUsageTip();
+  };
+  trigger.onblur = () => { if (!claudeUsageState?.tip?.pinned) scheduleClaudeUsageTipClose(); };
+  trigger.onpointerdown = event => {
+    if (event.isPrimary && event.button === 0 && document.activeElement === $("#prompt")) event.preventDefault();
+  };
+}
 function tokenCount(value) { return value >= 1000 ? `${Number((value / 1000).toFixed(1))}k` : String(Math.round(value)); }
 function contextUsage(info) {
   const modelWindow = info?.modelContextWindow, value = info?.last?.totalTokens;
@@ -4294,7 +4624,8 @@ function showContextUsageTip(pinned = false) {
   const node = element("div", "ui-popup context-usage-tooltip");
   node.id = "context-usage-tooltip"; node.setAttribute("role", "tooltip");
   // 用户要求与 Codex 一致，只显示用量、百分比和容量，不再增加 Claude 或压缩配置说明行。
-  node.append(element("div", "context-usage-value muted"));
+  // 用户要求用量文字颜色对齐 Codex 正文，不能沿用 muted 提示色；仍只显示原有单行用量。
+  node.append(element("div", "context-usage-value"));
   contextUsageTip = { node, trigger, pinned, closeTimer: null };
   trigger.setAttribute("aria-expanded", "true");
   trigger.setAttribute("aria-describedby", node.id);
@@ -4330,6 +4661,84 @@ function mountContextUsage() {
     if (event.isPrimary && event.button === 0 && document.activeElement === $("#prompt")) event.preventDefault();
   };
 }
+function installComposerTooltips() {
+  // 用户要求 hover 信息跟随 Codex 配色；浏览器原生 title 无法应用网页主题，编辑区改用可访问的普通提示层。
+  // 仅接管编辑区和关联菜单的 title，保留原 aria-label；触屏及已有独立上下文提示继续沿用原交互。
+  const scope = ".composer-area,.composer-popover,.composer-add-popup,.queued-message-popup";
+  let pending = null, timer = null, node = null, observer = null;
+  function close() {
+    clearTimeout(timer); timer = null;
+    observer?.disconnect(); observer = null;
+    if (pending) {
+      const { trigger, title } = pending;
+      if (!trigger.hasAttribute("title")) trigger.setAttribute("title", title);
+      const descriptions = (trigger.getAttribute("aria-describedby") || "").split(/\s+/)
+        .filter(id => id && id !== "composer-hover-tooltip");
+      if (descriptions.length) trigger.setAttribute("aria-describedby", descriptions.join(" "));
+      else trigger.removeAttribute("aria-describedby");
+    }
+    node?.remove(); node = null; pending = null;
+  }
+  function target(event) {
+    const trigger = event.target?.closest?.("[title]") || pending?.trigger;
+    return trigger && trigger.contains(event.target) && trigger.closest(scope)
+      && trigger.id !== "context-info" ? trigger : null;
+  }
+  function schedule(trigger) {
+    if (pending?.trigger === trigger) return;
+    close();
+    const title = trigger.getAttribute("title")?.trim();
+    if (!title) return;
+    pending = { trigger, title };
+    trigger.removeAttribute("title");
+    // 原生 Codex 普通提示默认延迟 200ms，避免移动鼠标经过工具栏时连续闪烁。
+    timer = setTimeout(() => {
+      if (!trigger.isConnected || trigger.closest("[hidden],[inert]")) { close(); return; }
+      node = element("div", "composer-tooltip", title);
+      node.id = "composer-hover-tooltip"; node.setAttribute("role", "tooltip");
+      const descriptions = (trigger.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
+      trigger.setAttribute("aria-describedby", [...new Set([...descriptions, node.id])].join(" "));
+      if (typeof node.showPopover === "function") node.setAttribute("popover", "manual");
+      document.body.append(node);
+      if (node.hasAttribute("popover")) node.showPopover();
+      const view = window.visualViewport, left = view?.offsetLeft || 0, top = view?.offsetTop || 0;
+      const width = view?.width || window.innerWidth, height = view?.height || window.innerHeight;
+      const anchor = trigger.getBoundingClientRect(), box = node.getBoundingClientRect();
+      node.style.left = `${Math.max(left + 8, Math.min(anchor.left + (anchor.width - box.width) / 2, left + width - box.width - 8))}px`;
+      const above = anchor.top - box.height - 6;
+      node.style.top = `${Math.max(top + 8, Math.min(above >= top + 8 ? above : anchor.bottom + 6, top + height - box.height - 8))}px`;
+      observer = new MutationObserver(() => {
+        if (!trigger.isConnected || trigger.closest("[hidden],[inert]")) close();
+      });
+      observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "inert"] });
+    }, 200);
+  }
+  document.addEventListener("pointerover", event => {
+    if (event.pointerType !== "mouse") return;
+    const trigger = target(event);
+    if (trigger) schedule(trigger);
+  });
+  document.addEventListener("pointerout", event => {
+    if (pending?.trigger.contains(event.target) && !pending.trigger.contains(event.relatedTarget)) close();
+  });
+  document.addEventListener("focusin", event => {
+    if (document.documentElement.dataset.inputModality !== "keyboard") return;
+    const trigger = target(event);
+    if (trigger) schedule(trigger);
+  });
+  document.addEventListener("focusout", event => {
+    if (pending?.trigger.contains(event.target) && !pending.trigger.contains(event.relatedTarget)) close();
+  });
+  document.addEventListener("pointerdown", close, true);
+  document.addEventListener("keydown", close);
+  document.addEventListener("scroll", close, true);
+  window.addEventListener("resize", close);
+  window.addEventListener("blur", close);
+  window.visualViewport?.addEventListener("resize", close);
+  window.visualViewport?.addEventListener("scroll", close);
+  return { close };
+}
+let composerTooltips = null;
 function compactUsageDescription(usage) {
   return usage ? `（已使用${usage.percent}%/${tokenCount(usage.total)}）` : "";
 }
@@ -4550,10 +4959,13 @@ function fitApprovalArea() {
   const top = viewport?.offsetTop || 0, height = viewport?.height || window.innerHeight;
   const anchorBottom = anchor.getBoundingClientRect().top - gap;
   let contentBottom = anchorBottom;
-  for (let previous = anchor.previousElementSibling; previous; previous = previous.previousElementSibling) {
-    if (previous.hidden) continue;
-    const box = previous.getBoundingClientRect();
-    if (box.width > 0 && box.height > 0) contentBottom = Math.min(contentBottom, box.top - gap);
+  // 用户要求问答卡贴在输入栏上方，可直接覆盖排队、目标等附属信息；普通权限审批仍避让这些内容。
+  if (!root.querySelector(".question-card")) {
+    for (let previous = anchor.previousElementSibling; previous; previous = previous.previousElementSibling) {
+      if (previous.hidden) continue;
+      const box = previous.getBoundingClientRect();
+      if (box.width > 0 && box.height > 0) contentBottom = Math.min(contentBottom, box.top - gap);
+    }
   }
   const bottom = Math.min(contentBottom, top + height - padding);
   root.style.setProperty("--approval-available-height", `${Math.max(0, bottom - top - padding)}px`);
@@ -4562,6 +4974,7 @@ function fitApprovalArea() {
 function refitComposerMenus() {
   fitPopup();
   fitContextUsageTip();
+  fitClaudeUsageTip();
   fitApprovalArea();
   fitGoalEditor();
   for (const id of ["model-settings", "skill-menu"]) {
@@ -4574,6 +4987,7 @@ window.visualViewport?.addEventListener("scroll", refitComposerMenus);
 document.addEventListener("scroll", event => {
   fitApprovalArea();
   fitContextUsageTip();
+  fitClaudeUsageTip();
   if (activePopup && !activePopup.node.contains(event.target)) fitPopup();
   const menu = $("#model-settings");
   if (menu && !menu.hidden && !menu.contains(event.target)) fitComposerMenu(menu);
@@ -5049,11 +5463,13 @@ document.addEventListener("pointerdown", event => {
   document.documentElement.dataset.inputModality = "pointer";
   if (activePopup && !activePopup.node.contains(event.target) && !activePopup.trigger.contains(event.target)) closePopup();
   if (contextUsageTip && !event.target.closest("#context-info,#context-usage-tooltip")) closeContextUsageTip();
+  if (claudeUsageState?.tip && !event.target.closest("#claude-usage,#claude-usage-tooltip")) closeClaudeUsageTip();
   if (!event.target.closest("#model-button,#model-settings,#skill-menu,#prompt,#context-info,#context-usage-tooltip")) closeComposerMenus();
 });
 document.addEventListener("focusin", event => {
   if (activePopup && !activePopup.node.contains(event.target) && !activePopup.trigger.contains(event.target)) closePopup();
   if (contextUsageTip && !event.target.closest("#context-info,#context-usage-tooltip")) closeContextUsageTip();
+  if (claudeUsageState?.tip && !event.target.closest("#claude-usage,#claude-usage-tooltip")) closeClaudeUsageTip();
   if (!event.target.closest("#model-button,#model-settings")) closeModelMenu();
 });
 function checkModelMenuFocus() {
@@ -5076,6 +5492,7 @@ document.addEventListener("keydown", event => {
     if (queueDrag) { event.preventDefault(); finishQueueDrag(); return; }
     if (sessionMenuIsOpen()) { event.preventDefault(); sessionMenu.close(); return; }
     if (contextUsageTip) { event.preventDefault(); closeContextUsageTip(); return; }
+    if (claudeUsageState?.tip) { event.preventDefault(); closeClaudeUsageTip(); return; }
     if (activePopup) { event.preventDefault(); event.stopPropagation(); closePopup(true); return; }
     const modelOpen = $("#model-settings") && !$("#model-settings").hidden;
     const skillOpen = $("#skill-menu") && !$("#skill-menu").hidden;
@@ -5301,8 +5718,9 @@ function renderPopup() {
     query ? "没有匹配的项目，请修改搜索条件" : hasFooter ? "本机暂无可用项目" : "暂无可用选项"));
   choices.forEach(option => {
     const node = button("", option.label, () => {
-      if (trigger.disabled || node.disabled) return;
-      closePopup(true);
+      if (trigger.disabled || node.disabled || activePopup?.trigger !== trigger || !list.contains(node)) return;
+      // 实例多选菜单允许连续选择；旧菜单节点的迟到点击不能覆盖重绘后的选择状态。
+      if (trigger.selectOptions || !option.keepOpen) closePopup(true);
       if (trigger.selectOptions) {
         commitSelectValue(trigger, option.value);
       } else void option.action();
@@ -5310,20 +5728,23 @@ function renderPopup() {
     node.disabled = !!option.disabled; node.tabIndex = -1;
     node.onfocus = () => { if (activePopup) activePopup.index = choices.indexOf(option); };
     node.dataset.value = option.value ?? option.label;
-    node.setAttribute("role", trigger.selectOptions ? "option" : "menuitem");
+    node.setAttribute("role", trigger.selectOptions ? "option" : option.checkable ? "menuitemcheckbox" : "menuitem");
     if (trigger.selectOptions) node.setAttribute("aria-selected", String(trigger.value === option.value));
+    else if (option.checkable) node.setAttribute("aria-checked", String(option.selected));
     if (option.icon) node.append(icon(option.icon));
     const labels = element("span", "popup-option-label");
     labels.append(element("span", "", option.label));
     if (option.description) labels.append(element("small", "muted", option.description));
     node.append(labels);
     if (trigger.selectOptions) node.append(element("span", "choice-check", trigger.value === option.value ? "✓" : ""));
+    else if (option.checkable) node.append(element("span", "choice-check", option.selected ? "✓" : ""));
     (option.footer ? list : options).append(node);
     if (focused === node.dataset.value && !node.disabled) node.focus();
   });
   if (restoreFocus && !list.contains(document.activeElement)) {
     // 动态环境列表变化时只移动键盘焦点，不改选中值，也不启用已失效的目标。
-    (list.querySelector('button[aria-selected="true"]:not(:disabled)') || list.querySelector("button:not(:disabled)"))?.focus();
+    (list.querySelector('button[aria-selected="true"]:not(:disabled),button[aria-checked="true"]:not(:disabled)')
+      || list.querySelector("button:not(:disabled)"))?.focus();
   }
   fitPopup();
 }
@@ -7085,6 +7506,7 @@ function shell() {
   stopRelatedSessionTimers();
   sessionTools?.dispose(); sessionTools = null;
   closeContextUsageTip();
+  resetClaudeUsage();
   approvalSignature = null;
   search = "";
   composerScroll?.dispose(); composerScroll = null;
@@ -7108,11 +7530,13 @@ function shell() {
         <div class="composer-toolbar"><div class="composer-controls"><button id="composer-add" class="icon-button composer-add-button" type="button" aria-label="添加图片、压缩上下文或设置目标" aria-haspopup="menu" aria-expanded="false"></button><button id="prompt-optimize" class="icon-button prompt-optimize-button" type="button" aria-label="优化提示词" aria-busy="false" disabled>✨</button><button id="context-info" class="context-info muted" type="button" aria-label="查看上下文用量" aria-controls="context-usage-tooltip" aria-expanded="false"></button><button id="model-button" class="text-button model-button" type="button" aria-label="选择模型与思考深度" aria-haspopup="menu" aria-controls="model-settings" aria-expanded="false">正在读取模型…</button></div><div class="composer-send"><span id="send-status" class="composer-send-status" role="status" aria-live="polite"></span><button id="send" class="send-button" type="submit" aria-label="发送消息"></button></div></div>
         <div id="model-settings" class="composer-popover" role="menu" aria-label="模型与思考深度" hidden></div>
         <div id="skill-menu" class="composer-popover skill-menu" role="listbox" aria-label="命令与 Skill" hidden></div>
-      </form></div></div>
+      </form><button id="claude-usage" class="claude-usage" type="button" aria-label="查看 Claude 订阅额度" aria-controls="claude-usage-tooltip" aria-expanded="false" hidden></button></div></div>
     </main>
   </div>`;
   configurePromptEditor($("#prompt"));
   mountContextUsage();
+  mountClaudeUsage();
+  composerTooltips ||= installComposerTooltips();
   // 用户要求移除顶部 CLI 连接按钮，不再创建或按会话类型恢复该入口。
   $("#open-sidebar").append(icon("menu"));
   $("#related-session-back").onclick = () => void returnToParentSession().catch(error => notice(error.message, true));
@@ -7174,6 +7598,7 @@ function shell() {
     if (messages && followMessages) messages.scrollTop = messages.scrollHeight;
     fitApprovalArea();
     fitContextUsageTip();
+    fitClaudeUsageTip();
     updateScrollControl();
     scheduleHistoryLoad();
   });
@@ -7310,19 +7735,12 @@ function shell() {
   const searchInput = $("#sidebar-search"), searchToggle = $("#sidebar-search-toggle");
   const typeFilter = $("#sidebar-type-filter");
   typeFilter.popupClassName = "sidebar-type-popup";
-  const typeFilterOptions = () => sessionFilterOptions().map(option => ({
-    ...option, selected: option.value === sessionFilterValue(),
-    action: () => {
-      appearance.sessionFilter = option.value; applyAppearance(true);
-      recentLimit = 40; projectVisibleThreadCounts.clear(); renderSidebar();
-    } }));
   typeFilter.onclick = () => {
-    typeFilter.menuOptions = typeFilterOptions(); typeFilter.value = sessionFilterValue();
-    togglePopup(typeFilter);
+    renderSessionFilter(); togglePopup(typeFilter);
   };
   typeFilter.onkeydown = event => {
     if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
-    event.preventDefault(); typeFilter.menuOptions = typeFilterOptions(); typeFilter.value = sessionFilterValue();
+    event.preventDefault(); renderSessionFilter();
     openPopup(typeFilter, { edge: event.key === "ArrowUp" ? "last" : "first" });
   };
   const setSidebarSearchOpen = open => {
@@ -7364,6 +7782,7 @@ function shell() {
   toolsTrigger.append(icon("tools"));
   sessionTools = mountSessionTools({
     workspace: $(".workspace"), trigger: $("#open-session-tools"),
+    sidePanel: workspaceSidePanel,
     getContext: () => ({ deviceId: session?.device.id, threadId: selectedId, creating,
       projectId: creationProject, readOnly: threadReadOnly(), cacheScope: privateInputScope(session) }),
     cache: workspaceViewCache,
@@ -7746,6 +8165,7 @@ function sidebarAttentionState(item) {
   return side?.active || own === "active" || !own && (type === "active" || type === "inProgress") ? "active" : "idle";
 }
 function renderSidebar() {
+  renderSessionFilter();
   syncSideThreadUnread();
   const root = $("#sidebar-content");
   if (!root || !sidebar) return;
@@ -7760,15 +8180,6 @@ function renderSidebar() {
   const focusedMenu = document.activeElement.classList.contains("row-menu-button");
   if (popupState) closePopup();
   root.replaceChildren();
-  const filter = sessionFilterValue();
-  const typeFilter = $("#sidebar-type-filter");
-  if (typeFilter) {
-    const instance = availableSessionInstances().find(value => value.id === filter);
-    const label = filter === "all" ? "全部会话" : instance?.label || "实例暂不可用";
-    typeFilter.replaceChildren(icon(instance && ["codex", "claude"].includes(instance.backend) ? instance.backend : "allSessions"));
-    typeFilter.dataset.backend = instance?.backend || "all"; typeFilter.title = label;
-    typeFilter.setAttribute("aria-label", `筛选会话实例：${label}`);
-  }
   // 用户要求按会话实例筛选所有分组，并与实例开关取交集；保留原快照和未读状态。
   const typeMatches = item => sessionTypeVisible(item);
   const preferences = {
@@ -8172,7 +8583,9 @@ function loadMessageSkillChoices(items) {
 async function markVisibleThreadRead(id = selectedId, { opened = false } = {}) {
   if (!id || id !== selectedId || thread?.id !== id || threadActionReadOnly("markRead", id) || !connected
       || !historyInitialized || historyError || transcriptChecking
-      || threadDeletionLocked(id) || threadDeleted(id) || document.hidden || !opened && !followMessages) return;
+      || threadDeletionLocked(id) || threadDeleted(id) || document.hidden
+      || document.documentElement?.dataset?.workspaceSidePanelVisible === "false"
+      || !opened && !followMessages) return;
   if (readMarkRequests.has(id)) return readMarkRequests.get(id);
   const deviceId = session.device.id, readVersion = messageVersion;
   recentPrioritySelectionSuppressions.add(id);
@@ -12040,6 +12453,30 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
     snapshot = { ...snapshot, items: snapshot.items.filter(item => !item.remoteHistoryContext) };
   // 跨页补投影的轮次开头和压缩输入不能充当当前页的定位点。
   const snapshotAnchor = snapshot.items?.find(item => !item.remoteCompactionInput && !item.remoteHistoryContext)?.id || null;
+  if (snapshot._nativeUserId && snapshot.itemsComplete === true) {
+    // Claude 每页提供完整轮次；不能套用 Codex 增量“保留所有新条目”的规则，否则正式正文到达后仍留下旧终端预览。
+    // 读取开始后收到的正式通知优先；同一正文基线内只合并可延长的临时气泡，不混合两份正式内容。
+    const authoritative = current && (turnVersions.get(snapshot.id) || 0) > readVersion ? current : snapshot;
+    const isPreview = item => item._nativePreview === true
+      || typeof item.id === "string" && item.id.startsWith("native-live-");
+    const items = (authoritative.items || []).filter(item => !isPreview(item));
+    const basis = authoritative._nativePreviewBasis;
+    let preview = null;
+    if (["inProgress", "pending", "unknown"].includes(authoritative.status) && !authoritative._nativeDone
+        && /^[0-9a-f]{64}$/i.test(basis || "")) {
+      for (const candidate of [authoritative, current]) {
+        if (!candidate || candidate._nativeUserId !== authoritative._nativeUserId
+            || candidate._process !== authoritative._process || candidate._nativePreviewBasis !== basis) continue;
+        const next = candidate.items?.find(item => item._nativePreview === true
+          && item.id === `native-live-${authoritative._nativeUserId}` && typeof item.text === "string");
+        if (next && (!preview || next.text.replace(/\s/gu, "").startsWith(preview.text.replace(/\s/gu, ""))))
+          preview = next;
+      }
+    }
+    if (preview) items.push(preview);
+    return enrichTurnTranscriptEvents({ ...authoritative, items,
+      itemsCursorAnchor: items.find(item => !item.remoteCompactionInput)?.id || snapshotAnchor });
+  }
   if (!current) return enrichTurnTranscriptEvents({
     ...snapshot, items: [...contextItems, ...(snapshot.items || [])], itemsCursorAnchor: snapshotAnchor
   });
@@ -13037,7 +13474,8 @@ function renderAsyncQuestion(card, request, requestThreadId) {
     if (!draft.has(question.id)) draft.set(question.id, options[0] || "");
     const choices = element("div", "async-question-options");
     const input = element("textarea", "async-question-input");
-    input.rows = 2; input.placeholder = options.length ? "或输入其他回答…" : "输入你的回答…";
+    // 用户要求问答菜单紧凑：自由回答默认一行，与 CSS 的 34px 最小高度配合，仍可输入多行或手动拉高。
+    input.rows = 1; input.placeholder = options.length ? "或输入其他回答…" : "输入你的回答…";
     input.setAttribute("aria-label", `${question.question || question.header}：其他回答`);
     input.value = options.includes(draft.get(question.id)) ? "" : draft.get(question.id);
     for (const [optionIndex, option] of (question.options || []).entries()) {
@@ -13664,6 +14102,7 @@ function updateComposer() {
   $("#model-button").title = modelLoadError || `模型：${name}${effort ? ` · 思考深度：${effortLabels[effort] || effort}` : ""}`;
   syncRelatedModelDisplay();
   updateContextUsage();
+  syncClaudeUsage();
   if ($("#skill-menu") && !$("#skill-menu").hidden) renderSkillMenu();
   if (threadReadOnly()) closeComposerMenus({ keepContextUsage: true });
   refitComposerMenus();
@@ -14178,7 +14617,8 @@ function applyRemoteRuntime(runtime) {
 }
 function receiveClaudeHistory(params) {
   const id = params.threadId;
-  if (id !== selectedId) { scheduleSidebarRefresh(); return; }
+  // 临时正文不改变其他会话的标题、未读或队列；只让正式快照触发侧栏读取，避免流式片段反复刷新列表。
+  if (id !== selectedId) { if (!params.preview) scheduleSidebarRefresh(); return; }
   if (!params.thread || params.thread.id !== id || !Array.isArray(params.turns)) return;
   const version = ++messageVersion;
   if (!params.preview) {
@@ -14189,12 +14629,33 @@ function receiveClaudeHistory(params) {
   // 用户要求同步后旧内部摘要气泡消失；完整快照给出全部有效轮次 ID，仅移除已失效的原生轮次，不删除待发送预览。
   if (!params.preview) retireClaudeHistoryTurns(params.turnIds, version, version);
   // 共享会话提供同一原生历史的完整投影；替换对应轮次，CLI 消息不依赖刷新或再次发送。
+  let applied = false;
   for (const snapshot of [...params.turns].reverse()) {
     if (!snapshot?.id || !Array.isArray(snapshot.items)) continue;
-    const value = { ...snapshot, items: normalizeDisplayedTurnItems(snapshot.items) };
+    let value = { ...snapshot, items: normalizeDisplayedTurnItems(snapshot.items) };
+    if (params.preview) {
+      // 用户要求 Claude 正文稳定：终端预览只能更新当前临时气泡，不能用其附带的旧快照覆盖正式消息。
+      // 原生正文基线变化、连接切换或轮次结束后，迟到预览必须丢弃；旧服务无基线时等待正式历史。
+      const current = turns.get(value.id), basis = value._nativePreviewBasis;
+      if (!current || current.status !== "inProgress" || !/^[0-9a-f]{64}$/i.test(basis || "")
+          || current._nativePreviewBasis !== basis || !current._process || current._process !== value._process
+          || current._nativeUserId !== value._nativeUserId) continue;
+      const id = `native-live-${current._nativeUserId}`;
+      const preview = value.items.find(item => item.id === id && item.type === "agentMessage"
+        && item._nativePreview === true && typeof item.text === "string" && item.text.trim());
+      if (!preview) continue;
+      const previous = current.items?.find(item => item.id === id && item._nativePreview === true);
+      if (previous) {
+        const before = previous.text.replace(/\s/gu, ""), after = preview.text.replace(/\s/gu, "");
+        if (before === after || !after.startsWith(before)) continue;
+      }
+      value = { ...current, items: [...(current.items || []).filter(item => item.id !== id), preview] };
+    }
     turns.set(value.id, enrichTurnTranscriptEvents(value));
-    turnVersions.set(value.id, version);
+    applied = true;
+    if (!params.preview) turnVersions.set(value.id, version);
     for (const item of value.items) {
+      if (params.preview && item._nativePreview !== true) continue;
       itemVersions.set(`${value.id}:${item.id}`, version);
       partialItems.delete(`${value.id}:${item.id}`);
     }
@@ -14205,7 +14666,7 @@ function receiveClaudeHistory(params) {
     if (cursor !== undefined) historyCursor = cursor;
   }
   // 正文流只刷新消息；完整原生快照再保存缓存和更新侧栏，避免逐字重复写历史。
-  if (params.preview) { scheduleMessages(); return; }
+  if (params.preview) { if (applied) scheduleMessages(); return; }
   reconcileSentMessageDisplays(id, thread.queuedMessages);
   rememberThreadDisplay(thread);
   rememberTranscript();
@@ -14480,6 +14941,7 @@ function receive(event) {
   }
 }
 function disconnect() {
+  resetClaudeUsage();
   clearPendingFeedbackTimer();
   $("#video-preview-dialog")?.close();
   clearRemoteChannels();
@@ -14667,6 +15129,7 @@ function suspendPage() {
   sessionMenu?.close(); stopRelatedSessionTimers();
   rememberPageInputs();
   closeContextUsageTip();
+  resetClaudeUsage();
   pageLeaving = true;
   retireForegroundReads();
   stopCatalogRefresh();
@@ -14867,6 +15330,17 @@ if (isAndroidContainer()) {
     openNotificationThread(detail.threadId);
   });
 }
+window.addEventListener("message", event => {
+  if (!workspaceSidePanel || event.source !== window.parent || event.origin !== location.origin
+      || event.data?.type !== "codex-elves-side-panel-visibility" || typeof event.data.visible !== "boolean") return;
+  // iframe 的 document.hidden 不随标签隐藏改变；只对实际显示的侧边标签确认已读，后台标签继续保留未读状态。
+  document.documentElement.dataset.workspaceSidePanelVisible = String(event.data.visible);
+  if (event.data.visible) void markVisibleThreadRead().catch(() => {});
+});
+window.addEventListener("storage", event => {
+  if (!workspaceSidePanel || event.key !== "codex-elves-web-appearance") return;
+  appearance = readAppearance(); applyAppearance();
+});
 window.addEventListener("online", () => {
   retryConnectionRecovery({ recoveryProbe: true });
 });
@@ -14879,6 +15353,7 @@ window.addEventListener("offline", () => {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     stopCatalogRefresh();
+    resetClaudeUsage();
     if (session) { rememberTranscript(); rememberReadingPosition(); }
     retireForegroundReads();
     stopActivityTimer();
@@ -14892,6 +15367,7 @@ document.addEventListener("visibilitychange", () => {
   }
   recordRuntimeDiagnostic("page.visible");
   if (pageLeaving) { resumePage(); return; }
+  syncClaudeUsage();
   syncActivityTimer();
   syncGoalLiveTimer();
   scheduleRelatedSessionCheck();

@@ -3636,6 +3636,58 @@ assert.deepEqual(h.serverItems[0].input.at(-1),mention);
 }
 
 #[test]
+fn queued_edit_rspack_current_build_preserves_input_and_fifo_on_save_and_cancel() {
+    run_native_queue_edit_consumption_contract(
+        r#"
+const fixture=rspackQueueFixture.compatibleVersions["26.1106.6628.0"];
+assert.equal(nodeCrypto.createHash("sha256").update(fixture.serializer.source).digest("hex"),fixture.serializer.sha256);
+assert.equal(nodeCrypto.createHash("sha256").update(fixture.merger.source).digest("hex"),fixture.merger.sha256);
+// 已核对的新版本仅改变压缩绑定名；比较原文替换结果，不能把此归一化用于运行时放行未知函数。
+assert.equal(fixture.serializer.source.replace(/\bg\b/g,"CONTEXT_IMPORT").replace(/\b_\b/g,"SERIALIZED"),
+  rspackQueueFixture.serializer.source.replace(/\b_\b/g,"CONTEXT_IMPORT").replace(/\bg\b/g,"SERIALIZED"));
+assert.equal(fixture.merger.source.replace(/\bg\b/g,"MERGED"),
+  rspackQueueFixture.merger.source.replace(/\b_\b/g,"MERGED"));
+for(const action of ["commit","cancel"])for(const idle of [false,true]){
+  const h=await createFullNativeQueueHarness({rspack:true}),a=h.adapter();
+  h.nativeModule=h.createRspackModule({serializerSource:fixture.serializer.source,mergerSource:fixture.merger.source});
+  const image={id:"original-image",src:"https://fixture.invalid/original.png",filename:"original.png"};
+  const original=[{type:"text",text:"原文\n",text_elements:[]},
+    {type:"image",url:image.src,detail:"high"},{type:"skill",name:"保留技能",path:"/skills/fixture/SKILL.md"}];
+  const entry=await h.beginEdit(a,{input:original,images:[image],leftAnchor:!idle,rightAnchor:!idle});
+  const token=entry.token,originalToken=structuredClone(token);
+  if(idle)h.finishBase();
+  const result=await a.api.finish({threadId:"thread",editId:"edit",prompt:"修改后"},action);
+  assert.equal(result.ok,true,JSON.stringify({action,idle,result}));
+  assert.equal(result.editState,action==="cancel"?"canceled":"committed");
+  assert.deepEqual(token,originalToken,"保存和取消均不能改写原恢复令牌");
+  if(!idle){
+    assert.deepEqual(h.serverItems.map(item=>item.clientUserMessageId),["left-client","original-logical","right-client"]);
+    await h.completeBaseAndDrain();
+  }
+  const accepted=h.accepted().filter(item=>item.clientId==="original-logical");
+  assert.equal(accepted.length,1,"原逻辑消息最终只执行一次");
+  assert.deepEqual(accepted[0].content,action==="cancel"?original:
+    [{...original[0],text:"修改后\n"},original[1],original[2]]);
+  assert.deepEqual(h.native.readMessages("thread"),[]);
+  await a.api.finish({threadId:"thread",editId:"edit",prompt:"修改后"},action);
+  assert.equal(h.accepted().filter(item=>item.clientId==="original-logical").length,1,"重复回执不能重放");
+}
+for(const changed of ["mixed-versions","serializer-mutation","merger-mutation"]){
+  const h=await createFullNativeQueueHarness({rspack:true}),a=h.adapter();
+  h.nativeModule=h.createRspackModule({
+    serializerSource:changed==="mixed-versions"?rspackQueueFixture.serializer.source:
+      changed==="serializer-mutation"?fixture.serializer.source.replace("function(","function ("):fixture.serializer.source,
+    mergerSource:changed==="merger-mutation"?fixture.merger.source.replace("function(","function ("):fixture.merger.source});
+  const result=await h.beginEdit(a,{expectBeginOk:false});
+  assert.equal(result.code,503,changed);
+  assert.equal(h.serverItems[0].id,"original-physical");
+  assert.equal(h.calls.delete+h.calls.add+h.calls.start+h.calls.steer+h.calls.restore,0);
+}
+"#,
+    );
+}
+
+#[test]
 fn queued_edit_rspack_rejects_hidden_context_and_keeps_empty_context_compatible() {
     run_native_queue_edit_consumption_contract(
         r#"
@@ -4614,6 +4666,8 @@ function createRspackQueuedInputModule(h,prepare,{serializerSource=rspackQueueFi
     o:{nt:()=>null,o_:(text)=>text,Y5:(text)=>text},
     m:{Dh:text=>text.trimEnd(),m5:(_previous,text)=>text}
   };
+  // 26.1106 的同一原生上下文依赖仅由 _ 重命名为 g，冻结函数本体保持安装包原文。
+  dependencies.g=dependencies._;
   const compile=body=>new Function("dependencies",`with(dependencies){return (${body});}`)(dependencies);
   const module={pJ:compile(serializerSource),rc:compile(mergerSource),
     async prepareQueuedMessage(options,phase){
@@ -10504,8 +10558,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = include_str!("../../../assets/remote-access/native.js");
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 144"));
-    assert!(script.contains("version: 144, call"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 146"));
+    assert!(script.contains("version: 146, call"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));
@@ -10690,6 +10744,81 @@ function locate(scripts, ambiguous = false) {
     assert!(
         output.status.success(),
         "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn remote_native_subagent_bindings_accept_indexed_items_and_direct_rspack_exports() {
+    let source = include_str!("../../../assets/remote-access/native.js");
+    let from = source
+        .find("  async function nativeResource(name)")
+        .unwrap();
+    let to = source.find("  async function nativeSideState(").unwrap();
+    let program = r###"
+const assert=require("node:assert/strict"),vm=require("node:vm");
+const bindings=__BINDINGS__;
+const stateSource='State(e,t,n){let discovery=(0,s.bD)(scope,e=>null,{onMount:(e,t)=>client.rpc.discoverSubagentDescendantSnapshot("fixture")}),publicRows=(0,s.i1)(scope,(e,{get:t})=>{let{rows:r,conversations:c,parentActivity:p}=t(details,e);return r.map(e=>e)}),details=(0,s.i1)(scope,(e,{get:t})=>build({getIndexedSubagentItems:items,sourceLinkedThreadsDiscoveryComplete:true})),keys=(0,s.i1)(scope,(e,{get:t})=>{let{rows:r}=t(details,e);return r.map(e=>e.parentTurnKey)});let decoy={An:details};othern.d(t,{},{An:details});n.d(other,{},{An:details});n.d(t,{},{An:publicRows,Rj:discovery,fQ:keys})}';
+const utilitySource='Utility(e,t,n){build({getIndexedSubagentItems:items,sourceLinkedThreadsDiscoveryComplete:true})}';
+function factory(source){return vm.runInNewContext("({"+source+"})")[source.slice(0,source.indexOf("("))];}
+function create(state=stateSource){
+  const rows={read(){}},snapshot={read(){}},keys={read(){}};
+  function sortRows(rows){return[...rows].sort((a,b)=>(b.recencyAtMs??0)-(a.recencyAtMs??0))}
+  function formatPath(path){return path.split("/").filter(value=>value!=="root").join(" ").toUpperCase()}
+  let executed=0;
+  const runtime=()=>{executed++;throw Error("unloaded factory must not run")};
+  runtime.c={state:{exports:{An:rows,Rj:snapshot,fQ:keys}},utility:{exports:{sortRows}},format:{exports:{formatPath}}};
+  runtime.m={state:factory(state),utility:factory(utilitySource),format:function(){},
+    unloaded:factory(stateSource)};
+  const context=vm.createContext({nativeRspackRuntime:{runtime,resource:"app://-/assets/1.fixture.js"},
+    nativeRspackSnapshot:null,nativeResourceSources:new Map(),nativeModuleSnapshots:new Map(),
+    relatedNativeState:null,appScope:{get(){assert.fail("binding must not read or modify desktop state")}},
+    failure:(code,message)=>Object.assign(new Error(message),{code})});
+  vm.runInContext(bindings,context);
+  return {context,runtime,rows,snapshot,keys,sortRows,formatPath,get executed(){return executed}};
+}
+(async()=>{
+  const h=create(),resolved=await vm.runInContext("nativeRelatedState()",h.context);
+  assert.equal(resolved.rowsFamily,h.rows,"选择原生公开行信号，不使用未导出的详情或父轮次 key");
+  assert.equal(resolved.snapshotFamily,h.snapshot);
+  assert.equal(resolved.sortRows,h.sortRows);
+  assert.equal(resolved.formatAgentPath,h.formatPath);
+  assert.equal(h.executed,0,"只读取已加载模块的公开导出");
+  const record={source:stateSource,module:h.runtime.c.state.exports,rspack:true};
+  h.context.record=record;
+  assert.equal(vm.runInContext('nativeExport(record,"publicRows")',h.context),h.rows);
+  assert.throws(()=>vm.runInContext('nativeExport(record,"details")',h.context),/无法唯一识别/,
+    "内部对象、其他加载器及其他 exports 对象不能冒充模块导出");
+  h.context.legacy={source:"getIndexedSubagentProgress:progress;export{rows as list};",module:{list:h.rows}};
+  assert.equal(vm.runInContext('nativeSubagentRowsFamily(legacy,"rows")',h.context),h.rows,
+    "旧版 ESM 的直接行信号继续可用");
+  h.context.getter={source:"Getter(e,t,n){n.d(t,{An:()=>publicRows})}",module:{An:h.rows},rspack:true};
+  assert.equal(vm.runInContext('nativeExport(getter,"publicRows")',h.context),h.rows,
+    "旧版 Rspack getter 导出继续可用");
+  const ambiguous=create(stateSource.replace("An:publicRows,","An:publicRows,Other:publicRows,"));
+  ambiguous.runtime.c.state.exports.Other=ambiguous.rows;
+  await assert.rejects(vm.runInContext("nativeRelatedState()",ambiguous.context),/无法唯一识别/);
+  const hidden=create(stateSource.replace("An:publicRows,",""));
+  await assert.rejects(vm.runInContext("nativeRelatedState()",hidden.context),/无法唯一识别/,
+    "缺失公开行导出时不能猜测私有状态");
+  const changed=create(stateSource.replace("{rows:r,conversations:c,parentActivity:p}=","{rows:r,conversations:c}="));
+  await assert.rejects(vm.runInContext("nativeRelatedState()",changed.context),/子代理行接口无法唯一识别/);
+  assert.equal(ambiguous.executed+hidden.executed+changed.executed,0);
+})().catch(error=>{console.error(error);process.exitCode=1});
+"###;
+    let program = program.replace(
+        "__BINDINGS__",
+        &serde_json::to_string(&source[from..to]).unwrap(),
+    );
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(program)
+        .output()
+        .expect("应能执行子代理原生模块绑定检查");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

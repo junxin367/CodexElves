@@ -44,6 +44,7 @@ export function mountSessionMenu({
   let disposed = false, opened = false, owner = "", authorization = "", context = null, cached = null;
   let suspended = false;
   let ticker = null, press = null, suppressedClick = null, blockedContext = null;
+  let positionFrame = null, positionSignature = "";
   const entries = new Map(), maxEntries = 32, refreshAgeMs = 30000;
   let contextSource = null, contextItem = null, contextPosition = null, message = "";
   const times = [], mutationButtons = new Map(), listeners = [];
@@ -197,8 +198,9 @@ export function mountSessionMenu({
     if (restoreFocus && source?.isConnected && opened) source.focus();
   }
   function close(restoreFocus = false, force = false) {
-    // PC 不因外部点击、Escape、切换会话或普通工具操作关闭；授权变化和销毁仍必须强制清理。
+    // PC 不因外部点击、Escape、切换会话或普通工具操作关闭；授权变化、触发按钮失效和销毁仍须清理。
     if (!force && pinned()) return;
+    stopPositionTracking();
     if (!opened) { cancelPress(); return; }
     opened = false; suspended = false; clearInterval(ticker); ticker = null; cancelPress(); hideContext();
     trigger.setAttribute("aria-expanded", "false");
@@ -211,6 +213,7 @@ export function mountSessionMenu({
   }
   function suspend() {
     if (!opened || suspended) return;
+    stopPositionTracking();
     suspended = true; cancelPress(); hideContext();
     trigger.setAttribute("aria-expanded", "false");
     if (layer.hasAttribute("popover")) {
@@ -229,10 +232,11 @@ export function mountSessionMenu({
       try { layer.showPopover(); } catch { layer.removeAttribute("popover"); }
     }
     trigger.setAttribute("aria-expanded", "true");
+    startPositionTracking();
     (window.requestAnimationFrame || (cb => setTimeout(cb, 16)))(() => {
       if (opened && !suspended) {
         fit();
-        focusEdge(false);
+        if (opened && !suspended) focusEdge(false);
       }
     });
   }
@@ -452,6 +456,32 @@ export function mountSessionMenu({
     }
     if (opened) fit();
   }
+  function stopPositionTracking() {
+    if (positionFrame != null) {
+      if (window.cancelAnimationFrame) window.cancelAnimationFrame(positionFrame);
+      else clearTimeout(positionFrame);
+    }
+    positionFrame = null; positionSignature = "";
+  }
+  function anchorPositionSignature(box, view) {
+    return [box.left, box.top, box.right, box.bottom, box.width, box.height,
+      view.left, view.top, view.width, view.height].join(",");
+  }
+  function startPositionTracking() {
+    if (positionFrame != null || disposed || !opened || suspended || document.hidden) return;
+    // 用户要求会话菜单跟随触发按钮：侧栏和右侧面板移动、关联页动画不一定产生窗口 resize。
+    // 只在菜单可见时比较锚点坐标；位置不变不写样式，关闭、挂起和后台页面均取消逐帧跟踪。
+    const requestFrame = callback => window.requestAnimationFrame
+      ? window.requestAnimationFrame(callback) : setTimeout(callback, 16);
+    const follow = () => {
+      positionFrame = null;
+      if (disposed || !opened || suspended || document.hidden) return;
+      if (!trigger.isConnected || trigger.disabled || trigger.hidden
+          || anchorPositionSignature(trigger.getBoundingClientRect(), viewport()) !== positionSignature) fit();
+      if (!disposed && opened && !suspended && !document.hidden) positionFrame = requestFrame(follow);
+    };
+    positionFrame = requestFrame(follow);
+  }
   function viewport() {
     const view = window.visualViewport;
     return { top: view?.offsetTop || 0, left: view?.offsetLeft || 0,
@@ -459,18 +489,17 @@ export function mountSessionMenu({
   }
   function fit() {
     if (!opened || suspended) return;
-    if (trigger.closest?.(".related-session-view")) return;
-    if (!trigger.isConnected || trigger.disabled || trigger.hidden) { close(); return; }
+    if (!trigger.isConnected || trigger.disabled || trigger.hidden) { close(false, true); return; }
     const view = viewport(), box = trigger.getBoundingClientRect(), padding = 8;
     if (box.width === 0 && box.height === 0) {
-      (window.requestAnimationFrame || (cb => setTimeout(cb, 16)))(() => { if (opened && !suspended) fit(); });
-      return;
+      close(false, true); return;
     }
     if (box.bottom <= view.top || box.top >= view.top + view.height
-        || box.right <= view.left || box.left >= view.left + view.width) { close(); return; }
-    // Keep the menu compact on desktop and tablet while retaining a viewport
-    // relative width on phones where a fixed 300px panel would not fit.
-    const phoneViewport = Math.min(view.width, view.height) < 600;
+        || box.right <= view.left || box.left >= view.left + view.width) { close(false, true); return; }
+    positionSignature = anchorPositionSignature(box, view);
+    // PC 沿用 300px 宽度，不能因窗口高度低于 600px 而改用手机比例；
+    // 手机短边低于 600px 时仍取视口宽度的 65%，两侧至少保留 8px。
+    const phoneViewport = !desktop() && Math.min(view.width, view.height) < 600;
     const width = phoneViewport
       ? Math.max(0, Math.min(view.width * .65, view.width - padding * 2))
       : Math.max(0, Math.min(300, view.width - padding * 2));
@@ -483,7 +512,8 @@ export function mountSessionMenu({
     menu.style.maxHeight = `${Math.max(0, Math.min(480, view.height * .8, view.top + view.height - top - padding))}px`;
     if (!actionMenu.hidden) {
       const source = contextSource.getBoundingClientRect();
-      const x = contextPosition?.x ?? source.right, y = contextPosition?.y ?? source.bottom;
+      const x = contextPosition ? source.left + contextPosition.x : source.right;
+      const y = contextPosition ? source.top + contextPosition.y : source.bottom;
       actionMenu.style.width = `${Math.min(180, view.width - padding * 2)}px`;
       const rect = actionMenu.getBoundingClientRect();
       actionMenu.style.left = `${Math.max(view.left + padding, Math.min(x, view.left + view.width - rect.width - padding))}px`;
@@ -492,9 +522,13 @@ export function mountSessionMenu({
   }
   function showContext(button, item, expected, position = null) {
     if (!opened || !owns(expected) || !canMutate(context) || typeof closeSideThread !== "function") return;
-    hideContext(); contextSource = button; contextItem = item; contextPosition = position;
+    hideContext(); contextSource = button; contextItem = item;
+    const box = button.getBoundingClientRect();
+    // 操作子菜单也按行内偏移跟随，不能在主菜单移动后停留于旧的屏幕坐标。
+    contextPosition = position ? { x: position.x - box.left, y: position.y - box.top } : null;
     button.setAttribute("aria-expanded", "true");
-    actionMenu.hidden = false; closeAction.disabled = false; fit(); closeAction.focus();
+    actionMenu.hidden = false; closeAction.disabled = false; fit();
+    if (opened && !actionMenu.hidden) closeAction.focus();
   }
   function bindSideThread(button, item, expected) {
     button.setAttribute("aria-haspopup", "menu"); button.setAttribute("aria-expanded", "false");
@@ -588,12 +622,14 @@ export function mountSessionMenu({
     const value = syncContext(); restore(entryFor(value)); opened = true; layer.hidden = false;
     (trigger.closest("dialog") || document.body).append(layer);
     render();
+    if (!opened) return Promise.resolve(null);
     if (layer.hasAttribute("popover")) {
       try { layer.showPopover(); } catch { layer.removeAttribute("popover"); }
     }
     trigger.setAttribute("aria-expanded", "true");
-    fit(); if (options?.focus !== false) focusEdge(options?.edge === "last");
+    fit(); if (opened && options?.focus !== false) focusEdge(options?.edge === "last");
     if (!opened) return Promise.resolve(null);
+    startPositionTracking();
     ticker = setInterval(() => {
       syncContext();
       if (opened) {
@@ -692,7 +728,10 @@ export function mountSessionMenu({
     listen(window.visualViewport, "resize", fit); listen(window.visualViewport, "scroll", fit);
   }
   listen(window, "blur", () => cancelPress({ suppress: true, blockContext: true }));
-  listen(document, "visibilitychange", () => { if (document.hidden) close(); });
+  listen(document, "visibilitychange", () => {
+    if (document.hidden) { stopPositionTracking(); close(); }
+    else if (opened && !suspended) { fit(); startPositionTracking(); }
+  });
   syncContext();
   return { toggle, open, close, suspend, resume, refresh, reposition: fit,
     isOpen: () => opened && !suspended, isSuspended: () => opened && suspended,

@@ -123,11 +123,16 @@ impl RemoteQueue {
         let turn = &turns[index];
         // 用户要求引导完成后队列自然续发：CLI 可能把完成回执记在后续提示轮次。
         // 同一顺序历史中后续轮次已完成，也确认此前受理请求结束；不按提示文案识别，不解除既有暂停。
-        if turns[index..]
+        if let Some(ended) = turns[index..]
             .iter()
-            .any(|turn| turn["_nativeDone"] == true)
+            .find(|turn| turn["_nativeDone"] == true || turn["status"] == "failed")
         {
             self.awaiting_turn = None;
+            // 原生中断也带结束标记，只有正常完成允许续发；中断或失败必须保持暂停，不能误启动下一条。
+            if matches!(ended["status"].as_str(), Some("interrupted" | "failed")) && !self.paused {
+                self.paused = true;
+                self.revision += 1;
+            }
         } else if matches!(status["tempo"].as_str(), Some("active" | "blocked")) {
             self.awaiting_started = true;
         } else if self.awaiting_started
@@ -366,6 +371,21 @@ impl Claude {
         payload["model"] = json!(model);
         payload["reasoningEffort"] = json!(effort);
         let payload_hash = fingerprint(&payload);
+        // 用户要求以当前执行状态决定排队：发送前刷新同一连接的原生快照，不能沿用上轮 active 缓存。
+        // 此处仅查询；失败时本次消息尚未准入，必须保留草稿，不能转成送达未知或创建队列项。
+        process
+            .control(json!({"subtype":"shared_sync"}), Some(authorization))
+            .await
+            .map_err(|failure| {
+                if failure
+                    .downcast_ref::<ApiError>()
+                    .is_some_and(|e| matches!(e.code, 401 | 403))
+                {
+                    failure
+                } else {
+                    error(503, "暂时无法核对 Claude 当前执行状态，本次消息尚未投递")
+                }
+            })?;
         authorization.check().await?;
         let direct = self
             .change(|saved| {
@@ -899,6 +919,9 @@ mod tests {
         Rejected,
         ControlRejected,
         Unknown,
+        SyncIdle,
+        SyncActive,
+        SyncRejected,
     }
 
     async fn fixture() -> (
@@ -959,6 +982,49 @@ mod tests {
             while let Ok(Some(line)) = lines.next_line().await {
                 let frame: Value = serde_json::from_str(&line).unwrap();
                 let request = &frame["request"];
+                if request["subtype"] == "shared_sync" {
+                    let next = {
+                        let mut plan = plan.lock().await;
+                        if matches!(
+                            plan.front(),
+                            Some(Reply::SyncIdle | Reply::SyncActive | Reply::SyncRejected)
+                        ) {
+                            plan.pop_front()
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(state @ (Reply::SyncIdle | Reply::SyncActive)) = next
+                        && let Some(service) = weak.upgrade()
+                    {
+                        service
+                            .change(|saved| {
+                                let c = saved.conversations.get_mut(&id).unwrap();
+                                let active = matches!(state, Reply::SyncActive);
+                                c.native_status =
+                                    json!({"tempo":if active {"active"} else {"idle"}});
+                                c.turns.last_mut().unwrap()["status"] =
+                                    json!(if active { "inProgress" } else { "completed" });
+                                Ok(())
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    if let Some(sender) = channel
+                        .pending
+                        .lock()
+                        .await
+                        .remove(frame["request_id"].as_str().unwrap())
+                    {
+                        let response = if matches!(next, Some(Reply::SyncRejected)) {
+                            Err(ApiError::new(503, "状态查询失败").after_admission().into())
+                        } else {
+                            Ok(json!({}))
+                        };
+                        let _ = sender.send(response);
+                    }
+                    continue;
+                }
                 record.lock().await.push(request.clone());
                 let reply = plan.lock().await.pop_front().unwrap_or(Reply::Accepted);
                 if request["subtype"] == "shared_send"
@@ -986,6 +1052,7 @@ mod tests {
                     )
                     .into()),
                     Reply::Unknown => Err(ApiError::new(503, "回执未知").after_admission().into()),
+                    Reply::SyncIdle | Reply::SyncActive | Reply::SyncRejected => unreachable!(),
                 };
                 if let Some(sender) = channel
                     .pending
@@ -1292,9 +1359,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn native_interruption_completion_marker_does_not_resume_the_queue() {
+        let mut queue = RemoteQueue {
+            awaiting_turn: Some("client".into()),
+            awaiting_started: true,
+            ..Default::default()
+        };
+        queue.observe_turns(
+            &[
+                json!({"id":"client","status":"interrupted","_nativeDone":true,
+                "nativeInterruption":{"source":"claude"}}),
+            ],
+            &json!({"tempo":"idle"}),
+        );
+        assert!(queue.awaiting_turn.is_none());
+        assert!(queue.paused, "已结束的中断轮次不能被当成正常完成后自动续发");
+    }
+
     #[tokio::test]
     async fn only_confirmed_running_enqueues_new_messages() {
-        for state in ["idle", "unknown", "old-queue", "stale-history", "blocked"] {
+        for state in [
+            "idle",
+            "unknown",
+            "unknown-stale-history",
+            "old-queue",
+            "stale-history",
+            "blocked",
+        ] {
             let (_directory, _auth_directory, service, c, auth, calls, _replies) = fixture().await;
             if state == "old-queue" {
                 service
@@ -1307,11 +1399,11 @@ mod tests {
                 .change(|saved| {
                     let current = saved.conversations.get_mut(&c.id).unwrap();
                     current.native_status = match state {
-                        "unknown" => json!({}),
+                        "unknown" | "unknown-stale-history" => json!({}),
                         "blocked" => json!({"tempo":"blocked","needs":{"kind":"clarification"}}),
                         _ => json!({"tempo":"idle"}),
                     };
-                    if state != "stale-history" {
+                    if !matches!(state, "stale-history" | "unknown-stale-history") {
                         current.turns.last_mut().unwrap()["status"] = json!("completed");
                     }
                     if state == "old-queue" {
@@ -1337,6 +1429,49 @@ mod tests {
             if state == "old-queue" {
                 assert_eq!(current.remote_queue.messages[0].id, "old");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn new_send_refreshes_activity_before_admission_and_query_failure_stays_unsent() {
+        for (reply, cached_active, expected) in [
+            (Reply::SyncIdle, true, "accepted"),
+            (Reply::SyncActive, false, "queued"),
+            (Reply::SyncRejected, true, "failed"),
+        ] {
+            let (_directory, _auth_directory, service, c, auth, calls, replies) = fixture().await;
+            service
+                .change(|saved| {
+                    let c = saved.conversations.get_mut(&c.id).unwrap();
+                    c.native_status = json!({"tempo":if cached_active {"active"} else {"idle"}});
+                    c.turns.last_mut().unwrap()["status"] = json!(if cached_active {
+                        "inProgress"
+                    } else {
+                        "completed"
+                    });
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            replies.lock().await.push_back(reply);
+            let input = payload(&c, "fresh-status");
+            let result = service.command("send", &input, &auth).await;
+            if expected == "failed" {
+                let failure = result.unwrap_err();
+                assert!(!failure.downcast_ref::<ApiError>().unwrap().outcome_unknown);
+                assert!(
+                    service.queue(&c.id).await.unwrap()["queuedMessages"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                );
+            } else {
+                assert_eq!(result.unwrap()["deliveryState"], expected);
+            }
+            assert_eq!(
+                calls.lock().await.len(),
+                usize::from(expected == "accepted")
+            );
         }
     }
 

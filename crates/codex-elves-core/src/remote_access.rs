@@ -1825,6 +1825,28 @@ impl RemoteAccessController {
                 return Err(ApiError::new(409, "该 Codex 实例的执行接入尚未支持").into());
             }
         }
+        if action == "claudeUsage" {
+            let allow_probe = !self
+                .access_policy
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .read_only;
+            // 用户要求只能经会话所属 WSL 的 Claude 读取额度；已有会话始终使用保存的实例身份。
+            return if claude_thread {
+                self.claude
+                    .session_subscription_usage(thread_id.unwrap(), allow_probe)
+                    .await
+            } else if requested == Some("claude") {
+                let config = if let Some(id) = &instance_id {
+                    self.claude_instance_config(id).await?
+                } else {
+                    self.claude.config()?
+                };
+                self.claude.subscription_usage(config, allow_probe).await
+            } else {
+                Err(ApiError::new(400, "额度读取仅支持 Claude 实例").into())
+            };
+        }
         if action == "models"
             && (claude_thread || requested == Some("claude"))
             && self
@@ -2971,7 +2993,11 @@ async fn static_web_asset(uri: Uri, headers: HeaderMap) -> Response {
     tokio::task::spawn_blocking(move || {
         let asset = if uri.path() == "/app-resources.json" {
             app_resources_asset()
-        } else if let Some(asset) = web_assets().get(uri.path()) {
+        } else if let Some(asset) = web_assets().get(if uri.path() == "/side-thread" {
+            "/"
+        } else {
+            uri.path()
+        }) {
             asset
         } else {
             return StatusCode::NOT_FOUND.into_response();
@@ -3048,6 +3074,7 @@ pub fn web_router(
     };
     Router::new()
         .route("/", get(static_web_asset))
+        .route("/side-thread", get(static_web_asset))
         .route("/app-resources.json", get(static_web_asset))
         .route("/app.js", get(static_web_asset))
         .route("/select.js", get(static_web_asset))
@@ -3335,6 +3362,7 @@ async fn access_boundary_response(
     next: Next,
 ) -> Response {
     let static_web_asset = is_static_web_asset_path(request.uri().path());
+    let side_thread_panel = request.uri().path() == "/side-thread";
     let host = request
         .headers()
         .get(header::HOST)
@@ -3542,15 +3570,33 @@ async fn access_boundary_response(
         HeaderValue::from_static("nosniff"),
     );
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
-    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
-    headers.insert("content-security-policy", HeaderValue::from_static(
+    // 用户要求 PC 侧边会话并排编辑：只有专用页面可被同源页面嵌入，首页和 API 仍禁止嵌入，外部站点不能嵌入。
+    headers.insert(
+        "x-frame-options",
+        HeaderValue::from_static(if side_thread_panel {
+            "SAMEORIGIN"
+        } else {
+            "DENY"
+        }),
+    );
+    let frame_ancestors = if side_thread_panel {
+        "'self'"
+    } else {
+        "'none'"
+    };
+    let policy = format!(
+        "{}frame-ancestors {frame_ancestors}; form-action 'self'",
         concat!(
             "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; ",
             "img-src 'self' data: https://*.ngrok-free.app https://*.ngrok-free.dev https://*.ngrok.app https://*.ngrok.dev https://*.ngrok.io https://*.shares.zrok.io; ",
             "media-src 'self' https://*.ngrok-free.app https://*.ngrok-free.dev https://*.ngrok.app https://*.ngrok.dev https://*.ngrok.io https://*.shares.zrok.io; ",
-            "connect-src 'self' https://*.ngrok-free.app wss://*.ngrok-free.app https://*.ngrok-free.dev wss://*.ngrok-free.dev https://*.ngrok.app wss://*.ngrok.app https://*.ngrok.dev wss://*.ngrok.dev https://*.ngrok.io wss://*.ngrok.io https://*.shares.zrok.io wss://*.shares.zrok.io; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+            "connect-src 'self' https://*.ngrok-free.app wss://*.ngrok-free.app https://*.ngrok-free.dev wss://*.ngrok-free.dev https://*.ngrok.app wss://*.ngrok.app https://*.ngrok.dev wss://*.ngrok.dev https://*.ngrok.io wss://*.ngrok.io https://*.shares.zrok.io wss://*.shares.zrok.io; object-src 'none'; base-uri 'none'; "
         )
-    ));
+    );
+    headers.insert(
+        "content-security-policy",
+        HeaderValue::from_str(&policy).expect("static frame policy must be a valid header"),
+    );
     if external_https {
         headers.insert(
             "strict-transport-security",
@@ -3872,7 +3918,7 @@ async fn session(
         "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
         "sendText":native_write_available || service_connected,
         "sideThreads":true,"serviceSideThreads":true,"subagents":true,"serviceSubagents":true,
-        "claudeSessions":true,"claudeProjectTrust":true}}),
+        "claudeSessions":true,"claudeProjectTrust":true,"claudeSubscriptionUsage":true}}),
     ))
 }
 
@@ -4043,6 +4089,7 @@ async fn read(
             | "history"
             | "thread"
             | "models"
+            | "claudeUsage"
             | "projectTrust"
             | "skills"
             | "queue"
@@ -6029,6 +6076,33 @@ mod tests {
             assert_eq!(response["data"], json!([]));
             assert_eq!(response["readOnly"], true);
         }
+    }
+
+    #[tokio::test]
+    async fn claude_read_only_usage_does_not_resolve_projects_or_start_cli() {
+        let (_directory, authorization) = service_dispatch_fixture().await;
+        let controller = &authorization.controller;
+        controller.publish_access_policy(&RemoteAccessSettings {
+            enabled: true,
+            read_only: true,
+            ..Default::default()
+        });
+        let response = controller
+            .call_backend(
+                "claudeUsage",
+                json!({"backend":"claude","projectId":"does-not-exist"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["backend"], "claude");
+        assert!(response["usage"].is_null());
+        let failure = controller
+            .call_backend("claudeUsage", json!({"backend":"codex"}), &authorization)
+            .await
+            .unwrap_err();
+        assert_eq!(failure.downcast_ref::<ApiError>().unwrap().code, 400);
     }
 
     #[cfg(windows)]
@@ -14098,8 +14172,36 @@ call("send",{threadId:"isolated-thread",prompt:"隔离发送"})
         assert!(!paths.contains(&"/native.js"));
         assert!(!paths.contains(&"/cache-recovery.html"));
         assert!(!paths.contains(&"/cache-recovery.js"));
+        assert!(!paths.contains(&"/side-thread"));
         assert!(paths.iter().all(|path| !path.starts_with("/api/")));
         assert!(paths.contains(&"/session-files.js"));
+
+        let mut main_page = None;
+        for (path, frame_options, ancestors) in [
+            ("/", "DENY", "frame-ancestors 'none'"),
+            ("/side-thread", "SAMEORIGIN", "frame-ancestors 'self'"),
+        ] {
+            let response = client
+                .get(format!("{base_url}{path}"))
+                .header(reqwest::header::ACCEPT_ENCODING, "identity")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.headers()["x-frame-options"], frame_options);
+            assert!(
+                response.headers()["content-security-policy"]
+                    .to_str()
+                    .unwrap()
+                    .contains(ancestors)
+            );
+            let body = response.bytes().await.unwrap();
+            if path == "/" {
+                main_page = Some(body);
+            } else {
+                assert_eq!(Some(body), main_page);
+            }
+        }
 
         for (path, content_type) in [
             ("/cache-recovery.html", "text/html; charset=utf-8"),

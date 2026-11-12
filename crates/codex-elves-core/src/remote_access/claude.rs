@@ -21,6 +21,9 @@ use crate::desktop_owner_ipc::{WriteFrame, guarded_write, spawn_writer};
 mod remote_queue;
 use remote_queue::RemoteQueue;
 
+#[path = "claude_usage.rs"]
+mod subscription_usage;
+
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 // 同一会话类型实例的完整模型目录缓存五分钟；新建与历史会话共用此期限。
 const MODEL_CATALOG_TTL: Duration = Duration::from_secs(300);
@@ -122,6 +125,9 @@ struct Conversation {
     queued_messages: Vec<Value>,
     #[serde(default)]
     remote_queue: RemoteQueue,
+    // 终端预览只属于当前连接的内存视图；其他设置落盘也不能把它保存成原生正式历史。
+    #[serde(skip)]
+    live_preview: Option<SharedPreview>,
     // 用户要求原生发现与网页创建区分：发现项重启/读历史只读，首次用户发送才接入原任务；本地标题修改不能被扫描覆盖。
     #[serde(default)]
     discovered: bool,
@@ -129,19 +135,57 @@ struct Conversation {
     native_title: String,
 }
 
+#[derive(Clone)]
+struct SharedPreview {
+    generation: String,
+    native_user_id: String,
+    basis: String,
+    text: String,
+}
+
+impl SharedPreview {
+    fn matches(&self, turn: &Value) -> bool {
+        matches!(
+            turn["status"].as_str(),
+            Some("inProgress" | "pending" | "unknown")
+        ) && turn["_nativeDone"] != true
+            && turn["_process"].as_str() == Some(self.generation.as_str())
+            && turn["_nativeUserId"].as_str() == Some(self.native_user_id.as_str())
+            && turn["_nativePreviewBasis"].as_str() == Some(self.basis.as_str())
+    }
+}
+
+fn shared_preview_basis(frame: &Value) -> Option<&str> {
+    frame["preview_basis"]
+        .as_str()
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 fn claude_backend() -> String {
     "claude".into()
 }
 
 impl Conversation {
+    fn displayed_turn(&self, turn: &Value) -> Value {
+        let mut value = turn.clone();
+        if let Some(preview) = self
+            .live_preview
+            .as_ref()
+            .filter(|preview| preview.matches(turn))
+            && let Some(items) = value["items"].as_array_mut()
+        {
+            items.push(json!({"id":format!("native-live-{}",preview.native_user_id),
+                "type":"agentMessage","text":preview.text,
+                "status":if turn["status"]=="inProgress" {"inProgress"} else {"unknown"},"_nativePreview":true}));
+        }
+        value
+    }
+
     fn running_for_send(&self) -> bool {
         // 用户要求只有明确执行中才入队；共享会话的新鲜空闲/阻塞状态优先于尚未更新的历史轮次。
         if self.shared {
-            match self.native_status["tempo"].as_str() {
-                Some("active") => return true,
-                Some("idle" | "blocked") => return false,
-                _ => {}
-            }
+            // 共享状态未知时不能用旧历史的 inProgress 推断仍在执行，最终派发还会由原生入口复核。
+            return self.native_status["tempo"] == "active";
         }
         self.turns
             .last()
@@ -277,6 +321,8 @@ pub(super) struct Claude {
     processes: Mutex<HashMap<String, Arc<Process>>>,
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     metadata: Mutex<HashMap<String, (Instant, Value)>>,
+    // 用户要求账号额度按 WSL 实例隔离；只缓存白名单百分比与重置时间，不保存登录凭据。
+    subscription_usage_cache: Mutex<HashMap<String, subscription_usage::CachedUsage>>,
     requests: Mutex<HashMap<String, BTreeMap<String, Value>>>,
     observed: Mutex<HashMap<String, String>>,
     controller: OnceLock<Weak<RemoteAccessController>>,
@@ -301,6 +347,19 @@ impl Claude {
                 "Claude 会话类型或身份无效，未改写记录"
             );
             conversation.remote_queue.recover();
+            if conversation.shared {
+                // 兼容旧版曾被其他状态写入带入的临时记录，升级后只从原生日志恢复正文。
+                for turn in &mut conversation.turns {
+                    if let Some(items) = turn["items"].as_array_mut() {
+                        items.retain(|item| {
+                            item["_nativePreview"] != true
+                                && !item["id"]
+                                    .as_str()
+                                    .is_some_and(|id| id.starts_with("native-live-"))
+                        });
+                    }
+                }
+            }
             if !conversation.shared
                 && let Some(turn) = conversation.turns.last_mut()
                 && turn["status"] == "inProgress"
@@ -316,6 +375,7 @@ impl Claude {
             processes: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()),
             metadata: Mutex::new(HashMap::new()),
+            subscription_usage_cache: Mutex::new(HashMap::new()),
             requests: Mutex::new(HashMap::new()),
             observed: Mutex::new(HashMap::new()),
             controller: OnceLock::new(),
@@ -604,6 +664,7 @@ impl Claude {
             native_clients: BTreeMap::new(),
             queued_messages: vec![],
             remote_queue: RemoteQueue::default(),
+            live_preview: None,
             discovered: true,
             native_title: String::new(),
         };
@@ -813,6 +874,7 @@ impl Claude {
                 native_clients: BTreeMap::new(),
                 queued_messages: vec![],
                 remote_queue: RemoteQueue::default(),
+                live_preview: None,
                 discovered: true,
                 native_title: title.into(),
             };
@@ -939,7 +1001,11 @@ impl Claude {
             _ => return Err(error(400, "Claude 历史游标无效")),
         };
         let start = end.saturating_sub(10);
-        let turns: Vec<_> = c.turns[start..end].iter().rev().cloned().collect();
+        let turns: Vec<_> = c.turns[start..end]
+            .iter()
+            .rev()
+            .map(|turn| c.displayed_turn(turn))
+            .collect();
         Ok(json!({"ok":true,"threadId":id,"data":turns,
             // 用户要求修复中断假消息；HTTP 分页也提供完整有效 ID，旧缓存无需等待事件流才能退役错误轮次。
             "turnIds":c.turns.iter().map(|turn| &turn["id"]).collect::<Vec<_>>(),
@@ -1207,6 +1273,7 @@ impl Claude {
             native_clients: BTreeMap::new(),
             queued_messages: vec![],
             remote_queue: RemoteQueue::default(),
+            live_preview: None,
             discovered: false,
             native_title: String::new(),
         };
@@ -1448,6 +1515,7 @@ impl Claude {
             native_clients: BTreeMap::new(),
             queued_messages: vec![],
             remote_queue: RemoteQueue::default(),
+            live_preview: None,
             discovered: false,
             native_title: String::new(),
         };
@@ -1912,7 +1980,7 @@ impl Claude {
                     || job_id.len() == 8 && job_id.bytes().all(|byte| byte.is_ascii_hexdigit())),
             "Claude 原生会话身份无效"
         );
-        let (thread, turns, turn_ids, completed, usage_changed) = self
+        let (thread, turns, turn_ids, completed, usage_changed, changed) = self
             .change(|saved| {
                 let c = saved
                     .conversations
@@ -1925,6 +1993,8 @@ impl Claude {
                     "原生会话 UUID 不匹配，未替换原历史"
                 );
                 let initial_import = c.discovered && c.turns.is_empty();
+                let previous_view = c.view();
+                let previous_queue = c.queue_snapshot(&self.epoch);
                 c.native_id = native_id.into();
                 c.native_job_id = job_id.into();
                 c.native_status = frame["native_status"].clone();
@@ -1956,12 +2026,16 @@ impl Claude {
                     }
                 }
                 let completed = projected.iter().any(|t| {
-                    t["status"] != "inProgress"
-                        && c.turns
-                            .iter()
-                            .any(|old| old["id"] == t["id"] && old["status"] == "inProgress")
+                    matches!(
+                        t["status"].as_str(),
+                        Some("completed" | "failed" | "interrupted")
+                    ) && c
+                        .turns
+                        .iter()
+                        .any(|old| old["id"] == t["id"] && old["status"] == "inProgress")
                 });
-                if projected != c.turns {
+                let history_changed = projected != c.turns;
+                if history_changed {
                     c.updated_at = frame["updated_at"]
                         .as_u64()
                         .map_or_else(now_ms, |at| c.updated_at.max(at));
@@ -1979,8 +2053,17 @@ impl Claude {
                     c.discovered = false;
                 }
                 c.turns = projected;
+                // 用户要求正文不反复出现/隐藏：元数据快照沿用同一预览，正式正文或轮次变化时一次性退役。
+                if c.live_preview.as_ref().is_some_and(|preview| {
+                    !c.turns.last().is_some_and(|turn| preview.matches(turn))
+                }) {
+                    c.live_preview = None;
+                }
                 c.remote_queue.observe_turns(&c.turns, &c.native_status);
                 let mut view = c.view();
+                let changed = history_changed
+                    || previous_view != view
+                    || previous_queue != c.queue_snapshot(&self.epoch);
                 for (key, value) in c.queue_snapshot(&self.epoch).as_object().unwrap() {
                     if key != "ok" && key != "threadId" {
                         view[key] = value.clone();
@@ -1988,13 +2071,19 @@ impl Claude {
                 }
                 Ok((
                     view,
-                    c.turns.iter().rev().take(20).cloned().collect::<Vec<_>>(),
+                    c.turns
+                        .iter()
+                        .rev()
+                        .take(20)
+                        .map(|turn| c.displayed_turn(turn))
+                        .collect::<Vec<_>>(),
                     c.turns
                         .iter()
                         .map(|turn| turn["id"].clone())
                         .collect::<Vec<_>>(),
                     completed,
                     usage_changed,
+                    changed,
                 ))
             })
             .await?;
@@ -2014,12 +2103,14 @@ impl Claude {
             self.requests_changed(id).await;
         }
         // 用户要求沿用网页聊天组件；共享消息按原生 UUID 投影成完整轮次，不把终端画面塞进聊天区。
-        self.publish(json!({"method":"claude/history/updated","params":{
-            "threadId":id,"thread":thread,"turns":turns,"turnIds":turn_ids,"completed":completed}}));
+        if changed {
+            self.publish(json!({"method":"claude/history/updated","params":{
+                "threadId":id,"thread":thread,"turns":turns,"turnIds":turn_ids,"completed":completed}}));
+            self.publish(json!({"method":"remote/sidebarChanged","params":{"threadId":id}}));
+        }
         if usage_changed {
             self.publish(json!({"method":"thread/tokenUsage/updated","params":{"threadId":id,"tokenUsage":usage}}));
         }
-        self.publish(json!({"method":"remote/sidebarChanged","params":{"threadId":id}}));
         Ok(())
     }
 
@@ -2046,24 +2137,48 @@ impl Claude {
         else {
             return Ok(());
         };
-        let Some(turn) = c.turns.last_mut().filter(|t| {
-            t["status"] == "inProgress" && t["_nativeUserId"] == frame["native_user_id"]
-        }) else {
+        let (Some(basis), Some(text), Some(native_user_id)) = (
+            shared_preview_basis(frame),
+            frame["text"].as_str(),
+            frame["native_user_id"].as_str(),
+        ) else {
             return Ok(());
         };
-        let preview_id = format!(
-            "native-live-{}",
-            frame["native_user_id"].as_str().unwrap_or("")
-        );
-        let item = json!({"id":preview_id,"type":"agentMessage","text":frame["text"],"status":"inProgress"});
-        let items = turn["items"].as_array_mut().context("共享轮次缺少消息")?;
-        if let Some(previous) = items.iter_mut().find(|i| i["id"] == preview_id) {
-            *previous = item;
-        } else {
-            items.push(item);
+        // 预览最多 64 KiB，超过时等待正式历史；不把不完整终端数据扩展成无界正文。
+        if text.trim().is_empty() || text.len() > 64 * 1024 {
+            return Ok(());
         }
-        // 流式预览只更新内存和既有聊天气泡；原生完整正文到达后替换预览并持久化，保留 Markdown 原文。
-        let turn = turn.clone();
+        let preview = SharedPreview {
+            generation: generation.into(),
+            native_user_id: native_user_id.into(),
+            basis: basis.into(),
+            text: text.into(),
+        };
+        let Some(turn) = c
+            .turns
+            .last()
+            .filter(|turn| turn["status"] == "inProgress" && preview.matches(turn))
+        else {
+            return Ok(());
+        };
+        if let Some(previous) = c
+            .live_preview
+            .as_ref()
+            .filter(|previous| previous.matches(turn))
+        {
+            let compact = |text: &str| {
+                text.chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect::<String>()
+            };
+            let old = compact(&previous.text);
+            let next = compact(text);
+            if next == old || !next.starts_with(&old) {
+                return Ok(());
+            }
+        }
+        c.live_preview = Some(preview);
+        let turn = c.displayed_turn(c.turns.last().unwrap());
         let thread = c.view();
         drop(saved);
         self.publish(json!({"method":"claude/history/updated","params":{
@@ -3001,14 +3116,27 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
     }
     if let Some(turn) = turns.last_mut()
         && turn["_nativeDone"] != true
+        && turn["status"] != "failed"
     {
         if matches!(
             frame["native_status"]["tempo"].as_str(),
             Some("active" | "blocked")
         ) {
             turn["status"] = json!("inProgress");
-        } else {
+        } else if frame["native_status"]["state"] == "stopped" {
             turn["status"] = json!("interrupted");
+        } else if frame["native_status"]["state"] == "failed" {
+            turn["status"] = json!("failed");
+        } else {
+            // 用户要求发送期间不闪现“已停止”：原生用户消息可先于工作状态落盘，idle/未知不是中断证据。
+            // 已接收且尚无回复的网页输入保持待启动；缺少明确结束证据的旧历史保持未知，不能伪造完成或停止。
+            let accepted_input = turn["_nativeUserId"]
+                .as_str()
+                .is_some_and(|native| frame["clients"][native].is_string())
+                && turn["items"]
+                    .as_array()
+                    .is_some_and(|items| items.iter().all(|item| item["type"] == "userMessage"));
+            turn["status"] = json!(if accepted_input { "pending" } else { "unknown" });
         }
     }
     let latest = turns.len().checked_sub(1);
@@ -3016,14 +3144,22 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
         if turn["nativeInterruption"]["source"] == "claude"
             || Some(index) == latest && turn["status"] != "inProgress"
         {
+            let unfinished = match turn["status"].as_str() {
+                Some("interrupted") => "interrupted",
+                Some("failed") => "failed",
+                _ => "unknown",
+            };
             for item in turn["items"].as_array_mut().into_iter().flatten() {
                 if item["status"] == "inProgress" {
-                    item["status"] = json!("interrupted");
+                    item["status"] = json!(unfinished);
                 }
             }
         }
     }
     project_shared_setting_changes(frame, &mut turns, &native_owners);
+    if let (Some(turn), Some(basis)) = (turns.last_mut(), shared_preview_basis(frame)) {
+        turn["_nativePreviewBasis"] = json!(basis);
+    }
     turns
 }
 
@@ -3427,6 +3563,7 @@ mod tests {
             native_clients: BTreeMap::new(),
             queued_messages: vec![],
             remote_queue: RemoteQueue::default(),
+            live_preview: None,
             discovered: false,
             native_title: String::new(),
             turns: vec![
@@ -4191,6 +4328,180 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_preview_survives_metadata_snapshots_without_persisting_or_reviving_after_canonical_text()
+     {
+        let (directory, service, mut c) = fixture();
+        c.shared = true;
+        c.turns.clear();
+        let (writer, _) = mpsc::channel(1);
+        service.processes.lock().await.insert(
+            c.id.clone(),
+            Arc::new(Process {
+                _child: Mutex::new(None),
+                writer,
+                shared: true,
+                initialization: json!({}),
+                channel: Arc::new(Channel {
+                    live: AtomicBool::new(true),
+                    generation: "preview-fixture".into(),
+                    pending: Mutex::new(HashMap::new()),
+                }),
+            }),
+        );
+        service
+            .change(|saved| {
+                saved.conversations.insert(c.id.clone(), c.clone());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut frame = json!({"type":"shared_snapshot","native_id":c.native_id,
+            "job_id":&c.native_id[..8],"native_status":{"tempo":"active"},
+            "clients":{"native-user":"client"},"pending":[],"requests":{},
+            "preview_basis":"a".repeat(64),
+            "messages":[{"type":"user","uuid":"native-user","message":{"content":"question"}}]});
+        service
+            .ingest_shared(&c.id, "preview-fixture", &frame)
+            .await
+            .unwrap();
+        let preview = json!({"native_user_id":"native-user","text":"partial response","preview_basis":"a".repeat(64)});
+        service
+            .ingest_shared_preview(&c.id, "preview-fixture", &preview)
+            .await
+            .unwrap();
+        let history = service.history(&json!({"threadId":c.id})).await.unwrap();
+        assert_eq!(history["data"][0]["items"].as_array().unwrap().len(), 2);
+        frame["native_status"]["detail"] = json!("metadata changed");
+        service
+            .ingest_shared(&c.id, "preview-fixture", &frame)
+            .await
+            .unwrap();
+        let history = service.history(&json!({"threadId":c.id})).await.unwrap();
+        assert_eq!(
+            history["data"][0]["items"].as_array().unwrap().len(),
+            2,
+            "正式正文尚未变化时，状态快照不能反复删除预览"
+        );
+        frame["native_status"]["tempo"] = json!("idle");
+        service
+            .ingest_shared(&c.id, "preview-fixture", &frame)
+            .await
+            .unwrap();
+        assert_eq!(
+            service.history(&json!({"threadId":c.id})).await.unwrap()["data"][0]["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "短暂空闲且没有结束证据时，已经展示的预览也不能消失"
+        );
+        frame["native_status"]["tempo"] = json!("active");
+        service
+            .change(|saved| {
+                saved.conversations.get_mut(&c.id).unwrap().pinned = true;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let stored: Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("remote-claude-sessions.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            stored["conversations"][&c.id]["turns"][0]["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "其他设置落盘也不能把终端预览保存为正式历史"
+        );
+        let mut legacy = stored;
+        legacy["conversations"][&c.id]["turns"][0]["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"native-live-native-user",
+                "type":"agentMessage","text":"legacy terminal fragment"}));
+        std::fs::write(
+            directory.path().join("remote-claude-sessions.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let reopened = Claude::new(directory.path())
+            .unwrap()
+            .conversation(&c.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.turns[0]["items"].as_array().unwrap().len(),
+            1,
+            "升级重开时清理旧版曾持久化的终端气泡"
+        );
+        assert!(reopened.live_preview.is_none());
+        frame["preview_basis"] = json!("b".repeat(64));
+        frame["messages"].as_array_mut().unwrap().push(json!({
+            "type":"assistant","uuid":"reply-row","message":{
+                "id":"reply","content":[{"type":"text","text":"partial **response** complete"}]}}));
+        service
+            .ingest_shared(&c.id, "preview-fixture", &frame)
+            .await
+            .unwrap();
+        service
+            .ingest_shared_preview(&c.id, "preview-fixture", &preview)
+            .await
+            .unwrap();
+        let history = service.history(&json!({"threadId":c.id})).await.unwrap();
+        assert_eq!(history["data"][0]["items"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            history["data"][0]["items"][1]["text"], "partial **response** complete",
+            "正式 Markdown 接替后，迟到终端预览不能复活"
+        );
+        let next_preview = json!({"native_user_id":"native-user",
+            "text":"next response fragment","preview_basis":"b".repeat(64)});
+        service
+            .ingest_shared_preview(&c.id, "retired-generation", &next_preview)
+            .await
+            .unwrap();
+        assert!(
+            service
+                .conversation(&c.id)
+                .await
+                .unwrap()
+                .live_preview
+                .is_none()
+        );
+        service
+            .ingest_shared_preview(&c.id, "preview-fixture", &next_preview)
+            .await
+            .unwrap();
+        assert_eq!(
+            service.history(&json!({"threadId":c.id})).await.unwrap()["data"][0]["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        frame["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type":"system","subtype":"turn_duration"}));
+        service
+            .ingest_shared(&c.id, "preview-fixture", &frame)
+            .await
+            .unwrap();
+        service
+            .ingest_shared_preview(&c.id, "preview-fixture", &next_preview)
+            .await
+            .unwrap();
+        let ended = service.history(&json!({"threadId":c.id})).await.unwrap();
+        assert_eq!(ended["data"][0]["status"], "completed");
+        assert_eq!(
+            ended["data"][0]["items"].as_array().unwrap().len(),
+            2,
+            "已结束轮次只保留正式正文，不恢复残留或迟到预览"
+        );
+    }
+
+    #[tokio::test]
     async fn shared_usage_persists_notifies_and_updates_after_compaction_without_native_commands() {
         let (directory, service, mut c) = fixture();
         let (_auth_directory, auth) = crate::remote_access::tests::service_dispatch_fixture().await;
@@ -4812,6 +5123,48 @@ mod tests {
         );
         assert!(!items.iter().any(|item| item["id"] == "synthetic-0"));
         assert_eq!(turns, project_shared_history(&frame, "connection"));
+    }
+
+    #[test]
+    fn shared_starting_turn_never_invents_a_stop_from_idle_metadata() {
+        let mut frame = json!({"clients":{"native-new":"web-new"},
+        "native_status":{"tempo":"idle"},"messages":[
+            {"type":"user","uuid":"native-new","message":{"content":"new input"}}
+        ]});
+        let pending = project_shared_history(&frame, "connection");
+        assert_eq!(pending[0]["status"], "pending");
+        assert_ne!(pending[0]["_nativeDone"], true);
+        frame["native_status"]["tempo"] = json!("active");
+        assert_eq!(
+            project_shared_history(&frame, "connection")[0]["status"],
+            "inProgress"
+        );
+        frame["native_status"]["tempo"] = json!("idle");
+        assert_eq!(
+            project_shared_history(&frame, "connection")[0]["status"],
+            "pending"
+        );
+        frame["messages"].as_array_mut().unwrap().push(json!({
+            "type":"system","subtype":"turn_duration","timestampMs":123}));
+        let completed = project_shared_history(&frame, "connection");
+        assert_eq!(completed[0]["status"], "completed");
+        assert_eq!(completed[0]["_nativeDone"], true);
+    }
+
+    #[test]
+    fn shared_error_is_not_overwritten_by_stale_activity_metadata() {
+        for tempo in ["active", "idle", "blocked"] {
+            let frame = json!({"clients":{},"native_status":{"tempo":tempo},"messages":[
+                {"type":"user","uuid":"native-error","message":{"content":"input"}},
+                {"type":"assistant","isApiErrorMessage":true,"message":{
+                    "id":"failure","content":[{"type":"text","text":"request failed"}]}}
+            ]});
+            assert_eq!(
+                project_shared_history(&frame, "connection")[0]["status"],
+                "failed",
+                "{tempo}"
+            );
+        }
     }
 
     fn interruption_fixture() -> Value {
