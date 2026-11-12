@@ -17,6 +17,8 @@ apps/codex-elves-manager/src-tauri/gen/
 .claude/
 .playwright-cli/
 docs/superpowers/
+# 验收截图可能包含会话或个人信息，用户要求不入库。
+/docs/validation/images/
 
 *.log
 .env

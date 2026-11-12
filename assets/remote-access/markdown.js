@@ -85,6 +85,9 @@ export function markdown(text, remoteImages = [], options = {}) {
 export function renderMermaidBlocks(node, onRender, withLayout) {
   renderer?.renderMermaidBlocks(node, onRender, withLayout);
 }
+export function releaseMermaidBlocks(node) {
+  renderer?.releaseMermaidBlocks(node);
+}
 
 const anchorIgnored = "[hidden],button,textarea,input,.code-header,.markdown-deferred,.transcript-checking-notice";
 const anchorCharacters = value => [...String(value).matchAll(/[\p{L}\p{N}]/gu)];

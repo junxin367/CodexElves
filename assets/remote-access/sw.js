@@ -26,7 +26,7 @@ const deferredResourcePaths = new Set([
   "/icons/icon-192.png", "/icons/icon-512.png", "/icons/apple-touch-icon.png"
 ]);
 const criticalResourceOrder = [
-  "/", "/style.css", "/platform.js", "/pwa.js", "/markdown.js", "/app.js",
+  "/", "/style.css", "/platform.js", "/pwa.js", "/markdown.js", "/app.js", "/select.js",
   "/events-client.js", "/recovery-store.js", "/attachments.js", "/message-actions.js",
   "/events-worker.js", "/channels.js", "/diagnostics.js", "/session-tools.js", "/session-files.js", "/session-menu.js"
 ];

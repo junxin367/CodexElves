@@ -63,6 +63,9 @@ export function mountSessionMenu({
   actionMenu.append(closeAction); layer.append(menu, actionMenu);
   trigger.setAttribute("aria-haspopup", "menu"); trigger.setAttribute("aria-expanded", "false");
   trigger.setAttribute("aria-controls", id);
+  const desktop = () => !globalThis.matchMedia?.("(max-width: 760px)").matches;
+  // 用户要求 PC 点击图标后始终固定显示，再点图标才关闭；手机仍使用原遮罩、点击外部与返回关闭行为。
+  const pinned = desktop;
 
   function listen(target, name, handler, options) {
     target.addEventListener(name, handler, options);
@@ -94,17 +97,19 @@ export function mountSessionMenu({
     if (suspended) return context;
     const next = readContext();
     const changed = next.owner !== owner;
-    if (next.authorization !== authorization) {
+    const authorizationChanged = next.authorization !== authorization;
+    if (authorizationChanged) {
       authorization = next.authorization;
       entries.clear();
     }
     if (next.owner !== owner) {
       owner = next.owner; cached = entries.get(owner)?.snapshot || null; message = "";
       times.length = 0; mutationButtons.clear();
-      if (opened) close();
+      if (opened) close(false, authorizationChanged);
       menu.replaceChildren();
     }
     context = next;
+    if (changed && opened && pinned()) render();
     if (changed && cached) onData?.(cached.data);
     return next;
   }
@@ -191,7 +196,9 @@ export function mountSessionMenu({
     source?.setAttribute("aria-expanded", "false");
     if (restoreFocus && source?.isConnected && opened) source.focus();
   }
-  function close(restoreFocus = false) {
+  function close(restoreFocus = false, force = false) {
+    // PC 不因外部点击、Escape、切换会话或普通工具操作关闭；授权变化和销毁仍必须强制清理。
+    if (!force && pinned()) return;
     if (!opened) { cancelPress(); return; }
     opened = false; suspended = false; clearInterval(ticker); ticker = null; cancelPress(); hideContext();
     trigger.setAttribute("aria-expanded", "false");
@@ -249,7 +256,7 @@ export function mountSessionMenu({
   }
   function invoke(callback, args, expected, mutation = false, onSuccess, { keepMenu = false } = {}) {
     if (!owns(expected) || mutation && !canMutate(context) || typeof callback !== "function") return;
-    if (keepMenu) suspend(); else close();
+    if (keepMenu && !pinned()) suspend(); else close();
     try {
       Promise.resolve(callback(...args)).then(() => {
         if (onSuccess && owns(expected)) onSuccess();
@@ -292,6 +299,7 @@ export function mountSessionMenu({
     cancelPress(); hideContext(); times.length = 0; mutationButtons.clear(); menu.replaceChildren();
     const tools = element("div", "session-related-menu-group");
     menu.append(tools);
+    layer.classList.toggle("session-menu-pinned", pinned());
     const changes = itemButton("变更", openChanges, []);
     changes.dataset.menuKey = "changes"; tools.append(changes);
     const files = itemButton("文件", openFiles, []);
@@ -461,7 +469,9 @@ export function mountSessionMenu({
     const width = phoneViewport
       ? Math.max(0, Math.min(view.width * .65, view.width - padding * 2))
       : Math.max(0, Math.min(300, view.width - padding * 2));
-    const top = Math.max(view.top + padding, Math.min(box.bottom + 5, view.top + view.height - padding));
+    // 用户要求弹层与图标统一间隔 10px；PC 和手机共用，视口边缘仍保留 8px 安全留白。
+    const anchorGap = 10;
+    const top = Math.max(view.top + padding, Math.min(box.bottom + anchorGap, view.top + view.height - padding));
     menu.style.width = `${width}px`;
     menu.style.left = `${Math.max(view.left + padding, Math.min(box.right - width, view.left + view.width - width - padding))}px`;
     menu.style.top = `${top}px`;
@@ -577,7 +587,7 @@ export function mountSessionMenu({
       try { layer.showPopover(); } catch { layer.removeAttribute("popover"); }
     }
     trigger.setAttribute("aria-expanded", "true");
-    fit(); focusEdge(options?.edge === "last");
+    fit(); if (options?.focus !== false) focusEdge(options?.edge === "last");
     if (!opened) return Promise.resolve(null);
     ticker = setInterval(() => {
       syncContext();
@@ -590,7 +600,9 @@ export function mountSessionMenu({
     return refresh();
   }
   function toggle() {
-    if (opened) { close(true); return Promise.resolve(null); }
+    if (opened) {
+      close(true, true); return Promise.resolve(null);
+    }
     return open();
   }
   listen(trigger, "click", toggle);
@@ -617,6 +629,7 @@ export function mountSessionMenu({
     if (!opened || event.isComposing) return;
     if (trigger.closest?.(".related-session-view")) return;
     if (event.key === "Escape") {
+      if (pinned() && !layer.contains(event.target) && event.target !== trigger) return;
       event.preventDefault(); event.stopImmediatePropagation();
       if (!actionMenu.hidden) hideContext(true); else close(true);
       return;
@@ -665,7 +678,11 @@ export function mountSessionMenu({
     cancelPress({ suppress: true, blockContext: true });
     if (opened && !layer.contains(event.target)) fit();
   }, true);
-  listen(window, "resize", fit);
+  listen(window, "resize", () => {
+    // 已由图标关闭的菜单在窗口缩放后继续关闭，不能因 PC 固定显示规则自动重开。
+    if (opened) render();
+    fit();
+  });
   if (window.visualViewport) {
     listen(window.visualViewport, "resize", fit); listen(window.visualViewport, "scroll", fit);
   }
@@ -724,7 +741,7 @@ export function mountSessionMenu({
     },
     dispose() {
       if (disposed) return;
-      close(); disposed = true; entries.clear(); cached = null; suppressedClick = null; blockedContext = null;
+      close(false, true); disposed = true; entries.clear(); cached = null; suppressedClick = null; blockedContext = null;
       for (const remove of listeners) remove();
       for (const [name, value] of originalAria) {
         if (value == null) trigger.removeAttribute(name); else trigger.setAttribute(name, value);

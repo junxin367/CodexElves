@@ -1,7 +1,8 @@
 import { remoteMediaCandidates, remoteMediaUrl } from "./channels.js";
 import { sha256Hex } from "./sha256.js";
 
-const MAX_IMAGE_COUNT = 4;
+// 用户要求 Codex/Claude 单条固定最多 8 张；添加、粘贴、拖拽与草稿/队列恢复共用此值，并与 native.js、Rust MAX_INPUT_IMAGE_COUNT 同步。
+const MAX_IMAGE_COUNT = 8;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 12 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION = 16_384;

@@ -48,7 +48,8 @@ function Get-NetTCPConnection {
     param([string]$State, [int]$LocalPort)
     [pscustomobject]@{ OwningProcess = $(if ($LocalPort -eq 33330) { 22 } else { $script:fixture.service.processId }) }
 }
-function Stop-RemoteUpdateService($Plan, $Service, [string]$Retired) {
+function Stop-RemoteUpdateService($Plan, $Service, [string]$Retired, [switch]$AllowManagerParent) {
+    Assert-RemoteUpdateServiceStopIdentity $Plan $Service -AllowManagerParent:$AllowManagerParent
     $script:fixture.stops++
     Assert-Test ($Service.processId -eq $script:fixture.service.processId) "只能停止夹具正式服务"
     $script:fixture.alive = $false
@@ -59,9 +60,11 @@ function Request-RemoteUpdateStart($Plan) {
     if ($script:fixture.failStart -and $newProgram) { throw "夹具：新版无法启动。" }
     if (-not $script:fixture.alive) {
         $script:fixture.service = [pscustomobject]@{
-            processId = $script:fixture.service.processId + 1; parentProcessId = 22
+            processId = $script:fixture.service.processId + 1
+            parentProcessId = $(if ($script:fixture.managerRaceCount -gt 0) { 33 } else { 22 })
             imagePath = $Plan.installedProgram; createdFileTime = [string]([long]$script:fixture.service.createdFileTime + 1)
         }
+        if ($script:fixture.managerRaceCount -gt 0) { $script:fixture.managerRaceCount-- }
         $script:fixture.alive = $true
         Write-RemoteUpdateJson (Join-Path $Plan.stateDirectory "remote-access-service.json") @{
             processId = $script:fixture.service.processId; port = 33332; protocolVersion = 5; token = ("f" * 64)
@@ -125,7 +128,7 @@ function New-TestFixture {
     $script:fixture = @{
         plan = $plan; path = (Join-Path $records "plan.json"); service = $service; alive = $true
         stops = 0; startRequests = 0; protectedChanged = $false; failStart = $false
-        failLocal = $false; failPublic = $false; failAfterRename = $false
+        failLocal = $false; failPublic = $false; failAfterRename = $false; managerRaceCount = 0
     }
     Write-RemoteUpdateJson $script:fixture.path $plan
 }
@@ -161,6 +164,60 @@ try {
     Assert-Test ((Get-RemoteUpdateHash $script:fixture.plan.installedProgram) -eq $script:fixture.plan.oldSha256) "回滚恢复原程序"
     Invoke-TestAction "Verify"
     Complete-Test "正常更新、重复应用、回滚及回滚后核验"
+
+    New-TestFixture
+    $script:fixture.plan.protectedManagers = @([pscustomobject]@{
+        processId=33;parentProcessId=44;createdFileTime="80";imagePath=(Join-Path (Split-Path -Parent $script:fixture.plan.installedProgram) "codex-elves-manager.original.exe")
+    })
+    Write-RemoteUpdateJson $script:fixture.path $script:fixture.plan
+    $script:fixture.managerRaceCount = 1
+    Invoke-TestAction "Apply"
+    Assert-Test ($script:fixture.stops -eq 2) "仅额外停止抢先启动的服务，不停止管理器"
+    Assert-Test ($script:fixture.service.parentProcessId -eq 22) "最终仍归原 launcher"
+    Complete-Test "管理器抢先恢复服务后由原 launcher 接续"
+
+    New-TestFixture
+    $script:fixture.plan.protectedManagers = @([pscustomobject]@{
+        processId=33;parentProcessId=44;createdFileTime="80";imagePath=(Join-Path (Split-Path -Parent $script:fixture.plan.installedProgram) "codex-elves-manager.original.exe")
+    })
+    Write-RemoteUpdateJson $script:fixture.path $script:fixture.plan
+    $null = Switch-RemoteUpdateProgram $script:fixture.plan $script:fixture.plan.preparedProgram $script:fixture.plan.newSha256 "apply"
+    $script:fixture.alive = $false
+    $script:fixture.managerRaceCount = 1
+    Request-RemoteUpdateStart $script:fixture.plan
+    $null = Switch-RemoteUpdateProgram $script:fixture.plan $script:fixture.plan.backupProgram $script:fixture.plan.oldSha256 ("restore-" + [Guid]::NewGuid().ToString("N"))
+    $stops = $script:fixture.stops
+    Assert-Fails { Invoke-TestAction "Verify" } "Verify 不能接管管理器启动的服务"
+    Assert-Test ($script:fixture.stops -eq $stops) "Verify 始终只读"
+    Invoke-TestAction "Rollback"
+    Assert-Test ($script:fixture.service.parentProcessId -eq 22) "回滚中断后恢复原 launcher 归属"
+    Assert-Test ((Get-RemoteUpdateHash $script:fixture.plan.installedProgram) -eq $script:fixture.plan.oldSha256) "保留原版程序"
+    Complete-Test "管理器子进程映像已重命名时仍可安全回滚，Verify 不修改进程"
+
+    foreach ($invalid in @("parent", "protected", "path", "other-transaction", "hash", "time", "identity", "manager-changed", "endpoint")) {
+        New-TestFixture
+        $plan = $script:fixture.plan
+        $plan.protectedManagers = @([pscustomobject]@{processId=33;parentProcessId=44;createdFileTime="80";imagePath="original-manager"})
+        $service = [pscustomobject]@{processId=12;parentProcessId=33;createdFileTime="101";imagePath=$plan.installedProgram}
+        $script:fixture.service = $service
+        switch ($invalid) {
+            "parent" { $service.parentProcessId = 999 }
+            "protected" { $service.processId = 33 }
+            "path" { $service.imagePath = $plan.backupProgram }
+            "other-transaction" {
+                $service.imagePath = Join-Path (Split-Path -Parent $plan.installedProgram) ("codex-elves-manager.remote-before-" + ("f" * 32) + "-apply.exe")
+                Copy-Item -LiteralPath $plan.backupProgram -Destination $service.imagePath
+            }
+            "hash" { [IO.File]::WriteAllText($plan.installedProgram,"unrelated program") }
+            "time" { $service.createdFileTime = "99" }
+            "identity" { $service = [pscustomobject]@{processId=12;parentProcessId=33;createdFileTime="102";imagePath=$plan.installedProgram} }
+            "manager-changed" { $script:fixture.protectedChanged = $true }
+            "endpoint" { $script:fixture.service = [pscustomobject]@{processId=13;parentProcessId=33;createdFileTime="101";imagePath=$plan.installedProgram} }
+        }
+        Assert-Fails { Stop-RemoteUpdateService $plan $service $service.imagePath -AllowManagerParent } "拒绝未确认的恢复进程：$invalid"
+        Assert-Test ($script:fixture.stops -eq 0) "身份拒绝不停止任何进程"
+    }
+    Complete-Test "管理器恢复分支拒绝未知父进程、受保护进程、异地映像、摘要、时间及端点身份变化"
 
     foreach ($failure in @("failLocal", "failStart", "failAfterRename")) {
         New-TestFixture

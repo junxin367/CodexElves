@@ -333,7 +333,7 @@ pub(super) async fn view(
         tokio::task::spawn_blocking(move || {
             let root = std::fs::canonicalize(root)
                 .map_err(|_| ApiError::new(404, "当前项目目录已失效"))?;
-            if !cwd.starts_with(&root) || !super::canonical_path_is_local(&root) {
+            if !workspace_root_matches(&cwd, &root) {
                 return Err(ApiError::new(403, "项目目录与当前会话不一致"));
             }
             let path = project_relative_path(&root, &requested, false)?;
@@ -439,7 +439,7 @@ async fn browse_workspace(
         let (mut value, root, branch_directory) = tokio::task::spawn_blocking(move || {
             let root = std::fs::canonicalize(root)
                 .map_err(|_| ApiError::new(404, "当前项目目录已失效"))?;
-            if !cwd.starts_with(&root) || !super::canonical_path_is_local(&root) {
+            if !workspace_root_matches(&cwd, &root) {
                 return Err(ApiError::new(403, "项目目录与当前会话不一致"));
             }
             let path = project_relative_path(&root, &requested, !content)?;
@@ -478,9 +478,21 @@ async fn browse_workspace(
 
 fn display_project_path(path: &Path) -> String {
     let path = path.to_string_lossy();
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        return format!("//{}", unc.replace('\\', "/"));
+    }
     path.strip_prefix(r"\\?\")
         .unwrap_or(&path)
         .replace('\\', "/")
+}
+
+fn workspace_root_matches(cwd: &Path, root: &Path) -> bool {
+    cwd.starts_with(root)
+        && (super::canonical_path_is_local(root)
+            || super::preferences::wsl_distribution(root).is_some_and(|distribution| {
+                super::preferences::wsl_distribution(cwd)
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&distribution))
+            }))
 }
 
 async fn branch_metadata(root: &Path, authorization: &RemoteAuthorization) -> Value {
@@ -583,15 +595,44 @@ fn project_relative_path(
     let mut path = requested.replace('\\', "/");
     if path.starts_with("//?/") {
         path = path[4..].to_owned();
+        if let Some(unc) = path.strip_prefix("UNC/") {
+            path = format!("//{unc}");
+        }
     }
     if path.starts_with('/') && path.as_bytes().get(2) == Some(&b':') {
         path.remove(0);
+    }
+    // 用户要求 Linux 文件引用、/mnt/<盘符> 和 WSL UNC 都识别为同一项目；最终仍做完整根目录和路径穿越校验。
+    if cfg!(windows) && path.starts_with('/') && !path.starts_with("//") {
+        if let Some(distribution) = super::preferences::wsl_distribution(root) {
+            path = display_project_path(&super::preferences::wsl_path(&distribution, &path)?);
+        } else if path.starts_with("/mnt/")
+            && path.as_bytes().get(5).is_some_and(u8::is_ascii_alphabetic)
+            && path.as_bytes().get(6) == Some(&b'/')
+        {
+            path = format!("{}:/{}", &path[5..6], &path[7..]);
+        }
+    }
+    if cfg!(windows)
+        && let Some(distribution) = super::preferences::wsl_distribution(root)
+        && let Some(request_distribution) = super::preferences::wsl_distribution(Path::new(&path))
+        && distribution.eq_ignore_ascii_case(&request_distribution)
+    {
+        let linux = format!(
+            "/{}",
+            path.trim_start_matches('/')
+                .split('/')
+                .skip(2)
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        path = display_project_path(&super::preferences::wsl_path(&distribution, &linux)?);
     }
     let root_name = display_project_path(root);
     let absolute = path.starts_with('/') || path.as_bytes().get(1) == Some(&b':');
     if absolute {
         let equal = |left: &str, right: &str| {
-            if cfg!(windows) {
+            if cfg!(windows) && super::preferences::wsl_distribution(root).is_none() {
                 left.eq_ignore_ascii_case(right)
             } else {
                 left == right
@@ -2181,16 +2222,9 @@ fn verify_open_file(file: &File, _: &Path, root: &Path) -> Result<(), ApiError> 
     // `\\?\E:\repo\file`) while `canonicalize` commonly returns the
     // regular drive path (`E:\repo`). Compare the same namespace so
     // every ordinary local file is not rejected as outside the workspace.
-    let actual = actual
-        .to_string_lossy()
-        .strip_prefix(r"\\?\")
-        .map(PathBuf::from)
-        .unwrap_or(actual);
-    let root = root
-        .to_string_lossy()
-        .strip_prefix(r"\\?\")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.to_owned());
+    // WSL 句柄也会返回 \\?\UNC\ 前缀；与 canonicalize 使用同一 UNC 表示，不能把 UNC\ 当相对路径。
+    let actual = PathBuf::from(display_project_path(&actual));
+    let root = PathBuf::from(display_project_path(root));
     if !actual.starts_with(&root) {
         return Err(ApiError::new(403, "文件实际路径已越出当前 Git 仓库"));
     }
@@ -2502,6 +2536,43 @@ fn added_diff(path: &str, bytes: &[u8]) -> GitOutput {
 mod tests {
     use super::*;
 
+    #[test]
+    #[cfg(windows)]
+    fn wsl_session_file_references_share_project_boundary_and_reject_escapes() {
+        let root = Path::new(r"\\wsl.localhost\Ubuntu\home\alice\repo");
+        for requested in [
+            "/home/alice/repo/src/main.rs",
+            r"\\wsl$\Ubuntu\home\alice\repo\src\main.rs",
+            r"\\?\UNC\wsl.localhost\Ubuntu\home\alice\repo\src\main.rs",
+            "src/main.rs",
+        ] {
+            assert_eq!(
+                project_relative_path(root, requested, false).unwrap(),
+                "src/main.rs"
+            );
+        }
+        for outside in [
+            "/home/alice/repo-other/key",
+            "/home/alice/repo/../key",
+            r"\\wsl$\Other\home\alice\repo\key",
+            "src/../../key",
+        ] {
+            assert!(
+                project_relative_path(root, outside, false).is_err(),
+                "{outside}"
+            );
+        }
+        assert_eq!(
+            project_relative_path(Path::new(r"E:\repo"), "/mnt/e/repo/README.md", false).unwrap(),
+            "README.md"
+        );
+        assert!(workspace_root_matches(&root.join("src"), root));
+        assert!(!workspace_root_matches(
+            Path::new(r"\\wsl.localhost\Other\home\alice\repo"),
+            root
+        ));
+    }
+
     fn fixture_dir() -> tempfile::TempDir {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp");
         std::fs::create_dir_all(&root).unwrap();
@@ -2566,6 +2637,7 @@ mod tests {
                 id: "workspace-detail-device".into(),
                 name: "工作区详情回归".into(),
                 token_hash: hash("workspace-detail-cookie"),
+                client_id_hash: String::new(),
                 created_at_ms: now_ms(),
                 expires_at_ms: now_ms() + 120_000,
                 last_seen_at_ms: now_ms(),

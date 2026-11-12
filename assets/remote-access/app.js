@@ -6,6 +6,7 @@ import { renderMessageActions } from "./message-actions.js";
 import { mountSessionTools } from "./session-tools.js";
 import { createWorkspaceBranch, setWorkspaceBranch } from "./session-files.js";
 import { mountSessionMenu } from "./session-menu.js";
+import { createSelectComponent } from "./select.js";
 import { sha256Hex } from "./sha256.js";
 import {
   getAndroidAppInfo,
@@ -143,6 +144,166 @@ const modelCatalogCacheVersion = 1;
 let modelDefaults = { model: "", reasoningEffort: "" };
 const newChatModels = new Map();
 let skillLoading = null, creationProject = "", threadReadVersion = 0, tokenUsageVersion = 0, notifiedTokenUsage = null;
+let creationBackend = "codex", modelsScope = "codex", modelLoadError = "";
+let creationInstanceId = "codex:local", sessionInstances = [], sessionInstanceRequest = null;
+let sessionTypes = [{ id: "codex", label: "Codex" }, { id: "claude", label: "Claude" }];
+function availableSessionInstances() {
+  if (sessionInstances.length) return sessionInstances;
+  // 用户要求实例显示名不拼接“本机”“WSL”；目录未返回时的默认名称也遵循同一规则。
+  return [{ id: "codex:local", backend: "codex", label: "Codex", ready: true, legacyDefault: true },
+    ...(session?.claudeInstanceId ? [{ id: session.claudeInstanceId, backend: "claude",
+      label: ["Claude", session.claudeWslDistribution].filter(Boolean).join(" · "), ready: true, legacyDefault: true }] : [])];
+}
+function conversationInstanceId(value) {
+  if (value?.instanceId) return value.instanceId;
+  const backend = conversationBackend(value);
+  return availableSessionInstances().find(instance => instance.backend === backend
+    && (value?.wslDistribution ? instance.distribution === value.wslDistribution
+      && (!value.wslUser || instance.user === value.wslUser) : instance.legacyDefault))?.id
+    || (backend === "codex" ? "codex:local" : "");
+}
+function activeInstanceId() {
+  const display = thread || (typeof currentThreadDisplay === "function" ? currentThreadDisplay() : null);
+  return creating ? creationInstanceId : conversationInstanceId(display || { id: selectedId });
+}
+function sessionInstanceEnabled(id, preferences = appearance) {
+  if (preferences.sessionInstances && typeof preferences.sessionInstances === "object")
+    return preferences.sessionInstances[id] === true;
+  const instance = availableSessionInstances().find(value => value.id === id);
+  return !!instance?.legacyDefault && preferences.sessionTypes?.[instance.backend] === true;
+}
+function enabledInstanceIds() {
+  // 所有环境统一按实例开关决定列表入口，不按发行版名称筛选。
+  return availableSessionInstances().filter(instance => sessionInstanceEnabled(instance.id)).map(instance => instance.id);
+}
+function sessionBackendEnabled(backend) {
+  return availableSessionInstances().some(instance => instance.backend === backend && sessionInstanceEnabled(instance.id));
+}
+function migrateSessionInstances(preferences, instances) {
+  // 旧类型开关仅迁移到原默认实例；新发现的同类型实例保持关闭，各实例允许全部关闭。
+  if (preferences.sessionInstances && typeof preferences.sessionInstances === "object") return false;
+  preferences.sessionInstances = Object.fromEntries(instances.map(instance =>
+    [instance.id, instance.legacyDefault === true && preferences.sessionTypes?.[instance.backend] === true]));
+  return true;
+}
+function applySessionCatalog(result) {
+  if (!Array.isArray(result.instances) || !Array.isArray(result.types)) return;
+  sessionTypes = result.types.filter(kind => typeof kind.id === "string" && typeof kind.label === "string");
+  sessionInstances = result.instances.filter(instance => typeof instance.id === "string"
+    && typeof instance.label === "string" && sessionTypes.some(kind => kind.id === instance.backend));
+  let changed = migrateSessionInstances(appearance, sessionInstances);
+  const filter = sessionFilterValue();
+  if (appearance.sessionFilter !== filter) { appearance.sessionFilter = filter; changed = true; }
+  if (changed) applyAppearance(true);
+  if (!sessionInstanceEnabled(creationInstanceId)) {
+    const next = newChatBackendOptions()[0];
+    if (next && creating) setCreationBackend(next.value);
+    else if (next) { creationInstanceId = next.value; creationBackend = next.backend; }
+  }
+  renderSessionInstances();
+  if ($("#composer")) { renderSidebar(); updateComposer(); }
+}
+async function loadSessionInstances(force = false) {
+  if (sessionInstanceRequest?.deviceId === session?.device.id) return sessionInstanceRequest;
+  const deviceId = session?.device.id;
+  const request = api("/api/settings/environments", { force }).then(result => {
+    if (session?.device.id === deviceId) applySessionCatalog(result);
+    return result;
+  }).finally(() => { if (sessionInstanceRequest === request) sessionInstanceRequest = null; });
+  request.deviceId = deviceId;
+  sessionInstanceRequest = request;
+  return request;
+}
+function renderSessionInstances() {
+  const root = $("#appearance-session-instances");
+  if (!root) return;
+  root.replaceChildren();
+  for (const kind of sessionTypes) {
+    const instances = availableSessionInstances().filter(instance => instance.backend === kind.id);
+    if (!instances.length) continue;
+    const group = element("section", "session-instance-group");
+    group.append(element("h4", "", `${kind.label}（${instances.length}）`));
+    for (const instance of instances) {
+      const row = element("label", "appearance-notification-row session-instance-row");
+      const copy = element("span", "appearance-environment-copy");
+      copy.append(element("strong", "", instance.label), element("small", "muted", instance.status || "可接入"));
+      if (instance.executable) copy.append(element("small", "muted session-instance-path", instance.executable));
+      const control = element("input", "appearance-notification-switch");
+      control.type = "checkbox"; control.setAttribute("role", "switch");
+      control.dataset.instanceId = instance.id; control.setAttribute("aria-label", `启用 ${instance.label}`);
+      control.checked = sessionInstanceEnabled(instance.id);
+      control.onchange = () => {
+        migrateSessionInstances(appearance, availableSessionInstances());
+        appearance.sessionInstances = { ...appearance.sessionInstances, [instance.id]: control.checked };
+        if (appearance.sessionFilter !== "all" && !sessionInstanceEnabled(sessionFilterValue()))
+          appearance.sessionFilter = "all";
+        if (!sessionInstanceEnabled(creationInstanceId)) {
+          const next = newChatBackendOptions()[0];
+          if (next && creating) setCreationBackend(next.value);
+          else if (next) { creationInstanceId = next.value; creationBackend = next.backend; }
+        }
+        applyAppearance(true); projectVisibleThreadCounts.clear(); renderSidebar(); updateComposer();
+        void loadSidebar(null, { fresh: true }).catch(error => notice(error.message, true));
+      };
+      row.append(copy, control); group.append(row);
+    }
+    root.append(group);
+  }
+}
+function claudeThreadId(id) { return typeof id === "string" && /^claude-[0-9a-f-]{36}$/i.test(id); }
+function activeBackend() {
+  return creating ? creationBackend : conversationBackend(thread || { id: selectedId });
+}
+function isClaude() { return activeBackend() === "claude"; }
+function newChatBackendOptions() {
+  // 用户要求类型与环境实例分别控制；未接通的执行适配器只在设置中展示，不能悄悄改投默认实例。
+  return availableSessionInstances().filter(instance => instance.ready && sessionInstanceEnabled(instance.id))
+    .map(instance => ({ value: instance.id, backend: instance.backend, label: instance.label,
+      icon: ["codex", "claude"].includes(instance.backend) ? instance.backend : "allSessions" }));
+}
+function threadLocation(value) {
+  const cwd = value?.cwd || "";
+  const distribution = value?.wslDistribution;
+  return distribution ? `WSL · ${distribution}${cwd ? ` · ${cwd}` : ""}` : cwd;
+}
+function claudeNativeQueue() { return isClaude() && thread?.capabilities?.queue === true; }
+function queueCapability(name, id = selectedId) {
+  // Claude 队列能力由当前会话报告；Codex 桌面离线时也必须保留已支持的图片编辑与回执恢复。
+  return claudeThreadId(id) || thread?.id === id && thread?.backend === "claude"
+    ? thread?.id === id && thread.capabilities?.[name] === true : session?.capabilities?.[name] === true;
+}
+function backendAvailable(value = session) {
+  return isClaude() ? value?.capabilities?.claudeSessions === true : value?.nativeConnected || value?.serviceConnected;
+}
+function approvalsAllowed() { return isClaude() ? session?.claudeAllowApprovals === true : session?.allowApprovals === true; }
+function backendCapability(name) {
+  return isClaude() && ["imageInput", "projectlessCreation", "sendText"].includes(name)
+    ? session?.capabilities?.claudeSessions === true : session?.capabilities?.[name] === true;
+}
+function newDraftKey(projectId, backend = "codex", instanceId = "") {
+  // 用户要求实例固定；草稿和失败恢复按实例隔离，旧 Claude 记录只迁移到原默认实例。
+  if (!instanceId && backend === "claude") instanceId = session?.claudeInstanceId || "";
+  if (instanceId && instanceId !== "codex:local") return `$new:instance:${instanceId}:${projectId || ""}`;
+  return backend === "claude" ? `$new:claude:${projectId || ""}` : `$new:${projectId || ""}`;
+}
+function modelContext() {
+  return { backend: activeBackend(), instanceId: activeInstanceId(),
+    ...(selectedId ? { threadId: selectedId } : { projectId: creationProject }) };
+}
+function modelContextKey() {
+  // 用户要求同一会话类型实例共用模型目录；项目、历史会话和新建入口不能各建一份模型缓存。
+  return activeInstanceId() === "codex:local" ? "codex" : activeInstanceId();
+}
+function syncBackendModels() {
+  if (!sessionInstanceEnabled(activeInstanceId())) return;
+  const key = modelContextKey();
+  if (key === modelsScope) return;
+  modelsScope = key; models = []; modelsLoadedAt = 0; modelsPromise = null; modelsRetryAt = 0;
+  modelDefaults = { model: "", reasoningEffort: "" }; modelLoadError = "";
+  void loadModels().catch(error => {
+    if (modelsScope === key) { modelLoadError = error.message; updateComposer(); }
+  });
+}
 let creationBranchRead = null, creationBranchSnapshot = null;
 let skillRenderVersion = 0, messageSkillLoadScope = "";
 let recentLimit = 40;
@@ -182,6 +343,7 @@ window.addEventListener("storage", event => {
   renderSidebar();
 });
 let messageFrame = null, activityTimer = null, stopping = false, messageVersion = 0, statusVersion = 0, notifiedStatus = null;
+let claudeHistoryOrder = null;
 let followMessages = true;
 let messagesResizeObserver = null;
 let composerScroll = null;
@@ -352,12 +514,66 @@ try {
 const escapes = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 const escape = value => String(value ?? "").replace(/[&<>"']/g, character => escapes[character]);
 const randomId = () => globalThis.crypto?.randomUUID?.() || [...crypto.getRandomValues(new Uint8Array(24))].map(byte => byte.toString(16).padStart(2, "0")).join("");
+let loginClientId = "";
+function remoteLoginClientId() {
+  // 用户要求同一 App/浏览器重复登录不累积设备；随机标识只做去重，不能替代访问密钥，也不采集硬件指纹。
+  if (loginClientId) return loginClientId;
+  try { loginClientId = localStorage.getItem("codex-elves-login-client-id") || ""; } catch {}
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(loginClientId)) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = bytes[6] & 15 | 64; bytes[8] = bytes[8] & 63 | 128;
+    const hex = [...bytes].map(value => value.toString(16).padStart(2, "0")).join("");
+    loginClientId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  try { localStorage.setItem("codex-elves-login-client-id", loginClientId); } catch {}
+  return loginClientId;
+}
 const relatedNavigationOwner = randomId();
 let selectionToken = randomId();
 const appearancePresets = {
   light: { background: "#ffffff", foreground: "#1f1f1f", accent: "#171717" },
   dark: { background: "#171717", foreground: "#ededed", accent: "#ededed" }
 };
+// 用户要求主题与明暗模式独立；两套主题分别保存浅色/深色调色，切换主题不覆盖另一套自定义颜色。
+const appearanceThemes = {
+  chatgpt: { label: "ChatGPT", colors: appearancePresets },
+  "vscode-plus": { label: "VS Code Plus", colors: {
+    light: { background: "#ffffff", foreground: "#3b3b3b", accent: "#0078d4" },
+    dark: { background: "#1f1f1f", foreground: "#cccccc", accent: "#0078d4" }
+  } }
+};
+const defaultUiFont = '-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif';
+const defaultCodeFont = 'ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace';
+// 用户要求正文以整个可视窗口居中，上限默认 950px，空间不足时收窄；与 style.css 的窗口中心公式和回退值同步。
+const conversationWidthDefault = 950, conversationWidthMin = 320, conversationWidthMax = 3840;
+const validFontFamily = value => typeof value === "string" && value.length <= 100
+  && !/[{};<>\u0000-\u001f]/u.test(value);
+const fontStack = (family, fallback) => family ? `${JSON.stringify(family)},${fallback}` : fallback;
+function conversationBackend(item) {
+  return item?.backend || (claudeThreadId(item?.id) ? "claude" : "codex");
+}
+function sessionFilterValue(preferences = appearance) {
+  const filter = preferences.sessionFilter;
+  if (!filter || filter === "all") return "all";
+  if (filter.includes(":")) return filter;
+  // 用户要求按实例筛选；旧类型选择优先迁到已启用的原默认实例，其次同类型首个已启用实例。
+  // 同类型全部关闭时保留默认实例筛选为空，不能退成“全部”而意外显示其他类型。
+  const instances = availableSessionInstances().filter(instance => instance.backend === filter);
+  const enabled = instances.filter(instance => sessionInstanceEnabled(instance.id, preferences));
+  return (enabled.find(instance => instance.legacyDefault) || enabled[0]
+    || instances.find(instance => instance.legacyDefault) || instances[0])?.id || "all";
+}
+function sessionFilterOptions() {
+  return [{ value: "all", label: "全部会话", icon: "allSessions" },
+    ...availableSessionInstances().map(instance => ({ value: instance.id, label: instance.label,
+      icon: ["codex", "claude"].includes(instance.backend) ? instance.backend : "allSessions",
+      disabled: !sessionInstanceEnabled(instance.id) }))];
+}
+function sessionTypeVisible(item, preferences = appearance) {
+  const instanceId = conversationInstanceId(item), filter = sessionFilterValue(preferences);
+  // 最近、项目、置顶和搜索共用实例 ID 过滤，同类型的不同 WSL 实例不能互相混入。
+  return sessionInstanceEnabled(instanceId, preferences) && (filter === "all" || filter === instanceId);
+}
 const projectThreadLimits = [5, 10, 20, 50];
 // 用户要求文件阅读字号统一控制变更预览和文件查看，范围 6～14px、默认 12px、步长 1px；文件列表继续使用原字号。
 const fileReadingFontMin = 6, fileReadingFontMax = 14, fileReadingFontDefault = 12;
@@ -368,9 +584,14 @@ function normalizeAutomaticThemeLightLux(value) {
     ? Math.min(automaticThemeLightLuxMax, Math.max(automaticThemeLightLuxMin, value)) : automaticThemeLightLuxDefault;
 }
 function defaultAppearance(theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") {
+  const palettes = Object.fromEntries(Object.entries(appearanceThemes).map(([key, preset]) =>
+    [key, { light: { ...preset.colors.light }, dark: { ...preset.colors.dark } }]));
   return { theme, themeMode: "manual", automaticThemeLightLux: automaticThemeLightLuxDefault,
-    fontSize: 13, fileReadingFontSize: fileReadingFontDefault, projectThreadLimit: 5, backgroundOpacity: 35, backgroundFit: "cover",
-    colors: { light: { ...appearancePresets.light }, dark: { ...appearancePresets.dark } } };
+    // 用户要求字体默认参考 Codex：系统界面字体/系统等宽字体，均为 14px；保留已保存字号和独立文件阅读字号。
+    fontSize: 14, codeFontSize: 14, uiFont: "", codeFont: "", uiFontWeight: 400, codeFontWeight: 400,
+    conversationWidth: conversationWidthDefault, sessionTypes: { codex: true, claude: false }, sessionInstances: null, sessionFilter: "all",
+    themePreset: "chatgpt", palettes, colors: palettes.chatgpt,
+    fileReadingFontSize: fileReadingFontDefault, projectThreadLimit: 5, backgroundOpacity: 35, backgroundFit: "cover" };
 }
 function readAppearance() {
   const value = defaultAppearance();
@@ -379,6 +600,21 @@ function readAppearance() {
     if (!saved || typeof saved !== "object") return value;
     if (["light", "dark"].includes(saved.theme)) value.theme = saved.theme;
     if (["auto", "manual"].includes(saved.themeMode)) value.themeMode = saved.themeMode;
+    if (Object.hasOwn(appearanceThemes, saved.themePreset)) value.themePreset = saved.themePreset;
+    if (Number.isInteger(saved.conversationWidth))
+      value.conversationWidth = Math.min(conversationWidthMax, Math.max(conversationWidthMin, saved.conversationWidth));
+    if (typeof saved.sessionFilter === "string" && /^[a-z][a-z0-9:-]{0,255}$/.test(saved.sessionFilter))
+      value.sessionFilter = saved.sessionFilter;
+    if (saved.sessionTypes && typeof saved.sessionTypes === "object") {
+      value.sessionTypes = { codex: saved.sessionTypes.codex !== false, claude: saved.sessionTypes.claude === true };
+    }
+    if (saved.sessionInstances && typeof saved.sessionInstances === "object" && !Array.isArray(saved.sessionInstances))
+      value.sessionInstances = Object.fromEntries(Object.entries(saved.sessionInstances)
+        .filter(([id, enabled]) => id.length <= 160 && typeof enabled === "boolean"));
+    for (const key of ["uiFont", "codeFont"]) if (validFontFamily(saved[key])) value[key] = saved[key].trim();
+    for (const key of ["uiFontWeight", "codeFontWeight"])
+      if ([400, 500, 600].includes(saved[key])) value[key] = saved[key];
+    if (Number.isInteger(saved.codeFontSize)) value.codeFontSize = Math.min(24, Math.max(8, saved.codeFontSize));
     value.automaticThemeLightLux = normalizeAutomaticThemeLightLux(saved.automaticThemeLightLux);
     if (Number.isInteger(saved.backgroundOpacity)) value.backgroundOpacity = Math.min(100, Math.max(1, saved.backgroundOpacity));
     if (["cover", "contain"].includes(saved.backgroundFit)) value.backgroundFit = saved.backgroundFit;
@@ -386,9 +622,13 @@ function readAppearance() {
     if (Number.isInteger(saved.fileReadingFontSize))
       value.fileReadingFontSize = Math.min(fileReadingFontMax, Math.max(fileReadingFontMin, saved.fileReadingFontSize));
     if (projectThreadLimits.includes(saved.projectThreadLimit)) value.projectThreadLimit = saved.projectThreadLimit;
-    for (const theme of ["light", "dark"]) for (const name of ["background", "foreground", "accent"]) {
-      if (/^#[0-9a-f]{6}$/i.test(saved.colors?.[theme]?.[name])) value.colors[theme][name] = saved.colors[theme][name];
-    }
+    for (const preset of Object.keys(appearanceThemes)) for (const theme of ["light", "dark"])
+      for (const name of ["background", "foreground", "accent"]) {
+        const color = saved.palettes?.[preset]?.[theme]?.[name]
+          ?? (preset === value.themePreset ? saved.colors?.[theme]?.[name] : null);
+        if (/^#[0-9a-f]{6}$/i.test(color)) value.palettes[preset][theme][name] = color;
+      }
+    value.colors = value.palettes[value.themePreset];
   } catch {}
   return value;
 }
@@ -656,11 +896,23 @@ function applyAppearance(save = false) {
   root.style.colorScheme = appearance.theme;
   const brightness = [1, 3, 5].map(index => parseInt(accent.slice(index, index + 2), 16));
   const onAccent = brightness[0] * .299 + brightness[1] * .587 + brightness[2] * .114 > 150 ? "#171717" : "#ffffff";
+  // 用户要求远程输入框参考原生 Codex，单独派生不透明表面色，不能降低文字或工具栏透明度。
+  // 远程端没有对比度设置，沿用原生默认值：深色 60% 得到 .08 + .08 * .6 = .128，
+  // 浅色 45% 得到 .16 + .12 * .45 = .214；深色混入当前前景，浅色混入白色。
+  // 默认深色结果 #323232 须与 style.css 的加载前回退色一致；自定义颜色和主题切换均重新计算。
+  const composerBackground = appearance.theme === "dark"
+    ? mixColor(background, foreground, .128) : mixColor(background, "#ffffff", .214);
   const values = {
     bg: background, text: foreground, accent, "on-accent": onAccent,
+    "composer-bg": composerBackground,
     side: mixColor(background, foreground, .035), code: mixColor(background, foreground, .05),
     hover: mixColor(background, foreground, .075), line: mixColor(background, foreground, .14),
     muted: mixColor(background, foreground, .58), "font-size": `${appearance.fontSize}px`,
+    "ui-font-family": fontStack(appearance.uiFont, defaultUiFont),
+    "code-font-family": fontStack(appearance.codeFont, defaultCodeFont),
+    "ui-font-weight": String(appearance.uiFontWeight), "code-font-weight": String(appearance.codeFontWeight),
+    "code-font-size": `${appearance.codeFontSize}px`,
+    "conversation-max-width": `${appearance.conversationWidth}px`,
     "file-reading-font-size": `${currentFileReadingFontSize()}px`,
     danger: appearance.theme === "dark" ? "#ff9c97" : "#b42318", green: appearance.theme === "dark" ? "#77c7a0" : "#168350"
   };
@@ -729,8 +981,11 @@ function localFileBrowserUrl(path) {
     throw new Error("文件路径无效");
   }
   const url = new URL(location.href);
+  // Linux/WSL 绝对路径的前导斜杠也须保留在路由参数中；否则 /home/... 会被当成项目内相对路径。
+  const absolutePrefix = normalized.startsWith("//") ? "%2F%2F" : normalized.startsWith("/")
+    && !/^\/[a-z]:\//i.test(normalized) ? "%2F" : "";
   url.pathname = `/api/workspace/view/${encodeURIComponent(threadId)}/${
-    segments.map(segment => encodeURIComponent(segment)).join("/")
+    absolutePrefix + segments.map(segment => encodeURIComponent(segment)).join("/")
   }`;
   url.search = "";
   url.hash = "";
@@ -751,8 +1006,144 @@ function openLocalFileInBrowser(path) {
 window.addEventListener("codex-elves-open-local-file", event => {
   openLocalFileInBrowser(event.detail?.path);
 });
+// textarea 将 CRLF 规范为 LF；比较草稿时统一文本，保存时恢复原文件换行，避免未编辑即提示“未保存”。
+const normalizeInstructionText = value => value.replace(/\r\n?/g, "\n");
+const instructionFileText = (value, lineEnding) => lineEnding === "\r\n" ? value.replace(/\n/g, "\r\n") : value;
+const instructionDrafts = new Map();
+function mountRemoteSettings(dialog) {
+  const find = id => $("#" + id, dialog);
+  const instance = find("instruction-instance"), input = find("instruction-content");
+  const status = find("instruction-status"), save = find("instruction-save"), reload = find("instruction-reload");
+  const detectionButton = find("appearance-detect-environments"), detectionStatus = find("appearance-environments-status");
+  let disposed = false, generation = 0, environments = null, instances = [], detection = null, current = null, saving = false;
+  const deviceId = session?.device.id;
+  const alive = () => !disposed && dialog.isConnected && session?.device.id === deviceId;
+  // 用户要求只选择会话类型实例，编辑其用户级全局指令；实例身份同时隔离各环境的未保存草稿。
+  const identity = () => ({ instanceId: instance.value });
+  const keyFor = value => JSON.stringify([privateInputScope(session), value]);
+  // 用户要求正常读取后不显示“已读取”；检测、读取及撤销编辑恢复原文时均留空。
+  const dirty = () => current && input.value !== current.content;
+  // 历史会话保留的已卸载实例不能冒充当前安装；本机 Codex 仍允许通过已连接桌面管理全局指令。
+  const instanceAvailable = id => instances.some(value => value.id === id && environments?.some(environment =>
+    environment.id === value.environmentId && environment.user === value.user && !environment.error
+      && (value.id === "codex:local" || !!environment.executables?.[value.backend])));
+  const update = () => {
+    save.disabled = saving || !!detection || !current || !instanceAvailable(current.instanceId)
+      || current.key !== keyFor(identity()) || !dirty() || session?.readOnly || !connected;
+    reload.disabled = saving || !!detection || !instanceAvailable(instance.value); input.disabled = saving || !current;
+    if (detectionButton) detectionButton.disabled = saving || !!detection;
+    instance.disabled = saving || !!detection;
+  };
+  const renderInstances = () => {
+    const old = instance.value;
+    const options = instances.map(value => ({ value: value.id, label: value.label, disabled: !instanceAvailable(value.id) }));
+    if (old && !instances.some(value => value.id === old)) {
+      // 实例暂不可用时保留原目标，不能把旧指令和草稿悄悄配给另一个本机/WSL 文件。
+      const label = instance.selectOptions.find(option => option.value === old)?.label || old;
+      options.push({ value: old, label, description: "暂不可用", disabled: true });
+    }
+    setSelectOptions(instance, options, old || "codex:local");
+  };
+  async function detect(force = false) {
+    if (detection) return detection;
+    if (detectionButton) detectionButton.disabled = true;
+    if (detectionStatus) detectionStatus.textContent = "正在检测本机与 WSL 中的会话实例…";
+    detection = (async () => {
+      try {
+        const result = await loadSessionInstances(force);
+        if (!alive()) return;
+        if (!Array.isArray(result.environments) || !Array.isArray(result.instances)) throw new Error("实例检测数据无效。");
+        environments = result.environments;
+        instances = result.instances;
+        renderInstances();
+        if (detectionStatus) detectionStatus.textContent = "检测只读取安装位置，不启动模型会话。开关仅影响当前浏览器或 App。";
+        if (current) status.textContent = instanceAvailable(current.instanceId)
+          ? dirty() ? "未保存的草稿" : ""
+          : "所选实例暂不可用，草稿已保留。";
+      } catch (error) {
+        if (alive()) {
+          if (detectionStatus) detectionStatus.textContent = error.message;
+          else status.textContent = error.message;
+        }
+      } finally {
+        detection = null;
+        if (alive()) update();
+      }
+    })();
+    update();
+    return detection;
+  }
+  async function read({ discard = false } = {}) {
+    if (!alive() || saving) return;
+    const version = ++generation, value = identity(), key = keyFor(value);
+    current = null; input.value = ""; update();
+    find("instruction-path").textContent = "";
+    if (!instanceAvailable(value.instanceId)) {
+      status.textContent = "请选择可用的会话类型实例。"; return;
+    }
+    status.textContent = "正在读取原生指令文件…";
+    try {
+      const result = await api("/api/settings/instructions", value);
+      if (!alive() || generation !== version || keyFor(identity()) !== key) return;
+      if (typeof result.content !== "string" || typeof result.revision !== "string")
+        throw new Error("指令文件返回格式无效。");
+      const content = normalizeInstructionText(result.content);
+      current = { ...value, content, lineEnding: result.content.includes("\r\n") ? "\r\n" : "\n", revision: result.revision, key };
+      let draft = !discard && instructionDrafts.get(key);
+      if (draft?.content === content) { instructionDrafts.delete(key); draft = null; }
+      input.value = draft?.content ?? content;
+      if (draft && draft.revision !== result.revision) {
+        current.revision = draft.revision;
+        status.textContent = "有未保存的草稿，原文件也已变化。请复制草稿后重新读取并合并。";
+      } else status.textContent = dirty() ? "未保存的草稿" : result.exists ? "" : "文件尚不存在，保存时创建。";
+      find("instruction-path").textContent = result.path;
+    } catch (error) {
+      if (alive() && generation === version) status.textContent = error.message;
+    } finally { if (alive() && generation === version) update(); }
+  }
+  input.oninput = () => {
+    if (!current) return;
+    if (dirty()) instructionDrafts.set(current.key, { content: input.value, revision: current.revision });
+    else instructionDrafts.delete(current.key);
+    status.textContent = dirty() ? "未保存的草稿" : ""; update();
+  };
+  instance.onchange = () => void read();
+  reload.onclick = async () => {
+    if (dirty() && !await confirmAction("重新读取指令", "当前未保存的草稿将被文件内容替换。", "重新读取")) return;
+    if (current) instructionDrafts.delete(current.key);
+    await read({ discard: true });
+  };
+  save.onclick = async () => {
+    if (save.disabled || !current || current.key !== keyFor(identity()) || !instanceAvailable(current.instanceId)) return;
+    const value = current, content = input.value;
+    saving = true; update(); status.textContent = "正在保存…";
+    try {
+      const result = await api("/api/settings/instructions", { instanceId: value.instanceId,
+        content: instructionFileText(content, value.lineEnding),
+        expectedRevision: value.revision });
+      if (typeof result.content !== "string" || typeof result.revision !== "string"
+          || normalizeInstructionText(result.content) !== content) throw new Error("保存结果无法确认，请重新读取。");
+      // 关闭后重开仍可继续编辑；迟到回包只清理自己提交的版本，不能删除新窗口的新草稿。
+      const draft = instructionDrafts.get(value.key);
+      if (draft?.content === content && draft.revision === value.revision) instructionDrafts.delete(value.key);
+      if (!alive()) return;
+      current = { ...value, content, revision: result.revision };
+      status.textContent = "已保存至原生指令文件。";
+    } catch (error) { if (alive()) status.textContent = error.message; }
+    finally { saving = false; if (alive()) update(); }
+  };
+  if (detectionButton) detectionButton.onclick = () => void detect(true);
+  update();
+  return {
+    async show(page) {
+      if (!environments) await detect();
+      if (page === "instructions" && alive() && !current) await read();
+    },
+    dispose() { disposed = true; generation++; }
+  };
+}
 function openAppearance() {
-  closeComposerMenus(); closePopup();
+  closeComposerMenus(); closePopup(); sessionMenu?.close();
   const trigger = document.activeElement;
   const androidContainer = isAndroidContainer();
   const previousDialog = $("#appearance-dialog");
@@ -764,31 +1155,68 @@ function openAppearance() {
   dialog.innerHTML = `<div class="appearance-heading"><h2 id="appearance-title">设置</h2><button type="button" class="icon-button" title="关闭设置" aria-label="关闭设置"></button></div>
     <div class="appearance-layout">
     <nav class="appearance-nav" aria-label="设置导航">
-      <button type="button" id="appearance-general-entry" class="appearance-nav-item" aria-controls="appearance-general-page" aria-selected="true"><span class="appearance-nav-icon"></span><span>通用设置</span></button>
-      <button type="button" id="appearance-customization-entry" class="appearance-nav-item" title="打开外观主题" aria-label="打开外观主题" aria-controls="appearance-customization-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>外观主题</span></button>
+      <button type="button" id="appearance-general-entry" class="appearance-nav-item" aria-controls="appearance-general-page" aria-selected="true"><span class="appearance-nav-icon"></span><span>会话</span></button>
+      <button type="button" id="appearance-types-entry" class="appearance-nav-item" aria-controls="appearance-types-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>会话类型实例</span></button>
+      <button type="button" id="appearance-instructions-entry" class="appearance-nav-item" aria-controls="appearance-instructions-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>自定义指令</span></button>
+      <button type="button" id="appearance-customization-entry" class="appearance-nav-item" title="打开外观" aria-label="打开外观" aria-controls="appearance-customization-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>外观</span></button>
       <button type="button" id="appearance-runtime-entry" class="appearance-nav-item" aria-controls="appearance-runtime-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>运行模式</span></button>
       <button type="button" id="appearance-notifications-entry" class="appearance-nav-item" title="打开通知事件" aria-label="打开通知事件" aria-controls="appearance-notifications-page" aria-selected="false" hidden><span class="appearance-nav-icon"></span><span>通知事件</span></button>
       <button type="button" id="appearance-diagnostics-entry" class="appearance-nav-item" title="打开诊断日志" aria-label="打开诊断日志" aria-controls="appearance-diagnostics-page" aria-selected="false" hidden><span class="appearance-nav-icon"></span><span>诊断日志</span></button>
     </nav>
     <div class="appearance-panels">
     <section id="appearance-general-page" class="appearance-body appearance-settings-page">
-    <h3 class="appearance-panel-title">通用设置</h3>
-    <div class="appearance-field"><span id="appearance-theme-label">主题</span><div id="appearance-theme-slot" class="appearance-theme-options" role="group" aria-labelledby="appearance-theme-label"></div></div>
-    <div id="appearance-auto-light-setting" hidden></div>
+    <h3 class="appearance-panel-title">会话</h3>
+    <label class="appearance-field appearance-width-field"><span>会话正文宽度上限</span><span class="appearance-number"><input id="appearance-conversation-width" type="number" min="${conversationWidthMin}" max="${conversationWidthMax}" step="10" value="${appearance.conversationWidth}" aria-label="会话正文宽度上限"><span>px</span></span></label>
+    <p class="appearance-hint">默认 950px。窗口较窄时，正文和输入框会随可用空间自动收窄。</p>
     <div class="appearance-field appearance-thread-limit-field"><span>每个项目显示会话数</span><div id="appearance-project-thread-limit-slot"></div></div>
+    <div id="appearance-cache-state" class="appearance-field" role="status"></div>
+    </section>
+    <section id="appearance-types-page" class="appearance-body appearance-settings-page" hidden>
+    <!-- 用户更正名称为“会话类型实例”，并要求精简说明；保留逐实例开关与自动检测。 -->
+    <h3 class="appearance-panel-title">会话类型实例</h3>
+    <p class="appearance-hint">按实例启用会话，仅影响当前设备；关闭不会停止任务。</p>
+    <div id="appearance-session-instances"></div>
+    </section>
+    <section id="appearance-instructions-page" class="appearance-body appearance-settings-page" hidden>
+    <h3 class="appearance-panel-title">自定义指令</h3>
+    <!-- 用户要求只选择实例并编辑用户级全局指令，不再提供类型、环境、作用范围和项目选择。 -->
+    <div class="instruction-selectors"><label>会话类型实例<div id="instruction-instance-slot"></div></label></div>
+    <p id="instruction-path" class="appearance-hint instruction-path"></p>
+    <textarea id="instruction-content" class="instruction-content" aria-label="自定义指令内容" spellcheck="false" disabled></textarea>
+    <div class="instruction-actions"><span id="instruction-status" class="appearance-hint" role="status"></span><button id="instruction-reload" type="button">重新读取</button><button id="instruction-save" type="button" class="primary" disabled>保存指令</button></div>
+    <p class="appearance-hint">保存至所选实例的用户级全局指令文件，重新加载后生效。</p>
+    </section>
+    <section id="appearance-customization-page" class="appearance-body appearance-settings-page" hidden>
+    <h3 class="appearance-panel-title">外观</h3>
+    <nav class="appearance-subnav" aria-label="外观分类"><button type="button" data-appearance-tab="theme" aria-pressed="true">主题与模式</button><button type="button" data-appearance-tab="fonts" aria-pressed="false">字体</button><button type="button" data-appearance-tab="background" aria-pressed="false">背景</button></nav>
+    <div data-appearance-panel="theme">
+    <div class="appearance-field"><span id="appearance-theme-label">模式</span><div id="appearance-theme-slot" class="appearance-theme-options" role="group" aria-labelledby="appearance-theme-label"></div></div>
+    <div id="appearance-auto-light-setting" hidden></div>
+    <div class="appearance-field"><span>主题</span><div id="appearance-preset-slot"></div></div>
+    <div id="appearance-colors"></div>
+    </div>
+    <div data-appearance-panel="background" hidden>
     <div class="appearance-field appearance-background-field"><span>背景图片</span><div class="appearance-background-actions"><input id="appearance-background-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden><button type="button" id="appearance-background-action"></button></div></div>
     <div id="appearance-background-preview" class="appearance-background-preview" hidden><img id="appearance-background-thumbnail" alt=""><span id="appearance-background-name"></span></div>
     <label class="appearance-field"><span>背景透明度</span><span class="appearance-font"><input id="appearance-background-opacity" type="range" min="1" max="100" step="1" aria-label="背景透明度"><output id="appearance-background-opacity-value"></output></span></label>
     <div class="appearance-field"><span>图片铺法</span><div id="appearance-background-fit-slot"></div></div>
     <p id="appearance-background-status" class="appearance-background-status" role="status" hidden></p>
-    <div id="appearance-cache-state" class="appearance-field" role="status"></div>
-    </section>
-    <section id="appearance-customization-page" class="appearance-body appearance-settings-page" hidden>
-    <h3 class="appearance-panel-title">外观主题</h3>
-    <div id="appearance-colors"></div>
-    <label class="appearance-field">字体大小<span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="字体大小"><output id="appearance-font-value"></output></span></label>
+    </div>
+    <div data-appearance-panel="fonts" hidden>
+    <label class="appearance-field"><span>程序字体</span><input id="appearance-ui-font" class="appearance-font-family" type="text" list="appearance-ui-fonts" placeholder="系统默认" maxlength="100" aria-label="程序字体"></label>
+    <datalist id="appearance-ui-fonts"><option value="Segoe UI"><option value="Microsoft YaHei"><option value="Inter"><option value="Arial"><option value="Noto Sans SC"></datalist>
+    <label class="appearance-field"><span>程序字号</span><span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="程序字号"><output id="appearance-font-value"></output></span></label>
+    <label class="appearance-field"><span>程序字重</span><div id="appearance-ui-font-weight-slot"></div></label>
+    <p class="appearance-font-preview">CodexElves · 你好，开始新的会话 Aa 012345</p>
+    <label class="appearance-field"><span>代码字体</span><input id="appearance-code-font" class="appearance-font-family" type="text" list="appearance-code-fonts" placeholder="系统默认等宽字体" maxlength="100" aria-label="代码字体"></label>
+    <datalist id="appearance-code-fonts"><option value="Consolas"><option value="Cascadia Code"><option value="JetBrains Mono"><option value="Fira Code"><option value="SF Mono"></datalist>
+    <label class="appearance-field"><span>代码字号</span><span class="appearance-number"><input id="appearance-code-font-size" type="number" min="8" max="24" step="1" aria-label="代码字号"><span>px</span></span></label>
+    <label class="appearance-field"><span>代码字重</span><div id="appearance-code-font-weight-slot"></div></label>
+    <pre class="appearance-code-preview">const greeting = "Hello, 你好";\n0123456789  () [] {} =&gt;</pre>
     <label class="appearance-field"><span>文件阅读字号</span><span class="appearance-font"><input id="appearance-file-reading-font" type="range" min="${fileReadingFontMin}" max="${fileReadingFontMax}" step="1" aria-label="文件阅读字号" aria-describedby="appearance-file-reading-font-hint"><output id="appearance-file-reading-font-value" for="appearance-file-reading-font"></output></span></label>
     <div id="appearance-file-reading-font-hint" class="appearance-reading-font-hint"><span>用于变更预览与文件查看。</span><button type="button" id="appearance-file-reading-font-reset" class="text-button" title="恢复为 ${fileReadingFontDefault}px">恢复默认</button></div>
+    <p class="appearance-hint">留空使用系统默认字体，程序和代码默认均为 14px。自定义字体需要已安装在当前设备上。</p>
+    </div>
     </section>
     <section id="appearance-diagnostics-page" class="appearance-body appearance-settings-page" hidden>
     <h3 class="appearance-panel-title">诊断日志</h3>
@@ -797,12 +1225,21 @@ function openAppearance() {
     </section>
     <section id="appearance-runtime-page" class="appearance-body appearance-settings-page" hidden>
     <h3 class="appearance-panel-title">运行模式</h3>
+    <!-- 用户要求实例名省略“本机/WSL”标签；运行模式仍仅适用于本机 Codex。 -->
+    <p class="appearance-hint">适用实例：Codex。这里选择本机 Codex 的连接方式；各 WSL Claude 实例使用各自的原生连接。</p>
     <label class="appearance-notification-row"><span id="appearance-runtime-mode" aria-live="polite">CDP 模式</span><input id="appearance-cdp-injection" class="appearance-notification-switch" type="checkbox" role="switch" aria-label="切换运行模式，当前为 CDP 模式" checked disabled></label>
     <p id="appearance-runtime-status" class="appearance-notification-status" role="status" hidden></p>
     </section>
     </div></div>
     <div class="appearance-actions"><button type="button" class="appearance-version" id="appearance-app-version" hidden disabled></button><div class="appearance-action-buttons"><button type="button" id="appearance-reset">恢复默认</button><button type="button" class="primary" id="appearance-close">完成</button></div></div>`;
   document.body.append(dialog);
+  // 用户要求设置复用主题 Select：指令实例与两种字重也使用统一组件。
+  for (const [id, label, options, value] of [
+    ["instruction-instance", "会话类型实例", [], ""],
+    ...[["ui", "程序字重", appearance.uiFontWeight], ["code", "代码字重", appearance.codeFontWeight]]
+      .map(([kind, label, weight]) => [`appearance-${kind}-font-weight`, label,
+        [{ value: "400", label: "常规" }, { value: "500", label: "中等" }, { value: "600", label: "半粗" }], String(weight)])
+  ]) $(`#${id}-slot`, dialog).append(selectControl(id, label, options, value));
   const title = $("#appearance-title", dialog);
   const headingButton = $(".appearance-heading button", dialog);
   const primaryBody = $("#appearance-general-page", dialog);
@@ -932,6 +1369,8 @@ function openAppearance() {
   entryButton.querySelector(".appearance-nav-icon").append(icon("globe"));
   diagnosticsEntry.querySelector(".appearance-nav-icon").append(icon("tools"));
   runtimeEntry.querySelector(".appearance-nav-icon").append(icon("settings"));
+  $("#appearance-types-entry", dialog).querySelector(".appearance-nav-icon").append(icon("allSessions"));
+  $("#appearance-instructions-entry", dialog).querySelector(".appearance-nav-icon").append(icon("edit"));
   headingButton.append(icon("close"));
   renderPwaCacheState();
   const versionButton = notificationVersionButton;
@@ -1014,7 +1453,21 @@ function openAppearance() {
   };
   customizationEntry.onclick = () => {
     if (!dialog.isConnected || !dialog.open) return;
-    showAppearancePage(customizationPage, "外观设置", customizationEntry);
+    showAppearancePage(customizationPage, "外观", customizationEntry);
+  };
+  for (const [name, label] of [["types", "会话类型"], ["instructions", "自定义指令"]]) {
+    const entry = $(`#appearance-${name}-entry`, dialog);
+    entry.onclick = () => {
+      showAppearancePage($(`#appearance-${name}-page`, dialog), label, entry);
+      void remoteSettings.show(name);
+    };
+  }
+  for (const tab of dialog.querySelectorAll("[data-appearance-tab]")) tab.onclick = () => {
+    closePopup();
+    for (const control of dialog.querySelectorAll("[data-appearance-tab]"))
+      control.setAttribute("aria-pressed", String(control === tab));
+    for (const panel of dialog.querySelectorAll("[data-appearance-panel]"))
+      panel.hidden = panel.dataset.appearancePanel !== tab.dataset.appearanceTab;
   };
   generalEntry.onclick = () => {
     if (!dialog.isConnected || !dialog.open) return;
@@ -1238,6 +1691,10 @@ function openAppearance() {
   const closeAppearance = returnValue => {
     if (!dialog.open || closing) return;
     closing = true;
+    // 用户要求 PC 设置立即开关；手机沿用 220ms 滑入/滑出及原生返回行为。
+    if (matchMedia("(min-width: 761px)").matches) {
+      dialog.close(returnValue); closing = false; return;
+    }
     dialog.classList.remove("appearance-screen-visible");
     setTimeout(() => {
       if (dialog.open) dialog.close(returnValue);
@@ -1247,14 +1704,17 @@ function openAppearance() {
   const onNativeBack = event => {
     if (!dialog.open || !dialog.isConnected || document.querySelector("dialog[open]") !== dialog) return;
     event.preventDefault();
-    if (subpageEntry) restoreAppearanceRoot();
+    if (activePopup?.trigger.closest("dialog") === dialog) closePopup(true);
+    else if (subpageEntry) restoreAppearanceRoot();
     else closeAppearance();
   };
   const onAppearanceEscape = event => {
     if (event.key !== "Escape" || event.isComposing || !dialog.open || !subpageEntry) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    restoreAppearanceRoot();
+    // 设置中的所有 Select 共用关闭顺序：先关闭弹层并恢复焦点，再响应下一次返回。
+    if (activePopup?.trigger.closest("dialog") === dialog) closePopup(true);
+    else restoreAppearanceRoot();
   };
   if (androidContainer) {
     window.addEventListener("codex-elves-native-back", onNativeBack);
@@ -1293,6 +1753,8 @@ function openAppearance() {
     modeButtons.set(mode, modeButton); modeGroup.append(modeButton);
   }
   $("#appearance-theme-slot").append(themeButton, modeGroup);
+  $("#appearance-preset-slot").append(selectControl("appearance-preset", "主题",
+    Object.entries(appearanceThemes).map(([value, preset]) => ({ value, label: preset.label })), appearance.themePreset));
   const syncAutomaticLightSetting = mountAutomaticThemeLightSetting($("#appearance-auto-light-setting"));
   $("#appearance-project-thread-limit-slot").append(selectControl("appearance-project-thread-limit", "每个项目显示会话数",
     projectThreadLimits.map(value => ({ value: String(value), label: `${value}个` })), String(appearance.projectThreadLimit)));
@@ -1339,11 +1801,11 @@ function openAppearance() {
     const isLightTheme = appearance.theme === "light";
     const automatic = appearance.themeMode === "auto";
     const themeLabel = automatic
-      ? `自动主题，当前为${isLightTheme ? "浅色" : "深色"}主题`
-      : isLightTheme ? "当前为浅色主题，切换到深色主题" : "当前为深色主题，切换到浅色主题";
+      ? `自动模式，当前为${isLightTheme ? "白色" : "黑暗"}模式`
+      : isLightTheme ? "当前为白色模式，切换到黑暗模式" : "当前为黑暗模式，切换到白色模式";
     themeButton.title = themeLabel;
     themeButton.setAttribute("aria-label", themeLabel);
-    themeButton.replaceChildren(icon(isLightTheme ? "sun" : "moon"));
+    themeButton.replaceChildren(icon(isLightTheme ? "sun" : "moon"), element("span", "", isLightTheme ? "白色" : "黑暗"));
     themeButton.disabled = automatic;
     for (const [mode, control] of modeButtons) control.setAttribute("aria-pressed", String(mode === appearance.themeMode));
     syncAutomaticLightSetting();
@@ -1376,6 +1838,15 @@ function openAppearance() {
     $("#appearance-font").value = appearance.fontSize;
     $("#appearance-font").style.setProperty("--range-fill", `${(appearance.fontSize - 10) * 10}%`);
     $("#appearance-font-value").textContent = `${appearance.fontSize}px`;
+    setSelectValue($("#appearance-preset"), appearance.themePreset);
+    for (const [id, value] of [["ui-font", appearance.uiFont], ["code-font", appearance.codeFont],
+      ["code-font-size", appearance.codeFontSize], ["conversation-width", appearance.conversationWidth]]) {
+      const control = $(`#appearance-${id}`, dialog);
+      if (document.activeElement !== control) control.value = value;
+    }
+    setSelectValue($("#appearance-ui-font-weight", dialog), appearance.uiFontWeight);
+    setSelectValue($("#appearance-code-font-weight", dialog), appearance.codeFontWeight);
+    renderSessionInstances();
     const readingFontSize = currentFileReadingFontSize();
     $("#appearance-file-reading-font").value = readingFontSize;
     $("#appearance-file-reading-font").style.setProperty("--range-fill",
@@ -1385,7 +1856,35 @@ function openAppearance() {
   };
   sync.lightReading = syncAutomaticLightSetting.lightReading;
   syncAppearanceThemeControls = sync;
+  const remoteSettings = mountRemoteSettings(dialog, sync);
   sync();
+  $("#appearance-conversation-width", dialog).onchange = event => {
+    const value = Number(event.target.value);
+    if (!Number.isInteger(value) || value < conversationWidthMin || value > conversationWidthMax) {
+      event.target.value = appearance.conversationWidth;
+      notice(`正文宽度请填写 ${conversationWidthMin}～${conversationWidthMax}px。`, true); return;
+    }
+    appearance.conversationWidth = value; applyAppearance(true);
+  };
+  $("#appearance-preset", dialog).onchange = event => {
+    appearance.themePreset = event.target.value;
+    appearance.colors = appearance.palettes[appearance.themePreset];
+    applyAppearance(true); sync();
+  };
+  for (const [id, key] of [["ui-font", "uiFont"], ["code-font", "codeFont"]])
+    $(`#appearance-${id}`, dialog).onchange = event => {
+      const value = event.target.value.trim();
+      if (!validFontFamily(value)) { event.target.value = appearance[key]; return; }
+      appearance[key] = value; applyAppearance(true);
+    };
+  for (const [id, key] of [["ui-font-weight", "uiFontWeight"], ["code-font-weight", "codeFontWeight"],
+    ["code-font-size", "codeFontSize"]]) $(`#appearance-${id}`, dialog).onchange = event => {
+    const value = Number(event.target.value);
+    if (key === "codeFontSize" ? !Number.isInteger(value) || value < 8 || value > 24 : ![400, 500, 600].includes(value)) {
+      event.target.value = appearance[key]; return;
+    }
+    appearance[key] = value; applyAppearance(true);
+  };
   $("#appearance-project-thread-limit").onchange = event => {
     appearance.projectThreadLimit = Number(event.target.value);
     applyAppearance(true);
@@ -1461,9 +1960,12 @@ function openAppearance() {
       if (operation !== remoteBackgroundOperation) return;
       remoteBackground = { dataUrl: "", name: "" };
       appearance = defaultAppearance(appearance.theme);
+      if (creating) setCreationBackend("codex");
       applyAppearance(true);
       projectVisibleThreadCounts.clear();
       renderSidebar();
+      updateComposer(); sessionMenu?.close();
+      void loadSidebar(null, { fresh: true }).catch(error => notice(error.message, true));
     } catch (error) {
       if (operation === remoteBackgroundOperation) remoteBackgroundError = error.message || "恢复默认设置失败。";
     } finally {
@@ -1501,6 +2003,7 @@ function openAppearance() {
     else closeAppearance();
   };
   dialog.onclose = () => {
+    remoteSettings.dispose();
     if (syncAppearanceThemeControls === sync) syncAppearanceThemeControls = null;
     dialog.classList.remove("appearance-screen-visible");
     dialog.classList.remove("appearance-subpage-open");
@@ -1521,7 +2024,8 @@ function openAppearance() {
   };
   document.body.classList.add("modal-open");
   dialog.showModal();
-  requestAnimationFrame(() => {
+  if (matchMedia("(min-width: 761px)").matches) dialog.classList.add("appearance-screen-visible");
+  else requestAnimationFrame(() => {
     if (dialog.isConnected && dialog.open) dialog.classList.add("appearance-screen-visible");
   });
 }
@@ -1957,7 +2461,7 @@ function snapshotDraft() {
     goalMode: selectedGoal
   };
 }
-function draftKey() { return selectedId || `$new:${creationProject}`; }
+function draftKey() { return selectedId || newDraftKey(creationProject, creationBackend, creationInstanceId); }
 function storedDraft(key) {
   return {
     text: drafts.get(key) || "",
@@ -2029,10 +2533,13 @@ function normalizeRelatedView(value, id = value?.threadId) {
       ...(value.owner === relatedNavigationOwner ? { owner: value.owner } : {}) } : null;
 }
 function subagentsEnabled() {
+  // 用户确认 Claude 首期隐藏尚未适配的子智能体和侧边会话菜单，原生工具执行仍由 CLI 处理。
+  if (isClaude()) return false;
   // 子智能体与侧边会话使用独立能力字段，兼容旧后台并分别约束只读与写入入口。
   return session?.runtime?.cdpInjectionEnabled !== false || session?.capabilities?.serviceSubagents === true;
 }
 function sideThreadsEnabled() {
+  if (isClaude()) return false;
   // 用户选择服务独立管理临时侧边会话；只有新后台声明能力时开放，旧后台仍保持禁用。
   return session?.runtime?.cdpInjectionEnabled !== false || session?.capabilities?.serviceSideThreads === true;
 }
@@ -2056,6 +2563,7 @@ function threadReadOnlyMessage() {
   return session?.readOnly ? "当前设备为只读模式" : "当前会话仅支持只读查看";
 }
 function threadSentMessageEditAllowed(id = selectedId) {
+  if (claudeThreadId(id)) return false;
   if (!id) return false;
   const view = relatedViewForThread(id);
   return view?.kind !== "side" && !(thread?.id === id && thread.viewKind === "side");
@@ -2814,9 +3322,18 @@ function rememberThreadDisplay(value = thread, { persist = true } = {}) {
   const usage = contextUsage(value.tokenUsage), ephemeral = threadEphemeralState(value.id, value);
   // 缓存目标和队列的展示数据；审批、权限及写操作仍使用重新读取的会话。
   const display = {
-    id: value.id, model: value.model || "", reasoningEffort: value.reasoningEffort || "",
-    tokenUsage: usage ? { modelContextWindow: usage.total,
-      last: { totalTokens: value.tokenUsage.last.totalTokens } } : null,
+    id: value.id, backend: value.backend || (claudeThreadId(value.id) ? "claude" : "codex"),
+    ...(value.instanceId ? { instanceId: value.instanceId, instanceLabel: value.instanceLabel,
+      wslDistribution: value.wslDistribution, wslUser: value.wslUser } : {}),
+    model: value.model || "", reasoningEffort: value.reasoningEffort || "",
+    // 用户要求缺容量时仍保留真实最后请求用量；缓存不能把已知 Token 一并丢掉，也不能伪造百分比。
+    tokenUsage: usage || typeof value.tokenUsage?.last?.totalTokens === "number"
+      && Number.isFinite(value.tokenUsage.last.totalTokens) && value.tokenUsage.last.totalTokens >= 0
+      ? { modelContextWindow: usage?.total ?? null,
+        // 用户要求重连缓存仍区分配置容量与原生能力，并保留最后请求模型，不能把配置来源丢成协议报告值。
+        ...(typeof value.tokenUsage.model === "string" ? { model: value.tokenUsage.model } : {}),
+        ...(value.tokenUsage.modelContextWindowSource ? { modelContextWindowSource: value.tokenUsage.modelContextWindowSource } : {}),
+        last: { totalTokens: value.tokenUsage.last.totalTokens } } : null,
     ...(Object.hasOwn(value, "goal") ? { goal: value.goal } : {}),
     ...(Array.isArray(value.queuedMessages) ? { queuedMessages: value.queuedMessages } : {}),
     ...(Object.hasOwn(value, "queueSnapshotVersion") ? { queueSnapshotVersion: value.queueSnapshotVersion } : {}),
@@ -3020,6 +3537,7 @@ function clearPrivateInputs({ persisted = true } = {}) {
   let previousScope = recoveryScope || privateInputScope(session);
   if (!previousScope) try { previousScope = sessionStorage.getItem("codex-elves-input-owner"); } catch {}
   ++recoveryGeneration; recoveryScope = null;
+  sessionInstances = []; sessionInstanceRequest = null;
   resetRelatedSessions({ persisted: true });
   drafts.clear(); skillDrafts.clear(); attachmentDrafts.clear(); goalDrafts.clear();
   draftWrites.clear(); failedInputRecoveries.clear(); goalComposerRecoveries.clear();
@@ -3080,9 +3598,17 @@ async function restorePrivateInputs(value, { expected = null, requestGeneration 
     if (latest) pending = { ...latest, recoveryRef: latest.id };
   }
   if (pending?.draft) submittedDrafts.set(pending.payload, pending.draft);
-  for (const { id, value: draft } of savedDrafts) {
+  for (const { id: savedId, value: draft } of savedDrafts) {
+    const id = savedId.startsWith("$new:claude:") && value.claudeInstanceId
+      ? newDraftKey(savedId.slice("$new:claude:".length), "claude", value.claudeInstanceId) : savedId;
     if (typeof draft?.text !== "string" || !validSkillSelection(draft.skills) || !Array.isArray(draft.attachments)
-        || drafts.has(id)) continue;
+        || drafts.has(id) || id !== savedId && savedDrafts.some(entry => entry.id === id)) continue;
+    if (id !== savedId) {
+      // 旧默认 Claude 草稿先持久化到实例键再移除旧键；迁移失败保留原数据，不影响其他环境草稿。
+      await recoveryStore.put(scope, [{ kind: "draft", id, value: draft }]);
+      if (currentGeneration !== recoveryGeneration || privateInputScope(session) !== scope) return;
+      await recoveryStore.remove(scope, "draft", savedId);
+    }
     drafts.set(id, draft.text); skillDrafts.set(id, draft.skills || []);
     attachmentDrafts.set(id, draft.attachments);
     if (draft.goalMode) goalDrafts.set(id, draft.goalMode);
@@ -3116,7 +3642,7 @@ async function recoverFailedInput(record) {
       || record.recoveryScope && record.recoveryScope !== privateInputScope(session)) return;
   if (record.recoveryRef && !record.draft) throw new Error("本地草稿暂时无法读取，原回执已保留。请恢复存储后再核对，勿重新发送。");
   const scope = recoveryScope || privateInputScope(session), generation = recoveryGeneration;
-  const key = record.payload.threadId || `$new:${record.payload.projectId || ""}`;
+  const key = record.payload.threadId || newDraftKey(record.payload.projectId, record.payload.backend, record.payload.instanceId);
   const draft = record.draft || { text: record.payload.prompt || "", skills: record.payload.skills || [],
     attachments: (record.payload.images || []).map(image => ({ ...image, kind: "inline" })), goalMode: null };
   const recovery = { ...record, draft, recoveryScope: scope };
@@ -3209,9 +3735,9 @@ function matchingDraft(draft, payload) {
       === JSON.stringify(payload.images || []);
 }
 function clearSubmittedDraft(payload, current = true) {
-  const key = payload.threadId || `$new:${payload.projectId || ""}`;
+  const key = payload.threadId || newDraftKey(payload.projectId, payload.backend, payload.instanceId);
   for (const [id, record] of failedInputRecoveries) {
-    const recoveryKey = record.payload.threadId || `$new:${record.payload.projectId || ""}`;
+    const recoveryKey = record.payload.threadId || newDraftKey(record.payload.projectId, record.payload.backend, record.payload.instanceId);
     if (recoveryKey !== key || !matchingDraft(record.draft, payload)) continue;
     failedInputRecoveries.delete(id);
     if (!record.sessionRecovery && recoveryScope) void recoveryStore.remove(recoveryScope, "failed", id).catch(() => {});
@@ -3226,7 +3752,7 @@ function clearSubmittedDraft(payload, current = true) {
 function resetComposerOptions() {
   selectedModel = selectedEffort = "";
   modelQuery = "";
-  skillChoices = [...globalSkillChoices]; skillScope = ""; skillLoading = null; ++skillLoadVersion;
+  skillChoices = isClaude() ? [] : [...globalSkillChoices]; skillScope = ""; skillLoading = null; ++skillLoadVersion;
   messageSkillLoadScope = ""; ++skillRenderVersion;
   appliedSkillCatalog = appliedGlobalSkills = null;
   closeComposerMenus();
@@ -3419,6 +3945,30 @@ function changeCreationProject() {
   sessionTools?.updateContext();
   restoreDraft(draftKey()); resetComposerOptions(); updateComposer();
 }
+function changeCreationBackend() {
+  const select = $("#new-chat-backend");
+  if (!select || select.disabled) return;
+  setCreationBackend(select.value);
+}
+function setCreationBackend(instanceId) {
+  const instance = availableSessionInstances().find(value => value.id === instanceId
+    || value.backend === instanceId && value.legacyDefault);
+  if (!creating || !instance?.ready || !sessionInstanceEnabled(instance.id) || instance.id === creationInstanceId) return;
+  const draft = snapshotDraft();
+  rememberDraft(); closePopup(); closeComposerMenus();
+  creationBackend = instance.backend; creationInstanceId = instance.id;
+  ++selectionVersion; selectionToken = randomId();
+  // 实例按钮、设置开关和恢复默认共用切换流程；目标实例已有草稿优先，首次切换保留文字/图片，清理模型、目标和 Skill。
+  selectedSkills = []; selectedGoal = null;
+  if (!drafts.has(draftKey()) && !attachmentDrafts.has(draftKey()))
+    storeDraft(draftKey(), { ...draft, skills: [], goalMode: null });
+  restoreDraft(draftKey()); resetComposerOptions();
+  const select = $("#new-chat-backend");
+  if (select) setSelectOptions(select, newChatBackendOptions(), instance.id);
+  renderMessages();
+  setConnection(backendAvailable() && stream?.readyState === EventSource.OPEN);
+  updateComposer(); renderApprovals();
+}
 function selectCreatedThread(id) {
   const key = draftKey(), draft = snapshotDraft();
   storeDraft(id, draft);
@@ -3449,11 +3999,22 @@ function contextUsage(info) {
   return { used, total, percent: Math.round(used / total * 100) };
 }
 function contextUsageText() {
-  const usage = contextUsage(currentThreadDisplay()?.tokenUsage);
-  return usage ? {
-    value: `${tokenCount(usage.used)} / ${usage.percent}%，${tokenCount(usage.total)}`,
-    description: `最后一次请求的上下文占用：${usage.used.toLocaleString()} / ${usage.total.toLocaleString()} Token，不是累计用量`
-  } : { value: "上下文信息尚未提供", description: "原生会话尚未提供有效的上下文容量或最后一次请求用量。" };
+  const info = currentThreadDisplay()?.tokenUsage, usage = contextUsage(info);
+  if (usage) {
+    // 用户要求有效配置容量明确标注来源，不冒称上游协议报告；百分比仍用原生最后请求用量计算，压缩比例不参与容量。
+    const source = info.modelContextWindowSource, configured = source?.kind === "configuration";
+    return {
+      value: `${tokenCount(usage.used)} / ${usage.percent}%，${tokenCount(usage.total)}${configured ? "（配置容量）" : ""}`,
+      description: `最后一次请求的上下文占用：${usage.used.toLocaleString()} / ${usage.total.toLocaleString()} Token，不是累计用量`
+        + (configured ? `；容量来自 Claude 有效配置 ${source.key}，不是协议报告值${info.model ? `；最后请求模型：${info.model}` : ""}。` : "")
+    };
+  }
+  // 用户允许容量未知时诚实降级：显示原生已知用量，但不估算容量或百分比；环形指示仍保持“—”。
+  const value = info?.last?.totalTokens;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? { value: `${tokenCount(value)} Token，容量尚未提供`,
+      description: `最后一次请求的上下文占用：${value.toLocaleString()} Token，不是累计用量；原生尚未提供模型容量，无法计算百分比。` }
+    : { value: "上下文信息尚未提供", description: "原生会话尚未提供有效的上下文容量或最后一次请求用量。" };
 }
 function closeContextUsageTip() {
   if (!contextUsageTip) return;
@@ -3559,24 +4120,39 @@ function mountContextUsage() {
 function compactUsageDescription(usage) {
   return usage ? `（已使用${usage.percent}%/${tokenCount(usage.total)}）` : "";
 }
-async function loadModels(force = false) {
-  if (!force && catalogUsable({ loadedAt: modelsLoadedAt })) {
+async function loadModels(force = false, { includeAvailable = false } = {}) {
+  if (!sessionInstanceEnabled(activeInstanceId())) return [];
+  const scope = privateInputScope(session);
+  const context = modelContext(), contextKey = modelContextKey();
+  const runtimeRevision = session?.runtime?.revision ?? 0;
+  const current = () => scope && privateInputScope(session) === scope
+    && (session?.runtime?.revision ?? 0) === runtimeRevision && modelContextKey() === contextKey;
+  // 缓存只保存实例的完整目录；打开选择器复用新鲜目录，过期时才显式读取可用模型。
+  if (!force && catalogUsable({ loadedAt: modelsLoadedAt })
+      && (!includeAvailable || !catalogNeedsRefresh({ loadedAt: modelsLoadedAt }))) {
     if (catalogNeedsRefresh({ loadedAt: modelsLoadedAt }) && Date.now() >= modelsRetryAt)
       void loadModels(true).catch(() => {});
     scheduleCatalogRefresh();
     return models;
   }
-  if (modelsPromise) return modelsPromise;
-  const scope = privateInputScope(session);
-  const runtimeRevision = session?.runtime?.revision ?? 0;
+  if (modelsPromise) {
+    if (!includeAvailable || modelsPromise.includeAvailable) return modelsPromise;
+    // 自动历史读取尚未结束时补读完整目录；切换实例后不能替另一环境发起探测。
+    await modelsPromise.catch(() => {});
+    return current() ? loadModels(force, { includeAvailable: true }) : [];
+  }
   const previousModels = models;
   const request = (async () => {
-    const result = await api("/api/read/models", { forceReload: force });
-    if (!scope || privateInputScope(session) !== scope
-        || (session?.runtime?.revision ?? 0) !== runtimeRevision) return [];
+    const result = await api("/api/read/models", { ...context, forceReload: force, includeAvailable });
+    if (!current()) return [];
     if (!Array.isArray(result.data) || !result.data.every(model => model && typeof model.model === "string"
         && (model.supportedReasoningEfforts == null || Array.isArray(model.supportedReasoningEfforts))))
       throw new Error("模型列表返回格式无效");
+    // 历史当前模型属于会话展示，不是可用模型目录；不能缓存它或覆盖实例的全局默认值。
+    if (result.catalogComplete === false) {
+      modelsRetryAt = Date.now() + catalogRetryMs;
+      return models;
+    }
     // 用户要求两条路径各自决定 Ultra 可见性，网页不能绕过注入路径返回的关闭状态。
     const nextModels = result.data.map(model => ({
       ...model,
@@ -3586,14 +4162,16 @@ async function loadModels(force = false) {
     models = nextModels;
     modelDefaults = { model: result.defaultModel || "", reasoningEffort: result.defaultReasoningEffort || "" };
     modelsLoadedAt = Date.now(); modelsRetryAt = 0;
-    cacheDisplayData("models", "global", { version: modelCatalogCacheVersion, models, defaults: modelDefaults, loadedAt: modelsLoadedAt },
+    modelLoadError = "";
+    cacheDisplayData("models", contextKey === "codex" ? "global" : contextKey, { version: modelCatalogCacheVersion, models, defaults: modelDefaults, loadedAt: modelsLoadedAt },
       { maxAge: catalogFallbackMs });
     return models;
   })();
+  request.includeAvailable = includeAvailable;
   modelsPromise = request;
   try { return await request; }
   catch (error) {
-    if (privateInputScope(session) === scope) modelsRetryAt = Date.now() + catalogRetryMs;
+    if (current()) { modelsRetryAt = Date.now() + catalogRetryMs; modelLoadError = error.message; }
     throw error;
   }
   finally {
@@ -3605,17 +4183,17 @@ async function loadModels(force = false) {
   }
 }
 function rememberedNewChatModel() {
-  const scope = privateInputScope(session);
+  const owner = privateInputScope(session), scope = owner && `${owner}${activeInstanceId() === "codex:local" ? "" : `:${activeInstanceId()}`}`;
   if (!scope) return null;
   if (!newChatModels.has(scope)) {
     let model = "";
     try { model = localStorage.getItem(`codex-elves-new-chat-model:${scope}`) || ""; } catch {}
     newChatModels.set(scope, model);
   }
-  return models.find(model => model.model === newChatModels.get(scope)) || null;
+  return modelForId(newChatModels.get(scope));
 }
 function rememberNewChatModel(model) {
-  const scope = privateInputScope(session);
+  const owner = privateInputScope(session), scope = owner && `${owner}${activeInstanceId() === "codex:local" ? "" : `:${activeInstanceId()}`}`;
   if (!scope) return;
   newChatModels.set(scope, model);
   try { localStorage.setItem(`codex-elves-new-chat-model:${scope}`, model); } catch {}
@@ -3629,13 +4207,25 @@ function currentModelId() {
   return selectedModel || (selectedId ? currentThreadDisplay()?.model
     : creating && rememberedNewChatModel()?.model || modelDefaults.model) || "";
 }
-function currentModel() { return models.find(model => model.model === currentModelId()); }
+function modelForId(id) {
+  if (typeof id !== "string" || !id) return null;
+  // 用户要求 Claude 完整模型 ID 与原生目录别名共用推理等级；只采用显式 resolvedModel，Codex 仍按原值精确匹配。
+  return models.find(model => model.model === id)
+    || (isClaude() && models.find(model => model.resolvedModel === id)) || null;
+}
+function modelIdentityMatches(left, right) {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const model = modelForId(left);
+  return !!model && model === modelForId(right);
+}
+function currentModel() { return modelForId(currentModelId()); }
 function currentEffort() {
   if (selectedEffort) return selectedEffort;
   const model = currentModelId();
   const display = currentThreadDisplay();
-  if (selectedId) return model && model === display?.model ? display.reasoningEffort || "" : "";
-  return model === modelDefaults.model ? modelDefaults.reasoningEffort
+  if (selectedId) return modelIdentityMatches(model, display?.model) ? display.reasoningEffort || "" : "";
+  return modelIdentityMatches(model, modelDefaults.model) ? modelDefaults.reasoningEffort
     : creating && !selectedModel ? defaultModelEffort(currentModel()) : "";
 }
 function renderModelMenu() {
@@ -3674,17 +4264,17 @@ function renderModelMenu() {
     $("#prompt").focus();
   };
   const group = element("div", "model-options"); group.setAttribute("role", "group"); group.setAttribute("aria-label", "模型");
-  const modelId = currentModelId(), selectedReasoning = currentEffort();
+  const modelId = currentModelId(), matchedModel = currentModel(), selectedReasoning = currentEffort();
   const visibleModels = models.filter(model => `${model.displayName || ""} ${model.model}`.toLowerCase().includes(modelQuery.trim().toLowerCase()));
-  for (const model of visibleModels) group.append(choice(model.displayName || model.model, modelId === model.model, () => {
-    if (currentModelId() !== model.model) {
+  for (const model of visibleModels) group.append(choice(model.displayName || model.model, matchedModel === model, () => {
+    if (currentModel() !== model) {
       selectedModel = model.model;
       selectedEffort = defaultModelEffort(model);
     }
     if (creating) rememberNewChatModel(model.model);
     applyModelMenuChoice();
   }, null, `model:${model.model}`));
-  if (modelId && !models.some(model => model.model === modelId) && modelId.toLowerCase().includes(modelQuery.trim().toLowerCase())) {
+  if (modelId && !matchedModel && modelId.toLowerCase().includes(modelQuery.trim().toLowerCase())) {
     const current = choice(modelId, true, () => {}, "当前会话模型，原生模型列表暂未提供", `model:${modelId}`);
     current.disabled = true; group.prepend(current);
   }
@@ -3792,6 +4382,7 @@ function slashQuery() {
   return match ? { query: match[1].toLowerCase(), start: prompt.selectionStart - match[1].length - 1, end: prompt.selectionStart } : null;
 }
 function compactCommandAvailable() {
+  if (isClaude()) return false;
   return !!session && !creating && !!selectedId && thread?.id === selectedId && !threadReadOnly() && connected
     && !busy && !stopping && !pending && !editingMessage && !editingQueuedMessage && !compactionLocked(selectedId);
 }
@@ -3803,6 +4394,7 @@ function unfinishedGoal(goal = thread?.goal) {
   return !!goal && goal.status !== "complete" && goal.status !== "completed";
 }
 function goalComposerReason({ submitting = false } = {}) {
+  if (isClaude()) return "Claude 会话尚未适配目标模式";
   if (!session || !creating && (!selectedId || thread?.id !== selectedId)) return "请先打开会话或新建会话";
   if (threadReadOnly()) return threadReadOnlyMessage();
   if (serviceSideThread()) return "临时侧边会话不创建持续目标，请返回主会话设置";
@@ -3822,6 +4414,7 @@ function goalCommandMatches(query) {
   return ["目标", "goal", "持续追求"].some(value => value.includes(query));
 }
 function goalPrefix(text, skills = selectedSkills) {
+  if (isClaude()) return null;
   const match = /^(\/go+al)(?=\s|$)\s*/i.exec(String(text ?? ""));
   if (match && skills.some(skill => (skill._offset ?? 0) < match[1].length)) return null;
   return match ? { start: 0, end: match[0].length } : null;
@@ -3849,6 +4442,7 @@ function clearGoalComposerMode() {
   rememberDraft(); updateComposer(); prompt?.focus({ preventScroll: true });
 }
 function slashMenuEntries(query = slashQuery()) {
+  if (isClaude()) return [];
   if (!query) return [];
   const entries = [];
   entries.push(...skillChoices.filter(skill => !selectedSkills.some(item => skillIdentity(item) === skillIdentity(skill))
@@ -3881,6 +4475,7 @@ function moveSlashIndex(entries, offset) {
   skillIndex = enabled[(current < 0 ? 0 : current + offset + enabled.length) % enabled.length];
 }
 function renderSkillMenu(message) {
+  if (isClaude()) { closeSkillMenu(); return; }
   const menu = $("#skill-menu"), query = slashQuery();
   if (!menu || !query || threadReadOnly()) { closeSkillMenu(); return; }
   closePopup(); closeContextUsageTip();
@@ -3954,6 +4549,7 @@ function catalogNeedsRefresh(value) {
   return !catalogFresh(value) || Date.now() - value.loadedAt >= catalogCacheMs - catalogRefreshAheadMs;
 }
 function activeSkillCatalogContext() {
+  if (isClaude()) return null;
   const projectId = creating ? $("#project-select")?.value : "";
   const scope = selectedId ? `thread:${selectedId}` : projectId ? `project:${projectId}`
     : creating && session?.capabilities?.projectlessCreation === true ? "projectless" : "";
@@ -4117,6 +4713,7 @@ async function refreshSkillCatalogRecord(scope, payload, force) {
   }
 }
 async function loadSkillChoices(scope, payload, { force = false } = {}) {
+  if (isClaude()) return;
   if (!force && skillLoading?.scope === scope) return skillLoading.promise;
   const version = ++skillLoadVersion, selection = selectionVersion, owner = privateInputScope(session);
   const loading = skillLoading = { scope };
@@ -4327,6 +4924,11 @@ function button(text, label, action, className = "") {
 }
 function icon(name) {
   const paths = {
+    allSessions: '<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
+    // 用户指定 Codex 使用真实结形标识，不用终端图；原始路径取自 OpenAI 官方文档，仅填色随主题适配。
+    // https://openai.github.io/openai-agents-python/assets/logo.svg
+    codex: '<path d="M304.246 295.411V249.828C304.246 245.989 305.687 243.109 309.044 241.191L400.692 188.412C413.167 181.215 428.042 177.858 443.394 177.858C500.971 177.858 537.44 222.482 537.44 269.982C537.44 273.34 537.44 277.179 536.959 281.018L441.954 225.358C436.197 222 430.437 222 424.68 225.358L304.246 295.411ZM518.245 472.945V364.024C518.245 357.304 515.364 352.507 509.608 349.149L389.174 279.096L428.519 256.543C431.877 254.626 434.757 254.626 438.115 256.543L529.762 309.323C556.154 324.679 573.905 357.304 573.905 388.971C573.905 425.436 552.315 459.024 518.245 472.941V472.945ZM275.937 376.982L236.592 353.952C233.235 352.034 231.794 349.154 231.794 345.315V239.756C231.794 188.416 271.139 149.548 324.4 149.548C344.555 149.548 363.264 156.268 379.102 168.262L284.578 222.964C278.822 226.321 275.942 231.119 275.942 237.838V376.986L275.937 376.982ZM360.626 425.922L304.246 394.255V327.083L360.626 295.416L417.002 327.083V394.255L360.626 425.922ZM396.852 571.789C376.698 571.789 357.989 565.07 342.151 553.075L436.674 498.374C442.431 495.017 445.311 490.219 445.311 483.499V344.352L485.138 367.382C488.495 369.299 489.936 372.179 489.936 376.018V481.577C489.936 532.917 450.109 571.785 396.852 571.785V571.789ZM283.134 464.79L191.486 412.01C165.094 396.654 147.343 364.029 147.343 332.362C147.343 295.416 169.415 262.309 203.48 248.393V357.791C203.48 364.51 206.361 369.308 212.117 372.665L332.074 442.237L292.729 464.79C289.372 466.707 286.491 466.707 283.134 464.79ZM277.859 543.48C223.639 543.48 183.813 502.695 183.813 452.314C183.813 448.475 184.294 444.636 184.771 440.797L279.295 495.498C285.051 498.856 290.812 498.856 296.568 495.498L417.002 425.927V471.509C417.002 475.349 415.562 478.229 412.204 480.146L320.557 532.926C308.081 540.122 293.206 543.48 277.854 543.48H277.859ZM396.852 600.576C454.911 600.576 503.37 559.313 514.41 504.612C568.149 490.696 602.696 440.315 602.696 388.976C602.696 355.387 588.303 322.762 562.392 299.25C564.791 289.173 566.231 279.096 566.231 269.024C566.231 200.411 510.571 149.067 446.274 149.067C433.322 149.067 420.846 150.984 408.37 155.305C386.775 134.192 357.026 120.758 324.4 120.758C266.342 120.758 217.883 162.02 206.843 216.721C153.104 230.637 118.557 281.018 118.557 332.357C118.557 365.946 132.95 398.571 158.861 422.083C156.462 432.16 155.022 442.237 155.022 452.309C155.022 520.922 210.682 572.266 274.978 572.266C287.931 572.266 300.407 570.349 312.883 566.028C334.473 587.141 364.222 600.576 396.852 600.576Z" fill="currentColor" stroke="none"/>',
+    claude: '<path d="m12 2 .7 6.2 4.8-4-2.8 5.6 6.3-.3-5.5 3.1 5.1 3.7-6.2-1.1 2 6-4.2-4.7-1.5 6.1-.7-6.2-4.8 4 2.8-5.6-6.3.3 5.5-3.1-5.1-3.7 6.2 1.1-2-6 4.2 4.7Z"/>',
     chevron: '<path d="m6 9 6 6 6-6"/>', folder: '<path d="M3 9V5a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v2"/><path d="M3 10h18l-3 10H3a1 1 0 0 1-1-1Z"/>',
     search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
     chat: '<path d="M20 11.5a8.5 8.5 0 0 1-8.5 8.5 9 9 0 0 1-4-.9L3 21l1.9-4.5A9 9 0 0 1 4 12.5 8.5 8.5 0 0 1 12.5 4h.5a8.5 8.5 0 0 1 7 7.5Z"/>',
@@ -4373,36 +4975,15 @@ function icon(name) {
   const node = element("span", "ui-icon");
   node.setAttribute("aria-hidden", "true");
   const recent = name === "recent";
-  node.innerHTML = `<svg viewBox="${recent ? "0 0 16 16" : "0 0 24 24"}" fill="none" stroke="currentColor" stroke-width="${recent ? "1.3" : "1.6"}" stroke-linecap="round" stroke-linejoin="round">${paths[name] || ""}</svg>`;
+  // 沿用官方结形裁剪框和原始路径，只去掉画布留白，避免 16px 图标内的品牌标识被额外缩小。
+  const viewBox = name === "codex" ? "118.557 120.758 484.139 479.818" : recent ? "0 0 16 16" : "0 0 24 24";
+  node.innerHTML = `<svg viewBox="${viewBox}" fill="none" stroke="currentColor" stroke-width="${recent ? "1.3" : "1.6"}" stroke-linecap="round" stroke-linejoin="round">${paths[name] || ""}</svg>`;
   return node;
 }
-function selectControl(id, label, options, value, className = "", renderValue = null) {
-  const node = button("", label, () => togglePopup(node), `select-trigger ${className}`.trim());
-  node.id = id; node.setAttribute("aria-haspopup", "listbox"); node.setAttribute("aria-expanded", "false");
-  node.selectOptions = options; node.renderSelectValue = renderValue;
-  setSelectValue(node, value);
-  node.onkeydown = event => {
-    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
-      event.preventDefault(); openPopup(node, { edge: event.key === "Home" ? "first" : event.key === "End" ? "last" : null });
-    }
-  };
-  return node;
-}
-function setSelectValue(node, value) {
-  const selected = node.selectOptions.find(option => option.value === value)
-    || node.selectOptions.find(option => option.value === "") || node.selectOptions[0];
-  node.value = selected?.value || "";
-  node.setAttribute("aria-description", `当前选择：${selected?.label || "暂无可选项目"}`);
-  node.title = `${node.getAttribute("aria-label")}：${selected?.label || "暂无可选项目"}${selected?.description ? ` · ${selected.description}` : ""}`;
-  const content = node.renderSelectValue?.(selected);
-  node.replaceChildren(...(Array.isArray(content) ? content
-    : [element("span", "select-label", selected?.label || "暂无可选项目"), icon("chevron")]));
-  if (activePopup?.trigger === node) renderPopup();
-}
-function setSelectOptions(node, options, value = node.value) {
-  node.selectOptions = options;
-  setSelectValue(node, value);
-}
+const { selectControl, setSelectValue, setSelectOptions, commitSelectValue } = createSelectComponent({
+  element, icon, button, togglePopup, openPopup,
+  refreshPopup(node) { if (activePopup?.trigger === node) renderPopup(); }
+});
 function closePopup(restoreFocus = false) {
   if (!activePopup) return;
   const { node, trigger, dismiss } = activePopup;
@@ -4490,7 +5071,8 @@ function openPopup(trigger, { query = "", edge = null, focus = true, position = 
 function renderPopup() {
   if (!activePopup) return;
   const { trigger, list, query } = activePopup;
-  const focused = list.contains(document.activeElement) ? document.activeElement.dataset.value : null;
+  const restoreFocus = list.contains(document.activeElement);
+  const focused = restoreFocus ? document.activeElement.dataset.value : null;
   const choices = (trigger.selectOptions || trigger.menuOptions).filter(option =>
     option.footer || !query || `${option.label} ${option.description || ""} ${option.searchText || ""}`.toLowerCase().includes(query.trim().toLowerCase()));
   activePopup.choices = choices;
@@ -4506,9 +5088,7 @@ function renderPopup() {
       if (trigger.disabled || node.disabled) return;
       closePopup(true);
       if (trigger.selectOptions) {
-        if (trigger.value === option.value) return;
-        setSelectValue(trigger, option.value);
-        trigger.dispatchEvent(new Event("change", { bubbles: true }));
+        commitSelectValue(trigger, option.value);
       } else void option.action();
     }, `popup-option${option.footer ? " popup-option-footer" : ""}${option.danger ? " popup-option-danger" : ""}`);
     node.disabled = !!option.disabled; node.tabIndex = -1;
@@ -4523,8 +5103,12 @@ function renderPopup() {
     node.append(labels);
     if (trigger.selectOptions) node.append(element("span", "choice-check", trigger.value === option.value ? "✓" : ""));
     (option.footer ? list : options).append(node);
-    if (focused === node.dataset.value) node.focus();
+    if (focused === node.dataset.value && !node.disabled) node.focus();
   });
+  if (restoreFocus && !list.contains(document.activeElement)) {
+    // 动态环境列表变化时只移动键盘焦点，不改选中值，也不启用已失效的目标。
+    (list.querySelector('button[aria-selected="true"]:not(:disabled)') || list.querySelector("button:not(:disabled)"))?.focus();
+  }
   fitPopup();
 }
 function fitPopup() {
@@ -4545,7 +5129,14 @@ function fitPopup() {
   const availableAbove = Math.max(0, originTop - (position ? 0 : gap) - top - padding);
   const preferredWidth = trigger.popupWidth || (trigger.selectSearchable ? 300 : 200);
   const maxHeight = Math.min(trigger.popupMaxHeight || 360, height * .8);
-  node.style.width = `${Math.min(Math.max(box.width, preferredWidth), width - padding * 2)}px`;
+  if (trigger.popupAutoWidth) {
+    // 用户要求类型菜单以旧宽度为下限、随内容自适应；窄屏仍保留两侧各 8px，不改变其他菜单的宽度规则。
+    node.style.width = "max-content";
+    node.style.minWidth = `${Math.min(preferredWidth, width - padding * 2)}px`;
+    node.style.maxWidth = `${width - padding * 2}px`;
+  } else {
+    node.style.width = `${Math.min(Math.max(box.width, preferredWidth), width - padding * 2)}px`;
+  }
   node.style.maxHeight = `${Math.min(maxHeight, Math.max(availableAbove, availableBelow))}px`;
   const menuHeight = node.getBoundingClientRect().height;
   const above = trigger.popupDirection === "up" ? availableAbove > 0
@@ -4752,7 +5343,11 @@ async function deleteSidebarThread(item) {
   let record = { id: randomId(), deviceId, threadId: item.id, title: item.title || "未命名会话", state: "confirming" };
   threadDeletions.set(key, record);
   try {
-    const confirmed = await confirmAction("删除会话", `将永久删除“${record.title}”及其会话记录，此操作不可恢复。确定删除吗？`, "删除会话", true);
+    const claude = claudeThreadId(item.id);
+    const confirmed = await confirmAction(claude ? "移除 Claude 会话" : "删除会话",
+      claude ? `将从远程列表移除“${record.title}”。Claude 原生会话历史仍保留，项目文件不受影响。`
+        : `将永久删除“${record.title}”及其会话记录，此操作不可恢复。确定删除吗？`,
+      claude ? "移除会话" : "删除会话", true);
     if (!confirmed || session?.device.id !== deviceId || session.readOnly || !connected) return;
     if (threadDeletions.get(key) !== record || threadDeletionConflict(item.id)) return;
     record = { ...record, state: "submitting" };
@@ -4763,7 +5358,7 @@ async function deleteSidebarThread(item) {
       throw Object.assign(new Error(result?.message || "删除结果尚未确认，请核对回执，勿重复删除。"), { outcomeUnknown: true });
     applyThreadDeletion(item.id, deviceId);
     if (session?.device.id === deviceId) {
-      notice(result.status === "partial" ? result.message || "会话已永久删除，部分列表清理未完成。" : "会话已永久删除",
+      notice(claude ? "已从远程列表移除 Claude 会话" : result.status === "partial" ? result.message || "会话已永久删除，部分列表清理未完成。" : "会话已永久删除",
         result.status === "partial");
       void loadSidebar(null, { fresh: true }).catch(() => {});
     }
@@ -4915,7 +5510,7 @@ async function api(path, body, id, signal, { resourcePriority = "foreground", on
   // 16 KiB/s 包含 base64 上传；12 MiB 图片可等待约 18 分钟，仍有有限上限。
   const actionTimeout = path.startsWith("/api/action/")
     ? Math.min(20 * 60000, 90000 + Math.ceil(new TextEncoder().encode(encodedBody || "").length / 16384) * 1000) : 0;
-  const timeout = ["/api/diagnostics", "/api/workspace/context"].includes(path) ? 45000 : path.startsWith("/api/read/") ? 60000
+  const timeout = ["/api/diagnostics", "/api/workspace/context"].includes(path) || path.startsWith("/api/settings/") ? 45000 : path.startsWith("/api/read/") ? 60000
     : path === "/api/session" || path.startsWith("/api/receipts/") ? 15000 : actionTimeout;
   const controller = timeout ? new AbortController() : null;
   const abort = () => controller?.abort(signal?.reason);
@@ -4955,6 +5550,8 @@ async function api(path, body, id, signal, { resourcePriority = "foreground", on
             readThreadScope: typeof deviceId === "string" ? JSON.stringify([deviceId, deviceCreatedAtMs]) : null } : {}),
         remoteApplicationError: result?.ok === false && typeof result.message === "string"
           && /(?:^|\/|\+)json(?:\s*;|$)/i.test(response.headers.get("Content-Type") || ""),
+        ...(path.startsWith("/api/action/") && result?.notSent === true && result?.outcomeUnknown !== true
+          ? { notSubmitted: true } : {}),
         ...(result?.outcomeUnknown === true ? { outcomeUnknown: true } : {})
       });
     }
@@ -5085,7 +5682,7 @@ async function syncConnectionState(source = stream, { recoveryProbe = false } = 
   }
   if (latest.runtime) applyRemoteRuntime(latest.runtime);
   session = latest;
-  setConnection((latest.nativeConnected || latest.serviceConnected) && source?.readyState === EventSource.OPEN);
+  setConnection(backendAvailable(latest) && source?.readyState === EventSource.OPEN);
   renderApprovals();
   return true;
 }
@@ -5165,7 +5762,7 @@ function restoreGoalComposerDrafts() {
   }
   const key = pending.action === "create" && (state?.firstTurnAccepted || pending.manuallyVerified
       || pending.confirmedCreated || pending.result?.status === "created")
-    ? state?.threadId : pending.payload.threadId || `$new:${pending.payload.projectId || ""}`;
+    ? state?.threadId : pending.payload.threadId || newDraftKey(pending.payload.projectId, pending.payload.backend, pending.payload.instanceId);
   if (key) restore(pending, key);
 }
 function goalReceiptOutcome(receipt, action) {
@@ -5222,7 +5819,7 @@ async function applyGoalComposerReceipt(record, receipt, { allowSelection = fals
     }
     if (record.deviceId !== session?.device.id) return;
   }
-  const sourceKey = record.payload.threadId || `$new:${record.payload.projectId || ""}`;
+  const sourceKey = record.payload.threadId || newDraftKey(record.payload.projectId, record.payload.backend, record.payload.instanceId);
   const ownsSelection = record.selectionToken === selectionToken && draftKey() === sourceKey;
   const unchangedCurrent = !ownsSelection || matchingDraft(snapshotDraft(), record.payload);
   const threadId = state?.threadId || record.payload.threadId || null;
@@ -5314,6 +5911,10 @@ function currentCompaction(id = selectedId) {
 }
 function compactionLocked(id = selectedId) {
   return ["pending", "running", "unknown"].includes(currentCompaction(id).state);
+}
+function compactionInProgress(value = currentCompaction()) {
+  // 用户要求压缩时显示可用的停止按钮；未确认送达或结果未知的压缩不能凭本地锁定状态发起停止。
+  return value.state === "running" || value.state === "pending" && (value.acknowledged || value.nativeConfirmed);
 }
 function compactionQueueSendReason(id = selectedId) {
   if (serviceSideThread()) return "临时侧边会话压缩期间不能排队发送，请等待压缩完成";
@@ -5852,7 +6453,34 @@ async function resolvePending() {
         return;
       }
       if (queueAction) {
-        notice("未找到原队列操作回执，原请求标识已保留；请继续核对，不要重复引导或删除。", true);
+        // 旧引导可能根本未派发；不能凭 404 判断成功，只在原生历史确认已接收且队列已移除后结束等待。
+        if (claudeThreadId(current.payload.threadId)) {
+          const queue = await api("/api/read/queue", { threadId: current.payload.threadId }).catch(() => null);
+          if (!stillCurrent()) return;
+          if (queue?.threadId === current.payload.threadId && Array.isArray(queue.queuedMessages)
+              && !queue.queuedMessages.some(message => message.id === current.payload.messageId)) {
+            const history = await api("/api/read/history", { threadId: current.payload.threadId }).catch(() => null);
+            if (!stillCurrent()) return;
+            const received = history?.threadId === current.payload.threadId && Array.isArray(history.data)
+              && history.data.some(turn => turn.items?.some(item => item.type === "userMessage"
+                && item.clientId === current.payload.messageId && !item.remotePendingInput));
+            if (received) {
+              savePending(null);
+              if (pendingSteer?.threadId === current.payload.threadId
+                  && pendingSteer.messageId === current.payload.messageId) pendingSteer = null;
+              if (selectedId === current.payload.threadId && thread?.id === selectedId) {
+                if (queueReadVersion === queueVersion || queueSnapshotIsVersioned(queue))
+                  applyQueueSnapshot(selectedId, queue.queuedMessages, queue.queuedEdits, queue);
+                else void reloadQueue().catch(() => {});
+                renderMessages();
+              }
+              updateComposer();
+              return;
+            }
+          }
+        }
+        // 未确认的原请求继续保留为页面内提示，避免每次恢复连接都弹同一条红色错误。
+        if (!current.receiptMissing) savePending({ ...current, receiptMissing: true });
         updateComposer(); return;
       }
       if (queuedEditActions.has(current.action) && session.capabilities?.queueEditRecovery === true)
@@ -6076,7 +6704,10 @@ function showLogin() {
     const timeout = setTimeout(() => controller.abort(), 20000);
     try {
       if (!authenticated) {
-        await api("/api/connect", { key: value }, undefined, controller.signal);
+        await api("/api/connect", {
+          key: value, clientId: remoteLoginClientId(),
+          clientKind: isAndroidContainer() ? "android-app" : "browser"
+        }, undefined, controller.signal);
         if (disposed || !panel.isConnected) return;
         stopLoginStatusRead(); checkingLoginStatus = false;
         authenticated = true; key.value = ""; key.placeholder = "密钥已验证"; updateForm();
@@ -6237,13 +6868,13 @@ function shell() {
   app.innerHTML = `<div class="workspace">
     <div class="sidebar-backdrop"></div>
     <aside id="session-sidebar" class="sidebar" aria-label="会话侧边栏">
-      <div class="sidebar-header"><strong>✦ CodexElves</strong><div class="sidebar-header-actions"><button id="sidebar-view-toggle" class="icon-button sidebar-view-toggle" type="button" aria-label="切换会话视图" disabled></button><button id="sidebar-search-toggle" class="icon-button sidebar-search-toggle" type="button" title="搜索会话与项目" aria-label="搜索会话与项目" aria-controls="sidebar-search" aria-expanded="false" aria-pressed="false"></button></div></div>
+      <div class="sidebar-header"><strong>✦ CodexElves</strong><div class="sidebar-header-actions"><button id="sidebar-type-filter" class="icon-button sidebar-type-filter" type="button" title="筛选会话实例" aria-label="筛选会话实例" aria-haspopup="menu"></button><button id="sidebar-view-toggle" class="icon-button sidebar-view-toggle" type="button" aria-label="切换会话视图" disabled></button><button id="sidebar-search-toggle" class="icon-button sidebar-search-toggle" type="button" title="搜索会话与项目" aria-label="搜索会话与项目" aria-controls="sidebar-search" aria-expanded="false" aria-pressed="false"></button></div></div>
       <div class="sidebar-action"><button id="new-chat" class="new-chat" type="button">＋ 新建会话</button><input id="sidebar-search" class="search" type="search" placeholder="搜索会话与项目" aria-label="搜索会话与项目" autocomplete="off" hidden></div>
       <div id="sidebar-content" class="sidebar-content"></div>
       <div class="sidebar-footer"><div class="footer-actions"><button id="appearance-button" class="footer-button" type="button" aria-label="设置"></button><button id="logout" class="footer-button" type="button"></button></div></div>
     </aside>
     <main class="conversation">
-      <header class="conversation-header"><button id="open-sidebar" class="icon-button" type="button" aria-label="打开侧边栏" aria-controls="session-sidebar"></button><div class="thread-heading"><strong id="thread-title">远程会话</strong><span id="thread-path" class="muted"></span></div><button id="connection-state" class="connection-state pending" type="button" aria-live="polite" title="${connectionRttDescription}" aria-label="连接中…。${connectionRttDescription}">连接中…</button><button id="open-session-tools" class="icon-button session-tools-trigger" type="button" title="会话菜单" aria-label="会话菜单" aria-haspopup="menu" aria-expanded="false"></button><span id="related-session-model" class="related-session-model muted" hidden></span><button id="related-session-back" class="text-button" type="button" aria-label="返回主会话" hidden>返回</button></header>
+      <header class="conversation-header"><button id="open-sidebar" class="icon-button" type="button" aria-label="打开侧边栏" aria-controls="session-sidebar"></button><div class="thread-heading"><div class="thread-title-line"><span id="thread-backend-icon" class="thread-backend-icon" aria-hidden="true" hidden></span><strong id="thread-title">远程会话</strong></div><span id="thread-path" class="muted"></span></div><button id="connection-state" class="connection-state pending" type="button" aria-live="polite" title="${connectionRttDescription}" aria-label="连接中…。${connectionRttDescription}">连接中…</button><button id="open-session-tools" class="icon-button session-tools-trigger" type="button" title="会话菜单" aria-label="会话菜单" aria-haspopup="menu" aria-expanded="false"></button><span id="related-session-model" class="related-session-model muted" hidden></span><button id="related-session-back" class="text-button" type="button" aria-label="返回主会话" hidden>返回</button></header>
       <div id="desktop-connection-guidance" class="desktop-connection-guidance" role="status" aria-live="polite" hidden>Codex 桌面尚未连接或正在重启。请在电脑端 CodexElves 管理器右上角点击「重启 Codex」；若已点击，请等待 Codex 主界面完全打开、能够正常查看会话后，再刷新远程网页。</div>
       <div class="messages-shell"><div id="messages" class="messages" role="log" aria-label="会话消息"></div><button id="scroll-to-bottom" class="scroll-to-bottom" type="button" aria-label="跳转到最新消息" hidden></button></div>
       <div class="composer-area"><div class="composer-context"><div id="queued-area" hidden></div><div id="goal-area" hidden></div></div><div id="pending-area"></div><div id="project-select-slot" hidden></div><div class="composer-anchor"><div id="approval-area" class="approval-area" aria-live="polite"></div><div id="side-thread-expired" class="side-thread-expired-banner" role="status" hidden><strong>侧边会话已过期</strong><span>该会话已结束，当前仅可查看已保留的消息。</span></div><form id="composer" class="composer">
@@ -6258,6 +6889,7 @@ function shell() {
   </div>`;
   configurePromptEditor($("#prompt"));
   mountContextUsage();
+  // 用户要求移除顶部 CLI 连接按钮，不再创建或按会话类型恢复该入口。
   $("#open-sidebar").append(icon("menu"));
   $("#related-session-back").onclick = () => void returnToParentSession().catch(error => notice(error.message, true));
   $("#prompt-optimize").onclick = () => void activatePromptOptimization();
@@ -6351,7 +6983,23 @@ function shell() {
   branchBadge.id = "new-chat-branch";
   branchBadge.classList.add("new-chat-branch");
   branchBadge.setAttribute("aria-live", "polite");
-  projectPicker.append(projectControl, branchBadge);
+  // 用户要求类型按钮去掉箭头、保留品牌图标和名称；列表中的两类会话也共用相同标识。
+  const backendSelect = selectControl("new-chat-backend", "会话实例",
+    newChatBackendOptions(),
+    creationInstanceId, "new-chat-backend", selected => {
+      if (!selected) return [element("span", "select-label", "暂无已启用实例")];
+      const mark = icon(selected.icon);
+      mark.classList.add(`backend-icon-${selected.backend}`);
+      return [mark, element("span", "select-label", selected.label)];
+    });
+  backendSelect.popupClassName = "backend-picker-popup";
+  backendSelect.popupDirection = "up";
+  // 类型菜单原先使用非搜索菜单的 200px 宽度；用户要求将它作为最小宽度，内容较长时自然撑开。
+  backendSelect.popupWidth = 200;
+  backendSelect.popupAutoWidth = true;
+  backendSelect.onchange = changeCreationBackend;
+  // 用户指定入口位于分支右侧，仅新建时可选；已有会话不渲染后端切换入口。
+  projectPicker.append(projectControl, branchBadge, backendSelect);
   $("#send").append(icon("arrowUp"));
   $("#logout").append(icon("logout"), element("span", "", "退出"));
   $("#appearance-button").append(icon("settings"), element("span", "", "设置"));
@@ -6436,6 +7084,23 @@ function shell() {
     closeSidebar();
   };
   const searchInput = $("#sidebar-search"), searchToggle = $("#sidebar-search-toggle");
+  const typeFilter = $("#sidebar-type-filter");
+  typeFilter.popupClassName = "sidebar-type-popup";
+  const typeFilterOptions = () => sessionFilterOptions().map(option => ({
+    ...option, selected: option.value === sessionFilterValue(),
+    action: () => {
+      appearance.sessionFilter = option.value; applyAppearance(true);
+      recentLimit = 40; projectVisibleThreadCounts.clear(); renderSidebar();
+    } }));
+  typeFilter.onclick = () => {
+    typeFilter.menuOptions = typeFilterOptions(); typeFilter.value = sessionFilterValue();
+    togglePopup(typeFilter);
+  };
+  typeFilter.onkeydown = event => {
+    if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
+    event.preventDefault(); typeFilter.menuOptions = typeFilterOptions(); typeFilter.value = sessionFilterValue();
+    openPopup(typeFilter, { edge: event.key === "ArrowUp" ? "last" : "first" });
+  };
   const setSidebarSearchOpen = open => {
     closePopup();
     searchInput.hidden = !open;
@@ -6624,22 +7289,26 @@ function shell() {
     modelQuery = "";
     $("#model-settings").hidden = false; $("#model-button").setAttribute("aria-expanded", "true");
     const cached = !!modelsLoadedAt;
+    const menu = $("#model-settings"), owner = privateInputScope(session), contextKey = modelContextKey();
+    const runtimeRevision = session?.runtime?.revision ?? 0;
+    const current = () => $("#model-settings") === menu && !menu.hidden && privateInputScope(session) === owner
+      && modelContextKey() === contextKey && (session?.runtime?.revision ?? 0) === runtimeRevision;
     if (cached) {
       renderModelMenu(); $('#model-settings [aria-checked="true"]:not(:disabled)')?.focus();
-    } else {
-      $("#model-settings").replaceChildren(element("p", "popover-empty muted", "正在读取原生模型…"));
-      fitComposerMenu($("#model-settings"));
-    }
+    } else menu.replaceChildren();
+    // 历史读取只提供当前模型；用户点击后才加载该实例的完整选项，并明确显示加载或失败状态。
+    if (!cached || isClaude()) menu.append(element("p", "popover-empty muted", "正在读取可用模型…"));
+    fitComposerMenu(menu);
     try {
-      await loadModels();
-      if (!cached && $("#model-settings") && !$("#model-settings").hidden) {
-        $('#model-settings [aria-checked="true"]:not(:disabled)')?.focus();
-      }
+      await loadModels(false, { includeAvailable: isClaude() });
+      if (!current()) return;
+      renderModelMenu();
+      if (!cached) $('#model-settings [aria-checked="true"]:not(:disabled)')?.focus();
     } catch (error) {
-      if (!cached && $("#model-settings") && !$("#model-settings").hidden) {
-        $("#model-settings").replaceChildren(element("p", "popover-empty error-text", error.message));
-        fitComposerMenu($("#model-settings"));
-      }
+      if (!current()) return;
+      renderModelMenu();
+      menu.prepend(element("p", "popover-empty error-text", error.message));
+      fitComposerMenu(menu);
     }
   };
   $("#model-settings").onkeydown = event => {
@@ -6687,6 +7356,10 @@ async function startNewChat(projectId, { focus = true, closeSidebar = true } = {
   relatedSessionView = null; relatedReturnTranscript = null; sessionMenu?.close(); syncRelatedSessionLayout();
   selectionToken = randomId();
   creationProject = $("#project-select").value; notifiedTokenUsage = null; ++threadReadVersion;
+  const instance = newChatBackendOptions().find(value => value.value === creationInstanceId) || newChatBackendOptions()[0];
+  creationInstanceId = instance?.value || "codex:local"; creationBackend = instance?.backend || "codex";
+  if ($("#new-chat-backend")) setSelectValue($("#new-chat-backend"), creationInstanceId);
+  setConnection(backendAvailable() && stream?.readyState === EventSource.OPEN);
   syncNewChatHash();
   sessionTools?.updateContext();
   restoreDraft(draftKey()); resetComposerOptions(); renderApprovals();
@@ -6708,7 +7381,7 @@ function mergeIncompleteSidebar(previous, current) {
   // 用户要求服务模式与桌面置顶一致：原生置顶已完整时立即接受取消，不能被未完成的最近分页补回。
   const completePins = current.pinnedThreadsComplete === true;
   const pinnedIds = new Set(current.pinnedThreads.map(item => item.id));
-  const mergeRows = (old, fresh) => [...fresh, ...old.filter(item => !freshIds.has(item.id))]
+  const mergeRows = (old, fresh) => [...fresh, ...old.filter(item => !freshIds.has(item.id) && !claudeThreadId(item.id))]
     .map(item => item.projectId && !projectIds.has(item.projectId) ? { ...item, projectId: null } : item)
     .map(item => completePins ? { ...item, pinned: pinnedIds.has(item.id) } : item);
   const oldRecent = completePins
@@ -6751,7 +7424,7 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
       let result;
       try {
         request.apiStarted = true;
-        result = await api("/api/read/sidebar", { cursor: request.cursor }, undefined, request.controller.signal,
+        result = await api("/api/read/sidebar", { cursor: request.cursor, enabledInstanceIds: enabledInstanceIds() }, undefined, request.controller.signal,
           { resourcePriority: request.resourcePriority });
       }
       catch (error) {
@@ -6845,6 +7518,17 @@ function renderSidebar() {
   const focusedMenu = document.activeElement.classList.contains("row-menu-button");
   if (popupState) closePopup();
   root.replaceChildren();
+  const filter = sessionFilterValue();
+  const typeFilter = $("#sidebar-type-filter");
+  if (typeFilter) {
+    const instance = availableSessionInstances().find(value => value.id === filter);
+    const label = filter === "all" ? "全部会话" : instance?.label || "实例暂不可用";
+    typeFilter.replaceChildren(icon(instance && ["codex", "claude"].includes(instance.backend) ? instance.backend : "allSessions"));
+    typeFilter.dataset.backend = instance?.backend || "all"; typeFilter.title = label;
+    typeFilter.setAttribute("aria-label", `筛选会话实例：${label}`);
+  }
+  // 用户要求按会话实例筛选所有分组，并与实例开关取交集；保留原快照和未读状态。
+  const typeMatches = item => sessionTypeVisible(item);
   const preferences = {
     mode: sidebarFilters.mode ?? sidebar.preferences.mode,
     chats: sidebarFilters.chats ?? sidebar.preferences.chats,
@@ -6863,9 +7547,10 @@ function renderSidebar() {
   const projectNames = new Map(sidebar.projects.map(project => [project.id, project.name]));
   const domId = (type, id) => `${type}-${encodeURIComponent(id)}`;
   const normalizedSearch = search.replace(/[\\/]+/g, " ");
-  const matches = item => !search || `${item.title || ""} ${item.name || ""} ${projectNames.get(item.projectId) || ""}
+  const searchMatches = item => !search || `${item.title || ""} ${item.name || ""} ${projectNames.get(item.projectId) || ""}
     ${item.cwd || ""} ${(item.roots || []).join(" ")}`
     .toLowerCase().replace(/[\\/]+/g, " ").includes(normalizedSearch);
+  const matches = item => typeMatches(item) && searchMatches(item);
   const sortThreads = (items, mode) => mode === "updated_at"
     ? [...items].sort((left, right) => sidebarUpdatedAt(right) - sidebarUpdatedAt(left)
       || (right.createdAt || 0) - (left.createdAt || 0) || left.id.localeCompare(right.id))
@@ -6893,16 +7578,26 @@ function renderSidebar() {
     container.dataset.threadId = item.id;
     const title = button(item.title, item.title, () => void openThread(item).catch(error => notice(error.message, true)), "thread-link");
     title.id = domId("thread", `${scope}:${item.id}`);
+    let titleLine = title;
     if (recentView) {
+      // 用户要求最近会话图标只占标题行；项目名与标题行同起点，不因图标预留额外一列。
+      titleLine = element("span", "thread-label-line");
+      titleLine.append(element("span", "thread-label", item.title));
       const copy = element("span", "thread-copy");
-      copy.append(element("span", "thread-label", item.title), element("span", "thread-project", threadProjectName(item)));
+      copy.append(titleLine, element("span", "thread-project", threadProjectName(item)));
       title.replaceChildren(copy);
     } else title.replaceChildren(element("span", "thread-label", item.title));
     if (selectedId === item.id) title.setAttribute("aria-current", "page");
     const attention = sidebarAttentionState(item);
     const active = attention !== "waiting" && (item.sideThreadAttention?.active === true
       || (typeof item.priority?.active === "boolean" ? item.priority.active : isActive(item)));
-    if (scope === "pinned") title.prepend(icon("chat"));
+    // 用户要求 Codex 与 Claude 列表均显示对应品牌，置顶不再用通用聊天图标；
+    // 最近列表仅在标题行放图标，与项目/置顶列表共用 1em 尺寸、3px 间距和文字居中对齐规则。
+    const backend = item.backend === "claude" || claudeThreadId(item.id) ? "claude" : "codex";
+    const mark = icon(backend);
+    mark.classList.add("session-type-icon", `${backend}-session-icon`);
+    mark.title = backend === "claude" ? "Claude" : "Codex";
+    titleLine.prepend(mark);
     container.append(title);
     if (active || attention === "unread" || attention === "waiting") {
       const state = element("span", `thread-state${active ? " active" : " unread"}`);
@@ -6950,9 +7645,10 @@ function renderSidebar() {
     root.append(heading, body);
   }
   function projectGroup(project) {
-    const available = sortThreads(project.threads.filter(item => !pinnedIds.has(item.id)), preferences.projects);
-    const items = matches(project) && search ? available : available.filter(matches);
-    if (search && !matches(project) && !items.length) return null;
+    if (filter !== "all" && !project.threads.some(typeMatches)) return null;
+    const available = sortThreads(project.threads.filter(item => !pinnedIds.has(item.id) && typeMatches(item)), preferences.projects);
+    const items = searchMatches(project) && search ? available : available.filter(matches);
+    if (search && !searchMatches(project) && !items.length) return null;
     const group = element("div", "project-group");
     const header = element("div", "project-header");
     const projectTitle = button("", project.name, () => {
@@ -6982,7 +7678,8 @@ function renderSidebar() {
         projectVisibleThreadCounts.set(project.id, Math.min(items.length, visible.length + projectThreadLimit));
         renderSidebar();
       }, "load-more project-load-more"));
-      if (!items.length) group.append(element("small", "empty-project", project.threads.length ? "会话已移至置顶区" : "暂无会话"));
+      if (!items.length) group.append(element("small", "empty-project",
+        project.threads.some(typeMatches) ? "会话已移至置顶区" : project.threads.length ? "没有符合实例筛选的会话" : "暂无会话"));
     }
     return group;
   }
@@ -8321,7 +9018,8 @@ function renderItem(item, previous, inActivity = false, running = false) {
     const previousImages = [...attachments.children], images = [];
     for (const content of item.content || []) if (["image", "localImage"].includes(content.type)) {
       const source = content.path || content.url;
-      const label = /^data:/iu.test(source || "") ? "图片附件" : String(source || "图片附件").split(/[\\/]/).at(-1);
+      // Claude 图片沿用现有附件预览；内联资源 ID 不作为面向用户的文件名。
+      const label = /^(?:data|inline):/iu.test(source || "") ? "图片附件" : String(source || "图片附件").split(/[\\/]/).at(-1);
       const image = messageImage(item.remoteImages?.find(image => image.source === source), label, source, previousImages[images.length]);
       images.push(image || element("span", "attachment-placeholder", "图片附件 · 请在 Codex 桌面查看"));
     }
@@ -9190,7 +9888,8 @@ const queuedActionBusy = new Set();
 const sameQueueOrder = (left, right) => left.length === right.length && left.every((id, index) => id === right[index]);
 function queueReorderAvailable() {
   const messages = thread?.queuedMessages;
-  return !!selectedId && thread?.id === selectedId && connected && !threadReadOnly()
+  return (thread?.backend !== "claude" || thread.capabilities?.remoteQueue === true)
+    && !!selectedId && thread?.id === selectedId && connected && !threadReadOnly()
     && !busy && !stopping && !pending && !compactionLocked() && !queuedActionBusy.size
     && editingQueuedMessage?.state !== "starting"
     && Array.isArray(messages) && messages.length > 1
@@ -9530,9 +10229,18 @@ function applyQueuedSendResult(id, result, readVersion) {
 function queueMessageText(message) {
   return message?.text ?? message?.context?.prompt ?? message?.prompt ?? message?.message?.prompt ?? "";
 }
+function pendingSteerDelivered(pending = pendingSteer) {
+  if (!pending || pending.threadId !== selectedId) return false;
+  // 用户要求引导只显示一次：以队列／逻辑消息身份收敛预览，兼容原生事件早于 HTTP 回执及逻辑 ID 恢复。
+  return [...turns.values()].some(turn => (turn.items || []).some(item =>
+    item.type === "userMessage" && !item.remotePendingInput
+      && (pending.messageId && item.restoreMessage?.id === pending.messageId
+        || pending.clientId && [item.clientId, item.clientUserMessageId, item.serverClientUserMessageId]
+          .includes(pending.clientId))));
+}
 function pendingSteerTurn() {
   const pending = pendingSteer;
-  if (!pending || pending.threadId !== selectedId || !pending.text) return null;
+  if (!pending || pending.threadId !== selectedId || !pending.text || pendingSteerDelivered(pending)) return null;
   const pendingItem = {
       id: pending.itemId,
       type: "userMessage",
@@ -9542,8 +10250,6 @@ function pendingSteerTurn() {
   };
   const current = pending.turnId ? turns.get(pending.turnId) : null;
   if (!current) return { id: pending.localTurnId, status: "inProgress", items: [pendingItem] };
-  if (current.items?.some(item => item.type === "userMessage" && !item.remotePendingInput
-      && (!pending.clientId || item.clientId === pending.clientId))) return null;
   return { ...current, items: [...(current.items || []), pendingItem] };
 }
 function renderQueuedMessages(messages, previous = null) {
@@ -9556,7 +10262,7 @@ function renderQueuedMessages(messages, previous = null) {
     .map(row => [row.dataset.messageId, $(".queued-message-attachments", row)]));
   const queue = element("section", "queued-messages");
   const acceptedCount = messages.filter(message => message?.remoteDeliveryState === "accepted").length;
-  queue.setAttribute("aria-label", `原生消息队列，${messages.length - acceptedCount} 条待执行`
+  queue.setAttribute("aria-label", `${thread?.capabilities?.remoteQueue === true ? "远程待发送队列" : "原生消息队列"}，${messages.length - acceptedCount} 条待执行`
     + (acceptedCount ? `，${acceptedCount} 条已发送待同步` : ""));
   queue.setAttribute("role", "list");
   for (const message of messages) {
@@ -9624,7 +10330,7 @@ function renderQueuedMessages(messages, previous = null) {
     menu.append(icon("more"));
     menu.setAttribute("aria-haspopup", "menu");
     menu.setAttribute("aria-expanded", "false");
-    menu.disabled = unavailable;
+    menu.disabled = unavailable || thread?.backend === "claude" && accepted;
     menu.popupClassName = "queued-message-popup";
     menu.menuOptions = [
       {
@@ -9649,10 +10355,22 @@ function renderQueuedMessages(messages, previous = null) {
     };
     row.oncontextmenu = event => {
       event.preventDefault();
+      if (thread?.backend === "claude" && (thread.capabilities?.remoteQueue !== true || accepted)) return;
       if (queueDrag || event.target.closest(".queued-drag-handle")) return;
       openPopup(menu, { position: { x: event.clientX, y: event.clientY } });
     };
-    if (!threadReadOnly(threadId)) row.append(steer, menu);
+    // 用户改为远程服务保存待发消息：具备 remoteQueue 时允许逐条引导、编辑、删除和排序；
+    // 已投递给原生的旧记录仍只展示接收状态，不能伪装成可修改的未发送消息。
+    if (thread?.backend === "claude" && thread.capabilities?.remoteQueue !== true && thread.capabilities?.queueSendNow === true
+        && message === messages[0] && !threadReadOnly(threadId)) {
+      const sendAll = button("立即执行全部", "停止当前回复并执行全部排队消息，保留原版 CLI 未发送草稿",
+        () => void steerQueuedMessage(threadId, messageId), "queued-steer-button");
+      sendAll.disabled = !active || unavailable || awaitingReceipt || accepted;
+      row.append(sendAll);
+    }
+    if (!threadReadOnly(threadId) && (thread?.backend !== "claude" || thread.capabilities?.remoteQueue === true))
+      row.append(steer, ...(thread?.backend === "claude" && accepted ? [] : [menu]));
+    if (thread?.backend === "claude" && thread.capabilities?.remoteQueue !== true) queueIcon.hidden = true;
     queue.append(row);
   }
   return queue;
@@ -9663,7 +10381,8 @@ function renderQueueArea() {
   const messages = currentThreadDisplay()?.queuedMessages;
   const ready = thread?.id === selectedId && Array.isArray(thread.queuedMessages);
   // 队列内容可保持不变，但停止/恢复会改变按钮文案与图标，必须纳入刷新判断。
-  const signature = JSON.stringify([selectedId, messages, ready, isActiveThread(), thread?.queuedEdits, session?.device.id, threadReadOnly(), connected,
+  const signature = JSON.stringify([selectedId, messages, ready, isActiveThread(), thread?.queuedEdits,
+    thread?.capabilities?.queueSendNow, thread?.capabilities?.remoteQueue, session?.device.id, threadReadOnly(), connected,
     compactionLocked(), [...queuedActionBusy], editingQueuedMessage?.message.id, editingQueuedMessage?.state,
     !!editingMessage, busy, stopping, pending?.id, queueReorder, queuedEditCheckVersion,
     queueDisplayMessages(messages)?.map(message => message.id)]);
@@ -9707,7 +10426,7 @@ async function queuedEditFingerprint(action, payload) {
   return sha256Hex(value);
 }
 async function checkQueuedMessageEdit(threadId, editId) {
-  if (!connected || session?.capabilities?.queueEditRecovery !== true) return null;
+  if (!connected || !queueCapability("queueEditRecovery", threadId)) return null;
   const existing = queuedEditChecks.get(editId), deviceId = session.device.id;
   if (existing?.deviceId === deviceId && existing.promise) return existing.promise;
   const request = { deviceId, loading: true, result: null, error: "", promise: null, queueReadVersion: queueVersion };
@@ -9892,7 +10611,8 @@ async function steerQueuedMessage(threadId, messageId) {
     text: queueMessageText(queuedMessage)
   };
   queuedActionBusy.add(key);
-  pendingSteer = preview;
+  // Claude 投递后等待原生权威历史确认；远程队列也不额外插入正文预览，避免同一消息重复展示。
+  if (thread?.backend !== "claude") pendingSteer = preview;
   recordDiagnostic("remote.steer", { phase: "request" });
   renderMessages();
   if (selectedId === threadId) renderQueueArea();
@@ -9903,8 +10623,9 @@ async function steerQueuedMessage(threadId, messageId) {
     updateComposer();
     const result = await request;
     if (!currentAuthorization()) return;
-    pendingSteer = pendingSteer === preview
-      ? { ...preview, turnId: typeof result?.turnId === "string" ? result.turnId : null } : pendingSteer;
+    // 保持同一预览对象，后续历史读取才能清理本次预览；替换对象会让成功和退出分支的身份比较永久失效。
+    if (pendingSteer === preview)
+      preview.turnId = typeof result?.turnId === "string" ? result.turnId : null;
     if (selectedId === threadId && thread?.id === threadId) {
       if (readVersion === queueVersion || queueSnapshotIsVersioned(result))
         applyQueueSnapshot(threadId, Array.isArray(result?.queuedMessages)
@@ -9970,10 +10691,10 @@ async function beginQueuedMessageEdit(threadId, message) {
   const originalImageSources = attachments.map(attachment => attachment.source);
   const imageCount = Array.isArray(message.context?.imageAttachments) ? message.context.imageAttachments.length
     : Array.isArray(message.remoteImages) ? message.remoteImages.length : 0;
-  const imageRemoval = (session.capabilities?.queuedImageRemoval === true || session.capabilities?.queuedImageEditing === true)
+  const imageRemoval = (queueCapability("queuedImageRemoval") || queueCapability("queuedImageEditing"))
     && attachments.length === imageCount
     && validQueuedImageSources(originalImageSources);
-  const imageEditing = imageRemoval && session.capabilities?.queuedImageEditing === true;
+  const imageEditing = imageRemoval && queueCapability("queuedImageEditing");
   const edit = {
     threadId, editId: randomId(), deviceId: session.device.id, state: "starting",
     message: { id: message.id, clientUserMessageId: message.clientUserMessageId, createdAt: message.createdAt },
@@ -10055,7 +10776,7 @@ async function submitQueuedMessageEdit(cancel = false) {
   if (!cancel && composerAttachmentsLoading()) { notice("图片正在读取，请稍后保存"); return; }
   if (!cancel && !prompt && !composerHasAttachments()) { notice("请输入消息或保留至少一张图片", true); return; }
   const images = edit.imageEditing ? composerAttachmentsPayload() : [];
-  if (!cancel && images.length && session.capabilities?.queuedImageEditing !== true) {
+  if (!cancel && images.length && !queueCapability("queuedImageEditing")) {
     notice("当前运行的服务尚不支持编辑队列图片，修改已保留，请更新程序后再保存。", true);
     return;
   }
@@ -10184,12 +10905,7 @@ function renderMessages(keepScroll = true) {
   const anchor = !keepScroll || !bottom ? visibleMessageAnchor(root) : null;
   const children = [], itemKeys = new Set(), turnKeys = new Set(), activityKeys = new Set();
   const relatedViewKind = relatedSessionView?.kind || "";
-  if (pendingSteer?.threadId === selectedId && pendingSteer.turnId) {
-    const delivered = turns.get(pendingSteer.turnId)?.items?.some(item =>
-      item.type === "userMessage" && !item.remotePendingInput
-      && (!pendingSteer.clientId || item.clientId === pendingSteer.clientId));
-    if (delivered) pendingSteer = null;
-  }
+  if (pendingSteerDelivered()) pendingSteer = null;
   const sorted = [...turns.values()];
   const pendingTurn = pendingSteerTurn();
   if (pendingTurn) {
@@ -10314,7 +11030,16 @@ function renderMessages(keepScroll = true) {
       if (editedFiles) items.push(editedFiles);
     }
     if (turn.error) items.push(element("div", "turn-error", turn.error.message || "此轮执行失败"));
-    if (turn.status === "interrupted") items.push(element("small", "turn-end muted", "已停止"));
+    if (turn.status === "interrupted") {
+      // 用户要求原生中断按执行状态展示，不伪装成用户正文，也不据此推断用户按了哪个按钮。
+      const native = turn.nativeInterruption?.source === "claude";
+      const note = element("small", "turn-end muted", native ? "请求已中断" : "已停止");
+      if (native) {
+        note.dataset.nativeInterruption = turn.nativeInterruption.id;
+        note.title = `Claude 原生中断记录：${turn.nativeInterruption.text}`;
+      }
+      items.push(note);
+    }
     if (turn.plan?.length) {
       const plan = element("ul", "turn-plan");
       for (const step of turn.plan) plan.append(element("li", step.status, `${step.status === "completed" ? "✓" : step.status === "inProgress" ? "◌" : "○"} ${step.step}`));
@@ -10498,6 +11223,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   const version = ++selectionVersion;
   selectionToken = randomId();
   selectedId = id; creating = false; thread = initialSide; turns.clear(); transcriptEvents.clear(); historyCursor = null; historyInitialized = false;
+  setConnection(backendAvailable() && stream?.readyState === EventSource.OPEN);
   relatedSessionView = nextRelatedView;
   if (preparedView) $(".workspace")?.classList.add("related-session-prepared");
   syncRelatedSessionLayout();
@@ -10554,7 +11280,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   const summary = [...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
     ...(sidebar?.projects || []).flatMap(project => project.threads || [])].find(item => item.id === id);
   $("#thread-title").textContent = initialSide?.title || relatedSessionView?.name || summary?.title || cached?.title || "正在打开会话";
-  $("#thread-path").textContent = initialSide?.cwd || summary?.cwd || cached?.cwd || "正在读取会话设置…";
+  $("#thread-path").textContent = threadLocation(initialSide) || threadLocation(summary) || threadLocation(cached) || "正在读取会话设置…";
   renderSidebar(); updateComposer();
   if (exitTransition) {
     const scope = privateInputScope(session);
@@ -10597,7 +11323,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     else thread.compaction = normalizeCompaction(currentCompaction(id));
     rememberThreadDisplay();
     $("#thread-title").textContent = thread.viewKind === "subagent" ? thread.agentName || thread.title || "子代理" : thread.title;
-    $("#thread-path").textContent = thread.cwd;
+    $("#thread-path").textContent = threadLocation(thread);
     syncEditableMessageMetadata();
     updateComposer(); renderApprovals();
     if (historyInitialized) scheduleMessages();
@@ -10647,7 +11373,12 @@ function syncNewChatHash() {
 }
 function welcomeNode() {
   const node = element("div", "welcome");
-  node.append(element("h1", "", "继续本机的工作"), element("p", "", "选择左侧会话，发送会话。"), element("small", "", "消息、审批和执行状态与 Codex 桌面共享。"));
+  // 用户要求 Claude 使用自身后端；新建页的欢迎说明随类型同步，明确消息和工具由谁处理。
+  node.append(element("h1", "", isClaude() ? "开始 Claude 会话" : "继续本机的工作"),
+    element("p", "", isClaude() ? "选择项目，输入消息开始工作。" : "选择左侧会话，发送会话。"),
+    element("small", "", isClaude()
+      ? `由 WSL${session?.claudeWslDistribution ? `（${session.claudeWslDistribution}）` : ""} 中的 Claude 处理消息、工具和上下文。`
+      : "消息、审批和执行状态与 Codex 桌面共享。"));
   return node;
 }
 function showWelcome({ startNew = true, clearHash = false } = {}) {
@@ -10741,6 +11472,11 @@ async function readHistoryPage(older, version, itemsTurnId, generation = foregro
         || pageLeaving || version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
     if (!Array.isArray(result?.data)) throw new Error("会话历史返回格式无效");
     if (itemsTurnId && (result.scope !== "items" || result.turnId !== itemsTurnId)) throw new Error("会话消息分页归属无效");
+    if (!itemsTurnId && claudeThreadId(id))
+      retireClaudeHistoryTurns(result.turnIds, readVersion, messageVersion + 1);
+    // 用户要求旧摘要同步删除后不能被迟到读取复活；仅过滤本次读取开始后已明确删除的 Claude 轮次，不影响分页或 Codex。
+    if (!itemsTurnId && claudeThreadId(id))
+      result.data = result.data.filter(turn => turns.has(turn.id) || (turnVersions.get(turn.id) || 0) <= readVersion);
     if (result.ephemeral === true) {
       if (thread?.id === id) thread.ephemeral = true;
       if (relatedSessionView?.threadId === id) relatedSessionView = { ...relatedSessionView, ephemeral: true };
@@ -10784,6 +11520,11 @@ async function readHistoryPage(older, version, itemsTurnId, generation = foregro
         turns = new Map([...earlier, ...chronological, ...later].map(turn => [turn.id, turn]));
       }
       if (older || !historyInitialized) historyCursor = result.nextCursor;
+    }
+    if (!itemsTurnId && claudeThreadId(id)) {
+      const order = orderClaudeHistoryTurns(result.turnIds, readVersion);
+      const cursor = claudeHistoryCursor(order);
+      if (cursor !== undefined) historyCursor = cursor;
     }
     historyInitialized = true;
     if (latestPage) { transcriptChecking = false; latestHistoryReadFailed = false; }
@@ -10832,6 +11573,46 @@ async function readHistoryPage(older, version, itemsTurnId, generation = foregro
       syncHistoryButtons();
     }
   }
+}
+function retireClaudeHistoryTurns(ids, readVersion, version) {
+  if (!Array.isArray(ids)) return false;
+  const current = new Set(ids);
+  let changed = false;
+  for (const [key, value] of turns) {
+    // 用户要求旧中断气泡从缓存退役；只处理已确认原生轮次，不能清掉待发送预览或迟于 HTTP 读取的新流消息。
+    if (!value._nativeUserId || current.has(key) || (turnVersions.get(key) || 0) > readVersion) continue;
+    turns.delete(key); turnVersions.set(key, version); changed = true;
+    for (const item of value.items || []) {
+      itemVersions.set(`${key}:${item.id}`, version); partialItems.delete(`${key}:${item.id}`);
+    }
+    for (const [eventId, event] of transcriptEvents) if (event.turnId === key) transcriptEvents.delete(eventId);
+  }
+  if (changed) messageVersion = Math.max(messageVersion, version);
+  return changed;
+}
+function orderClaudeHistoryTurns(ids, readVersion = messageVersion) {
+  const sameSelection = claudeHistoryOrder?.threadId === selectedId
+    && claudeHistoryOrder.selectionVersion === selectionVersion;
+  // 用户要求长历史与实时消息保持原生顺序；较早 HTTP 回包不能撤回新通知给出的顺序。
+  if (Array.isArray(ids) && (!sameSelection || readVersion >= claudeHistoryOrder.version)) {
+    claudeHistoryOrder = { threadId: selectedId, selectionVersion, version: readVersion, ids: [...ids] };
+  } else if (!sameSelection) return ids;
+  const order = claudeHistoryOrder.ids, known = new Set(order);
+  const entries = order.filter(id => turns.has(id)).map(id => [id, turns.get(id)]);
+  // 原生列表尚未包含的实时输入或本地预览继续保留，不能把补历史等同删除。
+  entries.push(...[...turns].filter(([id]) => !known.has(id)));
+  turns.clear();
+  for (const [id, turn] of entries) turns.set(id, turn);
+  return order;
+}
+function claudeHistoryCursor(ids) {
+  if (!Array.isArray(ids)) return undefined;
+  if (!ids.length) return null;
+  if (!ids.some(id => turns.has(id))) return undefined;
+  // 从最新轮次向前寻找连续已加载区间；零散旧缓存不能让中间未读取的轮次被跳过。
+  let first = ids.length;
+  while (first > 0 && turns.has(ids[first - 1])) --first;
+  return first === 0 ? null : String(first);
 }
 function pruneCachedHistory(snapshots, readVersion) {
   const ids = new Set(snapshots.map(turn => turn.id)), known = [...turns.values()];
@@ -10895,6 +11676,16 @@ function normalizeDisplayedUserMessage(item) {
     content
   };
 }
+function normalizeDisplayedTurnItems(items) {
+  const byId = new Map();
+  for (const source of items) {
+    const item = normalizeDisplayedUserMessage(source);
+    // 原生正文和 steered 确认共用消息 ID；分页、实时轮次与重进缓存必须一致保留一份正文。
+    if (byId.get(item.id)?.type === "userMessage" && item.type === "steered") continue;
+    byId.set(item.id, item);
+  }
+  return [...byId.values()];
+}
 function completedItem(item) {
   // 普通消息的 completed 可能仅为原生展示推导，不能证明这份正文已经定稿。
   return item?.remoteItemCompleted === true || Number.isFinite(item?.completedAtMs)
@@ -10902,6 +11693,8 @@ function completedItem(item) {
     || ["completed", "failed", "interrupted"].includes(item?.status);
 }
 function mergeItemProjection(previous, item) {
+  // 单条状态事件也可能晚于正文到达，不能用同 ID 的 steered 把已接受的引导内容改回空状态。
+  if (previous?.id === item.id && previous.type === "userMessage" && item.type === "steered") return previous;
   const projection = {};
   for (const field of ["messageMetadata", "sentAtMs", "startedAtMs", "completedAtMs", "completed",
     "remoteImages", "remoteVideos", "clientId", "remoteCompactionInput", "remoteHistoryContext", "remoteItemCompleted"])
@@ -10911,7 +11704,7 @@ function mergeItemProjection(previous, item) {
 }
 function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = null, cached = false } = {}) {
   if (Array.isArray(snapshot?.items)) {
-    snapshot = { ...snapshot, items: snapshot.items.map(normalizeDisplayedUserMessage) };
+    snapshot = { ...snapshot, items: normalizeDisplayedTurnItems(snapshot.items) };
   }
   const current = turns.get(snapshot.id);
   const contextItems = (snapshot.items || []).filter(item => item.remoteHistoryContext);
@@ -10933,6 +11726,8 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
     const live = previous.get(item.id), key = `${snapshot.id}:${item.id}`;
     previous.delete(item.id);
     if (!live) return item;
+    // 旧缓存或迟到分页仍可能只含同 ID 的引导状态，不能退化已经恢复的正文。
+    if (live.type === "userMessage" && item.type === "steered") return live;
     const newer = (itemVersions.get(key) || 0) > readVersion;
     if (cached && !newer) return mergeItemProjection(live, item);
     const liveComplete = completedItem(live), snapshotComplete = completedItem(item);
@@ -11081,7 +11876,7 @@ async function reloadThread() {
       if (compactionReadVersion === compactionVersion) reconcileCompaction(id, thread.compaction);
       else thread.compaction = normalizeCompaction(currentCompaction(id));
       $("#thread-title").textContent = thread.viewKind === "subagent" ? thread.agentName || thread.title || "子代理" : thread.title;
-      $("#thread-path").textContent = thread.cwd || ""; syncThreadHash(id);
+      $("#thread-path").textContent = threadLocation(thread); syncThreadHash(id);
       updateComposer(); renderApprovals();
       await historyRead;
     } while (request.again && generation === foregroundReadGeneration && version === selectionVersion && selectedId === id);
@@ -11762,7 +12557,7 @@ function invalidateBlockingRequests(id, requestId, resolved = false) {
   }
 }
 async function submitBlockingRequest(requestThreadId, request, action, value, identity = blockingApprovalIdentity(requestThreadId, request)) {
-  if (!connected || threadReadOnly(requestThreadId) || !session?.allowApprovals || thread?.id !== requestThreadId) return;
+  if (!connected || threadReadOnly(requestThreadId) || !approvalsAllowed() || thread?.id !== requestThreadId) return;
   const current = (thread.requests || []).find(value => value.id === request.id && value.method === request.method);
   if (!current || blockingApprovalIdentity(requestThreadId, current) !== identity) return;
   const deviceId = session.device.id, key = approvalReplyKey(requestThreadId, request, deviceId);
@@ -11870,7 +12665,7 @@ async function recoverQuestionReceipts() {
   await Promise.allSettled(checks);
 }
 async function submitAsyncQuestion(requestThreadId, request, answers, { skip = false } = {}) {
-  if (!connected || threadReadOnly(requestThreadId) || !session.allowApprovals || thread?.id !== requestThreadId) return;
+  if (!connected || threadReadOnly(requestThreadId) || !approvalsAllowed() || thread?.id !== requestThreadId) return;
   const key = JSON.stringify([session.device.id, requestThreadId, request.id]);
   if (questionReplyReceipts.has(key) || request.params?.submissionState) return;
   const record = { id: randomId(), deviceId: session.device.id, threadId: requestThreadId,
@@ -11902,7 +12697,7 @@ function renderAsyncQuestion(card, request, requestThreadId) {
   const key = JSON.stringify([session.device.id, requestThreadId, request.id]);
   const receipt = questionReplyReceipts.get(key);
   const submissionState = receipt?.state || request.params?.submissionState;
-  const allowed = !threadReadOnly(requestThreadId) && session.allowApprovals && connected;
+  const allowed = !threadReadOnly(requestThreadId) && approvalsAllowed() && connected;
   const draft = questionDrafts.get(key) || new Map();
   questionDrafts.set(key, draft);
   card.append(element("strong", "", "Codex 需要你回答"));
@@ -11957,7 +12752,7 @@ function renderAsyncQuestion(card, request, requestThreadId) {
       status.textContent = receipt?.skip ? "正在确认问题跳过结果。" : "正在确认回答结果。";
     if (receipt?.skip) skip.textContent = "跳过中…";
     else submit.textContent = "提交中…";
-  } else if (!allowed) status.textContent = threadReadOnly(requestThreadId) || !session.allowApprovals
+  } else if (!allowed) status.textContent = threadReadOnly(requestThreadId) || !approvalsAllowed()
     ? "此设备没有问答回复权限，请在 Codex 桌面处理。" : "连接恢复后可以提交回答。";
   form.onsubmit = event => {
     event.preventDefault();
@@ -12105,7 +12900,7 @@ function renderApprovals() {
   syncPendingFeedbackTimer();
   const root = $("#approval-area"); if (!root) return;
   const requests = thread?.requests || [];
-  const signature = JSON.stringify([session?.device.id, thread?.id, requests, threadReadOnly(), session?.allowApprovals, connected,
+  const signature = JSON.stringify([session?.device.id, thread?.id, requests, threadReadOnly(), approvalsAllowed(), connected,
     thread?.id ? [blockingRequestState(thread.id).epoch, blockingRequestState(thread.id).sourceVersion] : null,
     [...approvalReplies].filter(([, reply]) => reply.deviceId === session?.device.id && reply.threadId === thread?.id)
       .map(([key, reply]) => [key, reply.state, pendingFeedbackReady(reply)]),
@@ -12132,7 +12927,7 @@ function renderApprovals() {
     const asyncQuestion = request.method === "remote/requestUserInputAsync";
     const questionKey = asyncQuestion ? JSON.stringify([session.device.id, requestThreadId, request.id]) : null;
     const requestSignature = JSON.stringify([blockingApprovalIdentity(requestThreadId, request),
-      threadReadOnly(), session?.allowApprovals, connected,
+      threadReadOnly(), approvalsAllowed(), connected,
       asyncQuestion ? [questionReplyReceipts.get(questionKey)?.state,
         pendingFeedbackReady(questionReplyReceipts.get(questionKey))] : null]);
     const previous = previousCards.get(requestSignature);
@@ -12150,11 +12945,11 @@ function renderApprovals() {
     if (toolApproval) renderMcpToolApproval(card, toolApproval);
     else if (request.method === "item/commandExecution/requestApproval") renderCommandApproval(card, request.params);
     else {
-      card.append(element("strong", "", request.method === "item/tool/requestUserInput" ? "Codex 需要你回答" : "等待你的授权"));
+      card.append(element("strong", "", request.method === "item/tool/requestUserInput" ? `${isClaude() ? "Claude" : "Codex"} 需要你回答` : "等待你的授权"));
       const description = request.params?.command || request.params?.reason || request.params?.message || request.method;
       card.append(element("pre", "approval-description", typeof description === "string" ? description : JSON.stringify(description, null, 2)));
     }
-    if (threadReadOnly() || !session.allowApprovals) { card.append(element("small", "muted", "请在 Codex 桌面处理，此设备没有审批权限。")); cards.push(card); continue; }
+    if (threadReadOnly() || !approvalsAllowed()) { card.append(element("small", "muted", isClaude() ? "此设备没有远程审批权限。" : "请在 Codex 桌面处理，此设备没有审批权限。")); cards.push(card); continue; }
     const requestIdentity = blockingApprovalIdentity(requestThreadId, request);
     const reply = (action, value) => submitBlockingRequest(requestThreadId, request, action, value, requestIdentity);
     const actions = element("div", "approval-actions");
@@ -12165,7 +12960,7 @@ function renderApprovals() {
         actions.append(button(label, label, async () => {
           const deviceId = session?.device.id;
           if (decision === "acceptForSession" && !await confirmAction("本会话允许", "允许此会话后续同类操作，不再逐次询问。请确认已了解该操作范围。", "允许本会话")) return;
-          if (!card.isConnected || session?.device.id !== deviceId || threadReadOnly() || !session.allowApprovals) return;
+          if (!card.isConnected || session?.device.id !== deviceId || threadReadOnly() || !approvalsAllowed()) return;
           void reply("approve", { decision });
         }, decision === "accept" ? "primary" : ""));
       }
@@ -12179,9 +12974,20 @@ function renderApprovals() {
         input.value = draft.get(question.id) || "";
         input.oninput = () => draft.set(question.id, input.value);
         const choices = element("div", "question-options");
-        for (const option of question.options || []) choices.append(button(option.label, option.description || option.label, () => {
-          input.value = option.label; draft.set(question.id, input.value);
-        }));
+        const selected = new Set((draft.get(question.id) || "").split(", "));
+        for (const option of question.options || []) {
+          const choice = button(option.label, option.description || option.label, () => {
+            if (question.multiSelect) {
+              selected.has(option.label) ? selected.delete(option.label) : selected.add(option.label);
+              input.value = [...selected].join(", ");
+              for (const node of choices.children) node.setAttribute("aria-pressed", String(selected.has(node.textContent)));
+            } else input.value = option.label;
+            draft.set(question.id, input.value);
+          });
+          // Claude 原生多选问题允许同时选中多项，保留自由输入并按原生 answers 字符串回传。
+          if (question.multiSelect) choice.setAttribute("aria-pressed", String(selected.has(option.label)));
+          choices.append(choice);
+        }
         fields.push([question.id, input]); label.append(choices, input); card.append(label);
       }
       actions.append(button("提交回答", "提交所有问题的回答", () => reply("answer", {
@@ -12283,7 +13089,7 @@ function dismissGoalComposerRecovery(record) {
 function renderGoalComposerRecovery(root) {
   const record = goalComposerRecoveries.get(selectedId) || (creating
     ? [...goalComposerRecoveries.values()].reverse().find(value =>
-      value.deviceId === session?.device.id && `$new:${value.payload.projectId || ""}` === draftKey())
+      value.deviceId === session?.device.id && newDraftKey(value.payload.projectId, value.payload.backend, value.payload.instanceId) === draftKey())
     : null);
   if (!record || record.deviceId !== session?.device.id || pending?.id === record.id) return;
   if (record.recoveryState === "unknown" && !pendingFeedbackReady(record)) return;
@@ -12363,7 +13169,7 @@ function syncPendingFeedbackTimer() {
       ownsRelatedOperation(record) && record.parentThreadId === selectedId),
     ...[...goalComposerRecoveries.values()].filter(record =>
       record.recoveryState === "unknown" && (goalRecordThreadId(record) === selectedId
-        || creating && `$new:${record.payload.projectId || ""}` === draftKey())),
+        || creating && newDraftKey(record.payload.projectId, record.payload.backend, record.payload.instanceId) === draftKey())),
     ...[...approvalReplies.values(), ...questionReplyReceipts.values()].filter(record =>
       record.deviceId === session.device.id && record.threadId === selectedId)
   ];
@@ -12387,6 +13193,24 @@ function updateComposer() {
   sessionTools?.updateContext();
   syncRelatedSessionLayout();
   if (!$("#composer")) return;
+  const sessionTypeEnabled = sessionInstanceEnabled(activeInstanceId());
+  const backendSelect = $("#new-chat-backend");
+  const distribution = JSON.stringify([availableSessionInstances(), appearance.sessionInstances, creationInstanceId]);
+  if (backendSelect && backendSelect.dataset.wslDistribution !== distribution) {
+    backendSelect.dataset.wslDistribution = distribution;
+    setSelectOptions(backendSelect, newChatBackendOptions(), creationInstanceId);
+  }
+  // 用户要求已选会话顶部显示对应品牌；图标独立于标题文字，标题更新不会清掉图标，新建/欢迎页不残留旧品牌。
+  const backendMark = $("#thread-backend-icon");
+  if (backendMark) {
+    const backend = selectedId ? activeBackend() : "";
+    if (backendMark.dataset.backend !== backend) {
+      backendMark.dataset.backend = backend;
+      backendMark.hidden = !backend;
+      backendMark.replaceChildren(...(backend ? [icon(backend)] : []));
+    }
+  }
+  syncBackendModels();
   resizeComposerInput();
   renderGoalStatus();
   renderQueueArea();
@@ -12399,18 +13223,18 @@ function updateComposer() {
     hasAttachments = composerHasAttachments(), send = $("#send");
   const goalReason = goalMode ? goalComposerReason({ submitting: true }) : "";
   const deleting = threadDeletionLocked();
-  const unsupportedProjectless = creating && !$("#project-select").value && session.capabilities?.projectlessCreation !== true;
+  const unsupportedProjectless = creating && !$("#project-select").value && !backendCapability("projectlessCreation");
   const compaction = currentCompaction(), compacting = compactionLocked();
   const editing = !!editingMessage || !!editingQueuedMessage;
   const compactionSendReason = compacting && !goalMode && !editing ? compactionQueueSendReason() : "";
   const queueOnly = compacting && !goalMode && !editing && !compactionSendReason;
-  const unsupportedImages = !editing && hasAttachments && session.capabilities?.imageInput !== true
+  const unsupportedImages = !editing && hasAttachments && !backendCapability("imageInput")
     || !!editingQueuedMessage?.imageEditing && composerAttachmentsPayload().length > 0
-      && session.capabilities?.queuedImageEditing !== true;
+      && !queueCapability("queuedImageEditing");
   const queueImageNote = editingQueuedMessage?.state === "editing" && !editingQueuedMessage.imageEditing
     ? editingQueuedMessage.imageRemoval
       ? "当前运行的服务仅支持删除原图；更新程序后可添加图片。"
-      : session.capabilities?.queuedImageEditing === true
+      : queueCapability("queuedImageEditing")
         ? "部分原图片无法安全编辑，本次仅修改文字，原图片会保留。"
         : "当前运行的服务仅支持修改文字，原图片会保留；更新程序后可增删图片。"
     : "";
@@ -12440,15 +13264,19 @@ function updateComposer() {
       description: goalComposerReason() || "设置要持续追求的目标",
       disabled: !!goalComposerReason(), action: () => selectGoalCommand(null) },
     { label: "添加图片", icon: "image", disabled: deleting || !composerCanAddImages(), action: chooseComposerImages }
-  ];
+  ].filter(option => !isClaude() || !["compact", "goal"].includes(option.value));
+  $("#prompt-optimize").hidden = isClaude();
   add.disabled = add.menuOptions.every(option => option.disabled);
   if (activePopup?.trigger === add) renderPopup();
   const queuedEditAction = queuedEditSubmittingAction();
   const sendingLabel = sending ? sending.phase === "syncing" ? "同步中…" : "发送中…"
     : queuedEditAction === "cancelQueuedEdit" ? "取消中…" : queuedEditAction === "editQueued" ? "保存中…" : "";
   if ($("#send-status").textContent !== sendingLabel) $("#send-status").textContent = sendingLabel;
-  const action = sending ? "sending" : editingQueuedMessage ? "save"
-    : !compacting && !goalMode && !editing && active && ((!prompt && !hasAttachments) || pending) && selectedId ? "stop" : "send";
+  // 用户要求压缩执行中空输入显示停止；有正文或附件时仍可加入原生队列，旧 print 会话保留原停止行为。
+  const action = sending ? "sending" : editingQueuedMessage ? "save" : isClaude() && !claudeNativeQueue() && active && selectedId ? "stop"
+    : !goalMode && !editing && (active || compactionInProgress(compaction))
+      && ((!prompt && !hasAttachments) || pending) && selectedId ? "stop" : "send";
+  const stopLabel = compacting ? "停止压缩" : "停止生成";
   const sendLoading = action === "sending" || !!queuedEditAction;
   if (send.dataset.action !== action || send.dataset.loading !== String(sendLoading)) {
     send.dataset.action = action;
@@ -12458,17 +13286,20 @@ function updateComposer() {
     indicator.setAttribute("aria-hidden", "true");
     send.replaceChildren(indicator);
   }
-  send.setAttribute("aria-label", sendingLabel || (editingQueuedMessage ? "保存队列消息修改" : goalMode ? "创建目标" : action === "stop" ? "停止生成" : queueOnly ? "发送到原生消息队列" : "发送消息"));
-  send.title = sendingLabel || (editingQueuedMessage ? "保存队列消息修改" : editingMessage ? "请先完成消息编辑" : goalMode ? goalReason || "创建目标" : action === "stop" ? "停止生成" : queueOnly ? "加入原生消息队列，压缩完成后执行" : compactionSendReason || (active ? "发送补充消息" : "发送消息"));
+  send.setAttribute("aria-label", sendingLabel || (editingQueuedMessage ? "保存队列消息修改" : goalMode ? "创建目标" : action === "stop" ? stopLabel : queueOnly ? "发送到原生消息队列" : "发送消息"));
+  send.title = sendingLabel || (editingQueuedMessage ? "保存队列消息修改" : editingMessage ? "请先完成消息编辑" : goalMode ? goalReason || "创建目标" : action === "stop" ? stopLabel : queueOnly ? "加入原生消息队列，压缩完成后执行" : compactionSendReason || (active ? "发送补充消息" : "发送消息"));
   if (unsupportedImages) send.title = "当前服务版本尚不支持图片发送，请先更新程序";
   if (unsupportedProjectless) send.title = "当前服务版本尚不支持无项目会话，请先更新程序或选择已有项目";
   send.setAttribute("aria-busy", String(busy || stopping));
-  const blockedBy = editingMessage ? "message-edit" : editingQueuedMessage?.state === "starting" ? "queue-edit-loading"
+  const blockedBy = !sessionTypeEnabled && action !== "stop" ? "backend-disabled"
+    : editingMessage ? "message-edit" : editingQueuedMessage?.state === "starting" ? "queue-edit-loading"
     : deleting ? "delete" : busy ? "busy" : stopping ? "stopping" : compacting && editing ? "compaction-edit"
-    : compactionSendReason ? compaction.deviceId && compaction.deviceId !== session?.device.id ? "compaction-scope"
+    : action !== "stop" && compactionSendReason ? compaction.deviceId && compaction.deviceId !== session?.device.id ? "compaction-scope"
       : compaction.state === "unknown" ? "compaction-unknown" : compaction.state === "pending" && !compaction.acknowledged && !compaction.nativeConfirmed
         ? "compaction-pending" : "compaction-unsupported"
-    : !connected ? "offline" : threadReadOnly() ? "read-only" : unsupportedImages ? "images-unsupported"
+    : !connected ? "offline" : isClaude() && !claudeNativeQueue() && active && action !== "stop" ? "claude-running"
+    // 历史会话已保存当前模型时可直接续发；没有完整目录也不能强制用户先打开模型选择器。
+    : isClaude() && !modelsLoadedAt && !currentThreadDisplay()?.model && action !== "stop" ? "claude-models" : threadReadOnly() ? "read-only" : unsupportedImages ? "images-unsupported"
     : unsupportedProjectless ? "project-required" : goalReason ? "goal" : composerAttachmentsLoading() ? "images-loading"
     : action !== "stop" && pending ? "pending-receipt" : action !== "stop" && !prompt && !hasAttachments ? "empty"
     : !creating && (!selectedId || thread?.id !== selectedId) ? "thread-not-loaded" : "ready";
@@ -12479,19 +13310,23 @@ function updateComposer() {
     recordRuntimeDiagnostic("composer.state", { blockedBy, draftChars: prompt.length,
       attachmentCount: composerAttachmentSnapshot().length });
   }
-  $("#prompt").disabled = threadReadOnly() || deleting || compacting && editing || !!editingMessage || editing && (busy || !!pending)
+  $("#prompt").disabled = !sessionTypeEnabled || threadReadOnly() || deleting || compacting && editing || !!editingMessage || editing && (busy || !!pending)
     || editingQueuedMessage?.state === "starting" || (!creating && !selectedId);
-  $("#new-chat").disabled = threadReadOnly() || !connected;
-  $("#model-button").disabled = threadReadOnly() || deleting || serviceSideThread() && active || !!editingQueuedMessage
+  $("#new-chat").disabled = threadReadOnly() || !connected && !(session?.capabilities?.claudeSessions && stream?.readyState === EventSource.OPEN);
+  $("#model-button").disabled = !sessionTypeEnabled || threadReadOnly() || deleting || serviceSideThread() && active || !!editingQueuedMessage
     || !!editingMessage && (busy || stopping || !!pending || !connected);
   $("#sidebar-view-toggle").disabled = !sidebar;
   syncNewChatProjectPicker();
+  if (backendSelect) backendSelect.disabled = !creating || threadReadOnly() || busy || stopping || !!pending;
   updatePromptOptimization();
   for (const control of document.querySelectorAll(".row-menu-button")) control.disabled = threadReadOnly() || sidebarBusy || !connected;
   fitPopup();
   $("#prompt").placeholder = threadReadOnly() ? threadReadOnlyMessage() : compacting && !editing && !goalMode
     ? queueOnly ? "继续输入，发送后会排队等待压缩完成…" : "可继续编辑草稿，压缩期间暂不能发送…"
     : editingQueuedMessage ? "修改排队消息…" : goalMode ? goalComposerPlaceholder
+    : isClaude() ? active ? claudeNativeQueue()
+      ? thread?.capabilities?.remoteQueue === true ? "继续输入，消息会排队等待发送…" : "继续输入，消息会进入 Claude 原生队列…"
+      : "Claude 正在执行，可停止后发送新消息…" : "给 Claude 发送消息…"
     : active ? serviceSideThread() ? "补充要求，发送后引导当前任务…" : "补充要求，会使用原生消息队列…"
     : "给 Codex 发送消息，输入 / 选择命令或 Skill…";
   const model = currentModel(), effort = currentEffort();
@@ -12499,13 +13334,15 @@ function updateComposer() {
     || (modelsPromise || selectedId && !thread ? "正在读取模型…" : "模型信息暂不可用");
   $("#model-button").replaceChildren(element("span", "model-name", name));
   if (effort) $("#model-button").append(document.createTextNode(" "), element("span", "model-effort", effortLabels[effort] || effort));
-  $("#model-button").title = `模型：${name}${effort ? ` · 思考深度：${effortLabels[effort] || effort}` : ""}`;
+  $("#model-button").title = modelLoadError || `模型：${name}${effort ? ` · 思考深度：${effortLabels[effort] || effort}` : ""}`;
   syncRelatedModelDisplay();
   updateContextUsage();
   if ($("#skill-menu") && !$("#skill-menu").hidden) renderSkillMenu();
   if (threadReadOnly()) closeComposerMenus({ keepContextUsage: true });
   refitComposerMenus();
   $("#pending-area").replaceChildren();
+  if (!sessionTypeEnabled) $("#pending-area").append(element("div", "pending-banner",
+    "此会话实例尚未启用。可在「设置 → 会话类型」中启用对应运行环境。"));
   const deletion = threadDeletions.get(threadDeletionKey(selectedId));
   if (deletion && !["confirming", "deleted"].includes(deletion.state) && pendingFeedbackReady(deletion)) {
     const box = element("div", "pending-banner", "正在确认会话删除结果。");
@@ -12529,6 +13366,7 @@ function updateComposer() {
     const box = element("div", "pending-banner", unavailable ? "回执损坏或属于旧授权。请检查原生会话后人工解除锁定，不会自动重发。"
       : pending.action === "reorderQueued" ? "正在确认队列排序结果。"
       : pendingGoal ? "正在确认目标提交结果。"
+      : pendingQueueItem && pending.receiptMissing ? "未找到队列操作回执，请核对原生会话；不会自动重发。"
       : pendingQueueItem ? pending.action === "steerQueued"
         ? "正在确认队列引导结果。"
         : "正在确认队列删除结果。"
@@ -12561,7 +13399,7 @@ function updateComposer() {
 function renderFailedInputRecovery(root) {
   const key = draftKey(), scope = privateInputScope(session);
   const record = [...failedInputRecoveries.values()].find(record => record.deviceId === session?.device.id
-    && record.recoveryScope === scope && (record.payload.threadId || `$new:${record.payload.projectId || ""}`) === key);
+    && record.recoveryScope === scope && (record.payload.threadId || newDraftKey(record.payload.projectId, record.payload.backend, record.payload.instanceId)) === key);
   if (!record) return;
   const empty = !editingQueuedMessage && !editingMessage && inputDraftEmpty(snapshotDraft());
   const box = element("div", "pending-banner", empty
@@ -12584,6 +13422,8 @@ function renderFailedInputRecovery(root) {
   box.append(restore); root.append(box);
 }
 async function sendMessage() {
+  // 用户要求未启用类型不可发起新输入；打开旧深链仍可查看历史，不会因此停止原生正在执行的任务。
+  if (!sessionInstanceEnabled(activeInstanceId())) return;
   if (threadDeletionLocked() || threadDeleted(selectedId)) return;
   if (editingQueuedMessage) return submitQueuedMessageEdit();
   if (editingMessage) return;
@@ -12602,7 +13442,7 @@ async function sendMessage() {
   }
   const prompt = composerPrompt(draft.text, draft.skills, goalMode);
   const images = composerAttachmentsPayload();
-  if (images.length && session.capabilities?.imageInput !== true) {
+  if (images.length && !backendCapability("imageInput")) {
     notice("当前服务版本尚不支持图片发送，附件已保留，请先更新程序。", true);
     return;
   }
@@ -12623,7 +13463,7 @@ async function sendMessage() {
   const model = selectedModel || rememberedModel?.model || (selectedEffort ? currentModelId() : ""),
     reasoningEffort = selectedEffort || (rememberedModel ? currentEffort() : "");
   const payload = {
-    prompt, ...(creating ? { projectId: $("#project-select").value } : {
+    prompt, instanceId: activeInstanceId(), ...(creating ? { projectId: $("#project-select").value, backend: activeBackend() } : {
       threadId: id,
       ...(!goalMode && session.capabilities?.queueSendRecovery === true ? { clientUserMessageId: randomId() } : {})
     }),
@@ -12634,7 +13474,7 @@ async function sendMessage() {
     ...(draft.skills.length ? { skills: draft.skills.map(({ name, path }) => ({ name, path })) } : {}),
     ...(images.length ? { images } : {})
   };
-  if (creating && !payload.projectId && session.capabilities?.projectlessCreation !== true) {
+  if (creating && !payload.projectId && !backendCapability("projectlessCreation")) {
     notice("当前服务版本尚不支持无项目会话，草稿已保留，请先更新程序或选择已有项目。", true);
     return;
   }
@@ -12700,7 +13540,9 @@ async function sendMessage() {
   }
 }
 async function stopGeneration() {
-  if (stopping || compactionLocked() || busy || threadReadOnly() || !connected || !selectedId || !isActiveThread()) return;
+  // 压缩的实时状态可能先于线程 active 到达；与按钮共用已确认压缩判断，点击后才真正派发停止。
+  if (stopping || busy || threadReadOnly() || !connected || !selectedId
+      || !isActiveThread() && !compactionInProgress()) return;
   const id = selectedId, version = selectionVersion;
   stopping = true; updateComposer();
   try {
@@ -12816,7 +13658,7 @@ function setConnection(value) {
       || connectionRtt.nativeVersion !== nativeConnectionVersion
       || connectionRtt.connectionVersion !== connectionCycleVersion)) connectionRtt = null;
   const guidance = $("#desktop-connection-guidance");
-  if (guidance) guidance.hidden = session?.runtime?.cdpInjectionEnabled === false
+  if (guidance) guidance.hidden = isClaude() || session?.runtime?.cdpInjectionEnabled === false
     || session?.nativeConnected !== false || session?.serviceConnected === true;
   renderConnectionIndicator();
   updateComposer();
@@ -12978,6 +13820,44 @@ function applyRemoteRuntime(runtime) {
   sessionMenu?.updateContext();
   $("#appearance-dialog")?.updateRemoteRuntimeSwitch?.();
 }
+function receiveClaudeHistory(params) {
+  const id = params.threadId;
+  if (id !== selectedId) { scheduleSidebarRefresh(); return; }
+  if (!params.thread || params.thread.id !== id || !Array.isArray(params.turns)) return;
+  const version = ++messageVersion;
+  if (!params.preview) {
+    thread = { ...thread, ...params.thread };
+    notifiedStatus = thread.status; ++statusVersion;
+    notifiedQueue = thread.queuedMessages; notifiedQueueEdits = thread.queuedEdits || []; ++queueVersion;
+  }
+  // 用户要求同步后旧内部摘要气泡消失；完整快照给出全部有效轮次 ID，仅移除已失效的原生轮次，不删除待发送预览。
+  if (!params.preview) retireClaudeHistoryTurns(params.turnIds, version, version);
+  // 共享会话提供同一原生历史的完整投影；替换对应轮次，CLI 消息不依赖刷新或再次发送。
+  for (const snapshot of [...params.turns].reverse()) {
+    if (!snapshot?.id || !Array.isArray(snapshot.items)) continue;
+    const value = { ...snapshot, items: normalizeDisplayedTurnItems(snapshot.items) };
+    turns.set(value.id, enrichTurnTranscriptEvents(value));
+    turnVersions.set(value.id, version);
+    for (const item of value.items) {
+      itemVersions.set(`${value.id}:${item.id}`, version);
+      partialItems.delete(`${value.id}:${item.id}`);
+    }
+  }
+  if (!params.preview) {
+    const order = orderClaudeHistoryTurns(params.turnIds, version);
+    const cursor = claudeHistoryCursor(order);
+    if (cursor !== undefined) historyCursor = cursor;
+  }
+  // 正文流只刷新消息；完整原生快照再保存缓存和更新侧栏，避免逐字重复写历史。
+  if (params.preview) { scheduleMessages(); return; }
+  reconcileDirectSendPreviews(id, thread.queuedMessages);
+  rememberThreadDisplay(thread);
+  rememberTranscript();
+  updateComposer();
+  scheduleMessages();
+  scheduleSidebarRefresh();
+  if (params.completed) void markVisibleThreadRead().catch(() => {});
+}
 function receive(event) {
   if (handleRemoteChannelEvent(event)) return;
   if (event.method === "remote/runtimeChanged") {
@@ -12987,6 +13867,10 @@ function receive(event) {
   }
   const rawParams = event.params || {};
   const eventThreadId = rawParams.threadId ?? rawParams.conversationId ?? rawParams.thread?.id;
+  if (event.method === "claude/history/updated") {
+    receiveClaudeHistory(rawParams);
+    return;
+  }
   const suppressSidebarRefresh = event.method === "remote/sidebarChanged"
     && rawParams.reason === "read"
     && typeof eventThreadId === "string" && sidebarReadRefreshSuppressions.has(eventThreadId);
@@ -13002,7 +13886,7 @@ function receive(event) {
       session.nativeConnected = nativeAvailable;
       session.serviceConnected = serviceAvailable;
     }
-    setConnection((nativeAvailable || serviceAvailable) && stream?.readyState === EventSource.OPEN);
+    setConnection(backendAvailable() && stream?.readyState === EventSource.OPEN);
     if (available) {
       void withRecoveryErrorSilence(() => refreshConnectedSession()).catch(() => {});
     }
@@ -13015,9 +13899,10 @@ function receive(event) {
   const params = { ...event.params || {} };
   const displayItem = normalizeDisplayedUserMessage(params.item);
   const displayTurnItems = Array.isArray(params.turn?.items)
-    ? params.turn.items.map(normalizeDisplayedUserMessage) : null;
+    ? normalizeDisplayedTurnItems(params.turn.items) : null;
   const turnChanged = displayTurnItems
-    && displayTurnItems.some((item, index) => item !== params.turn.items[index]);
+    && (displayTurnItems.length !== params.turn.items.length
+      || displayTurnItems.some((item, index) => item !== params.turn.items[index]));
   if (displayItem !== params.item) params.item = displayItem;
   if (turnChanged) params.turn = { ...params.turn, items: displayTurnItems };
   if (event.method === "remote/diagnosticsRequested") {
@@ -13386,7 +14271,7 @@ function startConnectionPoll(deviceId) {
       if (privateInputScope(current) !== privateInputScope(session)) { await reconnectChangedAuthorization(); return; }
       const wasConnected = connected;
       session = current;
-      setConnection((current.nativeConnected || current.serviceConnected) && stream?.readyState === EventSource.OPEN);
+      setConnection(backendAvailable(current) && stream?.readyState === EventSource.OPEN);
       // 连接在线不等于当前会话已读完；只补失败或未完成的读取，成功后停止补读。
       if (connected && (!wasConnected || selectedThreadReadIncomplete()
           && !selectionController && !threadRequest && !historyRequest))
@@ -13504,6 +14389,7 @@ async function connectPage(signal) {
   postPlatformMessage("authenticated");
   pageLeaving = false;
   connected = false; shell(); restoreGoalComposerDrafts();
+  void loadSessionInstances().then(() => loadSidebar(null, { fresh: true })).catch(() => {});
   if (sidebar) renderSidebar();
   if (storageError) notice(recoveryStorageMessage(storageError), true);
   setConnection(false);

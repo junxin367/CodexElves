@@ -348,6 +348,7 @@ mod tests {
                 id: "browser-device".into(),
                 name: "browser fixture".into(),
                 token_hash: hash("browser-cookie"),
+                client_id_hash: String::new(),
                 created_at_ms: now_ms(),
                 expires_at_ms: now_ms() + 120_000,
                 last_seen_at_ms: now_ms(),

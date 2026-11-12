@@ -270,6 +270,7 @@ mod tests {
             id: "device".into(),
             name: "test".into(),
             token_hash: "test".into(),
+            client_id_hash: String::new(),
             key_id: "key".into(),
             created_at_ms: 1,
             expires_at_ms: u64::MAX,

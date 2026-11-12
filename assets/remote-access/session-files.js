@@ -1,5 +1,5 @@
 import { requestRemote } from "./channels.js";
-import { bindLocalFileReferences, markdown } from "./markdown.js";
+import { bindLocalFileReferences, markdown, releaseMermaidBlocks, renderMermaidBlocks, withStableMessageLayout } from "./markdown.js";
 import { safeInlineImageSource } from "./attachments.js";
 
 const node = (tag, className = "", text = "") => {
@@ -814,6 +814,7 @@ export function mountSessionFiles({
     screen.querySelector(".session-tools-back").focus({ preventScroll: true });
   }
   function hide(screen) {
+    if (screen === content.screen) releaseMermaidBlocks(body);
     screen.inert = true; screen.classList.remove("session-tools-visible");
   }
   async function openDirectory(path = "", { recordHistory = true } = {}) {
@@ -928,7 +929,8 @@ export function mountSessionFiles({
     if (!normalized) { searchMatches = null; renderDirectory(); return; }
     const epoch = ++searchEpoch; searchController?.abort(); searchController = new AbortController();
     const cached = responses.get(`files::${normalized}`);
-    if (cached?.root === listResponse?.root) {
+    // 首次目录尚未返回时两侧 root 都可能为空，只有真实缓存存在才可命中，避免提前搜索抛错。
+    if (cached && cached.root === listResponse?.root) {
       searchMatches = cached.files || [];
       listing.location.set(cached.root, cached.git);
       renderDirectory();
@@ -991,6 +993,7 @@ export function mountSessionFiles({
     return parts.join("/");
   }
   function renderContent() {
+    releaseMermaidBlocks(body);
     body.replaceChildren(); body.classList.toggle("session-files-wrap", wrap);
     richRange.replaceChildren(); richRange.hidden = true;
     const value = contentResponse;
@@ -1032,6 +1035,7 @@ export function mountSessionFiles({
         }
       });
       body.append(document);
+      refreshFileDiagrams();
     } else if (value.kind === "text") {
       const code = node("div", "session-files-source");
       code.tabIndex = 0; code.setAttribute("aria-label", "文件源码，可横向滚动");
@@ -1119,8 +1123,17 @@ export function mountSessionFiles({
     event.preventDefault(); back();
   }
   function markdownReady() {
-    if (route?.kind === "file" && contentResponse?.kind === "text" && !sourceMode) renderContent();
+    if (route?.kind === "file" && contentResponse?.kind === "text" && !sourceMode)
+      withStableMessageLayout(body, renderContent);
   }
+  function refreshFileDiagrams() {
+    if (disposed || route?.kind !== "file" || contentResponse?.kind !== "text" || sourceMode) return;
+    // 用户要求文件 Markdown 与会话共用 Mermaid；按文件滚动区延迟渲染，主题变化只换图，不重建正文或跳动阅读位置。
+    renderMermaidBlocks(body, undefined, change => withStableMessageLayout(body, change));
+  }
+  const diagramThemeObserver = typeof MutationObserver === "function"
+    ? new MutationObserver(refreshFileDiagrams) : null;
+  diagramThemeObserver?.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
   let searchTimer = null;
   search.addEventListener("input", () => {
     clearTimeout(searchTimer);
@@ -1144,6 +1157,7 @@ export function mountSessionFiles({
     open: () => openDirectory(currentDirectory), openFile, updateContext,
     dispose() {
       if (disposed) return;
+      diagramThemeObserver?.disconnect();
       controlsScroll.dispose();
       hideAll(true); disposed = true;
       for (const controller of controllers) controller.abort();

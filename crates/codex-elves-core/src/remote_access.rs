@@ -33,7 +33,11 @@ use crate::codex_service::{CodexCliService, ServiceDispatchGuard, ServiceDispatc
 use crate::settings::{RemoteAccessSettings, SettingsStore};
 
 mod browser;
+// 验收入口仅随调试构建提供，不进入正式安装版的启动流程。
+#[cfg(debug_assertions)]
+pub mod acceptance;
 mod channels;
+mod claude;
 mod context_usage;
 mod credentials;
 mod diagnostics;
@@ -43,7 +47,9 @@ mod frp_recovery;
 mod frp_tunnel;
 mod harness;
 mod image_preview;
+mod instances;
 mod ngrok_tunnel;
+mod preferences;
 mod primary_route;
 mod prompt_optimization;
 mod runtime_fallback;
@@ -61,6 +67,7 @@ use zrok_tunnel::ZrokTunnelService;
 const NATIVE_SCRIPT: &str = include_str!("../../../assets/remote-access/native.js");
 const WEB_HTML: &str = include_str!("../../../assets/remote-access/index.html");
 const WEB_JS: &str = include_str!("../../../assets/remote-access/app.js");
+const WEB_SELECT_JS: &str = include_str!("../../../assets/remote-access/select.js");
 const WEB_SESSION_TOOLS_JS: &str = include_str!("../../../assets/remote-access/session-tools.js");
 const WEB_SESSION_FILES_JS: &str = include_str!("../../../assets/remote-access/session-files.js");
 const WEB_SESSION_MENU_JS: &str = include_str!("../../../assets/remote-access/session-menu.js");
@@ -105,7 +112,8 @@ const MAX_REMOTE_INLINE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_REMOTE_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_REMOTE_IMAGE_DIMENSION: u32 = 16_384;
 const MAX_REMOTE_IMAGE_PIXELS: u64 = 100_000_000;
-const MAX_INPUT_IMAGE_COUNT: usize = 4;
+// 用户要求 Codex/Claude 单条固定最多 8 张，含队列保留+新增；与 attachments.js、native.js 同步，大小/格式上限不变。
+const MAX_INPUT_IMAGE_COUNT: usize = 8;
 const MAX_INPUT_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 const MAX_INPUT_IMAGES_TOTAL_BYTES: usize = 12 * 1024 * 1024;
 const MAX_ACTION_BODY_BYTES: usize = 18 * 1024 * 1024;
@@ -531,6 +539,9 @@ struct Device {
     #[serde(default)]
     #[serde(alias = "quickTunnelOrigin")]
     public_origin: Option<String>,
+    // 用户要求按持久随机客户端标识去重；仅存摘要，不能用它代替 Cookie/密钥或按 IP、UA 合并设备。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    client_id_hash: String,
 }
 
 impl Device {
@@ -799,6 +810,7 @@ pub struct RemoteAccessController {
     native: Arc<dyn NativeRemoteBridge>,
     native_started: AtomicBool,
     harness: Arc<harness::Harness>,
+    claude: Arc<claude::Claude>,
     runtime_modes: tokio::sync::RwLock<HashMap<String, RemoteRuntimeMode>>,
     harness_connected: AtomicBool,
     prompt_optimization: Arc<prompt_optimization::RemotePromptOptimization>,
@@ -891,6 +903,7 @@ impl RemoteAccessController {
         let runtime_modes: HashMap<String, RemoteRuntimeMode> =
             read_json_or_default(&state_dir.join("remote-access-device-runtimes.json"))?;
         let harness = harness::Harness::new(&state_dir)?;
+        let claude = claude::Claude::new(&state_dir)?;
         harness.enabled.store(
             execution::cdp_disabled()
                 || runtime_modes
@@ -902,6 +915,7 @@ impl RemoteAccessController {
             native,
             native_started: AtomicBool::new(false),
             harness: harness.clone(),
+            claude: claude.clone(),
             runtime_modes: tokio::sync::RwLock::new(runtime_modes),
             harness_connected: AtomicBool::new(false),
             prompt_optimization: Arc::new(prompt_optimization::RemotePromptOptimization::default()),
@@ -944,6 +958,7 @@ impl RemoteAccessController {
             browser_tunnels: browser::Registry::new(),
         });
         harness.attach(Arc::downgrade(&controller));
+        claude.attach(Arc::downgrade(&controller));
         Ok(controller)
     }
 
@@ -1725,7 +1740,7 @@ impl RemoteAccessController {
         }
         let context_thread_id = payload["threadId"]
             .as_str()
-            .filter(|_| action == "thread")
+            .filter(|id| action == "thread" && !claude::Claude::owns_id(id))
             .map(str::to_owned);
         let value = self.call_backend(action, payload, authorization).await?;
         if let Some(thread_id) = context_thread_id
@@ -1749,6 +1764,267 @@ impl RemoteAccessController {
     }
 
     async fn call_backend(
+        &self,
+        action: &str,
+        mut payload: Value,
+        authorization: &RemoteAuthorization,
+    ) -> anyhow::Result<Value> {
+        let instance_id = payload
+            .get("instanceId")
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|id| !id.is_empty() && id.len() <= 160)
+                    .map(str::to_owned)
+                    .ok_or_else(|| ApiError::new(400, "会话实例标识无效"))
+            })
+            .transpose()?;
+        if let Some(id) = &instance_id {
+            let backend = id.split(':').next().unwrap_or("");
+            if !instances::TYPES.iter().any(|kind| kind.id == backend) {
+                return Err(ApiError::new(400, "未知会话实例类型").into());
+            }
+            if payload.get("backend").is_some_and(|value| value != backend) {
+                return Err(ApiError::new(409, "会话类型与实例不匹配").into());
+            }
+            payload["backend"] = json!(backend);
+        }
+        let thread_id = payload["threadId"].as_str();
+        let claude_thread = thread_id.is_some_and(claude::Claude::owns_id);
+        let requested = payload["backend"].as_str();
+        if requested.is_some_and(|backend| !instances::TYPES.iter().any(|kind| kind.id == backend))
+        {
+            return Err(ApiError::new(400, "会话后端无效").into());
+        }
+        if requested.is_some_and(|backend| !matches!(backend, "codex" | "claude")) {
+            // 新类型可先注册检测和设置，但必须提供执行适配器后才能派发，不能默认落到 Codex。
+            return Err(ApiError::new(409, "该会话类型的执行接入尚未支持").into());
+        }
+        // 用户要求创建后类型固定；以已保存会话身份路由，不能由页面或设备的 CDP 开关改写。
+        if thread_id.is_some()
+            && requested.is_some_and(|backend| (backend == "claude") != claude_thread)
+        {
+            return Err(ApiError::new(409, "已创建的会话不能切换 Codex / Claude").into());
+        }
+        // 用户要求每个实例独立控制；已有会话的实例来自保存身份，客户端不能通过参数改投另一个环境。
+        if let Some(id) = &instance_id {
+            let expected = if let Some(thread_id) = thread_id {
+                if claude_thread {
+                    self.claude.instance_id(thread_id).await?
+                } else {
+                    "codex:local".into()
+                }
+            } else {
+                id.clone()
+            };
+            if *id != expected {
+                return Err(ApiError::new(409, "已创建的会话不能切换运行实例").into());
+            }
+            if requested == Some("codex") && id != "codex:local" {
+                return Err(ApiError::new(409, "该 Codex 实例的执行接入尚未支持").into());
+            }
+        }
+        if action == "models"
+            && (claude_thread || requested == Some("claude"))
+            && self
+                .access_policy
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .read_only
+        {
+            // 只读设备只查看已保存会话的模型名；不能为读取选项而启动可能加载 Hooks / MCP 的 CLI。
+            return Ok(
+                json!({"ok":true,"backend":"claude","readOnly":true,"data":[],
+                "defaultModel":"","defaultReasoningEffort":""}),
+            );
+        }
+        if claude_thread {
+            let id = thread_id.unwrap();
+            return execution::Scope::new(
+                self.harness.audit.clone(),
+                true,
+                action,
+                &payload,
+                Some(authorization),
+                None,
+            )
+            .recorded(async {
+                execution::transport("claude-wsl-stdio", action, service_write_action(action));
+                match action {
+                    "thread" => self.claude.detail(id).await,
+                    "history" => self.claude.history(&payload).await,
+                    "workspaceContext" => self.claude.workspace(id).await,
+                    "models" => {
+                        self.claude
+                            .session_models(
+                                id,
+                                payload["includeAvailable"] == true,
+                                payload["forceReload"] == true,
+                            )
+                            .await
+                    }
+                    "skills" => Ok(json!({"ok":true,"data":[],"errors":[],"backend":"claude"})),
+                    "queue" => self.claude.queue(id).await,
+                    "queueEdit" => self.claude.queue_edit_state(&payload).await,
+                    "sendState" => self.claude.queue_send_state(&payload).await,
+                    "relatedThreads" => Ok(
+                        json!({"ok":true,"threadId":id,"subagents":[],"sideThreads":[],
+                    "completedSubagents":[],"completedSubagentCount":0,"subagentsComplete":true}),
+                    ),
+                    _ => self.claude.command(action, &payload, authorization).await,
+                }
+            })
+            .await
+            .map_err(claude::api_error);
+        }
+        if requested == Some("claude") {
+            let selected_config = if let Some(id) = &instance_id {
+                Some(self.claude_instance_config(id).await?)
+            } else {
+                None
+            };
+            let cwd =
+                if let Some(project_id) = payload["projectId"].as_str().filter(|s| !s.is_empty()) {
+                    let context = self
+                        .call_codex_backend(
+                            "workspaceContext",
+                            json!({"projectId":project_id}),
+                            authorization,
+                        )
+                        .await?;
+                    let context = native_result(context)?;
+                    anyhow::ensure!(
+                        context["hostId"] == "local" && context["projectId"] == project_id,
+                        "Claude 仅支持已确认的本机项目"
+                    );
+                    context["cwd"]
+                        .as_str()
+                        .context("项目工作目录不可用")?
+                        .to_owned()
+                } else {
+                    String::new()
+                };
+            return execution::Scope::new(
+                self.harness.audit.clone(),
+                true,
+                action,
+                &payload,
+                Some(authorization),
+                None,
+            )
+            .recorded(async {
+                execution::transport("claude-wsl-stdio", action, service_write_action(action));
+                match action {
+                    "models" => {
+                        if let Some(config) = selected_config {
+                            self.claude
+                                .models_in(config, &cwd, payload["forceReload"] == true)
+                                .await
+                        } else {
+                            self.claude
+                                .models(&cwd, payload["forceReload"] == true)
+                                .await
+                        }
+                    }
+                    "skills" => Ok(json!({"ok":true,"data":[],"errors":[],"backend":"claude"})),
+                    "create" => {
+                        if let Some(config) = selected_config {
+                            self.claude
+                                .create_in(config, &payload, &cwd, authorization)
+                                .await
+                        } else {
+                            self.claude.create(&payload, &cwd, authorization).await
+                        }
+                    }
+                    _ => Err(ApiError::new(400, "此操作需要已创建的 Claude 会话").into()),
+                }
+            })
+            .await
+            .map_err(claude::api_error);
+        }
+        // 用户要求默认仅 Codex；旧客户端或后台读取未显式启用 Claude 时也不能启动 WSL 扫描。
+        let include_claude = payload["includeClaude"] == true;
+        let enabled_instances: Option<Vec<String>> = payload
+            .get("enabledInstanceIds")
+            .map(|value| {
+                let values = value
+                    .as_array()
+                    .filter(|values| values.len() <= 128)
+                    .ok_or_else(|| ApiError::new(400, "启用实例列表无效"))?;
+                values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .filter(|id| !id.is_empty() && id.len() <= 160)
+                            .map(str::to_owned)
+                            .ok_or_else(|| ApiError::new(400, "启用实例标识无效"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+        if let Some(object) = payload.as_object_mut() {
+            object.remove("instanceId");
+            object.remove("enabledInstanceIds");
+            object.remove("backend");
+        }
+        let mut result = self
+            .call_codex_backend(action, payload, authorization)
+            .await?;
+        instances::annotate_codex(&mut result);
+        if action == "sidebar"
+            && let Some(ids) = &enabled_instances
+        {
+            // 按实例筛选只改变返回列表；关闭实例不停止原生任务，也不删除会话。
+            instances::filter_sidebar(&mut result, ids);
+            // 本机 Claude 尚无执行/发现适配器；启用偏好不能触发默认 WSL，也不把未接通状态当扫描故障。
+            for id in ids.iter().filter(|id| id.starts_with("claude:wsl:")) {
+                let outcome = async {
+                    let config = self.claude_instance_config(id).await?;
+                    self.claude.discover_in(&config, &result).await
+                }
+                .await;
+                if let Err(failure) = outcome {
+                    result["claudeDiscoveryError"] =
+                        json!(format!("Claude 实例发现暂不可用：{failure}"));
+                }
+            }
+            self.claude
+                .merge_sidebar_instances(&mut result, Some(ids))
+                .await;
+        } else if action == "sidebar" && include_claude {
+            // 用户要求默认仅启用 Codex；网页明确关闭 Claude 时不触发 WSL 原生会话发现。
+            // 用户要求在正常列表刷新中只读发现指定 WSL 原生会话；不能复制其他服务登记文件或启动/恢复模型来“发现”。
+            if let Err(failure) = self.claude.discover(&result).await {
+                result["claudeDiscoveryError"] =
+                    json!(format!("Claude 原生会话发现暂不可用：{failure}"));
+            }
+            // 两种后端共用同一项目目录；无论设备使用 CDP 或服务模式，都合并 Claude 会话。
+            self.claude.merge_sidebar(&mut result).await;
+        }
+        Ok(result)
+    }
+
+    async fn claude_instance_config(&self, id: &str) -> anyhow::Result<claude::WslConfig> {
+        if let Ok(default) = self.claude.config()
+            && id == default.instance_id()
+        {
+            return Ok(default);
+        }
+        // 新实例只能从服务端检测结果解析；不接受请求携带的发行版、用户或程序路径。
+        let environments = preferences::detect(&self.state_dir, false).await;
+        let instance = instances::catalog(&environments)
+            .into_iter()
+            .find(|instance| instance.id == id && instance.backend == "claude" && instance.ready)
+            .ok_or_else(|| ApiError::new(409, "所选 Claude 实例暂不可用或执行接入尚未支持"))?;
+        Ok(claude::WslConfig {
+            distribution: instance.distribution,
+            user: instance.user,
+            executable: instance.executable,
+        })
+    }
+
+    async fn call_codex_backend(
         &self,
         action: &str,
         payload: Value,
@@ -1975,7 +2251,7 @@ impl RemoteAccessController {
             .is_some_and(|id| id != device_id)
             || event["_runtimeSource"]
                 .as_str()
-                .is_some_and(|source| (source == "cdp") != use_cdp);
+                .is_some_and(|source| source != "claude" && (source == "cdp") != use_cdp);
         if suppressed {
             // 双线路合流要求连续序号；屏蔽其他后端的内容时保留空心跳占位，避免制造游标缺口。
             return json!({"method":"remote/heartbeat","channelEpoch":event["channelEpoch"],
@@ -2325,6 +2601,13 @@ fn web_assets() -> &'static HashMap<&'static str, StaticWebAsset> {
                 StaticWebAsset::new("application/javascript; charset=utf-8", WEB_JS.as_bytes()),
             ),
             (
+                "/select.js",
+                StaticWebAsset::new(
+                    "application/javascript; charset=utf-8",
+                    WEB_SELECT_JS.as_bytes(),
+                ),
+            ),
+            (
                 "/session-tools.js",
                 StaticWebAsset::new(
                     "application/javascript; charset=utf-8",
@@ -2573,6 +2856,7 @@ fn is_static_web_asset_path(path: &str) -> bool {
         path,
         "/" | "/app-resources.json"
             | "/app.js"
+            | "/select.js"
             | "/attachments.js"
             | "/sha256.js"
             | "/recovery-store.js"
@@ -2758,6 +3042,7 @@ pub fn web_router(
         .route("/", get(static_web_asset))
         .route("/app-resources.json", get(static_web_asset))
         .route("/app.js", get(static_web_asset))
+        .route("/select.js", get(static_web_asset))
         .route("/session-tools.js", get(static_web_asset))
         .route("/session-files.js", get(static_web_asset))
         .route("/session-menu.js", get(static_web_asset))
@@ -2796,6 +3081,14 @@ pub fn web_router(
             post(diagnostics::upload).layer(DefaultBodyLimit::max(diagnostics::MAX_BODY_BYTES)),
         )
         .route("/api/read/{action}", post(read))
+        .route(
+            "/api/settings/environments",
+            post(preferences::environments),
+        )
+        .route(
+            "/api/settings/instructions",
+            post(preferences::instructions),
+        )
         .route("/api/workspace/context", post(workspace::context))
         .route("/api/workspace/changes", post(workspace::changes))
         .route("/api/workspace/change", post(workspace::change))
@@ -3270,6 +3563,12 @@ async fn authorized(state: &WebState, headers: &HeaderMap) -> Result<Device, Api
         .ok_or_else(|| ApiError::new(401, "设备未授权或授权已过期"))
 }
 
+#[derive(Default)]
+struct LoginClient {
+    id_hash: Option<String>,
+    android_app: bool,
+}
+
 async fn connect(
     State(state): State<WebState>,
     ConnectInfo(_peer): ConnectInfo<SocketAddr>,
@@ -3289,6 +3588,19 @@ async fn connect(
             "请填写 8–256 个非空格 ASCII 字符的访问密钥",
         ));
     }
+    let client = LoginClient {
+        id_hash: match payload.get("clientId") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(id)) if id.is_empty() => None,
+            Some(Value::String(id)) => Some(hash(
+                &uuid::Uuid::parse_str(id)
+                    .map_err(|_| ApiError::new(400, "客户端标识无效，请刷新页面后重试"))?
+                    .to_string(),
+            )),
+            _ => return Err(ApiError::new(400, "客户端标识格式无效")),
+        },
+        android_app: payload["clientKind"] == "android-app",
+    };
     let key = {
         let mut auth = state.controller.auth.lock().await;
         let (_store, key, locked) = state
@@ -3320,7 +3632,7 @@ async fn connect(
         })
         .await
         .map_err(|_| ApiError::new(503, "无法验证访问密钥，请稍后再试"))?;
-        complete_login(state, key, valid, headers, trust).await
+        complete_login(state, key, valid, headers, trust, client).await
     })
     .await
     .map_err(|_| ApiError::new(503, "无法完成访问密钥验证，请稍后再试"))?
@@ -3362,6 +3674,7 @@ async fn complete_login(
     valid: bool,
     headers: HeaderMap,
     trust: RequestTrustContext,
+    client: LoginClient,
 ) -> Result<Response, ApiError> {
     // Every controller path takes auth before the file lock. Keep both until the
     // outcome and any device authorization are committed, including key rotation.
@@ -3401,12 +3714,47 @@ async fn complete_login(
             ApiError::new(401, "访问密钥不正确")
         });
     }
+    let previous_devices = auth.devices.clone();
     auth.devices
         .retain(|device| device.expires_at_ms > now_ms() && device.key_id == key.id);
-    if auth.devices.len() >= MAX_DEVICES {
+    let public_origin = if trust.external_public {
+        state.controller.public_origin()
+    } else {
+        None
+    };
+    let cookie_token = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|cookie| {
+                let (name, value) = cookie.trim().split_once('=')?;
+                (name == COOKIE_NAME && !value.is_empty() && value.len() <= 256).then_some(value)
+            })
+        });
+    let cookie_hash = cookie_token.map(hash);
+    let cookie_index = cookie_hash.as_ref().and_then(|digest| {
+        auth.devices.iter().position(|device| {
+            device.public_origin == public_origin && constant_time_eq(&device.token_hash, digest)
+        })
+    });
+    // 用户要求旧客户端凭有效 Cookie 迁移时保留设备 ID、草稿和队列；丢失 Cookie 后仍须验证密钥才可复用有效客户端。
+    // 仅新授权检查既有 32 条上限；过期、换密钥和已撤销记录不参与匹配，不能恢复其旧 ID 或凭据。
+    let existing = cookie_index.or_else(|| {
+        client.id_hash.as_ref().and_then(|digest| {
+            auth.devices.iter().position(|device| {
+                device.public_origin == public_origin
+                    && constant_time_eq(&device.client_id_hash, digest)
+            })
+        })
+    });
+    if existing.is_none() && auth.devices.len() >= MAX_DEVICES {
         return Err(ApiError::new(409, "授权设备已达上限，请撤销旧设备"));
     }
-    let token = random_token();
+    let token = if cookie_index.is_some() {
+        cookie_token.unwrap().to_owned()
+    } else {
+        random_token()
+    };
     let (expires_at_ms, max_age_seconds) = if state.settings.device_session_hours == 0 {
         (u64::MAX, 315_360_000u64)
     } else {
@@ -3415,30 +3763,43 @@ async fn complete_login(
             u64::from(state.settings.device_session_hours) * 3600,
         )
     };
-    let device = Device {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: device_name(&headers).into(),
-        token_hash: hash(&token),
-        created_at_ms: now_ms(),
-        expires_at_ms,
-        last_seen_at_ms: now_ms(),
-        key_id: key.id.clone(),
-        public_origin: if trust.external_public {
-            state.controller.public_origin()
-        } else {
-            None
-        },
-    };
-    auth.devices.push(device.clone());
+    let mut device = existing
+        .map(|index| auth.devices[index].clone())
+        .unwrap_or_else(|| Device {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: device_name(&headers, client.android_app).into(),
+            token_hash: hash(&token),
+            created_at_ms: now_ms(),
+            expires_at_ms,
+            last_seen_at_ms: now_ms(),
+            key_id: key.id.clone(),
+            public_origin,
+            client_id_hash: String::new(),
+        });
+    device.token_hash = hash(&token);
+    device.expires_at_ms = expires_at_ms;
+    device.last_seen_at_ms = now_ms();
+    if let Some(digest) = client.id_hash {
+        device.client_id_hash = digest;
+    }
+    let name = device_name(&headers, client.android_app);
+    if name != "网页设备" || device.name.is_empty() {
+        device.name = name.into();
+    }
+    if let Some(index) = existing {
+        auth.devices[index] = device.clone();
+    } else {
+        auth.devices.push(device.clone());
+    }
     if state.controller.save_devices(&auth).await.is_err() {
-        auth.devices.pop();
+        auth.devices = previous_devices;
         return Err(ApiError::new(503, "设备授权保存失败"));
     }
     let key_id = key.id.clone();
     let (_store, key) = match persist_login_result(store, key, true).await {
         Ok(result) => result,
         Err(_) => {
-            auth.devices.pop();
+            auth.devices = previous_devices;
             let _ = state.controller.save_devices(&auth).await;
             auth.login_locked = true;
             auth.login_storage_failed_for = Some(key_id);
@@ -3491,6 +3852,9 @@ async fn session(
         json!({"ok":true,"device":device.public(),"nativeConnected":native_connected,
         "serviceConnected":service_connected,"nativeWriteAvailable":native_write_available,
         "readOnly":policy.read_only,"allowApprovals":policy.allow_approvals && native_write_available,
+        "claudeAllowApprovals":policy.allow_approvals,
+        "claudeWslDistribution":state.controller.claude.wsl_distribution(),
+        "claudeInstanceId":state.controller.claude.config().ok().map(|config| config.instance_id()),
         "runtime":runtime,
         "diagnosticsRequest":diagnostics_request,
         "capabilities":{"imageInput":native_write_available,"queuedImageRemoval":native_write_available,
@@ -3499,7 +3863,8 @@ async fn session(
         "promptOptimization":true,"messageEditModelSettings":native_write_available,
         "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
         "sendText":native_write_available || service_connected,
-        "sideThreads":true,"serviceSideThreads":true,"subagents":true,"serviceSubagents":true}}),
+        "sideThreads":true,"serviceSideThreads":true,"subagents":true,"serviceSubagents":true,
+        "claudeSessions":true}}),
     ))
 }
 
@@ -3616,22 +3981,36 @@ async fn workspace_context(
         .as_str()
         .filter(|cwd| !cwd.is_empty() && cwd.len() <= 32_768 && !cwd.contains('\0'))
         .ok_or_else(|| ApiError::new(404, "当前会话没有可读取的工作目录"))?;
-    let path = PathBuf::from(cwd);
+    // 用户要求 WSL Claude 文件可查看；只将原生会话确认的 Linux 目录映射到其自身发行版，不能放开任意 UNC。
+    let distribution = result["wslDistribution"]
+        .as_str()
+        .filter(|_| result["backend"] == "claude");
+    let path = if cfg!(windows)
+        && let Some(distribution) = distribution
+    {
+        preferences::wsl_path(distribution, result["linuxCwd"].as_str().unwrap_or(cwd))?
+    } else {
+        PathBuf::from(cwd)
+    };
     if !path.is_absolute() {
         return Err(ApiError::new(400, "会话工作目录必须是本机绝对路径"));
     }
     #[cfg(windows)]
-    if !matches!(
-        path.components().next(),
-        Some(Component::Prefix(prefix))
-            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
-    ) {
+    if preferences::wsl_distribution(&path).is_none()
+        && !matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        )
+    {
         return Err(ApiError::new(400, "仅支持本机磁盘上的项目变更"));
     }
     let path = tokio::task::spawn_blocking(move || {
         let path = std::fs::canonicalize(path)
             .map_err(|_| ApiError::new(404, "会话工作目录不存在或无法读取"))?;
-        if !path.is_dir() || !canonical_path_is_local(&path) {
+        if !path.is_dir()
+            || !(canonical_path_is_local(&path) || preferences::wsl_distribution(&path).is_some())
+        {
             return Err(ApiError::new(400, "仅支持本机磁盘上的项目目录"));
         }
         Ok(path)
@@ -4043,6 +4422,8 @@ fn validate_goal_composer_payload(action: &str, payload: &Value) -> Result<(), A
             "images",
             "model",
             "reasoningEffort",
+            "backend",
+            "instanceId",
         ]
         .contains(&key.as_str())
     }) {
@@ -4204,7 +4585,9 @@ fn validate_delete_thread_payload(payload: &Value) -> Result<(), ApiError> {
         .get("threadId")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::new(400, "永久删除需要已创建完成的本机会话 ID"))?;
-    if thread_id.len() != 36 || uuid::Uuid::parse_str(thread_id).is_err() {
+    if !claude::Claude::owns_id(thread_id)
+        && (thread_id.len() != 36 || uuid::Uuid::parse_str(thread_id).is_err())
+    {
         return Err(ApiError::new(400, "永久删除需要已创建完成的本机会话 ID"));
     }
     Ok(())
@@ -4218,7 +4601,10 @@ fn validate_input_images(payload: &Value) -> Result<(), ApiError> {
         .as_array()
         .ok_or_else(|| ApiError::new(400, "图片附件参数无效"))?;
     if images.len() > MAX_INPUT_IMAGE_COUNT {
-        return Err(ApiError::new(400, "每条消息最多添加 4 张图片"));
+        return Err(ApiError::new(
+            400,
+            format!("每条消息最多添加 {MAX_INPUT_IMAGE_COUNT} 张图片"),
+        ));
     }
     let mut total = 0usize;
     for image in images {
@@ -4452,7 +4838,10 @@ fn validate_queued_action_payload(action: &str, payload: &Value) -> Result<(), A
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
             if retained_count + added_count > MAX_INPUT_IMAGE_COUNT {
-                return Err(ApiError::new(400, "每条消息最多保留或新增 4 张图片"));
+                return Err(ApiError::new(
+                    400,
+                    format!("每条消息最多保留或新增 {MAX_INPUT_IMAGE_COUNT} 张图片"),
+                ));
             }
             if prompt.trim().is_empty() && retained_count + added_count == 0 {
                 return Err(ApiError::new(400, "消息不能为空或超过 128 KiB"));
@@ -5497,15 +5886,20 @@ fn native_result(value: Value) -> Result<Value, ApiError> {
     }
 }
 
-fn device_name(headers: &HeaderMap) -> &'static str {
+fn device_name(headers: &HeaderMap, android_app: bool) -> &'static str {
     let agent = headers
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if agent.contains("iPhone") || agent.contains("iPad") {
-        "Apple 移动设备"
+    // 用户要求安卓 App、手机浏览器和电脑浏览器名称可辨识；标记仅用于名称，不能作为授权或合并依据。
+    if android_app || agent.contains("CodexElvesAndroid/") {
+        "Android App"
+    } else if agent.contains("iPhone") {
+        "iPhone 浏览器"
+    } else if agent.contains("iPad") {
+        "iPad 浏览器"
     } else if agent.contains("Android") {
-        "Android 设备"
+        "Android 浏览器"
     } else if agent.contains("Windows") {
         "Windows 浏览器"
     } else if agent.contains("Macintosh") {
@@ -5603,6 +5997,379 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn claude_read_only_model_metadata_does_not_start_wsl_or_codex() {
+        let (_directory, authorization) = service_dispatch_fixture().await;
+        let controller = &authorization.controller;
+        controller.publish_access_policy(&RemoteAccessSettings {
+            enabled: true,
+            read_only: true,
+            ..Default::default()
+        });
+        // 故意使用不存在的项目；只读能力查询必须先返回，不得解析项目或启动任何执行引擎。
+        for include_available in [false, true] {
+            let response = controller
+                .call_backend(
+                    "models",
+                    json!({"backend":"claude","projectId":"does-not-exist",
+                        "includeAvailable":include_available,"forceReload":true}),
+                    &authorization,
+                )
+                .await
+                .unwrap();
+            assert_eq!(response["data"], json!([]));
+            assert_eq!(response["readOnly"], true);
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "显式运行：需要独立 codex-elves-claude-test 中已配置的测试 API"]
+    async fn claude_wsl_api_end_to_end() {
+        struct SharedProjects {
+            cwd: String,
+        }
+        #[async_trait]
+        impl NativeRemoteBridge for SharedProjects {
+            async fn call(&self, action: &str, payload: Value) -> anyhow::Result<Value> {
+                match action {
+                    "workspaceContext" => Ok(json!({"ok":true,"hostId":"local",
+                        "projectId":payload["projectId"],"cwd":self.cwd})),
+                    "sidebar" => Ok(json!({"ok":true,"nativeBridge":"cdp","complete":true,
+                        "recent":[],"pinnedThreads":[],"sideThreadIds":[],
+                        "projects":[{"id":"shared-project","name":"Claude 隔离测试项目","cwd":self.cwd,
+                            "roots":[self.cwd],"threads":[]}],
+                        "preferences":{"mode":"project","chats":"updated_at","projects":"updated_at","pinned":"manual"}})),
+                    "models" => Ok(json!({"ok":true,"data":[{"model":"codex-fixture",
+                        "displayName":"Codex 隔离样例","supportedReasoningEfforts":[]}]})),
+                    "skills" => Ok(json!({"ok":true,"data":[],"errors":[]})),
+                    "events" => Ok(json!({"ok":true,"events":[],"writeAvailable":true})),
+                    _ => anyhow::bail!("Claude 测试不允许进入 Codex 执行入口：{action}"),
+                }
+            }
+        }
+        async fn idle(controller: &RemoteAccessController, id: &str) -> Value {
+            tokio::time::timeout(Duration::from_secs(150), async {
+                loop {
+                    let detail = controller.claude.detail(id).await.unwrap();
+                    if detail["thread"]["status"]["type"] == "idle" {
+                        return controller
+                            .claude
+                            .history(&json!({"threadId":id}))
+                            .await
+                            .unwrap();
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            })
+            .await
+            .expect("Claude 测试轮次超时")
+        }
+        async fn pending(controller: &RemoteAccessController, id: &str, method: &str) -> Value {
+            tokio::time::timeout(Duration::from_secs(100), async {
+                loop {
+                    let detail = controller.claude.detail(id).await.unwrap();
+                    if let Some(request) = detail["thread"]["requests"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|r| r["method"] == method)
+                    {
+                        return request.clone();
+                    }
+                    assert_ne!(
+                        detail["thread"]["status"]["type"],
+                        "idle",
+                        "Claude 没有发出预期请求 {method}：{}",
+                        controller
+                            .claude
+                            .history(&json!({"threadId":id}))
+                            .await
+                            .unwrap()
+                    );
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            })
+            .await
+            .expect("等待 Claude 原生交互请求超时")
+        }
+        let (directory, old_state) = login_lock_test_state();
+        drop(old_state);
+        let fixture = directory.path().join("shared-project");
+        std::fs::create_dir_all(fixture.join(".claude")).unwrap();
+        std::fs::write(
+            fixture.join(".claude/settings.local.json"),
+            br#"{"permissions":{"ask":["Bash","Write","Edit"]}}"#,
+        )
+        .unwrap();
+        let native = Arc::new(SharedProjects {
+            cwd: fixture.to_string_lossy().into_owned(),
+        });
+        let controller =
+            RemoteAccessController::new(native, directory.path().to_path_buf()).unwrap();
+        let settings = RemoteAccessSettings {
+            enabled: true,
+            allow_approvals: true,
+            ..RemoteAccessSettings::default()
+        };
+        controller.publish_access_policy(&settings);
+        controller.running.store(true, Ordering::SeqCst);
+        let device = {
+            let mut auth = controller.auth.lock().await;
+            let device = Device {
+                id: "claude-fixture-device".into(),
+                name: "Claude 隔离联调".into(),
+                token_hash: hash("claude-fixture-cookie"),
+                client_id_hash: String::new(),
+                key_id: auth.access_key.as_ref().unwrap().id.clone(),
+                created_at_ms: now_ms(),
+                last_seen_at_ms: now_ms(),
+                expires_at_ms: now_ms() + 3_600_000,
+                public_origin: None,
+            };
+            auth.devices.push(device.clone());
+            device
+        };
+        let authorization = controller.authorization(device.clone(), Some("create"));
+        let catalog = controller
+            .call_backend(
+                "models",
+                json!({"backend":"claude","projectId":"shared-project"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let models = catalog["data"].as_array().unwrap();
+        assert!(!models.is_empty());
+        // 用户已添加 GPT 供手动验收；自动工具联调仍显式选择 Haiku，不能依赖选项顺序。
+        let model = models
+            .iter()
+            .find(|m| m["model"] == "claude-haiku-5-5")
+            .expect("测试环境必须提供 Haiku")["model"]
+            .clone();
+        let phrase = format!("elves-{}", uuid::Uuid::new_v4().simple());
+        let payload = json!({"backend":"claude","projectId":"shared-project","model":model,
+            "reasoningEffort":"low","prompt":format!("记住测试短语 {phrase}，只回复已记住，不使用工具。")});
+        let receipt = "claude-fixture-create".to_owned();
+        let created = controller
+            .execute(
+                device.clone(),
+                receipt.clone(),
+                "create".into(),
+                payload.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["result"]["ok"], true, "{created}");
+        let result = created["result"].clone();
+        let id = result["threadId"].as_str().unwrap().to_owned();
+        let repeated = controller
+            .execute(device.clone(), receipt, "create".into(), payload)
+            .await
+            .unwrap();
+        assert_eq!(
+            repeated["result"]["threadId"], id,
+            "同一回执不能重复创建会话"
+        );
+        let history = idle(&controller, &id).await;
+        assert_eq!(history["data"][0]["status"], "completed", "{history}");
+        let sidebar = controller
+            .call_backend("sidebar", json!({"includeClaude":true}), &authorization)
+            .await
+            .unwrap();
+        assert!(
+            sidebar["recent"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["id"] == id && t["backend"] == "claude")
+        );
+        assert_eq!(sidebar["projects"][0]["id"], "shared-project");
+        assert_eq!(sidebar["projects"][0]["threads"][0]["id"], id);
+        assert!(
+            controller
+                .call_backend(
+                    "send",
+                    json!({"threadId":id,"backend":"codex","prompt":"禁止切换"}),
+                    &authorization
+                )
+                .await
+                .is_err()
+        );
+        println!("真实 CLI 创建、共享项目、两种列表、类型锁定和幂等创建通过");
+
+        controller.execute(device.clone(), "claude-fixture-write".into(), "send".into(),
+            json!({"threadId":id,"model":model,"reasoningEffort":"low",
+                "prompt":"请只使用 Write 工具在当前项目目录创建 approval.txt，内容严格为 ELVES_APPROVAL_OK，不运行其他工具，完成后简短回复。"}))
+            .await.unwrap();
+        let request = pending(&controller, &id, "item/commandExecution/requestApproval").await;
+        assert_eq!(request["_claude"]["tool_name"], "Write");
+        assert!(
+            request["_claude"]["input"]["file_path"]
+                .as_str()
+                .unwrap()
+                .ends_with("/approval.txt")
+        );
+        assert_eq!(
+            request["_claude"]["input"]["content"]
+                .as_str()
+                .unwrap()
+                .trim(),
+            "ELVES_APPROVAL_OK"
+        );
+        let approved = controller
+            .execute(
+                device.clone(),
+                "claude-fixture-approve".into(),
+                "approve".into(),
+                json!({"threadId":id,"requestId":request["id"],"decision":"accept"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(approved["result"]["ok"], true);
+        let history = idle(&controller, &id).await;
+        assert_eq!(history["data"][0]["status"], "completed", "{history}");
+        assert_eq!(
+            std::fs::read_to_string(fixture.join("approval.txt"))
+                .unwrap()
+                .trim(),
+            "ELVES_APPROVAL_OK"
+        );
+        println!("真实 CLI 工具请求经远程批准后写入隔离文件通过");
+
+        controller.execute(device.clone(), "claude-fixture-question".into(), "send".into(),
+            json!({"threadId":id,"model":model,"reasoningEffort":"low",
+                "prompt":"请立即调用 AskUserQuestion 工具询问我选择方案一还是方案二，收到我的选择后复述选择。不使用文字代替工具询问。"}))
+            .await.unwrap();
+        let request = pending(&controller, &id, "item/tool/requestUserInput").await;
+        let question = &request["params"]["questions"][0];
+        let choice = question["options"][0]["label"].as_str().unwrap();
+        let answered = controller
+            .execute(
+                device.clone(),
+                "claude-fixture-answer".into(),
+                "answer".into(),
+                json!({"threadId":id,"requestId":request["id"],"response":{"answers":{
+                    question["id"].as_str().unwrap():{"answers":[choice]}
+                }}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(answered["result"]["ok"], true);
+        let history = idle(&controller, &id).await;
+        assert_eq!(history["data"][0]["status"], "completed", "{history}");
+        println!("真实 AskUserQuestion 经远程回答后继续执行通过");
+
+        controller
+            .execute(
+                device.clone(),
+                "claude-fixture-stream".into(),
+                "send".into(),
+                json!({"threadId":id,"model":model,"reasoningEffort":"low",
+                "prompt":"请逐行输出从 1 到 2000 的全部整数，每行一个数字，不省略，不使用工具。"}),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(100), async {
+            loop {
+                let history = controller
+                    .claude
+                    .history(&json!({"threadId":id}))
+                    .await
+                    .unwrap();
+                if history["data"][0]["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| {
+                        item["type"] == "agentMessage"
+                            && item["text"].as_str().is_some_and(|s| !s.is_empty())
+                    })
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("等待首个真实流式输出超时");
+        let stopped = controller
+            .execute(
+                device.clone(),
+                "claude-fixture-stop".into(),
+                "stop".into(),
+                json!({"threadId":id}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stopped["result"]["ok"], true);
+        let history = tokio::time::timeout(Duration::from_secs(20), idle(&controller, &id))
+            .await
+            .unwrap();
+        assert_eq!(history["data"][0]["status"], "interrupted", "{history}");
+        println!("真实流式生成被远程停止通过");
+
+        // 关闭本后端启动的进程，重新加载持久记录；下一轮必须由 Claude --resume 恢复上下文。
+        controller.claude.release().await;
+        let restored = claude::Claude::new(directory.path()).unwrap();
+        let sent = restored
+            .command(
+                "send",
+                &json!({"threadId":id,"model":model,"reasoningEffort":"low",
+            "prompt":"刚才让你记住的测试短语是什么？只回复该短语，不使用工具。"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent["ok"], true);
+        tokio::time::timeout(Duration::from_secs(150), async {
+            while restored.detail(&id).await.unwrap()["thread"]["status"]["type"] != "idle" {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let history = restored.history(&json!({"threadId":id})).await.unwrap();
+        assert_eq!(history["data"][0]["status"], "completed", "{history}");
+        assert!(
+            history["data"][0]["items"].to_string().contains(&phrase),
+            "必须恢复 Claude 原生上下文：{history}"
+        );
+        restored.release().await;
+        println!("重建后端后由原版 Claude --resume 恢复真实上下文通过");
+
+        // 可选本机 UI 验收入口，使用隔离项目和测试访问密钥，不连接当前桌面会话。
+        if let Ok(port) = std::env::var("CODEX_ELVES_CLAUDE_UI_PORT") {
+            let port = port.parse::<u16>().unwrap();
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let router = web_router(
+                controller.clone(),
+                RemoteAccessSettings { port, ..settings },
+            );
+            println!("Claude 隔离 UI：http://127.0.0.1:{port}；测试访问密钥：{LOGIN_TEST_KEY}");
+            println!(
+                "关闭验收：创建 {}",
+                directory.path().join("finish-ui").display()
+            );
+            let service = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    router.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                .unwrap()
+            });
+            let stop = directory.path().join("finish-ui");
+            while !stop.is_file() {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            service.abort();
+        }
+        controller.claude.release().await;
+    }
+
     #[test]
     fn connection_diagnostics_accept_only_scoped_get_requests_and_bounded_ids() {
         let accepted = format!("/api/session?diag={}&ignored=secret", "a".repeat(80));
@@ -5671,6 +6438,7 @@ mod tests {
                 id: "diagnostic-fixture".into(),
                 name: "diagnostic-fixture".into(),
                 token_hash: hash("private-fixture-cookie"),
+                client_id_hash: String::new(),
                 key_id,
                 created_at_ms: now_ms(),
                 last_seen_at_ms: now_ms(),
@@ -5858,7 +6626,7 @@ mod tests {
         })));
     }
 
-    async fn service_dispatch_fixture() -> (tempfile::TempDir, RemoteAuthorization) {
+    pub(super) async fn service_dispatch_fixture() -> (tempfile::TempDir, RemoteAuthorization) {
         let (directory, state) = login_lock_test_state();
         let controller = state.controller;
         let device = {
@@ -5867,6 +6635,7 @@ mod tests {
                 id: "service-dispatch-device".into(),
                 name: "隔离派发测试".into(),
                 token_hash: hash("isolated-service-dispatch-token"),
+                client_id_hash: String::new(),
                 key_id: auth.access_key.as_ref().unwrap().id.clone(),
                 created_at_ms: now_ms(),
                 // 功能回归在 Windows 并发构建时可能排队超过两分钟；过期行为由专门用例显式设置。
@@ -6551,11 +7320,17 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             .unwrap_err();
         assert!(execution::is_cdp_forbidden(&error));
         assert_eq!(audit.snapshot()["serviceCdpAttempts"], 3);
-        let task = scope()
-            .run(async { execution::spawn_inherited(async { crate::cdp::list_targets(1).await }) })
+        let mut task = None;
+        // 父作用域结束后再等待派生任务，确认继承的 CDP 禁用策略仍有效。
+        scope()
+            .run(async {
+                task = Some(execution::spawn_inherited(async {
+                    crate::cdp::list_targets(1).await
+                }));
+            })
             .await;
         assert!(execution::is_cdp_forbidden(
-            &task.await.unwrap().unwrap_err()
+            &task.unwrap().await.unwrap().unwrap_err()
         ));
         assert_eq!(audit.snapshot()["serviceCdpAttempts"], 4);
         let error = scope()
@@ -8769,6 +9544,83 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     }
 
     #[tokio::test]
+    async fn sidebar_requires_explicit_claude_opt_in_before_wsl_detection() {
+        let (directory, authorization) = native_pin_fixture(json!({})).await;
+        // 故意放入无效配置；未启用时不得尝试检测，显式启用仅报告配置错误，不连接真实 WSL。
+        std::fs::write(directory.path().join("remote-claude-wsl.json"), b"{invalid").unwrap();
+        for payload in [
+            json!({}),
+            json!({"includeClaude":false}),
+            json!({"includeClaude":"true"}),
+        ] {
+            let sidebar = authorization
+                .controller
+                .call_authorized("sidebar", payload, &authorization)
+                .await
+                .unwrap();
+            assert!(sidebar["claudeDiscoveryError"].is_null(), "{sidebar}");
+            assert_eq!(sidebar["recent"].as_array().unwrap().len(), 3);
+        }
+        let sidebar = authorization
+            .controller
+            .call_authorized("sidebar", json!({"includeClaude":true}), &authorization)
+            .await
+            .unwrap();
+        assert!(sidebar["claudeDiscoveryError"].is_string());
+        authorization.controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn session_instances_route_rejects_cross_instance_writes_and_filters_disabled_rows() {
+        let (_directory, authorization) = native_pin_fixture(json!({})).await;
+        let controller = &authorization.controller;
+        validate_goal_composer_payload(
+            "create",
+            &json!({"projectId":"project-a","prompt":"goal",
+            "goalMode":true,"backend":"codex","instanceId":"codex:local"}),
+        )
+        .unwrap();
+        for payload in [
+            json!({"threadId":"old-a","instanceId":"codex:wsl:other","prompt":"must not dispatch"}),
+            json!({"threadId":"old-a","instanceId":"claude:local","prompt":"must not dispatch"}),
+            json!({"instanceId":"codex:wsl:other","prompt":"must not dispatch"}),
+            json!({"instanceId":"future:local","prompt":"must not dispatch"}),
+        ] {
+            assert!(
+                controller
+                    .call_authorized("send", payload, &authorization)
+                    .await
+                    .is_err()
+            );
+        }
+        let none = controller
+            .call_authorized("sidebar", json!({"enabledInstanceIds":[]}), &authorization)
+            .await
+            .unwrap();
+        assert!(none["recent"].as_array().unwrap().is_empty());
+        assert!(none["pinnedThreads"].as_array().unwrap().is_empty());
+        assert!(none["claudeDiscoveryError"].is_null());
+        let local = controller
+            .call_authorized(
+                "sidebar",
+                json!({"enabledInstanceIds":["codex:local","claude:local"]}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(local["recent"].as_array().unwrap().len(), 3);
+        assert!(local["claudeDiscoveryError"].is_null());
+        assert!(
+            local["recent"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["instanceId"] == "codex:local")
+        );
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
     async fn harness_native_pins_restore_all_pages_and_share_desktop_mutations() {
         let (directory, authorization) = native_pin_fixture(json!({})).await;
         let controller = &authorization.controller;
@@ -9242,6 +10094,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                     id: id.into(),
                     name: id.into(),
                     token_hash: hash(token),
+                    client_id_hash: String::new(),
                     key_id: key_id.clone(),
                     created_at_ms: now_ms(),
                     last_seen_at_ms: now_ms(),
@@ -9546,6 +10399,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 id: "related-device".into(),
                 name: "关联会话隔离验证".into(),
                 token_hash: hash("related-cookie"),
+                client_id_hash: String::new(),
                 created_at_ms: now_ms(),
                 expires_at_ms: now_ms() + 60_000,
                 last_seen_at_ms: now_ms(),
@@ -10637,6 +11491,7 @@ call("send",{threadId:"isolated-thread",prompt:"隔离发送"})
                 id: "context-device".into(),
                 name: "上下文验证".into(),
                 token_hash: hash("context-cookie"),
+                client_id_hash: String::new(),
                 created_at_ms: now_ms(),
                 expires_at_ms: now_ms() + 60_000,
                 last_seen_at_ms: now_ms(),
@@ -10837,6 +11692,7 @@ call("send",{threadId:"isolated-thread",prompt:"隔离发送"})
                 id: "image-cache-device".into(),
                 name: "图片缓存回归".into(),
                 token_hash: hash("image-cache-cookie"),
+                client_id_hash: String::new(),
                 created_at_ms: now_ms(),
                 expires_at_ms: now_ms() + 120_000,
                 last_seen_at_ms: now_ms(),
@@ -10998,6 +11854,7 @@ call("send",{threadId:"isolated-thread",prompt:"隔离发送"})
                 id: "compression-device".into(),
                 name: "隔离传输验证".into(),
                 token_hash: hash("compression-cookie"),
+                client_id_hash: String::new(),
                 created_at_ms: now_ms(),
                 expires_at_ms: now_ms() + 120_000,
                 last_seen_at_ms: now_ms(),
@@ -11128,6 +11985,7 @@ call("send",{threadId:"isolated-thread",prompt:"隔离发送"})
                 id: "test-device".into(),
                 name: "隔离删除测试".into(),
                 token_hash: hash("test-cookie"),
+                client_id_hash: String::new(),
                 created_at_ms: now_ms(),
                 expires_at_ms: now_ms() + 60_000,
                 last_seen_at_ms: now_ms(),
@@ -11263,6 +12121,48 @@ call("send",{threadId:"isolated-thread",prompt:"隔离发送"})
     }
 
     #[test]
+    fn remote_input_images_keep_eight_for_both_backends_and_reject_the_ninth() {
+        let mut encoded = Cursor::new(Vec::new());
+        image::RgbaImage::new(1, 1)
+            .write_to(&mut encoded, ImageFormat::Png)
+            .unwrap();
+        let bytes = encoded.into_inner();
+        let image = json!({"name":"test.png","mime":"image/png","size":bytes.len(),
+            "dataUrl":format!("data:image/png;base64,{}", STANDARD.encode(&bytes))});
+        for backend in ["codex", "claude"] {
+            let mut payload = json!({"backend":backend,"images":vec![image.clone();8]});
+            assert!(validate_input_images(&payload).is_ok());
+            if backend == "claude" {
+                let content = claude::input_content(&payload).unwrap();
+                assert_eq!(
+                    content
+                        .iter()
+                        .filter(|part| part["type"] == "image")
+                        .count(),
+                    8
+                );
+            }
+            payload["images"]
+                .as_array_mut()
+                .unwrap()
+                .push(image.clone());
+            let error = validate_input_images(&payload).unwrap_err();
+            assert_eq!(error.code, 400);
+            assert!(error.message.contains("8 张图片"));
+        }
+        let mut edit = json!({"threadId":"thread","editId":"edit","prompt":"编辑",
+            "retainedImageSources":["one","two","three","four"],"images":vec![image.clone();4]});
+        assert!(validate_queued_action_payload("editQueued", &edit).is_ok());
+        edit["images"].as_array_mut().unwrap().push(image);
+        assert!(
+            validate_queued_action_payload("editQueued", &edit)
+                .unwrap_err()
+                .message
+                .contains("8 张图片")
+        );
+    }
+
+    #[test]
     fn goal_composer_payload_requires_explicit_mode_and_validated_inputs() {
         let payload = json!({
             "threadId":"existing-thread","prompt":"前文 [$example](C:/skills/example/SKILL.md) 后文",
@@ -11373,6 +12273,7 @@ call("send",{threadId:"isolated-thread",prompt:"隔离发送"})
                 id: "goal-test-device".into(),
                 name: "隔离目标测试".into(),
                 token_hash: hash("goal-test-cookie"),
+                client_id_hash: String::new(),
                 created_at_ms: now_ms(),
                 expires_at_ms: now_ms() + 60_000,
                 last_seen_at_ms: now_ms(),
@@ -12060,6 +12961,87 @@ call("send",{threadId:"isolated-thread",prompt:"隔离发送"})
     }
 
     #[tokio::test]
+    async fn login_client_identity_reuses_cookie_and_never_revives_revoked_device() {
+        async fn attempt(state: &WebState, client: Option<&str>, cookie: &str) -> (String, String) {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::USER_AGENT,
+                HeaderValue::from_static("Windows identical-UA"),
+            );
+            if !cookie.is_empty() {
+                headers.insert(header::COOKIE, HeaderValue::from_str(cookie).unwrap());
+            }
+            let response = connect(
+                State(state.clone()),
+                ConnectInfo("192.0.2.1:1000".parse().unwrap()),
+                Extension(RequestTrustContext::default()),
+                headers,
+                Json(json!({"key":LOGIN_TEST_KEY,"clientId":client})),
+            )
+            .await
+            .unwrap();
+            let cookie = login_cookie(&response);
+            let mut headers = HeaderMap::new();
+            headers.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
+            let device = state.controller.authorize(&headers).await.unwrap();
+            (device.id, cookie)
+        }
+        let (_directory, state) = login_lock_test_state();
+        let client = uuid::Uuid::new_v4().to_string();
+        let (id, legacy_cookie) = attempt(&state, None, "").await;
+        let (migrated, cookie) = attempt(&state, Some(&client), &legacy_cookie).await;
+        assert_eq!(migrated, id);
+        assert_eq!(cookie, legacy_cookie, "有效 Cookie 迁移不使其他标签页失效");
+        let (reused, cookie) = attempt(&state, Some(&client), "").await;
+        assert_eq!(reused, id);
+        assert_eq!(state.controller.auth.lock().await.devices.len(), 1);
+        let (other, _) = attempt(&state, Some(&uuid::Uuid::new_v4().to_string()), "").await;
+        assert_ne!(other, id, "相同 UA 和 IP 的不同客户端不能合并");
+        state
+            .controller
+            .admin("revoke", json!({"deviceId":id}))
+            .await
+            .unwrap();
+        let (renewed, _) = attempt(&state, Some(&client), "").await;
+        assert_ne!(renewed, id);
+        let mut old = HeaderMap::new();
+        old.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
+        assert!(state.controller.authorize(&old).await.is_none());
+        {
+            let mut auth = state.controller.auth.lock().await;
+            let template = auth.devices[0].clone();
+            while auth.devices.len() < MAX_DEVICES {
+                let mut filler = template.clone();
+                filler.id = uuid::Uuid::new_v4().to_string();
+                filler.token_hash = hash(&filler.id);
+                filler.client_id_hash.clear();
+                auth.devices.push(filler);
+            }
+        }
+        assert_eq!(
+            attempt(&state, Some(&client), "").await.0,
+            renewed,
+            "满额时仍允许同端复用"
+        );
+        assert_eq!(
+            state.controller.auth.lock().await.devices.len(),
+            MAX_DEVICES
+        );
+        let headers = HeaderMap::new();
+        let failure = connect(
+            State(state.clone()),
+            ConnectInfo("192.0.2.1:1000".parse().unwrap()),
+            Extension(RequestTrustContext::default()),
+            headers,
+            Json(json!({"key":LOGIN_TEST_KEY,"clientId":uuid::Uuid::new_v4().to_string()})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure.code, 409);
+        assert_eq!(device_name(&HeaderMap::new(), true), "Android App");
+    }
+
+    #[tokio::test]
     async fn login_lock_is_global_at_four_failures_and_skips_non_key_errors() {
         let (directory, state) = login_lock_test_state();
         assert_eq!(
@@ -12403,6 +13385,7 @@ call("send",{threadId:"isolated-thread",prompt:"隔离发送"})
                     valid,
                     HeaderMap::new(),
                     RequestTrustContext::default(),
+                    LoginClient::default(),
                 )
                 .await
             })
@@ -12435,7 +13418,8 @@ call("send",{threadId:"isolated-thread",prompt:"隔离发送"})
                     snapshot.clone(),
                     valid,
                     HeaderMap::new(),
-                    RequestTrustContext::default()
+                    RequestTrustContext::default(),
+                    LoginClient::default()
                 )
                 .await
                 .unwrap_err()

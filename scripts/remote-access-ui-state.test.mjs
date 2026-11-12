@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import vm from "node:vm";
+import nodeVm from "node:vm";
 import { createSidebarPreferenceStore } from "../assets/remote-access/recovery-store.js";
+import { createSelectComponent } from "../assets/remote-access/select.js";
 
 function storage() {
   const records = new Map();
@@ -72,6 +73,183 @@ const eventsClient = await readFile(new URL("../assets/remote-access/events-clie
 const sessionTools = await readFile(new URL("../assets/remote-access/session-tools.js", import.meta.url), "utf8");
 const sessionFiles = await readFile(new URL("../assets/remote-access/session-files.js", import.meta.url), "utf8");
 const sessionMenuSource = await readFile(new URL("../assets/remote-access/session-menu.js", import.meta.url), "utf8");
+const markdownRendererSource = await readFile(new URL("../assets/remote-access/markdown-renderer.js", import.meta.url), "utf8");
+const devServerSource = await readFile(new URL("./dev-remote-access.mjs", import.meta.url), "utf8");
+
+test("设置 Select 的调试代理只放行两个固定设置接口，不扩大到任意路径", () => {
+  const context = nodeVm.createContext();
+  nodeVm.runInContext(devServerSource.slice(devServerSource.indexOf("function allowedApi("),
+    devServerSource.indexOf("function mappedCookie(")), context);
+  for (const path of ["/api/settings/environments", "/api/settings/instructions"])
+    assert.equal(context.allowedApi("POST", path), true);
+  for (const [method, path] of [["GET", "/api/settings/instructions"], ["POST", "/api/settings/other"],
+    ["POST", "/api/settings/instructions/extra"], ["DELETE", "/api/settings/instructions"], ["POST", "/settings/instructions"]])
+    assert.equal(context.allowedApi(method, path), false);
+});
+// 旧回归用例只加载待测函数；补齐来自真实页面源码的后端上下文，默认仍使用 Codex。
+const backendHelpers = app.slice(app.indexOf("function availableSessionInstances("), app.indexOf("function syncBackendModels("))
+  + app.slice(app.indexOf("function conversationBackend("), app.indexOf("const projectThreadLimits ="));
+const vm = {
+  ...nodeVm,
+  createContext(context = {}, options) {
+    for (const [key, value] of Object.entries({
+      creating: false, creationBackend: "codex", creationProject: "", selectedId: null, thread: null,
+      creationInstanceId: "codex:local", sessionInstanceRequest: null,
+      sessionTypes: [{ id: "codex", label: "Codex" }, { id: "claude", label: "Claude" }],
+      sessionInstances: [{ id: "codex:local", backend: "codex", label: "Codex · 本机", ready: true, legacyDefault: true },
+        { id: "claude:wsl:test", backend: "claude", label: "Claude · WSL · test", ready: true, legacyDefault: true }],
+      drafts: new Map(), attachmentDrafts: new Map(),
+      session: null, stream: null, EventSource: { OPEN: 1 }, modelsScope: "codex", modelLoadError: "",
+      selectionVersion: 0,
+      syncBackendModels() {}, setConnection() {},
+      appearance: { sessionTypes: { codex: true, claude: false }, sessionFilter: "all" },
+      transcriptEvents: new Map(), claudeHistoryOrder: null,
+    })) if (!Object.hasOwn(context, key)) context[key] = value;
+    context.appearance.sessionTypes ??= { codex: true, claude: false };
+    context.appearance.sessionFilter ??= "all";
+    const result = nodeVm.createContext(context, options);
+    nodeVm.runInContext(backendHelpers, result);
+    nodeVm.runInContext(app.slice(app.indexOf("function compactionInProgress("),
+      app.indexOf("function compactionQueueSendReason(")), result);
+    nodeVm.runInContext(app.slice(app.indexOf("function retireClaudeHistoryTurns("),
+      app.indexOf("function pruneCachedHistory(")), result);
+    return result;
+  },
+};
+
+test("Codex/Claude 图片添加和草稿/队列恢复完整保留八张，第九张拒绝且不丢原图", async () => {
+  const source = await readFile(new URL("../assets/remote-access/attachments.js", import.meta.url), "utf8");
+  const notices = [];
+  class Reader {
+    readAsDataURL(blob) {
+      void blob.arrayBuffer().then(bytes => {
+        this.result = `data:${blob.type};base64,${Buffer.from(bytes).toString("base64")}`;
+        this.onload();
+      });
+    }
+  }
+  const context = vm.createContext({ Blob, FileReader: Reader, Uint8Array,
+    createImageBitmap: async () => ({ width: 1, height: 1, close() {} }),
+    atob, sha256Hex: async () => "test-hash" });
+  vm.runInContext(source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""), context);
+  context.report = message => notices.push(message);
+  vm.runInContext("showNotice = report", context);
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==", "base64");
+  for (const backend of ["codex", "claude"]) {
+    context.backend = backend;
+    context.files = Array.from({ length: 8 }, (_, i) => Object.assign(new Blob([png], { type: "image/png" }), { name: `${i}.png` }));
+    vm.runInContext("clearComposerAttachments()", context);
+    await vm.runInContext("addFiles(files)", context);
+    const payload = vm.runInContext("composerAttachmentsPayload()", context);
+    assert.equal(payload.length, 8, `${backend} 发送不能截为四张`);
+    assert.equal(vm.runInContext("setComposerAttachments(composerAttachmentSnapshot()); composerAttachmentsPayload().length", context), 8);
+    await vm.runInContext("addFiles([files[0]])", context);
+    assert.match(notices.at(-1), /最多添加 8 张图片/);
+    assert.deepEqual(vm.runInContext("composerAttachmentsPayload()", context), payload);
+    context.queued = { context: { imageAttachments: payload.map(image => ({ src: image.dataUrl, filename: image.name })) } };
+    await vm.runInContext("attachmentsFromQueuedMessage(queued).then(images => setComposerAttachments(images, {readOnly:true,removableRemote:true}))", context);
+    assert.equal(vm.runInContext("composerAttachmentSnapshot().length", context), 8);
+    assert.equal(vm.runInContext("composerRemoteAttachmentSources().length", context), 8);
+  }
+  assert.match(source, /attachmentInput\.onchange[^\n]*addFiles/);
+  assert.match(source, /addEventListener\("drop"[\s\S]*?addFiles\(files\)/);
+  assert.match(source, /function handleComposerImagePaste[\s\S]*?addFiles\(files\)/);
+});
+
+test("native 桥接对发送与队列来源都接收八张，并拒绝第九张", () => {
+  let next = 0;
+  const context = vm.createContext({ nativeImageAttachmentId: () => `image-${++next}`,
+    failure: (code, message) => Object.assign(new Error(message), { code }) });
+  vm.runInContext(native.slice(native.indexOf("  const remoteInputImageMaxCount"), native.indexOf("  function remoteAttachmentContext"))
+    + native.slice(native.indexOf("  function validateQueuedImageSources("), native.indexOf("  function hexBytes(")), context);
+  context.payload = { images: Array.from({ length: 8 }, (_, i) => ({ name: `${i}.png`, mime: "image/png", size: 3, dataUrl: "data:image/png;base64,AQID" })) };
+  assert.equal(vm.runInContext('remoteImageAttachments(payload, "send-validation").length', context), 8);
+  assert.equal(vm.runInContext('validateQueuedImageSources(payload.images.map((_, i) => `path-${i}`), "基线").length', context), 8);
+  context.payload.images.push({ ...context.payload.images[0], name: "9.png" });
+  assert.throws(() => vm.runInContext('remoteImageAttachments(payload, "send-validation")', context), /最多添加 8 张图片/);
+  assert.throws(() => vm.runInContext('validateQueuedImageSources(payload.images.map((_, i) => `path-${i}`), "基线")', context), /基线无效/);
+});
+
+test("桥接版本升级清理旧实例，守卫与公布版本一致", () => {
+  const version = Number(native.match(/__codexElvesRemoteAccess\?\.version === (\d+)/)[1]);
+  assert.ok(version > 139);
+  assert.match(native, new RegExp(`version: ${version}, call`));
+  for (const installed of [135, 139, version]) {
+    let disposed = 0;
+    const context = vm.createContext({ window: { __codexElvesRemoteAccess: { version: installed, dispose() { ++disposed; } } } });
+    vm.runInContext(native.slice(0, native.indexOf("  let manager = null;")) + "globalThis.upgraded = true; })();", context);
+    assert.equal(disposed, installed === version ? 0 : 1);
+    assert.equal(context.upgraded, installed === version ? undefined : true);
+  }
+});
+
+test("Claude 完整历史同步移除旧摘要轮次，迟到的历史响应不能复活摘要", async () => {
+  const id = "claude-00000000-0000-4000-8000-000000000001", summary = { id: "compact", _nativeUserId: "summary-native", items: [{ id: "summary-item" }] };
+  const turns = new Map([[summary.id, summary], ["real", { id: "real", _nativeUserId: "native-real", items: [] }], ["pending", { id: "pending", items: [] }]]);
+  const context = vm.createContext({ selectedId: id, turns, thread: { id }, messageVersion: 0, statusVersion: 0, queueVersion: 0,
+    notifiedStatus: null, notifiedQueue: null, notifiedQueueEdits: [],
+    turnVersions: new Map(), itemVersions: new Map(), partialItems: new Map(),
+    normalizeDisplayedTurnItems: value => value, enrichTurnTranscriptEvents: value => value,
+    reconcileDirectSendPreviews() {}, rememberThreadDisplay() {}, rememberTranscript() {}, updateComposer() {},
+    scheduleMessages() {}, scheduleSidebarRefresh() {}, markVisibleThreadRead: async () => {} });
+  let respond;
+  Object.assign(context, { document: { hidden: false }, performance, AbortController,
+    pageLeaving: false, foregroundReadGeneration: 0, selectionVersion: 1, historyCursor: null,
+    threadDeleted: () => false, transcriptChecking: false, historyInitialized: true,
+    syncHistoryButtons() {}, recordDiagnostic() {}, mergeTranscriptEvents() {},
+    syncEditableMessageMetadata() {}, renderMessages() {}, sideThreadExpired: () => false,
+    mergeHistoryTurn: value => turns.get(value.id) || value,
+    threadEphemeralState: () => false, isMissingThreadError: () => false, recoveryErrorSilenceDepth: 0,
+    api: () => new Promise(resolve => { respond = resolve; }), notice: message => assert.fail(message) });
+  vm.runInContext(app.slice(app.indexOf("async function readHistoryPage("), app.indexOf("function pruneCachedHistory(")), context);
+  const oldRead = context.readHistoryPage(false, 1);
+  vm.runInContext(app.slice(app.indexOf("function receiveClaudeHistory("), app.indexOf("function receive(event)")), context);
+  context.params = { threadId: id, thread: { id, queuedMessages: [] }, turnIds: ["real"],
+    turns: [{ id: "real", _nativeUserId: "native-real", _nativeDone: true, items: [{ id: "reply", type: "agentMessage", text: "完成" }] }] };
+  vm.runInContext("receiveClaudeHistory(params)", context);
+  assert.equal(turns.has("compact"), false);
+  assert.equal(turns.has("pending"), true);
+  assert.equal(turns.get("real")._nativeDone, true);
+  assert.equal(context.turnVersions.get("compact"), 1, "删除版本保留，防止较早的历史请求复活摘要");
+  respond({ data: [summary, { id: "real", items: [] }], nextCursor: null });
+  await oldRead;
+  assert.equal(context.turns.has("compact"), false, "已删除摘要不能被通知之前发起的旧读取复活");
+  assert.equal(context.recentHistoryPage.turns.some(turn => turn.id === "compact"), false);
+});
+
+test("上下文容量缺失时显示真实最后请求用量，不伪造百分比", () => {
+  let info = { modelContextWindow: null, last: { totalTokens: 1300 } };
+  const context = vm.createContext({ currentThreadDisplay: () => ({ tokenUsage: info }) });
+  vm.runInContext(app.slice(app.indexOf("function tokenCount("), app.indexOf("function closeContextUsageTip(")), context);
+  let text = vm.runInContext("contextUsageText()", context);
+  assert.match(text.value, /1\.3k Token，容量尚未提供/);
+  assert.doesNotMatch(text.value, /%/);
+  info = { modelContextWindow: 10000, last: { totalTokens: 1300 } };
+  assert.match(vm.runInContext("contextUsageText().value", context), /13%/);
+  info = null;
+  assert.match(vm.runInContext("contextUsageText().value", context), /上下文信息尚未提供/);
+  const cache = threadDisplayCacheHarness();
+  cache.context.rememberThreadDisplay({ id: "main", tokenUsage: { modelContextWindow: null, last: { totalTokens: 1300 } } });
+  assert.equal(cache.persisted.at(-1).value.tokenUsage.last.totalTokens, 1300);
+  assert.equal(cache.context.currentThreadDisplay().tokenUsage.modelContextWindow, null);
+});
+
+test("Claude 配置容量显示600k及真实比例，重连缓存保留来源和请求模型", () => {
+  const { context, persisted } = threadDisplayCacheHarness();
+  vm.runInContext(app.slice(app.indexOf("function tokenCount("), app.indexOf("function closeContextUsageTip(")), context);
+  const usage = { modelContextWindow: 600000, model: "gpt-6.1-sol",
+    modelContextWindowSource: { kind: "configuration", key: "CLAUDE_CODE_MAX_CONTEXT_TOKENS", scope: "user-settings.env", model: "gpt-6.1-sol" },
+    last: { totalTokens: 108213 } };
+  context.rememberThreadDisplay({ id: "main", model: "gpt-6.1-sol", tokenUsage: usage });
+  const text = context.contextUsageText();
+  assert.match(text.value, /18%，600k（配置容量）/);
+  assert.match(text.description, /CLAUDE_CODE_MAX_CONTEXT_TOKENS.*不是协议报告值.*gpt-6\.1-sol/);
+  assert.deepEqual(persisted.at(-1).value.tokenUsage.modelContextWindowSource, usage.modelContextWindowSource);
+  assert.equal(persisted.at(-1).value.tokenUsage.model, usage.model);
+  context.rememberThreadDisplay({ id: "main", model: "other-model", tokenUsage: { modelContextWindow: null, model: "other-model", last: { totalTokens: 500 } } });
+  assert.match(context.contextUsageText().value, /容量尚未提供/);
+  assert.equal(context.currentThreadDisplay().tokenUsage.modelContextWindowSource, undefined, "新模型的明确未知值不能复用旧容量来源");
+});
 
 function richFileHarness() {
   const node = (tag, className = "", textContent = "") => ({
@@ -428,6 +606,7 @@ test("服务菜单实际展示子智能体并继续禁用侧边会话，旧侧�
   };
   const context = vm.createContext({
     menu, groups, mutationButtons, element, itemButton, section, times: [], document: { activeElement: null },
+    layer: { classList: { toggle() {} } }, pinned: () => false, desktop: () => false,
     context: { subagentsEnabled: true, sideThreadsEnabled: false, connected: true, threadId: "parent" },
     cached: { loadedAtMs: 1, data: { subagents: [{ id: "child", name: "工作中的子智能体", status: "active" }],
       completedSubagentCount: 1, completedSubagents: [{ id: "done", name: "已结束子智能体", outcome: "failed" }],
@@ -519,6 +698,488 @@ test("文件阅读字号默认12，旧配置和新设置都限制在6至14且独
     assert.equal(context.appearance.fontSize, 20);
   }
   assert.equal(context.defaultAppearance().fileReadingFontSize, 12);
+});
+
+test("新会话设置默认仅 Codex、正文950和系统14px字体，兼容旧颜色及隔离两套主题", () => {
+  const disk = storage();
+  const context = vm.createContext({ localStorage: disk, matchMedia: () => ({ matches: false }) });
+  vm.runInContext(app.slice(app.indexOf("const appearancePresets ="), app.indexOf("let ambientLightStatus =")), context);
+  const defaults = context.readAppearance();
+  assert.deepEqual(JSON.parse(JSON.stringify(defaults.sessionTypes)), { codex: true, claude: false });
+  assert.equal(defaults.conversationWidth, 950);
+  assert.equal(defaults.fontSize, 14); assert.equal(defaults.codeFontSize, 14);
+  assert.equal(defaults.uiFont, ""); assert.equal(defaults.codeFont, "");
+  disk.setItem("codex-elves-web-appearance", JSON.stringify({ fontSize: 17, conversationWidth: 100000,
+    uiFont: "Consolas;url(invalid)", colors: { dark: { background: "#232323" } } }));
+  const migrated = context.readAppearance();
+  assert.equal(migrated.fontSize, 17); assert.equal(migrated.conversationWidth, 3840);
+  assert.equal(migrated.uiFont, "");
+  assert.equal(migrated.colors.dark.background, "#232323");
+  assert.equal(migrated.palettes["vscode-plus"].dark.background, "#1f1f1f");
+  migrated.palettes["vscode-plus"].dark.background = "#123456";
+  assert.equal(migrated.palettes.chatgpt.dark.background, "#232323");
+});
+
+test("会话类型筛选与启用开关取交集，原生 Claude ID 也按同一规则过滤", () => {
+  const context = vm.createContext();
+  vm.runInContext(app.slice(app.indexOf("function conversationBackend("), app.indexOf("const projectThreadLimits =")), context);
+  const codex = { id: "codex-thread" }, claude = { id: "claude-12345678-1234-1234-1234-123456789abc" };
+  for (const [enabled, filter, expected] of [
+    [{ codex: true, claude: false }, "all", [true, false]],
+    [{ codex: true, claude: true }, "all", [true, true]],
+    [{ codex: true, claude: true }, "codex", [true, false]],
+    [{ codex: true, claude: true }, "claude", [false, true]],
+    [{ codex: true, claude: false }, "claude", [false, false]],
+  ]) {
+    const preferences = { sessionTypes: enabled, sessionFilter: filter };
+    assert.deepEqual([context.sessionTypeVisible(codex, preferences), context.sessionTypeVisible(claude, preferences)], expected);
+  }
+});
+
+test("会话实例筛选分别显示同类型 WSL 选项，精确匹配实例并遵循各自启用开关", () => {
+  const instances = [
+    { id: "codex:local", backend: "codex", label: "Codex", legacyDefault: true },
+    { id: "claude:wsl:a", backend: "claude", label: "Claude · Ubuntu", distribution: "Ubuntu", legacyDefault: true },
+    { id: "claude:wsl:b", backend: "claude", label: "Claude · Debian", distribution: "Debian" },
+  ];
+  const appearance = { sessionFilter: "claude:wsl:b",
+    sessionInstances: { "codex:local": true, "claude:wsl:a": true, "claude:wsl:b": true } };
+  const context = vm.createContext({ sessionInstances: instances, appearance });
+  const rows = [{ id: "codex", instanceId: "codex:local" },
+    { id: "a", backend: "claude", instanceId: "claude:wsl:a" },
+    { id: "b", backend: "claude", instanceId: "claude:wsl:b" },
+    { id: "legacy-b", backend: "claude", wslDistribution: "Debian" }];
+  assert.deepEqual(Array.from(context.sessionFilterOptions(), option => [option.value, option.label]), [
+    ["all", "全部会话"], ["codex:local", "Codex"],
+    ["claude:wsl:a", "Claude · Ubuntu"], ["claude:wsl:b", "Claude · Debian"],
+  ]);
+  assert.deepEqual(rows.map(row => context.sessionTypeVisible(row)), [false, false, true, true]);
+  appearance.sessionInstances["claude:wsl:b"] = false;
+  assert.deepEqual(rows.map(row => context.sessionTypeVisible(row)), [false, false, false, false]);
+  assert.equal(context.sessionFilterOptions().find(option => option.value === "claude:wsl:b").disabled, true);
+  appearance.sessionFilter = "all";
+  assert.deepEqual(rows.map(row => context.sessionTypeVisible(row)), [true, true, false, false]);
+  assert.equal(rows.length, 4, "筛选不能改写原列表快照");
+});
+
+test("实例筛选可持久保存，旧类型选择迁到启用的默认实例且不扩大到其他类型", () => {
+  const disk = storage(), instances = [
+    { id: "codex:local", backend: "codex", label: "Codex", legacyDefault: true },
+    { id: "claude:wsl:a", backend: "claude", label: "Claude · Ubuntu", legacyDefault: true },
+    { id: "claude:wsl:b", backend: "claude", label: "Claude · Debian" },
+  ];
+  const context = vm.createContext({ localStorage: disk, sessionInstances: instances,
+    matchMedia: () => ({ matches: false }) });
+  vm.runInContext(app.slice(app.indexOf("const appearancePresets ="), app.indexOf("let ambientLightStatus =")), context);
+  disk.setItem("codex-elves-web-appearance", JSON.stringify({ sessionFilter: "claude:wsl:b",
+    sessionInstances: { "codex:local": true, "claude:wsl:a": true, "claude:wsl:b": true } }));
+  const preferences = context.readAppearance();
+  assert.equal(preferences.sessionFilter, "claude:wsl:b");
+  preferences.sessionFilter = "claude";
+  assert.equal(context.sessionFilterValue(preferences), "claude:wsl:a");
+  preferences.sessionInstances["claude:wsl:a"] = false;
+  assert.equal(context.sessionFilterValue(preferences), "claude:wsl:b");
+  preferences.sessionInstances["claude:wsl:b"] = false;
+  assert.equal(context.sessionFilterValue(preferences), "claude:wsl:a");
+  assert.equal(context.sessionTypeVisible({ instanceId: "codex:local" }, preferences), false);
+});
+
+test("PC 会话菜单仅图标切换或生命周期清理会关闭，手机普通关闭行为保留", async () => {
+  for (const desktop of [true, false]) {
+    const context = vm.createContext({
+      opened: true, suspended: false, ticker: null, cached: null,
+      pinned: () => desktop, clearInterval() {}, cancelPress() {}, hideContext() {},
+      trigger: { isConnected: true, disabled: false, setAttribute() {}, focus() {} },
+      layer: { hidden: false, hasAttribute: () => false, classList: { remove() {} } },
+      open: async () => { context.opened = true; context.layer.hidden = false; },
+    });
+    vm.runInContext(sessionMenuSource.slice(sessionMenuSource.indexOf("  function close("),
+      sessionMenuSource.indexOf("  function suspend(")) + sessionMenuSource.slice(
+      sessionMenuSource.indexOf("  function toggle()"), sessionMenuSource.indexOf('  listen(trigger, "click"')), context);
+    context.close(true);
+    assert.equal(context.opened, desktop, "外部点击、Escape 和普通操作共用关闭入口");
+    context.opened = true; context.layer.hidden = false;
+    await context.toggle();
+    assert.equal(context.opened, false, "再次点击图标必须关闭");
+    await context.toggle();
+    assert.equal(context.opened, true, "点击图标重新打开");
+    context.close(false, true);
+    assert.equal(context.opened, false, "授权变化或销毁必须清理菜单");
+  }
+});
+
+test("三个 Claude 与两个 Codex 实例独立迁移、启用和筛选，新类型沿用同一逻辑", () => {
+  const instances = [
+    { id: "codex:local", backend: "codex", ready: true, legacyDefault: true },
+    { id: "codex:wsl:3", backend: "codex", ready: false },
+    { id: "claude:local", backend: "claude", ready: false },
+    { id: "claude:wsl:1", backend: "claude", ready: true, legacyDefault: true },
+    { id: "claude:wsl:2", backend: "claude", ready: true },
+  ].map(instance => ({ ...instance, label: instance.id }));
+  const preferences = { sessionTypes: { codex: true, claude: true }, sessionFilter: "all" };
+  const context = vm.createContext({ sessionInstances: instances, appearance: preferences });
+  assert.equal(context.migrateSessionInstances(preferences, instances), true);
+  assert.deepEqual(Object.entries(preferences.sessionInstances).filter(([, enabled]) => enabled).map(([id]) => id),
+    ["codex:local", "claude:wsl:1"]);
+  preferences.sessionInstances["claude:wsl:1"] = false;
+  preferences.sessionInstances["claude:wsl:2"] = true;
+  preferences.sessionInstances["claude:local"] = true;
+  assert.equal(context.migrateSessionInstances(preferences, instances), false);
+  assert.equal(context.sessionTypeVisible({ backend: "claude", instanceId: "claude:wsl:1" }), false);
+  assert.equal(context.sessionTypeVisible({ backend: "claude", instanceId: "claude:wsl:2" }), true);
+  assert.deepEqual(Array.from(context.newChatBackendOptions(), option => option.value), ["codex:local", "claude:wsl:2"]);
+  instances.push({ id: "future:wsl:4", backend: "future", ready: true, label: "Future · WSL4" });
+  preferences.sessionInstances["future:wsl:4"] = true;
+  assert.equal(context.newChatBackendOptions().at(-1).value, "future:wsl:4");
+  assert.equal(context.sessionTypeVisible({ backend: "future", instanceId: "future:wsl:4" }), true);
+  preferences.sessionFilter = "claude";
+  assert.equal(context.sessionTypeVisible({ backend: "future", instanceId: "future:wsl:4" }), false);
+  // 仅使用内存选项验证：环境名称不改变实例开关、列表和新建入口的规则。
+  instances.push({ id: "claude:wsl:third", backend: "claude", ready: true,
+    label: "Claude · WSL · claude-us", distribution: "claude-us" });
+  preferences.sessionInstances["claude:wsl:third"] = true;
+  assert.equal(context.enabledInstanceIds().includes("claude:wsl:third"), true);
+  assert.equal(context.newChatBackendOptions().some(option => option.value === "claude:wsl:third"), true);
+  for (const id of Object.keys(preferences.sessionInstances)) preferences.sessionInstances[id] = false;
+  assert.equal(context.newChatBackendOptions().length, 0, "允许所有实例关闭，不暗中重新启用默认实例");
+});
+
+test("实例偏好重新打开后保留全部关闭，草稿及模型上下文不跨 WSL 实例", () => {
+  const disk = storage();
+  const context = vm.createContext({ localStorage: disk, matchMedia: () => ({ matches: false }),
+    creating: true, creationBackend: "claude", creationInstanceId: "claude:wsl:1",
+    session: { claudeInstanceId: "claude:wsl:1" } });
+  vm.runInContext(app.slice(app.indexOf("const appearancePresets ="), app.indexOf("let ambientLightStatus =")), context);
+  disk.setItem("codex-elves-web-appearance", JSON.stringify({ sessionInstances: {}, sessionTypes: { codex: true, claude: true } }));
+  context.appearance = context.readAppearance();
+  assert.equal(context.sessionInstanceEnabled("codex:local"), false);
+  assert.equal(context.newChatBackendOptions().length, 0);
+  const a = context.newDraftKey("project", "claude", "claude:wsl:1");
+  const b = context.newDraftKey("project", "claude", "claude:wsl:2");
+  assert.notEqual(a, b);
+  assert.equal(context.newDraftKey("project", "claude"), a, "旧失败恢复只归属原默认实例");
+  const modelsA = context.modelContextKey();
+  context.creationInstanceId = "claude:wsl:2";
+  assert.notEqual(context.modelContextKey(), modelsA);
+  assert.equal(context.modelContext().instanceId, "claude:wsl:2");
+});
+
+test("设置强制切换新建类型时保留文字图片，清理旧模型目标并隔离原草稿", () => {
+  const selector = { value: "codex" }, saved = new Map();
+  const initial = { text: "继续这项工作", attachments: [{ name: "proof.png" }],
+    skills: [{ name: "codex-skill", path: "/skill" }], goalMode: "goal-id" };
+  let current = structuredClone(initial);
+  const context = vm.createContext({
+    creating: true, creationBackend: "codex", creationProject: "original-project", selectionVersion: 2,
+    selectedSkills: initial.skills, selectedGoal: initial.goalMode, selectedModel: "codex-model", selectedEffort: "xhigh",
+    appearance: { sessionTypes: { codex: false, claude: true } },
+    $: id => id === "#new-chat-backend" ? selector : null,
+    snapshotDraft: () => structuredClone(current),
+    rememberDraft: () => saved.set(context.draftKey(), structuredClone(current)),
+    storeDraft: (key, value) => saved.set(key, structuredClone(value)),
+    restoreDraft: key => { current = structuredClone(saved.get(key)); },
+    resetComposerOptions: () => { context.selectedModel = context.selectedEffort = ""; },
+    closePopup() {}, closeComposerMenus() {}, renderMessages() {}, updateComposer() {}, renderApprovals() {},
+    setSelectOptions: (node, options, value) => { node.value = value; node.selectOptions = options; },
+    randomId: () => "new-selection",
+  });
+  vm.runInContext(sourceSection("function draftKey()", "function storedDraft("), context);
+  vm.runInContext(sourceSection("function changeCreationBackend(", "function selectCreatedThread("), context);
+  context.setCreationBackend("claude");
+  assert.equal(context.creationProject, "original-project");
+  assert.equal(context.creationBackend, "claude");
+  assert.equal(selector.value, "claude:wsl:test");
+  assert.equal(context.selectionVersion, 3);
+  assert.equal(context.selectedModel, "");
+  assert.equal(context.selectedEffort, "");
+  assert.equal(context.selectedGoal, null);
+  assert.equal(context.selectedSkills.length, 0);
+  assert.deepEqual(current, { ...initial, skills: [], goalMode: null });
+  assert.deepEqual(saved.get("$new:original-project"), initial, "原 Codex 草稿仍可恢复");
+  context.creating = false;
+  context.setCreationBackend("codex");
+  assert.equal(context.creationBackend, "claude", "已创建会话不能通过此入口切换类型");
+});
+
+test("Claude 队列编辑使用会话图片能力，桌面离线不禁用保存且不借用其他会话能力", () => {
+  const id = "claude-01234567-89ab-4cde-8fab-0123456789ab";
+  const context = vm.createContext({
+    selectedId: id, thread: { id, backend: "claude", capabilities: { queuedImageEditing: true, queueEditRecovery: true } },
+    session: { capabilities: { queuedImageEditing: false, queueEditRecovery: false } },
+    editing: true, hasAttachments: true, editingQueuedMessage: { imageEditing: true },
+    composerAttachmentsPayload: () => [{ name: "new.png" }],
+  });
+  const unsupported = vm.runInContext(`() => {${sourceSection("  const unsupportedImages =", "  const queueImageNote =")}
+    return unsupportedImages; }`, context);
+  assert.equal(unsupported(), false);
+  assert.equal(context.queueCapability("queueEditRecovery"), true);
+  assert.equal(context.queueCapability("queueEditRecovery", "claude-11111111-1111-4111-8111-111111111111"), false);
+  context.thread.capabilities.queuedImageEditing = false;
+  context.session.capabilities.queuedImageEditing = true;
+  assert.equal(unsupported(), true, "Codex 的能力不能冒充 Claude 支持");
+});
+
+test("指令编辑将CRLF规范为textarea文本并恢复原换行，不制造未保存变更", () => {
+  const context = vm.createContext();
+  vm.runInContext(app.slice(app.indexOf("const normalizeInstructionText ="), app.indexOf("const instructionDrafts =")), context);
+  context.original = "# 全局指令\r\n中文说明。\r\n";
+  assert.equal(vm.runInContext('instructionFileText(normalizeInstructionText(original), "\\r\\n")', context), context.original);
+  assert.equal(vm.runInContext('normalizeInstructionText(original)', context), "# 全局指令\n中文说明。\n");
+});
+
+function selectComponentHarness() {
+  const opened = [], refreshed = [];
+  function element(tag, _class = "", text = "") {
+    const attributes = new Map();
+    return { tag, textContent: text, value: "", disabled: false, children: [], events: [],
+      setAttribute(name, value) { attributes.set(name, String(value)); },
+      getAttribute(name) { return attributes.get(name) ?? null; },
+      dispatchEvent(event) { this.events.push(event); this["on" + event.type]?.({ target: this, type: event.type }); return true; },
+      append(...children) { this.children.push(...children); },
+      replaceChildren(...children) { this.children = children; } };
+  }
+  const component = createSelectComponent({
+    element, icon: name => element("span", "ui-icon", name),
+    button(text, label, action) {
+      const node = element("button", "", text); node.setAttribute("aria-label", label); node.onclick = action; return node;
+    },
+    togglePopup: node => opened.push({ node }),
+    openPopup: (node, options) => opened.push({ node, ...options }),
+    refreshPopup: node => refreshed.push(node),
+  });
+  return { element, ...component, opened, refreshed };
+}
+
+test("统一 Select 的程序同步不触发 change，用户选择只触发一次并拒绝禁用项", () => {
+  const h = selectComponentHarness();
+  const node = h.selectControl("weight", "程序字重", [
+    { value: "400", label: "常规" }, { value: "500", label: "中等" }, { value: "600", label: "半粗", disabled: true },
+  ], 400);
+  assert.equal(node.value, "400");
+  assert.equal(node.children[0].textContent, "常规");
+  assert.equal(node.getAttribute("aria-haspopup"), "listbox");
+  assert.equal(h.commitSelectValue(node, 500), true);
+  assert.equal(node.value, "500"); assert.equal(node.events.length, 1);
+  assert.equal(node.events[0].bubbles, true);
+  assert.equal(h.commitSelectValue(node, "500"), false);
+  assert.equal(h.commitSelectValue(node, "600"), false);
+  assert.equal(h.commitSelectValue(node, "missing"), false);
+  h.setSelectValue(node, "400");
+  assert.equal(node.events.length, 1);
+  node.disabled = true;
+  assert.equal(h.commitSelectValue(node, "500"), false);
+  assert.equal(node.events.length, 1);
+});
+
+test("统一 Select 保留失效目标及空状态，键盘打开不越过禁用或输入法状态", () => {
+  const h = selectComponentHarness(), node = h.selectControl("environment", "指令环境", [], "");
+  assert.equal(node.children[0].textContent, "暂无可用选项");
+  h.setSelectOptions(node, [{ value: "old", label: "原环境（暂不可用）", disabled: true },
+    { value: "local", label: "本机" }], "old");
+  assert.equal(node.value, "old");
+  assert.equal(node.children[0].textContent, "原环境（暂不可用）");
+  assert.equal(h.commitSelectValue(node, "old"), false);
+  let prevented = 0;
+  for (const key of ["ArrowDown", "ArrowUp", "Home", "End"])
+    node.onkeydown({ key, preventDefault() { ++prevented; } });
+  assert.equal(prevented, 4);
+  assert.deepEqual(h.opened.map(entry => entry.edge), [null, null, "first", "last"]);
+  node.disabled = true;
+  node.onkeydown({ key: "Home", preventDefault() { throw new Error("禁用时不能打开"); } });
+  node.disabled = false;
+  node.onkeydown({ key: "Home", isComposing: true, preventDefault() { throw new Error("输入法组合时不能打开"); } });
+  assert.equal(h.opened.length, 4);
+});
+
+function instructionSettingsHarness(api) {
+  const select = selectComponentHarness(), { element } = select;
+  const context = vm.createContext({ api, element, setSelectOptions: select.setSelectOptions,
+    connected: true, session: { device: { id: "instruction-device" } },
+    privateInputScope: () => "instruction-device", confirmAction: async () => true,
+    $: (id, dialog) => dialog.nodes.get(id), sidebar: { projects: [] } });
+  vm.runInContext(sourceSection("const normalizeInstructionText =", "function openAppearance("), context);
+  function mount({ withDetectionControls = false } = {}) {
+    const nodes = new Map();
+    for (const name of ["content", "status", "save", "reload", "path"])
+      nodes.set("#instruction-" + name, element("input"));
+    nodes.set("#instruction-instance", select.selectControl("instruction-instance", "会话类型实例", [], ""));
+    if (withDetectionControls) for (const name of ["detect-environments", "environments-status", "environments"])
+      nodes.set("#appearance-" + name, element("div"));
+    const dialog = { isConnected: true, nodes };
+    const settings = context.mountRemoteSettings(dialog);
+    return { dialog, settings, get: id => nodes.get("#" + id),
+      async chooseInstance(id) {
+        select.commitSelectValue(nodes.get("#instruction-instance"), id);
+        await new Promise(resolve => setImmediate(resolve));
+      },
+      edit(text) { const input = nodes.get("#instruction-content"); input.value = text; input.oninput(); } };
+  }
+  return { context, mount };
+}
+
+test("指令保存迟到不能清掉重新打开窗口后的新草稿", async () => {
+  const pendingSave = deferred();
+  let stored = { content: "旧指令\n", revision: "r1", exists: true, path: "/fixture/AGENTS.md" };
+  const h = instructionSettingsHarness((path, body) => {
+    if (path.endsWith("environments")) return Promise.resolve({ environments: [
+      { id: "local", label: "本机" },
+      { id: "wsl:claude-us", label: "WSL · claude-us", executables: { claude: "/fixture/bin/claude" } },
+      { id: "wsl:unavailable", label: "不可用环境", error: "模拟环境不可用" },
+    ], instances: [
+      { id: "codex:local", label: "Codex · 本机", backend: "codex", environmentId: "local" },
+      { id: "claude:wsl:fixture", label: "Claude · WSL · claude-us", backend: "claude", environmentId: "wsl:claude-us" },
+      { id: "claude:wsl:unavailable", label: "Claude · 不可用环境", backend: "claude", environmentId: "wsl:unavailable" },
+    ] });
+    return Object.hasOwn(body, "content") ? pendingSave.promise : Promise.resolve(stored);
+  });
+  const a = h.mount();
+  await a.settings.show("instructions");
+  assert.deepEqual(Array.from(a.get("instruction-instance").selectOptions.filter(option => !option.disabled), option => option.value),
+    ["codex:local", "claude:wsl:fixture"], "所有正常实例均可编辑全局指令，不按发行版名称限制");
+  a.edit("第一次保存\n");
+  const save = a.get("instruction-save").onclick();
+  a.settings.dispose(); a.dialog.isConnected = false;
+  const b = h.mount();
+  await b.settings.show("instructions");
+  b.edit("第二个窗口尚未保存的新草稿\n");
+  stored = { ...stored, content: "第一次保存\n", revision: "r2" };
+  pendingSave.resolve(stored);
+  await save;
+  b.settings.dispose(); b.dialog.isConnected = false;
+  const c = h.mount();
+  await c.settings.show("instructions");
+  assert.equal(c.get("instruction-content").value, "第二个窗口尚未保存的新草稿\n");
+  assert.match(c.get("instruction-status").textContent, /原文件也已变化/);
+});
+
+test("重新检测实例失效时保留明确的目标与草稿，并禁用保存", async () => {
+  let available = true, writes = 0;
+  const h = instructionSettingsHarness(async (path, body) => {
+    if (path.endsWith("environments")) return { environments: available
+      ? [{ id: "wsl:test", label: "测试 WSL", executables: { claude: "/fixture/bin/claude" } }, { id: "local", label: "本机" }]
+      : [{ id: "local", label: "本机" }], instances: [
+        ...(available ? [{ id: "claude:wsl:test", backend: "claude", label: "Claude · 测试 WSL", environmentId: "wsl:test" }] : []),
+        { id: "codex:local", backend: "codex", label: "Codex · 本机", environmentId: "local" },
+      ] };
+    if (Object.hasOwn(body, "content")) ++writes;
+    return { content: "WSL 指令", revision: "r1", exists: true, path: "/test/AGENTS.md" };
+  });
+  const page = h.mount({ withDetectionControls: true });
+  await page.settings.show("instructions");
+  await page.chooseInstance("claude:wsl:test");
+  page.edit("保留 WSL 草稿");
+  available = false;
+  await page.get("appearance-detect-environments").onclick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(page.get("instruction-instance").value, "claude:wsl:test", "不能自动跳成本机并保留旧实例的正文");
+  assert.equal(page.get("instruction-instance").selectOptions.find(option => option.value === "claude:wsl:test").disabled, true);
+  assert.equal(page.get("instruction-content").value, "保留 WSL 草稿");
+  assert.equal(page.get("instruction-save").disabled, true);
+  await page.get("instruction-save").onclick();
+  assert.equal(writes, 0);
+});
+
+test("全局指令只按实例读写，实例开关不限制编辑，草稿和换行各自保留", async () => {
+  const catalog = { environments: [
+    { id: "local", user: "" }, { id: "wsl:fixture", user: "fixture-user", executables: { claude: "/fixture/bin/claude" } },
+  ], instances: [
+    { id: "codex:local", backend: "codex", label: "Codex · 本机", environmentId: "local", user: "" },
+    { id: "claude:wsl:fixture", backend: "claude", label: "Claude · WSL · fixture", environmentId: "wsl:fixture", user: "fixture-user" },
+  ] };
+  const stored = new Map([
+    ["codex:local", { content: "Codex 原文\r\n", revision: "c1", exists: true, path: "/fixture/.codex/AGENTS.md" }],
+    ["claude:wsl:fixture", { content: "Claude 原文\r\n", revision: "a1", exists: true, path: "/fixture/.claude/CLAUDE.md" }],
+  ]), requests = [];
+  const h = instructionSettingsHarness(async (path, body) => {
+    if (path.endsWith("environments")) return catalog;
+    requests.push({ ...body });
+    if (Object.hasOwn(body, "content")) stored.set(body.instanceId,
+      { ...stored.get(body.instanceId), content: body.content, revision: "saved" });
+    return stored.get(body.instanceId);
+  });
+  h.context.appearance.sessionInstances = { "codex:local": true, "claude:wsl:fixture": false };
+  const page = h.mount();
+  await page.settings.show("instructions");
+  page.edit("Codex 未保存草稿\n");
+  await page.chooseInstance("claude:wsl:fixture");
+  assert.equal(page.get("instruction-content").value, "Claude 原文\n");
+  page.edit("Claude 全局新指令\n");
+  await page.get("instruction-save").onclick();
+  assert.deepEqual(requests.at(-1), { instanceId: "claude:wsl:fixture",
+    content: "Claude 全局新指令\r\n", expectedRevision: "a1" });
+  assert.equal(page.get("instruction-save").disabled, true);
+  await page.chooseInstance("codex:local");
+  assert.equal(page.get("instruction-content").value, "Codex 未保存草稿\n");
+  assert.equal(stored.get("codex:local").content, "Codex 原文\r\n");
+  assert.ok(requests.filter(body => !Object.hasOwn(body, "content"))
+    .every(body => Object.keys(body).join() === "instanceId"));
+});
+
+test("切换指令实例后忽略旧实例的迟到回包，不能覆盖当前文件", async () => {
+  const pending = deferred();
+  const h = instructionSettingsHarness(async (path, body) => {
+    if (path.endsWith("environments")) return { environments: [{ id: "local" },
+      { id: "wsl:fixture", executables: { claude: "/fixture/bin/claude" } }], instances: [
+      { id: "codex:local", backend: "codex", label: "Codex · 本机", environmentId: "local" },
+      { id: "claude:wsl:fixture", backend: "claude", label: "Claude · WSL · fixture", environmentId: "wsl:fixture" },
+    ] };
+    if (body.instanceId === "codex:local") return pending.promise;
+    return { content: "当前 Claude 指令", revision: "a1", exists: true, path: "/fixture/CLAUDE.md" };
+  });
+  const page = h.mount(), initialRead = page.settings.show("instructions");
+  await new Promise(resolve => setImmediate(resolve));
+  await page.chooseInstance("claude:wsl:fixture");
+  pending.resolve({ content: "迟到 Codex 指令", revision: "c1", exists: true, path: "/fixture/AGENTS.md" });
+  await initialRead;
+  assert.equal(page.get("instruction-content").value, "当前 Claude 指令");
+  assert.equal(page.get("instruction-path").textContent, "/fixture/CLAUDE.md");
+});
+
+test("历史保留实例缺少安装或用户不匹配时不能读取全局指令", async () => {
+  let reads = 0;
+  const h = instructionSettingsHarness(async (path, body) => {
+    if (path.endsWith("environments")) return { environments: [
+      { id: "local", user: "" }, { id: "wsl:uninstalled", user: "fixture", executables: {} },
+      { id: "wsl:other-user", user: "current", executables: { claude: "/fixture/bin/claude" } },
+    ], instances: [
+      { id: "codex:local", backend: "codex", label: "Codex · 本机", environmentId: "local", user: "" },
+      { id: "claude:wsl:uninstalled", backend: "claude", label: "Claude · 已卸载", environmentId: "wsl:uninstalled", user: "fixture" },
+      { id: "claude:wsl:other-user", backend: "claude", label: "Claude · 其他用户", environmentId: "wsl:other-user", user: "saved" },
+    ] };
+    ++reads;
+    assert.equal(body.instanceId, "codex:local");
+    return { content: "Codex 全局指令", revision: "c1", exists: true, path: "/fixture/AGENTS.md" };
+  });
+  const page = h.mount();
+  await page.settings.show("instructions");
+  for (const id of ["claude:wsl:uninstalled", "claude:wsl:other-user"]) {
+    assert.equal(page.get("instruction-instance").selectOptions.find(option => option.value === id).disabled, true);
+    await page.chooseInstance(id);
+    assert.equal(page.get("instruction-instance").value, "codex:local");
+  }
+  assert.equal(reads, 1);
+});
+
+test("Claude 中断修复退役旧气泡并重算分页，同时保留待发送输入和较新的原生消息", () => {
+  const context = vm.createContext({
+    turns: new Map([
+      ["real", { _nativeUserId: "real" }],
+      ["interruption", { _nativeUserId: "interruption", items: [{ id: "control-item" }] }],
+      ["pending", { items: [{ id: "pending-item", remotePendingInput: true }] }],
+      ["new-live", { _nativeUserId: "new-live" }],
+    ]),
+    turnVersions: new Map([["new-live", 20]]), itemVersions: new Map(), partialItems: new Set(["interruption:control-item"]),
+    transcriptEvents: new Map([["old-event", { turnId: "interruption" }]]), messageVersion: 20,
+  });
+  assert.equal(context.retireClaudeHistoryTurns(["older", "real"], 10, 21), true);
+  assert.deepEqual([...context.turns.keys()], ["real", "pending", "new-live"]);
+  assert.equal(context.turnVersions.get("interruption"), 21);
+  assert.equal(context.itemVersions.get("interruption:control-item"), 21);
+  assert.equal(context.partialItems.size, 0); assert.equal(context.transcriptEvents.size, 0);
+  assert.equal(context.claudeHistoryCursor(["older", "real"]), "1");
+  context.turns.set("older", { _nativeUserId: "older" });
+  assert.equal(context.claudeHistoryCursor(["older", "real"]), null);
+  assert.equal(context.claudeHistoryCursor(undefined), undefined);
 });
 
 test("自动主题浅色阈值默认10，旧设置兼容且保存值收敛至5至40", () => {
@@ -823,7 +1484,8 @@ test("Windows 打包拒绝缺少分支信息、运行模式或压缩恢复的旧
     readFile(new URL("../crates/codex-elves-core/src/remote_access/workspace.rs", import.meta.url), "utf8"),
   ]);
   const current = { backend, service, workspace, app, native };
-  assert.deepEqual(verify(current), { protocol: 5, bridge: 139 });
+  // 原生队列诊断升级到桥接 142，打包正例同步；下方旧协议和能力缺失的拒绝断言保留。
+  assert.deepEqual(verify(current), { protocol: 5, bridge: 142 });
   for (const obsolete of [2, 3, 4])
     assert.throws(() => verify({ ...current, service: service.replace("PROTOCOL_VERSION: u32 = 5", `PROTOCOL_VERSION: u32 = ${obsolete}`) }), /后台协议不能低于 5/);
   assert.throws(() => verify({ ...current, workspace: workspace.replace("async fn branch_metadata(", "async fn obsolete_metadata(") }), /缺少真实分支/);
@@ -1615,6 +2277,64 @@ test("普通队列仍按待执行显示，保留引导、编辑、删除及排�
   }
 });
 
+test("Claude 仅按原生能力提供一次整队立即执行，不开放逐条编辑、删除或排序", () => {
+  const messages = ["a", "b"].map(id => ({ id, text: `待执行-${id}` }));
+  const { context } = queueDeliveryHarness(messages), calls = [];
+  context.thread.backend = "claude";
+  context.thread.status = { type: "active" };
+  context.thread.capabilities = { queueSendNow: true };
+  context.steerQueuedMessage = (threadId, messageId) => calls.push({ threadId, messageId });
+  context.openPopup = () => assert.fail("Claude 不应通过右键打开 Codex 队列菜单");
+  const queue = context.renderQueuedMessages(messages);
+  const actions = queue.children.flatMap(row =>
+    row.children.filter(node => node.className === "queued-steer-button"));
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].text, "立即执行全部");
+  assert.equal(actions[0].disabled, false);
+  assert.equal(context.queueReorderAvailable(), false);
+  for (const row of queue.children) {
+    assert.equal(row.children.some(node => node.className === "queued-menu-button"), false);
+    row.oncontextmenu({ preventDefault() {}, target: { closest: () => null } });
+  }
+  actions[0].action();
+  assert.deepEqual(calls, [{ threadId: "main", messageId: "a" }]);
+  context.thread.capabilities.queueSendNow = false;
+  assert.equal(context.renderQueuedMessages(messages).children.some(row =>
+    row.children.some(node => node.className === "queued-steer-button")), false);
+});
+
+test("Claude 远程待发送队列逐条引导并开放编辑删除排序，原生已接收记录保持只读", () => {
+  const messages = ["B", "C", "D"].map((id,index) => ({
+    id, clientUserMessageId:id, createdAt:index+1, text:`待发送-${id}`,
+    remoteQueueSource:"remote", submission:{status:"queued"},
+  }));
+  const {context}=queueDeliveryHarness(messages), calls=[];
+  context.thread.backend="claude";
+  context.thread.status={type:"active"};
+  context.thread.capabilities={remoteQueue:true,queueSendNow:false};
+  context.steerQueuedMessage=(threadId,messageId)=>calls.push({threadId,messageId});
+  const queue=context.renderQueuedMessages(messages);
+  assert.equal(queue.attributes["aria-label"],"远程待发送队列，3 条待执行");
+  assert.equal(context.queueReorderAvailable(),true);
+  for (const row of queue.children) {
+    const action=row.children.find(n=>n.className==="queued-steer-button");
+    assert.equal(action.children.at(-1).text,"引导");
+    assert.equal(action.disabled,false);
+    const menu=row.children.find(n=>n.className==="queued-menu-button");
+    assert.equal(menu.menuOptions[0].disabled,false);
+    assert.equal(menu.menuOptions[1].label,"删除排队消息");
+    assert.notEqual(row.children[0].hidden,true);
+  }
+  queue.children[1].children.find(n=>n.className==="queued-steer-button").action();
+  assert.deepEqual(calls,[{threadId:"main",messageId:"C"}]);
+  const accepted={...messages[0],remoteQueueSource:"native",remoteDeliveryState:"accepted",
+    submission:{status:"accepted"},canSendNow:false};
+  context.thread.queuedMessages=[accepted,...messages.slice(1)];
+  const readonly=context.renderQueuedMessages(context.thread.queuedMessages).children[0];
+  assert.equal(readonly.children.find(n=>n.className==="queued-steer-button").disabled,true);
+  assert.equal(readonly.children.some(n=>n.className==="queued-menu-button"),false);
+});
+
 test("原生暂停的队列消息显示可用重试按钮，点击仍操作原消息", () => {
   for (const submission of [undefined, { status: "queued" }]) {
     const message = { id: "original-queue", text: "原图文消息", clientUserMessageId: "original-client",
@@ -1871,6 +2591,7 @@ function queuedEditFeedbackHarness() {
     session: { device: { id: "device-a" }, capabilities: {} },
     sending: null, compacting: false, goalMode: false, editing: true, editingMessage: null, active: false, hasAttachments: false,
     unsupportedImages: false, unsupportedProjectless: false, goalReason: "", queueOnly: false,
+    sessionTypeEnabled: true,
     compactionSendReason: "", compaction: { state: "idle" }, deleting: false, prompt: h.prompt.value,
     pageLeaving: false, stream: null, composerDiagnosticState: "", creating: false,
     privateInputScope: () => "device-a", recordRuntimeDiagnostic() {},
@@ -1899,6 +2620,92 @@ function queuedEditFeedbackHarness() {
   context.updateComposer();
   return { ...h, response, area, send, status };
 }
+
+function compactionComposerHarness() {
+  const h = queuedEditFeedbackHarness(), { context } = h;
+  Object.assign(context, {
+    editingQueuedMessage: null, editing: false, prompt: "", active: false,
+    compacting: true, compaction: { state: "running", nativeConfirmed: true },
+    compactionSendReason: "当前服务不支持压缩期间排队发送", queueOnly: false,
+    currentCompaction: () => context.compaction, isActiveThread: () => context.active,
+    updateComposer: () => context.renderSendFeedback(),
+  });
+  vm.runInContext(sourceSection("async function stopGeneration(", "async function applyCompactionReceipt("), context);
+  context.updateComposer();
+  return h;
+}
+
+test("已确认压缩先于线程执行状态到达时，空输入显示可用停止按钮，有内容仍可排队发送", () => {
+  const h = compactionComposerHarness();
+  assert.equal(h.send.dataset.action, "stop");
+  assert.equal(h.send.disabled, false, "排队发送能力缺失不能禁用停止压缩");
+  assert.ok(h.send.querySelector(".stop"));
+  assert.equal(h.send.attributes["aria-label"], "停止压缩");
+  assert.equal(h.send.title, "停止压缩");
+  h.context.compactionSendReason = ""; h.context.queueOnly = true;
+  for (const [prompt, hasAttachments] of [["补充消息", false], ["", true]]) {
+    Object.assign(h.context, { prompt, hasAttachments });
+    h.context.updateComposer();
+    assert.equal(h.send.dataset.action, "send");
+    assert.equal(h.send.disabled, false);
+    assert.ok(h.send.querySelector(".arrowUp"));
+    assert.equal(h.send.attributes["aria-label"], "发送到原生消息队列");
+  }
+  h.context.prompt = ""; h.context.hasAttachments = false; h.context.compacting = false;
+  h.context.compaction = { state: "idle" }; h.context.queueOnly = false;
+  h.context.updateComposer();
+  assert.equal(h.send.dataset.action, "send");
+  assert.equal(h.send.disabled, true, "压缩结束后恢复空输入的发送禁用状态");
+});
+
+test("未确认或未知压缩保留发送锁定，已确认压缩仍受只读和离线限制", async () => {
+  const h = compactionComposerHarness(), writes = [];
+  h.context.mutate = async (...input) => { writes.push(input); };
+  for (const state of ["pending", "unknown"]) {
+    h.context.compaction = { state };
+    h.context.compactionSendReason = "等待原压缩回执";
+    h.context.updateComposer();
+    assert.equal(h.send.dataset.action, "send");
+    assert.equal(h.send.disabled, true);
+    await h.context.stopGeneration();
+  }
+  assert.equal(writes.length, 0);
+  h.context.compaction = { state: "running" };
+  for (const lockedBy of ["read-only", "offline"]) {
+    h.context.threadReadOnly = () => lockedBy === "read-only";
+    h.context.connected = lockedBy !== "offline";
+    h.context.updateComposer();
+    assert.equal(h.send.dataset.action, "stop");
+    assert.equal(h.send.disabled, true);
+    await h.context.stopGeneration();
+  }
+  assert.equal(writes.length, 0);
+});
+
+test("停止压缩实际提交当前会话停止请求，在途重复点击不重复提交，回读后恢复发送状态", async () => {
+  for (const compaction of [{ state: "running" }, { state: "pending", acknowledged: true },
+    { state: "pending", nativeConfirmed: true }]) {
+    const h = compactionComposerHarness(), response = deferred(), writes = [];
+    h.context.compaction = compaction;
+    h.context.mutate = async (action, payload) => { writes.push({ action, ...payload }); return response.promise; };
+    let reloaded = 0;
+    h.context.reloadThread = async () => {
+      reloaded++; h.context.compaction = { state: "idle" }; h.context.compacting = false;
+      h.context.compactionSendReason = "";
+    };
+    const operation = h.context.stopGeneration();
+    assert.equal(h.context.stopping, true);
+    assert.equal(h.send.disabled, true);
+    await h.context.stopGeneration();
+    assert.deepEqual(writes, [{ action: "stop", threadId: h.context.selectedId }]);
+    response.resolve({ ok: true });
+    await operation;
+    assert.equal(reloaded, 1);
+    assert.equal(h.context.stopping, false);
+    assert.equal(h.send.dataset.action, "send");
+    assert.equal(h.send.disabled, true);
+  }
+});
 
 test("取消队列编辑立即显示取消中和spinner，明确失败后恢复原标签和可编辑状态", async () => {
   const h = queuedEditFeedbackHarness(), operation = h.context.submitQueuedMessageEdit(true);
@@ -2454,6 +3261,104 @@ function sourceSection(start, end) {
   assert.ok(from >= 0 && to > from);
   return app.slice(from, to);
 }
+
+function mermaidRootsHarness() {
+  const observers = [], rendered = [];
+  class Observer {
+    constructor(callback, options) {
+      this.callback = callback; this.options = options; this.blocks = new Set(); this.disconnected = false;
+      observers.push(this);
+    }
+    observe(block) { this.blocks.add(block); }
+    unobserve(block) { this.blocks.delete(block); }
+    disconnect() { this.disconnected = true; this.blocks.clear(); }
+  }
+  const context = vm.createContext({
+    IntersectionObserver: Observer, document: { documentElement: { dataset: { theme: "light" } } },
+    renderMermaidBlock: (block, callback) => { rendered.push(block); callback?.(); },
+  });
+  vm.runInContext(markdownRendererSource.slice(markdownRendererSource.indexOf("  const diagramRoots ="),
+    markdownRendererSource.indexOf("  function renderMermaidBlock(")), context);
+  const root = name => {
+    const block = { name, isConnected: true, querySelector: () => ({ textContent: "flowchart TD; A --> B" }) };
+    return { isConnected: true, blocks: [block], querySelectorAll() { return this.blocks; },
+      contains(value) { return this.blocks.includes(value); } };
+  };
+  return { context, observers, rendered, root };
+}
+
+test("消息与文件分别观察 Mermaid，打开文件不会取消消息里的离屏图表", () => {
+  const h = mermaidRootsHarness(), messages = h.root("message"), files = h.root("file");
+  h.context.renderMermaidBlocks(messages);
+  h.context.renderMermaidBlocks(files);
+  assert.equal(h.observers.length, 2);
+  assert.equal(h.observers[0].disconnected, false);
+  assert.equal(h.observers[0].options.root, messages);
+  assert.equal(h.observers[1].options.root, files);
+  for (const observer of h.observers)
+    observer.callback([...observer.blocks].map(target => ({ target, isIntersecting: true })));
+  assert.deepEqual(h.rendered.map(block => block.name), ["message", "file"]);
+  h.context.renderMermaidBlocks(messages);
+  assert.equal(h.observers.length, 2, "重新扫描复用当前容器的观察器");
+});
+
+test("文件关闭、容器移除或主题更新后，旧 Mermaid 任务不能写回新内容", () => {
+  const h = mermaidRootsHarness(), messages = h.root("message"), files = h.root("file");
+  h.context.renderMermaidBlocks(messages); h.context.renderMermaidBlocks(files);
+  const message = messages.blocks[0], file = files.blocks[0];
+  message.mermaidKey = "message-key"; file.mermaidKey = "file-key";
+  h.context.releaseMermaidBlocks(files);
+  assert.equal(h.observers[1].disconnected, true);
+  assert.equal(h.context.currentDiagramBlock(file, "file-key"), false);
+  assert.equal(h.context.currentDiagramBlock(message, "message-key"), true);
+  message.mermaidKey = "new-theme";
+  assert.equal(h.context.currentDiagramBlock(message, "old-theme"), false);
+  assert.equal(message.mermaidKey, "new-theme", "旧任务不能清除新主题标识");
+  h.context.renderMermaidBlocks(files);
+  files.isConnected = false;
+  h.context.renderMermaidBlocks(messages);
+  assert.equal(h.observers[2].disconnected, true);
+});
+
+test("文件图表只在当前 Markdown 预览扫描，并使用文件自己的布局事务", () => {
+  const calls = [], body = {};
+  const context = vm.createContext({
+    disposed: false, route: { kind: "file" }, contentResponse: { kind: "text" }, sourceMode: false, body,
+    renderMermaidBlocks: (root, _onRender, withLayout) => { calls.push(root); withLayout(() => calls.push("change")); },
+    withStableMessageLayout: (root, change) => { assert.equal(root, body); calls.push("layout"); change(); },
+  });
+  const source = awaitSource => awaitSource.slice(awaitSource.indexOf("  function refreshFileDiagrams()"),
+    awaitSource.indexOf("  const diagramThemeObserver ="));
+  vm.runInContext(source(sessionFiles), context);
+  context.refreshFileDiagrams();
+  assert.deepEqual(calls, [body, "layout", "change"]);
+  for (const change of [
+    () => { context.sourceMode = true; },
+    () => { context.sourceMode = false; context.route = { kind: "list" }; },
+    () => { context.route = { kind: "file" }; context.disposed = true; },
+  ]) { change(); context.refreshFileDiagrams(); }
+  assert.equal(calls.length, 3, "源码、目录和已销毁页面不继续渲染");
+});
+
+test("首次目录尚未返回时可以搜索文件，不把两侧空 root 当成缓存命中", async () => {
+  for (const listResponse of [null, undefined]) {
+    const results = [{ name: "diagram.md", path: "docs/diagram.md", kind: "file" }];
+    const reads = [];
+    const context = vm.createContext({
+      responses: new Map(), listResponse, searchMatches: null, searchEpoch: 0, searchController: null,
+      route: { kind: "list" }, AbortController, listStatus: {},
+      listing: { location: { set() {} } }, renderDirectory() {}, message() {},
+      read: async (...input) => { reads.push(input); return { root: "/project", files: results, truncated: false }; },
+    });
+    vm.runInContext(sessionFiles.slice(sessionFiles.indexOf("  async function searchProject("),
+      sessionFiles.indexOf("  async function openFile(")), context);
+    await context.searchProject("diagram.md");
+    assert.equal(reads.length, 1);
+    assert.equal(reads[0][3], "diagram.md");
+    assert.equal(context.searchMatches, results);
+  }
+});
+
 function deferred() {
   let resolve, reject;
   const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
@@ -2567,8 +3472,9 @@ function queuedReceiptHarness({ disk = storage(), refresh = async () => {} } = {
     selectedId: "main", thread: { id: "main", queuedMessages: [{ id: "queued-a", text: "原队列正文" }] },
     selectionVersion: 1, selectionToken: "selected-a", recoveryGeneration: 0, recoveryScope: null,
     connected: true, busy: false, stopping: false, pending: null, pendingTimer: null, sending: null,
+    claudeThreadId: id => typeof id === "string" && id.startsWith("claude-"),
     queuedActionBusy: new Set(), queuedEditActions: new Set(["beginQueuedEdit", "editQueued", "cancelQueuedEdit"]),
-    pendingSteer: null, queueVersion: 0, goalVersion: 0, submittedDrafts: new Map(),
+    pendingSteer: null, turns: new Map(), queueVersion: 0, goalVersion: 0, submittedDrafts: new Map(),
     goalComposerRecoveries: new Map(), editingMessage: null,
     privateInputScope: value => JSON.stringify([value?.device?.id, value?.device?.createdAtMs]),
     goalComposerAction: () => false, goalComposerStorageRecord: value => value,
@@ -2605,6 +3511,7 @@ function queuedReceiptHarness({ disk = storage(), refresh = async () => {} } = {
     sourceSection("function ordinaryInputRecord(", "function rememberDraft("),
     sourceSection("async function mutate(", "function acceptedSendItem("),
     sourceSection("async function resolvePending()", "let loginPageCleanup"),
+    sourceSection("function pendingSteerDelivered(", "function renderQueuedMessages("),
     sourceSection("async function removeQueuedMessage(", "async function beginQueuedMessageEdit("),
     sourceSection("async function stopGeneration()", "async function applyCompactionReceipt("),
     `function renderPending(){${sourceSection("  if (pending && (!sending || pending.payload !== sending.payload)",
@@ -2623,6 +3530,156 @@ function queuedReceiptHarness({ disk = storage(), refresh = async () => {} } = {
     ? context.steerQueuedMessage("main", "queued-a") : context.removeQueuedMessage("main", "queued-a");
   return { context, requests, notices, refreshes, timers, draft, area, disk, clearedDrafts, receipt, completed, invoke };
 }
+
+test("Claude 整队立即执行只等待原生历史，不产生逐条引导的重复预览", async () => {
+  const h = queuedReceiptHarness();
+  h.context.thread.backend = "claude";
+  const operation = h.invoke("steerQueued");
+  assert.equal(h.context.pendingSteer, null);
+  h.receipt(0, "completed", { ok: true, threadId: "main", scope: "all",
+    queuedMessages: h.context.thread.queuedMessages, queuedEdits: [] });
+  await operation;
+  assert.equal(h.context.pendingSteer, null);
+  assert.equal(h.context.pending, null);
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.draft.text, "操作期间保留的普通草稿");
+});
+
+test("侧边引导原生正文早于回执到达时，立即按消息身份隐藏临时预览", async () => {
+  const h = queuedReceiptHarness();
+  h.context.thread.queuedMessages[0].clientUserMessageId = "old-client";
+  const operation = h.invoke("steerQueued"), preview = h.context.pendingSteer;
+  assert.equal(h.context.pendingSteerTurn().items.length, 1);
+  h.context.turns.set("active-turn", { id: "active-turn", status: "inProgress", items: [
+    { id: "original", type: "userMessage", clientId: "initial-client",
+      content: [{ type: "text", text: preview.text }] },
+  ] });
+  assert.ok(h.context.pendingSteerTurn(), "同文初始问题不能被误判为引导已送达");
+  h.context.turns.get("active-turn").items.push({
+    id: "server-steer", type: "userMessage", clientId: "restored-client",
+    restoreMessage: { id: "queued-a" }, content: [{ type: "text", text: preview.text }],
+  });
+  assert.equal(h.context.pendingSteerTurn(), null, "回执未返回也不能再显示第二个正文气泡");
+  h.completed(0);
+  await operation;
+  assert.equal(h.context.pendingSteer, null);
+  assert.equal(h.requests.length, 1);
+});
+
+test("侧边引导成功后沿用原预览身份，历史读取完成会清理且不会清掉后续预览", async () => {
+  const reload = deferred(), h = queuedReceiptHarness({ refresh: () => reload.promise });
+  const operation = h.invoke("steerQueued"), preview = h.context.pendingSteer;
+  h.completed(0);
+  await operation;
+  assert.equal(h.context.pendingSteer, preview);
+  assert.equal(preview.turnId, "active-turn");
+  reload.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.context.pendingSteer, null, "成功后的异步读取必须能清掉本次预览");
+  const laterReload = deferred(), later = queuedReceiptHarness({ refresh: () => laterReload.promise });
+  const laterOperation = later.invoke("steerQueued");
+  later.completed(0);
+  await laterOperation;
+  const nextPreview = { threadId: "main", messageId: "queued-b", text: "下一条消息" };
+  later.context.pendingSteer = nextPreview;
+  laterReload.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(later.context.pendingSteer, nextPreview);
+});
+
+function nativeSteerHistoryHarness() {
+  const context = vm.createContext({
+    array: value => Array.isArray(value) ? value : [],
+    failure: (code, message) => Object.assign(new Error(message), { code }),
+    HISTORY_ITEM_PAGE_LIMIT: 40, timestamp: value => Number.isFinite(value) ? value : null,
+    messageActionManager() {}, nativeConversationTurns: value => value.turns,
+    nativeTurnId: turn => turn.turnId, nativeTurnStatus: turn => turn.status,
+    initialUserMessage: turn => turn?.items.find(item => item.type === "userMessage"),
+    subagentIdentity: () => null, editableMessageState: () => ({ metadata: null }),
+    manager: { getConversation: () => context.conversation },
+  });
+  vm.runInContext(native.slice(native.indexOf("  function nativeDisplayMessageItem("),
+    native.indexOf("  async function requestClientNativeRpc("))
+    + native.slice(native.indexOf("  function nativeAssistantSentAtMs("),
+      native.indexOf("  async function editLastMessage(")), context);
+  return context;
+}
+
+test("侧边引导正文与确认共用 ID 时，执行中、结束后分页及重建读取都保留一份图文", () => {
+  const h = nativeSteerHistoryHarness();
+  const content = [{ type: "text", text: "同文引导" }, { type: "image", url: "inline:image" }];
+  const accepted = id => ({ id: `local-${id}`, type: "steeringUserMessage", status: "accepted",
+    serverUserMessageId: id, clientUserMessageId: `client-${id}`, input: structuredClone(content),
+    restoreMessage: { id: `queue-${id}`, createdAt: 2000 } });
+  const turn = { turnId: "active-turn", status: "completed", turnStartedAtMs: 1000, items: [
+    { id: "original", type: "userMessage", clientId: "initial", content: [{ type: "text", text: "初始问题" }] },
+    ...Array.from({ length: 45 }, (_, index) => ({ id: `tool-${index}`, type: "commandExecution" })),
+    accepted("server-a"), { id: "server-a", type: "steered" },
+    { id: "server-b", type: "steered" }, accepted("server-b"),
+    { id: "orphan", type: "steered" },
+  ] };
+  const before = JSON.stringify(turn);
+  for (const fresh of [h, nativeSteerHistoryHarness()]) {
+    const full = fresh.nativeCompleteSideItemsPage(turn);
+    assert.equal(full.nextCursor, null);
+    assert.equal(full.items.filter(item => item.type === "userMessage").length, 3,
+      "相同正文的两个原生逻辑消息均保留；确认状态不能覆盖正文");
+    assert.equal(full.items.filter(item => item.id === "orphan").length, 1, "未关联正文的原生状态保留");
+    const restored = new Map();
+    let cursor = null, pageCount = 0;
+    do {
+      const page = fresh.nativeSideItemsPage(turn, cursor);
+      for (const item of page.items) restored.set(item.id, item);
+      cursor = page.nextCursor;
+      assert.ok(++pageCount < 5, "分页游标必须前进");
+    } while (cursor);
+    assert.equal(pageCount, 2);
+    for (const id of ["server-a", "server-b"]) {
+      const message = restored.get(id);
+      assert.equal(message.type, "userMessage");
+      assert.deepEqual(structuredClone(message.content), content);
+      assert.equal(message.clientId, `client-${id}`);
+    }
+  }
+  assert.equal(JSON.stringify(turn), before, "读取不能改写原生历史");
+});
+
+test("侧边引导确认不能挤掉正文来源，恢复后的时间与逻辑 ID 保留原生值", () => {
+  const h = nativeSteerHistoryHarness();
+  const steer = { id: "local", type: "steeringUserMessage", status: "accepted",
+    serverUserMessageId: "server", clientUserMessageId: "logical", input: [{ type: "text", text: "补充" }],
+    restoreMessage: { id: "queue", createdAt: 2345 } };
+  h.conversation = { turns: [{ turnId: "turn", status: "completed", turnStartedAtMs: 1000,
+    items: [steer, { id: "server", type: "steered" }] }] };
+  const items = h.nativeDisplayMessageItems(h.conversation.turns[0].items);
+  const [turn] = h.enrichMessageMetadata("side", [{ id: "turn", status: "completed", items }], { readOnly: true });
+  assert.equal(turn.items.length, 1);
+  assert.equal(turn.items[0].sentAtMs, 2345);
+  assert.equal(turn.items[0].messageMetadata.sentAtMs, 2345);
+  assert.equal(turn.items[0].clientId, "logical");
+});
+
+test("侧边引导在实时轮次、重进历史与迟到旧状态中只显示一份正文", () => {
+  const h = vm.createContext({
+    turns: new Map(), itemVersions: new Map(), turnVersions: new Map(), turnFieldVersions: new Map(),
+    partialItems: new Map(), enrichTurnTranscriptEvents: value => value,
+  });
+  vm.runInContext(sourceSection("function normalizeDisplayedUserMessage(", "async function reloadThread("), h);
+  const steer = { id: "local", type: "steeringUserMessage", status: "accepted",
+    serverUserMessageId: "server", clientUserMessageId: "logical", input: [{ type: "text", text: "补充正文" }] };
+  const marker = { id: "server", type: "steered" };
+  for (const items of [[steer, marker], [marker, steer]]) {
+    const turn = h.mergeHistoryTurn({ id: "turn", status: "completed", items }, 0);
+    assert.equal(turn.items.length, 1);
+    assert.equal(turn.items[0].type, "userMessage");
+    assert.equal(turn.items[0].content[0].text, "补充正文");
+    h.turns.set(turn.id, turn);
+    assert.equal(h.mergeItemProjection(turn.items[0], marker).type, "userMessage");
+    const stale = h.mergeHistoryTurn({ id: "turn", status: "completed", items: [marker] }, 100);
+    assert.equal(stale.items[0].type, "userMessage", "迟到旧分页不能再次抹掉正文");
+    h.turns.clear();
+  }
+});
 
 test("队列引导和删除unknown保留原回执，刷新只读恢复且不清普通草稿", async () => {
   for (const action of ["steerQueued", "removeQueued"]) {
@@ -2702,6 +3759,8 @@ test("队列原回执404或结果身份不符继续保锁，不重复写入", as
     fixture.requests[1].reject(Object.assign(new Error("original receipt missing"), { code: 404 }));
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(fixture.context.pending.id, id);
+    assert.equal(fixture.context.pending.receiptMissing, true);
+    assert.deepEqual(fixture.notices, [], "不存在的回执保持页内提示，不反复弹红色错误");
     const check = fixture.context.resolvePending();
     fixture.receipt(2, "completed", { ok: true, threadId: "other-thread", messageId: "queued-a" });
     await check;
@@ -2709,6 +3768,52 @@ test("队列原回执404或结果身份不符继续保锁，不重复写入", as
     await fixture.invoke(action);
     assert.equal(fixture.requests.filter(request => request.path.startsWith("/api/action/")).length, 1);
     assert.deepEqual(fixture.clearedDrafts, []);
+  }
+});
+
+test("队列明确未派发的409立即结束等待，保留普通草稿且不查询不存在的回执", async () => {
+  const h = queuedReceiptHarness(), original = structuredClone(h.draft);
+  const operation = h.invoke("steerQueued");
+  h.requests[0].reject(Object.assign(new Error("验收入口未开放此操作"),
+    { code: 409, notSubmitted: true }));
+  await operation;
+  assert.equal(h.context.pending, null);
+  assert.equal(h.requests.length, 1);
+  assert.deepEqual(h.draft, original);
+  assert.deepEqual(h.clearedDrafts, []);
+});
+
+test("Claude 旧队列回执缺失时，以原生接收记录和当前队列核对残留，不能凭404假定完成", async () => {
+  for (const delivered of [true, false]) {
+    const h = queuedReceiptHarness(), original = structuredClone(h.draft);
+    const threadId = "claude-12345678-1234-1234-1234-123456789abc";
+    h.context.selectedId = threadId;
+    h.context.thread.id = threadId;
+    h.context.thread.backend = "claude";
+    const operation = h.context.steerQueuedMessage(threadId, "queued-a");
+    h.receipt(0, "unknown", { ok: false, outcomeUnknown: true });
+    await operation;
+    h.requests[1].reject(Object.assign(new Error("missing"), { code: 404 }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.requests[2].path, "/api/read/queue");
+    h.requests[2].resolve({ ok: true, threadId, queuedMessages: [{ id: "other-message" }], queuedEdits: [] });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.requests[3].path, "/api/read/history");
+    h.requests[3].resolve({ ok: true, threadId, data: [{ items: [{
+      type: "userMessage", clientId: delivered ? "queued-a" : "unrelated-message"
+    }] }] });
+    await new Promise(resolve => setImmediate(resolve));
+    if (delivered) {
+      assert.equal(h.context.pending, null);
+      assert.deepEqual(h.context.thread.queuedMessages.map(message => message.id), ["other-message"]);
+    } else {
+      assert.equal(h.context.pending.receiptMissing, true);
+      assert.equal(h.context.thread.queuedMessages[0].id, "queued-a");
+    }
+    assert.equal(h.requests.filter(request => request.path.startsWith("/api/action/")).length, 1);
+    assert.deepEqual(h.notices, []);
+    assert.deepEqual(h.draft, original);
+    assert.deepEqual(h.clearedDrafts, []);
   }
 });
 
@@ -3663,6 +4768,7 @@ test("只有历史事件更新时也立即恢复真正等待的队列，不依�
   Object.assign(context, {
     messageFrame: null, followMessages: true, composerScroll: null, pendingSteer: null,
     cancelAnimationFrame() {}, scheduleMermaidBlocks() {}, pendingSteerTurn: () => null,
+    pendingSteerDelivered: () => false,
     $: (selector, root) => !root && selector === "#messages" ? messagesRoot : originalQuery(selector, root),
   });
   vm.runInContext(sourceSection("function renderMessages(", "  loadMessageSkillChoices(sorted.flatMap")
@@ -4338,7 +5444,7 @@ test("发送状态诊断区分未读完整、回执和压缩锁定，只在状�
     compactionSendReason: "", compaction: { state: "idle" },
     session: { device: { id: "device-a" } }, connected: true, pageLeaving: false,
     stream: { readyState: 1 }, threadReadOnly: () => false,
-    unsupportedImages: false, unsupportedProjectless: false, goalReason: "",
+    unsupportedImages: false, unsupportedProjectless: false, goalReason: "", sessionTypeEnabled: true,
     composerAttachmentsLoading: () => false, action: "send", pending: null,
     prompt: "不应进入日志的私人正文", hasAttachments: false, creating: false,
     selectedId: "main", thread: null, send: {}, composerDiagnosticState: "",
@@ -4348,7 +5454,7 @@ test("发送状态诊断区分未读完整、回执和压缩锁定，只在状�
   };
   vm.createContext(context);
   const update = vm.runInContext(`() => {${sourceSection(
-    "  const blockedBy = editingMessage ?", '  $("#prompt").disabled =')}}`, context);
+    "  const blockedBy =", '  $("#prompt").disabled =')}}`, context);
   update();
   assert.equal(context.send.disabled, true);
   assert.equal(events.at(-1).fields.blockedBy, "thread-not-loaded");
@@ -4375,6 +5481,14 @@ test("发送状态诊断区分未读完整、回执和压缩锁定，只在状�
   update();
   assert.equal(context.send.disabled, false, "已确认压缩且可排队时不能因诊断改动禁用发送");
   assert.equal(events.at(-1).fields.blockedBy, "ready");
+  context.isClaude = () => true;
+  context.active = false; context.modelsLoadedAt = 0;
+  context.currentThreadDisplay = () => context.thread;
+  update();
+  assert.equal(events.at(-1).fields.blockedBy, "claude-models");
+  context.thread.model = "history-model";
+  update();
+  assert.equal(context.send.disabled, false, "历史已知当前模型时，完整目录尚未加载也可续发");
   assert.equal(JSON.stringify(events).includes("私人正文"), false);
   assert.ok(events.every(({ fields }) => Number.isInteger(fields.draftChars) && fields.attachmentCount === 0));
 });
@@ -5816,6 +6930,389 @@ test("切换运行方式后，旧模型读取晚到不能覆盖新后端目录",
   assert.equal(context.models[0].model, "service-model");
   assert.equal(context.modelDefaults.model, "service-model");
   assert.equal(reads[1].payload.forceReload, true);
+});
+
+test("Claude 会话图标使用品牌色，间距仅由列表 gap 提供", async () => {
+  const css = await readFile(new URL("../assets/remote-access/style.css", import.meta.url), "utf8");
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, selectors]) => selectors.split(",").some(selector => selector.trim() === ".thread-link>.claude-session-icon"))
+    .map(([, , declarations]) => declarations).join(";");
+  assert.match(rules, /(?:^|;)\s*color\s*:\s*#d97757\s*(?:;|$)/);
+  assert.doesNotMatch(rules, /\bmargin(?:-right)?\s*:/);
+});
+
+test("Claude 类型跟随已有会话身份，新建草稿和能力与 Codex 分开", () => {
+  const context = {
+    creating: true, creationBackend: "claude", creationProject: "shared-project",
+    session: { capabilities: { claudeSessions: true, goalComposer: true },
+      claudeAllowApprovals: true, runtime: { cdpInjectionEnabled: true } },
+  };
+  vm.createContext(context);
+  vm.runInContext(sourceSection("function subagentsEnabled(", "function threadReadOnly("), context);
+  assert.equal(context.activeBackend(), "claude");
+  assert.equal(context.modelContext().projectId, "shared-project");
+  assert.equal(context.subagentsEnabled(), false);
+  assert.equal(context.sideThreadsEnabled(), false);
+  assert.notEqual(context.newDraftKey("shared-project", "claude"), context.newDraftKey("shared-project", "codex"));
+  context.creating = false;
+  context.creationBackend = "codex";
+  context.selectedId = "claude-01234567-89ab-4cde-8fab-0123456789ab";
+  assert.equal(context.activeBackend(), "claude");
+  assert.equal(context.approvalsAllowed(), true);
+  context.selectedId = "codex-existing";
+  assert.equal(context.activeBackend(), "codex");
+});
+
+test("Claude 原生队列允许执行中继续发送，仅提交期间防重复", () => {
+  const h = queuedEditFeedbackHarness(), context = h.context;
+  Object.assign(context, {
+    selectedId: "claude-01234567-89ab-4cde-8fab-0123456789ab",
+    thread: { id: "claude-01234567-89ab-4cde-8fab-0123456789ab",
+      backend: "claude", capabilities: { queue: true } },
+    active: true, prompt: "下一条消息", editing: false, editingQueuedMessage: null,
+    pending: null, busy: false, stopping: false, modelsLoadedAt: 1,
+  });
+  context.renderSendFeedback();
+  assert.equal(h.send.dataset.action, "send");
+  assert.equal(h.send.disabled, false);
+  context.busy = true;
+  context.renderSendFeedback();
+  assert.equal(h.send.disabled, true);
+  context.busy = false;
+  context.renderSendFeedback();
+  assert.equal(h.send.disabled, false);
+});
+
+test("Claude 实时历史投影接收 CLI 消息，重复快照不产生重复消息", () => {
+  const context = vm.createContext({
+    selectedId: "claude-live", thread: { id: "claude-live", backend: "claude" },
+    turns: new Map(), turnVersions: new Map(), itemVersions: new Map(), partialItems: new Set(),
+    messageVersion: 0, statusVersion: 0, queueVersion: 0,
+    normalizeDisplayedTurnItems: value => value, enrichTurnTranscriptEvents: value => value,
+    rememberThreadDisplay() {}, rememberTranscript() {}, reconcileDirectSendPreviews() {},
+    updateComposer() {}, scheduleMessages() {}, scheduleSidebarRefresh() {},
+    markVisibleThreadRead: async () => {},
+  });
+  vm.runInContext(sourceSection("function receiveClaudeHistory(", "function receive(event)"), context);
+  const snapshot = { threadId: "claude-live",
+    thread: { id: "claude-live", backend: "claude", status: { type: "active" },
+      capabilities: { queue: true }, queuedMessages: [{ id: "web-next", text: "网页补充" }],
+      queuedEdits: [{ editId: "edit-active", messageId: "web-edit", state: "editing" }] },
+    turns: [{ id: "native-cli-user", status: "inProgress", items: [
+      { id: "native-cli-user", type: "userMessage", content: [{ type: "text", text: "CLI 发出的消息" }] },
+      { id: "native-reply", type: "agentMessage", text: "正在回复" },
+    ] }] };
+  context.receiveClaudeHistory(snapshot);
+  context.receiveClaudeHistory(structuredClone(snapshot));
+  assert.equal(context.turns.size, 1);
+  assert.equal(context.turns.get("native-cli-user").items.length, 2);
+  assert.equal(context.turns.get("native-cli-user").items[0].content[0].text, "CLI 发出的消息");
+  assert.equal(context.thread.queuedMessages[0].id, "web-next");
+  assert.equal(context.notifiedQueueEdits[0].editId, "edit-active", "实时快照必须保留队列编辑，供迟到读取合并");
+  context.receiveClaudeHistory({ ...snapshot, threadId: "another" });
+  assert.equal(context.turns.size, 1);
+});
+
+test("Claude 长历史按原生顺序补齐实时快照，零散缓存不能跳过中间分页", () => {
+  const id = "claude-01234567-89ab-4cde-8fab-0123456789ab";
+  const ids = Array.from({ length: 30 }, (_, index) => `turn-${index + 1}`);
+  const turn = key => ({ id: key, _nativeUserId: key, items: [], status: "completed" });
+  const context = vm.createContext({
+    selectedId: id, selectionVersion: 1, thread: { id, backend: "claude" },
+    turns: new Map(ids.slice(-10).map(key => [key, turn(key)])),
+    turnVersions: new Map(), itemVersions: new Map(), partialItems: new Set(),
+    messageVersion: 0, statusVersion: 0, queueVersion: 0,
+    normalizeDisplayedTurnItems: value => value, enrichTurnTranscriptEvents: value => value,
+    rememberThreadDisplay() {}, rememberTranscript() {}, reconcileDirectSendPreviews() {},
+    updateComposer() {}, scheduleMessages() {}, scheduleSidebarRefresh() {},
+    markVisibleThreadRead: async () => {},
+  });
+  vm.runInContext(sourceSection("function receiveClaudeHistory(", "function receive(event)"), context);
+  context.receiveClaudeHistory({ threadId: id, thread: { id, queuedMessages: [], queuedEdits: [] },
+    turnIds: ids, turns: ids.slice(-20).reverse().map(turn) });
+  assert.deepEqual([...context.turns.keys()], ids.slice(-20), "实时补入的旧轮次必须在最新轮次前面");
+  context.turns.set(ids[0], turn(ids[0]));
+  assert.equal(context.claudeHistoryCursor(ids), "10", "第一条已缓存不代表中间九轮已加载");
+  context.turns.set("live-new", turn("live-new"));
+  context.turnVersions.set("live-new", 3);
+  const newest = [...ids, "live-new"];
+  context.receiveClaudeHistory({ threadId: id, thread: { id, queuedMessages: [] },
+    turnIds: newest, turns: [turn("live-new")] });
+  context.orderClaudeHistoryTurns([...ids].reverse(), 0);
+  assert.deepEqual([...context.turns.keys()], [ids[0], ...ids.slice(-20), "live-new"],
+    "迟到 HTTP 顺序不能覆盖较新的原生顺序或移走新轮次");
+  assert.equal(context.claudeHistoryCursor(ids), "10");
+  for (const key of ids.slice(1, 10)) context.turns.set(key, turn(key));
+  context.orderClaudeHistoryTurns(newest);
+  assert.deepEqual([...context.turns.keys()], newest);
+  assert.equal(context.claudeHistoryCursor(newest), null);
+});
+
+test("新建类型切换后，迟到 Codex 模型不覆盖 Claude，项目 ID 保持共用", async () => {
+  const reads = [];
+  const context = {
+    creating: true, creationBackend: "codex", creationProject: "shared-project",
+    appearance: { sessionInstances: { "codex:local": true, "claude:wsl:test": true } },
+    session: { device: { id: "backend-device" }, runtime: { revision: 1 } },
+    models: [], modelsPromise: null, modelsLoadedAt: 0, modelsRetryAt: 0, modelDefaults: {},
+    modelCatalogCacheVersion: 1, catalogFallbackMs: 1000, catalogRetryMs: 1000,
+    privateInputScope: () => "backend-device", catalogUsable: () => false,
+    api: (_path, payload) => { const response = deferred(); reads.push({ payload, response }); return response.promise; },
+    cacheDisplayData() {}, scheduleCatalogRefresh() {}, updateComposer() {}, $: () => null,
+  };
+  vm.createContext(context);
+  vm.runInContext(sourceSection("async function loadModels(", "function rememberedNewChatModel("), context);
+  const codex = context.loadModels(true);
+  context.creationBackend = "claude";
+  context.creationInstanceId = "claude:wsl:test";
+  context.modelsPromise = null;
+  const claude = context.loadModels(true);
+  assert.equal(reads[1].payload.backend, "claude");
+  assert.equal(reads[1].payload.projectId, "shared-project");
+  reads[1].response.resolve({ data: [{ model: "haiku" }], defaultModel: "haiku" });
+  await claude;
+  reads[0].response.resolve({ data: [{ model: "codex-model" }], defaultModel: "codex-model" });
+  await codex;
+  assert.equal(context.models[0].model, "haiku");
+  assert.equal(context.modelDefaults.model, "haiku");
+});
+
+function claudeHistoryModelMenuHarness({ cached = false, stale = false } = {}) {
+  const reads = [], cacheWrites = [];
+  const catalog = { data: [
+    { model: "history-haiku", supportedReasoningEfforts: [{ reasoningEffort: "high" }] },
+    { model: "fixture-opus", supportedReasoningEfforts: [{ reasoningEffort: "max" }] },
+    { model: "fixture-sonnet", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] },
+  ], defaultModel: "history-haiku", defaultReasoningEffort: "" };
+  function element(tag, className = "", textContent = "") {
+    return { tag, className, textContent, children: [], hidden: false,
+      append(...nodes) { this.children.push(...nodes); },
+      prepend(...nodes) { this.children.unshift(...nodes); },
+      replaceChildren(...nodes) { this.children = nodes; },
+      setAttribute() {} };
+  }
+  const menu = element("div"), trigger = element("button");
+  menu.hidden = true;
+  const context = vm.createContext({
+    creating: false, selectedId: "claude-00000000-0000-4000-8000-000000000001",
+    thread: { id: "claude-00000000-0000-4000-8000-000000000001", backend: "claude",
+      instanceId: "claude:wsl:history", model: "history-haiku", reasoningEffort: "high" },
+    appearance: { sessionInstances: { "claude:wsl:history": true } },
+    session: { device: { id: "history-model-device" }, runtime: { revision: 1 } },
+    models: cached ? catalog.data : [],
+    modelsPromise: null, modelsLoadedAt: cached ? Date.now() - (stale ? 3600001 : 0) : 0, modelsRetryAt: 0,
+    modelDefaults: cached ? { model: catalog.defaultModel, reasoningEffort: "" } : {},
+    modelCatalogCacheVersion: 1, catalogFallbackMs: 1000, catalogRetryMs: 1000,
+    selectedModel: "", selectedEffort: "", modelQuery: "",
+    privateInputScope: value => value?.device?.id,
+    catalogUsable: value => value.loadedAt > 0,
+    catalogNeedsRefresh: value => Date.now() - value.loadedAt > 3600000,
+    api(path, payload) {
+      assert.equal(path, "/api/read/models", "模型菜单只允许模型读取，不能发送或恢复会话");
+      const response = deferred(); reads.push({ payload, response }); return response.promise;
+    },
+    cacheDisplayData(...args) { cacheWrites.push(args); }, scheduleCatalogRefresh() {}, updateComposer() {}, element,
+    $: selector => selector === "#model-settings" ? menu : selector === "#model-button" ? trigger : null,
+    threadReadOnly: () => false, closePopup() {}, closeComposerMenus() { menu.hidden = true; },
+    fitComposerMenu() {}, renderModelMenu() {
+      menu.replaceChildren(...Array.from(context.models, model => element("button", "", model.model)));
+    },
+  });
+  vm.runInContext(sourceSection("async function loadModels(", "function rememberedNewChatModel("), context);
+  vm.runInContext(sourceSection('  $("#model-button").onclick = async () => {', '  $("#model-settings").onkeydown ='), context);
+  return { context, reads, cacheWrites, menu, trigger, catalog, settle: () => new Promise(resolve => setImmediate(resolve)) };
+}
+
+function claudeAliasModelMenuHarness() {
+  class MenuNode {
+    constructor(tag, className = "", text = "") {
+      this.tag = tag; this.className = className; this.text = text;
+      this.children = []; this.dataset = {}; this.attributes = {}; this.hidden = false; this.scrollTop = 0;
+    }
+    get textContent() { return this.text + this.children.map(node => node.textContent).join(""); }
+    append(...nodes) { this.children.push(...nodes); }
+    prepend(...nodes) { this.children.unshift(...nodes); }
+    replaceChildren(...nodes) { this.children = nodes; }
+    setAttribute(name, value) { this.attributes[name] = value; }
+    contains(value) { return !!value && (this === value || this.children.some(node => node.contains(value))); }
+    querySelectorAll(selector) {
+      return this.children.flatMap(node => [
+        ...(selector === "button" ? node.tag === "button" : node.className.split(" ").includes(selector.slice(1))) ? [node] : [],
+        ...node.querySelectorAll(selector),
+      ]);
+    }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    focus() {}
+  }
+  const menu = new MenuNode("div"), prompt = new MenuNode("input");
+  const context = vm.createContext({
+    models: [
+      { model: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus 5.5",
+        supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"].map(reasoningEffort => ({ reasoningEffort })) },
+      { model: "sonnet", resolvedModel: "claude-sonnet-5-5", displayName: "Sonnet 5.5",
+        supportedReasoningEfforts: [{ reasoningEffort: "medium" }, { reasoningEffort: "high" }] },
+      { model: "legacy-haiku", resolvedModel: "claude-haiku-4-5", displayName: "Haiku 4.5",
+        supportedReasoningEfforts: [] },
+    ],
+    selectedId: "claude-00000000-0000-4000-8000-000000000001", creating: false,
+    thread: { backend: "claude", model: "claude-opus-5-5", reasoningEffort: "max" },
+    selectedModel: "", selectedEffort: "", modelQuery: "",
+    modelDefaults: { model: "opus", reasoningEffort: "high" },
+    document: { activeElement: prompt }, newChatModels: new Map(),
+    session: { device: { id: "model-device" } }, privateInputScope: () => "model-device",
+    localStorage: { getItem: () => "", setItem() {} },
+    currentThreadDisplay: () => context.thread,
+    effortLabels: { low: "轻度", medium: "中", high: "高", xhigh: "极高", max: "Max" },
+    element: (tag, className, text) => new MenuNode(tag, className, text),
+    button: (text, _label, action, className) => Object.assign(new MenuNode("button", className, text), { onclick: action }),
+    $: (selector, root) => root ? root.querySelector(selector)
+      : selector === "#model-settings" ? menu : selector === "#prompt" ? prompt : null,
+    updateComposer() {}, fitComposerMenu() {}, closeComposerMenus() { menu.hidden = true; },
+  });
+  vm.runInContext(sourceSection("function rememberedNewChatModel(", "function fitComposerMenu("), context);
+  const choices = group => menu.querySelector(`.${group}`).children.filter(node => node.tag === "button");
+  return { context, menu, choices };
+}
+
+test("Claude 完整模型 ID 匹配原生别名，显示已选模型和推理等级，重选同模型保留 Max", () => {
+  const h = claudeAliasModelMenuHarness();
+  h.context.renderModelMenu();
+  assert.equal(h.context.currentModel(), h.context.models[0]);
+  assert.equal(h.context.currentEffort(), "max");
+  assert.deepEqual(h.choices("model-options").filter(node => node.attributes["aria-checked"] === "true")
+    .map(node => node.dataset.choiceKey), ["model:opus"]);
+  assert.deepEqual(h.choices("effort-options").map(node => node.dataset.choiceKey),
+    ["effort:low", "effort:medium", "effort:high", "effort:xhigh", "effort:max"]);
+  assert.equal(h.menu.textContent.includes("原生模型列表暂未提供"), false);
+  h.choices("model-options")[0].onclick();
+  assert.equal(h.context.selectedModel, "");
+  assert.equal(h.context.currentEffort(), "max");
+  h.choices("effort-options").find(node => node.dataset.choiceKey === "effort:high").onclick();
+  assert.equal(h.context.selectedEffort, "high");
+  h.choices("model-options").find(node => node.dataset.choiceKey === "model:sonnet").onclick();
+  assert.equal(h.context.selectedModel, "sonnet");
+  assert.equal(h.context.selectedEffort, "medium");
+});
+
+test("Claude 模型匹配优先精确值，未知或未报告等级不猜测，Codex 不扩展别名规则", () => {
+  const h = claudeAliasModelMenuHarness();
+  h.context.models.push({ model: "claude-opus-5-5", supportedReasoningEfforts: [{ reasoningEffort: "low" }] });
+  assert.equal(h.context.currentModel(), h.context.models[3]);
+  h.context.renderModelMenu();
+  assert.deepEqual(h.choices("effort-options").map(node => node.dataset.choiceKey), ["effort:low"]);
+  h.context.models.pop();
+  h.context.thread.model = "claude-opus-unreported";
+  h.context.renderModelMenu();
+  assert.equal(h.context.currentModel(), null);
+  assert.ok(h.menu.textContent.includes("原生模型列表暂未提供"));
+  assert.equal(h.choices("effort-options").length, 0);
+  h.context.thread.model = "claude-haiku-4-5";
+  h.context.renderModelMenu();
+  assert.equal(h.choices("effort-options").length, 0);
+  h.context.thread = { backend: "codex", model: "claude-opus-5-5" };
+  assert.equal(h.context.currentModel(), null);
+  assert.equal(h.context.modelForId(""), null);
+  assert.equal(h.context.modelForId(undefined), null);
+});
+
+test("Claude 新建默认等级与记住的完整模型 ID 复用同一别名目录", () => {
+  const h = claudeAliasModelMenuHarness();
+  Object.assign(h.context, { creating: true, selectedId: null, creationBackend: "claude",
+    creationInstanceId: "claude:wsl:fixture", selectedModel: "claude-opus-5-5" });
+  h.context.newChatModels.set("model-device:claude:wsl:fixture", "claude-opus-5-5");
+  assert.equal(h.context.rememberedNewChatModel(), h.context.models[0]);
+  assert.equal(h.context.currentEffort(), "high");
+});
+
+test("历史当前模型不进入共用目录，点击选择器时读取完整模型和思考深度", async () => {
+  const h = claudeHistoryModelMenuHarness();
+  const history = h.context.loadModels();
+  assert.equal(h.reads[0].payload.includeAvailable, false, "单纯显示历史不能触发能力初始化");
+  h.reads[0].response.resolve({ data: [h.catalog.data[0]], catalogComplete: false,
+    defaultModel: "history-haiku", defaultReasoningEffort: "high" });
+  await history;
+  assert.equal(h.context.modelsLoadedAt, 0);
+  assert.equal(h.context.models.length, 0);
+  assert.equal(h.cacheWrites.length, 0, "单个历史模型不能污染实例的共用目录缓存");
+  const opened = h.trigger.onclick();
+  assert.equal(h.reads.length, 2, "当前模型展示不能阻止显式读取可用选项");
+  assert.deepEqual({ ...h.reads[1].payload }, { backend: "claude", instanceId: "claude:wsl:history",
+    threadId: h.context.selectedId, forceReload: false, includeAvailable: true });
+  assert.ok(h.menu.children.some(node => /正在读取/.test(node.textContent)));
+  h.reads[1].response.resolve(h.catalog);
+  await opened;
+  assert.deepEqual(Array.from(h.context.models, model => model.model), ["history-haiku", "fixture-opus", "fixture-sonnet"]);
+  assert.equal(h.context.models[1].supportedReasoningEfforts[0].reasoningEffort, "max");
+  assert.deepEqual(h.menu.children.map(node => node.textContent), ["history-haiku", "fixture-opus", "fixture-sonnet"]);
+  assert.equal(h.context.thread.model, "history-haiku");
+  assert.equal(h.context.selectedModel, "", "读取完整目录不能自行切换历史会话模型");
+  assert.equal(h.cacheWrites[0][1], "claude:wsl:history");
+});
+
+test("同一实例的新建与多个历史会话共用完整模型缓存，不逐会话请求目录", async () => {
+  const h = claudeHistoryModelMenuHarness({ cached: true });
+  const key = h.context.modelContextKey();
+  await h.trigger.onclick();
+  h.context.selectedId = "claude-00000000-0000-4000-8000-000000000002";
+  h.context.thread = { ...h.context.thread, id: h.context.selectedId, model: "fixture-opus", reasoningEffort: "max" };
+  assert.equal(h.context.modelContextKey(), key);
+  await h.context.loadModels();
+  h.context.creating = true; h.context.selectedId = null; h.context.thread = null;
+  h.context.creationBackend = "claude"; h.context.creationInstanceId = "claude:wsl:history";
+  h.context.creationProject = "another-project";
+  assert.equal(h.context.modelContextKey(), key);
+  await h.context.loadModels();
+  assert.equal(h.context.models.length, 3);
+  assert.equal(h.reads.length, 0);
+  assert.equal(h.context.modelDefaults.reasoningEffort, "", "历史会话的等级不能污染新建默认值");
+});
+
+test("点击模型菜单会在进行中的历史读取后补读完整目录，并合并重复选择请求", async () => {
+  const h = claudeHistoryModelMenuHarness({ cached: false });
+  const history = h.context.loadModels();
+  const opened = h.trigger.onclick();
+  assert.equal(h.reads.length, 1);
+  assert.equal(h.reads[0].payload.includeAvailable, false);
+  h.reads[0].response.resolve({ data: [h.catalog.data[0]], catalogComplete: false });
+  await history; await h.settle();
+  assert.equal(h.reads.length, 2);
+  assert.equal(h.reads[1].payload.includeAvailable, true);
+  const repeated = h.context.loadModels(false, { includeAvailable: true });
+  assert.equal(h.reads.length, 2);
+  h.reads[1].response.resolve(h.catalog);
+  await Promise.all([opened, repeated]);
+  assert.equal(h.context.models.length, 3);
+});
+
+test("历史模型读取期间切换会话后，旧菜单不能替新实例发起能力探测", async () => {
+  const h = claudeHistoryModelMenuHarness({ cached: false });
+  const history = h.context.loadModels(), opened = h.trigger.onclick();
+  h.context.selectedId = "claude-00000000-0000-4000-8000-000000000002";
+  h.context.thread = { ...h.context.thread, id: h.context.selectedId, instanceId: "claude:wsl:other" };
+  h.context.appearance.sessionInstances["claude:wsl:other"] = true;
+  h.context.models = [{ model: "other-instance-model" }];
+  h.reads[0].response.resolve({ data: [h.catalog.data[0]] });
+  await Promise.all([history, opened]);
+  assert.equal(h.reads.length, 1);
+  assert.equal(h.context.models[0].model, "other-instance-model");
+});
+
+test("历史模型目录读取失败时显示错误并保留旧目录，重新打开可重试", async () => {
+  const h = claudeHistoryModelMenuHarness({ cached: true, stale: true });
+  const opened = h.trigger.onclick();
+  h.reads[0].response.reject(new Error("模拟原生模型目录读取失败"));
+  await opened;
+  assert.ok(h.menu.children.some(node => /模拟原生模型目录读取失败/.test(node.textContent)));
+  assert.equal(h.context.models[0].model, "history-haiku");
+  assert.equal(h.context.modelLoadError, "模拟原生模型目录读取失败");
+  await h.trigger.onclick();
+  const retried = h.trigger.onclick();
+  assert.equal(h.reads.length, 2);
+  h.reads[1].response.resolve(h.catalog);
+  await retried;
+  assert.equal(h.context.models.length, 3);
+  assert.equal(h.context.modelLoadError, "");
+  assert.ok(h.menu.children.every(node => !node.className.includes("error-text")));
 });
 
 test("服务部分侧栏保留旧会话展示，完整目录及其他后端不合并旧记录", () => {

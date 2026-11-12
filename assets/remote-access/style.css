@@ -1,4 +1,5 @@
 @property --bg{syntax:"<color>";inherits:true;initial-value:#ffffff}
+@property --composer-bg{syntax:"<color>";inherits:true;initial-value:#ffffff}
 @property --side{syntax:"<color>";inherits:true;initial-value:#f9f9f9}
 @property --text{syntax:"<color>";inherits:true;initial-value:#1f1f1f}
 @property --muted{syntax:"<color>";inherits:true;initial-value:#717171}
@@ -9,9 +10,11 @@
 @property --on-accent{syntax:"<color>";inherits:true;initial-value:#ffffff}
 @property --danger{syntax:"<color>";inherits:true;initial-value:#b42318}
 @property --green{syntax:"<color>";inherits:true;initial-value:#168350}
-html.theme-transition{transition:--bg 300ms linear,--side 300ms linear,--text 300ms linear,--muted 300ms linear,--line 300ms linear,--hover 300ms linear,--code 300ms linear,--accent 300ms linear,--on-accent 300ms linear,--danger 300ms linear,--green 300ms linear}
+html.theme-transition{transition:--bg 300ms linear,--composer-bg 300ms linear,--side 300ms linear,--text 300ms linear,--muted 300ms linear,--line 300ms linear,--hover 300ms linear,--code 300ms linear,--accent 300ms linear,--on-accent 300ms linear,--danger 300ms linear,--green 300ms linear}
 :root{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;color-scheme:light dark;--bg:#fff;--side:#f9f9f9;--text:#1f1f1f;--muted:#717171;--line:#e8e8e8;--hover:#eee;--code:#f7f7f7;--accent:#171717;--on-accent:#fff;--danger:#b42318;--green:#168350;--skill:#3f86c7;--font-size:1rem;font-size:var(--font-size)}
 :root{--control-icon-size:32px;--control-inline-size:28px;--control-toolbar-size:32px;--control-menu-height:36px;--prompt-editor-max-height:180px;--popup-max-height:80dvh}
+/* 用户要求输入框发送/停止共用按钮固定为 28px；桌面、手机共用此值，独立于工具栏的 32px/36px 尺寸。 */
+:root{--composer-send-size:28px}
 .workspace.related-session-view{--sidebar-layout-width:0px;grid-template-columns:minmax(0,1fr)}
 .workspace.related-session-view>.sidebar,.workspace.related-session-view>.sidebar-backdrop{display:none!important}
 .workspace.related-session-view>.conversation{grid-column:1;min-width:0;width:100%;background:var(--bg);position:relative;z-index:calc(var(--layer-menu,200) + 1);animation:related-session-enter .17s ease-out}
@@ -116,7 +119,10 @@ html{scrollbar-color:var(--muted) transparent}
 @media(prefers-color-scheme:dark){:root{--bg:#171717;--side:#202020;--text:#ededed;--muted:#a0a0a0;--line:#343434;--hover:#303030;--code:#222;--accent:#eee;--on-accent:#171717;--danger:#ff9c97;--green:#77c7a0;--skill:#75b7ef}.approval-card{border-color:#615031}}
 @media(min-width:761px){.workspace.sidebar-collapsed{--sidebar-layout-width:0px}.workspace.sidebar-collapsed .sidebar{visibility:hidden;overflow:hidden;border-right:0;padding-right:0;padding-left:0;pointer-events:none}#close-sidebar,.workspace.sidebar-collapsed #open-sidebar{display:grid;min-width:32px;min-height:32px;place-items:center;padding:0}}
 @media(max-width:760px){.workspace{grid-template-columns:minmax(0,1fr)}.sidebar{position:fixed;left:0;top:0;bottom:0;width:80vw;z-index:20;transform:translateX(-100%);transition:transform .15s}.sidebar-open .sidebar{transform:translateX(0)}.sidebar-open .sidebar-backdrop{display:block;position:fixed;inset:0;background:#0007;z-index:19}.messages{padding:22px 18px}.conversation-header{padding:3px 12px;min-height:48px;gap:8px}.thread-heading strong{font-size:0.85714rem}.thread-heading>span{font-size:0.64286rem}.connection-state{font-size:0.64286rem;max-width:80px;white-space:normal;text-align:right}.composer-area{padding:10px 12px max(10px,env(safe-area-inset-bottom))}.approval-area{padding:0 12px}.user-bubble{max-width:95%;font-size:0.92857rem}.agent-message{font-size:0.92857rem}.composer-note{font-size:0.64286rem}.pin-button{opacity:.7}#open-sidebar,#close-sidebar{display:block}.welcome{margin:16vh auto}.welcome h1{font-size:1.71429rem}.sidebar-footer{padding-bottom:max(6px,env(safe-area-inset-bottom))}}
-.composer{position:relative}
+/* 用户要求输入框使用独立的不透明表面色；与 applyAppearance 的默认深色 12.8% 混色结果同步，
+ * 自定义配色由 JS 写入 --composer-bg，主题切换与全局颜色同样过渡 300ms，桌面和手机共用。 */
+@media(prefers-color-scheme:dark){:root{--composer-bg:#323232}}
+.composer{position:relative;background:var(--composer-bg,var(--side))}
 .composer-anchor{position:relative;min-width:0}
 .composer-anchor>.approval-area{position:absolute;left:0;right:0;bottom:calc(100% + 8px + var(--approval-lift,0px));z-index:10;max-height:min(35dvh,var(--approval-available-height,35dvh));padding:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;border-radius:12px;background:var(--side);box-shadow:0 8px 28px #0002}
 .composer-anchor>.approval-area:empty{display:none}
@@ -137,8 +143,11 @@ html{scrollbar-color:var(--muted) transparent}
 .prompt-optimize-button{display:grid;place-items:center;flex:0 0 24px;width:24px;height:28px;padding:0;border-radius:6px;color:var(--muted);font:16px/1 "Segoe UI Emoji",system-ui,sans-serif}
 .prompt-optimize-button[data-state=loading]{animation:pulse 1s ease-in-out infinite}
 .prompt-optimize-button[data-state=optimized]{background:color-mix(in srgb,var(--green) 14%,transparent);color:var(--green)}
-.context-usage-ring{display:grid;width:18px;height:18px;place-items:center;flex:0 0 18px;border-radius:50%;background:radial-gradient(circle closest-side,var(--side) calc(100% - 1px),transparent calc(100% - .5px)),conic-gradient(var(--accent) var(--context-progress),var(--line) 0);color:var(--text);font-size:6.5px;font-variant-numeric:tabular-nums;line-height:1}
-.context-usage-tooltip.ui-popup{gap:5px;padding:10px 12px;overflow:auto;overflow-wrap:anywhere;font-size:calc(var(--font-size)*.8);line-height:1.6}
+/* 用户要求上下文信息背景与输入框一致：圆心和提示层共用 --composer-bg，随主题和自定义配色联动。
+ * 用户指定已达到进度部分宽 2px、未达到部分宽 1px，直径保持 18px；两层径向遮罩各保留 .5px 平滑内缘。
+ * 上层径向遮罩和锥形渐变绘制 2px 进度，下层径向遮罩和默认 --line 底色绘制 1px 未达到部分。 */
+.context-usage-ring{display:grid;width:18px;height:18px;place-items:center;flex:0 0 18px;border-radius:50%;background:radial-gradient(circle closest-side,var(--composer-bg,var(--side)) calc(100% - 2px),transparent calc(100% - 1.5px)),conic-gradient(var(--accent) var(--context-progress),transparent 0),radial-gradient(circle closest-side,var(--composer-bg,var(--side)) calc(100% - 1px),transparent calc(100% - .5px)),var(--line);color:var(--text);font-size:6.5px;font-variant-numeric:tabular-nums;line-height:1}
+.context-usage-tooltip.ui-popup{gap:5px;padding:10px 12px;overflow:auto;overflow-wrap:anywhere;background:var(--composer-bg,var(--side));font-size:calc(var(--font-size)*.8);line-height:1.6}
 .context-usage-value{font-weight:600;font-variant-numeric:tabular-nums}
 @media(pointer:coarse){.context-info{flex-basis:32px;width:32px;height:36px}}
 .context-percent{border:0;padding:0;color:var(--text)}
@@ -222,8 +231,15 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .sidebar{z-index:var(--layer-sidebar);padding:16px 12px 12px}
 .sidebar-header{gap:8px;padding:0 8px 16px}
 .sidebar-header strong{display:flex;align-items:center;min-width:0;line-height:24px}
-.sidebar-header-actions{display:flex;align-items:center;gap:4px;flex-shrink:0}
-.sidebar-view-toggle,.sidebar-search-toggle{display:flex;align-items:center;justify-content:center;width:var(--control-icon-size);height:var(--control-icon-size);padding:0;line-height:1;color:var(--muted);border-radius:var(--radius-control)}
+.sidebar-header-actions{display:flex;align-items:center;gap:0;flex-shrink:0}
+/* 用户要求顶部两图标更紧凑，新增类型筛选在其左侧；0px 容器间距、28px 按钮保留独立点击区域。 */
+.sidebar-view-toggle,.sidebar-search-toggle,.sidebar-type-filter{display:flex;align-items:center;justify-content:center;width:28px;height:var(--control-icon-size);padding:0;line-height:1;color:var(--muted);border-radius:var(--radius-control)}
+.sidebar-header strong{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.sidebar-type-filter[data-backend=claude]{color:#d97757}
+.sidebar-type-filter[data-backend=codex]{color:var(--text)}
+/* 筛选改为实例 ID 后仍保留用户要求的品牌配色，兼容旧类型值与各实例值。 */
+.sidebar-type-popup .popup-option:is([data-value=claude],[data-value^="claude:"])>.ui-icon{color:#d97757}
+.sidebar-type-popup .popup-option:is([data-value=codex],[data-value^="codex:"])>.ui-icon{color:var(--text);color:light-dark(var(--text),#fff)}
 .sidebar-view-toggle:hover,.sidebar-search-toggle:hover{color:var(--text)}
 .sidebar-search-toggle[aria-pressed=true]{color:#3076df}
 .sidebar-action{display:flex;flex-shrink:0;margin-bottom:0}
@@ -291,10 +307,9 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .composer-add-popup .popup-option:is([data-value=compact],[data-value=goal]) .popup-option-label small{font-size:calc(var(--font-size)*.75);line-height:1.6;white-space:nowrap}
 .composer-add-popup .popup-option[data-value=goal] .popup-option-label>span{flex-shrink:0}
 .composer-add-popup .popup-option[data-value=goal] .popup-option-label small{min-width:0;overflow:hidden;text-overflow:ellipsis}
-.popup-option[aria-selected=true]{background:color-mix(in srgb,var(--accent) 10%,var(--bg));font-weight:500}
-.popup-option:hover{background:var(--hover)}
-.popup-option[aria-selected=true]:hover{background:color-mix(in srgb,var(--accent) 16%,var(--bg))}
-.popup-option:focus-visible{outline-offset:-2px;background:var(--hover)}
+/* 用户要求所有 Select 选中项只显示右侧勾选，不填色、不加粗；键盘焦点保留轮廓，仅鼠标悬停整项高亮。 */
+.popup-option:focus-visible{outline-offset:-2px}
+@media(hover:hover) and (pointer:fine){.popup-option:not(:disabled):hover{background:var(--hover)}}
 .popup-option:disabled{cursor:not-allowed;opacity:.45}
 .popup-option:disabled:hover{background:transparent}
 .thread-row-popup .popup-option-danger{color:var(--danger)}
@@ -304,7 +319,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .new-chat-project{position:relative;z-index:1;display:flex;align-items:center;width:calc(100% - 24px);min-width:0;margin:0 12px -1px;padding:3px 8px;border:1px solid var(--line);border-bottom:0;border-radius:12px 12px 0 0;background:var(--side)}
 .new-chat-project-control{position:relative;display:inline-flex;min-width:0;max-width:min(100%,320px)}
 #project-select.new-chat-project-select{width:auto;max-width:100%;min-height:30px;margin:0;padding:3px 10px;border-color:transparent;border-radius:999px;background:transparent;color:var(--text);font-size:.92857rem;line-height:1.2}
-#project-select.new-chat-project-select:hover,.new-chat-project-control:has(>.new-chat-project-clear:hover)>#project-select{background:var(--hover)}
+#project-select.new-chat-project-select:is(:hover,:focus-visible,[aria-expanded=true]),.new-chat-project-control:has(>.new-chat-project-clear:hover)>#project-select{background:var(--hover)}
 .new-chat-project-control:has(>:focus-visible)>#project-select{background:var(--hover)}
 #project-select.new-chat-project-select>.ui-icon:first-child{width:14px;height:14px;color:var(--muted)}
 .new-chat-project-clear{position:absolute;left:7px;top:50%;transform:translateY(-50%);display:grid;place-items:center;width:22px;height:22px;padding:4px;border:0;border-radius:50%;background:transparent;color:var(--muted);opacity:0;pointer-events:none}
@@ -317,20 +332,41 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 /* 用户要求新建会话显示真实分支；45% 给项目名保留余宽，24em 限制桌面长分支；8px 间距与标题路径行同步核对。 */
 .new-chat-project-control{flex-shrink:1}
 .new-chat-project>.new-chat-branch{margin-left:8px;max-width:min(45%,24em)}
-.project-picker-popup{border-radius:16px;padding:6px}
+/* 用户要求类型选择位于分支右侧；选择器不压缩，项目/分支可收缩，窄屏不足时允许换行。 */
+.new-chat-project{flex-wrap:wrap;row-gap:3px}
+/* 用户要求类型按钮与项目按钮的字号、30px 最小高度、内边距、胶囊圆角和展开背景一致；品牌图文间距仍为 3px。 */
+.new-chat-project>.new-chat-backend{flex:0 0 auto;min-width:0;max-width:100%;margin-left:8px;min-height:30px;padding:3px 10px;border:0;border-radius:999px;background:transparent;font-size:.92857rem;line-height:1.2}
+.new-chat-project>.new-chat-backend:is(:hover,:focus-visible,[aria-expanded=true]){background:var(--hover)}
+/* 用户要求最近会话标题行、项目/置顶列表、顶部标题、收起类型按钮的品牌图标与文字均间隔 3px；
+   调整时同步核对这四处，不给项目名行预留图标列，也不改变其他选择器的 8px 间距与箭头。 */
+.thread-label-line,.thread-title-line,.thread-link:has(>.session-type-icon),.new-chat-project>.new-chat-backend{gap:3px}
+.thread-label-line,.thread-title-line{display:flex;align-items:center;min-width:0}
+.thread-label-line>.thread-label,.thread-title-line>strong{flex:1;min-width:0}
+.thread-backend-icon{display:flex;align-items:center;justify-content:center;align-self:center;flex:0 0 1em;width:1em;height:1em;line-height:1}
+.thread-backend-icon>.ui-icon{width:100%;height:100%}
+/* 用户要求两类品牌图标与文字在同一水平线上：按各自文字的 1em 缩放并在所在行居中，
+   图标自身用单倍行高消除内联基线留白；最近、项目/置顶、类型按钮及弹层同步核对，3px 间距保持不变。
+   实例筛选按钮和菜单也共用此规则，图标与各自文字等大，不沿用通用图标的固定 16px。 */
+.thread-link>.session-type-icon,.thread-label-line>.session-type-icon,.new-chat-project>.new-chat-backend>.ui-icon,.backend-picker-popup .popup-option>.ui-icon,.sidebar-type-filter>.ui-icon,.sidebar-type-popup .popup-option>.ui-icon{display:inline-flex;align-items:center;justify-content:center;align-self:center;flex:0 0 1em;width:1em;height:1em;line-height:1;vertical-align:middle}
+/* 用户要求 Claude 保持品牌橙色；菜单需兼容旧值 claude 与 claude:local / claude:wsl:… 实例 ID。
+   颜色仅作用于指定位置的图标，不染文字、Codex 或勾选。 */
+.new-chat-backend>.backend-icon-claude,.backend-picker-popup .popup-option:is([data-value=claude],[data-value^="claude:"])>.ui-icon,.thread-link>.claude-session-icon,.thread-label-line>.claude-session-icon,.thread-backend-icon[data-backend=claude]{color:#d97757}
+/* 用户指定 Codex 白色结形标识；深色主题使用纯白，浅色沿用文字色以免不可见，旧浏览器仍可继承主题文字色。 */
+.new-chat-backend>.backend-icon-codex,.backend-picker-popup .popup-option[data-value=codex]>.ui-icon,.thread-link>.codex-session-icon,.thread-label-line>.codex-session-icon,.thread-backend-icon[data-backend=codex]{color:var(--text);color:light-dark(var(--text),#fff)}
+/* 会话类型和项目选择器共用通用 Select 的勾选、鼠标悬停与键盘轮廓，不再单独定义选中填色。 */
+/* 用户要求会话类型菜单沿用项目菜单的间距与圆角；桌面 38px/7px，手机 36px/4px 在下方断点同步。 */
+.project-picker-popup,.backend-picker-popup{border-radius:16px;padding:6px}
 .project-picker-popup .popup-search{width:calc(100% - 8px);min-height:36px;margin:2px 4px 6px;border-radius:9px}
 .project-picker-popup .popup-list{scrollbar-width:thin}
 .project-picker-popup .popup-list.has-footer{display:flex;flex-direction:column;overflow:hidden}
 .project-picker-popup .popup-options{overflow:auto;min-height:0;scrollbar-width:thin;overscroll-behavior:contain}
-.project-picker-popup .popup-option{min-height:38px;padding:7px 9px}
-.project-picker-popup .popup-option[aria-selected=true]{background:transparent;font-weight:400}
-.project-picker-popup .popup-option:is(:hover,:focus-visible){background:var(--hover)}
+.project-picker-popup .popup-option,.backend-picker-popup .popup-option{min-height:38px;padding:7px 9px}
 .project-picker-popup .popup-option-footer{flex-shrink:0;margin-top:4px;border-top:1px solid var(--line)}
 .project-picker-popup .popup-option>.ui-icon{color:var(--muted)}
-.project-picker-popup .popup-option-label{flex-direction:row;align-items:baseline;gap:5px;white-space:nowrap}
-.project-picker-popup .popup-option-label>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto}
-.project-picker-popup .popup-option-label small{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto}
-.project-picker-popup .choice-check{width:16px;flex-shrink:0;text-align:center}
+.project-picker-popup .popup-option-label,.backend-picker-popup .popup-option-label{flex-direction:row;align-items:baseline;gap:5px;white-space:nowrap}
+.project-picker-popup .popup-option-label>span,.backend-picker-popup .popup-option-label>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto}
+.project-picker-popup .popup-option-label small,.backend-picker-popup .popup-option-label small{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto}
+.project-picker-popup .choice-check,.backend-picker-popup .choice-check{width:16px;flex-shrink:0;text-align:center}
 .appearance-dialog[open]{display:flex;flex-direction:column;padding:14px 20px 18px;border-radius:var(--radius-popup)}
 .appearance-heading,.appearance-actions{flex-shrink:0}
 .appearance-body{overflow:auto;min-height:0;padding:0 2px;scrollbar-width:thin}
@@ -365,7 +401,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 #notice{inset:auto;top:max(24px,env(safe-area-inset-top));bottom:auto;left:50%;margin:0;max-height:var(--popup-max-height);overflow:auto;border:0;z-index:var(--layer-toast)}
 #notice.error{color:#fff}
 .modal-open{overflow:hidden}
-.send-button{display:grid;place-items:center;width:var(--control-toolbar-size);height:var(--control-toolbar-size);padding:0;border:0;line-height:1}
+/* 限定输入框并覆盖手机端旧的 36px 规则；按钮尺寸与工具栏高度分别控制。 */
+.composer .send-button{display:grid;place-items:center;width:var(--composer-send-size);height:var(--composer-send-size);padding:0;border:0;line-height:1}
 .send-button .ui-icon{width:18px;height:18px}
 .send-button .ui-icon svg{stroke-width:1.8}
 .send-button:disabled:hover{background:var(--accent)}
@@ -382,7 +419,11 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 @media(hover:none){.row-menu-button{opacity:1}}
 @media(max-width:760px){.sidebar{width:80vw;padding-bottom:max(12px,env(safe-area-inset-bottom));transition:transform var(--duration-popup) ease-out}.row-menu-button{opacity:1}.footer-button{min-height:40px}.appearance-dialog[open]{max-height:var(--popup-max-height);padding:12px 14px 14px}.appearance-font input{width:100%;max-width:120px;min-width:48px}.appearance-font{flex:1;justify-content:flex-end}.appearance-field{gap:12px}.appearance-field>span:first-child{flex-shrink:0}.appearance-thread-limit-field>span:first-child{min-width:0;flex-shrink:1;line-height:1.4}#notice{top:max(16px,env(safe-area-inset-top))}}
 @media(max-width:760px){#appearance-font,#appearance-file-reading-font{width:120px;flex-basis:120px}}
-@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+  /* 用户要求 PC 与 App 的执行中圆圈持续旋转；仅保留此状态指示，其他动效仍遵循系统减少动态效果设置。 */
+  .thread-state.active{animation:thread-spin 1s linear infinite!important}
+}
 @media(max-width:760px){#open-sidebar{display:grid;place-items:center;min-width:36px;min-height:36px;padding:0}#close-sidebar{display:grid;place-items:center;min-width:32px;min-height:32px;padding:0}.composer-toolbar .model-button{min-height:36px}.send-button{width:36px;height:36px}.context-info{font-size:calc(var(--font-size)*.72)}}
 @media(hover:none),(max-width:760px){.row-menu-button{opacity:1}.popup-option{min-height:44px}.copy-code{min-height:32px;padding:4px 10px}}
 @media(hover:none),(pointer:coarse),(max-width:760px){
@@ -392,10 +433,11 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 }
 @media(hover:none),(max-width:760px){.select-trigger{min-height:36px}.load-more{min-height:40px}.priority-section-label{min-height:40px}}
 @media(max-width:760px){
+  .appearance-width-field>span:first-child{min-width:0;flex-shrink:1;line-height:1.5}
   #project-select.new-chat-project-select{max-width:100%;min-height:30px}
-  .project-picker-popup{max-width:calc(100vw - 16px)}
+  .project-picker-popup,.backend-picker-popup{max-width:calc(100vw - 16px)}
   /* 用户要求手机项目列表更紧凑：行高由 44px 降至 36px，上下内边距由 7px 降至 4px；底部选项同步，桌面仍保持 38px。 */
-  .project-picker-popup .popup-option{min-height:36px;padding:4px 9px}
+  .project-picker-popup .popup-option,.backend-picker-popup .popup-option{min-height:36px;padding:4px 9px}
 }
 .color-swatch{width:50px;height:34px;padding:3px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
 .color-swatch:hover{background:var(--bg)}
@@ -407,17 +449,25 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .color-preset[aria-pressed=true]::after{content:"✓";display:grid;place-items:center;height:100%;color:#fff;mix-blend-mode:difference;font-size:.85714rem}
 .color-hex{width:100%;font-family:Consolas,monospace;font-size:.85714rem}
 .color-hex[aria-invalid=true]{border-color:var(--danger)}
+/* 用户要求 PC 选色面板紧凑：>760px 时宽度 258px =
+   6列×32px 色块 + 5×8px 间距 + 2×12px 内边距 + 2×1px 边框，并与右侧色样按钮对齐。
+   容器不足 258px 时随可用宽度收缩；手机沿用原自适应布局，核对尺寸时须同步检查六列和间距。 */
+@media(min-width:761px){
+  .appearance-screen .color-panel{width:min(100%,258px);margin-inline-start:auto;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--side)}
+}
 .messages{overflow-anchor:none}
 @media(min-width:761px){.messages{scrollbar-gutter:stable both-edges}}
 .messages-shell{position:relative;display:flex;flex:1;min-width:0;min-height:0}
-.scroll-to-bottom{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);display:grid;place-items:center;width:var(--control-icon-size);height:var(--control-icon-size);padding:0;border:1px solid var(--line);border-radius:50%;background:var(--bg);color:var(--muted);box-shadow:0 2px 8px #0002;z-index:2}
+/* 用户要求按钮对齐消息列/输入框的内容中轴：(容器宽 + 左留白 - 右留白) / 2；
+   复用内容留白变量随侧栏展开/收起更新；窄屏两侧留白对称，在下方断点回到 50%，不移动消息列或输入框。 */
+.scroll-to-bottom{position:absolute;left:calc(50% + (var(--content-padding-start) - var(--content-padding-end)) / 2);bottom:12px;transform:translateX(-50%);display:grid;place-items:center;width:var(--control-icon-size);height:var(--control-icon-size);padding:0;border:1px solid var(--line);border-radius:50%;background:var(--bg);color:var(--muted);box-shadow:0 2px 8px #0002;z-index:2}
 .scroll-to-bottom[data-state=latest]>.ui-icon{transform:rotate(180deg)}
 .scroll-working-dots{display:flex;align-items:center;gap:3px}
 .scroll-working-dots>span{width:3px;height:3px;border-radius:50%;background:currentColor;animation:scroll-working-dot 1.2s ease-in-out infinite}
 .scroll-working-dots>span:nth-child(2){animation-delay:.16s}
 .scroll-working-dots>span:nth-child(3){animation-delay:.32s}
 @keyframes scroll-working-dot{0%,65%,100%{opacity:.35;transform:translateY(0)}30%{opacity:1;transform:translateY(-2px)}}
-@media(max-width:760px){.scroll-to-bottom{bottom:10px}}
+@media(max-width:760px){.scroll-to-bottom{left:50%;bottom:10px}}
 .turn{min-width:0}
 .agent-message{line-height:1.75}
 .markdown>:first-child{margin-top:0}
@@ -784,7 +834,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .composer-attachment-preview:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .composer-attachment-image{display:block;width:40px;height:40px;object-fit:cover;border:1px solid var(--line);border-radius:8px}
 .composer-attachment>figcaption{display:none}
-.composer-attachment-remove{position:absolute;top:-5px;right:-5px;display:grid;place-items:center;width:18px;height:18px;padding:0;border-radius:50%;background:var(--side);font-size:14px;line-height:1}
+.composer-attachment-remove{position:absolute;top:-5px;right:-5px;display:grid;place-items:center;width:18px;height:18px;padding:0;border-radius:50%;background:var(--composer-bg,var(--side));font-size:14px;line-height:1}
 .composer-attachment-remove>svg{display:block;width:12px;height:12px}
 @media(hover:hover) and (pointer:fine){.composer-attachment-remove:hover:not(:disabled){background:var(--hover)}}
 .attachments-locked .composer-attachment{opacity:.7}
@@ -842,7 +892,6 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .async-question-form .approval-actions{justify-content:flex-end;flex-shrink:0}
 .conversation-header{padding-left:8px}
 #open-sidebar{display:grid;width:32px;height:32px;flex:0 0 32px;place-items:center;padding:0}
-@media(min-width:761px) and (max-width:1199px){.workspace:not(.sidebar-collapsed){--content-padding-start:max(24px,calc((100vw - var(--sidebar-layout-width) - 820px)/2));--content-padding-end:max(24px,calc((100vw - var(--sidebar-layout-width) - 820px)/2))}}
 @media(max-width:760px){.conversation{isolation:isolate}.conversation-header{padding-left:4px}#open-sidebar{width:36px;height:36px;flex-basis:36px}}
 .markdown-plain-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .markdown-deferred { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; font-size: .85714rem; color: var(--muted); }
@@ -915,7 +964,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
    标题、路径字号及两行间距共用下列规则，随全局字号放大；手机断点须同步核对，分支标签不能额外撑高路径行。 */
 .conversation-header,.session-tools-heading{min-height:52px;padding-block:6px}
 .thread-heading,.session-tools-heading-copy{gap:5px}
-.thread-heading strong,.session-tools-heading h1{font-size:1rem;line-height:normal}
+.thread-title-line,.thread-heading strong,.session-tools-heading h1{font-size:1rem;line-height:normal}
 .thread-heading>span,.session-tools-heading-path,.session-tools-heading-location{font-size:.71429rem}
 /* 路径与分支保留 8px 间距、Git 图标和边框，分支最多占 45%，各自省略长文本；取消原先固定 22px 行高以对齐会话副标题。 */
 .session-tools-heading-location{display:flex;align-items:center;gap:8px;min-width:0;min-height:0}
@@ -994,7 +1043,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 @media(max-width:760px){
   .session-tools-heading{padding-inline:12px}
   .conversation-header,.session-tools-heading{min-height:48px;padding-block:3px}
-  .thread-heading strong,.session-tools-heading h1{font-size:.85714rem}
+  .thread-title-line,.thread-heading strong,.session-tools-heading h1{font-size:.85714rem}
   .thread-heading>span,.session-tools-heading-path,.session-tools-heading-location{font-size:.64286rem}
 }
 @media(prefers-reduced-motion:reduce){.session-tools-screen{transition-duration:1ms}}
@@ -1198,3 +1247,74 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .side-thread-expired-banner strong{font-size:.85714rem;color:var(--danger);font-weight:600}
 .side-thread-expired-banner span{font-size:.78571rem;color:var(--muted)}
 @media(max-width:760px){.composer-anchor>.side-thread-expired-banner{min-height:calc(112px + var(--control-toolbar-size))}}
+
+/* 用户要求字体区分程序与代码：系统字体默认 14px；文件预览仍保留独立阅读字号。 */
+:root{font-family:var(--ui-font-family,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif)}
+body{font-weight:var(--ui-font-weight,400)}
+.markdown code,.local-file-reference,.color-hex,.command-group-title.markdown-inline code,
+.command-group-panel>.command-item .tool-description,.tool-output,.reconnecting-error,
+.approval-command-code,.approval-description,.edited-files-diff,.session-tools-diff,.session-files-source,
+.instruction-content,.appearance-code-preview{
+  font-family:var(--code-font-family,ui-monospace,Consolas,monospace);
+  font-weight:var(--code-font-weight,400)
+}
+.markdown code,.code-block pre,.tool-output,.approval-command-code,.appearance-code-preview{font-size:var(--code-font-size,14px)}
+.appearance-code-preview{margin:12px 0 20px;padding:12px;overflow:auto;background:var(--code);border-radius:8px;line-height:1.7}
+.appearance-font-preview{padding:12px;background:var(--side);border-radius:8px}
+/* 用户要求正文、输入框以整个可视窗口居中，不能因宽度设置改成右侧区域居中。
+   半宽取设置上限的一半与「半窗口 - 侧栏 - 24px」的较小值，空间不足时对称收窄且不压到侧栏；
+   左留白 = 半窗口 - 侧栏 - 半正文，右留白 = 半窗口 - 半正文，故中心始终为 50vw。
+   默认 950px 与 app.js 的 conversationWidthDefault 同步；手机沿用原有 18px/12px 对称内边距。 */
+@media(min-width:761px){
+  .workspace,.workspace:not(.sidebar-collapsed){
+    --content-half-width:min(calc(var(--conversation-max-width,950px)/2),max(0px,calc(50vw - var(--sidebar-layout-width) - 24px)));
+    --content-padding-start:max(24px,calc(50vw - var(--sidebar-layout-width) - var(--content-half-width)));
+    --content-padding-end:max(24px,calc(50vw - var(--content-half-width)))
+  }
+  .appearance-screen,.appearance-screen[open],.appearance-screen.appearance-screen-visible{
+    transform:none;transition:none;animation:none;will-change:auto
+  }
+  .appearance-screen .appearance-subpage{animation:none}
+}
+.appearance-hint{margin:8px 0 16px;color:var(--muted);font-size:.85714rem;line-height:1.6;overflow-wrap:anywhere}
+.appearance-number{display:inline-flex;align-items:center;gap:6px;flex-shrink:0}
+.appearance-number>input{width:100px;padding:7px 9px}
+.appearance-theme-button{display:inline-flex;align-items:center;justify-content:center;width:auto;gap:5px;padding:0 6px;font-size:.85714rem}
+.appearance-font-family{width:min(240px,55%);padding:7px 9px}
+.appearance-subnav{display:flex;gap:4px;margin:0 0 20px;border-bottom:1px solid var(--line);overflow:auto}
+.appearance-subnav>button{flex-shrink:0;border:0;border-radius:7px 7px 0 0;padding:9px 12px;color:var(--muted)}
+.appearance-subnav>button[aria-pressed=true]{background:var(--hover);color:var(--text);box-shadow:inset 0 -2px var(--accent)}
+.appearance-section-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:24px}
+.appearance-section-heading h4{margin:0;font-size:1rem}
+.appearance-environment{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}
+.appearance-environment-copy{display:flex;flex-direction:column;gap:5px;min-width:0;overflow-wrap:anywhere}
+.appearance-environment-copy strong{font-size:.92857rem}
+.appearance-environment-copy small{font-size:.78571rem}
+.appearance-environment-status{flex-shrink:0;color:var(--muted);font-size:.78571rem}
+/* 用户要求同类型的本机/WSL 各实例独立开关；长环境名和程序路径换行，手机宽度不挤压开关。 */
+.session-instance-group{margin:16px 0}
+.session-instance-group h4{margin:0 0 6px;font-size:.92857rem}
+.session-instance-row{gap:16px;align-items:center}
+.session-instance-row .appearance-environment-copy{flex:1}
+.session-instance-row .appearance-notification-switch{flex-shrink:0}
+.session-instance-path{overflow-wrap:anywhere;word-break:break-word}
+.instruction-selectors{display:flex;flex-wrap:wrap;gap:12px}
+.instruction-selectors>label{display:flex;flex:1 1 180px;flex-direction:column;gap:6px;min-width:0;font-size:.85714rem}
+.instruction-selectors .select-trigger{width:100%;max-width:100%;padding:8px}
+.instruction-path{user-select:text}
+.instruction-content{display:block;width:100%;height:45dvh;min-height:180px;resize:vertical;font-size:var(--code-font-size,14px);line-height:1.7;tab-size:2}
+.instruction-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin:12px 0}
+.instruction-actions>.appearance-hint{flex:1 1 160px;margin:0}
+/* 正常读取后隐藏空状态，避免为已移除的提示保留一行。 */
+#instruction-status:empty{display:none}
+/* PC 固定菜单不拦截正文/侧栏点击，菜单自身仍可交互；手机不添加该类，沿用原遮罩和关闭行为。 */
+.session-related-menu-layer.session-menu-pinned{pointer-events:none}
+.session-menu-pinned>.session-related-menu{pointer-events:auto}
+@media(max-width:760px){
+  .appearance-field:has(>.appearance-font-family){align-items:flex-start;flex-direction:column;gap:7px}
+  .appearance-font-family{width:100%}
+  .appearance-number>input{width:82px}
+  .appearance-environment{align-items:flex-start;flex-direction:column;gap:6px}
+  .appearance-section-heading{align-items:flex-start;flex-direction:column}
+  .appearance-subnav>button{padding:9px 8px}
+}

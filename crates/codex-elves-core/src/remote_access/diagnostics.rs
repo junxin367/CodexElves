@@ -1004,6 +1004,7 @@ mod tests {
                 id: id.into(),
                 name: id.into(),
                 token_hash: hash(token),
+                client_id_hash: String::new(),
                 created_at_ms: now_ms(),
                 expires_at_ms: now_ms() + 1_000_000,
                 last_seen_at_ms: now_ms(),

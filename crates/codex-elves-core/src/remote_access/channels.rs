@@ -152,6 +152,7 @@ pub(super) fn read_path(method: &Method, path: &str) -> bool {
                         | "/api/workspace/change"
                         | "/api/workspace/files"
                         | "/api/workspace/file"
+                        | "/api/settings/environments"
                 )
         }
         _ => false,
@@ -161,12 +162,14 @@ pub(super) fn read_path(method: &Method, path: &str) -> bool {
 pub(super) fn request_path(method: &Method, path: &str) -> bool {
     read_path(method, path)
         || method == Method::POST
-            && (matches!(path, "/api/logout" | "/api/diagnostics")
-                || path.strip_prefix("/api/action/").is_some_and(|action| {
-                    !action.is_empty()
-                        && action.len() <= 64
-                        && action.bytes().all(|byte| byte.is_ascii_alphabetic())
-                }))
+            && (matches!(
+                path,
+                "/api/logout" | "/api/diagnostics" | "/api/settings/instructions"
+            ) || path.strip_prefix("/api/action/").is_some_and(|action| {
+                !action.is_empty()
+                    && action.len() <= 64
+                    && action.bytes().all(|byte| byte.is_ascii_alphabetic())
+            }))
 }
 
 pub(super) fn media_path(method: &Method, path: &str) -> bool {

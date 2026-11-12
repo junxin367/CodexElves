@@ -3792,7 +3792,10 @@ async fn audit_transport_anthropic_error_body_obeys_the_request_timeout() {
     let upstream = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut buffer = [0_u8; 8192];
-        stream.read(&mut buffer).await.unwrap();
+        assert!(
+            stream.read(&mut buffer).await.unwrap() > 0,
+            "请求到达后才返回错误响应"
+        );
         stream
             .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 999\r\n\r\n{")
             .await

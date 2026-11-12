@@ -277,37 +277,44 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
     } finally { stage.remove(); }
   }
 
-  const pendingDiagrams = new Map();
+  // 用户要求文件预览复用会话 Mermaid；各滚动容器独立观察，共享解析队列和图表缓存，不能互相退役。
+  const diagramRoots = new Map();
   const diagramTheme = () => document.documentElement.dataset.theme
     || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  let diagramObserver = null, diagramRoot = null;
 
+  function releaseMermaidBlocks(node) {
+    const state = diagramRoots.get(node);
+    state?.observer?.disconnect();
+    state?.pending.clear();
+    diagramRoots.delete(node);
+  }
   function observeDiagramRoot(node) {
-    if (diagramRoot === node) return;
-    diagramObserver?.disconnect();
-    pendingDiagrams.clear();
-    diagramRoot = node;
+    for (const root of diagramRoots.keys()) if (!root.isConnected) releaseMermaidBlocks(root);
+    if (diagramRoots.has(node)) return diagramRoots.get(node);
+    const state = { pending: new Map(), observer: null };
+    diagramRoots.set(node, state);
     const observer = typeof IntersectionObserver === "function" ? new IntersectionObserver(entries => {
-      if (diagramObserver !== observer || diagramRoot !== node) return;
+      if (diagramRoots.get(node) !== state) return;
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
-        const pending = pendingDiagrams.get(entry.target);
-        pendingDiagrams.delete(entry.target);
+        const pending = state.pending.get(entry.target);
+        state.pending.delete(entry.target);
         observer.unobserve(entry.target);
         if (pending && entry.target.isConnected && node.contains(entry.target))
           renderMermaidBlock(entry.target, pending.onRender);
       }
     }, { root: node, rootMargin: "200px" }) : null;
-    diagramObserver = observer;
+    state.observer = observer;
+    return state;
   }
 
   function renderMermaidBlocks(node, onRender, withLayout = change => change()) {
-    observeDiagramRoot(node);
-    // 每次会话挂载或刷新时清理旧页面的观察项，不保留已切走会话的 DOM。
-    for (const [block] of pendingDiagrams) {
-      if (block.isConnected) continue;
-      diagramObserver?.unobserve(block);
-      pendingDiagrams.delete(block);
+    const { pending, observer } = observeDiagramRoot(node);
+    // 只清理当前容器中已移除的图表，消息和文件预览的离屏观察互不影响。
+    for (const [block] of pending) {
+      if (block.isConnected && node.contains(block)) continue;
+      observer?.unobserve(block);
+      pending.delete(block);
     }
     for (const block of node.querySelectorAll(".mermaid-block")) {
       if (!block.isConnected) continue;
@@ -315,16 +322,16 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
       block.mermaidRoot = node;
       const key = JSON.stringify([diagramTheme(), block.querySelector("pre code")?.textContent || ""]);
       if (block.mermaidKey === key) continue;
-      if (diagramObserver) {
-        pendingDiagrams.set(block, { onRender });
-        diagramObserver.observe(block);
+      if (observer) {
+        pending.set(block, { onRender });
+        observer.observe(block);
       } else renderMermaidBlock(block, onRender);
     }
   }
 
   function currentDiagramBlock(block, key) {
     if (block.mermaidKey !== key) return false;
-    if (block.isConnected && block.mermaidRoot === diagramRoot && diagramRoot?.contains(block)) return true;
+    if (block.isConnected && diagramRoots.has(block.mermaidRoot) && block.mermaidRoot.contains(block)) return true;
     // 生成或解码期间切走或更换消息根，重新挂载时仍能使用已完成缓存。
     block.mermaidKey = null;
     return false;
@@ -416,5 +423,5 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
     });
   }
 
-  return { markdown, renderMermaidBlocks };
+  return { markdown, renderMermaidBlocks, releaseMermaidBlocks };
 }

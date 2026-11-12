@@ -341,13 +341,48 @@ function Request-RemoteUpdateStart($Plan) {
     if ($status.status -ne "ok") { throw "原启动器未确认服务启动，请检查服务诊断日志。" }
 }
 
-function Wait-RemoteUpdateLocal($Plan, $Expected, [int]$Seconds, $RetainedService = $null) {
+function Test-RemoteUpdateServiceImage($Plan, $Service) {
+    if ((Split-Path -Parent $Service.imagePath) -ne (Split-Path -Parent $Plan.installedProgram)) { return $false }
+    $name = [IO.Path]::GetFileName($Service.imagePath)
+    $retiredPattern = "^codex-elves-manager\.remote-before-$([regex]::Escape($Plan.id))-(apply|restore-[a-f0-9]{32})\.exe$"
+    if ($name -ne "codex-elves-manager.exe" -and $name -notmatch $retiredPattern) { return $false }
+    if (-not (Test-Path -LiteralPath $Service.imagePath)) { return $false }
+    return (Get-RemoteUpdateHash $Service.imagePath) -in @($Plan.oldSha256, $Plan.newSha256)
+}
+
+function Assert-RemoteUpdateServiceStopIdentity($Plan, $Service, [switch]$AllowManagerParent) {
+    if ($Service.processId -eq $Plan.launcher.processId -or $Service.processId -in $Plan.protectedManagers.processId) {
+        throw "拒绝停止管理器或启动器。"
+    }
+    if ($Service.parentProcessId -eq $Plan.launcher.processId) { return }
+    # 用户要求保留管理器与本地代理：只处理本次切换期间由原管理器抢先恢复、且健康端点确认为服务的子进程。
+    # 不扩大到同名进程；原管理器创建时间、服务 PID/创建时间、事务映像名称和程序摘要均须一致。
+    if (-not $AllowManagerParent -or $Service.parentProcessId -notin $Plan.protectedManagers.processId -or
+        [long]$Service.createdFileTime -le [long]$Plan.serviceBefore.createdFileTime -or
+        -not (Test-RemoteUpdateServiceImage $Plan $Service)) { throw "拒绝停止未确认归属的进程。" }
+    Assert-RemoteUpdateProtected $Plan
+    $live = Get-RemoteUpdateLive $Plan.stateDirectory
+    if ($live.service.processId -ne $Service.processId -or $live.service.createdFileTime -ne $Service.createdFileTime -or
+        $live.service.parentProcessId -ne $Service.parentProcessId -or $live.service.imagePath -ne $Service.imagePath) {
+        throw "自动恢复的服务身份已变化，未停止任何进程。"
+    }
+}
+
+function Wait-RemoteUpdateLocal($Plan, $Expected, [int]$Seconds, $RetainedService = $null, [switch]$RecoverManagerRace) {
     if (-not $RetainedService) { $RetainedService = $Plan.serviceBefore }
     $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
     $lastFailure = ""
+    $ownerRecoveries = 0
     do {
         try {
             $live = Get-RemoteUpdateLive $Plan.stateDirectory
+            if ($RecoverManagerRace -and $live.service.parentProcessId -ne $Plan.launcher.processId -and $ownerRecoveries -lt 2) {
+                # 最多恢复两次已确认的管理器抢先启动；最终仍必须由原 launcher 持有，Verify 始终只读。
+                Stop-RemoteUpdateService $Plan $live.service $live.service.imagePath -AllowManagerParent
+                $ownerRecoveries++
+                Request-RemoteUpdateStart $Plan
+                $live = Get-RemoteUpdateLive $Plan.stateDirectory
+            }
             $retained = $RetainedService -and $live.service.processId -eq $RetainedService.processId -and
                 $live.service.createdFileTime -eq $RetainedService.createdFileTime -and
                 (Split-Path -Parent $live.service.imagePath) -eq (Split-Path -Parent $Plan.installedProgram)
@@ -386,9 +421,8 @@ function Switch-RemoteUpdateProgram($Plan, [string]$Program, [string]$Hash, [str
     return $retired
 }
 
-function Stop-RemoteUpdateService($Plan, $Service, [string]$Retired) {
-    if ($Service.processId -eq $Plan.launcher.processId -or $Service.processId -in $Plan.protectedManagers.processId -or
-        $Service.parentProcessId -ne $Plan.launcher.processId) { throw "拒绝停止未确认归属的进程。" }
+function Stop-RemoteUpdateService($Plan, $Service, [string]$Retired, [switch]$AllowManagerParent) {
+    Assert-RemoteUpdateServiceStopIdentity $Plan $Service -AllowManagerParent:$AllowManagerParent
     [CodexElves.RemoteUpdateNative]::Stop($Service.processId, [long]$Service.createdFileTime, $Plan.installedProgram, $Retired)
 }
 
@@ -408,14 +442,15 @@ function Restore-RemoteUpdatePrevious($Plan, $Previous, [string]$Program, [strin
     if ($process) {
         $service = Get-RemoteUpdateProcess $endpoint.processId
         if ($service.processId -ne $Previous.processId -or $service.createdFileTime -ne $Previous.createdFileTime) {
-            # 新服务已经起来但未通过核验时，仅停止本安装目录、原 launcher 所属的服务。
-            if ($service.imagePath -notin @($Plan.installedProgram, $retired)) { throw "回滚遇到未识别映像，已停止自动操作。" }
-            Stop-RemoteUpdateService $Plan $service $retired
+            # 自动回滚中断后仍识别本事务已重命名的服务映像；不接纳其他更新的备份或摘要。
+            if ($service.imagePath -notin @($Plan.installedProgram, $retired) -and
+                -not (Test-RemoteUpdateServiceImage $Plan $service)) { throw "回滚遇到未识别映像，已停止自动操作。" }
+            Stop-RemoteUpdateService $Plan $service $service.imagePath -AllowManagerParent
         }
         # 原服务尚未停止的失败发生在文件切换阶段：恢复磁盘程序即可，不再停止原服务。
     }
     Request-RemoteUpdateStart $Plan
-    Wait-RemoteUpdateLocal $Plan $Manifest $Seconds $Previous
+    Wait-RemoteUpdateLocal $Plan $Manifest $Seconds $Previous -RecoverManagerRace
 }
 
 function New-RemoteUpdatePlan([string]$Path, [string]$Repository, [string]$Directory, [int]$Port,
@@ -647,7 +682,7 @@ function Invoke-RemoteServiceUpdate {
                 $journal.phase = "service-stopped"
                 Write-RemoteUpdateJson $journalPath $journal
                 Request-RemoteUpdateStart $plan
-                $null = Wait-RemoteUpdateLocal $plan $manifest $TimeoutSeconds
+                $null = Wait-RemoteUpdateLocal $plan $manifest $TimeoutSeconds -RecoverManagerRace
                 Assert-RemoteUpdateProtected $plan
                 $null = Assert-RemoteUpdateState $plan.stateBefore $plan.stateDirectory
             } catch {

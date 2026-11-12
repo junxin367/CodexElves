@@ -15,6 +15,88 @@ static REQUIRE_EXPLICIT_CDP: AtomicBool = AtomicBool::new(false);
 static PROCESS_CDP_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 static PROCESS_BLOCKED_CDP_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 
+fn queue_steer_diagnostic(value: &Value) -> Option<Value> {
+    if value["version"] != 1
+        || value["stage"] != "prepared-contract"
+        || !matches!(value["phase"].as_str(), Some("start" | "steer" | "unknown"))
+        || !matches!(
+            value["adapter"].as_str(),
+            Some("request-client" | "manager")
+        )
+        || !matches!(value["queueKind"].as_str(), Some("server" | "local"))
+    {
+        return None;
+    }
+    // 用户要求引导失败能关联请求并定位校验项；与 native.js 同步固定字段，只持久化布尔值和数量，拒绝透传正文及凭据。
+    let mut result = json!({
+        "version":1,"stage":"prepared-contract","phase":value["phase"],
+        "adapter":value["adapter"],"queueKind":value["queueKind"],"checks":{},"inputs":{},"restores":{}
+    });
+    for key in [
+        "conversationId",
+        "resume.conversationId",
+        "steer.clientUserMessageId",
+        "steer.restoreMessage",
+        "steer.input",
+        "steer.expectedTurnId",
+        "steer.targetTurnId",
+        "steer.serverInput",
+        "start.required",
+        "start.threadId",
+        "start.clientUserMessageId",
+        "start.input",
+        "start.restoreMessage",
+        "admissionStart.threadId",
+        "admissionStart.clientUserMessageId",
+        "admissionStart.input",
+        "admissionStart.restoreMessage",
+    ] {
+        if let Some(flag) = value["checks"][key].as_bool() {
+            result["checks"][key] = json!(flag);
+        }
+    }
+    if result["checks"].as_object()?.is_empty() {
+        return None;
+    }
+    for group in ["inputs", "restores"] {
+        for role in ["steer", "server", "start", "admissionStart"] {
+            let item = &value[group][role];
+            if !item.is_object() || group == "restores" && role == "server" {
+                continue;
+            }
+            let mut summary = json!({});
+            if group == "restores" {
+                for key in [
+                    "present",
+                    "idMatches",
+                    "clientIdMatches",
+                    "serverIdMatches",
+                    "textMatches",
+                    "contextMatches",
+                    "promptMatches",
+                    "turnTriggerMatches",
+                ] {
+                    if let Some(flag) = item[key].as_bool() {
+                        summary[key] = json!(flag);
+                    }
+                }
+            }
+            let counts: &[&str] = if group == "inputs" {
+                &["items", "text", "image", "localImage", "skill", "other"]
+            } else {
+                &["expectedFieldCount", "actualFieldCount"]
+            };
+            for key in counts {
+                if let Some(count) = item[*key].as_u64() {
+                    summary[*key] = json!(count);
+                }
+            }
+            result[group][role] = summary;
+        }
+    }
+    Some(result)
+}
+
 tokio::task_local! {
     static CURRENT: Scope;
 }
@@ -155,6 +237,15 @@ impl Scope {
                 Ok(_) => "completed",
                 Err(_) => "failed",
             });
+            if scope.metadata["action"] == "steerQueued"
+                && let Ok(value) = &result
+                && value["ok"] == false
+                && value["notSent"] == true
+                && let Some(detail) = queue_steer_diagnostic(&value["queueSteerDiagnostic"])
+            {
+                // 复用本请求的 requestId、threadId、设备和通道，服务重启后仍可从现有轮转日志追踪失败校验。
+                record["queueSteerDiagnostic"] = detail;
+            }
             if let Ok(value) = &mut result
                 && value.is_object()
                 && !record["executionTransport"].is_null()
@@ -281,4 +372,91 @@ pub(crate) fn check_cdp_allowed(phase: &'static str) -> anyhow::Result<()> {
     }
     transport("cdp", phase, false);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn queue_steer_contract_diagnostic_is_correlated_and_redacted() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("queue-steer-diagnostic.log");
+        struct ResetLogPath;
+        impl Drop for ResetLogPath {
+            fn drop(&mut self) {
+                crate::diagnostic_log::set_diagnostic_log_path_for_tests(None);
+            }
+        }
+        crate::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+        let _reset_log_path = ResetLogPath;
+        let audit = Arc::new(Audit::default());
+        let result = Scope::new(
+            audit.clone(),
+            false,
+            "steerQueued",
+            &json!({"threadId":"diagnostic-thread"}),
+            None,
+            Some(7),
+        )
+        .recorded(async {
+            Ok(json!({
+                "ok":false,"notSent":true,
+                "queueSteerDiagnostic":{
+                    "version":1,"stage":"prepared-contract","phase":"steer",
+                    "adapter":"request-client","queueKind":"server",
+                    "checks":{"steer.expectedTurnId":false,"steer.input":true,"private-secret":false},
+                    "inputs":{"steer":{"items":2,"text":1,"image":1,"url":"private-secret"}},
+                    "restores":{"steer":{"present":true,"promptMatches":false,"text":"private-secret",
+                        "expectedFieldCount":8,"actualFieldCount":9}},
+                    "prompt":"private-secret","token":"private-secret"
+                }
+            }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["notSent"], true);
+        let records = audit.snapshot()["records"].as_array().unwrap().clone();
+        let record = records.last().unwrap();
+        assert_eq!(record["threadId"], "diagnostic-thread");
+        assert!(
+            record["requestId"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+        assert_eq!(record["runtimeRevision"], 7);
+        assert_eq!(record["outcome"], "rejected");
+        assert_eq!(
+            record["queueSteerDiagnostic"]["checks"]["steer.expectedTurnId"],
+            false
+        );
+        assert_eq!(
+            record["queueSteerDiagnostic"]["inputs"]["steer"]["image"],
+            1
+        );
+        assert_eq!(
+            record["queueSteerDiagnostic"]["restores"]["steer"]["promptMatches"],
+            false
+        );
+        assert!(!record.to_string().contains("private-secret"));
+        let saved = std::fs::read_to_string(log_path).unwrap();
+        let saved: Value = serde_json::from_str(saved.trim()).unwrap();
+        assert_eq!(saved["event"], "remote_access.execution");
+        assert_eq!(saved["detail"], *record);
+    }
+
+    #[test]
+    fn queue_steer_contract_diagnostic_rejects_unknown_schema_and_text_values() {
+        assert!(queue_steer_diagnostic(&json!(null)).is_none());
+        let mut value = json!({
+            "version":1,"stage":"prepared-contract","phase":"steer",
+            "adapter":"request-client","queueKind":"local",
+            "checks":{"steer.input":"private-secret"}
+        });
+        assert!(queue_steer_diagnostic(&value).is_none());
+        value["checks"]["steer.input"] = json!(false);
+        value["phase"] = json!("private-secret");
+        assert!(queue_steer_diagnostic(&value).is_none());
+    }
 }

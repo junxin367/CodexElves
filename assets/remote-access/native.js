@@ -1,5 +1,6 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 139) return;
+  // 用户要求旧桌面页面升级到 8 张图片校验；守卫与底部公布版本同步递增，仍先清理旧桥接再安装。
+  if (window.__codexElvesRemoteAccess?.version === 142) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -575,9 +576,10 @@
     }
     const displayItem = nativeDisplayMessageItem(event.params?.item);
     const displayTurnItems = Array.isArray(event.params?.turn?.items)
-      ? event.params.turn.items.map(nativeDisplayMessageItem) : null;
+      ? nativeDisplayMessageItems(event.params.turn.items) : null;
     const turnChanged = displayTurnItems
-      && displayTurnItems.some((item, index) => item !== event.params.turn.items[index]);
+      && (displayTurnItems.length !== event.params.turn.items.length
+        || displayTurnItems.some((item, index) => item !== event.params.turn.items[index]));
     if (displayItem !== event.params?.item || turnChanged) {
       event = {
         ...event,
@@ -2950,13 +2952,19 @@
       content
     };
   }
-  function nativeSideItemsPage(turn, cursor = null) {
+  function nativeDisplayMessageItems(items) {
     const byId = new Map();
-    for (const item of array(turn.items)) {
-      const displayItem = nativeDisplayMessageItem(item);
-      if (typeof displayItem?.id === "string") byId.set(displayItem.id, displayItem);
+    for (const source of array(items)) {
+      const item = nativeDisplayMessageItem(source);
+      if (typeof item?.id !== "string") continue;
+      // 用户要求侧边引导重进后保留正文：原生 steered 与已接受正文共用服务端 ID，状态项不能覆盖正文。
+      if (byId.get(item.id)?.type === "userMessage" && item.type === "steered") continue;
+      byId.set(item.id, item);
     }
-    const all = [...byId.values()], prefix = "native-side-item:";
+    return [...byId.values()];
+  }
+  function nativeSideItemsPage(turn, cursor = null) {
+    const all = nativeDisplayMessageItems(turn.items), prefix = "native-side-item:";
     const end = cursor == null ? all.length
       : cursor.startsWith(prefix) ? all.findIndex(item => item.id === cursor.slice(prefix.length)) : -1;
     if (end < 0) throw failure(409, "侧边会话消息已变化，请重新读取");
@@ -2970,12 +2978,7 @@
       newestSnapshotItemId: items.at(-1)?.id ?? null, pageLimit: HISTORY_ITEM_PAGE_LIMIT };
   }
   function nativeCompleteSideItemsPage(turn, cursor = null) {
-    const byId = new Map();
-    for (const item of array(turn.items)) {
-      const displayItem = nativeDisplayMessageItem(item);
-      if (typeof displayItem?.id === "string") byId.set(displayItem.id, displayItem);
-    }
-    const all = [...byId.values()], prefix = "native-side-item:";
+    const all = nativeDisplayMessageItems(turn.items), prefix = "native-side-item:";
     const end = cursor == null
       ? all.length
       : cursor.startsWith(prefix) ? all.findIndex(item => item.id === cursor.slice(prefix.length)) : -1;
@@ -4125,9 +4128,16 @@
       const sourceTurn = nativeById.get(turnId) || null;
       const sourceItems = new Map();
       for (const item of array(sourceTurn?.items)) {
-        if (typeof item?.id === "string") sourceItems.set(item.id, item);
+        const remember = id => {
+          if (typeof id !== "string") return;
+          // 与侧边历史投影同步：共享 ID 的引导状态不能挤掉正文的原生时间和来源元数据。
+          if (["userMessage", "steeringUserMessage"].includes(sourceItems.get(id)?.type)
+              && item.type === "steered") return;
+          sourceItems.set(id, item);
+        };
+        remember(item?.id);
         if (item?.type === "steeringUserMessage" && typeof item.serverUserMessageId === "string")
-          sourceItems.set(item.serverUserMessageId, item);
+          remember(item.serverUserMessageId);
       }
       const initial = initialUserMessage(sourceTurn);
       const fallbackInitial = array(turn?.items).find(item => item?.type === "userMessage");
@@ -5264,7 +5274,7 @@
     return input.map((item, index) => index === candidates[0] ? rewritten[index] : item);
   }
   function validateQueuedImageSources(value, field) {
-    if (!Array.isArray(value) || value.length > 4
+    if (!Array.isArray(value) || value.length > remoteInputImageMaxCount
         || value.some(source => typeof source !== "string" || !source || source.length > 32767
           || /[\u0000-\u001f\u007f]/u.test(source))
         || new Set(value).size !== value.length)
@@ -6060,8 +6070,8 @@
     if (retainedImageSources != null)
       validateRetainedQueuedImages(entry.expectedImageSources, retainedImageSources);
     const effectiveRetainedSources = retainedImageSources ?? entry.expectedImageSources ?? [];
-    if (action === "commit" && effectiveRetainedSources.length + (addedImages?.length || 0) > 4)
-      return { ok: false, code: 400, message: "每条消息最多保留或新增 4 张图片" };
+    if (action === "commit" && effectiveRetainedSources.length + (addedImages?.length || 0) > remoteInputImageMaxCount)
+      return { ok: false, code: 400, message: `每条消息最多保留或新增 ${remoteInputImageMaxCount} 张图片` };
     if (action === "commit" && !prompt && !effectiveRetainedSources.length && !(addedImages?.length))
       return { ok: false, code: 400, message: "队列消息不能为空" };
     let addedImagePlan = null;
@@ -6556,8 +6566,72 @@
             || serverInput != null && !sameQueuedUserInput(steer.input, serverInput)
             || start == null && !(sourceManager.__codexElvesRequestClientManager && phase === "steer")
             || start != null && !startMatches(start)
-            || admissionStart != null && !startMatches(admissionStart))
-          throw failure(503, "原生准备结果不符合队列消息身份、输入或目标轮次契约");
+            || admissionStart != null && !startMatches(admissionStart)) {
+          // 用户要求引导失败可追踪到具体校验项；仅记录相等性、存在性和数量，不记录正文、图片 URL、路径或原生返回原文。
+          // 与 execution.rs 的诊断白名单同步；保持上方原准入条件，日志不能放宽校验或触发再次提交。
+          const checks = {
+            "conversationId": submission.conversationId === threadId,
+            "resume.conversationId": submission.resume?.conversationId == null || submission.resume.conversationId === threadId,
+            "steer.clientUserMessageId": steer?.clientUserMessageId === preparedClientId,
+            "steer.restoreMessage": restoreMatches(steer?.restoreMessage),
+            "steer.input": Array.isArray(steer?.input),
+            "steer.expectedTurnId": targetMatches(steer?.expectedTurnId),
+            "steer.targetTurnId": targetMatches(steer?.targetTurnId),
+            "steer.serverInput": serverInput == null || sameQueuedUserInput(steer?.input, serverInput),
+            "start.required": start != null || !!sourceManager.__codexElvesRequestClientManager && phase === "steer"
+          };
+          for (const [prefix, value] of [["start", start], ["admissionStart", admissionStart]]) {
+            if (value == null) continue;
+            checks[`${prefix}.threadId`] = value.request?.threadId === threadId;
+            checks[`${prefix}.clientUserMessageId`] = value.request?.clientUserMessageId === preparedClientId;
+            checks[`${prefix}.input`] = sameQueuedUserInput(value.request?.input, steer?.input);
+            checks[`${prefix}.restoreMessage`] = restoreMatches(value.context?.restoreMessage);
+          }
+          const inputSummary = input => {
+            if (!Array.isArray(input)) return null;
+            const counts = { items: input.length, text: 0, image: 0, localImage: 0, skill: 0, other: 0 };
+            for (const item of input)
+              counts[["text", "image", "localImage", "skill"].includes(item?.type) ? item.type : "other"]++;
+            return counts;
+          };
+          const restoreSummary = restored => {
+            const expected = {
+              ...baseline,
+              context: { ...baseline.context, ...(restored?.context?.turnTrigger === "send_user_message"
+                ? { turnTrigger: "send_user_message" } : {}) }
+            };
+            return {
+              present: restored != null,
+              idMatches: sameJsonValue(restored?.id, expected.id),
+              clientIdMatches: sameJsonValue(restored?.clientUserMessageId, expected.clientUserMessageId),
+              serverIdMatches: sameJsonValue(restored?.serverQueuedMessageId, expected.serverQueuedMessageId),
+              textMatches: sameJsonValue(restored?.text, expected.text),
+              contextMatches: sameJsonValue(restored?.context, expected.context),
+              promptMatches: sameJsonValue(restored?.context?.prompt, expected.context.prompt),
+              turnTriggerMatches: sameJsonValue(restored?.context?.turnTrigger, expected.context.turnTrigger),
+              expectedFieldCount: Object.keys(expected).length,
+              actualFieldCount: restored != null && typeof restored === "object" ? Object.keys(restored).length : 0
+            };
+          };
+          throw failure(503, "原生准备结果不符合队列消息身份、输入或目标轮次契约", {
+            queueSteerDiagnostic: {
+              version: 1, stage: "prepared-contract",
+              phase: ["start", "steer"].includes(phase) ? phase : "unknown",
+              adapter: sourceManager.__codexElvesRequestClientManager ? "request-client" : "manager",
+              queueKind: serverQueuedMessage ? "server" : "local",
+              checks,
+              inputs: {
+                steer: inputSummary(steer?.input), server: inputSummary(serverInput),
+                start: inputSummary(start?.request?.input), admissionStart: inputSummary(admissionStart?.request?.input)
+              },
+              restores: {
+                steer: restoreSummary(steer?.restoreMessage),
+                ...(start == null ? {} : { start: restoreSummary(start.context?.restoreMessage) }),
+                ...(admissionStart == null ? {} : { admissionStart: restoreSummary(admissionStart.context?.restoreMessage) })
+              }
+            }
+          });
+        }
         if (clientUserMessageId === preparedClientId) return submission;
         if (start == null) throw failure(503, "原生队列缺少可确认的开始请求");
         const updatedStart = {
@@ -6613,6 +6687,7 @@
       if (preDispatchError) error = preDispatchError;
       finishAttempt(preDispatchError || error.notSent === true || error.remoteValidationFailure ? "not-sent" : "unknown");
       return { ok: false, code: error.code || 503,
+        ...(preDispatchError?.queueSteerDiagnostic ? { queueSteerDiagnostic: preDispatchError.queueSteerDiagnostic } : {}),
         ...(preDispatchError || error.notSent === true ? { notSent: true } : {}),
         ...(submitted && !preDispatchError && error.notSent !== true && !error.remoteValidationFailure
           ? { outcomeUnknown: true } : {}),
@@ -6661,13 +6736,15 @@
     }
     return [...selected.values()];
   }
+  // 用户要求单条固定最多 8 张；发送及队列保留+新增共用此值，与 attachments.js 和 Rust MAX_INPUT_IMAGE_COUNT 同步，大小限制不变。
+  const remoteInputImageMaxCount = 8;
   const remoteInputImageMaxBytes = 5 * 1024 * 1024;
   const remoteInputImageMaxSourceLength = Math.ceil(remoteInputImageMaxBytes / 3) * 4 + 64;
   const remoteImageDataPattern = /^data:image\/(?:png|jpeg|webp|gif);base64,(?=.+)(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
   function remoteImageAttachments(payload = {}, phase = "unknown") {
     if (payload.images == null) return [];
-    if (!Array.isArray(payload.images) || payload.images.length > 4)
-      throw failure(400, "每条消息最多添加 4 张图片");
+    if (!Array.isArray(payload.images) || payload.images.length > remoteInputImageMaxCount)
+      throw failure(400, `每条消息最多添加 ${remoteInputImageMaxCount} 张图片`);
     let total = 0;
     return payload.images.map((image, index) => {
       if (!image || typeof image.name !== "string" || !image.name.trim() || image.name.length > 255
@@ -7607,7 +7684,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 139, call,
+    version: 142, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {

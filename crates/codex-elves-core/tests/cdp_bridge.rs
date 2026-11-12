@@ -1748,6 +1748,7 @@ const rpc = {
 };
 const env = {
   manager:{__codexElvesRequestClientManager:true},appScope:{},requestClientQueues:new Map(),
+  remoteInputImageMaxCount:Number(source.match(/const remoteInputImageMaxCount = (\d+);/)[1]),
   requestClientNativeRpc:async()=>rpc,
   failure:(code,message)=>Object.assign(new Error(message),{code}),
   pushNotification:event=>events.push(event),
@@ -2726,9 +2727,63 @@ for(const kind of ["server","local"]){
   await new Promise(setImmediate);
   assert.equal(result.ok,false,JSON.stringify({kind,result}));
   assert.equal(result.outcomeUnknown,undefined,"错误目标在准备校验时已确定拒绝");
+  assert.equal(result.notSent,true);
+  assert.equal(result.queueSteerDiagnostic.stage,"prepared-contract");
+  assert.equal(result.queueSteerDiagnostic.queueKind,kind);
+  assert.equal(result.queueSteerDiagnostic.checks["steer.expectedTurnId"],false);
+  assert.equal(result.queueSteerDiagnostic.checks["steer.clientUserMessageId"],true);
+  assert.equal(JSON.stringify(result.queueSteerDiagnostic).includes(message.text),false,"诊断不能记录消息正文");
   assert.equal(h.calls.start+h.calls.steer,0,"prepare 返回另一轮次时不能进入原生派发");
   assert.equal(h.calls.delete,0);
   assert.equal(h.accepted().length,1);
+}
+"#,
+    );
+}
+
+#[test]
+fn request_client_steer_contract_diagnostics_identify_fields_without_private_input() {
+    run_native_queue_edit_consumption_contract(
+        r#"
+for(const kind of ["server","local"]){
+  for(const mismatch of ["conversationId","steer.clientUserMessageId","steer.restoreMessage","start.threadId"]){
+    const h=await createFullNativeQueueHarness(),a=h.adapter();
+    h.allowSteer=true;
+    const secret="PRIVATE-STEER-DIAGNOSTIC-CONTENT";
+    const message={id:"diagnostic-physical",clientUserMessageId:"diagnostic-logical",createdAt:123,
+      text:secret,cwd:"/"+secret,context:{prompt:secret,imageAttachments:[],addedFiles:[],fileAttachments:[]}};
+    if(kind==="local")h.native.messages.set("thread",{messages:[message],refreshing:false});
+    else{
+      h.projectedMessages.set(message.id,message);
+      h.serverItems=[{id:message.id,clientUserMessageId:message.clientUserMessageId,
+        input:[{type:"text",text:secret+"\n",text_elements:[]}]}];
+    }
+    a.env.requestClientQueues.set("thread",{messages:[message]});
+    h.transformPrepared=submission=>{
+      if(mismatch==="conversationId")return{...submission,conversationId:secret};
+      if(mismatch==="steer.clientUserMessageId")return{...submission,steer:{...submission.steer,clientUserMessageId:secret}};
+      if(mismatch==="steer.restoreMessage")return{...submission,steer:{...submission.steer,
+        restoreMessage:{...submission.steer.restoreMessage,context:{...submission.steer.restoreMessage.context,
+          privateUnrecognizedField:secret}}}};
+      return{...submission,start:{request:{threadId:secret,clientUserMessageId:submission.steer.clientUserMessageId,
+        input:submission.steer.input},context:{restoreMessage:submission.steer.restoreMessage}}};
+    };
+    const result=await a.api.steer({threadId:"thread",messageId:message.id});
+    const detail=result.queueSteerDiagnostic;
+    assert.equal(result.ok,false,JSON.stringify({kind,mismatch,result}));
+    assert.equal(result.notSent,true);
+    assert.equal(detail.checks[mismatch],false,JSON.stringify(detail));
+    assert.equal(detail.inputs.steer.items,1);
+    assert.equal(detail.inputs.steer.text,1);
+    if(mismatch==="steer.restoreMessage"){
+      assert.equal(detail.restores.steer.contextMatches,false);
+      assert.equal(detail.restores.steer.promptMatches,true);
+      assert.equal(detail.restores.steer.textMatches,true);
+    }
+    assert.equal(JSON.stringify(detail).includes(secret),false,"诊断不得泄露正文、路径或错误返回的字符串");
+    assert.equal(JSON.stringify(detail).includes("privateUnrecognizedField"),false,"不记录原生对象中的任意字段名");
+    assert.equal(h.calls.start+h.calls.steer+h.calls.delete,0);
+  }
 }
 "#,
     );
@@ -4566,6 +4621,7 @@ async function createFullNativeQueueHarness({ephemeral=false,rspack=false}={}){
     getFollowUpContext:async()=>({cwd:"/memory-fixture",ephemeral,sideConversation:ephemeral,...h.context})};
   h.adapter=()=>{
     const env={manager:null,appScope:{},requestClientQueues:new Map(),requestClientQueuePrepare:null,
+      remoteInputImageMaxCount:Number(source.match(/const remoteInputImageMaxCount = (\d+);/)[1]),
       requestClientNativeRpc:async()=>rpc,
       nativeModuleSnapshot:async()=>({module:h.nativeModule??=Object.create(null),
         source:h.moduleSource??w8t.toString()+"function nextFixtureFunction(){}",rspack,
@@ -4760,6 +4816,7 @@ function createLegacyQueueRestoreHarness({ghost=true,acceptImmediately=true}={})
       return response;
     }
   },getConversation:()=>history},appScope:{},requestClientQueues:new Map(),
+    remoteInputImageMaxCount:Number(source.match(/const remoteInputImageMaxCount = (\d+);/)[1]),
     requestClientNativeRpc:async()=>rpc,readRequestClientQueue:async()=>h.refresh(),
     requiredId:v=>v,array:v=>Array.isArray(v)?v:[],TextEncoder,Uint8Array,crypto:nodeCrypto.webcrypto,
     failure:(code,message,details={})=>Object.assign(new Error(message),{code,remoteValidationFailure:true,...details}),
@@ -4887,6 +4944,7 @@ const coordinator={
   }
 };
 const env={crypto,TextEncoder,Uint8Array,atob,Map,Set,
+  remoteInputImageMaxCount:Number(source.match(/const remoteInputImageMaxCount = (\d+);/)[1]),
   manager:{getTurnCoordinator:async()=>coordinator},appScope:{},
   requiredId:v=>v,array:v=>Array.isArray(v)?v:[],
   messageActionManager:()=>env.manager,readServerQueuedSubmissions:async()=>echo,
@@ -10260,8 +10318,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = include_str!("../../../assets/remote-access/native.js");
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 139"));
-    assert!(script.contains("version: 139, call"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 142"));
+    assert!(script.contains("version: 142, call"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));
