@@ -1,6 +1,6 @@
 (() => {
   // 用户要求旧页面也修复带图队列引导；守卫与底部版本同步递增，先清理旧桥接再安装，并保留 8 张图片限制。
-  if (window.__codexElvesRemoteAccess?.version === 143) return;
+  if (window.__codexElvesRemoteAccess?.version === 144) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -6897,7 +6897,7 @@
       return { ok: false, code: error.code || 503, message: error.message || "加入原生队列失败" };
     }
   }
-  async function submitQueuedMessage(payload = {}, allowImmediate = false) {
+  async function submitQueuedMessage(payload = {}, allowImmediate = false, admissionRetry = false) {
     let threadId = null;
     let clientUserMessageId = null;
     let queueAddStarted = false;
@@ -6927,10 +6927,8 @@
         throw failure(503, "当前 Codex 版本不支持原生队列发送");
       await loadNativeQueue(coordinator, threadId);
       assertCurrent();
-      const streamRole = sourceManager.getStreamRole?.(threadId)
-        ?? coordinator.getStreamRole?.(threadId)
-        ?? coordinator.options?.getStreamRole?.(threadId);
-      sendNow = allowImmediate && streamRole?.role !== "follower";
+      // 用户要求只有明确执行中才入队；旧队列、未知状态和 follower 身份都不能把普通发送改成排队。
+      sendNow = !nativeSendIsRunning(threadId, sourceManager, thread);
       const cwd = manager.getConversationCwd(threadId) || thread.cwd || "/";
       const message = {
         id: payload.clientUserMessageId == null ? crypto.randomUUID() : requiredId(payload.clientUserMessageId),
@@ -6975,14 +6973,7 @@
       if (resumed?.status === "not-ready") throw failure(409, "会话暂不可用，请稍后重试");
       await applyThreadModelSettings(threadId, threadSettings);
       assertCurrent();
-      const nativeQueueIntent = sourceManager.__codexElvesRequestClientManager === true
-        && sendNow && !useServerQueue && payload.queueOnly !== true
-        && message.requiresExistingOwner !== true && conversation?.threadSource === "user"
-        && [thread, conversation].every(current => current?.ephemeral === false
-          && ["vscode", "cli", "exec", "appServer"].includes(current.source)
-          && current.sideConversation !== true && current.parentThreadId == null
-          && current.requiresExistingOwner !== true && current.threadStartKind !== "aeon"
-          && current.threadSource !== "aeon");
+      const nativeDirectSend = sourceManager.__codexElvesRequestClientManager === true && sendNow && !useServerQueue;
       const prepareAtDispatch = sourceManager.__codexElvesRequestClientManager === true
         && sendNow && !useServerQueue && inputItems.length === 0
         && message.requiresExistingOwner !== true
@@ -6992,6 +6983,7 @@
           && current.sideConversation !== true && current.parentThreadId == null
           && current.forkedFromId == null && current.requiresExistingOwner !== true);
       let input = null;
+      let preparedPhase = null;
       if (!prepareAtDispatch) {
         const prepared = await retryExecutionConfigLoading(
           () => coordinator.execution.prepare(threadId, message, "start"),
@@ -7017,10 +7009,9 @@
           throw failure(503, "当前 Codex 版本不支持原生本地消息队列");
         const request = {
           conversationId: threadId, message,
-          // 普通主会话由原生本地接受和发送锁承接；queue 在空闲时直接开始，晚到忙碌时入队。
-          queueModeOverride: nativeQueueIntent ? "queue"
-            : sendNow ? "send-now" : payload.queueOnly === true ? "queue-only" : "queue",
-          acceptLocally: nativeQueueIntent || !sendNow,
+          // 空闲普通消息直接发送；异步准备后的忙碌竞争由最终准入重新核对，不能预先本地入队。
+          queueModeOverride: sendNow ? "send-now" : payload.queueOnly === true ? "queue-only" : "queue",
+          acceptLocally: !sendNow,
           // Skill 等额外输入仍随原生重放上下文保存；普通直接发送由实际 phase 生成输入。
           ...(input == null ? {} : { editPosition: {
             serverSubmission: { id: message.id, clientUserMessageId, input },
@@ -7036,20 +7027,15 @@
             || (sourceManager.__codexElvesRequestClientManager ? thread : null);
           if (!conversation)
             throw failure(409, "会话状态已变化，暂不能提交排队消息");
-          const status = sourceManager.getThreadRuntimeStatusEvidence?.(threadId)
-            || conversation.threadRuntimeStatus || thread.status;
-          const runtime = status?.status ?? status;
-          const statusType = typeof runtime === "string" ? runtime : runtime?.type;
-          const queued = coordinator.readMessages(threadId);
-          const compacting = runtimeCompaction(threadId, conversation).state !== "idle";
-          const active = compacting
-            || ["active", "inProgress", "running", "pending"].includes(statusType)
-            || nativeConversationTurns(conversation).some(turn => nativeTurnStatus(turn) === "inProgress")
-            || array(queued?.messages || queued).length;
+          const compacting = runtimeCompaction(threadId, conversation).state === "running";
+          const activeTurns = nativeConversationTurns(conversation).filter(turn =>
+            nativeTurnId(turn) && nativeTurnStatus(turn) === "inProgress");
+          // 原生 start 会先建立本消息的 active/null-turn，再调用准入；主/侧边和 send-only 均不能把自身占位当作别的任务。
+          const ownStart = nativeDirectSend && preparedPhase === "start" && !activeTurns.length;
+          const active = compacting || !ownStart && nativeSendIsRunning(threadId, sourceManager, thread);
           if (sendOnly && active)
             throw failure(409, "此类会话只支持空闲时直接发送，请等待当前回复或压缩完成后重试");
-          // fpn 会在最终回调前建立本消息的 active/null-turn；queue 路径由原生 when-idle 判定忙碌。
-          if (sendNow && (nativeQueueIntent ? compacting : active))
+          if (sendNow && active)
             throw Object.assign(failure(409, "会话状态已变化，消息需要进入原生队列"), { queueRequired: true });
         };
         if (sendOnly) {
@@ -7057,6 +7043,8 @@
             throw failure(409, "此类会话不支持排队发送，请等待当前回复完成后重试");
           assertAdmission();
         }
+        if (!sendNow && !nativeSendIsRunning(threadId, sourceManager, thread))
+          throw Object.assign(failure(409, "会话已空闲，消息应直接发送"), { directRequired: true });
         queueAddStarted = true;
         localQueueStarted = request.acceptLocally;
         // send-only 不经过本地接受阶段，使用原生提交前的请求校验位置保护压缩交界。
@@ -7088,7 +7076,9 @@
                   || !sameQueuedUserInput(start.request.input, steer.input)))
               throw failure(503, "原生准备结果不符合普通发送身份或输入契约");
           }
-          return current.submission;
+          preparedPhase = phase;
+          // 普通发送不能意外引导晚到的另一轮；原生锁内最后一次空闲核对仍然保留。
+          return sendNow ? { ...current.submission, requiresIdle: true } : current.submission;
         }, undefined, sendNow ? assertAdmission : undefined, assertAdmission,
         ...(sourceManager.__codexElvesRequestClientManager === true ? [{ deferQueueSnapshotOnSent: true }] : []));
         if (!["queued", "sent"].includes(result?.status)
@@ -7106,6 +7096,8 @@
         if (confirmed.confirmed) return confirmed;
         throw new Error("原生本地队列尚未确认消息已排队或接受");
       }
+      if (!nativeSendIsRunning(threadId, sourceManager, thread))
+        throw Object.assign(failure(409, "会话已空闲，消息应直接发送"), { directRequired: true });
       queueAddStarted = true;
       const result = await sourceManager.requestClient.sendRequest("thread/queue/add", {
         threadId,
@@ -7128,8 +7120,8 @@
         ...queueSnapshotFields(threadId, queued)
       };
     } catch (error) {
-      if (error.queueRequired && sendNow)
-        return await submitQueuedMessage(payload, false);
+      if ((error.queueRequired || error.directRequired) && !admissionRetry)
+        return await submitQueuedMessage(payload, !sendNow, true);
       if (queuedSubmission) {
         return {
           ok: true,
@@ -7153,6 +7145,19 @@
         };
       return { ok: false, code: error.code || 503, message: error.message || "加入原生队列失败" };
     }
+  }
+  function nativeSendIsRunning(threadId, sourceManager = manager, thread = null) {
+    const conversation = sourceManager.getConversation(threadId);
+    if (runtimeCompaction(threadId, conversation).state === "running") return true;
+    const status = sourceManager.getThreadRuntimeStatusEvidence?.(threadId)
+      || conversation?.threadRuntimeStatus || thread?.status;
+    const runtime = status?.status ?? status;
+    const type = typeof runtime === "string" ? runtime : runtime?.type;
+    if (["active", "inProgress", "running"].includes(type)) return true;
+    // 新鲜空闲证据优先于尚未刷新的历史轮次；pending、缺失状态或队列残留本身不证明正在执行。
+    if (["idle", "completed", "interrupted", "failed"].includes(type)) return false;
+    return nativeConversationTurns(conversation).some(turn =>
+      nativeTurnId(turn) && nativeTurnStatus(turn) === "inProgress");
   }
   async function nativeCreationModule() {
     return (await nativeModuleSnapshot("initial")).module;
@@ -7441,19 +7446,8 @@
             return { ok: false, code: 503, message: error?.message || "原生发送准备能力不可用",
               nativeDispatch: { status: "not-dispatched", phase: "send-preparation" } };
           }
-          const conversation = manager.getConversation(id);
-          const status = manager.getThreadRuntimeStatusEvidence?.(id)
-            || conversation?.threadRuntimeStatus || loaded.status;
-          const runtime = status?.status ?? status;
-          const statusType = typeof runtime === "string" ? runtime : runtime?.type;
-          const queued = manager.getTurnCoordinator?.()?.readMessages?.(id);
-          if (payload.queueOnly === true || runtimeCompaction(id, conversation).state !== "idle"
-              || ["active", "inProgress", "running", "pending"].includes(statusType)
-              || nativeConversationTurns(conversation).some(turn => nativeTurnStatus(turn) === "inProgress")
-              || array(queued?.messages || queued).length)
-            return await queueMessage({ ...payload, threadId: id });
-          // 普通空闲发送也经过同一准备和身份保护；由原生在异步准备后决定立即发送或入队。
-          return await queueMessage({ ...payload, threadId: id }, true);
+          return await queueMessage({ ...payload, threadId: id },
+            !nativeSendIsRunning(id, manager, loaded));
         }
         case "create": {
           let startConversationSubmitted = false;
@@ -7732,7 +7726,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 143, call,
+    version: 144, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {

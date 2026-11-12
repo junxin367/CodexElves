@@ -5,6 +5,7 @@ members = [
   "crates/codex-elves-data",
   "apps/codex-elves-launcher",
   "apps/codex-elves-manager/src-tauri",
+  "apps/codex-elves-remote/src-tauri",
 ]
 
 [workspace.package]

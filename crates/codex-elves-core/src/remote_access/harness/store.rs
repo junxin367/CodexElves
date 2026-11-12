@@ -110,9 +110,14 @@ impl Store {
         for queue in data.queues.values_mut() {
             for message in queue
                 .iter_mut()
-                .filter(|message| message.state == "sending")
+                .filter(|message| matches!(message.state.as_str(), "sending" | "direct-sending"))
             {
-                message.state = "unknown".into();
+                message.state = if message.state == "direct-sending" {
+                    "direct-unknown"
+                } else {
+                    "unknown"
+                }
+                .into();
             }
         }
         Ok(Self {
@@ -166,7 +171,7 @@ impl Store {
             .get(thread_id)
             .into_iter()
             .flatten()
-            .filter(|q| q.state != "editing")
+            .filter(|q| q.state != "editing" && !q.state.starts_with("direct-"))
             .map(Queued::view)
             .collect();
         let edits: Vec<_> = self.data.edits.iter().filter(|(_, e)| e.thread_id == thread_id
@@ -184,34 +189,50 @@ mod tests {
 
     #[test]
     fn harness_store_restart_never_replays_an_unconfirmed_dispatch() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut store = Store::open(directory.path()).unwrap();
-        store
-            .commit(|data| {
-                data.queues.insert(
-                    "thread-a".into(),
-                    vec![Queued {
-                        id: "message-a".into(),
-                        payload: json!({"prompt":"test","clientUserMessageId":"client-a"}),
-                        created_at: 1,
-                        device_id: "device-a".into(),
-                        key_id: "key-a".into(),
-                        state: "sending".into(),
-                        request_id: None,
-                        runtime_revision: None,
-                    }],
+        for state in ["sending", "direct-sending"] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = Store::open(directory.path()).unwrap();
+            store
+                .commit(|data| {
+                    data.queues.insert(
+                        "thread-a".into(),
+                        vec![Queued {
+                            id: "message-a".into(),
+                            payload: json!({"prompt":"test","clientUserMessageId":"client-a"}),
+                            created_at: 1,
+                            device_id: "device-a".into(),
+                            key_id: "key-a".into(),
+                            state: state.into(),
+                            request_id: None,
+                            runtime_revision: None,
+                        }],
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            let reopened = Store::open(directory.path()).unwrap();
+            assert_eq!(
+                reopened.data.queues["thread-a"][0].state,
+                if state == "sending" {
+                    "unknown"
+                } else {
+                    "direct-unknown"
+                }
+            );
+            let view = reopened.queue("thread-a", "epoch");
+            if state == "direct-sending" {
+                assert!(
+                    view["queuedMessages"].as_array().unwrap().is_empty(),
+                    "直接发送意图重启后继续只读核对，不能变成待发送队列"
                 );
-                Ok(())
-            })
-            .unwrap();
-        let reopened = Store::open(directory.path()).unwrap();
-        assert_eq!(reopened.data.queues["thread-a"][0].state, "unknown");
-        let view = reopened.queue("thread-a", "epoch");
-        assert_eq!(view["queuedMessages"][0]["canSendNow"], false);
-        assert_eq!(
-            view["queuedMessages"][0]["submission"]["status"],
-            "outcome-unknown"
-        );
+                continue;
+            }
+            assert_eq!(view["queuedMessages"][0]["canSendNow"], false);
+            assert_eq!(
+                view["queuedMessages"][0]["submission"]["status"],
+                "outcome-unknown"
+            );
+        }
     }
 
     #[test]

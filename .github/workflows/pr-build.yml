@@ -118,7 +118,7 @@ jobs:
           cargo test -p codex-elves-core --lib remote_access::tests:: -- --test-threads=1
 
       - name: 远程会话回归证据校验测试
-        run: node --test scripts/remote-access-e2e-evidence.test.mjs scripts/remote-access-e2e-environment.test.mjs scripts/remote-access-e2e-receipt-driver.test.mjs scripts/remote-access-ui-state.test.mjs
+        run: node --test scripts/remote-access-e2e-evidence.test.mjs scripts/remote-access-e2e-environment.test.mjs scripts/remote-access-e2e-receipt-driver.test.mjs scripts/remote-access-ui-state.test.mjs scripts/workspace-tabs.test.mjs scripts/windows-remote-titlebar.test.mjs
 
       - name: Build release binaries
         run: cargo build --release
@@ -130,6 +130,10 @@ jobs:
           Copy-Item target/release/codex-elves.exe dist/windows/app/
           Copy-Item target/release/codex-elves-manager.exe dist/windows/app/
           Copy-Item target/release/codex-elves-task-board.exe dist/windows/app/
+
+      - name: Stage standalone Windows remote client
+        shell: pwsh
+        run: .\scripts\build-windows-remote.ps1 -Version "${{ env.ARTIFACT_VERSION }}" -Profile release -SkipBuild
 
       - name: Build Windows installer
         shell: pwsh
@@ -154,7 +158,14 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: codex-elves-windows-installer
-          path: dist/windows/*.exe
+          path: dist/windows/*-windows-x64-setup.exe
+          if-no-files-found: error
+
+      - name: Upload standalone Windows remote client
+        uses: actions/upload-artifact@v6
+        with:
+          name: codex-elves-windows-remote-client
+          path: dist/windows/CodexElves-Remote-*-windows-x64.exe
           if-no-files-found: error
 
   macos-dmg:

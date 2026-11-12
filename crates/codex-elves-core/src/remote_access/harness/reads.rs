@@ -740,10 +740,12 @@ impl Harness {
             .flatten()
             .find(|q| q.payload["clientUserMessageId"] == payload["clientUserMessageId"])
             .cloned();
-        if let Some(message) = queued
-            .as_ref()
-            .filter(|q| matches!(q.state.as_str(), "sending" | "unknown"))
-        {
+        if let Some(message) = queued.as_ref().filter(|q| {
+            matches!(
+                q.state.as_str(),
+                "sending" | "unknown" | "direct-sending" | "direct-unknown"
+            )
+        }) {
             // 断线后只用同一客户端消息 ID 的历史证据确认送达；找不到证据继续保留未知状态。
             if let Ok(history) = self
                 .runtime

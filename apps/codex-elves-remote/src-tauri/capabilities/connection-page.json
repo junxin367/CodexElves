@@ -1,0 +1,7 @@
+{
+  "identifier": "connection-page",
+  "description": "仅内置连接页可读取客户端设置和连接服务，远程会话页面不获得本机命令权限。",
+  "local": true,
+  "webviews": ["remote-content"],
+  "permissions": ["remote-connection"]
+}

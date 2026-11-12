@@ -56,7 +56,7 @@ let session = null, sidebar = null, selectedId = null, thread = null, historyCur
 let pendingNotificationOpen = null;
 let stream = null, connected = false, selectionVersion = 0, busy = false, creating = false, historyLoadingVersion = -1;
 let sending = null;
-const directSendPreviews = new Map();
+const sentMessageDisplays = new Map();
 let composerDiagnosticState = "";
 let turns = new Map(), collapsed = new Set(), search = "", sidebarTimer = null, refreshTimer = null;
 let historyInitialized = false;
@@ -544,7 +544,7 @@ const appearanceThemes = {
 };
 const defaultUiFont = '-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif';
 const defaultCodeFont = 'ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace';
-// 用户要求正文以整个可视窗口居中，上限默认 950px，空间不足时收窄；与 style.css 的窗口中心公式和回退值同步。
+// 用户要求先保留正文宽度上限，仅在右侧实际空间不足时收窄；有足够留白才对齐整个可视窗口中心，与 style.css 同步。
 const conversationWidthDefault = 950, conversationWidthMin = 320, conversationWidthMax = 3840;
 const validFontFamily = value => typeof value === "string" && value.length <= 100
   && !/[{};<>\u0000-\u001f]/u.test(value);
@@ -827,12 +827,14 @@ function applyAutomaticAppearance(save = false, { immediate = false, reason = "t
   finishThemeDiagnosticTransition(transition);
   return true;
 }
-function setAppearanceThemeMode(mode) {
+function setAppearanceThemeMode(mode, { theme = null } = {}) {
   if (!["auto", "manual"].includes(mode)) return;
   const previousTheme = appearance.theme, previousMode = appearance.themeMode;
   automaticThemeCandidate = null;
   appearance.themeMode = mode;
   if (mode === "auto") appearance.theme = automaticAppearanceTheme();
+  // 用户要求自动/浅色/深色三个预览选项；浅色和深色仍沿用原有 manual 存储与自动模式切换约束。
+  else if (["light", "dark"].includes(theme)) appearance.theme = theme;
   const transition = previousMode !== mode || previousTheme !== appearance.theme
     ? beginThemeDiagnosticTransition(appearance.theme, "manual", { previousTheme, previousMode }) : null;
   applyAppearance(true);
@@ -1142,6 +1144,121 @@ function mountRemoteSettings(dialog) {
     dispose() { disposed = true; generation++; }
   };
 }
+const appearanceFontFamilies = [
+  "Arial", "Arial Black", "Bahnschrift", "Calibri", "Cambria", "Cambria Math", "Candara",
+  "Cascadia Code", "Cascadia Mono", "Comic Sans MS", "Consolas", "Constantia", "Corbel",
+  "Courier New", "Fira Code", "Georgia", "Helvetica", "Helvetica Neue", "Inter", "JetBrains Mono",
+  "Liberation Mono", "Menlo", "Microsoft JhengHei", "Microsoft YaHei", "Monaco", "Noto Sans",
+  "Noto Sans SC", "Noto Serif SC", "PingFang SC", "Segoe UI", "SF Mono", "SimHei", "SimSun",
+  "Source Code Pro", "Tahoma", "Times New Roman", "Trebuchet MS", "Verdana"
+];
+function appearanceFontOptions(current = "") {
+  // 用户要求字体使用 Codex 风格 Select；在当前设备检测常用字体，不请求本地字体权限，也保留已保存的自定义字体。
+  const sample = "AaBbWw0123456789汉字", bases = ["monospace", "sans-serif", "serif"];
+  let fonts = appearanceFontFamilies;
+  try {
+    const canvas = document.createElement("canvas").getContext("2d");
+    if (canvas) {
+      const measure = family => { canvas.font = `16px ${family}`; return canvas.measureText(sample).width; };
+      const widths = bases.map(measure);
+      fonts = fonts.filter(family => bases.some((base, index) =>
+        Math.abs(measure(`${JSON.stringify(family)},${base}`) - widths[index]) > .01));
+    }
+  } catch {}
+  if (current && validFontFamily(current) && !fonts.includes(current)) fonts = [...fonts, current];
+  return [{ value: "", label: "系统" },
+    ...[...fonts].sort((left, right) => left.localeCompare(right)).map(family => ({ value: family, label: family }))];
+}
+function appearanceHexToHsv(hex) {
+  if (!/^#[0-9a-f]{6}$/i.test(hex)) return null;
+  const [r, g, b] = [1, 3, 5].map(index => parseInt(hex.slice(index, index + 2), 16) / 255);
+  const high = Math.max(r, g, b), low = Math.min(r, g, b), delta = high - low;
+  const hue = !delta ? 0 : high === r ? ((g - b) / delta) % 6 : high === g ? (b - r) / delta + 2 : (r - g) / delta + 4;
+  return { h: (hue * 60 + 360) % 360, s: high ? delta / high : 0, v: high };
+}
+function appearanceHsvToHex({ h, s, v }) {
+  const hue = ((h % 360) + 360) % 360 / 60, chroma = v * s;
+  const part = chroma * (1 - Math.abs(hue % 2 - 1)), base = v - chroma;
+  const rgb = [[chroma, part, 0], [part, chroma, 0], [0, chroma, part],
+    [0, part, chroma], [part, 0, chroma], [chroma, 0, part]][Math.floor(hue)];
+  return "#" + rgb.map(channel => Math.round((channel + base) * 255).toString(16).padStart(2, "0")).join("");
+}
+function openAppearanceColorPicker(trigger, label, color, onChange) {
+  if (activePopup?.trigger === trigger) { closePopup(true); return; }
+  closePopup(); closeComposerMenus();
+  // 用户要求色点＋色值触发浮层，使用连续饱和度/亮度面板与色相条；复用菜单的顶层、边界定位和关闭逻辑。
+  const node = element("div", "ui-popup appearance-color-picker");
+  node.id = "active-popup"; node.setAttribute("role", "dialog"); node.setAttribute("aria-label", `${label}颜色选择`);
+  const plane = element("div", "appearance-color-plane"), cursor = element("span", "appearance-color-cursor");
+  plane.tabIndex = 0; plane.setAttribute("role", "slider");
+  plane.setAttribute("aria-label", `${label}饱和度与亮度`);
+  plane.setAttribute("aria-description", "左右方向键调整饱和度，上下方向键调整亮度，按住 Shift 加快调整");
+  plane.setAttribute("aria-valuemin", "0"); plane.setAttribute("aria-valuemax", "100");
+  cursor.setAttribute("aria-hidden", "true"); plane.append(cursor);
+  const hue = element("input", "appearance-color-hue"), hex = element("input", "color-hex");
+  hue.type = "range"; hue.min = "0"; hue.max = "360"; hue.step = "1"; hue.setAttribute("aria-label", `${label}色相`);
+  hex.type = "text"; hex.maxLength = 7; hex.spellcheck = false; hex.autocomplete = "off";
+  hex.setAttribute("aria-label", `${label}色值`);
+  const footer = element("div", "appearance-color-footer"), swatch = element("span", "appearance-color-dot");
+  footer.append(swatch, hex); node.append(plane, hue, footer);
+  let hsv = appearanceHexToHsv(color), currentColor = color.toLowerCase();
+  const render = () => {
+    plane.style.setProperty("--color-hue", hsv.h);
+    cursor.style.left = `${hsv.s * 100}%`; cursor.style.top = `${(1 - hsv.v) * 100}%`;
+    cursor.style.background = currentColor; swatch.style.background = currentColor;
+    plane.setAttribute("aria-valuenow", String(Math.round(hsv.s * 100)));
+    plane.setAttribute("aria-valuetext", `饱和度 ${Math.round(hsv.s * 100)}%，亮度 ${Math.round(hsv.v * 100)}%`);
+    hue.value = String(hsv.h);
+    if (document.activeElement !== hex) { hex.value = currentColor.toUpperCase(); hex.setAttribute("aria-invalid", "false"); }
+  };
+  const commit = () => {
+    currentColor = appearanceHsvToHex(hsv); onChange(currentColor); render();
+  };
+  const move = event => {
+    const bounds = plane.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return;
+    hsv.s = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
+    hsv.v = 1 - Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height));
+    commit();
+  };
+  plane.onpointerdown = event => {
+    if (!event.isPrimary || event.button !== 0) return;
+    event.preventDefault(); plane.focus({ preventScroll: true }); plane.setPointerCapture(event.pointerId); move(event);
+  };
+  plane.onpointermove = event => { if (plane.hasPointerCapture(event.pointerId)) move(event); };
+  plane.onpointerup = event => {
+    if (plane.hasPointerCapture(event.pointerId)) { move(event); plane.releasePointerCapture(event.pointerId); }
+  };
+  plane.onkeydown = event => {
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+    event.preventDefault();
+    const step = event.shiftKey ? .1 : .01;
+    if (["ArrowLeft", "ArrowRight"].includes(event.key))
+      hsv.s = Math.max(0, Math.min(1, hsv.s + (event.key === "ArrowRight" ? step : -step)));
+    else hsv.v = Math.max(0, Math.min(1, hsv.v + (event.key === "ArrowUp" ? step : -step)));
+    commit();
+  };
+  hue.oninput = () => { hsv.h = Number(hue.value); commit(); };
+  hex.oninput = () => {
+    const value = appearanceHexToHsv(hex.value);
+    hex.setAttribute("aria-invalid", String(!value));
+    if (value) { hsv = { ...value, h: value.s ? value.h : hsv.h }; commit(); }
+  };
+  trigger.popupWidth = 240; trigger.popupMaxHeight = 360;
+  trigger.setAttribute("aria-expanded", "true"); trigger.setAttribute("aria-controls", node.id);
+  activePopup = { node, trigger, syncColor(value) {
+    if (value.toLowerCase() !== currentColor) {
+      const next = appearanceHexToHsv(value);
+      if (next) { hsv = { ...next, h: next.s ? next.h : hsv.h }; currentColor = value.toLowerCase(); }
+    }
+    render();
+  } };
+  if (typeof node.showPopover === "function") node.setAttribute("popover", "manual");
+  (trigger.closest("dialog") || document.body).append(node);
+  render();
+  if (node.hasAttribute("popover")) node.showPopover();
+  fitPopup(); plane.focus({ preventScroll: true });
+}
 function openAppearance() {
   closeComposerMenus(); closePopup(); sessionMenu?.close();
   const trigger = document.activeElement;
@@ -1166,10 +1283,11 @@ function openAppearance() {
     <div class="appearance-panels">
     <section id="appearance-general-page" class="appearance-body appearance-settings-page">
     <h3 class="appearance-panel-title">会话</h3>
-    <label class="appearance-field appearance-width-field"><span>会话正文宽度上限</span><span class="appearance-number"><input id="appearance-conversation-width" type="number" min="${conversationWidthMin}" max="${conversationWidthMax}" step="10" value="${appearance.conversationWidth}" aria-label="会话正文宽度上限"><span>px</span></span></label>
-    <p class="appearance-hint">默认 950px。窗口较窄时，正文和输入框会随可用空间自动收窄。</p>
+    <section class="appearance-section"><h4>显示</h4><div class="appearance-card">
+    <label class="appearance-field appearance-width-field"><span class="appearance-field-copy"><span>会话正文宽度上限</span><small>默认 950px，仅在右侧可用空间不足时自动收窄。</small></span><span class="appearance-number"><input id="appearance-conversation-width" type="number" min="${conversationWidthMin}" max="${conversationWidthMax}" step="10" value="${appearance.conversationWidth}" aria-label="会话正文宽度上限"><span>px</span></span></label>
     <div class="appearance-field appearance-thread-limit-field"><span>每个项目显示会话数</span><div id="appearance-project-thread-limit-slot"></div></div>
     <div id="appearance-cache-state" class="appearance-field" role="status"></div>
+    </div></section>
     </section>
     <section id="appearance-types-page" class="appearance-body appearance-settings-page" hidden>
     <!-- 用户要求统一显示为“会话实例”：导航、页头与指令选择保持一致，逐实例开关与自动检测行为不变。 -->
@@ -1179,44 +1297,47 @@ function openAppearance() {
     </section>
     <section id="appearance-instructions-page" class="appearance-body appearance-settings-page" hidden>
     <h3 class="appearance-panel-title">自定义指令</h3>
+    <div class="appearance-card appearance-instructions-card">
     <!-- 用户要求只选择实例并编辑用户级全局指令，不再提供类型、环境、作用范围和项目选择。 -->
     <div class="instruction-selectors"><label>会话实例<div id="instruction-instance-slot"></div></label></div>
     <p id="instruction-path" class="appearance-hint instruction-path"></p>
     <textarea id="instruction-content" class="instruction-content" aria-label="自定义指令内容" spellcheck="false" disabled></textarea>
     <p id="instruction-status" class="appearance-hint" role="status"></p>
     <p class="appearance-hint">保存至所选实例的用户级全局指令文件，重新加载后生效。</p>
-    </section>
+    </div></section>
     <section id="appearance-customization-page" class="appearance-body appearance-settings-page" hidden>
     <h3 class="appearance-panel-title">外观</h3>
-    <nav class="appearance-subnav" aria-label="外观分类"><button type="button" data-appearance-tab="theme" aria-pressed="true">主题与模式</button><button type="button" data-appearance-tab="fonts" aria-pressed="false">字体</button><button type="button" data-appearance-tab="background" aria-pressed="false">背景</button></nav>
-    <div data-appearance-panel="theme">
-    <div class="appearance-field"><span id="appearance-theme-label">模式</span><div id="appearance-theme-slot" class="appearance-theme-options" role="group" aria-labelledby="appearance-theme-label"></div></div>
-    <div id="appearance-auto-light-setting" hidden></div>
-    <div class="appearance-field"><span>主题</span><div id="appearance-preset-slot"></div></div>
-    <div id="appearance-colors"></div>
+    <!-- 用户要求单层设置页使用分组卡片，不再添加主题/字体/背景的内部导航。 -->
+    <section class="appearance-section"><h4>视觉风格</h4>
+    <div class="appearance-card appearance-mode-card">
+      <div class="appearance-field"><span id="appearance-theme-label">模式</span><div id="appearance-theme-slot" class="appearance-theme-options" role="group" aria-labelledby="appearance-theme-label"></div></div>
+      <div id="appearance-auto-light-setting" hidden></div>
     </div>
-    <div data-appearance-panel="background" hidden>
-    <div class="appearance-field appearance-background-field"><span>背景图片</span><div class="appearance-background-actions"><input id="appearance-background-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden><button type="button" id="appearance-background-action"></button></div></div>
+    <div class="appearance-card">
+      <div class="appearance-field"><span>主题</span><div id="appearance-preset-slot"></div></div>
+      <div id="appearance-colors"></div>
+      <div class="appearance-field"><span>字体</span><div id="appearance-ui-font-slot"></div></div>
+    </div></section>
+    <section class="appearance-section"><h4>背景图片</h4><div class="appearance-card">
+    <div class="appearance-field appearance-background-field"><span>图片</span><div class="appearance-background-actions"><input id="appearance-background-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden><button type="button" id="appearance-background-action"></button></div></div>
     <div id="appearance-background-preview" class="appearance-background-preview" hidden><img id="appearance-background-thumbnail" alt=""><span id="appearance-background-name"></span></div>
-    <label class="appearance-field"><span>背景透明度</span><span class="appearance-font"><input id="appearance-background-opacity" type="range" min="1" max="100" step="1" aria-label="背景透明度"><output id="appearance-background-opacity-value"></output></span></label>
+    <label class="appearance-field"><span>透明度</span><span class="appearance-font"><input id="appearance-background-opacity" type="range" min="1" max="100" step="1" aria-label="背景透明度"><output id="appearance-background-opacity-value"></output></span></label>
     <div class="appearance-field"><span>图片铺法</span><div id="appearance-background-fit-slot"></div></div>
     <p id="appearance-background-status" class="appearance-background-status" role="status" hidden></p>
-    </div>
-    <div data-appearance-panel="fonts" hidden>
-    <label class="appearance-field"><span>程序字体</span><input id="appearance-ui-font" class="appearance-font-family" type="text" list="appearance-ui-fonts" placeholder="系统默认" maxlength="100" aria-label="程序字体"></label>
-    <datalist id="appearance-ui-fonts"><option value="Segoe UI"><option value="Microsoft YaHei"><option value="Inter"><option value="Arial"><option value="Noto Sans SC"></datalist>
+    </div></section>
+    <details class="appearance-advanced"><summary>高级<span aria-hidden="true">›</span></summary>
+    <section class="appearance-section"><h4>字体与排版</h4><div class="appearance-card">
     <label class="appearance-field"><span>程序字号</span><span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="程序字号"><output id="appearance-font-value"></output></span></label>
-    <label class="appearance-field"><span>程序字重</span><div id="appearance-ui-font-weight-slot"></div></label>
+    <div class="appearance-field"><span>程序字重</span><div id="appearance-ui-font-weight-slot"></div></div>
     <p class="appearance-font-preview">CodexElves · 你好，开始新的会话 Aa 012345</p>
-    <label class="appearance-field"><span>代码字体</span><input id="appearance-code-font" class="appearance-font-family" type="text" list="appearance-code-fonts" placeholder="系统默认等宽字体" maxlength="100" aria-label="代码字体"></label>
-    <datalist id="appearance-code-fonts"><option value="Consolas"><option value="Cascadia Code"><option value="JetBrains Mono"><option value="Fira Code"><option value="SF Mono"></datalist>
+    <div class="appearance-field"><span>代码字体</span><div id="appearance-code-font-slot"></div></div>
     <label class="appearance-field"><span>代码字号</span><span class="appearance-number"><input id="appearance-code-font-size" type="number" min="8" max="24" step="1" aria-label="代码字号"><span>px</span></span></label>
-    <label class="appearance-field"><span>代码字重</span><div id="appearance-code-font-weight-slot"></div></label>
+    <div class="appearance-field"><span>代码字重</span><div id="appearance-code-font-weight-slot"></div></div>
     <pre class="appearance-code-preview">const greeting = "Hello, 你好";\n0123456789  () [] {} =&gt;</pre>
     <label class="appearance-field"><span>文件阅读字号</span><span class="appearance-font"><input id="appearance-file-reading-font" type="range" min="${fileReadingFontMin}" max="${fileReadingFontMax}" step="1" aria-label="文件阅读字号" aria-describedby="appearance-file-reading-font-hint"><output id="appearance-file-reading-font-value" for="appearance-file-reading-font"></output></span></label>
     <div id="appearance-file-reading-font-hint" class="appearance-reading-font-hint"><span>用于变更预览与文件查看。</span><button type="button" id="appearance-file-reading-font-reset" class="text-button" title="恢复为 ${fileReadingFontDefault}px">恢复默认</button></div>
-    <p class="appearance-hint">留空使用系统默认字体，程序和代码默认均为 14px。自定义字体需要已安装在当前设备上。</p>
-    </div>
+    </div><p class="appearance-hint">选择“系统”使用当前设备默认字体；程序和代码默认均为 14px。</p></section>
+    </details>
     </section>
     <section id="appearance-diagnostics-page" class="appearance-body appearance-settings-page" hidden>
     <h3 class="appearance-panel-title">诊断日志</h3>
@@ -1225,21 +1346,39 @@ function openAppearance() {
     </section>
     <section id="appearance-runtime-page" class="appearance-body appearance-settings-page" hidden>
     <h3 class="appearance-panel-title">运行模式</h3>
+    <section class="appearance-section"><h4>连接方式</h4><div class="appearance-card appearance-runtime-card">
     <!-- 用户要求实例名省略“本机/WSL”标签；运行模式仍仅适用于本机 Codex。 -->
     <p class="appearance-hint">适用实例：Codex。这里选择本机 Codex 的连接方式；各 WSL Claude 实例使用各自的原生连接。</p>
     <label class="appearance-notification-row"><span id="appearance-runtime-mode" aria-live="polite">CDP 模式</span><input id="appearance-cdp-injection" class="appearance-notification-switch" type="checkbox" role="switch" aria-label="切换运行模式，当前为 CDP 模式" checked disabled></label>
     <p id="appearance-runtime-status" class="appearance-notification-status" role="status" hidden></p>
-    </section>
+    </div></section></section>
     </div></div>
     <div class="appearance-actions"><button type="button" class="appearance-version" id="appearance-app-version" hidden disabled></button><div class="appearance-action-buttons"><button type="button" id="appearance-reset">恢复默认</button><button id="instruction-reload" type="button" hidden>重新读取</button><button id="instruction-save" type="button" class="primary" hidden disabled>保存指令</button><button type="button" class="primary" id="appearance-close">完成</button></div></div>`;
   document.body.append(dialog);
+  const wrapSettingsPage = page => {
+    if (page.querySelector(":scope > .appearance-page-content")) return;
+    const content = element("div", "appearance-page-content");
+    content.append(...page.childNodes); page.append(content);
+  };
+  for (const page of dialog.querySelectorAll(".appearance-settings-page")) wrapSettingsPage(page);
+  // 设置内容实际保留 1000px，不把滚动条算进正文；左导航宽度随字体自适应，窗口居中不能依赖写死的侧栏尺寸。
+  const syncSettingsOffset = () => {
+    if (dialog.open) dialog.style.setProperty("--settings-content-offset",
+      `${$(".appearance-nav", dialog).getBoundingClientRect().right}px`);
+  };
+  const settingsResize = typeof ResizeObserver === "function" ? new ResizeObserver(syncSettingsOffset) : null;
+  settingsResize?.observe($(".appearance-nav", dialog));
+  window.addEventListener("resize", syncSettingsOffset);
   // 用户要求设置复用主题 Select：指令实例与两种字重也使用统一组件。
   for (const [id, label, options, value] of [
     ["instruction-instance", "会话实例", [], ""],
+    ...[["ui", "程序字体", appearance.uiFont], ["code", "代码字体", appearance.codeFont]]
+      .map(([kind, label, family]) => [`appearance-${kind}-font`, label, appearanceFontOptions(family), family]),
     ...[["ui", "程序字重", appearance.uiFontWeight], ["code", "代码字重", appearance.codeFontWeight]]
       .map(([kind, label, weight]) => [`appearance-${kind}-font-weight`, label,
         [{ value: "400", label: "常规" }, { value: "500", label: "中等" }, { value: "600", label: "半粗" }], String(weight)])
-  ]) $(`#${id}-slot`, dialog).append(selectControl(id, label, options, value));
+  ]) $(`#${id}-slot`, dialog).append(selectControl(id, label, options, value,
+    id.endsWith("-font") ? "appearance-font-family" : ""));
   const title = $("#appearance-title", dialog);
   const headingButton = $(".appearance-heading button", dialog);
   const primaryBody = $("#appearance-general-page", dialog);
@@ -1410,6 +1549,8 @@ function openAppearance() {
   };
   const selectSettingsPage = (page, entry, { focus = false } = {}) => {
     if (!page?.isConnected) return;
+    wrapSettingsPage(page);
+    closePopup();
     for (const panel of panelHost.querySelectorAll(".appearance-settings-page"))
       panel.hidden = panel !== page;
     // 用户要求指令按钮使用底部“完成”的位置；该页只显示重新读取和保存，切换到其他页时恢复“完成”。
@@ -1417,6 +1558,7 @@ function openAppearance() {
     for (const id of ["instruction-reload", "instruction-save"])
       $(`#${id}`, dialog).hidden = !instructions;
     $("#appearance-close", dialog).hidden = instructions;
+    resetButton.hidden = page !== primaryBody && page !== customizationPage;
     setSettingsNav(entry);
     page.scrollTop = 0;
     if (focus) entry?.focus({ preventScroll: true });
@@ -1424,14 +1566,13 @@ function openAppearance() {
   const showAppearancePage = (page, pageTitle, entry) => {
     subpageEntry = entry;
     selectSettingsPage(page, entry);
-    title.textContent = pageTitle;
-    headingButton.title = "返回设置";
-    headingButton.setAttribute("aria-label", "返回设置");
-    headingButton.replaceChildren(icon("back"));
-    resetButton.hidden = true;
-    versionButton.hidden = true;
-    dialog.classList.add("appearance-subpage-open");
-    headingButton.focus({ preventScroll: true });
+    // 用户要求设置内容按分组显示，导航保持单层；标题始终为“设置”，不增加返回箭头或页内面包屑。
+    page.setAttribute("aria-label", pageTitle);
+    title.textContent = "设置";
+    headingButton.title = "关闭设置";
+    headingButton.setAttribute("aria-label", "关闭设置");
+    headingButton.replaceChildren(icon("close"));
+    versionButton.hidden = !androidVersionLoaded;
   };
   const restoreAppearanceRoot = () => {
     if (!subpageEntry) return;
@@ -1467,13 +1608,6 @@ function openAppearance() {
       void remoteSettings.show(name);
     };
   }
-  for (const tab of dialog.querySelectorAll("[data-appearance-tab]")) tab.onclick = () => {
-    closePopup();
-    for (const control of dialog.querySelectorAll("[data-appearance-tab]"))
-      control.setAttribute("aria-pressed", String(control === tab));
-    for (const panel of dialog.querySelectorAll("[data-appearance-panel]"))
-      panel.hidden = panel.dataset.appearancePanel !== tab.dataset.appearanceTab;
-  };
   generalEntry.onclick = () => {
     if (!dialog.isConnected || !dialog.open) return;
     if (subpageEntry) restoreAppearanceRoot();
@@ -1707,19 +1841,20 @@ function openAppearance() {
     }, 220);
   };
   const onNativeBack = event => {
-    if (!dialog.open || !dialog.isConnected || document.querySelector("dialog[open]") !== dialog) return;
+    if (!dialog.open || !dialog.isConnected || [...document.querySelectorAll("dialog[open]")].at(-1) !== dialog) return;
     event.preventDefault();
     if (activePopup?.trigger.closest("dialog") === dialog) closePopup(true);
-    else if (subpageEntry) restoreAppearanceRoot();
     else closeAppearance();
   };
   const onAppearanceEscape = event => {
-    if (event.key !== "Escape" || event.isComposing || !dialog.open || !subpageEntry) return;
+    // 只处理顶层设置窗口；指令重新读取等确认弹窗继续使用自己的取消行为。
+    if (event.key !== "Escape" || event.isComposing || !dialog.open
+        || [...document.querySelectorAll("dialog[open]")].at(-1) !== dialog) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     // 设置中的所有 Select 共用关闭顺序：先关闭弹层并恢复焦点，再响应下一次返回。
     if (activePopup?.trigger.closest("dialog") === dialog) closePopup(true);
-    else restoreAppearanceRoot();
+    else closeAppearance();
   };
   if (androidContainer) {
     window.addEventListener("codex-elves-native-back", onNativeBack);
@@ -1735,29 +1870,23 @@ function openAppearance() {
       versionButton.setAttribute("aria-label", info.updateSupported
         ? `当前应用版本 v${info.versionName}，点击检查更新`
         : `当前应用版本 v${info.versionName}，暂不支持在线更新`);
-      versionButton.hidden = !!subpageEntry;
+      versionButton.hidden = false;
     }).catch(() => {});
   }
   versionButton.onclick = () => {
     if (dialog.isConnected && dialog.open && !versionButton.disabled) postPlatformMessage("check-app-update");
   };
-  const themeButton = button("", "切换主题", () => {
-    if (appearance.themeMode === "auto") return;
-    const transition = beginThemeDiagnosticTransition(appearance.theme === "light" ? "dark" : "light", "manual");
-    appearance.theme = appearance.theme === "light" ? "dark" : "light";
-    applyAppearance(true);
-    sync();
-    finishThemeDiagnosticTransition(transition);
-  }, "appearance-theme-button");
-  const modeGroup = element("div", "appearance-theme-mode");
-  modeGroup.setAttribute("role", "group"); modeGroup.setAttribute("aria-label", "主题模式");
   const modeButtons = new Map();
-  for (const [mode, label] of [["auto", "自动"], ["manual", "手动"]]) {
-    const modeButton = button(label, label, () => setAppearanceThemeMode(mode), "appearance-theme-mode-button");
-    modeButton.dataset.themeMode = mode;
-    modeButtons.set(mode, modeButton); modeGroup.append(modeButton);
+  for (const [mode, label] of [["auto", "自动"], ["light", "浅色"], ["dark", "深色"]]) {
+    const control = button("", `${label}模式`, () =>
+      setAppearanceThemeMode(mode === "auto" ? "auto" : "manual", { theme: mode }), "appearance-mode-option");
+    control.dataset.themeMode = mode;
+    const preview = element("span", `appearance-mode-preview appearance-mode-${mode}`);
+    preview.setAttribute("aria-hidden", "true");
+    preview.append(element("span", "appearance-mode-sidebar"), element("span", "appearance-mode-lines"));
+    control.append(preview, element("span", "appearance-mode-label", label));
+    modeButtons.set(mode, control); $("#appearance-theme-slot").append(control);
   }
-  $("#appearance-theme-slot").append(themeButton, modeGroup);
   $("#appearance-preset-slot").append(selectControl("appearance-preset", "主题",
     Object.entries(appearanceThemes).map(([value, preset]) => ({ value, label: preset.label })), appearance.themePreset));
   const syncAutomaticLightSetting = mountAutomaticThemeLightSetting($("#appearance-auto-light-setting"));
@@ -1767,52 +1896,20 @@ function openAppearance() {
   $("#appearance-background-fit-slot").append(selectControl("appearance-background-fit", "图片铺法", [
     { value: "cover", label: "铺满裁切" }, { value: "contain", label: "完整不裁" }
   ], appearance.backgroundFit));
-  const colorFields = [["accent", "强调色"], ["background", "背景色"], ["foreground", "前景色"]];
-  const colorPresets = ["#171717", "#3f3f46", "#71717a", "#d4d4d8", "#f4f4f5", "#ffffff", "#2563eb", "#7c3aed", "#db2777", "#dc2626", "#ea580c", "#16a34a"];
+  const colorFields = [["accent", "强调色"], ["background", "背景"], ["foreground", "前景"]];
   const setColor = (name, color) => { appearance.colors[appearance.theme][name] = color; applyAppearance(true); sync(); };
   for (const [name, label] of colorFields) {
-    const field = element("div", "color-field");
     const row = element("div", "appearance-field");
-    const swatch = element("button", "color-swatch");
-    const panel = element("div", "color-panel");
-    const presets = element("div", "color-presets");
-    const hex = element("input", "color-hex");
-    swatch.type = "button"; swatch.id = `appearance-${name}`;
-    swatch.setAttribute("aria-label", label); swatch.setAttribute("aria-expanded", "false"); swatch.setAttribute("aria-controls", `appearance-${name}-panel`);
-    swatch.onclick = () => {
-      const expand = panel.hidden;
-      for (const control of $("#appearance-colors").querySelectorAll(".color-swatch")) control.setAttribute("aria-expanded", "false");
-      for (const other of $("#appearance-colors").querySelectorAll(".color-panel")) other.hidden = true;
-      panel.hidden = !expand; swatch.setAttribute("aria-expanded", String(expand));
-    };
-    row.append(element("span", "", label), swatch);
-    panel.id = `appearance-${name}-panel`; panel.hidden = true;
-    for (const color of colorPresets) {
-      const preset = button("", `${label} ${color}`, () => setColor(name, color), "color-preset");
-      preset.dataset.color = color; preset.style.setProperty("--swatch", color); preset.setAttribute("aria-pressed", "false");
-      presets.append(preset);
-    }
-    hex.id = `appearance-${name}-hex`; hex.type = "text"; hex.maxLength = 7; hex.spellcheck = false; hex.autocomplete = "off"; hex.placeholder = "#rrggbb";
-    hex.setAttribute("aria-label", `${label}色值`);
-    hex.oninput = () => {
-      const valid = /^#[0-9a-f]{6}$/i.test(hex.value);
-      hex.setAttribute("aria-invalid", String(!valid));
-      if (valid) setColor(name, hex.value.toLowerCase());
-    };
-    panel.append(presets, hex); field.append(row, panel);
-    $("#appearance-colors").append(field);
+    const swatch = button("", `${label}颜色`, () => openAppearanceColorPicker(swatch, label,
+      appearance.colors[appearance.theme][name], color => setColor(name, color)), "color-swatch");
+    swatch.id = `appearance-${name}`;
+    swatch.setAttribute("aria-haspopup", "dialog"); swatch.setAttribute("aria-expanded", "false");
+    swatch.append(element("span", "appearance-color-dot"), element("span", "appearance-color-value"));
+    row.append(element("span", "", label), swatch); $("#appearance-colors").append(row);
   }
   const sync = () => {
-    const isLightTheme = appearance.theme === "light";
-    const automatic = appearance.themeMode === "auto";
-    const themeLabel = automatic
-      ? `自动模式，当前为${isLightTheme ? "白色" : "黑暗"}模式`
-      : isLightTheme ? "当前为白色模式，切换到黑暗模式" : "当前为黑暗模式，切换到白色模式";
-    themeButton.title = themeLabel;
-    themeButton.setAttribute("aria-label", themeLabel);
-    themeButton.replaceChildren(icon(isLightTheme ? "sun" : "moon"), element("span", "", isLightTheme ? "白色" : "黑暗"));
-    themeButton.disabled = automatic;
-    for (const [mode, control] of modeButtons) control.setAttribute("aria-pressed", String(mode === appearance.themeMode));
+    const selectedMode = appearance.themeMode === "auto" ? "auto" : appearance.theme;
+    for (const [mode, control] of modeButtons) control.setAttribute("aria-pressed", String(mode === selectedMode));
     syncAutomaticLightSetting();
     setSelectValue($("#appearance-project-thread-limit"), String(appearance.projectThreadLimit));
     const hasBackground = !!remoteBackground.dataUrl;
@@ -1834,18 +1931,19 @@ function openAppearance() {
     $("#appearance-background-status").hidden = !remoteBackgroundError;
     $("#appearance-background-status").textContent = remoteBackgroundError;
     for (const [name] of colorFields) {
-      const color = appearance.colors[appearance.theme][name];
-      const hex = $(`#appearance-${name}-hex`);
-      $(`#appearance-${name}`).style.setProperty("--swatch", color);
-      if (document.activeElement !== hex) { hex.value = color; hex.setAttribute("aria-invalid", "false"); }
-      for (const preset of $(`#appearance-${name}-panel .color-presets`).children) preset.setAttribute("aria-pressed", String(preset.dataset.color === color));
+      const color = appearance.colors[appearance.theme][name], swatch = $(`#appearance-${name}`);
+      swatch.style.setProperty("--swatch", color);
+      $(".appearance-color-value", swatch).textContent = color.toUpperCase();
+      swatch.setAttribute("aria-description", color.toUpperCase());
+      if (activePopup?.trigger === swatch) activePopup.syncColor?.(color);
     }
     $("#appearance-font").value = appearance.fontSize;
     $("#appearance-font").style.setProperty("--range-fill", `${(appearance.fontSize - 10) * 10}%`);
     $("#appearance-font-value").textContent = `${appearance.fontSize}px`;
     setSelectValue($("#appearance-preset"), appearance.themePreset);
-    for (const [id, value] of [["ui-font", appearance.uiFont], ["code-font", appearance.codeFont],
-      ["code-font-size", appearance.codeFontSize], ["conversation-width", appearance.conversationWidth]]) {
+    for (const [id, value] of [["ui-font", appearance.uiFont], ["code-font", appearance.codeFont]])
+      setSelectValue($(`#appearance-${id}`, dialog), value);
+    for (const [id, value] of [["code-font-size", appearance.codeFontSize], ["conversation-width", appearance.conversationWidth]]) {
       const control = $(`#appearance-${id}`, dialog);
       if (document.activeElement !== control) control.value = value;
     }
@@ -1957,7 +2055,7 @@ function openAppearance() {
     appearance.fileReadingFontSize = fileReadingFontDefault; applyAppearance(true); sync();
   };
   $("#appearance-reset").onclick = async () => {
-    if (subpageEntry || remoteBackgroundBusy) return;
+    if (remoteBackgroundBusy) return;
     const operation = ++remoteBackgroundOperation;
     remoteBackgroundBusy = true; remoteBackgroundError = ""; sync();
     try {
@@ -1981,10 +2079,7 @@ function openAppearance() {
     }
   };
   $("#appearance-close").onclick = () => closeAppearance();
-  headingButton.onclick = () => {
-    if (subpageEntry) restoreAppearanceRoot();
-    else closeAppearance();
-  };
+  headingButton.onclick = () => closeAppearance();
   let backdropPressed = false;
   const onBackdrop = event => {
     const box = dialog.getBoundingClientRect();
@@ -2004,10 +2099,12 @@ function openAppearance() {
   };
   dialog.oncancel = event => {
     event.preventDefault();
-    if (subpageEntry) restoreAppearanceRoot();
+    if (activePopup?.trigger.closest("dialog") === dialog) closePopup(true);
     else closeAppearance();
   };
   dialog.onclose = () => {
+    settingsResize?.disconnect();
+    window.removeEventListener("resize", syncSettingsOffset);
     remoteSettings.dispose();
     if (syncAppearanceThemeControls === sync) syncAppearanceThemeControls = null;
     dialog.classList.remove("appearance-screen-visible");
@@ -2029,6 +2126,7 @@ function openAppearance() {
   };
   document.body.classList.add("modal-open");
   dialog.showModal();
+  syncSettingsOffset();
   if (matchMedia("(min-width: 761px)").matches) dialog.classList.add("appearance-screen-visible");
   else requestAnimationFrame(() => {
     if (dialog.isConnected && dialog.open) dialog.classList.add("appearance-screen-visible");
@@ -3335,12 +3433,9 @@ function rememberThreadDisplay(value = thread, { persist = true } = {}) {
     tokenUsage: usage || typeof value.tokenUsage?.last?.totalTokens === "number"
       && Number.isFinite(value.tokenUsage.last.totalTokens) && value.tokenUsage.last.totalTokens >= 0
       ? { modelContextWindow: usage?.total ?? null,
-        // 用户要求原生容量、原生百分比和压缩配置独立缓存；旧配置容量不能在重连后冒充原生报告。
+        // 用户要求模型容量缺失时使用配置压缩窗口；缓存所用分母和用量，百分比统一按 Codex 原有规则重算。
         ...(typeof value.tokenUsage.model === "string" ? { model: value.tokenUsage.model } : {}),
         ...(value.tokenUsage.modelContextWindowSource ? { modelContextWindowSource: value.tokenUsage.modelContextWindowSource } : {}),
-        ...(usage && typeof value.tokenUsage.usedPercentage === "number"
-          && Number.isFinite(value.tokenUsage.usedPercentage) && value.tokenUsage.usedPercentage >= 0
-          && value.tokenUsage.usedPercentage <= 100 ? { usedPercentage: value.tokenUsage.usedPercentage } : {}),
         ...(value.tokenUsage.compaction && typeof value.tokenUsage.compaction === "object"
           ? { compaction: { windowTokens: value.tokenUsage.compaction.windowTokens,
             triggerPercent: value.tokenUsage.compaction.triggerPercent } } : {}),
@@ -3370,7 +3465,7 @@ function rememberBackgroundThreadDisplay(event, params) {
         && params.queueRevision <= previous.queueRevision)) return;
     rememberThreadDisplay({ id, queuedMessages: params.queuedMessages,
       queueSnapshotVersion: versioned ? { queueEpoch: params.queueEpoch, queueRevision: params.queueRevision } : null });
-    reconcileDirectSendPreviews(id, params.queuedMessages);
+    reconcileSentMessageDisplays(id, params.queuedMessages);
   }
   if (goalChanged)
     rememberThreadDisplay({ id, goal: event.method === "thread/goal/cleared" ? null : params.goal });
@@ -3553,7 +3648,7 @@ function clearPrivateInputs({ persisted = true } = {}) {
   drafts.clear(); skillDrafts.clear(); attachmentDrafts.clear(); goalDrafts.clear();
   draftWrites.clear(); failedInputRecoveries.clear(); goalComposerRecoveries.clear();
   queuedEdits.clear(); questionDrafts.clear(); questionReplyReceipts.clear(); questionReceiptChecks.clear(); compactions.clear();
-  directSendPreviews.clear();
+  sentMessageDisplays.clear();
   blockingRequestStates.clear(); approvalReplies.clear(); approvalDrafts.clear(); threadDeletions.clear();
   pending = null; pendingSendRequest = null; editingQueuedMessage = null; editingMessage = null;
   if (sending) { sending = null; busy = false; }
@@ -4005,43 +4100,30 @@ function closeComposerMenus({ keepContextUsage = false } = {}) {
 }
 function tokenCount(value) { return value >= 1000 ? `${Number((value / 1000).toFixed(1))}k` : String(Math.round(value)); }
 function contextUsage(info) {
-  const total = info?.modelContextWindow, value = info?.last?.totalTokens;
-  // 用户要求沿用各自原生口径，不把旧缓存中的显式配置容量或压缩窗口用作分母，也不套用另一客户端的预留比例。
-  if (info?.modelContextWindowSource?.kind === "configuration"
-      || typeof total !== "number" || !Number.isFinite(total) || total <= 0
+  const modelWindow = info?.modelContextWindow, value = info?.last?.totalTokens;
+  const hasModelWindow = typeof modelWindow === "number" && Number.isFinite(modelWindow) && modelWindow > 0;
+  // 用户要求所有实例共用 Codex 显示：模型容量优先，缺失时直接采用配置压缩窗口，不按提前压缩比例额外折算。
+  const total = hasModelWindow ? modelWindow : info?.compaction?.windowTokens;
+  if (typeof total !== "number" || !Number.isFinite(total) || total <= 0
       || typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
   const used = Math.min(value, total);
-  const reported = info.usedPercentage;
-  const nativePercentage = typeof reported === "number" && Number.isFinite(reported)
-    && reported >= 0 && reported <= 100;
-  return { used, total, percent: nativePercentage ? reported : Math.round(used / total * 100),
-    reported: nativePercentage };
-}
-// 用户要求压缩参数独立展示：配置值只作说明，不参与主容量和占用率计算。
-function contextCompactionText(info) {
-  const window = info?.compaction?.windowTokens, trigger = info?.compaction?.triggerPercent, parts = [];
-  if (typeof window === "number" && Number.isFinite(window) && window > 0)
-    parts.push(`配置压缩窗口 ${tokenCount(window)}`);
-  if (typeof trigger === "number" && Number.isFinite(trigger) && trigger > 0 && trigger <= 100)
-    parts.push(`提前压缩比例 ${trigger}%`);
-  return parts.length ? `${parts.join("，")}；实际触发由原生程序决定` : "";
+  // 用户要求沿用 Codex 原有百分比：统一按用量除以所用容量四舍五入，不另用实例特有的原生百分比。
+  return { used, total, percent: Math.round(used / total * 100) };
 }
 function contextUsageText() {
-  const info = currentThreadDisplay()?.tokenUsage, usage = contextUsage(info), compaction = contextCompactionText(info);
+  const info = currentThreadDisplay()?.tokenUsage, usage = contextUsage(info);
   if (usage) {
     return {
       value: `${tokenCount(usage.used)} / ${usage.percent}%，${tokenCount(usage.total)}`,
-      description: `最后一次请求的上下文占用：${usage.used.toLocaleString()} / ${usage.total.toLocaleString()} Token，不是累计用量`
-        + (usage.reported ? "；占用率采用原生报告。" : "。"),
-      compaction
+      description: `最后一次请求的上下文占用：${usage.used.toLocaleString()} / ${usage.total.toLocaleString()} Token，不是累计用量。`
     };
   }
   // 用户允许容量未知时诚实降级：显示原生已知用量，但不估算容量或百分比；环形指示仍保持“—”。
   const value = info?.last?.totalTokens;
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? { value: `${tokenCount(value)} Token，容量尚未提供`,
-      description: `最后一次请求的上下文占用：${value.toLocaleString()} Token，不是累计用量；原生尚未提供模型容量，无法计算百分比。`, compaction }
-    : { value: "上下文信息尚未提供", description: "原生会话尚未提供有效的上下文容量或最后一次请求用量。", compaction };
+      description: `最后一次请求的上下文占用：${value.toLocaleString()} Token，不是累计用量；尚未提供可用容量，无法计算百分比。` }
+    : { value: "上下文信息尚未提供", description: "会话尚未提供有效的上下文容量或最后一次请求用量。" };
 }
 function closeContextUsageTip() {
   if (!contextUsageTip) return;
@@ -4090,12 +4172,10 @@ function updateContextUsage() {
   }
   ring.textContent = usage ? `${usage.percent}%` : "—";
   ring.style.setProperty("--context-progress", `${(usage?.percent || 0) * 3.6}deg`);
-  trigger.setAttribute("aria-label", `${text.value}。${text.description}${text.compaction ? ` ${text.compaction}` : ""}`);
+  trigger.setAttribute("aria-label", `${text.value}。${text.description}`);
   if (contextUsageTip?.trigger === trigger) {
     const { node } = contextUsageTip;
     if (node.firstElementChild.textContent !== text.value) node.firstElementChild.textContent = text.value;
-    node.children[1].textContent = text.compaction;
-    node.children[1].hidden = !text.compaction;
     fitContextUsageTip();
   }
 }
@@ -4110,7 +4190,8 @@ function showContextUsageTip(pinned = false) {
   closePopup(); closeComposerMenus();
   const node = element("div", "ui-popup context-usage-tooltip");
   node.id = "context-usage-tooltip"; node.setAttribute("role", "tooltip");
-  node.append(element("div", "context-usage-value muted"), element("div", "context-usage-config muted"));
+  // 用户要求与 Codex 一致，只显示用量、百分比和容量，不再增加 Claude 或压缩配置说明行。
+  node.append(element("div", "context-usage-value muted"));
   contextUsageTip = { node, trigger, pinned, closeTimer: null };
   trigger.setAttribute("aria-expanded", "true");
   trigger.setAttribute("aria-describedby", node.id);
@@ -5310,6 +5391,7 @@ function applyThreadDeletion(id, deviceId = session?.device.id) {
   const key = threadDeletionKey(id, deviceId), previous = threadDeletions.get(key);
   setThreadDeletion(key, { ...previous, deviceId, threadId: id, state: "deleted" });
   if (session?.device.id !== deviceId) return;
+  clearSentMessageDisplays(id);
   sessionMenu?.removeThread(id);
   if (selectedId === id) {
     stopGoalLiveTimer(); showWelcome();
@@ -5484,11 +5566,11 @@ async function changeSidebar(payload) {
     }
   }
 }
-function confirmAction(title, message, action, danger = false) {
+function confirmAction(title, message, action, danger = false, className = "") {
   closePopup(); closeComposerMenus();
   if ($("#confirmation-dialog")) return Promise.resolve(false);
   const trigger = document.activeElement;
-  const dialog = element("dialog", "confirmation-dialog");
+  const dialog = element("dialog", `confirmation-dialog${className ? ` ${className}` : ""}`);
   dialog.id = "confirmation-dialog";
   dialog.setAttribute("aria-labelledby", "confirmation-title"); dialog.setAttribute("aria-describedby", "confirmation-message");
   const heading = element("h2", "", title); heading.id = "confirmation-title";
@@ -6064,7 +6146,7 @@ function enrichTurnTranscriptEvents(turn) {
   const eventIds = new Set(events.map(entry => entry.item.id));
   for (const item of items) {
     if (item.type === "modelChanged" && !eventIds.has(item.id))
-      events.push({ item, beforeItemId: null });
+      events.push({ item, beforeItemId: item.beforeItemId || null });
   }
   const beforeInput = () => {
     let index = items.findIndex(item => item.type === "userMessage");
@@ -6078,7 +6160,8 @@ function enrichTurnTranscriptEvents(turn) {
     if (existing >= 0) {
       const item = { ...items[existing], ...entry.item,
         ...(items[existing].type === "contextCompaction" && items[existing].completed === true ? { completed: true } : {}) };
-      if (item.type !== "modelChanged") { items[existing] = item; continue; }
+      // Claude 同一轮中途换配置时保留原生请求位置，不能把后半轮的变化提前到用户问题之前。
+      if (item.type !== "modelChanged" || item.remoteInlineEvent) { items[existing] = item; continue; }
       items.splice(existing, 1);
       pending.push({ ...entry, item });
     } else pending.push(entry);
@@ -6088,7 +6171,7 @@ function enrichTurnTranscriptEvents(turn) {
     for (let index = 0; index < pending.length;) {
       const entry = pending[index];
       const insertion = entry.beforeItemId ? items.findIndex(item => item.id === entry.beforeItemId)
-        : entry.item.type === "modelChanged" ? beforeInput() : items.length;
+        : entry.item.type === "modelChanged" && !entry.item.remoteInlineEvent ? beforeInput() : items.length;
       if (insertion < 0) { index++; continue; }
       items.splice(insertion, 0, entry.item);
       pending.splice(index, 1);
@@ -6096,7 +6179,8 @@ function enrichTurnTranscriptEvents(turn) {
     }
     if (inserted) continue;
     for (const entry of pending.splice(0)) {
-      const insertion = ["modelChanged", "modelRerouted"].includes(entry.item.type) ? beforeInput() : items.length;
+      const insertion = ["modelChanged", "modelRerouted"].includes(entry.item.type) && !entry.item.remoteInlineEvent
+        ? beforeInput() : items.length;
       items.splice(insertion, 0, entry.item);
     }
   }
@@ -6409,6 +6493,8 @@ async function resolvePending() {
     if (queueAction) {
       const id = current.payload.threadId;
       if (receipt.state === "completed") {
+        if (current.action === "steerQueued")
+          confirmQueuedSteerDisplay(id, current.payload.messageId, receipt.result);
         if (selectedId === id && thread?.id === id) {
           const result = receipt.result;
           if (current.selectionToken === selectionToken && queueReadVersion === queueVersion || queueSnapshotIsVersioned(result))
@@ -6457,9 +6543,10 @@ async function resolvePending() {
     }
     const queued = receipt.state === "completed" && current.action === "send"
       && applyQueuedSendResult(current.payload.threadId, receipt.result,
-        current.selectionToken === selectionToken ? queueReadVersion : -1);
+        current.selectionToken === selectionToken ? queueReadVersion : -1, current.payload);
     if (receipt.state === "completed") {
       if (current.action === "editMessage") {
+        clearSentMessageDisplays(current.payload.threadId);
         if (editingMessage?.threadId === current.payload.threadId) cancelMessageEdit({ focus: false });
       } else clearSubmittedDraft(current.payload,
         (selectedId === current.payload.threadId || (creating && current.action === "create")) && current.selectionToken === selectionToken);
@@ -6495,6 +6582,8 @@ async function resolvePending() {
                 && item.clientId === current.payload.messageId && !item.remotePendingInput));
             if (received) {
               savePending(null);
+              confirmQueuedSteerDisplay(current.payload.threadId, current.payload.messageId,
+                { ok: true, threadId: current.payload.threadId, messageId: current.payload.messageId });
               if (pendingSteer?.threadId === current.payload.threadId
                   && pendingSteer.messageId === current.payload.messageId) pendingSteer = null;
               if (selectedId === current.payload.threadId && thread?.id === selectedId) {
@@ -6519,7 +6608,7 @@ async function resolvePending() {
         if (confirmed && stillCurrent()) {
           savePending(null);
           applyQueuedSendResult(current.payload.threadId, confirmed,
-            current.selectionToken === selectionToken ? queueReadVersion : -1);
+            current.selectionToken === selectionToken ? queueReadVersion : -1, current.payload);
           clearSubmittedDraft(current.payload,
             selectedId === current.payload.threadId && current.selectionToken === selectionToken);
           updateComposer();
@@ -8122,6 +8211,7 @@ async function submitMessageEdit() {
       ...(modelSettingsSupported && model ? { model } : {}),
       ...(modelSettingsSupported && reasoningEffort ? { reasoningEffort } : {})
     }, { reliable: true });
+    clearSentMessageDisplays(edit.threadId);
     if (editingMessage === edit) cancelMessageEdit({ focus: false });
     if (version === selectionVersion && selectedId === edit.threadId)
       await selectThread(edit.threadId, { closeSidebar: false, force: true });
@@ -8986,8 +9076,19 @@ function renderTranscriptEvent(item, previous) {
       : "尚未收到明确的压缩完成状态，请以原生会话为准。";
   } else {
     const from = transcriptModelName(item.fromModel), to = transcriptModelName(item.toModel);
-    label = item.type === "modelRerouted" ? `模型已从 ${from} 重新路由到 ${to}` : `模型已从 ${from} 更改为 ${to}`;
-    description = `模型切换可能触发上下文压缩。${item.reason ? ` 原因：${item.reason}` : ""}`;
+    const effortChanged = typeof item.fromEffort === "string" && typeof item.toEffort === "string"
+      && item.fromEffort !== item.toEffort;
+    const modelChanged = typeof item.fromModel === "string" && typeof item.toModel === "string"
+      && item.fromModel !== item.toModel;
+    const effort = value => effortLabels[value] || value;
+    // 用户要求沿用 Codex 的紧凑变更行；只改等级也显示，恢复时同配置重设不冒充新的模型切换。
+    label = effortChanged && !modelChanged
+      ? `思考深度已从 ${effort(item.fromEffort)} 更改为 ${effort(item.toEffort)}`
+      : (item.type === "modelRerouted" ? `模型已从 ${from} 重新路由到 ${to}` : `模型已从 ${from} 更改为 ${to}`)
+        + (effortChanged ? `，思考深度从 ${effort(item.fromEffort)} 更改为 ${effort(item.toEffort)}` : "");
+    description = item.source === "claude"
+      ? `已根据 Claude 原生实际请求确认${item.remoteInlineEvent ? "，从此处开始使用此配置" : "，此配置用于下方消息"}。`
+      : `模型切换可能触发上下文压缩。${item.reason ? ` 原因：${item.reason}` : ""}`;
   }
   const text = element("span", `transcript-event-label${compacting && item.status !== "failed" ? " working-label" : ""}`, label);
   const info = button("", description, event => event.stopPropagation(), "transcript-event-info");
@@ -9067,9 +9168,7 @@ function renderItem(item, previous, inActivity = false, running = false) {
     reconcileChildren(attachments, images);
     bindMessageVideos(attachments, prepareRemoteTunnelAccess);
     reconcileChildren(node, [...(images.length ? [attachments] : []),
-      ...(editing ? [messageEditor()] : display.text.trim() || display.questionReplies ? [bubble] : []),
-      ...(item.remoteDirectSend ? [element("small", "muted",
-        item.remoteDirectSendState === "accepted" ? "已发送，等待同步…" : "发送中…")] : [])]);
+      ...(editing ? [messageEditor()] : display.text.trim() || display.questionReplies ? [bubble] : [])]);
     return node;
   }
   if (item.type === "agentMessage" || item.type === "plan") {
@@ -9923,7 +10022,7 @@ function queueReorderAvailable() {
     && editingQueuedMessage?.state !== "starting"
     && Array.isArray(messages) && messages.length > 1
     && messages.every(message => message?.id && message.remoteDeliveryState !== "accepted"
-      && !directSendPreviewFor(message)
+      && !confirmedSendDisplayFor(message)
       && (!message.submission?.status || message.submission.status === "queued"));
 }
 function moveQueueItem(ids, messageId, index) {
@@ -9931,88 +10030,177 @@ function moveQueueItem(ids, messageId, index) {
   order.splice(Math.max(0, Math.min(index, order.length)), 0, messageId);
   return order;
 }
-function beginDirectSendPreview(payload) {
-  // 用户要求 CDP 和服务模式在提交时空闲就直接显示发送；执行、压缩或已有等待消息时仍显示真实队列。
-  // 这里只记录展示意图，后台排队、原请求标识及送达回执不变，不能据此重发或提前声称已送达。
-  if (session?.capabilities?.queueSendRecovery !== true || !payload.clientUserMessageId
-      || payload.queueOnly || thread?.id !== payload.threadId || !thread.status || isActiveThread() || compactionLocked()
-      || !Array.isArray(thread.queuedMessages)
-      || thread.queuedMessages.some(message => message.remoteDeliveryState !== "accepted")
-      || thread.queuedEdits?.length) return null;
+function rememberSendDisplay(payload) {
+  // 用户要求发送和引导成功后才进入正文；这里只保存原输入，不据此展示、确认送达或重发。
+  if (!payload?.threadId || !payload.clientUserMessageId || !session) return null;
+  const key = JSON.stringify([payload.threadId, payload.clientUserMessageId]);
+  const existing = sentMessageDisplays.get(key);
+  if (existing?.scope === privateInputScope(session)) return existing;
   const record = {
     payload, threadId: payload.threadId, clientId: payload.clientUserMessageId,
-    scope: privateInputScope(session), lastTurnId: [...turns.keys()].at(-1), seen: false, demoted: false
+    scope: privateInputScope(session), confirmed: false,
+    previousTurnId: payload.threadId === selectedId ? [...turns.keys()].at(-1) : null,
+    index: payload.threadId === selectedId ? turns.size : Number.MAX_SAFE_INTEGER
   };
-  directSendPreviews.set(record.clientId, record);
-  // 与 rememberThreadDisplay 的 32 项展示缓存保持同一上限；超出后回到真实队列，不删除任何消息。
-  while (directSendPreviews.size > 32) directSendPreviews.delete(directSendPreviews.keys().next().value);
+  sentMessageDisplays.set(key, record);
+  // 与会话展示缓存一样保留最近 32 个会话；同一会话已显示的成功消息不按条数淘汰。
+  const ids = [...new Set([...sentMessageDisplays.values()].map(value => value.threadId))];
+  for (const id of ids.filter(id => id !== selectedId && id !== payload.threadId)
+    .slice(0, Math.max(0, ids.length - 32))) clearSentMessageDisplays(id);
   return record;
 }
-function directSendPreviewFor(message, id = selectedId) {
-  const record = directSendPreviews.get(queueMessageIdentity(message));
-  if (!record || record.threadId !== id || record.scope !== privateInputScope(session) || record.demoted) return null;
-  if (typeof message.pausedReason === "string" && message.pausedReason.trim()
-      || message.remoteDeliveryState === "outcome-unknown"
-      || message.submission?.status === "outcome-unknown") record.demoted = true;
-  const delivered = id === selectedId
-    && !!acceptedSendItem([...turns.values()].flatMap(turn => turn.items || []), record.clientId);
-  if (id === selectedId && compactionLocked(id) && !delivered) record.demoted = true;
-  // 空闲快照之后若另一条消息抢先启动，当前输入确实需要等待，必须恢复队列操作而非持续冒充直发。
-  if (id === selectedId && isActiveThread() && !delivered) {
-    const turn = [...turns.values()].reverse().find(turn => turn.status === "inProgress");
-    if (turn && turn.id !== record.lastTurnId) {
-      const input = (turn.items || []).find(item => item.type === "userMessage" && !item.remotePendingInput);
-      const clientId = input?.clientId ?? input?.clientUserMessageId;
-      if (clientId && clientId !== record.clientId) record.demoted = true;
+function clearSentMessageDisplays(id) {
+  for (const [key, record] of sentMessageDisplays)
+    if (record.threadId === id) sentMessageDisplays.delete(key);
+}
+function sentMessageIdentities(item) {
+  return [item?.clientId, item?.clientUserMessageId, item?.serverClientUserMessageId,
+    item?.submissionOptions?.clientUserMessageId, item?.restoreMessage?.clientUserMessageId,
+    item?.restoreMessage?.id, item?.id].filter(value => typeof value === "string" && value);
+}
+function sentMessageDisplayFor(item, id = selectedId) {
+  const identities = sentMessageIdentities(item);
+  return [...sentMessageDisplays.values()].find(record => record.threadId === id
+    && record.scope === privateInputScope(session)
+    && [record.clientId, record.messageId, ...sentMessageIdentities(record.item)]
+      .some(identity => identities.includes(identity))) || null;
+}
+function confirmSendDisplay(payload, result, { steering = false } = {}) {
+  if (!payload?.threadId || result?.threadId && result.threadId !== payload.threadId
+      || !steering && result?.clientUserMessageId && result.clientUserMessageId !== payload.clientUserMessageId
+      || result?.ok === false || result?.outcomeUnknown === true
+      || !steering && result?.deliveryState !== "accepted" && result?.result?.status !== "sent"
+        && !(result?.ok === true && !Array.isArray(result.queuedMessages) && !result.queueSyncPending)) return false;
+  const record = rememberSendDisplay(payload);
+  if (!record) return false;
+  const changed = !record.confirmed;
+  record.confirmed = true;
+  if (changed) {
+    let order = 0;
+    for (const value of sentMessageDisplays.values()) order = Math.max(order, value.confirmationOrder || 0);
+    record.confirmationOrder = order + 1;
+    if (payload.threadId === selectedId) {
+      record.previousTurnId = [...turns.keys()].at(-1) || null;
+      record.index = turns.size;
     }
   }
-  return record.demoted ? null : record;
+  record.turnId ||= result?.turnId || result?.result?.turnId || null;
+  record.messageId ||= result?.messageId || null;
+  if (!record.item) record.item = {
+    id: `remote-confirmed-input:${record.clientId}`, type: "userMessage", clientId: record.clientId,
+    // 成功回执可展示正文，但该投影仍不能作为原生回执核对或已发送消息编辑的依据。
+    remotePendingInput: true, remoteConfirmedInput: true, remoteDirectSend: true,
+    content: [
+      ...(payload.prompt ? [{ type: "text", text: payload.prompt }] : []),
+      ...(payload.images || []).map(image => ({ type: "image", url: image.dataUrl ?? image.url ?? image.src })),
+      ...(payload.skills || []).map(skill => ({ type: "skill", name: skill.name, path: skill.path }))
+    ]
+  };
+  return changed;
 }
-function reconcileDirectSendPreviews(id, messages, { removeMissing = true } = {}) {
-  if (!directSendPreviews.size || !Array.isArray(messages)) return false;
+function confirmedSendDisplayFor(message, id = selectedId) {
+  const record = sentMessageDisplayFor(message, id);
+  return record?.confirmed ? record : null;
+}
+function reconcileSentMessageDisplays(id, messages) {
+  if (!Array.isArray(messages)) return false;
   let changed = false;
-  const byIdentity = new Map(messages.map(message => [queueMessageIdentity(message), message]));
-  for (const [clientId, record] of directSendPreviews) {
-    if (record.threadId !== id || record.scope !== privateInputScope(session)) continue;
-    if (byIdentity.has(clientId)) {
-      if (!record.seen) { record.seen = true; changed = true; }
-      const wasDemoted = record.demoted;
-      directSendPreviewFor(byIdentity.get(clientId), id);
-      if (record.demoted !== wasDemoted) changed = true;
-    } else if (record.seen && removeMissing) {
-      directSendPreviews.delete(clientId); changed = true;
-    }
+  for (const message of messages) {
+    const record = sentMessageDisplayFor(message, id) || rememberSendDisplay({
+      threadId: id, clientUserMessageId: queueMessageIdentity(message) || message.id,
+      prompt: queueMessageText(message), images: message.context?.imageAttachments || message.images || [],
+      skills: message.context?.skills || message.skills || []
+    });
+    if (record && message.remoteDeliveryState === "accepted") changed = confirmSendDisplay(record.payload, {
+      threadId: id, messageId: message.id, deliveryState: "accepted"
+    }) || changed;
   }
   return changed;
 }
-function pendingDirectSendTurns() {
-  const items = [...turns.values()].flatMap(turn => turn.items || []);
-  return (currentThreadDisplay()?.queuedMessages || []).flatMap(message => {
-    const record = directSendPreviewFor(message);
-    if (!record || acceptedSendItem(items, record.clientId)) return [];
-    const payload = record.payload;
-    const state = message.remoteDeliveryState === "accepted" ? "accepted" : "sending";
-    if (!record.preview || record.previewState !== state) {
-      record.previewState = state;
-      record.preview = {
-        id: `remote-direct-turn:${record.clientId}`, status: "pending",
-        items: [{
-          id: `remote-direct-input:${record.clientId}`, type: "userMessage", clientId: record.clientId,
-          remotePendingInput: true, remoteDirectSend: true, remoteDirectSendState: state,
-          content: [
-            ...(payload.prompt ? [{ type: "text", text: payload.prompt }] : []),
-            ...(payload.images || []).map(image => ({ type: "image", url: image.dataUrl })),
-            ...(payload.skills || []).map(skill => ({ type: "skill", name: skill.name, path: skill.path }))
-          ]
-        }]
-      };
+function withSentMessageDisplays(source = [...turns.values()]) {
+  if (!selectedId || !session) return source;
+  const nativeIds = new Set(source.flatMap(turn => (turn.items || [])
+    .filter(item => item.type === "userMessage" && !item.remotePendingInput)
+    .flatMap(sentMessageIdentities)));
+  // 重进缓存时先恢复成功身份；真实消息即使在另一轮到达，也应优先接替旧成功投影。
+  for (const [index, turn] of source.entries()) for (const item of turn.items || []) {
+    if (!item.remoteConfirmedInput || item.type !== "userMessage") continue;
+    const record = sentMessageDisplayFor(item) || rememberSendDisplay({
+      threadId: selectedId, clientUserMessageId: item.clientId ?? item.clientUserMessageId ?? item.id
+    });
+    if (record && !record.item) {
+      record.item = item; record.confirmed = true; record.turnId = turn.id; record.index = index;
     }
-    return [record.preview];
-  });
+  }
+  const displayed = source.map(turn => ({ ...turn, items: (turn.items || []).filter(item =>
+    !item.remotePendingInput || item.remoteCompactionInput
+      || item.remoteConfirmedInput && !sentMessageIdentities(item).some(identity => nativeIds.has(identity))) }));
+  const sourceIds = new Set(source.map(turn => turn.id));
+  const byIdentity = new Map();
+  const indexRecord = record => {
+    for (const identity of [record.clientId, record.messageId, ...sentMessageIdentities(record.item)])
+      if (identity) byIdentity.set(identity, record);
+  };
+  for (const record of sentMessageDisplays.values())
+    if (record.threadId === selectedId && record.scope === privateInputScope(session)) indexRecord(record);
+  const received = new Set();
+  for (const [turnIndex, turn] of displayed.entries()) {
+    for (const [itemIndex, item] of turn.items.entries()) {
+      if (item.type !== "userMessage" || !item.id || item.remoteCompactionInput || item.remoteHistoryContext
+          || item.remotePendingInput && !item.remoteConfirmedInput) continue;
+      let record = sentMessageIdentities(item).map(identity => byIdentity.get(identity)).find(Boolean);
+      // 只保留本次发送/引导及缓存中已有成功标记的输入；原生显式退役的内部摘要继续按原规则清理。
+      if (!record && item.remoteConfirmedInput) record = rememberSendDisplay({
+        threadId: selectedId, clientUserMessageId: item.clientId ?? item.clientUserMessageId ?? item.id
+      });
+      if (!record) continue;
+      if (received.has(record)) {
+        turn.items = turn.items.filter(candidate => candidate !== item);
+        continue;
+      }
+      received.add(record);
+      record.confirmed = true;
+      // 原生正文接替成功投影；保留其稳定身份和位置，迟到/缺项快照不能让已显示消息消失。
+      if (!item.remotePendingInput || !record.item) {
+        const previous = record.item;
+        record.item = record.nativeItem === item ? record.item
+          : { ...item, remoteConfirmedInput: true,
+            ...(previous?.content?.length && !item.content?.length ? { content: previous.content,
+              ...(!item.remoteImages && previous.remoteImages ? { remoteImages: previous.remoteImages } : {}) } : {}) };
+        record.nativeItem = item;
+        turn.items[itemIndex] = record.item;
+      }
+      indexRecord(record);
+      record.turnId = turn.id; record.index = turnIndex; record.itemIndex = itemIndex;
+      record.previousTurnId = displayed[turnIndex - 1]?.id || null;
+      record.nextTurnId = displayed[turnIndex + 1]?.id || null;
+      record.nextItemId = turn.items[itemIndex + 1]?.id || null;
+    }
+  }
+  for (const record of [...sentMessageDisplays.values()].sort((left, right) =>
+    (left.confirmationOrder ?? Infinity) - (right.confirmationOrder ?? Infinity))) {
+    if (!record.confirmed || !record.item || received.has(record)
+        || record.threadId !== selectedId || record.scope !== privateInputScope(session)) continue;
+    let turn = displayed.find(turn => turn.id === record.turnId);
+    if (!turn) {
+      turn = { id: record.turnId || `remote-confirmed-turn:${record.clientId}`, status: "completed", items: [] };
+      const next = displayed.findIndex(turn => turn.id === record.nextTurnId);
+      const previous = displayed.findIndex(turn => turn.id === record.previousTurnId);
+      let index = next >= 0 ? next : previous >= 0 ? previous + 1 : Math.min(record.index, displayed.length);
+      // 同一历史空档内连续确认的消息按实际成功顺序接续，不能反向插到前一条成功消息之前。
+      if (next < 0) while (index < displayed.length && !sourceIds.has(displayed[index].id)) index++;
+      displayed.splice(index, 0, turn);
+    }
+    const next = turn.items.findIndex(item => item.id === record.nextItemId);
+    turn.items.splice(next >= 0 ? next : Math.min(record.itemIndex ?? turn.items.length, turn.items.length), 0, record.item);
+  }
+  return displayed;
 }
-function finishDirectSendPreview(record, failed = false) {
-  if (!record || directSendPreviews.get(record.clientId) !== record) return;
-  if (failed || !record.seen) directSendPreviews.delete(record.clientId);
+function finishSendDisplay(record, failed = false) {
+  if (!record) return;
+  const key = JSON.stringify([record.threadId, record.clientId]);
+  if (sentMessageDisplays.get(key) !== record) return;
+  if (failed && !record.confirmed) sentMessageDisplays.delete(key);
   if (record.threadId === selectedId && record.scope === privateInputScope(session)) {
     renderQueueArea(); renderMessages();
   }
@@ -10023,9 +10211,9 @@ function queueDisplayMessages(messages) {
     : pending?.action === "reorderQueued" && pending.deviceId === session?.device.id ? pending.payload : null;
   if (reorder?.threadId !== selectedId
       || !sameQueueOrder(messages.map(message => message.id), reorder.expectedMessageIds))
-    return messages.filter(message => !directSendPreviewFor(message));
+    return messages.filter(message => !confirmedSendDisplayFor(message));
   const byId = new Map(messages.map(message => [message.id, message]));
-  return reorder.messageIds.map(id => byId.get(id)).filter(message => message && !directSendPreviewFor(message));
+  return reorder.messageIds.map(id => byId.get(id)).filter(message => message && !confirmedSendDisplayFor(message));
 }
 function applyQueueReorderResult(id, result, readVersion) {
   if (id !== selectedId || thread?.id !== id) return;
@@ -10203,9 +10391,9 @@ function applyQueueSnapshot(id, messages, edits, snapshot = null, { authoritativ
     if (Array.isArray(edits)) thread.queuedEdits = edits;
   }
   rememberThreadDisplay({ id, queuedMessages: messages, queueSnapshotVersion });
-  const directSendChanged = reconcileDirectSendPreviews(id, messages);
+  const sentDisplayChanged = reconcileSentMessageDisplays(id, messages);
   renderQueueArea();
-  if (directSendChanged || messages.some(message => directSendPreviewFor(message))) renderMessages();
+  if (sentDisplayChanged || messages.some(message => confirmedSendDisplayFor(message))) renderMessages();
   if (removedMessage) scheduleReload();
   return true;
 }
@@ -10241,10 +10429,14 @@ async function reloadQueue() {
   try { await request.promise; }
   finally { if (queueRequest === request) queueRequest = null; }
 }
-function applyQueuedSendResult(id, result, readVersion) {
-  if (!id || (result?.threadId && result.threadId !== id)
-      || !Array.isArray(result?.queuedMessages) && !result?.queueSyncPending) return false;
-  if (id !== selectedId) reconcileDirectSendPreviews(id, result.queuedMessages, { removeMissing: false });
+function applyQueuedSendResult(id, result, readVersion, payload = null) {
+  if (!id || result?.threadId && result.threadId !== id) return false;
+  if (payload && confirmSendDisplay(payload, result) && id === selectedId) {
+    renderMessages();
+    scheduleReload();
+  }
+  if (!Array.isArray(result?.queuedMessages) && !result?.queueSyncPending) return false;
+  if (id !== selectedId) reconcileSentMessageDisplays(id, result.queuedMessages, { removeMissing: false });
   if (id === selectedId) {
     if (!Array.isArray(result.queuedMessages)
         || readVersion !== queueVersion && !queueSnapshotIsVersioned(result)
@@ -10258,28 +10450,20 @@ function applyQueuedSendResult(id, result, readVersion) {
 function queueMessageText(message) {
   return message?.text ?? message?.context?.prompt ?? message?.prompt ?? message?.message?.prompt ?? "";
 }
-function pendingSteerDelivered(pending = pendingSteer) {
-  if (!pending || pending.threadId !== selectedId) return false;
-  // 用户要求引导只显示一次：以队列／逻辑消息身份收敛预览，兼容原生事件早于 HTTP 回执及逻辑 ID 恢复。
-  return [...turns.values()].some(turn => (turn.items || []).some(item =>
-    item.type === "userMessage" && !item.remotePendingInput
-      && (pending.messageId && item.restoreMessage?.id === pending.messageId
-        || pending.clientId && [item.clientId, item.clientUserMessageId, item.serverClientUserMessageId]
-          .includes(pending.clientId))));
-}
-function pendingSteerTurn() {
-  const pending = pendingSteer;
-  if (!pending || pending.threadId !== selectedId || !pending.text || pendingSteerDelivered(pending)) return null;
-  const pendingItem = {
-      id: pending.itemId,
-      type: "userMessage",
-      ...(pending.clientId ? { clientId: pending.clientId } : {}),
-      content: [{ type: "text", text: pending.text }],
-      remotePendingInput: true
-  };
-  const current = pending.turnId ? turns.get(pending.turnId) : null;
-  if (!current) return { id: pending.localTurnId, status: "inProgress", items: [pendingItem] };
-  return { ...current, items: [...(current.items || []), pendingItem] };
+function confirmQueuedSteerDisplay(id, messageId, result) {
+  let record = sentMessageDisplayFor({ id: messageId }, id);
+  if (!record && thread?.id === id) {
+    const message = thread.queuedMessages?.find(message => message.id === messageId);
+    if (message) {
+      record = rememberSendDisplay({
+        threadId: id, clientUserMessageId: queueMessageIdentity(message) || messageId,
+        prompt: queueMessageText(message), images: message.context?.imageAttachments || message.images || [],
+        skills: message.context?.skills || message.skills || []
+      });
+      if (record) record.messageId = messageId;
+    }
+  }
+  if (record) confirmSendDisplay(record.payload, result, { steering: true });
 }
 function renderQueuedMessages(messages, previous = null) {
   messages = queueDisplayMessages(messages);
@@ -10632,16 +10816,20 @@ async function steerQueuedMessage(threadId, messageId) {
   const preview = {
     threadId,
     messageId,
-    localTurnId: `pending-steer-${messageId}`,
-    itemId: `pending-steer-message-${messageId}`,
     clientId: queuedMessage?.clientUserMessageId
       ?? queuedMessage?.submissionOptions?.clientUserMessageId
       ?? null,
     text: queueMessageText(queuedMessage)
   };
+  const sendDisplay = rememberSendDisplay({
+    threadId, clientUserMessageId: preview.clientId || messageId, prompt: preview.text,
+    images: queuedMessage?.context?.imageAttachments || queuedMessage?.images || [],
+    skills: queuedMessage?.context?.skills || queuedMessage?.skills || []
+  });
+  if (sendDisplay) sendDisplay.messageId = messageId;
   queuedActionBusy.add(key);
-  // Claude 投递后等待原生权威历史确认；远程队列也不额外插入正文预览，避免同一消息重复展示。
-  if (thread?.backend !== "claude") pendingSteer = preview;
+  // 引导中不插入正文；成功后使用同一份确认展示缓存，不能因历史尚未同步而移除。
+  pendingSteer = preview;
   recordDiagnostic("remote.steer", { phase: "request" });
   renderMessages();
   if (selectedId === threadId) renderQueueArea();
@@ -10652,9 +10840,8 @@ async function steerQueuedMessage(threadId, messageId) {
     updateComposer();
     const result = await request;
     if (!currentAuthorization()) return;
-    // 保持同一预览对象，后续历史读取才能清理本次预览；替换对象会让成功和退出分支的身份比较永久失效。
-    if (pendingSteer === preview)
-      preview.turnId = typeof result?.turnId === "string" ? result.turnId : null;
+    if (sendDisplay) confirmSendDisplay(sendDisplay.payload, result, { steering: true });
+    if (pendingSteer === preview) pendingSteer = null;
     if (selectedId === threadId && thread?.id === threadId) {
       if (readVersion === queueVersion || queueSnapshotIsVersioned(result))
         applyQueueSnapshot(threadId, Array.isArray(result?.queuedMessages)
@@ -10667,10 +10854,6 @@ async function steerQueuedMessage(threadId, messageId) {
         recordDiagnostic("remote.steer.reload", {
           phase: "complete", durationMs: performance.now() - reloadStartedAt
         });
-        if (pendingSteer === preview) {
-          pendingSteer = null;
-          renderMessages();
-        }
       }).catch(error => {
         if (!currentAuthorization()) return;
         recordDiagnostic("remote.steer.reload", {
@@ -10685,6 +10868,7 @@ async function steerQueuedMessage(threadId, messageId) {
     });
   } catch (error) {
     if (!currentAuthorization()) return;
+    finishSendDisplay(sendDisplay, !pending);
     if (pendingSteer === preview) {
       pendingSteer = null;
       renderMessages();
@@ -10934,18 +11118,9 @@ function renderMessages(keepScroll = true) {
   const anchor = !keepScroll || !bottom ? visibleMessageAnchor(root) : null;
   const children = [], itemKeys = new Set(), turnKeys = new Set(), activityKeys = new Set();
   const relatedViewKind = relatedSessionView?.kind || "";
-  if (pendingSteerDelivered()) pendingSteer = null;
-  const sorted = [...turns.values()];
-  const pendingTurn = pendingSteerTurn();
-  if (pendingTurn) {
-    const existingIndex = sorted.findIndex(turn => turn.id === pendingTurn.id);
-    if (existingIndex >= 0) sorted[existingIndex] = pendingTurn;
-    else sorted.push(pendingTurn);
-  }
-  const lastRealTurn = pendingTurn
-    ? [...sorted].reverse().find(turn => turn.id !== pendingTurn.id) : sorted.at(-1);
-  if (reconcileDirectSendPreviews(selectedId, currentThreadDisplay()?.queuedMessages)) renderQueueArea();
-  sorted.push(...pendingDirectSendTurns());
+  if (reconcileSentMessageDisplays(selectedId, currentThreadDisplay()?.queuedMessages)) renderQueueArea();
+  const sorted = withSentMessageDisplays();
+  const lastRealTurn = [...sorted].reverse().find(turn => turns.has(turn.id));
   loadMessageSkillChoices(sorted.flatMap(turn => turn.items || []));
   if (historyError && sorted.length)
     children.push(historyLoadButton("最新记录加载失败，重试", () => void loadHistory()));
@@ -11106,7 +11281,7 @@ function rememberTranscript({ retainView = false, retainRelatedParent = false } 
   const ephemeral = threadEphemeralState(selectedId);
   const summary = [...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
     ...(sidebar?.projects || []).flatMap(project => project.threads || [])].find(item => item.id === selectedId);
-  const currentTurns = [...turns.values()], events = [...transcriptEvents.values()];
+  const currentTurns = withSentMessageDisplays(), events = [...transcriptEvents.values()];
   const recentStart = currentTurns.findIndex(turn => turn.id === recentHistoryPage?.turns?.[0]?.id);
   // 最近页起点和游标来自服务器；合并该页之后收到的新轮次，避免回退窗口遗漏刚完成的回复。
   const recentTurns = recentStart >= 0 ? currentTurns.slice(recentStart) : null;
@@ -11124,7 +11299,7 @@ function rememberTranscript({ retainView = false, retainRelatedParent = false } 
   };
   // 仅离开会话时保留渲染节点，和正文共用容量限制；超限回退窗口时不复用整页视图。
   const view = retainView ? {
-    turns: new Map(turns), items: new Map(renderedItems),
+    turns: new Map(currentTurns.map(turn => [turn.id, turn])), items: new Map(renderedItems),
     groups: new Map(renderedTurns), activities: new Map(renderedActivities)
   } : null;
   // 子页仅保留一层返回位置，正文超出普通缓存窗口时也保留主会话原节点。
@@ -13449,6 +13624,24 @@ function renderFailedInputRecovery(root) {
   restore.disabled = threadReadOnly() || !empty || busy || stopping || !!pending;
   box.append(restore); root.append(box);
 }
+async function prepareClaudeProjectCreation(payload, stillCurrent) {
+  const result = await api("/api/read/projectTrust", {
+    backend: "claude", instanceId: payload.instanceId, projectId: payload.projectId
+  });
+  if (!stillCurrent()) return false;
+  if (result?.instanceId !== payload.instanceId || typeof result?.trustPath !== "string" || !result.trustPath)
+    throw new Error("项目目录信任检查结果不匹配，草稿已保留，请重新选择项目后重试。");
+  if (result.trusted === true) return true;
+  // 用户要求在远程完成一次目录信任；明确显示实例和真实信任边界，取消和切换项目均不写入或发送。
+  const confirmed = await confirmAction("信任 Claude 项目目录",
+    `实例：${result.instanceLabel || payload.instanceId}\n目录：${result.trustPath}\n`
+      + "允许 Claude 加载此项目的规则和工具配置。仅确认你信任的项目；确认后继续发送当前消息。",
+    "信任并继续", false, "project-trust-confirmation");
+  if (!confirmed || !stillCurrent()) return false;
+  payload.trustProject = true;
+  payload.expectedProjectPath = result.trustPath;
+  return true;
+}
 async function sendMessage() {
   // 用户要求未启用类型不可发起新输入；打开旧深链仍可查看历史，不会因此停止原生正在执行的任务。
   if (!sessionInstanceEnabled(activeInstanceId())) return;
@@ -13513,10 +13706,20 @@ async function sendMessage() {
     deviceId: session.device.id, selectionToken, time: Date.now()
   } : null;
   const submission = { payload, phase: "sending" };
-  const directPreview = action === "send" ? beginDirectSendPreview(payload) : null;
+  const sendDisplay = action === "send" ? rememberSendDisplay(payload) : null;
   sending = submission;
   busy = true; updateComposer();
+  let requestStarted = false;
   try {
+    if (wasCreating && payload.backend === "claude" && session.capabilities?.claudeProjectTrust === true) {
+      const currentCreation = () => currentAuthorization() && creating && selectionVersion === version
+        && activeInstanceId() === payload.instanceId && $("#project-select").value === payload.projectId;
+      if (!await prepareClaudeProjectCreation(payload, currentCreation)) {
+        submittedDrafts.delete(payload);
+        return;
+      }
+    }
+    requestStarted = true;
     const result = await mutate(action, payload, { reliable: true, receiptId: goalRecord?.id });
     if (!currentAuthorization()) return;
     if (goalMode) {
@@ -13524,7 +13727,7 @@ async function sendMessage() {
         { state: "completed", result }, { allowSelection: true });
       return;
     }
-    const queued = !wasCreating && applyQueuedSendResult(id, result, queueReadVersion);
+    const queued = !wasCreating && applyQueuedSendResult(id, result, queueReadVersion, payload);
     clearSubmittedDraft(payload, selectionVersion === version);
     if (queued) {
       return;
@@ -13544,7 +13747,8 @@ async function sendMessage() {
     }
   } catch (error) {
     if (!currentAuthorization()) return;
-    finishDirectSendPreview(directPreview, true);
+    if (!requestStarted) submittedDrafts.delete(payload);
+    finishSendDisplay(sendDisplay, !pending);
     if (goalMode) {
       const record = pending?.id === goalRecord.id ? pending : goalRecord;
       const outcome = await applyGoalComposerReceipt(record, error.goalReceipt || {
@@ -13563,7 +13767,7 @@ async function sendMessage() {
     });
     else notice(error.message, true);
   } finally {
-    finishDirectSendPreview(directPreview);
+    finishSendDisplay(sendDisplay);
     if (sending === submission) { sending = null; busy = false; updateComposer(); }
   }
 }
@@ -13878,7 +14082,7 @@ function receiveClaudeHistory(params) {
   }
   // 正文流只刷新消息；完整原生快照再保存缓存和更新侧栏，避免逐字重复写历史。
   if (params.preview) { scheduleMessages(); return; }
-  reconcileDirectSendPreviews(id, thread.queuedMessages);
+  reconcileSentMessageDisplays(id, thread.queuedMessages);
   rememberThreadDisplay(thread);
   rememberTranscript();
   updateComposer();
@@ -14016,6 +14220,7 @@ function receive(event) {
     return;
   }
   if (event.method === "remote/threadReverted" && typeof eventThreadId === "string") {
+    clearSentMessageDisplays(eventThreadId);
     transcriptCache.remove(session?.device.id, eventThreadId);
     threadDisplays.delete(threadDisplayKey(eventThreadId));
     if (readScope) {

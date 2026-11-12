@@ -106,6 +106,12 @@ jobs:
           Copy-Item target/release/codex-elves-manager.exe dist/windows/app/
           Copy-Item target/release/codex-elves-task-board.exe dist/windows/app/
 
+      - name: Stage standalone Windows remote client
+        shell: pwsh
+        run: |
+          $version = "${{ needs.ensure-release.outputs.tag }}".TrimStart("v", "V")
+          .\scripts\build-windows-remote.ps1 -Version $version -Profile release -SkipBuild
+
       - name: Build Windows installer
         shell: pwsh
         run: |
@@ -118,7 +124,7 @@ jobs:
           & $makensis "/INPUTCHARSET" "UTF8" "/DVERSION=$version" CodexElves.nsi
           Pop-Location
 
-      - name: Upload Windows installer
+      - name: Upload Windows installer and remote client
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -127,7 +133,7 @@ jobs:
         run: |
           $files = Get-ChildItem -LiteralPath dist/windows -Filter *.exe
           if (-not $files) {
-            throw "No Windows installer found in dist/windows"
+            throw "No Windows executables found in dist/windows"
           }
           gh release upload $env:TAG @($files.FullName) --clobber --repo $env:REPO
 

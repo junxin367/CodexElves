@@ -34,6 +34,7 @@
 - launcher 产物：`codex-elves.exe`
 - manager 产物：`codex-elves-manager.exe`
 - Windows 安装包：`dist/windows/CodexElves-<version>-windows-x64-setup.exe`
+- Windows 独立远程客户端：`dist/windows/CodexElves-Remote-<version>-windows-x64.exe`
 - 管理器包名：`codex-elves-manager`
 
 禁止把任何运行时代码、构建配置、安装脚本、README、用户可见 UI 改回：
@@ -106,6 +107,13 @@
 - 请求模型下拉层级必须高于周边面板，点击空白处不能误触模型列表。
 - 插件入口、工具与插件、会话管理、模型配置等现有交互不能因上游 UI patch 回退。
 
+## 远程会话发送与显示约束
+
+- 普通消息只有在明确确认当前会话正在执行时才允许入队；空闲、未知状态或仅有旧队列残留时应走直接发送。异步准备后再次核对真实执行状态，不能把本次发送自身的启动占位误认为另一条正在执行的任务。
+- 发送中、引导中以及仅确认入队的消息不得提前插入会话正文；正文展示必须来自成功回执或同一原生消息的已接收证据。结果未知时保留原回执，不展示假成功，也不自动重发。
+- 已确认并展示的消息不得因空队列、迟到快照或历史暂未同步而消失。原生消息到达后按稳定消息身份接替并去重；只有明确的编辑回退、会话删除等操作可以移除对应内容。
+- PC 网页和 Windows 远程 EXE 的文件、变更在右侧可调宽的多标签面板打开，不能覆盖或禁用聊天。列表与各详情可同时保留，重复目标复用标签；切换会话、项目或授权时释放旧标签与请求。手机和 Android 容器沿用原整页导航。
+
 ## 构建约定
 
 ### 正式远程服务更新
@@ -135,8 +143,17 @@
 - `dist/windows/app/codex-elves.exe`
 - `dist/windows/app/codex-elves-manager.exe`
 - `dist/windows/CodexElves-<version>-windows-x64-setup.exe`（`<version>` 取自根 `Cargo.toml` 的 `workspace.package.version`）
+- `dist/windows/CodexElves-Remote-<version>-windows-x64.exe`（独立客户端，不放入管理器安装目录）
 
 不要改回手工 NSIS 命令作为默认流程。根 `build.ps1` 当前会自动调用 Android 同步构建；普通 Windows 编译使用上述专用入口，不能默认调用根 `build.ps1` 或 `scripts/sync-android-build.ps1`，以免附带构建 Android。需要修改构建流程时，优先更新 `build.ps1` 和 `scripts/build-windows-installer.ps1`。
+
+### Windows 独立远程客户端
+
+- 用户只要求编译远程客户端时，执行 `.\scripts\build-windows-remote.ps1`，只生成独立 EXE 和对应构建信息，不附带管理器或 Android 构建。
+- 客户端使用独立配置与 WebView2 登录缓存，只连接用户填写的远程服务，不启动本机 launcher、管理器或远程后台。
+- 独立程序最顶部标题栏固定为 36 个逻辑像素，随 DPI 缩放；背景、文字和分隔线跟随会话页实际外观模式与自定义配色。保留窗口拖动、缩放、最小化、最大化及还原，关闭收进托盘，再次启动唤回原窗口。不显示“连接”“窗口”菜单栏，连接设置、刷新及退出入口保留在托盘。
+- 本地标题栏与远程内容使用独立 WebView。只有本地标题栏获得窗口操作权限；远程内容只额外允许同步经过校验的 RGB 配色，连接设置仍仅授权内置连接页，不能为配色联动扩大其他原生命令权限。
+- 地址输入错误或网络加载失败后返回可编辑连接页并保留本次输入；只有成功加载的地址才能保存为下次自动连接目标。远程网页不得获得本机连接设置命令权限。
 
 ### Android 显式编译
 

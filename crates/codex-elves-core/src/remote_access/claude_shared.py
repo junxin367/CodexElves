@@ -151,10 +151,32 @@ def native_interruption(row):
             ("[Request interrupted by user]", "[Request interrupted by user for tool use]"))
 
 
+def native_setting_source(row):
+    origin = row.get("origin")
+    return (row.get("type") == "user" and row.get("entrypoint") == "cli"
+            and (origin is None or isinstance(origin, dict) and origin.get("kind") != "human")
+            and row.get("promptSource") != "typed" and row.get("turnOrigin") != "human")
+
+
+def native_setting_command(row):
+    # 用户要求模型/等级命令使用变更提示行；仅识别 CLI 控制记录，保留用户输入或引用的同样标签。
+    if not native_setting_source(row) or not isinstance(row.get("message"), dict):
+        return None
+    content = row.get("message", {}).get("content")
+    if not isinstance(content, str):
+        return None
+    match = re.fullmatch(
+        r"\s*<command-name>/(model|effort)</command-name>\s*"
+        r"<command-message>\1</command-message>\s*"
+        r"<command-args>([^<>\r\n]*)</command-args>\s*", content)
+    return {"name": match[1], "value": match[2].strip()} if match else None
+
+
 def real_user(row):
     if any(row.get(key) is True for key in ("isMeta", "isSidechain", "isCompactSummary", "isVisibleInTranscriptOnly")):
         return False
-    if native_interruption(row):
+    if native_interruption(row) or native_setting_command(row) \
+            or row.get("nativeSettingCommand") or row.get("nativeSettingOutput"):
         return False
     if row.get("type") == "attachment":
         attachment = row.get("attachment", {})
@@ -854,12 +876,27 @@ class NativeSession:
                     continue
                 if row.get("type") == "system" and row.get("subtype") != "turn_duration":
                     continue
+                setting = native_setting_command(row)
+                if setting:
+                    row["nativeSettingCommand"] = setting
+                elif (native_setting_source(row)
+                      and isinstance(row.get("message", {}).get("content"), str)
+                      and re.fullmatch(r"\s*<local-command-stdout>[\s\S]*</local-command-stdout>\s*",
+                                       row["message"]["content"])):
+                    command = next((message for message in reversed(self.messages)
+                                    if message.get("uuid") == row.get("parentUuid")
+                                    and message.get("nativeSettingCommand")), None)
+                    if command:
+                        # 必须能关联到同一原生命令；孤立回显或用户引用不能按文本前缀误删。
+                        row["nativeSettingOutput"] = {"commandId": command["uuid"],
+                                                      **command["nativeSettingCommand"]}
                 self.seen.add(row["uuid"])
                 self.messages.append({key: row[key] for key in
                                       ("type", "uuid", "parentUuid", "interruptedMessageId", "timestamp", "message", "subtype", "isMeta",
                                        "isCompactSummary", "isVisibleInTranscriptOnly",
                                        "isApiErrorMessage", "isUnmetered", "apiBlockIndex", "durationMs",
-                                       "requestedModel", "effort", "filename", "remote_upload")
+                                       "requestedModel", "effort", "filename", "remote_upload",
+                                       "nativeSettingCommand", "nativeSettingOutput")
                                       if key in row})
                 if isinstance(row.get("message"), dict):
                     message = {key: row["message"][key] for key in

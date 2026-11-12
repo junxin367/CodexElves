@@ -1,6 +1,7 @@
 import { requestRemote } from "./channels.js";
 import { createWorkspaceBranch, createWorkspaceLocation, displayWorkspaceName, displayWorkspacePath, mountPreviewControlsScroll, mountSessionFiles, setWorkspaceBranch } from "./session-files.js";
 import { safeInlineImageSource } from "./attachments.js";
+import { isAndroidContainer } from "./platform.js";
 
 const sections = [
   ["staged", "已暂存"], ["unstaged", "未暂存"], ["untracked", "未跟踪"]
@@ -115,7 +116,243 @@ function responseBytes(value) {
   const serialized = JSON.stringify(value);
   return typeof TextEncoder === "function" ? new TextEncoder().encode(serialized).length : serialized.length * 2;
 }
-export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, copyText, cache, request: transport = requestRemote }) {
+export function mountSessionTools(options) {
+  const { workspace, trigger, getContext, beforeOpen } = options;
+  const desktopMedia = window.matchMedia("(min-width:761px)");
+  const desktop = () => desktopMedia.matches && !isAndroidContainer();
+  const tabs = new Map();
+  const owner = `workspace-reader-${Math.random().toString(36).slice(2)}`;
+  const widthKey = "codexElvesWorkspacePanelWidth";
+  let disposed = false, mobile = null, active = null, sequence = 0, contextKey = "", drag = null;
+  // 默认 480px 便于并排阅读；仅用户拖动或键盘调整才保存，窗口临时变窄不能覆盖偏好。
+  let preferredWidth = 480;
+  try {
+    const saved = Number(localStorage.getItem(widthKey));
+    if (Number.isFinite(saved) && saved >= 200 && saved <= 10000) preferredWidth = saved;
+  } catch {}
+  const dock = node("aside", "workspace-reader");
+  dock.hidden = true; dock.inert = true;
+  dock.setAttribute("aria-label", "文件与变更");
+  const separator = node("div", "workspace-reader-resize");
+  separator.tabIndex = 0;
+  separator.setAttribute("role", "separator");
+  separator.setAttribute("aria-label", "调整文件与变更面板宽度");
+  separator.setAttribute("aria-orientation", "vertical");
+  const toolbar = node("header", "workspace-reader-toolbar");
+  const tablist = node("div", "workspace-reader-tabs");
+  tablist.setAttribute("role", "tablist");
+  tablist.setAttribute("aria-label", "文件与变更标签页");
+  const add = control("+", "打开文件", () => openTab({ kind: "files" }), "workspace-reader-add");
+  const close = control("×", "关闭文件与变更面板", () => clearTabs(true), "workspace-reader-close");
+  const views = node("div", "workspace-reader-views");
+  toolbar.append(tablist, add, close); dock.append(separator, toolbar, views); workspace.append(dock);
+
+  function identity() {
+    const context = getContext() || {};
+    return JSON.stringify([context.deviceId || "", context.cacheScope || "",
+      context.threadId ? ["thread", context.threadId] : context.creating ? ["project", context.projectId || ""] : null]);
+  }
+  function mobilePages() {
+    mobile ||= mountSessionToolPages({ ...options, isAvailable: () => !desktop() });
+    return mobile;
+  }
+  function widthBounds() {
+    const sidebar = workspace.querySelector(":scope > .sidebar");
+    const available = Math.max(0, workspace.clientWidth - (sidebar?.getBoundingClientRect().width || 0));
+    // 用户要求右侧可拖宽；通常至少 320px、给会话保留 360px，窄窗口则各占一半，不能撑出横向整页滚动。
+    const minimum = Math.min(320, Math.floor(available / 2));
+    return { minimum, maximum: Math.max(minimum, available - 360) };
+  }
+  function resize(width = preferredWidth, persist = false) {
+    const { minimum, maximum } = widthBounds();
+    const next = Math.round(Math.max(minimum, Math.min(maximum, width)));
+    workspace.style.setProperty("--workspace-reader-width", `${next}px`);
+    separator.setAttribute("aria-valuemin", String(minimum));
+    separator.setAttribute("aria-valuemax", String(maximum));
+    separator.setAttribute("aria-valuenow", String(next));
+    separator.setAttribute("aria-valuetext", `${next} 像素`);
+    if (persist) {
+      preferredWidth = next;
+      try { localStorage.setItem(widthKey, String(next)); } catch {}
+    }
+    return next;
+  }
+  function syncLayout() {
+    const visible = desktop() && tabs.size > 0;
+    dock.hidden = !visible; dock.inert = !visible;
+    workspace.classList.toggle("workspace-reader-open", visible);
+    if (visible) { mobile?.hide(); resize(); }
+    else finishDrag(false);
+  }
+  function tabKey(item) {
+    if (item.kind === "file") return JSON.stringify(["file", item.path.replaceAll("\\", "/")]);
+    if (item.kind === "change") return JSON.stringify(["change", detailKey(item.file)]);
+    return item.kind;
+  }
+  function selectTab(record, focus = false) {
+    if (!record || disposed) return;
+    active = record.key;
+    for (const candidate of tabs.values()) {
+      const selected = candidate === record;
+      candidate.view.hidden = !selected; candidate.view.inert = !selected;
+      candidate.button.setAttribute("aria-selected", String(selected));
+      candidate.button.tabIndex = selected ? 0 : -1;
+      candidate.tab.classList.toggle("selected", selected);
+    }
+    syncLayout();
+    record.tab.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    if (focus) record.button.focus({ preventScroll: true });
+  }
+  function closeTab(key, focus = true) {
+    const record = tabs.get(key);
+    if (!record) return;
+    const order = [...tabs.keys()], index = order.indexOf(key);
+    record.renderer.dispose(); record.tab.remove(); record.view.remove(); tabs.delete(key);
+    if (active === key) {
+      active = null;
+      selectTab(tabs.get(order[index + 1]) || tabs.get(order[index - 1]), focus);
+    }
+    syncLayout();
+    if (!tabs.size && focus) trigger?.focus({ preventScroll: true });
+  }
+  function clearTabs(focus = false) {
+    for (const key of [...tabs.keys()]) closeTab(key, false);
+    if (focus) trigger?.focus({ preventScroll: true });
+  }
+  function updateContext() {
+    if (disposed) return;
+    const next = identity();
+    // 用户要求标签可同时阅读；会话、项目或授权切换必须清空旧标签，关闭时也取消各自尚未完成的读取。
+    if (next !== contextKey) { contextKey = next; clearTabs(); }
+    mobile?.updateContext();
+  }
+  function openTab(item) {
+    if (disposed) return;
+    updateContext(); beforeOpen?.();
+    const key = tabKey(item), existing = tabs.get(key);
+    if (existing) {
+      selectTab(existing);
+      if (item.kind === "file") void existing.renderer.openFile(item.path, item.line);
+      else if (item.kind === "change") void existing.renderer.openChange(item.file, item.list);
+      else if (item.kind === "changes") existing.renderer.open("changes");
+      else void existing.renderer.open();
+      return;
+    }
+    const id = `${owner}-${++sequence}`;
+    const label = item.kind === "changes" ? "变更" : item.kind === "files" ? "打开文件"
+      : `${displayWorkspaceName((item.path || item.file.path).split(/[\\/]/).at(-1))}${item.kind === "change" ? " · 变更" : ""}`;
+    const title = item.kind === "change" ? `${sections.find(([name]) => name === item.file.section)?.[1] || "变更"}：${displayedPath(item.file)}`
+      : item.path ? displayWorkspacePath(item.path) : label;
+    const tab = node("div", "workspace-reader-tab");
+    tab.setAttribute("role", "presentation");
+    const button = control("", title, () => selectTab(record), "workspace-reader-tab-select");
+    button.id = `${id}-tab`; button.setAttribute("role", "tab");
+    button.setAttribute("aria-controls", id);
+    const symbol = node("span", "workspace-reader-tab-icon");
+    symbol.innerHTML = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">${
+      item.kind === "changes" || item.kind === "change"
+        ? '<rect x="4" y="2.5" width="12" height="15" rx="2"/><path d="M7 7h6M10 4v6M7 13h6"/>'
+        : '<path d="M11.5 2.5H5a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7z"/><path d="M11 2.5V7h5"/>'}</svg>`;
+    symbol.setAttribute("aria-hidden", "true");
+    button.append(symbol, node("span", "workspace-reader-tab-label", label));
+    const remove = control("×", `关闭${label}`, () => closeTab(key), "workspace-reader-tab-close");
+    tab.append(button, remove);
+    const view = node("section", "workspace-reader-view");
+    view.id = id; view.setAttribute("role", "tabpanel"); view.setAttribute("aria-labelledby", button.id);
+    tablist.append(tab); views.append(view);
+    const ownsTab = () => !disposed && tabs.get(key) === record && contextKey === identity();
+    const embedded = { id, onClose: () => { if (ownsTab()) closeTab(key); },
+      onOpenFile: (path, line) => { if (ownsTab()) openTab({ kind: "file", path, line }); },
+      onOpenChange: (file, list) => { if (ownsTab()) openTab({ kind: "change", file, list }); } };
+    const rendererOptions = { ...options, workspace: view, beforeOpen: undefined, embedded };
+    // 每个标签保留自己的阅读 DOM、滚动和请求；详情不重复写变更列表的持久缓存。
+    const renderer = item.kind === "changes" || item.kind === "change"
+      ? mountSessionToolPages({ ...rendererOptions, cache: item.kind === "changes" ? options.cache : null })
+      : mountSessionFiles(rendererOptions);
+    const record = { key, item, tab, button, view, renderer };
+    tabs.set(key, record); selectTab(record);
+    if (item.kind === "changes") renderer.open("changes");
+    else if (item.kind === "change") void renderer.openChange(item.file, item.list);
+    else if (item.kind === "files") void renderer.open();
+    else void renderer.openFile(item.path, item.line);
+  }
+  function open(name) {
+    if (!["files", "changes"].includes(name)) return;
+    updateContext();
+    if (desktop()) openTab({ kind: name });
+    else mobilePages().open(name);
+  }
+  function openFile(path, line) {
+    if (typeof path !== "string" || !path) return;
+    updateContext();
+    if (desktop()) openTab({ kind: "file", path, line });
+    else mobilePages().openFile(path, line);
+  }
+  function finishDrag(persist) {
+    if (!drag) return;
+    const previous = drag; drag = null;
+    workspace.classList.remove("workspace-reader-resizing");
+    if (separator.hasPointerCapture?.(previous.pointer)) separator.releasePointerCapture(previous.pointer);
+    resize(persist ? previous.current : preferredWidth, persist);
+  }
+  separator.addEventListener("pointerdown", event => {
+    if (event.button !== 0 || !event.isPrimary) return;
+    event.preventDefault();
+    const width = resize();
+    drag = { pointer: event.pointerId, x: event.clientX, width, current: width };
+    separator.setPointerCapture(event.pointerId);
+    workspace.classList.add("workspace-reader-resizing");
+  });
+  separator.addEventListener("pointermove", event => {
+    if (!drag || drag.pointer !== event.pointerId) return;
+    drag.current = resize(drag.width + drag.x - event.clientX);
+  });
+  separator.addEventListener("pointerup", event => { if (drag?.pointer === event.pointerId) finishDrag(true); });
+  separator.addEventListener("pointercancel", () => finishDrag(false));
+  separator.addEventListener("lostpointercapture", () => finishDrag(false));
+  separator.addEventListener("dblclick", () => resize(480, true));
+  separator.addEventListener("keydown", event => {
+    const width = Number(separator.getAttribute("aria-valuenow"));
+    const bounds = widthBounds();
+    // 分隔线也可用方向键每次调整 20px，Home/End 到两端，避免只能靠鼠标拖动。
+    const next = { ArrowLeft: width + 20, ArrowRight: width - 20, Home: bounds.minimum, End: bounds.maximum }[event.key];
+    if (next == null) return;
+    event.preventDefault(); resize(next, true);
+  });
+  tablist.addEventListener("keydown", event => {
+    const records = [...tabs.values()], index = records.findIndex(record => record.button === event.target);
+    if (index < 0 || event.altKey || event.ctrlKey || event.metaKey) return;
+    const next = { ArrowLeft: (index - 1 + records.length) % records.length,
+      ArrowRight: (index + 1) % records.length, Home: 0, End: records.length - 1 }[event.key];
+    if (next != null) { event.preventDefault(); selectTab(records[next], true); }
+    else if (event.key === "Delete") { event.preventDefault(); closeTab(records[index].key); }
+  });
+  dock.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || event.isComposing || document.querySelector("dialog[open]")) return;
+    event.preventDefault(); event.stopPropagation(); closeTab(active);
+  });
+  const observer = typeof ResizeObserver === "function" ? new ResizeObserver(() => {
+    if (desktop() && tabs.size && !drag) resize();
+  }) : null;
+  observer?.observe(workspace);
+  const sidebar = workspace.querySelector(":scope > .sidebar");
+  if (sidebar) observer?.observe(sidebar);
+  desktopMedia.addEventListener("change", syncLayout);
+  updateContext();
+  return {
+    open, openFile, updateContext,
+    close: () => desktop() ? closeTab(active) : mobile?.close(),
+    dispose() {
+      if (disposed) return;
+      finishDrag(false); clearTabs(); mobile?.dispose(); disposed = true;
+      observer?.disconnect(); desktopMedia.removeEventListener("change", syncLayout);
+      dock.remove(); workspace.classList.remove("workspace-reader-open", "workspace-reader-resizing");
+      workspace.style.removeProperty("--workspace-reader-width");
+    }
+  };
+}
+
+function mountSessionToolPages({ workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, copyText, cache, embedded = null, isAvailable = () => true, request: transport = requestRemote }) {
   let projectFiles = null;
   let disposed = false, opened = false, activePage = "changes", detailVisible = false, contextKey = "";
   let changesEpoch = 0, detailEpoch = 0, changesController = null, detailController = null;
@@ -130,14 +367,14 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
   const pageTitles = { changes: "变更" };
   const fileTriggers = new Map();
   const panel = node("section", "session-tools-screen");
-  panel.id = "session-tools-screen";
+  panel.id = embedded ? `${embedded.id}-changes` : "session-tools-screen";
   panel.hidden = true;
-  panel.setAttribute("aria-labelledby", "session-tools-title");
+  panel.setAttribute("aria-labelledby", embedded ? `${panel.id}-title` : "session-tools-title");
   panel.setAttribute("tabindex", "-1");
   const heading = node("header", "session-tools-heading");
   const headingCopy = node("div", "session-tools-heading-copy");
   const pageTitle = node("h1", "", "变更");
-  pageTitle.id = "session-tools-title";
+  pageTitle.id = embedded ? `${panel.id}-title` : "session-tools-title";
   const rootLocation = createWorkspaceLocation("当前会话工作目录");
   const backToConversation = control("返回", "返回会话", requestBack, "text-button session-tools-back");
   headingCopy.append(pageTitle, rootLocation.element);
@@ -145,19 +382,19 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
   const pageBodies = new Map();
   for (const [name, label] of [["changes", "变更"]]) {
     const body = node("section", `session-tools-page session-tools-${name}`);
-    body.id = `session-tools-${name}`;
+    body.id = embedded ? `${embedded.id}-${name}-body` : `session-tools-${name}`;
     body.setAttribute("aria-label", label);
     body.hidden = name !== activePage;
     pageBodies.set(name, body);
   }
   panel.append(heading, ...pageBodies.values());
   const detailPanel = node("section", "session-tools-screen session-tools-file-screen");
-  detailPanel.id = "session-tools-file-screen"; detailPanel.hidden = true; detailPanel.inert = true;
-  detailPanel.setAttribute("aria-labelledby", "session-tools-file-title");
+  detailPanel.id = embedded ? `${embedded.id}-detail` : "session-tools-file-screen"; detailPanel.hidden = true; detailPanel.inert = true;
+  detailPanel.setAttribute("aria-labelledby", embedded ? `${detailPanel.id}-title` : "session-tools-file-title");
   const detailHeading = node("header", "session-tools-heading");
   const detailHeadingCopy = node("div", "session-tools-heading-copy");
   const detailTitle = node("h1");
-  detailTitle.id = "session-tools-file-title";
+  detailTitle.id = embedded ? `${detailPanel.id}-title` : "session-tools-file-title";
   const detailLocation = createWorkspaceLocation();
   detailHeadingCopy.append(detailTitle, detailLocation.element);
   const backToFiles = control("返回", "返回变更列表", requestBack, "text-button session-tools-back");
@@ -695,7 +932,10 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
         title.append(toggle); group.append(title, body); p.groups.set(key, { toggle, body });
         applyFold(p, key);
         for (const file of entries) {
-          const button = control("", `${label}：${displayedPath(file)}`, () => void loadDetail(file), "session-tools-file");
+          const button = control("", `${label}：${displayedPath(file)}`, () => {
+            if (embedded?.onOpenChange) embedded.onOpenChange(file, p.list);
+            else void loadDetail(file);
+          }, "session-tools-file");
           const parts = fileParts(file), copy = node("span", "session-tools-file-copy");
           const directory = file.oldPath ? `${parts.directory} · 原路径：${displayWorkspacePath(file.oldPath)}` : parts.directory;
           copy.append(node("strong", "session-tools-file-name", parts.name), node("span", "session-tools-file-directory", directory));
@@ -923,12 +1163,14 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     inertState.clear();
   }
   function suspendConversation() {
+    if (embedded) return;
     for (const element of workspace.querySelectorAll(":scope > .conversation, :scope > .sidebar")) {
       if (!inertState.has(element)) inertState.set(element, element.inert);
       element.inert = true;
     }
   }
   function recordRoute(route, file = null) {
+    if (embedded) return;
     history.pushState({
       ...(history.state || {}),
       [historyKey]: { owner: navigationOwner, route, page: activePage, context: contextKey,
@@ -940,7 +1182,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     beforeOpen?.();
     showPage(name, options);
   }
-  function showPage(name, { recordHistory = true } = {}) {
+  function showPage(name, { recordHistory = true, refresh = true } = {}) {
     if (disposed || !pageTitles[name]) return;
     const wasOpened = opened;
     const enteringChanges = name === "changes" && (!wasOpened || activePage !== "changes");
@@ -960,9 +1202,9 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     panel.classList.add("session-tools-visible");
     if (recordHistory) recordRoute(name);
     updateContext();
-    if (name === "changes" && !changesBusy && changeTarget() && (enteringChanges || !changesLoaded))
+    if (refresh && name === "changes" && !changesBusy && changeTarget() && (embedded || enteringChanges || !changesLoaded))
       void refreshChanges();
-    backToConversation.focus({ preventScroll: true });
+    if (!embedded) backToConversation.focus({ preventScroll: true });
   }
   function finishPageExit() {
     if (disposed || opened) return;
@@ -973,7 +1215,7 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     if (returnView?.context === contextKey && returnView.messages?.isConnected)
       returnView.messages.scrollTop = returnView.scrollTop;
     returnView = null;
-    if (trigger.isConnected) trigger.focus({ preventScroll: true });
+    if (!embedded && isAvailable() && trigger?.isConnected) trigger.focus({ preventScroll: true });
   }
   function hidePage() {
     if (disposed || !opened) return;
@@ -993,19 +1235,21 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     clearTimeout(detailExitTimer); detailExitTimer = null;
     detailVisible = true;
     detailPanel.hidden = false; detailPanel.inert = false; panel.inert = true;
+    if (embedded) panel.hidden = true;
     if (!wasVisible) {
       detail.scrollTop = detailRecord?.scrollTop || 0;
       detailPanel.getBoundingClientRect();
     }
     detailPanel.classList.add("session-tools-visible");
     if (recordHistory && !wasVisible) recordRoute("detail", selectedFile);
-    backToFiles.focus({ preventScroll: true });
+    if (!embedded) backToFiles.focus({ preventScroll: true });
   }
   function finishDetailExit(focus) {
     if (disposed || detailVisible) return;
     clearTimeout(detailExitTimer); detailExitTimer = null;
     detailPanel.hidden = true;
     panel.inert = !opened;
+    if (embedded) panel.hidden = !opened;
     if (focus && opened) {
       const selected = selectedFile && fileTriggers.get(detailKey(selectedFile));
       (selected || backToConversation).focus({ preventScroll: true });
@@ -1023,13 +1267,14 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
   }
   function requestBack() {
     if (disposed || !opened) return;
+    if (embedded) { embedded.onClose(); return; }
     const ownsEntry = history.state?.[historyKey]?.owner === navigationOwner;
     if (detailVisible) hideDetail();
     else hidePage();
     if (ownsEntry) history.back();
   }
   function handlePopState(event) {
-    if (disposed) return;
+    if (disposed || embedded || !isAvailable()) return;
     const route = event.state?.[historyKey];
     if (route?.owner !== navigationOwner || route.context !== contextKey) {
       if (opened) hidePage();
@@ -1046,14 +1291,14 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
     }
   }
   function handleNativeBack(event) {
-    if (disposed || !opened || event.defaultPrevented) return;
+    if (disposed || embedded || !isAvailable() || !opened || event.defaultPrevented) return;
     const imageDialog = document.querySelector("#image-preview-dialog[open]");
     if (imageDialog) { event.preventDefault(); imageDialog.close(); return; }
     if (document.querySelector("dialog[open]")) return;
     event.preventDefault(); requestBack();
   }
   function handleKey(event) {
-    if (!opened || disposed || document.querySelector("dialog[open]")) return;
+    if (!opened || disposed || embedded || !isAvailable() || document.querySelector("dialog[open]")) return;
     if (event.key === "Escape") {
       event.preventDefault(); event.stopImmediatePropagation(); requestBack();
     } else if (event.key === "Tab") {
@@ -1074,20 +1319,38 @@ export function mountSessionTools({ workspace, trigger, getContext, beforeOpen, 
   document.addEventListener("keydown", handleKey, true);
   window.addEventListener("popstate", handlePopState, true);
   window.addEventListener("codex-elves-native-back", handleNativeBack);
-  projectFiles = mountSessionFiles({
-    workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, copyText, request: transport
+  if (!embedded) projectFiles = mountSessionFiles({
+    workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, copyText,
+    request: transport, isAvailable
   });
   updateContext();
 
   return {
     updateContext,
-    open: name => name === "files" ? projectFiles.open() : openPage(name),
-    openFile: (path, line) => projectFiles.openFile(path, line),
+    open: name => name === "files" ? projectFiles?.open() : openPage(name),
+    openFile: (path, line) => projectFiles?.openFile(path, line),
+    async openChange(file, snapshot) {
+      showPage("changes", { recordHistory: false, refresh: false });
+      const list = listResponse(snapshot);
+      if (list && project) acceptList(project, list);
+      else await refreshChanges();
+      if (disposed) return;
+      if (files.some(entry => detailKey(entry) === detailKey(file))) await loadDetail(file);
+      else {
+        detailTitle.textContent = fileParts(file).name;
+        showDetail({ recordHistory: false });
+        setDetailNotice("该文件已不在变更列表中，请重新打开变更列表。", true);
+      }
+    },
+    hide() {
+      projectFiles?.close();
+      if (opened) { hidePage(); finishPageExit(); }
+    },
     close: requestBack,
     dispose() {
       if (disposed) return;
       detailControlsScroll.dispose();
-      projectFiles.dispose();
+      projectFiles?.dispose();
       saveCurrentView(true);
       disposed = true; opened = false; detailVisible = false; ++changesEpoch; ++detailEpoch;
       changesController?.abort(); detailController?.abort();

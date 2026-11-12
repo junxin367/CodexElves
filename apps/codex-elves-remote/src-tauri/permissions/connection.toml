@@ -1,0 +1,14 @@
+[[permission]]
+identifier = "remote-connection"
+description = "内置连接页可以读取远程客户端设置并连接指定服务。"
+commands.allow = ["remote_client_state", "connect_remote"]
+
+[[permission]]
+identifier = "remote-appearance"
+description = "当前服务仅可同步经过校验的标题栏 RGB 配色，不可操作窗口或修改连接设置。"
+commands.allow = ["remote_titlebar_theme"]
+
+[[permission]]
+identifier = "titlebar-state"
+description = "本地标题栏可以读取最近的同步配色。"
+commands.allow = ["remote_titlebar_state"]

@@ -61,7 +61,10 @@ impl Harness {
             return self.answer_async(&id, &payload, authorization).await;
         }
         match action {
-            "send" => self.enqueue(&id, payload, authorization).await,
+            "send" => {
+                self.enqueue(&id, payload, &identity["thread"], authorization)
+                    .await
+            }
             "stop" => {
                 let snapshot = self.owner_snapshot(&id).await?;
                 let turn_id = match &snapshot {
@@ -300,10 +303,12 @@ impl Harness {
         &self,
         id: &str,
         payload: Value,
+        fresh_thread: &Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
         inputs(&payload)?;
-        let message = Queued::new(payload, authorization);
+        let direct = !self.send_is_running(id, fresh_thread).await?;
+        let mut message = Queued::new(payload, authorization);
         let client_id = message.payload["clientUserMessageId"].clone();
         let mut store = self.store.lock().await;
         if let Some(previous) = store.data.sent.get(&sent_key(id, &message.payload)) {
@@ -328,7 +333,10 @@ impl Harness {
             if previous.payload != message.payload {
                 return Err(error(409, "消息标识已用于其他内容"));
             }
-            if matches!(previous.state.as_str(), "sending" | "unknown") {
+            if matches!(
+                previous.state.as_str(),
+                "sending" | "unknown" | "direct-sending" | "direct-unknown"
+            ) {
                 return Ok(
                     json!({"ok":false,"code":409,"outcomeUnknown":true,"threadId":id,
                     "clientUserMessageId":client_id,"message":"原消息送达状态待核对，不会重复发送"}),
@@ -338,6 +346,20 @@ impl Harness {
                 json!({"ok":true,"confirmed":true,"threadId":id,"messageId":previous.id,
                 "clientUserMessageId":client_id,"deliveryState":"queued"}),
             );
+        }
+        if direct
+            && store.data.queues.get(id).into_iter().flatten().any(|q| {
+                matches!(
+                    q.state.as_str(),
+                    "sending" | "unknown" | "direct-sending" | "direct-unknown"
+                )
+            })
+        {
+            return Err(error(409, "请先核对尚未确认的消息"));
+        }
+        // 用户要求只有明确执行中才入队；直接发送保存的仅是防重复投递意图，不展示为待发送队列。
+        if direct {
+            message.state = "direct-sending".into();
         }
         let permit = authorization.prepare_dispatch().await?;
         crate::bridge::CdpDispatchPermit::commit(permit, || {
@@ -351,10 +373,121 @@ impl Harness {
             })
         })?;
         drop(store);
+        if direct {
+            return self.dispatch_direct(id, &message, authorization).await;
+        }
         self.queue_changed(id).await;
         let mut response = self.queue(id).await;
         response["messageId"] = json!(&message.id);
         response["clientUserMessageId"] = client_id;
+        response["deliveryState"] = json!("queued");
+        response["confirmed"] = json!(true);
+        Ok(response)
+    }
+
+    async fn send_is_running(&self, id: &str, fresh_thread: &Value) -> anyhow::Result<bool> {
+        if let Some(snapshot) = self.owner_snapshot(id).await? {
+            let status = &snapshot["threadRuntimeStatus"];
+            let status = status.as_str().or_else(|| status["type"].as_str());
+            if matches!(status, Some("active" | "inProgress" | "running")) {
+                return Ok(true);
+            }
+            if status == Some("idle") {
+                return Ok(false);
+            }
+            return Ok(crate::desktop_owner_ipc::snapshot_turns(&snapshot)
+                .iter()
+                .any(|turn| turn["status"] == "inProgress"));
+        }
+        let projection = self.projection.lock().await;
+        if projection.compactions.contains_key(id) {
+            return Ok(true);
+        }
+        let status = &fresh_thread["status"];
+        let status = status.as_str().or_else(|| status["type"].as_str());
+        Ok(match status {
+            Some("active" | "inProgress" | "running") => true,
+            Some("idle" | "completed" | "failed" | "interrupted") => false,
+            _ => projection.active.contains_key(id),
+        })
+    }
+
+    async fn dispatch_direct(
+        &self,
+        id: &str,
+        message: &Queued,
+        authorization: &RemoteAuthorization,
+    ) -> anyhow::Result<Value> {
+        let mut attempted = false;
+        let result: anyhow::Result<Option<Value>> = async {
+            let fresh = self
+                .runtime
+                .request(
+                    "thread/read",
+                    json!({"threadId":id,"includeTurns":false}),
+                    None,
+                )
+                .await?;
+            normalize_thread_response(&fresh)?;
+            // 准备之后再检查；只有此时明确开始执行，才把本次意图转换为真正的队列消息。
+            if self.send_is_running(id, &fresh["thread"]).await? {
+                return Ok(None);
+            }
+            authorization.check().await?;
+            attempted = true;
+            self.start_turn(id, &message.payload, authorization)
+                .await
+                .map(Some)
+        }
+        .await;
+        self.store.lock().await.commit(|data| {
+            match &result {
+                Ok(Some(response)) => {
+                    data.sent
+                        .insert(sent_key(id, &message.payload), response.clone());
+                    data.sent_hashes.insert(
+                        sent_key(id, &message.payload),
+                        payload_hash(&message.payload),
+                    );
+                    if let Some(queue) = data.queues.get_mut(id) {
+                        queue.retain(|q| q.id != message.id);
+                    }
+                }
+                Ok(None) => {
+                    if let Some(queued) = data
+                        .queues
+                        .get_mut(id)
+                        .and_then(|q| q.iter_mut().find(|q| q.id == message.id))
+                    {
+                        queued.state = "queued".into();
+                    }
+                }
+                Err(failure) => {
+                    let not_sent = !attempted
+                        || failure
+                            .downcast_ref::<super::super::ApiError>()
+                            .is_some_and(|error| !error.outcome_unknown)
+                        || failure
+                            .downcast_ref::<crate::desktop_owner_ipc::DispatchFailure>()
+                            .is_some_and(|error| !error.dispatched);
+                    if let Some(queue) = data.queues.get_mut(id) {
+                        if not_sent {
+                            queue.retain(|q| q.id != message.id);
+                        } else if let Some(queued) = queue.iter_mut().find(|q| q.id == message.id) {
+                            queued.state = "direct-unknown".into();
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        self.queue_changed(id).await;
+        if let Some(response) = result? {
+            return Ok(response);
+        }
+        let mut response = self.queue(id).await;
+        response["messageId"] = json!(message.id);
+        response["clientUserMessageId"] = message.payload["clientUserMessageId"].clone();
         response["deliveryState"] = json!("queued");
         response["confirmed"] = json!(true);
         Ok(response)

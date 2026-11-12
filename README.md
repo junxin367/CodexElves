@@ -135,6 +135,8 @@ Chrome 插件调用兼容与图片结果显示兼容是不同路径。这里介�
 
 界面演示、首次连接、访问方式及排查步骤见 **[远程会话移动端指南](docs/remote-access-mobile.md)**；当前路由、权限和交互限制见 [会话工具说明](docs/remote-session-tools.md)。
 
+另一台 Windows 电脑可使用独立远程客户端 `CodexElves-Remote-<版本>-windows-x64.exe`。支持窗口缩放、最小化、最大化和托盘管理，连接失败后可直接修改地址。使用及单独构建方法见 [Windows 远程客户端](docs/windows-remote-client.md)。
+
 ## 数据与运行方式
 
 CodexElves 通过独立 launcher 启动桌面应用并注入增强脚本。桌面界面升级可能影响注入兼容性；「API Key 浏览器插件兼容」还会备份并适配相关运行时文件，因此部分功能也会涉及运行时文件变更。
@@ -173,6 +175,7 @@ CodexElves 通过独立 launcher 启动桌面应用并注入增强脚本。桌�
 - [远程会话技术说明](docs/remote-access.md)：公网入口、权限、协议、状态恢复与本机调试。
 - [会话工具说明](docs/remote-session-tools.md)：当前菜单、工作区读取、侧边会话和原生/service 路由边界。
 - [Android 构建与运行](docs/android.md)、[Android 与 PWA 发布说明](docs/android-release.md)：移动应用构建、资源更新和发布规则。
+- [Windows 远程客户端](docs/windows-remote-client.md)：独立 EXE、连接恢复、窗口和托盘管理。
 
 ## 开发
 
@@ -192,6 +195,9 @@ cargo check --workspace
 
 # Windows 安装包
 .\scripts\build-windows-installer.ps1
+
+# 只构建 Windows 远程客户端
+.\scripts\build-windows-remote.ps1
 ```
 
 主要目录：
@@ -199,6 +205,7 @@ cargo check --workspace
 ```text
 apps/codex-elves-launcher/    静默启动入口
 apps/codex-elves-manager/     Tauri 管理工具
+apps/codex-elves-remote/      Windows 独立远程客户端
 apps/codex-elves-android/     Android 应用
 assets/inject/               桌面注入脚本
 assets/remote-access/        手机网页与 PWA

@@ -1916,6 +1916,13 @@ impl RemoteAccessController {
             .recorded(async {
                 execution::transport("claude-wsl-stdio", action, service_write_action(action));
                 match action {
+                    "projectTrust" => {
+                        let config = match selected_config {
+                            Some(config) => config,
+                            None => self.claude.config()?,
+                        };
+                        self.claude.project_trust(config, &cwd, None, None).await
+                    }
                     "models" => {
                         if let Some(config) = selected_config {
                             self.claude
@@ -3865,7 +3872,7 @@ async fn session(
         "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
         "sendText":native_write_available || service_connected,
         "sideThreads":true,"serviceSideThreads":true,"subagents":true,"serviceSubagents":true,
-        "claudeSessions":true}}),
+        "claudeSessions":true,"claudeProjectTrust":true}}),
     ))
 }
 
@@ -4036,6 +4043,7 @@ async fn read(
             | "history"
             | "thread"
             | "models"
+            | "projectTrust"
             | "skills"
             | "queue"
             | "queueEdit"
@@ -9877,6 +9885,126 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         let deleted=controller.call_authorized("updateGoal",json!({"threadId":id,"objective":"wait goal",
             "expectedCreatedAt":1,"expectedObjective":"wait goal","expectedStatus":"active","operation":"delete"}),&authorization).await.unwrap();
         assert!(deleted["goal"].is_null());
+    }
+
+    #[tokio::test]
+    async fn harness_idle_send_bypasses_old_queue_and_deduplicates_success() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let created = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"wait"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        let old = controller
+            .call_authorized(
+                "send",
+                json!({"threadId":id,"prompt":"old waiting","clientUserMessageId":"old-waiting"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(old["deliveryState"], "queued", "明确执行中才入队");
+        controller
+            .call_authorized("stop", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        let input = json!({"threadId":id,"prompt":"direct now","clientUserMessageId":"new-direct"});
+        let sent = controller
+            .call_authorized("send", input.clone(), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(
+            sent["deliveryState"], "accepted",
+            "旧队列不能让空闲普通消息继续入队"
+        );
+        let queue = controller
+            .call_authorized("queue", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(queue["queuedMessages"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            queue["queuedMessages"][0]["clientUserMessageId"],
+            "old-waiting"
+        );
+        assert_eq!(
+            controller
+                .call_authorized("send", input, &authorization)
+                .await
+                .unwrap(),
+            sent
+        );
+        let frames = std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap();
+        assert_eq!(
+            frames
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|request| request["method"] == "turn/start"
+                    && request["params"]["clientUserMessageId"] == "new-direct")
+                .count(),
+            1
+        );
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+    }
+
+    #[tokio::test]
+    async fn harness_idle_direct_unknown_is_hidden_and_recovers_without_replay() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let created = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"initial"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let input = json!({"threadId":id,"prompt":"uncertain direct","clientUserMessageId":"direct-unknown"});
+        assert!(
+            controller
+                .call_authorized("send", input.clone(), &authorization)
+                .await
+                .is_err()
+        );
+        let queue = controller
+            .call_authorized("queue", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert!(
+            queue["queuedMessages"].as_array().unwrap().is_empty(),
+            "直接发送的未知意图不能展示为等待队列"
+        );
+        let state = controller
+            .call_authorized("sendState", input.clone(), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(
+            state["deliveryState"], "accepted",
+            "只能通过相同原生消息身份核对成功"
+        );
+        assert_eq!(
+            controller
+                .call_authorized("send", input, &authorization)
+                .await
+                .unwrap()["deliveryState"],
+            "accepted"
+        );
+        let frames = std::fs::read_to_string(directory.path().join("requests.jsonl")).unwrap();
+        assert_eq!(
+            frames
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|request| request["method"] == "turn/start"
+                    && request["params"]["clientUserMessageId"] == "direct-unknown")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

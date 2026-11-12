@@ -183,4 +183,8 @@ Write-Output "[OK] Installer: $InstallerPath"
 Write-Output "[OK] Size: $Length bytes"
 Write-Output "[OK] Updated: $LastWriteTime"
 
+# 用户要求 Windows 常规构建同时提供独立远程客户端；单独生成便携 EXE，不混入管理器安装目录或启动服务。
+& (Join-Path $RepoRoot "scripts\build-windows-remote.ps1") `
+    -Version $ResolvedVersion -Profile "release-fast" -SkipBuild -BinaryDirectory $ReleaseDir
+
 Start-CargoCacheCleanup -RepoRoot $RepoRoot -MaxSizeGiB 20

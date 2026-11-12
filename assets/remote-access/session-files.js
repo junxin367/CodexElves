@@ -645,7 +645,8 @@ export function mountPreviewControlsScroll({ body, controls, isActive = () => tr
 }
 
 export function mountSessionFiles({
-  workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, copyText, request = requestRemote
+  workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, copyText,
+  embedded = null, isAvailable = () => true, request = requestRemote
 }) {
   const historyKey = "codexElvesFiles";
   let navigationOwner = Math.random().toString(36).slice(2);
@@ -659,6 +660,7 @@ export function mountSessionFiles({
   let sourceMode = false, wrap = false, richView = {}, returnView = null, exitTimer = null;
   const createScreen = (id, title) => {
     const screen = node("section", "session-tools-screen session-files-screen");
+    if (embedded) id = `${embedded.id}-${id}`;
     screen.id = id; screen.hidden = true; screen.inert = true;
     const heading = node("header", "session-tools-heading");
     const copy = node("div", "session-tools-heading-copy");
@@ -801,17 +803,17 @@ export function mountSessionFiles({
       returnView = { messages, scroll: messages?.scrollTop || 0, key: contextKey };
     }
     route = next;
-    for (const element of workspace.querySelectorAll(":scope > .conversation, :scope > .sidebar")) {
+    for (const element of embedded ? [] : workspace.querySelectorAll(":scope > .conversation, :scope > .sidebar")) {
       if (!inertState.has(element)) inertState.set(element, element.inert);
       element.inert = true;
     }
-    if (recordHistory) history.pushState({ ...history.state,
+    if (recordHistory && !embedded) history.pushState({ ...history.state,
       [historyKey]: { owner: navigationOwner, context: contextKey, ...next } }, "", location.href);
   }
   function show(screen) {
     screen.hidden = false; screen.inert = false;
     screen.getBoundingClientRect(); screen.classList.add("session-tools-visible");
-    screen.querySelector(".session-tools-back").focus({ preventScroll: true });
+    if (!embedded) screen.querySelector(".session-tools-back").focus({ preventScroll: true });
   }
   function hide(screen) {
     if (screen === content.screen) releaseMermaidBlocks(body);
@@ -874,7 +876,8 @@ export function mountSessionFiles({
   function renderTreeRow(file, depth, searchResult) {
     const isFolder = file.kind === "directory";
     const isExpanded = expanded.has(file.path);
-    const button = control("", () => isFolder ? toggleDirectory(file.path) : void openFile(file.path), "session-tools-file");
+    const button = control("", () => isFolder ? toggleDirectory(file.path)
+      : embedded?.onOpenFile ? embedded.onOpenFile(file.path) : void openFile(file.path), "session-tools-file");
     button.title = displayWorkspacePath(file.path); button.disabled = file.kind === "unsupported";
     button.style.setProperty("--file-depth", String(depth));
     button.dataset.path = file.path;
@@ -953,6 +956,7 @@ export function mountSessionFiles({
     if (disposed || typeof path !== "string") return;
     prepare({ kind: "file", path, line: Number.isSafeInteger(line) && line > 0 ? line : null }, recordHistory);
     ++listEpoch; listController?.abort(); listing.screen.inert = true;
+    if (embedded) listing.screen.hidden = true;
     show(content.screen); content.label.textContent = displayWorkspaceName(fileName(path));
     const saved = views.get(`file:${path}`);
     controlsScroll.reset();
@@ -1025,7 +1029,10 @@ export function mountSessionFiles({
       bindLocalFileReferences(document, {
         openFile: (reference, line) => {
           const path = resolveDocumentReference(reference);
-          if (path) void openFile(path, line);
+          if (path) {
+            if (embedded?.onOpenFile) embedded.onOpenFile(path, line);
+            else void openFile(path, line);
+          }
           else message(fileStatus, "该路径超出了当前项目。", true);
         },
         openBrowser: (reference) => {
@@ -1080,7 +1087,7 @@ export function mountSessionFiles({
     inertState.clear();
     if (returnView?.key === contextKey && returnView.messages?.isConnected) returnView.messages.scrollTop = returnView.scroll;
     returnView = null;
-    if (returning && trigger.isConnected) trigger.focus({ preventScroll: true });
+    if (!embedded && returning && trigger?.isConnected) trigger.focus({ preventScroll: true });
   }
   function hideAll(immediate = false) {
     saveView(); route = null; ++fileEpoch; ++listEpoch;
@@ -1091,6 +1098,7 @@ export function mountSessionFiles({
   }
   function back() {
     if (!route || disposed) return;
+    if (embedded) { embedded.onClose(); return; }
     const image = document.querySelector("#image-preview-dialog[open]");
     if (image) { image.close(); return; }
     saveView();
@@ -1098,13 +1106,14 @@ export function mountSessionFiles({
     else hideAll();
   }
   function pop(event) {
+    if (embedded || !isAvailable()) return;
     const next = event.state?.[historyKey];
     if (next?.owner !== navigationOwner || next.context !== contextKey) { if (route) hideAll(); return; }
     if (next.kind === "file") void openFile(next.path, next.line, { recordHistory: false });
     else if (next.kind === "list") void openDirectory(next.path, { recordHistory: false });
   }
   function key(event) {
-    if (!route || disposed || event.isComposing || document.querySelector("dialog[open]")) return;
+    if (!route || disposed || embedded || !isAvailable() || event.isComposing || document.querySelector("dialog[open]")) return;
     if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); back(); }
     if (event.key === "Tab") {
       const screen = route.kind === "file" ? content.screen : listing.screen;
@@ -1119,7 +1128,7 @@ export function mountSessionFiles({
     }
   }
   function nativeBack(event) {
-    if (!route || disposed || event.defaultPrevented || document.querySelector("dialog[open]")) return;
+    if (!route || disposed || embedded || !isAvailable() || event.defaultPrevented || document.querySelector("dialog[open]")) return;
     event.preventDefault(); back();
   }
   function markdownReady() {
@@ -1154,7 +1163,7 @@ export function mountSessionFiles({
   window.addEventListener("codex-elves-markdown-ready", markdownReady);
   updateContext();
   return {
-    open: () => openDirectory(currentDirectory), openFile, updateContext,
+    open: () => openDirectory(currentDirectory), openFile, updateContext, close: () => hideAll(true),
     dispose() {
       if (disposed) return;
       diagramThemeObserver?.disconnect();

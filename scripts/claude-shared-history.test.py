@@ -13,6 +13,9 @@ namespace = {"__name__": "claude_shared_history_test"}
 exec(compile(source.read_text(encoding="utf-8"), str(source), "exec"), namespace)
 NativeSession = namespace["NativeSession"]
 NativeDiscovery = namespace["NativeDiscovery"]
+trust_source = source.with_name("claude_project_trust.py")
+trust_namespace = {"__name__": "claude_project_trust_test"}
+exec(compile(trust_source.read_text(encoding="utf-8"), str(trust_source), "exec"), trust_namespace)
 
 
 class SharedQueueHistoryTests(unittest.TestCase):
@@ -352,6 +355,35 @@ class SharedQueueHistoryTests(unittest.TestCase):
             native.stream_preview("  新回复\n")
         self.assertEqual(native.preview_user, "quoted")
 
+    def test_setting_commands_and_paired_outputs_are_control_records_but_typed_quotes_survive(self):
+        command = ("<command-name>/effort</command-name>\n"
+                   "<command-message>effort</command-message>\n"
+                   "<command-args>xhigh</command-args>")
+        output = "<local-command-stdout>Set effort level to xhigh</local-command-stdout>"
+        native = self.read([
+            {"type": "user", "uuid": "command", "entrypoint": "cli",
+             "message": {"role": "user", "content": command}},
+            {"type": "user", "uuid": "output", "parentUuid": "command", "entrypoint": "cli",
+             "message": {"role": "user", "content": output}},
+            {"type": "user", "uuid": "orphan-output", "parentUuid": "unrelated", "entrypoint": "cli",
+             "message": {"role": "user", "content": output}},
+            {"type": "user", "uuid": "quote", "entrypoint": "cli", "origin": {"kind": "human"},
+             "promptSource": "typed", "turnOrigin": "human",
+             "message": {"role": "user", "content": command}},
+        ], pending_text=command)
+        self.assertEqual(native.messages[0]["nativeSettingCommand"], {"name": "effort", "value": "xhigh"})
+        self.assertEqual(native.messages[1]["nativeSettingOutput"]["commandId"], "command")
+        self.assertFalse(namespace["real_user"](native.messages[0]))
+        self.assertFalse(namespace["real_user"](native.messages[1]))
+        self.assertNotIn("nativeSettingOutput", native.messages[2], "孤立回显不按标签文本猜测来源")
+        self.assertNotIn("nativeSettingCommand", native.messages[3], "保留真实用户的同文引用")
+        self.assertEqual(native.clients, {"quote": "web-client"}, "控制命令不能确认用户的待发送消息")
+        self.assertEqual(native.pending, [])
+        literal = self.read([{"type": "user", "uuid": "quoted-code", "entrypoint": "cli",
+                             "message": {"content": "```xml\n" + command + "\n```"}}],
+                            pending_text="```xml\n" + command + "\n```")
+        self.assertEqual(literal.clients, {"quoted-code": "web-client"})
+
     def test_image_attachments_still_use_existing_image_projection(self):
         native = self.read([{"type": "attachment", "uuid": "image",
                             "attachment": {"type": "file", "filename": "/test/0.png",
@@ -402,10 +434,13 @@ class SharedQueueHistoryTests(unittest.TestCase):
                  "cache_creation_input_tokens": 200, "output_tokens": 50,
                  "iterations": [{"type": "message", "input_tokens": 30}]}
         native = self.read([{"type": "assistant", "uuid": "reply-uuid", "isUnmetered": False,
+                            "requestedModel": "native-model", "effort": "xhigh",
                             "message": {"role": "assistant", "id": "reply", "model": "native-model",
                                         "content": [{"type": "text", "text": "回复"}], "usage": usage}}])
         self.assertEqual(native.messages[0]["message"]["usage"], usage)
         self.assertFalse(native.messages[0]["isUnmetered"])
+        self.assertEqual(native.messages[0]["requestedModel"], "native-model")
+        self.assertEqual(native.messages[0]["effort"], "xhigh")
 
     def test_context_configuration_keeps_compaction_separate_and_bound_to_the_usage_model(self):
         folder = tempfile.TemporaryDirectory()
@@ -626,6 +661,112 @@ class SharedQueueHistoryTests(unittest.TestCase):
         self.assertEqual(frame["native_id"], "test-session")
         self.assertEqual(frame["pending"], [])
         self.assertEqual(frame["clients"]["absorbed-user"], "web-client")
+
+
+class ProjectTrustTests(unittest.TestCase):
+    def fixture(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        project = root / "project"
+        project.mkdir()
+        config = root / ".claude.json"
+        config.write_text(json.dumps({"oauthAccount": {"accountUuid": "preserved-account"},
+                                      "projects": {"other-project": {"hasTrustDialogAccepted": True}},
+                                      "nativeSetting": {"keep": True}}), encoding="utf-8")
+        return project, config
+
+    def test_check_is_read_only_and_confirmation_preserves_other_native_configuration(self):
+        project, config = self.fixture()
+        original = config.read_bytes()
+        with patch.object(trust_namespace["subprocess"], "run") as run:
+            run.return_value.returncode = 128
+            checked = trust_namespace["inspect"](str(project), file=config)
+            self.assertFalse(checked["trusted"])
+            self.assertEqual(config.read_bytes(), original, "检查不修改原生配置")
+            result = trust_namespace["confirm"](str(project), str(project.resolve()), file=config)
+            self.assertTrue(result["trusted"])
+            saved = json.loads(config.read_text())
+            old = json.loads(original)
+            self.assertEqual(saved.pop("projects")[str(project.resolve())], {"hasTrustDialogAccepted": True})
+            self.assertEqual(saved, {k: v for k, v in old.items() if k != "projects"})
+            self.assertEqual(json.loads(config.read_text())["projects"]["other-project"],
+                             old["projects"]["other-project"])
+            before_repeat = config.read_bytes()
+            self.assertTrue(trust_namespace["confirm"](str(project), str(project.resolve()), file=config)["trusted"])
+            self.assertEqual(config.read_bytes(), before_repeat, "相同目录确认幂等，不重复改写配置")
+            self.assertFalse(Path(str(config) + ".lock").exists())
+
+    def test_changed_path_and_broad_directory_are_rejected_before_writing(self):
+        project, config = self.fixture()
+        original = config.read_bytes()
+        with patch.object(trust_namespace["subprocess"], "run") as run:
+            run.return_value.returncode = 128
+            with self.assertRaisesRegex(ValueError, "目录已变化"):
+                trust_namespace["confirm"](str(project), str(project / "different"), file=config)
+            with self.assertRaisesRegex(ValueError, "具体项目目录"):
+                trust_namespace["confirm"]("/", "/", file=config)
+        self.assertEqual(config.read_bytes(), original)
+        self.assertFalse(Path(str(config) + ".lock").exists())
+        with patch.dict(trust_namespace["os"].environ, {"CLAUDE_CONFIG_DIR": "relative-config"}):
+            with self.assertRaisesRegex(ValueError, "绝对路径"):
+                trust_namespace["config_path"]()
+
+    def test_trusted_symlink_configuration_can_be_read_but_is_not_replaced(self):
+        project, config = self.fixture()
+        value = json.loads(config.read_text())
+        value["projects"][str(project.resolve())] = {"hasTrustDialogAccepted": True}
+        config.write_text(json.dumps(value))
+        link = config.parent / "linked-config"
+        link.symlink_to(config)
+        with patch.object(trust_namespace["subprocess"], "run") as run:
+            run.return_value.returncode = 128
+            self.assertTrue(trust_namespace["inspect"](str(project), file=link)["trusted"])
+            with self.assertRaisesRegex(RuntimeError, "符号链接"):
+                trust_namespace["confirm"](str(project), str(project.resolve()), file=link)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(json.loads(config.read_text()), value)
+
+    def test_foreign_native_lock_and_invalid_json_are_not_overwritten(self):
+        project, config = self.fixture()
+        original = config.read_bytes()
+        lock = Path(str(config) + ".lock")
+        lock.mkdir()
+        with patch.object(trust_namespace["subprocess"], "run") as run, \
+                patch.object(trust_namespace["time"], "monotonic", side_effect=[0, 6]):
+            run.return_value.returncode = 128
+            with self.assertRaisesRegex(RuntimeError, "正在更新配置"):
+                trust_namespace["confirm"](str(project), str(project.resolve()), file=config)
+        self.assertTrue(lock.exists(), "不能删除原生 CLI 的锁")
+        self.assertEqual(config.read_bytes(), original)
+        lock.rmdir()
+        config.write_text("{broken", encoding="utf-8")
+        with patch.object(trust_namespace["subprocess"], "run") as run:
+            run.return_value.returncode = 128
+            with self.assertRaises(ValueError):
+                trust_namespace["confirm"](str(project), str(project.resolve()), file=config)
+        self.assertEqual(config.read_text(), "{broken")
+        self.assertFalse(lock.exists())
+
+    def test_git_boundary_and_managed_workspace_require_the_exact_confirmed_path(self):
+        project, config = self.fixture()
+        child = project / "child"
+        child.mkdir()
+        with patch.object(trust_namespace["subprocess"], "run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = (str(project.resolve()) + "\n").encode()
+            checked = trust_namespace["inspect"](str(child), file=config)
+            self.assertEqual(checked["trustPath"], str(project.resolve()))
+            with self.assertRaises(ValueError):
+                trust_namespace["confirm"](str(child), str(child.resolve()), file=config)
+            self.assertTrue(trust_namespace["confirm"](str(child), checked["trustPath"], file=config)["trusted"])
+            managed = project.parent / "managed"
+            run.return_value.returncode = 128
+            checked = trust_namespace["inspect"](str(managed), managed=True, file=config)
+            self.assertFalse(managed.exists(), "未确认的无项目目录不提前创建")
+            self.assertTrue(trust_namespace["confirm"](str(managed), checked["trustPath"],
+                                                       managed=True, file=config)["trusted"])
+            self.assertTrue(managed.is_dir())
 
 
 if __name__ == "__main__":

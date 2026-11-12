@@ -4196,14 +4196,52 @@ for(const kind of ["text","image","fork","skill"]){
 }
 
 #[test]
+fn request_client_idle_unknown_and_stale_queue_send_directly_but_running_enqueues() {
+    run_native_queue_edit_consumption_contract(
+        r#"
+for(const state of ["idle","unknown","pending","follower","old-queue","stale-history"]){
+  const h=await createFullNativeQueueHarness(),a=h.adapter();
+  const conversation=a.env.manager.getConversation("thread");
+  Object.assign(conversation,{ephemeral:false,threadSource:"user",source:"vscode",parentThreadId:null});
+  h.finishBase();
+  if(state==="unknown")h.runtimeStatus={};
+  if(state==="pending")h.runtimeStatus={type:"pending"};
+  if(state==="follower")h.role="follower";
+  if(state==="stale-history")h.history.turns[0].status="inProgress";
+  if(state==="old-queue"){
+    a.env.loadNativeQueue=async()=>a.env.requestClientQueues.set("thread",{
+      messages:[{id:"old-waiting",text:"旧队列残留",pausedReason:"等待核对"}]
+    });
+  }
+  const payload={threadId:"thread",prompt:"只按明确执行状态发送",clientUserMessageId:"direct-"+state};
+  const result=await a.api.send(payload,false);
+  assert.equal(result.ok,true,JSON.stringify({state,result}));
+  assert.equal(result.deliveryState,"accepted");
+  assert.equal(h.calls.start,1);assert.equal(h.calls.steer,0);assert.equal(h.calls.add,0);
+  assert.equal(h.requests.length,1);
+  assert.equal(h.requests[0].queueModeOverride,"send-now");
+  assert.equal(h.requests[0].acceptLocally,false);
+}
+const h=await createFullNativeQueueHarness(),a=h.adapter();
+const result=await a.api.send({threadId:"thread",prompt:"当前明确执行中",
+  clientUserMessageId:"really-running"},true);
+assert.equal(result.ok,true);assert.equal(result.deliveryState,"queued");
+assert.equal(h.calls.start+h.calls.steer,0);assert.equal(h.calls.add,1);
+"#,
+    );
+}
+
+#[test]
 fn request_client_idle_send_own_reservation_does_not_reenter_queue_submission() {
     run_native_queue_edit_consumption_contract(
         r#"
-for(const kind of ["text","image","fork","skill"]){
+for(const kind of ["text","image","fork","skill","side","send-only"]){
   const h=await createFullNativeQueueHarness(),a=h.adapter();
   const conversation=a.env.manager.getConversation("thread");
   Object.assign(conversation,{ephemeral:false,threadSource:"user",source:"vscode",
     parentThreadId:null,forkedFromId:kind==="fork"?"original-main":null});
+  if(kind==="side"){conversation.sideConversation=true;conversation.parentThreadId="main";h.context={sideConversation:true};}
+  if(kind==="send-only"){conversation.threadStartKind="aeon";h.queueMode="send-only";}
   h.finishBase();h.reserveStartBeforeAdmission=true;h.hidePendingTurnsFromAdapter=true;
   const skill={type:"skill",name:"保持原技能",path:"/skills/original/SKILL.md"};
   if(kind==="skill")a.env.skillInputs=async()=>[skill];
@@ -4215,13 +4253,13 @@ for(const kind of ["text","image","fork","skill"]){
   const result=await a.api.send(payload,true);
   assert.equal(result.ok,true,JSON.stringify({kind,result}));
   assert.equal(h.requests.length,1,"本次尚未派发的 active 占位不能导致 queueRequired 后重新提交");
-  assert.equal(h.requests[0].queueModeOverride,"queue","普通发送由原生 when-idle 决策");
-  assert.equal(h.requests[0].acceptLocally,true,"必须经过原生本地接受与发送锁");
+  assert.equal(h.requests[0].queueModeOverride,"send-now","空闲普通消息必须直接发送");
+  assert.equal(h.requests[0].acceptLocally,false,"发送成功前不能写入本地等待队列");
   assert.deepEqual(h.prepared.map(item=>item.phase),
-    ["fork","skill"].includes(kind)?["start","steer","start"]:["steer","start"],
+    ["fork","skill","side"].includes(kind)?["start","steer","start"]:["steer","start"],
     "fork 与 Skill 保留预准备，其余只走原生实际 phase");
   assert.equal(h.fpnReservations.length,1);
-  assert(h.fpnReservations.every(value=>value.locked&&value.runtime.type==="active"
+  assert(h.fpnReservations.every(value=>value.runtime.type==="active"
     &&value.activeTurns.length===0&&value.placeholderClientId===payload.clientUserMessageId),
     "复现 fpn 在 admission 之前插入本消息 null-turn，并先发 runtimeStatus 的顺序");
   assert.equal(h.calls.start,1);assert.equal(h.calls.steer,0);assert.equal(h.calls.add,0);
@@ -4245,7 +4283,7 @@ for(const kind of ["text","image","fork","skill"]){
     h.finishBase();h.reserveStartBeforeAdmission=true;
     let raced=false;
     h.beforePrepare=async current=>{
-      if(raced||!h.sendLockHeld||current.phase!==phase)return;
+      if(raced||current.phase!==phase)return;
       await new Promise(setImmediate);
       raced=true;h.active="base";h.history.turns[0].status="inProgress";
     };
@@ -4259,7 +4297,7 @@ for(const kind of ["text","image","fork","skill"]){
     const result=await a.api.send({threadId:"thread",prompt,images,clientUserMessageId},true);
     assert.equal(result.ok,true,JSON.stringify({kind,phase,result}));
     assert.equal(result.deliveryState,"queued");assert.equal(raced,true);
-    assert.equal(h.requests.length,1,"原生 deferred 入队不应重进远程提交入口");
+    assert(h.requests.length<=2,"明确准入失败最多按新执行状态重新准备一次");
     assert.equal(h.calls.start,0);assert.equal(h.calls.steer,0,"不能把普通发送引导到晚到的另一轮");
     assert.equal(h.calls.add,1);
     assert.deepEqual(h.serverItems.map(item=>({clientUserMessageId:item.clientUserMessageId,input:item.input})),
@@ -4285,7 +4323,7 @@ for(const guard of ["compaction","manager"]){
   let changed=false,compacting=false;
   a.env.runtimeCompaction=()=>({state:compacting?"running":"idle"});
   h.beforePrepare=async()=>{
-    if(changed||!h.sendLockHeld)return;
+    if(changed)return;
     changed=true;
     if(guard==="manager")a.env.manager={...a.env.manager};
     else{compacting=true;h.active="base";h.history.turns[0].status="inProgress";}
@@ -4295,11 +4333,16 @@ for(const guard of ["compaction","manager"]){
   assert.equal(changed,true);
   assert(result.ok===false||result.deliveryState==="queued",
     "保护触发后只能拒绝或确认已保留的原生队列："+JSON.stringify({guard,result}));
-  assert.equal(h.calls.start+h.calls.steer+h.calls.add,0,"压缩或连接变化后不能进入派发");
+  assert.equal(h.calls.start+h.calls.steer,0,"压缩或连接变化后不能启动或引导");
+  assert.equal(h.calls.add,guard==="compaction"?1:0,"确认压缩执行中可入队，连接变化必须拒绝");
   assert.equal(h.accepted().some(item=>item.clientId===payload.clientUserMessageId),false);
-  await a.api.send(payload,true);
-  assert.equal(h.requests.length,1,"未确认结果只能读取确认，不能重新派发");
-  assert.equal(h.calls.start+h.calls.steer+h.calls.add,0);
+  if(result.ok||result.outcomeUnknown){
+    const attempts=h.requests.length;
+    await a.api.send(payload,true);
+    assert.equal(h.requests.length,attempts,"成功或未知结果只能读取确认，不能重新派发");
+    assert.equal(h.calls.start+h.calls.steer,0);
+    assert.equal(h.calls.add,guard==="compaction"?1:0,"同一消息不能重复入队");
+  }else assert.equal(result.code,409,"连接变化在准入前明确拒绝，保留未发送事实");
 }
 "#,
     );
@@ -4459,9 +4502,9 @@ const sent=await a.api.send({threadId:"thread",prompt:"竞争后排队",images:[
 assert.equal(sent.ok,true,JSON.stringify(sent));
 assert.equal(sent.deliveryState,"queued");assert.equal(h.calls.start,0);assert.equal(h.calls.steer,0);
 assert.equal(h.requests[0].editPosition,undefined);
-assert.equal(h.requests.length,1,"晚到忙碌由原生 deferred 入队，不能递归重新提交");
-assert.equal(h.requests[0].queueModeOverride,"queue");
-assert.equal(h.requests[0].acceptLocally,true);
+assert(h.requests.length<=2,"明确未派发的准入竞争可按当前状态重新准备一次");
+assert.equal(h.requests[0].queueModeOverride,"send-now");
+assert.equal(h.requests[0].acceptLocally,false);
 const queued=a.coordinator.readMessages("thread")[0];
 const expectedImageSources=await Promise.all(queued.context.imageAttachments.map(image=>a.api.reference(image.src)));
 const begun=await a.api.begin({threadId:"thread",messageId:queued.id,editId:"race-edit",
@@ -7590,6 +7633,7 @@ Object.assign(env,{
 });
 const call=new Function("env",`with(env){
   ${extract("function failure(","const EXECUTION_CONFIG_RETRY_DELAYS_MS")}
+  ${extract("function nativeSendIsRunning(","async function nativeCreationModule(")}
   ${extract("function discover(","function blockingRequestsSnapshot(")}
   ${extract("async function call(action,","window.__codexElvesRemoteAccess =")}
   return call;
@@ -10460,8 +10504,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = include_str!("../../../assets/remote-access/native.js");
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 143"));
-    assert!(script.contains("version: 143, call"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 144"));
+    assert!(script.contains("version: 144, call"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));

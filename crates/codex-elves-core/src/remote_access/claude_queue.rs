@@ -23,6 +23,9 @@ struct Message {
     device_id: String,
     key_id: String,
     state: String,
+    // 直接发送的在途/未知记录仅用于核对原回执；只有原生明确忙碌后才成为可见等待项。
+    #[serde(default)]
+    direct: bool,
     #[serde(default)]
     reason: String,
     #[serde(default)]
@@ -231,7 +234,7 @@ impl RemoteQueue {
         messages.extend(
             self.messages
                 .iter()
-                .filter(|m| m.state != "editing")
+                .filter(|m| m.state != "editing" && !m.direct)
                 .map(|m| m.view(self.paused)),
         );
         messages
@@ -268,7 +271,7 @@ impl Conversation {
                 .remote_queue
                 .messages
                 .first()
-                .is_some_and(|m| m.state == "queued")
+                .is_some_and(|m| m.state == "queued" && !m.direct)
             && (self.native_status["tempo"] == "idle"
                 || self.native_status["tempo"] == "blocked"
                     && self.native_status["needs"].is_null()
@@ -293,8 +296,9 @@ impl Claude {
             || c.queued_messages
                 .iter()
                 .any(|m| m["clientUserMessageId"] == client);
-        let queued =
-            message.is_some_and(|m| matches!(m.state.as_str(), "queued" | "paused" | "editing"));
+        let queued = message.is_some_and(|m| {
+            !m.direct && matches!(m.state.as_str(), "queued" | "paused" | "editing")
+        });
         let mut result = c.queue_snapshot(&self.epoch);
         result["clientUserMessageId"] = json!(client);
         result["confirmed"] = json!(accepted || queued);
@@ -378,15 +382,23 @@ impl Claude {
                         fingerprint(&existing.payload) == payload_hash,
                         "相同消息标识的内容已变化"
                     );
+                    if existing.direct || matches!(existing.state.as_str(), "sending" | "unknown") {
+                        return Err(ApiError::new(409, "原消息送达状态待核对，不会重复发送")
+                            .after_admission()
+                            .into());
+                    }
                     return Ok(false);
                 }
-                let direct = !c.active()
-                    && c.queued_messages.is_empty()
-                    && c.remote_queue.messages.is_empty()
-                    && (c.remote_queue.awaiting_turn.is_none() || c.remote_queue.paused)
-                    && (c.native_status["tempo"] != "blocked"
-                        || c.native_status["needs"].is_null())
-                    && payload["queueOnly"] != true;
+                // 普通消息只在确认执行中时排队；旧队列、awaiting 标记或未知状态不能替代执行证据。
+                let direct = !c.running_for_send();
+                if direct
+                    && c.remote_queue
+                        .messages
+                        .iter()
+                        .any(|m| matches!(m.state.as_str(), "sending" | "unknown"))
+                {
+                    return Err(error(409, "请先核对尚未确认的消息"));
+                }
                 c.remote_queue.messages.push(Message {
                     id: client_id.clone(),
                     payload: payload.clone(),
@@ -394,6 +406,7 @@ impl Claude {
                     device_id: authorization.device.id.clone(),
                     key_id: authorization.device.key_id.clone(),
                     state: "queued".into(),
+                    direct,
                     reason: String::new(),
                     native_intent: None,
                 });
@@ -434,9 +447,9 @@ impl Claude {
         authorization: &RemoteAuthorization,
         remove_if_unsent: bool,
     ) -> anyhow::Result<Value> {
-        authorization.check().await?;
-        let message = self
-            .change(|saved| {
+        let admission = async {
+            authorization.check().await?;
+            self.change(|saved| {
                 let c = saved
                     .conversations
                     .get_mut(id)
@@ -467,7 +480,29 @@ impl Claude {
                 c.remote_queue.revision += 1;
                 Ok(result)
             })
-            .await?;
+            .await
+        }
+        .await;
+        let message = match admission {
+            Ok(message) => message,
+            Err(failure) => {
+                if remove_if_unsent {
+                    // 直接发送尚未准入时失败（含授权或并发核对），不能留下新建的等待项。
+                    self.change(|saved| {
+                        if let Some(c) = saved.conversations.get_mut(id) {
+                            c.remote_queue.messages.retain(|m| {
+                                m.id != message_id
+                                    || !matches!(m.state.as_str(), "queued" | "paused")
+                            });
+                            c.remote_queue.revision += 1;
+                        }
+                        Ok(())
+                    })
+                    .await?;
+                }
+                return Err(failure);
+            }
+        };
         // 用户要求即时发送未成功时不能留下队列项；首次投递先记录送达意图，确认排队后再通知页面。
         if !remove_if_unsent {
             self.remote_queue_changed(id).await;
@@ -519,6 +554,7 @@ impl Claude {
                     .find(|m| m.id == message.id)
                 {
                     m.state = "queued".into();
+                    m.direct = false;
                 }
             } else if result.is_ok() {
                 c.remote_queue.messages.retain(|m| m.id != message.id);
@@ -985,6 +1021,7 @@ mod tests {
             device_id: "device".into(),
             key_id: "key".into(),
             state: "queued".into(),
+            direct: false,
             reason: String::new(),
             native_intent: None,
         };
@@ -1036,6 +1073,7 @@ mod tests {
             device_id: "device".into(),
             key_id: "key".into(),
             state: "queued".into(),
+            direct: false,
             reason: String::new(),
             native_intent: None,
         };
@@ -1255,6 +1293,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_confirmed_running_enqueues_new_messages() {
+        for state in ["idle", "unknown", "old-queue", "stale-history", "blocked"] {
+            let (_directory, _auth_directory, service, c, auth, calls, _replies) = fixture().await;
+            if state == "old-queue" {
+                service
+                    .command("send", &payload(&c, "old"), &auth)
+                    .await
+                    .unwrap();
+                assert!(calls.lock().await.is_empty(), "明确执行中应入队");
+            }
+            service
+                .change(|saved| {
+                    let current = saved.conversations.get_mut(&c.id).unwrap();
+                    current.native_status = match state {
+                        "unknown" => json!({}),
+                        "blocked" => json!({"tempo":"blocked","needs":{"kind":"clarification"}}),
+                        _ => json!({"tempo":"idle"}),
+                    };
+                    if state != "stale-history" {
+                        current.turns.last_mut().unwrap()["status"] = json!("completed");
+                    }
+                    if state == "old-queue" {
+                        current.queued_messages.push(json!({"id":"native-old"}));
+                        current.remote_queue.awaiting_turn = Some("old".into());
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let result = service
+                .command("send", &payload(&c, "new"), &auth)
+                .await
+                .unwrap();
+            assert_eq!(result["deliveryState"], "accepted", "{state}: {result}");
+            assert_eq!(calls.lock().await.len(), 1, "{state} 应直接投递一次");
+            let current = service.conversation(&c.id).await.unwrap();
+            assert!(current.remote_queue.accepted.contains_key("new"));
+            assert_eq!(
+                current.remote_queue.messages.len(),
+                usize::from(state == "old-queue")
+            );
+            if state == "old-queue" {
+                assert_eq!(current.remote_queue.messages[0].id, "old");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_unknown_receipt_does_not_admit_another_waiting_message() {
+        let (_directory, _auth_directory, service, c, auth, calls, _replies) = fixture().await;
+        service
+            .command("send", &payload(&c, "old"), &auth)
+            .await
+            .unwrap();
+        service
+            .change(|saved| {
+                let current = saved.conversations.get_mut(&c.id).unwrap();
+                current.native_status = json!({"tempo":"idle"});
+                current.remote_queue.messages[0].state = "unknown".into();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            service
+                .command("send", &payload(&c, "new"), &auth)
+                .await
+                .is_err()
+        );
+        let current = service.conversation(&c.id).await.unwrap();
+        assert_eq!(current.remote_queue.messages.len(), 1);
+        assert_eq!(current.remote_queue.messages[0].id, "old");
+        assert_eq!(current.remote_queue.messages[0].state, "unknown");
+        assert!(
+            calls.lock().await.is_empty(),
+            "未知回执不能触发重发或另建等待项"
+        );
+    }
+
+    #[tokio::test]
     async fn new_direct_send_rejection_drops_queue_entry_but_preserves_deferred_and_unknown() {
         for reply in [Reply::ControlRejected, Reply::Deferred, Reply::Unknown] {
             let (directory, _auth_directory, service, c, auth, calls, replies) = fixture().await;
@@ -1304,15 +1422,23 @@ mod tests {
                         .unwrap()
                         .outcome_unknown
                 );
-                assert_eq!(
-                    queue["queuedMessages"][0]["submission"]["status"],
-                    "outcome-unknown"
+                assert!(
+                    queue["queuedMessages"].as_array().unwrap().is_empty(),
+                    "直接发送的未知意图不能显示为待发送队列"
                 );
-                assert_eq!(queue["queuedMessages"][0]["canSendNow"], false);
+                let current = restored.conversation(&c.id).await.unwrap();
+                assert_eq!(current.remote_queue.messages[0].state, "unknown");
+                assert!(current.remote_queue.messages[0].direct);
                 assert_eq!(
                     state["confirmed"], false,
                     "送达未知不能误报已排队或允许重发"
                 );
+                let repeated = service.command("send", &input, &auth).await.unwrap_err();
+                assert!(
+                    repeated.downcast_ref::<ApiError>().unwrap().outcome_unknown,
+                    "相同未知消息身份仍保留待核对，不能改报入队成功"
+                );
+                assert_eq!(calls.lock().await.len(), 1);
             }
         }
     }
@@ -1589,6 +1715,7 @@ mod tests {
             device_id: "device".into(),
             key_id: "key".into(),
             state: "sending".into(),
+            direct: false,
             reason: String::new(),
             native_intent: Some(json!({"clientUserMessageId":"C","deliveryConfirmed":false})),
         };

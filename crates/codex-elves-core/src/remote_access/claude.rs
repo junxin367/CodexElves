@@ -134,6 +134,20 @@ fn claude_backend() -> String {
 }
 
 impl Conversation {
+    fn running_for_send(&self) -> bool {
+        // 用户要求只有明确执行中才入队；共享会话的新鲜空闲/阻塞状态优先于尚未更新的历史轮次。
+        if self.shared {
+            match self.native_status["tempo"].as_str() {
+                Some("active") => return true,
+                Some("idle" | "blocked") => return false,
+                _ => {}
+            }
+        }
+        self.turns
+            .last()
+            .is_some_and(|turn| turn["status"] == "inProgress")
+    }
+
     fn active(&self) -> bool {
         // 原版已回复的澄清也可能标为 blocked；只按生成活动或未完成轮次显示执行中，保留真正的工具等待。
         self.shared && self.native_status["tempo"] == "active"
@@ -1263,6 +1277,86 @@ impl Claude {
         self.models_in(c.config.clone(), &c.cwd, force).await
     }
 
+    pub async fn project_trust(
+        &self,
+        config: WslConfig,
+        cwd: &str,
+        confirmed_path: Option<&str>,
+        authorization: Option<&RemoteAuthorization>,
+    ) -> anyhow::Result<Value> {
+        if confirmed_path.is_some() && authorization.is_none() {
+            return Err(error(403, "确认目录信任需要当前写入授权"));
+        }
+        config.validate()?;
+        let managed = cwd.is_empty();
+        let directory = if managed {
+            self.directory.join("claude-workspaces")
+        } else {
+            PathBuf::from(cwd)
+        };
+        let linux_cwd = Self::linux_cwd(
+            &config,
+            directory.to_str().context("Claude 项目目录编码无效")?,
+        )
+        .await?;
+        let script = self.directory.join("claude-project-trust.py");
+        crate::settings::atomic_write(&script, include_bytes!("claude_project_trust.py"))?;
+        let linux_script = Self::linux_cwd(
+            &config,
+            script.to_str().context("Claude 信任连接端路径编码无效")?,
+        )
+        .await?;
+        let mut command = Self::wsl(&config)?;
+        let mut child = command
+            .args(["--exec", "python3", "-u", &linux_script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("无法检查 Claude 项目目录信任，首条消息尚未发送")?;
+        let (writer, _) = spawn_writer(
+            child.stdin.take().context("目录信任连接不可用")?,
+            WRITE_TIMEOUT,
+        );
+        let mut bytes = serde_json::to_vec(&json!({
+            "cwd":linux_cwd,"managed":managed,
+            "confirm":confirmed_path.is_some(),"expectedPath":confirmed_path
+        }))?;
+        bytes.push(b'\n');
+        // 信任写入只由用户确认后的 create 携带；提交到所选实例前复核设备和当前策略。
+        guarded_write(
+            &writer,
+            bytes,
+            authorization.map(|value| value as &dyn crate::codex_service::ServiceDispatchGuard),
+            WRITE_TIMEOUT,
+        )
+        .await
+        .map_err(|_| error(503, "无法确认目录信任操作，首条消息尚未发送，请重试"))?;
+        drop(writer);
+        let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+            .await
+            .map_err(|_| error(503, "目录信任检查超时，首条消息尚未发送"))??;
+        if !output.status.success() || output.stdout.len() > 32 * 1024 {
+            return Err(error(503, "目录信任检查失败，首条消息尚未发送"));
+        }
+        let mut result: Value = serde_json::from_slice(&output.stdout)
+            .map_err(|_| error(503, "目录信任检查结果无效，首条消息尚未发送"))?;
+        if result["ok"] != true {
+            return Err(error(
+                409,
+                "无法安全确认或保存 Claude 目录信任，首条消息尚未发送，请核对后重试",
+            ));
+        }
+        result["instanceId"] = json!(config.instance_id());
+        result["instanceLabel"] = json!(super::instances::label(
+            "claude",
+            &config.distribution,
+            &config.user
+        ));
+        Ok(result)
+    }
+
     pub async fn create(
         self: &Arc<Self>,
         payload: &Value,
@@ -1282,6 +1376,32 @@ impl Claude {
     ) -> anyhow::Result<Value> {
         config.validate()?;
         let content = input_content(payload)?;
+        // 用户要求在远程页面确认目录信任；先检查/保存，再启动 CLI 或登记会话，拒绝和取消不留下空会话。
+        if payload
+            .get("trustProject")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            return Err(error(400, "目录信任确认参数无效"));
+        }
+        let confirmed = if payload["trustProject"] == true {
+            Some(
+                payload["expectedProjectPath"]
+                    .as_str()
+                    .filter(|path| !path.is_empty() && path.len() <= 4096)
+                    .ok_or_else(|| error(400, "缺少已确认的项目目录"))?,
+            )
+        } else {
+            None
+        };
+        let trust = self
+            .project_trust(config.clone(), cwd, confirmed, Some(authorization))
+            .await?;
+        if trust["trusted"] != true {
+            return Err(error(
+                409,
+                "项目目录尚未被 Claude 信任，请在远程页面确认信任后继续；首条消息尚未发送",
+            ));
+        }
         let native_id = uuid::Uuid::new_v4().to_string();
         let standalone;
         let cwd = if cwd.is_empty() {
@@ -1676,7 +1796,7 @@ impl Claude {
                     };
                     let model = c.token_usage["model"].as_str().unwrap_or("");
                     let (capacity, source) =
-                        native_context_capacity(model, &json!({"modelUsage":frame["modelUsage"]}));
+                        model_context_capacity(model, &json!({"modelUsage":frame["modelUsage"]}));
                     let Some(capacity) = capacity else {
                         return Ok(None);
                     };
@@ -2251,6 +2371,10 @@ fn shared_history_has_new_content(previous: &[Value], current: &[Value]) -> bool
                 .unwrap_or("");
             for item in turn["items"].as_array().into_iter().flatten() {
                 let kind = item["type"].as_str().unwrap_or("");
+                // 补回历史配置变更提示不算新回复；CLI 重复同步同一配置也不能制造未读消息。
+                if kind == "modelChanged" && item["source"] == "claude" {
+                    continue;
+                }
                 let id = if kind == "userMessage" {
                     ""
                 } else {
@@ -2356,11 +2480,11 @@ fn repaired_history_baseline(previous: &[Value], frame: &Value) -> Option<Vec<Va
     Some(repaired)
 }
 
-fn native_context_capacity(model: &str, initialization: &Value) -> (Option<u64>, Value) {
+fn model_context_capacity(model: &str, initialization: &Value) -> (Option<u64>, Value) {
     if model.is_empty() {
         return (None, Value::Null);
     }
-    // 用户要求统一原生口径：statusline、SDK 与模型目录的明确报告可作为容量；配置容量和压缩参数均不能替代。
+    // 用户要求模型上下文优先；读取不到时，使用同一模型的配置压缩窗口作为容量，不额外折算提前压缩比例。
     let native = &initialization["contextConfiguration"]["native"];
     if native["model"] == model
         && let Some(capacity) = native["context_window_size"]
@@ -2401,6 +2525,17 @@ fn native_context_capacity(model: &str, initialization: &Value) -> (Option<u64>,
         return (
             Some(capacity),
             json!({"kind":"native","key":key,"model":model}),
+        );
+    }
+    let context = &initialization["contextConfiguration"];
+    if context["model"] == model
+        && let Some(capacity) = context["compaction"]["windowTokens"]
+            .as_u64()
+            .filter(|value| *value > 0 && *value <= 9007199254740991)
+    {
+        return (
+            Some(capacity),
+            json!({"kind":"configuration","key":"compaction.windowTokens","model":model}),
         );
     }
     (None, Value::Null)
@@ -2478,7 +2613,7 @@ fn native_token_usage(messages: &[Value], initialization: &Value) -> Value {
             continue;
         };
         let model = message["model"].as_str().unwrap_or("");
-        let (capacity, capacity_source) = native_context_capacity(model, initialization);
+        let (capacity, capacity_source) = model_context_capacity(model, initialization);
         let mut result = json!({"modelContextWindow":capacity,"modelContextWindowSource":capacity_source,"model":model,"source":"claude-native-usage",
             "messageId":message["id"],"last":{"totalTokens":total,"inputTokens":input,
             "cachedInputTokens":read,"cacheCreationInputTokens":created,"outputTokens":output}});
@@ -2607,11 +2742,120 @@ fn native_response_placeholder(row: &Value) -> bool {
         })
 }
 
+fn native_setting_control(row: &Value) -> bool {
+    ["nativeSettingCommand", "nativeSettingOutput"]
+        .into_iter()
+        .any(|field| {
+            matches!(row[field]["name"].as_str(), Some("model" | "effort"))
+                && row[field]["value"].is_string()
+        })
+}
+
+fn project_shared_setting_changes(
+    frame: &Value,
+    turns: &mut [Value],
+    owners: &HashMap<&str, usize>,
+) {
+    let mut previous_model: Option<String> = None;
+    let mut previous_effort: Option<String> = None;
+    let mut observed_turns = std::collections::HashSet::new();
+    for row in frame["messages"].as_array().into_iter().flatten() {
+        // 用户要求按首次实际使用新配置的位置显示变更；启动参数也会生效，不能只靠晚到的斜杠命令。
+        if row["type"] != "assistant"
+            || row["isApiErrorMessage"] == true
+            || row["message"]["model"] == "<synthetic>"
+        {
+            continue;
+        }
+        let model = row["requestedModel"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                row["message"]["model"]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+            });
+        let effort = row["effort"].as_str().filter(|value| !value.is_empty());
+        if model.is_none() && effort.is_none() {
+            continue;
+        }
+        let model_changed = previous_model
+            .as_deref()
+            .zip(model)
+            .is_some_and(|(previous, current)| previous != current);
+        let effort_changed = previous_effort
+            .as_deref()
+            .zip(effort)
+            .is_some_and(|(previous, current)| previous != current);
+        let owner = row["uuid"]
+            .as_str()
+            .and_then(|id| owners.get(id))
+            .or_else(|| row["message"]["id"].as_str().and_then(|id| owners.get(id)))
+            .copied();
+        let first_request = owner.is_some_and(|index| observed_turns.insert(index));
+        if (model_changed || effort_changed)
+            && let Some(turn) = owner.and_then(|index| turns.get_mut(index))
+        {
+            let native_user = turn["_nativeUserId"].as_str().unwrap_or("").to_owned();
+            let response = row["message"]["id"]
+                .as_str()
+                .or_else(|| row["uuid"].as_str())
+                .unwrap_or("request");
+            if let Some(items) = turn["items"].as_array_mut() {
+                let input = items.iter().position(|item| item["type"] == "userMessage");
+                let prefix = format!("{response}-");
+                let tool_ids: Vec<_> = row["message"]["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|block| block["type"] == "tool_use")
+                    .filter_map(|block| block["id"].as_str())
+                    .collect();
+                let position = if first_request {
+                    input
+                } else {
+                    items.iter().position(|item| {
+                        item["id"]
+                            .as_str()
+                            .is_some_and(|id| id.starts_with(&prefix) || tool_ids.contains(&id))
+                    })
+                }
+                .unwrap_or(items.len());
+                let before = items.get(position).map(|item| item["id"].clone());
+                items.insert(
+                    position,
+                    json!({
+                        "id":format!("claude-settings:{native_user}:{response}"),
+                        "type":"modelChanged","source":"claude","status":"completed",
+                        "fromModel":previous_model,"toModel":model.or(previous_model.as_deref()),
+                        "fromEffort":previous_effort,"toEffort":effort,
+                        "beforeItemId":before,"remoteInlineEvent":!first_request,
+                        "startedAtMs":row["timestampMs"]
+                    }),
+                );
+            }
+        }
+        if let Some(model) = model {
+            previous_model = Some(model.to_owned());
+            if model_changed {
+                previous_effort = effort.map(str::to_owned);
+            }
+        }
+        if let Some(effort) = effort {
+            previous_effort = Some(effort.to_owned());
+        }
+    }
+}
+
 fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
     let mut turns: Vec<Value> = vec![];
     let mut native_owners: HashMap<&str, usize> = HashMap::new();
     let mut web_image_paths = std::collections::HashSet::new();
     for row in frame["messages"].as_array().into_iter().flatten() {
+        // 连接端按原生控制记录标记模型/等级命令和成对回显；用户手写相同标签仍是普通消息。
+        if native_setting_control(row) {
+            continue;
+        }
         // 用户要求仅按原生元数据隐藏自动压缩内部摘要，不修改 JSONL，也不按英文前缀误删真实用户引用。
         if row["type"] == "user"
             && (row["isCompactSummary"] == true || row["isVisibleInTranscriptOnly"] == true)
@@ -2779,6 +3023,7 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
             }
         }
     }
+    project_shared_setting_changes(frame, &mut turns, &native_owners);
     turns
 }
 
@@ -4107,7 +4352,7 @@ mod tests {
     }
 
     #[test]
-    fn native_capacity_uses_only_reports_and_keeps_compaction_configuration_separate() {
+    fn context_capacity_prefers_model_reports_then_the_configured_compaction_window() {
         let mut messages = vec![
             json!({"type":"assistant","message":{"id":"request","model":"gpt-6.1-sol",
             "usage":{"input_tokens":181,"cache_read_input_tokens":108032,"cache_creation_input_tokens":0,"output_tokens":545}}}),
@@ -4117,10 +4362,13 @@ mod tests {
             "compaction":{"windowTokens":600000,"triggerPercent":90},
             "source":{"kind":"configuration","key":"CLAUDE_CODE_MAX_CONTEXT_TOKENS","scope":"user-settings.env","model":"gpt-6.1-sol"}}});
         let usage = native_token_usage(&messages, &initialization);
-        assert!(
-            usage["modelContextWindow"].is_null(),
-            "配置值不能作为原生容量"
+        assert_eq!(usage["modelContextWindow"], 600000);
+        assert_eq!(usage["modelContextWindowSource"]["kind"], "configuration");
+        assert_eq!(
+            usage["modelContextWindowSource"]["key"],
+            "compaction.windowTokens"
         );
+        assert!(usage["usedPercentage"].is_null());
         assert_eq!(usage["compaction"]["windowTokens"], 600000);
         assert_eq!(usage["compaction"]["triggerPercent"], 90);
         assert_eq!(
@@ -4131,7 +4379,7 @@ mod tests {
         let reported = native_token_usage(&messages, &initialization);
         assert_eq!(
             reported["modelContextWindow"], 700000,
-            "模型目录原生报告与压缩配置独立"
+            "模型目录报告优先于配置压缩窗口"
         );
         assert_eq!(reported["modelContextWindowSource"]["kind"], "native");
         initialization["modelUsage"] = json!({"gpt-6.1-sol":{"contextWindow":800000}});
@@ -4159,7 +4407,11 @@ mod tests {
         initialization["contextConfiguration"]["model"] = json!("other-model");
         initialization["contextConfiguration"]["source"]["model"] = json!("other-model");
         initialization["contextConfiguration"]["maxContextTokens"] = json!(400000);
-        assert!(native_token_usage(&messages, &initialization)["modelContextWindow"].is_null());
+        assert_eq!(
+            native_token_usage(&messages, &initialization)["modelContextWindow"],
+            600000,
+            "模型绑定更新后使用该模型的配置窗口，不改用其他配置字段"
+        );
         for invalid in [
             json!(0),
             json!(-1),
@@ -4167,7 +4419,7 @@ mod tests {
             json!("600000"),
             json!(9007199254740992_u64),
         ] {
-            initialization["contextConfiguration"]["maxContextTokens"] = invalid;
+            initialization["contextConfiguration"]["compaction"]["windowTokens"] = invalid;
             assert!(native_token_usage(&messages, &initialization)["modelContextWindow"].is_null());
         }
         initialization["contextConfiguration"] =
@@ -4272,6 +4524,178 @@ mod tests {
         let mut extended = turns.clone();
         extended[0]["items"][0]["content"][0]["text"] = json!("八张图片，新增正文");
         assert!(shared_history_has_new_content(&turns, &extended));
+    }
+
+    #[test]
+    fn shared_settings_history_anchors_effective_change_and_hides_only_native_controls() {
+        let response = |id: &str, effort: &str| {
+            json!({"type":"assistant","uuid":id,"requestedModel":"claude-opus-5-5","effort":effort,
+                "message":{"id":id,"model":"claude-opus-5-5","content":[{"type":"text","text":"回复"}]}})
+        };
+        let literal = "<command-name>/effort</command-name>\n<command-message>effort</command-message>\n<command-args>xhigh</command-args>";
+        let frame = json!({"native_status":{"tempo":"idle"},"clients":{},"messages":[
+            {"type":"user","uuid":"old-user","message":{"content":"之前的问题"}},
+            response("old-response", "max"),
+            {"type":"user","uuid":"changed-user","timestampMs":100,"message":{"content":"这条消息开始使用新等级"}},
+            response("changed-response", "xhigh"), response("same-turn-response", "xhigh"),
+            {"type":"user","uuid":"model-command","nativeSettingCommand":{"name":"model","value":"claude-opus-5-5"},
+                "message":{"content":"<command-name>/model</command-name>"}},
+            {"type":"user","uuid":"model-output","nativeSettingOutput":{"name":"model","value":"claude-opus-5-5","commandId":"model-command"},
+                "message":{"content":"<local-command-stdout>Set model</local-command-stdout>"}},
+            {"type":"user","uuid":"effort-command","nativeSettingCommand":{"name":"effort","value":"xhigh"},
+                "message":{"content":literal}},
+            {"type":"user","uuid":"effort-output","nativeSettingOutput":{"name":"effort","value":"xhigh","commandId":"effort-command"},
+                "message":{"content":"<local-command-stdout>Set effort level</local-command-stdout>"}},
+            {"type":"user","uuid":"next-user","message":{"content":"恢复后继续"}},
+            response("next-response", "xhigh"),
+            {"type":"user","uuid":"literal-user","message":{"content":literal}}
+        ]});
+        let turns = project_shared_history(&frame, "first");
+        assert_eq!(turns.len(), 4, "命令与成对回显不能形成聊天轮次");
+        let event = &turns[1]["items"][0];
+        assert_eq!(event["type"], "modelChanged");
+        assert_eq!(event["fromEffort"], "max");
+        assert_eq!(event["toEffort"], "xhigh");
+        assert_eq!(event["beforeItemId"], "changed-user");
+        assert_eq!(event["remoteInlineEvent"], false);
+        assert_eq!(turns[1]["items"][1]["type"], "userMessage");
+        assert_eq!(turns[3]["items"][0]["content"][0]["text"], literal);
+        assert_eq!(
+            turns
+                .iter()
+                .flat_map(|turn| turn["items"].as_array().unwrap())
+                .filter(|item| item["type"] == "modelChanged")
+                .count(),
+            1,
+            "同一轮多次请求及恢复时同配置重设只保留首次实际变更"
+        );
+        let restored = project_shared_history(&frame, "reconnected");
+        assert_eq!(
+            restored[1]["items"][0], *event,
+            "重连保留事件身份与原生位置"
+        );
+        let mut old_frame = frame.clone();
+        for row in old_frame["messages"].as_array_mut().unwrap() {
+            row.as_object_mut().unwrap().remove("nativeSettingCommand");
+            row.as_object_mut().unwrap().remove("nativeSettingOutput");
+        }
+        let mut legacy = project_shared_history(&old_frame, "old");
+        for turn in &mut legacy {
+            turn["items"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|item| item["type"] != "modelChanged");
+        }
+        assert!(
+            !shared_history_has_new_content(&legacy, &turns),
+            "清理旧命令和补回变更提示不重置未读"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_trust_confirmation_requires_authorization_before_any_side_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Claude::new(directory.path()).unwrap();
+        let failure = service
+            .project_trust(
+                WslConfig::default(),
+                "unused",
+                Some("/confirmed-project"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failure.downcast_ref::<ApiError>().unwrap().code, 403);
+        assert!(!directory.path().join("claude-project-trust.py").exists());
+        assert!(service.saved.lock().await.conversations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn project_trust_invalid_create_confirmation_does_not_spawn_or_register_a_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Claude::new(directory.path()).unwrap();
+        let (_auth_directory, auth) = crate::remote_access::tests::service_dispatch_fixture().await;
+        for trust in [
+            json!({"trustProject":"yes"}),
+            json!({"trustProject":true}),
+            json!({"trustProject":true,"expectedProjectPath":""}),
+            json!({"trustProject":true,"expectedProjectPath":"x".repeat(4097)}),
+        ] {
+            let mut payload = trust;
+            payload["prompt"] = json!("不应派发的首条消息");
+            let failure = service
+                .create_in(WslConfig::default(), &payload, "unused", &auth)
+                .await
+                .unwrap_err();
+            assert_eq!(failure.downcast_ref::<ApiError>().unwrap().code, 400);
+        }
+        assert!(!directory.path().join("claude-project-trust.py").exists());
+        assert!(service.processes.lock().await.is_empty());
+        assert!(service.saved.lock().await.conversations.is_empty());
+    }
+
+    #[test]
+    fn shared_settings_history_keeps_mid_turn_model_change_at_the_effective_request() {
+        let frame = json!({"native_status":{"tempo":"idle"},"clients":{},"messages":[
+            {"type":"user","uuid":"first-user","message":{"content":"初始问题"}},
+            {"type":"assistant","uuid":"first-response","requestedModel":"model-a","effort":"high",
+                "message":{"id":"first-response","model":"proxy-alias","content":[{"type":"text","text":"首轮"}]}},
+            {"type":"user","uuid":"next-user","message":{"content":"下一轮"}},
+            {"type":"assistant","uuid":"second-response","requestedModel":"model-b","effort":"high",
+                "message":{"id":"second-response","model":"proxy-alias","content":[{"type":"text","text":"前半轮"}]}},
+            {"type":"assistant","uuid":"synthetic","requestedModel":"wrong-model","effort":"low",
+                "isApiErrorMessage":true,"message":{"id":"error","model":"<synthetic>","content":[{"type":"text","text":"错误"}]}},
+            {"type":"assistant","uuid":"third-response","requestedModel":"model-b","effort":"max",
+                "message":{"id":"third-response","model":"proxy-alias","content":[{"type":"text","text":"后半轮"}]}}
+        ]});
+        let turns = project_shared_history(&frame, "first");
+        let items = turns[1]["items"].as_array().unwrap();
+        assert_eq!(items[0]["type"], "modelChanged");
+        assert_eq!(items[0]["fromModel"], "model-a");
+        assert_eq!(
+            items[0]["toModel"], "model-b",
+            "以实际请求型号为准，不能用代理回复别名"
+        );
+        let inline = items
+            .iter()
+            .position(|item| item["type"] == "modelChanged" && item["remoteInlineEvent"] == true)
+            .unwrap();
+        let before = items
+            .iter()
+            .position(|item| item["id"] == "second-response-0")
+            .unwrap();
+        let after = items
+            .iter()
+            .position(|item| item["id"] == "third-response-0")
+            .unwrap();
+        assert!(
+            before < inline && inline < after,
+            "本轮中途生效的等级变化不能提前到问题之前"
+        );
+        assert_eq!(items[inline]["fromEffort"], "high");
+        assert_eq!(
+            items[inline]["toEffort"], "max",
+            "错误合成回复不能覆盖已确认配置"
+        );
+    }
+
+    #[test]
+    fn shared_settings_history_does_not_invent_a_change_from_missing_request_metadata() {
+        let frame = json!({"native_status":{"tempo":"idle"},"clients":{},"messages":[
+            {"type":"user","uuid":"first-user","message":{"content":"旧历史"}},
+            {"type":"assistant","message":{"id":"old","content":[{"type":"text","text":"旧回复"}]}},
+            {"type":"user","uuid":"next-user","message":{"content":"新请求"}},
+            {"type":"assistant","requestedModel":"model-a","effort":"max",
+                "message":{"id":"new","content":[{"type":"text","text":"新回复"}]}}
+        ]});
+        let turns = project_shared_history(&frame, "first");
+        assert!(
+            turns
+                .iter()
+                .flat_map(|turn| turn["items"].as_array().unwrap())
+                .all(|item| item["type"] != "modelChanged"),
+            "缺失旧配置时只建立基线，不猜造切换"
+        );
     }
 
     #[test]

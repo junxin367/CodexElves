@@ -190,7 +190,7 @@ test("Claude 完整历史同步移除旧摘要轮次，迟到的历史响应不�
     notifiedStatus: null, notifiedQueue: null, notifiedQueueEdits: [],
     turnVersions: new Map(), itemVersions: new Map(), partialItems: new Map(),
     normalizeDisplayedTurnItems: value => value, enrichTurnTranscriptEvents: value => value,
-    reconcileDirectSendPreviews() {}, rememberThreadDisplay() {}, rememberTranscript() {}, updateComposer() {},
+    reconcileSentMessageDisplays() {}, rememberThreadDisplay() {}, rememberTranscript() {}, updateComposer() {},
     scheduleMessages() {}, scheduleSidebarRefresh() {}, markVisibleThreadRead: async () => {} });
   let respond;
   Object.assign(context, { document: { hidden: false }, performance, AbortController,
@@ -234,7 +234,7 @@ test("上下文容量缺失时显示真实最后请求用量，不伪造百分�
   assert.equal(cache.context.currentThreadDisplay().tokenUsage.modelContextWindow, null);
 });
 
-test("Claude 原生容量与百分比独立于600k压缩配置，重连缓存保留原生口径", () => {
+test("模型容量优先于配置窗口，百分比和重连缓存沿用 Codex 原有规则", () => {
   const { context, persisted } = threadDisplayCacheHarness();
   vm.runInContext(app.slice(app.indexOf("function tokenCount("), app.indexOf("function closeContextUsageTip(")), context);
   const usage = { modelContextWindow: 1000000, usedPercentage: 21.6, model: "claude-opus-5-5",
@@ -242,60 +242,97 @@ test("Claude 原生容量与百分比独立于600k压缩配置，重连缓存保
     compaction: { windowTokens: 600000, triggerPercent: 90 }, last: { totalTokens: 215496 } };
   context.rememberThreadDisplay({ id: "main", model: "gpt-6.1-sol", tokenUsage: usage });
   const text = context.contextUsageText();
-  assert.match(text.value, /21\.6%，1000k/);
+  assert.equal(text.value, "215.5k / 22%，1000k");
   assert.doesNotMatch(text.value, /600k|36%|配置容量/);
-  assert.match(text.description, /占用率采用原生报告/);
-  assert.match(text.compaction, /配置压缩窗口 600k.*提前压缩比例 90%/);
+  assert.doesNotMatch(text.description, /原生报告|配置压缩|提前压缩/);
+  assert.equal(Object.hasOwn(text, "compaction"), false);
   assert.deepEqual(persisted.at(-1).value.tokenUsage.modelContextWindowSource, usage.modelContextWindowSource);
   assert.equal(persisted.at(-1).value.tokenUsage.model, usage.model);
-  assert.equal(persisted.at(-1).value.tokenUsage.usedPercentage, 21.6);
+  assert.equal(Object.hasOwn(persisted.at(-1).value.tokenUsage, "usedPercentage"), false);
   assert.deepEqual(persisted.at(-1).value.tokenUsage.compaction, usage.compaction);
   context.rememberThreadDisplay({ id: "main", model: "other-model", tokenUsage: { modelContextWindow: null, model: "other-model", last: { totalTokens: 500 } } });
   assert.match(context.contextUsageText().value, /容量尚未提供/);
   assert.equal(context.currentThreadDisplay().tokenUsage.modelContextWindowSource, undefined, "新模型的明确未知值不能复用旧容量来源");
 });
 
-test("旧配置容量缓存保持未知，Codex原生475k不被压缩阈值覆盖", () => {
+test("配置窗口补齐缺失容量，Codex原生475k保持优先，提前压缩比例不改变分母", () => {
   let info = { modelContextWindow: 600000, modelContextWindowSource: { kind: "configuration" },
     last: { totalTokens: 215496 }, compaction: { windowTokens: 600000, triggerPercent: 90 } };
   const context = vm.createContext({ currentThreadDisplay: () => ({ tokenUsage: info }) });
   vm.runInContext(app.slice(app.indexOf("function tokenCount("), app.indexOf("function closeContextUsageTip(")), context);
-  assert.match(context.contextUsageText().value, /容量尚未提供/);
-  assert.doesNotMatch(context.contextUsageText().value, /%/);
-  assert.match(context.contextUsageText().compaction, /600k.*90%/);
+  assert.equal(context.contextUsageText().value, "215.5k / 36%，600k");
+  assert.equal(Object.hasOwn(context.contextUsageText(), "compaction"), false);
+  for (const modelWindow of [null, undefined, 0, -1, NaN, Infinity, "1000000"]) {
+    info.modelContextWindow = modelWindow;
+    info.usedPercentage = 95;
+    for (const triggerPercent of [1, 50, 95, 100]) {
+      info.compaction.triggerPercent = triggerPercent;
+      assert.equal(context.contextUsageText().value, "215.5k / 36%，600k");
+    }
+  }
+  for (const invalidWindow of [undefined, 0, -1, NaN, Infinity, "600000"]) {
+    info.compaction.windowTokens = invalidWindow;
+    assert.match(context.contextUsageText().value, /容量尚未提供/);
+  }
   info = { modelContextWindow: 475000, last: { totalTokens: 194100 }, compaction: { windowTokens: 900000 } };
   assert.equal(context.contextUsageText().value, "194.1k / 41%，475k");
-  assert.match(context.contextUsageText().compaction, /配置压缩窗口 900k/);
-  for (const invalid of [NaN, Infinity, -1, 101, "50"]) {
-    info.usedPercentage = invalid;
+  for (const reported of [NaN, Infinity, -1, 101, "50", 50, 21.6, 95]) {
+    info.usedPercentage = reported;
     assert.equal(context.contextUsageText().value, "194.1k / 41%，475k");
-    assert.doesNotMatch(context.contextUsageText().description, /采用原生报告/);
   }
+  const cache = threadDisplayCacheHarness();
+  vm.runInContext(app.slice(app.indexOf("function tokenCount("), app.indexOf("function closeContextUsageTip(")), cache.context);
+  cache.context.rememberThreadDisplay({ id: "main", tokenUsage: {
+    modelContextWindow: null, usedPercentage: 95, model: "claude-opus-5-5",
+    compaction: { windowTokens: 600000, triggerPercent: 95 }, last: { totalTokens: 215496 },
+  } });
+  const stored = cache.persisted.at(-1).value.tokenUsage;
+  assert.equal(stored.modelContextWindow, 600000);
+  assert.equal(Object.hasOwn(stored, "usedPercentage"), false);
+  cache.context.rememberThreadDisplay({ id: "main", tokenUsage: stored });
+  assert.equal(cache.context.contextUsageText().value, "215.5k / 36%，600k", "重连后不能恢复旧百分比");
 });
 
-test("上下文弹层把压缩配置显示在独立一行，未知容量仍不显示百分比", () => {
+test("Claude 与 Codex 共用单行容量弹层，不显示配置、比例或来源说明", () => {
   let info = { modelContextWindow: null, last: { totalTokens: 215496 },
-    compaction: { windowTokens: 600000, triggerPercent: 90 } };
-  const value = { textContent: "" }, configuration = { textContent: "", hidden: true }, attributes = {};
-  const node = { firstElementChild: value, children: [value, configuration] };
+    compaction: { windowTokens: 600000, triggerPercent: 95 } };
+  const attributes = {}, nodes = [];
   const ring = { textContent: "", style: { setProperty(name, data) { this[name] = data; } } };
-  const trigger = { setAttribute(name, data) { attributes[name] = data; } };
+  const trigger = { isConnected: true, setAttribute(name, data) { attributes[name] = data; } };
+  const element = (tag, className = "", textContent = "") => ({
+    tag, className, textContent, children: [], attributes: {},
+    get firstElementChild() { return this.children[0]; },
+    append(...children) { this.children.push(...children); },
+    setAttribute(name, data) { this.attributes[name] = data; },
+    hasAttribute(name) { return Object.hasOwn(this.attributes, name); },
+  });
   const context = vm.createContext({ currentThreadDisplay: () => ({ tokenUsage: info }),
     $: selector => selector === "#context-info" ? trigger : ring,
-    contextUsageTip: { node, trigger }, fitContextUsageTip() {} });
+    contextUsageTip: null, fitContextUsageTip() {}, element,
+    closePopup() {}, closeComposerMenus() {}, closeContextUsageTip() {}, clearTimeout() {},
+    scheduleContextUsageTipClose() {}, document: { body: { append: node => nodes.push(node) } } });
   vm.runInContext(sourceSection("function tokenCount(", "function closeContextUsageTip(")
-    + sourceSection("function updateContextUsage()", "function showContextUsageTip("), context);
+    + sourceSection("function updateContextUsage()", "function scheduleContextUsageTipClose("), context);
+  context.showContextUsageTip(true);
+  const node = nodes[0];
+  assert.equal(node.children.length, 1, "实际弹层只创建一行");
+  assert.equal(node.firstElementChild.textContent, "215.5k / 36%，600k");
+  assert.equal(ring.textContent, "36%");
+  assert.doesNotMatch(attributes["aria-label"], /配置压缩|提前压缩|原生报告|实际触发/);
+  info = { modelContextWindow: 475000, last: { totalTokens: 395300 } };
   context.updateContextUsage();
-  assert.match(value.textContent, /容量尚未提供/);
-  assert.equal(ring.textContent, "—");
-  assert.equal(configuration.hidden, false);
-  assert.match(configuration.textContent, /600k.*90%/);
-  assert.match(attributes["aria-label"], /600k.*90%/);
+  assert.equal(node.firstElementChild.textContent, "395.3k / 83%，475k");
+  assert.equal(ring.textContent, "83%");
   info = { modelContextWindow: 1000000, usedPercentage: 21.6, last: { totalTokens: 215496 } };
   context.updateContextUsage();
-  assert.equal(ring.textContent, "21.6%");
-  assert.equal(configuration.hidden, true, "压缩配置消失后清理旧辅助信息");
-  assert.equal(configuration.textContent, "");
+  assert.equal(ring.textContent, "22%");
+  assert.equal(node.children.length, 1);
+  assert.equal(node.firstElementChild.textContent, "215.5k / 22%，1000k");
+  info = { modelContextWindow: null, last: { totalTokens: 215496 } };
+  context.updateContextUsage();
+  assert.equal(ring.textContent, "—");
+  assert.match(node.firstElementChild.textContent, /容量尚未提供/);
+  assert.equal(node.children.length, 1);
 });
 
 function richFileHarness() {
@@ -765,6 +802,48 @@ test("新会话设置默认仅 Codex、正文950和系统14px字体，兼容旧�
   assert.equal(migrated.palettes["vscode-plus"].dark.background, "#1f1f1f");
   migrated.palettes["vscode-plus"].dark.background = "#123456";
   assert.equal(migrated.palettes.chatgpt.dark.background, "#232323");
+});
+
+test("连续取色的 HSV 与 HEX 往返保留原色，灰阶和色相边界保持有效", () => {
+  const context = vm.createContext();
+  vm.runInContext(sourceSection("function appearanceHexToHsv(", "function openAppearanceColorPicker("), context);
+  for (const color of ["#000000", "#ffffff", "#808080", "#ff0000", "#00ff00", "#0000ff", "#007acc", "#a561df", "#fe0010"]) {
+    const hsv = context.appearanceHexToHsv(color);
+    assert.ok(hsv.h >= 0 && hsv.h < 360 && hsv.s >= 0 && hsv.s <= 1 && hsv.v >= 0 && hsv.v <= 1);
+    assert.equal(context.appearanceHsvToHex(hsv), color);
+  }
+  assert.equal(context.appearanceHexToHsv("#bad"), null);
+  assert.equal(context.appearanceHexToHsv("not-a-color"), null);
+  assert.equal(context.appearanceHsvToHex({ h: 360, s: 1, v: 1 }), "#ff0000");
+});
+
+test("字体 Select 提供系统选项及设备可用字体，并保留已保存的自定义字体", () => {
+  const metrics = { font: "", measureText() {
+    return { width: /Segoe UI|Consolas/.test(this.font) ? 120 : 100 };
+  } };
+  const context = vm.createContext({
+    localStorage: storage(), matchMedia: () => ({ matches: false }),
+    document: { createElement: () => ({ getContext: () => metrics }) },
+  });
+  vm.runInContext(app.slice(app.indexOf("const appearancePresets ="), app.indexOf("let ambientLightStatus =")), context);
+  vm.runInContext(sourceSection("const appearanceFontFamilies =", "function appearanceHexToHsv("), context);
+  assert.deepEqual(Array.from(context.appearanceFontOptions("Custom Font"), option => option.value),
+    ["", "Consolas", "Custom Font", "Segoe UI"]);
+  assert.equal(context.appearanceFontOptions("")[0].label, "系统");
+  assert.equal(context.appearanceFontOptions("bad;font").some(option => option.value === "bad;font"), false);
+});
+
+test("浅色与深色预览选择沿用 manual 存储，自动选择仍由自动主题决定", async () => {
+  const h = await themeDiagnosticsHarness();
+  h.context.setAppearanceThemeMode("manual", { theme: "dark" });
+  assert.equal(h.appearance.themeMode, "manual");
+  assert.equal(h.appearance.theme, "dark");
+  h.context.setAppearanceThemeMode("manual", { theme: "light" });
+  assert.equal(h.appearance.theme, "light");
+  h.hour(21);
+  h.context.setAppearanceThemeMode("auto");
+  assert.equal(h.appearance.themeMode, "auto");
+  assert.equal(h.appearance.theme, "dark");
 });
 
 test("会话类型筛选与启用开关取交集，原生 Claude ID 也按同一规则过滤", () => {
@@ -1531,8 +1610,8 @@ test("Windows 打包拒绝缺少分支信息、运行模式或压缩恢复的旧
     readFile(new URL("../crates/codex-elves-core/src/remote_access/workspace.rs", import.meta.url), "utf8"),
   ]);
   const current = { backend, service, workspace, app, native };
-  // 带图队列引导兼容升级到桥接 143，打包正例同步；下方旧协议和能力缺失的拒绝断言保留。
-  assert.deepEqual(verify(current), { protocol: 5, bridge: 143 });
+  // 普通发送仅在明确执行中入队，桥接升级到 144，打包正例同步；下方旧协议和能力缺失的拒绝断言保留。
+  assert.deepEqual(verify(current), { protocol: 5, bridge: 144 });
   for (const obsolete of [2, 3, 4])
     assert.throws(() => verify({ ...current, service: service.replace("PROTOCOL_VERSION: u32 = 5", `PROTOCOL_VERSION: u32 = ${obsolete}`) }), /后台协议不能低于 5/);
   assert.throws(() => verify({ ...current, workspace: workspace.replace("async fn branch_metadata(", "async fn obsolete_metadata(") }), /缺少真实分支/);
@@ -1660,6 +1739,7 @@ test("WSL 映射文件名只在界面还原，展开目录与打开文件仍保�
     createWorkspaceRepository: () => null, bytesLabel: size => `${size} B`,
     toggleDirectory: path => opened.push(["directory", path]),
     openFile: path => opened.push(["file", path]),
+    embedded: null,
   });
   vm.runInContext(sessionFiles.slice(sessionFiles.indexOf("export function displayWorkspacePath("),
     sessionFiles.indexOf("export function workspaceBranchLabel(")).replace(/^export /gm, "")
@@ -2261,7 +2341,7 @@ function queueDeliveryHarness(messages) {
     queueVersion: 1, connected: true, busy: false, stopping: false, pending: null,
     queuedActionBusy: new Set(), editingQueuedMessage: null, editingMessage: null,
     threadReadOnly: () => false, compactionLocked: () => false,
-    directSendPreviewFor: () => null, reconcileDirectSendPreviews: () => false,
+    confirmedSendDisplayFor: () => null, reconcileSentMessageDisplays: () => false,
     queueDisplayMessages: value => value, queueMessageText: value => value.text,
     applyQueueSnapshot: () => true, queueSnapshotIsVersioned: () => true,
     notice: value => notices.push(value),
@@ -2988,11 +3068,50 @@ function compactionRenderer() {
     };
   }
   const context = { element, icon: () => element("svg"), button: () => element("button"),
-    compactionQueueSendReason: () => "", models: [] };
+    compactionQueueSendReason: () => "", models: [],
+    effortLabels: { high: "高", xhigh: "极高", max: "Max" } };
   vm.createContext(context);
   vm.runInContext(sourceSection("function transcriptModelName(", "function readableToolName("), context);
   return context.renderTranscriptEvent;
 }
+
+test("Claude 模型和等级变化沿用 Codex 变更行，纯等级调整不显示假模型切换", () => {
+  const render = compactionRenderer();
+  const effort = render({ id: "effort", type: "modelChanged", source: "claude",
+    fromModel: "claude-opus-5-5", toModel: "claude-opus-5-5", fromEffort: "max", toEffort: "xhigh" });
+  assert.match(effort.className, /transcript-event.*model-change/);
+  assert.match(effort.textContent, /思考深度已从 Max 更改为 极高/);
+  assert.doesNotMatch(effort.textContent, /模型已从|command-name|local-command-stdout/);
+  assert.match(effort.attributes["aria-label"], /原生实际请求确认/);
+  const partial = render({ id: "partial", type: "modelChanged", source: "claude",
+    fromModel: null, toModel: "model-b", fromEffort: "high", toEffort: "max" });
+  assert.match(partial.textContent, /思考深度已从 高 更改为 Max/);
+  assert.doesNotMatch(partial.textContent, /模型已从|未知模型/, "缺失旧型号不能猜造型号切换");
+  const both = render({ id: "both", type: "modelChanged", source: "claude",
+    fromModel: "model-a", toModel: "model-b", fromEffort: "high", toEffort: "max" });
+  assert.match(both.textContent, /模型已从 model-a 更改为 model-b，思考深度从 高 更改为 Max/);
+  const codex = render({ id: "codex", type: "modelChanged", fromModel: "model-a", toModel: "model-b" });
+  assert.equal(codex.textContent, "模型已从 model-a 更改为 model-b");
+  assert.match(codex.attributes["aria-label"], /模型切换可能触发上下文压缩/);
+});
+
+test("Claude 首次生效提示位于对应问题前，中途变更保持原生请求位置且重绘不重复", () => {
+  const context = { transcriptEvents: new Map(), itemVersions: new Map() };
+  vm.createContext(context);
+  vm.runInContext([
+    sourceSection("const transcriptEventTypes =", "async function mutate("),
+    sourceSection("function completedItem(", "function mergeHistoryTurn("),
+  ].join("\n"), context);
+  const input = { id: "input", type: "userMessage" }, first = { id: "first", type: "agentMessage" },
+    second = { id: "second", type: "agentMessage" };
+  const initial = { id: "initial-change", type: "modelChanged", source: "claude", beforeItemId: "input" };
+  const inline = { id: "inline-change", type: "modelChanged", source: "claude",
+    remoteInlineEvent: true, beforeItemId: "second" };
+  let turn = { id: "turn", status: "completed", items: [input, initial, first, inline, second] };
+  for (let index = 0; index < 3; index++) turn = context.enrichTurnTranscriptEvents(turn);
+  assert.deepEqual([...turn.items.map(item => item.id)], ["initial-change", "input", "first", "inline-change", "second"]);
+  assert.equal(turn.items.filter(item => item.type === "modelChanged").length, 2);
+});
 
 test("压缩历史仅有时间字段时，切回会话即可显示进行中或已完成", () => {
   const render = compactionRenderer();
@@ -3528,6 +3647,14 @@ function deferred() {
   const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
   return { promise, resolve, reject };
 }
+function installSentMessageDisplayHarness(context) {
+  context.sentMessageDisplays ??= new Map();
+  context.turns ??= new Map();
+  vm.runInContext([
+    sourceSection("function rememberSendDisplay(", "function queueDisplayMessages("),
+    sourceSection("function queueMessageIdentity(", "function applyQueueSnapshot("),
+  ].join("\n"), context);
+}
 function queueReloadHarness() {
   const timers = new Map(), threadReads = [], historyReads = [], notices = [];
   let timerId = 0;
@@ -3552,7 +3679,7 @@ function queueReloadHarness() {
     clearTimeout(id) { timers.delete(id); }, refreshTimer: null,
     notice: message => notices.push(message),
     recordDiagnostic() {}, renderMessages() {}, renderQueueArea() {},
-    directSendPreviewFor: () => null, reconcileDirectSendPreviews: () => false,
+    confirmedSendDisplayFor: () => null, reconcileSentMessageDisplays: () => false,
     rememberThreadDisplay() {}, applyRelatedThreadMetadata() {}, mergeBlockingRequestsRead() {},
     replaceTranscriptEvents() {}, refreshTranscriptEvents() {}, syncEditableMessageMetadata() {},
     reconcileCompaction() {}, syncThreadHash() {}, updateComposer() {}, renderApprovals() {},
@@ -3570,6 +3697,7 @@ function queueReloadHarness() {
     },
   };
   vm.createContext(context);
+  installSentMessageDisplayHarness(context);
   vm.runInContext([
     sourceSection("function queueSnapshotIsVersioned(", "async function reloadQueue("),
     sourceSection("async function steerQueuedMessage(", "async function beginQueuedMessageEdit("),
@@ -3668,6 +3796,7 @@ function queuedReceiptHarness({ disk = storage(), refresh = async () => {} } = {
     button: (label, aria, action) => ({ label, aria, action }),
   };
   vm.createContext(context);
+  installSentMessageDisplayHarness(context);
   vm.runInContext([
     sourceSection("function threadActionReadOnly(", "function threadReadOnlyMessage("),
     sourceSection("const pendingFeedbackDelayMs =", "function clearPendingFeedbackTimer("),
@@ -3675,7 +3804,7 @@ function queuedReceiptHarness({ disk = storage(), refresh = async () => {} } = {
     sourceSection("function ordinaryInputRecord(", "function rememberDraft("),
     sourceSection("async function mutate(", "function acceptedSendItem("),
     sourceSection("async function resolvePending()", "let loginPageCleanup"),
-    sourceSection("function pendingSteerDelivered(", "function renderQueuedMessages("),
+    sourceSection("function confirmQueuedSteerDisplay(", "function renderQueuedMessages("),
     sourceSection("async function removeQueuedMessage(", "async function beginQueuedMessageEdit("),
     sourceSection("async function stopGeneration()", "async function applyCompactionReceipt("),
     `function renderPending(){${sourceSection("  if (pending && (!sending || pending.payload !== sending.payload)",
@@ -3695,51 +3824,57 @@ function queuedReceiptHarness({ disk = storage(), refresh = async () => {} } = {
   return { context, requests, notices, refreshes, timers, draft, area, disk, clearedDrafts, receipt, completed, invoke };
 }
 
-test("Claude 整队立即执行只等待原生历史，不产生逐条引导的重复预览", async () => {
+test("Claude 引导确认前不展示正文，成功后保留一份消息", async () => {
   const h = queuedReceiptHarness();
   h.context.thread.backend = "claude";
   const operation = h.invoke("steerQueued");
-  assert.equal(h.context.pendingSteer, null);
+  assert.equal(h.context.withSentMessageDisplays().flatMap(turn => turn.items).length, 0);
   h.receipt(0, "completed", { ok: true, threadId: "main", scope: "all",
     queuedMessages: h.context.thread.queuedMessages, queuedEdits: [] });
   await operation;
+  assert.equal(h.context.withSentMessageDisplays().flatMap(turn => turn.items).length, 1);
   assert.equal(h.context.pendingSteer, null);
   assert.equal(h.context.pending, null);
   assert.equal(h.requests.length, 1);
   assert.equal(h.draft.text, "操作期间保留的普通草稿");
 });
 
-test("侧边引导原生正文早于回执到达时，立即按消息身份隐藏临时预览", async () => {
+test("引导原生正文早于回执时按身份接收，确认前不凭同文问题展示消息", async () => {
   const h = queuedReceiptHarness();
   h.context.thread.queuedMessages[0].clientUserMessageId = "old-client";
   const operation = h.invoke("steerQueued"), preview = h.context.pendingSteer;
-  assert.equal(h.context.pendingSteerTurn().items.length, 1);
+  assert.equal(h.context.withSentMessageDisplays().flatMap(turn => turn.items).length, 0);
   h.context.turns.set("active-turn", { id: "active-turn", status: "inProgress", items: [
     { id: "original", type: "userMessage", clientId: "initial-client",
       content: [{ type: "text", text: preview.text }] },
   ] });
-  assert.ok(h.context.pendingSteerTurn(), "同文初始问题不能被误判为引导已送达");
+  assert.equal(h.context.withSentMessageDisplays().flatMap(turn => turn.items).length, 1,
+    "同文初始问题不能被误判为引导已送达");
   h.context.turns.get("active-turn").items.push({
     id: "server-steer", type: "userMessage", clientId: "restored-client",
     restoreMessage: { id: "queued-a" }, content: [{ type: "text", text: preview.text }],
   });
-  assert.equal(h.context.pendingSteerTurn(), null, "回执未返回也不能再显示第二个正文气泡");
+  assert.equal(h.context.withSentMessageDisplays().flatMap(turn => turn.items).length, 2);
   h.completed(0);
   await operation;
+  assert.equal(h.context.withSentMessageDisplays().flatMap(turn => turn.items).length, 2, "成功回执不能重复插入引导正文");
   assert.equal(h.context.pendingSteer, null);
   assert.equal(h.requests.length, 1);
 });
 
-test("侧边引导成功后沿用原预览身份，历史读取完成会清理且不会清掉后续预览", async () => {
+test("引导成功后历史空档和迟到读取不移除正文，也不影响后续引导", async () => {
   const reload = deferred(), h = queuedReceiptHarness({ refresh: () => reload.promise });
   const operation = h.invoke("steerQueued"), preview = h.context.pendingSteer;
   h.completed(0);
   await operation;
-  assert.equal(h.context.pendingSteer, preview);
-  assert.equal(preview.turnId, "active-turn");
+  assert.equal(h.context.pendingSteer, null);
+  const displayed = h.context.withSentMessageDisplays().flatMap(turn => turn.items);
+  assert.equal(displayed.length, 1);
+  assert.equal(displayed[0].content[0].text, preview.text);
   reload.resolve();
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(h.context.pendingSteer, null, "成功后的异步读取必须能清掉本次预览");
+  assert.equal(h.context.withSentMessageDisplays().flatMap(turn => turn.items).length, 1,
+    "成功后的读取缺项不能清掉已确认内容");
   const laterReload = deferred(), later = queuedReceiptHarness({ refresh: () => laterReload.promise });
   const laterOperation = later.invoke("steerQueued");
   later.completed(0);
@@ -3854,6 +3989,8 @@ test("队列引导和删除unknown保留原回执，刷新只读恢复且不清�
     assert.equal(first.context.pending.id, id);
     first.receipt(0, "unknown", { ok: false, outcomeUnknown: true });
     await operation;
+    assert.equal(first.context.withSentMessageDisplays().flatMap(turn => turn.items).length, 0,
+      "未知引导回执不能展示正文");
     assert.equal(first.notices.length, 0, "快速返回未确认时不得抢先弹出错误提示");
     assert.equal(first.requests[1].path, `/api/receipts/${id}`);
     await first.invoke(action);
@@ -3891,6 +4028,8 @@ test("队列引导和删除unknown保留原回执，刷新只读恢复且不清�
     assert.deepEqual(reopened.clearedDrafts, []);
     assert.equal(reopened.requests.filter(request => request.path.startsWith("/api/action/")).length, 0);
     assert.deepEqual(reopened.refreshes, [action === "steerQueued" ? "thread" : "queue"]);
+    assert.equal(reopened.context.withSentMessageDisplays().flatMap(turn => turn.items).length,
+      action === "steerQueued" ? 1 : 0, "原回执恢复后才确认引导正文，删除不产生正文");
   }
 });
 
@@ -4576,9 +4715,10 @@ function sidebarDeletionHarness() {
   };
   for (const name of ["goalComposerRecoveries", "promptOptimizations", "readMarkRequests", "queuedEdits",
     "compactions", "blockingRequestStates", "approvalReplies", "approvalDrafts",
-    "questionReplyReceipts", "questionDrafts"]) context[name] = new Map();
+    "questionReplyReceipts", "questionDrafts", "sentMessageDisplays"]) context[name] = new Map();
   vm.createContext(context);
   vm.runInContext([
+    sourceSection("function clearSentMessageDisplays(", "function sentMessageIdentities("),
     sourceSection("function deleteDraft(", "function inputDraftEmpty("),
     sourceSection("function threadDeletionKey(", "async function checkThreadDeletion("),
   ].join("\n"), context);
@@ -4721,7 +4861,7 @@ function sendRecoveryHarness() {
       const result = deferred(); actions.push({ path, payload, requestId, ...result }); return result.promise;
     },
     applyQueuedSendResult: () => false, sameSkills: () => true, persistSmallInputRecoveries() {},
-    beginDirectSendPreview: () => null, finishDirectSendPreview() {},
+    rememberSendDisplay: () => null, finishSendDisplay() {},
     persistInputDraft: (key, remove) => {
       draftRemovals.push({ key, remove, scope: context.recoveryScope }); return Promise.resolve();
     },
@@ -4734,7 +4874,7 @@ function sendRecoveryHarness() {
   for (const name of ["drafts", "skillDrafts", "attachmentDrafts", "goalDrafts", "draftWrites",
     "failedInputRecoveries", "goalComposerRecoveries", "submittedDrafts", "queuedEdits", "questionDrafts",
     "questionReplyReceipts", "questionReceiptChecks", "compactions", "blockingRequestStates", "approvalReplies",
-    "approvalDrafts", "threadDeletions", "directSendPreviews"]) context[name] = new Map();
+    "approvalDrafts", "threadDeletions", "sentMessageDisplays"]) context[name] = new Map();
   context.drafts.set("main", originalText);
   vm.createContext(context);
   vm.runInContext([
@@ -4752,6 +4892,89 @@ function sendRecoveryHarness() {
   return { context, actions, draftRemovals, notices, reads, prompt, originalText, complete };
 }
 
+test("Claude 目录信任检查只在明确确认后附加精确目录，取消和已信任均不写确认参数", async () => {
+  for (const state of ["trusted", "confirm", "cancel"]) {
+    const calls = [];
+    const context = vm.createContext({
+      api: async (path, payload) => {
+        calls.push({ path, payload });
+        return { ok: true, instanceId: "claude:fixture", instanceLabel: "Claude · 测试",
+          trusted: state === "trusted", trustPath: "/project" };
+      },
+      confirmAction: async (title, message, action) => {
+        calls.push({ title, message, action });
+        return state === "confirm";
+      },
+    });
+    vm.runInContext(sourceSection("async function prepareClaudeProjectCreation(", "async function sendMessage("), context);
+    const payload = { backend: "claude", instanceId: "claude:fixture", projectId: "project", prompt: "原消息" };
+    assert.equal(await context.prepareClaudeProjectCreation(payload, () => true), state !== "cancel");
+    assert.equal(calls[0].path, "/api/read/projectTrust");
+    assert.equal(payload.trustProject, state === "confirm" ? true : undefined);
+    assert.equal(payload.expectedProjectPath, state === "confirm" ? "/project" : undefined);
+    assert.equal(payload.prompt, "原消息");
+    if (state === "trusted") assert.equal(calls.length, 1);
+    else {
+      assert.match(calls[1].message, /Claude · 测试/);
+      assert.match(calls[1].message, /\/project/);
+      assert.equal(calls[1].action, "信任并继续");
+    }
+  }
+});
+
+test("Claude 信任结果实例不匹配或确认期间切换选择时不能继续发送", async () => {
+  let selected = true;
+  const context = vm.createContext({
+    api: async () => ({ ok: true, trusted: false, instanceId: "claude:fixture", trustPath: "/project" }),
+    confirmAction: async () => { selected = false; return true; },
+  });
+  vm.runInContext(sourceSection("async function prepareClaudeProjectCreation(", "async function sendMessage("), context);
+  const payload = { backend: "claude", instanceId: "claude:fixture", projectId: "project" };
+  assert.equal(await context.prepareClaudeProjectCreation(payload, () => selected), false);
+  assert.equal(payload.trustProject, undefined);
+  await assert.rejects(context.prepareClaudeProjectCreation({ instanceId: "claude:other" }, () => true),
+    /检查结果不匹配/);
+});
+
+test("Claude 新建入口先等待目录信任，确认才提交一次创建，取消保留输入且不创建空会话", async () => {
+  for (const accepted of [false, true]) {
+    const h = sendRecoveryHarness(), { context } = h, approval = deferred();
+    context.creating = true;
+    context.creationBackend = "claude";
+    context.creationInstanceId = "claude:wsl:test";
+    context.appearance.sessionTypes.claude = true;
+    context.session.capabilities.claudeProjectTrust = true;
+    context.confirmAction = () => approval.promise;
+    context.selectCreatedThread = async () => {};
+    const query = context.$;
+    context.$ = (selector, root) => selector === "#project-select" ? { value: "project" } : query(selector, root);
+    vm.runInContext(sourceSection("async function prepareClaudeProjectCreation(", "async function sendMessage("), context);
+    const sending = context.sendMessage();
+    assert.equal(h.actions.length, 1);
+    assert.equal(h.actions[0].path, "/api/read/projectTrust");
+    h.actions[0].resolve({ ok: true, instanceId: "claude:wsl:test", trusted: false, trustPath: "/project" });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.actions.length, 1, "确认前不得派发 create 或首条消息");
+    approval.resolve(accepted);
+    await new Promise(resolve => setImmediate(resolve));
+    if (accepted) {
+      assert.equal(h.actions.length, 2);
+      const create = h.actions[1];
+      assert.equal(create.path, "/api/action/create");
+      assert.equal(create.payload.trustProject, true);
+      assert.equal(create.payload.expectedProjectPath, "/project");
+      create.resolve({ requestId: create.requestId, state: "completed", result: { ok: true, threadId: "created" } });
+    }
+    await sending;
+    if (!accepted) {
+      assert.equal(h.actions.length, 1);
+      assert.equal(h.prompt.value, h.originalText);
+      assert.equal(context.submittedDrafts.size, 0);
+      assert.equal(context.busy, false);
+    }
+  }
+});
+
 function idleSendDisplayHarness(mode = "native") {
   const h = sendRecoveryHarness(), controls = cachedControlsHarness(h.context);
   const { context } = h, frames = [], reloads = [];
@@ -4765,7 +4988,7 @@ function idleSendDisplayHarness(mode = "native") {
     notifiedQueue: [], notifiedQueueEdits: [], queueSnapshotVersion: null, retiredQueueEpochs: new Set(),
     recordDiagnostic() {}, compactionQueueSendReason: () => "",
     scheduleReload: () => reloads.push("thread"), reloadQueue: async () => reloads.push("queue"),
-    renderMessages: () => frames.push(context.pendingDirectSendTurns()),
+    renderMessages: () => frames.push(context.withSentMessageDisplays()),
     updateComposer: () => context.renderQueueArea(),
     $: (selector, root) => !root && selector === "#prompt" ? h.prompt : controlsQuery(selector, root),
   });
@@ -4791,163 +5014,184 @@ function idleSendDisplayHarness(mode = "native") {
   return { ...h, queue: controls.queue, frames, reloads, snapshot, queued, completeQueued };
 }
 
-test("CDP 与服务模式空闲发送直接显示聊天输入，接收前后不闪队列或重复消息", async () => {
+const displayedUserMessages = context => context.withSentMessageDisplays().flatMap(turn => turn.items)
+  .filter(item => item.type === "userMessage");
+
+test("CDP 与服务普通发送成功后进入正文，空队列和迟到历史不移除已确认消息", async () => {
   for (const mode of ["native", "service"]) {
-    const h = idleSendDisplayHarness(mode), { context, queue } = h;
+    const h = idleSendDisplayHarness(mode), { context } = h;
     const send = context.sendMessage();
     await new Promise(resolve => setImmediate(resolve));
     const action = h.actions[0], queued = h.queued(action);
-    assert.ok(context.directSendPreviews.has(action.payload.clientUserMessageId));
-    context.applyQueueSnapshot("main", [queued], [], h.snapshot([queued], 1));
-    assert.equal(queue.hidden, true, `${mode} 空闲发送不能进入队列区域`);
-    assert.equal(h.frames.at(-1)[0].items[0].content[0].text, h.originalText);
-    assert.equal(h.frames.at(-1)[0].items[0].remoteDirectSend, true);
-    assert.equal(h.frames.at(-1)[0].items[0].remotePendingInput, true, "预览不能当成已送达确认");
-    assert.equal(context.pendingDirectSendTurns()[0], h.frames.at(-1)[0], "预览重绘复用原节点数据，避免图片和正文闪动");
-    h.completeQueued(action, [queued], 1);
+    assert.equal(displayedUserMessages(context).length, 0, "发出请求不能提前显示正文");
+    action.resolve({ requestId: action.requestId, state: "completed", result: {
+      ok: true, threadId: "main", clientUserMessageId: action.payload.clientUserMessageId,
+      queueSyncPending: true, deliveryState: "accepted", result: { status: "sent", turnId: "started" }
+    } });
     await send;
-    assert.equal(queue.hidden, true);
-    assert.equal(h.prompt.value, "", "确认原请求入站后才清理输入框");
-
-    context.thread.status = { type: "active" };
-    context.turns.set("started", { id: "started", status: "inProgress", items: [] });
-    context.updateComposer(); context.renderMessages();
-    assert.equal(queue.hidden, true, "本消息刚启动但用户项尚未同步时不能重新闪现队列");
-    assert.equal(context.pendingDirectSendTurns().length, 1);
-    const acceptedQueued = { ...queued, remoteDeliveryState: "accepted" };
-    context.applyQueueSnapshot("main", [acceptedQueued], [], h.snapshot([acceptedQueued], 2));
-    assert.equal(context.pendingDirectSendTurns()[0].items[0].remoteDirectSendState, "accepted");
-    context.turns.get("started").items.push({
-      id: "real-user-message", type: "userMessage", clientId: action.payload.clientUserMessageId
-    });
-    context.renderMessages(); context.updateComposer();
-    assert.equal(context.pendingDirectSendTurns().length, 0, "原生用户消息到达后必须去掉本地预览");
-    assert.equal(queue.hidden, true, "已接收的短暂队列残留继续隐藏");
-    context.applyQueueSnapshot("main", [], [], h.snapshot([], 3));
-    assert.equal(context.directSendPreviews.size, 0);
-    assert.equal(h.actions.length, 1, "显示优化不能重复派发消息");
-  }
-});
-
-test("执行中、压缩中或已有真实等待消息仍显示队列，未知运行状态不冒充空闲", async () => {
-  for (const mode of ["native", "service"]) {
-    for (const state of ["active", "compacting", "queued", "unknown"]) {
-      const h = idleSendDisplayHarness(mode), { context } = h;
-      if (state === "active") context.thread.status = { type: "active" };
-      if (state === "unknown") delete context.thread.status;
-      if (state === "compacting") context.compactionLocked = () => true;
-      const previous = state === "queued" ? [{ id: "previous-queued", text: "已有等待消息" }] : [];
-      context.thread.queuedMessages = previous;
-      const send = context.sendMessage();
-      await new Promise(resolve => setImmediate(resolve));
-      const action = h.actions[0], messages = [...previous, h.queued(action)];
-      assert.equal(context.directSendPreviews.size, 0, `${mode}/${state}`);
-      context.applyQueueSnapshot("main", messages, [], h.snapshot(messages, 1));
-      h.completeQueued(action, messages, 1);
-      await send;
-      assert.equal(h.queue.hidden, false, `${mode}/${state} 不能隐藏真正的等待`);
-      assert.equal(context.pendingDirectSendTurns().length, 0);
-      assert.equal(h.actions.length, 1);
-      if (state === "compacting") assert.equal(action.payload.queueOnly, true);
-    }
-  }
-});
-
-test("空闲直发保留图片与技能，确认仅有旧已发送残留时仍可以直接展示新输入", async () => {
-  const h = idleSendDisplayHarness("service"), { context } = h;
-  const image = { id: "image-1", name: "截图.png", dataUrl: "data:image/png;base64,AA==" };
-  context.composerAttachmentsPayload = () => [image];
-  context.session.capabilities.imageInput = true;
-  context.snapshotDraft = () => ({ text: h.originalText, skills: [{ name: "示例", path: "/skills/example" }], attachments: [image] });
-  context.thread.queuedMessages = [{ id: "accepted-old", remoteDeliveryState: "accepted", text: "已发送待同步" }];
-  const send = context.sendMessage();
-  await new Promise(resolve => setImmediate(resolve));
-  const action = h.actions[0], queued = h.queued(action);
-  context.applyQueueSnapshot("main", [queued], [], h.snapshot([queued], 1));
-  const preview = context.pendingDirectSendTurns()[0].items[0];
-  assert.equal(preview.content.find(item => item.type === "image").url, image.dataUrl);
-  assert.equal(preview.content.find(item => item.type === "skill").name, "示例");
-  assert.equal(h.queue.hidden, true);
-  h.completeQueued(action, [queued], 1);
-  await send;
-  assert.equal(h.actions.length, 1);
-});
-
-test("发送途中暂停、结果未知或另一轮抢先启动时恢复队列，恢复空闲也不重新隐藏真实等待", async () => {
-  for (const outcome of ["paused", "unknown", "peer-turn", "compacting"]) {
-    const h = idleSendDisplayHarness(), { context } = h;
-    const send = context.sendMessage();
-    await new Promise(resolve => setImmediate(resolve));
-    const action = h.actions[0], queued = h.queued(action);
-    context.applyQueueSnapshot("main", [queued], [], h.snapshot([queued], 1));
-    assert.equal(h.queue.hidden, true);
-    const waiting = { ...queued };
-    if (outcome === "paused") waiting.pausedReason = "原生尚未接收";
-    if (outcome === "unknown") waiting.submission = { status: "outcome-unknown" };
-    if (outcome === "peer-turn") {
-      context.thread.status = { type: "active" };
-      context.turns.set("other-turn", { id: "other-turn", status: "inProgress",
-        items: [{ type: "userMessage", clientId: "other-device-input" }] });
-    }
-    if (outcome === "compacting") context.compactionLocked = () => true;
-    context.applyQueueSnapshot("main", [waiting], [], h.snapshot([waiting], 2));
-    assert.equal(h.queue.hidden, false, outcome);
-    assert.equal(h.frames.at(-1).length, 0, "恢复真实等待后不能残留发送中气泡");
-    h.completeQueued(action, [queued], 1);
-    await send;
-    context.thread.status = { type: "idle" }; context.compactionLocked = () => false;
-    context.applyQueueSnapshot("main", [queued], [], h.snapshot([queued], 3));
-    assert.equal(h.queue.hidden, false, "曾确认需要等待的消息不能随空闲状态重新隐藏");
+    const confirmed = displayedUserMessages(context)[0];
+    assert.equal(confirmed.content[0].text, h.originalText);
+    assert.equal(confirmed.remoteConfirmedInput, true);
+    assert.equal(context.acceptedSendItem([confirmed], action.payload.clientUserMessageId), undefined,
+      "成功展示投影不能冒充原生核对证据");
+    context.applyQueueSnapshot("main", [], [], h.snapshot([], 1));
+    assert.equal(displayedUserMessages(context)[0], confirmed, "队列先移除，历史尚未同步也要保持正文");
+    context.applyQueueSnapshot("main", [queued], [], h.snapshot([queued], 2));
+    assert.equal(h.queue.hidden, true, "迟到的未发送队列不能降级已确认成功的消息");
+    assert.equal(displayedUserMessages(context).length, 1);
+    const native = { id: "real-user", type: "userMessage", clientId: action.payload.clientUserMessageId,
+      content: [{ type: "text", text: h.originalText }] };
+    context.turns.set("started", { id: "started", status: "completed", items: [native] });
+    const adopted = displayedUserMessages(context)[0];
+    assert.equal(adopted.id, native.id, "原生消息接替展示投影");
+    assert.equal(adopted.remoteConfirmedInput, true, "成功身份进入原有会话缓存以便重进恢复");
+    assert.equal(displayedUserMessages(context).length, 1);
+    context.turns.get("started").items = [];
+    assert.equal(displayedUserMessages(context)[0], adopted, "较旧历史缺项不能让成功消息消失");
+    context.turns.delete("started");
+    assert.equal(displayedUserMessages(context)[0], adopted, "整轮暂缺也保持已显示的消息");
+    assert.equal(h.prompt.value, "");
     assert.equal(h.actions.length, 1);
   }
 });
 
-test("直发预览等待接收时不允许跨过隐藏消息排序，授权清理后迟到回执不影响新授权", async () => {
-  const h = idleSendDisplayHarness(), { context } = h;
-  const send = context.sendMessage();
-  await new Promise(resolve => setImmediate(resolve));
-  const action = h.actions[0], queued = h.queued(action);
-  context.applyQueueSnapshot("main", [queued, { id: "later", text: "后续等待" }], [],
-    h.snapshot([queued, { id: "later", text: "后续等待" }], 1));
-  context.busy = false;
-  assert.equal(context.queueReorderAvailable(), false);
-  assert.equal(h.queue.querySelectorAll(".queued-message").length, 1, "只显示真正的后续等待");
-  context.clearPrivateInputs();
-  assert.equal(context.directSendPreviews.size, 0);
-  context.session = { ...context.session, device: { id: "device-b", createdAtMs: 2 } };
-  const newRecord = { clientId: "new-client", threadId: "main", scope: context.privateInputScope(context.session) };
-  context.directSendPreviews.set(newRecord.clientId, newRecord);
-  h.completeQueued(action, [queued], 1);
-  await send;
-  assert.equal(context.directSendPreviews.get("new-client"), newRecord);
+test("仅确认入队的消息留在队列，运行状态变化不能提前展示正文", async () => {
+  for (const mode of ["native", "service"]) {
+    const h = idleSendDisplayHarness(mode), { context } = h;
+    context.thread.status = { type: "active" };
+    const send = context.sendMessage();
+    await new Promise(resolve => setImmediate(resolve));
+    const action = h.actions[0], queued = h.queued(action);
+    context.applyQueueSnapshot("main", [queued], [], h.snapshot([queued], 1));
+    h.completeQueued(action, [queued], 1);
+    await send;
+    assert.equal(h.queue.hidden, false);
+    assert.equal(displayedUserMessages(context).length, 0);
+    context.thread.status = { type: "idle" };
+    context.renderMessages();
+    assert.equal(displayedUserMessages(context).length, 0, "空闲本身不证明队列消息已发送");
+    const accepted = { ...queued, remoteDeliveryState: "accepted" };
+    context.applyQueueSnapshot("main", [accepted], [], h.snapshot([accepted], 2));
+    assert.equal(displayedUserMessages(context).length, 1, "原生接受证据可确认后续自动发送");
+    context.applyQueueSnapshot("main", [], [], h.snapshot([], 3));
+    assert.equal(displayedUserMessages(context).length, 1);
+    assert.equal(h.actions.length, 1);
+  }
 });
 
-test("只有历史事件更新时也立即恢复真正等待的队列，不依赖下一次队列轮询", async () => {
+test("发送成功完整保留图片和技能，原生身份先到正文后到时不闪空", async () => {
+  const h = idleSendDisplayHarness("service"), { context } = h;
+  const image = { id: "image-1", name: "附件.png", dataUrl: "data:image/png;base64,AA==" };
+  context.composerAttachmentsPayload = () => [image];
+  context.session.capabilities.imageInput = true;
+  context.snapshotDraft = () => ({ text: h.originalText, skills: [{ name: "示例", path: "/skills/example" }], attachments: [image] });
+  const send = context.sendMessage();
+  await new Promise(resolve => setImmediate(resolve));
+  const action = h.actions[0];
+  assert.equal(displayedUserMessages(context).length, 0);
+  action.resolve({ requestId: action.requestId, state: "completed", result: {
+    ok: true, threadId: "main", deliveryState: "accepted", result: { status: "sent", turnId: "native-turn" }
+  } });
+  await send;
+  const confirmed = displayedUserMessages(context)[0];
+  assert.equal(confirmed.content.find(part => part.type === "image").url, image.dataUrl);
+  assert.equal(confirmed.content.find(part => part.type === "skill").name, "示例");
+  context.turns.set("native-turn", { id: "native-turn", items: [{ id: "native-input", type: "userMessage",
+    clientId: action.payload.clientUserMessageId, content: [] }] });
+  const adopted = displayedUserMessages(context);
+  assert.equal(adopted.length, 1);
+  assert.equal(adopted[0].id, "native-input");
+  assert.equal(adopted[0].content.find(part => part.type === "image").url, image.dataUrl);
+  assert.equal(h.actions.length, 1);
+});
+
+test("重进成功消息缓存后原生跨轮接替，正文和附件保留且只显示一次", () => {
+  const { context } = idleSendDisplayHarness();
+  const cached = { id: "cached-input", type: "userMessage", clientId: "cache-client",
+    remotePendingInput: true, remoteConfirmedInput: true, remoteDirectSend: true,
+    content: [{ type: "text", text: "已成功消息" }, { type: "image", url: "data:image/png;base64,AA==" }] };
+  context.turns.set("cached-turn", { id: "cached-turn", status: "completed", items: [cached] });
+  context.turns.set("native-turn", { id: "native-turn", status: "completed", items: [
+    { id: "native-input", type: "userMessage", clientId: "cache-client", content: [] }
+  ] });
+  const messages = displayedUserMessages(context);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].id, "native-input");
+  assert.equal(messages[0].content.length, 2);
+  context.turns.clear();
+  assert.equal(displayedUserMessages(context).length, 1, "原生接替后短暂空历史也不能删除已显示消息");
+});
+
+test("历史同步空档内连续成功的消息按确认顺序显示，队列登记顺序不能把正文倒排", () => {
+  const { context } = idleSendDisplayHarness();
+  const first = { threadId: "main", clientUserMessageId: "first", prompt: "先登记后发送" };
+  const second = { threadId: "main", clientUserMessageId: "second", prompt: "后登记先发送" };
+  context.rememberSendDisplay(first);
+  context.rememberSendDisplay(second);
+  context.confirmSendDisplay(second, { ok: true, threadId: "main", deliveryState: "accepted" });
+  context.confirmSendDisplay(first, { ok: true, threadId: "main", deliveryState: "accepted" });
+  assert.deepEqual(Array.from(displayedUserMessages(context), item => item.clientId), ["second", "first"]);
+  context.applyQueueSnapshot("main", [], [], { queueEpoch: "order", queueRevision: 1 });
+  assert.deepEqual(Array.from(displayedUserMessages(context), item => item.clientId), ["second", "first"]);
+});
+
+test("暂停、结果未知和其他设备抢先执行都不能在成功前产生正文气泡", async () => {
+  for (const outcome of ["paused", "unknown", "peer-turn"]) {
+    const h = idleSendDisplayHarness(), { context } = h;
+    const send = context.sendMessage();
+    await new Promise(resolve => setImmediate(resolve));
+    const action = h.actions[0], queued = h.queued(action);
+    if (outcome === "paused") queued.pausedReason = "原生尚未接收";
+    if (outcome === "unknown") queued.submission = { status: "outcome-unknown" };
+    if (outcome === "peer-turn") context.thread.status = { type: "active" };
+    context.applyQueueSnapshot("main", [queued], [], h.snapshot([queued], 1));
+    assert.equal(displayedUserMessages(context).length, 0);
+    h.completeQueued(action, [queued], 1);
+    await send;
+    assert.equal(displayedUserMessages(context).length, 0);
+    assert.equal(h.queue.hidden, false);
+  }
+});
+
+test("授权清理后迟到发送回执不展示旧正文，也不删除新授权的展示记录", async () => {
   const h = idleSendDisplayHarness(), { context } = h;
   const send = context.sendMessage();
   await new Promise(resolve => setImmediate(resolve));
-  const action = h.actions[0], queued = h.queued(action);
-  context.applyQueueSnapshot("main", [queued], [], h.snapshot([queued], 1));
+  const action = h.actions[0];
+  context.clearPrivateInputs();
+  assert.equal(context.sentMessageDisplays.size, 0);
+  context.session = { ...context.session, device: { id: "device-b", createdAtMs: 2 } };
+  const record = context.rememberSendDisplay({ threadId: "main", clientUserMessageId: "new-client", prompt: "新输入" });
+  action.resolve({ requestId: action.requestId, state: "completed", result: {
+    ok: true, threadId: "main", deliveryState: "accepted"
+  } });
+  await send;
+  assert.equal(context.sentMessageDisplays.size, 1);
+  assert.equal([...context.sentMessageDisplays.values()][0], record);
+  assert.equal(displayedUserMessages(context).length, 0);
+});
+
+test("真实渲染入口过滤未确认占位，已确认正文在后续渲染保留", () => {
+  const h = idleSendDisplayHarness(), { context } = h;
+  context.turns.set("native-pending", { id: "native-pending", items: [{ id: "pending-user", type: "userMessage",
+    remotePendingInput: true, clientId: "pending", content: [{ type: "text", text: "尚未成功" }] }] });
   const originalQuery = context.$, messagesRoot = { scrollHeight: 0, scrollTop: 0 };
   Object.assign(context, {
-    messageFrame: null, followMessages: true, composerScroll: null, pendingSteer: null,
-    cancelAnimationFrame() {}, scheduleMermaidBlocks() {}, pendingSteerTurn: () => null,
-    pendingSteerDelivered: () => false,
+    messageFrame: null, followMessages: true, composerScroll: null,
+    cancelAnimationFrame() {}, scheduleMermaidBlocks() {},
     $: (selector, root) => !root && selector === "#messages" ? messagesRoot : originalQuery(selector, root),
   });
   vm.runInContext(sourceSection("function renderMessages(", "  loadMessageSkillChoices(sorted.flatMap")
     .replace("function renderMessages(", "function projectDisplayTurns(") + "\nreturn sorted;\n}", context);
-  context.thread.status = { type: "active" };
-  context.turns.set("other-turn", { id: "other-turn", status: "inProgress",
-    items: [{ type: "userMessage", clientId: "other-client" }] });
-  const displayedTurns = context.projectDisplayTurns();
-  assert.equal(h.queue.hidden, false);
-  assert.equal(displayedTurns.some(turn => turn.id.startsWith("remote-direct-turn:")), false);
-  h.completeQueued(action, [queued], 1);
-  await send;
+  assert.equal(context.projectDisplayTurns().flatMap(turn => turn.items).length, 0);
+  context.confirmSendDisplay({ threadId: "main", clientUserMessageId: "success", prompt: "已经成功" },
+    { ok: true, threadId: "main", deliveryState: "accepted" });
+  assert.equal(context.projectDisplayTurns().flatMap(turn => turn.items).length, 1);
+  context.clearSentMessageDisplays("main");
+  assert.equal(context.projectDisplayTurns().flatMap(turn => turn.items).length, 0, "明确回退可清除成功展示缓存");
 });
 
-test("发送网络结果未知仍保留草稿和原回执，只恢复展示而不重新提交", async () => {
+test("发送网络结果未知保留草稿和原回执，核对成功前没有正文也不重发", async () => {
   const h = idleSendDisplayHarness("service"), { context } = h;
   let receiptChecks = 0;
   context.resolvePending = async () => { receiptChecks++; };
@@ -4961,14 +5205,13 @@ test("发送网络结果未知仍保留草稿和原回执，只恢复展示而�
   assert.equal(context.pending.payload.clientUserMessageId, action.payload.clientUserMessageId);
   assert.equal(h.prompt.value, h.originalText);
   assert.equal(context.drafts.get("main"), h.originalText);
-  assert.equal(context.directSendPreviews.size, 0);
-  assert.equal(h.queue.hidden, false);
+  assert.equal(displayedUserMessages(context).length, 0);
   assert.equal(h.queue.querySelector(".queued-steer-button").disabled, true);
   assert.equal(receiptChecks, 1);
   assert.equal(h.actions.length, 1);
 });
 
-test("即时发送预览沿用普通用户气泡并明确标注发送中，真实消息不残留发送标签", () => {
+test("成功消息沿用普通用户气泡，正文不附加发送中或等待同步标签", () => {
   const element = (tag, className = "", text = "") => ({
     tag, className, text, children: [], classList: { add() {}, remove() {} },
   });
@@ -4981,16 +5224,13 @@ test("即时发送预览沿用普通用户气泡并明确标注发送中，真�
   });
   vm.runInContext(sourceSection("function renderItem(", '  if (item.type === "agentMessage"')
     + "\nreturn null;\n}", context);
-  const item = { id: "preview", type: "userMessage", content: [{ type: "text", text: "即时输入" }] };
-  const preview = context.renderItem({ ...item, remoteDirectSend: true });
-  assert.equal(preview.className, "message user-message");
-  assert.equal(preview.children[0].text, "即时输入");
-  assert.equal(preview.children.at(-1).text, "发送中…");
-  const syncing = context.renderItem({ ...item, remoteDirectSend: true, remoteDirectSendState: "accepted" });
-  assert.equal(syncing.children.at(-1).text, "已发送，等待同步…");
-  const accepted = context.renderItem(item);
-  assert.equal(accepted.children.length, 1);
-  assert.equal(accepted.children[0].text, "即时输入");
+  for (const confirmed of [false, true]) {
+    const node = context.renderItem({ id: "input", type: "userMessage", remoteDirectSend: confirmed,
+      content: [{ type: "text", text: "成功输入" }] });
+    assert.equal(node.className, "message user-message");
+    assert.equal(node.children.length, 1);
+    assert.equal(node.children[0].text, "成功输入");
+  }
 });
 
 test("旧授权普通发送的迟到成功不得清理新授权同键同内容草稿或刷新新授权页面", async () => {
@@ -6392,7 +6632,7 @@ function threadDisplayCacheHarness(existing = null) {
     threadDeleted: () => false,
   });
   Object.assign(context, {
-    directSendPreviews: new Map(), reconcileDirectSendPreviews: () => false,
+    sentMessageDisplays: new Map(), reconcileSentMessageDisplays: () => false,
     threadDisplays: new Map(), contextUsage: () => null, syncRelatedModelDisplay() {},
     readCache: { put: async (scope, kind, id, value) => {
       persisted.push({ scope, kind, id, value: structuredClone(value) });
@@ -7153,7 +7393,7 @@ test("Claude 实时历史投影接收 CLI 消息，重复快照不产生重复�
     turns: new Map(), turnVersions: new Map(), itemVersions: new Map(), partialItems: new Set(),
     messageVersion: 0, statusVersion: 0, queueVersion: 0,
     normalizeDisplayedTurnItems: value => value, enrichTurnTranscriptEvents: value => value,
-    rememberThreadDisplay() {}, rememberTranscript() {}, reconcileDirectSendPreviews() {},
+    rememberThreadDisplay() {}, rememberTranscript() {}, reconcileSentMessageDisplays() {},
     updateComposer() {}, scheduleMessages() {}, scheduleSidebarRefresh() {},
     markVisibleThreadRead: async () => {},
   });
@@ -7187,7 +7427,7 @@ test("Claude 长历史按原生顺序补齐实时快照，零散缓存不能跳�
     turnVersions: new Map(), itemVersions: new Map(), partialItems: new Set(),
     messageVersion: 0, statusVersion: 0, queueVersion: 0,
     normalizeDisplayedTurnItems: value => value, enrichTurnTranscriptEvents: value => value,
-    rememberThreadDisplay() {}, rememberTranscript() {}, reconcileDirectSendPreviews() {},
+    rememberThreadDisplay() {}, rememberTranscript() {}, reconcileSentMessageDisplays() {},
     updateComposer() {}, scheduleMessages() {}, scheduleSidebarRefresh() {},
     markVisibleThreadRead: async () => {},
   });
