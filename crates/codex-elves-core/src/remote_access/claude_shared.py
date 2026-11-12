@@ -370,11 +370,13 @@ class NativeSession:
         self.preview_emitted = ""
         self.preview_at = 0
         self.context_files = {}
+        self.native_context = {}
 
     def context_configuration(self):
-        # 用户要求最小容量兜底：只读同一 WSL 的显式最大窗口，不读取压缩窗口/95%或 Windows relay；这里只标“配置容量”，不推断模型物理上限。
+        # 用户要求容量与压缩设置分开：这里只传配置来源，不能把任何配置值当作原生容量。
         key = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
-        raw, scope = os.environ.get(key), "environment"
+        keys = (key, "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")
+        values = {name: (os.environ.get(name), "environment") for name in keys}
         path = self.root / "settings.json"
         try:
             stat = path.stat()
@@ -383,24 +385,65 @@ class NativeSession:
             if cached is None or cached[0] != signature:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 env = data.get("env", {}) if isinstance(data, dict) else {}
-                self.context_files[path] = (signature, {key: env[key]} if isinstance(env, dict) and key in env else {})
+                self.context_files[path] = (signature, {name: env[name] for name in keys if name in env} if isinstance(env, dict) else {})
             configured = self.context_files[path][1]
-            if key in configured:
-                raw, scope = configured[key], "user-settings.env"
+            values.update({name: (raw, "user-settings.env") for name, raw in configured.items()})
         except (OSError, ValueError):
             pass
-        if not isinstance(raw, str) or not re.fullmatch(r"\s*\+?\d+\s*", raw):
-            return {}
-        count = int(raw)
-        if not 0 < count <= 9007199254740991:
-            return {}
-        # 与 Rust 最后实际请求选择一致，模型切换后的容量只属于该请求；首个请求前仅使用初始化模型，不能跨会话复用缓存。
+        # 配置、原生窗口和最后实际请求绑定同一模型，不能把其他模型或会话的窗口带过来。
         model = next((row["message"].get("model", "") for row in reversed(self.messages)
                       if row.get("type") == "assistant" and row.get("isUnmetered") is not True
                       and row.get("isApiErrorMessage") is not True and row.get("message", {}).get("model") != "<synthetic>"
                       and isinstance(row.get("message", {}).get("usage", {}).get("input_tokens"), int)), self.model)
-        return {"maxContextTokens": count, "model": model,
-                "source": {"kind": "configuration", "key": key, "scope": scope, "model": model}}
+        result = {"model": model}
+        for name, field in ((key, "maxContextTokens"),
+                            ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "windowTokens"),
+                            ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "triggerPercent")):
+            raw, scope = values[name]
+            if not isinstance(raw, str) or not re.fullmatch(r"\s*\+?\d+\s*", raw):
+                continue
+            count = int(raw)
+            if not 0 < count <= (100 if field == "triggerPercent" else 9007199254740991):
+                continue
+            source = {"kind": "configuration", "key": name, "scope": scope, "model": model}
+            if name == key:
+                result.update(maxContextTokens=count, source=source)
+            else:
+                result.setdefault("compaction", {})[field] = count
+                result["compaction"][field + "Source"] = source
+        if self.native_context.get("model") == model:
+            result["native"] = self.native_context
+        return result if len(result) > 1 else {}
+
+    def observe_native_context(self, row):
+        # 只接收同一原生日志/会话明确报告的 statusline 字段；不调用模型或复刻 CLI 的窗口计算。
+        if row.get("session_id", row.get("sessionId", self.native_id)) != self.native_id:
+            return
+        context = row.get("context_window")
+        message = row.get("message")
+        if not isinstance(context, dict) and isinstance(message, dict):
+            context = message.get("context_window")
+        if not isinstance(context, dict):
+            return
+        model = row.get("model")
+        if isinstance(model, dict):
+            model = model.get("id")
+        if not isinstance(model, str) and isinstance(message, dict):
+            model = message.get("model")
+        size = context.get("context_window_size")
+        if (not isinstance(model, str) or not model or type(size) is not int
+                or not 0 < size <= 9007199254740991):
+            return
+        report = {"model": model, "context_window_size": size}
+        percentage = context.get("used_percentage")
+        if type(percentage) in (int, float) and 0 <= percentage <= 100:
+            report["used_percentage"] = percentage
+        usage = context.get("current_usage")
+        if isinstance(usage, dict):
+            report["current_usage"] = {key: usage[key] for key in (
+                "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+                if type(usage.get(key)) is int and 0 <= usage[key] <= 9007199254740991}
+        self.native_context = report
 
     def rpc(self, operation):
         # 2.1.322 的原生后台协议 v1；control.key 只用于同一 WSL 用户的本地连接，不回传网页。
@@ -758,6 +801,7 @@ class NativeSession:
                 or self.log_mtime is not None and stat.st_size == self.log_offset
                 and stat.st_mtime_ns != self.log_mtime):
             self.messages, self.log_offset, self.seen = [], 0, set()
+            self.native_context = {}
             self.signature = None
         self.log_identity, self.log_mtime = identity, stat.st_mtime_ns
         with self.log_path.open("rb") as stream:
@@ -775,6 +819,8 @@ class NativeSession:
                     continue
                 if not isinstance(row, dict):
                     continue
+                if not row.get("isSidechain"):
+                    self.observe_native_context(row)
                 if not row.get("uuid") or row.get("isSidechain"):
                     continue
                 if row.get("type") in ("user", "assistant") and not isinstance(row.get("message"), dict):

@@ -291,7 +291,7 @@ function modelContext() {
     ...(selectedId ? { threadId: selectedId } : { projectId: creationProject }) };
 }
 function modelContextKey() {
-  // 用户要求同一会话类型实例共用模型目录；项目、历史会话和新建入口不能各建一份模型缓存。
+  // 用户要求同一会话实例共用模型目录；项目、历史会话和新建入口不能各建一份模型缓存。
   return activeInstanceId() === "codex:local" ? "codex" : activeInstanceId();
 }
 function syncBackendModels() {
@@ -1018,7 +1018,7 @@ function mountRemoteSettings(dialog) {
   let disposed = false, generation = 0, environments = null, instances = [], detection = null, current = null, saving = false;
   const deviceId = session?.device.id;
   const alive = () => !disposed && dialog.isConnected && session?.device.id === deviceId;
-  // 用户要求只选择会话类型实例，编辑其用户级全局指令；实例身份同时隔离各环境的未保存草稿。
+  // 用户要求只选择会话实例，编辑其用户级全局指令；实例身份同时隔离各环境的未保存草稿。
   const identity = () => ({ instanceId: instance.value });
   const keyFor = value => JSON.stringify([privateInputScope(session), value]);
   // 用户要求正常读取后不显示“已读取”；检测、读取及撤销编辑恢复原文时均留空。
@@ -1079,7 +1079,7 @@ function mountRemoteSettings(dialog) {
     current = null; input.value = ""; update();
     find("instruction-path").textContent = "";
     if (!instanceAvailable(value.instanceId)) {
-      status.textContent = "请选择可用的会话类型实例。"; return;
+      status.textContent = "请选择可用的会话实例。"; return;
     }
     status.textContent = "正在读取原生指令文件…";
     try {
@@ -1156,7 +1156,7 @@ function openAppearance() {
     <div class="appearance-layout">
     <nav class="appearance-nav" aria-label="设置导航">
       <button type="button" id="appearance-general-entry" class="appearance-nav-item" aria-controls="appearance-general-page" aria-selected="true"><span class="appearance-nav-icon"></span><span>会话</span></button>
-      <button type="button" id="appearance-types-entry" class="appearance-nav-item" aria-controls="appearance-types-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>会话类型实例</span></button>
+      <button type="button" id="appearance-types-entry" class="appearance-nav-item" aria-controls="appearance-types-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>会话实例</span></button>
       <button type="button" id="appearance-instructions-entry" class="appearance-nav-item" aria-controls="appearance-instructions-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>自定义指令</span></button>
       <button type="button" id="appearance-customization-entry" class="appearance-nav-item" title="打开外观" aria-label="打开外观" aria-controls="appearance-customization-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>外观</span></button>
       <button type="button" id="appearance-runtime-entry" class="appearance-nav-item" aria-controls="appearance-runtime-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>运行模式</span></button>
@@ -1172,18 +1172,18 @@ function openAppearance() {
     <div id="appearance-cache-state" class="appearance-field" role="status"></div>
     </section>
     <section id="appearance-types-page" class="appearance-body appearance-settings-page" hidden>
-    <!-- 用户更正名称为“会话类型实例”，并要求精简说明；保留逐实例开关与自动检测。 -->
-    <h3 class="appearance-panel-title">会话类型实例</h3>
+    <!-- 用户要求统一显示为“会话实例”：导航、页头与指令选择保持一致，逐实例开关与自动检测行为不变。 -->
+    <h3 class="appearance-panel-title">会话实例</h3>
     <p class="appearance-hint">按实例启用会话，仅影响当前设备；关闭不会停止任务。</p>
     <div id="appearance-session-instances"></div>
     </section>
     <section id="appearance-instructions-page" class="appearance-body appearance-settings-page" hidden>
     <h3 class="appearance-panel-title">自定义指令</h3>
     <!-- 用户要求只选择实例并编辑用户级全局指令，不再提供类型、环境、作用范围和项目选择。 -->
-    <div class="instruction-selectors"><label>会话类型实例<div id="instruction-instance-slot"></div></label></div>
+    <div class="instruction-selectors"><label>会话实例<div id="instruction-instance-slot"></div></label></div>
     <p id="instruction-path" class="appearance-hint instruction-path"></p>
     <textarea id="instruction-content" class="instruction-content" aria-label="自定义指令内容" spellcheck="false" disabled></textarea>
-    <div class="instruction-actions"><span id="instruction-status" class="appearance-hint" role="status"></span><button id="instruction-reload" type="button">重新读取</button><button id="instruction-save" type="button" class="primary" disabled>保存指令</button></div>
+    <p id="instruction-status" class="appearance-hint" role="status"></p>
     <p class="appearance-hint">保存至所选实例的用户级全局指令文件，重新加载后生效。</p>
     </section>
     <section id="appearance-customization-page" class="appearance-body appearance-settings-page" hidden>
@@ -1231,11 +1231,11 @@ function openAppearance() {
     <p id="appearance-runtime-status" class="appearance-notification-status" role="status" hidden></p>
     </section>
     </div></div>
-    <div class="appearance-actions"><button type="button" class="appearance-version" id="appearance-app-version" hidden disabled></button><div class="appearance-action-buttons"><button type="button" id="appearance-reset">恢复默认</button><button type="button" class="primary" id="appearance-close">完成</button></div></div>`;
+    <div class="appearance-actions"><button type="button" class="appearance-version" id="appearance-app-version" hidden disabled></button><div class="appearance-action-buttons"><button type="button" id="appearance-reset">恢复默认</button><button id="instruction-reload" type="button" hidden>重新读取</button><button id="instruction-save" type="button" class="primary" hidden disabled>保存指令</button><button type="button" class="primary" id="appearance-close">完成</button></div></div>`;
   document.body.append(dialog);
   // 用户要求设置复用主题 Select：指令实例与两种字重也使用统一组件。
   for (const [id, label, options, value] of [
-    ["instruction-instance", "会话类型实例", [], ""],
+    ["instruction-instance", "会话实例", [], ""],
     ...[["ui", "程序字重", appearance.uiFontWeight], ["code", "代码字重", appearance.codeFontWeight]]
       .map(([kind, label, weight]) => [`appearance-${kind}-font-weight`, label,
         [{ value: "400", label: "常规" }, { value: "500", label: "中等" }, { value: "600", label: "半粗" }], String(weight)])
@@ -1412,6 +1412,11 @@ function openAppearance() {
     if (!page?.isConnected) return;
     for (const panel of panelHost.querySelectorAll(".appearance-settings-page"))
       panel.hidden = panel !== page;
+    // 用户要求指令按钮使用底部“完成”的位置；该页只显示重新读取和保存，切换到其他页时恢复“完成”。
+    const instructions = page.id === "appearance-instructions-page";
+    for (const id of ["instruction-reload", "instruction-save"])
+      $(`#${id}`, dialog).hidden = !instructions;
+    $("#appearance-close", dialog).hidden = instructions;
     setSettingsNav(entry);
     page.scrollTop = 0;
     if (focus) entry?.focus({ preventScroll: true });
@@ -1455,7 +1460,7 @@ function openAppearance() {
     if (!dialog.isConnected || !dialog.open) return;
     showAppearancePage(customizationPage, "外观", customizationEntry);
   };
-  for (const [name, label] of [["types", "会话类型"], ["instructions", "自定义指令"]]) {
+  for (const [name, label] of [["types", "会话实例"], ["instructions", "自定义指令"]]) {
     const entry = $(`#appearance-${name}-entry`, dialog);
     entry.onclick = () => {
       showAppearancePage($(`#appearance-${name}-page`, dialog), label, entry);
@@ -3330,9 +3335,15 @@ function rememberThreadDisplay(value = thread, { persist = true } = {}) {
     tokenUsage: usage || typeof value.tokenUsage?.last?.totalTokens === "number"
       && Number.isFinite(value.tokenUsage.last.totalTokens) && value.tokenUsage.last.totalTokens >= 0
       ? { modelContextWindow: usage?.total ?? null,
-        // 用户要求重连缓存仍区分配置容量与原生能力，并保留最后请求模型，不能把配置来源丢成协议报告值。
+        // 用户要求原生容量、原生百分比和压缩配置独立缓存；旧配置容量不能在重连后冒充原生报告。
         ...(typeof value.tokenUsage.model === "string" ? { model: value.tokenUsage.model } : {}),
         ...(value.tokenUsage.modelContextWindowSource ? { modelContextWindowSource: value.tokenUsage.modelContextWindowSource } : {}),
+        ...(usage && typeof value.tokenUsage.usedPercentage === "number"
+          && Number.isFinite(value.tokenUsage.usedPercentage) && value.tokenUsage.usedPercentage >= 0
+          && value.tokenUsage.usedPercentage <= 100 ? { usedPercentage: value.tokenUsage.usedPercentage } : {}),
+        ...(value.tokenUsage.compaction && typeof value.tokenUsage.compaction === "object"
+          ? { compaction: { windowTokens: value.tokenUsage.compaction.windowTokens,
+            triggerPercent: value.tokenUsage.compaction.triggerPercent } } : {}),
         last: { totalTokens: value.tokenUsage.last.totalTokens } } : null,
     ...(Object.hasOwn(value, "goal") ? { goal: value.goal } : {}),
     ...(Array.isArray(value.queuedMessages) ? { queuedMessages: value.queuedMessages } : {}),
@@ -3773,6 +3784,8 @@ function cancelPromptOptimization(record) {
 function updatePromptOptimization() {
   const control = $("#prompt-optimize");
   if (!control) return;
+  // 用户要求提示词优化独立于会话类型：Claude 实例也显示，复用独立优化服务和桌面设置，不依赖原生 CLI/CDP 能力。
+  control.hidden = false;
   const scope = promptOptimizationScope(), signature = promptOptimizationSignature();
   for (const record of promptOptimizations.values()) {
     if (record.state === "pending" && (record.scope !== scope || record.version !== selectionVersion
@@ -3993,28 +4006,42 @@ function closeComposerMenus({ keepContextUsage = false } = {}) {
 function tokenCount(value) { return value >= 1000 ? `${Number((value / 1000).toFixed(1))}k` : String(Math.round(value)); }
 function contextUsage(info) {
   const total = info?.modelContextWindow, value = info?.last?.totalTokens;
-  if (typeof total !== "number" || !Number.isFinite(total) || total <= 0
+  // 用户要求沿用各自原生口径，不把旧缓存中的显式配置容量或压缩窗口用作分母，也不套用另一客户端的预留比例。
+  if (info?.modelContextWindowSource?.kind === "configuration"
+      || typeof total !== "number" || !Number.isFinite(total) || total <= 0
       || typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
   const used = Math.min(value, total);
-  return { used, total, percent: Math.round(used / total * 100) };
+  const reported = info.usedPercentage;
+  const nativePercentage = typeof reported === "number" && Number.isFinite(reported)
+    && reported >= 0 && reported <= 100;
+  return { used, total, percent: nativePercentage ? reported : Math.round(used / total * 100),
+    reported: nativePercentage };
+}
+// 用户要求压缩参数独立展示：配置值只作说明，不参与主容量和占用率计算。
+function contextCompactionText(info) {
+  const window = info?.compaction?.windowTokens, trigger = info?.compaction?.triggerPercent, parts = [];
+  if (typeof window === "number" && Number.isFinite(window) && window > 0)
+    parts.push(`配置压缩窗口 ${tokenCount(window)}`);
+  if (typeof trigger === "number" && Number.isFinite(trigger) && trigger > 0 && trigger <= 100)
+    parts.push(`提前压缩比例 ${trigger}%`);
+  return parts.length ? `${parts.join("，")}；实际触发由原生程序决定` : "";
 }
 function contextUsageText() {
-  const info = currentThreadDisplay()?.tokenUsage, usage = contextUsage(info);
+  const info = currentThreadDisplay()?.tokenUsage, usage = contextUsage(info), compaction = contextCompactionText(info);
   if (usage) {
-    // 用户要求有效配置容量明确标注来源，不冒称上游协议报告；百分比仍用原生最后请求用量计算，压缩比例不参与容量。
-    const source = info.modelContextWindowSource, configured = source?.kind === "configuration";
     return {
-      value: `${tokenCount(usage.used)} / ${usage.percent}%，${tokenCount(usage.total)}${configured ? "（配置容量）" : ""}`,
+      value: `${tokenCount(usage.used)} / ${usage.percent}%，${tokenCount(usage.total)}`,
       description: `最后一次请求的上下文占用：${usage.used.toLocaleString()} / ${usage.total.toLocaleString()} Token，不是累计用量`
-        + (configured ? `；容量来自 Claude 有效配置 ${source.key}，不是协议报告值${info.model ? `；最后请求模型：${info.model}` : ""}。` : "")
+        + (usage.reported ? "；占用率采用原生报告。" : "。"),
+      compaction
     };
   }
   // 用户允许容量未知时诚实降级：显示原生已知用量，但不估算容量或百分比；环形指示仍保持“—”。
   const value = info?.last?.totalTokens;
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? { value: `${tokenCount(value)} Token，容量尚未提供`,
-      description: `最后一次请求的上下文占用：${value.toLocaleString()} Token，不是累计用量；原生尚未提供模型容量，无法计算百分比。` }
-    : { value: "上下文信息尚未提供", description: "原生会话尚未提供有效的上下文容量或最后一次请求用量。" };
+      description: `最后一次请求的上下文占用：${value.toLocaleString()} Token，不是累计用量；原生尚未提供模型容量，无法计算百分比。`, compaction }
+    : { value: "上下文信息尚未提供", description: "原生会话尚未提供有效的上下文容量或最后一次请求用量。", compaction };
 }
 function closeContextUsageTip() {
   if (!contextUsageTip) return;
@@ -4063,10 +4090,12 @@ function updateContextUsage() {
   }
   ring.textContent = usage ? `${usage.percent}%` : "—";
   ring.style.setProperty("--context-progress", `${(usage?.percent || 0) * 3.6}deg`);
-  trigger.setAttribute("aria-label", `${text.value}。${text.description}`);
+  trigger.setAttribute("aria-label", `${text.value}。${text.description}${text.compaction ? ` ${text.compaction}` : ""}`);
   if (contextUsageTip?.trigger === trigger) {
     const { node } = contextUsageTip;
     if (node.firstElementChild.textContent !== text.value) node.firstElementChild.textContent = text.value;
+    node.children[1].textContent = text.compaction;
+    node.children[1].hidden = !text.compaction;
     fitContextUsageTip();
   }
 }
@@ -4081,7 +4110,7 @@ function showContextUsageTip(pinned = false) {
   closePopup(); closeComposerMenus();
   const node = element("div", "ui-popup context-usage-tooltip");
   node.id = "context-usage-tooltip"; node.setAttribute("role", "tooltip");
-  node.append(element("div", "context-usage-value muted"));
+  node.append(element("div", "context-usage-value muted"), element("div", "context-usage-config muted"));
   contextUsageTip = { node, trigger, pinned, closeTimer: null };
   trigger.setAttribute("aria-expanded", "true");
   trigger.setAttribute("aria-describedby", node.id);
@@ -13265,7 +13294,6 @@ function updateComposer() {
       disabled: !!goalComposerReason(), action: () => selectGoalCommand(null) },
     { label: "添加图片", icon: "image", disabled: deleting || !composerCanAddImages(), action: chooseComposerImages }
   ].filter(option => !isClaude() || !["compact", "goal"].includes(option.value));
-  $("#prompt-optimize").hidden = isClaude();
   add.disabled = add.menuOptions.every(option => option.disabled);
   if (activePopup?.trigger === add) renderPopup();
   const queuedEditAction = queuedEditSubmittingAction();
@@ -13342,7 +13370,7 @@ function updateComposer() {
   refitComposerMenus();
   $("#pending-area").replaceChildren();
   if (!sessionTypeEnabled) $("#pending-area").append(element("div", "pending-banner",
-    "此会话实例尚未启用。可在「设置 → 会话类型」中启用对应运行环境。"));
+    "此会话实例尚未启用。可在「设置 → 会话实例」中启用对应运行环境。"));
   const deletion = threadDeletions.get(threadDeletionKey(selectedId));
   if (deletion && !["confirming", "deleted"].includes(deletion.state) && pendingFeedbackReady(deletion)) {
     const box = element("div", "pending-banner", "正在确认会话删除结果。");

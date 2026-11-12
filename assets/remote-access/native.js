@@ -1,6 +1,6 @@
 (() => {
-  // 用户要求旧桌面页面升级到 8 张图片校验；守卫与底部公布版本同步递增，仍先清理旧桥接再安装。
-  if (window.__codexElvesRemoteAccess?.version === 142) return;
+  // 用户要求旧页面也修复带图队列引导；守卫与底部版本同步递增，先清理旧桥接再安装，并保留 8 张图片限制。
+  if (window.__codexElvesRemoteAccess?.version === 143) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -5445,6 +5445,53 @@
       ? { ...item, detail: null } : item);
     return sameJsonValue(canonical(left), canonical(right));
   }
+  function queuedNativeImageInput(attachment) {
+    if (typeof attachment?.src !== "string" || !attachment.src) return null;
+    let path = attachment.localPath;
+    if (!path) {
+      if (/^data:image\//i.test(attachment.src)) return { type: "image", url: attachment.src };
+      path = attachment.src;
+      if (path.startsWith("file://")) {
+        try { path = decodeURIComponent(path.replace(/^file:\/\//i, "")); }
+        catch { return null; }
+      }
+    }
+    // 原生把非内联 src 当作路径；只为绝对路径证明同一文件，远程 URL 和相对路径仍不能据此放行。
+    if (typeof path !== "string" || !/^(?:[a-z]:[\\/]|\/|\\\\)/i.test(path)) return null;
+    return { type: "localImage", path };
+  }
+  function sameQueuedSteerInput(prepared, original, message) {
+    if (sameQueuedUserInput(prepared, original)) return true;
+    if (!Array.isArray(prepared) || !Array.isArray(original) || prepared.length !== original.length)
+      return false;
+    const attachments = message?.context?.imageAttachments;
+    if (!Array.isArray(attachments)) return false;
+    const usedAttachments = new Set();
+    // 用户要求兼容原生 image → localImage 转换，不能绕过图片校验：
+    // 仅按同条消息中唯一的 src/localPath 及原生 file:// 解码规则证明对应；文本、顺序和额外字段仍严格比较。
+    // 此兼容仅用于引导准备结果与服务端原输入的核对，不能放宽队列编辑、历史回执或不同准备阶段之间的校验。
+    return original.every((item, index) => {
+      const value = prepared[index];
+      if (sameQueuedUserInput([value], [item])) return true;
+      if (item?.type !== "image" || typeof item.url !== "string" || !item.url
+          || item.detail != null || Object.keys(item).some(key => !["type", "url", "detail"].includes(key))
+          || value?.type !== "localImage" || typeof value.path !== "string" || !value.path
+          || Object.keys(value).some(key => !["type", "path"].includes(key))
+          || /[\u0000-\u001f\u007f]/u.test(value.path)) return false;
+      const candidates = attachments.flatMap((attachment, attachmentIndex) =>
+        attachment?.src === item.url ? [attachmentIndex] : []);
+      if (candidates.length !== 1 || usedAttachments.has(candidates[0])
+          || original.filter(input => input?.type === "image" && input.url === item.url).length !== 1
+          || prepared.filter(input => input?.type === "localImage" && input.path === value.path).length !== 1)
+        return false;
+      const expected = queuedNativeImageInput(attachments[candidates[0]]);
+      if (!sameJsonValue(value, expected)
+          || attachments.filter(attachment => sameJsonValue(queuedNativeImageInput(attachment), expected)).length !== 1)
+        return false;
+      usedAttachments.add(candidates[0]);
+      return true;
+    });
+  }
   async function readServerQueuedSubmissions(threadId, sourceManager = manager) {
     const submissions = [];
     const cursors = new Set();
@@ -6558,12 +6605,13 @@
           && value.request.clientUserMessageId === preparedClientId
           && sameQueuedUserInput(value.request.input, steer?.input)
           && restoreMatches(value.context?.restoreMessage);
+        const serverInputMatches = serverInput == null || sameQueuedSteerInput(steer?.input, serverInput, baseline);
         if (submission.conversationId !== threadId
             || submission.resume?.conversationId != null && submission.resume.conversationId !== threadId
             || steer?.clientUserMessageId !== preparedClientId
             || !restoreMatches(steer.restoreMessage) || !Array.isArray(steer.input)
             || !targetMatches(steer.expectedTurnId) || !targetMatches(steer.targetTurnId)
-            || serverInput != null && !sameQueuedUserInput(steer.input, serverInput)
+            || !serverInputMatches
             || start == null && !(sourceManager.__codexElvesRequestClientManager && phase === "steer")
             || start != null && !startMatches(start)
             || admissionStart != null && !startMatches(admissionStart)) {
@@ -6577,7 +6625,7 @@
             "steer.input": Array.isArray(steer?.input),
             "steer.expectedTurnId": targetMatches(steer?.expectedTurnId),
             "steer.targetTurnId": targetMatches(steer?.targetTurnId),
-            "steer.serverInput": serverInput == null || sameQueuedUserInput(steer?.input, serverInput),
+            "steer.serverInput": serverInputMatches,
             "start.required": start != null || !!sourceManager.__codexElvesRequestClientManager && phase === "steer"
           };
           for (const [prefix, value] of [["start", start], ["admissionStart", admissionStart]]) {
@@ -7684,7 +7732,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 142, call,
+    version: 143, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {

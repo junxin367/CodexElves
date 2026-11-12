@@ -295,7 +295,9 @@ export function mountSessionMenu({
     return [...root.querySelectorAll("button:not(:disabled)")].filter(node => !node.closest("[hidden]"));
   }
   function render() {
-    const focusedKey = menu.contains(document.activeElement) ? document.activeElement.dataset.menuKey : null;
+    const previousKey = menu.contains(document.activeElement) ? document.activeElement.dataset.menuKey : null;
+    // 手机转为 PC 布局时，浏览器入口会移除；原焦点回到相邻的文件入口，避免键盘焦点落到页面外。
+    const focusedKey = previousKey === "browser" && desktop() ? "files" : previousKey;
     cancelPress(); hideContext(); times.length = 0; mutationButtons.clear(); menu.replaceChildren();
     const tools = element("div", "session-related-menu-group");
     menu.append(tools);
@@ -304,8 +306,11 @@ export function mountSessionMenu({
     changes.dataset.menuKey = "changes"; tools.append(changes);
     const files = itemButton("文件", openFiles, []);
     files.dataset.menuKey = "files"; tools.append(files);
-    const browser = itemButton("浏览器", openBrowser, []);
-    browser.dataset.menuKey = "browser"; tools.append(browser);
+    // 用户要求 PC 布局（宽于 760px）不显示浏览器；手机保留，跨断点缩放时由现有 resize 重渲染同步。
+    if (!desktop()) {
+      const browser = itemButton("浏览器", openBrowser, []);
+      browser.dataset.menuKey = "browser"; tools.append(browser);
+    }
     // 旧后台未声明独立能力时继续置灰；新后台的子智能体和侧边会话分别受控，不展示禁用能力的旧缓存。
     if (context?.subagentsEnabled === false && context?.sideThreadsEnabled === false) {
       const subagents = section("子智能体");

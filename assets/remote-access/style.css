@@ -119,10 +119,13 @@ html{scrollbar-color:var(--muted) transparent}
 @media(prefers-color-scheme:dark){:root{--bg:#171717;--side:#202020;--text:#ededed;--muted:#a0a0a0;--line:#343434;--hover:#303030;--code:#222;--accent:#eee;--on-accent:#171717;--danger:#ff9c97;--green:#77c7a0;--skill:#75b7ef}.approval-card{border-color:#615031}}
 @media(min-width:761px){.workspace.sidebar-collapsed{--sidebar-layout-width:0px}.workspace.sidebar-collapsed .sidebar{visibility:hidden;overflow:hidden;border-right:0;padding-right:0;padding-left:0;pointer-events:none}#close-sidebar,.workspace.sidebar-collapsed #open-sidebar{display:grid;min-width:32px;min-height:32px;place-items:center;padding:0}}
 @media(max-width:760px){.workspace{grid-template-columns:minmax(0,1fr)}.sidebar{position:fixed;left:0;top:0;bottom:0;width:80vw;z-index:20;transform:translateX(-100%);transition:transform .15s}.sidebar-open .sidebar{transform:translateX(0)}.sidebar-open .sidebar-backdrop{display:block;position:fixed;inset:0;background:#0007;z-index:19}.messages{padding:22px 18px}.conversation-header{padding:3px 12px;min-height:48px;gap:8px}.thread-heading strong{font-size:0.85714rem}.thread-heading>span{font-size:0.64286rem}.connection-state{font-size:0.64286rem;max-width:80px;white-space:normal;text-align:right}.composer-area{padding:10px 12px max(10px,env(safe-area-inset-bottom))}.approval-area{padding:0 12px}.user-bubble{max-width:95%;font-size:0.92857rem}.agent-message{font-size:0.92857rem}.composer-note{font-size:0.64286rem}.pin-button{opacity:.7}#open-sidebar,#close-sidebar{display:block}.welcome{margin:16vh auto}.welcome h1{font-size:1.71429rem}.sidebar-footer{padding-bottom:max(6px,env(safe-area-inset-bottom))}}
+/* 用户要求输入区上内边距为 4px，下内边距至少 20px 并保留安全区；桌面和手机共用，两侧留白沿用各自规则。 */
+.composer-area{padding-top:4px;padding-bottom:max(20px,env(safe-area-inset-bottom))}
 /* 用户要求输入框使用独立的不透明表面色；与 applyAppearance 的默认深色 12.8% 混色结果同步，
  * 自定义配色由 JS 写入 --composer-bg，主题切换与全局颜色同样过渡 300ms，桌面和手机共用。 */
 @media(prefers-color-scheme:dark){:root{--composer-bg:#323232}}
-.composer{position:relative;background:var(--composer-bg,var(--side))}
+/* 用户指定输入框上下、左右内边距均为 8px，桌面与手机共用；过期提示的等高计算须同步核对。 */
+.composer{position:relative;background:var(--composer-bg,var(--side));padding:8px 8px}
 .composer-anchor{position:relative;min-width:0}
 .composer-anchor>.approval-area{position:absolute;left:0;right:0;bottom:calc(100% + 8px + var(--approval-lift,0px));z-index:10;max-height:min(35dvh,var(--approval-available-height,35dvh));padding:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;border-radius:12px;background:var(--side);box-shadow:0 8px 28px #0002}
 .composer-anchor>.approval-area:empty{display:none}
@@ -234,6 +237,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .sidebar-header-actions{display:flex;align-items:center;gap:0;flex-shrink:0}
 /* 用户要求顶部两图标更紧凑，新增类型筛选在其左侧；0px 容器间距、28px 按钮保留独立点击区域。 */
 .sidebar-view-toggle,.sidebar-search-toggle,.sidebar-type-filter{display:flex;align-items:center;justify-content:center;width:28px;height:var(--control-icon-size);padding:0;line-height:1;color:var(--muted);border-radius:var(--radius-control)}
+/* 用户要求类型筛选图标与右侧切换、搜索图标等大：三者统一为 16×16px，保留原 28px 按钮宽度，不随图标按钮的 20px 字号放大。 */
+.sidebar-header-actions>.icon-button>.ui-icon{flex:0 0 16px;width:16px;height:16px}
 .sidebar-header strong{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .sidebar-type-filter[data-backend=claude]{color:#d97757}
 .sidebar-type-filter[data-backend=codex]{color:var(--text)}
@@ -262,8 +267,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .thread-row>.thread-state,.thread-row>.row-menu-button{grid-area:1/2;justify-self:center;margin-right:0}
 .thread-row>.thread-state{pointer-events:none}
 .thread-row:hover{background:var(--hover)}
+/* 用户要求选中会话时标题不额外加粗：最近、项目和置顶列表共用选中底色，文字继续继承原程序字重。 */
 .thread-row.selected{background:var(--hover)}
-.thread-row.selected .thread-link{font-weight:500}
 .thread-link{min-height:32px;padding:4px 8px;font-size:.92857rem;line-height:24px}
 .thread-row-recent>.thread-link{min-height:48px;padding:6px 8px;line-height:normal}
 .thread-copy{display:flex;flex:1;flex-direction:column;justify-content:center;min-width:0;overflow:hidden}
@@ -346,8 +351,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .thread-backend-icon>.ui-icon{width:100%;height:100%}
 /* 用户要求两类品牌图标与文字在同一水平线上：按各自文字的 1em 缩放并在所在行居中，
    图标自身用单倍行高消除内联基线留白；最近、项目/置顶、类型按钮及弹层同步核对，3px 间距保持不变。
-   实例筛选按钮和菜单也共用此规则，图标与各自文字等大，不沿用通用图标的固定 16px。 */
-.thread-link>.session-type-icon,.thread-label-line>.session-type-icon,.new-chat-project>.new-chat-backend>.ui-icon,.backend-picker-popup .popup-option>.ui-icon,.sidebar-type-filter>.ui-icon,.sidebar-type-popup .popup-option>.ui-icon{display:inline-flex;align-items:center;justify-content:center;align-self:center;flex:0 0 1em;width:1em;height:1em;line-height:1;vertical-align:middle}
+   实例筛选菜单也与文字等大；无文字的顶部筛选按钮改用上方与右侧图标共用的 16px 规则。 */
+.thread-link>.session-type-icon,.thread-label-line>.session-type-icon,.new-chat-project>.new-chat-backend>.ui-icon,.backend-picker-popup .popup-option>.ui-icon,.sidebar-type-popup .popup-option>.ui-icon{display:inline-flex;align-items:center;justify-content:center;align-self:center;flex:0 0 1em;width:1em;height:1em;line-height:1;vertical-align:middle}
 /* 用户要求 Claude 保持品牌橙色；菜单需兼容旧值 claude 与 claude:local / claude:wsl:… 实例 ID。
    颜色仅作用于指定位置的图标，不染文字、Codex 或勾选。 */
 .new-chat-backend>.backend-icon-claude,.backend-picker-popup .popup-option:is([data-value=claude],[data-value^="claude:"])>.ui-icon,.thread-link>.claude-session-icon,.thread-label-line>.claude-session-icon,.thread-backend-icon[data-backend=claude]{color:#d97757}
@@ -1236,17 +1241,17 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 /*
  * 用户要求：侧边会话过期提示块仅调整高度，与整个输入框等高，保留原有提示样式。
  * 高度对齐无附件、无编辑提示且完全展开的空输入框：
- * 桌面：100px 输入区 + 24px 上下内边距 + 2px 边框 + 6px 工具栏间距 + 工具栏高度，默认 164px。
- * 手机：80px 输入区 + 同样的 32px 固定间距 + 工具栏高度，默认 148px。
+ * 桌面：100px 输入区 + 16px 上下内边距 + 2px 边框 + 6px 工具栏间距 + 工具栏高度，默认 156px。
+ * 手机：80px 输入区 + 同样的 24px 固定间距 + 工具栏高度，默认 140px。
  * 调整 .composer、.prompt-editor、.composer-toolbar 或 --control-toolbar-size 时，
  * 须同步核对本块及下方 760px 断点；不要据此改动原有字体颜色、背景、边框、圆角或内边距。
  * 使用 min-height，允许大字号或窄屏下的提示文字换行撑高，避免裁切。
  */
-.composer-anchor>.side-thread-expired-banner{min-height:calc(132px + var(--control-toolbar-size))}
+.composer-anchor>.side-thread-expired-banner{min-height:calc(124px + var(--control-toolbar-size))}
 .side-thread-expired-banner{display:flex;flex-direction:column;gap:4px;margin:0;padding:12px 14px;border:1px solid color-mix(in srgb,var(--danger) 28%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--danger) 7%,var(--side));color:var(--text);line-height:1.6}
 .side-thread-expired-banner strong{font-size:.85714rem;color:var(--danger);font-weight:600}
 .side-thread-expired-banner span{font-size:.78571rem;color:var(--muted)}
-@media(max-width:760px){.composer-anchor>.side-thread-expired-banner{min-height:calc(112px + var(--control-toolbar-size))}}
+@media(max-width:760px){.composer-anchor>.side-thread-expired-banner{min-height:calc(104px + var(--control-toolbar-size))}}
 
 /* 用户要求字体区分程序与代码：系统字体默认 14px；文件预览仍保留独立阅读字号。 */
 :root{font-family:var(--ui-font-family,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif)}
@@ -1303,8 +1308,6 @@ body{font-weight:var(--ui-font-weight,400)}
 .instruction-selectors .select-trigger{width:100%;max-width:100%;padding:8px}
 .instruction-path{user-select:text}
 .instruction-content{display:block;width:100%;height:45dvh;min-height:180px;resize:vertical;font-size:var(--code-font-size,14px);line-height:1.7;tab-size:2}
-.instruction-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin:12px 0}
-.instruction-actions>.appearance-hint{flex:1 1 160px;margin:0}
 /* 正常读取后隐藏空状态，避免为已移除的提示保留一行。 */
 #instruction-status:empty{display:none}
 /* PC 固定菜单不拦截正文/侧栏点击，菜单自身仍可交互；手机不添加该类，沿用原遮罩和关闭行为。 */

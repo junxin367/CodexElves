@@ -234,21 +234,68 @@ test("上下文容量缺失时显示真实最后请求用量，不伪造百分�
   assert.equal(cache.context.currentThreadDisplay().tokenUsage.modelContextWindow, null);
 });
 
-test("Claude 配置容量显示600k及真实比例，重连缓存保留来源和请求模型", () => {
+test("Claude 原生容量与百分比独立于600k压缩配置，重连缓存保留原生口径", () => {
   const { context, persisted } = threadDisplayCacheHarness();
   vm.runInContext(app.slice(app.indexOf("function tokenCount("), app.indexOf("function closeContextUsageTip(")), context);
-  const usage = { modelContextWindow: 600000, model: "gpt-6.1-sol",
-    modelContextWindowSource: { kind: "configuration", key: "CLAUDE_CODE_MAX_CONTEXT_TOKENS", scope: "user-settings.env", model: "gpt-6.1-sol" },
-    last: { totalTokens: 108213 } };
+  const usage = { modelContextWindow: 1000000, usedPercentage: 21.6, model: "claude-opus-5-5",
+    modelContextWindowSource: { kind: "native", key: "context_window.context_window_size", model: "claude-opus-5-5" },
+    compaction: { windowTokens: 600000, triggerPercent: 90 }, last: { totalTokens: 215496 } };
   context.rememberThreadDisplay({ id: "main", model: "gpt-6.1-sol", tokenUsage: usage });
   const text = context.contextUsageText();
-  assert.match(text.value, /18%，600k（配置容量）/);
-  assert.match(text.description, /CLAUDE_CODE_MAX_CONTEXT_TOKENS.*不是协议报告值.*gpt-6\.1-sol/);
+  assert.match(text.value, /21\.6%，1000k/);
+  assert.doesNotMatch(text.value, /600k|36%|配置容量/);
+  assert.match(text.description, /占用率采用原生报告/);
+  assert.match(text.compaction, /配置压缩窗口 600k.*提前压缩比例 90%/);
   assert.deepEqual(persisted.at(-1).value.tokenUsage.modelContextWindowSource, usage.modelContextWindowSource);
   assert.equal(persisted.at(-1).value.tokenUsage.model, usage.model);
+  assert.equal(persisted.at(-1).value.tokenUsage.usedPercentage, 21.6);
+  assert.deepEqual(persisted.at(-1).value.tokenUsage.compaction, usage.compaction);
   context.rememberThreadDisplay({ id: "main", model: "other-model", tokenUsage: { modelContextWindow: null, model: "other-model", last: { totalTokens: 500 } } });
   assert.match(context.contextUsageText().value, /容量尚未提供/);
   assert.equal(context.currentThreadDisplay().tokenUsage.modelContextWindowSource, undefined, "新模型的明确未知值不能复用旧容量来源");
+});
+
+test("旧配置容量缓存保持未知，Codex原生475k不被压缩阈值覆盖", () => {
+  let info = { modelContextWindow: 600000, modelContextWindowSource: { kind: "configuration" },
+    last: { totalTokens: 215496 }, compaction: { windowTokens: 600000, triggerPercent: 90 } };
+  const context = vm.createContext({ currentThreadDisplay: () => ({ tokenUsage: info }) });
+  vm.runInContext(app.slice(app.indexOf("function tokenCount("), app.indexOf("function closeContextUsageTip(")), context);
+  assert.match(context.contextUsageText().value, /容量尚未提供/);
+  assert.doesNotMatch(context.contextUsageText().value, /%/);
+  assert.match(context.contextUsageText().compaction, /600k.*90%/);
+  info = { modelContextWindow: 475000, last: { totalTokens: 194100 }, compaction: { windowTokens: 900000 } };
+  assert.equal(context.contextUsageText().value, "194.1k / 41%，475k");
+  assert.match(context.contextUsageText().compaction, /配置压缩窗口 900k/);
+  for (const invalid of [NaN, Infinity, -1, 101, "50"]) {
+    info.usedPercentage = invalid;
+    assert.equal(context.contextUsageText().value, "194.1k / 41%，475k");
+    assert.doesNotMatch(context.contextUsageText().description, /采用原生报告/);
+  }
+});
+
+test("上下文弹层把压缩配置显示在独立一行，未知容量仍不显示百分比", () => {
+  let info = { modelContextWindow: null, last: { totalTokens: 215496 },
+    compaction: { windowTokens: 600000, triggerPercent: 90 } };
+  const value = { textContent: "" }, configuration = { textContent: "", hidden: true }, attributes = {};
+  const node = { firstElementChild: value, children: [value, configuration] };
+  const ring = { textContent: "", style: { setProperty(name, data) { this[name] = data; } } };
+  const trigger = { setAttribute(name, data) { attributes[name] = data; } };
+  const context = vm.createContext({ currentThreadDisplay: () => ({ tokenUsage: info }),
+    $: selector => selector === "#context-info" ? trigger : ring,
+    contextUsageTip: { node, trigger }, fitContextUsageTip() {} });
+  vm.runInContext(sourceSection("function tokenCount(", "function closeContextUsageTip(")
+    + sourceSection("function updateContextUsage()", "function showContextUsageTip("), context);
+  context.updateContextUsage();
+  assert.match(value.textContent, /容量尚未提供/);
+  assert.equal(ring.textContent, "—");
+  assert.equal(configuration.hidden, false);
+  assert.match(configuration.textContent, /600k.*90%/);
+  assert.match(attributes["aria-label"], /600k.*90%/);
+  info = { modelContextWindow: 1000000, usedPercentage: 21.6, last: { totalTokens: 215496 } };
+  context.updateContextUsage();
+  assert.equal(ring.textContent, "21.6%");
+  assert.equal(configuration.hidden, true, "压缩配置消失后清理旧辅助信息");
+  assert.equal(configuration.textContent, "");
 });
 
 function richFileHarness() {
@@ -1002,7 +1049,7 @@ function instructionSettingsHarness(api) {
     const nodes = new Map();
     for (const name of ["content", "status", "save", "reload", "path"])
       nodes.set("#instruction-" + name, element("input"));
-    nodes.set("#instruction-instance", select.selectControl("instruction-instance", "会话类型实例", [], ""));
+    nodes.set("#instruction-instance", select.selectControl("instruction-instance", "会话实例", [], ""));
     if (withDetectionControls) for (const name of ["detect-environments", "environments-status", "environments"])
       nodes.set("#appearance-" + name, element("div"));
     const dialog = { isConnected: true, nodes };
@@ -1484,8 +1531,8 @@ test("Windows 打包拒绝缺少分支信息、运行模式或压缩恢复的旧
     readFile(new URL("../crates/codex-elves-core/src/remote_access/workspace.rs", import.meta.url), "utf8"),
   ]);
   const current = { backend, service, workspace, app, native };
-  // 原生队列诊断升级到桥接 142，打包正例同步；下方旧协议和能力缺失的拒绝断言保留。
-  assert.deepEqual(verify(current), { protocol: 5, bridge: 142 });
+  // 带图队列引导兼容升级到桥接 143，打包正例同步；下方旧协议和能力缺失的拒绝断言保留。
+  assert.deepEqual(verify(current), { protocol: 5, bridge: 143 });
   for (const obsolete of [2, 3, 4])
     assert.throws(() => verify({ ...current, service: service.replace("PROTOCOL_VERSION: u32 = 5", `PROTOCOL_VERSION: u32 = ${obsolete}`) }), /后台协议不能低于 5/);
   assert.throws(() => verify({ ...current, workspace: workspace.replace("async fn branch_metadata(", "async fn obsolete_metadata(") }), /缺少真实分支/);
@@ -3261,6 +3308,123 @@ function sourceSection(start, end) {
   assert.ok(from >= 0 && to > from);
   return app.slice(from, to);
 }
+
+function independentPromptOptimizationHarness(backend = "claude") {
+  const control = { hidden: true, dataset: {}, attributes: {},
+    setAttribute(name, value) { this.attributes[name] = value; } };
+  const prompt = { value: "请整理这段需求", disabled: false, focus() {} }, add = {};
+  const calls = [], notices = [], attachments = [{ id: "fixture-image", src: "data:image/png;base64,AQID" }];
+  const h = { control, prompt, add, calls, notices, attachments,
+    respond: async () => ({ state: "completed", result: { state: "completed", text: "优化后的需求", totalTokens: 12 } }) };
+  let sequence = 0;
+  const context = {
+    backend, scope: `new:project:${backend}:fixture-a`, readOnly: false,
+    session: { device: { id: "device-a" }, nativeConnected: false, serviceConnected: false,
+      capabilities: { promptOptimization: true } },
+    connected: false, busy: false, stopping: false, pending: null, selectionVersion: 1,
+    editingQueuedMessage: null, selectedSkills: [{ name: "fixture-skill", path: "/fixtures/skill" }],
+    promptOptimizations: new Map(),
+    turns: new Map([["turn", { items: [
+      { type: "userMessage", text: "先前需求" }, { type: "agentMessage", text: "已有解释" },
+    ] }]]),
+    $: selector => selector === "#prompt" ? prompt : selector === "#composer-add" ? add : control,
+    draftKey: () => context.scope, threadReadOnly: () => context.readOnly,
+    isClaude: () => context.backend === "claude",
+    currentThreadDisplay: () => ({ tokenUsage: null }), contextUsage: () => null,
+    compactUsageDescription: () => "", compactCommandAvailable: () => false, compactContext() {},
+    goalComposerReason: () => "当前原生会话不提供目标", selectGoalCommand() {},
+    deleting: false, composerCanAddImages: () => true, chooseComposerImages() {},
+    activePopup: null, renderPopup() {}, closePopup() {}, closeComposerMenus() {},
+    currentModelId: () => context.backend === "claude" ? "claude-opus-5-5" : "gpt-fixture",
+    randomId: () => `optimize-${++sequence}`, messageCopyText: item => item.text,
+    writePromptContent: (node, text) => { node.value = text; }, setPromptSelection() {}, rememberDraft() {},
+    notice: (message, error = false) => notices.push({ message, error }), tokenCount: String,
+    api: async (path, payload, id) => {
+      calls.push({ path, payload: JSON.parse(JSON.stringify(payload)), id });
+      if (path === "/api/action/cancelPromptOptimize") return { state: "completed", result: { state: "cancelled" } };
+      assert.equal(path, "/api/action/optimizePrompt", "独立优化不能请求会话、模型目录或原生 CLI");
+      return h.respond();
+    },
+  };
+  nodeVm.createContext(context);
+  const composer = app.indexOf("function updateComposer(");
+  const tools = app.indexOf('  const add = $("#composer-add");', composer);
+  const end = app.indexOf("  const queuedEditAction = queuedEditSubmittingAction();", tools);
+  assert.ok(composer >= 0 && tools > composer && end > tools);
+  nodeVm.runInContext(sourceSection("function promptOptimizationScope()", "function newChatProjectOptions(")
+    + `\nfunction renderComposerTools(){${app.slice(tools, end)}}`, context);
+  context.updateComposer = () => { context.renderComposerTools(); context.updatePromptOptimization(); };
+  context.updateComposer();
+  h.context = context;
+  return h;
+}
+
+test("Claude 与 Codex 均显示独立提示词优化，不依赖原生连接并保留恢复、附件和写入限制", async () => {
+  for (const backend of ["claude", "codex"]) {
+    const h = independentPromptOptimizationHarness(backend), { context, control, prompt } = h;
+    const skills = JSON.stringify(context.selectedSkills), images = JSON.stringify(h.attachments);
+    assert.equal(control.hidden, false);
+    assert.equal(control.disabled, false, "未连接原生服务也可以使用独立优化");
+    assert.deepEqual(Array.from(h.add.menuOptions, option => option.value || option.label),
+      backend === "claude" ? ["添加图片"] : ["compact", "goal", "添加图片"]);
+    await context.activatePromptOptimization();
+    assert.equal(prompt.value, "优化后的需求");
+    assert.equal(control.dataset.state, "optimized");
+    assert.equal(h.calls.length, 1);
+    assert.deepEqual(Object.keys(h.calls[0].payload).sort(), ["input", "model", "recentContext"]);
+    assert.equal(h.calls[0].payload.model, backend === "claude" ? "claude-opus-5-5" : "gpt-fixture");
+    assert.deepEqual(h.calls[0].payload.recentContext, { user: "先前需求", assistant: "已有解释" });
+    await context.activatePromptOptimization();
+    assert.equal(prompt.value, "请整理这段需求");
+    assert.equal(h.calls.length, 1, "恢复原文不能再次调用优化服务");
+    assert.equal(JSON.stringify(context.selectedSkills), skills);
+    assert.equal(JSON.stringify(h.attachments), images);
+    for (const lock of ["readOnly", "input", "busy", "stopping", "pending", "capability"]) {
+      const blocked = independentPromptOptimizationHarness(backend);
+      if (lock === "input") blocked.prompt.disabled = true;
+      else if (lock === "capability") blocked.context.session.capabilities.promptOptimization = false;
+      else blocked.context[lock] = lock === "pending" ? {} : true;
+      blocked.context.updateComposer();
+      assert.equal(blocked.control.hidden, false);
+      assert.equal(blocked.control.disabled, true, lock);
+      await blocked.context.activatePromptOptimization();
+      assert.equal(blocked.calls.length, 0, lock);
+    }
+  }
+});
+
+test("Claude 独立优化取消、继续编辑或切换实例与授权后，迟到结果不能覆盖草稿", async () => {
+  for (const change of ["cancel", "edit", "scope", "device", "skills"]) {
+    const h = independentPromptOptimizationHarness(), { context, prompt } = h, response = deferred();
+    h.respond = () => response.promise;
+    const running = context.activatePromptOptimization();
+    assert.equal(h.control.dataset.state, "loading");
+    if (change === "cancel") await context.activatePromptOptimization();
+    if (change === "edit") prompt.value = "用户继续编辑";
+    if (change === "scope") {
+      context.scope = "new:project:claude:fixture-b"; context.selectionVersion++;
+      prompt.value = "另一个实例的草稿";
+    }
+    if (change === "device") { context.session.device = { id: "device-b" }; prompt.value = "新授权的草稿"; }
+    if (change === "skills") context.selectedSkills.push({ name: "new-skill", path: "/fixtures/new-skill" });
+    context.updateComposer();
+    const currentText = prompt.value, currentImages = JSON.stringify(h.attachments);
+    response.resolve({ state: "completed", result: { state: "completed", text: "已过期的优化结果" } });
+    await running;
+    assert.equal(prompt.value, currentText, change);
+    assert.equal(JSON.stringify(h.attachments), currentImages);
+    assert.equal(h.calls.filter(call => call.path === "/api/action/optimizePrompt").length, 1);
+    assert.equal(h.calls.filter(call => call.path === "/api/action/cancelPromptOptimize").length,
+      change === "device" ? 0 : 1, "新授权不能取消旧设备的请求");
+  }
+  const failed = independentPromptOptimizationHarness();
+  failed.respond = async () => ({ state: "completed", result: { state: "failed", message: "优化配置不可用" } });
+  await failed.context.activatePromptOptimization();
+  assert.equal(failed.prompt.value, "请整理这段需求");
+  assert.equal(failed.notices.at(-1).error, true);
+  assert.equal(failed.control.hidden, false);
+  assert.equal(failed.control.disabled, false);
+});
 
 function mermaidRootsHarness() {
   const observers = [], rendered = [];

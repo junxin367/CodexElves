@@ -1722,6 +1722,7 @@ impl RemoteAccessController {
             action,
             "optimizePrompt" | "promptOptimization" | "cancelPromptOptimize"
         ) {
+            // 用户要求优化独立于 Codex/Claude 实例；必须在会话后端路由前处理，不进入原生 CDP 或 CLI 准入。
             return execution::Scope::new(
                 self.harness.audit.clone(),
                 true,
@@ -10139,8 +10140,9 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         assert_eq!(session["serviceConnected"], false);
         assert_eq!(session["readOnly"], false);
         assert_eq!(session["capabilities"]["promptOptimization"], true);
+        // Claude 会话模型也可作为浏览器上下文；独立优化仍优先使用桌面保存的模型，不能转入 Claude CLI。
         let payload = json!({
-            "input":"待优化文本","model":"unused-model",
+            "input":"待优化文本","model":"claude-opus-5-5",
             "recentContext":{"user":"背景输入","assistant":"背景回复"}
         });
         let start = "/api/action/optimizePrompt";

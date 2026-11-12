@@ -1433,7 +1433,7 @@ impl Claude {
                     .get(id)
                     .cloned()
                     .ok_or_else(|| error(409, "原生会话尚未连接，请稍后核对队列"))?;
-                self.dispatch_remote(id, message_id, &process, true, authorization)
+                self.dispatch_remote(id, message_id, &process, true, authorization, false)
                     .await
             }
             "removeQueued" | "reorderQueued" | "beginQueuedEdit" | "editQueued"
@@ -1668,6 +1668,30 @@ impl Claude {
             return Ok(());
         }
         if frame["type"] == "result" {
+            // SDK 的 modelUsage.contextWindow 是原生报告；只补最后请求所属模型的容量，不拿结果累计 tokens 替换请求用量。
+            let usage = self
+                .change(|saved| {
+                    let Some(c) = saved.conversations.get_mut(id).filter(|c| !c.deleted) else {
+                        return Ok(None);
+                    };
+                    let model = c.token_usage["model"].as_str().unwrap_or("");
+                    let (capacity, source) =
+                        native_context_capacity(model, &json!({"modelUsage":frame["modelUsage"]}));
+                    let Some(capacity) = capacity else {
+                        return Ok(None);
+                    };
+                    let previous = c.token_usage.clone();
+                    c.token_usage["modelContextWindow"] = json!(capacity);
+                    c.token_usage["modelContextWindowSource"] = source;
+                    if let Some(usage) = c.token_usage.as_object_mut() {
+                        usage.remove("usedPercentage");
+                    }
+                    Ok((previous != c.token_usage).then(|| c.token_usage.clone()))
+                })
+                .await?;
+            if let Some(usage) = usage {
+                self.publish(json!({"method":"thread/tokenUsage/updated","params":{"threadId":id,"tokenUsage":usage}}));
+            }
             let failure = (frame["is_error"] == true).then(|| {
                 frame["result"]
                     .as_str()
@@ -2336,7 +2360,27 @@ fn native_context_capacity(model: &str, initialization: &Value) -> (Option<u64>,
     if model.is_empty() {
         return (None, Value::Null);
     }
-    // 用户要求采用最小方案：对应请求模型的原生报告优先；字段缺失时才用显式 Claude 配置窗口，不复刻 CLI 窗口计算器。
+    // 用户要求统一原生口径：statusline、SDK 与模型目录的明确报告可作为容量；配置容量和压缩参数均不能替代。
+    let native = &initialization["contextConfiguration"]["native"];
+    if native["model"] == model
+        && let Some(capacity) = native["context_window_size"]
+            .as_u64()
+            .filter(|value| *value > 0 && *value <= 9007199254740991)
+    {
+        return (
+            Some(capacity),
+            json!({"kind":"native","key":"context_window.context_window_size","model":model}),
+        );
+    }
+    if let Some(capacity) = initialization["modelUsage"][model]["contextWindow"]
+        .as_u64()
+        .filter(|value| *value > 0 && *value <= 9007199254740991)
+    {
+        return (
+            Some(capacity),
+            json!({"kind":"native","key":"modelUsage.contextWindow","model":model}),
+        );
+    }
     let entry = initialization["models"]
         .as_array()
         .into_iter()
@@ -2358,18 +2402,6 @@ fn native_context_capacity(model: &str, initialization: &Value) -> (Option<u64>,
             Some(capacity),
             json!({"kind":"native","key":key,"model":model}),
         );
-    }
-    let context = &initialization["contextConfiguration"];
-    // 配置与 usage.model 精确绑定，切换模型不能沿用其他模型的容量；压缩窗口/阈值和无来源的数值均不作为容量。
-    if context["model"] == model
-        && context["source"]["model"] == model
-        && context["source"]["kind"] == "configuration"
-        && context["source"]["key"] == "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
-        && let Some(value) = context["maxContextTokens"]
-            .as_u64()
-            .filter(|value| *value > 0 && *value <= 9007199254740991)
-    {
-        return (Some(value), context["source"].clone());
     }
     (None, Value::Null)
 }
@@ -2447,9 +2479,49 @@ fn native_token_usage(messages: &[Value], initialization: &Value) -> Value {
         };
         let model = message["model"].as_str().unwrap_or("");
         let (capacity, capacity_source) = native_context_capacity(model, initialization);
-        return json!({"modelContextWindow":capacity,"modelContextWindowSource":capacity_source,"model":model,"source":"claude-native-usage",
+        let mut result = json!({"modelContextWindow":capacity,"modelContextWindowSource":capacity_source,"model":model,"source":"claude-native-usage",
             "messageId":message["id"],"last":{"totalTokens":total,"inputTokens":input,
             "cachedInputTokens":read,"cacheCreationInputTokens":created,"outputTokens":output}});
+        let context = &initialization["contextConfiguration"];
+        let native = &context["native"];
+        // 原生百分比必须对应同一模型、同一次输入占用；旧 statusline 只提供容量，不覆盖新请求的百分比。
+        let current = &native["current_usage"];
+        let current_total = current["input_tokens"].as_u64().and_then(|input| {
+            input
+                .checked_add(current["cache_read_input_tokens"].as_u64()?)?
+                .checked_add(current["cache_creation_input_tokens"].as_u64()?)
+        });
+        if capacity.is_some()
+            && result["modelContextWindowSource"]["key"] == "context_window.context_window_size"
+            && native["model"] == model
+            && current_total == Some(total)
+            && let Some(percentage) = native["used_percentage"]
+                .as_f64()
+                .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 100.0)
+        {
+            result["usedPercentage"] = json!(percentage);
+        }
+        if context["model"] == model {
+            let mut compaction = json!({});
+            for (key, max) in [
+                ("windowTokens", 9007199254740991_u64),
+                ("triggerPercent", 100),
+            ] {
+                if let Some(value) = context["compaction"][key]
+                    .as_u64()
+                    .filter(|value| *value > 0 && *value <= max)
+                {
+                    compaction[key] = json!(value);
+                }
+            }
+            if compaction
+                .as_object()
+                .is_some_and(|value| !value.is_empty())
+            {
+                result["compaction"] = compaction;
+            }
+        }
+        return result;
     }
     Value::Null
 }
@@ -3422,7 +3494,8 @@ mod tests {
         let frame = json!({"type":"shared_snapshot","native_id":native,"job_id":"","native_status":{"tempo":"idle"},
             "messages":messages,"clients":{},"pending":[],"requests":{},"updated_at":2000,
             "context_configuration":{"maxContextTokens":600000,"model":"gpt-6.1-sol","source":{
-                "kind":"configuration","key":"CLAUDE_CODE_MAX_CONTEXT_TOKENS","scope":"user-settings.env","model":"gpt-6.1-sol"}}});
+                "kind":"configuration","key":"CLAUDE_CODE_MAX_CONTEXT_TOKENS","scope":"user-settings.env","model":"gpt-6.1-sol"},
+                "native":{"model":"gpt-6.1-sol","context_window_size":1000000}}});
         let calls = discovery_fixture(&service, rows.clone(), frame.clone()).await;
         let mut sidebar = json!({"recent":[],"pinnedThreads":[],"projects":[{"id":"same-project","roots":["E:\\shared"],"threads":[]}]});
         service.discover(&sidebar).await.unwrap();
@@ -3432,7 +3505,10 @@ mod tests {
         let detail = service.detail(id).await.unwrap();
         assert_eq!(detail["thread"]["nativeId"], native);
         assert_eq!(detail["thread"]["nativeJobId"], "");
-        assert_eq!(detail["thread"]["tokenUsage"]["modelContextWindow"], 600000);
+        assert_eq!(
+            detail["thread"]["tokenUsage"]["modelContextWindow"],
+            1000000
+        );
         assert_eq!(
             detail["thread"]["tokenUsage"]["last"]["totalTokens"],
             108213
@@ -3919,10 +3995,15 @@ mod tests {
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0]["params"]["tokenUsage"], usage);
         frame["context_configuration"] = json!({"maxContextTokens":600000,"model":"native-model",
-            "source":{"kind":"configuration","key":"CLAUDE_CODE_MAX_CONTEXT_TOKENS","scope":"user-settings.env","model":"native-model"}});
+            "source":{"kind":"configuration","key":"CLAUDE_CODE_MAX_CONTEXT_TOKENS","scope":"user-settings.env","model":"native-model"},
+            "compaction":{"windowTokens":600000,"triggerPercent":90},
+            "native":{"model":"native-model","context_window_size":1000000,"used_percentage":0.13,
+                "current_usage":{"input_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200}}});
         service.ingest_shared(&c.id, "first", &frame).await.unwrap();
         usage = service.conversation(&c.id).await.unwrap().view()["tokenUsage"].clone();
-        assert_eq!(usage["modelContextWindow"], 600000);
+        assert_eq!(usage["modelContextWindow"], 1000000);
+        assert_eq!(usage["usedPercentage"], 0.13);
+        assert_eq!(usage["compaction"]["windowTokens"], 600000);
         assert_eq!(usage["last"]["totalTokens"], 1300);
         let notifications: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
             .filter(|event| event["method"] == "thread/tokenUsage/updated")
@@ -3953,7 +4034,11 @@ mod tests {
             .await
             .unwrap();
         let reconnected = restored.conversation(&c.id).await.unwrap().token_usage;
-        assert_eq!(reconnected["modelContextWindow"], 600000);
+        assert_eq!(reconnected["modelContextWindow"], 1000000);
+        assert!(
+            reconnected["usedPercentage"].is_null(),
+            "旧请求的原生百分比不能覆盖新请求"
+        );
         assert_eq!(
             reconnected["modelContextWindowSource"],
             usage["modelContextWindowSource"]
@@ -3983,17 +4068,61 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn sdk_result_reports_only_the_last_models_capacity_without_replacing_request_usage() {
+        for matching in [true, false] {
+            let (_directory, service, mut c) = fixture();
+            c.token_usage = json!({"model":"native-model","modelContextWindow":null,
+                "last":{"totalTokens":1300}});
+            let id = c.id.clone();
+            service
+                .change(|saved| {
+                    saved.conversations.insert(id.clone(), c);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let model = if matching {
+                "native-model"
+            } else {
+                "other-model"
+            };
+            let mut frame = json!({"type":"result","is_error":false,"modelUsage":{}});
+            frame["modelUsage"][model] = json!({"contextWindow":1000000,"inputTokens":999999});
+            service.ingest(&id, "new-process", frame).await.unwrap();
+            let usage = service.conversation(&id).await.unwrap().token_usage;
+            assert_eq!(
+                usage["last"]["totalTokens"], 1300,
+                "SDK 累计量不能覆盖最后请求"
+            );
+            assert_eq!(
+                usage["modelContextWindow"],
+                if matching {
+                    json!(1000000)
+                } else {
+                    Value::Null
+                }
+            );
+        }
+    }
+
     #[test]
-    fn native_capacity_prefers_reports_then_explicit_configuration_for_the_same_usage_model() {
+    fn native_capacity_uses_only_reports_and_keeps_compaction_configuration_separate() {
         let mut messages = vec![
             json!({"type":"assistant","message":{"id":"request","model":"gpt-6.1-sol",
             "usage":{"input_tokens":181,"cache_read_input_tokens":108032,"cache_creation_input_tokens":0,"output_tokens":545}}}),
         ];
         let mut initialization = json!({"models":[{"value":"gpt-6.1-sol"}],"contextConfiguration":{
-            "maxContextTokens":600000,"model":"gpt-6.1-sol","source":{"kind":"configuration","key":"CLAUDE_CODE_MAX_CONTEXT_TOKENS","scope":"user-settings.env","model":"gpt-6.1-sol"}}});
+            "maxContextTokens":600000,"model":"gpt-6.1-sol",
+            "compaction":{"windowTokens":600000,"triggerPercent":90},
+            "source":{"kind":"configuration","key":"CLAUDE_CODE_MAX_CONTEXT_TOKENS","scope":"user-settings.env","model":"gpt-6.1-sol"}}});
         let usage = native_token_usage(&messages, &initialization);
-        assert_eq!(usage["modelContextWindow"], 600000);
-        assert_eq!(usage["modelContextWindowSource"]["kind"], "configuration");
+        assert!(
+            usage["modelContextWindow"].is_null(),
+            "配置值不能作为原生容量"
+        );
+        assert_eq!(usage["compaction"]["windowTokens"], 600000);
+        assert_eq!(usage["compaction"]["triggerPercent"], 90);
         assert_eq!(
             usage["last"]["totalTokens"], 108213,
             "真实原生输入与缓存口径保持不变"
@@ -4002,9 +4131,26 @@ mod tests {
         let reported = native_token_usage(&messages, &initialization);
         assert_eq!(
             reported["modelContextWindow"], 700000,
-            "原生报告优先于显式配置窗口"
+            "模型目录原生报告与压缩配置独立"
         );
         assert_eq!(reported["modelContextWindowSource"]["kind"], "native");
+        initialization["modelUsage"] = json!({"gpt-6.1-sol":{"contextWindow":800000}});
+        assert_eq!(
+            native_token_usage(&messages, &initialization)["modelContextWindow"],
+            800000
+        );
+        initialization["contextConfiguration"]["native"] = json!({"model":"gpt-6.1-sol","context_window_size":1000000,"used_percentage":10.8,
+                "current_usage":{"input_tokens":181,"cache_read_input_tokens":108032,"cache_creation_input_tokens":0}});
+        let statusline = native_token_usage(&messages, &initialization);
+        assert_eq!(statusline["modelContextWindow"], 1000000);
+        assert_eq!(statusline["usedPercentage"], 10.8);
+        initialization["contextConfiguration"]["native"]["context_window_size"] = json!(0);
+        let fallback = native_token_usage(&messages, &initialization);
+        assert_eq!(fallback["modelContextWindow"], 800000);
+        assert!(
+            fallback["usedPercentage"].is_null(),
+            "无效原生窗口的百分比不能配到其他容量来源"
+        );
         messages[0]["message"]["model"] = json!("other-model");
         assert!(
             native_token_usage(&messages, &initialization)["modelContextWindow"].is_null(),
@@ -4013,10 +4159,7 @@ mod tests {
         initialization["contextConfiguration"]["model"] = json!("other-model");
         initialization["contextConfiguration"]["source"]["model"] = json!("other-model");
         initialization["contextConfiguration"]["maxContextTokens"] = json!(400000);
-        assert_eq!(
-            native_token_usage(&messages, &initialization)["modelContextWindow"],
-            400000
-        );
+        assert!(native_token_usage(&messages, &initialization)["modelContextWindow"].is_null());
         for invalid in [
             json!(0),
             json!(-1),

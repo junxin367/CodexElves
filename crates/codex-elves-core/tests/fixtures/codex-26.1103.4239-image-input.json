@@ -1,0 +1,7 @@
+{
+  "provenance": "2026-11-12 从已安装 OpenAI.Codex_26.1103.4239.0 的 OoLr.K 导出读取；仅冻结图片输入转换函数，不包含会话或用户图片。",
+  "module": "webview/assets/async/182735.bb2cb0d2af.js",
+  "export": "K",
+  "sha256": "2b6f9a54c0371dfca111f8bf6ed88c3bc96b5875decc6951edc0f33f46477569",
+  "source": "function(e,{localPath:t,isRemoteHost:n=!1}={}){let r=/^data:image\\//i.test(e);if(!n&&t)return{type:\"localImage\",path:t};if(r)return{type:\"image\",url:e};let i=e;if(e.startsWith(\"file://\"))try{let t=e.replace(/^file:\\/\\//i,\"\");i=decodeURIComponent(t)}catch{i=e}return{type:\"localImage\",path:i}}"
+}

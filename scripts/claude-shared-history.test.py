@@ -210,6 +210,35 @@ class SharedQueueHistoryTests(unittest.TestCase):
         self.assertEqual(replies, [])
         self.assertEqual(native.pending, [])
 
+    def test_interactive_session_rejects_before_launch_and_stale_pid_does_not_block(self):
+        with tempfile.TemporaryDirectory() as folder:
+            native_id = "00000000-0000-4000-8000-000000000001"
+            native = NativeSession("unused", native_id)
+            native.root = Path(folder)
+            sessions = native.root / "sessions"
+            sessions.mkdir()
+            (sessions / "123.json").write_text(json.dumps({
+                "sessionId": native_id, "pid": 123, "kind": "interactive"
+            }), encoding="utf-8")
+            native.read_messages = lambda: None
+            native.lookup = lambda: None
+            native.rpc = lambda operation: {"ok": True, "alive": False, "present": False}
+            with patch.object(namespace["os"], "kill", return_value=None), \
+                    patch.object(namespace["subprocess"], "run") as run, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(namespace["NativeError"]) as failure:
+                    native.send({"client_id": "interactive-rejected",
+                                 "content": [{"type": "text", "text": "未投递的输入"}]})
+            self.assertEqual(failure.exception.code, "ESESSIONOPEN")
+            self.assertEqual(native.pending, [])
+            self.assertFalse(native.delivery_started)
+            run.assert_not_called()
+            # 区分真实交互式进程占用和已退出的登记，不能据此启动第二个会话或误称模型请求失败。
+            with patch.object(namespace["os"], "kill", side_effect=ProcessLookupError), \
+                    patch.object(namespace["subprocess"], "run") as run:
+                native.check_history_resume()
+            run.assert_not_called()
+
     def test_live_effort_change_from_default_uses_native_command_without_restarting(self):
         native = NativeSession("unused", "test-session", "saved-job")
         native.lookup = lambda: {"short": "saved-job", "tempo": "active"}
@@ -378,7 +407,7 @@ class SharedQueueHistoryTests(unittest.TestCase):
         self.assertEqual(native.messages[0]["message"]["usage"], usage)
         self.assertFalse(native.messages[0]["isUnmetered"])
 
-    def test_explicit_context_window_is_model_bound_and_excludes_compaction_settings(self):
+    def test_context_configuration_keeps_compaction_separate_and_bound_to_the_usage_model(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         native = NativeSession("unused", "test-session")
@@ -396,6 +425,8 @@ class SharedQueueHistoryTests(unittest.TestCase):
             catalog = native.control({"subtype": "initialize", "model": native.model, "catalog": {}})
             context = catalog["contextConfiguration"]
             self.assertEqual(context["maxContextTokens"], 600000)
+            self.assertEqual(context["compaction"]["windowTokens"], 700000)
+            self.assertEqual(context["compaction"]["triggerPercent"], 95)
             self.assertEqual(context["source"], {"kind": "configuration", "key": key,
                                                "scope": "user-settings.env", "model": "gpt-6.1-sol"})
             self.assertNotIn("not-for-export", json.dumps(context))
@@ -410,12 +441,39 @@ class SharedQueueHistoryTests(unittest.TestCase):
             for invalid in ("0", "-1", "600k", "bad", "9007199254740992", True, 600000):
                 data["env"][key] = invalid
                 settings.write_text(json.dumps(data))
-                self.assertEqual(native.context_configuration(), {}, f"非法容量不能用于显示：{invalid}")
+                self.assertNotIn("maxContextTokens", native.context_configuration(),
+                                 f"非法容量不能用于显示：{invalid}")
             del data["env"][key]
             settings.write_text(json.dumps(data))
             self.assertEqual(native.context_configuration()["maxContextTokens"], 400000)
             namespace["os"].environ.pop(key)
-            self.assertEqual(native.context_configuration(), {}, "只有压缩窗口和95%时容量仍未知")
+            context = native.context_configuration()
+            self.assertNotIn("maxContextTokens", context)
+            self.assertNotIn("native", context, "压缩配置不能冒充原生容量")
+            self.assertEqual(context["compaction"]["windowTokens"], 700000)
+
+    def test_native_statusline_context_is_sanitized_model_bound_and_cleared_on_log_replacement(self):
+        usage = {"input_tokens": 100, "cache_read_input_tokens": 1000,
+                 "cache_creation_input_tokens": 200, "output_tokens": 50}
+        native = self.read([
+            {"type": "assistant", "uuid": "reply", "message": {"model": "native-model", "usage": usage}},
+            {"session_id": "test-session", "model": {"id": "native-model"},
+             "context_window": {"context_window_size": 1000000, "used_percentage": 0.13,
+                                "current_usage": usage, "private": "must-not-export"}}
+        ])
+        context = native.context_configuration()["native"]
+        self.assertEqual(context["context_window_size"], 1000000)
+        self.assertEqual(context["used_percentage"], 0.13)
+        self.assertNotIn("private", json.dumps(context))
+        self.assertNotIn("output_tokens", context["current_usage"])
+        native.observe_native_context({"session_id": "another-session", "model": "native-model",
+                                      "context_window": {"context_window_size": 600000}})
+        self.assertEqual(native.native_context, context)
+        native.messages.append({"type": "assistant", "message": {"model": "new-model", "usage": usage}})
+        self.assertNotIn("native", native.context_configuration())
+        native.log_path.write_text("", encoding="utf-8")
+        native.read_messages()
+        self.assertEqual(native.native_context, {})
 
     def test_native_discovery_uses_logs_jobs_and_incremental_offsets_without_registry_or_execution(self):
         folder = tempfile.TemporaryDirectory()

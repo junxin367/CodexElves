@@ -364,15 +364,15 @@ fn instruction_target(
     }
     let id = payload["instanceId"]
         .as_str()
-        .ok_or_else(|| ApiError::new(400, "请选择会话类型实例"))?;
+        .ok_or_else(|| ApiError::new(400, "请选择会话实例"))?;
     let instance = super::instances::catalog(environments)
         .into_iter()
         .find(|item| item.id == id)
-        .ok_or_else(|| ApiError::new(404, "会话类型实例暂不可用"))?;
+        .ok_or_else(|| ApiError::new(404, "会话实例暂不可用"))?;
     let environment = environments
         .iter()
         .find(|item| item.id == instance.environment_id && item.error.is_none())
-        .ok_or_else(|| ApiError::new(404, "会话类型实例暂不可用"))?;
+        .ok_or_else(|| ApiError::new(404, "会话实例暂不可用"))?;
     let kind = super::instances::TYPES
         .iter()
         .find(|kind| kind.id == instance.backend)

@@ -406,12 +406,12 @@ impl Claude {
                 Ok(direct)
             })
             .await?;
-        self.remote_queue_changed(id).await;
         if direct {
             return self
-                .dispatch_remote(id, &client_id, process, false, authorization)
+                .dispatch_remote(id, &client_id, process, false, authorization, true)
                 .await;
         }
+        self.remote_queue_changed(id).await;
         let c = self.conversation(id).await?;
         let mut result = c.queue_snapshot(&self.epoch);
         result["confirmed"] = json!(true);
@@ -432,6 +432,7 @@ impl Claude {
         process: &Process,
         steer: bool,
         authorization: &RemoteAuthorization,
+        remove_if_unsent: bool,
     ) -> anyhow::Result<Value> {
         authorization.check().await?;
         let message = self
@@ -467,7 +468,10 @@ impl Claude {
                 Ok(result)
             })
             .await?;
-        self.remote_queue_changed(id).await;
+        // 用户要求即时发送未成功时不能留下队列项；首次投递先记录送达意图，确认排队后再通知页面。
+        if !remove_if_unsent {
+            self.remote_queue_changed(id).await;
+        }
         let result = async {
             let mut c = self.conversation(id).await?;
             let catalog = normalize_models(&process.initialization);
@@ -531,6 +535,10 @@ impl Claude {
                     turn["_stopRequested"] = json!(true);
                     turn["status"] = json!("interrupted");
                 }
+            } else if not_sent && remove_if_unsent {
+                // 明确未投递的新消息回到原输入框；已有待发消息的重试失败和送达未知仍保留原有核对机制。
+                c.remote_queue.messages.retain(|m| m.id != message.id);
+                c.remote_queue.awaiting_turn = None;
             } else if let Some(m) = c
                 .remote_queue
                 .messages
@@ -630,7 +638,7 @@ impl Claude {
                 continue;
             }
             let _ = self
-                .dispatch_remote(&id, &message.id, &process, false, &auth)
+                .dispatch_remote(&id, &message.id, &process, false, &auth, false)
                 .await;
         }
     }
@@ -853,6 +861,7 @@ mod tests {
         Accepted,
         Deferred,
         Rejected,
+        ControlRejected,
         Unknown,
     }
 
@@ -935,6 +944,11 @@ mod tests {
                     Reply::Accepted => Ok(json!({"accepted":true})),
                     Reply::Deferred => Ok(json!({"deferred":true,"accepted":false})),
                     Reply::Rejected => Err(ApiError::new(409, "尚未投递").into()),
+                    Reply::ControlRejected => Err(ApiError::new(
+                        503,
+                        "Claude 控制请求失败：原生会话仍在其他 CLI 中打开",
+                    )
+                    .into()),
                     Reply::Unknown => Err(ApiError::new(503, "回执未知").after_admission().into()),
                 };
                 if let Some(sender) = channel
@@ -1241,6 +1255,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_direct_send_rejection_drops_queue_entry_but_preserves_deferred_and_unknown() {
+        for reply in [Reply::ControlRejected, Reply::Deferred, Reply::Unknown] {
+            let (directory, _auth_directory, service, c, auth, calls, replies) = fixture().await;
+            service
+                .change(|saved| {
+                    let c = saved.conversations.get_mut(&c.id).unwrap();
+                    c.native_status = json!({"tempo":"idle"});
+                    c.turns.last_mut().unwrap()["status"] = json!("completed");
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let mut input = payload(&c, "first-direct");
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(1, 1)
+                .write_to(&mut png, image::ImageFormat::Png)
+                .unwrap();
+            input["images"] = json!([{"name":"fixture.png","mime":"image/png","size":png.get_ref().len(),
+                "dataUrl":format!("data:image/png;base64,{}",base64::engine::general_purpose::STANDARD.encode(png.get_ref()))}]);
+            let original = input.clone();
+            replies.lock().await.push_back(reply);
+            let result = service.command("send", &input, &auth).await;
+            assert_eq!(input, original, "失败不能改写原文字或图片");
+            assert_eq!(calls.lock().await.len(), 1, "每次提交只投递一次");
+            let restored = Claude::new(directory.path()).unwrap();
+            let queue = restored.queue(&c.id).await.unwrap();
+            let state = restored.queue_send_state(&input).await.unwrap();
+            if matches!(reply, Reply::ControlRejected) {
+                let failure = result.unwrap_err();
+                assert!(!failure.downcast_ref::<ApiError>().unwrap().outcome_unknown);
+                assert!(queue["queuedMessages"].as_array().unwrap().is_empty());
+                let restored = restored.conversation(&c.id).await.unwrap();
+                assert!(restored.remote_queue.awaiting_turn.is_none());
+                assert!(restored.remote_queue.accepted.is_empty());
+                assert_eq!(state["confirmed"], false, "明确拒绝不能被回读误认为已排队");
+                service.drain_remote_queues().await;
+                assert_eq!(calls.lock().await.len(), 1, "明确拒绝不能随后自动投递");
+            } else if matches!(reply, Reply::Deferred) {
+                assert_eq!(result.unwrap()["deliveryState"], "queued");
+                assert_eq!(queue["queuedMessages"].as_array().unwrap().len(), 1);
+                assert_eq!(state["confirmed"], true, "原生忙碌时仍支持正常排队");
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .downcast_ref::<ApiError>()
+                        .unwrap()
+                        .outcome_unknown
+                );
+                assert_eq!(
+                    queue["queuedMessages"][0]["submission"]["status"],
+                    "outcome-unknown"
+                );
+                assert_eq!(queue["queuedMessages"][0]["canSendNow"], false);
+                assert_eq!(
+                    state["confirmed"], false,
+                    "送达未知不能误报已排队或允许重发"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn remote_queue_known_rejection_can_retry_but_native_busy_stays_queued() {
         let (_directory, _auth_directory, service, c, auth, calls, replies) = fixture().await;
         service
@@ -1250,7 +1327,7 @@ mod tests {
         replies.lock().await.push_back(Reply::Deferred);
         let process = service.processes.lock().await[&c.id].clone();
         let result = service
-            .dispatch_remote(&c.id, "B", &process, false, &auth)
+            .dispatch_remote(&c.id, "B", &process, false, &auth, false)
             .await
             .unwrap();
         assert_eq!(result["deliveryState"], "queued");
@@ -1267,7 +1344,7 @@ mod tests {
         replies.lock().await.push_back(Reply::Rejected);
         assert!(
             service
-                .dispatch_remote(&c.id, "B", &process, true, &auth)
+                .dispatch_remote(&c.id, "B", &process, true, &auth, false)
                 .await
                 .is_err()
         );
@@ -1282,7 +1359,7 @@ mod tests {
             "paused"
         );
         service
-            .dispatch_remote(&c.id, "B", &process, true, &auth)
+            .dispatch_remote(&c.id, "B", &process, true, &auth, false)
             .await
             .unwrap();
         assert_eq!(calls.lock().await.len(), 3);

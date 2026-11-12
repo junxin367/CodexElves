@@ -2742,6 +2742,148 @@ for(const kind of ["server","local"]){
 }
 
 #[test]
+fn request_client_steer_accepts_images_converted_by_the_frozen_native_mapper() {
+    run_native_queue_edit_consumption_contract(
+        r#"
+const imageFixture=JSON.parse(require("node:fs").readFileSync(require("node:path").join(
+  require("node:path").dirname(process.argv[3]),"codex-26.1103.4239-image-input.json"),"utf8"));
+assert.equal(nodeCrypto.createHash("sha256").update(imageFixture.source).digest("hex"),imageFixture.sha256);
+const convertImage=new Function(`return (${imageFixture.source});`)();
+const groups=[
+  [{src:"C:\\fixtures\\first.png"},{src:"file:///fixtures/second%20image.png"}],
+  [{src:"/fixtures/first.png"},{src:"\\\\fixture-host\\images\\second.png"}],
+  [{src:"data:image/png;base64,AQID",localPath:"C:\\fixtures\\cached-first.png"},
+    {src:"data:image/png;base64,BAUG",localPath:"C:\\fixtures\\cached-second.png"}],
+  [{src:"data:image/png;base64,AQID"},{src:"data:image/png;base64,BAUG"}]
+];
+for(const withStart of [false,true]){
+  for(const sources of groups){
+    const h=await createFullNativeQueueHarness(),a=h.adapter();
+    h.allowSteer=true;
+    const images=sources.map((image,index)=>({id:"fixture-image-"+index,...image}));
+    const message={id:"image-physical",clientUserMessageId:"image-logical",createdAt:123,
+      text:"引导这两张图片",cwd:"/memory-fixture",
+      context:{prompt:"引导这两张图片",imageAttachments:images,addedFiles:[],fileAttachments:[]}};
+    const original=[{type:"text",text:message.text+"\n",text_elements:[]},
+      ...images.map(image=>({type:"image",url:image.src,detail:null}))];
+    const expected=[original[0],...images.map(image=>convertImage(image.src,{localPath:image.localPath}))];
+    h.projectedMessages.set(message.id,message);
+    h.serverItems=[{id:message.id,clientUserMessageId:message.clientUserMessageId,input:structuredClone(original)}];
+    h.transformPrepared=submission=>{
+      const input=structuredClone(expected);
+      const value={...submission,steer:{...submission.steer,input}};
+      if(withStart)value.start={request:{threadId:"thread",
+        clientUserMessageId:value.steer.clientUserMessageId,input:structuredClone(input)},
+        context:{restoreMessage:value.steer.restoreMessage}};
+      // 同时核对原生的后备 start 与 admission start，不能只验证 steer 分支。
+      value.steer.userMessageAdmissionStart={request:{threadId:"thread",
+        clientUserMessageId:value.steer.clientUserMessageId,input:structuredClone(input)},
+        context:{restoreMessage:value.steer.restoreMessage}};
+      return value;
+    };
+    a.env.requestClientQueues.set("thread",{messages:[message]});
+    const result=await a.api.steer({threadId:"thread",messageId:message.id});
+    await new Promise(setImmediate);
+    assert.equal(result.ok,true,JSON.stringify({withStart,sources,result}));
+    assert.equal(h.calls.start+h.calls.steer,1,"图片转换确认后也只能派发一次");
+    assert.equal(h.calls.start,0);
+    const accepted=h.history.turns.flatMap(turn=>turn.items).filter(item=>
+      (item.clientId??item.clientUserMessageId)===message.clientUserMessageId);
+    assert.equal(accepted.length,1,"同一逻辑消息不能因图片表示变化生成重复副本");
+    assert.deepEqual(accepted[0].content??accepted[0].input,expected);
+    assert.deepEqual(message.context.imageAttachments,images,"校验不能改写原始附件上下文");
+  }
+}
+"#,
+    );
+}
+
+#[test]
+fn request_client_steer_native_image_conversion_rejects_unproven_or_changed_inputs() {
+    run_native_queue_edit_consumption_contract(
+        r#"
+const imageFixture=JSON.parse(require("node:fs").readFileSync(require("node:path").join(
+  require("node:path").dirname(process.argv[3]),"codex-26.1103.4239-image-input.json"),"utf8"));
+const convertImage=new Function(`return (${imageFixture.source});`)();
+for(const mismatch of [
+  "other-directory","same-basename","image-order","missing-image","extra-image","text","text-elements",
+  "explicit-detail","unknown-server-field","file-id","unknown-prepared-field","missing-source",
+  "missing-inline-path","ambiguous-source","ambiguous-path","duplicate-original","duplicate-prepared",
+  "remote-url-as-path","relative-path","malformed-file-uri",
+  "changed-context","start-input","admission-input"
+]){
+  const h=await createFullNativeQueueHarness(),a=h.adapter();
+  h.allowSteer=true;
+  const images=[{id:"first",src:"file:///fixtures/first.png"},
+    {id:"second",src:"file:///fixtures/second.png"}];
+  const message={id:"image-physical",clientUserMessageId:"image-logical",createdAt:123,
+    text:"原图片与原顺序",cwd:"/memory-fixture",
+    context:{prompt:"原图片与原顺序",imageAttachments:images,addedFiles:[],fileAttachments:[]}};
+  const original=[{type:"text",text:message.text+"\n",text_elements:[]},
+    ...images.map(image=>({type:"image",url:image.src,detail:null}))];
+  if(mismatch==="explicit-detail")original[1].detail="high";
+  if(mismatch==="unknown-server-field")original[1].unrecognized="must-survive";
+  if(mismatch==="file-id")original[1].fileId="different-original";
+  if(mismatch==="duplicate-original")original[2]=structuredClone(original[1]);
+  if(mismatch==="missing-source")images[0].src="file:///unrelated/first.png";
+  if(mismatch==="ambiguous-source")images.push({...images[0],id:"duplicate"});
+  if(mismatch==="ambiguous-path")images[1].localPath="/fixtures/first.png";
+  if(mismatch==="missing-inline-path"){
+    images[0].src="data:image/png;base64,AQID";
+    original[1].url=images[0].src;
+  }
+  const unsupportedSources={"remote-url-as-path":"https://fixture.invalid/first.png",
+    "relative-path":"first.png","malformed-file-uri":"file:///fixtures/invalid%ZZ.png"};
+  if(unsupportedSources[mismatch]){
+    images[0].src=unsupportedSources[mismatch];
+    original[1].url=images[0].src;
+  }
+  h.projectedMessages.set(message.id,message);
+  h.serverItems=[{id:message.id,clientUserMessageId:message.clientUserMessageId,input:structuredClone(original)}];
+  h.transformPrepared=submission=>{
+    const input=[structuredClone(original[0]),
+      ...images.slice(0,2).map(image=>convertImage(image.src,{localPath:image.localPath}))];
+    if(mismatch==="other-directory")input[1].path="/unrelated/replacement.png";
+    if(mismatch==="same-basename")input[1].path="/unrelated/first.png";
+    if(mismatch==="image-order")[input[1],input[2]]=[input[2],input[1]];
+    if(mismatch==="missing-image")input.pop();
+    if(mismatch==="extra-image")input.push({type:"localImage",path:"/fixtures/extra.png"});
+    if(mismatch==="text")input[0].text="其他正文\n";
+    if(mismatch==="text-elements")input[0].text_elements=[{byteRange:{start:0,end:3},placeholder:"other"}];
+    if(mismatch==="unknown-prepared-field")input[1].unrecognized="must-not-ignore";
+    if(mismatch==="duplicate-prepared")input[2]=structuredClone(input[1]);
+    if(mismatch==="missing-inline-path")input[1]={type:"localImage",path:"/fixtures/unproven.png"};
+    const value={...submission,steer:{...submission.steer,input}};
+    if(mismatch==="changed-context")value.steer.restoreMessage={...value.steer.restoreMessage,
+      context:{...value.steer.restoreMessage.context,imageAttachments:[]}};
+    if(mismatch==="start-input"||mismatch==="admission-input"){
+      const start={request:{threadId:"thread",clientUserMessageId:value.steer.clientUserMessageId,
+        input:structuredClone(original)},context:{restoreMessage:value.steer.restoreMessage}};
+      if(mismatch==="start-input")value.start=start;else value.steer.userMessageAdmissionStart=start;
+    }
+    return value;
+  };
+  a.env.requestClientQueues.set("thread",{messages:[message]});
+  const result=await a.api.steer({threadId:"thread",messageId:message.id});
+  await new Promise(setImmediate);
+  assert.equal(result.ok,false,JSON.stringify({mismatch,result}));
+  assert.equal(result.notSent,true,"不能把准备阶段拒绝伪装成已发送未知");
+  assert.equal(result.outcomeUnknown,undefined);
+  const key=mismatch==="changed-context"?"steer.restoreMessage"
+    :mismatch==="start-input"?"start.input":mismatch==="admission-input"?"admissionStart.input":"steer.serverInput";
+  assert.equal(result.queueSteerDiagnostic.checks[key],false,JSON.stringify({mismatch,result}));
+  assert.equal(h.calls.start+h.calls.steer+h.calls.delete,0,"图片映射未证明时，不能发送或移除原队列");
+  assert.equal(h.serverItems.length,1);
+  const diagnostic=JSON.stringify(result.queueSteerDiagnostic);
+  assert.equal(diagnostic.includes(message.text),false);
+  assert.equal(diagnostic.includes("fixtures"),false,"诊断不能记录本地图片路径");
+  assert.equal(diagnostic.includes("AQID"),false,"诊断不能记录图片内容");
+}
+"#,
+    );
+}
+
+#[test]
 fn request_client_steer_contract_diagnostics_identify_fields_without_private_input() {
     run_native_queue_edit_consumption_contract(
         r#"
@@ -10318,8 +10460,8 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 fn renderer_script_normalizes_remote_image_attachments_for_native_composer() {
     let script = include_str!("../../../assets/remote-access/native.js");
 
-    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 142"));
-    assert!(script.contains("version: 142, call"));
+    assert!(script.contains("window.__codexElvesRemoteAccess?.version === 143"));
+    assert!(script.contains("version: 143, call"));
     assert!(script.contains("function remoteImageAttachments(payload = {}, phase = \"unknown\")"));
     assert!(script.contains("id: nativeImageAttachmentId()"));
     assert!(script.contains("function nativeImageAttachmentId()"));
