@@ -64,8 +64,33 @@ if ([BitConverter]::ToUInt32($image, $peOffset) -ne 0x4550 -or
 $DistDirectory = Join-Path $RepoRoot "dist\windows"
 New-Item -ItemType Directory -Path $DistDirectory -Force | Out-Null
 $Destination = Join-Path $DistDirectory "CodexElves-Remote-$ResolvedVersion-windows-x64.exe"
-Copy-Item -LiteralPath $Executable -Destination $Destination -Force
+$sourceHasher = [Security.Cryptography.SHA256]::Create()
+try { $sourceDigest = [BitConverter]::ToString($sourceHasher.ComputeHash($image)).Replace("-", "").ToLowerInvariant() }
+finally { $sourceHasher.Dispose() }
+# 用户可能正在使用便携客户端；相同字节无需覆盖，避免常规安装包编译因运行中的同版 EXE 被锁定而失败。
+if (!(Test-Path -LiteralPath $Destination -PathType Leaf) -or
+    (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sourceDigest) {
+    # 编译时保留正在使用的客户端：先写入完整新文件，再轮换旧产物，不停止用户窗口。
+    $artifactSuffix = [Guid]::NewGuid().ToString("N")
+    $temporaryArtifact = Join-Path $DistDirectory "remote-$artifactSuffix.tmp"
+    $previousArtifact = "$Destination.previous-$artifactSuffix"
+    [IO.File]::WriteAllBytes($temporaryArtifact, $image)
+    try {
+        if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+            Move-Item -LiteralPath $Destination -Destination $previousArtifact -ErrorAction Stop
+        }
+        try { Move-Item -LiteralPath $temporaryArtifact -Destination $Destination -ErrorAction Stop }
+        catch {
+            if (!(Test-Path -LiteralPath $Destination) -and (Test-Path -LiteralPath $previousArtifact)) {
+                Move-Item -LiteralPath $previousArtifact -Destination $Destination -ErrorAction Stop
+            }
+            throw
+        }
+    }
+    finally { Remove-Item -LiteralPath $temporaryArtifact -Force -ErrorAction SilentlyContinue }
+}
 $digest = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($digest -ne $sourceDigest) { throw "Staged remote client does not match the validated executable." }
 $info = [ordered]@{
     product = "CodexElves Remote"
     version = $WorkspaceVersion

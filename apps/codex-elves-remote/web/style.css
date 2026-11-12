@@ -16,8 +16,5 @@ button{margin-top:8px;border-color:var(--accent);background:var(--accent);color:
 button:disabled{opacity:.6;cursor:wait}
 #status{min-height:2em;margin:14px 0 28px;color:var(--muted);overflow-wrap:anywhere}
 #status.error{color:var(--danger)}
-.window-help{padding:16px 18px;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--muted)}
-.window-help>p{margin:0;font-size:12px}
-.window-help>p+p{margin-top:4px}
 footer{display:flex;justify-content:space-between;gap:16px;margin-top:24px;color:var(--muted);font-size:12px}
 @media(max-height:600px){body{place-items:start center;padding-block:20px}h1{margin-top:18px}#status{margin-bottom:14px}}

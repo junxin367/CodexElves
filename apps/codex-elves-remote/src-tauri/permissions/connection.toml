@@ -12,3 +12,8 @@ commands.allow = ["remote_titlebar_theme"]
 identifier = "titlebar-state"
 description = "本地标题栏可以读取最近的同步配色。"
 commands.allow = ["remote_titlebar_state"]
+
+[[permission]]
+identifier = "remote-resource-cache"
+description = "当前服务只可查看/检查公开网页资源缓存并告知前台忙碌状态，不可改变服务地址或读取设备凭据。"
+commands.allow = ["remote_cache_status", "remote_cache_refresh", "remote_cache_activity"]

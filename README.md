@@ -135,7 +135,7 @@ Chrome 插件调用兼容与图片结果显示兼容是不同路径。这里介�
 
 界面演示、首次连接、访问方式及排查步骤见 **[远程会话移动端指南](docs/remote-access-mobile.md)**；当前路由、权限和交互限制见 [会话工具说明](docs/remote-session-tools.md)。
 
-另一台 Windows 电脑可使用独立远程客户端 `CodexElves-Remote-<版本>-windows-x64.exe`。支持窗口缩放、最小化、最大化和托盘管理，连接失败后可直接修改地址。使用及单独构建方法见 [Windows 远程客户端](docs/windows-remote-client.md)。
+另一台 Windows 电脑可使用独立远程客户端 `CodexElves-Remote-<版本>-windows-x64.exe`。Windows 安装包也会同时安装客户端，并创建桌面和开始菜单的“CodexElves 远程会话”快捷方式。支持窗口缩放、最小化、最大化和托盘管理，连接失败后可直接修改地址。使用及单独构建方法见 [Windows 远程客户端](docs/windows-remote-client.md)。
 
 ## 数据与运行方式
 

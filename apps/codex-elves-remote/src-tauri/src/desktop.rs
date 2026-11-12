@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{
-    Mutex,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -13,6 +13,7 @@ use url::Url;
 
 use crate::appearance::{ThemeSnapshot, TitlebarTheme};
 use crate::connection::{Completion, Connection};
+use crate::resource_cache::{CacheInfo, ResourceCache};
 use crate::settings::{self, Settings};
 
 const TITLE: &str = "CodexElves 远程会话";
@@ -30,6 +31,7 @@ struct ClientState {
     exiting: AtomicBool,
     connection: Mutex<Connection>,
     titlebar_theme: Mutex<Option<ThemeSnapshot>>,
+    cache: Arc<ResourceCache>,
 }
 
 #[derive(Serialize)]
@@ -39,6 +41,7 @@ struct ClientInfo {
     auto_connect: bool,
     version: &'static str,
     error: Option<String>,
+    detected: bool,
 }
 
 fn trusted_connection_page(webview: &tauri::Webview) -> Result<(), String> {
@@ -53,22 +56,36 @@ fn trusted_connection_page(webview: &tauri::Webview) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn remote_client_state(
+async fn remote_client_state(
     webview: tauri::Webview,
     state: tauri::State<'_, ClientState>,
 ) -> Result<ClientInfo, String> {
     trusted_connection_page(&webview)?;
     let saved = state.settings.lock().unwrap().server_url.clone();
-    let connection = state.connection.lock().unwrap();
+    let (draft, error) = {
+        let connection = state.connection.lock().unwrap();
+        (connection.draft_url.clone(), connection.error.clone())
+    };
+    let mut server_url = if draft.is_empty() { saved } else { draft };
+    let mut detected = false;
+    if server_url.is_empty() && error.is_none() {
+        if let Some(home) = directories::BaseDirs::new() {
+            if let Some(url) = crate::discovery::detect(
+                &home.home_dir().join(".codex-session-delete/settings.json"),
+            )
+            .await
+            {
+                server_url = url.to_string();
+                detected = true;
+            }
+        }
+    }
     Ok(ClientInfo {
-        server_url: if connection.draft_url.is_empty() {
-            saved
-        } else {
-            connection.draft_url.clone()
-        },
+        server_url,
         auto_connect: state.auto_connect.swap(false, Ordering::SeqCst),
         version: env!("CARGO_PKG_VERSION"),
-        error: connection.error.clone(),
+        error,
+        detected,
     })
 }
 
@@ -81,11 +98,67 @@ async fn connect_remote(
     trusted_connection_page(&webview)?;
     let url = settings::normalize_server_url(&server_url).map_err(|error| error.to_string())?;
     state.connection.lock().unwrap().begin(url.clone());
+    let previously_connected = Url::parse(&state.settings.lock().unwrap().server_url)
+        .is_ok_and(|saved| saved.origin() == url.origin());
+    if let Err(error) = state.cache.prepare(&url, previously_connected).await {
+        state.connection.lock().unwrap().cancel();
+        return Err(error.to_string());
+    }
     // 导航已提交不代表加载成功；只有 WebView2 成功回执到达后才保存下次自动连接地址。
     if let Err(error) = webview.navigate(url) {
         state.connection.lock().unwrap().cancel();
         return Err(format!("打开远程服务失败：{error}"));
     }
+    Ok(())
+}
+
+fn trusted_service_page(webview: &tauri::Webview, state: &ClientState) -> Result<Url, String> {
+    let url = webview.url().map_err(|error| error.to_string())?;
+    let saved = state.settings.lock().unwrap().server_url.clone();
+    if webview.label() != CONTENT_LABEL
+        || webview.window().label() != WINDOW_LABEL
+        || !(settings::is_connection_page(&url)
+            || matches!(url.scheme(), "http" | "https")
+                && state.connection.lock().unwrap().allows(&url, &saved))
+    {
+        return Err("只有当前服务页面可以管理网页资源缓存。".into());
+    }
+    Ok(url)
+}
+
+#[tauri::command]
+async fn remote_cache_status(
+    webview: tauri::Webview,
+    state: tauri::State<'_, ClientState>,
+) -> Result<CacheInfo, String> {
+    trusted_service_page(&webview, &state)?;
+    Ok(state.cache.info())
+}
+
+#[tauri::command]
+async fn remote_cache_refresh(
+    webview: tauri::Webview,
+    state: tauri::State<'_, ClientState>,
+) -> Result<CacheInfo, String> {
+    let mut url = trusted_service_page(&webview, &state)?;
+    url.set_path("/");
+    url.set_query(None);
+    url.set_fragment(None);
+    state
+        .cache
+        .refresh(&url)
+        .await
+        .map_err(|_| "网页资源更新检查未完成，仍保留当前可用缓存。".into())
+}
+
+#[tauri::command]
+async fn remote_cache_activity(
+    webview: tauri::Webview,
+    state: tauri::State<'_, ClientState>,
+    busy: bool,
+) -> Result<(), String> {
+    trusted_service_page(&webview, &state)?;
+    state.cache.set_busy(busy);
     Ok(())
 }
 
@@ -214,6 +287,7 @@ unsafe fn register_navigation_recovery(
                 let mut id = 0;
                 args.NavigationId(&mut id)?;
                 let state = start_app.state::<ClientState>();
+                state.cache.begin_navigation(&url);
                 let saved = state.settings.lock().unwrap().server_url.clone();
                 state.connection.lock().unwrap().started(id, &url, &saved);
                 Ok(())
@@ -343,6 +417,11 @@ fn restore_window(window: &tauri::Window, settings: &Settings) -> tauri::Result<
         window.maximize()?;
     }
     layout_webviews(window)?;
+    #[cfg(debug_assertions)]
+    if std::env::var("CODEX_ELVES_REMOTE_TEST_HIDDEN").as_deref() == Ok("1") {
+        // 调试验收可隐藏独立测试窗口，避免打断用户的实际会话；发布版不启用此入口。
+        return Ok(());
+    }
     window.show()
 }
 
@@ -488,7 +567,10 @@ pub fn run() -> anyhow::Result<()> {
             remote_client_state,
             connect_remote,
             remote_titlebar_theme,
-            remote_titlebar_state
+            remote_titlebar_state,
+            remote_cache_status,
+            remote_cache_refresh,
+            remote_cache_activity
         ])
         .on_menu_event(handle_menu_event)
         .setup(|app| {
@@ -504,6 +586,7 @@ pub fn run() -> anyhow::Result<()> {
             };
             std::fs::create_dir_all(&directory)?;
             let settings = settings::load(&directory.join("settings.json"))?;
+            let cache = ResourceCache::new(directory.join("web-resources"))?;
             app.manage(ClientState {
                 directory: directory.clone(),
                 settings: Mutex::new(settings.clone()),
@@ -512,6 +595,7 @@ pub fn run() -> anyhow::Result<()> {
                 exiting: AtomicBool::new(false),
                 connection: Mutex::new(Connection::default()),
                 titlebar_theme: Mutex::new(None),
+                cache: cache.clone(),
             });
             let window = tauri::window::WindowBuilder::new(app, WINDOW_LABEL)
                 .title(TITLE)
@@ -527,7 +611,7 @@ pub fn run() -> anyhow::Result<()> {
             let navigation_app = app.handle().clone();
             let content_builder = tauri::webview::WebviewBuilder::new(
                 CONTENT_LABEL,
-                WebviewUrl::App("index.html".into()),
+                WebviewUrl::External(Url::parse("about:blank")?),
             )
             .data_directory(directory.join("webview"))
             .initialization_script(include_str!("../../web/theme-bridge.js"))
@@ -568,8 +652,11 @@ pub fn run() -> anyhow::Result<()> {
                 tauri::LogicalPosition::new(0.0, 0.0),
                 tauri::LogicalSize::new(1280.0, TITLEBAR_HEIGHT),
             )?;
-            *app.state::<ClientState>().home.lock().unwrap() = Some(content.url()?);
+            // Windows Tauri 本地资源默认 Origin；先完成原生缓存接管，再打开连接页，防止自动连接抢在初始化前执行。
+            let home = Url::parse("http://tauri.localhost/index.html")?;
+            *app.state::<ClientState>().home.lock().unwrap() = Some(home.clone());
             install_navigation_recovery(&content)?;
+            crate::native_cache::install(&content, cache, home)?;
             // 用户要求独立程序不显示“连接”“窗口”菜单栏；连接恢复、刷新和退出统一保留在托盘。
             install_tray(app)?;
             let event_window = window.clone();

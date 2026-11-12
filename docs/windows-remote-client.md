@@ -2,11 +2,13 @@
 
 `CodexElves-Remote-<版本>-windows-x64.exe` 是独立的 Windows x64 远程会话客户端。把 EXE 复制到另一台 Windows 电脑即可启动；需要已安装 Microsoft Edge WebView2 Runtime。客户端不需要安装 CodexElves 管理器。
 
+Windows 安装包也会同时安装此客户端，并在桌面和开始菜单的 CodexElves 分组创建“CodexElves 远程会话”快捷方式。快捷方式直接打开客户端；安装完成页保留管理器运行选项，不自动打开远程客户端。
+
 ## 连接
 
 1. 在服务端电脑的 CodexElves 中启用远程会话，取得可从客户端电脑访问的服务首页地址。
-2. 启动 EXE，在“服务地址”填写 HTTP 或 HTTPS 地址；访问密钥在连接后的原有登录页输入。
-3. 按远程网页流程完成配对。客户端独立保留登录状态，之后启动自动恢复上次成功连接的地址。
+2. 启动 EXE。首次使用会检查本机已有的远程服务并预填地址；也可手动填写 HTTP 或 HTTPS 地址。访问密钥在连接后的原有登录页输入。
+3. 按远程网页流程完成配对。客户端独立保留登录状态，之后启动自动打开上次成功连接地址，无需再次点“连接”；已有有效授权继续复用，授权过期或撤销后仍需重新登录。
 
 服务端电脑和远程后台需要保持运行。客户端使用服务端提供的会话网页，能力和权限沿用该网页；仅支持 Android 原生桥的功能仍由 Android 提供。
 
@@ -19,6 +21,16 @@
 PC 布局中“文件”“变更”在右侧标签面板打开，可以同时保留多个文件及差异，聊天继续可用。拖动面板左侧边界调宽，标签可切换和关闭；网页与 EXE 共用此界面，更新服务端网页后使用相同行为。
 
 配置默认位于 `%LOCALAPPDATA%\com.codexelves.remote\`，其中 `settings.json` 保存成功连接地址和窗口状态，`webview\` 保存独立登录缓存。它与管理器及普通浏览器的数据分开。开发验收可用 `CODEX_ELVES_REMOTE_DATA_DIR` 指向独立的绝对路径目录。
+
+## 网页资源缓存
+
+客户端内置公开网页资源包，并在 `web-resources\` 中按服务 Origin 保存校验后的完整更新及上一版。清单、文件大小和 SHA-256 均验证通过后才提交候选；相同文件优先复用现有或内置内容，只下载差异。支持 gzip 传输，编码及解压后都有限额。
+
+已连接的服务优先从本地打开，后台检查更新。新版资源在下次刷新或重新打开页面时启用，当前会话不自动刷新；前台消息、历史等请求会让后台资源更新暂缓。服务不可达时仍可加载网页界面，会话同步和发送仍需服务在线。
+
+此缓存由 Windows 原生层处理，普通 HTTP 也适用；API、上传、登录校验和 `/native.js` 均不进入资源缓存。原服务地址与浏览器 Origin 保持不变，接管旧 Service Worker 时只停止其注册，不清除 Cookie、外观设置、草稿或 IndexedDB。
+
+本机地址探测仅使用当前用户 `.codex-session-delete/settings.json` 的监听端口以及默认 `45222`，只连接回环地址并验证公开资源清单；不会扫描端口，也不会取用访问密钥。已保存地址和正在编辑的内容优先于探测结果。
 
 ## 构建
 
@@ -33,6 +45,6 @@ PC 布局中“文件”“变更”在右侧标签面板打开，可以同时�
 - `dist/windows/CodexElves-Remote-<版本>-windows-x64.exe`
 - `dist/windows/CodexElves-Remote-<版本>-windows-x64-build-info.json`，记录版本、大小及 SHA-256。
 
-版本取根 `Cargo.toml`；默认使用本地增量 `release-fast`，正式优化构建可加 `-Profile release`。常规 `scripts/build-windows-installer.ps1` 也会额外生成该便携 EXE，管理器安装包仍单独交付。GitHub Windows 构建和发布流程提供相同的独立客户端产物。
+版本取根 `Cargo.toml`；默认使用本地增量 `release-fast`，正式优化构建可加 `-Profile release`。常规 `scripts/build-windows-installer.ps1` 在安装包内包含客户端，同时额外生成便携 EXE。GitHub Windows 构建和发布流程使用相同的打包范围。
 
 客户端源码位于 `apps/codex-elves-remote/`。本地标题栏和远程内容使用不同的 WebView；窗口控制只授权本地标题栏，连接设置命令只授权内置连接页。远程网页仅可同步严格校验的 RGB 配色，本机还会核对其为当前配置的服务来源；其他来源的链接交给默认浏览器打开。

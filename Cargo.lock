@@ -800,12 +800,17 @@ name = "codex-elves-remote"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "directories",
+ "flate2",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-single-instance",
  "tempfile",
+ "tokio",
  "url",
  "webview2-com",
  "windows 0.61.3",

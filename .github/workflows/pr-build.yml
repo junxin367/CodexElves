@@ -118,7 +118,7 @@ jobs:
           cargo test -p codex-elves-core --lib remote_access::tests:: -- --test-threads=1
 
       - name: 远程会话回归证据校验测试
-        run: node --test scripts/remote-access-e2e-evidence.test.mjs scripts/remote-access-e2e-environment.test.mjs scripts/remote-access-e2e-receipt-driver.test.mjs scripts/remote-access-ui-state.test.mjs scripts/workspace-tabs.test.mjs scripts/windows-remote-titlebar.test.mjs
+        run: node --test scripts/remote-access-e2e-evidence.test.mjs scripts/remote-access-e2e-environment.test.mjs scripts/remote-access-e2e-receipt-driver.test.mjs scripts/remote-access-ui-state.test.mjs scripts/workspace-tabs.test.mjs scripts/windows-remote-titlebar.test.mjs scripts/windows-remote-cache.test.mjs
 
       - name: Build release binaries
         run: cargo build --release
@@ -130,6 +130,7 @@ jobs:
           Copy-Item target/release/codex-elves.exe dist/windows/app/
           Copy-Item target/release/codex-elves-manager.exe dist/windows/app/
           Copy-Item target/release/codex-elves-task-board.exe dist/windows/app/
+          Copy-Item target/release/codex-elves-remote.exe dist/windows/app/
 
       - name: Stage standalone Windows remote client
         shell: pwsh

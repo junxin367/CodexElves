@@ -56,16 +56,28 @@ const programs = [
     "assets/remote-access/app.js",
     "assets/remote-access/channels.js",
     "assets/remote-access/native.js",
+    "assets/remote-access/pwa.js",
+    "assets/remote-access/recovery-store.js",
     "assets/remote-access/session-files.js",
     "assets/remote-access/session-menu.js",
     "assets/remote-access/session-tools.js",
     "assets/remote-access/style.css",
   ]],
+  // 用户要求独立客户端内置网页缓存；打包时也核对其内置资源，不能把旧网页包随新 EXE 一起交付。
+  ["codex-elves-remote.exe", [
+    "assets/remote-access/app.js",
+    "assets/remote-access/channels.js",
+    "assets/remote-access/pwa.js",
+    "assets/remote-access/recovery-store.js",
+    "assets/remote-access/session-files.js",
+    "assets/remote-access/session-tools.js",
+    "assets/remote-access/style.css",
+  ], false],
 ];
 const failures = [];
-for (const [name, sources] of sourceOnly ? [] : programs) {
+for (const [name, sources, requireBuildId = true] of sourceOnly ? [] : programs) {
   const binary = readFileSync(resolve(binaryDirectory, name));
-  if (!binary.includes(Buffer.from(buildId))) failures.push(`${name} 缺少当前构建标识`);
+  if (requireBuildId && !binary.includes(Buffer.from(buildId))) failures.push(`${name} 缺少当前构建标识`);
   for (const source of sources) {
     if (!binary.includes(readFileSync(resolve(repositoryRoot, source))))
       failures.push(`${name} 内嵌的 ${source} 与当前工作区不一致`);

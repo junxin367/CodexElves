@@ -1,6 +1,8 @@
 import { isAndroidContainer } from "./platform.js";
 
 const shellVersion = 1;
+const nativeResourceCache = globalThis.__CODEX_ELVES_NATIVE_RESOURCES__?.version === 1;
+let nativeBusy = null;
 const zrokShareHostnamePattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.shares\.zrok\.io$/i;
 const stateEvent = "codex-elves-pwa-state";
 const states = new Set([
@@ -136,6 +138,18 @@ function workerVersion(worker) {
 }
 
 function broadcastResourceActivity() {
+  if (nativeResourceCache) {
+    const quiet = Math.max(0, foregroundQuietUntil - Date.now());
+    const busy = foregroundWorkCount > 0 || quiet > 0 || navigator.onLine === false;
+    if (nativeBusy !== busy) {
+      nativeBusy = busy;
+      void window.__TAURI__.core.invoke("remote_cache_activity", { busy }).catch(() => { nativeBusy = null; });
+    }
+    if (activityTimer !== null) clearTimeout(activityTimer);
+    activityTimer = !foregroundWorkCount && quiet > 0
+      ? setTimeout(() => { activityTimer = null; broadcastResourceActivity(); }, quiet + 20) : null;
+    return;
+  }
   const workers = new Set([
     registration?.installing, registration?.waiting, registration?.active,
     navigator.serviceWorker?.controller
@@ -245,6 +259,18 @@ async function readResourceManifest(manual = false) {
 }
 
 async function registerServiceWorker(manual = false) {
+  if (nativeResourceCache) {
+    // 用户要求 Windows EXE 缓存支持普通 HTTP；由原生完整资源包接管，避免与 Service Worker 同时混用不同版本。
+    try {
+      if (manual) setCacheState("checking", "正在检查客户端网页资源");
+      const result = await window.__TAURI__.core.invoke(manual ? "remote_cache_refresh" : "remote_cache_status");
+      setCacheState(result.status, result.message, { version: result.version });
+      return null;
+    } catch {
+      setCacheState("failed", "网页资源检查未完成，当前缓存仍可继续使用");
+      return null;
+    }
+  }
   if (isAndroidContainer() || !globalThis.isSecureContext || !("serviceWorker" in navigator)) {
     setCacheState("unsupported", "");
     return null;
@@ -336,7 +362,12 @@ function scheduleBackgroundCheck() {
 
 prepareManifestLink();
 renderLoadingRecovery();
-if (isAndroidContainer() || !globalThis.isSecureContext || !("serviceWorker" in navigator)) {
+if (nativeResourceCache) {
+  setCacheState("ready", "网页资源由 Windows 客户端缓存");
+  window.addEventListener("codex-elves-app-ready", () => {
+    appReady = true; void registerServiceWorker();
+  }, { once: true });
+} else if (isAndroidContainer() || !globalThis.isSecureContext || !("serviceWorker" in navigator)) {
   setCacheState("unsupported", "");
 } else {
   window.addEventListener("codex-elves-app-ready", () => {

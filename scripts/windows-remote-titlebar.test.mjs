@@ -75,7 +75,7 @@ test("配色同步权限与连接设置、窗口控制按 WebView 分开", async
     capability("content-appearance"), capability("connection-page"), capability("titlebar"),
   ]);
   assert.deepEqual(appearance.webviews, ["remote-content"]);
-  assert.deepEqual(appearance.permissions, ["remote-appearance"]);
+  assert.deepEqual(appearance.permissions, ["remote-appearance", "remote-resource-cache"]);
   assert.ok(appearance.remote.urls.every(url => /^https?:/.test(url)));
   assert.equal(connection.local, true);
   assert.equal(connection.remote, undefined);

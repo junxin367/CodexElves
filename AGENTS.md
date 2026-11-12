@@ -140,10 +140,14 @@
 
 - `target/release/codex-elves.exe`
 - `target/release/codex-elves-manager.exe`
+- `target/release/codex-elves-remote.exe`
 - `dist/windows/app/codex-elves.exe`
 - `dist/windows/app/codex-elves-manager.exe`
+- `dist/windows/app/codex-elves-remote.exe`
 - `dist/windows/CodexElves-<version>-windows-x64-setup.exe`（`<version>` 取自根 `Cargo.toml` 的 `workspace.package.version`）
-- `dist/windows/CodexElves-Remote-<version>-windows-x64.exe`（独立客户端，不放入管理器安装目录）
+- `dist/windows/CodexElves-Remote-<version>-windows-x64.exe`（另行提供的便携客户端）
+
+安装包必须同时安装 `codex-elves-remote.exe`，并在桌面和开始菜单的 CodexElves 分组创建“CodexElves 远程会话”快捷方式，直接启动客户端自身。卸载时清理对应程序和快捷方式，保留独立用户数据目录内的设置与登录缓存。安装完成页沿用管理器运行选项，不自动启动远程客户端。
 
 不要改回手工 NSIS 命令作为默认流程。根 `build.ps1` 当前会自动调用 Android 同步构建；普通 Windows 编译使用上述专用入口，不能默认调用根 `build.ps1` 或 `scripts/sync-android-build.ps1`，以免附带构建 Android。需要修改构建流程时，优先更新 `build.ps1` 和 `scripts/build-windows-installer.ps1`。
 
@@ -152,8 +156,10 @@
 - 用户只要求编译远程客户端时，执行 `.\scripts\build-windows-remote.ps1`，只生成独立 EXE 和对应构建信息，不附带管理器或 Android 构建。
 - 客户端使用独立配置与 WebView2 登录缓存，只连接用户填写的远程服务，不启动本机 launcher、管理器或远程后台。
 - 独立程序最顶部标题栏固定为 36 个逻辑像素，随 DPI 缩放；背景、文字和分隔线跟随会话页实际外观模式与自定义配色。保留窗口拖动、缩放、最小化、最大化及还原，关闭收进托盘，再次启动唤回原窗口。不显示“连接”“窗口”菜单栏，连接设置、刷新及退出入口保留在托盘。
-- 本地标题栏与远程内容使用独立 WebView。只有本地标题栏获得窗口操作权限；远程内容只额外允许同步经过校验的 RGB 配色，连接设置仍仅授权内置连接页，不能为配色联动扩大其他原生命令权限。
+- 本地标题栏与远程内容使用独立 WebView。只有本地标题栏获得窗口操作权限；远程内容仅允许同步经过校验的 RGB 配色以及管理公开网页资源缓存，连接设置仍仅授权内置连接页，不能扩大其他原生命令权限。
 - 地址输入错误或网络加载失败后返回可编辑连接页并保留本次输入；只有成功加载的地址才能保存为下次自动连接目标。远程网页不得获得本机连接设置命令权限。
+- 客户端内置公开网页包，按服务 Origin 保存经过清单及 SHA-256 校验的当前/上一版资源；完整更新只在下次导航启用，不在使用中混换资源或自动刷新。缓存不能拦截 API、上传、鉴权或原生注入脚本。接管 Service Worker 时不得清除 Cookie、localStorage 或 IndexedDB；前台会话请求优先于资源更新。
+- 启动优先自动打开上次成功连接地址并复用有效登录授权。无已保存地址时，只读取当前用户管理器监听配置并探测回环地址与默认端口，清单验证成功后预填；不得扫描其他端口、读取访问密钥或覆盖用户正在编辑的地址。连接页不恢复已移除的窗口操作说明。
 
 ### Android 显式编译
 

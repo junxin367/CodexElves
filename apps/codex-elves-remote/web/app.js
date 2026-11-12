@@ -4,6 +4,8 @@ const connect = document.querySelector("#connect");
 const status = document.querySelector("#status");
 const invoke = (command, payload = {}) => window.__TAURI__.core.invoke(command, payload);
 let connecting = false;
+let edited = false;
+server.addEventListener("input", () => { edited = true; });
 
 async function openConnection() {
   if (connecting || !server.value.trim()) return;
@@ -30,18 +32,22 @@ form.addEventListener("submit", event => {
 
 try {
   const settings = await invoke("remote_client_state");
-  server.value = settings.serverUrl;
+  // 本地探测异步返回时不能覆盖用户已经开始编辑的地址。
+  if (!edited) server.value = settings.serverUrl;
   document.querySelector("#version").textContent = `v${settings.version}`;
-  status.textContent = settings.error || "连接后将使用此客户端独立保存的登录状态。";
-  status.classList.toggle("error", Boolean(settings.error));
-  connect.disabled = false;
-  if (settings.error) {
+  if (!connecting) {
+    status.textContent = (!edited && settings.error) || (!edited && settings.detected
+      ? "已发现本机远程服务，可直接连接。" : "连接后将使用此客户端独立保存的登录状态。");
+    status.classList.toggle("error", !edited && Boolean(settings.error));
+    connect.disabled = false;
+  }
+  if (settings.error && !edited) {
     // 地址错误后直接选中原输入，便于立即修正，不再次自动进入错误页面。
     server.focus();
     server.select();
   }
   // 用户要求独立程序直接打开会话；仅首次启动自动恢复已成功连接的地址。
-  if (!settings.error && settings.autoConnect && settings.serverUrl) void openConnection();
+  if (!edited && !settings.error && settings.autoConnect && settings.serverUrl) void openConnection();
 } catch (error) {
   status.textContent = `读取设置失败：${error}`;
   status.classList.add("error");

@@ -7882,3 +7882,153 @@ test("新版多仓库页面连接旧后台时仅对旧白名单拒绝回退，�
   context.request = async () => { throw Object.assign(new Error("访问已撤销"), { code: 403 }); };
   await assert.rejects(context.requestChanges({ threadId: "thread" }), error => error.code === 403);
 });
+
+function promptUndoHarness() {
+  const microtasks = [];
+  let clock = 0, scope = "device-a:thread-a", readOnly = false;
+  const prompt = { text: "", selection: { start: 0, end: 0 }, disabled: false, scrollTop: 0, scrollLeft: 0, focus() {} };
+  const context = nodeVm.createContext({
+    selectedSkills: [], selectedGoal: null,
+    queueMicrotask: action => microtasks.push(action),
+    skillIdentity: skill => `${skill.name}\0${skill.path}`,
+    promptPlainText: () => prompt.text,
+    promptSelection: () => prompt.selection,
+    setPromptSelection: (_prompt, start, end, selection) => { prompt.selection = { ...selection, start, end }; },
+    writePromptContent: (_prompt, text) => { prompt.editHistory.begin("replace"); prompt.text = text; },
+    handlePromptInput: () => prompt.editHistory.commit(),
+    randomId: () => "fresh-goal-id",
+    threadReadOnly: () => readOnly,
+    removeAdjacentPromptToken: () => false,
+    $: selector => selector === "#prompt" ? prompt : { hidden: true },
+  });
+  nodeVm.runInContext(app.slice(app.indexOf("function createPromptEditHistory("),
+    app.indexOf("function configurePromptEditor("))
+    + "\n" + app.slice(app.indexOf('  $("#prompt").onkeydown ='), app.indexOf('  $("#prompt").onpaste =')), context);
+  prompt.editHistory = context.createPromptEditHistory(prompt, () => scope, () => clock);
+  const flush = () => { while (microtasks.length) microtasks.shift()(); };
+  const key = (key, extra = {}) => {
+    const event = { key, ctrlKey: true, metaKey: false, altKey: false, shiftKey: false,
+      isComposing: false, preventDefault() { this.prevented = true; }, ...extra };
+    prompt.onkeydown(event); return event;
+  };
+  const native = (text, type = "insertText") => {
+    prompt.onbeforeinput({ inputType: type, data: text, isComposing: false, preventDefault() {} });
+    // 浏览器可在 beforeinput 默认改写 DOM 前运行微任务；不能在这个时机丢弃原编辑快照。
+    flush();
+    prompt.text = text;
+    prompt.selection = { start: text.length, end: text.length };
+    prompt.editHistory.commit();
+    flush();
+  };
+  const replace = text => {
+    prompt.editHistory.begin("replace");
+    prompt.text = text; prompt.selection = { start: text.length, end: text.length };
+    flush();
+  };
+  return {
+    prompt, context, flush, key, native, replace,
+    tick: milliseconds => { clock += milliseconds; },
+    scope: value => { scope = value; },
+    readOnly: value => { readOnly = value; },
+  };
+}
+
+test("编辑框连续输入按一段撤销，Ctrl+Y 与 Ctrl+Shift+Z 可重做", () => {
+  const h = promptUndoHarness();
+  for (const text of ["h", "he", "hel", "hell", "hello"]) { h.native(text); h.tick(30); }
+  assert.equal(h.key("z").prevented, true);
+  assert.equal(h.prompt.text, "");
+  h.key("y"); assert.equal(h.prompt.text, "hello");
+  h.key("z"); h.key("z", { shiftKey: true });
+  assert.equal(h.prompt.text, "hello");
+  h.tick(1100); h.native("hello world");
+  h.key("z"); assert.equal(h.prompt.text, "hello", "停顿后的编辑独立撤销");
+});
+
+test("粘贴、换行和选区替换分别撤销，并恢复被替换的选区", () => {
+  const h = promptUndoHarness();
+  h.replace("第一行\n第二行");
+  h.replace("第一行\n第二行\n");
+  h.key("z"); assert.equal(h.prompt.text, "第一行\n第二行");
+  h.key("z"); assert.equal(h.prompt.text, "");
+  h.key("y"); assert.equal(h.prompt.text, "第一行\n第二行");
+  h.prompt.selection = { start: 0, end: 3 };
+  h.replace("修改后\n第二行");
+  h.key("z");
+  assert.equal(h.prompt.text, "第一行\n第二行");
+  assert.equal(h.prompt.selection.start, 0);
+  assert.equal(h.prompt.selection.end, 3);
+  h.key("y"); assert.equal(h.prompt.text, "修改后\n第二行");
+});
+
+test("撤销恢复 Skill 位置和目标标签，目标恢复不复用旧请求标识", () => {
+  const h = promptUndoHarness();
+  h.context.selectedSkills = [{ name: "test-skill", path: "/fixture/SKILL.md", _offset: 1 }];
+  h.context.selectedGoal = "old-goal-id";
+  h.prompt.text = "abc"; h.prompt.selection = { start: 1, end: 1 };
+  h.prompt.editHistory.begin("replace");
+  h.context.selectedSkills = []; h.context.selectedGoal = null;
+  h.prompt.text = "a新内容bc"; h.flush();
+  h.key("z");
+  assert.equal(h.prompt.text, "abc");
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.selectedSkills)), [{ name: "test-skill", path: "/fixture/SKILL.md", _offset: 1 }]);
+  assert.equal(h.context.selectedGoal, "fresh-goal-id");
+  h.key("y");
+  assert.equal(h.prompt.text, "a新内容bc");
+  assert.equal(h.context.selectedSkills.length, 0);
+  assert.equal(h.context.selectedGoal, null);
+});
+
+test("中文输入法候选过程不被撤销打断，提交后整次输入可以撤销", () => {
+  const h = promptUndoHarness();
+  h.prompt.text = "原稿"; h.prompt.selection = { start: 2, end: 2 };
+  h.prompt.editHistory.startComposition();
+  for (const text of ["原稿n", "原稿ni", "原稿你"]) {
+    h.prompt.text = text; h.prompt.selection = { start: text.length, end: text.length };
+    h.prompt.editHistory.commit(); h.flush();
+    assert.equal(h.prompt.editHistory.undo(), false);
+  }
+  const candidateUndo = { inputType: "historyUndo", isComposing: false, preventDefault() { this.prevented = true; } };
+  h.prompt.onbeforeinput(candidateUndo);
+  assert.equal(candidateUndo.prevented, undefined, "候选阶段保留输入法原生处理，不拦截其撤销");
+  h.prompt.editHistory.endComposition(); h.prompt.editHistory.commit();
+  h.key("z"); assert.equal(h.prompt.text, "原稿");
+  h.key("y"); assert.equal(h.prompt.text, "原稿你");
+});
+
+test("撤销后新编辑丢弃重做分支，切换会话和清空草稿均不恢复旧内容", () => {
+  const h = promptUndoHarness();
+  h.replace("原内容"); h.replace("第二次修改"); h.key("z"); h.replace("新分支");
+  assert.equal(h.prompt.editHistory.redo(), false);
+  assert.equal(h.prompt.text, "新分支");
+  h.scope("device-a:thread-b"); h.prompt.text = "其他会话草稿";
+  h.key("z"); assert.equal(h.prompt.text, "其他会话草稿");
+  h.replace("等待提交的编辑");
+  h.prompt.editHistory.begin("replace"); h.prompt.text = "";
+  h.prompt.editHistory.reset(); h.flush();
+  h.key("z"); assert.equal(h.prompt.text, "", "发送后清空建立新基线，待处理微任务不能复活原稿");
+});
+
+test("编辑框支持 beforeinput 的撤销与重做，只读和输入法组合期间不改内容", () => {
+  const h = promptUndoHarness();
+  h.replace("第一行\n第二行");
+  const undo = { inputType: "historyUndo", isComposing: false, preventDefault() { this.prevented = true; } };
+  h.prompt.onbeforeinput(undo);
+  assert.equal(undo.prevented, true); assert.equal(h.prompt.text, "");
+  h.prompt.onbeforeinput({ inputType: "historyRedo", isComposing: false, preventDefault() {} });
+  assert.equal(h.prompt.text, "第一行\n第二行");
+  h.readOnly(true); h.key("z"); assert.equal(h.prompt.text, "第一行\n第二行");
+  h.readOnly(false); h.key("z", { isComposing: true });
+  assert.equal(h.prompt.text, "第一行\n第二行");
+});
+
+test("长时间编辑仅保留最近一百次独立修改，淘汰旧记录后仍能撤销到正确位置", () => {
+  const h = promptUndoHarness();
+  for (let value = 1; value <= 150; value++) h.replace(String(value));
+  let count = 0;
+  while (h.prompt.editHistory.undo()) count++;
+  assert.equal(count, 100);
+  assert.equal(h.prompt.text, "50");
+  while (h.prompt.editHistory.redo()) {}
+  assert.equal(h.prompt.text, "150");
+});

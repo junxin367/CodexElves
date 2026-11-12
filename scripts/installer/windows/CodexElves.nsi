@@ -40,10 +40,14 @@ Section "Install"
   Pop $0
   nsExec::ExecToLog 'taskkill /IM codex-elves-task-board.exe /F'
   Pop $0
+  ; 用户要求安装包同时安装独立远程客户端，升级前释放已安装客户端的程序文件。
+  nsExec::ExecToLog 'taskkill /IM codex-elves-remote.exe /F'
+  Pop $0
 
   File "${ROOT}\dist\windows\app\codex-elves.exe"
   File "${ROOT}\dist\windows\app\codex-elves-manager.exe"
   File "${ROOT}\dist\windows\app\codex-elves-task-board.exe"
+  File "${ROOT}\dist\windows\app\codex-elves-remote.exe"
 
   Delete "$DESKTOP\CodexElves 绠＄悊宸ュ叿.lnk"
   Delete "$DESKTOP\CodexElves Manager.lnk"
@@ -53,9 +57,12 @@ Section "Install"
 
   CreateShortcut "$DESKTOP\CodexElves.lnk" "$INSTDIR\codex-elves.exe" "" "$INSTDIR\codex-elves.exe"
   CreateShortcut "$DESKTOP\CodexElves 管理工具.lnk" "$INSTDIR\codex-elves-manager.exe" "" "$INSTDIR\codex-elves-manager.exe"
+  ; 用户要求为独立程序创建快捷方式：桌面与开始菜单均指向客户端自身，不经管理器启动。
+  CreateShortcut "$DESKTOP\CodexElves 远程会话.lnk" "$INSTDIR\codex-elves-remote.exe" "" "$INSTDIR\codex-elves-remote.exe"
   CreateDirectory "$SMPROGRAMS\CodexElves"
   CreateShortcut "$SMPROGRAMS\CodexElves\CodexElves.lnk" "$INSTDIR\codex-elves.exe" "" "$INSTDIR\codex-elves.exe"
   CreateShortcut "$SMPROGRAMS\CodexElves\CodexElves 管理工具.lnk" "$INSTDIR\codex-elves-manager.exe" "" "$INSTDIR\codex-elves-manager.exe"
+  CreateShortcut "$SMPROGRAMS\CodexElves\CodexElves 远程会话.lnk" "$INSTDIR\codex-elves-remote.exe" "" "$INSTDIR\codex-elves-remote.exe"
   CreateShortcut "$SMPROGRAMS\CodexElves\卸载 CodexElves.lnk" "$INSTDIR\uninstall.exe" "" "$INSTDIR\codex-elves-manager.exe"
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -76,13 +83,17 @@ Section "Uninstall"
   Pop $0
   nsExec::ExecToLog 'taskkill /IM codex-elves-task-board.exe /F'
   Pop $0
+  nsExec::ExecToLog 'taskkill /IM codex-elves-remote.exe /F'
+  Pop $0
 
   Delete "$DESKTOP\CodexElves.lnk"
   Delete "$DESKTOP\CodexElves 管理工具.lnk"
+  Delete "$DESKTOP\CodexElves 远程会话.lnk"
   Delete "$DESKTOP\CodexElves Manager.lnk"
   Delete "$DESKTOP\CodexElves 绠＄悊宸ュ叿.lnk"
   Delete "$SMPROGRAMS\CodexElves\CodexElves.lnk"
   Delete "$SMPROGRAMS\CodexElves\CodexElves 管理工具.lnk"
+  Delete "$SMPROGRAMS\CodexElves\CodexElves 远程会话.lnk"
   Delete "$SMPROGRAMS\CodexElves\CodexElves 绠＄悊宸ュ叿.lnk"
   Delete "$SMPROGRAMS\CodexElves\卸载 CodexElves.lnk"
   Delete "$SMPROGRAMS\CodexElves\鍗歌浇 CodexElves.lnk"
@@ -92,6 +103,8 @@ Section "Uninstall"
   Delete "$INSTDIR\codex-elves.exe"
   Delete "$INSTDIR\codex-elves-manager.exe"
   Delete "$INSTDIR\codex-elves-task-board.exe"
+  ; 只移除程序；远程客户端设置和登录缓存位于独立用户数据目录，升级及卸载不在此清除。
+  Delete "$INSTDIR\codex-elves-remote.exe"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 

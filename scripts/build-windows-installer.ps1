@@ -153,8 +153,10 @@ New-Item -ItemType Directory -Path $ReleaseMirrorDir -Force | Out-Null
 $LauncherExe = Join-Path $ReleaseDir "codex-elves.exe"
 $ManagerExe = Join-Path $ReleaseDir "codex-elves-manager.exe"
 $TaskBoardExe = Join-Path $ReleaseDir "codex-elves-task-board.exe"
+$RemoteClientExe = Join-Path $ReleaseDir "codex-elves-remote.exe"
 
-foreach ($artifact in @($LauncherExe, $ManagerExe, $TaskBoardExe)) {
+# 用户要求安装包同时包含独立远程客户端，必须与其他程序一起复制到安装输入目录及 release 镜像。
+foreach ($artifact in @($LauncherExe, $ManagerExe, $TaskBoardExe, $RemoteClientExe)) {
     if (!(Test-Path -LiteralPath $artifact)) {
         throw "Expected release artifact not found: $artifact"
     }
@@ -166,6 +168,10 @@ foreach ($artifact in @($LauncherExe, $ManagerExe, $TaskBoardExe)) {
 }
 
 Invoke-Checked -FilePath $NodePath -Arguments @($BuildInputVerifier, $RepoRoot, $DistAppDir) -WorkingDirectory $RepoRoot
+
+# 校验独立客户端为 x64 GUI 程序，并保留单独交付的便携 EXE；安装包同时嵌入上述同一份客户端。
+& (Join-Path $RepoRoot "scripts\build-windows-remote.ps1") `
+    -Version $ResolvedVersion -Profile "release-fast" -SkipBuild -BinaryDirectory $ReleaseDir
 
 Invoke-Checked `
     -FilePath $NsisPath `
@@ -182,9 +188,5 @@ $LastWriteTime = $InstallerItem.LastWriteTime
 Write-Output "[OK] Installer: $InstallerPath"
 Write-Output "[OK] Size: $Length bytes"
 Write-Output "[OK] Updated: $LastWriteTime"
-
-# 用户要求 Windows 常规构建同时提供独立远程客户端；单独生成便携 EXE，不混入管理器安装目录或启动服务。
-& (Join-Path $RepoRoot "scripts\build-windows-remote.ps1") `
-    -Version $ResolvedVersion -Profile "release-fast" -SkipBuild -BinaryDirectory $ReleaseDir
 
 Start-CargoCacheCleanup -RepoRoot $RepoRoot -MaxSizeGiB 20

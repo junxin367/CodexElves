@@ -105,6 +105,7 @@ jobs:
           Copy-Item target/release/codex-elves.exe dist/windows/app/
           Copy-Item target/release/codex-elves-manager.exe dist/windows/app/
           Copy-Item target/release/codex-elves-task-board.exe dist/windows/app/
+          Copy-Item target/release/codex-elves-remote.exe dist/windows/app/
 
       - name: Stage standalone Windows remote client
         shell: pwsh

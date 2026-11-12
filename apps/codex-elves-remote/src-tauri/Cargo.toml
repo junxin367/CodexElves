@@ -7,16 +7,21 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+directories.workspace = true
+flate2.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 url.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 tauri = { version = "2", features = ["custom-protocol", "tray-icon", "unstable"] }
 tauri-plugin-single-instance = "2"
 webview2-com = "0.38"
-windows = { version = "0.61", features = ["Win32_Foundation"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_System_Com"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(windows)'.build-dependencies]
