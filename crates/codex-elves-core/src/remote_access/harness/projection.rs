@@ -174,8 +174,11 @@ impl Projection {
 
     pub fn side_changed(&mut self, id: &str) {
         if let Some(side) = self.sides.threads.get(id) {
-            self.push(json!({"method":"remote/relatedThreadsChanged","params":{
-                "threadId":side.parent,"closedThreadIds":if side.closed {json!([id])} else {json!([])}}}));
+            let related = json!({"method":"remote/relatedThreadsChanged","params":{
+                "threadId":side.parent,"closedThreadIds":if side.closed {json!([id])} else {json!([])}}});
+            let queue = side.queue_snapshot();
+            self.push(related);
+            self.push(json!({"method":"thread/queue/changed","params":queue}));
         }
     }
 
@@ -185,6 +188,7 @@ impl Projection {
             side.closing = false;
             side.turns.clear();
             side.sent.clear();
+            side.clear_queue();
         }
         self.clear_side_runtime(id);
         self.side_changed(id);

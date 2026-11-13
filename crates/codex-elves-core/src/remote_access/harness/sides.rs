@@ -3,12 +3,15 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 
 use super::super::{ApiError, RemoteAuthorization, now_ms};
+use super::store::{Data, Queued};
 use super::{Harness, error, required};
 
 // 用户要求服务独立管理且过期后仍可读取：最多保留 16 个未关闭会话（含过期），每个正文最多 16 MiB，
 // 合计正文上限约 256 MiB；达到上限明确停止接受新输入，不静默截断或落盘恢复。
 const MAX_OPEN_SIDES: usize = 16;
 const MAX_HISTORY_BYTES: usize = 16 * 1024 * 1024;
+// 侧边待发队列与正文分别限制为 16 MiB，条数沿用主会话的 100 条上限，避免临时图片无限占用内存。
+const MAX_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) struct SideThread {
     pub parent: String,
@@ -22,6 +25,9 @@ pub(super) struct SideThread {
     pub incomplete: bool,
     pub unread: bool,
     pub sent: HashMap<String, (String, Value)>,
+    // 用户要求侧边执行中普通发送也排队；仅复用队列/编辑/完成门控结构，绝不写入持久 Store。
+    pub queue: Data,
+    pub queue_revision: u64,
     bytes: usize,
 }
 
@@ -42,6 +48,8 @@ mod tests {
             incomplete: false,
             unread: false,
             sent: HashMap::new(),
+            queue: Data::default(),
+            queue_revision: 1,
             bytes: 0,
         }
     }
@@ -180,9 +188,60 @@ impl SideThread {
         view["readOnly"] = json!(self.closed || self.closing || self.expired);
         view["editableMessage"] = Value::Null;
         view["goal"] = Value::Null;
-        view["queuedMessages"] = json!([]);
-        view["queuedEdits"] = json!([]);
+        let queue = self.queue_snapshot();
+        for key in [
+            "queuedMessages",
+            "queuedEdits",
+            "queueEpoch",
+            "queueRevision",
+        ] {
+            view[key] = queue[key].clone();
+        }
+        view["capabilities"]["remoteQueue"] = json!(true);
         Ok(view)
+    }
+
+    pub fn queue_snapshot(&self) -> Value {
+        self.queue.queue(
+            self.metadata["id"].as_str().unwrap_or(""),
+            &self.generation,
+            self.queue_revision,
+        )
+    }
+
+    pub fn clear_queue(&mut self) {
+        self.queue = Data::default();
+        self.queue_revision += 1;
+    }
+
+    pub fn change_queue(
+        &mut self,
+        change: impl FnOnce(&mut Data) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let mut next = self.queue.clone();
+        change(&mut next)?;
+        // 与 Store::commit 同步保留最近 256 份已结束编辑回执并释放原图；编辑中的草稿仍计入 16 MiB 上限。
+        let completed: Vec<_> = next
+            .edits
+            .iter_mut()
+            .filter(|(_, edit)| matches!(edit.state.as_str(), "committed" | "canceled"))
+            .map(|(id, edit)| {
+                edit.original.payload = json!({"prompt":""});
+                id.clone()
+            })
+            .collect();
+        for id in completed.iter().take(completed.len().saturating_sub(256)) {
+            next.edits.remove(id);
+        }
+        if serde_json::to_vec(&next)?.len() > MAX_QUEUE_BYTES {
+            return Err(error(
+                429,
+                "侧边会话的待发送内容已达 16 MiB，请先处理现有队列",
+            ));
+        }
+        self.queue = next;
+        self.queue_revision += 1;
+        Ok(())
     }
 
     pub fn expire(&mut self) {
@@ -193,6 +252,7 @@ impl SideThread {
         self.expired = true;
         self.closing = false;
         self.sent.clear();
+        self.clear_queue();
         self.metadata["status"] = json!({"type":"idle"});
         for turn in &mut self.turns {
             if turn["status"] == "inProgress" {
@@ -237,6 +297,7 @@ impl SideThread {
                     self.closing = false;
                     self.turns.clear();
                     self.sent.clear();
+                    self.clear_queue();
                     self.bytes = 0;
                 } else {
                     self.expire();
@@ -260,6 +321,24 @@ impl SideThread {
                     self.upsert_item(id, item.clone());
                 }
                 let completed = frame["method"] == "turn/completed";
+                if completed {
+                    self.queue.finish_queue(
+                        self.metadata["id"].as_str().unwrap_or(""),
+                        id,
+                        if raw["error"].is_null() {
+                            raw["status"].as_str().unwrap_or("unknown")
+                        } else {
+                            "failed"
+                        },
+                    );
+                } else {
+                    self.queue.wait_queue(
+                        self.metadata["id"].as_str().unwrap_or(""),
+                        Some(id.to_owned()),
+                        false,
+                    );
+                }
+                self.queue_revision += 1;
                 self.metadata["status"] = json!({"type":if completed {"idle"} else {"active"}});
                 self.unread = completed;
             }
@@ -616,6 +695,8 @@ impl Harness {
             incomplete: false,
             unread: false,
             sent: HashMap::new(),
+            queue: Data::default(),
+            queue_revision: 1,
             bytes: 0,
         };
         let mut projection = self.projection.lock().await;
@@ -657,6 +738,7 @@ impl Harness {
     ) -> anyhow::Result<Value> {
         let id = required(payload, "threadId")?;
         if matches!(action, "markRead" | "closeSideThread") {
+            let permit = authorization.prepare_dispatch().await?;
             let mut projection = self.projection.lock().await;
             let side = projection
                 .sides
@@ -668,7 +750,6 @@ impl Harness {
                     return Err(error(410, "侧边会话已关闭，内容已释放"));
                 }
                 // 已读只修改当前保留正文的标记，不依赖已过期的引擎连接，也不恢复临时会话。
-                let permit = authorization.prepare_dispatch().await?;
                 return crate::bridge::CdpDispatchPermit::commit(permit, || {
                     let side = projection.sides.threads.get_mut(id).unwrap();
                     if side.unread {
@@ -686,7 +767,6 @@ impl Harness {
                 return Ok(json!({"ok":true,"threadId":id,"parentThreadId":parent,"closed":true}));
             }
             if side.expired {
-                let permit = authorization.prepare_dispatch().await?;
                 return crate::bridge::CdpDispatchPermit::commit(permit, || {
                     projection.close_side(id);
                     Ok(json!({"ok":true,"threadId":id,"parentThreadId":parent,"closed":true}))
@@ -696,7 +776,51 @@ impl Harness {
         let generation = self.side_generation(id).await?;
         match action {
             "send" => self.send_side(id, payload, authorization).await,
+            "removeQueued" | "reorderQueued" | "beginQueuedEdit" | "editQueued"
+            | "cancelQueuedEdit" | "dismissQueuedEdit" => {
+                self.edit_queue(id, action, payload, authorization).await
+            }
+            "steerQueued" => {
+                let message_id = required(payload, "messageId")?;
+                let message = self.projection.lock().await.sides.threads[id]
+                    .queue
+                    .queues
+                    .get(id)
+                    .and_then(|queue| queue.iter().find(|message| message.id == message_id))
+                    .cloned()
+                    .ok_or_else(|| error(409, "队列消息已变化"))?;
+                self.dispatch_side_queued(id, &message, authorization, true)
+                    .await?;
+                let mut response = self.queue(id).await;
+                if let Some((_, receipt)) = self.projection.lock().await.sides.threads[id].sent.get(
+                    message.payload["clientUserMessageId"]
+                        .as_str()
+                        .unwrap_or(""),
+                ) {
+                    for key in ["turnId", "nativeBridge", "executionTransport"] {
+                        if let Some(value) = receipt.get(key) {
+                            response[key] = value.clone();
+                        }
+                    }
+                }
+                response["confirmed"] = json!(true);
+                response["deliveryState"] = json!("accepted");
+                response["messageId"] = json!(message_id);
+                response["clientUserMessageId"] = message.payload["clientUserMessageId"].clone();
+                Ok(response)
+            }
             "stop" | "closeSideThread" => {
+                // 用户主动停止只结束当前任务；尚未派发的侧边消息保持暂停，不能被迟到完成事件自动续发。
+                let permit = authorization.prepare_dispatch().await?;
+                let mut projection = self.projection.lock().await;
+                crate::bridge::CdpDispatchPermit::commit(permit, || {
+                    let side = projection.sides.threads.get_mut(id).unwrap();
+                    side.queue.pause_queue(id, "消息已暂停");
+                    side.queue_revision += 1;
+                    projection.side_changed(id);
+                    Ok(())
+                })?;
+                drop(projection);
                 let active = self.projection.lock().await.active.get(id).cloned();
                 if action == "closeSideThread" {
                     self.projection
@@ -774,10 +898,22 @@ impl Harness {
         payload: &Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
-        let input = super::commands::inputs(payload)?;
+        self.submit_side(id, payload, authorization, false).await
+    }
+
+    async fn submit_side(
+        &self,
+        id: &str,
+        payload: &Value,
+        authorization: &RemoteAuthorization,
+        steer: bool,
+    ) -> anyhow::Result<Value> {
+        super::commands::inputs(payload)?;
         let client = required(payload, "clientUserMessageId")?;
         let fingerprint = super::commands::payload_hash(payload);
         let generation = self.side_generation(id).await?;
+        // 与 Fast/队列编辑共用“授权锁 → 投影锁”顺序，避免不同侧边会话并发操作时交叉等待。
+        let permit = authorization.prepare_dispatch().await?;
         let mut projection = self.projection.lock().await;
         let active = projection.active.get(id).cloned();
         if projection.compactions.contains_key(id) || payload["queueOnly"] == true {
@@ -793,7 +929,7 @@ impl Harness {
         if side.closing || side.incomplete {
             return Err(error(409, "此侧边会话不能继续发送，请先关闭"));
         }
-        // 运行中补充走 turn/steer，不能应用新的模型设置；必须在派发前拒绝，避免显示未生效的模型。
+        // 执行中的普通消息只排队，不携带新模型/深度；模型选择由任务结束后的新发送应用。
         if active.is_some()
             && ["model", "reasoningEffort", "serviceTier"]
                 .iter()
@@ -814,15 +950,76 @@ impl Harness {
             if hash != &fingerprint {
                 return Err(error(409, "消息标识已用于其他内容"));
             }
+            if result["deliveryState"] == "queued" {
+                let mut response = side.queue_snapshot();
+                for (key, value) in result.as_object().into_iter().flatten() {
+                    response[key] = value.clone();
+                }
+                return Ok(response);
+            }
             return Ok(result.clone());
         }
         if side.sent.len() >= 4096 {
             return Err(error(429, "临时侧边会话消息已达上限，请新建侧边会话"));
         }
-        let unknown = json!({"ok":false,"code":503,"threadId":id,"clientUserMessageId":client,
-            "outcomeUnknown":true,"confirmed":false,"deliveryState":"unknown","message":"消息结果待核对，不会重复发送"});
-        side.sent.insert(client.to_owned(), (fingerprint, unknown));
+        if let Some(turn) = active.as_ref().filter(|_| !steer) {
+            let mut message = Queued::new(payload.clone(), authorization);
+            // Fast 在实际派发时读取当前会话档位；队列本身不冻结模型、思考深度或 Fast。
+            for key in ["model", "reasoningEffort", "serviceTier"] {
+                message.payload.as_object_mut().unwrap().remove(key);
+            }
+            if side
+                .queue
+                .queues
+                .get(id)
+                .is_some_and(|queue| queue.len() >= 100)
+            {
+                return Err(error(429, "此会话的待发送消息已达上限"));
+            }
+            if serde_json::to_vec(&side.queue)?.len() + serde_json::to_vec(&message)?.len()
+                > MAX_QUEUE_BYTES
+            {
+                return Err(error(
+                    429,
+                    "侧边会话的待发送内容已达 16 MiB，请先处理现有队列",
+                ));
+            }
+            let response = crate::bridge::CdpDispatchPermit::commit(permit, || {
+                side.queue
+                    .queues
+                    .entry(id.to_owned())
+                    .or_default()
+                    .push(message.clone());
+                side.queue.wait_queue(id, Some(turn.clone()), false);
+                side.queue_revision += 1;
+                let receipt = json!({"ok":true,"threadId":id,"messageId":message.id,
+                    "clientUserMessageId":client,"deliveryState":"queued","confirmed":true});
+                let mut response = side.queue_snapshot();
+                for (key, value) in receipt.as_object().unwrap() {
+                    response[key] = value.clone();
+                }
+                // 回执只保存消息身份；队列图片和完整快照仅保留一份，避免每次入队重复缓存整条队列。
+                side.sent.insert(client.to_owned(), (fingerprint, receipt));
+                Ok(response)
+            })?;
+            projection.side_changed(id);
+            return Ok(response);
+        }
         drop(projection);
+        drop(permit);
+        self.deliver_side(id, payload, authorization, active).await
+    }
+
+    async fn deliver_side(
+        &self,
+        id: &str,
+        payload: &Value,
+        authorization: &RemoteAuthorization,
+        active: Option<String>,
+    ) -> anyhow::Result<Value> {
+        let input = super::commands::inputs(payload)?;
+        let client = required(payload, "clientUserMessageId")?;
+        let generation = self.side_generation(id).await?;
         let mut params = json!({"threadId":id,"input":input,"clientUserMessageId":client});
         let method = if let Some(turn) = &active {
             params["expectedTurnId"] = json!(turn);
@@ -855,13 +1052,22 @@ impl Harness {
         if method == "turn/start"
             && let Err(failure) = self.apply_fast_to_turn(id, &mut params).await
         {
-            // Fast 准备失败发生在任何轮次写入之前，不能把此消息留成“已发送待核对”。
-            if let Some(side) = self.projection.lock().await.sides.threads.get_mut(id) {
-                side.sent.remove(client);
-            }
+            // Fast 准备失败发生在轮次写入之前；保留已有入队回执，直接发送尚未登记未知意图。
             return Err(failure);
         }
         let applied_tier = params["serviceTier"].clone();
+        let mut projection = self.projection.lock().await;
+        let side = projection.sides.threads.get_mut(id).unwrap();
+        if side.closed || side.closing || side.expired || side.generation != generation {
+            return Err(error(410, "侧边会话已过期，不能恢复或重新执行"));
+        }
+        let unknown = json!({"ok":false,"code":503,"threadId":id,"clientUserMessageId":client,
+            "outcomeUnknown":true,"confirmed":false,"deliveryState":"unknown","message":"消息结果待核对，不会重复发送"});
+        side.sent
+            .entry(client.to_owned())
+            .or_insert_with(|| (super::commands::payload_hash(payload), Value::Null))
+            .1 = unknown;
+        drop(projection);
         let response = self
             .runtime
             .request_in_generation(&generation, method, params, authorization)
@@ -875,7 +1081,21 @@ impl Harness {
                     .downcast_ref::<ApiError>()
                     .is_some_and(|failure| !failure.outcome_unknown)
                 {
-                    side.sent.remove(client);
+                    if let Some(queued) = side
+                        .queue
+                        .queues
+                        .get(id)
+                        .into_iter()
+                        .flatten()
+                        .find(|queued| queued.payload["clientUserMessageId"] == client)
+                    {
+                        if let Some(sent) = side.sent.get_mut(client) {
+                            sent.1 = json!({"ok":true,"confirmed":true,"threadId":id,
+                                "messageId":queued.id,"clientUserMessageId":client,"deliveryState":"queued"});
+                        }
+                    } else {
+                        side.sent.remove(client);
+                    }
                 }
                 return Err(failure);
             }
@@ -884,7 +1104,13 @@ impl Harness {
             .as_str()
             .or_else(|| response["turnId"].as_str())
             .or(active.as_deref())
-            .ok_or_else(|| error(503, "侧边消息轮次尚未确认"))?
+            .ok_or_else(|| {
+                anyhow::Error::from(ApiError {
+                    code: 503,
+                    message: "侧边消息轮次尚未确认，请查询原回执".into(),
+                    outcome_unknown: true,
+                })
+            })?
             .to_owned();
         let result = json!({"ok":true,"confirmed":true,"threadId":id,"turnId":turn,"clientUserMessageId":client,
             "deliveryState":"accepted","nativeBridge":"harness","executionTransport":"app-server-stdio"});
@@ -934,6 +1160,105 @@ impl Harness {
         Ok(result)
     }
 
+    pub(super) async fn dispatch_side_queued(
+        &self,
+        id: &str,
+        message: &Queued,
+        authorization: &RemoteAuthorization,
+        manual: bool,
+    ) -> anyhow::Result<()> {
+        let generation = self.side_generation(id).await?;
+        let permit = authorization.prepare_dispatch().await?;
+        let mut projection = self.projection.lock().await;
+        let active = projection.active.get(id).cloned();
+        if projection.compactions.contains_key(id) {
+            return if manual {
+                Err(error(409, "侧边会话压缩期间不能引导队列消息"))
+            } else {
+                Ok(())
+            };
+        }
+        if !manual && active.is_some() {
+            return Ok(());
+        }
+        let side = projection.sides.threads.get_mut(id).unwrap();
+        if side.closed
+            || side.expired
+            || side.closing
+            || side.incomplete
+            || side.generation != generation
+        {
+            return Err(error(410, "此侧边会话不能继续发送"));
+        }
+        if !manual
+            && !side
+                .queue
+                .queue_gates
+                .get(id)
+                .is_some_and(|gate| gate.phase == "ready")
+        {
+            return Ok(());
+        }
+        let queued = side
+            .queue
+            .queues
+            .get_mut(id)
+            .and_then(|queue| queue.iter_mut().find(|queued| queued.id == message.id))
+            .ok_or_else(|| error(409, "队列消息已变化"))?;
+        if !["queued", "paused"].contains(&queued.state.as_str())
+            || !manual && queued.state != "queued"
+        {
+            return Err(error(409, "消息正在发送或待核对"));
+        }
+        crate::bridge::CdpDispatchPermit::commit(permit, || {
+            queued.state = "sending".into();
+            side.queue_revision += 1;
+            Ok(())
+        })?;
+        projection.side_changed(id);
+        drop(projection);
+        let result = self
+            .deliver_side(id, &message.payload, authorization, active)
+            .await;
+        let mut projection = self.projection.lock().await;
+        if let Some(side) = projection
+            .sides
+            .threads
+            .get_mut(id)
+            .filter(|side| !side.closed && !side.expired && side.generation == generation)
+        {
+            if result.is_ok() {
+                if let Some(queue) = side.queue.queues.get_mut(id) {
+                    queue.retain(|queued| queued.id != message.id);
+                }
+            } else {
+                let state = if result
+                    .as_ref()
+                    .unwrap_err()
+                    .downcast_ref::<ApiError>()
+                    .is_some_and(|failure| !failure.outcome_unknown)
+                {
+                    "paused"
+                } else {
+                    "unknown"
+                };
+                if let Some(queued) = side
+                    .queue
+                    .queues
+                    .get_mut(id)
+                    .and_then(|queue| queue.iter_mut().find(|queued| queued.id == message.id))
+                {
+                    queued.state = state.into();
+                }
+                side.queue
+                    .pause_queue(id, "侧边消息未确认送达，待发送消息已暂停");
+            }
+            side.queue_revision += 1;
+            projection.side_changed(id);
+        }
+        result.map(|_| ())
+    }
+
     async fn answer_side_async(
         &self,
         id: &str,
@@ -958,18 +1283,19 @@ impl Harness {
         if let Some(mut message) = message {
             // 同一问题的回执即使迟到，也复用同一客户端消息 ID，不能因重复回答再次引导模型。
             message["clientUserMessageId"] = json!(format!("side-question-{request_id}"));
-            let result = self.send_side(id, &message, authorization).await?;
+            // 提问答案需要补充到等待中的任务；仅普通发送进入 FIFO，避免答案排队造成当前任务一直等待。
+            let result = self.submit_side(id, &message, authorization, true).await?;
             if result["ok"] != true || result["confirmed"] != true {
                 return Ok(result);
             }
         }
+        let permit = authorization.prepare_dispatch().await?;
         let mut projection = self.projection.lock().await;
         let key = projection
             .requests
             .iter()
             .find(|(_, request)| request["params"]["threadId"] == id && request["id"] == request_id)
             .map(|(key, _)| key.clone());
-        let permit = authorization.prepare_dispatch().await?;
         crate::bridge::CdpDispatchPermit::commit(permit, || {
             if let Some(key) = key {
                 projection.resolve(&key);

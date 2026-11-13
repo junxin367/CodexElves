@@ -140,9 +140,8 @@ html{scrollbar-color:var(--muted) transparent}
 /* 用户确认额度放在输入框下方现有空位：20px 高度复用 .composer-area 已有的至少 20px 下边距。
  * 绝对定位不参与布局，禁止为额度增加 margin/padding/行高或移动输入框；右侧保持原内侧对齐。 */
 /* 用户确认两个额度的分隔圆点两侧各由 10px 收至 5px；单项名称与百分比仍保持下方 5px 间距。
- * 原有“已用”前缀额外保留 5px 外边距，与新 gap 相加仍为原 10px，不连带改变前缀间距。 */
+ * 用户要求前缀改为“剩余”后与 5h 同样保持 5px：取消原额外 5px 外边距，不改变底行高度或右侧对齐。 */
 .composer-anchor>.claude-usage{position:absolute;top:100%;right:12px;display:flex;align-items:center;justify-content:flex-end;gap:5px;max-width:calc(100% - 24px);height:20px;min-height:0;margin:0;padding:0 2px;border:0;border-radius:0;background:transparent;color:var(--text);font:inherit;font-size:calc(var(--font-size)*.785714);font-variant-numeric:tabular-nums;line-height:20px;white-space:nowrap;cursor:pointer}
-.composer-anchor>.claude-usage>span:first-child:not(.claude-usage-window){margin-inline-end:5px}
 .composer-anchor>.claude-usage:is(:hover,:active,[aria-expanded=true]){background:transparent}
 /* 用户确认“48tk/s 本轮 20步 1m 总 5m”放在输入框外侧左下方，与右侧额度共用既有 20px 空位。
  * 12px 内侧对齐、.785714 × 默认 14px = 11px 字号与额度一致；只让统计避开额度宽度及 8px 空隙，不增高输入框或移动工具栏。 */
@@ -164,7 +163,10 @@ html{scrollbar-color:var(--muted) transparent}
 .claude-usage-percent{font-weight:400}
 .claude-usage-dot{color:var(--muted)}
 .claude-usage-tooltip.ui-popup{display:block;gap:0;padding:14px;border-color:var(--menu-divider,var(--line));border-radius:10px;background:var(--control-bg,var(--side));color:var(--text);font-size:12px;line-height:1.5;overflow:auto}
-.claude-usage-title{margin-bottom:12px;font-size:13px;font-weight:600}
+.claude-usage-title{display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:13px;font-weight:600}
+.claude-usage-title-text{flex:0 0 auto}
+/* 用户确认等级紧贴标题右侧，沿用效果图的淡紫色圆角标签；300px 弹层和手机字号保持不变，长等级只省略标签。 */
+.claude-usage-subscription{display:inline-block;flex:0 1 auto;min-width:0;max-width:128px;height:20px;padding:0 6px;border:1px solid color-mix(in srgb,#ad83e7 45%,transparent);border-radius:6px;background:color-mix(in srgb,#ad83e7 15%,transparent);color:color-mix(in srgb,#ad83e7 65%,var(--text));font-size:11px;font-weight:600;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .claude-usage-section+.claude-usage-section{margin-top:16px}
 .claude-usage-detail-row{display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
 .claude-usage-remaining{font-size:11px}
@@ -206,7 +208,9 @@ html{scrollbar-color:var(--muted) transparent}
 .composer-toolbar .permission-button{display:inline-flex;align-items:center;justify-content:center;gap:5px;flex:0 0 auto;min-width:0;max-width:150px;height:30px;padding:4px 6px;border:0;border-radius:7px;background:transparent;color:var(--muted);font-size:calc(var(--font-size)*.78);white-space:nowrap}
 .composer-toolbar .permission-button .ui-icon{flex:0 0 16px;width:16px;height:16px}
 .permission-button .permission-button-label{min-width:0;overflow:hidden;text-overflow:ellipsis}
-.permission-button[data-permission-mode=full-access],.permission-button[data-permission-mode=bypassPermissions]{color:var(--text)}
+/* Codex“完全访问”和 Claude“绕过权限”共用警示色；入口、菜单标题和图标随明暗主题同步。 */
+:root{--permission-elevated-color:light-dark(#9d690a,#e3b35e)}
+.permission-button[data-permission-backend=codex][data-permission-mode=full-access],.permission-button[data-permission-backend=claude][data-permission-mode=bypassPermissions]{color:var(--permission-elevated-color)}
 .composer-toolbar .permission-button:is(:focus-visible,[aria-expanded=true]){background:var(--composer-hover,var(--hover))}
 @media(hover:hover) and (pointer:fine){.composer-toolbar .permission-button:hover:not(:disabled){background:var(--composer-hover,var(--hover))}}
 .context-info{position:relative;display:flex;align-items:center;justify-content:center;flex:0 0 28px;width:28px;height:28px;min-width:0;padding:0;border:0;border-radius:6px;font-size:calc(var(--font-size)*.78);white-space:nowrap}
@@ -432,6 +436,17 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .popup-option{display:flex;align-items:center;gap:8px;width:100%;border:0;border-radius:var(--radius-control);min-height:var(--control-menu-height);padding:8px 12px;text-align:left;font-size:.92857rem;line-height:1.4;cursor:pointer}
 .popup-option-label{display:flex;flex-direction:column;gap:4px;flex:1;min-width:0;overflow-wrap:anywhere}
 .popup-option-label small{font-size:.78571rem;line-height:1.5}
+/* Codex 四项、Claude 五项沿用 App 模式：菜单图标 20px 对齐标题约 21px 的首行行高，当前项勾选。
+ * 入口仍为 16px 图标；同步核对下方手机 28×36px 点击区，标题和帮助链接不能占用底部工具栏宽度。 */
+.composer-permissions-popup .popup-title{flex-shrink:0;padding:9px 12px 8px;color:var(--muted);font-size:.78571rem;line-height:1.5}
+.composer-permissions-popup .popup-option{align-items:flex-start;gap:10px;padding:10px 12px}
+.composer-permissions-popup .popup-option>.ui-icon{flex:0 0 20px;width:20px;height:20px;margin-top:1px}
+.composer-permissions-popup .popup-option-label small{text-wrap:pretty}
+.composer-permissions-popup .popup-option[aria-selected=true]{background:var(--control-hover,var(--hover))}
+.composer-codex-permissions-popup .popup-option[data-value=full-access]>.ui-icon,.composer-codex-permissions-popup .popup-option[data-value=full-access]>.popup-option-label>span,.composer-claude-permissions-popup .popup-option[data-value=bypassPermissions]>.ui-icon,.composer-claude-permissions-popup .popup-option[data-value=bypassPermissions]>.popup-option-label>span{color:var(--permission-elevated-color)}
+.composer-permissions-popup .popup-note{flex-shrink:0;margin:4px 8px 0;padding:10px 4px 6px;border-top:1px solid var(--menu-divider,var(--line));color:var(--muted);font-size:.71429rem;line-height:1.5}
+.composer-codex-permissions-popup .popup-help{display:flex;flex-shrink:0;align-items:center;gap:6px;margin-top:4px;padding:10px 12px;border-top:1px solid var(--menu-divider,var(--line));color:var(--muted);font-size:.78571rem;text-decoration:none}
+.composer-codex-permissions-popup .popup-help>.ui-icon{width:13px;height:13px}
 .composer-add-popup .popup-option:is([data-value=compact],[data-value=goal]){font-size:calc(var(--font-size)*.9)}
 .composer-add-popup .popup-option:is([data-value=compact],[data-value=goal])>.ui-icon{width:18px;height:18px;color:var(--muted)}
 .composer-add-popup .popup-option:is([data-value=compact],[data-value=goal]) .popup-option-label{flex-direction:row;align-items:baseline;gap:7px;white-space:nowrap}
@@ -1053,6 +1068,10 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .async-question-status{flex:1 1 10em;min-width:0;margin:0;font-size:.78571rem;line-height:1.6;overflow-wrap:anywhere}
 .async-question-status:empty{display:none}
 .async-question-form .approval-actions{justify-content:flex-end;flex-shrink:0;gap:6px}
+/* Claude 计划审批（用户要求网页能审阅计划后批准或提修改意见）：计划正文是 Markdown，改用界面字体与正常换行；
+   正文自身最高 min(240px,26dvh) 内部滚动，让按钮尽量留在 35dvh 的审批区内；修改意见框沿用问答卡输入框的 34px/120px。 */
+.approval-description.approval-plan{max-height:min(240px,26dvh);margin:0 0 12px;padding:6px 12px;border:1px solid var(--line);border-radius:8px;white-space:normal;font-family:inherit;font-size:.85714rem;line-height:1.7}
+.plan-feedback{display:block;width:100%;min-height:34px;max-height:120px;resize:vertical;margin:0 0 10px;padding:5px 8px;font-size:inherit;line-height:1.6}
 .conversation-header{padding-left:8px}
 #open-sidebar{display:grid;width:32px;height:32px;flex:0 0 32px;place-items:center;padding:0}
 @media(max-width:760px){.conversation{isolation:isolate}.conversation-header{padding-left:4px}#open-sidebar{width:36px;height:36px;flex-basis:36px}}
@@ -1604,6 +1623,9 @@ body{font-weight:var(--ui-font-weight,400)}
 .instance-permission-field{gap:14px}
 .instance-permission-field>.select-trigger{max-width:65%;min-width:0}
 .permission-instance-slot .select-label,.instance-permission-field .select-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 用户要求 PC 权限设置中的会话实例下拉框收窄：761px 起以 240px 为基准，仍受卡片 65% 上限约束并可收缩；
+ * 长实例名沿用上方省略规则，760px 及以下保留原有 65% 布局；断点须与设置页的 PC/手机布局同步。 */
+@media(min-width:761px){.permission-instance-slot{flex-basis:240px}}
 .permission-settings-status{min-height:1.5em;white-space:pre-wrap}
 .permission-settings-actions{justify-content:flex-end;margin-top:14px}
 /* 手机底栏可用宽度有限：权限与上下文按钮等宽，仅占 28px，隐藏文字和箭头；36px 高度对齐手机模型/Fast。

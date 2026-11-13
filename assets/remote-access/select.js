@@ -4,10 +4,11 @@ export function createSelectComponent({ element, icon, button, togglePopup, open
   function setSelectValue(node, value) {
     value = String(value ?? "");
     const selected = node.selectOptions.find(option => option.value === value)
-      || node.selectOptions.find(option => option.value === "")
-      || node.selectOptions.find(option => !option.disabled) || node.selectOptions[0];
+      || (node.selectAllowEmpty && value === "" ? null
+        : node.selectOptions.find(option => option.value === "")
+          || node.selectOptions.find(option => !option.disabled) || node.selectOptions[0]);
     node.value = selected?.value ?? "";
-    const label = selected?.label || "暂无可用选项";
+    const label = selected?.label || (node.selectAllowEmpty ? "尚未选择" : "暂无可用选项");
     node.setAttribute("aria-description", `当前选择：${label}`);
     node.title = `${node.getAttribute("aria-label")}：${label}${selected?.description ? ` · ${selected.description}` : ""}`;
     const content = node.renderSelectValue?.(selected);

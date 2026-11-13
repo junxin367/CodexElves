@@ -8,7 +8,7 @@ import { normalizeWorkspacePreview, openWorkspacePreviewWindow } from "./workspa
 import { createWorkspaceBranch, setWorkspaceBranch } from "./session-files.js";
 import { menuHorizontalLeft, mountSessionMenu } from "./session-menu.js";
 import { createSelectComponent } from "./select.js";
-import { mountInstancePermissions, permissionLabel, permissionOptions } from "./permissions.js";
+import { mountInstancePermissions, permissionLabel, permissionModeKnown, permissionOptions } from "./permissions.js";
 import { sha256Hex } from "./sha256.js";
 import {
   getAndroidAppInfo,
@@ -276,7 +276,8 @@ function renderSessionInstances() {
   }
 }
 function rememberPermissionSelection(id, mode, revision = 0) {
-  if (!id || !permissionOptions(claudeThreadId(id) ? "claude" : "codex").some(option => option.value === mode)) return;
+  const backend = claudeThreadId(id) ? "claude" : "codex";
+  if (!id || !permissionModeKnown(backend, mode)) return;
   const scope = privateInputScope(session), previous = permissionSelections.get(id);
   if (previous?.scope === scope && previous.revision > revision) return;
   permissionSelections.set(id, { scope, mode, revision });
@@ -287,15 +288,24 @@ function rememberPermissionSelection(id, mode, revision = 0) {
 }
 function rememberInstancePermissionCatalog(id, value) {
   if (value.backend !== "claude" || value.instanceId !== id || !Array.isArray(value.supportedModes)) return;
-  instancePermissionCatalogs.set(id, { scope: privateInputScope(session), modes: value.supportedModes });
+  instancePermissionCatalogs.set(id, { scope: privateInputScope(session), modes: value.supportedModes,
+    defaultMode: typeof value.settings?.permissionMode === "string" ? value.settings.permissionMode : "" });
 }
 async function loadInstancePermissionCatalog(id) {
   if (!id || !id.startsWith("claude:") || instancePermissionReads.has(id)) return;
   const scope = privateInputScope(session);
   const operation = api("/api/settings/permissions", { instanceId: id }).then(result => {
-    if (scope === privateInputScope(session)) rememberInstancePermissionCatalog(id, result);
+    if (scope !== privateInputScope(session)) return;
+    if (result?.instanceId !== id || result.backend !== "claude"
+        || !Array.isArray(result.supportedModes) || result.supportedModes.some(mode => typeof mode !== "string")
+        || !result.settings || typeof result.settings !== "object" || Array.isArray(result.settings))
+      throw new Error("实例权限读取结果不匹配，请重新读取。");
+    rememberInstancePermissionCatalog(id, result);
   }).catch(error => {
-    if (scope === privateInputScope(session)) notice(error.message, true);
+    if (scope === privateInputScope(session)) {
+      instancePermissionCatalogs.set(id, { scope, modes: [], defaultMode: "", error: error.message });
+      notice(error.message, true);
+    }
   }).finally(() => {
     if (instancePermissionReads.get(id) === operation) instancePermissionReads.delete(id);
     if (scope === privateInputScope(session) && activeInstanceId() === id) updateComposerPermissions();
@@ -313,8 +323,24 @@ function updateComposerPermissions() {
   const choice = creating ? draftPermissionChoices.get(draftKey())
     : saved?.scope === privateInputScope(session) ? saved.mode : display?.permissionMode;
   const mode = choice || (creating ? "configured" : "");
-  const catalog = instancePermissionCatalogs.get(activeInstanceId());
-  let supported = !isClaude() ? null : catalog?.scope === privateInputScope(session) ? catalog.modes : [];
+  const codex = !isClaude();
+  const catalogRecord = instancePermissionCatalogs.get(activeInstanceId());
+  const catalog = catalogRecord?.scope === privateInputScope(session) ? catalogRecord : null;
+  // 未显式覆盖的 Claude 会话显示原生实际模式，新建草稿读取所选实例配置；展示不能静默保存权限。
+  const effectiveMode = !codex && (!mode || mode === "configured")
+    ? (!creating && display?.nativeSettings?.permissionMode) || catalog?.defaultMode || "" : mode;
+  control.dataset.permissionBackend = codex ? "codex" : "claude";
+  control.popupClassName = `composer-permissions-popup composer-${codex ? "codex" : "claude"}-permissions-popup`;
+  // 两类菜单均以 340px 排列图标、说明和勾选；fitPopup 按视口两侧各 8px 收窄，手机入口仍为 28×36px。
+  control.popupWidth = 340;
+  // Claude 五行模式连同标题、说明约需 400px；预留到 440px，矮屏仍由 fitPopup 限高并滚动列表。
+  control.popupMaxHeight = codex ? 360 : 440;
+  control.popupTitle = codex ? "应如何批准 Codex 操作？" : "模式";
+  control.popupHelp = codex ? { label: "了解更多", href: "https://developers.openai.com/codex/agent-approvals-security" } : null;
+  control.popupNote = codex ? "" : "“绕过权限”仅在该实例 CLI 支持且已允许时显示";
+  if (!codex && !catalog && connected && session?.capabilities?.sessionPermissions === true
+      && sessionInstanceEnabled(activeInstanceId())) void loadInstancePermissionCatalog(activeInstanceId());
+  let supported = codex ? null : catalog?.modes || [];
   if (isClaude() && !creating && supported) {
     // 共享 CLI 只能切换原生已开放的模式；未在启动时允许绕过审批的会话不能被网页补开。
     const runtimeModes = Array.isArray(display?.permissionModes) ? display.permissionModes
@@ -323,18 +349,16 @@ function updateComposerPermissions() {
       || ["default", "manual"].includes(mode) && runtimeModes.some(value => ["default", "manual"].includes(value)));
   }
   const options = permissionOptions(activeBackend(), supported);
-  if (choice && !options.some(option => option.value === choice)) options.push({
-    value: choice, label: permissionLabel(activeBackend(), choice), disabled: true,
-    description: "该模式尚未被当前实例确认支持"
-  });
-  if (!creating && !choice) options.unshift({ value: "", label: "沿用当前权限",
-    description: "保留当前原生会话的权限；选择其他模式后仅覆盖本会话", disabled: true });
-  const signature = JSON.stringify([activeBackend(), mode, options]);
+  // 旧只读 Codex 仍按原权限执行；Claude 的 manual/default 只选中同一项，不增加第六种模式。
+  const displayMode = codex ? mode === "read-only" ? "auto" : mode || "configured"
+    : options.find(option => option.value === effectiveMode
+      || ["default", "manual"].includes(effectiveMode) && ["default", "manual"].includes(option.value))?.value || "";
+  const signature = JSON.stringify([activeBackend(), displayMode, options]);
   if (control.dataset.permissionSignature !== signature) {
     control.dataset.permissionSignature = signature;
-    setSelectOptions(control, options, mode);
+    setSelectOptions(control, options, displayMode);
   }
-  control.dataset.permissionMode = mode;
+  control.dataset.permissionMode = displayMode;
   control.dataset.explicitPermission = String(creating && draftPermissionChoices.has(draftKey()));
   const saving = permissionWrites.get(selectedId)?.scope === privateInputScope(session);
   control.dataset.saving = String(saving);
@@ -344,10 +368,12 @@ function updateComposerPermissions() {
   control.disabled = !sessionInstanceEnabled(activeInstanceId()) || threadReadOnly() || !connected || busy
     || stopping || !!pending || !!editingMessage || !!editingQueuedMessage || threadDeletionLocked()
     || saving || !creating && (!selectedId || waiting);
-  const label = permissionLabel(activeBackend(), choice, creating);
+  const label = permissionLabel(activeBackend(), codex ? choice : effectiveMode, creating);
   control.setAttribute("aria-label", `选择会话权限，当前为${label}`);
   control.title = saving ? "正在保存会话权限"
     : waiting ? `当前权限：${label}；任务及待发消息结束后可修改`
+    : catalog?.error ? `实例权限读取失败：${catalog.error}；点击重新读取`
+    : !codex && !supported.length ? "暂无法确认该 Claude CLI 支持的权限模式，点击重新读取"
     : `当前权限：${label}；仅此会话的后续新轮次生效`;
 }
 async function changeComposerPermissions() {
@@ -2478,7 +2504,13 @@ function openAppearance() {
     appearance.fileReadingFontSize = fileReadingFontDefault; applyAppearance(true); sync();
   };
   $("#appearance-reset").onclick = async () => {
-    if (remoteBackgroundBusy) return;
+    if (remoteBackgroundBusy || !dialog.isConnected || !dialog.open) return;
+    const scope = privateInputScope(session);
+    // 用户要求外观“恢复默认”先二次确认；取消、关闭设置或更换授权均不得删除背景或改写当前设置。
+    if (!await confirmAction("恢复默认设置",
+      "将恢复默认配色、字体、字号、会话宽度、项目会话数、会话筛选和实例开关，并移除背景图片。是否继续？",
+      "恢复默认", true) || remoteBackgroundBusy || !dialog.isConnected || !dialog.open
+        || scope !== privateInputScope(session)) return;
     const operation = ++remoteBackgroundOperation;
     remoteBackgroundBusy = true; remoteBackgroundError = ""; sync();
     try {
@@ -3108,7 +3140,7 @@ function storeDraft(key, draft) {
   if (draft.goalMode) goalDrafts.set(key, draft.goalMode);
   else goalDrafts.delete(key);
   if (key.startsWith("$new:") && typeof draft.permissionMode === "string"
-      && [...permissionOptions("codex"), ...permissionOptions("claude")].some(option => option.value === draft.permissionMode))
+      && (permissionModeKnown("codex", draft.permissionMode) || permissionModeKnown("claude", draft.permissionMode)))
     draftPermissionChoices.set(key, draft.permissionMode);
   void persistInputDraft(key).catch(() => {});
 }
@@ -4320,7 +4352,7 @@ async function restorePrivateInputs(value, { expected = null, requestGeneration 
     attachmentDrafts.set(id, draft.attachments);
     if (draft.goalMode) goalDrafts.set(id, draft.goalMode);
     if (id.startsWith("$new:") && typeof draft.permissionMode === "string"
-        && [...permissionOptions("codex"), ...permissionOptions("claude")].some(option => option.value === draft.permissionMode))
+        && (permissionModeKnown("codex", draft.permissionMode) || permissionModeKnown("claude", draft.permissionMode)))
       draftPermissionChoices.set(id, draft.permissionMode);
   }
   for (const { id, value: record } of savedFailures)
@@ -4428,6 +4460,8 @@ function restoreQueuedMessageEdit() {
   $("#prompt").value = edit.state === "editing" ? edit.text : edit.backup.text;
   selectedSkills = edit.state === "editing" ? [] : edit.backup.skills || [];
   selectedGoal = edit.state === "editing" ? null : edit.backup.goalMode || null;
+  // 模型选择属于后续发送，不存入队列消息；每次恢复编辑时记录当前选择版本，结束编辑不能覆盖后来选择。
+  edit.modelChoiceVersion = modelChoiceVersion;
   setComposerAttachments(edit.state === "editing" ? edit.attachments || [] : edit.backup.attachments || [],
     { readOnly: edit.state === "editing" && edit.imageEditing !== true,
       removableRemote: edit.state === "editing" && edit.imageRemoval === true });
@@ -4864,13 +4898,19 @@ function closeComposerMenus({ keepContextUsage = false } = {}) {
   if (!keepContextUsage) closeContextUsageTip();
 }
 function claudeUsageContext() {
-  const owner = privateInputScope(session), instanceId = activeInstanceId();
-  // 子代理只读查看页没有编辑区，不为隐藏的额度控件启动额外读取。
-  if (thread?.viewKind === "subagent") return null;
-  if (!owner || !isClaude() || !instanceId || !sessionInstanceEnabled(instanceId)
-      || session?.capabilities?.claudeSubscriptionUsage !== true || !connected || pageLeaving || document.hidden
-      || !creating && (!selectedId || thread?.id !== selectedId)) return null;
-  return { key: JSON.stringify([owner, instanceId]), owner, instanceId,
+  const owner = privateInputScope(session);
+  if (!owner || session?.capabilities?.claudeSubscriptionUsage !== true || pageLeaving || document.hidden
+      || !creating && !selectedId) return null;
+  const current = !creating && thread?.id === selectedId ? thread : null;
+  const cached = !creating && !current ? currentThreadDisplay() : null;
+  const display = current || (cached?.id === selectedId ? cached : null) || (!creating
+    ? [...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
+      ...(sidebar?.projects || []).flatMap(project => project.threads || [])].find(item => item.id === selectedId) : null);
+  // 用户要求切换时先显示目标实例的缓存；详情未到时只认目标会话缓存/侧栏明确提供的实例，不借用旧会话或默认实例。
+  const instanceId = creating || current ? activeInstanceId() : display?.instanceId;
+  if (!(creating || current ? isClaude() : display?.backend === "claude") || !instanceId
+      || !sessionInstanceEnabled(instanceId) || display?.viewKind === "subagent") return null;
+  return { key: JSON.stringify([owner, instanceId]), owner, instanceId, canRead: connected && (creating || !!current),
     payload: { backend: "claude", instanceId, ...(!creating ? { threadId: selectedId } : {}) } };
 }
 const claudeUsageRefreshMs = 60000, claudeUsageMaxAgeMs = 180000;
@@ -4901,9 +4941,18 @@ function claudeUsageWindows(value, now = Date.now()) {
     const reset = data.resetsAt == null ? null : typeof data.resetsAt === "string" ? Date.parse(data.resetsAt)
       : typeof data.resetsAt === "number" ? data.resetsAt * (data.resetsAt < 1e12 ? 1000 : 1) : NaN;
     if (reset != null && (!Number.isFinite(reset) || reset <= now || reset > 8640000000000000)) return [];
-    // 展示百分比仍取整，预估总额度必须使用原生小数比例，不能把显示值当作分母。
-    return [{ key, short, label, used: Math.round(used), usedPercentage: used, resetAt: reset }];
+    // 用户要求底部和账号信息统一显示剩余比例，直接按 100 - 原生已用比例取整；预测仍使用未取整的原生已用值。
+    return [{ key, short, label, used: Math.round(used), remaining: Math.round(100 - used), usedPercentage: used, resetAt: reset }];
   });
+}
+function claudeUsageSubscription(value) {
+  const raw = value?.subscriptionType;
+  const type = typeof raw === "string" ? raw.trim() : "";
+  if (/^[A-Za-z0-9][A-Za-z0-9 _+()./-]{0,63}$/u.test(type)) {
+    // 用户要求等级只来自所属 WSL Claude CLI；仅统一首字母显示，不从额度比例推断等级或倍率。
+    return { type, label: type[0].toUpperCase() + type.slice(1) };
+  }
+  return { type: null, label: "" };
 }
 function claudeUsageResetText(resetAt, now = Date.now()) {
   if (resetAt == null) return "时间未知";
@@ -4937,7 +4986,14 @@ function claudeUsageMetricsMatch(metrics, window, now = Date.now()) {
 }
 function claudeUsageMetrics(window, now = Date.now()) {
   const metrics = claudeUsageState?.details?.value?.[window.key];
-  return claudeUsageMetricsMatch(metrics, window, now) ? metrics : null;
+  return claudeUsageMetricsMatch(metrics, window, now) ? { ...metrics,
+    usedCostUsd: claudeUsageMetricValue(metrics, "usedCostUsd", "costObservedAtMs", now),
+    usedTokens: claudeUsageMetricValue(metrics, "usedTokens", "tokensObservedAtMs", now) } : null;
+}
+function claudeUsageMetricValue(metrics, key, timeKey, now = Date.now()) {
+  const at = metrics?.[timeKey] ?? metrics?.observedAtMs;
+  return claudeUsageNumber(metrics?.[key]) && claudeUsageNumber(at) && at > 0
+    && at <= now + 30000 && now - at < claudeUsageMaxAgeMs ? metrics[key] : null;
 }
 function claudeUsageSignature(windows) {
   return JSON.stringify(windows.map(window => [window.key, window.resetAt]));
@@ -4947,14 +5003,19 @@ function rememberClaudeUsageDetails(state, usage, windows) {
   const value = Object.fromEntries(windows.map(window => {
     const incoming = usage?.[window.key]?.metrics, previous = state.details?.value?.[window.key];
     const retained = claudeUsageMetricsMatch(previous, window) ? previous : null;
-    if (!claudeUsageMetricsMatch(incoming, window)
-        || !claudeUsageNumber(incoming.usedCostUsd) && !claudeUsageNumber(incoming.usedTokens)
-        || retained && retained.observedAtMs > incoming.observedAtMs) return [window.key, retained];
-    received = true;
-    return [window.key, { source: incoming.source, observedAtMs: incoming.observedAtMs,
-      windowStartMs: incoming.windowStartMs, windowEndMs: incoming.windowEndMs,
-      usedCostUsd: claudeUsageNumber(incoming.usedCostUsd) ? incoming.usedCostUsd : null,
-      usedTokens: claudeUsageNumber(incoming.usedTokens) ? incoming.usedTokens : null }];
+    const usable = claudeUsageMetricsMatch(incoming, window);
+    const metrics = { source: "claude-wsl-local-journal", windowEndMs: window.resetAt,
+      windowStartMs: window.resetAt - (window.key === "fiveHour" ? 18000000 : 604800000) };
+    // 用户要求使用和预测先展示缓存：金额与 Token 各自接替，单项缺失不覆盖另一项已有数字，且不延长旧值的采集时间。
+    for (const [key, timeKey] of [["usedCostUsd", "costObservedAtMs"], ["usedTokens", "tokensObservedAtMs"]]) {
+      const old = claudeUsageMetricValue(retained, key, timeKey);
+      const oldAt = retained?.[timeKey] ?? retained?.observedAtMs;
+      if (usable && claudeUsageNumber(incoming[key]) && (!claudeUsageNumber(old) || incoming.observedAtMs >= oldAt)) {
+        metrics[key] = incoming[key]; metrics[timeKey] = incoming.observedAtMs; received = true;
+      } else { metrics[key] = old; metrics[timeKey] = claudeUsageNumber(old) ? oldAt : null; }
+    }
+    metrics.observedAtMs = Math.max(metrics.costObservedAtMs || 0, metrics.tokensObservedAtMs || 0);
+    return [window.key, metrics.observedAtMs ? metrics : null];
   }));
   // 刷新失败或缺少数字时保留同窗口的有效旧值；新窗口、过期数据和迟到的较旧统计不能覆盖当前值。
   state.details = Object.values(value).some(Boolean)
@@ -4963,7 +5024,7 @@ function rememberClaudeUsageDetails(state, usage, windows) {
 }
 function loadClaudeUsageDetails() {
   const state = claudeUsageState, context = claudeUsageContext();
-  if (!state?.tip || state.key !== context?.key || state.detailsPending || state.pending) return;
+  if (!state?.tip || state.key !== context?.key || !context.canRead || state.detailsPending || state.pending) return;
   const windows = claudeUsageWindows(state.value);
   const signature = claudeUsageSignature(windows);
   if (!windows.length || state.detailsRead?.signature === signature
@@ -5009,17 +5070,20 @@ function closeClaudeUsageTip() {
   if (tip.node.hasAttribute("popover") && tip.node.matches(":popover-open")) tip.node.hidePopover();
   tip.node.remove();
 }
-function resetClaudeUsage({ clearCache = false } = {}) {
+function pauseClaudeUsage(state) {
+  clearTimeout(state.timer);
+  state.controller?.abort(); state.detailsController?.abort();
+  state.timer = state.controller = state.detailsController = null;
+  state.pending = state.detailsPending = false;
+}
+function resetClaudeUsage({ clearCache = false, hideTrigger = true } = {}) {
   if (clearCache) claudeUsageCache.clear();
   else rememberClaudeUsage();
   closeClaudeUsageTip();
-  if (claudeUsageState) {
-    clearTimeout(claudeUsageState.timer);
-    claudeUsageState.controller?.abort();
-  }
+  if (claudeUsageState) pauseClaudeUsage(claudeUsageState);
   claudeUsageState = null;
   const trigger = $("#claude-usage");
-  if (trigger) trigger.hidden = true;
+  if (trigger && hideTrigger) trigger.hidden = true;
 }
 function fitClaudeUsageTip() {
   const tip = claudeUsageState?.tip;
@@ -5049,14 +5113,24 @@ function renderClaudeUsageTip(windows) {
   const tip = claudeUsageState?.tip;
   if (!tip) return;
   if (!windows.length) { closeClaudeUsageTip(); return; }
-  const content = [element("div", "claude-usage-title", "Claude 订阅额度")];
+  const subscription = claudeUsageSubscription(claudeUsageState.value);
+  const title = element("div", "claude-usage-title");
+  // 用户要求弹出的菜单统一称为“账号信息”，标题右侧继续保留 CLI 返回的真实订阅等级。
+  title.append(element("span", "claude-usage-title-text", "账号信息"));
+  // 用户确认缺少等级时直接不显示，不添加未知标签、占位或说明，也不使用效果图里的示例等级补齐。
+  if (subscription.type) {
+    const badge = element("span", "claude-usage-subscription", subscription.label);
+    badge.title = `所属 WSL Claude CLI 返回的订阅类型：${subscription.type}`;
+    badge.setAttribute("aria-label", `订阅等级：${subscription.label}`); title.append(badge);
+  }
+  const content = [title];
   for (const window of windows) {
     const section = element("section", "claude-usage-section");
     const row = element("div", "claude-usage-detail-row");
     row.append(element("span", "", `${window.label}额度`),
-      element("span", "claude-usage-remaining", `剩余 ${100 - window.used}%`));
+      element("span", "claude-usage-remaining", `剩余 ${window.remaining}%`));
     const track = element("div", "claude-usage-track"), fill = element("div", "claude-usage-fill");
-    track.setAttribute("aria-hidden", "true"); fill.style.width = `${100 - window.used}%`; track.append(fill);
+    track.setAttribute("aria-hidden", "true"); fill.style.width = `${window.remaining}%`; track.append(fill);
     const metrics = claudeUsageMetrics(window), numbers = element("div", "claude-usage-metrics");
     const stats = element("div", "claude-usage-stats");
     for (const estimated of [false, true]) {
@@ -5084,33 +5158,37 @@ function renderClaudeUsage() {
   trigger.hidden = !windows.length;
   fitComposerMetrics();
   if (!windows.length) { closeClaudeUsageTip(); return; }
-  const signature = JSON.stringify(windows.map(window => [window.key, window.used]));
+  const signature = JSON.stringify(["remaining", ...windows.map(window => [window.key, window.remaining])]);
   if (trigger.dataset.usage !== signature) {
     trigger.dataset.usage = signature;
-    const nodes = [element("span", "", "已用")];
+    const nodes = [element("span", "", "剩余")];
     for (const [index, window] of windows.entries()) {
       if (index) nodes.push(element("span", "claude-usage-dot", "·"));
       const row = element("span", "claude-usage-window");
-      row.append(element("span", "", window.short), element("span", "claude-usage-percent", `${window.used}%`));
+      row.append(element("span", "", window.short), element("span", "claude-usage-percent", `${window.remaining}%`));
       nodes.push(row);
     }
     trigger.replaceChildren(...nodes);
-    trigger.setAttribute("aria-label", `Claude 订阅额度，${windows.map(window => `${window.label}已用 ${window.used}%`).join("，")}，查看重置时间`);
+    trigger.setAttribute("aria-label", `Claude 账号信息，${windows.map(window => `${window.label}剩余 ${window.remaining}%`).join("，")}，查看重置时间`);
   }
   renderClaudeUsageTip(windows);
   fitComposerMetrics();
 }
 function scheduleClaudeUsageUpdate() {
   const state = claudeUsageState;
-  if (!state || state.pending) return;
+  if (!state) return;
   clearTimeout(state.timer);
+  const context = claudeUsageContext();
+  if (context?.key !== state.key) return;
   const now = Date.now(), windows = claudeUsageWindows(state.value, now);
   const expiry = [state.value?.observedAtMs, ...(state.tip
-    ? Object.values(state.details?.value || {}).map(metrics => metrics?.observedAtMs) : [])]
+    ? Object.values(state.details?.value || {}).flatMap(metrics =>
+      [metrics?.observedAtMs, metrics?.costObservedAtMs, metrics?.tokensObservedAtMs]) : [])]
     .filter(claudeUsageNumber).map(at => at + claudeUsageMaxAgeMs).filter(at => at > now);
   // 刷新和三分钟数据失效分别计时；失败退避不能延长真实数据寿命，窗口到期也不能继续显示旧额度。
-  const deadlines = [state.checkedAt + claudeUsageRefreshMs, ...expiry,
+  const deadlines = [...(context.canRead && !state.pending ? [state.checkedAt + claudeUsageRefreshMs] : []), ...expiry,
     ...windows.filter(window => window.resetAt != null).map(window => window.resetAt)];
+  if (!deadlines.length) { state.timer = null; return; }
   state.timer = setTimeout(() => {
     if (claudeUsageState !== state) return;
     state.timer = null; syncClaudeUsage();
@@ -5121,25 +5199,32 @@ function syncClaudeUsage() {
   const context = claudeUsageContext();
   if (!context) { resetClaudeUsage(); return; }
   if (claudeUsageState?.key !== context.key) {
-    resetClaudeUsage();
+    // 切换实例时原子替换数据并直接渲染目标缓存，不能先 hidden=true 再等待会话详情。
+    resetClaudeUsage({ hideTrigger: false });
     const cached = claudeUsageCache.get(context.key);
     claudeUsageState = { key: context.key, owner: context.owner, value: cached?.value || null,
       checkedAt: cached?.checkedAt || 0, pending: false, controller: null, timer: null, tip: null,
       details: cached?.details || null, detailsRead: cached?.detailsRead || null, detailsPending: false, detailsController: null };
   }
   const state = claudeUsageState;
+  if (!context.canRead) pauseClaudeUsage(state);
   renderClaudeUsage();
+  if (!context.canRead) { scheduleClaudeUsageUpdate(); return; }
   if (!state.pending && Date.now() - state.checkedAt >= claudeUsageRefreshMs) {
     state.pending = true;
-    state.controller = new AbortController();
+    const controller = new AbortController();
+    state.controller = controller;
     // 用户要求额度按账号所属实例显示；授权或实例切换后丢弃迟到响应，后台页不轮询。
-    void api("/api/read/claudeUsage", context.payload, undefined, state.controller.signal, { resourcePriority: "background" })
+    void api("/api/read/claudeUsage", context.payload, undefined, controller.signal, { resourcePriority: "background" })
       .then(result => {
-        if (claudeUsageState !== state) return;
+        if (claudeUsageState !== state || state.controller !== controller || controller.signal.aborted) return;
         if (result?.ok !== true || result.backend !== "claude" || result.instanceId !== context.instanceId)
           throw new Error("Claude 额度响应无效");
         const value = result.usage, windows = claudeUsageWindows(value);
+        // 读取暂未返回有效窗口时保留该实例仍有效的快照；采集时间不更新，超时/重置仍按原边界失效。
+        if (!windows.length && claudeUsageWindows(state.value).length) return;
         state.value = windows.length ? { source: value.source, observedAtMs: value.observedAtMs,
+          ...(Object.hasOwn(value, "subscriptionType") ? { subscriptionType: claudeUsageSubscription(value).type } : {}),
           ...Object.fromEntries(windows.map(window => [window.key,
             { usedPercentage: window.usedPercentage, resetsAt: window.resetAt }])) } : null;
         const received = rememberClaudeUsageDetails(state, value, windows);
@@ -5150,12 +5235,12 @@ function syncClaudeUsage() {
         }
       })
       .catch(error => {
-        if (claudeUsageState === state && [401, 403].includes(error.code)) {
+        if (claudeUsageState === state && state.controller === controller && [401, 403].includes(error.code)) {
           state.value = null; state.details = null; claudeUsageCache.delete(state.key);
         }
       })
       .finally(() => {
-        if (claudeUsageState !== state) return;
+        if (claudeUsageState !== state || state.controller !== controller) return;
         state.checkedAt = Date.now(); state.pending = false; state.controller = null;
         rememberClaudeUsage(state);
         renderClaudeUsage(); loadClaudeUsageDetails(); scheduleClaudeUsageUpdate();
@@ -5852,6 +5937,8 @@ function updateRemoteFast() {
   const modelSupported = serviceMode ? serviceModelSupported : !!model && (model.fastModeSupported === true
     || model.fastModeSupported == null && /^gpt-\d/i.test(model.model?.split("/").at(-1) || ""))
     && Array.isArray(model.serviceTiers) && model.serviceTiers.some(tier => ["priority", "fast"].includes(tier?.id));
+  // 用户要求选择不支持 Fast 的模型时隐藏按钮；沿用实际请求模型及目录能力判断，切回支持模型后恢复原偏好。
+  control.hidden = !modelSupported;
   const preference = creating ? selectedDraftFast : currentThreadDisplay()?.fastMode;
   const preferenceKnown = typeof preference === "boolean";
   const supported = directoryReady && availability?.available === true && modelSupported && preferenceKnown;
@@ -5871,20 +5958,20 @@ function updateRemoteFast() {
   control.setAttribute("aria-busy", String(writing || !directoryReady
     || modelSupported && (availability?.available === null || availability?.available === true && !preferenceKnown)));
   control.setAttribute("aria-label", enabled ? "关闭本会话 Fast" : "开启本会话 Fast");
-  // 执行中允许保存后续轮次偏好；这里只锁保存或提交待确认，不能按 isActiveThread() 禁用。
+  // 用户要求编辑消息或队列草稿时也可选择 Fast；只锁实际保存、提交待确认及不可写状态，不以编辑标记禁用。
   control.disabled = (!state?.supported && !state?.canDisable) || !!writing || !connected || busy || stopping || !!pending
-    || threadReadOnly() || threadDeletionLocked() || !!editingMessage || !!editingQueuedMessage
+    || threadReadOnly() || threadDeletionLocked()
     || !sessionInstanceEnabled(activeInstanceId());
-  // 执行中只改变之后新发起的轮次（含尚未派发的队列），当前任务内的模型调用不改变档位。
-  control.title = writing ? "正在保存后续轮次的 Fast 设置"
-    : !supported && canDisable ? `${state.reason}；点击关闭后续轮次 Fast 设置`
-    : state.reason || (enabled ? "后续轮次 Fast 已开启，点击关闭；当前任务档位保持不变"
-      : "后续轮次 Fast 已关闭，点击开启；当前任务档位保持不变");
+  // 用户要求 Fast 保持现有即时切换流程，不得套用模型/思考深度等待任务结束的规则；这里只展示会话开关状态。
+  control.title = writing ? "正在保存本会话的 Fast 设置"
+    : !supported && canDisable ? `${state.reason}；点击关闭本会话 Fast`
+    : state.reason || (enabled ? "本会话 Fast 已开启，点击关闭"
+      : "本会话 Fast 已关闭，点击开启");
   composerTooltips?.update?.(control, control.title);
 }
 async function toggleRemoteFast() {
   const control = $("#fast-button"), key = remoteFastKey();
-  if (!key || control?.disabled || remoteFastState?.key !== key
+  if (!key || control?.hidden || control?.disabled || remoteFastState?.key !== key
       || !remoteFastState.supported && !remoteFastState.canDisable) return;
   if (creating) {
     selectedDraftFast = !selectedDraftFast;
@@ -6694,6 +6781,15 @@ function icon(name) {
     plus: '<path d="M12 5v14M5 12h14"/>', check: '<path d="m5 12 4 4L19 6"/>',
     image: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-6-6L3 21"/>',
     shield: '<path d="M12 3 4 6v6c0 4.5 5 7.7 8 9 3-1.3 8-4.5 8-9V6Z"/><path d="m8.5 11.5 2.5 2.5 4.5-5"/>',
+    // 用户要求权限图标与 App 同义；菜单和编辑区入口共用选项中的图标，选择后必须同步变化。
+    permissionAsk: '<path d="M18 11V7a2 2 0 0 0-4 0v4M14 10V5a2 2 0 0 0-4 0v6M10 10.5V7a2 2 0 0 0-4 0v9"/><path d="M18 8a2 2 0 1 1 4 0v8a7 7 0 0 1-7 7h-2c-2.8 0-4.5-1.4-6-3.5l-4-5a2 2 0 0 1 3-2.5l2 2.5"/>',
+    permissionFull: '<path d="M12 3 4 6v6c0 4.5 5 7.7 8 9 3-1.3 8-4.5 8-9V6Z"/><path d="M12 8v5m0 3h.01"/>',
+    // Claude 模式使用原生扩展的 20px SVG，菜单与入口共享路径和 currentColor。
+    claudeManual: "<path d=\"M10.25 2C11.0283 2 11.6867 2.50842 11.9141 3.21094C12.1623 3.07581 12.4475 3 12.75 3C13.7165 3 14.5 3.7835 14.5 4.75V6.16992C14.7275 6.06176 14.9814 6 15.25 6C16.2165 6 17 6.7835 17 7.75V11.25C17 14.9779 13.9779 18 10.25 18C6.52208 18 3.5 14.9779 3.5 11.25V8C3.5 7.44772 3.94772 7 4.5 7H5C5.36464 7 5.70563 7.09906 6 7.26953V4.75C6 3.7835 6.7835 3 7.75 3C8.05224 3 8.33688 3.07606 8.58496 3.21094C8.81229 2.50827 9.47163 2 10.25 2ZM10.25 3C9.83579 3 9.5 3.33579 9.5 3.75V9.5C9.5 9.77614 9.27614 10 9 10C8.72386 10 8.5 9.77614 8.5 9.5V4.75C8.5 4.33579 8.16421 4 7.75 4C7.33579 4 7 4.33579 7 4.75V11.002C8.32553 11.0277 9.48461 11.8814 9.90918 13.1221L9.98535 13.3789L10 13.4785C10.0102 13.711 9.85565 13.9267 9.62109 13.9854C9.38677 14.0438 9.1493 13.9264 9.04883 13.7168L9.01465 13.6211L8.96289 13.4463C8.66901 12.5877 7.85929 12 6.93848 12H6.5C6.22386 12 6 11.7761 6 11.5V9C6 8.44772 5.55228 8 5 8H4.5V11.25C4.5 14.4256 7.07436 17 10.25 17C13.4256 17 16 14.4256 16 11.25V7.75C16 7.33579 15.6642 7 15.25 7C14.8358 7 14.5 7.33579 14.5 7.75V10.5C14.5 10.7761 14.2761 11 14 11C13.7239 11 13.5 10.7761 13.5 10.5V4.75C13.5 4.33579 13.1642 4 12.75 4C12.3358 4 12 4.33579 12 4.75V9.5C12 9.77614 11.7761 10 11.5 10C11.2239 10 11 9.77614 11 9.5V3.75C11 3.33579 10.6642 3 10.25 3Z\" fill=\"currentColor\" stroke=\"none\" fill-rule=\"evenodd\"/>",
+    claudeEdits: "<path d=\"M11.6318 4.01755C11.898 4.0903 12.055 4.36553 11.9824 4.63181L8.98242 15.6318C8.90966 15.8981 8.63449 16.0551 8.36816 15.9824C8.10193 15.9096 7.94495 15.6345 8.01758 15.3682L11.0176 4.36814C11.0904 4.10198 11.3656 3.94496 11.6318 4.01755ZM13.124 6.17088C13.3059 5.96324 13.6213 5.94229 13.8291 6.124L17.8291 9.62401L17.9014 9.70213C17.9647 9.78753 18 9.8918 18 9.99999C18 10.1441 17.9375 10.281 17.8291 10.376L13.8291 13.876L13.7471 13.9346C13.5449 14.0498 13.2833 14.011 13.124 13.8291C12.9649 13.6472 12.9606 13.3824 13.1016 13.1973L13.1709 13.124L16.7412 9.99999L13.1709 6.87596C12.9632 6.69409 12.9422 6.37865 13.124 6.17088ZM6.25293 6.06541C6.45509 5.95024 6.71675 5.98907 6.87598 6.17088C7.03513 6.35277 7.03933 6.61758 6.89844 6.80271L6.8291 6.87596L3.25879 9.99999L6.8291 13.124C7.03682 13.3058 7.05771 13.6213 6.87598 13.8291C6.69413 14.0368 6.37869 14.0578 6.1709 13.876L2.1709 10.376L2.09863 10.2978C2.03528 10.2124 2 10.1082 2 9.99999C2.00005 9.8559 2.06247 9.71891 2.1709 9.62401L6.1709 6.124L6.25293 6.06541Z\" fill=\"currentColor\" stroke=\"none\" fill-rule=\"evenodd\"/>",
+    claudePlan: "<path d=\"M13.04 7.30371C13.1486 7.05001 13.4425 6.93174 13.6963 7.04004C13.95 7.14863 14.0683 7.44253 13.96 7.69629C13.6651 8.38527 13.089 9 12.2998 9C11.8132 8.99994 11.408 8.76633 11.0996 8.42578C10.7913 8.76607 10.3867 8.99987 9.90039 9C9.41365 9 9.00769 8.76648 8.69922 8.42578C8.39083 8.76606 7.98636 9 7.5 9C7.22386 9 7 8.77614 7 8.5C7 8.22386 7.22386 8 7.5 8C7.71245 8 8.01918 7.8199 8.24023 7.30371C8.31897 7.11975 8.50009 7 8.7002 7C8.90022 7.00008 9.08145 7.11981 9.16016 7.30371C9.38121 7.8198 9.68796 8 9.90039 8C10.1128 7.99978 10.4197 7.81969 10.6406 7.30371L10.6748 7.2373C10.7649 7.09147 10.9248 7.00014 11.0996 7C11.2997 7 11.4808 7.11975 11.5596 7.30371C11.7806 7.8198 12.0874 7.99989 12.2998 8C12.5122 8 12.819 7.81985 13.04 7.30371Z\" fill=\"currentColor\" stroke=\"none\" fill-rule=\"evenodd\"/><path d=\"M14 3C15.1046 3 16 3.89543 16 5V13H17.5C17.7761 13 18 13.2239 18 13.5V15C18 16.1046 17.1046 17 16 17H7C5.89543 17 5 16.1046 5 15V4H4C3.44772 4 3 4.44772 3 5C3 5.25644 3.09624 5.48974 3.25488 5.66699C3.43863 5.87277 3.42144 6.18901 3.21582 6.37305C3.01006 6.5572 2.69393 6.53877 2.50977 6.33301C2.1934 5.97951 2 5.51189 2 5C2 3.89543 2.89543 3 4 3H14ZM6 15C6 15.5523 6.44772 16 7 16C7.55228 16 8 15.5523 8 15V13.5C8 13.2239 8.22386 13 8.5 13H15V5C15 4.44772 14.5523 4 14 4H6V15ZM9 15C9 15.3646 8.90094 15.7056 8.73047 16H16C16.5523 16 17 15.5523 17 15V14H9V15Z\" fill=\"currentColor\" stroke=\"none\" fill-rule=\"evenodd\"/>",
+    claudeAuto: "<path d=\"M8.95808 2.62966C9.93062 1.31904 12.0004 2.28461 11.6212 3.87186L10.6339 7.99985H15.0128C16.2452 7.99985 16.9519 9.40362 16.2179 10.3934L11.0421 17.3701C10.0696 18.6811 7.99935 17.7154 8.37898 16.1279L9.36629 11.9999H4.98734C3.75494 11.9999 3.04807 10.5961 3.78225 9.60632L8.95808 2.62966ZM10.6485 3.63944C10.7748 3.11051 10.085 2.78874 9.76083 3.22537L4.58499 10.202C4.3405 10.532 4.57663 10.9999 4.98734 10.9999H10.0001C10.1531 10.9999 10.2978 11.0703 10.3927 11.1903C10.4873 11.3104 10.5218 11.4674 10.4864 11.6161L9.35164 16.3603C9.22504 16.8895 9.91515 17.2114 10.2393 16.7744L15.4152 9.79773C15.6594 9.46781 15.4235 8.99987 15.0128 8.99987H10.0001C9.84702 8.99986 9.70232 8.92961 9.6075 8.80944C9.51291 8.68933 9.47822 8.53235 9.51375 8.38365L10.6485 3.63944Z\" fill=\"currentColor\" stroke=\"none\" fill-rule=\"evenodd\"/>",
+    claudeBypass: "<path d=\"M5 2.5C5.93171 2.5 6.71235 3.13768 6.93457 4H13.75C15.5449 4 17 5.45507 17 7.25C17 9.04493 15.5449 10.5 13.75 10.5H12.707L10.3535 12.8535C10.1583 13.0488 9.84175 13.0488 9.64648 12.8535L7.29297 10.5H6.25C5.00736 10.5 4 11.5074 4 12.75C4 13.9926 5.00736 15 6.25 15H13.0654C13.2877 14.1377 14.0683 13.5 15 13.5C16.1046 13.5 17 14.3954 17 15.5C17 16.6046 16.1046 17.5 15 17.5C14.0683 17.5 13.2877 16.8623 13.0654 16H6.25C4.45507 16 3 14.5449 3 12.75C3 10.9551 4.45507 9.5 6.25 9.5H7.29297L9.64648 7.14648L9.72461 7.08203C9.91869 6.95387 10.1827 6.97562 10.3535 7.14648L12.707 9.5H13.75C14.9926 9.5 16 8.49264 16 7.25C16 6.00736 14.9926 5 13.75 5H6.93457C6.71235 5.86232 5.93171 6.5 5 6.5C3.89543 6.5 3 5.60457 3 4.5C3 3.39543 3.89543 2.5 5 2.5ZM15 14.5C14.4477 14.5 14 14.9477 14 15.5C14 16.0523 14.4477 16.5 15 16.5C15.5523 16.5 16 16.0523 16 15.5C16 14.9477 15.5523 14.5 15 14.5ZM8.20703 10L10 11.793L11.793 10L10 8.20703L8.20703 10ZM5 3.5C4.44772 3.5 4 3.94772 4 4.5C4 5.05228 4.44772 5.5 5 5.5C5.55228 5.5 6 5.05228 6 4.5C6 3.94772 5.55228 3.5 5 3.5Z\" fill=\"currentColor\" stroke=\"none\" fill-rule=\"evenodd\"/>",
     close: '<path d="m6 6 12 12M18 6 6 18"/>',
     back: '<path d="m15 18-6-6 6-6"/><path d="M20 12H9"/>',
     closeCircle: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
@@ -6731,7 +6827,7 @@ function icon(name) {
   node.setAttribute("aria-hidden", "true");
   const recent = name === "recent";
   // 沿用官方结形裁剪框和原始路径，只去掉画布留白，避免 16px 图标内的品牌标识被额外缩小。
-  const viewBox = name === "codex" ? "118.557 120.758 484.139 479.818" : recent ? "0 0 16 16" : "0 0 24 24";
+  const viewBox = name === "codex" ? "118.557 120.758 484.139 479.818" : ["claudeManual", "claudeEdits", "claudePlan", "claudeAuto", "claudeBypass"].includes(name) ? "0 0 20 20" : recent ? "0 0 16 16" : "0 0 24 24";
   node.innerHTML = `<svg viewBox="${viewBox}" fill="none" stroke="currentColor" stroke-width="${recent ? "1.3" : "1.6"}" stroke-linecap="round" stroke-linejoin="round">${paths[name] || ""}</svg>`;
   return node;
 }
@@ -6761,6 +6857,7 @@ function openPopup(trigger, { query = "", edge = null, focus = true, position = 
   node.id = "active-popup";
   const selecting = !!trigger.selectOptions;
   node.setAttribute("aria-label", trigger.getAttribute("aria-label"));
+  if (trigger.popupTitle) node.append(element("div", "popup-title", trigger.popupTitle));
   const list = element("div", "popup-list");
   list.setAttribute("role", selecting ? "listbox" : "menu");
   list.setAttribute("aria-label", trigger.getAttribute("aria-label"));
@@ -6773,6 +6870,14 @@ function openPopup(trigger, { query = "", edge = null, focus = true, position = 
     node.append(input);
   }
   node.append(list);
+  if (trigger.popupNote) node.append(element("div", "popup-note", trigger.popupNote));
+  let help = null;
+  if (trigger.popupHelp) {
+    help = element("a", "popup-help", trigger.popupHelp.label);
+    help.href = trigger.popupHelp.href; help.target = "_blank"; help.rel = "noopener noreferrer";
+    help.append(icon("window"));
+    node.append(help);
+  }
   const choices = selecting ? trigger.selectOptions : trigger.menuOptions;
   activePopup = { node, trigger, list, input, query, position, index: Math.max(0, choices.findIndex(option => option.value === trigger.value)), choices: [] };
   trigger.setAttribute("aria-expanded", "true"); trigger.setAttribute("aria-controls", node.id);
@@ -6815,8 +6920,13 @@ function openPopup(trigger, { query = "", edge = null, focus = true, position = 
       event.preventDefault();
       const selected = list.querySelectorAll("button")[activePopup.index];
       (selected && !selected.disabled ? selected : options[0])?.click();
-    } else if (event.key === "Tab") closePopup(true);
-    else if (event.target !== input && event.key.length === 1 && !event.ctrlKey && !event.metaKey && event.key !== " ") {
+    } else if (event.key === "Tab") {
+      if (help && event.target !== help && !event.shiftKey) {
+        event.preventDefault(); help.focus();
+      } else if (help && event.target === help && event.shiftKey) {
+        event.preventDefault(); options.at(-1)?.focus();
+      } else closePopup(true);
+    } else if (event.target !== input && event.key.length === 1 && !event.ctrlKey && !event.metaKey && event.key !== " ") {
       const start = options.indexOf(document.activeElement) + 1;
       const ordered = [...options.slice(start), ...options.slice(0, start)];
       ordered.find(option => option.textContent.trim().toLowerCase().startsWith(event.key.toLowerCase()))?.focus();
@@ -7889,7 +7999,10 @@ function reconcileCompaction(id, value) {
   if (thread?.id === id) thread.compaction = normalizeCompaction(current);
   return current;
 }
-const transcriptEventTypes = new Set(["modelChanged", "modelRerouted", "contextCompaction"]);
+// Claude 事件行（Rust claude_tools.rs 生成）：claudeTaskNotification 为后台命令、监控事件、后台子代理通知开启的
+// 自动续跑轮次起点；claudeLocalCommand 为终端执行的本地斜杠命令；claudeNotice 为离开期间回顾、原生提示与 Stop Hook。
+const transcriptEventTypes = new Set(["modelChanged", "modelRerouted", "contextCompaction",
+  "claudeTaskNotification", "claudeLocalCommand", "claudeNotice"]);
 function replaceTranscriptEvents(entries, readVersion = null) {
   // 用户要求切回/刷新不丢压缩记录；读取开始后收到的事件比这次快照新，不能被空列表清掉。
   const live = Number.isFinite(readVersion) ? [...transcriptEvents.entries()]
@@ -8801,7 +8914,7 @@ function shell() {
         <div class="composer-toolbar"><div class="composer-controls"><button id="composer-add" class="icon-button composer-add-button" type="button" aria-label="添加图片、压缩上下文或设置目标" aria-haspopup="menu" aria-expanded="false"></button><button id="prompt-optimize" class="icon-button prompt-optimize-button" type="button" aria-label="优化提示词" aria-busy="false" disabled>✨</button><button id="context-info" class="context-info muted" type="button" aria-label="查看上下文用量" aria-controls="context-usage-tooltip" aria-expanded="false"></button><button id="fast-button" class="icon-button fast-button" type="button" aria-label="开启本会话 Fast" aria-pressed="false" aria-busy="false" disabled hidden><span class="fast-bolt" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h8l-1 8 11-12h-8V2Z"/></svg></span></button><button id="model-button" class="text-button model-button" type="button" aria-label="选择模型与思考深度" aria-haspopup="menu" aria-controls="model-settings" aria-expanded="false">正在读取模型…</button></div><div class="composer-send"><span id="send-status" class="composer-send-status" role="status" aria-live="polite"></span><button id="send" class="send-button" type="submit" aria-label="发送消息"></button></div></div>
         <div id="model-settings" class="composer-popover" role="menu" aria-label="模型与思考深度" hidden></div>
         <div id="skill-menu" class="composer-popover skill-menu" role="listbox" aria-label="命令与 Skill" hidden></div>
-      </form><span id="session-metrics" class="composer-metrics" tabindex="0" aria-label="会话 Token 统计" hidden></span><button id="claude-usage" class="claude-usage" type="button" aria-label="查看 Claude 订阅额度" aria-controls="claude-usage-tooltip" aria-expanded="false" hidden></button></div></div>
+      </form><span id="session-metrics" class="composer-metrics" tabindex="0" aria-label="会话 Token 统计" hidden></span><button id="claude-usage" class="claude-usage" type="button" aria-label="查看 Claude 账号信息" aria-controls="claude-usage-tooltip" aria-expanded="false" hidden></button></div></div>
     </main>
   </div>`;
   configurePromptEditor($("#prompt"));
@@ -8834,16 +8947,17 @@ function shell() {
   add.append(icon("plus"));
   // 用户要求权限紧邻“+”；小屏只展示图标，空白由此入口后的自动外边距吸收。
   const permissions = selectControl("permission-button", "选择会话权限", permissionOptions("codex"), "configured",
-    "permission-button", selected => [icon("shield"),
-      element("span", "permission-button-label", selected?.label || "权限"), icon("chevron")]);
+    "permission-button", selected => [icon(selected?.icon || "shield"),
+      element("span", "permission-button-label", selected?.shortLabel || selected?.label || "权限"), icon("chevron")]);
+  // 实际模式尚未确认时保持占位，不自动选中列表第一项，也不为占位增加特殊权限选项。
+  permissions.selectAllowEmpty = true;
   permissions.popupDirection = "up";
-  permissions.popupWidth = 310;
   permissions.popupClassName = "composer-permissions-popup";
   permissions.onchange = () => void changeComposerPermissions();
-  permissions.onclick = () => {
-    togglePopup(permissions);
+  // 权限菜单沿用 Select 自带的点击开关；这里只读取 Claude 模式，避免同一次点击打开后又被关闭。
+  permissions.addEventListener("click", () => {
     if (isClaude()) void loadInstancePermissionCatalog(activeInstanceId());
-  };
+  });
   const permissionKeydown = permissions.onkeydown;
   permissions.onkeydown = event => {
     permissionKeydown(event);
@@ -10866,7 +10980,8 @@ function toolResultParts(item) {
       }
     }
   };
-  append(item.type === "dynamicToolCall" ? item.contentItems : item.result?.content);
+  // Claude 网页搜索与动态工具一样把原生结果放在 contentItems；MCP 结果沿用 result.content。
+  append(["dynamicToolCall", "webSearch"].includes(item.type) ? item.contentItems : item.result?.content);
   if (!parts.length && item.result?.structuredContent != null)
     parts.push({ type: "text", text: JSON.stringify(item.result.structuredContent, null, 2) });
   if (typeof item.error?.message === "string" && !parts.some(part => part.text === item.error.message))
@@ -10916,7 +11031,8 @@ function renderToolOutput(details, item) {
   details.querySelector(".tool-body")?.remove();
   if (!details.open) return;
   const body = element("div", "tool-body");
-  if (["mcpToolCall", "dynamicToolCall"].includes(item.type)) {
+  // Claude 网页搜索带原生结果正文，展开时按通用结果显示，不输出条目 JSON。
+  if (["mcpToolCall", "dynamicToolCall"].includes(item.type) || item.type === "webSearch" && item.source === "claude") {
     renderGenericToolOutput(body, item); details.append(body); return;
   }
   const content = item.type === "commandExecution" ? item.aggregatedOutput || item.output || ""
@@ -11103,10 +11219,50 @@ function transcriptModelName(id) {
   if (typeof id !== "string" || !id) return "未知模型";
   return models.find(model => model.model === id || model.id === id)?.displayName || id;
 }
+// 用户要求 Claude 原生任务通知触发的自动续跑显示为“自动继续”，不显示成用户消息；原生摘要放在信息提示里。
+function claudeTaskNotificationText(item) {
+  const status = String(item.status || "");
+  const subject = { command: "后台命令", agent: "后台子代理", monitor: "监控", schedule: "定时任务" }[item.kind] || "后台任务";
+  // 监控每个事件都是无状态通知；监控结束时的通知带状态（2.1.323 实测）。定时任务触发时摘要为其提示词。
+  const state = item.kind === "schedule" ? "已触发" : !status && item.kind === "monitor" ? "收到事件"
+    : status === "completed" ? item.kind === "monitor" ? "已结束" : "已完成"
+    : status === "failed" ? "失败" : ["killed", "stopped"].includes(status) ? "已停止" : "发来通知";
+  const detail = [item.summary, item.event].filter(value => typeof value === "string" && value.trim()).join("\n");
+  return {
+    label: `${subject}${state} · Claude 自动继续`,
+    description: detail || "原生任务通知没有提供摘要。"
+  };
+}
+// 用户要求终端本地命令与原生系统提示不显示成用户消息、也不静默丢弃：以紧凑事件行展示，原文放在信息提示中。
+function claudeEventText(item) {
+  const clip = (value, size) => {
+    const chars = Array.from(String(value || "").replace(/\s+/g, " ").trim());
+    return chars.length > size ? `${chars.slice(0, size).join("")}…` : chars.join("");
+  };
+  if (item.type === "claudeLocalCommand") {
+    const command = [item.name, item.args].filter(value => typeof value === "string" && value.trim()).join(" ");
+    const output = typeof item.output === "string" ? item.output.trim() : "";
+    return { label: `终端执行了 ${clip(command, 80) || "本地命令"}`,
+      description: output || (typeof item.output === "string" ? "命令没有输出。" : "尚未收到命令输出。") };
+  }
+  const text = typeof item.text === "string" ? item.text.trim() : "";
+  if (item.kind === "awaySummary") return { label: `离开期间回顾：${clip(text, 160)}`, description: text || "原生回顾没有内容。" };
+  if (item.kind === "stopHook") {
+    const details = [item.reason, ...(Array.isArray(item.errors) ? item.errors : [])]
+      .filter(value => typeof value === "string" && value.trim());
+    return { label: item.prevented ? "Stop Hook 阻止了继续执行" : "Stop Hook 执行出错",
+      description: details.join("\n") || "原生记录没有提供原因。" };
+  }
+  return { label: `Claude 提示：${clip(text, 120)}`, description: text || "原生提示没有内容。" };
+}
 function renderTranscriptEvent(item, previous) {
   const node = previous || element("div");
-  node.className = `transcript-event muted ${item.type === "contextCompaction" ? "context-compaction" : "model-change"}`;
-  const symbol = icon(item.type === "contextCompaction" ? "compaction" : "model");
+  const notification = item.type === "claudeTaskNotification";
+  const claudeEvent = ["claudeLocalCommand", "claudeNotice"].includes(item.type);
+  node.className = `transcript-event muted ${item.type === "contextCompaction" ? "context-compaction"
+    : notification ? "task-notification" : claudeEvent ? "claude-event" : "model-change"}`;
+  const symbol = icon(item.type === "contextCompaction" ? "compaction" : notification ? "play"
+    : item.type === "claudeLocalCommand" ? "terminal" : claudeEvent ? "info" : "model");
   symbol.classList.add("transcript-event-icon");
   // 用户要求切回会话仍显示压缩状态；服务历史可能只有起止时间，不能等下一条实时消息补 completed。
   const status = typeof item.status === "string" ? item.status : item.status?.type;
@@ -11138,6 +11294,10 @@ function renderTranscriptEvent(item, previous) {
     if (validCount(item.preTokens) && validCount(item.postTokens))
       description += ` 压缩前 ${item.preTokens.toLocaleString("zh-CN")} Token，压缩后 ${item.postTokens.toLocaleString("zh-CN")} Token。`;
     if (validCount(item.durationMs)) description += ` 用时 ${(item.durationMs / 1000).toLocaleString("zh-CN")} 秒。`;
+  } else if (notification) {
+    ({ label, description } = claudeTaskNotificationText(item));
+  } else if (claudeEvent) {
+    ({ label, description } = claudeEventText(item));
   } else {
     const from = transcriptModelName(item.fromModel), to = transcriptModelName(item.toModel);
     const effortChanged = typeof item.fromEffort === "string" && typeof item.toEffort === "string"
@@ -11168,7 +11328,58 @@ function readableToolName(item) {
   return [words(item.server), words(item.tool)].filter(Boolean).join(" · ")
     || (item.type === "dynamicToolCall" ? "动态工具" : "MCP 工具");
 }
+// 用户要求 Claude 实例按原生工具语义展示：内置工具显示动作和关键参数，不显示“动态工具”或英文工具名。
+// 与 Rust claude_tools.rs 对应：命令、文件修改、网页搜索、MCP 已转为专用条目，这里只处理其余内置工具；
+// 文件修改与任务清单工具仅在失败（改为通用卡片保留原生报错）时出现在这里。
+function claudeToolPresentation(item) {
+  const input = item.arguments && typeof item.arguments === "object" ? item.arguments : {};
+  const clip = value => Array.from(String(value ?? "").replace(/\s+/g, " ").trim()).slice(0, 80).join("");
+  const file = value => clip(String(value || "").split(/[\\/]/).filter(Boolean).at(-1) || "");
+  const join = (...parts) => parts.filter(Boolean).join(" · ");
+  const task = value => typeof value === "string" && value.trim() || Number.isSafeInteger(value) ? `#${clip(value)}` : "";
+  const host = value => {
+    try { return new URL(value).host; } catch { return clip(value); }
+  };
+  const tool = String(item.tool || "");
+  switch (tool) {
+    case "Read": return { icon: "eye", description: join("读取文件", file(input.file_path)), explore: true };
+    case "NotebookRead": return { icon: "eye", description: join("读取笔记本", file(input.notebook_path)), explore: true };
+    case "Grep": return { icon: "search", description: join("搜索", input.pattern ? `“${clip(input.pattern)}”` : "", file(input.path)), explore: true };
+    case "Glob": return { icon: "search", description: join("查找文件", clip(input.pattern), file(input.path)), explore: true };
+    case "LS": return { icon: "folderClosed", description: join("列出目录", file(input.path)), explore: true };
+    case "WebFetch": return { icon: "globe", description: join("读取网页", input.url ? host(input.url) : "") };
+    case "Edit": case "MultiEdit": return { icon: "edit", description: join("修改文件", file(input.file_path)) };
+    case "Write": return { icon: "edit", description: join("写入文件", file(input.file_path)) };
+    case "NotebookEdit": return { icon: "edit", description: join("修改笔记本", file(input.notebook_path)) };
+    case "Skill": return { icon: "wrench", description: join("使用技能", clip(input.skill)) };
+    case "ToolSearch": return { icon: "search", description: join("加载工具", clip(input.query).replace(/^select:/, "")) };
+    case "TaskCreate": return { icon: "queue", description: join("创建任务", clip(input.subject)) };
+    case "TaskUpdate": return { icon: "queue", description: join("更新任务", task(input.taskId)) };
+    case "TodoWrite": return { icon: "queue", description: "更新任务清单" };
+    case "TaskList": return { icon: "queue", description: "查看任务清单" };
+    case "TaskGet": return { icon: "queue", description: join("查看任务", task(input.taskId)) };
+    case "TaskOutput": case "BashOutput":
+      return { icon: "terminal", description: join("查看后台任务输出", clip(input.task_id || input.bash_id)) };
+    case "TaskStop": case "KillShell": case "KillBash":
+      return { icon: "stop", description: join("停止后台任务", clip(input.task_id || input.shell_id)) };
+    case "Monitor": return { icon: "eye", description: join("监控", clip(input.description || input.command)) };
+    case "AskUserQuestion":
+      return { icon: "chat", description: join("提问", clip(Array.isArray(input.questions) ? input.questions[0]?.question : "")) };
+    case "ExitPlanMode": return { icon: "target", description: "提交计划" };
+    case "EnterPlanMode": return { icon: "target", description: "进入计划模式" };
+    case "ScheduleWakeup":
+      return { icon: "recent", description: join("定时唤醒", Number.isFinite(input.delaySeconds) ? `${input.delaySeconds} 秒后` : "") };
+    case "CronCreate": return { icon: "recent", description: join("创建定时任务", clip(input.cron || input.schedule)) };
+    case "CronDelete": return { icon: "recent", description: join("删除定时任务", clip(input.id)) };
+    case "CronList": return { icon: "recent", description: "查看定时任务" };
+    case "SendMessage": return { icon: "chat", description: join("发送消息", clip(input.to)) };
+    case "EnterWorktree": return { icon: "folderClosed", description: "进入工作树" };
+    case "ExitWorktree": return { icon: "folderClosed", description: "离开工作树" };
+    default: return { icon: "tools", description: readableToolName(item) };
+  }
+}
 function genericToolPresentation(item) {
+  if (item.source === "claude" && item.type === "dynamicToolCall") return claudeToolPresentation(item);
   const surfaces = [
     item.toolSurface,
     item._meta?.["codex/toolSurface"],
@@ -11291,13 +11502,17 @@ function renderItem(item, previous, inActivity = false, running = false) {
       : state ? `${presentation.description}，${state}` : presentation.description);
     details.setAttribute("aria-busy", String(active));
   } else {
+    // Claude 后台命令：启动即返回，结束状态由原生任务通知写回；“已转入后台”只陈述启动事实，不声称仍在运行。
+    const background = item.type === "commandExecution" && typeof item.backgroundStatus === "string" ? item.backgroundStatus : "";
+    const backgroundLabel = { running: "已转入后台", completed: "后台已完成", failed: "后台失败",
+      killed: "后台已停止", stopped: "后台已停止", unknown: "后台结果未知" }[background] || "";
     const label = element("strong", "", item.type === "reasoning" ? active ? "正在思考" : unknown || failed || interrupted ? "思考" : "已完成思考"
-      : item.type === "commandExecution" ? active ? "正在运行" : unknown || failed || interrupted ? "执行命令" : "已运行" : titles[item.type] || item.type);
+      : item.type === "commandExecution" ? active && !background ? "正在运行" : backgroundLabel || (unknown || failed || interrupted ? "执行命令" : "已运行") : titles[item.type] || item.type);
     summary.append(!active && !failed && !interrupted && !unknown && ["commandExecution", "fileChange"].includes(item.type)
       ? icon(item.type === "commandExecution" ? "terminal" : "fileChange")
       : element("span", `tool-state${active ? " spinner" : ""}`, active ? "" : failed ? "!" : interrupted ? "■" : unknown ? "?" : "✓"),
       label, element("span", "tool-description", name),
-      element("small", "muted", active ? "进行中" : item.exitCode != null && item.exitCode !== 0 ? `退出码 ${item.exitCode}`
+      element("small", "muted", active && !background ? "进行中" : item.exitCode != null && item.exitCode !== 0 ? `退出码 ${item.exitCode}`
         : failed ? "失败" : interrupted ? "已中断" : unknown ? "状态未知" : ""));
     if (["commandExecution", "reasoning"].includes(item.type)) {
       summary.title = item.type === "reasoning" ? "查看思考内容" : name;
@@ -11862,6 +12077,11 @@ function workGroupSummary(items, running = false) {
   const commands = items.filter(item => item.type === "commandExecution" && !skillReadInfo(item));
   const changes = items.filter(item => item.type === "fileChange");
   const tools = items.filter(item => ["mcpToolCall", "dynamicToolCall"].includes(item.type));
+  // Claude 内置工具不是集成：按动作汇总为“浏览了文件 / 使用了工具”，Claude 的 MCP 工具仍按服务器名显示集成。
+  const claudeTools = tools.filter(item => item.source === "claude" && item.type === "dynamicToolCall");
+  const integrationTools = tools.filter(item => !claudeTools.includes(item));
+  const explored = claudeTools.some(item => claudeToolPresentation(item).explore);
+  const usedTools = claudeTools.some(item => !claudeToolPresentation(item).explore);
   const searches = items.filter(item => item.type === "webSearch");
   const reasoning = items.filter(item => item.type === "reasoning");
   const paths = new Set(changes.flatMap(item => item.changes || []).map(change => change.path).filter(Boolean));
@@ -11875,11 +12095,11 @@ function workGroupSummary(items, running = false) {
     if (item.pluginId === "unified-computer-use@openai-bundled") return "Chrome";
     return item.server || item.tool || "工具";
   };
-  const names = [...new Set(tools.map(toolName))];
+  const names = [...new Set(integrationTools.map(toolName))];
   const name = names.length > 1 ? `${names.slice(0, -1).join("、")}和${names.at(-1)}` : names[0];
   const integrations = names.length > 0 && !names.includes("浏览器");
   const edited = changes.length ? "编辑了多个文件" : "";
-  let text = `${name ? `已使用 ${name}${integrations ? " 集成" : ""}` : ""}${searches.length ? "搜索了网页" : ""}${edited}${commands.length ? "运行了命令" : ""}` || (reasoning.length ? "思考" : "已完成操作");
+  let text = `${name ? `已使用 ${name}${integrations ? " 集成" : ""}` : ""}${explored ? "浏览了文件" : ""}${usedTools ? "使用了工具" : ""}${searches.length ? "搜索了网页" : ""}${edited}${commands.length ? "运行了命令" : ""}` || (reasoning.length ? "思考" : "已完成操作");
   let currentTool = null, thinking = false;
   if (running) {
     const current = items.at(-1);
@@ -12139,6 +12359,14 @@ function clearSentMessageDisplays(id, { retire = false } = {}) {
       sentMessageDisplays.delete(key);
     }
 }
+function settleSentMessageDisplays(id) {
+  // 用户反馈切换会话后，旧消息只剩提问并被补到正文末尾或执行中轮次之前，看起来时序错乱、回复丢失。
+  // 进入新视图时，此前已被原生正文接替的成功记录改以本次读取的历史为准：所在轮次已加载时照常留在原位，
+  // 位于未加载的更早历史时不再按旧窗口位置补插。仍未见原生正文的成功投影不受影响，继续遵守
+  // “空队列、迟到快照或历史暂未同步时不消失”。须与 selectThread 清空轮次处及 withSentMessageDisplays 一并核对。
+  for (const record of sentMessageDisplays.values())
+    if (record.threadId === id && record.nativeItem) record.settled = true;
+}
 function sentMessageIdentities(item) {
   return [item?.clientId, item?.clientUserMessageId, item?.serverClientUserMessageId,
     item?.submissionOptions?.clientUserMessageId, item?.restoreMessage?.clientUserMessageId,
@@ -12216,6 +12444,8 @@ function withSentMessageDisplays(source = [...turns.values()]) {
     });
     if (record && !record.item) {
       record.item = item; record.confirmed = true; record.turnId = turn.id; record.index = index;
+      // 缓存里的原生正文副本来自此前视图，同样以本次读取的历史为准；未见原生正文的成功投影仍需桥接显示。
+      if (!item.remotePendingInput) record.settled = true;
     }
   }
   const displayed = source.map(turn => ({ ...turn, items: (turn.items || []).filter(item =>
@@ -12268,6 +12498,9 @@ function withSentMessageDisplays(source = [...turns.values()]) {
     if (!record.confirmed || !record.item || received.has(record)
         || record.threadId !== selectedId || record.scope !== privateInputScope(session)) continue;
     let turn = displayed.find(turn => turn.id === record.turnId);
+    // 此前视图已接替的记录只在所在轮次已加载时补回缺项；轮次属于未加载的更早历史时不再按旧位置补插，
+    // 避免切换会话后旧消息出现在正文末尾或执行中轮次之前。本视图内接替或刚确认的消息仍按下方原规则保持可见。
+    if (!turn && record.settled) continue;
     if (!turn) {
       turn = { id: record.turnId || `remote-confirmed-turn:${record.clientId}`, status: "completed", items: [] };
       const next = displayed.findIndex(turn => turn.id === record.nextTurnId);
@@ -12857,7 +13090,7 @@ function resumeQueuedMessageEdit(summary) {
     threadId: selectedId, editId: summary.editId, deviceId: session.device.id, state: "editing",
     message: { id: summary.messageId }, originalText: summary.originalText || "", text: summary.originalText || "",
     attachments: [], originalImageSources: [], imageRemoval: false,
-    backup: snapshotDraft(), model: selectedModel, effort: selectedEffort
+    backup: snapshotDraft(), model: selectedModel, effort: selectedEffort, modelChoiceVersion
   };
   queuedEdits.set(selectedId, edit);
   try { persistQueuedEdits(true); }
@@ -13001,7 +13234,7 @@ async function beginQueuedMessageEdit(threadId, message) {
     message: { id: message.id, clientUserMessageId: message.clientUserMessageId, createdAt: message.createdAt },
     originalText: queueMessageText(message), text: queueMessageText(message),
     attachments, originalImageSources, imageRemoval, imageEditing,
-    backup: snapshotDraft(), model: selectedModel, effort: selectedEffort
+    backup: snapshotDraft(), model: selectedModel, effort: selectedEffort, modelChoiceVersion
   };
   queuedEdits.set(threadId, edit);
   try { persistQueuedEdits(true); }
@@ -13046,7 +13279,10 @@ function finishQueuedMessageEdit(edit) {
     editingQueuedMessage = null;
     if (selectedId === edit.threadId && $("#prompt")) {
       restoreDraft(edit.threadId);
-      selectedModel = edit.model || ""; selectedEffort = edit.effort || "";
+      // 用户要求模型/深度只供后续新发送使用；队列编辑结束不能把期间的新选择恢复为旧值。
+      if (edit.modelChoiceVersion == null || edit.modelChoiceVersion === modelChoiceVersion) {
+        selectedModel = edit.model || ""; selectedEffort = edit.effort || "";
+      }
     }
   }
 }
@@ -13330,8 +13566,11 @@ function renderMessages(keepScroll = true) {
     }
     if (turn.error) items.push(element("div", "turn-error", turn.error.message || "此轮执行失败"));
     // 原生已结束但没有回复时保留已接收消息，结束等待提示；不把未知的结束原因说成用户主动停止。
+    // 出字前停止由连接端按终端输入框确认为原生撤回（Rust _nativeWithdrawn）：原文回到原版终端输入框，不进入对话。
     if (turn._nativeEndedWithoutReply === true)
-      items.push(element("small", "turn-end muted", "本轮已结束，未生成回复"));
+      items.push(element("small", "turn-end muted", turn._nativeWithdrawn === true
+        ? "已撤回：Claude 在开始回复前停止，原文已放回原版终端输入框，不会进入对话"
+        : "本轮已结束，未生成回复"));
     if (turn.status === "interrupted") {
       // 用户要求原生中断按执行状态展示，不伪装成用户正文，也不据此推断用户按了哪个按钮。
       const native = turn.nativeInterruption?.source === "claude";
@@ -13379,7 +13618,13 @@ function rememberTranscript({ retainView = false, retainRelatedParent = false } 
   const ephemeral = threadEphemeralState(selectedId);
   const summary = [...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
     ...(sidebar?.projects || []).flatMap(project => project.threads || [])].find(item => item.id === selectedId);
-  const currentTurns = withSentMessageDisplays(), events = [...transcriptEvents.values()];
+  // 补插轮次只用于维持当前视图：缓存只保留已加载轮次和仍未见原生正文的成功投影，不把补出的原生副本写成历史轮次，
+  // 避免用户切回会话或重启后，旧消息被当作真实历史插到执行中轮次前后。
+  const currentTurns = withSentMessageDisplays().flatMap(turn => {
+    if (turns.has(turn.id)) return [turn];
+    const items = turn.items.filter(item => item.remotePendingInput);
+    return items.length ? [{ ...turn, items }] : [];
+  }), events = [...transcriptEvents.values()];
   const recentStart = currentTurns.findIndex(turn => turn.id === recentHistoryPage?.turns?.[0]?.id);
   // 最近页起点和游标来自服务器；合并该页之后收到的新轮次，避免回退窗口遗漏刚完成的回复。
   const recentTurns = recentStart >= 0 ? currentTurns.slice(recentStart) : null;
@@ -13417,6 +13662,13 @@ function rememberTranscript({ retainView = false, retainRelatedParent = false } 
   }
   rememberReadingPosition();
 }
+function legacySentDisplayTurn(turn) {
+  // 旧版本曾把补插出的已接替提问写成只有 id/status/items 的完成轮次，用户升级后旧缓存仍会把旧消息插到执行中轮次前后。
+  // 真实轮次带有原生或分页字段；仍未见原生正文的成功投影带 remotePendingInput，均不在此剔除范围内。
+  return turn?.status === "completed" && Object.keys(turn).every(key => ["id", "status", "items"].includes(key))
+    && Array.isArray(turn.items) && turn.items.length > 0
+    && turn.items.every(item => item?.type === "userMessage" && item.remoteConfirmedInput === true && !item.remotePendingInput);
+}
 function restoreTranscript(id) {
   const returning = relatedReturnTranscript?.scope === privateInputScope(session)
     && relatedReturnTranscript.threadId === id ? relatedReturnTranscript : null;
@@ -13438,7 +13690,7 @@ function restoreTranscript(id) {
     if (!relatedThreadViews.has(id)) relatedThreadViews.set(id, cachedView);
     syncRelatedSessionLayout();
   }
-  turns = view?.turns || new Map(cached.turns.map(turn => [turn.id, turn]));
+  turns = view?.turns || new Map(cached.turns.filter(turn => !legacySentDisplayTurn(turn)).map(turn => [turn.id, turn]));
   if (view) {
     for (const [key, value] of view.items) renderedItems.set(key, value);
     for (const [key, value] of view.groups) renderedTurns.set(key, value);
@@ -13525,6 +13777,8 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   const version = ++selectionVersion;
   selectionToken = randomId();
   selectedId = id; creating = false; thread = initialSide; turns.clear(); transcriptEvents.clear(); historyCursor = null; historyInitialized = false;
+  // 用户反馈切换会话后旧消息被补插、时序错乱：清空旧轮次后，之前已被原生接替的成功记录以本次读取的历史为准。
+  settleSentMessageDisplays(id);
   setConnection(backendAvailable() && stream?.readyState === EventSource.OPEN);
   relatedSessionView = nextRelatedView;
   if (preparedView) $(".workspace")?.classList.add("related-session-prepared");
@@ -15336,11 +15590,18 @@ function renderApprovals() {
     const nativeDialog = request.params?.nativeDialog;
     if (nativeDialog) {
       const kind = nativeDialog.kind === "model" ? "模型" : "思考深度";
+      const planDialog = nativeDialog.kind === "plan";
       const title = nativeDialog.kind === "unknown" ? "Claude 正在等待本机确认"
-        : nativeDialog.state === "submitted" ? "正在确认原生操作结果" : `切换${kind}需要确认`;
+        : nativeDialog.state === "submitted" ? "正在确认原生操作结果"
+        : planDialog ? "Claude 已写好计划，等待你确认" : `切换${kind}需要确认`;
       card.append(element("strong", "approval-title", title));
       if (nativeDialog.target) card.append(element("p", "approval-reason", `目标${kind}：${nativeDialog.target}`));
-      if (nativeDialog.description)
+      if (planDialog && nativeDialog.description) {
+        // 计划正文取自原生计划文件，按 Markdown 展示，便于在网页上审阅后再批准。
+        const plan = element("div", "approval-description markdown approval-plan");
+        setMarkdown(plan, nativeDialog.description);
+        card.append(plan);
+      } else if (nativeDialog.description)
         card.append(element("pre", "approval-description", nativeDialog.description));
       if (!nativeDialog.remoteSupported || nativeDialog.kind === "unknown")
         card.append(element("small", "muted", "请在该会话的原版 Claude CLI 中处理，完成后这里会自动同步。"));
@@ -15368,6 +15629,27 @@ function renderApprovals() {
         actions.append(button("确认切换", "确认原生模型或等级切换，并继续已经收到的消息",
           () => reply("approve", { decision: "accept" }), "primary"),
         button(keep, keep, () => reply("approve", { decision: "decline" })));
+      } else if (nativeDialog.remoteSupported && nativeDialog.state === "waiting" && nativeDialog.kind === "plan") {
+        // 用户要求网页处理计划审批：每个批准项对应原生编号（会同时决定后续权限模式，按钮提示保留原生原文）；
+        // 修改意见对应原生 “Tell Claude what to change”，提交后 Claude 继续规划。
+        const options = Array.isArray(nativeDialog.options) ? nativeDialog.options : [];
+        for (const option of options.filter(option => option.action === "approve"))
+          actions.append(button(claudePlanOptionLabel(option.label), `原生选项：${option.label}`,
+            () => reply("approve", { decision: "accept", option: option.index }), option.index === 1 ? "primary" : ""));
+        if (options.some(option => option.action === "feedback")) {
+          const draft = blockingApprovalDraft(requestThreadId, request);
+          const feedback = element("textarea", "plan-feedback");
+          feedback.placeholder = "告诉 Claude 需要修改什么";
+          feedback.setAttribute("aria-label", "计划修改意见");
+          feedback.value = draft.get("feedback") || "";
+          feedback.oninput = () => draft.set("feedback", feedback.value);
+          card.append(feedback);
+          actions.append(button("提交修改意见", "把修改意见交给 Claude，继续规划", () => {
+            const text = feedback.value.trim();
+            if (!text) { notice("请先填写修改意见", true); return; }
+            void reply("approve", { decision: "decline", feedback: text });
+          }));
+        }
       }
     } else if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval"].includes(request.method)) {
       const allowed = request.params?.availableDecisions;
@@ -15461,8 +15743,32 @@ function isActiveThread() {
   return ["active", "inProgress", "running", "pending"].includes(statusType);
 }
 let expandedClaudeGoalNotice = "";
+// 计划审批批准项的中文按钮；原生措辞随权限配置变化（2.1.323 实测 auto mode / manually approve edits），未知措辞保留原文。
+function claudePlanOptionLabel(label) {
+  const text = String(label || "").trim();
+  if (/auto mode/i.test(text)) return "批准并使用自动模式";
+  if (/auto-accept edits/i.test(text)) return "批准并自动接受编辑";
+  if (/bypass permissions/i.test(text)) return "批准并跳过权限确认";
+  if (/manually approve edits/i.test(text)) return "批准，编辑逐项确认";
+  return `批准：${text}`;
+}
+// 原生底栏摘要（如 “1 shell”、“2 shells”）翻译为中文；未知写法保留原文，不猜测数量或类型。
+function claudeBackgroundLabel(value) {
+  const text = String(value || "").trim();
+  const names = { shell: "后台命令", monitor: "监控", agent: "后台子代理", task: "后台任务" };
+  const parts = text.split(/\s*,\s*/).map(part => {
+    const match = /^(\d+)\s+(?:local\s+|background\s+)?(shell|monitor|agent|task)s?$/i.exec(part);
+    return match ? `${match[1]} 个${names[match[2].toLowerCase()]}` : null;
+  });
+  return parts.length && parts.every(Boolean) ? parts.join("、") : text === "background" ? "后台任务" : text;
+}
 function renderClaudeControlNotices(root) {
   if (!isClaude()) return;
+  // 用户要求网页能看到原版 Claude 仍在运行的后台任务（后台命令、监控、后台子代理）；数据取自原生底栏，
+  // 仅在会话在线且画面可读时由 Rust 视图 backgroundTasks 提供。任务结束后原版会以新一轮自动继续回复。
+  const background = typeof thread?.backgroundTasks === "string" ? thread.backgroundTasks.trim() : "";
+  if (background) root.append(element("div", "pending-banner",
+    `后台任务运行中：${claudeBackgroundLabel(background)}。任务结束后 Claude 会自动继续回复。`));
   // 压缩运行及终态统一进入正文；等待/待确认只走 renderCompactionBanner，避免输入区双重提示。
   for (const command of thread?.nativeCommands || []) {
     if (command.name !== "goal" || !["pending", "unknown", "failed"].includes(command.state)) continue;
@@ -15775,8 +16081,9 @@ function updateComposer() {
   $("#prompt").disabled = !sessionTypeEnabled || threadReadOnly() || deleting || compacting && editing || !!editingMessage || editing && (busy || !!pending)
     || editingQueuedMessage?.state === "starting" || (!creating && !selectedId);
   $("#new-chat").disabled = threadReadOnly() || !connected && !(session?.capabilities?.claudeSessions && stream?.readyState === EventSource.OPEN);
-  $("#model-button").disabled = !sessionTypeEnabled || threadReadOnly() || deleting || serviceSideThread() && active || !!editingQueuedMessage
-    || !!editingMessage && (busy || stopping || !!pending || !connected);
+  // 用户要求主会话和侧边队列编辑时仍可选择后续模型；执行中选择不写进排队消息，后续新发送才应用。
+  $("#model-button").disabled = !sessionTypeEnabled || threadReadOnly() || deleting
+    || !!(editingMessage || editingQueuedMessage) && (busy || stopping || !!pending || !connected);
   $("#sidebar-view-toggle").disabled = !sidebar;
   syncNewChatProjectPicker();
   if (backendSelect) backendSelect.disabled = !creating || threadReadOnly() || busy || stopping || !!pending;
@@ -15789,7 +16096,7 @@ function updateComposer() {
     : isClaude() ? active ? claudeNativeQueue()
       ? thread?.capabilities?.remoteQueue === true ? "继续输入，消息会排队等待发送…" : "继续输入，消息会进入 Claude 原生队列…"
       : "Claude 正在执行，可停止后发送新消息…" : "给 Claude 发送消息…"
-    : active ? serviceSideThread() ? "补充要求，发送后引导当前任务…" : "补充要求，会使用原生消息队列…"
+    : active ? serviceSideThread() ? "继续输入，消息会排队等待当前任务完成…" : "补充要求，会使用原生消息队列…"
     : "给 Codex 发送消息，输入 / 选择命令或 Skill…";
   const model = currentModel(), effort = currentEffort();
   const name = model?.displayName || currentModelId()
@@ -15956,6 +16263,8 @@ async function sendMessage() {
   const model = selectedModel || rememberedModel?.model
     || (selectedEffort || creating && selectedDraftFast ? currentModelId() : ""),
     reasoningEffort = selectedEffort || (rememberedModel ? currentEffort() : "");
+  // 用户要求 Codex 执行期间仅保留模型/深度选择，排队消息不携带新设置；停止或完成后的新发送才应用。
+  const modelChoiceApplies = creating || isClaude() || !isActiveThread();
   const payload = {
     prompt, instanceId: activeInstanceId(), ...(creating ? { projectId: $("#project-select").value, backend: activeBackend() } : {
       threadId: id,
@@ -15963,14 +16272,15 @@ async function sendMessage() {
     }),
     ...(goalMode ? { goalMode: true } : {}),
     ...(queueOnly ? { queueOnly: true } : {}),
-    ...(model ? { model } : {}),
-    ...(creating && session.capabilities?.sessionPermissions === true && $("#permission-button")?.value
-      ? { permissionMode: $("#permission-button").value } : {}),
+    ...(modelChoiceApplies && model ? { model } : {}),
+    // 展示归类不能扩大旧草稿权限；未显式选择的 Claude 草稿继续继承实例配置，不把展示值固化为会话覆盖。
+    ...(creating && session.capabilities?.sessionPermissions === true && (draft.permissionMode || $("#permission-button")?.value)
+      ? { permissionMode: draft.permissionMode || (isClaude() ? "configured" : $("#permission-button").value) } : {}),
     // 新建只传本次草稿的显式选择；已有会话由原生会话偏好控制，发送不增加额外设置请求。
     ...(creating && session.capabilities?.fastMode && !isClaude() ? {
       fastMode: remoteFastState?.key === remoteFastKey() && remoteFastState.supported && selectedDraftFast
     } : {}),
-    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(modelChoiceApplies && reasoningEffort ? { reasoningEffort } : {}),
     ...(draft.skills.length ? { skills: draft.skills.map(({ name, path }) => ({ name, path })) } : {}),
     ...(images.length ? { images } : {})
   };

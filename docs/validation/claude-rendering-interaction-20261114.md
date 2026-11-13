@@ -1,0 +1,54 @@
+# Claude 渲染与交互验收
+
+日期：2026-11-13～14。
+
+## 结论
+
+远程会话对 Claude 实例的以下场景完成适配，并在测试 WSL 中用真实 CLI 和真实模型验收通过：
+
+- 工具调用渲染；
+- 任务清单；
+- 后台任务通知及其自动续跑；
+- 定时任务触发；
+- 终端本地命令；
+- 计划审批；
+- 出字前停止。
+
+网页逻辑由单元测试覆盖，另外用 6 个实测会话的真实快照跑了 Rust 投影；没有在浏览器中实际打开新页面，因为需要先更新正式远程服务。
+
+## 环境
+
+- WSL：`codex-elves-claude-test`，用户 `elves-test`，Claude Code 2.1.323。
+- 使用临时隔离的 `CLAUDE_CONFIG_DIR`，复制该实例的 `settings.json` 与 `.claude.json`，带独立 daemon，模型使用该实例自身配置。验收后已停止全部隔离会话，并删除配置目录和工作目录。
+- 连接端为仓库当前的 `claude_shared.py`，按远程服务相同的方式驱动；投影使用连接端实际发给 Rust 的 `shared_snapshot`。
+
+## 结果
+
+| 场景 | 原生实测 | 远程会话结果 |
+| --- | --- | --- |
+| 计划模式调用 `ExitPlanMode` | 审批框弹出时，记录中还没有该工具调用；原生状态为 `blocked`、`needs: permission prompt` | 按画面识别为 `nativeDialog.kind = plan`，`remoteSupported: true`；计划正文完整读自 `plans/<slug>.md` |
+| 网页提交多行修改意见 | 原生第 3 项只移动光标，输入的文字替换选项标签，回车后提交 | 意见合并为单行后提交；Claude 修改计划文件，并重新弹出审批框 |
+| 网页批准第 2 项 | 原生 `Yes, manually approve edits`，权限模式切为 manual | 按编号 `2` 提交，计划开始执行；之后的 Bash 权限框沿用原有通用审批 |
+| 出字前停止（Esc） | 输入被撤回，原文放回终端输入框，记录中无标记；原生状态 `idle` | 连接端报出 `withdrawnPrompt`，网页轮次以「已撤回」结束；随后网页发送的新消息正常送达 |
+| 后台 Bash `sleep 40` 运行中 | 底栏 `auto mode on · ← 2 agents · 1 shell · esc to interrupt · ↓ to manage`，结束后 `↓ to manage` 消失 | `background` 依次为 `1 shell` 和空；`← 2 agents` 从会话一开始就有，不计入 |
+| Monitor 运行中 | 底栏 `… · ← 2 agents · 1 monitor · esc to interrupt · ↓ to manage` | `background` 为 `1 monitor` |
+| Monitor 事件、Monitor 结束、后台 Bash 完成，三条通知连续写入 | 原生只回复一次，只有一个 `turn_duration` | 合为一个自动续跑轮次，含三条事件行；Claude 回复后再来的通知开启新轮次 |
+| 通知写回工具卡片 | Bash 完成通知带 `tool-use-id`、`exit code 0`；Monitor 结束通知带 `tool-use-id`、无 `<event>` | 命令卡片显示「后台已完成」、退出码 0；监控显示「监控已结束」 |
+| 一次性定时任务（`CronCreate`，约 1 分钟后触发） | 写入 `system/scheduled_task_fire`，随后写一条以它为父节点、没有 `origin` 的 user 提示 | 显示为「定时任务已触发」自动续跑轮次，不可编辑；用户手动输入相同文字时仍按用户消息处理 |
+| 终端执行 `/context` | 两条 `system/local_command`，分别为命令和带 ANSI 颜色的输出，另有一条 `isMeta` 的 Markdown user 记录 | 事件行「终端执行了 /context」，输出去掉颜色后放在详情中；`isMeta` 记录不显示 |
+| 任务清单：第一轮并行 `TaskCreate` 甲、乙，`TaskUpdate #1 completed`；第二轮 `TaskUpdate #2`、`TaskCreate` 丙、`TaskList` | 编号 1、2、3 跨轮次连续；`TaskList` 返回 `#1 [completed] 甲`、`#2 [completed] 乙`、`#3 [pending] 丙` | 第一轮清单为甲已完成、乙待办；第二轮为甲、乙已完成，丙待办，与原生一致 |
+| 6 个实测会话的快照投影 | — | 命令退出码、文件差异、计划正文、等待权限的 Bash（显示进行中）均与原生状态一致 |
+
+## 验收中发现并修正的问题
+
+1. 后台任务提示取错片段：原先取 `↓ to manage` 的前一段，运行中拿到的是 `esc to interrupt`。改为只取「数字 + 类型」片段，例如 `1 shell`。
+2. 连续多条通知被拆成多个没有回复的空轮次。改为并入同一个尚未回复的自动续跑轮次。
+3. Monitor 结束通知被归为通用「后台任务」。改为按所属工具卡片识别为监控。
+4. 并行工具调用只显示最后一条结果。原生把每条结果挂在各自的调用之下，只有最后一条在当前父子链上，导致第一条 `TaskCreate` 的编号丢失、甲一直待办，计划文件的写入一直显示进行中。连接端改为保留答复当前分支调用的结果。
+5. 定时任务提示被当成可编辑的用户消息。改为按 `scheduled_task_fire` 的子记录识别为自动续跑。
+
+## 未覆盖
+
+- 后台子代理的任务通知只做了单元测试，本次实测没有触发。
+- 循环定时任务没有实测，只验证了一次性任务的触发记录。
+- 原版终端自己执行 `/rewind` 时不写记录标记，网页要等终端发出下一条消息后，才能按分支关系显示回退结果，本次未改动。

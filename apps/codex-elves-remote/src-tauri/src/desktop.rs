@@ -670,6 +670,78 @@ fn open_external(url: Url) {
     });
 }
 
+unsafe fn register_context_menu(
+    core: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+) -> windows::core::Result<()> {
+    use webview2_com::{
+        ContextMenuRequestedEventHandler, Microsoft::Web::WebView2::Win32::ICoreWebView2_11,
+    };
+    use windows::core::Interface;
+
+    unsafe {
+        // 用户要求保留原有功能按钮及网页自定义右键菜单，不能全局关闭 WebView2 的菜单事件。
+        core.Settings()?.SetAreDefaultContextMenusEnabled(true)?;
+        let mut token = 0;
+        core.cast::<ICoreWebView2_11>()?.add_ContextMenuRequested(
+            &ContextMenuRequestedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                // 只筛选此次原生弹窗；读取或筛选失败也不放出默认项，不改全局开关或拦截网页事件。
+                args.SetHandled(true)?;
+                if let Err(error) = retain_context_menu_copy(&args) {
+                    eprintln!("筛选原生右键菜单失败：{error}");
+                }
+                Ok(())
+            })),
+            &mut token,
+        )
+    }
+}
+
+unsafe fn retain_context_menu_copy(
+    args: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ContextMenuRequestedEventArgs,
+) -> windows::core::Result<()> {
+    use webview2_com::{
+        Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND, take_pwstr,
+    };
+
+    unsafe {
+        let mut selection = Default::default();
+        args.ContextMenuTarget()?.HasSelection(&mut selection)?;
+        // 用户指定空白处不展示浏览器操作，选中文字后仅保留原生“复制”；快捷键及网页菜单不受此筛选影响。
+        if !selection.as_bool() {
+            return Ok(());
+        }
+        let items = args.MenuItems()?;
+        let mut count = 0;
+        items.Count(&mut count)?;
+        let mut retained = false;
+        // 倒序移除，防止索引移动漏掉“打印”“复制突出显示链接”“更多工具”等项及分隔线。
+        for index in (0..count).rev() {
+            let item = items.GetValueAtIndex(index)?;
+            let mut name = Default::default();
+            item.Name(&mut name)?;
+            let name = take_pwstr(name);
+            let mut kind = Default::default();
+            item.Kind(&mut kind)?;
+            let mut enabled = Default::default();
+            item.IsEnabled(&mut enabled)?;
+            // Name 是不随界面语言变化的原生命令标识，不能用中文标题或命令 ID 猜测“复制”。
+            if name == "copy"
+                && kind == COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND
+                && enabled.as_bool()
+            {
+                retained = true;
+            } else {
+                items.RemoveValueAtIndex(index)?;
+            }
+        }
+        if retained {
+            args.SetHandled(false)?;
+        }
+        Ok(())
+    }
+}
+
 fn create_client_window(
     app: &tauri::AppHandle,
     label: &str,
@@ -728,16 +800,14 @@ fn create_client_window(
         tauri::LogicalPosition::new(0.0, app_bar::HEIGHT),
         tauri::LogicalSize::new(1280.0, 860.0 - app_bar::HEIGHT),
     )?;
-    // 用户要求会话、文件和选中文字的右键功能正常可用，不能在 WebView2 层全局禁用菜单。
-    // 网页自定义菜单自行 preventDefault；未被接管的场景保留原生复制/粘贴，主窗口、独立会话窗口及 iframe 共用此设置。
+    // 主窗口、独立会话窗口及其中 iframe 共用原生菜单筛选；保留网页按钮与自定义菜单，只开放选中文字的“复制”。
     content.with_webview(|webview| unsafe {
         if let Err(error) = webview
             .controller()
             .CoreWebView2()
-            .and_then(|core| core.Settings())
-            .and_then(|settings| settings.SetAreDefaultContextMenusEnabled(true))
+            .and_then(|core| register_context_menu(&core))
         {
-            eprintln!("启用网页右键菜单失败：{error}");
+            eprintln!("设置原生右键菜单筛选失败：{error}");
         }
     })?;
     install_navigation_recovery(&content, cache.clone())?;

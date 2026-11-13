@@ -1,6 +1,6 @@
 (() => {
-  // Fast 能力和开关随模型目录、会话详情同步；守卫与底部版本同步递增，先清理旧桥接。
-  if (window.__codexElvesRemoteAccess?.version === 149) return;
+  // Fast 能力和开关随模型目录、会话详情同步；权限预设变化也同步递增守卫与底部版本，先清理旧桥接。
+  if (window.__codexElvesRemoteAccess?.version === 150) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -6066,7 +6066,8 @@
         "usePermissionSelection", "executionHostId", "permissionProfileId", "serviceTier", "collaborationMode"].includes(key))
       && selection && (selection.kind === "custom" && options.agentMode === "custom" && Object.keys(selection).length === 1
         || selection.kind === "agent-mode" && Object.keys(selection).length === 2
-          && ["auto", "read-only", "full-access"].includes(selection.agentMode) && options.agentMode === selection.agentMode);
+          && ["auto", "guardian-approvals", "read-only", "full-access"].includes(selection.agentMode)
+          && options.agentMode === selection.agentMode);
     if (options && (options.executionHostId != null && options.executionHostId !== "local"
         || options.permissionProfileId != null || options.serviceTier != null || options.collaborationMode != null
         || !knownPermission && (options.agentMode != null && options.agentMode !== "auto"
@@ -6075,13 +6076,19 @@
     if (!prepared) return;
     if (prepared.executionHostId != null && prepared.executionHostId !== "local")
       throw failure(409, "原生取消准备不属于原本地执行宿主");
-    if (knownPermission) {
+    // 完整 prepare 校验执行权限；后续仅含 steer.input 的序列化回放只核对输入，不重复要求执行配置。
+    if (knownPermission && prepared.start) {
       const permissions = prepared.start?.request;
-      const expected = { auto: ["on-request", "workspaceWrite", ":workspace"],
-        "read-only": ["on-request", "readOnly", ":read-only"],
-        "full-access": ["never", "dangerFullAccess", ":danger-full-access"] }[selection.agentMode];
+      const expected = { auto: ["on-request", "workspaceWrite", ":workspace", "user"],
+        "guardian-approvals": ["on-request", "workspaceWrite", ":workspace", "auto_review"],
+        "read-only": ["on-request", "readOnly", ":read-only", "user"],
+        "full-access": ["never", "dangerFullAccess", ":danger-full-access", "user"] }[selection.agentMode];
+      // “帮我批准”的队列恢复必须保留审核者；兼容 App 旧字段 guardian_subagent，不得悄悄改回人工审批。
+      const reviewer = permissions?.approvalsReviewer === "guardian_subagent" ? "auto_review"
+        : permissions?.approvalsReviewer || "user";
       if (!permissions || expected && (permissions.approvalPolicy !== expected[0]
-          || permissions.sandboxPolicy?.type !== expected[1] && permissions.permissions !== expected[2])
+          || permissions.sandboxPolicy?.type !== expected[1] && permissions.permissions !== expected[2]
+          || reviewer !== expected[3])
           || !expected && (!(typeof permissions.approvalPolicy === "string" || permissions.approvalPolicy
             && typeof permissions.approvalPolicy === "object")
             || !permissions.sandboxPolicy && typeof permissions.permissions !== "string"))
@@ -7306,10 +7313,14 @@
   }
   function requestedPermissionOverrides(payload, cwd) {
     if (payload.permissionMode == null) return null;
-    // 与 remote_access/permissions.rs 共用预设含义；完全访问同时为 dangerFullAccess 和 never。
+    // 用户要求与 App 同义：“帮我批准”使用原生 auto_review；完全访问同时为 dangerFullAccess 和 never。
     const presets = {
       "read-only": { approvalPolicy: "on-request", approvalsReviewer: "user", sandboxPolicy: { type: "readOnly" } },
       auto: { approvalPolicy: "on-request", approvalsReviewer: "user", sandboxPolicy: {
+        type: "workspaceWrite", writableRoots: [cwd], networkAccess: false,
+        excludeTmpdirEnvVar: false, excludeSlashTmp: false
+      } },
+      "guardian-approvals": { approvalPolicy: "on-request", approvalsReviewer: "auto_review", sandboxPolicy: {
         type: "workspaceWrite", writableRoots: [cwd], networkAccess: false,
         excludeTmpdirEnvVar: false, excludeSlashTmp: false
       } },
@@ -7917,7 +7928,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 149, call,
+    version: 150, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {

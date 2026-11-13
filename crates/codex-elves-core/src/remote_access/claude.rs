@@ -33,6 +33,9 @@ mod subagents;
 #[path = "claude_skills.rs"]
 mod skills;
 
+#[path = "claude_tools.rs"]
+mod tools;
+
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 // 同一会话类型实例的完整模型目录缓存五分钟；新建与历史会话共用此期限。
 const MODEL_CATALOG_TTL: Duration = Duration::from_secs(300);
@@ -216,6 +219,10 @@ impl Conversation {
         if let Some(fields) = value.as_object_mut() {
             fields.remove("_metricsRequests");
             fields.remove("_metricsVersion");
+            // 任务清单的原始调用与跨轮次状态只用于合成 plan，不发给网页。
+            fields.remove("_claudePlanCalls");
+            fields.remove("_claudeTasks");
+            fields.remove("_claudeTaskSeed");
         }
         if let Some(items) = value["items"].as_array_mut() {
             for item in items
@@ -310,6 +317,8 @@ impl Conversation {
             "permissionRevision":self.permission_revision,
             "permissionModes":self.native_control["capabilities"]["permissionModes"],
             "nativeDialog":self.native_control["dialog"],
+            // 原生底栏汇报的后台任务摘要（如 “1 shell”），仅共享会话在线且画面可读时存在，网页负责翻译展示。
+            "backgroundTasks":if self.shared {self.native_status["background"].clone()} else {Value::Null},
             "nativeId":self.native_id,"nativeJobId":self.native_job_id,
             "wslDistribution":self.config.distribution,
             "instanceId":self.config.instance_id(),
@@ -1041,13 +1050,20 @@ impl Claude {
         let process = self.native_reader(&c.config).await?;
         let mut pending = c.queued_messages.clone();
         pending.extend(c.remote_queue.native_intents());
-        let frame = process
+        let result = process
             .control(
                 json!({"subtype":"read_history","native_id":c.native_id,
             "clients":c.native_clients,"pending":pending,"model":c.model,"native_control":c.native_control}),
                 None,
             )
-            .await?;
+            .await;
+        let frame = match result {
+            Ok(frame) => frame,
+            Err(failure) => {
+                self.clear_missing_history_unread(&c, &failure).await?;
+                return Err(failure);
+            }
+        };
         // 初次导入的旧历史不置未读；之后真正新增正文仍沿用已有判断。稳定代次使重启/重复读取不会回弹未读。
         self.apply_shared_snapshot(
             id,
@@ -1057,6 +1073,51 @@ impl Claude {
             !c.turns.is_empty(),
         )
         .await
+    }
+
+    async fn clear_missing_history_unread(
+        &self,
+        observed: &Conversation,
+        failure: &anyhow::Error,
+    ) -> anyhow::Result<()> {
+        // 用户要求此类无有效原生历史的会话也消除未读；只匹配指定 WSL 读取器的明确结果，超时、断网等错误仍保留未读。
+        if !observed.unread
+            || !failure.downcast_ref::<ApiError>().is_some_and(|failure| {
+                failure.code == 503
+                    && failure.message == "Claude 控制请求失败：指定 WSL 内没有该原生会话的有效历史"
+            })
+        {
+            return Ok(());
+        }
+        // 只读接入仍不修改已读状态，不能借历史失败绕过原有 markRead 的权限边界。
+        if let Some(controller) = self.controller.get().and_then(Weak::upgrade)
+            && controller.access_policy.read().unwrap().read_only
+        {
+            return Ok(());
+        }
+        let mut saved = self.saved.lock().await;
+        let unchanged = saved
+            .conversations
+            .get(&observed.id)
+            .is_some_and(|current| {
+                !current.deleted
+                    && current.unread
+                    && current.native_id == observed.native_id
+                    && current.config == observed.config
+                    && current.updated_at == observed.updated_at
+                    && current.turns == observed.turns
+            });
+        // 只确认本次读取所见的内容；较早失败不能消除读取期间新到达回复的未读标记。
+        if !unchanged {
+            return Ok(());
+        }
+        let mut next = saved.clone();
+        next.conversations.get_mut(&observed.id).unwrap().unread = false;
+        self.persist(&next)?;
+        *saved = next;
+        drop(saved);
+        self.publish(json!({"method":"remote/sidebarChanged","params":{"threadId":observed.id}}));
+        Ok(())
     }
 
     pub async fn merge_sidebar(&self, sidebar: &mut Value) {
@@ -2177,7 +2238,12 @@ impl Claude {
                 .conversations
                 .get_mut(id)
                 .context("Claude 会话不存在")?;
-            c.turns.push(turn.clone());
+            let mut turn = turn.clone();
+            // 原生任务清单跨轮次延续：新轮次从上一轮的最终清单开始。
+            if let Some(tasks) = c.turns.last().and_then(tools::carried_tasks) {
+                turn["_claudeTaskSeed"] = tasks;
+            }
+            c.turns.push(turn);
             c.updated_at = now_ms();
             // 发送前持久保存原生会话身份和派发意图；成功写入后不再因另一次落盘失败误报“未发送”。
             c.resumed = true;
@@ -2354,7 +2420,10 @@ impl Claude {
             return Ok(());
         };
         let turn_id = turn["id"].clone();
+        let previous_plan = turn["plan"].clone();
         let changed = project_frame(turn, &frame);
+        // 任务清单合成的计划沿用 Codex 计划事件推送，网页按轮次字段版本合并。
+        let plan = (turn["plan"] != previous_plan).then(|| turn["plan"].clone());
         c.updated_at = now_ms();
         let usage_changed = !usage.is_null() && c.token_usage != usage;
         if usage_changed {
@@ -2366,6 +2435,9 @@ impl Claude {
         drop(saved);
         for item in changed {
             self.publish(json!({"method":"item/updated","params":{"threadId":id,"turnId":turn_id,"item":item}}));
+        }
+        if let Some(plan) = plan {
+            self.publish(json!({"method":"turn/plan/updated","params":{"threadId":id,"turnId":turn_id,"plan":plan}}));
         }
         if usage_changed {
             self.publish(json!({"method":"thread/tokenUsage/updated","params":{"threadId":id,"tokenUsage":usage}}));
@@ -2505,6 +2577,9 @@ impl Claude {
                         turn["_nativeDone"] = json!(true);
                         turn["_nativeEndedWithoutReply"] = json!(true);
                         turn["turnCompletedAtMs"] = old["turnCompletedAtMs"].clone();
+                        if old["_nativeWithdrawn"] == true {
+                            turn["_nativeWithdrawn"] = json!(true);
+                        }
                     }
                     if c.turns.iter().any(|old| {
                         old["id"] == turn["id"]
@@ -2829,14 +2904,20 @@ impl Claude {
             input["answers"] = json!(values);
             json!({"behavior":"allow","updatedInput":input})
         } else {
-            match payload["decision"].as_str() {
+            let mut response = match payload["decision"].as_str() {
                 Some("accept") => json!({"behavior":"allow","updatedInput":original["input"]}),
                 Some("decline" | "cancel") => {
                     json!({"behavior":"deny","message":"用户拒绝本次操作",
                     "interrupt":payload["decision"]=="cancel"})
                 }
                 _ => return Err(error(400, "Claude 仅支持本次允许、拒绝或取消")),
+            };
+            // 计划审批：批准时带所选原生编号，拒绝时带修改意见；只发给共享连接端，不进入 print 控制协议。
+            if original["subtype"] == "native_dialog" && original["dialog"]["kind"] == "plan" {
+                response["option"] = payload["option"].clone();
+                response["feedback"] = payload["feedback"].clone();
             }
+            response
         };
         let response = json!({"subtype":"success","request_id":request_id,"response":response});
         if process.shared {
@@ -3504,7 +3585,37 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
         .unwrap_or_default();
     let mut web_image_paths = std::collections::HashSet::new();
     for row in frame["messages"].as_array().into_iter().flatten() {
-        if subagents::observe_notification(&mut turns, row) {
+        let agent_notification = subagents::observe_notification(&mut turns, row);
+        // 原生任务通知开启自动续跑轮次（见 claude_tools::push_notification），随后的回复归入该轮次。
+        if row["nativeTaskNotification"].is_object() {
+            if let Some((index, item_id)) = tools::push_notification(&mut turns, row, generation)
+                && let Some(id) = row["uuid"].as_str()
+            {
+                native_owners.insert(id, index);
+                native_positions.insert(id.to_owned(), (index, item_id));
+            }
+            continue;
+        }
+        if agent_notification {
+            continue;
+        }
+        // 终端本地斜杠命令与原生系统提示以事件行附在当前轮次末尾，不制造用户气泡、不可编辑。
+        if let Some(item) = tools::event_item(row) {
+            let item_id = item["id"].as_str().unwrap_or_default().to_owned();
+            match turns.last_mut() {
+                Some(turn) => turn["items"].as_array_mut().unwrap().push(item),
+                None => turns.push(
+                    json!({"id":format!("event-{item_id}"),"_nativeUserId":row["uuid"],
+                    "_nativeDone":true,"status":"completed","itemsComplete":true,"items":[item]}),
+                ),
+            }
+            if let Some(id) = row["uuid"].as_str() {
+                native_owners.insert(id, turns.len() - 1);
+                native_positions.insert(id.to_owned(), (turns.len() - 1, item_id));
+            }
+            continue;
+        }
+        if tools::attach_local_output(&mut turns, row) {
             continue;
         }
         if row["nativeControlOutput"].is_object() || row["attachment"]["type"] == "goal_status" {
@@ -3647,12 +3758,17 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
             let client_id = frame["clients"][native_user]
                 .as_str()
                 .unwrap_or(native_user);
-            turns.push(json!({"id":client_id,"_nativeUserId":native_user,
+            let mut turn = json!({"id":client_id,"_nativeUserId":native_user,
                 "_nativeEditable":row["nativeEditable"] == true,
                 "_process":generation,"status":"completed","itemsView":"full","itemsComplete":true,
                 "turnStartedAtMs":row["timestampMs"],
                 "items":[{"id":client_id,"clientId":client_id,"type":"userMessage",
-                    "content":content,"sentAtMs":row["timestampMs"]}]}));
+                    "content":content,"sentAtMs":row["timestampMs"]}]});
+            // 原生任务清单跨轮次延续：新轮次从上一轮的最终清单开始。
+            if let Some(tasks) = turns.last().and_then(tools::carried_tasks) {
+                turn["_claudeTaskSeed"] = tasks;
+            }
+            turns.push(turn);
         } else if let Some(turn) = turns.last_mut() {
             if row["type"] == "attachment" {
                 if let Some(user) = turn["items"]
@@ -3737,6 +3853,13 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
             && turn["items"]
                 .as_array()
                 .is_some_and(|items| items.iter().all(|item| item["type"] == "userMessage"));
+        // 出字前停止：连接端依据终端输入框确认原生已撤回本条输入（见 claude_shared.py withdrawn_prompt）。
+        let withdrawn = turn["_nativeUserId"]
+            .as_str()
+            .is_some_and(|native| frame["native_status"]["withdrawnPrompt"] == native)
+            && turn["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().all(|item| item["type"] == "userMessage"));
         let ended_at = frame["native_status"]["endedAtMs"].as_u64();
         let ended_without_reply = accepted_without_reply
             && frame["native_status"]["tempo"] == "idle"
@@ -3747,7 +3870,13 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
             && ended_at
                 .zip(turn["turnStartedAtMs"].as_u64())
                 .is_some_and(|(ended, started)| started > 0 && ended >= started);
-        if ended_without_reply {
+        if withdrawn {
+            // 用户要求如实显示“已撤回”，不能一直等待开始；沿用“结束且无回复”标记，排队续发同样暂停。
+            turn["status"] = json!("completed");
+            turn["_nativeDone"] = json!(true);
+            turn["_nativeEndedWithoutReply"] = json!(true);
+            turn["_nativeWithdrawn"] = json!(true);
+        } else if ended_without_reply {
             // 用户要求取消后不无限等待：必须有晚于本条原生输入的结束时间，单独 idle 或旧完成记录均不够。
             // 原生未给出取消原因时只陈述“已结束且无回复”，不伪造成功回复，也不移除已接收正文。
             turn["status"] = json!("completed");
@@ -3773,6 +3902,7 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
             });
         }
     }
+    tools::settle_background(&mut turns, &frame["native_status"]);
     let latest = turns.len().checked_sub(1);
     for (index, turn) in turns.iter_mut().enumerate() {
         turn["_metricsVersion"] = json!(1);
@@ -4049,8 +4179,9 @@ pub(super) fn input_content(payload: &Value) -> anyhow::Result<Vec<Value>> {
 fn permission_request(thread: &str, id: &str, request: &Value) -> anyhow::Result<Value> {
     if request["subtype"] == "native_dialog" {
         let dialog = &request["dialog"];
+        // plan：计划模式审批框，批准项编号与修改意见由连接端 answer_plan 按原生交互发送。
         let supported = dialog["remoteSupported"] == true
-            && matches!(dialog["kind"].as_str(), Some("model" | "effort"))
+            && matches!(dialog["kind"].as_str(), Some("model" | "effort" | "plan"))
             && dialog["state"] == "waiting";
         // 复用现有审批权限、请求版本与回执；未知原生弹窗只读提示，不开放任意终端输入。
         return Ok(
@@ -4089,11 +4220,13 @@ fn permission_request(thread: &str, id: &str, request: &Value) -> anyhow::Result
 fn project_frame(turn: &mut Value, frame: &Value) -> Vec<Value> {
     turn["_metricsVersion"] = json!(1);
     super::session_metrics::observe_claude(turn, frame);
-    let Some(items) = turn["items"].as_array_mut() else {
+    if !turn["items"].is_array() {
         return vec![];
-    };
+    }
     let mut changes: Vec<Value> = Vec::new();
     if frame["type"] == "assistant" {
+        let mut plan_calls = Vec::new();
+        let items = turn["items"].as_array_mut().unwrap();
         let message = frame["message"]["id"].as_str().unwrap_or("assistant");
         for (index, block) in frame["message"]["content"]
             .as_array()
@@ -4147,16 +4280,14 @@ fn project_frame(turn: &mut Value, frame: &Value) -> Vec<Value> {
                 Some("thinking") => {
                     json!({"id":id,"type":"reasoning","summary":[block["thinking"]],"status":"completed"})
                 }
-                Some("tool_use") => {
-                    if matches!(block["name"].as_str(), Some("Agent" | "Task")) {
-                        json!({"id":block["id"],"type":"collabAgentToolCall","tool":"spawn_agent",
-                            "displayName":block["input"]["description"],"arguments":block["input"],
-                            "status":"inProgress","contentItems":[]})
-                    } else {
-                        json!({"id":block["id"],"type":"dynamicToolCall","tool":block["name"],
-                            "arguments":block["input"],"status":"inProgress","contentItems":[]})
+                // 用户要求按 Claude 原生工具语义渲染，映射规则见 claude_tools.rs；任务清单工具并入轮次计划。
+                Some("tool_use") => match tools::tool_item(block) {
+                    Some(item) => item,
+                    None => {
+                        plan_calls.push(block);
+                        continue;
                     }
-                }
+                },
                 _ => continue,
             };
             // stream_event 的部分内容与最终 assistant 使用同一个原生消息 ID，避免回复重复。
@@ -4167,23 +4298,26 @@ fn project_frame(turn: &mut Value, frame: &Value) -> Vec<Value> {
             }
             changes.push(item);
         }
+        for block in plan_calls {
+            tools::observe_plan_call(turn, block);
+        }
     } else if frame["type"] == "user" {
         for block in frame["message"]["content"].as_array().into_iter().flatten() {
             if block["type"] != "tool_result" {
                 continue;
             }
+            let items = turn["items"].as_array_mut().unwrap();
             if let Some(item) = items.iter_mut().find(|i| i["id"] == block["tool_use_id"]) {
-                item["status"] = json!(if block["is_error"] == true {
-                    "failed"
-                } else {
-                    "completed"
-                });
-                item["contentItems"] = if block["content"].is_array() {
-                    block["content"].clone()
-                } else {
-                    json!([{"type":"text","text":block["content"].as_str().unwrap_or("")}])
-                };
+                tools::apply_result(item, block, frame);
                 changes.push(item.clone());
+            } else if let Some(item) = tools::observe_plan_result(turn, block, frame) {
+                // 失败的任务清单调用不改变计划，单独显示通用失败卡片保留原生报错。
+                let items = turn["items"].as_array_mut().unwrap();
+                match items.iter_mut().find(|old| old["id"] == item["id"]) {
+                    Some(old) => *old = item.clone(),
+                    None => items.push(item.clone()),
+                }
+                changes.push(item);
             }
         }
     } else if frame["type"] == "stream_event" {
@@ -4335,6 +4469,14 @@ mod tests {
         rows: Value,
         snapshot: Value,
     ) -> Arc<Mutex<Vec<Value>>> {
+        discovery_fixture_response(service, rows, Ok(snapshot)).await
+    }
+
+    async fn discovery_fixture_response(
+        service: &Arc<Claude>,
+        rows: Value,
+        snapshot: Result<Value, (u16, String)>,
+    ) -> Arc<Mutex<Vec<Value>>> {
         let channel = Arc::new(Channel {
             live: AtomicBool::new(true),
             generation: "discovery-fixture".into(),
@@ -4358,8 +4500,10 @@ mod tests {
                 let request = &frame["request"];
                 record.lock().await.push(request.clone());
                 let response = match request["subtype"].as_str() {
-                    Some("discover") => json!({"sessions":rows}),
-                    Some("read_history") => snapshot.clone(),
+                    Some("discover") => Ok(json!({"sessions":rows})),
+                    Some("read_history") => snapshot
+                        .clone()
+                        .map_err(|(code, message)| error(code, message)),
                     _ => panic!("只读测试不能启动模型、恢复任务或发送消息"),
                 };
                 if let Some(sender) = channel
@@ -4368,7 +4512,7 @@ mod tests {
                     .await
                     .remove(frame["request_id"].as_str().unwrap())
                 {
-                    let _ = sender.send(Ok(response));
+                    let _ = sender.send(response);
                 }
             }
         });
@@ -4383,6 +4527,107 @@ mod tests {
             checked: None,
         };
         calls
+    }
+
+    #[tokio::test]
+    async fn missing_native_history_clears_only_its_unread_and_preserves_the_read_failure() {
+        const MISSING: &str = "Claude 控制请求失败：指定 WSL 内没有该原生会话的有效历史";
+        for action in ["thread", "history"] {
+            for (code, message, clears) in [
+                (503, MISSING, true),
+                (503, "Claude 控制请求已派发，回执等待超时", false),
+                (503, "Claude 控制请求已派发，连接已关闭", false),
+                (403, MISSING, false),
+                (503, "其他历史读取错误", false),
+            ] {
+                let (directory, service, mut c) = fixture();
+                c.shared = true;
+                c.discovered = true;
+                c.unread = true;
+                c.pinned = true;
+                let mut other = c.clone();
+                other.id = format!("claude-{}", uuid::Uuid::new_v4());
+                other.native_id = uuid::Uuid::new_v4().to_string();
+                service
+                    .change(|saved| {
+                        saved.conversations.insert(c.id.clone(), c.clone());
+                        saved.conversations.insert(other.id.clone(), other.clone());
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+                let calls =
+                    discovery_fixture_response(&service, json!([]), Err((code, message.into())))
+                        .await;
+                let failure = match action {
+                    "thread" => service.detail(&c.id).await.unwrap_err(),
+                    _ => service
+                        .history(&json!({"threadId":c.id,"cursor":null}))
+                        .await
+                        .unwrap_err(),
+                };
+                assert_eq!(failure.downcast_ref::<ApiError>().unwrap().message, message);
+                assert_eq!(calls.lock().await.len(), 1, "失败不重读或重发任务");
+                let restored = Claude::new(directory.path()).unwrap();
+                let current = restored.conversation(&c.id).await.unwrap();
+                assert_eq!(current.unread, !clears, "{action}: {code} {message}");
+                assert_eq!(current.turns, c.turns, "清除未读不能删除保留历史");
+                assert!(restored.conversation(&other.id).await.unwrap().unread);
+                let mut sidebar = json!({"recent":[],"pinnedThreads":[],
+                    "projects":[{"id":c.project_id,"threads":[]}]});
+                restored.merge_sidebar(&mut sidebar).await;
+                for row in sidebar["recent"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .chain(sidebar["pinnedThreads"].as_array().unwrap())
+                    .chain(sidebar["projects"][0]["threads"].as_array().unwrap())
+                    .filter(|row| row["id"] == c.id)
+                {
+                    assert_eq!(row["hasUnreadTurn"], !clears);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_native_history_does_not_acknowledge_newer_replies_or_other_instances() {
+        let (_directory, service, mut observed) = fixture();
+        observed.unread = true;
+        for change in ["reply", "instance", "native-id", "deleted"] {
+            let mut current = observed.clone();
+            match change {
+                "reply" => {
+                    current.turns[0]["items"] = json!([
+                        {"id":"new-reply","type":"agentMessage","text":"读取期间新增回复"}
+                    ])
+                }
+                "instance" => current.config.distribution = "other-instance".into(),
+                "native-id" => current.native_id = uuid::Uuid::new_v4().to_string(),
+                _ => current.deleted = true,
+            }
+            service
+                .change(|saved| {
+                    saved.conversations.insert(current.id.clone(), current);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            service
+                .clear_missing_history_unread(
+                    &observed,
+                    &error(
+                        503,
+                        "Claude 控制请求失败：指定 WSL 内没有该原生会话的有效历史",
+                    ),
+                )
+                .await
+                .unwrap();
+            assert!(
+                service.saved.lock().await.conversations[&observed.id].unread,
+                "{change}: 旧读取失败不能清除变化后的未读"
+            );
+        }
     }
 
     #[tokio::test]
@@ -6313,6 +6558,132 @@ mod tests {
         assert_eq!(turns[1]["id"], "user-cli");
         assert_eq!(turns[1]["items"][1]["status"], "completed");
         assert_eq!(turns, project_shared_history(&frame, "connection"));
+    }
+
+    #[test]
+    fn shared_task_notification_opens_an_auto_turn_instead_of_a_user_message() {
+        let frame = json!({"native_status":{"tempo":"idle"},"clients":{},"messages":[
+            {"type":"user","uuid":"u1","nativeEditable":true,"timestampMs":10,"message":{"content":"跑测试"}},
+            {"type":"assistant","uuid":"a1","message":{"id":"m1","content":[
+                {"type":"tool_use","id":"b1","name":"Bash","input":{"command":"cargo test","run_in_background":true}},
+                {"type":"tool_use","id":"t1","name":"TaskCreate","input":{"subject":"等待测试"}}]}},
+            {"type":"user","uuid":"r1","nativeToolResult":{"toolUseId":"b1","backgroundTaskId":"bg1"},
+                "message":{"content":[{"type":"tool_result","tool_use_id":"b1","content":"Command running in background with ID: bg1."}]}},
+            {"type":"user","uuid":"r2","nativeToolResult":{"toolUseId":"t1","createdTaskId":"1"},
+                "message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Task #1 created"}]}},
+            {"type":"assistant","uuid":"a2","message":{"id":"m2","content":[{"type":"text","text":"已在后台运行"}]}},
+            {"type":"system","subtype":"turn_duration","timestampMs":20,"durationMs":10},
+            {"type":"user","uuid":"n1","timestampMs":30,"nativeTaskNotification":{"taskId":"bg1","toolUseId":"b1",
+                "status":"completed","summary":"Background command \"cargo test\" completed (exit code 0)"},
+                "message":{"content":"<task-notification><task-id>bg1</task-id></task-notification>"}},
+            {"type":"assistant","uuid":"a3","message":{"id":"m3","content":[
+                {"type":"tool_use","id":"t2","name":"TaskUpdate","input":{"taskId":"1","status":"completed"}},
+                {"type":"text","text":"测试全部通过"}]}},
+            {"type":"system","subtype":"turn_duration","timestampMs":40,"durationMs":7}
+        ]});
+        let turns = project_shared_history(&frame, "connection");
+        assert_eq!(turns.len(), 2);
+        let first: Vec<_> = turns[0]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["type"].clone())
+            .collect();
+        assert_eq!(
+            first,
+            [
+                json!("userMessage"),
+                json!("commandExecution"),
+                json!("agentMessage")
+            ]
+        );
+        assert_eq!(turns[0]["items"][1]["backgroundStatus"], "completed");
+        assert_eq!(turns[0]["items"][1]["exitCode"], 0);
+        assert_eq!(
+            turns[0]["plan"],
+            json!([{"step":"等待测试","status":"pending"}])
+        );
+        // 自动续跑轮次：不是用户气泡、不可编辑，随后的回复与耗时归入新轮次，任务清单从上一轮延续。
+        assert_eq!(turns[1]["id"], "n1");
+        assert_eq!(turns[1]["_nativeEditable"], false);
+        assert_eq!(turns[1]["items"][0]["type"], "claudeTaskNotification");
+        assert_eq!(turns[1]["items"][1]["text"], "测试全部通过");
+        assert_eq!(turns[1]["durationMs"], 7);
+        assert_eq!(
+            turns[1]["plan"],
+            json!([{"step":"等待测试","status":"completed"}])
+        );
+        assert!(
+            !turns
+                .iter()
+                .flat_map(|turn| turn["items"].as_array().unwrap())
+                .any(|item| item["type"] == "userMessage"
+                    && item["content"].to_string().contains("task-notification"))
+        );
+        assert_eq!(turns, project_shared_history(&frame, "connection"));
+    }
+
+    #[test]
+    fn shared_withdrawn_prompt_is_closed_instead_of_waiting_to_start() {
+        // 2.1.323 实测：出字前停止后原生状态为 idle（不是 done/ended），未确认撤回时网页会一直等待开始。
+        let frame = json!({"native_status":{"tempo":"idle","state":"idle","withdrawnPrompt":"u1"},
+            "clients":{"u1":"web-1"},"messages":[{"type":"user","uuid":"u1","timestampMs":10,
+                "nativeEditable":true,"message":{"content":"用三句话介绍一下杭州西湖。"}}]});
+        let turns = project_shared_history(&frame, "connection");
+        assert_eq!(
+            (
+                turns[0]["status"].clone(),
+                turns[0]["_nativeWithdrawn"].clone(),
+                turns[0]["_nativeEndedWithoutReply"].clone()
+            ),
+            (json!("completed"), json!(true), json!(true))
+        );
+        let mut waiting = frame.clone();
+        waiting["native_status"]["withdrawnPrompt"] = Value::Null;
+        let turns = project_shared_history(&waiting, "connection");
+        assert_eq!(turns[0]["status"], "pending");
+        assert!(turns[0]["_nativeWithdrawn"].is_null());
+    }
+
+    #[test]
+    fn shared_local_commands_and_notices_render_as_events_in_the_current_turn() {
+        let frame = json!({"native_status":{"tempo":"idle"},"clients":{},"messages":[
+            {"type":"user","uuid":"c1","nativeLocalCommand":{"name":"/resume","args":""},
+                "message":{"content":"<command-name>/resume</command-name>"}},
+            {"type":"user","uuid":"c2","nativeLocalOutput":{"commandId":"c1","stream":"stdout","text":"已在后台运行"},
+                "message":{"content":"<local-command-stdout>已在后台运行</local-command-stdout>"}},
+            {"type":"user","uuid":"u1","nativeEditable":true,"message":{"content":"你好"}},
+            {"type":"assistant","uuid":"a1","message":{"id":"m1","content":[{"type":"text","text":"你好！"}]}},
+            {"type":"system","subtype":"turn_duration","uuid":"d1","durationMs":5},
+            {"type":"system","subtype":"away_summary","uuid":"s1",
+                "nativeSystemNotice":{"kind":"awaySummary","text":"已问候"}}
+        ]});
+        let turns = project_shared_history(&frame, "connection");
+        assert_eq!(turns.len(), 2);
+        assert_eq!(
+            turns[0]["items"],
+            json!([{"id":"c1","type":"claudeLocalCommand","source":"claude","name":"/resume","args":"",
+                "output":"已在后台运行","outputStream":"stdout","completedAtMs":null}])
+        );
+        let types: Vec<_> = turns[1]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["type"].clone())
+            .collect();
+        assert_eq!(
+            types,
+            [
+                json!("userMessage"),
+                json!("agentMessage"),
+                json!("claudeNotice")
+            ]
+        );
+        assert_eq!(turns[1]["items"][2]["text"], "已问候");
+        assert_eq!(
+            (turns[1]["status"].clone(), turns[1]["durationMs"].clone()),
+            (json!("completed"), json!(5))
+        );
     }
 
     #[test]

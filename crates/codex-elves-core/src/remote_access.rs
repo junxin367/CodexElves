@@ -7221,6 +7221,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    break;
  }
  case 'test/seedHistory':
+   if(p.finish){finish(p.threadId,p.status||'completed');break;}
    for(const frame of p.events||[])output(frame);
    if(!p.turns)break;
    t.turns=p.turns;t.historyCursorLoop=p.cursorLoop===true;t.foreignHistoryTurn=p.foreignTurn===true;
@@ -8859,8 +8860,38 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             controller.automatically_use_cdp(&candidates).await.unwrap(),
             0
         );
+        // 用户要求只有确认执行中才入队；先在当前任务中排队，再停止，不能把空闲直发回执当成队列回执。
+        let queued = controller
+            .call_authorized(
+                "send",
+                json!({"threadId":thread_id,"prompt":"must not replay","clientUserMessageId":"stable-input"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(queued["deliveryState"], "queued");
+        let queued_id = queued["messageId"]
+            .as_str()
+            .expect("入队回执必须包含消息 ID");
         controller
             .call_authorized("stop", json!({"threadId":thread_id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(
+            controller.automatically_use_cdp(&candidates).await.unwrap(),
+            0
+        );
+        let queue = controller
+            .call_authorized("queue", json!({"threadId":thread_id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(queue["queuedMessages"][0]["id"], queued_id);
+        controller
+            .call_authorized(
+                "removeQueued",
+                json!({"threadId":thread_id,"messageId":queued_id}),
+                &authorization,
+            )
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -8883,31 +8914,6 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         })
         .await
         .unwrap();
-        let queued = controller
-            .call_authorized(
-                "send",
-                json!({"threadId":thread_id,"prompt":"must not replay","clientUserMessageId":"stable-input"}),
-                &authorization,
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            controller.automatically_use_cdp(&candidates).await.unwrap(),
-            0
-        );
-        let queue = controller
-            .call_authorized("queue", json!({"threadId":thread_id}), &authorization)
-            .await
-            .unwrap();
-        assert_eq!(queue["queuedMessages"][0]["id"], queued["messageId"]);
-        controller
-            .call_authorized(
-                "removeQueued",
-                json!({"threadId":thread_id,"messageId":queued["messageId"]}),
-                &authorization,
-            )
-            .await
-            .unwrap();
         {
             let mut auth = controller.auth.lock().await;
             for state in ["pending", "unknown"] {
@@ -9536,8 +9542,23 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             )
             .await
             .unwrap();
-        controller
+        let queued = controller
             .call_authorized("send", send("side-steer"), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(queued["deliveryState"], "queued");
+        assert!(
+            !harness_engine_requests(directory.path())
+                .iter()
+                .any(|frame| frame["method"] == "turn/steer"),
+            "普通发送不能自动引导侧边任务"
+        );
+        controller
+            .call_authorized(
+                "steerQueued",
+                json!({"threadId":id,"messageId":queued["messageId"]}),
+                &authorization,
+            )
             .await
             .unwrap();
         let frames = harness_engine_requests(directory.path());
@@ -10499,7 +10520,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     }
 
     #[tokio::test]
-    async fn harness_service_side_create_send_steer_stop_close_stays_in_memory() {
+    async fn harness_service_side_create_send_queue_stop_close_stays_in_memory() {
         let (directory, authorization) = harness_fixture().await;
         let controller = &authorization.controller;
         let main = controller
@@ -10561,7 +10582,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 .await
                 .is_err()
         );
-        controller
+        let queued = controller
             .call_authorized(
                 "send",
                 json!({
@@ -10571,6 +10592,31 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             )
             .await
             .unwrap();
+        assert_eq!(queued["deliveryState"], "queued");
+        assert_eq!(queued["confirmed"], true);
+        assert_eq!(queued["queuedMessages"].as_array().unwrap().len(), 1);
+        let queued_retry = controller
+            .call_authorized(
+                "send",
+                json!({"threadId":id,"prompt":"追加要求","clientUserMessageId":"side-message-2"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(queued_retry, queued, "重复提交不能产生第二条队列消息");
+        let detail = controller
+            .call_authorized("thread", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(detail["thread"]["queuedMessages"], queued["queuedMessages"]);
+        let history = controller
+            .call_authorized("history", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert!(
+            !history.to_string().contains("追加要求"),
+            "入队确认不能提前插入正文"
+        );
         for action in [
             "createSideThread",
             "deleteThread",
@@ -10614,6 +10660,11 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             .call_authorized("stop", json!({"threadId":id}), &authorization)
             .await
             .unwrap();
+        let paused = controller
+            .call_authorized("queue", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(paused["queuedMessages"][0]["pausedReason"], "消息已暂停");
         let list = controller
             .call_authorized("relatedThreads", json!({"threadId":parent}), &authorization)
             .await
@@ -10675,7 +10726,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 .iter()
                 .filter(|call| call["method"] == "turn/steer" && call["params"]["threadId"] == id)
                 .count(),
-            1
+            0
         );
         assert!(!calls.iter().any(|call| call["params"]["threadId"] == id
             && matches!(
@@ -10684,6 +10735,495 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             )));
         assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
         controller.harness.release().await;
+    }
+
+    async fn harness_active_side_fixture() -> (tempfile::TempDir, RemoteAuthorization, String) {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let main = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"wait parent"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let created = controller
+            .call_authorized(
+                "createSideThread",
+                json!({"threadId":main["threadId"]}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap().to_owned();
+        controller
+            .call_authorized(
+                "send",
+                json!({"threadId":id,"prompt":"wait first","clientUserMessageId":"side-first"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        (directory, authorization, id)
+    }
+
+    async fn harness_wait_side_starts(directory: &std::path::Path, id: &str, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if harness_engine_requests(directory)
+                    .iter()
+                    .filter(|frame| {
+                        frame["method"] == "turn/start" && frame["params"]["threadId"] == id
+                    })
+                    .count()
+                    >= expected
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("侧边队列没有按正常完成事件继续派发");
+    }
+
+    #[tokio::test]
+    async fn harness_service_side_queue_waits_for_completion_and_dispatches_fifo_without_model_options()
+     {
+        let (directory, authorization, id) = harness_active_side_fixture().await;
+        let controller = &authorization.controller;
+        let cursor = controller
+            .call_authorized("events", json!({}), &authorization)
+            .await
+            .unwrap();
+        for index in 0..2 {
+            let payload = json!({"threadId":id,"prompt":format!("wait queued {index}"),
+                "clientUserMessageId":format!("queued-{index}"),"model":"gpt-6.1-sol","reasoningEffort":"high"});
+            let queued = controller
+                .call_authorized("send", payload.clone(), &authorization)
+                .await
+                .unwrap();
+            assert_eq!(queued["deliveryState"], "queued");
+            assert_eq!(
+                queued["queuedMessages"].as_array().unwrap().len(),
+                index + 1
+            );
+            assert!(queued["queuedMessages"][index]["submissionOptions"]["model"].is_null());
+            assert!(
+                queued["queuedMessages"][index]["submissionOptions"]["reasoningEffort"].is_null()
+            );
+            assert_eq!(
+                controller
+                    .call_authorized("send", payload, &authorization)
+                    .await
+                    .unwrap(),
+                queued
+            );
+        }
+        let events = controller
+            .call_authorized(
+                "events",
+                json!({"epoch":cursor["epoch"],"cursor":cursor["cursor"]}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert!(events["events"].as_array().unwrap().iter().any(|frame| {
+            frame["method"] == "thread/queue/changed"
+                && frame["params"]["threadId"] == id
+                && frame["params"]["queuedMessages"]
+                    .as_array()
+                    .is_some_and(|queue| queue.len() == 2)
+        }));
+        let starts = || {
+            harness_engine_requests(directory.path())
+                .into_iter()
+                .filter(|frame| {
+                    frame["method"] == "turn/start" && frame["params"]["threadId"] == id
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(starts().len(), 1);
+        for expected in 2..=3 {
+            controller
+                .harness
+                .seed_test_history(json!({"threadId":id,"finish":true}))
+                .await
+                .unwrap();
+            harness_wait_side_starts(directory.path(), &id, expected).await;
+            let frames = starts();
+            assert_eq!(frames.len(), expected);
+            assert_eq!(
+                frames[expected - 1]["params"]["clientUserMessageId"],
+                format!("queued-{}", expected - 2)
+            );
+            assert!(frames[expected - 1]["params"].get("model").is_none());
+            assert!(frames[expected - 1]["params"].get("effort").is_none());
+        }
+        assert!(
+            !harness_engine_requests(directory.path())
+                .iter()
+                .any(|frame| frame["method"] == "turn/steer" && frame["params"]["threadId"] == id)
+        );
+        assert!(
+            !std::fs::read_to_string(directory.path().join("remote-harness-state.json"))
+                .unwrap()
+                .contains(&id)
+        );
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_service_side_queue_supports_edit_reorder_remove_and_manual_retry() {
+        let (directory, authorization, id) = harness_active_side_fixture().await;
+        let controller = &authorization.controller;
+        let mut messages = Vec::new();
+        for index in 0..3 {
+            let queued = controller.call_authorized("send", json!({"threadId":id,
+                "prompt":format!("wait queued {index}"),"clientUserMessageId":format!("queued-{index}")}),
+                &authorization).await.unwrap();
+            messages.push(queued["queuedMessages"][index].clone());
+        }
+        let ids: Vec<_> = messages
+            .iter()
+            .map(|message| message["id"].clone())
+            .collect();
+        controller
+            .call_authorized(
+                "reorderQueued",
+                json!({"threadId":id,
+            "messageIds":[ids[2],ids[1],ids[0]],"expectedMessageIds":ids}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let message = &messages[2];
+        let editing = controller
+            .call_authorized(
+                "beginQueuedEdit",
+                json!({"threadId":id,
+            "editId":"side-edit","messageId":message["id"],"originalText":message["text"],
+            "clientUserMessageId":message["clientUserMessageId"],"createdAt":message["createdAt"]}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(editing["editState"], "editing");
+        let draft = controller
+            .call_authorized(
+                "queueEdit",
+                json!({"threadId":id,"editId":"side-edit"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(draft["draftText"], "wait queued 2");
+        let edited = controller
+            .call_authorized(
+                "editQueued",
+                json!({"threadId":id,"editId":"side-edit","prompt":"wait edited","images":[]}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited["editState"], "committed");
+        assert_eq!(edited["queuedMessages"][0]["text"], "wait edited");
+        controller
+            .call_authorized(
+                "removeQueued",
+                json!({"threadId":id,"messageId":messages[1]["id"]}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        controller
+            .call_authorized("stop", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(850)).await;
+        let queue = controller
+            .call_authorized("queue", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(queue["queuedMessages"].as_array().unwrap().len(), 2);
+        assert_eq!(queue["queuedMessages"][0]["pausedReason"], "消息已暂停");
+        assert_eq!(queue["queuedMessages"][1]["pausedReason"], "消息已暂停");
+        let starts = harness_engine_requests(directory.path())
+            .into_iter()
+            .filter(|frame| frame["method"] == "turn/start" && frame["params"]["threadId"] == id)
+            .count();
+        assert_eq!(starts, 1, "停止之后不能自动发送剩余队列");
+        let retried = controller
+            .call_authorized(
+                "steerQueued",
+                json!({"threadId":id,"messageId":messages[2]["id"]}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert!(
+            retried["turnId"].is_string(),
+            "手动重试回执保留实际接收轮次"
+        );
+        harness_wait_side_starts(directory.path(), &id, 2).await;
+        let queue = controller
+            .call_authorized("queue", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(queue["queuedMessages"].as_array().unwrap().len(), 1);
+        assert!(
+            !queue["queuedMessages"][0]["pausedReason"].is_null(),
+            "手动重试一条不能恢复其它暂停消息"
+        );
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_service_side_queue_unknown_delivery_pauses_followers_without_replay() {
+        let (directory, authorization, id) = harness_active_side_fixture().await;
+        let controller = &authorization.controller;
+        for (client, prompt) in [
+            ("uncertain-side-queued", "uncertain queued"),
+            ("follower", "wait follower"),
+        ] {
+            controller
+                .call_authorized(
+                    "send",
+                    json!({"threadId":id,
+                "prompt":prompt,"clientUserMessageId":client}),
+                    &authorization,
+                )
+                .await
+                .unwrap();
+        }
+        controller
+            .harness
+            .seed_test_history(json!({"threadId":id,"finish":true}))
+            .await
+            .unwrap();
+        harness_wait_side_starts(directory.path(), &id, 2).await;
+        tokio::time::sleep(Duration::from_millis(850)).await;
+        let queue = controller
+            .call_authorized("queue", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(
+            queue["queuedMessages"][0]["submission"]["status"],
+            "outcome-unknown"
+        );
+        assert!(!queue["queuedMessages"][1]["pausedReason"].is_null());
+        let calls = harness_engine_requests(directory.path());
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|frame| frame["method"] == "turn/start"
+                    && frame["params"]["clientUserMessageId"] == "uncertain-side-queued")
+                .count(),
+            1
+        );
+        assert!(!calls.iter().any(|frame| frame["method"] == "turn/start"
+            && frame["params"]["clientUserMessageId"] == "follower"));
+        let state = controller
+            .call_authorized(
+                "sendState",
+                json!({"threadId":id,
+            "clientUserMessageId":"uncertain-side-queued"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state["deliveryState"], "accepted",
+            "只读原生证据可以确认已接收的同一消息"
+        );
+        let queue = controller
+            .call_authorized("queue", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(queue["queuedMessages"].as_array().unwrap().len(), 1);
+        assert!(!queue["queuedMessages"][0]["pausedReason"].is_null());
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_service_side_concurrent_queue_and_fast_operations_keep_sessions_independent() {
+        let (_directory, authorization, first_id) = harness_active_side_fixture().await;
+        let controller = &authorization.controller;
+        let detail = controller
+            .call_authorized("thread", json!({"threadId":first_id}), &authorization)
+            .await
+            .unwrap();
+        let created = controller
+            .call_authorized(
+                "createSideThread",
+                json!({"threadId":detail["thread"]["parentThreadId"]}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let second_id = created["threadId"].as_str().unwrap();
+        controller
+            .call_authorized(
+                "send",
+                json!({"threadId":second_id,"prompt":"wait second",
+            "clientUserMessageId":"second-first"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let fast_authorization =
+            controller.authorization(authorization.device.clone(), Some("setFast"));
+        let (first, fast, second) = tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::join!(
+                controller.call_authorized(
+                    "send",
+                    json!({"threadId":first_id,
+                    "prompt":"wait queued one","clientUserMessageId":"concurrent-one"}),
+                    &authorization
+                ),
+                controller.call_authorized(
+                    "setFast",
+                    json!({"threadId":second_id,
+                    "model":"gpt-6.1-sol","enabled":true}),
+                    &fast_authorization
+                ),
+                controller.call_authorized(
+                    "send",
+                    json!({"threadId":second_id,
+                    "prompt":"wait queued two","clientUserMessageId":"concurrent-two"}),
+                    &authorization
+                ),
+            )
+        })
+        .await
+        .expect("不同侧边的入队与 Fast 操作不能交叉持锁等待");
+        assert_eq!(first.unwrap()["deliveryState"], "queued");
+        assert_eq!(fast.unwrap()["enabled"], true);
+        assert_eq!(second.unwrap()["deliveryState"], "queued");
+        for (id, client) in [
+            (first_id.as_str(), "concurrent-one"),
+            (second_id, "concurrent-two"),
+        ] {
+            let queue = controller
+                .call_authorized("queue", json!({"threadId":id}), &authorization)
+                .await
+                .unwrap();
+            assert_eq!(queue["queuedMessages"].as_array().unwrap().len(), 1);
+            assert_eq!(queue["queuedMessages"][0]["clientUserMessageId"], client);
+        }
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_service_side_async_answer_steers_waiting_turn_without_consuming_queue() {
+        let (directory, authorization, id) = harness_active_side_fixture().await;
+        let controller = &authorization.controller;
+        controller
+            .call_authorized(
+                "send",
+                json!({"threadId":id,"prompt":"wait queued",
+            "clientUserMessageId":"queued"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let history = controller
+            .call_authorized("history", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        let turn = &history["data"][0]["id"];
+        controller
+            .harness
+            .seed_test_history(json!({"threadId":id,"events":[
+                {"method":"item/completed","params":{"threadId":id,"turnId":turn,
+                    "item":{"id":"async-question","type":"agentMessage","text":"请选择",
+                        "questions":[{"title":"采用哪一种？","options":["第一种","第二种"]}]}}}
+            ]}))
+            .await
+            .unwrap();
+        let request = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let detail = controller
+                    .call_authorized("thread", json!({"threadId":id}), &authorization)
+                    .await
+                    .unwrap();
+                if let Some(request) = detail["thread"]["requests"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|request| request["method"] == "remote/requestUserInputAsync")
+                {
+                    break request.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut response = json!({"answers":{}});
+        response["answers"][request["params"]["questions"][0]["id"].as_str().unwrap()] =
+            json!({"answers":["第一种"]});
+        controller
+            .call_authorized(
+                "answer",
+                json!({"threadId":id,"method":request["method"],
+            "requestId":request["id"],"response":response}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let calls = harness_engine_requests(directory.path());
+        assert_eq!(calls.iter().filter(|frame| frame["method"] == "turn/steer"
+            && frame["params"]["threadId"] == id).count(), 1, "询问答案需要立即补充到等待中的任务");
+        let queue = controller
+            .call_authorized("queue", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(queue["queuedMessages"].as_array().unwrap().len(), 1);
+        assert_eq!(queue["queuedMessages"][0]["clientUserMessageId"], "queued");
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_service_side_queue_failed_turn_and_revoked_device_do_not_dispatch() {
+        for revoke in [false, true] {
+            let (directory, authorization, id) = harness_active_side_fixture().await;
+            let controller = &authorization.controller;
+            controller
+                .call_authorized(
+                    "send",
+                    json!({"threadId":id,"prompt":"wait queued",
+                "clientUserMessageId":"queued"}),
+                    &authorization,
+                )
+                .await
+                .unwrap();
+            if revoke {
+                controller.auth.lock().await.devices.clear();
+            }
+            controller
+                .harness
+                .seed_test_history(json!({"threadId":id,"finish":true,
+                "status":if revoke {"completed"} else {"failed"}}))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(1600)).await;
+            assert!(
+                !harness_engine_requests(directory.path())
+                    .iter()
+                    .any(|frame| frame["method"] == "turn/start"
+                        && frame["params"]["clientUserMessageId"] == "queued")
+            );
+            if !revoke {
+                let queue = controller
+                    .call_authorized("queue", json!({"threadId":id}), &authorization)
+                    .await
+                    .unwrap();
+                assert!(!queue["queuedMessages"][0]["pausedReason"].is_null());
+            }
+            controller.harness.release().await;
+        }
     }
 
     #[tokio::test]
@@ -10717,6 +11257,16 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             )
             .await
             .unwrap();
+        let pending = controller
+            .call_authorized(
+                "send",
+                json!({"threadId":id,
+            "prompt":"wait expired queued","clientUserMessageId":"expiry-queued"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(pending["deliveryState"], "queued");
         let history = controller
             .call_authorized("history", json!({"threadId":id}), &authorization)
             .await
@@ -10742,6 +11292,11 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         assert_eq!(detail["thread"]["sideThreadExpired"], true);
         assert_eq!(detail["thread"]["readOnly"], true);
         assert_eq!(detail["thread"]["priority"]["active"], false);
+        assert_eq!(
+            detail["thread"]["queuedMessages"],
+            json!([]),
+            "侧边过期时释放待发队列"
+        );
         let retained = controller
             .call_authorized("history", json!({"threadId":id}), &authorization)
             .await

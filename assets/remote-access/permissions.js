@@ -1,30 +1,45 @@
 // 实例设置修改原生全局配置；编辑区菜单只选择当前会话的权限，两者不能互相代写。
+// 用户要求 Codex 菜单与 App 同名同义，只保留这四项；不新增只读、实例设置或命名配置入口。
 const codexModes = [
-  { value: "configured", label: "实例设置", description: "使用该 Codex 实例的批准策略和沙盒设置" },
-  { value: "auto", label: "默认权限", description: "可编辑当前工作区，越出权限范围时请求批准" },
-  { value: "read-only", label: "只读", description: "读取工作区，修改文件或执行受限操作时请求批准" },
-  { value: "full-access", label: "完全访问", description: "文件和网络不受沙盒限制，不请求命令批准" }
+  { value: "auto", label: "请求批准", icon: "permissionAsk",
+    description: "编辑外部文件和使用互联网时始终询问" },
+  { value: "guardian-approvals", label: "帮我批准", icon: "shield",
+    description: "仅对检测到的风险操作请求批准" },
+  { value: "full-access", label: "完全访问权限", shortLabel: "完全访问", icon: "permissionFull",
+    description: "可不受限制地访问互联网和你电脑上的任何文件" },
+  { value: "configured", label: "自定义 (config.toml)", shortLabel: "自定义", icon: "settings",
+    description: "使用 config.toml 中定义的权限" }
 ];
+// Claude 菜单只提供 App 的五种模式；manual/default 共用一项，配置继承和旧 dontAsk 值仅兼容既有记录。
 const claudeModes = [
-  { value: "configured", label: "实例设置", description: "使用该 Claude 实例的默认权限模式" },
-  { value: "manual", label: "按需批准", description: "由你批准需要授权的操作" },
-  { value: "default", label: "按需批准", description: "由你批准需要授权的操作" },
-  { value: "acceptEdits", label: "自动接受编辑", description: "自动批准文件编辑，其他操作保留原生审批" },
-  { value: "plan", label: "计划模式", description: "分析和制定计划，保留 Claude 原生的执行限制" },
-  { value: "auto", label: "自动审批", description: "由 Claude 原生自动审批能力检查操作" },
-  { value: "dontAsk", label: "拒绝未授权操作", description: "不弹出批准请求，拒绝尚未获得授权的操作" },
-  { value: "bypassPermissions", label: "完全访问", description: "跳过 Claude 原生权限检查" }
+  { value: "default", label: "手动", icon: "claudeManual", description: "每次更改前都先询问" },
+  { value: "acceptEdits", label: "接受编辑", icon: "claudeEdits", description: "自动接受所有文件编辑" },
+  { value: "plan", label: "计划", icon: "claudePlan", description: "更改前先制定计划" },
+  { value: "auto", label: "自动", icon: "claudeAuto", description: "由 Claude 处理权限决策" },
+  { value: "bypassPermissions", label: "绕过权限", icon: "claudeBypass", description: "接受所有权限请求" }
 ];
 
 export function permissionOptions(backend, supportedModes = null) {
   const options = backend === "claude" ? claudeModes : codexModes;
-  return options.filter(option => !supportedModes || option.value === "configured" || supportedModes.includes(option.value))
-    .map(option => ({ ...option }));
+  return options.filter(option => !supportedModes || backend !== "claude" && option.value === "configured"
+      || supportedModes.includes(option.value)
+      || backend === "claude" && option.value === "default" && supportedModes.includes("manual"))
+    .map(option => ({ ...option, value: backend === "claude" && option.value === "default"
+        && supportedModes && !supportedModes.includes("default") && supportedModes.includes("manual")
+      ? "manual" : option.value }));
+}
+
+export function permissionModeKnown(backend, mode) {
+  return permissionOptions(backend).some(option => option.value === mode)
+    || (backend === "claude" ? ["manual", "configured", "dontAsk"].includes(mode) : mode === "read-only");
 }
 
 export function permissionLabel(backend, mode, creating = false) {
-  return permissionOptions(backend).find(option => option.value === mode)?.label
-    || (creating ? "实例设置" : "权限");
+  // 旧会话的只读预设仍按原权限执行；与 App 一致归入“请求批准”，只改变展示，不自动迁移权限。
+  const value = backend === "claude" ? mode === "manual" ? "default" : mode
+    : mode === "read-only" ? "auto" : mode || "configured";
+  const option = permissionOptions(backend).find(option => option.value === value);
+  return option?.shortLabel || option?.label || (backend !== "claude" && creating ? "自定义" : "权限");
 }
 
 export function mountInstancePermissions({
@@ -69,6 +84,8 @@ export function mountInstancePermissions({
   function addField(label, name, options, value, disabled = false) {
     const row = element("label", "appearance-field instance-permission-field");
     row.append(element("span", "", label));
+    if (name === "permissionMode" && ["default", "manual"].includes(value))
+      value = options.find(option => ["default", "manual"].includes(option.value))?.value || value;
     if (!options.some(option => option.value === value))
       options = [...options, { value, label: "当前自定义配置（保留）", disabled: true }];
     const control = selectControl(`permission-global-${name}`, label, options, value);
@@ -102,7 +119,7 @@ export function mountInstancePermissions({
         record.permissionProfile ? "__profile__" : record.draft.sandboxMode, !!record.permissionProfile);
         const hint = element("p", "appearance-hint",
           record.permissionProfile
-            ? `当前使用命名权限配置 ${record.permissionProfile}；沙盒范围请在原生配置中调整。`
+            ? "当前访问范围包含本界面不支持的配置，请在原生 config.toml 中调整。"
             : "沙盒控制可访问范围，批准策略控制是否请求确认；完整访问范围与“从不请求批准”分别设置。");
         fields.append(hint);
       } else {

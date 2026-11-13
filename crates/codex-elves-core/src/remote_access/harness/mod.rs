@@ -579,7 +579,12 @@ impl Harness {
     }
 
     async fn queue(&self, id: &str) -> Value {
-        let epoch = self.projection.lock().await.epoch.clone();
+        let projection = self.projection.lock().await;
+        if let Some(side) = projection.sides.threads.get(id) {
+            return side.queue_snapshot();
+        }
+        let epoch = projection.epoch.clone();
+        drop(projection);
         self.store.lock().await.queue(id, &epoch)
     }
 
@@ -600,7 +605,7 @@ impl Harness {
     async fn drain_queues(self: &Arc<Self>) {
         // 用户要求取回编辑后等同未发送草稿，不阻塞后续队列；原槽位仅供再次发送时恢复顺序。
         // 这里只跳过 editing，暂停、发送中或结果未知的消息仍保持原有等待边界。
-        let candidates: Vec<_> = self
+        let mut candidates: Vec<_> = self
             .store
             .lock()
             .await
@@ -614,6 +619,31 @@ impl Harness {
             })
             .map(|(id, _)| id.clone())
             .collect();
+        candidates.extend(
+            self.projection
+                .lock()
+                .await
+                .sides
+                .threads
+                .iter()
+                .filter(|(id, side)| {
+                    !side.closed
+                        && !side.expired
+                        && !side.closing
+                        && side
+                            .queue
+                            .queue_gates
+                            .get(*id)
+                            .is_some_and(|gate| gate.phase == "ready")
+                        && side.queue.queues.get(*id).is_some_and(|queue| {
+                            queue
+                                .iter()
+                                .find(|message| message.state != "editing")
+                                .is_some_and(|message| message.state == "queued")
+                        })
+                })
+                .map(|(id, _)| id.clone()),
+        );
         for id in candidates {
             let lock = self.thread_lock(&id).await;
             let Ok(_serial) = lock.try_lock() else {
@@ -625,20 +655,43 @@ impl Harness {
             if self.projection.lock().await.compactions.contains_key(&id) {
                 continue;
             }
-            let message = self
-                .store
-                .lock()
-                .await
-                .data
-                .queues
-                .get(&id)
-                .and_then(|q| q.iter().find(|m| m.state != "editing"))
-                .cloned();
+            let side_message = {
+                let projection = self.projection.lock().await;
+                projection.sides.threads.get(&id).and_then(|side| {
+                    side.queue
+                        .queues
+                        .get(&id)
+                        .and_then(|queue| queue.iter().find(|message| message.state != "editing"))
+                        .cloned()
+                })
+            };
+            let message = if side_message.is_some() {
+                side_message
+            } else {
+                self.store
+                    .lock()
+                    .await
+                    .data
+                    .queues
+                    .get(&id)
+                    .and_then(|q| q.iter().find(|m| m.state != "editing"))
+                    .cloned()
+            };
             let Some(message) = message.filter(|q| q.state == "queued") else {
                 continue;
             };
             let result = self.dispatch_queued(&id, &message).await;
             if let Err(error) = result {
+                let mut projection = self.projection.lock().await;
+                if let Some(side) = projection.sides.threads.get_mut(&id)
+                    && side
+                        .queue
+                        .pause_queue(&id, "侧边队列发送失败，消息已暂停；请核对后手动重试")
+                {
+                    side.queue_revision += 1;
+                    projection.side_changed(&id);
+                }
+                drop(projection);
                 let _ = crate::diagnostic_log::append_diagnostic_log(
                     "remote_access.harness_queue_paused",
                     json!({"threadId":id,"messageId":message.id,"error":format!("{error:#}")}),
@@ -688,6 +741,11 @@ impl Harness {
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<()> {
         authorization.check().await?;
+        if self.known_side(id).await {
+            return self
+                .dispatch_side_queued(id, message, authorization, false)
+                .await;
+        }
         // 自动续发必须核对真实执行状态；重连后内存中没有 active 不代表上一轮正常完成。
         let identity = self
             .runtime

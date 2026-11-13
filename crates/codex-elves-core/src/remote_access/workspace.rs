@@ -1236,7 +1236,11 @@ impl WorkspaceRepositories {
                     truncated = true;
                     continue;
                 };
+                // 用户要求变更页不把 .claude/、.agents/ 内的 worktree 识别为额外仓库。
+                // 这里只停止子仓库发现，主仓库中这些目录的普通文件仍由 Git 正常计算变更。
                 if is_search_skipped_directory(&name)
+                    || name.eq_ignore_ascii_case(".claude")
+                    || name.eq_ignore_ascii_case(".agents")
                     || matches!(
                         name.as_str(),
                         ".venv"
@@ -3153,8 +3157,12 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_multirepo_supports_git_files_and_isolates_broken_repositories() {
-        let (_fixture, _state_dir, repo) = fixture_repo().await;
-        std::fs::write(repo.root.join(".gitignore"), "children/\nmetadata/\n").unwrap();
+        let (_fixture, state_dir, repo) = fixture_repo().await;
+        std::fs::write(
+            repo.root.join(".gitignore"),
+            "children/\nmetadata/\n.claude/worktrees/\n.agents/worktrees/\n",
+        )
+        .unwrap();
         let child = repo.root.join("children/worktree");
         let metadata = repo.root.join("metadata");
         std::fs::create_dir_all(&child).unwrap();
@@ -3186,6 +3194,35 @@ mod tests {
             .success
         );
         std::fs::write(child.join("same.txt"), "worktree file\n").unwrap();
+        for (index, relative) in [".claude/worktrees/hidden", ".agents/worktrees/hidden"]
+            .into_iter()
+            .enumerate()
+        {
+            let ignored = repo.root.join(relative);
+            let git_dir = state_dir.path().join(format!("agent-git-{index}"));
+            std::fs::create_dir_all(&ignored).unwrap();
+            assert!(
+                git_unchecked(
+                    &repo.root,
+                    &[
+                        "init",
+                        "--quiet",
+                        "--separate-git-dir",
+                        git_dir.to_str().unwrap(),
+                        ignored.to_str().unwrap(),
+                    ],
+                    16 * 1024,
+                )
+                .await
+                .unwrap()
+                .success
+            );
+            assert!(ignored.join(".git").is_file());
+            std::fs::write(ignored.join("same.txt"), "agent worktree file\n").unwrap();
+        }
+        for path in [".claude/settings.json", ".agents/README.md"] {
+            std::fs::write(repo.root.join(path), "agent configuration\n").unwrap();
+        }
         let broken = repo.root.join("children/broken");
         std::fs::create_dir_all(&broken).unwrap();
         std::fs::write(broken.join(".git"), "gitdir: missing-git-directory\n").unwrap();
@@ -3204,6 +3241,16 @@ mod tests {
         assert_eq!(list["truncated"], true);
         assert!(list["repositories"][1]["error"].is_string());
         assert_eq!(list["repositories"][2]["error"], Value::Null);
+        for path in [".claude/settings.json", ".agents/README.md"] {
+            assert!(
+                list["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["repository"] == "" && entry["path"] == path),
+                "排除工具 worktree 不应隐藏主仓库的普通配置文件变更"
+            );
+        }
         let directory = fixture_response_json(
             files(
                 State(state.clone()),
@@ -3252,12 +3299,45 @@ mod tests {
         let container = repo.root.join("container");
         fixture_child_repo(&container, "group/visible", "visible\n").await;
         fixture_child_repo(&container, "node_modules/hidden", "dependency\n").await;
+        for path in [
+            ".claude/worktrees/hidden",
+            ".agents/worktrees/hidden",
+            "group/visible/.CLAUDE/worktrees/hidden",
+            "group/.AGENTS/worktrees/hidden",
+        ] {
+            fixture_child_repo(&container, path, "agent worktree\n").await;
+        }
+        fixture_child_repo(
+            &container,
+            "group/.claude-backup/visible",
+            "ordinary repo\n",
+        )
+        .await;
+        fixture_child_repo(
+            &container,
+            "group/.agents-backup/visible",
+            "ordinary repo\n",
+        )
+        .await;
         let workspace = WorkspaceRepositories::scan(container).unwrap();
-        assert_eq!(workspace.paths, ["group/visible"]);
+        assert_eq!(
+            workspace.paths,
+            [
+                "group/.agents-backup/visible",
+                "group/.claude-backup/visible",
+                "group/visible"
+            ]
+        );
         assert!(!workspace.truncated);
         let list = workspace.listing(&repo.authorization).await.unwrap();
-        assert_eq!(list["files"][0]["repository"], "group/visible");
-        assert_eq!(list["files"][0]["path"], "same.txt");
+        assert_eq!(list["repositories"].as_array().unwrap().len(), 3);
+        assert!(
+            list["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["repository"] == "group/visible" && entry["path"] == "same.txt")
+        );
     }
 
     #[tokio::test]

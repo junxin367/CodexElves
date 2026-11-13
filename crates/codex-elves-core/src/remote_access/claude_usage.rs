@@ -398,14 +398,24 @@ async fn control(
 
 fn normalize_usage(value: &Value, observed_at: u64) -> Value {
     // 原生 CLI 负责判断账号订阅；API Key、Bedrock、Vertex 或缺少 profile scope 时不显示额度。
-    if value["rate_limits_available"] != true
-        || !value["subscription_type"]
-            .as_str()
-            .is_some_and(|kind| !kind.trim().is_empty())
-    {
+    if value["rate_limits_available"] != true {
         return Value::Null;
     }
-    let mut result = json!({"source":"claude-native-usage","observedAtMs":observed_at});
+    // 用户要求标题右侧展示真实等级：只透传所属 WSL Claude CLI 的原始类型，不推断套餐倍率或读取其他来源。
+    // 64 字节仅限制等级字段；用户确认等级缺失时直接隐藏标签，不能丢掉 CLI 已返回的有效额度或填入示例等级。
+    let subscription_type = value["subscription_type"]
+        .as_str()
+        .map(str::trim)
+        .filter(|kind| {
+            !kind.is_empty()
+                && kind.len() <= 64
+                && kind.as_bytes()[0].is_ascii_alphanumeric()
+                && kind
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b" _+()./-".contains(&byte))
+        });
+    let mut result = json!({"source":"claude-native-usage","observedAtMs":observed_at,
+        "subscriptionType":subscription_type});
     let mut count = 0;
     for (native, field) in [("five_hour", "fiveHour"), ("seven_day", "sevenDay")] {
         let window = &value["rate_limits"][native];
@@ -453,12 +463,11 @@ mod tests {
         assert_eq!(result["fiveHour"]["usedPercentage"], 0.0);
         assert_eq!(result["sevenDay"]["usedPercentage"], 52.4);
         assert_eq!(result["observedAtMs"], 1234);
+        assert_eq!(result["subscriptionType"], "max");
         assert!(!result.to_string().contains("must-not-export"));
         assert!(!result.to_string().contains("used_credits"));
         for changes in [
             json!({"rate_limits_available":false}),
-            json!({"subscription_type":null}),
-            json!({"subscription_type":""}),
             json!({"rate_limits":null}),
         ] {
             let mut invalid = raw.clone();
@@ -467,6 +476,39 @@ mod tests {
             }
             assert!(normalize_usage(&invalid, 1234).is_null());
         }
+    }
+
+    #[test]
+    fn subscription_type_only_uses_native_field_and_missing_type_keeps_valid_usage() {
+        let mut raw = json!({"rate_limits_available":true,
+            "rate_limits":{"five_hour":{"used_percentage":24,"resets_at":1794618000}}});
+        for kind in [
+            Value::Null,
+            json!(""),
+            json!("   "),
+            json!(false),
+            json!(123),
+            json!({"plan":"max"}),
+            json!("<img src=x>"),
+            json!("max\nprivate"),
+            json!("x".repeat(65)),
+        ] {
+            raw["subscription_type"] = kind;
+            let result = normalize_usage(&raw, 1234);
+            assert!(result["subscriptionType"].is_null());
+            assert_eq!(result["fiveHour"]["usedPercentage"], 24.0);
+        }
+        raw.as_object_mut().unwrap().remove("subscription_type");
+        assert!(normalize_usage(&raw, 1234)["subscriptionType"].is_null());
+        for kind in ["pro", "max", "team", "enterprise", "custom-plan", "max_5x"] {
+            raw["subscription_type"] = json!(format!(" {kind} "));
+            assert_eq!(normalize_usage(&raw, 1234)["subscriptionType"], kind);
+        }
+        raw["rate_limits_available"] = json!(false);
+        assert!(
+            normalize_usage(&raw, 1234).is_null(),
+            "等级字段不能绕过 CLI 的额度可用性判断"
+        );
     }
 
     #[test]

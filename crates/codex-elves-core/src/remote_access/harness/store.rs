@@ -199,8 +199,13 @@ impl Store {
     }
 
     pub fn queue(&self, thread_id: &str, epoch: &str) -> Value {
+        self.data.queue(thread_id, epoch, self.revision)
+    }
+}
+
+impl Data {
+    pub fn queue(&self, thread_id: &str, epoch: &str, revision: u64) -> Value {
         let messages: Vec<_> = self
-            .data
             .queues
             .get(thread_id)
             .into_iter()
@@ -208,7 +213,7 @@ impl Store {
             .filter(|q| q.state != "editing" && !q.state.starts_with("direct-"))
             .map(|message| {
                 let mut view = message.view();
-                if let Some(gate) = self.data.queue_gates.get(thread_id)
+                if let Some(gate) = self.queue_gates.get(thread_id)
                     && (message.state == "paused"
                         || message.state == "queued" && gate.phase == "recovering")
                     && !gate.reason.is_empty()
@@ -218,11 +223,11 @@ impl Store {
                 view
             })
             .collect();
-        let edits: Vec<_> = self.data.edits.iter().filter(|(_, e)| e.thread_id == thread_id
+        let edits: Vec<_> = self.edits.iter().filter(|(_, e)| e.thread_id == thread_id
             && !["committed","canceled"].contains(&e.state.as_str()))
             .map(|(id,e)| json!({"editId":id,"messageId":e.message_id,"state":e.state,
                 "editState":e.state,"originalText":e.original.payload["prompt"],"createdAt":e.original.created_at})).collect();
-        json!({"ok":true,"threadId":thread_id,"queueEpoch":epoch,"queueRevision":self.revision,
+        json!({"ok":true,"threadId":thread_id,"queueEpoch":epoch,"queueRevision":revision,
             "queuedMessages":messages,"queuedEdits":edits})
     }
 }

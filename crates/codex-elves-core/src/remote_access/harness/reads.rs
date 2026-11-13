@@ -736,7 +736,34 @@ impl Harness {
                 if let Some(sent) = side.sent.get_mut(client) {
                     sent.1 = result.clone();
                 }
+                // 只以同一原生消息的接收证据移除待核对条目，不重放发送。
+                if let Some(queue) = side.queue.queues.get_mut(id) {
+                    let before = queue.len();
+                    queue.retain(|message| message.payload["clientUserMessageId"] != client);
+                    if queue.len() != before {
+                        side.queue_revision += 1;
+                        projection.side_changed(id);
+                    }
+                }
                 return Ok(result);
+            }
+            if let Some(message) = side
+                .queue
+                .queues
+                .get(id)
+                .into_iter()
+                .flatten()
+                .find(|message| {
+                    message.payload["clientUserMessageId"] == client
+                        && matches!(message.state.as_str(), "queued" | "paused" | "editing")
+                })
+            {
+                let mut response = side.queue_snapshot();
+                response["messageId"] = json!(&message.id);
+                response["clientUserMessageId"] = json!(client);
+                response["deliveryState"] = json!("queued");
+                response["confirmed"] = json!(true);
+                return Ok(response);
             }
             return Ok(side.sent.get(client).map(|(_, result)| result.clone()).unwrap_or_else(||
                 json!({"ok":true,"confirmed":false,"deliveryState":"unknown","threadId":id,"clientUserMessageId":client})));
@@ -816,8 +843,19 @@ impl Harness {
         let id = required(payload, "threadId")?;
         let edit_id = required(payload, "editId")?;
         let mut snapshot = self.queue(id).await;
-        let store = self.store.lock().await;
-        let edit = store.data.edits.get(edit_id);
+        let side_edit = self
+            .projection
+            .lock()
+            .await
+            .sides
+            .threads
+            .get(id)
+            .map(|side| side.queue.edits.get(edit_id).cloned());
+        let edit = match side_edit {
+            Some(edit) => edit,
+            None => self.store.lock().await.data.edits.get(edit_id).cloned(),
+        };
+        let edit = edit.as_ref();
         if edit.is_some_and(|e| e.thread_id != id) {
             return Err(error(409, "编辑标识不属于此会话"));
         }

@@ -1022,7 +1022,7 @@ impl Harness {
         Ok(json!({"ok":true,"threadId":id,"requestId":request_id,"skipped":skip}))
     }
 
-    async fn edit_queue(
+    pub(super) async fn edit_queue(
         &self,
         id: &str,
         action: &str,
@@ -1036,181 +1036,187 @@ impl Harness {
                 projection.compactions.contains_key(id),
             )
         };
-        let mut store = self.store.lock().await;
-        let permit = authorization.prepare_dispatch().await?;
         let mut response = json!({"ok":true,"threadId":id});
-        crate::bridge::CdpDispatchPermit::commit(permit, || {
-            store.commit(|data| {
-                let queue = data.queues.entry(id.to_owned()).or_default();
-                if action == "reorderQueued" {
-                    let ids = payload["messageIds"]
-                        .as_array()
-                        .ok_or_else(|| error(400, "队列顺序无效"))?;
-                    let expected = payload["expectedMessageIds"]
-                        .as_array()
-                        .ok_or_else(|| error(400, "缺少队列顺序基线"))?;
-                    if ids.len() != queue.len()
-                        || expected.len() != queue.len()
-                        || queue.iter().zip(expected).any(|(q, id)| id != &json!(q.id))
-                        || ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len()
-                        || queue
-                            .iter()
-                            .any(|q| !["queued", "paused"].contains(&q.state.as_str()))
-                        || ids
-                            .iter()
-                            .any(|id| !queue.iter().any(|q| id == &json!(q.id)))
-                    {
-                        return Err(error(409, "队列顺序已变化"));
+        let change = |data: &mut super::store::Data| {
+            let queue = data.queues.entry(id.to_owned()).or_default();
+            if action == "reorderQueued" {
+                let ids = payload["messageIds"]
+                    .as_array()
+                    .ok_or_else(|| error(400, "队列顺序无效"))?;
+                let expected = payload["expectedMessageIds"]
+                    .as_array()
+                    .ok_or_else(|| error(400, "缺少队列顺序基线"))?;
+                if ids.len() != queue.len()
+                    || expected.len() != queue.len()
+                    || queue.iter().zip(expected).any(|(q, id)| id != &json!(q.id))
+                    || ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len()
+                    || queue
+                        .iter()
+                        .any(|q| !["queued", "paused"].contains(&q.state.as_str()))
+                    || ids
+                        .iter()
+                        .any(|id| !queue.iter().any(|q| id == &json!(q.id)))
+                {
+                    return Err(error(409, "队列顺序已变化"));
+                }
+                queue.sort_by_key(|q| ids.iter().position(|id| id == &json!(q.id)).unwrap());
+                return Ok(());
+            }
+            if matches!(
+                action,
+                "editQueued" | "cancelQueuedEdit" | "dismissQueuedEdit"
+            ) && payload["editId"].is_string()
+            {
+                let edit_id = required(payload, "editId")?;
+                let edit = data
+                    .edits
+                    .get_mut(edit_id)
+                    .ok_or_else(|| error(409, "队列编辑已失效"))?;
+                if edit.thread_id != id {
+                    return Err(error(409, "编辑标识不属于此会话"));
+                }
+                if action == "dismissQueuedEdit" {
+                    if payload["confirmed"] != true || edit.state == "editing" {
+                        return Err(error(409, "编辑尚未结束"));
                     }
-                    queue.sort_by_key(|q| ids.iter().position(|id| id == &json!(q.id)).unwrap());
+                    data.edits.remove(edit_id);
+                    response["editState"] = json!("dismissed");
                     return Ok(());
                 }
-                if matches!(
-                    action,
-                    "editQueued" | "cancelQueuedEdit" | "dismissQueuedEdit"
-                ) && payload["editId"].is_string()
-                {
-                    let edit_id = required(payload, "editId")?;
-                    let edit = data
-                        .edits
-                        .get_mut(edit_id)
-                        .ok_or_else(|| error(409, "队列编辑已失效"))?;
-                    if edit.thread_id != id {
-                        return Err(error(409, "编辑标识不属于此会话"));
-                    }
-                    if action == "dismissQueuedEdit" {
-                        if payload["confirmed"] != true || edit.state == "editing" {
-                            return Err(error(409, "编辑尚未结束"));
-                        }
-                        data.edits.remove(edit_id);
-                        response["editState"] = json!("dismissed");
-                        return Ok(());
-                    }
-                    if edit.state != "editing" {
-                        if edit.terminal_fingerprint.as_deref()
-                            != Some(&super::super::hash(&serde_json::to_string(&json!([
-                                action, payload
-                            ]))?))
-                        {
-                            return Err(error(409, "这次编辑已按其他内容完成"));
-                        }
-                        response = edit.result.clone();
-                        return Ok(());
-                    }
-                    let message = queue
-                        .iter_mut()
-                        .find(|q| q.id == edit.message_id && q.state == "editing")
-                        .ok_or_else(|| error(409, "编辑中的队列消息已变化"))?;
-                    if action == "editQueued" {
-                        message.payload["prompt"] = payload["prompt"].clone();
-                        let retained = payload["retainedImageSources"].as_array();
-                        let mut images: Vec<_> = edit.original.payload["images"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter(|i| {
-                                retained
-                                    .is_none_or(|sources| sources.contains(&json!(image_source(i))))
-                            })
-                            .cloned()
-                            .collect();
-                        images.extend(payload["images"].as_array().into_iter().flatten().cloned());
-                        message.payload["images"] = json!(images);
-                        inputs(&message.payload)?;
-                    } else {
-                        *message = edit.original.clone();
-                    }
-                    message.state = if action == "cancelQueuedEdit"
-                        && data.queue_gates.get(id).is_some_and(|gate| {
-                            matches!(gate.phase.as_str(), "paused" | "recovering")
-                        }) {
-                        "paused"
-                    } else {
-                        "queued"
-                    }
-                    .into();
-                    edit.state = if action == "editQueued" {
-                        "committed"
-                    } else {
-                        "canceled"
-                    }
-                    .into();
-                    response["editId"] = json!(edit_id);
-                    response["editState"] = json!(&edit.state);
-                    response["messageId"] = json!(&message.id);
-                    edit.result = response.clone();
-                    edit.terminal_fingerprint =
-                        Some(super::super::hash(&serde_json::to_string(&json!([
+                if edit.state != "editing" {
+                    if edit.terminal_fingerprint.as_deref()
+                        != Some(&super::super::hash(&serde_json::to_string(&json!([
                             action, payload
-                        ]))?));
-                    if action == "editQueued" {
-                        data.authorize_queue_edit(
-                            id,
-                            response["messageId"].as_str().unwrap(),
-                            editing_active.clone(),
-                            editing_compacting,
-                        );
+                        ]))?))
+                    {
+                        return Err(error(409, "这次编辑已按其他内容完成"));
                     }
+                    response = edit.result.clone();
                     return Ok(());
                 }
-                let message_id = required(payload, "messageId")?;
-                let index = queue
-                    .iter()
-                    .position(|q| q.id == message_id)
-                    .ok_or_else(|| error(409, "队列消息已变化"))?;
-                if !["queued", "paused"].contains(&queue[index].state.as_str()) {
-                    return Err(error(409, "消息正在发送或待核对"));
-                }
-                if action == "removeQueued" {
-                    queue.remove(index);
-                    return Ok(());
-                }
-                if payload["originalText"] != queue[index].payload["prompt"]
-                    || payload["clientUserMessageId"] != queue[index].payload["clientUserMessageId"]
-                    || payload["createdAt"] != queue[index].created_at
-                {
-                    return Err(error(409, "队列消息的内容或身份已变化"));
-                }
-                if action == "beginQueuedEdit" {
-                    let edit_id = required(payload, "editId")?;
-                    if data.edits.contains_key(edit_id) {
-                        return Err(error(409, "编辑标识已使用"));
-                    }
-                    let original = queue[index].clone();
-                    if let Some(expected) = payload["expectedImageSources"].as_array() {
-                        let current: Vec<_> = original.payload["images"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .map(|i| json!(image_source(i)))
-                            .collect();
-                        if &current != expected {
-                            return Err(error(409, "队列图片已变化"));
-                        }
-                    }
-                    queue[index].state = "editing".into();
-                    data.edits.insert(
-                        edit_id.to_owned(),
-                        Edit {
-                            thread_id: id.to_owned(),
-                            message_id: message_id.to_owned(),
-                            state: "editing".into(),
-                            original,
-                            result: Value::Null,
-                            terminal_fingerprint: None,
-                        },
-                    );
-                    response["editId"] = json!(edit_id);
-                    response["editState"] = json!("editing");
-                    response["messageId"] = json!(message_id);
+                let message = queue
+                    .iter_mut()
+                    .find(|q| q.id == edit.message_id && q.state == "editing")
+                    .ok_or_else(|| error(409, "编辑中的队列消息已变化"))?;
+                if action == "editQueued" {
+                    message.payload["prompt"] = payload["prompt"].clone();
+                    let retained = payload["retainedImageSources"].as_array();
+                    let mut images: Vec<_> = edit.original.payload["images"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|i| {
+                            retained.is_none_or(|sources| sources.contains(&json!(image_source(i))))
+                        })
+                        .cloned()
+                        .collect();
+                    images.extend(payload["images"].as_array().into_iter().flatten().cloned());
+                    message.payload["images"] = json!(images);
+                    inputs(&message.payload)?;
                 } else {
-                    queue[index].payload["prompt"] = payload["prompt"].clone();
-                    inputs(&queue[index].payload)?;
+                    *message = edit.original.clone();
                 }
-                Ok(())
-            })
-        })?;
-        drop(store);
+                message.state = if action == "cancelQueuedEdit"
+                    && data
+                        .queue_gates
+                        .get(id)
+                        .is_some_and(|gate| matches!(gate.phase.as_str(), "paused" | "recovering"))
+                {
+                    "paused"
+                } else {
+                    "queued"
+                }
+                .into();
+                edit.state = if action == "editQueued" {
+                    "committed"
+                } else {
+                    "canceled"
+                }
+                .into();
+                response["editId"] = json!(edit_id);
+                response["editState"] = json!(&edit.state);
+                response["messageId"] = json!(&message.id);
+                edit.result = response.clone();
+                edit.terminal_fingerprint =
+                    Some(super::super::hash(&serde_json::to_string(&json!([
+                        action, payload
+                    ]))?));
+                if action == "editQueued" {
+                    data.authorize_queue_edit(
+                        id,
+                        response["messageId"].as_str().unwrap(),
+                        editing_active.clone(),
+                        editing_compacting,
+                    );
+                }
+                return Ok(());
+            }
+            let message_id = required(payload, "messageId")?;
+            let index = queue
+                .iter()
+                .position(|q| q.id == message_id)
+                .ok_or_else(|| error(409, "队列消息已变化"))?;
+            if !["queued", "paused"].contains(&queue[index].state.as_str()) {
+                return Err(error(409, "消息正在发送或待核对"));
+            }
+            if action == "removeQueued" {
+                queue.remove(index);
+                return Ok(());
+            }
+            if payload["originalText"] != queue[index].payload["prompt"]
+                || payload["clientUserMessageId"] != queue[index].payload["clientUserMessageId"]
+                || payload["createdAt"] != queue[index].created_at
+            {
+                return Err(error(409, "队列消息的内容或身份已变化"));
+            }
+            if action == "beginQueuedEdit" {
+                let edit_id = required(payload, "editId")?;
+                if data.edits.contains_key(edit_id) {
+                    return Err(error(409, "编辑标识已使用"));
+                }
+                let original = queue[index].clone();
+                if let Some(expected) = payload["expectedImageSources"].as_array() {
+                    let current: Vec<_> = original.payload["images"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|i| json!(image_source(i)))
+                        .collect();
+                    if &current != expected {
+                        return Err(error(409, "队列图片已变化"));
+                    }
+                }
+                queue[index].state = "editing".into();
+                data.edits.insert(
+                    edit_id.to_owned(),
+                    Edit {
+                        thread_id: id.to_owned(),
+                        message_id: message_id.to_owned(),
+                        state: "editing".into(),
+                        original,
+                        result: Value::Null,
+                        terminal_fingerprint: None,
+                    },
+                );
+                response["editId"] = json!(edit_id);
+                response["editState"] = json!("editing");
+                response["messageId"] = json!(message_id);
+            } else {
+                queue[index].payload["prompt"] = payload["prompt"].clone();
+                inputs(&queue[index].payload)?;
+            }
+            Ok(())
+        };
+        if self.known_side(id).await {
+            let permit = authorization.prepare_dispatch().await?;
+            let mut projection = self.projection.lock().await;
+            let side = projection.sides.threads.get_mut(id).unwrap();
+            crate::bridge::CdpDispatchPermit::commit(permit, || side.change_queue(change))?;
+        } else {
+            let mut store = self.store.lock().await;
+            let permit = authorization.prepare_dispatch().await?;
+            crate::bridge::CdpDispatchPermit::commit(permit, || store.commit(change))?;
+        }
         let snapshot = self.queue(id).await;
         for key in [
             "queueEpoch",

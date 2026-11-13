@@ -1301,6 +1301,207 @@ class SharedQueueHistoryTests(unittest.TestCase):
         native.read_messages()
         return native
 
+    def test_parallel_tool_results_stay_on_the_current_branch(self):
+        # 2.1.323 实测：并行 TaskCreate 的两条结果分别挂在各自的 tool_use 行下，只有后一条在当前链上。
+        def use(uuid, parent, tool):
+            return {"type": "assistant", "uuid": uuid, "parentUuid": parent,
+                    "message": {"content": [{"type": "tool_use", "id": tool, "name": "TaskCreate", "input": {}}]}}
+
+        def result(uuid, parent, tool):
+            return {"type": "user", "uuid": uuid, "parentUuid": parent,
+                    "message": {"content": [{"type": "tool_result", "tool_use_id": tool, "content": "ok"}]}}
+
+        native = self.read([
+            {"type": "user", "uuid": "u0", "message": {"content": "创建任务"}},
+            use("a1", "u0", "t1"), use("a2", "a1", "t2"),
+            result("r1", "a1", "t1"), result("r2", "a2", "t2"),
+            {"type": "assistant", "uuid": "a3", "parentUuid": "r2", "message": {"content": [{"type": "text", "text": "完成"}]}},
+            # 被回退的旧分支：同样挂在当前链上的提示之后，但答复的调用不在当前分支。
+            use("old-a", "u0", "t-old"), result("old-r", "old-a", "t-old"),
+            {"type": "user", "uuid": "u1", "parentUuid": "a3", "message": {"content": "继续"}},
+        ], pending_text="无关")
+        self.assertEqual([row["uuid"] for row in native.messages], ["u0", "a1", "a2", "r1", "r2", "a3", "u1"])
+
+    def test_tool_results_forward_only_render_metadata_for_their_single_call(self):
+        patch_rows = [{"oldStart": 1, "oldLines": 1, "newStart": 1, "newLines": 1, "lines": ["-旧", "+新"]}]
+        native = self.read([
+            {"type": "user", "uuid": "u", "message": {"content": "改文件"}},
+            {"type": "assistant", "uuid": "a", "parentUuid": "u", "message": {"id": "m", "content": [
+                {"type": "tool_use", "id": "e1", "name": "Edit", "input": {"file_path": "/w/a"}},
+                {"type": "tool_use", "id": "b1", "name": "Bash",
+                 "input": {"command": "sleep 9", "run_in_background": True}}]}},
+            {"type": "user", "uuid": "r1", "parentUuid": "a", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "e1", "content": "ok"}]},
+             "toolUseResult": {"filePath": "/w/a", "oldString": "旧", "newString": "新",
+                               "originalFile": "旧\n" * 1000, "structuredPatch": patch_rows, "userModified": False}},
+            {"type": "user", "uuid": "r2", "parentUuid": "r1", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "b1", "content": "running"}]},
+             "toolUseResult": {"stdout": "x" * 1000, "stderr": "", "interrupted": False, "backgroundTaskId": "bg1"}},
+            {"type": "user", "uuid": "r3", "parentUuid": "r2", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "a"},
+                {"type": "tool_result", "tool_use_id": "t2", "content": "b"}]},
+             "toolUseResult": {"backgroundTaskId": "ambiguous"}},
+        ])
+        rows = {row["uuid"]: row for row in native.messages}
+        self.assertEqual(rows["r1"]["nativeToolResult"], {"toolUseId": "e1", "filePath": "/w/a",
+                                                          "fileChange": "update", "structuredPatch": patch_rows})
+        self.assertEqual(rows["r2"]["nativeToolResult"], {"toolUseId": "b1", "backgroundTaskId": "bg1"})
+        self.assertNotIn("nativeToolResult", rows["r3"], "多个结果共用元数据时归属不明，不能转发")
+        self.assertFalse(any("toolUseResult" in row for row in native.messages), "原始 originalFile/stdout 不随历史下发")
+        tool_result = namespace["native_tool_result"]
+        single = {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "w"}]}}
+        oversized = [{"oldStart": 0, "oldLines": 0, "newStart": 1, "newLines": 1,
+                      "lines": ["+" + "x" * namespace["NATIVE_PATCH_LIMIT"]]}]
+        self.assertEqual(tool_result({**single, "toolUseResult": {"filePath": "/w/b", "type": "update",
+                                                                   "structuredPatch": oversized}}),
+                         {"toolUseId": "w", "filePath": "/w/b", "fileChange": "update"})
+        self.assertEqual(tool_result({**single, "toolUseResult": {"task": {"id": 7, "subject": "任务"}}}),
+                         {"toolUseId": "w", "createdTaskId": "7"})
+        self.assertEqual(tool_result({**single, "toolUseResult": {"success": False, "taskId": "1"}}),
+                         {"toolUseId": "w", "success": False})
+        self.assertIsNone(tool_result({**single, "toolUseResult": {"structuredPatch": [{"oldStart": True}],
+                                                                    "filePath": 3}}))
+
+    def test_task_notifications_start_auto_turns_and_are_never_user_messages(self):
+        origin = {"kind": "task-notification", "producer": "session-task"}
+        monitor = {"type": "user", "uuid": "n1", "parentUuid": "d1", "origin": origin, "message": {"content": (
+            "<task-notification>\n<task-id>bzb25w5se</task-id>\n<summary>Monitor event: \"等待测试\"</summary>\n"
+            "<event>EXIT=0 &amp; 完成</event>\n</task-notification>")}}
+        command = {"type": "user", "uuid": "n2", "parentUuid": "d2", "origin": origin, "message": {"content": [
+            {"type": "text", "text": "<task-notification><task-id>bg1</task-id><tool-use-id>toolu_1</tool-use-id>"
+                                     "<status>completed</status><summary>Background command \"make\" completed "
+                                     "(exit code 0)</summary></task-notification>"}]}}
+        quoted = {"type": "user", "uuid": "q", "message": {"content": monitor["message"]["content"]}}
+        parse, real_user = namespace["native_task_notification"], namespace["real_user"]
+        self.assertEqual(parse(monitor), {"taskId": "bzb25w5se", "summary": "Monitor event: \"等待测试\"",
+                                          "event": "EXIT=0 & 完成"})
+        self.assertEqual(parse(command), {"taskId": "bg1", "summary": "Background command \"make\" completed (exit code 0)",
+                                          "status": "completed", "toolUseId": "toolu_1"})
+        self.assertIsNone(parse(quoted), "用户引用相同 XML 仍是普通正文")
+        self.assertFalse(real_user(monitor), "没有状态的监控事件也不能当作可编辑的用户消息")
+        self.assertTrue(real_user(quoted))
+        finished = namespace["native_turn_finished"]
+        done = [{"type": "user", "uuid": "u", "message": {"content": "跑测试"}},
+                {"type": "system", "uuid": "d1", "subtype": "turn_duration"}]
+        self.assertTrue(finished(done))
+        self.assertFalse(finished(done + [monitor]), "通知开启的新一轮尚未结束")
+
+        native = self.read([*done, monitor], pending_text="不相关")
+        row = native.messages[-1]
+        self.assertEqual(row["nativeTaskNotification"]["taskId"], "bzb25w5se")
+        self.assertFalse(row["nativeEditable"])
+        self.assertIsNone(native.preview_context(), "自动续跑轮次无法在终端定位回复区，不做实时预览")
+        self.assertEqual(native.clients, {}, "通知不能确认网页待发送消息")
+
+    def test_scheduled_task_prompt_is_an_auto_turn_not_a_user_message(self):
+        # 2.1.323 实测：system/scheduled_task_fire 之后紧跟以它为父节点、没有 origin 的 user 提示。
+        native = self.read([
+            {"type": "user", "uuid": "u0", "message": {"content": "创建定时任务"}},
+            {"type": "assistant", "uuid": "a0", "parentUuid": "u0", "message": {"content": [{"type": "text", "text": "已创建"}]}},
+            {"type": "system", "uuid": "d0", "parentUuid": "a0", "subtype": "turn_duration"},
+            {"type": "system", "uuid": "f1", "parentUuid": "d0", "subtype": "scheduled_task_fire",
+             "content": "Running scheduled task (Nov 14 12:27am)"},
+            {"type": "user", "uuid": "p1", "parentUuid": "f1", "message": {"content": "只回复“定时触发成功”。"}},
+            {"type": "assistant", "uuid": "a1", "parentUuid": "p1", "message": {"content": [{"type": "text", "text": "定时触发成功"}]}},
+            {"type": "user", "uuid": "p2", "parentUuid": "a1", "message": {"content": "只回复“定时触发成功”。"}},
+        ], pending_text="无关")
+        rows = {row["uuid"]: row for row in native.messages}
+        self.assertEqual(rows["p1"]["nativeTaskNotification"], {"taskId": "scheduled", "kind": "schedule",
+                                                                "summary": "只回复“定时触发成功”。",
+                                                                "event": "Running scheduled task (Nov 14 12:27am)"})
+        self.assertFalse(rows["p1"]["nativeEditable"], "定时任务提示不能作为可编辑的用户消息")
+        self.assertNotIn("nativeTaskNotification", rows["p2"], "用户手动输入相同文字仍是用户消息")
+        self.assertTrue(rows["p2"]["nativeEditable"])
+
+    def test_local_commands_and_system_notices_become_events_not_user_messages(self):
+        command_text = ("<command-name>/resume</command-name>\n            <command-message>resume</command-message>\n"
+                        "            <command-args></command-args>")
+        rows = [
+            {"type": "user", "uuid": "d", "message": {"content": "开始"}},
+            {"type": "user", "uuid": "c0", "parentUuid": "d", "isMeta": True, "entrypoint": "cli", "promptId": "p1",
+             "message": {"content": "<local-command-caveat>Caveat: run directly</local-command-caveat>"}},
+            {"type": "user", "uuid": "c1", "parentUuid": "c0", "entrypoint": "cli", "promptId": "p1",
+             "message": {"content": command_text}},
+            {"type": "user", "uuid": "c2", "parentUuid": "c1", "entrypoint": "cli", "promptId": "p1",
+             "message": {"content": "<local-command-stdout>\x1b[2m已在后台运行\x1b[22m</local-command-stdout>"}},
+            {"type": "user", "uuid": "q", "parentUuid": "c2", "entrypoint": "cli", "promptId": "p2",
+             "message": {"content": command_text}},
+            {"type": "system", "uuid": "s1", "parentUuid": "q", "subtype": "local_command", "level": "info",
+             "content": "<command-name>/skills</command-name>\n<command-message>skills</command-message>\n"
+                        "<command-args></command-args>"},
+            {"type": "system", "uuid": "s2", "parentUuid": "s1", "subtype": "local_command", "level": "info",
+             "content": "<local-command-stdout>No changes</local-command-stdout>",
+             "commandRun": {"command": "skills", "args": ""}},
+            {"type": "system", "uuid": "s3", "parentUuid": "s2", "subtype": "local_command",
+             "content": "<command-name>/model</command-name>\n<command-message>model</command-message>\n"
+                        "<command-args>opus</command-args>"},
+            {"type": "system", "uuid": "s4", "parentUuid": "s3", "subtype": "away_summary",
+             "content": "正在修复渲染。 (disable recaps in /config)"},
+            {"type": "system", "uuid": "s5", "parentUuid": "s4", "subtype": "stop_hook_summary", "hookErrors": [],
+             "preventedContinuation": False, "stopReason": ""},
+            {"type": "system", "uuid": "s6", "parentUuid": "s5", "subtype": "stop_hook_summary",
+             "hookErrors": ["exit 2"], "preventedContinuation": True, "stopReason": "测试未通过"},
+        ]
+        native = self.read(rows, pending_text="无关")
+        rows = {row["uuid"]: row for row in native.messages}
+        self.assertEqual(rows["c1"]["nativeLocalCommand"], {"name": "/resume", "args": ""})
+        self.assertFalse(rows["c1"]["nativeEditable"], "终端本地命令不能作为可编辑的用户消息")
+        self.assertEqual(rows["c2"]["nativeLocalOutput"], {"commandId": "c1", "stream": "stdout", "text": "已在后台运行"})
+        self.assertFalse(rows["c2"]["nativeEditable"])
+        self.assertNotIn("nativeLocalCommand", rows["q"], "没有原生 caveat 的同样标签按用户正文处理")
+        self.assertTrue(rows["q"]["nativeEditable"])
+        self.assertEqual(rows["s1"]["nativeLocalCommand"]["name"], "/skills")
+        self.assertEqual(rows["s2"]["nativeLocalOutput"]["text"], "No changes")
+        self.assertNotIn("s3", rows, "模型命令另有专门展示")
+        self.assertEqual(rows["s4"]["nativeSystemNotice"], {"kind": "awaySummary", "text": "正在修复渲染。"})
+        self.assertNotIn("s5", rows, "无输出、未阻止的 Stop Hook 汇总不展示")
+        self.assertEqual(rows["s6"]["nativeSystemNotice"],
+                         {"kind": "stopHook", "prevented": True, "reason": "测试未通过", "errors": ["exit 2"]})
+
+    def test_prompt_withdrawn_before_output_is_confirmed_by_the_terminal_input(self):
+        # 2.1.323 实测：出字前按 Esc，原生撤回本条输入并把原文放回终端输入框，记录不写中断标记。
+        messages = [
+            {"type": "user", "uuid": "u0", "message": {"content": "第一条"}},
+            {"type": "assistant", "uuid": "a0", "message": {"content": [{"type": "text", "text": "好"}]}},
+            {"type": "system", "uuid": "d0", "subtype": "turn_duration"},
+            {"type": "user", "uuid": "u1", "message": {"content": "用三句话介绍一下杭州西湖。"}},
+        ]
+        idle = {"tempo": "idle", "sessionAlive": True}
+
+        def session(rows, terminal):
+            native = NativeSession("unused", "test-session", "job")
+            native.messages = rows
+            native.screen.feed(terminal)
+            return native
+
+        native = session(messages, " ▐▛███▛█   Claude Code v2.1.323\n ❯ 用三句话介绍一下杭州西湖。\n"
+                                   "   ⏵⏵ auto mode on (shift+tab to cycle)\n")
+        self.assertIsNone(native.withdrawn_prompt({"tempo": "active", "sessionAlive": True}))
+        self.assertIsNone(native.withdrawn_prompt({"tempo": "idle", "sessionAlive": False}))
+        self.assertEqual(native.withdrawn_prompt(idle), "u1")
+        native.screen = namespace["Screen"]()
+        native.screen.feed("❯ \n")
+        self.assertEqual(native.withdrawn_prompt(idle), "u1", "已确认的撤回不因终端用户清空输入框而反复")
+        self.assertIsNone(session(messages, "❯ 别的内容\n").withdrawn_prompt(idle))
+        replied = messages + [{"type": "assistant", "uuid": "a1", "message": {"content": [{"type": "text", "text": "西湖"}]}}]
+        self.assertIsNone(session(replied, "❯ 用三句话介绍一下杭州西湖。\n").withdrawn_prompt(idle), "已有回复不是撤回")
+
+    def test_background_summary_reads_only_the_native_footer(self):
+        summary = NativeSession.background_summary
+        self.assertEqual(summary(["回复正文", "", "⏵⏵ auto mode on (shift+tab to cycle) · 1 shell · ↓ to manage"]),
+                         "1 shell")
+        # 2.1.323 实测：执行中与空闲时的底栏；“← 2 agents” 与 “esc to interrupt” 不是后台任务。
+        self.assertEqual(summary(["⏵⏵ auto mode on · ← 2 agents · 1 shell · esc to interrupt · ↓ to manage"]), "1 shell")
+        self.assertEqual(summary(["⏵⏵ auto mode on · ← 2 agents · 1 monitor · ↓ to manage"]), "1 monitor")
+        self.assertEqual(summary(["⏵⏵ auto mode on · 2 shells, 1 monitor · ↓ to manage"]), "2 shells, 1 monitor")
+        self.assertEqual(summary(["⏵⏵ auto mode on · 1 shell · 1 monitor · ↓ to manage"]), "1 shell, 1 monitor")
+        self.assertEqual(summary(["⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents · esc to interrupt"]), "")
+        self.assertEqual(summary(["· 2 shells · ↓ to manage", "⏵⏵ auto mode on"]), "2 shells")
+        self.assertEqual(summary(["正文引用：1 shell · ↓ to manage", "a", "b", "⏵⏵ auto mode on"]), "",
+                         "只认底部三行，正文引用不算后台任务")
+        self.assertEqual(summary(["↓ to manage"]), "background")
+        self.assertIsNone(summary(["", "  "]))
+
     def test_native_interruption_keeps_metadata_without_consuming_a_literal_pending_message(self):
         marker = "[Request interrupted by user]"
         native = self.read([
@@ -1695,6 +1896,80 @@ class SharedQueueHistoryTests(unittest.TestCase):
         self.assertEqual(frame["native_id"], "test-session")
         self.assertEqual(frame["pending"], [])
         self.assertEqual(frame["clients"]["absorbed-user"], "web-client")
+
+
+class PlanDialogTests(unittest.TestCase):
+    # 选项与提示取自 2.1.323 实测画面（测试 WSL，权限默认 auto）。
+    options = ("Claude has written up a plan and is ready to execute. Would you like to proceed?\n"
+               "❯ 1. Yes, and use auto mode\n  2. Yes, manually approve edits\n  3. Tell Claude what to change\n"
+               "     shift+tab to approve with this feedback\n")
+
+    def screen(self, root, options=None, path=None):
+        path = path or f"{root}/plans/plan-a.md"
+        return (" Ready to code?\n Here is Claude's plan:\n ╌╌╌╌\n 计划（画面）\n ╌╌╌╌\n"
+                + (options or self.options) + f" ctrl+g to edit in VS Code · {path}\n")
+
+    def native(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        (root / "plans").mkdir()
+        (root / "plans" / "plan-a.md").write_text("# 计划\n\n1. 追加一行\n2. 验证\n", encoding="utf-8")
+        native = NativeSession("unused", "test-session", "plan-job")
+        native.root = root
+        native.initialized = True
+        # ExitPlanMode 的 tool_use 可能已写入记录；计划审批框必须取代通用工具审批，不能盲按 1。
+        native.messages = [{"type": "assistant", "uuid": "a1", "message": {"content": [
+            {"type": "tool_use", "id": "toolu_plan", "name": "ExitPlanMode", "input": {"plan": "旧"}}]}}]
+        native.job = {"short": "plan-job", "sessionId": "test-session", "tempo": "blocked", "state": "blocked",
+                      "sessionStatus": "waiting", "sessionStatusAtMs": 3000, "needs": "permission prompt"}
+        native.lookup = lambda: native.job
+        native.read_messages = lambda: None
+        native.context_configuration = lambda: {}
+        native.screen.feed(self.screen(root))
+        with contextlib.redirect_stdout(io.StringIO()):
+            native.poll()
+        return native
+
+    def test_plan_dialog_is_read_from_the_screen_and_replaces_the_generic_tool_prompt(self):
+        native = self.native()
+        dialog = native.dialog
+        self.assertEqual(list(native.requests), [dialog["id"]])
+        self.assertEqual(native.requests[dialog["id"]]["subtype"], "native_dialog")
+        self.assertEqual((dialog["kind"], dialog["remoteSupported"], dialog["state"]), ("plan", True, "waiting"))
+        self.assertEqual(dialog["description"], "# 计划\n\n1. 追加一行\n2. 验证")
+        self.assertEqual([(option["index"], option["action"]) for option in dialog["options"]],
+                         [(1, "approve"), (2, "approve"), (3, "feedback")])
+        native_dialog, root = namespace["native_dialog"], native.root
+        moved = self.options.replace("❯ 1.", "  1.").replace("  3. Tell", "❯ 3. Tell")
+        self.assertEqual(native_dialog(native.job, self.screen(root, moved), "test-session", root)["id"], dialog["id"],
+                         "光标移动不是新的审批")
+        typed = native_dialog(native.job, self.screen(root, self.options.replace(
+            "3. Tell Claude what to change", "3. 改成 cat notes.txt")), "test-session", root)
+        self.assertNotEqual(typed["id"], dialog["id"])
+        self.assertEqual(typed["options"][2]["action"], "unknown", "终端里正在输入修改意见时网页不再提交修改意见")
+        outside = namespace["native_plan_dialog"](self.screen(root, path="/etc/hostname"), root)
+        self.assertEqual(outside["description"], "计划（画面）", "只读取当前配置 plans/ 目录内的计划文件")
+        self.assertIsNone(namespace["native_plan_dialog"](SharedQueueHistoryTests.dialog_text, root))
+
+    def test_plan_answers_use_native_option_numbers_and_single_line_feedback(self):
+        cases = [({"behavior": "allow", "option": 2}, [b"2"]),
+                 ({"behavior": "deny", "feedback": " 改成\n  cat notes.txt "}, [b"3", "改成 cat notes.txt".encode(), b"\r"])]
+        for answer, expected in cases:
+            native, sent = self.native(), []
+            native.terminal_input = lambda keys, dialog=None, sent=sent, **_: sent.append(keys)
+            request = native.dialog["id"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                native.answer({"response": {"request_id": request, "response": answer}})
+            self.assertEqual(sent, [expected])
+            self.assertEqual(native.dialog["state"], "submitted", "已提交的审批不能被另一端重复提交")
+        for answer in ({"behavior": "allow", "option": 3}, {"behavior": "allow"},
+                       {"behavior": "deny", "feedback": "  "}):
+            native = self.native()
+            native.terminal_input = lambda *_args, **_kwargs: self.fail("非法回答不能发送按键")
+            with self.assertRaises(namespace["NativeError"]) as raised, contextlib.redirect_stdout(io.StringIO()):
+                native.answer({"response": {"request_id": native.dialog["id"], "response": answer}})
+            self.assertEqual(raised.exception.code, "EINVAL")
 
 
 class NativeSubagentHistoryTests(unittest.TestCase):

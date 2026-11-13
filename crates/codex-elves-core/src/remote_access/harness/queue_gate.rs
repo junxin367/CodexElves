@@ -114,7 +114,7 @@ impl Data {
         );
     }
 
-    fn finish_queue(&mut self, id: &str, turn: &str, status: &str) -> bool {
+    pub(super) fn finish_queue(&mut self, id: &str, turn: &str, status: &str) -> bool {
         let Some(gate) = self.queue_gates.get(id) else {
             return false;
         };

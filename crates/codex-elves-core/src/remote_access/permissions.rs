@@ -19,7 +19,14 @@ static CONFIG_WRITE: OnceLock<Mutex<()>> = OnceLock::new();
 type ModeCache = BTreeMap<String, (Instant, Vec<String>)>;
 static CLAUDE_MODE_CACHE: OnceLock<Mutex<ModeCache>> = OnceLock::new();
 
-pub(super) const CODEX_MODES: &[&str] = &["configured", "read-only", "auto", "full-access"];
+// 用户要求菜单只提供 App 的四种选择；read-only 仅兼容旧会话已保存的权限，不再作为网页菜单项。
+pub(super) const CODEX_MODES: &[&str] = &[
+    "configured",
+    "auto",
+    "guardian-approvals",
+    "full-access",
+    "read-only",
+];
 pub(super) const CLAUDE_MODES: &[&str] = &[
     "configured",
     "default",
@@ -492,11 +499,11 @@ pub(super) async fn settings(
         .into_response())
 }
 
-/// 与 native.js 的会话预设保持一致；完全访问必须同时关闭沙盒和命令审批。
+/// 与 native.js 的会话预设保持一致；“帮我批准”交给原生自动审核，不能退化为人工审批或完全访问。
 pub(super) fn codex_preset(mode: &str, cwd: &str) -> Result<Value, ApiError> {
     let (approval, sandbox) = match mode {
         "read-only" => ("on-request", json!({"type":"readOnly"})),
-        "auto" => (
+        "auto" | "guardian-approvals" => (
             "on-request",
             json!({"type":"workspaceWrite","writableRoots":[cwd],
             "networkAccess":false,"excludeTmpdirEnvVar":false,"excludeSlashTmp":false}),
@@ -504,7 +511,12 @@ pub(super) fn codex_preset(mode: &str, cwd: &str) -> Result<Value, ApiError> {
         "full-access" => ("never", json!({"type":"dangerFullAccess"})),
         _ => return Err(ApiError::new(400, "Codex 会话权限模式无效")),
     };
-    Ok(json!({"approvalPolicy":approval,"approvalsReviewer":"user","sandboxPolicy":sandbox}))
+    let reviewer = if mode == "guardian-approvals" {
+        "auto_review"
+    } else {
+        "user"
+    };
+    Ok(json!({"approvalPolicy":approval,"approvalsReviewer":reviewer,"sandboxPolicy":sandbox}))
 }
 
 pub(super) fn codex_config_preset(config: &Value) -> Result<Value, ApiError> {
@@ -718,6 +730,39 @@ sandbox_mode = \"workspace-write\" # 沙盒说明\nmodel = \"fixture\"\n\n\
             json!(["/fixture"])
         );
         assert_eq!(params["model"], "unchanged");
+        for creating in [false, true] {
+            let mut reviewed = json!({"threadId":"fixture"});
+            apply_codex(
+                &json!({"permissionMode":"guardian-approvals"}),
+                &mut reviewed,
+                "/fixture",
+                creating,
+            )
+            .unwrap();
+            assert_eq!(reviewed["approvalPolicy"], "on-request");
+            assert_eq!(reviewed["approvalsReviewer"], "auto_review");
+            if creating {
+                assert_eq!(reviewed["sandbox"], "workspace-write");
+                assert_eq!(
+                    reviewed["config"]["sandbox_workspace_write.network_access"],
+                    false
+                );
+            } else {
+                assert_eq!(reviewed["sandboxPolicy"]["type"], "workspaceWrite");
+                assert_eq!(reviewed["sandboxPolicy"]["networkAccess"], false);
+            }
+            apply_codex(
+                &json!({"permissionMode":"auto"}),
+                &mut reviewed,
+                "/fixture",
+                creating,
+            )
+            .unwrap();
+            assert_eq!(reviewed["approvalsReviewer"], "user");
+        }
+        let legacy = codex_preset("read-only", "/fixture").unwrap();
+        assert_eq!(legacy["sandboxPolicy"]["type"], "readOnly");
+        assert_eq!(legacy["approvalPolicy"], "on-request");
         apply_codex(
             &json!({"permissionMode":"full-access"}),
             &mut params,
@@ -752,6 +797,7 @@ sandbox_mode = \"workspace-write\" # 沙盒说明\nmodel = \"fixture\"\n\n\
         );
         let preset = codex_config_preset(&json!({"config":{
             "approval_policy":"never","sandbox_mode":"workspace-write",
+            "approvals_reviewer":"auto_review",
             "sandbox_workspace_write":{"writable_roots":["/extra"],"network_access":true}
         }}))
         .unwrap();
@@ -764,6 +810,8 @@ sandbox_mode = \"workspace-write\" # 沙盒说明\nmodel = \"fixture\"\n\n\
         )
         .unwrap();
         assert_eq!(params["sandbox"], "workspace-write");
+        assert_eq!(params["approvalPolicy"], "never");
+        assert_eq!(params["approvalsReviewer"], "auto_review");
         assert_eq!(
             params["config"]["sandbox_workspace_write.writable_roots"],
             json!(["/extra", "/fixture"])
