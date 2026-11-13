@@ -101,11 +101,7 @@ impl Harness {
                     }
                 }
                 self.store.lock().await.commit(|data| {
-                    for message in data.queues.get_mut(&id).into_iter().flatten() {
-                        if message.state == "queued" {
-                            message.state = "paused".into();
-                        }
-                    }
+                    data.pause_queue(&id, "消息已暂停");
                     Ok(())
                 })?;
                 self.queue_changed(&id).await;
@@ -311,6 +307,11 @@ impl Harness {
     ) -> anyhow::Result<Value> {
         inputs(&payload)?;
         let direct = !self.send_is_running(id, fresh_thread).await?;
+        let anchor = if direct {
+            None
+        } else {
+            Some(self.queue_anchor(id).await.unwrap_or((None, false)))
+        };
         let mut message = Queued::new(payload, authorization);
         let client_id = message.payload["clientUserMessageId"].clone();
         let mut store = self.store.lock().await;
@@ -372,6 +373,9 @@ impl Harness {
                     return Err(error(429, "此会话的待发送消息已达上限"));
                 }
                 queue.push(message.clone());
+                if let Some((turn, compacting)) = anchor {
+                    data.wait_queue(id, turn, compacting);
+                }
                 Ok(())
             })
         })?;
@@ -388,7 +392,11 @@ impl Harness {
         Ok(response)
     }
 
-    async fn send_is_running(&self, id: &str, fresh_thread: &Value) -> anyhow::Result<bool> {
+    pub(super) async fn send_is_running(
+        &self,
+        id: &str,
+        fresh_thread: &Value,
+    ) -> anyhow::Result<bool> {
         if let Some(snapshot) = self.owner_snapshot(id).await? {
             let status = &snapshot["threadRuntimeStatus"];
             let status = status.as_str().or_else(|| status["type"].as_str());
@@ -422,6 +430,7 @@ impl Harness {
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
         let mut attempted = false;
+        let mut deferred_anchor = None;
         let result: anyhow::Result<Option<Value>> = async {
             let fresh = self
                 .runtime
@@ -434,6 +443,7 @@ impl Harness {
             normalize_thread_response(&fresh)?;
             // 准备之后再检查；只有此时明确开始执行，才把本次意图转换为真正的队列消息。
             if self.send_is_running(id, &fresh["thread"]).await? {
+                deferred_anchor = Some(self.queue_anchor(id).await.unwrap_or((None, false)));
                 return Ok(None);
             }
             authorization.check().await?;
@@ -463,6 +473,9 @@ impl Harness {
                         .and_then(|q| q.iter_mut().find(|q| q.id == message.id))
                     {
                         queued.state = "queued".into();
+                    }
+                    if let Some((turn, compacting)) = deferred_anchor {
+                        data.wait_queue(id, turn, compacting);
                     }
                 }
                 Err(failure) => {
@@ -520,6 +533,17 @@ impl Harness {
         })?;
         let mut params = json!({"threadId":id,"input":input,
             "clientUserMessageId":payload["clientUserMessageId"]});
+        let cwd = self
+            .projection
+            .lock()
+            .await
+            .threads
+            .get(id)
+            .and_then(|thread| thread["cwd"].as_str())
+            .unwrap_or("")
+            .to_owned();
+        // 会话菜单只覆盖后续新轮次；steer 不更改正在执行的轮次权限。
+        super::super::permissions::apply_codex(payload, &mut params, &cwd, false)?;
         for (source, target) in [
             ("model", "model"),
             ("reasoningEffort", "effort"),
@@ -557,6 +581,8 @@ impl Harness {
             )
         };
         let turn_id = required(&response["turn"], "id")?;
+        self.remember_queue_wait(id, Some(turn_id.to_owned()), false)
+            .await?;
         self.projection.lock().await.started(id, turn_id);
         let mut remembered = payload.clone();
         // 创建草稿中的旧 Fast 值不能在发送回执到达时覆盖执行期间后来保存的会话偏好。
@@ -653,6 +679,7 @@ impl Harness {
         if let Some(model) = payload["model"].as_str().filter(|s| !s.is_empty()) {
             params["model"] = json!(model);
         }
+        super::super::permissions::apply_codex(payload, &mut params, &cwd, true)?;
         let response = self
             .runtime
             .request("thread/start", params, Some(authorization))
@@ -1002,6 +1029,13 @@ impl Harness {
         payload: &Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
+        let (editing_active, editing_compacting) = {
+            let projection = self.projection.lock().await;
+            (
+                projection.active.get(id).cloned(),
+                projection.compactions.contains_key(id),
+            )
+        };
         let mut store = self.store.lock().await;
         let permit = authorization.prepare_dispatch().await?;
         let mut response = json!({"ok":true,"threadId":id});
@@ -1086,7 +1120,15 @@ impl Harness {
                     } else {
                         *message = edit.original.clone();
                     }
-                    message.state = "queued".into();
+                    message.state = if action == "cancelQueuedEdit"
+                        && data.queue_gates.get(id).is_some_and(|gate| {
+                            matches!(gate.phase.as_str(), "paused" | "recovering")
+                        }) {
+                        "paused"
+                    } else {
+                        "queued"
+                    }
+                    .into();
                     edit.state = if action == "editQueued" {
                         "committed"
                     } else {
@@ -1101,6 +1143,14 @@ impl Harness {
                         Some(super::super::hash(&serde_json::to_string(&json!([
                             action, payload
                         ]))?));
+                    if action == "editQueued" {
+                        data.authorize_queue_edit(
+                            id,
+                            response["messageId"].as_str().unwrap(),
+                            editing_active.clone(),
+                            editing_compacting,
+                        );
+                    }
                     return Ok(());
                 }
                 let message_id = required(payload, "messageId")?;

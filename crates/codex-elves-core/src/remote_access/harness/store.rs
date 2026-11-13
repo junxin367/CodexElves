@@ -74,6 +74,15 @@ pub(super) struct Edit {
     pub terminal_fingerprint: Option<String>,
 }
 
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(super) struct QueueGate {
+    pub turn_id: Option<String>,
+    pub kind: String,
+    pub phase: String,
+    pub reason: String,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub(super) struct Data {
@@ -88,6 +97,7 @@ pub(super) struct Data {
     pub settings: BTreeMap<String, Value>,
     pub answered_questions: BTreeMap<String, Value>,
     pub thread_devices: BTreeMap<String, String>,
+    pub queue_gates: BTreeMap<String, QueueGate>,
 }
 
 pub(super) struct Store {
@@ -120,6 +130,23 @@ impl Store {
                 .into();
             }
         }
+        // 用户要求异常退出后不自动续发：保留上一轮依赖，重启后重新核对正常完成凭据。
+        // 旧版本没有记录依赖轮次的队列也需要核对，不能把恢复后的 idle 当成正常结束。
+        for (id, queue) in &data.queues {
+            if queue.iter().any(|message| message.state == "queued") {
+                let gate = data
+                    .queue_gates
+                    .entry(id.clone())
+                    .or_insert_with(|| QueueGate {
+                        kind: "turn".into(),
+                        phase: "recovering".into(),
+                        ..Default::default()
+                    });
+                if gate.phase == "waiting" {
+                    gate.phase = "recovering".into();
+                }
+            }
+        }
         Ok(Self {
             path,
             data,
@@ -133,6 +160,13 @@ impl Store {
     ) -> anyhow::Result<T> {
         let mut next = self.data.clone();
         let value = change(&mut next)?;
+        next.queue_gates.retain(|id, _| {
+            next.queues.get(id).is_some_and(|queue| {
+                queue
+                    .iter()
+                    .any(|message| !message.state.starts_with("direct-"))
+            })
+        });
         while next.sent.len() > 4096 {
             next.sent.pop_first();
         }
@@ -172,7 +206,17 @@ impl Store {
             .into_iter()
             .flatten()
             .filter(|q| q.state != "editing" && !q.state.starts_with("direct-"))
-            .map(Queued::view)
+            .map(|message| {
+                let mut view = message.view();
+                if let Some(gate) = self.data.queue_gates.get(thread_id)
+                    && (message.state == "paused"
+                        || message.state == "queued" && gate.phase == "recovering")
+                    && !gate.reason.is_empty()
+                {
+                    view["pausedReason"] = json!(&gate.reason);
+                }
+                view
+            })
             .collect();
         let edits: Vec<_> = self.data.edits.iter().filter(|(_, e)| e.thread_id == thread_id
             && !["committed","canceled"].contains(&e.state.as_str()))

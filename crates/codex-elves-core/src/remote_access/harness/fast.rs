@@ -1,25 +1,88 @@
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::{Harness, error, required};
 use crate::remote_access::RemoteAuthorization;
 
 fn model<'a>(catalog: &'a Value, name: &str) -> Option<&'a Value> {
-    catalog["data"]
-        .as_array()?
+    let models = catalog["data"].as_array()?;
+    models
         .iter()
         .find(|row| row["model"] == name || row["id"] == name)
+        .or_else(|| models.iter().find(|row| row["requestModel"] == name))
+}
+
+fn alias_target<'a>(aliases: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
+    aliases
+        .iter()
+        .find(|(alias, _)| alias.trim().eq_ignore_ascii_case(name.trim()))
+        .and_then(|(_, target)| target.as_str())
+}
+
+fn request_model(catalog: &Value, name: &str) -> String {
+    catalog["fastModelAliases"]
+        .as_object()
+        .and_then(|aliases| alias_target(aliases, name))
+        .or_else(|| {
+            model(catalog, name).and_then(|row| {
+                row["requestModel"]
+                    .as_str()
+                    .or_else(|| row["model"].as_str())
+            })
+        })
+        .unwrap_or(name)
+        .to_owned()
 }
 
 fn fast_tier<'a>(catalog: &'a Value, name: &str) -> Option<&'a str> {
-    let row = model(catalog, name)?;
-    if row["fastModeSupported"] != true {
+    if !is_gpt_model(&request_model(catalog, name)) {
         return None;
     }
-    row["serviceTiers"]
-        .as_array()?
-        .iter()
+    // API 目录没有当前 GPT 行或档位声明时，也按用户要求使用 priority。
+    model(catalog, name)
+        .and_then(|row| row["serviceTiers"].as_array())
+        .into_iter()
+        .flatten()
         .filter_map(|tier| tier["id"].as_str())
         .find(|id| matches!(*id, "priority" | "fast"))
+        .or(Some("priority"))
+}
+
+fn is_gpt_model(name: &str) -> bool {
+    let name = name
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    // 与 native-fast-unlock.js 的 /^gpt-\d/ 一致，只核对实际请求模型。
+    name.strip_prefix("gpt-")
+        .and_then(|suffix| suffix.as_bytes().first())
+        .is_some_and(u8::is_ascii_digit)
+}
+
+pub(super) fn service_model(raw: &Value, aliases: &Map<String, Value>) -> Option<Value> {
+    let mut normalized = crate::codex_service::normalize_model(raw)?;
+    let name = normalized["model"].as_str()?;
+    let actual = alias_target(aliases, name)
+        .or_else(|| normalized["requestModel"].as_str())
+        .unwrap_or(name)
+        .to_owned();
+    let supported = is_gpt_model(&actual);
+    // 用户要求服务模式对 GPT 直接开放 Fast：API 目录缺少 tiers 或旧支持标记为 false 均不拦截。
+    // 复用注入的别名解析，GPT 名称指向非 GPT 时仍关闭；账号、管理员和配置限制由实例能力单独核对。
+    normalized["requestModel"] = json!(actual);
+    normalized["fastModeSupported"] = json!(supported);
+    if supported
+        && !normalized["serviceTiers"]
+            .as_array()?
+            .iter()
+            .any(|tier| matches!(tier["id"].as_str(), Some("priority" | "fast")))
+    {
+        normalized["serviceTiers"]
+            .as_array_mut()?
+            .push(json!({"id":"priority","name":"Fast"}));
+    }
+    Some(normalized)
 }
 
 fn configured_fast(config: &Value) -> Option<bool> {
@@ -125,7 +188,7 @@ impl Harness {
         Ok(
             json!({"ok":true,"threadId":id,"model":name,"supported":supported,
             "enabled":supported && if let Some(id) = id { self.fast_preference(id).await } else { false },
-            "reason":if fast_tier(&catalog, name).is_none() { json!("当前模型未声明 Fast 能力") }
+            "reason":if fast_tier(&catalog, name).is_none() { json!("当前请求模型不是 GPT，不能开启 Fast") }
                 else { catalog["fastModeAvailability"]["reason"].clone() }}),
         )
     }
@@ -139,7 +202,7 @@ impl Harness {
             ));
         }
         if fast_tier(&catalog, name).is_none() {
-            return Err(error(409, "当前请求模型未声明 Fast 能力"));
+            return Err(error(409, "当前请求模型不是 GPT，不能开启 Fast"));
         }
         Ok(catalog)
     }
@@ -166,6 +229,7 @@ impl Harness {
             self.models(&json!({})).await?
         };
         let same_model = actual == name
+            || request_model(&catalog, actual) == request_model(&catalog, name)
             || model(&catalog, actual)
                 .zip(model(&catalog, name))
                 .is_some_and(|(left, right)| {
@@ -325,24 +389,57 @@ mod tests {
     }
 
     #[test]
-    fn fast_model_metadata_preserves_actual_model_and_explicit_denials() {
-        let normalize = |row: Value| crate::codex_service::normalize_model(&row).unwrap();
+    fn service_fast_uses_actual_gpt_model_without_requiring_declared_capability() {
+        let normalize = |row: Value| service_model(&row, &Map::new()).unwrap();
         for row in [
             json!({"model":"claude-opus","serviceTiers":[{"id":"priority"}],"supports_fast":true}),
             json!({"model":"unknown-alias","serviceTiers":[{"id":"priority"}]}),
-            json!({"model":"gpt-test","serviceTiers":[]}),
-            json!({"model":"gpt-test","serviceTiers":[{"id":"priority"}],"supports_fast":false}),
-            json!({"model":"gpt-test","serviceTiers":[{"id":"priority"}],"supports_fast":true,"fastModeSupported":false}),
+            json!({"model":"gpt-unknown","serviceTiers":[{"id":"priority"}]}),
+            json!({"model":"gpt-6.1-alias","requestModel":"claude-opus","serviceTiers":[{"id":"priority"}]}),
         ] {
             let catalog = json!({"data":[normalize(row)]});
             let name = catalog["data"][0]["model"].as_str().unwrap();
             assert_eq!(fast_tier(&catalog, name), None);
         }
+        for row in [
+            json!({"model":"gpt-6.1-sol"}),
+            json!({"model":"openai/GPT-6.1-sol","serviceTiers":[]}),
+            json!({"model":"gpt-6.1-sol","serviceTiers":[],"supports_fast":false}),
+            json!({"model":"gpt-6.1-sol","serviceTiers":[{"id":"priority"}],"supports_fast":true,"fastModeSupported":false}),
+            json!({"model":"gpt-6.1-custom","serviceTiers":[{"id":"flex"}]}),
+        ] {
+            let normalized = normalize(row);
+            let catalog = json!({"data":[normalized.clone()]});
+            let name = normalized["model"].as_str().unwrap();
+            assert_eq!(normalized["fastModeSupported"], true);
+            assert_eq!(fast_tier(&catalog, name), Some("priority"));
+            assert_eq!(normalize(normalized.clone()), normalized);
+        }
         let alias = normalize(json!({"id":"alias-id","model":"sol-alias",
-            "requestModel":"gpt-6.1-sol","serviceTiers":[{"id":"priority","name":"Fast"}]}));
+            "requestModel":"gpt-6.1-sol","serviceTiers":[]}));
         let catalog = json!({"data":[alias]});
         assert_eq!(fast_tier(&catalog, "sol-alias"), Some("priority"));
         assert_eq!(fast_tier(&catalog, "alias-id"), Some("priority"));
+        assert_eq!(fast_tier(&catalog, "gpt-6.1-sol"), Some("priority"));
         assert_eq!(fast_tier(&catalog, "other-thread-model"), None);
+        let explicit = normalize(json!({"model":"gpt-6.1-sol","serviceTiers":[{"id":"fast"}]}));
+        assert_eq!(
+            fast_tier(&json!({"data":[explicit]}), "gpt-6.1-sol"),
+            Some("fast")
+        );
+        let aliases = serde_json::from_value::<Map<String, Value>>(json!({
+            "主力模型":"openai/gpt-6.1-sol",
+            "GPT-6.1-alias":"claude-opus"
+        }))
+        .unwrap();
+        for (name, expected) in [("主力模型", Some("priority")), ("gpt-6.1-alias", None)] {
+            let normalized = service_model(&json!({"model":name}), &aliases).unwrap();
+            assert_eq!(fast_tier(&json!({"data":[normalized]}), name), expected);
+        }
+        let catalog = json!({"data":[],"fastModelAliases":aliases});
+        assert_eq!(fast_tier(&catalog, "gpt-6.1-unlisted"), Some("priority"));
+        assert_eq!(fast_tier(&catalog, "主力模型"), Some("priority"));
+        assert_eq!(fast_tier(&catalog, "gpt-6.1-alias"), None);
+        assert_eq!(fast_tier(&catalog, "unknown-alias"), None);
     }
 }

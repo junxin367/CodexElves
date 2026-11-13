@@ -7,6 +7,7 @@ mod fast;
 mod pins;
 mod projection;
 mod projects;
+mod queue_gate;
 mod read_cache;
 mod reads;
 mod runtime;
@@ -46,6 +47,7 @@ pub(super) struct Harness {
     queue_worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     desktop: desktop::DesktopObservers,
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    queue_recovery_after: Mutex<HashMap<String, std::time::Instant>>,
     loaded: Mutex<HashMap<String, String>>,
     pin_capability: Mutex<Option<(String, bool)>>,
     pub enabled: AtomicBool,
@@ -109,6 +111,7 @@ impl Harness {
             queue_worker: Mutex::new(None),
             desktop: desktop::DesktopObservers::new(projection, audit),
             locks: Mutex::new(HashMap::new()),
+            queue_recovery_after: Mutex::new(HashMap::new()),
             loaded: Mutex::new(HashMap::new()),
             pin_capability: Mutex::new(None),
             enabled: AtomicBool::new(false),
@@ -117,6 +120,19 @@ impl Harness {
 
     pub fn attach(&self, controller: Weak<RemoteAccessController>) {
         let _ = self.controller.set(controller);
+    }
+
+    pub async fn configured_permissions(&self) -> anyhow::Result<Value> {
+        // 只读实例的生效配置，不创建或恢复会话；配置保存后不能复用模型目录的 30 秒缓存。
+        let response =
+            execution::Scope::service(self.audit.clone(), "permission-config", &json!({}), None)
+                .run(self.runtime.request(
+                    "config/read",
+                    json!({"cwd":null,"includeLayers":false}),
+                    None,
+                ))
+                .await?;
+        Ok(super::permissions::codex_config_preset(&response)?)
     }
 
     async fn start(self: &Arc<Self>) -> anyhow::Result<()> {
@@ -148,8 +164,22 @@ impl Harness {
                                 }
                             }
                         }
+                        let paused = match service.observe_queue_lifecycle(&frame).await {
+                            Ok(paused) => paused,
+                            Err(failure) => {
+                                let _ = crate::diagnostic_log::append_diagnostic_log(
+                                    "remote_access.queue_completion_check_failed",
+                                    json!({"error":format!("{failure:#}")}),
+                                );
+                                false
+                            }
+                        };
+                        let affected = frame["params"]["threadId"].as_str().map(str::to_owned);
                         service.catalog.observe(&frame).await;
                         service.projection.lock().await.ingest(frame);
+                        if paused && let Some(id) = affected {
+                            service.queue_changed(&id).await;
+                        }
                     }
                 },
             ));
@@ -555,6 +585,12 @@ impl Harness {
 
     async fn queue_changed(&self, id: &str) {
         let snapshot = self.queue(id).await;
+        if snapshot["queuedMessages"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+        {
+            self.queue_recovery_after.lock().await.remove(id);
+        }
         self.projection
             .lock()
             .await
@@ -562,6 +598,8 @@ impl Harness {
     }
 
     async fn drain_queues(self: &Arc<Self>) {
+        // 用户要求取回编辑后等同未发送草稿，不阻塞后续队列；原槽位仅供再次发送时恢复顺序。
+        // 这里只跳过 editing，暂停、发送中或结果未知的消息仍保持原有等待边界。
         let candidates: Vec<_> = self
             .store
             .lock()
@@ -569,7 +607,11 @@ impl Harness {
             .data
             .queues
             .iter()
-            .filter(|(_, q)| q.first().is_some_and(|m| m.state == "queued"))
+            .filter(|(_, q)| {
+                q.iter()
+                    .find(|m| m.state != "editing")
+                    .is_some_and(|m| m.state == "queued")
+            })
             .map(|(id, _)| id.clone())
             .collect();
         for id in candidates {
@@ -590,7 +632,7 @@ impl Harness {
                 .data
                 .queues
                 .get(&id)
-                .and_then(|q| q.first())
+                .and_then(|q| q.iter().find(|m| m.state != "editing"))
                 .cloned();
             let Some(message) = message.filter(|q| q.state == "queued") else {
                 continue;
@@ -646,6 +688,21 @@ impl Harness {
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<()> {
         authorization.check().await?;
+        // 自动续发必须核对真实执行状态；重连后内存中没有 active 不代表上一轮正常完成。
+        let identity = self
+            .runtime
+            .request(
+                "thread/read",
+                json!({"threadId":id,"includeTurns":false}),
+                None,
+            )
+            .await?;
+        crate::codex_service::normalize_thread_response(&identity)?;
+        if self.send_is_running(id, &identity["thread"]).await? {
+            let (turn, compacting) = self.queue_anchor(id).await?;
+            self.remember_queue_wait(id, turn, compacting).await?;
+            return Ok(());
+        }
         if let Some(snapshot) = self.owner_snapshot(id).await? {
             // 桌面已明确执行中时，历史尚未载入当前轮次也必须等待，不能提前派发队列。
             let active = desktop::executing(&snapshot)
@@ -653,6 +710,13 @@ impl Harness {
                     .iter()
                     .any(|t| t["status"] == "inProgress");
             if active {
+                let turn = crate::desktop_owner_ipc::snapshot_turns(&snapshot)
+                    .iter()
+                    .rev()
+                    .find(|turn| turn["status"] == "inProgress")
+                    .and_then(|turn| turn["turnId"].as_str())
+                    .map(str::to_owned);
+                self.remember_queue_wait(id, turn, false).await?;
                 self.follow_owner(id, snapshot).await;
                 return Ok(());
             }
@@ -677,11 +741,32 @@ impl Harness {
                 return Ok(());
             }
         }
+        if !self
+            .queue_completion_confirmed(id, &identity, message.created_at)
+            .await?
+        {
+            return Ok(());
+        }
+        {
+            let projection = self.projection.lock().await;
+            if projection.active.contains_key(id) || projection.compactions.contains_key(id) {
+                return Ok(());
+            }
+        }
         self.store.lock().await.commit(|data| {
+            anyhow::ensure!(
+                data.queue_gates
+                    .get(id)
+                    .is_some_and(|gate| gate.phase == "ready"),
+                "上一轮完成状态已变化，队列继续等待"
+            );
             let queued = data
                 .queues
                 .get_mut(id)
-                .and_then(|q| q.iter_mut().find(|q| q.id == message.id))
+                .and_then(|q| {
+                    q.iter_mut()
+                        .find(|q| q.id == message.id && q.state == "queued")
+                })
                 .context("队列消息已变化")?;
             queued.state = "sending".into();
             Ok(())

@@ -10,15 +10,15 @@ import { isDeepStrictEqual } from "node:util";
 import {
   sourceFingerprint, createEvidenceReference, verifyEvidenceReference, screenshotFileType,
   verifyNativeEvidence, verifyRemoteAccessReport, verifyRuntimeEvidence, verifySideNamePhase,
-  verifyQuestionReceiptRecoveryStage, verifyQueueEditCancelStage,
+  verifyQuestionReceiptRecoveryStage,
   verifyQueueRecoveryStage, classifyQueueRecoveryTransition, verifyQueueRecoveryTerminal,
-  verifyQueueEditCancelEditingFacts, verifyQueueEditCancelFacts,
+  verifyQueueEditCancelEditingFacts,
   verifyQueueDequeueRaceConsumption, verifyQueueDequeueRaceFacts,
 } from "./remote-access-e2e-evidence.mjs";
 import { withRemoteAccessEnvironmentLease, restoreRemoteAccessEnvironmentLease,
   validateRemoteAccessEnvironmentScope } from "./remote-access-e2e-environment.mjs";
 
-export const REMOTE_ACCESS_E2E_VERSION = "2.5.9";
+export const REMOTE_ACCESS_E2E_VERSION = "2.5.10";
 
 export const REMOTE_ACCESS_E2E_CASES = Object.freeze([
   { id: "read.ready", suite: "read", title: "真实页面与连接可用" },
@@ -28,8 +28,8 @@ export const REMOTE_ACCESS_E2E_CASES = Object.freeze([
   { id: "session.model", suite: "session", title: "模型选择、协议归属及发送后的实际模型" },
   { id: "session.send_stream", suite: "session", title: "真实发送、执行中流式变化和最终回复" },
   { id: "queue.automatic", suite: "queue", title: "两条原生队列消息按 FIFO 自然承接且各消费一次" },
-  { id: "queue.edit_cancel", suite: "queue", title: "队列编辑取消后恢复原消息" },
-  { id: "queue.edit_save", suite: "queue", title: "队列编辑保存并刷新核对" },
+  { id: "queue.edit_draft", suite: "queue", title: "取回排队消息作为未发送草稿，重新发送恢复原位置" },
+  { id: "queue.edit_save", suite: "queue", title: "修改排队草稿后重新发送并刷新核对" },
   { id: "queue.reorder", suite: "queue", title: "队列键盘排序并刷新核对" },
   { id: "queue.remove", suite: "queue", title: "删除指定排队消息" },
   { id: "queue.steer", suite: "queue", title: "引导指定排队消息进入实际执行" },
@@ -228,7 +228,10 @@ async function state(ctx) {
       canCreate: !!document.querySelector("#new-chat") && !document.querySelector("#new-chat").disabled,
       related: visible(document.querySelector("#related-session-back")),
       parentMenuUnread: document.querySelector("#open-session-tools")?.classList.contains("has-unread-side-thread") || false,
-      editing: visible(document.querySelector("#edit-message-area")),
+      editing: document.querySelector("#send")?.dataset.queuedEditState === "editing",
+      queueEditBanner: visible(document.querySelector("#edit-message-area")),
+      queueEditCancel: [...document.querySelectorAll("#composer button")].some(node =>
+        visible(node) && node.textContent?.trim() === "取消编辑"),
       confirmation: visible(document.querySelector("#confirmation-dialog"))
         ? { title: text("#confirmation-title"), message: text("#confirmation-message") } : null,
       menuItems: [...document.querySelectorAll('[role="menuitem"]')].filter(visible).map(node => ({
@@ -769,7 +772,7 @@ async function activeWindow(ctx, key) {
 async function queueRef(ctx, name) {
   permit(ctx, "allowQueueChanges");
   const spec = ctx.report.queue[name];
-  if (!spec) block(`没有本轮创建的队列对象 ${name}，请先运行 queue.edit_cancel`);
+  if (!spec) block(`没有本轮创建的队列对象 ${name}，请先运行 queue.edit_draft`);
   await selectOwned(ctx, "main");
   const observation = await state(ctx);
   const matches = observation.queue.filter(row => row.text.includes(spec.marker));
@@ -1027,7 +1030,6 @@ export const REMOTE_ACCESS_E2E_CONTRACTS = Object.freeze({
   "side.custom_name_refresh": { expectedFacts: { surface: "codex-desktop" },
     sideName: { key: "side", phases: ["custom-after-next-message"], afterMessage: true, custom: true } },
   "queue.automatic": { requiresNaturalQueue: true },
-  "queue.edit_cancel": { requiresQueueEditCancel: true },
   "transport.native": { expectedFacts: { transport: "native", submissionCount: 1, duplicateCount: 0 } },
   "transport.cli_fallback": { expectedFacts: { transport: "cli", fallbackScope: "thread", globalReadOnly: false, submissionCount: 1, duplicateCount: 0 } },
   "transport.native_takeover": { expectedFacts: { transport: "native", nativeTakeover: true, replayedSubmissionCount: 0 } },
@@ -1585,11 +1587,11 @@ const handlers = {
         prompt: spec.text, expectedReply: spec.expected })),
     }, requirement: "逐条将原排队回执的 clientUserMessageId 关联至持久 userMessage.clientId；核对 FIFO 起止时间、准确正文、唯一回复及最终空队列" });
   },
-  async "queue.edit_cancel"(ctx) {
+  async "queue.edit_draft"(ctx) {
     permit(ctx, "allowQueueChanges"); permit(ctx, "allowDrafts");
-    // 缺观察能力时先阻塞，不能先创建活动轮和队列再发现无原input/ED证据。
+    // 复用原生取回观察合同的 before/editing 两阶段，保留完整原输入及位置证据。
     driver(ctx, "native", ["observe-queue-edit-cancel"]);
-    const main = owned(ctx, "main"), control = owned(ctx, "control");
+    const main = owned(ctx, "main");
     await activeWindow(ctx, "editing");
     for (const key of ["A", "B", "C"]) {
       if (!ctx.report.queue[key]) {
@@ -1597,108 +1599,69 @@ const handlers = {
         await checkpoint(ctx);
       }
     }
-    const { spec } = await queueRef(ctx, "A");
-    const stage = { kind: "queue-edit-cancel", threadId: main.id, controlThreadId: control.id,
-      queueId: spec.queueId, queueActionId: spec.actionId,
-      cancelActionId: `${ctx.report.runId}:${ctx.current.id}:edit-cancel-A` };
-    const initialDrafts = {};
-    const captureDraft = async (key, label) => {
-      await selectOwned(ctx, key);
-      const initial = await wait(ctx, "草稿所属会话加载完成", value =>
-        value.threadId === owned(ctx, key).id && value.loading === false && value.promptEditable);
-      if (initial.editing || initial.pendingText) block("已有编辑事务或待确认写入，不能开始队列取消测试");
-      if (initial.prompt && !initial.prompt.includes(`[remote-e2e:${ctx.report.runId}:`))
-        block("普通草稿不是本轮输入，停止队列取消测试");
-      initialDrafts[key] = initial.prompt;
-      if (!initial.prompt) await fillOwnedDraft(ctx, key, marker(ctx, `queue-cancel-${key}-draft`));
-      return captureObservation(ctx, label);
-    };
-    stage.controlBeforeUi = await captureDraft("control", "queue-cancel-control-before");
-    stage.beforeUi = await captureDraft("main", "queue-cancel-main-before");
+    const { spec, observation: initial } = await queueRef(ctx, "A");
+    if (initial.editing || initial.pendingText) block("已有取回草稿或待确认写入，不能开始排队草稿测试");
+    if (initial.prompt && !initial.prompt.includes(`[remote-e2e:${ctx.report.runId}:`))
+      block("普通草稿不是本轮输入，停止排队草稿测试");
+    const stage = { kind: "queue-edit-draft", threadId: main.id, queueId: spec.queueId,
+      queueActionId: spec.actionId, beforeOrder: initial.queue.map(row => row.id) };
     const observe = async phase => {
       const result = await driverStep(ctx, "native", "observe-queue-edit-cancel", {
-        payload: { phase, queueId: stage.queueId, editId: stage.editId, cancelActionId: stage.cancelActionId },
+        payload: { phase, queueId: stage.queueId, editId: stage.editId },
         facts: [fact("phase", phase)],
       });
       const records = result.records.filter(record => record.facts.phase === phase && record.threadId === main.id);
-      invariant(records.length === 1, "队列取消每阶段必须提供唯一原始观察");
+      invariant(records.length === 1, "队列取回每阶段必须提供唯一原始观察");
       stage[phase] = records[0];
       return records[0].facts;
     };
     const before = await observe("before");
     if (!before.queuedMessages?.some(value => value.id === stage.queueId))
       block("原队列对象在取出前已离开，保留窗口错过结果，不重建或重发");
-    await action(ctx, "edit-cancel-A", { kind: "queue-edit-cancel", threadId: spec.threadId, queueId: spec.queueId }, async () => {
+    await action(ctx, "edit-draft-A", { kind: "queue-race-edit", threadId: spec.threadId, queueId: spec.queueId }, async () => {
       await queueMenu(ctx, spec.queueId);
       await click(ctx, ctx.tab.playwright.getByRole("menuitem", { name: "编辑消息", exact: true }));
       await wait(ctx, "真实队列编辑进入输入框", value => value.editing && value.prompt.includes(spec.marker));
       const editing = await observe("editing");
       invariant(typeof editing.editId === "string" && editing.editId.length > 0 && editing.editState === "editing",
-        "缺少准确原生ED，不执行取消");
+        "缺少准确原生ED，不继续修改");
       stage.editId = editing.editId;
       verifyQueueEditCancelEditingFacts({ before: stage.before.facts, editing }, {
         threadId: main.id, queueId: stage.queueId, editId: stage.editId,
       });
-      ctx.report.actions[stage.cancelActionId].editId = stage.editId;
-      const changed = `${spec.text}\n取消编辑的临时文字`;
+      const changed = `${spec.text}\n取回后尚未发送的草稿`;
       await ctx.tab.playwright.getByRole("textbox", { name: "消息输入", exact: true }).fill(changed);
       await wait(ctx, "真实编辑器已改成与原文不同的正文", value =>
         value.threadId === main.id && value.editing && value.prompt === changed);
-      stage.beforeCancelUi = await captureObservation(ctx, "queue-cancel-edited-before-cancel");
-      invariant(stage.beforeCancelUi.observation.prompt === changed
-        && changed !== spec.text, "取消前实际编辑器值未改稿，不执行取消");
-      const editorPath = join(ctx.outputDir, `${ctx.report.evidenceSequence}-queue-cancel-editor.json`);
-      await writeFile(editorPath, `${JSON.stringify({
-        threadId: stage.beforeCancelUi.observation.threadId, editId: stage.editId,
-        capturedAt: stage.beforeCancelUi.observation.at, value: stage.beforeCancelUi.observation.prompt,
-      }, null, 2)}\n`, "utf8");
-      stage.beforeCancelEditor = await createEvidenceReference(editorPath);
-      stage.cancelStartedAt = iso();
-      // 点击前持久保存实际contenteditable值、thread/ED及时间；DOM摘要可能不含编辑器值。
-      await note(ctx, "queue-cancel-before-submit", {
-        threadId: main.id, editId: stage.editId, cancelStartedAt: stage.cancelStartedAt,
-        beforeCancelEditor: stage.beforeCancelEditor, beforeCancelUi: stage.beforeCancelUi,
-      });
-      await click(ctx, ctx.tab.playwright.getByRole("button", { name: "取消编辑并恢复未发送草稿", exact: true }));
-      await wait(ctx, "取消后同一会话加载完成、原普通草稿恢复且发送可用", value =>
-        value.threadId === main.id && value.loading === false && !value.editing && !value.pendingText
-        && value.prompt === stage.beforeUi.observation.prompt && value.promptEditable
-        && value.send.action === "send" && value.send.enabled);
-      stage.afterUi = await captureObservation(ctx, "queue-cancel-main-restored");
-      const after = await observe("after");
-      if (Array.isArray(after.queuedMessages) && !after.queuedMessages.some(value =>
-        value.clientUserMessageId === editing.originalClientUserMessageId))
-        block("取消后原对象已离开队列；本例只验忙时恢复位置，需只读核对原消息，不能重发补过");
-      const restored = verifyQueueEditCancelFacts({
-        before: stage.before.facts, editing: stage.editing.facts, after,
-      }, { threadId: main.id, queueId: stage.queueId, editId: stage.editId });
-      return { queueId: restored.queueId, editId: stage.editId, receiptId: after.cancelReceipt.requestId };
+      stage.draftUi = await captureObservation(ctx, "queue-unsent-draft");
+      const draft = stage.draftUi.observation;
+      invariant(!draft.queueEditBanner && !draft.queueEditCancel && draft.send.action === "send",
+        "排队草稿仍显示专用编辑栏、取消按钮或保存入口");
+      invariant(!draft.queue.some(row => row.id === stage.queueId) && !userTurn(draft, spec),
+        "未点击发送，原消息已经恢复队列或进入执行");
+      return { queueId: stage.queueId, editId: stage.editId };
     });
-    await selectOwned(ctx, "control");
-    await wait(ctx, "取消后控制会话草稿加载完成", value =>
-      value.threadId === control.id && value.loading === false && value.promptEditable);
-    stage.controlAfterUi = await captureObservation(ctx, "queue-cancel-control-after");
-    await selectOwned(ctx, "main");
-    await wait(ctx, "返回主会话后加载完成且可发送", value =>
-      value.threadId === main.id && value.loading === false && value.promptEditable
-      && value.send.action === "send" && value.send.enabled);
-    stage.returnedUi = await captureObservation(ctx, "queue-cancel-returned-ready");
-    const verified = await verifyQueueEditCancelStage(stage, {
-      runId: ctx.report.runId, caseId: ctx.current.id, origin: ctx.origin,
-      sourceFingerprint: ctx.report.sourceFingerprint, runStartedAt: ctx.report.runStartedAt,
-      threadId: main.id, controlThreadId: control.id,
-      queueAction: ctx.report.actions[stage.queueActionId], cancelAction: ctx.report.actions[stage.cancelActionId],
-    }, { baseDir: ctx.outputDir });
-    spec.queueId = verified.queueId;
-    await note(ctx, "queue-edit-cancel", stage);
-    // 只清理由本例从空稿创建的测试稿；已有普通稿逐字保留，避免阻塞后续案例。
-    for (const key of ["control", "main"])
-      if (initialDrafts[key] === "") {
-        await fillOwnedDraft(ctx, key, "");
-        await captureObservation(ctx, `queue-cancel-clear-seeded-${key}-draft`);
-      }
-    await selectOwned(ctx, "main");
-    await verifyNative(ctx, { threadIds: [spec.threadId], requirement: "取消编辑恢复原消息且没有提前执行或重复插入" });
+    const changed = stage.draftUi.observation.prompt;
+    const reloaded = await refreshOwned(ctx, "main");
+    invariant(reloaded.editing && reloaded.prompt === changed
+      && !reloaded.queue.some(row => row.id === stage.queueId) && !userTurn(reloaded, spec),
+    "刷新后未发送草稿丢失，或原消息被自动恢复、执行");
+    await action(ctx, "resend-draft-A", { kind: "queue-edit-save", threadId: main.id, queueId: stage.queueId }, async () => {
+      await click(ctx, ctx.tab.playwright.getByRole("button", { name: "发送消息", exact: true }));
+      const after = await wait(ctx, "重新发送后原位置出现唯一修改消息", value => !value.editing
+        && value.queue.filter(row => row.text.trim() === changed.trim()).length === 1);
+      const restored = after.queue.find(row => row.text.trim() === changed.trim());
+      stage.afterOrder = after.queue.map(row => row.id);
+      invariant(isDeepStrictEqual(stage.afterOrder,
+        stage.beforeOrder.map(id => id === stage.queueId ? restored.id : id)),
+      "重新发送改变了原队列位置");
+      invariant(after.prompt === initial.prompt, "重新发送后原普通草稿没有恢复");
+      spec.text = changed; spec.queueId = restored.id;
+      return { queueId: restored.id, editId: stage.editId };
+    });
+    await note(ctx, "queue-edit-draft", stage);
+    await verifyNative(ctx, { threadIds: [main.id], queueOrder: stage.afterOrder,
+      requirement: "取回时保留完整原输入和位置；未再次发送不自动入队，重新发送后只保留一份修改且顺序不变" });
   },
   async "queue.edit_save"(ctx) {
     const { spec } = await queueRef(ctx, "A");
@@ -1708,8 +1671,9 @@ const handlers = {
       await click(ctx, ctx.tab.playwright.getByRole("menuitem", { name: "编辑消息", exact: true }));
       await wait(ctx, "进入队列编辑", value => value.editing && value.prompt.includes(spec.marker));
       await ctx.tab.playwright.getByRole("textbox", { name: "消息输入", exact: true }).fill(edited);
-      await click(ctx, ctx.tab.playwright.getByRole("button", { name: "保存队列消息修改", exact: true }));
-      await wait(ctx, "保存后队列出现唯一修改消息", value => !value.editing
+      await wait(ctx, "真实编辑器已改成待发送正文", value => value.editing && value.prompt === edited);
+      await click(ctx, ctx.tab.playwright.getByRole("button", { name: "发送消息", exact: true }));
+      await wait(ctx, "发送后队列出现唯一修改消息", value => !value.editing
         && value.queue.filter(row => row.text.trim() === edited.trim()).length === 1);
       const observation = await refreshOwned(ctx, "main");
       const row = observation.queue.find(value => value.text.trim() === edited.trim());
@@ -3390,7 +3354,7 @@ const requiredSteps = value => Object.freeze(value.split(" ").map(entry => {
   return Object.freeze({ driver, operation, count: Number(count) });
 }));
 export const REMOTE_ACCESS_E2E_REQUIRED_DRIVER_STEPS = Object.freeze(Object.fromEntries(Object.entries({
-  "queue.edit_cancel": "native:observe-queue-edit-cancel*3",
+  "queue.edit_draft": "native:observe-queue-edit-cancel*2",
   "side.default_name": "desktop:observe-thread*3",
   "side.first_message_name": "desktop:observe-thread*3",
   "side.same_id_name": "desktop:observe-thread*3",
@@ -3593,7 +3557,7 @@ export const testModelSelection = options => runRemoteAccessCase("session.model"
 export const testOrdinaryCreation = options => runRemoteAccessCase("session.create", options);
 export const testSendAndRealtimeReply = options => runRemoteAccessCase("session.send_stream", options);
 export const testAutomaticQueueHandoff = options => runRemoteAccessCase("queue.automatic", options);
-export const testQueueEditCancel = options => runRemoteAccessCase("queue.edit_cancel", options);
+export const testQueueEditDraft = options => runRemoteAccessCase("queue.edit_draft", options);
 export const testQueueEditSave = options => runRemoteAccessCase("queue.edit_save", options);
 export const testQueueReorder = options => runRemoteAccessCase("queue.reorder", options);
 export const testQueueRemoval = options => runRemoteAccessCase("queue.remove", options);

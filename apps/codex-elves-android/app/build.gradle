@@ -102,6 +102,8 @@ def bundledWebResources = [
     [source: "index.html", path: "/", contentType: "text/html; charset=utf-8"],
     [source: "app.js", path: "/app.js", contentType: "application/javascript; charset=utf-8"],
     [source: "select.js", path: "/select.js", contentType: "application/javascript; charset=utf-8"],
+    // 权限菜单与实例设置共用该模块，Android 内置网页须与远程页面保留同一导入依赖。
+    [source: "permissions.js", path: "/permissions.js", contentType: "application/javascript; charset=utf-8"],
     [source: "diagnostics.js", path: "/diagnostics.js", contentType: "application/javascript; charset=utf-8"],
     [source: "session-tools.js", path: "/session-tools.js", contentType: "application/javascript; charset=utf-8"],
     [source: "session-files.js", path: "/session-files.js", contentType: "application/javascript; charset=utf-8"],

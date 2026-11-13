@@ -6058,14 +6058,35 @@
         || request.message.multiUserMessageSender != null || context.messageSender != null)
       throw failure(409, "此队列消息带有额外原生上下文，请在 Codex 桌面编辑");
     const options = request.message.submissionOptions;
+    const selection = options?.permissionSelection;
+    // 用户要求权限覆盖随同一条队列消息保留；只接受原生可重建的预设/全局配置选择，
+    // 其它独立配置仍拒绝取消恢复，不能把原本受限的消息按当前默认权限重新提交。
+    const knownPermission = options?.shouldSendPermissionOverrides === true && options.usePermissionSelection === true
+      && Object.keys(options).every(key => ["agentMode", "permissionSelection", "shouldSendPermissionOverrides",
+        "usePermissionSelection", "executionHostId", "permissionProfileId", "serviceTier", "collaborationMode"].includes(key))
+      && selection && (selection.kind === "custom" && options.agentMode === "custom" && Object.keys(selection).length === 1
+        || selection.kind === "agent-mode" && Object.keys(selection).length === 2
+          && ["auto", "read-only", "full-access"].includes(selection.agentMode) && options.agentMode === selection.agentMode);
     if (options && (options.executionHostId != null && options.executionHostId !== "local"
-        || options.agentMode != null && options.agentMode !== "auto" || options.permissionProfileId != null
-        || options.serviceTier != null || options.shouldSendPermissionOverrides || options.usePermissionSelection
-        || options.permissionSelection != null || options.collaborationMode != null))
+        || options.permissionProfileId != null || options.serviceTier != null || options.collaborationMode != null
+        || !knownPermission && (options.agentMode != null && options.agentMode !== "auto"
+          || options.shouldSendPermissionOverrides || options.usePermissionSelection || options.permissionSelection != null)))
       throw failure(409, "此队列消息带有独立执行配置，不能按当前默认配置恢复");
     if (!prepared) return;
     if (prepared.executionHostId != null && prepared.executionHostId !== "local")
       throw failure(409, "原生取消准备不属于原本地执行宿主");
+    if (knownPermission) {
+      const permissions = prepared.start?.request;
+      const expected = { auto: ["on-request", "workspaceWrite", ":workspace"],
+        "read-only": ["on-request", "readOnly", ":read-only"],
+        "full-access": ["never", "dangerFullAccess", ":danger-full-access"] }[selection.agentMode];
+      if (!permissions || expected && (permissions.approvalPolicy !== expected[0]
+          || permissions.sandboxPolicy?.type !== expected[1] && permissions.permissions !== expected[2])
+          || !expected && (!(typeof permissions.approvalPolicy === "string" || permissions.approvalPolicy
+            && typeof permissions.approvalPolicy === "object")
+            || !permissions.sandboxPolicy && typeof permissions.permissions !== "string"))
+        throw failure(503, "原生取消准备未保留原权限选择，原消息尚未恢复，请在桌面核对");
+    }
     // 只接受已核 w8t 可证明等价的普通文本及图片：原生 prepare 产生完全相同的内容，
     // 其余原输入只能由 w8t 追加一次；不把完整原 input 强填回 prepare。
     const verify = input => {
@@ -6922,7 +6943,8 @@
         prompt: typeof payload.prompt === "string" ? payload.prompt.trim() : "",
         images: payload.images ?? [], skills: payload.skills ?? [],
         model: payload.model == null ? null : String(payload.model),
-        reasoningEffort: payload.reasoningEffort == null ? null : String(payload.reasoningEffort)
+        reasoningEffort: payload.reasoningEffort == null ? null : String(payload.reasoningEffort),
+        ...(payload.permissionMode ? { permissionMode: payload.permissionMode, permissionConfig: payload.permissionConfig } : {})
       }));
       const current = queuedSendSubmissions.get(key);
       if (current) {
@@ -6992,12 +7014,19 @@
       // 用户要求只有明确执行中才入队；旧队列、未知状态和 follower 身份都不能把普通发送改成排队。
       sendNow = !nativeSendIsRunning(threadId, sourceManager, thread);
       const cwd = manager.getConversationCwd(threadId) || thread.cwd || "/";
+      const permissionOverrides = payload.permissionMode ? requestedPermissionOverrides(payload, cwd) : null;
       const message = {
         id: payload.clientUserMessageId == null ? crypto.randomUUID() : requiredId(payload.clientUserMessageId),
         text: prompt,
         context: remoteAttachmentContext(prompt, cwd, imageAttachments),
         cwd,
         createdAt: Date.now()
+      };
+      if (permissionOverrides) message.submissionOptions = {
+        agentMode: payload.permissionMode === "configured" ? "custom" : payload.permissionMode,
+        shouldSendPermissionOverrides: true, usePermissionSelection: true,
+        permissionSelection: payload.permissionMode === "configured" ? { kind: "custom" }
+          : { kind: "agent-mode", agentMode: payload.permissionMode }
       };
       clientUserMessageId = message.id;
       message.clientUserMessageId = clientUserMessageId;
@@ -7018,6 +7047,8 @@
         && typeof serverQueue.read === "function"
         && !hasNativeLocalQueuedMessages(coordinator, serverQueue, threadId)
         && typeof serverQueue.canEnqueue === "function" && await serverQueue.canEnqueue(threadId, message);
+      // 单会话权限必须随原生准备结果保留；不支持独立覆盖的 server queue 继续交给原生本地队列保序。
+      if (permissionOverrides) useServerQueue = false;
       if (!useServerQueue && (typeof coordinator.sendMessage !== "function" || typeof coordinator.loadMessages !== "function"))
         throw failure(503, "当前 Codex 版本不支持原生本地消息队列");
       const inputItems = await skillInputs({ ...payload, threadId });
@@ -7029,7 +7060,8 @@
         model: threadSettings?.model ?? null,
         reasoningEffort: threadSettings?.effort ?? null,
         workspaceRoots: [cwd],
-        collaborationMode: conversation?.latestCollaborationMode ?? null
+        collaborationMode: conversation?.latestCollaborationMode ?? null,
+        ...(permissionOverrides ? { permissionsConfig: permissionOverrides, useAppServerPermissionDefault: false } : {})
       }), assertCurrent);
       assertCurrent();
       if (resumed?.status === "not-ready") throw failure(409, "会话暂不可用，请稍后重试");
@@ -7140,7 +7172,10 @@
           }
           preparedPhase = phase;
           // 普通发送不能意外引导晚到的另一轮；原生锁内最后一次空闲核对仍然保留。
-          return sendNow ? { ...current.submission, requiresIdle: true } : current.submission;
+          // 仅 start 覆盖权限；运行中吸收的 steer 仍使用当前轮次已确定的权限。
+          const submission = phase === "start" && permissionOverrides
+            ? withPermissionOverrides(current.submission, permissionOverrides) : current.submission;
+          return sendNow ? { ...submission, requiresIdle: true } : submission;
         }, undefined, sendNow ? assertAdmission : undefined, assertAdmission,
         ...(sourceManager.__codexElvesRequestClientManager === true ? [{ deferQueueSnapshotOnSent: true }] : []));
         if (!["queued", "sent"].includes(result?.status)
@@ -7268,6 +7303,43 @@
         && permissions.useAppServerPermissionDefault !== true))
       throw failure(503, "未能读取桌面权限设置，请稍后重试");
     return permissions;
+  }
+  function requestedPermissionOverrides(payload, cwd) {
+    if (payload.permissionMode == null) return null;
+    // 与 remote_access/permissions.rs 共用预设含义；完全访问同时为 dangerFullAccess 和 never。
+    const presets = {
+      "read-only": { approvalPolicy: "on-request", approvalsReviewer: "user", sandboxPolicy: { type: "readOnly" } },
+      auto: { approvalPolicy: "on-request", approvalsReviewer: "user", sandboxPolicy: {
+        type: "workspaceWrite", writableRoots: [cwd], networkAccess: false,
+        excludeTmpdirEnvVar: false, excludeSlashTmp: false
+      } },
+      "full-access": { approvalPolicy: "never", approvalsReviewer: "user", sandboxPolicy: { type: "dangerFullAccess" } }
+    };
+    if (payload.permissionMode === "configured") {
+      const config = payload.permissionConfig;
+      if (!config || !(typeof config.approvalPolicy === "string" || config.approvalPolicy
+          && typeof config.approvalPolicy === "object")
+          || !["readOnly", "workspaceWrite", "dangerFullAccess"].includes(config.sandboxPolicy?.type))
+        throw failure(503, "实例权限配置尚未确认，请重新选择权限");
+      const result = structuredClone(config);
+      if (result.sandboxPolicy.type === "workspaceWrite")
+        result.sandboxPolicy.writableRoots = [...new Set([cwd, ...array(result.sandboxPolicy.writableRoots)])];
+      return result;
+    }
+    if (!Object.hasOwn(presets, payload.permissionMode)) throw failure(400, "Codex 会话权限模式无效");
+    return presets[payload.permissionMode];
+  }
+  function withPermissionOverrides(submission, permissions) {
+    if (!permissions) return submission;
+    const update = start => start ? { ...start, request: { ...start.request, ...permissions } } : start;
+    return {
+      ...submission,
+      ...(submission.resume ? { resume: { ...submission.resume, permissionsConfig: permissions,
+        useAppServerPermissionDefault: false } } : {}),
+      ...(submission.start ? { start: update(submission.start) } : {}),
+      ...(submission.steer?.userMessageAdmissionStart ? { steer: { ...submission.steer,
+        userMessageAdmissionStart: update(submission.steer.userMessageAdmissionStart) } } : {})
+    };
   }
   function requestedProjectId(value) {
     if (value == null || value === "") return null;
@@ -7570,7 +7642,14 @@
             const workspace = projectId == null
               ? await nativeProjectlessWorkspace(prompt, module)
               : await localProjectWorkspace(projectId);
-            const permissions = await nativeCreationPermissions(module, workspace,
+            const override = payload.permissionMode ? requestedPermissionOverrides(payload, workspace.cwd) : null;
+            const permissions = override ? {
+              permissionsConfig: { ...override, runtimeWorkspaceRoots: workspace.workspaceRoots },
+              ...(payload.permissionMode !== "configured" ? { permissionSelection: {
+                kind: "agent-mode", agentMode: payload.permissionMode
+              } } : {}),
+              useAppServerPermissionDefault: false
+            } : await nativeCreationPermissions(module, workspace,
               projectId == null ? "projectless" : "project", goalSettings?.model ?? payload.model);
             const skills = await skillInputs(payload, workspace.cwd);
             if (goalMode) {

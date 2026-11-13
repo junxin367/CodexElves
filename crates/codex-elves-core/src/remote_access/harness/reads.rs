@@ -5,8 +5,7 @@ use serde_json::{Value, json};
 use super::projects::DesktopProjects;
 use super::{Harness, error, required, sent_key};
 use crate::codex_service::{
-    normalize_model, normalize_owner_thread, normalize_thread, normalize_thread_response,
-    owner_snapshot_history,
+    normalize_owner_thread, normalize_thread, normalize_thread_response, owner_snapshot_history,
 };
 
 // 40 只限制一次引擎读取的条数；执行中的轮次必须读取全部分页，不能因此隐藏“继续”等开头输入。
@@ -670,7 +669,14 @@ impl Harness {
             self.runtime
                 .read("config/read", json!({"cwd":null,"includeLayers":true}))
         )?;
-        let models: Vec<_> = model_rows.iter().filter_map(normalize_model).collect();
+        let settings = crate::settings::SettingsStore::default().load()?;
+        let aliases =
+            crate::relay_config::native_fast_model_aliases(&settings.active_relay_profile())
+                .unwrap_or_default();
+        let models: Vec<_> = model_rows
+            .iter()
+            .filter_map(|row| super::fast::service_model(row, &aliases))
+            .collect();
         let fast_availability = self
             .fast_availability(&config, payload["forceReload"] == true)
             .await;
@@ -678,7 +684,7 @@ impl Harness {
             json!({"ok":true,"data":models,"ultraReasoningEnabled":models.iter().any(|m|
             m["supportedReasoningEfforts"].as_array().is_some_and(|efforts|
                 efforts.iter().any(|e|e["reasoningEffort"]=="ultra"))),
-            "fastModeAvailability":fast_availability,
+            "fastModeAvailability":fast_availability,"fastModelAliases":aliases,
             "defaultModel":config["config"]["model"],
             "defaultReasoningEffort":config["config"]["model_reasoning_effort"]}),
         )

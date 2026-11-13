@@ -32,6 +32,7 @@ pub(super) struct Projection {
     pub sides: super::sides::SideState,
     pub requests: HashMap<String, Value>,
     pub active: HashMap<String, String>,
+    pub queue_turn_outcomes: HashMap<String, Value>,
     desktop: HashMap<String, DesktopState>,
     pub compactions: HashMap<String, Value>,
     compaction_records: VecDeque<CompactionRecord>,
@@ -55,6 +56,7 @@ impl Default for Projection {
             sides: super::sides::SideState::default(),
             requests: HashMap::new(),
             active: HashMap::new(),
+            queue_turn_outcomes: HashMap::new(),
             desktop: HashMap::new(),
             compactions: HashMap::new(),
             compaction_records: VecDeque::new(),
@@ -118,6 +120,10 @@ impl Projection {
                 event["method"].as_str(),
                 Some("turn/started" | "turn/completed")
             );
+            // 桌面重连补出的终态必须再查持久完成记录，不能凭恢复快照的 completed 自动续发。
+            if reconnected && event["method"] == "turn/completed" {
+                event["_queueRecoveryCheck"] = json!(true);
+            }
             self.ingest(event);
         }
         match active_turn {
@@ -492,6 +498,7 @@ impl Projection {
             self.notifications.clear();
             self.notification_sequence = 0;
             self.active.clear();
+            self.queue_turn_outcomes.clear();
             // app-server 重连不等于桌面 IPC 断开，桌面的执行与审批状态独立保留。
             self.active
                 .extend(self.desktop.iter().filter_map(|(id, state)| {
@@ -638,6 +645,18 @@ impl Projection {
                         self.completed.pop_front();
                     }
                 }
+                self.queue_turn_outcomes.insert(
+                    id.clone(),
+                    json!({
+                        "turnId":frame["params"]["turn"]["id"],
+                        "status":if frame["params"]["turn"]["error"].is_null() {
+                            frame["params"]["turn"]["status"].clone()
+                        } else {
+                            json!("failed")
+                        },
+                        "recoveryCheck":frame["_queueRecoveryCheck"] == true
+                    }),
+                );
                 if self
                     .active
                     .get(&id)
@@ -737,6 +756,7 @@ impl Projection {
         }
         frame.as_object_mut().unwrap().remove("_generation");
         frame.as_object_mut().unwrap().remove("_generationIndex");
+        frame.as_object_mut().unwrap().remove("_queueRecoveryCheck");
         self.push(frame);
     }
 

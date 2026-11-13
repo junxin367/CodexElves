@@ -1075,6 +1075,8 @@ class NativeDiscovery:
         reader.restore_question_reply(request.get("native_control") or {})
         reader.read_messages()
         row = self.rows[native]
+        reader.short = row["jobId"]
+        reader.job = self.jobs.get(native, row["nativeStatus"])
         reader.dialog = native_dialog(row["nativeStatus"], "", native)
         question = native_question_request(
             {**self.jobs.get(native, {}), **row["nativeStatus"], "short": row["jobId"]}, native)
@@ -1091,6 +1093,38 @@ class NativeDiscovery:
 
     def poll(self, force=False):
         pass
+
+
+def permission_footer_mode(lines):
+    # 只识别输入框下方的原生状态栏，不能把助手正文或用户引用当成权限已切换的证据。
+    separators = [index for index, line in enumerate(lines) if re.match(r"^\s*[─╌━]{6,}", line)]
+    if not separators:
+        return None
+    footer = " ".join(lines[separators[-1] + 1:]).strip().lower()
+    for phrase, mode in (
+        ("bypass permissions", "bypassPermissions"), ("permissions bypassed", "bypassPermissions"),
+        ("accept edits", "acceptEdits"), ("plan mode", "plan"), ("auto mode", "auto"),
+        ("don't ask", "dontAsk"), ("dontask", "dontAsk"),
+        ("manual mode", "default"), ("default mode", "default"),
+    ):
+        if phrase in footer:
+            return mode
+    if "for shortcuts" in footer and "mode" not in footer and "permissions" not in footer:
+        return "default"
+    return None
+
+
+def empty_permission_prompt(lines):
+    # 改权限不能清除或提交另一个终端正在编辑的草稿，也不能把快捷键送入确认框。
+    positions = [index for index, line in enumerate(lines) if re.match(r"^\s*❯", line)]
+    if not positions:
+        return False
+    position = positions[-1]
+    if re.sub(r"^\s*❯", "", lines[position]).strip():
+        return False
+    trailing = lines[position + 1:]
+    end = next((index for index, line in enumerate(trailing) if re.match(r"^\s*[─╌━]{6,}", line)), None)
+    return end is not None and not any(line.strip() for line in trailing[:end])
 
 
 class NativeSession:
@@ -1154,6 +1188,10 @@ class NativeSession:
         self.answered_dialog = ""
         self.question_reply = None
         self.question_layout = {"id": "", "multi": set()}
+        self.permission_mode = None
+        self.permission_catalog = []
+        self.permission_launch_key = None
+        self.permission_launch_flags = []
 
     def control_projection(self):
         current = self.compaction_events.get(self.compaction_event_id)
@@ -1162,7 +1200,8 @@ class NativeSession:
             current["_anchorResolved"] = True
         return {"goal": self.goal, "goalRevision": self.goal_revision, "goalNotice": self.goal_notice,
                 "compaction": self.compaction, "commands": self.native_commands,
-                "capabilities": self.native_capabilities, "compactionEvents": list(self.compaction_events.values()),
+                "capabilities": {**self.native_capabilities, "permissionModes": self.permission_modes()},
+                "compactionEvents": list(self.compaction_events.values()),
                 "compactionEventId": self.compaction_event_id,
                 "settings": self.settings_projection(), "dialog": self.dialog,
                 "questionReply": self.question_reply}
@@ -1200,6 +1239,112 @@ class NativeSession:
             change = (settings.get("changes") or {}).get(name)
             if isinstance(change, dict) and change.get("id"):
                 self.setting_changes[name] = dict(change)
+        if settings.get("permissionMode") in ("default", "manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"):
+            self.actual_settings["permissionMode"] = settings["permissionMode"]
+
+    def launch_permission_flags(self):
+        key = (self.short, self.job.get("pid"), self.job.get("cliVersion"))
+        if key != self.permission_launch_key:
+            self.permission_launch_key = key
+            self.permission_launch_flags = []
+            if re.fullmatch(r"[0-9a-f]{8}", self.short):
+                try:
+                    record = json.loads((self.root / "jobs" / self.short / "state.json").read_text())
+                    flags = record.get("respawnFlags", [])
+                    if isinstance(flags, list):
+                        # 只保留权限参数，不能把原始启动参数中的凭据或项目内容带入快照。
+                        for index, flag in enumerate(flags):
+                            if flag in ("--allow-dangerously-skip-permissions", "--dangerously-skip-permissions"):
+                                self.permission_launch_flags.append(flag)
+                            elif flag == "--permission-mode" and index + 1 < len(flags):
+                                self.permission_launch_flags += [flag, flags[index + 1]]
+                except (OSError, ValueError):
+                    pass
+        return self.permission_launch_flags
+
+    def permission_modes(self):
+        modes = self.permission_catalog or ["default", "manual", "acceptEdits", "plan",
+                                            "auto", "bypassPermissions", "dontAsk"]
+        if not self.short:
+            return list(modes)
+        flags = self.launch_permission_flags()
+        bypass = any(flag in flags for flag in (
+            "--allow-dangerously-skip-permissions", "--dangerously-skip-permissions", "bypassPermissions"))
+        # 原生共享会话只能选择已提供的运行模式；未在启动时开放的绕过能力不能由网页补开。
+        return [mode for mode in modes if (mode != "bypassPermissions" or bypass)
+                and (mode != "dontAsk" or mode in flags)]
+
+    def configured_permission_mode(self):
+        path = self.root / "settings.json"
+        try:
+            if path.exists() and path.stat().st_size > 2 * 1024 * 1024:
+                raise ValueError("config too large")
+            settings = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
+            mode = settings.get("permissions", {}).get("defaultMode", "default")
+        except (OSError, ValueError, AttributeError):
+            raise NativeError("ECONFIG", "无法读取 Claude 实例的全局权限，未发送消息") from None
+        if mode not in ("default", "manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"):
+            raise NativeError("ECONFIG", "Claude 实例的默认权限模式无效，未发送消息")
+        return mode
+
+    def change_permission_mode(self, requested):
+        modes = ("default", "manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions")
+        mode = self.configured_permission_mode() if requested == "configured" else requested
+        if mode not in modes:
+            raise NativeError("EINVAL", "Claude 权限模式无效")
+        target = "default" if mode == "manual" else mode
+        live = self.lookup() if self.native_id else None
+        if not live or live.get("outcome"):
+            # 尚未启动的轮次由原生 --permission-mode 实施；不为设置权限提前启动模型或复制会话。
+            self.permission_mode = requested
+            return {"nativeSettings": self.settings_projection(), "permissionPending": True}
+        self.short = live["short"]
+        self.job = live
+        expected_short = self.short
+
+        def read_current():
+            job = self.lookup()
+            if (not job or job["short"] != expected_short or job.get("outcome")
+                    or job.get("sessionStatus") != "idle" or job.get("needs")):
+                raise NativeError("EPERMISSIONBUSY", "原生会话不再空闲，请结束当前操作后再修改权限")
+            lines = self.read_terminal_screen()
+            if not empty_permission_prompt(lines):
+                raise NativeError("EPERMISSIONDRAFT", "原生 CLI 正在编辑或显示交互面板，未发送权限快捷键")
+            value = permission_footer_mode(lines)
+            if value is None:
+                raise NativeError("EPERMISSIONUNKNOWN", "无法识别原生权限状态栏，未继续切换或发送消息")
+            return value
+
+        original = current = read_current()
+        if current != target:
+            supported = self.permission_modes()
+            if mode not in supported and not (target == "default" and any(
+                    value in supported for value in ("default", "manual"))):
+                raise NativeError("EPERMISSIONMODE",
+                    "该原生共享会话未开放所选权限模式，请在新建会话时选择；未更改权限或发送消息")
+        visited = set()
+        for _ in range(8):
+            if current == target:
+                # 实例全局配置已让 CLI 处于目标模式时直接保留；缺少启动开关仍禁止网页另行开放该能力。
+                self.permission_mode = requested
+                self.actual_settings["permissionMode"] = current
+                self.signature = None
+                return {"nativeSettings": self.settings_projection()}
+            if current in visited:
+                break
+            visited.add(current)
+            # 与原生 Shift+Tab 相同，仅在同一空闲且空输入框中操作，每一步都重新确认状态栏。
+            self.terminal_input(b"\x1b[Z", permission={"short": expected_short, "mode": current})
+            current = read_current()
+        for _ in range(8):
+            if current == original:
+                self.actual_settings["permissionMode"] = original
+                raise NativeError("EPERMISSIONMODE",
+                    "原生会话未提供所选权限模式，已恢复原权限；未发送消息，可在新建会话时选择")
+            self.terminal_input(b"\x1b[Z", permission={"short": expected_short, "mode": current})
+            current = read_current()
+        self.actual_settings.pop("permissionMode", None)
+        raise NativeError("EPERMISSIONUNKNOWN", "原生权限状态待核对，未发送消息，请在 CLI 确认当前模式")
 
     def resolve_setting_label(self, name, label):
         if name == "effort":
@@ -1719,8 +1864,17 @@ class NativeSession:
     def start(self, text=None):
         if self.native_id:
             self.check_history_resume()
-        # 网页与 CLI 必须操作所选项目的同一目录；仅关闭后台默认的 worktree 隔离，不更改权限或提示。
+        # 网页与 CLI 必须操作所选项目的同一目录；仅关闭默认 worktree 隔离，保留原生提示和工具。
         arguments = [self.cli, "--bg", "--settings", '{"worktree":{"bgIsolation":"none"}}']
+        if self.permission_mode and self.permission_mode != "configured":
+            mode = self.permission_mode
+            if mode == "default" and "manual" in self.permission_catalog and "default" not in self.permission_catalog:
+                mode = "manual"
+            elif mode == "manual" and "default" in self.permission_catalog and "manual" not in self.permission_catalog:
+                mode = "default"
+            arguments += ["--permission-mode", mode]
+            if mode == "bypassPermissions":
+                arguments += ["--allow-dangerously-skip-permissions"]
         if self.native_id:
             arguments += ["--resume", self.native_id]
         if self.model:
@@ -2186,7 +2340,7 @@ class NativeSession:
             if self.question_reply and self.question_reply.get("id") == identity:
                 self.poll(force=True)
 
-    def terminal_input(self, data, dialog=None, question=None, final_question=False):
+    def terminal_input(self, data, dialog=None, question=None, final_question=False, permission=None):
         job = self.lookup()
         if not job or job.get("outcome"):
             raise RuntimeError("原生 Claude 会话已停止")
@@ -2223,7 +2377,15 @@ class NativeSession:
                 if final_question:
                     # 最后提交按键开始写入后即保留回执，断线或多端迟到点击不能再提交同一问题。
                     self.question_reply = {"id": question["nativeQuestion"]["id"], "state": "submitted"}
-            # 仅显式停止/审批使用原生按键；普通消息和引导都走原生消息入口。
+            if permission:
+                current = self.lookup() or {}
+                lines = self.read_terminal_screen()
+                if (current.get("short") != permission["short"] or current.get("outcome")
+                        or current.get("sessionStatus") != "idle" or current.get("needs")
+                        or not empty_permission_prompt(lines)
+                        or permission_footer_mode(lines) != permission["mode"]):
+                    raise NativeError("EPERMISSIONCHANGED", "原生输入或权限状态已变化，未发送切换按键")
+            # 仅停止、审批和经逐步核对的空闲权限切换使用按键；普通消息和引导仍走原生消息入口。
             connection.sendall(data)
             time.sleep(0.15)
             return True
@@ -2396,6 +2558,9 @@ class NativeSession:
                 if row["uuid"] in self.seen:
                     continue
                 self.observe_control_record(row)
+                if row.get("type") == "user" and row.get("permissionMode") in (
+                        "default", "manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"):
+                    self.actual_settings["permissionMode"] = row["permissionMode"]
                 native_editable = row.get("type") == "user" and real_user(row)
                 notification = native_agent_notification(row)
                 if notification:
@@ -2695,6 +2860,8 @@ class NativeSession:
         if subtype == "initialize":
             self.model = request.get("model", "")
             self.effort = request.get("effort", "")
+            self.permission_mode = request.get("permission_mode")
+            self.permission_catalog = request["catalog"].get("permissionModes", [])
             self.setting_catalog = request["catalog"].get("models", [])
             self.restore_settings(request.get("native_control") or {})
             self.restore_question_reply(request.get("native_control") or {})
@@ -2719,6 +2886,8 @@ class NativeSession:
             self.poll(force=True)
         elif subtype == "set_model":
             self.change_setting("model", request.get("model", ""))
+        elif subtype == "set_permission_mode":
+            return self.change_permission_mode(request.get("mode"))
         elif subtype == "apply_flag_settings":
             self.change_setting("effort", request.get("settings", {}).get("effortLevel") or "")
         elif subtype == "interrupt":

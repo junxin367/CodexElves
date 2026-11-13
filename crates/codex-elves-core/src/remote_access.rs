@@ -49,6 +49,7 @@ mod harness;
 mod image_preview;
 mod instances;
 mod ngrok_tunnel;
+mod permissions;
 mod preferences;
 mod primary_route;
 mod prompt_optimization;
@@ -69,6 +70,7 @@ const NATIVE_SCRIPT: &str = include_str!("../../../assets/remote-access/native.j
 const WEB_HTML: &str = include_str!("../../../assets/remote-access/index.html");
 const WEB_JS: &str = include_str!("../../../assets/remote-access/app.js");
 const WEB_SELECT_JS: &str = include_str!("../../../assets/remote-access/select.js");
+const WEB_PERMISSIONS_JS: &str = include_str!("../../../assets/remote-access/permissions.js");
 const WEB_SESSION_TOOLS_JS: &str = include_str!("../../../assets/remote-access/session-tools.js");
 const WEB_SESSION_FILES_JS: &str = include_str!("../../../assets/remote-access/session-files.js");
 const WEB_FILE_PREVIEW_HTML: &str = include_str!("../../../assets/remote-access/file-preview.html");
@@ -816,6 +818,7 @@ pub struct RemoteAccessController {
     native_started: AtomicBool,
     harness: Arc<harness::Harness>,
     claude: Arc<claude::Claude>,
+    permissions: permissions::SessionPermissions,
     runtime_modes: tokio::sync::RwLock<HashMap<String, RemoteRuntimeMode>>,
     harness_connected: AtomicBool,
     prompt_optimization: Arc<prompt_optimization::RemotePromptOptimization>,
@@ -909,6 +912,7 @@ impl RemoteAccessController {
             read_json_or_default(&state_dir.join("remote-access-device-runtimes.json"))?;
         let harness = harness::Harness::new(&state_dir)?;
         let claude = claude::Claude::new(&state_dir)?;
+        let permissions = permissions::SessionPermissions::open(&state_dir)?;
         harness.enabled.store(
             execution::cdp_disabled()
                 || runtime_modes
@@ -921,6 +925,7 @@ impl RemoteAccessController {
             native_started: AtomicBool::new(false),
             harness: harness.clone(),
             claude: claude.clone(),
+            permissions,
             runtime_modes: tokio::sync::RwLock::new(runtime_modes),
             harness_connected: AtomicBool::new(false),
             prompt_optimization: Arc::new(prompt_optimization::RemotePromptOptimization::default()),
@@ -1712,9 +1717,81 @@ impl RemoteAccessController {
     async fn call_authorized(
         &self,
         action: &str,
-        payload: Value,
+        mut payload: Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
+        if action == "setPermissions" {
+            let id = payload["threadId"]
+                .as_str()
+                .filter(|id| notification_thread_id(&json!(id)).is_some())
+                .ok_or_else(|| ApiError::new(400, "会话 ID 无效"))?;
+            if claude::Claude::is_subagent_id(id) {
+                return Err(ApiError::new(403, "子智能体仅支持只读查看").into());
+            }
+            // 只确认原会话身份，不恢复执行；实例来自服务端会话，不能由客户端改投环境。
+            let context = self
+                .call_backend("workspaceContext", payload.clone(), authorization)
+                .await?;
+            let backend = if claude::Claude::owns_id(id) {
+                "claude"
+            } else {
+                "codex"
+            };
+            let instance = context["instanceId"].as_str().unwrap_or("codex:local");
+            let mode = permissions::validate_mode(backend, &payload["permissionMode"])?;
+            if backend == "claude" {
+                return self
+                    .claude
+                    .set_permissions(id, mode, authorization)
+                    .await
+                    .map_err(claude::api_error);
+            }
+            let revision = self
+                .permissions
+                .save(id, instance, mode, authorization)
+                .await?;
+            let result = json!({"ok":true,"threadId":id,"instanceId":instance,
+                "permissionMode":mode,"permissionRevision":revision,"appliesTo":"nextTurn"});
+            self.publish_event(json!({"method":"thread/settings/updated","params":result}));
+            return Ok(result);
+        }
+        if matches!(action, "send" | "setGoal" | "editMessage" | "steerQueued") {
+            if let Some(selection) = match payload["threadId"].as_str() {
+                Some(id) if claude::Claude::owns_id(id) => {
+                    self.claude.permission_selection(id).await?
+                }
+                Some(id) => self.permissions.get(id).await,
+                None => None,
+            } {
+                if payload.get("instanceId").is_some_and(|instance| {
+                    instance.as_str() != Some(selection.instance_id.as_str())
+                }) {
+                    return Err(ApiError::new(409, "会话权限所属实例已变化").into());
+                }
+                // 用户要求会话选择只影响该会话；发送前带入覆盖，不改写实例全局配置。
+                payload["permissionMode"] = json!(selection.mode);
+            }
+        }
+        if let Some(mode) = payload.get("permissionMode") {
+            let backend = if payload["backend"] == "claude"
+                || payload["instanceId"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("claude:"))
+                || payload["threadId"]
+                    .as_str()
+                    .is_some_and(claude::Claude::owns_id)
+            {
+                "claude"
+            } else {
+                "codex"
+            };
+            permissions::validate_mode(backend, mode)?;
+            // 覆盖值由服务器重新解析，不能信任客户端提供的任意批准策略或文件目录。
+            payload.as_object_mut().unwrap().remove("permissionConfig");
+            if backend == "codex" && payload["permissionMode"] == "configured" {
+                payload["permissionConfig"] = self.harness.configured_permissions().await?;
+            }
+        }
         if action == "runtime" {
             return Ok(
                 json!({"ok":true,"runtime":self.runtime_for(&authorization.device.id).await}),
@@ -1764,7 +1841,48 @@ impl RemoteAccessController {
             .as_str()
             .filter(|id| action == "thread" && !claude::Claude::owns_id(id))
             .map(str::to_owned);
-        let value = self.call_backend(action, payload, authorization).await?;
+        let creation_mode = (action == "create"
+            && payload["backend"] != "claude"
+            && !payload["instanceId"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("claude:")))
+        .then(|| payload.get("permissionMode").cloned())
+        .flatten();
+        let creation_instance = payload["instanceId"]
+            .as_str()
+            .unwrap_or("codex:local")
+            .to_owned();
+        let detail_id = (action == "thread")
+            .then(|| payload["threadId"].as_str().map(str::to_owned))
+            .flatten();
+        let mut value = self.call_backend(action, payload, authorization).await?;
+        if let Some(mode) = creation_mode.and_then(|mode| mode.as_str().map(str::to_owned)) {
+            if let Some(id) = value["conversationId"]
+                .as_str()
+                .or_else(|| value["threadId"].as_str())
+            {
+                if let Err(error) = self
+                    .permissions
+                    .save(id, &creation_instance, &mode, authorization)
+                    .await
+                {
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "remote_access.permissions.persist_failed",
+                        json!({"threadId":id,"error":error.to_string()}),
+                    );
+                    value["permissionWarning"] = json!(
+                        "本轮已使用所选权限，但会话权限保存失败，请重新选择；不要重复发送消息"
+                    );
+                }
+            }
+        }
+        if let Some(id) = detail_id
+            && let Some(selection) = self.permissions.get(&id).await
+            && value["thread"].is_object()
+        {
+            value["thread"]["permissionMode"] = json!(selection.mode);
+            value["thread"]["permissionRevision"] = json!(selection.revision);
+        }
         if let Some(thread_id) = context_thread_id
             && context_usage::needs_usage(&value, &thread_id)
         {
@@ -2710,6 +2828,13 @@ fn web_assets() -> &'static HashMap<&'static str, StaticWebAsset> {
                 ),
             ),
             (
+                "/permissions.js",
+                StaticWebAsset::new(
+                    "application/javascript; charset=utf-8",
+                    WEB_PERMISSIONS_JS.as_bytes(),
+                ),
+            ),
+            (
                 "/session-tools.js",
                 StaticWebAsset::new(
                     "application/javascript; charset=utf-8",
@@ -2970,6 +3095,7 @@ fn is_static_web_asset_path(path: &str) -> bool {
         "/" | "/app-resources.json"
             | "/app.js"
             | "/select.js"
+            | "/permissions.js"
             | "/attachments.js"
             | "/sha256.js"
             | "/recovery-store.js"
@@ -3161,6 +3287,7 @@ pub fn web_router(
         .route("/app-resources.json", get(static_web_asset))
         .route("/app.js", get(static_web_asset))
         .route("/select.js", get(static_web_asset))
+        .route("/permissions.js", get(static_web_asset))
         .route("/session-tools.js", get(static_web_asset))
         .route("/session-files.js", get(static_web_asset))
         .route("/file-preview.html", get(static_web_asset))
@@ -3209,6 +3336,7 @@ pub fn web_router(
             "/api/settings/instructions",
             post(preferences::instructions),
         )
+        .route("/api/settings/permissions", post(permissions::settings))
         .route(
             "/api/settings/prompt-optimization",
             post(prompt_optimization::settings),
@@ -4006,6 +4134,7 @@ async fn session(
         "queueSendRecovery":native_write_available,"projectlessCreation":native_write_available,
         "promptOptimization":true,"promptOptimizationSettings":true,"messageEditModelSettings":native_write_available,
         "fastMode":native_write_available,
+        "sessionPermissions":true,"instancePermissions":true,
         "serviceFastMode":!runtime.cdp_injection_enabled && native_write_available,
         "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
         "sendText":native_write_available || service_connected,
@@ -4093,6 +4222,16 @@ async fn workspace_context(
     payload: &Value,
     authorization: &RemoteAuthorization,
 ) -> Result<PathBuf, ApiError> {
+    workspace_file_context(state, payload, authorization)
+        .await
+        .map(|(cwd, _)| cwd)
+}
+
+async fn workspace_file_context(
+    state: &WebState,
+    payload: &Value,
+    authorization: &RemoteAuthorization,
+) -> Result<(PathBuf, Value), ApiError> {
     let identity = workspace_identity(payload)?;
     let guidance = if state
         .controller
@@ -4165,7 +4304,7 @@ async fn workspace_context(
     .await
     .map_err(|_| ApiError::new(503, "读取会话工作目录失败"))??;
     authorization.check().await.map_err(authorization_error)?;
-    Ok(path)
+    Ok((path, result))
 }
 
 async fn read(
@@ -4642,6 +4781,7 @@ fn validate_goal_composer_payload(action: &str, payload: &Value) -> Result<(), A
         ]
         .contains(&key.as_str())
             && !(action == "create" && key == "fastMode")
+            && key != "permissionMode"
             && !(action == "create"
                 && payload["backend"] == "claude"
                 && matches!(key.as_str(), "trustProject" | "expectedProjectPath"))
@@ -5086,6 +5226,7 @@ async fn action(
         action.as_str(),
         "send"
             | "setFast"
+            | "setPermissions"
             | "setRuntime"
             | "stop"
             | "compact"
@@ -6985,6 +7126,8 @@ const fs=require('node:fs'),readline=require('node:readline'),crypto=require('no
 const threads=new Map(),goals=new Map();let approval=null,related={rows:[],loaded:[]};
 const output=v=>process.stdout.write(JSON.stringify(v)+'\n');
 const event=(method,params)=>output({method,params});
+const logTurn=(t,type,turn)=>{if(t?.path)fs.appendFileSync(t.path,JSON.stringify({
+  timestamp:new Date().toISOString(),type:'event_msg',payload:{type,turn_id:turn.id}})+'\n');};
 const pageRows=(rows,p,prefix)=>{
   const ordered=p.sortDirection==='asc'?[...rows]:[...rows].reverse();
   const start=p.cursor?Number(String(p.cursor).slice(prefix.length+1)):0,limit=p.limit||100;
@@ -6993,7 +7136,9 @@ const pageRows=(rows,p,prefix)=>{
 };
 const finish=(id,status='completed')=>{
   const t=threads.get(id),turn=t?.turns.at(-1);if(!turn)return;
-  turn.status=status;t.status={type:'idle'};event('turn/completed',{threadId:id,turn});
+  turn.status=status;t.status={type:'idle'};
+  logTurn(t,status==='completed'?'task_complete':'turn_aborted',turn);
+  event('turn/completed',{threadId:id,turn});
   event('thread/status/changed',{threadId:id,status:t.status});
 };
 readline.createInterface({input:process.stdin}).on('line',line=>{
@@ -7044,15 +7189,15 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    event('thread/section/changed',{threadId:p.threadId,sectionId:p.sectionId});break;
  case 'thread/start':{
    const id=crypto.randomUUID();const thread={id,cwd:p.cwd,name:'隔离会话',ephemeral:false,threadSource:'user',source:'appServer',
-     projectId:p.projectId,status:{type:'idle'},turns:[],createdAt:1,updatedAt:1};
-   threads.set(id,thread);result={thread,model:'gpt-test',reasoningEffort:'high',cwd:p.cwd};
+     projectId:p.projectId,status:{type:'idle'},turns:[],createdAt:1,updatedAt:1,path:__dirname+'/'+id+'.jsonl'};
+   threads.set(id,thread);result={thread,model:'gpt-6.1-sol',reasoningEffort:'high',cwd:p.cwd};
    event('thread/started',{thread});break;
  }
  case 'thread/fork':{
    if(!t||t.ephemeral){output({id:q.id,error:{code:-32600,message:'invalid fork parent'}});return;}
    const id=crypto.randomUUID(),thread={...t,id,ephemeral:true,path:null,forkedFromId:p.threadId,
      parentThreadId:null,turns:[],status:{type:'idle'}};
-   threads.set(id,thread);result={thread,model:'gpt-test',reasoningEffort:'high',cwd:t.cwd};
+   threads.set(id,thread);result={thread,model:'gpt-6.1-sol',reasoningEffort:'high',cwd:t.cwd};
    event('thread/started',{thread});break;
  }
  case 'thread/unsubscribe':
@@ -7065,7 +7210,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    const readThread=related.rows.includes(t)?{...t,turns:p.includeTurns?t.turns||[]:[]}:t;
    result={thread:nativePins?{...readThread,section:sectionId?{id:sectionId,name:'Section'}:null}:readThread,
      readState:{firstUnread:null,revision:'r1'}};break;
- case 'thread/resume': result={thread:t,model:'gpt-test',reasoningEffort:'high'};break;
+ case 'thread/resume': result={thread:t,model:'gpt-6.1-sol',reasoningEffort:'high'};break;
  case 'thread/turns/list':
    if(t?.ephemeral&&related.ephemeralHistoryUnavailable){output({id:q.id,error:{code:-32600,message:'ephemeral threads do not support thread/turns/list'}});return;}
    result=pageRows(t?.turns||[],p,'turns');break;
@@ -7089,7 +7234,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  case 'thread/goal/clear':goals.delete(p.threadId);event('thread/goal/cleared',{threadId:p.threadId});break;
  case 'turn/start':{
    const turn={id:crypto.randomUUID(),status:'inProgress',items:[{id:crypto.randomUUID(),type:'userMessage',content:p.input,clientUserMessageId:p.clientUserMessageId}]};
-   t.turns.push(turn);t.status={type:'active'};event('turn/started',{threadId:p.threadId,turn});result={turn};
+   t.turns.push(turn);t.status={type:'active'};logTurn(t,'task_started',turn);
+   event('turn/started',{threadId:p.threadId,turn});result={turn};
    const prompt=p.input.find(i=>i.type==='text')?.text||'';
    if(prompt.includes('uncertain')){
      setTimeout(()=>finish(p.threadId),20);
@@ -7104,7 +7250,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  case 'turn/steer':result={turnId:t.turns.at(-1).id};break;
  case 'turn/interrupt':finish(p.threadId,'interrupted');break;
  case 'thread/compact/start':event('item/started',{threadId:p.threadId,turnId:'compact',item:{id:'compact',type:'contextCompaction'}});
-   setTimeout(()=>event('item/completed',{threadId:p.threadId,turnId:'compact',item:{id:'compact',type:'contextCompaction'}}),20);break;
+   setTimeout(()=>event('item/completed',{threadId:p.threadId,turnId:'compact',item:{id:'compact',type:'contextCompaction'}}),fastPolicy.compactDelayMs||20);break;
  case 'thread/name/set':t.name=p.name;break;
  case 'thread/revert':t.turns=t.turns.filter(turn=>turn.id!==p.beforeTurnId);result={thread:t};break;
   case 'thread/delete':
@@ -7112,12 +7258,15 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     threads.delete(p.threadId);break;
  case 'thread/readState/update':result={readState:{firstUnread:null,revision:'r2'}};break;
  case 'skills/list':result={data:p.cwds.map(cwd=>({cwd,skills:[],errors:[]}))};break;
- case 'model/list':result={data:[{id:'gpt-test',model:'gpt-test',serviceTiers:fastPolicy.noTiers?[]:[{id:'priority',name:'Fast'}],
+ case 'model/list':result={data:[{id:'gpt-6.1-sol',model:'gpt-6.1-sol',serviceTiers:fastPolicy.noTiers?[]:[{id:'priority',name:'Fast'}],
+   ...(fastPolicy.modelFlagsDisabled?{supports_fast:false,fastModeSupported:false}:{}),
    supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:null};break;
  case 'account/read':result={account:{type:fastPolicy.accountType||'apiKey'}};break;
  case 'configRequirements/read':result=fastPolicy.requirementsMalformed?{requirements:'unknown'}:fastPolicy.requirementsUnknown?{}:
    {requirements:fastPolicy.requirementsDenied?{featureRequirements:{fast_mode:false}}:null};break;
- case 'config/read':result={config:{model:'gpt-test',model_reasoning_effort:'high',model_provider:fastPolicy.provider||'test',
+ case 'config/read':result={config:{model:'gpt-6.1-sol',model_reasoning_effort:'high',model_provider:fastPolicy.provider||'test',
+   approval_policy:fastPolicy.approvalPolicy||'on-request',sandbox_mode:fastPolicy.sandboxMode||'workspace-write',
+   sandbox_workspace_write:{writable_roots:[],network_access:false},
    features:{fast_mode:fastPolicy.configFast!==false},service_tier:fastPolicy.defaultTier||null}};break;
  default: output({id:q.id,error:{code:-32601,message:'unsupported: '+q.method}});return;
  }
@@ -8700,7 +8849,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         let created = controller
             .call_authorized(
                 "create",
-                json!({"prompt":"wait for recovery","model":"gpt-test"}),
+                json!({"prompt":"wait for recovery","model":"gpt-6.1-sol"}),
                 &authorization,
             )
             .await
@@ -8964,11 +9113,147 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     }
 
     #[tokio::test]
+    async fn harness_session_permissions_persist_and_override_only_the_selected_thread() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let first = controller
+            .call_authorized(
+                "create",
+                json!({
+                    "projectId":"project-a","prompt":"wait first","permissionMode":"read-only"
+                }),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = first["threadId"].as_str().unwrap();
+        let created = harness_engine_requests(directory.path());
+        let start = created
+            .iter()
+            .find(|frame| frame["method"] == "thread/start")
+            .unwrap();
+        let turn = created
+            .iter()
+            .find(|frame| frame["method"] == "turn/start")
+            .unwrap();
+        assert_eq!(start["params"]["sandbox"], "read-only");
+        assert_eq!(turn["params"]["sandboxPolicy"]["type"], "readOnly");
+        assert_eq!(turn["params"]["approvalPolicy"], "on-request");
+        let detail = controller
+            .call_authorized("thread", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(detail["thread"]["permissionMode"], "read-only");
+        controller
+            .call_authorized(
+                "stop",
+                json!({"threadId":id,"turnId":first["turnId"]}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let permission_auth =
+            controller.authorization(authorization.device.clone(), Some("setPermissions"));
+        let saved = controller
+            .call_authorized(
+                "setPermissions",
+                json!({
+                    "threadId":id,"instanceId":"codex:local","permissionMode":"full-access"
+                }),
+                &permission_auth,
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved["permissionRevision"], 2);
+        let reopened = permissions::SessionPermissions::open(directory.path()).unwrap();
+        assert_eq!(reopened.get(id).await.unwrap().mode, "full-access");
+        controller
+            .call_authorized(
+                "send",
+                json!({
+                    "threadId":id,"prompt":"wait next","clientUserMessageId":"permission-next"
+                }),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let frames = harness_engine_requests(directory.path());
+        let turn = frames
+            .iter()
+            .rev()
+            .find(|frame| frame["method"] == "turn/start")
+            .unwrap();
+        assert_eq!(turn["params"]["sandboxPolicy"]["type"], "dangerFullAccess");
+        assert_eq!(turn["params"]["approvalPolicy"], "never");
+        let other = controller
+            .call_authorized(
+                "create",
+                json!({
+                    "projectId":"project-a","prompt":"wait other"
+                }),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let frames = harness_engine_requests(directory.path());
+        let turn = frames
+            .iter()
+            .rev()
+            .find(|frame| frame["method"] == "turn/start")
+            .unwrap();
+        assert_eq!(turn["params"]["threadId"], other["threadId"]);
+        assert!(turn["params"].get("sandboxPolicy").is_none());
+        assert!(turn["params"].get("approvalPolicy").is_none());
+        let detail = controller
+            .call_authorized(
+                "thread",
+                json!({"threadId":other["threadId"]}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert!(detail["thread"].get("permissionMode").is_none());
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_configured_permissions_are_resolved_on_server_and_preserve_approvals() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        std::fs::write(
+            directory.path().join("fast-policy.json"),
+            br#"{"approvalPolicy":"on-request","sandboxMode":"danger-full-access"}"#,
+        )
+        .unwrap();
+        controller.call_authorized("create", json!({
+            "projectId":"project-a","prompt":"wait configured","permissionMode":"configured",
+            "permissionConfig":{"approvalPolicy":"never","sandboxPolicy":{"type":"dangerFullAccess"}}
+        }), &authorization).await.unwrap();
+        let frames = harness_engine_requests(directory.path());
+        let turn = frames
+            .iter()
+            .find(|frame| frame["method"] == "turn/start")
+            .unwrap();
+        assert_eq!(turn["params"]["sandboxPolicy"]["type"], "dangerFullAccess");
+        assert_eq!(
+            turn["params"]["approvalPolicy"], "on-request",
+            "不能接受客户端伪造的免审批配置"
+        );
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
     async fn harness_fast_running_toggle_applies_only_to_new_turns_and_queued_dispatch() {
         let (directory, authorization) = harness_fixture().await;
         let controller = &authorization.controller;
+        std::fs::write(
+            directory.path().join("fast-policy.json"),
+            br#"{"noTiers":true,"modelFlagsDisabled":true}"#,
+        )
+        .unwrap();
         let created = controller.call_authorized("create",
-            json!({"projectId":"project-a","prompt":"wait approval current","model":"gpt-test"}),
+            json!({"projectId":"project-a","prompt":"wait approval current","model":"gpt-6.1-sol"}),
             &authorization).await.unwrap();
         assert_eq!(created["ok"], true, "{created}");
         let id = created["threadId"].as_str().unwrap();
@@ -8990,7 +9275,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         let enabled = controller
             .call_authorized(
                 "setFast",
-                json!({"threadId":id,"model":"gpt-test","enabled":true}),
+                json!({"threadId":id,"model":"gpt-6.1-sol","enabled":true}),
                 &fast_auth,
             )
             .await
@@ -9053,7 +9338,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         controller
             .call_authorized(
                 "setFast",
-                json!({"threadId":id,"model":"gpt-test","enabled":false}),
+                json!({"threadId":id,"model":"gpt-6.1-sol","enabled":false}),
                 &fast_auth,
             )
             .await
@@ -9113,10 +9398,10 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 ))
         );
         let explicit = controller.call_authorized("create",
-            json!({"projectId":"project-a","prompt":"wait explicit fast","model":"gpt-test","fastMode":true}),
+            json!({"projectId":"project-a","prompt":"wait explicit fast","model":"gpt-6.1-sol","fastMode":true}),
             &authorization).await.unwrap();
         let normal = controller.call_authorized("create",
-            json!({"projectId":"project-a","prompt":"wait default standard","model":"gpt-test"}),
+            json!({"projectId":"project-a","prompt":"wait default standard","model":"gpt-6.1-sol"}),
             &authorization).await.unwrap();
         let final_starts = starts(harness_engine_requests(directory.path()));
         assert_eq!(final_starts[3]["params"]["serviceTier"], "priority");
@@ -9132,7 +9417,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         let created = controller
             .call_authorized(
                 "create",
-                json!({"projectId":"project-a","prompt":"wait","model":"gpt-test"}),
+                json!({"projectId":"project-a","prompt":"wait","model":"gpt-6.1-sol"}),
                 &authorization,
             )
             .await
@@ -9153,7 +9438,6 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             json!({"requirementsMalformed":true}),
             json!({"configFast":false}),
             json!({"provider":"copilot"}),
-            json!({"noTiers":true}),
         ] {
             std::fs::write(
                 directory.path().join("fast-policy.json"),
@@ -9163,7 +9447,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             let result = controller
                 .call_authorized(
                     "setFast",
-                    json!({"threadId":id,"model":"gpt-test","enabled":true}),
+                    json!({"threadId":id,"model":"gpt-6.1-sol","enabled":true}),
                     &fast_auth,
                 )
                 .await;
@@ -9174,7 +9458,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         controller
             .call_authorized(
                 "setFast",
-                json!({"threadId":id,"model":"gpt-test","enabled":true}),
+                json!({"threadId":id,"model":"gpt-6.1-sol","enabled":true}),
                 &fast_auth,
             )
             .await
@@ -9191,7 +9475,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         controller
             .call_authorized(
                 "setFast",
-                json!({"threadId":id,"model":"gpt-test","enabled":false}),
+                json!({"threadId":id,"model":"gpt-6.1-sol","enabled":false}),
                 &fast_auth,
             )
             .await
@@ -9201,7 +9485,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         let result = controller
             .call_authorized(
                 "setFast",
-                json!({"threadId":id,"model":"gpt-test","enabled":false}),
+                json!({"threadId":id,"model":"gpt-6.1-sol","enabled":false}),
                 &fast_auth,
             )
             .await;
@@ -9223,7 +9507,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         let main = controller
             .call_authorized(
                 "create",
-                json!({"projectId":"project-a","prompt":"wait","model":"gpt-test"}),
+                json!({"projectId":"project-a","prompt":"wait","model":"gpt-6.1-sol"}),
                 &authorization,
             )
             .await
@@ -9247,7 +9531,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         controller
             .call_authorized(
                 "setFast",
-                json!({"threadId":id,"model":"gpt-test","enabled":true}),
+                json!({"threadId":id,"model":"gpt-6.1-sol","enabled":true}),
                 &fast_auth,
             )
             .await
@@ -9285,7 +9569,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         controller
             .call_authorized(
                 "setFast",
-                json!({"threadId":id,"model":"gpt-test","enabled":false}),
+                json!({"threadId":id,"model":"gpt-6.1-sol","enabled":false}),
                 &fast_auth,
             )
             .await
@@ -9436,10 +9720,544 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
     }
 
+    #[tokio::test]
+    async fn harness_queue_edit_is_unsent_and_resend_preserves_remaining_order() {
+        for resend in [false, true] {
+            let (directory, authorization) = harness_fixture().await;
+            let controller = &authorization.controller;
+            let created = controller
+                .call_authorized(
+                    "create",
+                    json!({"projectId":"project-a","prompt":"wait approval active"}),
+                    &authorization,
+                )
+                .await
+                .unwrap();
+            let id = created["threadId"].as_str().unwrap();
+            let mut first = Value::Null;
+            for client in ["B", "C", "D"] {
+                let queued = controller
+                    .call_authorized(
+                        "send",
+                        json!({"threadId":id,"prompt":format!("wait approval {client}"),
+                            "clientUserMessageId":client}),
+                        &authorization,
+                    )
+                    .await
+                    .unwrap();
+                if client == "B" {
+                    first = queued["queuedMessages"][0].clone();
+                }
+            }
+            let taken = controller
+                .call_authorized(
+                    "beginQueuedEdit",
+                    json!({"threadId":id,"messageId":first["id"],"editId":"draft-B",
+                        "originalText":first["text"],"clientUserMessageId":"B","createdAt":first["createdAt"]}),
+                    &authorization,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                taken["queuedMessages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|message| message["clientUserMessageId"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["C", "D"]
+            );
+            let approve_current = || async {
+                let approve =
+                    controller.authorization(authorization.device.clone(), Some("approve"));
+                let request = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let detail = controller
+                            .call_authorized("thread", json!({"threadId":id}), &authorization)
+                            .await
+                            .unwrap();
+                        if let Some(request) = detail["thread"]["requests"]
+                            .as_array()
+                            .and_then(|requests| requests.first())
+                        {
+                            break request.clone();
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                controller
+                    .call_authorized(
+                        "approve",
+                        json!({"threadId":id,"requestId":request["id"],
+                            "method":request["method"],"decision":"accept"}),
+                        &approve,
+                    )
+                    .await
+                    .unwrap();
+            };
+            let wait_authorization = &authorization;
+            let delivered = |client: &'static str| async move {
+                tokio::time::timeout(Duration::from_secs(15), async {
+                    loop {
+                        let result = controller
+                            .call_authorized(
+                                "sendState",
+                                json!({"threadId":id,"clientUserMessageId":client}),
+                                wait_authorization,
+                            )
+                            .await
+                            .unwrap();
+                        if result["deliveryState"] == "accepted" {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                })
+                .await
+                .expect("取回编辑的草稿不应阻塞后续队列");
+            };
+            approve_current().await;
+            delivered("C").await;
+            let saved: Value = serde_json::from_slice(
+                &std::fs::read(directory.path().join("remote-harness-state.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved["edits"]["draft-B"]["state"], "editing");
+            assert!(
+                !harness_engine_requests(directory.path())
+                    .iter()
+                    .any(|frame| frame["method"] == "turn/start"
+                        && frame["params"]["clientUserMessageId"] == "B"),
+                "取回后未点击发送，不能自动恢复或派发原消息"
+            );
+            if resend {
+                let restored = controller
+                    .call_authorized(
+                        "editQueued",
+                        json!({"threadId":id,"editId":"draft-B","prompt":"wait approval B edited"}),
+                        &authorization,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    restored["queuedMessages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|message| message["clientUserMessageId"].as_str().unwrap())
+                        .collect::<Vec<_>>(),
+                    ["B", "D"],
+                    "已执行的 C 不回退，重新发送的 B 仍位于尚未执行的 D 之前"
+                );
+                approve_current().await;
+                delivered("B").await;
+            }
+            approve_current().await;
+            delivered("D").await;
+            let starts = harness_engine_requests(directory.path())
+                .into_iter()
+                .filter(|frame| frame["method"] == "turn/start")
+                .map(|frame| {
+                    frame["params"]["input"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>();
+            let expected = if resend {
+                vec![
+                    "wait approval active",
+                    "wait approval C",
+                    "wait approval B edited",
+                    "wait approval D",
+                ]
+            } else {
+                vec!["wait approval active", "wait approval C", "wait approval D"]
+            };
+            assert_eq!(starts, expected);
+            controller.harness.release().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn harness_queue_recovery_requires_normal_completion_and_keeps_manual_retry_available() {
+        for mode in ["missing", "before-restart", "after-reconnect"] {
+            let completed = mode == "before-restart";
+            let (original_dir, original_auth) = harness_fixture().await;
+            let original = &original_auth.controller;
+            let created = original
+                .call_authorized(
+                    "create",
+                    json!({"projectId":"project-a","prompt":"wait original"}),
+                    &original_auth,
+                )
+                .await
+                .unwrap();
+            let id = created["threadId"].as_str().unwrap();
+            let old_turn = created["turnId"].as_str().unwrap();
+            let mut old_messages = Value::Null;
+            for client in ["B", "C"] {
+                let queued = original.call_authorized("send", json!({
+                    "threadId":id,"prompt":format!("wait {client}"),"clientUserMessageId":client
+                }), &original_auth).await.unwrap();
+                old_messages = queued["queuedMessages"].clone();
+            }
+            let saved: Value = serde_json::from_slice(
+                &std::fs::read(original_dir.path().join("remote-harness-state.json")).unwrap(),
+            )
+            .unwrap();
+            let device = original_auth.device.clone();
+            let key = original.auth.lock().await.access_key.clone();
+            original.harness.release().await;
+            let rollout = original_dir.path().join(format!("{id}.jsonl"));
+            if completed {
+                use std::io::Write;
+                let record = json!({"timestamp":chrono::DateTime::from_timestamp_millis(now_ms() as i64)
+                    .unwrap().to_rfc3339(),"type":"event_msg",
+                    "payload":{"type":"task_complete","turn_id":old_turn}});
+                writeln!(
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&rollout)
+                        .unwrap(),
+                    "{record}"
+                )
+                .unwrap();
+            }
+            let (recovered_dir, recovered_auth) = harness_fixture_with_store(Some(saved)).await;
+            let controller = &recovered_auth.controller;
+            {
+                // 恢复沿用同一设备和密钥，模拟真实重启；仅复制隔离测试目录中的密钥材料。
+                let _key_store = lock_access_key_store(recovered_dir.path()).unwrap();
+                crate::settings::atomic_write(
+                    &recovered_dir.path().join("remote-access-key.json"),
+                    &serde_json::to_vec(key.as_ref().unwrap()).unwrap(),
+                )
+                .unwrap();
+            }
+            {
+                let mut auth = controller.auth.lock().await;
+                auth.access_key = key;
+                auth.devices = vec![device.clone()];
+            }
+            let authorization = controller.authorization(device, Some("send"));
+            controller.harness.seed_test_subagents(json!({"rows":[{
+                "id":id,"cwd":recovered_dir.path(),"path":rollout,"ephemeral":false,
+                "threadSource":"user","source":"appServer","status":{"type":"idle"},
+                "turns":[{"id":old_turn,"status":"completed","items":[{
+                    "id":"original-input","type":"userMessage","content":[{"type":"text","text":"wait original"}]
+                }]}]
+            }],"loaded":[]})).await.unwrap();
+            // 恢复读取故意返回 completed；没有原生结束记录时，不能据此认定异常前任务已完成。
+            for action in ["thread", "history", "queue"] {
+                controller
+                    .call_authorized(action, json!({"threadId":id}), &authorization)
+                    .await
+                    .unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let state: Value = serde_json::from_slice(
+                        &std::fs::read(recovered_dir.path().join("remote-harness-state.json"))
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    if completed {
+                        if state["sent"]
+                            .as_object()
+                            .unwrap()
+                            .values()
+                            .any(|result| result["clientUserMessageId"] == "B")
+                        {
+                            break;
+                        }
+                    } else if state["queueGates"][id]["phase"] == "recovering"
+                        && state["queueGates"][id]["reason"]
+                            .as_str()
+                            .is_some_and(|reason| !reason.is_empty())
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let frames = harness_engine_requests(recovered_dir.path());
+            let starts = frames
+                .iter()
+                .filter(|frame| frame["method"] == "turn/start")
+                .collect::<Vec<_>>();
+            if completed {
+                assert_eq!(starts.len(), 1);
+                assert_eq!(starts[0]["params"]["clientUserMessageId"], "B");
+            } else {
+                assert!(starts.is_empty(), "崩溃恢复读取不能启动排队消息");
+                assert!(!frames.iter().any(|frame| matches!(
+                    frame["method"].as_str(),
+                    Some("thread/resume" | "turn/steer")
+                )));
+                let queue = controller
+                    .call_authorized("queue", json!({"threadId":id}), &authorization)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    queue["queuedMessages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|message| message["id"].clone())
+                        .collect::<Vec<_>>(),
+                    old_messages
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|message| message["id"].clone())
+                        .collect::<Vec<_>>()
+                );
+                assert!(
+                    queue["queuedMessages"][0]["pausedReason"]
+                        .as_str()
+                        .unwrap()
+                        .contains("未确认正常结束")
+                );
+                if mode == "after-reconnect" {
+                    // 临时连接丢失后，迟到的真实完成记录仍应自然释放原队列。
+                    use std::io::Write;
+                    let record = json!({"timestamp":chrono::DateTime::from_timestamp_millis(now_ms() as i64)
+                        .unwrap().to_rfc3339(),"type":"event_msg",
+                        "payload":{"type":"task_complete","turn_id":old_turn}});
+                    writeln!(
+                        std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(&rollout)
+                            .unwrap(),
+                        "{record}"
+                    )
+                    .unwrap();
+                    tokio::time::timeout(Duration::from_secs(30), async {
+                        loop {
+                            let state = controller
+                                .call_authorized(
+                                    "sendState",
+                                    json!({"threadId":id,"clientUserMessageId":"B"}),
+                                    &authorization,
+                                )
+                                .await
+                                .unwrap();
+                            if state["deliveryState"] == "accepted" {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                } else {
+                    controller
+                        .call_authorized(
+                            "steerQueued",
+                            json!({
+                                "threadId":id,"messageId":queue["queuedMessages"][0]["id"]
+                            }),
+                            &authorization,
+                        )
+                        .await
+                        .unwrap();
+                }
+                let queue = controller
+                    .call_authorized("queue", json!({"threadId":id}), &authorization)
+                    .await
+                    .unwrap();
+                assert_eq!(queue["queuedMessages"].as_array().unwrap().len(), 1);
+                assert_eq!(queue["queuedMessages"][0]["clientUserMessageId"], "C");
+                assert_eq!(
+                    queue["queuedMessages"][0]["pausedReason"].is_string(),
+                    mode == "missing"
+                );
+            }
+            assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+            controller.harness.release().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn harness_queue_waits_for_upstream_retry_then_respects_the_real_terminal_status() {
+        for outcome in ["completed", "failed", "interrupted", "completed-with-error"] {
+            let status = if outcome == "completed-with-error" {
+                "completed"
+            } else {
+                outcome
+            };
+            let terminal_error = if outcome == "completed-with-error" {
+                json!({"message":"upstream failure"})
+            } else {
+                Value::Null
+            };
+            let (directory, authorization) = harness_fixture().await;
+            let controller = &authorization.controller;
+            let created = controller
+                .call_authorized(
+                    "create",
+                    json!({"projectId":"project-a","prompt":"wait upstream"}),
+                    &authorization,
+                )
+                .await
+                .unwrap();
+            let id = created["threadId"].as_str().unwrap();
+            let turn = created["turnId"].as_str().unwrap();
+            controller
+                .call_authorized(
+                    "send",
+                    json!({
+                        "threadId":id,"prompt":"wait queued","clientUserMessageId":"retry-queue"
+                    }),
+                    &authorization,
+                )
+                .await
+                .unwrap();
+            controller
+                .harness
+                .seed_test_history(json!({"threadId":id,"events":[{
+                    "method":"error","params":{"threadId":id,"turnId":turn,"willRetry":true,
+                        "error":{"message":"temporary upstream failure"}}
+                }]}))
+                .await
+                .unwrap();
+            // 队列每 750 毫秒检查一次，额外留 100 毫秒观察重试期间是否误派发。
+            tokio::time::sleep(Duration::from_millis(850)).await;
+            let queue = controller
+                .call_authorized("queue", json!({"threadId":id}), &authorization)
+                .await
+                .unwrap();
+            assert!(
+                queue["queuedMessages"][0]["pausedReason"].is_null(),
+                "模型重试中不能暂停队列"
+            );
+            assert_eq!(
+                harness_engine_requests(directory.path())
+                    .iter()
+                    .filter(|frame| frame["method"] == "turn/start")
+                    .count(),
+                1,
+                "重试期间不重放外层执行请求"
+            );
+            controller
+                .harness
+                .seed_test_history(json!({"threadId":id,"turns":[{
+                    "id":turn,"status":status,"items":[],"error":terminal_error
+                }],"events":[{"method":"turn/completed","params":{
+                    "threadId":id,"turn":{"id":turn,"status":status,"error":terminal_error}
+                }}]}))
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let queue = controller
+                        .call_authorized("queue", json!({"threadId":id}), &authorization)
+                        .await
+                        .unwrap();
+                    if outcome == "completed"
+                        && queue["queuedMessages"].as_array().unwrap().is_empty()
+                        || outcome != "completed"
+                            && queue["queuedMessages"][0]["pausedReason"].is_string()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let starts = harness_engine_requests(directory.path())
+                .into_iter()
+                .filter(|frame| frame["method"] == "turn/start")
+                .collect::<Vec<_>>();
+            assert_eq!(starts.len(), if outcome == "completed" { 2 } else { 1 });
+            controller.harness.release().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn harness_queue_normal_compaction_completion_still_dispatches_in_order() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        // 隔离引擎保留 2 秒压缩窗口，供真实只读及入队 RPC 完成，不依赖事件竞速。
+        std::fs::write(
+            directory.path().join("fast-policy.json"),
+            br#"{"compactDelayMs":2000}"#,
+        )
+        .unwrap();
+        let created = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"initial"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let detail = controller
+                    .call_authorized("thread", json!({"threadId":id}), &authorization)
+                    .await
+                    .unwrap();
+                if detail["thread"]["priority"]["active"] == false {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        controller
+            .call_authorized("compact", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        let queued = controller.call_authorized("send", json!({
+            "threadId":id,"prompt":"wait after compact","clientUserMessageId":"after-compact"
+        }), &authorization).await.unwrap();
+        assert_eq!(queued["deliveryState"], "queued");
+        let state: Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("remote-harness-state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state["queueGates"][id]["kind"], "compaction");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let sent = controller
+                    .call_authorized(
+                        "sendState",
+                        json!({"threadId":id,"clientUserMessageId":"after-compact"}),
+                        &authorization,
+                    )
+                    .await
+                    .unwrap();
+                if sent["deliveryState"] == "accepted" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            harness_engine_requests(directory.path())
+                .iter()
+                .filter(|frame| frame["method"] == "turn/start")
+                .count(),
+            2
+        );
+        controller.harness.release().await;
+    }
+
     async fn subagent_fixture() -> (tempfile::TempDir, RemoteAuthorization, String, Value) {
         let (directory, authorization) = harness_fixture().await;
         let created = authorization.controller.call_authorized("create", json!({
-            "projectId":"project-a","prompt":"wait parent","model":"gpt-test","reasoningEffort":"high"
+            "projectId":"project-a","prompt":"wait parent","model":"gpt-6.1-sol","reasoningEffort":"high"
         }), &authorization).await.unwrap();
         let root = created["threadId"].as_str().unwrap().to_owned();
         let row = |id: &str, parent: &str, ephemeral: bool, status: &str| {
@@ -9688,7 +10506,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             .call_authorized(
                 "create",
                 json!({
-                    "projectId":"project-a","prompt":"wait parent","model":"gpt-test"
+                    "projectId":"project-a","prompt":"wait parent","model":"gpt-6.1-sol"
                 }),
                 &authorization,
             )
@@ -9875,7 +10693,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         let main = controller
             .call_authorized(
                 "create",
-                json!({"projectId":"project-a","prompt":"parent","model":"gpt-test"}),
+                json!({"projectId":"project-a","prompt":"parent","model":"gpt-6.1-sol"}),
                 &authorization,
             )
             .await
@@ -10511,7 +11329,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             .call_authorized(
                 "create",
                 json!({"projectId":"project-a","prompt":"wait goal",
-            "goalMode":true,"model":"gpt-test","reasoningEffort":"high"}),
+            "goalMode":true,"model":"gpt-6.1-sol","reasoningEffort":"high"}),
                 &authorization,
             )
             .await
@@ -10574,7 +11392,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             .call_authorized("models", json!({}), &authorization)
             .await
             .unwrap();
-        assert_eq!(models["defaultModel"], "gpt-test");
+        assert_eq!(models["defaultModel"], "gpt-6.1-sol");
         assert_eq!(
             controller
                 .call_authorized("skills", json!({"threadId":id}), &authorization)

@@ -728,16 +728,16 @@ fn create_client_window(
         tauri::LogicalPosition::new(0.0, app_bar::HEIGHT),
         tauri::LogicalSize::new(1280.0, 860.0 - app_bar::HEIGHT),
     )?;
-    // 用户要求 PC 独立程序禁用网页默认右键菜单；所有会话窗口共用此入口，
-    // 原生设置同时覆盖侧边 iframe，保留网页自身交互与托盘菜单。
+    // 用户要求会话、文件和选中文字的右键功能正常可用，不能在 WebView2 层全局禁用菜单。
+    // 网页自定义菜单自行 preventDefault；未被接管的场景保留原生复制/粘贴，主窗口、独立会话窗口及 iframe 共用此设置。
     content.with_webview(|webview| unsafe {
         if let Err(error) = webview
             .controller()
             .CoreWebView2()
             .and_then(|core| core.Settings())
-            .and_then(|settings| settings.SetAreDefaultContextMenusEnabled(false))
+            .and_then(|settings| settings.SetAreDefaultContextMenusEnabled(true))
         {
-            eprintln!("禁用网页默认右键菜单失败：{error}");
+            eprintln!("启用网页右键菜单失败：{error}");
         }
     })?;
     install_navigation_recovery(&content, cache.clone())?;

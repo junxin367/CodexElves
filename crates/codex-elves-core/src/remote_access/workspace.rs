@@ -310,32 +310,13 @@ pub(super) async fn open_browser(
         .filter(|path| !path.trim().is_empty() && path.len() <= 16 * 1024)
         .ok_or_else(|| ApiError::new(400, "文件路径无效"))?
         .to_owned();
-    let cwd = super::workspace_context(&state, &payload, &authorization).await?;
+    let (cwd, context) = super::workspace_file_context(&state, &payload, &authorization).await?;
     let target = tokio::time::timeout(REQUEST_TIMEOUT, async {
-        let git_root = git(
-            &cwd,
-            &["rev-parse", "--show-toplevel"],
-            32 * 1024,
-            &authorization,
-        )
-        .await?;
-        let root = if git_root.success && !git_root.truncated {
-            let value = String::from_utf8(git_root.bytes)
-                .map_err(|_| ApiError::new(422, "项目目录编码无法识别"))?;
-            PathBuf::from(value.trim_end_matches(['\r', '\n']))
-        } else {
-            cwd.clone()
-        };
-        tokio::task::spawn_blocking(move || {
-            let root = std::fs::canonicalize(root)
-                .map_err(|_| ApiError::new(404, "当前项目目录已失效"))?;
-            if !workspace_root_matches(&cwd, &root) {
-                return Err(ApiError::new(403, "项目目录与当前会话不一致"));
-            }
-            local_browser_file_url(&root, &requested)
-        })
-        .await
-        .map_err(|_| ApiError::new(503, "无法确认项目文件路径"))?
+        let (root, path) =
+            resolve_file_target(cwd, &context, &requested, false, &authorization).await?;
+        tokio::task::spawn_blocking(move || local_browser_file_url(&root, &path))
+            .await
+            .map_err(|_| ApiError::new(503, "无法确认项目文件路径"))?
     })
     .await
     .map_err(|_| ApiError::new(504, "确认项目文件超时，请重试"))??;
@@ -453,30 +434,11 @@ pub(super) async fn view(
         .await
         .map_err(super::authorization_error)?;
     let payload = json!({"threadId": thread_id});
-    let cwd = super::workspace_context(&state, &payload, &authorization).await?;
+    let (cwd, context) = super::workspace_file_context(&state, &payload, &authorization).await?;
     let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
-        let git_root = git(
-            &cwd,
-            &["rev-parse", "--show-toplevel"],
-            32 * 1024,
-            &authorization,
-        )
-        .await?;
-        let root = if git_root.success && !git_root.truncated {
-            let value = String::from_utf8(git_root.bytes)
-                .map_err(|_| ApiError::new(422, "项目目录编码无法识别"))?;
-            PathBuf::from(value.trim_end_matches(['\r', '\n']))
-        } else {
-            cwd.clone()
-        };
-        let requested = requested.clone();
+        let (root, path) =
+            resolve_file_target(cwd, &context, &requested, false, &authorization).await?;
         tokio::task::spawn_blocking(move || {
-            let root = std::fs::canonicalize(root)
-                .map_err(|_| ApiError::new(404, "当前项目目录已失效"))?;
-            if !workspace_root_matches(&cwd, &root) {
-                return Err(ApiError::new(403, "项目目录与当前会话不一致"));
-            }
-            let path = project_relative_path(&root, &requested, false)?;
             let side = read_local(&root, &path)?;
             if !side.exists {
                 return Err(ApiError::new(404, "文件不存在或已被删除"));
@@ -557,32 +519,11 @@ async fn browse_workspace(
     if payload.get("query").is_some_and(|value| !value.is_string()) || query.len() > 256 {
         return Err(ApiError::new(400, "文件搜索条件无效"));
     }
-    let cwd = super::workspace_context(&state, &payload, &authorization).await?;
+    let (cwd, context) = super::workspace_file_context(&state, &payload, &authorization).await?;
     let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
-        // Git projects use the actual worktree root. A non-Git project uses its
-        // native working directory; the client never chooses this boundary.
-        let git_root = git(
-            &cwd,
-            &["rev-parse", "--show-toplevel"],
-            32 * 1024,
-            &authorization,
-        )
-        .await?;
-        let root = if git_root.success && !git_root.truncated {
-            let value = String::from_utf8(git_root.bytes)
-                .map_err(|_| ApiError::new(422, "项目目录编码无法识别"))?;
-            PathBuf::from(value.trim_end_matches(['\r', '\n']))
-        } else {
-            cwd.clone()
-        };
-        let requested = requested.to_owned();
+        let (root, path) =
+            resolve_file_target(cwd, &context, requested, !content, &authorization).await?;
         let (mut value, root, branch_directory) = tokio::task::spawn_blocking(move || {
-            let root = std::fs::canonicalize(root)
-                .map_err(|_| ApiError::new(404, "当前项目目录已失效"))?;
-            if !workspace_root_matches(&cwd, &root) {
-                return Err(ApiError::new(403, "项目目录与当前会话不一致"));
-            }
-            let path = project_relative_path(&root, &requested, !content)?;
             let value = if content {
                 project_file_content(&root, &path)?
             } else if !query.trim().is_empty() {
@@ -633,6 +574,55 @@ fn workspace_root_matches(cwd: &Path, root: &Path) -> bool {
                 super::preferences::wsl_distribution(cwd)
                     .is_some_and(|name| name.eq_ignore_ascii_case(&distribution))
             }))
+}
+
+async fn resolve_file_target(
+    cwd: PathBuf,
+    context: &Value,
+    requested: &str,
+    allow_root: bool,
+    authorization: &RemoteAuthorization,
+) -> Result<(PathBuf, String), ApiError> {
+    let root = resolve_workspace_root(cwd, authorization).await?;
+    match project_relative_path(&root, requested, allow_root) {
+        Ok(path) => return Ok((root, path)),
+        // 文件树仍以会话项目为根；仅外部文件引用扩展到所属引擎目录。
+        Err(error) if error.code == 403 && !allow_root => {}
+        Err(error) => return Err(error),
+    }
+    let roots = super::preferences::harness_file_roots(context).await?;
+    let requested = requested.to_owned();
+    tokio::task::spawn_blocking(move || harness_file_target(&roots, &requested))
+        .await
+        .map_err(|_| ApiError::new(503, "无法确认会话引擎文件路径"))?
+}
+
+fn harness_file_target(roots: &[PathBuf], requested: &str) -> Result<(PathBuf, String), ApiError> {
+    for root in roots {
+        let path = match project_relative_path(root, requested, false) {
+            Ok(path) => path,
+            Err(error) if error.code == 403 => continue,
+            Err(error) => return Err(error),
+        };
+        let canonical = std::fs::canonicalize(root)
+            .map_err(|_| ApiError::new(404, "会话引擎目录不存在或无法读取"))?;
+        if !canonical.is_dir()
+            || !(super::canonical_path_is_local(&canonical)
+                || super::preferences::wsl_distribution(root).is_some_and(|distribution| {
+                    super::preferences::wsl_distribution(&canonical)
+                        .is_some_and(|name| name.eq_ignore_ascii_case(&distribution))
+                }))
+        {
+            return Err(ApiError::new(403, "会话引擎目录不可访问"));
+        }
+        // 用户要求扩展 harness 文件访问，但继续逐级拒绝符号链接、重解析点和路径穿越。
+        safe_local_path(&canonical, &path)?;
+        return Ok((canonical, path));
+    }
+    Err(ApiError::new(
+        403,
+        "只能查看当前会话项目或所属引擎目录内的文件",
+    ))
 }
 
 async fn branch_metadata(root: &Path, authorization: &RemoteAuthorization) -> Value {
@@ -1133,7 +1123,7 @@ async fn resolve_workspace_root(
     tokio::task::spawn_blocking(move || {
         let root = std::fs::canonicalize(root)
             .map_err(|_| ApiError::new(404, "当前会话的工作目录已失效"))?;
-        if !cwd.starts_with(&root) || !super::canonical_path_is_local(&root) {
+        if !workspace_root_matches(&cwd, &root) {
             return Err(ApiError::new(403, "项目目录与当前会话不一致"));
         }
         Ok(root)
@@ -2735,6 +2725,48 @@ mod tests {
             .prefix("remote-workspace-")
             .tempdir_in(root)
             .unwrap()
+    }
+
+    #[test]
+    fn harness_file_access_reads_config_and_shared_skills_with_bounded_roots() {
+        let fixture = fixture_dir();
+        let home = std::fs::canonicalize(fixture.path()).unwrap();
+        let roots = [home.join(".codex"), home.join(".agents")];
+        std::fs::create_dir_all(roots[0].join("plugins/example")).unwrap();
+        std::fs::create_dir_all(roots[1].join("skills/example")).unwrap();
+        for (root, path, text) in [
+            (&roots[0], "config.toml", "model = \"fixture-model\"\n"),
+            (&roots[0], "AGENTS.md", "全局指令"),
+            (&roots[0], "plugins/example/README.md", "插件说明"),
+            (&roots[1], "skills/example/SKILL.md", "共享 Skill"),
+        ] {
+            std::fs::write(root.join(path), text).unwrap();
+            let requested = display_project_path(&root.join(path));
+            let (resolved, relative) = harness_file_target(&roots, &requested).unwrap();
+            assert_eq!(relative, path);
+            let result = project_file_content(&resolved, &relative).unwrap();
+            assert_eq!(result["kind"], "text");
+            assert_eq!(result["text"], text);
+            assert_eq!(result["root"], display_project_path(root));
+            assert_eq!(
+                local_browser_file_url(&resolved, &relative).unwrap(),
+                reqwest::Url::from_file_path(root.join(path)).unwrap()
+            );
+        }
+        for outside in [
+            home.join("private.txt"),
+            home.join(".codex-other/config.toml"),
+            home.join(".claude/settings.json"),
+            roots[0].join("../private.txt"),
+            roots[0].join("plugins/../../private.txt"),
+            roots[0].join(".git/config"),
+            roots[0].join("config.toml:stream"),
+        ] {
+            assert!(
+                harness_file_target(&roots, &display_project_path(&outside)).is_err(),
+                "{outside:?}"
+            );
+        }
     }
 
     struct WorkspaceTestBridge {

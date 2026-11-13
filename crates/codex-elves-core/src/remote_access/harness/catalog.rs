@@ -428,6 +428,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    else output({id:q.id,result:{data:[{id:'gpt-test',model:'gpt-test'}],nextCursor:null}});return;
  }
  if(q.method==='config/read'){output({id:q.id,result:{config:{model:'gpt-test'}}});return;}
+ if(q.method==='account/read'){output({id:q.id,result:{account:{type:'apiKey'}}});return;}
+ if(q.method==='configRequirements/read'){output({id:q.id,result:{requirements:null}});return;}
  if(q.method==='thread/turns/list'){
    output({id:q.id,result:{data:['new','middle','old'].map(id=>({id,status:'completed'})),nextCursor:null}});
    return;
@@ -898,7 +900,14 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         assert!(service.store.lock().await.data.queues.is_empty());
         assert!(!directory.path().join("remote-harness-state.json").exists());
         let calls = requests(directory.path());
-        for method in ["model/list", "config/read", "project/list"] {
+        // Fast 预热需要读取账号与管理员限制，同样必须只读且在并发预热间共享。
+        for method in [
+            "model/list",
+            "config/read",
+            "project/list",
+            "account/read",
+            "configRequirements/read",
+        ] {
             assert_eq!(
                 calls.iter().filter(|call| call["method"] == method).count(),
                 1
@@ -914,6 +923,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                     | "project/list"
                     | "model/list"
                     | "config/read"
+                    | "account/read"
+                    | "configRequirements/read"
             )
         )));
         service.stop_preparation().await;

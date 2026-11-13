@@ -56,11 +56,17 @@ impl Claude {
     ) -> anyhow::Result<Value> {
         config.validate()?;
         let mut response = self.account_usage(&config, allow_probe).await?;
-        if include_local && response["usage"].is_object() {
+        if response["usage"].is_object() {
             // 账号百分比经原生 CLI；金额、Token、预测仅覆盖对应 WSL 的本地数值账本。
-            let metrics = self
-                .local_usage(&config, &response["usage"], allow_probe)
-                .await;
+            // 用户要求弹窗缓存优先：普通轮询也附带已有新鲜详情，只有显式展开才允许扫描日志或更新价格。
+            let metrics = if include_local {
+                self.local_usage(&config, &response["usage"], allow_probe)
+                    .await
+            } else {
+                self.cached_local_usage(&config, &response["usage"])
+                    .await
+                    .unwrap_or(Value::Null)
+            };
             for key in ["fiveHour", "sevenDay"] {
                 if response["usage"][key].is_object() && metrics[key].is_object() {
                     response["usage"][key]["metrics"] = metrics[key].clone();
@@ -111,12 +117,8 @@ impl Claude {
         }
         let lock = self.lock(&format!("subscription-local:{instance}")).await;
         let _guard = lock.lock().await;
-        if let Some(cached) = self.local_usage_cache.lock().await.get(&instance)
-            && cached.config == *config
-            && cached.windows == windows
-            && cached.checked.elapsed() < CACHE_TTL
-        {
-            return cached.metrics.clone();
+        if let Some(cached) = self.cached_local_usage(config, usage).await {
+            return cached;
         }
         if !allow_probe {
             return Value::Null;
@@ -136,6 +138,21 @@ impl Claude {
             },
         );
         metrics
+    }
+
+    async fn cached_local_usage(&self, config: &WslConfig, usage: &Value) -> Option<Value> {
+        if let Some(cached) = self
+            .local_usage_cache
+            .lock()
+            .await
+            .get(&config.instance_id())
+            && cached.config == *config
+            && cached.windows == local_windows(usage)
+            && cached.checked.elapsed() < CACHE_TTL
+        {
+            return Some(cached.metrics.clone());
+        }
+        None
     }
 
     async fn local_usage_prices(&self) -> Value {
@@ -623,7 +640,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_details_are_opt_in_and_cached_by_instance_and_window() {
+    async fn local_details_reuse_cache_without_scanning_and_stay_bound_to_instance_and_window() {
         let directory = tempfile::tempdir().unwrap();
         let claude = Claude::new(directory.path()).unwrap();
         let config = WslConfig::default();
@@ -638,6 +655,14 @@ mod tests {
                 response: response.clone(),
             },
         );
+        assert_eq!(
+            claude
+                .subscription_usage(config.clone(), false, false)
+                .await
+                .unwrap(),
+            response,
+            "没有详情缓存时普通读取不能启动扫描"
+        );
         let metrics = json!({"fiveHour":{"source":"claude-wsl-local-journal","usedTokens":110,"usedCostUsd":null}});
         claude.local_usage_cache.lock().await.insert(
             config.instance_id(),
@@ -648,13 +673,11 @@ mod tests {
                 metrics: metrics.clone(),
             },
         );
-        assert_eq!(
-            claude
-                .subscription_usage(config.clone(), false, false)
-                .await
-                .unwrap(),
-            response
-        );
+        let cached = claude
+            .subscription_usage(config.clone(), false, false)
+            .await
+            .unwrap();
+        assert_eq!(cached["usage"]["fiveHour"]["metrics"], metrics["fiveHour"]);
         let detailed = claude
             .subscription_usage(config.clone(), false, true)
             .await
@@ -663,6 +686,7 @@ mod tests {
             detailed["usage"]["fiveHour"]["metrics"],
             metrics["fiveHour"]
         );
+        assert_eq!(cached, detailed, "普通读取可直接复用展开时的同一份详情");
         let mut changed = response["usage"].clone();
         changed["fiveHour"]["resetsAt"] = json!(now_ms() + 18000000);
         assert!(claude.local_usage(&config, &changed, false).await.is_null());
@@ -680,5 +704,49 @@ mod tests {
             claude.usage_prices.lock().await.attempted.is_none(),
             "普通额度读取不下载价格、不扫描日志"
         );
+        claude
+            .local_usage_cache
+            .lock()
+            .await
+            .get_mut(&config.instance_id())
+            .unwrap()
+            .checked = Instant::now() - CACHE_TTL;
+        assert!(
+            claude
+                .subscription_usage(config.clone(), false, false)
+                .await
+                .unwrap()["usage"]["fiveHour"]["metrics"]
+                .is_null(),
+            "普通读取不返回已过期的详情缓存"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_details_negative_cache_keeps_retry_backoff_without_loading_prices() {
+        let directory = tempfile::tempdir().unwrap();
+        let claude = Claude::new(directory.path()).unwrap();
+        let config = WslConfig::default();
+        let usage = json!({"fiveHour":{"usedPercentage":24,"resetsAt":now_ms()+9000000}});
+        claude.local_usage_cache.lock().await.insert(
+            config.instance_id(),
+            CachedLocalUsage {
+                config: config.clone(),
+                checked: Instant::now(),
+                windows: local_windows(&usage),
+                metrics: Value::Null,
+            },
+        );
+        assert_eq!(
+            claude.cached_local_usage(&config, &usage).await,
+            Some(Value::Null),
+            "已缓存的失败与从未读取必须区分，避免反复扫描"
+        );
+        assert!(claude.local_usage(&config, &usage, true).await.is_null());
+        assert!(claude.usage_prices.lock().await.attempted.is_none());
+        let changed = WslConfig {
+            executable: "/other/claude".into(),
+            ..config
+        };
+        assert!(claude.cached_local_usage(&changed, &usage).await.is_none());
     }
 }

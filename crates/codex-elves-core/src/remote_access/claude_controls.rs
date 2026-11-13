@@ -132,6 +132,9 @@ impl Claude {
         payload: &Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
+        if let Some(mode) = payload["permissionMode"].as_str() {
+            c.permission_mode = Some(mode.to_owned());
+        }
         let (name, argument) = match action {
             "compact" => ("compact", ""),
             "setGoal" => ("goal", goal_argument(payload)?),
@@ -171,6 +174,7 @@ impl Claude {
             }
         };
         if action == "setGoal" {
+            apply_permissions(&process, c, payload, authorization).await?;
             apply_model(&process, c, payload, authorization).await?;
             self.change(|saved| {
                 let current = saved
@@ -179,6 +183,7 @@ impl Claude {
                     .context("Claude 会话不存在")?;
                 current.model = c.model.clone();
                 current.effort = c.effort.clone();
+                current.permission_mode = c.permission_mode.clone();
                 Ok(())
             })
             .await?;

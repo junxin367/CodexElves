@@ -282,7 +282,9 @@ impl Conversation {
             && self
                 .remote_queue
                 .messages
-                .first()
+                // 共用输入框按用户要求把取回内容视为草稿；只跳过编辑槽位，不能跳过暂停或未知消息。
+                .iter()
+                .find(|m| m.state != "editing")
                 .is_some_and(|m| m.state == "queued" && !m.direct)
             && (self.native_status["tempo"] == "idle"
                 || self.native_status["tempo"] == "blocked"
@@ -569,6 +571,10 @@ impl Claude {
         let mut edit_settings = None;
         let result = async {
             let mut c = self.conversation(id).await?;
+            // 权限只在实际开始新轮次前应用；运行中的 next 引导不得改变该轮已经确定的权限。
+            if !steer {
+                apply_permissions(process, &mut c, &message.payload, authorization).await?;
+            }
             let catalog = normalize_models(&process.initialization);
             let (model, effort) = model_selection(&c, &message.payload, &catalog)?;
             if let Some(edit) = &message.native_edit {
@@ -603,6 +609,7 @@ impl Claude {
                     .context("Claude 会话不存在")?;
                 current.model = c.model;
                 current.effort = c.effort;
+                current.permission_mode = c.permission_mode;
                 Ok(())
             })
             .await?;
@@ -734,7 +741,15 @@ impl Claude {
             {
                 continue;
             }
-            let message = c.remote_queue.messages[0].clone();
+            let Some(message) = c
+                .remote_queue
+                .messages
+                .iter()
+                .find(|m| m.state != "editing")
+                .cloned()
+            else {
+                continue;
+            };
             let Some(controller) = self.controller.get().and_then(Weak::upgrade) else {
                 continue;
             };
@@ -1790,6 +1805,137 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn remote_queue_edit_draft_does_not_block_and_resend_preserves_position() {
+        for resend in [false, true] {
+            let (_directory, _auth_directory, service, c, auth, calls, _) = fixture().await;
+            for id in ["B", "C", "D"] {
+                service
+                    .command("send", &payload(&c, id), &auth)
+                    .await
+                    .unwrap();
+            }
+            let original = service
+                .conversation(&c.id)
+                .await
+                .unwrap()
+                .remote_queue
+                .messages[0]
+                .clone();
+            service
+                .command(
+                    "beginQueuedEdit",
+                    &json!({"threadId":c.id,"messageId":"B","editId":"draft-B",
+                        "originalText":"正文-B","clientUserMessageId":"B","createdAt":original.created_at}),
+                    &auth,
+                )
+                .await
+                .unwrap();
+            let finish_current = |saved: &mut Saved| {
+                let current = saved.conversations.get_mut(&c.id).unwrap();
+                current.native_status = json!({"tempo":"idle"});
+                current.queued_messages.clear();
+                if let Some(client) = current.remote_queue.awaiting_turn.clone() {
+                    current.turns.push(
+                        json!({"id":client,"status":"completed","_nativeDone":true,"items":[]}),
+                    );
+                } else {
+                    current.turns.last_mut().unwrap()["status"] = json!("completed");
+                }
+                current
+                    .remote_queue
+                    .observe_turns(&current.turns, &current.native_status);
+                Ok(())
+            };
+            service.change(finish_current).await.unwrap();
+            for state in ["paused", "unknown", "sending"] {
+                service
+                    .change(|saved| {
+                        saved
+                            .conversations
+                            .get_mut(&c.id)
+                            .unwrap()
+                            .remote_queue
+                            .messages[1]
+                            .state = state.into();
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+                service.drain_remote_queues().await;
+                assert!(
+                    calls.lock().await.is_empty(),
+                    "跳过编辑草稿不能跳过暂停、发送中或未知结果"
+                );
+            }
+            service
+                .change(|saved| {
+                    saved
+                        .conversations
+                        .get_mut(&c.id)
+                        .unwrap()
+                        .remote_queue
+                        .messages[1]
+                        .state = "queued".into();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            service.drain_remote_queues().await;
+            assert_eq!(calls.lock().await[0]["client_id"], "C");
+            assert_eq!(
+                service
+                    .conversation(&c.id)
+                    .await
+                    .unwrap()
+                    .remote_queue
+                    .edits["draft-B"]
+                    .state,
+                "editing",
+                "原消息仍是未发送草稿"
+            );
+            if resend {
+                service
+                    .command(
+                        "editQueued",
+                        &json!({"threadId":c.id,"editId":"draft-B","prompt":"编辑后-B"}),
+                        &auth,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    service
+                        .conversation(&c.id)
+                        .await
+                        .unwrap()
+                        .remote_queue
+                        .messages
+                        .iter()
+                        .map(|message| message.id.as_str())
+                        .collect::<Vec<_>>(),
+                    ["B", "D"]
+                );
+                service.change(finish_current).await.unwrap();
+                service.drain_remote_queues().await;
+            }
+            service.change(finish_current).await.unwrap();
+            service.drain_remote_queues().await;
+            assert_eq!(
+                calls
+                    .lock()
+                    .await
+                    .iter()
+                    .map(|request| request["client_id"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                if resend {
+                    vec!["C", "B", "D"]
+                } else {
+                    vec!["C", "D"]
+                }
+            );
+        }
     }
 
     #[tokio::test]

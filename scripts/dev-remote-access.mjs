@@ -47,6 +47,7 @@ const files = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "application/javascript; charset=utf-8"]],
   ["/select.js", ["select.js", "application/javascript; charset=utf-8"]],
+  ["/permissions.js", ["permissions.js", "application/javascript; charset=utf-8"]],
   ["/session-tools.js", ["session-tools.js", "application/javascript; charset=utf-8"]],
   ["/session-files.js", ["session-files.js", "application/javascript; charset=utf-8"]],
   ["/file-preview.html", ["file-preview.html", "text/html; charset=utf-8"]],
@@ -170,7 +171,8 @@ function allowedApi(method, path) {
     || /^\/api\/(?:receipts|images)\/[a-zA-Z0-9_-]+$/.test(path))
     // 设置仅转发固定路径，优化配置与环境、指令共用正式后端的登录和写权限校验。
     || method === "POST" && (["/api/connect", "/api/logout", "/api/workspace/context", "/api/workspace/changes", "/api/workspace/change", "/api/workspace/files", "/api/workspace/file", "/api/workspace/open-browser",
-      "/api/settings/environments", "/api/settings/instructions", "/api/settings/prompt-optimization"].includes(path)
+      "/api/settings/environments", "/api/settings/instructions", "/api/settings/permissions",
+      "/api/settings/prompt-optimization"].includes(path)
       || /^\/api\/(?:read|action)\/[a-zA-Z][a-zA-Z0-9_-]*$/.test(path));
 }
 function mappedCookie(req) {

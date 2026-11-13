@@ -4,7 +4,7 @@
 
 2026-11-02用户明确：本轮只恢复原有远程能力。文件审批记为能力缺失，排除主动开发及必做验收；`scenario.approval`继续验证已有命令审批，不据案例名称扩展文件审批。已撤回本轮新增的文件审批展示及专用测试。
 
-`scripts/remote-access-e2e.mjs` 是用户要求保留的长期回归资产。当前 2.5.9 包含 **73 个已列案例和处理器**；处理器与 73 条业务基线不是一一对应，数量相同不代表完整覆盖。功能覆盖与预期以 `docs/validation/remote-acceptance-cases-20261101.md` 为基线，子智能体等新补业务用例尚需逐项接入并真实执行。导入模块不启动环境、不认领浏览器、不发送消息；模块只接受调用方已经通过 `chrome@openai-bundled` 明确绑定的真实 `tab`。
+`scripts/remote-access-e2e.mjs` 是用户要求保留的长期回归资产。当前 2.5.10 包含 **73 个已列案例和处理器**；处理器与 73 条业务基线不是一一对应，数量相同不代表完整覆盖。功能覆盖与预期以 `docs/validation/remote-acceptance-cases-20261101.md` 为基线，子智能体等新补业务用例尚需逐项接入并真实执行。导入模块不启动环境、不认领浏览器、不发送消息；模块只接受调用方已经通过 `chrome@openai-bundled` 明确绑定的真实 `tab`。
 
 用户在 2026-11-03 至 11-04 的手动反馈及精确复现顺序见[手动反馈与防回归清单](validation/remote-user-feedback-20261103-20261104.md)：包含手机目标交互、旧消息/发送禁用恢复、侧栏异步关闭、提示时机、队列耗时、侧边模型往返和前后台连接诊断。后续相关修改按清单选择对应子场景，区分代码、真实验证、部署和真机状态；`UF-*` 仅为反馈索引，不代表新增处理器或整套 E2E 已通过。
 
@@ -32,7 +32,7 @@
 | 起步与版本 | `read.ready`、`read.runtime_version` | 真实连接与控件；原始版本 JSON、实际安装程序和网页资产文件哈希同时匹配 |
 | 普通会话 | `session.create`、`read.select_refresh`、`session.send_stream`、`session.stop` | 创建独立 main/control；切换、刷新；实际流式变化；停止原生轮次后可编辑，均按 ID 和消息标记核对 |
 | 模型 | `session.model`、`session.model_effort_isolation` | 两个实际模型/深度设置，main→control→main 各发送一轮；核对每个真实 turn 的 modelId、protocol、reasoningEffort，不只看按钮 |
-| 队列常规 | `queue.automatic`、`queue.edit_cancel`、`queue.edit_save`、`queue.reorder`、`queue.remove`、`queue.steer` | 两条消息按 FIFO 自然承接；A/B/C 原队列对象的编辑取消、保存、键盘排序、删除及引导；刷新后状态与单次消费一致 |
+| 队列常规 | `queue.automatic`、`queue.edit_draft`、`queue.edit_save`、`queue.reorder`、`queue.remove`、`queue.steer` | 两条消息按 FIFO 自然承接；取回后作为普通未发送草稿，不显示编辑栏和取消按钮，未发送不恢复队列，重新发送回到原位置；再核对修改、键盘排序、删除及引导 |
 | 队列边界 | `queue.after_stop`、`queue.after_failure`、`queue.approval_wait`、`queue.compaction` | 停止/真实上游失败后保留原队列，明确引导恢复；审批/压缩期间不抢先消费，结束后只消费一次 |
 | 队列并发与恢复 | `queue.dequeue_edit_race`、`queue.dequeue_remove_race`、`queue.cross_session` | 等到真实原生出队窗口再操作；接受明确过期拒绝，不接受未知结果；原对象只能删除或消费一次；跨会话刷新保持同 ID |
 | 侧边命名六项 | `side.default_name`、`side.first_message_name`、`side.same_id_name`、`side.desktop_created`、`side.desktop_rename`、`side.custom_name_refresh` | 首条消息前按同一真实 thread ID 核对原生默认标签，不写死默认语言或编号；默认名且首次出现有效用户文字时，按合并空白后的前 15 个 Unicode 码点计算期望，必须同时核对原生 tab 写入和远程列表、详情及刷新；已有自定义名不套用十五字符限制，两次连续改名分别留证并验证后续消息保持 |
@@ -102,7 +102,13 @@ authorization: {
 
 只打开本次批准的项。完整 73 项比旧 27 项有更多真实调用，不沿用旧例子的 17 次预算；按所选案例明确批准上限，达到上限即阻塞，不追加调用。优化有独立额度：restore/cancel/late_result 各一次，no_injection 两次；goal 及修改已发消息也计消息调用。`recovery.question_receipt` 预留两次消息额度，分别在提问和回答点击前扣除。多侧边聚合使用三次未读消息；其他已读单项使用两次，Android 通知使用一次。活动窗口太短、取消/并发窗口没捕获时保留 `blocked`，不为通过自动付费重试。
 
-### 队列取消的编辑器实际值与恢复合同
+### 排队草稿与重新发送
+
+2026-11-13 用户要求与 Codex 的排队编辑一致：点击编辑后消息离开待执行队列，输入框使用普通发送入口，不显示“取消编辑”按钮、编辑说明或保存图标。不再次发送时，该条消息不执行，也不阻塞后续队列；再次发送时保留原位置，已经执行的其他消息不回退。
+
+2.5.10 用 `queue.edit_draft` 替换原 `queue.edit_cancel` UI 案例。新案例沿用只读原生驱动 `observe-queue-edit-cancel` 的 `before`、`editing` 两阶段，核对原输入、准确编辑标识和位置；实际改稿、刷新后仍须保持未发送，再通过普通“发送消息”按钮放回队列并核对顺序。`queue.edit_save` 同样使用普通发送按钮，并等待真实编辑器值变化后才提交。以下旧取消合同仅供历史报告兼容，不能作为当前界面的操作说明。
+
+### 历史队列取消合同
 
 `queue.edit_cancel` 原先已经调用真实 `fill` 填入“原文＋取消编辑的临时文字”；2.5.4及证据门禁1.3.2补的是实际值留证、原生ED与完整恢复条件。不能仅凭DOM摘要没有临时文字、队列预览相同或`canceled`布尔判通过，也不能继承旧版报告。
 

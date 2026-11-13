@@ -129,6 +129,57 @@ export function fitMediaPreview(dialog, panel, media, dimensions, { fillAvailabl
   };
 }
 
+export function mediaPreviewContainsPoint(media, viewport, clientX, clientY) {
+  const box = media.getBoundingClientRect(), clip = viewport.getBoundingClientRect();
+  let { left, top, width, height } = box;
+  const naturalWidth = media.naturalWidth || media.videoWidth, naturalHeight = media.naturalHeight || media.videoHeight;
+  if (naturalWidth > 0 && naturalHeight > 0 && getComputedStyle(media).objectFit === "contain") {
+    const scale = Math.min(width / naturalWidth, height / naturalHeight);
+    left += (width - naturalWidth * scale) / 2; top += (height - naturalHeight * scale) / 2;
+    width = naturalWidth * scale; height = naturalHeight * scale;
+  }
+  // 用户要求放大后点击图片不能关闭；按变换后的实际内容与可见视口交集判断，不按透明容器判断。
+  return width > 0 && height > 0 && clientX >= Math.max(left, clip.left)
+    && clientX <= Math.min(left + width, clip.right) && clientY >= Math.max(top, clip.top)
+    && clientY <= Math.min(top + height, clip.bottom);
+}
+
+export function bindMediaPreviewDismiss(dialog, media, viewport = media) {
+  const pointers = new Set();
+  let pressed = null;
+  const background = event => !event.target.closest?.("button,input,select,textarea,a,.image-preview-caption,.video-preview-controls,.video-preview-status,.media-preview-loading-label")
+    && !mediaPreviewContainsPoint(media, viewport, event.clientX, event.clientY);
+  const down = event => {
+    pointers.add(event.pointerId);
+    pressed = pointers.size === 1 && event.isPrimary !== false && event.button === 0 && background(event)
+      ? { id: event.pointerId, x: event.clientX, y: event.clientY, released: false } : null;
+  };
+  const move = event => {
+    // PC 和手机共用 6 个 CSS 像素的单击容差；拖动、滚动及双指操作结束后不能误关弹窗。
+    if (pressed?.id === event.pointerId && (Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > 6
+        || !background(event))) pressed = null;
+  };
+  const up = event => {
+    pointers.delete(event.pointerId);
+    if (pressed?.id !== event.pointerId) return;
+    move(event);
+    if (pressed) pressed.released = true;
+  };
+  const cancel = event => { pointers.delete(event.pointerId); pressed = null; };
+  const click = event => {
+    const dismiss = pressed?.released && !pointers.size && background(event);
+    pressed = null;
+    // 用户要求内容以外单击关闭；消费完整 click 后再关闭，避免手机的合成点击穿透到会话。
+    if (dismiss) { event.preventDefault(); event.stopPropagation(); dialog.close(); }
+  };
+  const handlers = { pointerdown: down, pointermove: move, pointerup: up, pointercancel: cancel, click };
+  for (const [name, handler] of Object.entries(handlers)) dialog.addEventListener(name, handler);
+  return () => {
+    for (const [name, handler] of Object.entries(handlers)) dialog.removeEventListener(name, handler);
+    pointers.clear(); pressed = null;
+  };
+}
+
 export function openVideoPreview(trigger, source, poster, name, prepareAccess = () => {}) {
   if (!remoteVideoPattern.test(source) || poster !== `${source}/poster`) return;
   if (requestWorkspaceMediaPreview({ kind: "video", source, poster, name })) return;
@@ -343,22 +394,7 @@ export function openVideoPreview(trigger, source, poster, name, prepareAccess = 
       else fail("播放线路暂不可用，请重试或在电脑端查看");
     } else fail(video.error.code === 1 ? "播放已取消，请重试" : "视频无法播放，格式可能不受支持或文件已不可用");
   };
-  // 用 click 关闭遮罩，避免关闭后的合成点击落到会话页面。
-  let backdropPressed = false;
-  const onBackdrop = event => {
-    const rect = dialog.getBoundingClientRect();
-    return event.target === dialog && (event.clientX < rect.left || event.clientX > rect.right
-      || event.clientY < rect.top || event.clientY > rect.bottom);
-  };
-  dialog.onpointerdown = event => { backdropPressed = onBackdrop(event); };
-  dialog.onpointermove = event => { if (!onBackdrop(event)) backdropPressed = false; };
-  dialog.onpointercancel = () => { backdropPressed = false; };
-  dialog.onclick = event => {
-    if (backdropPressed && onBackdrop(event)) {
-      event.preventDefault(); event.stopPropagation(); dialog.close();
-    }
-    backdropPressed = false;
-  };
+  const disposeDismiss = bindMediaPreviewDismiss(dialog, video);
   dialog.oncancel = event => { event.preventDefault(); dialog.close(); };
   const stop = () => {
     if (closed) return;
@@ -384,6 +420,7 @@ export function openVideoPreview(trigger, source, poster, name, prepareAccess = 
   window.addEventListener("pagehide", leave);
   document.addEventListener("visibilitychange", hide);
   dialog.onclose = () => {
+    disposeDismiss();
     layout.dispose();
     cover.posterRecovery?.dispose();
     cover.removeAttribute("src");

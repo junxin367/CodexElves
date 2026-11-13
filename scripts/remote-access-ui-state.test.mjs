@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import nodeVm from "node:vm";
 import { createSidebarPreferenceStore } from "../assets/remote-access/recovery-store.js";
 import { createSelectComponent } from "../assets/remote-access/select.js";
+import { mountInstancePermissions, permissionLabel, permissionOptions } from "../assets/remote-access/permissions.js";
 import { menuHorizontalLeft } from "../assets/remote-access/session-menu.js";
 
 function storage() {
@@ -334,6 +335,9 @@ const vm = {
       claudePendingSetting: () => null,
       selectedDraftFast: false, remoteFastState: null, remoteFastWriting: null, fastModeVersion: 0,
       remoteFastWrites: new Map(),
+      draftPermissionChoices: new Map(), permissionSelections: new Map(), permissionWrites: new Map(),
+      instancePermissionCatalogs: new Map(), instancePermissionReads: new Map(),
+      permissionLabel, permissionOptions, $: () => null,
       remoteFastKey: () => "", updateRemoteFast() {}, rememberRemoteFastPreference() {},
       reconcileRemoteFastPreference: value => value,
       messageImageMediaReads: new WeakMap(), messageImageRefreshes: new Map(), messageImageReadSequence: 0,
@@ -527,6 +531,93 @@ test("Codex/Claude 图片添加和草稿/队列恢复完整保留八张，第九
   assert.match(source, /function handleComposerImagePaste[\s\S]*?addFiles\(files\)/);
 });
 
+async function mediaPreviewDismissHarness(width, height) {
+  const source = await readFile(new URL("../assets/remote-access/attachments.js", import.meta.url), "utf8");
+  const rect = (left, top, width, height) => ({ left, top, width, height, right: left + width, bottom: top + height });
+  const listeners = new Map(), events = [];
+  let closes = 0, picture = rect((width - 200) / 2, (height - 100) / 2, 200, 100);
+  const viewport = { getBoundingClientRect: () => rect(0, 0, width, height), closest: () => null };
+  const media = { naturalWidth: 200, naturalHeight: 100, getBoundingClientRect: () => picture };
+  const dialog = { addEventListener: (name, handler) => listeners.set(name, handler),
+    removeEventListener: name => listeners.delete(name), close: () => closes++ };
+  const context = vm.createContext({ getComputedStyle: () => ({ objectFit: "contain" }) });
+  vm.runInContext(source.slice(source.indexOf("export function mediaPreviewContainsPoint("),
+    source.indexOf("export function openVideoPreview(")).replace(/^export /gm, ""), context);
+  const dispose = context.bindMediaPreviewDismiss(dialog, media, viewport);
+  const fire = (type, x, y, options = {}) => {
+    const event = { target: viewport, pointerId: 1, button: 0, isPrimary: true, clientX: x, clientY: y,
+      preventDefault: () => events.push("preventDefault"), stopPropagation: () => events.push("stopPropagation"), ...options };
+    listeners.get(type)?.(event);
+  };
+  const tap = (x, y, options) => { fire("pointerdown", x, y, options); fire("pointerup", x, y, options); fire("click", x, y, options); };
+  return { fire, tap, dispose, listeners, events, closes: () => closes,
+    picture: box => { picture = rect(...box); } };
+}
+
+test("PC/手机图片预览仅点击实际内容周围空白关闭，放大覆盖区域及按钮不误关", async () => {
+  for (const [width, height] of [[1280, 800], [390, 844]]) {
+    const h = await mediaPreviewDismissHarness(width, height);
+    h.tap(width / 2, height / 2);
+    assert.equal(h.closes(), 0, "点击原始图片不关闭");
+    h.tap(16, 16, { target: { closest: () => ({ tagName: "BUTTON" }) } });
+    assert.equal(h.closes(), 0, "关闭以外的操作控件由自身处理");
+    h.tap(16, 16);
+    assert.equal(h.closes(), 1, "透明内容容器中的空白与遮罩均可关闭");
+    assert.deepEqual(h.events, ["preventDefault", "stopPropagation"], "关闭时消费完整单击，避免穿透");
+    const scaledWidth = Math.max(width, height) * 4;
+    h.picture([-scaledWidth / 4, -scaledWidth / 8, scaledWidth, scaledWidth / 2]);
+    h.tap(16, 16);
+    assert.equal(h.closes(), 1, "图片放大覆盖了原空白区域，即使事件被视口捕获也不能关闭");
+    h.dispose();
+    assert.equal(h.listeners.size, 0);
+  }
+});
+
+test("PC/手机图片拖动、双指缩放和取消手势结束时不会关闭预览", async () => {
+  for (const [width, height] of [[1280, 800], [390, 844]]) {
+    const h = await mediaPreviewDismissHarness(width, height);
+    h.fire("pointerdown", width / 2, height / 2);
+    h.fire("pointermove", 16, 16);
+    h.fire("pointerup", 16, 16);
+    h.fire("click", 16, 16);
+    assert.equal(h.closes(), 0, "从图片拖动到空白不能关闭");
+    h.fire("pointerdown", 16, 16);
+    h.fire("pointermove", 30, 16);
+    h.fire("pointermove", 16, 16);
+    h.fire("pointerup", 16, 16);
+    h.fire("click", 16, 16);
+    assert.equal(h.closes(), 0, "拖动回到原处也不能视为单击");
+    h.fire("pointerdown", 16, 16);
+    h.fire("pointerdown", 30, 30, { pointerId: 2, isPrimary: false });
+    h.fire("pointerup", 30, 30, { pointerId: 2, isPrimary: false });
+    h.fire("pointerup", 16, 16);
+    h.fire("click", 16, 16);
+    assert.equal(h.closes(), 0, "双指手势不能被最后一个 click 关闭");
+    h.fire("pointerdown", 16, 16);
+    h.fire("pointercancel", 16, 16);
+    h.fire("click", 16, 16);
+    h.tap(16, 16, { button: 2 });
+    assert.equal(h.closes(), 0, "取消及右键不能关闭");
+    h.tap(16, 16);
+    assert.equal(h.closes(), 1, "手势结束后下一次普通点击仍可关闭");
+  }
+});
+
+test("媒体 contain 留白按实际图像尺寸判断，按下或抬起落入图像均不关闭", async () => {
+  const h = await mediaPreviewDismissHarness(400, 800);
+  h.picture([0, 0, 400, 800]);
+  h.tap(200, 400);
+  assert.equal(h.closes(), 0);
+  h.fire("pointerdown", 200, 16);
+  h.picture([0, -400, 1600, 1600]);
+  h.fire("pointerup", 200, 16);
+  h.fire("click", 200, 16);
+  assert.equal(h.closes(), 0, "按下后图片覆盖了空白也不能关闭");
+  h.picture([0, 0, 400, 800]);
+  h.tap(200, 16);
+  assert.equal(h.closes(), 1, "contain 产生的上下留白可关闭");
+});
+
 test("native 桥接对发送与队列来源都接收八张，并拒绝第九张", () => {
   let next = 0;
   const context = vm.createContext({ nativeImageAttachmentId: () => `image-${++next}`,
@@ -653,6 +744,54 @@ test("服务模式 Fast 明确声明独立能力后可在执行中切换，只�
   assert.match(control.title, /后续轮次/);
   assert.match(control.title, /当前任务档位保持不变/);
   assert.equal(context.thread.status.type, "active");
+});
+
+test("API 服务模式按实际 GPT 模型开放 Fast，缺失档位或旧否定标记不拦截，别名不向非 GPT 泄漏", () => {
+  const { context, control, attributes } = remoteFastHarness();
+  context.session.runtime.cdpInjectionEnabled = false;
+  context.session.capabilities.serviceFastMode = true;
+  const allowed = [
+    { model: "gpt-6.1-sol" },
+    { model: "gpt-6.1-without-tiers", serviceTiers: [] },
+    { model: "gpt-6.1-old-denial", serviceTiers: [], fastModeSupported: false },
+    { model: "sol-alias", requestModel: "openai/GPT-6.1-sol", serviceTiers: [] },
+    { model: "sol-visible-name", id: "gpt-6.1-catalog-id", requestModel: "gpt-6.1-sol" },
+  ];
+  const denied = [
+    { model: "gpt-6.1-claude-alias", requestModel: "claude-opus", fastModeSupported: true },
+    { model: "unknown-alias", fastModeSupported: true, serviceTiers: [{ id: "priority" }] },
+    { model: "claude-opus", serviceTiers: [{ id: "priority" }] },
+  ];
+  context.models = [...allowed, ...denied];
+  context.modelDefaults.fastModelAliases = {
+    "API别名": "gpt-6.1-sol", "gpt-6.1-missing-alias": "claude-opus",
+  };
+  for (const model of allowed) {
+    context.model = model.model;
+    context.updateRemoteFast();
+    assert.equal(control.hidden, false);
+    assert.equal(control.disabled, false, model.model);
+    assert.equal(attributes.get("aria-pressed"), "false");
+  }
+  for (const name of ["gpt-6.1-catalog-id", "gpt-6.1-unlisted", "API别名"]) {
+    context.model = name;
+    context.updateRemoteFast();
+    assert.equal(control.disabled, false, "目录 ID、实际 GPT 名称和显式 GPT 别名均可使用");
+  }
+  context.rememberRemoteFastPreference(context.selectedId, true);
+  for (const name of [...denied.map(model => model.model), "gpt-6.1-missing-alias"]) {
+    context.model = name;
+    context.updateRemoteFast();
+    assert.equal(context.remoteFastState.supported, false, name);
+    assert.equal(attributes.get("aria-pressed"), "false");
+    assert.match(control.title, /不是 GPT/);
+  }
+  context.model = allowed[0].model;
+  context.modelDefaults.fastModeAvailability = { available: false, reason: "管理员关闭 Fast" };
+  context.rememberRemoteFastPreference(context.selectedId, false);
+  context.updateRemoteFast();
+  assert.equal(control.disabled, true);
+  assert.match(control.title, /管理员/);
 });
 
 test("Fast 在轮次异步准备后读取最新偏好，已构造的轮次和 steer 保持原档位", async () => {
@@ -1061,9 +1200,9 @@ function claudeUsageHarness() {
     setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
     api(path, payload, id, signal, options) {
-      let resolve;
-      const promise = new Promise(done => { resolve = done; });
-      requests.push({ path, payload, signal, options, resolve });
+      let resolve, reject;
+      const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+      requests.push({ path, payload, signal, options, resolve, reject });
       return promise;
     },
   });
@@ -1140,16 +1279,21 @@ test("Claude 额度按授权和实例隔离，切换后拒绝迟到响应，停�
   assert.equal(requests.length, 3);
 });
 
-test("Claude 额度详情支持鼠标与点击，数据失效时关闭浮层并保留未知状态", async () => {
+test("Claude 额度详情仅点击开关，悬停和聚焦不展开，数据失效时关闭浮层", async () => {
   const { context, trigger, requests, nodes, usage, advance } = claudeUsageHarness();
   context.mountClaudeUsage();
   context.syncClaudeUsage();
   requests[0].resolve({ ok: true, backend: "claude", instanceId: "claude:wsl:a", usage: usage() });
   await new Promise(resolve => setImmediate(resolve));
   assert.match(trigger.attributes["aria-label"], /5 小时已用 24%.*7 天已用 52%/);
-  trigger.onpointerenter({ pointerType: "touch" });
+  trigger.onpointerenter?.({ pointerType: "touch" });
   assert.equal(nodes.length, 0);
-  trigger.onpointerenter({ pointerType: "mouse" });
+  trigger.onpointerenter?.({ pointerType: "mouse" });
+  context.document.documentElement.dataset.inputModality = "keyboard";
+  trigger.onfocus?.();
+  assert.equal(nodes.length, 0, "悬停和键盘聚焦均不展开额度详情");
+  assert.equal(requests.length, 1, "未点击前不读取本地统计");
+  trigger.onclick();
   assert.equal(nodes.length, 1);
   assert.equal(trigger.attributes["aria-expanded"], "true");
   assert.equal(nodes[0].children[0].textContent, "Claude 订阅额度");
@@ -1158,8 +1302,10 @@ test("Claude 额度详情支持鼠标与点击，数据失效时关闭浮层并�
   assert.equal(first.children[1].children[0].style.width, "76%");
   assert.equal(first.children[2].children[1].textContent, "2小时后");
   assert.equal(requests[1].payload.includeLocal, true, "仅打开弹窗时加载本地统计");
-  trigger.onclick();
-  assert.equal(context.claudeUsageState.tip.pinned, true);
+  trigger.onpointerleave?.();
+  nodes[0].onpointerleave?.();
+  trigger.onblur?.();
+  assert.equal(context.claudeUsageState.tip.node, nodes[0], "鼠标离开和失焦不关闭已点击展开的弹层");
   trigger.onclick();
   assert.equal(trigger.attributes["aria-expanded"], "false");
   assert.equal(requests[1].signal.aborted, true, "关闭弹窗取消客户端读取");
@@ -1242,13 +1388,124 @@ test("Claude 详情关闭、实例和授权切换时忽略迟到结果，失败�
   requests[2].resolve({ ok: false });
   await flush();
   assert.equal(context.claudeUsageState.value.fiveHour.usedPercentage, 24);
-  assert.equal(context.claudeUsageState.details.value.fiveHour, null);
+  assert.equal(context.claudeUsageState.details, null);
   trigger.onclick(); trigger.onclick();
   assert.equal(requests.length, 3, "详情失败同样缓存一分钟，反复点击不重复扫描");
   context.instance = "claude:wsl:other";
   context.syncClaudeUsage();
   assert.equal(context.claudeUsageState.details, null);
   assert.equal(trigger.hidden, true);
+});
+
+function claudeUsageWithMetrics(h, value = h.usage(), tokens = 684200) {
+  return { ...value, ...Object.fromEntries(["fiveHour", "sevenDay"].map(key => {
+    const window = value[key], end = typeof window.resetsAt === "string" ? Date.parse(window.resetsAt)
+      : window.resetsAt * (window.resetsAt < 1e12 ? 1000 : 1);
+    return [key, { ...window, metrics: { source: "claude-wsl-local-journal", observedAtMs: h.context.Date.now(),
+      windowStartMs: end - (key === "fiveHour" ? 18000000 : 604800000), windowEndMs: end,
+      usedCostUsd: 12.84, usedTokens: tokens } }];
+  })) };
+}
+
+test("Claude 额度弹窗首帧显示普通读取携带的缓存详情，新鲜数据不额外扫描", async () => {
+  const h = claudeUsageHarness();
+  h.context.mountClaudeUsage(); h.context.syncClaudeUsage();
+  h.requests[0].resolve({ ok: true, backend: "claude", instanceId: h.context.instance, usage: claudeUsageWithMetrics(h) });
+  await new Promise(resolve => setImmediate(resolve));
+  h.trigger.onclick();
+  const metric = h.nodes[0].children[1].children[2].children[0].children[0].children;
+  assert.equal(metric[1].textContent, "$12.84", "打开时即显示缓存金额，无需等待详情响应");
+  assert.equal(metric[3].textContent, "684.2k");
+  assert.equal(h.requests.length, 1, "普通读取已携带新鲜详情时不再发起本地扫描");
+});
+
+test("Claude 额度缓存跨同实例会话、前后台和实例往返复用，重新授权立即隔离", async () => {
+  const h = claudeUsageHarness(), flush = () => new Promise(resolve => setImmediate(resolve));
+  h.context.mountClaudeUsage(); h.context.syncClaudeUsage();
+  h.requests[0].resolve({ ok: true, backend: "claude", instanceId: h.context.instance, usage: claudeUsageWithMetrics(h) });
+  await flush();
+  h.context.resetClaudeUsage();
+  h.context.selectedId = "another-claude-session"; h.context.thread.id = h.context.selectedId;
+  h.context.syncClaudeUsage(); h.trigger.onclick();
+  assert.equal(h.context.claudeUsageState.value.fiveHour.usedPercentage, 24);
+  assert.equal(h.requests.length, 1, "切换同实例会话不丢失账号缓存");
+  h.context.document.hidden = true; h.context.syncClaudeUsage();
+  assert.equal(h.context.claudeUsageState, null);
+  h.context.document.hidden = false; h.context.syncClaudeUsage(); h.trigger.onclick();
+  assert.equal(h.context.claudeUsageMetrics(h.context.claudeUsageWindows(h.context.claudeUsageState.value)[0]).usedTokens, 684200);
+  assert.equal(h.requests.length, 1, "回到前台先使用缓存，不重复请求");
+  h.context.instance = "claude:wsl:b"; h.context.syncClaudeUsage();
+  assert.equal(h.trigger.hidden, true, "另一实例不能显示旧实例缓存");
+  h.context.instance = "claude:wsl:a"; h.context.syncClaudeUsage(); h.trigger.onclick();
+  assert.equal(h.requests[1].signal.aborted, true);
+  assert.equal(h.context.claudeUsageState.details.value.fiveHour.usedTokens, 684200);
+  assert.equal(h.requests.length, 2, "切回实例立即恢复已缓存详情");
+  h.context.session.device.createdAtMs = 2; h.context.syncClaudeUsage();
+  assert.equal(h.trigger.hidden, true);
+  assert.equal(h.context.claudeUsageState.details, null, "重新授权不能恢复上一授权的数字");
+});
+
+test("Claude 额度刷新期间与失败后保留有效缓存，并按原采集时间失效和退避", async () => {
+  const h = claudeUsageHarness(), flush = () => new Promise(resolve => setImmediate(resolve));
+  h.context.mountClaudeUsage(); h.context.syncClaudeUsage();
+  h.requests[0].resolve({ ok: true, backend: "claude", instanceId: h.context.instance, usage: claudeUsageWithMetrics(h) });
+  await flush();
+  h.advance(61000); h.trigger.onclick();
+  assert.equal(h.requests.length, 2, "缓存到期后后台刷新原生额度");
+  assert.equal(h.nodes[0].children[1].children[2].children[0].children[0].children[3].textContent, "684.2k");
+  h.requests[1].reject(new Error("临时网络失败")); await flush();
+  assert.equal(h.trigger.hidden, false, "网络失败不能清空仍有效的百分比");
+  assert.equal(h.context.claudeUsageState.details.value.fiveHour.usedTokens, 684200);
+  assert.equal(h.requests.length, 3, "展开后的详情独立刷新");
+  h.requests[2].reject(new Error("本地详情暂不可用")); await flush();
+  assert.equal(h.context.claudeUsageState.details.value.fiveHour.usedTokens, 684200, "详情失败不覆盖有效数字");
+  h.trigger.onclick(); h.trigger.onclick();
+  assert.equal(h.requests.length, 3, "失败后重复开关仍按一分钟退避");
+  h.advance(89000);
+  h.context.claudeUsageState.checkedAt = h.context.Date.now();
+  h.context.scheduleClaudeUsageUpdate();
+  assert.ok([...h.timers.values()].some(timer => timer.delay === 30005), "失效检查独立于下次刷新退避");
+  h.advance(30001);
+  h.context.renderClaudeUsage();
+  assert.equal(h.trigger.hidden, true, "三分钟后不能把失败后的旧缓存继续当作有效数据");
+  assert.equal(h.context.claudeUsageState.tip, null);
+  h.context.resetClaudeUsage(); h.context.syncClaudeUsage();
+  assert.equal(h.context.claudeUsageState.value, null, "过期缓存不能在切回会话时复活");
+});
+
+test("Claude 额度窗口重置、权限拒绝和清理授权均不会复用旧详情", async () => {
+  const h = claudeUsageHarness(), flush = () => new Promise(resolve => setImmediate(resolve));
+  h.context.mountClaudeUsage(); h.context.syncClaudeUsage();
+  h.requests[0].resolve({ ok: true, backend: "claude", instanceId: h.context.instance, usage: claudeUsageWithMetrics(h) });
+  await flush();
+  h.advance(61000); h.context.syncClaudeUsage();
+  const next = h.usage();
+  h.requests[1].resolve({ ok: true, backend: "claude", instanceId: h.context.instance, usage: next }); await flush();
+  assert.equal(h.context.claudeUsageState.details, null, "新窗口不能显示旧窗口金额或 Token");
+  h.trigger.onclick();
+  h.requests[2].reject(Object.assign(new Error("已无读取权限"), { code: 403 })); await flush();
+  assert.equal(h.trigger.hidden, true, "权限失效不能继续展示缓存");
+  h.context.resetClaudeUsage({ clearCache: true }); h.context.syncClaudeUsage();
+  assert.equal(h.context.claudeUsageState.value, null);
+});
+
+test("Claude 额度迟到的较旧详情不回退新数字，部分缓存不阻止补齐缺失窗口", async () => {
+  const h = claudeUsageHarness(), flush = () => new Promise(resolve => setImmediate(resolve));
+  const cached = claudeUsageWithMetrics(h), earlier = cached.fiveHour.metrics.observedAtMs;
+  delete cached.sevenDay.metrics;
+  h.context.mountClaudeUsage(); h.context.syncClaudeUsage();
+  h.requests[0].resolve({ ok: true, backend: "claude", instanceId: h.context.instance, usage: cached }); await flush();
+  h.trigger.onclick();
+  assert.equal(h.nodes[0].children[1].children[2].children[0].children[0].children[3].textContent, "684.2k");
+  assert.equal(h.requests.length, 2, "部分缓存先展示，未缓存窗口仍可补读");
+  h.advance(1000);
+  const newer = claudeUsageWithMetrics(h, cached, 700000);
+  h.context.rememberClaudeUsageDetails(h.context.claudeUsageState, newer, h.context.claudeUsageWindows(h.context.claudeUsageState.value));
+  const delayed = claudeUsageWithMetrics(h, cached, 600000);
+  delayed.fiveHour.metrics.observedAtMs = earlier;
+  delayed.sevenDay.metrics.observedAtMs = earlier;
+  h.requests[1].resolve({ ok: true, backend: "claude", instanceId: h.context.instance, usage: delayed }); await flush();
+  assert.equal(h.context.claudeUsageState.details.value.fiveHour.usedTokens, 700000);
 });
 
 test("上下文容量缺失时显示真实最后请求用量，不伪造百分比", () => {
@@ -2541,6 +2798,244 @@ test("统一 Select 保留失效目标及空状态，键盘打开不越过禁用
   assert.equal(h.opened.length, 4);
 });
 
+function permissionSettingsHarness(api) {
+  const select = selectComponentHarness();
+  const element = (tag, className = "", text = "") => ({ ...select.element(tag, className, text), className });
+  const page = element("section");
+  page.isConnected = true;
+  const instances = [
+    { id: "codex:local", backend: "codex", label: "Codex" },
+    { id: "claude:wsl:fixture", backend: "claude", label: "Claude · fixture" }
+  ];
+  let scope = "device-a", readOnly = false;
+  const settings = mountInstancePermissions({
+    page, element, selectControl: select.selectControl, setSelectOptions: select.setSelectOptions,
+    setSelectValue: select.setSelectValue, api, getInstances: () => instances,
+    readOnly: () => readOnly, authorizationScope: () => scope
+  });
+  const find = predicate => {
+    const visit = node => predicate(node) ? node : node.children?.map(visit).find(Boolean);
+    return visit(page);
+  };
+  return { settings, page, instances,
+    get: id => find(node => node.id === id),
+    save: () => find(node => node.textContent === "保存权限" || node.textContent === "保存中…"),
+    status: () => find(node => node.className === "appearance-hint permission-settings-status"),
+    choose(id) { select.commitSelectValue(this.get("permission-instance"), id); },
+    edit(name, value) { select.commitSelectValue(this.get(`permission-global-${name}`), value); },
+    revoke() { scope = "device-b"; },
+    setReadOnly() { readOnly = true; }
+  };
+}
+function permissionRecord(id, settings, revision = "r1") {
+  return { instanceId: id, backend: id.startsWith("claude:") ? "claude" : "codex",
+    path: "/isolated/config", revision, settings, supportedModes: ["manual", "acceptEdits", "plan"] };
+}
+
+test("实例全局权限草稿按实例隔离，保存只包含所选实例改动的字段", async () => {
+  const requests = [];
+  const h = permissionSettingsHarness(async (path, body) => {
+    assert.equal(path, "/api/settings/permissions");
+    requests.push(body);
+    return body.instanceId.startsWith("claude:")
+      ? permissionRecord(body.instanceId, { permissionMode: body.settings?.permissionMode || "manual" }, body.operation ? "r2" : "r1")
+      : permissionRecord(body.instanceId, { approvalPolicy: "on-request", sandboxMode: "workspace-write" });
+  });
+  await h.settings.show("codex:local");
+  h.edit("approvalPolicy", "never");
+  assert.equal(h.save().disabled, false);
+  await h.settings.show("claude:wsl:fixture");
+  h.edit("permissionMode", "acceptEdits");
+  await h.save().onclick();
+  assert.deepEqual(requests.at(-1), { operation: "save", instanceId: "claude:wsl:fixture",
+    expectedRevision: "r1", settings: { permissionMode: "acceptEdits" } });
+  assert.equal(h.save().disabled, true);
+  await h.settings.show("codex:local");
+  assert.equal(h.get("permission-global-approvalPolicy").value, "never");
+  assert.equal(h.get("permission-global-sandboxMode").value, "workspace-write");
+});
+
+test("实例权限迟到读取与保存不能污染另一实例或新的授权", async () => {
+  const pendingRead = deferred(), pendingSave = deferred();
+  const h = permissionSettingsHarness((_, body) => body.operation === "save" ? pendingSave.promise
+    : body.instanceId === "codex:local" ? pendingRead.promise
+      : Promise.resolve(permissionRecord(body.instanceId, { permissionMode: "manual" })));
+  const first = h.settings.show("codex:local");
+  await h.settings.show("claude:wsl:fixture");
+  pendingRead.resolve(permissionRecord("codex:local", { approvalPolicy: "on-request", sandboxMode: "workspace-write" }));
+  await first;
+  assert.equal(h.get("permission-global-approvalPolicy"), undefined);
+  h.edit("permissionMode", "acceptEdits");
+  const saving = h.save().onclick();
+  h.revoke();
+  pendingSave.resolve(permissionRecord("claude:wsl:fixture", { permissionMode: "acceptEdits" }, "r2"));
+  await saving;
+  assert.equal(h.get("permission-global-permissionMode").value, "acceptEdits");
+  assert.doesNotMatch(h.status().textContent, /已保存/);
+});
+
+test("权限配置未知、只读或使用命名权限配置时不能误覆盖", async () => {
+  const failed = permissionSettingsHarness(async () => { throw new Error("隔离读取失败"); });
+  await failed.settings.show();
+  assert.equal(failed.save().disabled, true);
+  assert.match(failed.status().textContent, /隔离读取失败/);
+  const profile = permissionSettingsHarness(async (_, body) => permissionRecord(body.instanceId,
+    { approvalPolicy: "", sandboxMode: "", permissionProfile: "managed", customApproval: true }));
+  await profile.settings.show();
+  assert.equal(profile.get("permission-global-sandboxMode").disabled, true);
+  assert.equal(profile.get("permission-global-approvalPolicy").value, "__custom__");
+  assert.equal(profile.save().disabled, true);
+  const readonly = permissionSettingsHarness(async (_, body) => permissionRecord(body.instanceId,
+    { approvalPolicy: "on-request", sandboxMode: "workspace-write" }));
+  readonly.setReadOnly();
+  await readonly.settings.show();
+  assert.equal(readonly.get("permission-global-approvalPolicy").disabled, true);
+  assert.equal(readonly.save().disabled, true);
+});
+
+test("全局权限保存失败保留原草稿且不会自动重试", async () => {
+  let saves = 0;
+  const h = permissionSettingsHarness(async (_, body) => {
+    if (body.operation) { ++saves; throw new Error("原配置已变化"); }
+    return permissionRecord(body.instanceId, { approvalPolicy: "on-request", sandboxMode: "workspace-write" });
+  });
+  await h.settings.show();
+  h.edit("approvalPolicy", "never");
+  await h.save().onclick();
+  assert.equal(saves, 1);
+  assert.equal(h.get("permission-global-approvalPolicy").value, "never");
+  assert.match(h.status().textContent, /未自动重复保存/);
+});
+
+function composerPermissionHarness({ creating = false, backend = "codex" } = {}) {
+  const attributes = new Map(), requests = [], notices = [];
+  const button = { dataset: {}, value: "", disabled: false,
+    setAttribute: (name, value) => attributes.set(name, String(value)) };
+  const context = nodeVm.createContext({
+    creating, selectedId: "thread-a", thread: { id: "thread-a" },
+    session: { device: { id: "device-a" }, capabilities: { sessionPermissions: true } },
+    draftPermissionChoices: new Map(), permissionSelections: new Map(), permissionWrites: new Map(),
+    instancePermissionCatalogs: new Map(), instancePermissionReads: new Map(),
+    permissionLabel, permissionOptions, privateInputScope: value => value.device.id,
+    currentThreadDisplay: () => context.thread, activeBackend: () => backend, isClaude: () => backend === "claude",
+    claudeThreadId: () => backend === "claude",
+    activeInstanceId: () => backend === "claude" ? "claude:wsl:fixture" : "codex:local",
+    draftKey: () => "$new:fixture", snapshotDraft: () => ({ text: "草稿" }),
+    storeDraft: (key, value) => context.draftPermissionChoices.set(key, value.permissionMode),
+    $: () => button, sessionInstanceEnabled: () => true, threadReadOnly: () => false,
+    connected: true, busy: false, stopping: false, pending: null, editingMessage: null, editingQueuedMessage: null,
+    isActiveThread: () => false, threadDeletionLocked: () => false,
+    setSelectOptions: (node, options, mode) => { node.options = options; node.value = mode; },
+    notice: (...args) => notices.push(args),
+    mutate: async (action, payload, options) => {
+      assert.equal(options.reliable, true);
+      requests.push([action, payload]);
+      return { ...payload, permissionRevision: 2 };
+    },
+    updateComposer: () => context.updateComposerPermissions()
+  });
+  nodeVm.runInContext(sourceSection("function rememberPermissionSelection(", "function claudeThreadId("), context);
+  return { context, button, requests, notices, attributes };
+}
+
+test("编辑区权限覆盖只保存当前会话，迟到版本不能覆盖新的选择", async () => {
+  const h = composerPermissionHarness();
+  h.context.updateComposerPermissions();
+  h.button.value = "full-access";
+  await h.context.changeComposerPermissions();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.requests)), [["setPermissions",
+    { threadId: "thread-a", instanceId: "codex:local", permissionMode: "full-access" }]]);
+  assert.equal(h.button.value, "full-access");
+  h.context.rememberPermissionSelection("thread-a", "read-only", 1);
+  h.context.updateComposerPermissions();
+  assert.equal(h.button.value, "full-access");
+  h.context.selectedId = "thread-b"; h.context.thread = { id: "thread-b" };
+  h.context.updateComposerPermissions();
+  assert.equal(h.button.value, "");
+  h.context.session.device.id = "device-b";
+  h.context.selectedId = "thread-a"; h.context.thread = { id: "thread-a" };
+  h.context.updateComposerPermissions();
+  assert.equal(h.button.value, "", "新授权不能使用旧授权的会话选择");
+});
+
+test("新会话权限保留在本实例草稿中，运行及未确认发送期间禁止切换", async () => {
+  const h = composerPermissionHarness({ creating: true });
+  h.context.updateComposerPermissions();
+  assert.equal(h.button.value, "configured");
+  h.button.value = "read-only";
+  await h.context.changeComposerPermissions();
+  assert.equal(h.context.draftPermissionChoices.get("$new:fixture"), "read-only");
+  assert.equal(h.requests.length, 0, "新建草稿选择不能提前写入全局配置或原生会话");
+  h.context.creating = false;
+  h.context.isActiveThread = () => true;
+  h.context.updateComposerPermissions();
+  assert.equal(h.button.disabled, true);
+  h.context.isActiveThread = () => false;
+  h.context.thread.queuedMessages = [{ id: "awaiting" }];
+  h.context.updateComposerPermissions();
+  assert.equal(h.button.disabled, true);
+  h.context.thread.queuedMessages = [];
+  h.context.pending = { state: "unknown" };
+  h.context.updateComposerPermissions();
+  assert.equal(h.button.disabled, true);
+});
+
+test("Claude 菜单按 CLI 和原生会话开放能力筛选模式", () => {
+  const h = composerPermissionHarness({ backend: "claude" });
+  h.context.instancePermissionCatalogs.set("claude:wsl:fixture", {
+    scope: "device-a", modes: ["manual", "acceptEdits", "plan", "bypassPermissions"]
+  });
+  h.context.thread.permissionModes = ["default", "acceptEdits", "plan"];
+  h.context.updateComposerPermissions();
+  assert.deepEqual(Array.from(h.button.options, option => option.value),
+    ["", "configured", "manual", "acceptEdits", "plan"]);
+  h.context.creating = true;
+  h.context.updateComposerPermissions();
+  assert.ok(h.button.options.some(option => option.value === "bypassPermissions"));
+});
+
+test("权限入口紧邻加号，手机固定图标宽度且底栏强制单行", async () => {
+  assert.match(app, /add\.after\(permissions\)/);
+  assert.match(devServerSource, /"\/api\/settings\/permissions"/);
+  const css = await readFile(new URL("../assets/remote-access/style.css", import.meta.url), "utf8");
+  assert.match(css, /\.composer-toolbar\{gap:6px;flex-wrap:nowrap\}/);
+  assert.match(css, /\.composer-toolbar>\.composer-controls\{gap:0;flex-wrap:nowrap\}/);
+  assert.match(css, /\.permission-button\{flex:0 0 28px;width:28px;max-width:28px/);
+  assert.match(css, /\.composer-toolbar>\.composer-send\{flex:0 0 auto;flex-wrap:nowrap\}/);
+});
+
+test("CDP 权限预设与服务模式一致，实例配置缺失时禁止发送", () => {
+  const context = nodeVm.createContext({
+    structuredClone, array: value => Array.isArray(value) ? value : [],
+    failure: (code, message) => Object.assign(new Error(message), { code })
+  });
+  nodeVm.runInContext(native.slice(native.indexOf("  function requestedPermissionOverrides("),
+    native.indexOf("  function requestedProjectId(")), context);
+  const full = context.requestedPermissionOverrides({ permissionMode: "full-access" }, "/fixture");
+  assert.equal(full.approvalPolicy, "never");
+  assert.equal(full.sandboxPolicy.type, "dangerFullAccess");
+  const auto = context.requestedPermissionOverrides({ permissionMode: "auto" }, "/fixture");
+  assert.equal(auto.approvalPolicy, "on-request");
+  assert.equal(auto.sandboxPolicy.type, "workspaceWrite");
+  const original = { approvalPolicy: "on-request", sandboxPolicy: {
+    type: "workspaceWrite", writableRoots: ["/extra"], networkAccess: true
+  } };
+  const configured = context.requestedPermissionOverrides({
+    permissionMode: "configured", permissionConfig: original
+  }, "/fixture");
+  assert.deepEqual(Array.from(configured.sandboxPolicy.writableRoots), ["/fixture", "/extra"]);
+  assert.deepEqual(original.sandboxPolicy.writableRoots, ["/extra"]);
+  assert.throws(() => context.requestedPermissionOverrides({ permissionMode: "configured" }, "/fixture"), /尚未确认/);
+  assert.throws(() => context.requestedPermissionOverrides({ permissionMode: "bypassPermissions" }, "/fixture"), /无效/);
+  const submission = { start: { request: { input: ["same-input"] } },
+    steer: { request: { expectedTurnId: "current-turn" } } };
+  const updated = context.withPermissionOverrides(submission, full);
+  assert.equal(updated.start.request.approvalPolicy, "never");
+  assert.equal(updated.start.request.sandboxPolicy.type, "dangerFullAccess");
+  assert.equal(updated.steer, submission.steer, "运行中的引导仍使用原轮次权限");
+  assert.equal(submission.start.request.approvalPolicy, undefined);
+});
+
 function instructionSettingsHarness(api) {
   const select = selectComponentHarness(), { element } = select;
   const context = vm.createContext({ api, element, setSelectOptions: select.setSelectOptions,
@@ -3148,6 +3643,23 @@ test("路径仅在展示时去掉长路径前缀，分离 HEAD 与无分支状�
   assert.equal(context.workspaceBranchLabel({ unavailable: true }), "分支不可用");
   assert.equal(context.workspaceBranchLabel(undefined), "", "旧后台没有分支字段时不能伪造分支");
   assert.equal(context.workspaceBranchLabel({ branch: "\nmain" }), "分支不可用");
+});
+
+test("harness 文件相对链接沿实际引擎目录解析，并继续拒绝越出读取根目录", () => {
+  const context = vm.createContext({ contentResponse: null, renderedFile: "" });
+  vm.runInContext(sessionFiles.slice(sessionFiles.indexOf("const parentPath ="), sessionFiles.indexOf("const revisionValid ="))
+    + "\n" + sessionFiles.slice(sessionFiles.indexOf("  function resolveDocumentReference("),
+      sessionFiles.indexOf("  function renderContent(")), context);
+  for (const root of ["C:/Users/fixture/.codex", "//wsl.localhost/Fixture/home/user/.claude", "/home/user/.agents"]) {
+    context.contentResponse = { root, path: "skills/example/SKILL.md" };
+    assert.equal(context.resolveDocumentReference("references/example.md"), `${root}/skills/example/references/example.md`);
+    assert.equal(context.resolveDocumentReference("../other/SKILL.md"), `${root}/skills/other/SKILL.md`);
+    assert.equal(context.resolveDocumentReference("../../../private.txt"), null);
+    assert.equal(context.resolveDocumentReference(String.raw`C:\Users\fixture\.codex\config.toml`),
+      "C:/Users/fixture/.codex/config.toml");
+  }
+  context.contentResponse = { root: "E:/project", path: "docs/readme.md" };
+  assert.equal(context.resolveDocumentReference("../src/main.rs"), "E:/project/src/main.rs");
 });
 
 test("WSL 映射文件名只在界面还原，展开目录与打开文件仍保留原始路径和目录层级", () => {
@@ -4080,6 +4592,7 @@ test("原生暂停的队列消息显示可用重试按钮，点击仍操作原�
     const row = context.renderQueuedMessages([message]).children[0];
     const retry = row.children.find(node => node.className === "queued-steer-button");
     assert.equal(retry.attributes["aria-label"], "重试此队列消息");
+    assert.equal(retry.title, message.pausedReason);
     assert.equal(retry.children[0].className, "retry");
     assert.equal(retry.children[1].text, "重试");
     assert.equal(retry.disabled, false);
@@ -4313,7 +4826,7 @@ function queuedEditFeedbackHarness() {
       return null;
     },
   });
-  const area = element("div"), send = element("button"), status = element("span");
+  const send = element("button"), status = element("span");
   Object.assign(context, {
     element, icon: name => element("svg", name), send,
     button: (label, aria, action, className) => {
@@ -4322,7 +4835,7 @@ function queuedEditFeedbackHarness() {
     },
     document: { createTextNode: text => element("#text", "", text) },
     $: (selector, root) => root ? root.querySelector(selector)
-      : selector === "#edit-message-area" ? area : selector === "#send-status" ? status : h.prompt,
+      : selector === "#send-status" ? status : h.prompt,
     session: { device: { id: "device-a" }, capabilities: {} },
     sending: null, compacting: false, goalMode: false, editing: true, editingMessage: null, active: false, hasAttachments: false,
     unsupportedImages: false, unsupportedProjectless: false, goalReason: "", queueOnly: false,
@@ -4330,7 +4843,9 @@ function queuedEditFeedbackHarness() {
     compactionSendReason: "", compaction: { state: "idle" }, deleting: false, prompt: h.prompt.value,
     pageLeaving: false, stream: null, composerDiagnosticState: "", creating: false,
     privateInputScope: () => "device-a", recordRuntimeDiagnostic() {},
+    isClaude: () => false, serviceSideThread: () => true,
     mutate: async (action, payload) => {
+      h.submissions.push({ action, payload });
       context.pending = { id: "edit-receipt", action, payload, deviceId: "device-a", time: Date.now() };
       try {
         const result = await response.promise;
@@ -4350,10 +4865,12 @@ function queuedEditFeedbackHarness() {
     sourceSection("const pendingFeedbackDelayMs =", "function clearPendingFeedbackTimer("),
     `function renderSendFeedback(){${sourceSection("  const queuedEditAction = queuedEditSubmittingAction();",
       '  $("#prompt").disabled =')}}`,
+    `function renderComposerPlaceholder(){${sourceSection('  $("#prompt").placeholder =',
+      "  const model = currentModel(), effort = currentEffort();")}}`,
   ].join("\n"), context);
-  context.updateComposer = () => { context.renderMessageEditBanner(); context.renderSendFeedback(); };
+  context.updateComposer = () => { context.renderSendFeedback(); context.renderComposerPlaceholder(); };
   context.updateComposer();
-  return { ...h, response, area, send, status };
+  return { ...h, response, send, status };
 }
 
 function compactionComposerHarness() {
@@ -4446,86 +4963,110 @@ test("停止压缩实际提交当前会话停止请求，在途重复点击不�
   }
 });
 
-test("取消队列编辑立即显示取消中和spinner，明确失败后恢复原标签和可编辑状态", async () => {
-  const h = queuedEditFeedbackHarness(), operation = h.context.submitQueuedMessageEdit(true);
-  const cancel = h.area.querySelector("button");
-  assert.match(cancel.textContent, /取消中/);
-  assert.ok(cancel.querySelector(".spinner"));
-  assert.equal(cancel.disabled, true);
-  assert.equal(h.send.attributes["aria-label"], "取消中…");
+test("取回排队消息后沿用普通输入和发送入口，修改或清空均不自动恢复队列", () => {
+  const h = queuedEditFeedbackHarness();
+  for (const active of [false, true]) {
+    h.context.active = active;
+    h.context.editingQueuedMessage = null;
+    h.context.updateComposer();
+    const placeholder = h.prompt.placeholder;
+    h.context.editingQueuedMessage = h.edit;
+    for (const value of ["继续修改的排队消息", ""]) {
+      h.prompt.value = value; h.context.prompt = value;
+      h.context.handlePromptInput({});
+      h.context.updateComposer();
+      assert.equal(h.prompt.placeholder, placeholder);
+      assert.equal(h.send.dataset.action, "send");
+      assert.equal(h.send.dataset.queuedEditState, "editing");
+      assert.equal(h.send.attributes["aria-label"], "发送消息");
+      assert.equal(h.send.title, "发送消息");
+      assert.ok(h.send.querySelector(".arrowUp"));
+      assert.equal(h.send.disabled, !value);
+      assert.equal(h.edit.state, "editing");
+      assert.equal(h.edit.text, value);
+      assert.deepEqual(h.submissions, [], "输入变化不能恢复原消息或发出新消息");
+    }
+  }
+});
+
+test("排队输入发送明确失败时保留草稿和原编辑身份，并恢复普通发送入口", async () => {
+  const h = queuedEditFeedbackHarness(), operation = h.context.submitQueuedMessageEdit();
+  assert.equal(h.send.attributes["aria-label"], "发送中…");
   assert.ok(h.send.querySelector(".spinner"));
   assert.equal(h.send.disabled, true);
-  h.response.reject(new Error("取消操作明确失败"));
+  h.response.reject(new Error("发送操作明确失败"));
   await operation;
-  const restored = h.area.querySelector("button");
-  assert.equal(restored.textContent, "取消编辑");
-  assert.equal(restored.disabled, false);
-  assert.equal(restored.querySelector(".spinner"), null);
-  assert.equal(h.send.attributes["aria-label"], "保存队列消息修改");
+  assert.equal(h.send.attributes["aria-label"], "发送消息");
+  assert.ok(h.send.querySelector(".arrowUp"));
   assert.equal(h.send.querySelector(".spinner"), null);
   assert.equal(h.send.disabled, false);
   assert.equal(h.status.textContent, "");
-  assert.deepEqual(h.notices, ["取消操作明确失败"]);
+  assert.equal(h.context.editingQueuedMessage, h.edit);
+  assert.equal(h.edit.text, h.prompt.value);
+  assert.deepEqual(h.submissions.map(({ action, payload }) => [action, payload.editId]),
+    [["editQueued", h.edit.editId]]);
+  assert.deepEqual(h.notices, ["发送操作明确失败"]);
 });
 
-test("保存队列编辑立即显示保存中，成功结束编辑后恢复普通发送入口", async () => {
+test("排队输入使用原编辑身份发送，在途重复点击不重复提交，成功后恢复普通草稿", async () => {
   const h = queuedEditFeedbackHarness();
   h.context.completeQueuedEditAction = () => {
     h.context.editingQueuedMessage = null; h.context.editing = false;
   };
   const operation = h.context.submitQueuedMessageEdit();
-  assert.equal(h.status.textContent, "保存中…");
-  assert.equal(h.send.attributes["aria-label"], "保存中…");
+  assert.equal(h.status.textContent, "发送中…");
+  assert.equal(h.send.attributes["aria-label"], "发送中…");
   assert.ok(h.send.querySelector(".spinner"));
   assert.equal(h.send.disabled, true);
-  assert.equal(h.area.querySelector("button").textContent, "取消编辑");
+  await h.context.submitQueuedMessageEdit();
+  assert.deepEqual(h.submissions.map(({ action, payload }) => [action, payload.editId, payload.prompt]),
+    [["editQueued", h.edit.editId, h.prompt.value.trim()]]);
   h.response.resolve({});
   await operation;
   assert.equal(h.status.textContent, "");
-  assert.equal(h.area.hidden, true);
   assert.equal(h.send.attributes["aria-label"], "发送消息");
   assert.equal(h.send.querySelector(".spinner"), null);
   assert.equal(h.send.disabled, false);
 });
 
-test("取消和保存未知回执停止在途spinner但保持锁定，八秒前无额外提示", async () => {
-  for (const cancel of [false, true]) {
-    const h = queuedEditFeedbackHarness(), operation = h.context.submitQueuedMessageEdit(cancel);
-    h.response.resolve({ outcomeUnknown: true });
-    await operation;
-    const record = h.context.pending;
-    assert.equal(h.context.busy, false);
-    assert.equal(h.area.querySelector("button").textContent, "取消编辑");
-    assert.equal(h.area.querySelector("button").disabled, true);
-    assert.equal(h.send.disabled, true);
-    assert.equal(h.area.querySelector(".spinner"), null);
-    assert.equal(h.send.querySelector(".spinner"), null);
-    assert.equal(h.context.pendingFeedbackReady(record), false);
-    record.time -= 5000;
-    assert.equal(h.context.pendingFeedbackReady(record), false);
-    record.time -= 3000;
-    assert.equal(h.context.pendingFeedbackReady(record), true);
-    assert.equal(h.context.pending, record);
-    assert.deepEqual(h.notices, []);
-  }
+test("排队输入发送结果未知时保留原回执和草稿，停止spinner并锁定重复发送", async () => {
+  const h = queuedEditFeedbackHarness(), operation = h.context.submitQueuedMessageEdit();
+  h.response.resolve({ outcomeUnknown: true });
+  await operation;
+  const record = h.context.pending;
+  assert.equal(h.context.busy, false);
+  assert.equal(h.send.disabled, true);
+  assert.equal(h.send.querySelector(".spinner"), null);
+  assert.equal(h.context.pendingFeedbackReady(record), false);
+  record.time -= 5000;
+  assert.equal(h.context.pendingFeedbackReady(record), false);
+  record.time -= 3000;
+  assert.equal(h.context.pendingFeedbackReady(record), true);
+  assert.equal(h.context.pending, record);
+  assert.equal(h.context.editingQueuedMessage, h.edit);
+  await h.context.submitQueuedMessageEdit();
+  assert.equal(h.submissions.length, 1);
+  assert.deepEqual(h.notices, []);
 });
 
-test("其他editId的提交不显示当前编辑的取消中或保存中，开始编辑仍只显示正在取回", () => {
+test("其他编辑身份的请求不显示当前发送进度，取回期间禁用发送但不改变按钮用途", () => {
   const h = queuedEditFeedbackHarness();
   h.context.busy = true;
   h.context.queuedActionBusy.add(`${h.edit.threadId}:${h.edit.message.id}`);
   h.context.pending = { action: "cancelQueuedEdit", deviceId: "device-a",
     payload: { threadId: h.edit.threadId, editId: "other-edit" } };
   h.context.updateComposer();
-  assert.equal(h.area.querySelector("button").textContent, "取消编辑");
-  assert.equal(h.area.querySelector(".spinner"), null);
+  assert.equal(h.status.textContent, "");
+  assert.equal(h.send.dataset.action, "send");
   assert.equal(h.send.querySelector(".spinner"), null);
   h.edit.state = "starting";
   h.context.pending.payload.editId = h.edit.editId;
   h.context.updateComposer();
-  assert.match(h.area.textContent, /正在取回排队消息/);
-  assert.equal(h.area.querySelector("button").textContent, "重新取回");
-  assert.equal(h.area.querySelector(".spinner"), null);
+  assert.equal(h.status.textContent, "");
+  assert.equal(h.send.dataset.action, "send");
+  assert.equal(h.send.disabled, true);
+  assert.equal(h.send.dataset.queuedEditState, "starting");
+  assert.equal(h.send.querySelector(".spinner"), null);
 });
 
 function questionReceiptHarness(readReceipt) {
@@ -9392,7 +9933,8 @@ test("模型目录统一保存 Fast 档位、实例限制和缓存身份，Ultra
     api: async path => {
       assert.equal(path, "/api/read/models");
       return { defaultModel: "gpt-6.1-sol", defaultReasoningEffort: "xhigh", ultraReasoningEnabled: false,
-        fastModeAvailability: { available: true }, data: [{ model: "gpt-6.1-sol",
+        fastModeAvailability: { available: true }, fastModelAliases: { "API别名": "gpt-6.1-sol" },
+        data: [{ model: "gpt-6.1-sol", requestModel: "gpt-6.1-sol",
           serviceTiers: [{ id: "priority" }], fastModeSupported: true, supportedReasoningEfforts: [
           { reasoningEffort: "xhigh" }, { reasoningEffort: "max" }, { reasoningEffort: "ultra" },
         ] }] };
@@ -9406,16 +9948,19 @@ test("模型目录统一保存 Fast 档位、实例限制和缓存身份，Ultra
   assert.equal(context.modelDefaults.reasoningEffort, "xhigh");
   assert.equal(writes[0][2].models[0].serviceTiers[0].id, "priority");
   assert.equal(writes[0][2].models[0].fastModeSupported, true);
+  assert.equal(writes[0][2].models[0].requestModel, "gpt-6.1-sol");
   assert.equal(writes[0][2].defaults.fastModeAvailability.available, true);
+  assert.equal(writes[0][2].defaults.fastModelAliases["API别名"], "gpt-6.1-sol");
   assert.equal(writes[0][2].defaults.fastModeOwner, JSON.stringify(["device-a", "codex:local", 0]));
 });
 
 test("模型目录恢复保留 Fast 元数据，缺失 Fast 或 Ultra 过滤的旧目录重新读取", async () => {
   const owner = JSON.stringify(["device-a", "codex:local", 1]);
-  for (const version of [undefined, 1, 2, currentModelCatalogCacheVersion]) {
+  for (const version of [undefined, 1, 2, 3, currentModelCatalogCacheVersion]) {
     const modelCatalog = { version, loadedAt: Date.now(),
-      defaults: { fastModeAvailability: { available: true }, fastModeOwner: owner }, models: [
-      { model: "gpt-6.1-sol", serviceTiers: [{ id: "priority" }],
+      defaults: { fastModeAvailability: { available: true }, fastModeOwner: owner,
+        fastModelAliases: { "API别名": "gpt-6.1-sol" } }, models: [
+      { model: "gpt-6.1-sol", requestModel: "gpt-6.1-sol", serviceTiers: [{ id: "priority" }],
         fastModeSupported: true, supportedReasoningEfforts: [{ reasoningEffort: "xhigh" }] },
     ] };
     const context = {
@@ -9432,7 +9977,9 @@ test("模型目录恢复保留 Fast 元数据，缺失 Fast 或 Ultra 过滤的�
     if (version === currentModelCatalogCacheVersion) {
       assert.equal(context.modelDefaults.fastModeAvailability.available, true);
       assert.equal(context.modelDefaults.fastModeOwner, owner);
+      assert.equal(context.modelDefaults.fastModelAliases["API别名"], "gpt-6.1-sol");
       assert.equal(context.models[0].serviceTiers[0].id, "priority");
+      assert.equal(context.models[0].requestModel, "gpt-6.1-sol");
     }
   }
 });
@@ -10827,9 +11374,36 @@ test("编辑区主题提示接管并恢复 title，保留无障碍说明，触�
   assert.equal(trigger.getAttribute("title"), "本会话 Fast 已开启，点击关闭");
 });
 
-function composerMetricsHarness() {
-  const requests = [], timers = new Map(), properties = new Map(), remembered = [];
+function composerMetricsHarness({ animate = false, reducedMotion = false } = {}) {
+  const requests = [], timers = new Map(), properties = new Map(), remembered = [], animations = [];
   let now = 100000, timer = 0;
+  const element = (tag, className = "", text = "") => {
+    let ownText = text;
+    const classes = new Set(className.split(" ").filter(Boolean));
+    const item = { tag, className, dataset: {}, children: [], attributes: {}, parentNode: null,
+      get textContent() { return ownText + this.children.map(child => child.textContent).join(""); },
+      set textContent(value) { ownText = value; this.children = []; },
+      append(...children) {
+        for (const child of children) {
+          child.remove(); child.parentNode = this; this.children.push(child);
+        }
+      },
+      remove() {
+        if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(child => child !== this);
+        this.parentNode = null;
+      },
+      setAttribute(key, value) { this.attributes[key] = value; },
+      classList: { add: value => classes.add(value), remove: value => classes.delete(value), contains: value => classes.has(value) }
+    };
+    if (animate) item.animate = (frames, options) => {
+      let finish, fail;
+      const finished = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
+      const animation = { target: item, frames, options, finished, cancelled: false, finish,
+        cancel() { this.cancelled = true; fail(new Error("动画取消")); } };
+      animations.push(animation); return animation;
+    };
+    return item;
+  };
   const node = { hidden: true, dataset: {}, attributes: {}, children: [],
     style: { setProperty: (key, value) => properties.set(key, value) },
     replaceChildren(...children) { this.children = children; },
@@ -10841,12 +11415,13 @@ function composerMetricsHarness() {
     thread: { id: "thread-a" }, selectedId: "thread-a", selectionVersion: 1, messageVersion: 0,
     instance: "codex:local", backend: "codex", active: true, creating: false,
     connected: true, pageLeaving: false, document: { hidden: false }, AbortController,
+    reducedMotion, matchMedia: () => ({ matches: context.reducedMotion }),
     turns: new Map([["turn-current", { id: "turn-current", status: "inProgress" }]]),
     privateInputScope: value => JSON.stringify(value.device),
     activeInstanceId: () => context.instance, activeBackend: () => context.backend,
     currentThreadDisplay: () => context.thread, isActiveThread: () => context.active,
     rememberThreadDisplay: (value, options) => remembered.push({ value, options }),
-    element: (tag, className, textContent) => ({ tag, className, textContent }),
+    element,
     $: selector => selector === "#session-metrics" ? node : selector === "#claude-usage" ? quota : null,
     Date: class extends Date { static now() { return now; } },
     setTimeout(callback, delay) { const id = ++timer; timers.set(id, { callback, delay }); return id; },
@@ -10861,7 +11436,7 @@ function composerMetricsHarness() {
   const value = overrides => ({ source: "codex-rollout", turnId: "turn-current",
     inputTokens: 999952, outputTokens: 48, turnTokens: 1000000, steps: 20, totalTokens: 5000000,
     durationMs: 1000, tokensPerSecond: 48, ...overrides });
-  return { context, requests, timers, node, quota, properties, remembered, value,
+  return { context, requests, timers, node, quota, properties, remembered, value, animations,
     text: () => node.children.map(child => child.textContent).join("  "),
     advance: amount => { now += amount; },
     complete(index = 0, overrides = {}) {
@@ -10877,7 +11452,8 @@ test("会话底栏统计按步数在前展示，百万与千单位一致，未�
   assert.equal(c.composerMetricsCompact(12400), "12.4k");
   assert.equal(c.composerMetricsCompact(null), "—");
   c.syncComposerMetrics();
-  assert.equal(h.text(), "—tk/s  本轮 —步 —  总 —");
+  assert.equal(h.node.hidden, true, "尚无实测数据时不显示统计底栏");
+  assert.equal(h.text(), "");
   h.complete(); await h.flush();
   assert.equal(h.text(), "48tk/s  本轮 20步 1m  总 5m");
   assert.equal(h.node.hidden, false);
@@ -10919,16 +11495,67 @@ test("会话底栏统计切换实例和授权后中止旧请求，迟到结果�
   assert.equal(h.remembered[0].value.id, "claude-thread-b");
 });
 
-test("会话底栏统计新轮次先清除上一轮数字，保留已知累计，拒绝错会话响应", async () => {
+test("会话底栏统计新轮次保留上一轮数据，拒绝错会话响应，实测数据返回后更新", async () => {
   const h = composerMetricsHarness(), c = h.context;
   c.syncComposerMetrics(); h.complete(); await h.flush();
   c.turns.set("next", { id: "next", status: "inProgress" }); ++c.messageVersion;
   c.syncComposerMetrics();
-  assert.equal(h.text(), "—tk/s  本轮 —步 —  总 5m");
+  assert.equal(h.text(), "48tk/s  本轮 20步 1m  总 5m");
+  assert.match(h.node.title, /当前显示上一轮数据/);
   h.requests[1].resolve({ ok: true, backend: "codex", threadId: "other-thread", metrics: h.value({ turnId: "next" }) });
   await h.flush();
   assert.equal(c.composerMetricsState.value.turnId, "turn-current");
-  assert.equal(h.text(), "—tk/s  本轮 —步 —  总 5m");
+  assert.equal(h.text(), "48tk/s  本轮 20步 1m  总 5m");
+  h.advance(2001); c.syncComposerMetrics();
+  h.complete(2, { turnId: "next", inputTokens: null, outputTokens: null, turnTokens: null, steps: null,
+    durationMs: 500, tokensPerSecond: null });
+  await h.flush();
+  assert.equal(c.composerMetricsState.value.turnId, "turn-current", "仅有累计值不能覆盖上一轮统计");
+  assert.equal(h.text(), "48tk/s  本轮 20步 1m  总 5m");
+  h.advance(2001); c.syncComposerMetrics();
+  h.complete(3, { turnId: "next", inputTokens: 1200, outputTokens: 100, turnTokens: 1300,
+    steps: 1, totalTokens: 5001300, tokensPerSecond: 100 });
+  await h.flush();
+  assert.equal(c.composerMetricsState.value.turnId, "next");
+  assert.equal(h.text(), "100tk/s  本轮 1步 1.3k  总 5m");
+  assert.doesNotMatch(h.node.title, /当前显示上一轮数据/);
+});
+
+test("会话底栏统计空数据保持隐藏，部分数据仅展示已知项且保留真实零值", async () => {
+  const h = composerMetricsHarness(), c = h.context;
+  const empty = { inputTokens: null, outputTokens: null, turnTokens: null, steps: null,
+    totalTokens: null, durationMs: 200, tokensPerSecond: null };
+  c.syncComposerMetrics(); h.complete(0, empty); await h.flush();
+  assert.equal(h.node.hidden, true);
+  assert.equal(c.composerMetricsState.value, null, "仅有时长不算 Token 统计");
+  assert.equal(h.remembered.length, 0, "空值不能写入统计展示缓存");
+  h.advance(2001); c.syncComposerMetrics();
+  h.complete(1, { ...empty, turnTokens: 1234 }); await h.flush();
+  assert.equal(h.node.hidden, false);
+  assert.equal(h.text(), "本轮 1.2k");
+  assert.doesNotMatch(h.text(), /[—–]/);
+  h.advance(2001); c.syncComposerMetrics();
+  h.complete(2, { inputTokens: 0, outputTokens: 0, turnTokens: 0, steps: 0, totalTokens: 0, tokensPerSecond: 0 });
+  await h.flush();
+  assert.equal(h.text(), "0tk/s  本轮 0步 0  总 0");
+});
+
+test("Codex 和 Claude 新轮次的空响应及失败都保留上一轮统计，不写入空快照", async () => {
+  for (const [backend, source] of [["codex", "codex-rollout"], ["claude", "claude-native"]]) {
+    const h = composerMetricsHarness(), c = h.context;
+    c.backend = backend; c.instance = `${backend}:fixture`;
+    c.syncComposerMetrics(); h.complete(0, { source }); await h.flush();
+    c.turns.set("next", { id: "next", status: "inProgress" }); ++c.messageVersion;
+    c.syncComposerMetrics();
+    h.requests[1].resolve({ ok: true, threadId: c.selectedId, backend, metrics: null }); await h.flush();
+    assert.equal(h.text(), "48tk/s  本轮 20步 1m  总 5m");
+    assert.equal(h.remembered.length, 1);
+    h.advance(2001); c.syncComposerMetrics();
+    h.requests[2].reject(new Error("新轮次统计暂不可用")); await h.flush();
+    assert.equal(h.node.hidden, false);
+    assert.equal(h.text(), "48tk/s  本轮 20步 1m  总 5m");
+    assert.equal(c.composerMetricsState.value.turnId, "turn-current");
+  }
 });
 
 test("会话底栏统计读取失败保留最后实测值，离页停止轮询且旧服务不请求新接口", async () => {
@@ -10956,6 +11583,87 @@ test("会话底栏统计离线中止读取，旧回执不回写且重新连接�
   assert.equal(h.requests.length, 2);
   h.complete(1); await h.flush();
   assert.equal(h.text(), "48tk/s  本轮 20步 1m  总 5m");
+});
+
+test("Token 数字从个位开始向上滚动到 11，下降时反向经过数字且首次显示不补零", async () => {
+  const h = composerMetricsHarness({ animate: true }), state = {}, c = h.context;
+  const node = c.composerMetricNumber(state, "tokens", 0);
+  assert.equal(node.textContent, "0");
+  assert.equal(h.animations.length, 0, "首次真实值不从虚构的零滚入");
+  c.composerMetricNumber(state, "tokens", 11);
+  assert.equal(node.textContent, "11", "动画轨道不污染真实文本、复制或读屏内容");
+  const tracks = h.animations.filter(animation => animation.target.className === "composer-metric-track");
+  const ones = tracks.find(animation => animation.options.delay === 0);
+  assert.equal(ones.target.dataset.digits, "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n0\n1");
+  assert.equal(ones.frames[0].transform, "translateY(0em)");
+  assert.equal(ones.frames[1].transform, "translateY(-11em)");
+  assert.ok(tracks.some(animation => animation.options.delay > 0), "个位先动，高位随后启动");
+  for (const animation of h.animations) animation.finish();
+  await h.flush();
+  assert.equal(node.classList.contains("composer-metric-animating"), false);
+  const before = h.animations.length;
+  c.composerMetricNumber(state, "tokens", 9);
+  const down = h.animations.slice(before).find(animation => animation.target.className === "composer-metric-track");
+  assert.equal(down.target.dataset.digits, "9\n0\n1");
+  assert.equal(down.frames[0].transform, "translateY(-2em)");
+  assert.equal(down.frames[1].transform, "translateY(0em)");
+  assert.equal(node.textContent, "9");
+});
+
+test("Token 大跳变滚动圈数和时长有上限，单位切换过渡且数值格式不回退", () => {
+  const h = composerMetricsHarness({ animate: true }), c = h.context, state = {};
+  c.composerMetricNumber(state, "tokens", 0);
+  c.composerMetricNumber(state, "tokens", Number.MAX_SAFE_INTEGER);
+  for (const animation of h.animations) {
+    assert.ok(animation.options.delay + animation.options.duration <= 700);
+    if (animation.target.className === "composer-metric-track")
+      assert.ok(animation.target.dataset.digits.split("\n").length <= 20);
+  }
+  const compact = {}, start = h.animations.length;
+  const node = c.composerMetricNumber(compact, "total", 999, c.composerMetricsCompact);
+  c.composerMetricNumber(compact, "total", 1000, c.composerMetricsCompact);
+  assert.equal(node.textContent, "1k");
+  assert.equal(h.animations.length, start + 1);
+  assert.equal(h.animations.at(-1).target, node, "跨单位时整体过渡，不显示混用单位的中间数");
+  c.composerMetricNumber(compact, "total", 1001, c.composerMetricsCompact);
+  assert.equal(h.animations.length, start + 1, "格式化结果未变化不重复启动动画");
+  c.composerMetricNumber(compact, "total", 980, c.composerMetricsCompact);
+  assert.equal(h.animations.at(-1).frames[0].transform, "translateY(-.4em)");
+});
+
+test("Token 新数值取消旧动画，迟到完成不清理新动画，切换会话会释放全部轨道", async () => {
+  const h = composerMetricsHarness({ animate: true }), c = h.context, state = {};
+  c.composerMetricNumber(state, "tokens", 0);
+  const node = c.composerMetricNumber(state, "tokens", 11), old = [...h.animations];
+  c.composerMetricNumber(state, "tokens", 12);
+  assert.ok(old.every(animation => animation.cancelled));
+  await h.flush();
+  assert.equal(node.textContent, "12");
+  assert.equal(node.classList.contains("composer-metric-animating"), true, "旧 Promise 不能清理最新动画");
+  c.composerMetricsState = state;
+  c.resetComposerMetrics();
+  await h.flush();
+  assert.ok(h.animations.every(animation => animation.cancelled));
+  assert.equal(node.classList.contains("composer-metric-animating"), false);
+  assert.equal(node.children.length, 1, "释放动画层，只留下真实数值");
+  assert.equal(h.node.hidden, true);
+});
+
+test("Token 减少动态效果时直接更新，等待新轮次数据也不会重复触发滚动", async () => {
+  const reduced = composerMetricsHarness({ animate: true, reducedMotion: true }), state = {};
+  reduced.context.composerMetricNumber(state, "tokens", 0);
+  reduced.context.composerMetricNumber(state, "tokens", 11);
+  assert.equal(reduced.animations.length, 0);
+  assert.equal(state.metricNumbers.get("tokens").node.textContent, "11");
+  const h = composerMetricsHarness({ animate: true }), c = h.context;
+  c.syncComposerMetrics(); h.complete(); await h.flush();
+  assert.equal(h.animations.length, 0);
+  c.turns.set("next", { id: "next", status: "inProgress" }); ++c.messageVersion;
+  c.syncComposerMetrics();
+  assert.equal(h.animations.length, 0, "保留上一轮时不重播旧数字");
+  h.complete(1, { turnId: "next", steps: 21, turnTokens: 1100000 }); await h.flush();
+  assert.ok(h.animations.length > 0);
+  assert.equal(h.text(), "48tk/s  本轮 21步 1.1m  总 5m");
 });
 
 function claudeSlashMenuHarness() {

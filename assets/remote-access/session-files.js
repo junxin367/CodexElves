@@ -990,6 +990,7 @@ export function mountSessionFiles({
     }
   }
   function resolveDocumentReference(path) {
+    path = path.replaceAll("\\", "/");
     if (/^(?:[a-z]:\/|\/)/iu.test(path)) return path;
     const parts = parentPath(contentResponse?.path || renderedFile).split("/").filter(Boolean);
     for (const part of path.replaceAll("\\", "/").split("/")) {
@@ -999,7 +1000,9 @@ export function mountSessionFiles({
         parts.pop();
       } else parts.push(part);
     }
-    return parts.join("/");
+    // 用户要求 harness 文件也能查看；相对链接须沿当前文件的真实根目录解析，不能落回会话项目。
+    const root = contentResponse?.root;
+    return root ? `${root.replace(/[\\/]$/u, "")}/${parts.join("/")}` : parts.join("/");
   }
   function renderContent() {
     releaseMermaidBlocks(body);

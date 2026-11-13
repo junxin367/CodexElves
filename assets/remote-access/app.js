@@ -8,6 +8,7 @@ import { normalizeWorkspacePreview, openWorkspacePreviewWindow } from "./workspa
 import { createWorkspaceBranch, setWorkspaceBranch } from "./session-files.js";
 import { menuHorizontalLeft, mountSessionMenu } from "./session-menu.js";
 import { createSelectComponent } from "./select.js";
+import { mountInstancePermissions, permissionLabel, permissionOptions } from "./permissions.js";
 import { sha256Hex } from "./sha256.js";
 import {
   getAndroidAppInfo,
@@ -38,10 +39,12 @@ import {
   composerAttachmentsPayload,
   composerHasAttachments,
   composerRemoteAttachmentSources,
+  bindMediaPreviewDismiss,
   fitMediaPreview,
   handleComposerImagePaste,
   loadAttachmentThumbnail,
   mountComposerAttachments,
+  mediaPreviewContainsPoint,
   openVideoPreview,
   renderQueuedMessageAttachments,
   requestWorkspaceMediaPreview,
@@ -151,9 +154,12 @@ let modelChoiceVersion = 0;
 let selectedDraftFast = false, remoteFastState = null, remoteFastWriting = null, fastModeVersion = 0;
 // 用户要求 Fast 复用模型目录和会话详情；这里只协调尚未完成的保存，不另建模型能力或会话开关缓存。
 const remoteFastWrites = new Map();
+// 会话权限按授权及真实会话保存；新建页的选择按实例/项目草稿隔离，不写入全局设置。
+const draftPermissionChoices = new Map(), permissionSelections = new Map(), permissionWrites = new Map();
+const instancePermissionCatalogs = new Map(), instancePermissionReads = new Map();
 let models = [], modelsPromise = null, modelsLoadedAt = 0, modelQuery = "", skillChoices = [], skillIndex = 0, skillLoadVersion = 0, skillScope = "";
-// 目录增加模型 serviceTiers 和实例 Fast 配置；旧缓存缺失这些字段，升级后补读一次。
-const modelCatalogCacheVersion = 3;
+// 服务模式改按实际 GPT 模型开放 Fast；旧缓存中的能力否定和缺失档位需重新读取。
+const modelCatalogCacheVersion = 4;
 let modelDefaults = { model: "", reasoningEffort: "" };
 const newChatModels = new Map();
 let skillLoading = null, creationProject = "", threadReadVersion = 0, tokenUsageVersion = 0, notifiedTokenUsage = null;
@@ -267,6 +273,110 @@ function renderSessionInstances() {
       row.append(copy, control); group.append(row);
     }
     root.append(group);
+  }
+}
+function rememberPermissionSelection(id, mode, revision = 0) {
+  if (!id || !permissionOptions(claudeThreadId(id) ? "claude" : "codex").some(option => option.value === mode)) return;
+  const scope = privateInputScope(session), previous = permissionSelections.get(id);
+  if (previous?.scope === scope && previous.revision > revision) return;
+  permissionSelections.set(id, { scope, mode, revision });
+  if (thread?.id === id) {
+    thread.permissionMode = mode;
+    thread.permissionRevision = revision;
+  }
+}
+function rememberInstancePermissionCatalog(id, value) {
+  if (value.backend !== "claude" || value.instanceId !== id || !Array.isArray(value.supportedModes)) return;
+  instancePermissionCatalogs.set(id, { scope: privateInputScope(session), modes: value.supportedModes });
+}
+async function loadInstancePermissionCatalog(id) {
+  if (!id || !id.startsWith("claude:") || instancePermissionReads.has(id)) return;
+  const scope = privateInputScope(session);
+  const operation = api("/api/settings/permissions", { instanceId: id }).then(result => {
+    if (scope === privateInputScope(session)) rememberInstancePermissionCatalog(id, result);
+  }).catch(error => {
+    if (scope === privateInputScope(session)) notice(error.message, true);
+  }).finally(() => {
+    if (instancePermissionReads.get(id) === operation) instancePermissionReads.delete(id);
+    if (scope === privateInputScope(session) && activeInstanceId() === id) updateComposerPermissions();
+  });
+  instancePermissionReads.set(id, operation);
+  await operation;
+}
+function updateComposerPermissions() {
+  const control = $("#permission-button");
+  if (!control) return;
+  const display = currentThreadDisplay();
+  if (!creating && display?.permissionMode)
+    rememberPermissionSelection(selectedId, display.permissionMode, display.permissionRevision || 0);
+  const saved = permissionSelections.get(selectedId);
+  const choice = creating ? draftPermissionChoices.get(draftKey())
+    : saved?.scope === privateInputScope(session) ? saved.mode : display?.permissionMode;
+  const mode = choice || (creating ? "configured" : "");
+  const catalog = instancePermissionCatalogs.get(activeInstanceId());
+  let supported = !isClaude() ? null : catalog?.scope === privateInputScope(session) ? catalog.modes : [];
+  if (isClaude() && !creating && supported) {
+    // 共享 CLI 只能切换原生已开放的模式；未在启动时允许绕过审批的会话不能被网页补开。
+    const runtimeModes = Array.isArray(display?.permissionModes) ? display.permissionModes
+      : ["default", "manual", "acceptEdits", "plan"];
+    supported = supported.filter(mode => runtimeModes.includes(mode)
+      || ["default", "manual"].includes(mode) && runtimeModes.some(value => ["default", "manual"].includes(value)));
+  }
+  const options = permissionOptions(activeBackend(), supported);
+  if (choice && !options.some(option => option.value === choice)) options.push({
+    value: choice, label: permissionLabel(activeBackend(), choice), disabled: true,
+    description: "该模式尚未被当前实例确认支持"
+  });
+  if (!creating && !choice) options.unshift({ value: "", label: "沿用当前权限",
+    description: "保留当前原生会话的权限；选择其他模式后仅覆盖本会话", disabled: true });
+  const signature = JSON.stringify([activeBackend(), mode, options]);
+  if (control.dataset.permissionSignature !== signature) {
+    control.dataset.permissionSignature = signature;
+    setSelectOptions(control, options, mode);
+  }
+  control.dataset.permissionMode = mode;
+  control.dataset.explicitPermission = String(creating && draftPermissionChoices.has(draftKey()));
+  const saving = permissionWrites.get(selectedId)?.scope === privateInputScope(session);
+  control.dataset.saving = String(saving);
+  control.setAttribute("aria-busy", String(saving));
+  control.hidden = session?.capabilities?.sessionPermissions !== true;
+  const waiting = isActiveThread() || (display?.queuedMessages || []).length > 0;
+  control.disabled = !sessionInstanceEnabled(activeInstanceId()) || threadReadOnly() || !connected || busy
+    || stopping || !!pending || !!editingMessage || !!editingQueuedMessage || threadDeletionLocked()
+    || saving || !creating && (!selectedId || waiting);
+  const label = permissionLabel(activeBackend(), choice, creating);
+  control.setAttribute("aria-label", `选择会话权限，当前为${label}`);
+  control.title = saving ? "正在保存会话权限"
+    : waiting ? `当前权限：${label}；任务及待发消息结束后可修改`
+    : `当前权限：${label}；仅此会话的后续新轮次生效`;
+}
+async function changeComposerPermissions() {
+  const control = $("#permission-button");
+  if (!control || control.disabled) return;
+  const mode = control.value;
+  if (creating) {
+    storeDraft(draftKey(), { ...snapshotDraft(), permissionMode: mode });
+    updateComposerPermissions();
+    return;
+  }
+  const id = selectedId, instanceId = activeInstanceId(), scope = privateInputScope(session);
+  if (!id || permissionWrites.has(id)) return;
+  const writing = { scope, mode };
+  permissionWrites.set(id, writing);
+  updateComposer();
+  try {
+    // 权限保存断线时保留原回执并阻止后续发送，避免界面仍显示旧权限却按新权限执行。
+    const result = await mutate("setPermissions", { threadId: id, instanceId, permissionMode: mode }, { reliable: true });
+    if (scope !== privateInputScope(session)) return;
+    if (result?.threadId !== id || result.permissionMode !== mode || result.instanceId !== instanceId)
+      throw new Error("会话权限保存结果尚未确认，请重新读取会话后核对。");
+    rememberPermissionSelection(id, mode, result.permissionRevision || 0);
+    notice("已保存，仅本会话的后续新轮次使用所选权限。");
+  } catch (error) {
+    if (scope === privateInputScope(session)) notice(error.message, true);
+  } finally {
+    if (permissionWrites.get(id) === writing) permissionWrites.delete(id);
+    if (scope === privateInputScope(session) && selectedId === id) updateComposer();
   }
 }
 function claudeThreadId(id) {
@@ -1550,6 +1660,7 @@ function openAppearance() {
       <div class="appearance-nav-group" role="group" aria-labelledby="appearance-nav-connections-title">
         <h3 id="appearance-nav-connections-title" class="appearance-nav-group-title">会话与连接</h3>
         <button type="button" id="appearance-types-entry" class="appearance-nav-item" aria-controls="appearance-types-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>会话实例</span></button>
+        <button type="button" id="appearance-permissions-entry" class="appearance-nav-item" aria-controls="appearance-permissions-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>权限</span></button>
         <button type="button" id="appearance-instructions-entry" class="appearance-nav-item" aria-controls="appearance-instructions-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>自定义指令</span></button>
         <button type="button" id="appearance-runtime-entry" class="appearance-nav-item" aria-controls="appearance-runtime-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>运行模式</span></button>
       </div>
@@ -1574,6 +1685,10 @@ function openAppearance() {
     <h3 class="appearance-panel-title">会话实例</h3>
     <p class="appearance-hint">按实例启用会话，仅影响当前设备；关闭不会停止任务。</p>
     <div id="appearance-session-instances"></div>
+    </section>
+    <section id="appearance-permissions-page" class="appearance-body appearance-settings-page" hidden>
+    <h3 class="appearance-panel-title">权限</h3>
+    <div id="instance-permissions"></div>
     </section>
     <section id="appearance-instructions-page" class="appearance-body appearance-settings-page" hidden>
     <h3 class="appearance-panel-title">自定义指令</h3>
@@ -1793,6 +1908,7 @@ function openAppearance() {
   diagnosticsEntry.querySelector(".appearance-nav-icon").append(icon("tools"));
   runtimeEntry.querySelector(".appearance-nav-icon").append(icon("settings"));
   $("#appearance-types-entry", dialog).querySelector(".appearance-nav-icon").append(icon("allSessions"));
+  $("#appearance-permissions-entry", dialog).querySelector(".appearance-nav-icon").append(icon("shield"));
   $("#appearance-instructions-entry", dialog).querySelector(".appearance-nav-icon").append(icon("edit"));
   headingButton.append(icon("close"));
   renderPwaCacheState();
@@ -1892,6 +2008,15 @@ function openAppearance() {
       void remoteSettings.show(name);
     };
   }
+  $("#appearance-permissions-entry", dialog).onclick = async () => {
+    showAppearancePage($("#appearance-permissions-page", dialog), "权限", $("#appearance-permissions-entry", dialog));
+    try {
+      await loadSessionInstances();
+      await instancePermissions.show();
+    } catch (error) {
+      if (dialog.isConnected) notice(error.message, true);
+    }
+  };
   generalEntry.onclick = () => {
     if (!dialog.isConnected || !dialog.open) return;
     if (subpageEntry) restoreAppearanceRoot();
@@ -2248,6 +2373,13 @@ function openAppearance() {
   sync.lightReading = syncAutomaticLightSetting.lightReading;
   syncAppearanceThemeControls = sync;
   const remoteSettings = mountRemoteSettings(dialog, sync);
+  const instancePermissions = mountInstancePermissions({
+    page: $("#instance-permissions", dialog), element, selectControl, setSelectOptions, setSelectValue, api,
+    getInstances: availableSessionInstances, readOnly: () => !session || session.readOnly || !connected,
+    authorizationScope: () => privateInputScope(session),
+    onLoaded: rememberInstancePermissionCatalog,
+    onSaved(id, result) { rememberInstancePermissionCatalog(id, result); updateComposer(); }
+  });
   sync();
   bindAppearanceNumberValue($("#appearance-contrast", dialog), 0, 100,
     () => appearance.colors[appearance.theme].contrast,
@@ -2397,6 +2529,7 @@ function openAppearance() {
     settingsResize?.disconnect();
     window.removeEventListener("resize", syncSettingsOffset);
     remoteSettings.dispose();
+    instancePermissions.dispose();
     if (syncAppearanceThemeControls === sync) syncAppearanceThemeControls = null;
     dialog.classList.remove("appearance-screen-visible");
     dialog.classList.remove("appearance-subpage-open");
@@ -2955,7 +3088,8 @@ function snapshotDraft() {
     text: $("#prompt").value,
     skills: selectedSkills.map(skill => ({ ...skill })),
     attachments: composerAttachmentSnapshot(),
-    goalMode: selectedGoal
+    goalMode: selectedGoal,
+    ...(draftPermissionChoices.has(draftKey()) ? { permissionMode: draftPermissionChoices.get(draftKey()) } : {})
   };
 }
 function draftKey() { return selectedId || newDraftKey(creationProject, creationBackend, creationInstanceId); }
@@ -2964,7 +3098,8 @@ function storedDraft(key) {
     text: drafts.get(key) || "",
     skills: skillDrafts.get(key) || [],
     attachments: attachmentDrafts.get(key) || [],
-    goalMode: goalDrafts.get(key) || null
+    goalMode: goalDrafts.get(key) || null,
+    ...(draftPermissionChoices.has(key) ? { permissionMode: draftPermissionChoices.get(key) } : {})
   };
 }
 function storeDraft(key, draft) {
@@ -2972,14 +3107,18 @@ function storeDraft(key, draft) {
   attachmentDrafts.set(key, draft.attachments || []);
   if (draft.goalMode) goalDrafts.set(key, draft.goalMode);
   else goalDrafts.delete(key);
+  if (key.startsWith("$new:") && typeof draft.permissionMode === "string"
+      && [...permissionOptions("codex"), ...permissionOptions("claude")].some(option => option.value === draft.permissionMode))
+    draftPermissionChoices.set(key, draft.permissionMode);
   void persistInputDraft(key).catch(() => {});
 }
 function deleteDraft(key) {
   drafts.delete(key); skillDrafts.delete(key); attachmentDrafts.delete(key); goalDrafts.delete(key);
+  draftPermissionChoices.delete(key);
   void persistInputDraft(key, true).catch(() => {});
 }
 function inputDraftEmpty(draft) {
-  return !draft?.text && !draft?.skills?.length && !draft?.attachments?.length && !draft?.goalMode;
+  return !draft?.text && !draft?.skills?.length && !draft?.attachments?.length && !draft?.goalMode && !draft?.permissionMode;
 }
 function persistInputDraft(key, remove = false) {
   if (!recoveryScope || !session) return Promise.resolve();
@@ -4059,7 +4198,8 @@ async function restoreReadViews(value) {
       reasoningEffort: saved.modelCatalog.defaults?.reasoningEffort || "",
       nativeCapabilities: saved.modelCatalog.defaults?.nativeCapabilities,
       fastModeAvailability: saved.modelCatalog.defaults?.fastModeAvailability,
-      fastModeOwner: saved.modelCatalog.defaults?.fastModeOwner };
+      fastModeOwner: saved.modelCatalog.defaults?.fastModeOwner,
+      fastModelAliases: saved.modelCatalog.defaults?.fastModelAliases };
     modelsLoadedAt = saved.modelCatalog.loadedAt;
   }
   if (saved.globalSkills && Array.isArray(saved.globalSkills.data)
@@ -4102,6 +4242,8 @@ function clearPrivateInputs({ persisted = true } = {}) {
   selectedDraftFast = false;
   remoteFastState = remoteFastWriting = null;
   remoteFastWrites.clear(); ++fastModeVersion;
+  draftPermissionChoices.clear(); permissionSelections.clear(); permissionWrites.clear();
+  instancePermissionCatalogs.clear(); instancePermissionReads.clear();
   sessionInstances = []; sessionInstanceRequest = null;
   resetRelatedSessions({ persisted: true });
   drafts.clear(); skillDrafts.clear(); attachmentDrafts.clear(); goalDrafts.clear();
@@ -4177,6 +4319,9 @@ async function restorePrivateInputs(value, { expected = null, requestGeneration 
     drafts.set(id, draft.text); skillDrafts.set(id, draft.skills || []);
     attachmentDrafts.set(id, draft.attachments);
     if (draft.goalMode) goalDrafts.set(id, draft.goalMode);
+    if (id.startsWith("$new:") && typeof draft.permissionMode === "string"
+        && [...permissionOptions("codex"), ...permissionOptions("claude")].some(option => option.value === draft.permissionMode))
+      draftPermissionChoices.set(id, draft.permissionMode);
   }
   for (const { id, value: record } of savedFailures)
     if (record.deviceId === value.device.id && record.recoveryScope === scope) failedInputRecoveries.set(id, record);
@@ -4225,6 +4370,8 @@ async function recoverFailedInput(record) {
   if (isCurrent && composerAttachmentsLoading()) return;
   const existing = isCurrent ? snapshotDraft() : storedDraft(key);
   if (!inputDraftEmpty(existing) && !matchingDraft(existing, record.payload)) return;
+  if (record.action === "create" && !draft.permissionMode && typeof record.payload.permissionMode === "string")
+    draft.permissionMode = record.payload.permissionMode;
   storeDraft(key, draft);
   if (isCurrent) { restoreDraft(key); resizeComposerInput(); }
   if (recovery.sessionRecovery) return;
@@ -4242,7 +4389,8 @@ function rememberDraft() {
     || draft.attachments.length !== previous.attachments.length
     || draft.attachments.some((image, index) => ["kind", "name", "mime", "size", "dataUrl", "source", "url"]
       .some(name => image[name] !== previous.attachments[index]?.[name]))
-    || (draft.goalMode || null) !== (previous.goalMode || null);
+    || (draft.goalMode || null) !== (previous.goalMode || null)
+    || (draft.permissionMode || null) !== (previous.permissionMode || null);
   // 切换或卸载时，未编辑的本页旧稿不能覆盖其他页面已经保存的新稿。
   if (!changed) return;
   if (selectedGoal && previous.goalMode === selectedGoal) {
@@ -4264,7 +4412,7 @@ function persistQueuedEdits(required = false) {
     else sessionStorage.removeItem("codex-elves-queue-edits");
   } catch {
     if (required) throw new Error("无法保存队列编辑草稿，操作未提交。请允许此网页使用浏览器会话存储。");
-    notice("无法保存队列编辑草稿，请保持页面打开并完成保存或取消编辑。", true);
+    notice("无法保存队列编辑草稿，请保持页面打开并完成发送。", true);
   }
 }
 function rememberQueuedMessageEdit(required = false) {
@@ -4293,6 +4441,7 @@ function matchingDraft(draft, payload) {
         === JSON.stringify(submitted.skills.map(skill => skill._offset ?? 0))
       && (draft.goalMode || null) === (submitted.goalMode || null))
     && !!draft.goalMode === (payload.goalMode === true)
+    && (draft.permissionMode || "configured") === (payload.permissionMode || "configured")
     && composerPrompt(draft.text, draft.skills, payload.goalMode === true) === payload.prompt
     && sameSkills(draft.skills, payload.skills || [])
     && JSON.stringify((draft.attachments || []).filter(entry => entry.kind === "inline")
@@ -4721,14 +4870,31 @@ function claudeUsageContext() {
   if (!owner || !isClaude() || !instanceId || !sessionInstanceEnabled(instanceId)
       || session?.capabilities?.claudeSubscriptionUsage !== true || !connected || pageLeaving || document.hidden
       || !creating && (!selectedId || thread?.id !== selectedId)) return null;
-  return { key: JSON.stringify([owner, instanceId]), instanceId,
+  return { key: JSON.stringify([owner, instanceId]), owner, instanceId,
     payload: { backend: "claude", instanceId, ...(!creating ? { threadId: selectedId } : {}) } };
+}
+const claudeUsageRefreshMs = 60000, claudeUsageMaxAgeMs = 180000;
+const claudeUsageCache = new Map();
+function rememberClaudeUsage(state = claudeUsageState) {
+  const owner = privateInputScope(session);
+  for (const [key, cached] of claudeUsageCache) {
+    if (cached.owner !== owner || !claudeUsageWindows(cached.value).length) claudeUsageCache.delete(key);
+  }
+  if (!state) return;
+  claudeUsageCache.delete(state.key);
+  if (state.owner === owner && claudeUsageWindows(state.value).length) {
+    // 用户要求打开时先显示缓存；仅在内存中按授权和实例保存最近有效数据，切会话/前后台不丢失。
+    claudeUsageCache.set(state.key, { owner, value: state.value, checkedAt: state.checkedAt,
+      details: state.details, detailsRead: state.detailsRead });
+    // 最多保留 16 个最近使用实例，且仍受三分钟真实采集时间约束，不保存 DOM、请求或凭据。
+    while (claudeUsageCache.size > 16) claudeUsageCache.delete(claudeUsageCache.keys().next().value);
+  }
 }
 function claudeUsageWindows(value, now = Date.now()) {
   // 用户要求真实账号额度；缺失、过期或非法字段不能显示成 0%，窗口到期后也不推测已恢复的额度。
   if (value?.source !== "claude-native-usage" || typeof value.observedAtMs !== "number"
       || !Number.isFinite(value.observedAtMs) || value.observedAtMs <= 0
-      || value.observedAtMs > now + 30000 || now - value.observedAtMs > 180000) return [];
+      || value.observedAtMs > now + 30000 || now - value.observedAtMs >= claudeUsageMaxAgeMs) return [];
   return [["fiveHour", "5h", "5 小时"], ["sevenDay", "7d", "7 天"]].flatMap(([key, short, label]) => {
     const data = value[key], used = data?.usedPercentage;
     if (typeof used !== "number" || !Number.isFinite(used) || used < 0 || used > 100) return [];
@@ -4762,21 +4928,46 @@ function claudeUsageEstimatedTotal(used, usedPercentage) {
   const total = used / (usedPercentage / 100);
   return claudeUsageNumber(total) ? total : null;
 }
+function claudeUsageMetricsMatch(metrics, window, now = Date.now()) {
+  const duration = window.key === "fiveHour" ? 18000000 : 604800000;
+  return metrics?.source === "claude-wsl-local-journal" && claudeUsageNumber(metrics.observedAtMs)
+    && metrics.observedAtMs > 0 && metrics.observedAtMs <= now + 30000 && now - metrics.observedAtMs < claudeUsageMaxAgeMs
+    && window.resetAt != null && metrics.windowEndMs === window.resetAt
+    && metrics.windowStartMs === window.resetAt - duration;
+}
 function claudeUsageMetrics(window, now = Date.now()) {
   const metrics = claudeUsageState?.details?.value?.[window.key];
-  const duration = window.key === "fiveHour" ? 18000000 : 604800000;
-  if (metrics?.source !== "claude-wsl-local-journal" || !claudeUsageNumber(metrics.observedAtMs)
-      || metrics.observedAtMs > now + 30000 || now - metrics.observedAtMs > 180000
-      || window.resetAt == null || metrics.windowEndMs !== window.resetAt
-      || metrics.windowStartMs !== window.resetAt - duration) return null;
-  return metrics;
+  return claudeUsageMetricsMatch(metrics, window, now) ? metrics : null;
+}
+function claudeUsageSignature(windows) {
+  return JSON.stringify(windows.map(window => [window.key, window.resetAt]));
+}
+function rememberClaudeUsageDetails(state, usage, windows) {
+  let received = false;
+  const value = Object.fromEntries(windows.map(window => {
+    const incoming = usage?.[window.key]?.metrics, previous = state.details?.value?.[window.key];
+    const retained = claudeUsageMetricsMatch(previous, window) ? previous : null;
+    if (!claudeUsageMetricsMatch(incoming, window)
+        || !claudeUsageNumber(incoming.usedCostUsd) && !claudeUsageNumber(incoming.usedTokens)
+        || retained && retained.observedAtMs > incoming.observedAtMs) return [window.key, retained];
+    received = true;
+    return [window.key, { source: incoming.source, observedAtMs: incoming.observedAtMs,
+      windowStartMs: incoming.windowStartMs, windowEndMs: incoming.windowEndMs,
+      usedCostUsd: claudeUsageNumber(incoming.usedCostUsd) ? incoming.usedCostUsd : null,
+      usedTokens: claudeUsageNumber(incoming.usedTokens) ? incoming.usedTokens : null }];
+  }));
+  // 刷新失败或缺少数字时保留同窗口的有效旧值；新窗口、过期数据和迟到的较旧统计不能覆盖当前值。
+  state.details = Object.values(value).some(Boolean)
+    ? { signature: claudeUsageSignature(windows), value } : null;
+  return received;
 }
 function loadClaudeUsageDetails() {
   const state = claudeUsageState, context = claudeUsageContext();
   if (!state?.tip || state.key !== context?.key || state.detailsPending || state.pending) return;
   const windows = claudeUsageWindows(state.value);
-  const signature = JSON.stringify(windows.map(window => [window.key, window.resetAt]));
-  if (!windows.length || state.details?.signature === signature && Date.now() - state.details.checkedAt < 60000) return;
+  const signature = claudeUsageSignature(windows);
+  if (!windows.length || state.detailsRead?.signature === signature
+      && Date.now() - state.detailsRead.checkedAt < claudeUsageRefreshMs) return;
   const tip = state.tip, controller = new AbortController();
   state.detailsPending = true; state.detailsController = controller;
   // 用户要求仅展开时扫描 WSL 日志；关闭、切换授权/实例后丢弃迟到结果，详情失败不影响百分比。
@@ -4784,19 +4975,27 @@ function loadClaudeUsageDetails() {
     { resourcePriority: "background" })
     .then(result => {
       if (claudeUsageState !== state || state.tip !== tip || state.detailsController !== controller) return;
-      const value = result?.ok === true && result.backend === "claude" && result.instanceId === context.instanceId
-        ? result.usage : null;
-      state.details = { signature, checkedAt: Date.now(),
-        value: Object.fromEntries(windows.map(window => [window.key, value?.[window.key]?.metrics ?? null])) };
+      if (result?.ok !== true || result.backend !== "claude" || result.instanceId !== context.instanceId)
+        throw new Error("Claude 额度详情响应无效");
+      rememberClaudeUsageDetails(state, result.usage, claudeUsageWindows(state.value));
     })
-    .catch(() => {
-      if (claudeUsageState === state && state.tip === tip && state.detailsController === controller)
-        state.details = { signature, checkedAt: Date.now(), value: null };
+    .catch(error => {
+      if (claudeUsageState !== state || state.tip !== tip || state.detailsController !== controller) return;
+      if ([401, 403].includes(error.code)) {
+        state.value = null; state.details = null; claudeUsageCache.delete(state.key);
+      }
     })
     .finally(() => {
       if (claudeUsageState !== state || state.detailsController !== controller) return;
       state.detailsPending = false; state.detailsController = null;
-      if (state.tip === tip) renderClaudeUsageTip(claudeUsageWindows(state.value));
+      state.detailsRead = { signature, checkedAt: Date.now() };
+      rememberClaudeUsage(state);
+      if (state.tip === tip) {
+        const current = claudeUsageWindows(state.value);
+        renderClaudeUsage();
+        if (claudeUsageSignature(current) !== signature) loadClaudeUsageDetails();
+      }
+      scheduleClaudeUsageUpdate();
     });
 }
 function closeClaudeUsageTip() {
@@ -4805,13 +5004,14 @@ function closeClaudeUsageTip() {
   claudeUsageState.tip = null;
   claudeUsageState.detailsController?.abort();
   claudeUsageState.detailsController = null; claudeUsageState.detailsPending = false;
-  clearTimeout(tip.closeTimer);
   tip.trigger.setAttribute("aria-expanded", "false");
   tip.trigger.removeAttribute("aria-describedby");
   if (tip.node.hasAttribute("popover") && tip.node.matches(":popover-open")) tip.node.hidePopover();
   tip.node.remove();
 }
-function resetClaudeUsage() {
+function resetClaudeUsage({ clearCache = false } = {}) {
+  if (clearCache) claudeUsageCache.clear();
+  else rememberClaudeUsage();
   closeClaudeUsageTip();
   if (claudeUsageState) {
     clearTimeout(claudeUsageState.timer);
@@ -4832,9 +5032,9 @@ function fitClaudeUsageTip() {
   if (box.bottom <= top || box.top >= top + height || box.right <= left || box.left >= left + width) {
     closeClaudeUsageTip(); return;
   }
-  // 用户确认：244px 为原最小宽度，保持字号和单行；内容决定宽度，受可视区域约束。
-  tip.node.style.width = "max-content";
-  tip.node.style.minWidth = `${Math.min(244, Math.max(0, width - padding * 2))}px`;
+  // 用户要求弹层总宽固定 300px（含两侧各 14px 内边距与 1px 边框），不随内容扩展；
+  // 仅在可视区域不足 316px 时由 maxWidth 收窄，保留两侧各 8px 防越界间距。
+  tip.node.style.width = "300px";
   tip.node.style.maxWidth = `${Math.max(0, width - padding * 2)}px`;
   const above = Math.max(0, box.top - top - gap - padding);
   const below = Math.max(0, top + height - box.bottom - gap - padding);
@@ -4902,9 +5102,14 @@ function renderClaudeUsage() {
 }
 function scheduleClaudeUsageUpdate() {
   const state = claudeUsageState;
-  if (!state || state.pending || state.timer != null) return;
+  if (!state || state.pending) return;
+  clearTimeout(state.timer);
   const now = Date.now(), windows = claudeUsageWindows(state.value, now);
-  const deadlines = [state.checkedAt + 60000,
+  const expiry = [state.value?.observedAtMs, ...(state.tip
+    ? Object.values(state.details?.value || {}).map(metrics => metrics?.observedAtMs) : [])]
+    .filter(claudeUsageNumber).map(at => at + claudeUsageMaxAgeMs).filter(at => at > now);
+  // 刷新和三分钟数据失效分别计时；失败退避不能延长真实数据寿命，窗口到期也不能继续显示旧额度。
+  const deadlines = [state.checkedAt + claudeUsageRefreshMs, ...expiry,
     ...windows.filter(window => window.resetAt != null).map(window => window.resetAt)];
   state.timer = setTimeout(() => {
     if (claudeUsageState !== state) return;
@@ -4917,76 +5122,84 @@ function syncClaudeUsage() {
   if (!context) { resetClaudeUsage(); return; }
   if (claudeUsageState?.key !== context.key) {
     resetClaudeUsage();
-    claudeUsageState = { key: context.key, value: null, checkedAt: 0, pending: false, controller: null, timer: null, tip: null,
-      details: null, detailsPending: false, detailsController: null };
+    const cached = claudeUsageCache.get(context.key);
+    claudeUsageState = { key: context.key, owner: context.owner, value: cached?.value || null,
+      checkedAt: cached?.checkedAt || 0, pending: false, controller: null, timer: null, tip: null,
+      details: cached?.details || null, detailsRead: cached?.detailsRead || null, detailsPending: false, detailsController: null };
   }
   const state = claudeUsageState;
   renderClaudeUsage();
-  if (!state.pending && Date.now() - state.checkedAt >= 60000) {
+  if (!state.pending && Date.now() - state.checkedAt >= claudeUsageRefreshMs) {
     state.pending = true;
     state.controller = new AbortController();
     // 用户要求额度按账号所属实例显示；授权或实例切换后丢弃迟到响应，后台页不轮询。
     void api("/api/read/claudeUsage", context.payload, undefined, state.controller.signal, { resourcePriority: "background" })
       .then(result => {
         if (claudeUsageState !== state) return;
-        state.value = result?.ok === true && result.backend === "claude" && result.instanceId === context.instanceId
-          ? result.usage : null;
+        if (result?.ok !== true || result.backend !== "claude" || result.instanceId !== context.instanceId)
+          throw new Error("Claude 额度响应无效");
+        const value = result.usage, windows = claudeUsageWindows(value);
+        state.value = windows.length ? { source: value.source, observedAtMs: value.observedAtMs,
+          ...Object.fromEntries(windows.map(window => [window.key,
+            { usedPercentage: window.usedPercentage, resetsAt: window.resetAt }])) } : null;
+        const received = rememberClaudeUsageDetails(state, value, windows);
+        if (received && windows.every(window => claudeUsageMetricsMatch(state.details?.value?.[window.key], window))) {
+          const observed = Math.min(Date.now(), ...Object.values(state.details.value).filter(Boolean).map(metrics => metrics.observedAtMs));
+          state.detailsRead = { signature: claudeUsageSignature(windows),
+            checkedAt: Math.max(observed, state.detailsRead?.signature === claudeUsageSignature(windows) ? state.detailsRead.checkedAt : 0) };
+        }
       })
-      .catch(() => { if (claudeUsageState === state) state.value = null; })
+      .catch(error => {
+        if (claudeUsageState === state && [401, 403].includes(error.code)) {
+          state.value = null; state.details = null; claudeUsageCache.delete(state.key);
+        }
+      })
       .finally(() => {
         if (claudeUsageState !== state) return;
         state.checkedAt = Date.now(); state.pending = false; state.controller = null;
+        rememberClaudeUsage(state);
         renderClaudeUsage(); loadClaudeUsageDetails(); scheduleClaudeUsageUpdate();
       });
   }
   loadClaudeUsageDetails();
   scheduleClaudeUsageUpdate();
 }
-function showClaudeUsageTip(pinned = false) {
+function showClaudeUsageTip() {
+  syncClaudeUsage();
   const state = claudeUsageState, trigger = $("#claude-usage"), windows = claudeUsageWindows(state?.value);
   if (!trigger?.isConnected || trigger.hidden || !windows.length) return;
   if (state.tip) {
-    clearTimeout(state.tip.closeTimer); state.tip.pinned ||= pinned;
     renderClaudeUsageTip(windows); loadClaudeUsageDetails(); return;
   }
   closePopup(); closeComposerMenus();
   const node = element("div", "ui-popup claude-usage-tooltip");
   node.id = "claude-usage-tooltip"; node.setAttribute("role", "tooltip");
   if (typeof node.showPopover === "function") node.setAttribute("popover", "manual");
-  state.tip = { trigger, node, pinned, closeTimer: null };
+  state.tip = { trigger, node };
   trigger.setAttribute("aria-expanded", "true"); trigger.setAttribute("aria-describedby", node.id);
   document.body.append(node);
-  if (node.hasAttribute("popover")) node.showPopover();
+  // 用户要求缓存优先：先构造完整额度与已缓存数字，再展示弹层，刷新在后台进行。
   renderClaudeUsageTip(windows);
+  if (node.hasAttribute("popover")) node.showPopover();
+  fitClaudeUsageTip();
   loadClaudeUsageDetails();
-  node.onpointerenter = () => clearTimeout(state.tip?.closeTimer);
-  node.onpointerleave = scheduleClaudeUsageTipClose;
-}
-function scheduleClaudeUsageTipClose() {
-  const state = claudeUsageState, tip = state?.tip;
-  if (!tip || tip.pinned || document.activeElement === tip.trigger
-      && document.documentElement.dataset.inputModality === "keyboard") return;
-  clearTimeout(tip.closeTimer);
-  tip.closeTimer = setTimeout(() => { if (claudeUsageState === state && state.tip === tip) closeClaudeUsageTip(); }, 120);
 }
 function mountClaudeUsage() {
   const trigger = $("#claude-usage");
+  // 用户要求仅点击展开/收起，悬停和聚焦不打开；键盘通过按钮原生 Enter/空格激活。
   trigger.onclick = () => {
-    if (claudeUsageState?.tip?.pinned) closeClaudeUsageTip();
-    else showClaudeUsageTip(true);
+    if (claudeUsageState?.tip) closeClaudeUsageTip();
+    else showClaudeUsageTip();
   };
-  trigger.onpointerenter = event => { if (event.pointerType === "mouse") showClaudeUsageTip(); };
-  trigger.onpointerleave = scheduleClaudeUsageTipClose;
-  trigger.onfocus = () => {
-    if (document.documentElement.dataset.inputModality === "keyboard") showClaudeUsageTip();
-  };
-  trigger.onblur = () => { if (!claudeUsageState?.tip?.pinned) scheduleClaudeUsageTipClose(); };
   trigger.onpointerdown = event => {
     if (event.isPrimary && event.button === 0 && document.activeElement === $("#prompt")) event.preventDefault();
   };
 }
 function composerMetricsNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
+}
+function composerMetricsHasTurn(value) {
+  return ["tokensPerSecond", "steps", "turnTokens"].some(key => composerMetricsNumber(value?.[key]));
 }
 function normalizeComposerMetrics(value) {
   if (!value || !["codex-rollout", "claude-native"].includes(value.source)
@@ -4995,12 +5208,106 @@ function normalizeComposerMetrics(value) {
   for (const key of ["inputTokens", "outputTokens", "turnTokens", "steps", "totalTokens", "durationMs", "tokensPerSecond"])
     result[key] = composerMetricsNumber(value[key])
       && (key === "tokensPerSecond" || Number.isSafeInteger(value[key])) ? value[key] : null;
-  return result;
+  // 用户要求无数据时不显示；只有原生实际返回的可展示数值才算统计，零值仍是有效数据。
+  return composerMetricsHasTurn(result) || composerMetricsNumber(result.totalTokens) ? result : null;
 }
 function composerMetricsCompact(value) {
   if (!composerMetricsNumber(value)) return "—";
   const divisor = value >= 1e6 ? 1e6 : value >= 1e3 ? 1e3 : 1;
   return `${Number((value / divisor).toFixed(divisor === 1 ? 0 : 1))}${divisor === 1e6 ? "m" : divisor === 1e3 ? "k" : ""}`;
+}
+function composerMetricNumber(state, key, value, format = String) {
+  state.metricNumbers ||= new Map();
+  let record = state.metricNumbers.get(key);
+  const text = format(value);
+  if (!record) {
+    const node = element("span", "composer-metric-number"), label = element("span", "composer-metric-value", text);
+    node.append(label);
+    record = { node, label, value, text, dispose: null };
+    state.metricNumbers.set(key, record);
+    // 用户要求无数据时隐藏；首次取得数值直接展示，不从虚构的零开始计数。
+    return node;
+  }
+  if (record.text === text) { record.value = value; return record.node; }
+  const previous = record.value, previousText = record.text;
+  record.dispose?.();
+  record.value = value; record.text = text; record.label.textContent = text;
+  if (typeof record.node.animate !== "function" || typeof matchMedia !== "function"
+      || matchMedia("(prefers-reduced-motion: reduce)").matches) return record.node;
+  const direction = value > previous ? 1 : -1, animations = [];
+  let overlay = null;
+  const before = /^(\d+)(?:\.(\d+))?([km]?)$/u.exec(previousText), after = /^(\d+)(?:\.(\d+))?([km]?)$/u.exec(text);
+  if (before && after && before[3] === after[3]) {
+    const decimals = Math.max(before[2]?.length || 0, after[2]?.length || 0);
+    const start = Math.round(Number(`${before[1]}.${before[2] || "0"}`) * 10 ** decimals);
+    const end = Math.round(Number(`${after[1]}.${after[2] || "0"}`) * 10 ** decimals);
+    const jobs = [];
+    overlay = element("span", "composer-metric-rolling");
+    overlay.setAttribute("aria-hidden", "true");
+    const character = (char, old, place) => {
+      const digit = /\d/u.test(char), cell = element("span", `composer-metric-character${digit ? " composer-metric-digit" : ""}`);
+      cell.dataset.character = char;
+      if (digit) {
+        const from = /\d/u.test(old) ? Number(old) : 0, to = Number(char);
+        const distance = direction > 0 ? (to - from + 10) % 10 : (from - to + 10) % 10;
+        const changes = Math.abs(Math.floor(end / place) - Math.floor(start / place));
+        // 用户要求逐位向上递增、向下递减；小变化逐个经过，大跳变最多滚一圈加目标差值，避免手机长时间空转。
+        const steps = changes <= 19 && changes % 10 === distance ? changes : 10 + distance;
+        if (changes || !/\d/u.test(old)) {
+          const sequence = Array.from({ length: steps + 1 }, (_, index) => String((from + direction * index % 10 + 10) % 10));
+          if (direction < 0) sequence.reverse();
+          const track = element("span", "composer-metric-track");
+          track.dataset.digits = sequence.join("\n");
+          cell.dataset.character = "";
+          cell.append(track);
+          jobs.push({ cell, track, steps, position: Math.round(Math.log10(place)), appearing: !/\d/u.test(old) });
+        }
+      }
+      overlay.append(cell);
+    };
+    for (let index = 0; index < after[1].length; ++index) {
+      const position = after[1].length - index - 1;
+      character(after[1][index], before[1].at(-position - 1) || "", 10 ** (position + decimals));
+    }
+    if (after[2]) {
+      character(".", ".", 1);
+      for (let index = 0; index < after[2].length; ++index)
+        character(after[2][index], before[2]?.[index] || "0", 10 ** (decimals - index - 1));
+    }
+    for (const unit of after[3]) character(unit, unit, 1);
+    if (jobs.length) {
+      record.node.append(overlay); record.node.classList.add("composer-metric-animating");
+      // 最低位先动，高位最多错开 5 × 24ms；总时长限制为 320–700ms，低于既有 2 秒统计刷新间隔。
+      const duration = Math.min(700, Math.max(320, Math.max(...jobs.map(job => job.steps)) * 45));
+      const lowest = Math.min(...jobs.map(job => job.position));
+      for (const job of jobs) {
+        const delay = Math.min(5, job.position - lowest) * 24;
+        animations.push(job.track.animate([
+          { transform: `translateY(${direction > 0 ? 0 : -job.steps}em)` },
+          { transform: `translateY(${direction > 0 ? -job.steps : 0}em)` }
+        ], { duration: duration - delay, delay, fill: "both", easing: "cubic-bezier(.2,.65,.3,1)" }));
+        if (job.appearing) animations.push(job.cell.animate([{ opacity: 0 }, { opacity: 1 }],
+          { duration: duration - delay, delay, fill: "both" }));
+      }
+    } else overlay = null;
+  }
+  if (!animations.length) {
+    // k/m 单位或显示精度变化时整体过渡，不能把旧单位下的数字套在新单位上滚动。
+    animations.push(record.node.animate([
+      { transform: `translateY(${direction > 0 ? ".4" : "-.4"}em)`, opacity: .4 },
+      { transform: "translateY(0)", opacity: 1 }
+    ], { duration: 320, easing: "ease-out" }));
+  }
+  const dispose = () => {
+    if (record.dispose !== dispose) return;
+    record.dispose = null;
+    for (const animation of animations) animation.cancel();
+    overlay?.remove(); record.node.classList.remove("composer-metric-animating");
+  };
+  record.dispose = dispose;
+  // 新值在动画完成前到达时取消旧动画；旧 Promise 不得清理新数字，读屏与复制仍采用真实最终值。
+  void Promise.all(animations.map(animation => animation.finished)).then(dispose, dispose);
+  return record.node;
 }
 function composerMetricsContext() {
   const owner = privateInputScope(session), instanceId = activeInstanceId();
@@ -5014,6 +5321,7 @@ function resetComposerMetrics() {
   if (composerMetricsState) {
     clearTimeout(composerMetricsState.timer);
     composerMetricsState.controller?.abort();
+    for (const record of composerMetricsState.metricNumbers?.values() || []) record.dispose?.();
   }
   composerMetricsState = null;
   const node = $("#session-metrics");
@@ -5036,24 +5344,52 @@ function composerMetricsLatestTurn(state) {
 function renderComposerMetrics() {
   const node = $("#session-metrics"), state = composerMetricsState;
   if (!node) return;
-  node.hidden = !state;
-  if (!state) return;
-  const value = state.value;
+  const value = state?.value;
+  node.hidden = !value;
+  if (!value) return;
   const latest = composerMetricsLatestTurn(state);
-  // 新轮次已经在正文出现时，迟到的上一轮统计只保留会话累计，不能标成本轮。
-  const sameTurn = !latest || latest.status !== "inProgress" || !value?.turnId || latest.id === value.turnId;
-  const metrics = sameTurn ? value : null;
-  const speed = composerMetricsNumber(metrics?.tokensPerSecond) ? Math.round(metrics.tokensPerSecond) : "—";
-  const steps = composerMetricsNumber(metrics?.steps) ? metrics.steps : "—";
-  const labels = [`${speed}tk/s`, `本轮 ${steps}步 ${composerMetricsCompact(metrics?.turnTokens)}`,
-    `总 ${composerMetricsCompact(value?.totalTokens)}`];
+  // 用户要求新轮次等待统计时保留上一轮完整显示；快照仍保留原 turnId，不能伪造为新轮次实测。
+  const sameTurn = !latest || !value.turnId || latest.id === value.turnId;
+  const metrics = value, labels = [], round = [];
+  // 未提供的单项也不放“—”占位；已有实测值继续显示，直到收到可展示的新轮次统计。
+  if (composerMetricsNumber(metrics.tokensPerSecond)) labels.push(`${Math.round(metrics.tokensPerSecond)}tk/s`);
+  if (composerMetricsNumber(metrics.steps)) round.push(`${metrics.steps}步`);
+  if (composerMetricsNumber(metrics.turnTokens)) round.push(composerMetricsCompact(metrics.turnTokens));
+  if (round.length) labels.push(`本轮 ${round.join(" ")}`);
+  if (composerMetricsNumber(value.totalTokens)) labels.push(`总 ${composerMetricsCompact(value.totalTokens)}`);
+  node.hidden = !labels.length;
+  if (node.hidden) return;
   const signature = JSON.stringify(labels);
   if (node.dataset.metrics !== signature) {
     node.dataset.metrics = signature;
-    node.replaceChildren(...labels.map(label => element("span", "composer-metric-group", label)));
+    const groups = [], used = new Set();
+    const number = (key, amount, format) => { used.add(key); return composerMetricNumber(state, key, amount, format); };
+    if (composerMetricsNumber(metrics.tokensPerSecond)) {
+      const group = element("span", "composer-metric-group");
+      group.append(number("speed", metrics.tokensPerSecond, value => String(Math.round(value))), element("span", "", "tk/s"));
+      groups.push(group);
+    }
+    if (round.length) {
+      const group = element("span", "composer-metric-group", "本轮 ");
+      if (composerMetricsNumber(metrics.steps)) group.append(number("steps", metrics.steps), element("span", "", "步"));
+      if (composerMetricsNumber(metrics.turnTokens)) {
+        if (composerMetricsNumber(metrics.steps)) group.append(element("span", "", " "));
+        group.append(number("turnTokens", metrics.turnTokens, composerMetricsCompact));
+      }
+      groups.push(group);
+    }
+    if (composerMetricsNumber(value.totalTokens)) {
+      const group = element("span", "composer-metric-group", "总 ");
+      group.append(number("totalTokens", value.totalTokens, composerMetricsCompact)); groups.push(group);
+    }
+    for (const [key, record] of state.metricNumbers || []) {
+      if (!used.has(key)) { record.dispose?.(); state.metricNumbers.delete(key); }
+    }
+    node.replaceChildren(...groups);
   }
   const exact = number => composerMetricsNumber(number) ? number.toLocaleString("zh-CN") : "尚未提供";
-  const description = `本轮输入：${exact(metrics?.inputTokens)} Token；输出：${exact(metrics?.outputTokens)} Token；`
+  const description = (sameTurn ? "" : "新轮次统计尚未返回，当前显示上一轮数据。")
+    + `${sameTurn ? "本轮" : "上一轮"}输入：${exact(metrics?.inputTokens)} Token；输出：${exact(metrics?.outputTokens)} Token；`
     + `合计：${exact(metrics?.turnTokens)} Token；模型调用：${exact(metrics?.steps)} 次；`
     + `当前会话累计：${exact(value?.totalTokens)} Token。`
     + "速度为本轮输出 Token 除以原生执行时长的平均值，包含思考、工具与等待。m 表示百万 Token，k 表示千 Token。";
@@ -5094,7 +5430,8 @@ function syncComposerMetrics() {
           || composerMetricsContext()?.key !== state.key
           || result?.ok !== true || result.threadId !== context.payload.threadId || result.backend !== context.payload.backend) return;
       const value = normalizeComposerMetrics(result.metrics);
-      if (value) {
+      // 新轮次可能先只返回累计或空统计；这时保留上一轮快照，等本轮速度、步数或 Token 实测值到达再替换。
+      if (value && (!composerMetricsHasTurn(state.value) || composerMetricsHasTurn(value))) {
         state.value = value;
         if (thread?.id === result.threadId) thread.sessionMetrics = value;
         rememberThreadDisplay({ id: result.threadId, sessionMetrics: value }, { persist: !isActiveThread() });
@@ -5382,7 +5719,7 @@ async function loadModels(force = false, { includeAvailable = false } = {}) {
     modelDefaults = { model: result.defaultModel || "", reasoningEffort: result.defaultReasoningEffort || "",
       nativeCapabilities: result.nativeCapabilities,
       // 模型能力、实例限制共用同一目录及刷新周期；身份标记防止旧授权或运行方式的展示结果串用。
-      fastModeAvailability: result.fastModeAvailability,
+      fastModeAvailability: result.fastModeAvailability, fastModelAliases: result.fastModelAliases,
       fastModeOwner: JSON.stringify([scope, context.instanceId, runtimeRevision]) };
     modelsLoadedAt = Date.now();
     modelsRetryAt = result.fastModeAvailability?.available === null ? modelsLoadedAt + catalogRetryMs : 0;
@@ -5497,12 +5834,22 @@ function updateRemoteFast() {
   const key = remoteFastKey();
   control.hidden = !key;
   if (!key) return;
-  const context = remoteFastContext(), model = currentModel();
+  const context = remoteFastContext();
+  const serviceMode = session.runtime?.cdpInjectionEnabled === false;
+  const model = currentModel() || (serviceMode ? models.find(model => model.id === currentModelId()
+    || model.requestModel === currentModelId()) : null);
   const directoryReady = modelsScope === modelContextKey() && modelDefaults.fastModeOwner === context.owner
     && catalogUsable({ loadedAt: modelsLoadedAt });
   const availability = directoryReady ? modelDefaults.fastModeAvailability : null;
-  // 原生目录包含别名的 GPT 判定；旧服务缺少判定时仅接受明确的 GPT 名称，未知/非 GPT 不开放。
-  const modelSupported = !!model && (model.fastModeSupported === true
+  // 用户要求服务模式与注入的 GPT 名称判定一致，不再依赖 API 模型目录声明 Fast；
+  // requestModel 保留别名实际目标，不能因显示名像 GPT 就为 Claude 等模型开放。
+  const alias = Object.entries(modelDefaults.fastModelAliases || {})
+    .find(([name]) => name.trim().toLowerCase() === currentModelId().trim().toLowerCase());
+  const requestModel = (typeof alias?.[1] === "string" ? alias[1] : null)
+    ?? model?.requestModel ?? model?.request_model ?? model?.model ?? currentModelId();
+  const serviceModelSupported = typeof requestModel === "string"
+    && /^gpt-\d/i.test(requestModel.trim().split("/").at(-1) || "");
+  const modelSupported = serviceMode ? serviceModelSupported : !!model && (model.fastModeSupported === true
     || model.fastModeSupported == null && /^gpt-\d/i.test(model.model?.split("/").at(-1) || ""))
     && Array.isArray(model.serviceTiers) && model.serviceTiers.some(tier => ["priority", "fast"].includes(tier?.id));
   const preference = creating ? selectedDraftFast : currentThreadDisplay()?.fastMode;
@@ -5513,7 +5860,7 @@ function updateRemoteFast() {
     && session.capabilities.serviceFastMode === true && preference === true;
   const state = remoteFastState = { key, supported, canDisable, enabled: supported && preference,
     reason: !directoryReady ? modelLoadError || "正在读取模型目录"
-      : !modelSupported ? "当前模型未声明 Fast 能力"
+      : !modelSupported ? serviceMode ? "当前请求模型不是 GPT，不能开启 Fast" : "当前模型未声明 Fast 能力"
         : availability?.available !== true ? availability?.reason || "当前实例暂未提供 Fast 配置"
           : !preferenceKnown ? "正在读取会话设置" : "" };
   const operation = context.preferenceKey && remoteFastWrites.get(context.preferenceKey);
@@ -6346,6 +6693,7 @@ function icon(name) {
     pin: '<path d="m16 3 5 5-4 1-3 5-4-4 5-3Z"/><path d="m10 14-7 7"/>',
     plus: '<path d="M12 5v14M5 12h14"/>', check: '<path d="m5 12 4 4L19 6"/>',
     image: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-6-6L3 21"/>',
+    shield: '<path d="M12 3 4 6v6c0 4.5 5 7.7 8 9 3-1.3 8-4.5 8-9V6Z"/><path d="m8.5 11.5 2.5 2.5 4.5-5"/>',
     close: '<path d="m6 6 12 12M18 6 6 18"/>',
     back: '<path d="m15 18-6-6 6-6"/><path d="M20 12H9"/>',
     closeCircle: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
@@ -8447,7 +8795,7 @@ function shell() {
       <div id="desktop-connection-guidance" class="desktop-connection-guidance" role="status" aria-live="polite" hidden>Codex 桌面尚未连接或正在重启。请在电脑端 CodexElves 管理器右上角点击「重启 Codex」；若已点击，请等待 Codex 主界面完全打开、能够正常查看会话后，再刷新远程网页。</div>
       <div class="messages-shell"><div id="messages" class="messages" role="log" aria-label="会话消息"></div><button id="scroll-to-bottom" class="scroll-to-bottom" type="button" aria-label="跳转到最新消息" hidden></button></div>
       <div class="composer-area"><div class="composer-context"><div id="queued-area" hidden></div><div id="goal-area" hidden></div></div><div id="pending-area"></div><div id="project-select-slot" hidden></div><div class="composer-anchor"><div id="approval-area" class="approval-area" aria-live="polite"></div><div id="side-thread-expired" class="side-thread-expired-banner" role="status" hidden><strong>侧边会话已过期</strong><span>该会话已结束，当前仅可查看已保留的消息。</span></div><form id="composer" class="composer">
-        <div class="composer-input"><div class="composer-input-content"><div id="edit-message-area" hidden></div>
+        <div class="composer-input"><div class="composer-input-content">
         <div id="prompt" class="prompt-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="给 Codex 发送消息，输入 / 选择命令或 Skill…" aria-label="消息输入" aria-autocomplete="list" aria-controls="skill-menu" aria-expanded="false" spellcheck="true"></div>
         </div></div>
         <div class="composer-toolbar"><div class="composer-controls"><button id="composer-add" class="icon-button composer-add-button" type="button" aria-label="添加图片、压缩上下文或设置目标" aria-haspopup="menu" aria-expanded="false"></button><button id="prompt-optimize" class="icon-button prompt-optimize-button" type="button" aria-label="优化提示词" aria-busy="false" disabled>✨</button><button id="context-info" class="context-info muted" type="button" aria-label="查看上下文用量" aria-controls="context-usage-tooltip" aria-expanded="false"></button><button id="fast-button" class="icon-button fast-button" type="button" aria-label="开启本会话 Fast" aria-pressed="false" aria-busy="false" disabled hidden><span class="fast-bolt" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h8l-1 8 11-12h-8V2Z"/></svg></span></button><button id="model-button" class="text-button model-button" type="button" aria-label="选择模型与思考深度" aria-haspopup="menu" aria-controls="model-settings" aria-expanded="false">正在读取模型…</button></div><div class="composer-send"><span id="send-status" class="composer-send-status" role="status" aria-live="polite"></span><button id="send" class="send-button" type="submit" aria-label="发送消息"></button></div></div>
@@ -8484,6 +8832,25 @@ function shell() {
   announceAppReady();
   const add = $("#composer-add");
   add.append(icon("plus"));
+  // 用户要求权限紧邻“+”；小屏只展示图标，空白由此入口后的自动外边距吸收。
+  const permissions = selectControl("permission-button", "选择会话权限", permissionOptions("codex"), "configured",
+    "permission-button", selected => [icon("shield"),
+      element("span", "permission-button-label", selected?.label || "权限"), icon("chevron")]);
+  permissions.popupDirection = "up";
+  permissions.popupWidth = 310;
+  permissions.popupClassName = "composer-permissions-popup";
+  permissions.onchange = () => void changeComposerPermissions();
+  permissions.onclick = () => {
+    togglePopup(permissions);
+    if (isClaude()) void loadInstancePermissionCatalog(activeInstanceId());
+  };
+  const permissionKeydown = permissions.onkeydown;
+  permissions.onkeydown = event => {
+    permissionKeydown(event);
+    if (isClaude() && ["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key))
+      void loadInstancePermissionCatalog(activeInstanceId());
+  };
+  add.after(permissions);
   add.popupDirection = "up";
   add.popupClassName = "composer-add-popup";
   add.popupWidth = 300;
@@ -9785,31 +10152,6 @@ function queuedEditSubmittingAction() {
       || pending.payload.editId !== edit.editId) return "";
   return ["cancelQueuedEdit", "editQueued"].includes(pending.action) ? pending.action : "";
 }
-function renderMessageEditBanner() {
-  const area = $("#edit-message-area");
-  if (!area) return;
-  const kind = editingQueuedMessage ? editingQueuedMessage.state === "starting" ? "queued-starting" : "queued" : "";
-  const canceling = queuedEditSubmittingAction() === "cancelQueuedEdit";
-  area.hidden = !kind;
-  if (area.dataset.editKind !== kind || area.dataset.canceling !== String(canceling)) {
-    area.dataset.editKind = kind;
-    area.dataset.canceling = String(canceling);
-    area.replaceChildren();
-    if (kind) {
-      const cancel = button(canceling ? "" : kind === "queued-starting" ? "重新取回" : "取消编辑",
-        canceling ? "正在取消队列消息编辑"
-          : kind === "queued-starting" ? "核对并取回此排队消息" : "取消编辑并恢复未发送草稿", () => {
-        if (editingQueuedMessage?.state === "starting") void requestQueuedMessageEdit(editingQueuedMessage);
-        else if (editingQueuedMessage) void cancelQueuedMessageEdit();
-      }, "text-button");
-      cancel.setAttribute("aria-busy", String(canceling));
-      if (canceling) cancel.append(element("span", "spinner"), document.createTextNode(" 取消中…"));
-      area.append(element("span", "", kind === "queued-starting" ? "正在取回排队消息…" : "编辑排队消息"), cancel);
-    }
-  }
-  if (kind) $("button", area).disabled = busy || !!editingQueuedMessage
-    && (!!pending || !connected || threadReadOnly() || compactionLocked());
-}
 async function submitMessageEdit() {
   const edit = editingMessage;
   if (!edit || busy || stopping || pending || threadReadOnly(edit.threadId) || !threadSentMessageEditAllowed(edit.threadId) || !connected
@@ -9887,9 +10229,11 @@ function enableImagePreviewZoom(viewport, image) {
   };
   viewport.onpointerdown = event => {
     if (event.pointerType !== "touch" && event.button !== 0) return;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    // 用户要求图片周围空白可关闭；单指按在空白时不捕获单击，仍记录触点以保留跨空白的双指缩放。
+    if (pointers.size === 1 && !mediaPreviewContainsPoint(image, viewport, event.clientX, event.clientY)) return;
     event.preventDefault();
     viewport.focus({ preventScroll: true });
-    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     viewport.setPointerCapture(event.pointerId);
   };
   viewport.onpointermove = event => {
@@ -10017,18 +10361,11 @@ function openImagePreview(link, image) {
   };
   viewport.append(preview);
   panel.append(close, viewport, caption); dialog.append(panel, loading); document.body.append(dialog);
-  let backdropPressed = false;
-  const onBackdrop = event => {
-    const box = dialog.getBoundingClientRect();
-    return event.target === dialog && (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom);
-  };
-  dialog.onpointerdown = event => { backdropPressed = onBackdrop(event); };
-  dialog.onpointermove = event => { if (!onBackdrop(event)) backdropPressed = false; };
-  dialog.onpointercancel = () => { backdropPressed = false; };
-  dialog.onpointerup = event => { if (backdropPressed && onBackdrop(event)) dialog.close(); backdropPressed = false; };
+  const disposeDismiss = bindMediaPreviewDismiss(dialog, preview, viewport);
   dialog.oncancel = event => { event.preventDefault(); dialog.close(); };
   dialog.onclose = () => {
     clearTimeout(loadingTimer);
+    disposeDismiss();
     layout.dispose();
     disposeZoom?.();
     dialog.remove();
@@ -12286,6 +12623,8 @@ function renderQueuedMessages(messages, previous = null) {
       () => void steerQueuedMessage(threadId, messageId), "queued-steer-button");
     steer.append(steering ? element("span", "spinner") : icon(retryable ? "retry" : "steer"),
       element("span", "", accepted ? "已发送" : steering ? "引导中" : awaitingReceipt ? "待确认" : retryable ? "重试" : "引导"));
+    // 异常恢复沿用原有手动重试入口；显示服务端暂停原因，不能因重新打开页面自动恢复或重发。
+    if (retryable) steer.title = message.pausedReason;
     steer.disabled = accepted || awaitingReceipt || unavailable || message.canSendNow === false;
     const menu = button("", "排队消息操作", () => togglePopup(menu), "queued-menu-button");
     menu.id = `queued-menu-${messageId}`;
@@ -12716,6 +13055,8 @@ function completeQueuedEditAction(action, payload, result, readVersion) {
   applyQueuedSendResult(payload.threadId, result, readVersion);
   if (!edit || edit.editId !== payload.editId || edit.deviceId !== session?.device.id) { updateComposer(); return; }
   if (action === "beginQueuedEdit" && !["committed", "canceled"].includes(result?.editState)) {
+    // 用户要求与 Codex 一致：取回后作为未发送输入，不显示编辑提示或取消按钮；
+    // 未再次点击发送就不恢复队列，原位置仅在 editQueued 提交时使用。
     edit.state = "editing"; persistQueuedEdits();
     if (editingQueuedMessage === edit && selectedId === edit.threadId) {
       $("#prompt").value = edit.text;
@@ -12727,45 +13068,38 @@ function completeQueuedEditAction(action, payload, result, readVersion) {
   } else finishQueuedMessageEdit(edit);
   updateComposer();
 }
-async function cancelQueuedMessageEdit() {
-  return submitQueuedMessageEdit(true);
-}
-async function submitQueuedMessageEdit(cancel = false) {
+async function submitQueuedMessageEdit() {
   const edit = editingQueuedMessage;
   if (!edit || edit.state !== "editing" || busy || stopping || pending || threadReadOnly(edit.threadId) || !connected
       || edit.threadId !== selectedId || thread?.id !== selectedId || compactionLocked()) return;
   const prompt = $("#prompt").value.trim();
-  if (!cancel && composerAttachmentsLoading()) { notice("图片正在读取，请稍后保存"); return; }
-  if (!cancel && !prompt && !composerHasAttachments()) { notice("请输入消息或保留至少一张图片", true); return; }
+  if (composerAttachmentsLoading()) { notice("图片正在读取，请稍后发送"); return; }
+  if (!prompt && !composerHasAttachments()) { notice("请输入消息或保留至少一张图片", true); return; }
   const images = edit.imageEditing ? composerAttachmentsPayload() : [];
-  if (!cancel && images.length && !queueCapability("queuedImageEditing")) {
-    notice("当前运行的服务尚不支持编辑队列图片，修改已保留，请更新程序后再保存。", true);
+  if (images.length && !queueCapability("queuedImageEditing")) {
+    notice("当前运行的服务尚不支持编辑队列图片，修改已保留，请更新程序后再发送。", true);
     return;
   }
-  if (!cancel) {
-    try { rememberQueuedMessageEdit(true); }
-    catch (error) { notice(error.message, true); return; }
-  }
+  try { rememberQueuedMessageEdit(true); }
+  catch (error) { notice(error.message, true); return; }
   const { threadId, message } = edit, messageId = message.id;
   const key = `${threadId}:${messageId}`, readVersion = queueVersion;
   if (queuedActionBusy.has(key)) return;
   queuedActionBusy.add(key);
   busy = true;
-  const action = cancel ? "cancelQueuedEdit" : "editQueued";
   const payload = {
     threadId,
     editId: edit.editId,
-    ...(!cancel ? {
-      prompt,
-      ...(edit.imageRemoval ? { retainedImageSources: composerRemoteAttachmentSources() } : {}),
-      ...(images.length ? { images } : {})
-    } : {})
+    prompt,
+    ...(edit.imageRemoval ? { retainedImageSources: composerRemoteAttachmentSources() } : {}),
+    ...(images.length ? { images } : {})
   };
   try {
-    const request = mutate(action, payload, { reliable: true });
+    // 继续使用取回时的 editId，让服务端按原队列位置提交，不能作为一条新消息追加。
+    const request = mutate("editQueued", payload, { reliable: true });
     updateComposer();
     const result = await request;
-    completeQueuedEditAction(action, payload, result, readVersion);
+    completeQueuedEditAction("editQueued", payload, result, readVersion);
     if (selectedId === threadId) $("#prompt").focus({ preventScroll: true });
   } catch (error) {
     reportMutationError(error);
@@ -15316,6 +15650,7 @@ function updateComposer() {
   if (!$("#composer")) return;
   // 先恢复当前会话的缓存及保存状态，再决定发送按钮是否等待该会话的 Fast 写入。
   updateRemoteFast();
+  if ($("#permission-button")) updateComposerPermissions();
   const sessionTypeEnabled = sessionInstanceEnabled(activeInstanceId());
   const backendSelect = $("#new-chat-backend");
   const distribution = JSON.stringify([availableSessionInstances(), appearance.sessionInstances, creationInstanceId]);
@@ -15337,7 +15672,6 @@ function updateComposer() {
   resizeComposerInput();
   renderGoalStatus();
   renderQueueArea();
-  renderMessageEditBanner();
   updateScrollControl();
   const typedGoal = goalPrefix($("#prompt").value);
   const goalMode = !!selectedGoal || !!typedGoal;
@@ -15370,7 +15704,7 @@ function updateComposer() {
   if (attachmentNote) {
     attachmentNote.textContent = unsupportedImages
       ? editingQueuedMessage
-        ? "当前运行的服务尚不支持编辑队列图片，修改已保留，请更新程序后再保存。"
+        ? "当前运行的服务尚不支持编辑队列图片，修改已保留，请更新程序后再发送。"
         : "当前运行的服务尚不支持图片发送，请更新程序后再发送。"
       : queueImageNote;
     attachmentNote.hidden = !unsupportedImages && !queueImageNote;
@@ -15393,24 +15727,26 @@ function updateComposer() {
   if (activePopup?.trigger === add) renderPopup();
   const queuedEditAction = queuedEditSubmittingAction();
   const sendingLabel = sending ? sending.phase === "syncing" ? "同步中…" : "发送中…"
-    : queuedEditAction === "cancelQueuedEdit" ? "取消中…" : queuedEditAction === "editQueued" ? "保存中…" : "";
+    : queuedEditAction === "cancelQueuedEdit" ? "处理中…" : queuedEditAction === "editQueued" ? "发送中…" : "";
   if ($("#send-status").textContent !== sendingLabel) $("#send-status").textContent = sendingLabel;
   // 用户要求压缩执行中空输入显示停止；有正文或附件时仍可加入原生队列，旧 print 会话保留原停止行为。
-  const action = sending ? "sending" : editingQueuedMessage ? "save" : isClaude() && !claudeNativeQueue() && active && selectedId ? "stop"
+  // 用户要求排队取回后沿用普通发送图标和文案；空草稿不能误显示停止当前任务。
+  const action = sending ? "sending" : editingQueuedMessage ? "send" : isClaude() && !claudeNativeQueue() && active && selectedId ? "stop"
     : !goalMode && !editing && (active || compactionInProgress(compaction))
       && ((!prompt && !hasAttachments) || pending) && selectedId ? "stop" : "send";
+  send.dataset.queuedEditState = editingQueuedMessage?.state || "";
   const stopLabel = compacting ? "停止压缩" : "停止生成";
   const sendLoading = action === "sending" || !!queuedEditAction;
   if (send.dataset.action !== action || send.dataset.loading !== String(sendLoading)) {
     send.dataset.action = action;
     send.dataset.loading = String(sendLoading);
     const indicator = sendLoading ? element("span", "spinner")
-      : icon(action === "stop" ? "stop" : action === "save" ? "check" : "arrowUp");
+      : icon(action === "stop" ? "stop" : "arrowUp");
     indicator.setAttribute("aria-hidden", "true");
     send.replaceChildren(indicator);
   }
-  send.setAttribute("aria-label", sendingLabel || (editingQueuedMessage ? "保存队列消息修改" : goalMode ? "创建目标" : action === "stop" ? stopLabel : queueOnly ? "发送到原生消息队列" : "发送消息"));
-  send.title = sendingLabel || (editingQueuedMessage ? "保存队列消息修改" : editingMessage ? "请先完成消息编辑" : goalMode ? goalReason || "创建目标" : action === "stop" ? stopLabel : queueOnly ? "加入原生消息队列，压缩完成后执行" : compactionSendReason || (active ? "发送补充消息" : "发送消息"));
+  send.setAttribute("aria-label", sendingLabel || (goalMode ? "创建目标" : action === "stop" ? stopLabel : queueOnly ? "发送到原生消息队列" : "发送消息"));
+  send.title = sendingLabel || (editingQueuedMessage ? "发送消息" : editingMessage ? "请先完成消息编辑" : goalMode ? goalReason || "创建目标" : action === "stop" ? stopLabel : queueOnly ? "加入原生消息队列，压缩完成后执行" : compactionSendReason || (active ? "发送补充消息" : "发送消息"));
   if (unsupportedImages) send.title = "当前服务版本尚不支持图片发送，请先更新程序";
   if (unsupportedProjectless) send.title = "当前服务版本尚不支持无项目会话，请先更新程序或选择已有项目";
   send.setAttribute("aria-busy", String(busy || stopping));
@@ -15418,6 +15754,7 @@ function updateComposer() {
     : editingMessage ? "message-edit" : editingQueuedMessage?.state === "starting" ? "queue-edit-loading"
     : deleting ? "delete" : busy ? "busy" : stopping ? "stopping"
     // 保存档位仅防止新消息抢先提交，停止当前任务无需等待 Fast 请求。
+    : action !== "stop" && $("#permission-button")?.dataset?.saving === "true" ? "permissions-saving"
     : action !== "stop" && remoteFastWriting?.key === remoteFastKey() ? "fast-saving" : compacting && editing ? "compaction-edit"
     : action !== "stop" && compactionSendReason ? compaction.deviceId && compaction.deviceId !== session?.device.id ? "compaction-scope"
       : compaction.state === "unknown" ? "compaction-unknown" : compaction.state === "pending" && !compaction.acknowledged && !compaction.nativeConfirmed
@@ -15448,7 +15785,7 @@ function updateComposer() {
   fitPopup();
   $("#prompt").placeholder = threadReadOnly() ? threadReadOnlyMessage() : compacting && !editing && !goalMode
     ? queueOnly ? "继续输入，发送后会排队等待压缩完成…" : "可继续编辑草稿，压缩期间暂不能发送…"
-    : editingQueuedMessage ? "修改排队消息…" : goalMode ? goalComposerPlaceholder
+    : goalMode ? goalComposerPlaceholder
     : isClaude() ? active ? claudeNativeQueue()
       ? thread?.capabilities?.remoteQueue === true ? "继续输入，消息会排队等待发送…" : "继续输入，消息会进入 Claude 原生队列…"
       : "Claude 正在执行，可停止后发送新消息…" : "给 Claude 发送消息…"
@@ -15583,6 +15920,7 @@ async function sendMessage() {
   if (editingMessage) return;
   if (busy || stopping || pending || threadReadOnly() || !connected) return;
   if (remoteFastWriting?.key === remoteFastKey()) { notice("正在保存 Fast 设置，请稍后发送"); return; }
+  if ($("#permission-button")?.dataset?.saving === "true") { notice("正在保存权限，请稍后发送"); return; }
   if (composerAttachmentsLoading()) { notice("图片正在读取，请稍后发送"); return; }
   let draft = snapshotDraft();
   const prefix = goalPrefix(draft.text, draft.skills);
@@ -15626,6 +15964,8 @@ async function sendMessage() {
     ...(goalMode ? { goalMode: true } : {}),
     ...(queueOnly ? { queueOnly: true } : {}),
     ...(model ? { model } : {}),
+    ...(creating && session.capabilities?.sessionPermissions === true && $("#permission-button")?.value
+      ? { permissionMode: $("#permission-button").value } : {}),
     // 新建只传本次草稿的显式选择；已有会话由原生会话偏好控制，发送不增加额外设置请求。
     ...(creating && session.capabilities?.fastMode && !isClaude() ? {
       fastMode: remoteFastState?.key === remoteFastKey() && remoteFastState.supported && selectedDraftFast
@@ -15663,6 +16003,7 @@ async function sendMessage() {
     requestStarted = true;
     const result = await mutate(action, payload, { reliable: true, receiptId: goalRecord?.id });
     if (!currentAuthorization()) return;
+    if (result.permissionWarning) notice(result.permissionWarning, true);
     if (goalMode) {
       await applyGoalComposerReceipt(pending?.id === goalRecord.id ? pending : goalRecord,
         { state: "completed", result }, { allowSelection: true });
@@ -16149,6 +16490,10 @@ function receive(event) {
     rememberRemoteFastPreference(params.threadId, params.fastMode);
     if (params.threadId === selectedId) updateComposer();
   }
+  if (event.method === "thread/settings/updated" && typeof params.permissionMode === "string") {
+    rememberPermissionSelection(params.threadId, params.permissionMode, params.permissionRevision || 0);
+    if (selectedId === params.threadId) updateComposer();
+  }
   rememberBackgroundThreadDisplay(event, params);
   if (event.method === "remote/requestsChanged" || event.method === "serverRequest/resolved") {
     const id = params.threadId ?? params.conversationId;
@@ -16341,7 +16686,7 @@ function receive(event) {
 function disconnect() {
   stopClientUnreadBadgePolling(true);
   resetDesktopObservation();
-  resetClaudeUsage();
+  resetClaudeUsage({ clearCache: true });
   resetComposerMetrics();
   clearPendingFeedbackTimer();
   $("#video-preview-dialog")?.close();

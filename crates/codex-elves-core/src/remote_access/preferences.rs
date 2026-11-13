@@ -1,4 +1,4 @@
-//! 远程设置只管理已检测实例的用户级全局指令文件，不提供任意路径写入。
+//! 远程设置管理实例的用户级全局指令，并为文件预览确认引擎目录，不提供任意路径写入。
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -36,8 +36,8 @@ pub(super) struct Environment {
     pub executables: BTreeMap<String, String>,
     pub configured: bool,
     pub error: Option<String>,
-    codex_home: String,
-    claude_home: String,
+    pub(super) codex_home: String,
+    pub(super) claude_home: String,
 }
 
 type DetectionCache = Option<(PathBuf, Instant, Vec<Environment>)>;
@@ -114,7 +114,7 @@ fn native_environment() -> Environment {
     }
 }
 
-async fn output(mut command: Command) -> Result<Vec<u8>, ApiError> {
+pub(super) async fn output(mut command: Command) -> Result<Vec<u8>, ApiError> {
     command
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -346,6 +346,74 @@ pub(super) fn wsl_distribution(path: &Path) -> Option<String> {
     }
     let distribution = parts.next()?;
     valid_distribution_name(distribution).then(|| distribution.to_owned())
+}
+
+pub(super) async fn harness_file_roots(context: &Value) -> Result<Vec<PathBuf>, ApiError> {
+    // 用户要求文件访问覆盖当前 harness 的配置、指令、Skill 和插件；
+    // 目录只由服务端确认的实例推导，不能接受客户端指定用户目录或借用另一实例。
+    let backend = context["backend"].as_str().unwrap_or("codex");
+    let environment = match backend {
+        "codex"
+            if context["instanceId"]
+                .as_str()
+                .is_none_or(|id| id == "codex:local") =>
+        {
+            native_environment()
+        }
+        "claude" => {
+            let distribution = context["wslDistribution"]
+                .as_str()
+                .filter(|name| valid_distribution_name(name))
+                .ok_or_else(|| ApiError::new(403, "无法确认会话所属的 WSL 实例"))?;
+            let user = context["wslUser"]
+                .as_str()
+                .filter(|user| !user.is_empty())
+                .ok_or_else(|| ApiError::new(403, "无法确认会话所属的 WSL 用户"))?;
+            if context["instanceId"] != super::instances::id("claude", distribution, user) {
+                return Err(ApiError::new(403, "会话实例身份已变化，请重新打开会话"));
+            }
+            probe_wsl(
+                distribution.to_owned(),
+                &json!({"distribution":distribution,"user":user}),
+            )
+            .await
+        }
+        _ => return Err(ApiError::new(403, "该会话实例尚不支持引擎文件访问")),
+    };
+    harness_roots(&environment, backend)
+}
+
+fn harness_roots(environment: &Environment, backend: &str) -> Result<Vec<PathBuf>, ApiError> {
+    if environment.error.is_some() {
+        return Err(ApiError::new(503, "无法读取会话引擎的用户目录"));
+    }
+    let home = match backend {
+        "codex" => &environment.codex_home,
+        "claude" => &environment.claude_home,
+        _ => return Err(ApiError::new(403, "会话引擎类型无效")),
+    };
+    if home.is_empty() || environment.home.is_empty() {
+        return Err(ApiError::new(403, "会话引擎目录无效"));
+    }
+    let mut roots = Vec::new();
+    // 引擎目录包含其配置与扩展资源；通用 .agents 目录承载跨引擎 Skill，不放开整个用户主目录。
+    for value in [
+        home.to_owned(),
+        format!("{}/.agents", environment.home.trim_end_matches(['/', '\\'])),
+    ] {
+        let path = if environment.distribution.is_empty() {
+            PathBuf::from(&value)
+        } else {
+            wsl_path(&environment.distribution, &value)?
+        };
+        if !path.is_absolute() {
+            return Err(ApiError::new(403, "会话引擎目录无效"));
+        }
+        if !roots.contains(&path) {
+            roots.push(path);
+        }
+    }
+    Ok(roots)
 }
 
 fn instruction_target(
@@ -706,6 +774,7 @@ mod tests {
             id: "wsl:fixture-wsl".into(),
             distribution: "fixture-wsl".into(),
             user: "fixture-user".into(),
+            home: "/home/fixture".into(),
             executables: BTreeMap::from([
                 ("claude".into(), "/fixture/bin/claude".into()),
                 ("codex".into(), "/fixture/bin/codex".into()),
@@ -721,6 +790,13 @@ mod tests {
             local_target.0,
             PathBuf::from(&local.codex_home).join("AGENTS.md")
         );
+        assert_eq!(
+            harness_roots(&local, "codex").unwrap(),
+            [
+                PathBuf::from(&local.codex_home),
+                temporary.path().join(".agents")
+            ]
+        );
         for (backend, home, name) in [
             ("claude", &wsl.claude_home, "CLAUDE.md"),
             ("codex", &wsl.codex_home, "AGENTS.md"),
@@ -732,6 +808,13 @@ mod tests {
                 wsl_path(&wsl.distribution, home).unwrap().join(name)
             );
             assert_eq!(target.1, format!("{home}/{name}"));
+            assert_eq!(
+                harness_roots(&wsl, backend).unwrap(),
+                [
+                    wsl_path(&wsl.distribution, home).unwrap(),
+                    wsl_path(&wsl.distribution, "/home/fixture/.agents").unwrap()
+                ]
+            );
         }
         for payload in [
             json!({"instanceId":"codex:local","scope":"project","projectId":"fixture"}),
@@ -757,12 +840,26 @@ mod tests {
             error: Some("模拟不可用".into()),
             ..local
         };
+        assert_eq!(harness_roots(&unavailable, "codex").unwrap_err().code, 503);
         assert_eq!(
             instruction_target(&[unavailable], &json!({"instanceId":"codex:local"}))
                 .unwrap_err()
                 .code,
             404
         );
+    }
+
+    #[tokio::test]
+    async fn harness_file_roots_reject_unknown_or_mismatched_instances_before_probing() {
+        for context in [
+            json!({"backend":"unknown"}),
+            json!({"backend":"codex","instanceId":"codex:wsl:other"}),
+            json!({"backend":"claude","wslDistribution":"Other","wslUser":"fixture","instanceId":"claude:local"}),
+            json!({"backend":"claude","wslDistribution":"../Other","wslUser":"fixture"}),
+            json!({"backend":"claude","wslDistribution":"Other"}),
+        ] {
+            assert_eq!(harness_file_roots(&context).await.unwrap_err().code, 403);
+        }
     }
 
     #[test]

@@ -147,7 +147,18 @@ html{scrollbar-color:var(--muted) transparent}
 /* 用户确认“48tk/s 本轮 20步 1m 总 5m”放在输入框外侧左下方，与右侧额度共用既有 20px 空位。
  * 12px 内侧对齐、.785714 × 默认 14px = 11px 字号与额度一致；只让统计避开额度宽度及 8px 空隙，不增高输入框或移动工具栏。 */
 .composer-anchor>.composer-metrics{position:absolute;top:100%;left:12px;display:inline-flex;align-items:center;gap:10px;max-width:calc(100% - 24px - var(--composer-quota-width,0px));height:20px;margin:0;padding:0 2px;color:var(--text);font-size:calc(var(--font-size)*.785714);font-variant-numeric:tabular-nums;line-height:20px;white-space:nowrap;overflow:hidden;cursor:default}
-.composer-metric-group{flex:0 0 auto}
+.composer-metric-group{display:inline-flex;align-items:center;flex:0 0 auto;white-space:pre}
+/* 用户要求底栏数值增大向上滚、减小向下滚；只动画数字，不改变已有 20px 底行、字号和左右位置。 */
+.composer-metric-number{position:relative;display:inline-flex;line-height:1em;font-variant-numeric:tabular-nums}
+.composer-metric-animating>.composer-metric-value{color:transparent}
+.composer-metric-rolling{position:absolute;inset:0;display:inline-flex;align-items:center;pointer-events:none}
+.composer-metric-character{display:inline-block;height:1em;line-height:1em}
+.composer-metric-character::before{content:attr(data-character)}
+.composer-metric-character[data-character=""]::before{content:none}
+.composer-metric-digit{width:1ch;overflow:hidden}
+.composer-metric-track{display:block;line-height:1em;will-change:transform}
+.composer-metric-track::before{content:attr(data-digits);display:block;white-space:pre;line-height:1em}
+@media(prefers-reduced-motion:reduce){.composer-metric-animating>.composer-metric-value{color:inherit}.composer-metric-rolling{display:none}}
 @media(max-width:760px){.composer-anchor>.composer-metrics{gap:7px}}
 .claude-usage-window{display:inline-flex;gap:5px}
 .claude-usage-percent{font-weight:400}
@@ -159,7 +170,8 @@ html{scrollbar-color:var(--muted) transparent}
 .claude-usage-remaining{font-size:11px}
 .claude-usage-track{height:3px;margin-top:6px;overflow:hidden;border-radius:2px;background:color-mix(in srgb,var(--text) 18%,transparent)}
 .claude-usage-fill{height:100%;background:color-mix(in srgb,var(--text) 70%,transparent)}
-/* 用户确认：数字、预测及右侧重置时间保持一行，手机不缩字号；只按内容拓展原 244px 最小宽度。 */
+/* 用户要求弹层固定 300px，数字、预测及右侧重置时间保持一行，手机不缩字号；
+ * 不再按内容撑宽，窄屏边界由 fitClaudeUsageTip 限制。 */
 .claude-usage-metrics{display:grid;grid-template-columns:max-content max-content;justify-content:space-between;align-items:center;column-gap:12px;margin-top:8px;font-size:11px;font-variant-numeric:tabular-nums;color:color-mix(in srgb,var(--text) 75%,var(--muted));white-space:nowrap}
 .claude-usage-stats{display:flex;align-items:center;gap:10px}
 .claude-usage-metric{display:inline-flex;align-items:center;gap:4px}
@@ -185,9 +197,18 @@ html{scrollbar-color:var(--muted) transparent}
 .composer-context{--composer-context-row-height:max(34px,calc(1.4rem + 8px));display:flex;flex-direction:column;max-height:min(32dvh,260px);overflow:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .composer-controls{flex:1;min-width:0;display:flex;align-items:center;justify-content:flex-start;gap:8px;flex-wrap:nowrap;overflow:hidden}
 .composer-toolbar>.composer-controls{gap:8px;align-items:center}
-/* 用户要求仅「＋」留在最左侧，其余编辑区按钮靠近发送按钮右对齐。
- * 自动外边距吸收中间空白，桌面和手机共用；空间不足时继续由模型名称收缩，按钮顺序保持一致。 */
-.composer-toolbar>.composer-controls>.composer-add-button{margin-inline-end:auto}
+/* 用户要求权限入口紧邻「＋」，二者留在左侧，其余功能仍靠近发送按钮。
+ * 空白由权限入口后的自动外边距吸收，不能把提示词优化、上下文、Fast 或发送按钮挤到下一行。 */
+/* 旧服务未开放权限入口时，仍由「＋」后的外边距保持原右侧功能对齐。 */
+.composer-toolbar>.composer-controls>.composer-add-button{margin-inline-end:auto;flex-shrink:0}
+.composer-toolbar>.composer-controls>.composer-add-button:has(+.permission-button:not([hidden])){margin-inline-end:0}
+.composer-toolbar>.composer-controls>.permission-button{margin-inline-end:auto}
+.composer-toolbar .permission-button{display:inline-flex;align-items:center;justify-content:center;gap:5px;flex:0 0 auto;min-width:0;max-width:150px;height:30px;padding:4px 6px;border:0;border-radius:7px;background:transparent;color:var(--muted);font-size:calc(var(--font-size)*.78);white-space:nowrap}
+.composer-toolbar .permission-button .ui-icon{flex:0 0 16px;width:16px;height:16px}
+.permission-button .permission-button-label{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.permission-button[data-permission-mode=full-access],.permission-button[data-permission-mode=bypassPermissions]{color:var(--text)}
+.composer-toolbar .permission-button:is(:focus-visible,[aria-expanded=true]){background:var(--composer-hover,var(--hover))}
+@media(hover:hover) and (pointer:fine){.composer-toolbar .permission-button:hover:not(:disabled){background:var(--composer-hover,var(--hover))}}
 .context-info{position:relative;display:flex;align-items:center;justify-content:center;flex:0 0 28px;width:28px;height:28px;min-width:0;padding:0;border:0;border-radius:6px;font-size:calc(var(--font-size)*.78);white-space:nowrap}
 .context-info[aria-expanded=true]{color:var(--text)}
 .prompt-optimize-button{display:grid;place-items:center;flex:0 0 24px;width:24px;height:28px;padding:0;border-radius:6px;color:var(--muted);font:16px/1 "Segoe UI Emoji",system-ui,sans-serif}
@@ -231,7 +252,7 @@ html{scrollbar-color:var(--muted) transparent}
 .composer-toolbar .model-button{font-size:calc(var(--font-size)*.85);padding:5px 7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px;min-width:0;flex:0 1 auto}
 /* 用户要求 Fast 紧靠模型名称左侧，关闭为空心、开启为实心蓝色渐变流光。
  * 28px 点击区与上下文按钮对齐，手机沿用模型按钮的 36px 高度；18px 闪电保持两端布局一致。
- * 用户要求放慢且只扫一整遍、再扫半遍停在中央：每遍 4s、播放 1.5 遍，共 6s。
+ * 用户要求总时长由 6s 改为 2s；仍扫一整遍、再扫半遍停在中央，每遍用时按 2s ÷ 1.5 计算。
  * 250% 渐变从 125% 移到 -25%，半程正好为 50%；亮部也居于渐变中央，forwards 保持中央较亮，不循环或改变布局。 */
 .composer-toolbar .fast-button{display:grid;place-items:center;flex:0 0 28px;width:28px;height:28px;min-width:0;padding:0;border:0;border-radius:6px;background:transparent;color:var(--muted)}
 /* 桌面工具栏 gap 为 8px，模型前回收 6px 得到 2px；手机原 gap 已是 2px，必须取消回收，避免点击区重叠。 */
@@ -240,7 +261,7 @@ html{scrollbar-color:var(--muted) transparent}
 .fast-bolt svg{display:block;width:100%;height:100%}
 .fast-button[aria-pressed=true]{color:#3b82f6}
 .fast-button[aria-pressed=true] .fast-bolt svg{fill:currentColor}
-.fast-button[aria-pressed=true] .fast-bolt::after{content:"";position:absolute;inset:0;background:linear-gradient(115deg,#1d4ed8 0%,#3b82f6 28%,#38bdf8 42%,#a5edff 50%,#38bdf8 58%,#3b82f6 72%,#1d4ed8 100%);background-size:250% 100%;background-position:50% 50%;background-repeat:no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='white' d='M13 2 3 14h8l-1 8 11-12h-8V2Z'/%3E%3C/svg%3E") center/contain no-repeat;animation:fast-flow 4s linear 1.5 forwards;pointer-events:none}
+.fast-button[aria-pressed=true] .fast-bolt::after{content:"";position:absolute;inset:0;background:linear-gradient(115deg,#1d4ed8 0%,#3b82f6 28%,#38bdf8 42%,#a5edff 50%,#38bdf8 58%,#3b82f6 72%,#1d4ed8 100%);background-size:250% 100%;background-position:50% 50%;background-repeat:no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='white' d='M13 2 3 14h8l-1 8 11-12h-8V2Z'/%3E%3C/svg%3E") center/contain no-repeat;animation:fast-flow calc(2s / 1.5) linear 1.5 forwards;pointer-events:none}
 .fast-button:disabled .fast-bolt::after{animation-play-state:paused}
 .fast-button:focus-visible{outline:2px solid var(--accent);outline-offset:2px;background:var(--composer-hover,var(--hover))}
 @media(hover:hover) and (pointer:fine){.composer-toolbar .fast-button:hover:not(:disabled){background:var(--composer-hover,var(--hover))}}
@@ -754,8 +775,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .user-attachments .message-image{width:var(--thumbnail-size);height:var(--thumbnail-size);max-width:var(--thumbnail-size);max-height:var(--thumbnail-size);object-fit:cover}
 .user-attachments .message-video-preview{flex:0 0 140px;margin:0}
 /* 用户确认 PC/手机资源预览框内外共用一层 #000b 遮罩，不铺灰底、不重复叠加。
- * 只移除底板和边框；最大宽度仍为 90vw、高度沿用 --popup-max-height（80dvh），
- * fitMediaPreview 继续按整页视口扣除实际边距与文案，不能因透明效果取消尺寸上限。 */
+ * 视频沿用 90vw / --popup-max-height；图片按下方规则覆盖整层遮罩，不能被透明容器拦截关闭。 */
 .image-preview-dialog{--preview-margin:16px;--preview-min-width:120px;width:90vw;max-width:90vw;max-height:var(--popup-max-height);height:fit-content;margin:auto;padding:0;border:0;border-radius:12px;background:transparent;color:#ededed;overflow:hidden}
 .image-preview-dialog::backdrop{background:#000b}
 #image-preview-dialog::backdrop,.image-preview-dialog.image-preview-presented{animation:image-preview-appear 160ms ease-out both}
@@ -781,6 +801,12 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .image-preview-close:hover{background:#fff2}
 /* 透明预览始终叠在深色遮罩上，说明与关闭按钮使用浅色，浅色外观下同样保持可读。 */
 .image-preview-caption{max-width:100%;margin:10px 0 0;color:#ddd;text-shadow:0 1px 4px #000;font-size:.78571rem;overflow-wrap:anywhere;text-align:center}
+/* 用户要求 PC/手机图片的最大可用区域与遮罩一致：100vw × 100dvh，不再预留 90vw/80dvh 的空框。
+ * 关闭按钮和说明叠在图片上，fitMediaPreview 的尺寸计算不扣除它们；缩放后的图片仍可占满整个可见区域。 */
+#image-preview-dialog{--preview-margin:0px;width:100vw;max-width:100vw;height:100dvh;max-height:100dvh;inset:0;margin:0;border-radius:0}
+#image-preview-dialog>.image-preview-panel{width:100%;height:100%;max-height:none;padding:0;overflow:hidden}
+#image-preview-dialog .image-preview-caption{position:absolute;left:16px;right:16px;bottom:max(14px,env(safe-area-inset-bottom));margin:0;pointer-events:auto}
+#image-preview-dialog .image-preview-close{top:max(8px,env(safe-area-inset-top));right:max(8px,env(safe-area-inset-right))}
 .image-preview-unavailable{color:#ddd}
 .message-video-preview{display:inline-flex;flex-direction:column;width:160px;max-width:100%;margin:8px 4px 4px 0;padding:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--side);color:var(--text);text-align:left;vertical-align:top;cursor:pointer}
 .message-video-cover{position:relative;display:grid;place-items:center;width:100%;aspect-ratio:16/9;background:#252830}
@@ -860,10 +886,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .message-editor:focus-within{outline:1px solid var(--line)}
 @media(max-width:760px){.message-editor-actions>button{min-height:32px}}
 .message-time{white-space:nowrap}
-.composer:has(#edit-message-area:not([hidden])){padding-top:8px}
-#edit-message-area{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid var(--line);font-size:.78571rem;color:var(--muted)}
-#edit-message-area>.text-button{flex-shrink:0;min-height:24px;padding:2px 9px}
-@media(hover:none),(max-width:760px){.message-action-space,.message-actions{min-height:var(--control-inline-size)}.user-message{padding-bottom:14px}.user-message-action,.agent-message>.message-action-space .message-time{opacity:1}#edit-message-area{line-height:1.6}}
+@media(hover:none),(max-width:760px){.message-action-space,.message-actions{min-height:var(--control-inline-size)}.user-message{padding-bottom:14px}.user-message-action,.agent-message>.message-action-space .message-time{opacity:1}}
 .edited-files-card{width:100%;min-width:0;margin:0 0 20px;border:1px solid var(--line);border-radius:12px;background:var(--side);overflow:hidden;font-size:1rem}
 .edited-files-heading{display:flex;align-items:center;gap:12px;padding:12px 14px;font-weight:600;line-height:1.5}
 .edited-files-heading>.ui-icon{width:40px;height:40px;padding:10px;border-radius:10px;background:var(--bg);color:var(--muted)}
@@ -1574,6 +1597,27 @@ body{font-weight:var(--ui-font-weight,400)}
 .session-instance-group{overflow:hidden;border:1px solid var(--line);border-radius:16px;background:color-mix(in srgb,var(--composer-bg) 68%,var(--bg))}
 .session-instance-group>h4{margin:0;padding:14px 16px;border-bottom:1px solid var(--line)}
 .session-instance-group>.appearance-notification-row{margin:0;border-radius:0;padding:12px 16px}
+.instance-permissions-card{padding:0 16px 14px}
+.permission-instance-field{gap:14px}
+.permission-instance-slot{flex:0 1 65%;min-width:0}
+.permission-instance-slot>.select-trigger{width:100%;min-width:0}
+.instance-permission-field{gap:14px}
+.instance-permission-field>.select-trigger{max-width:65%;min-width:0}
+.permission-instance-slot .select-label,.instance-permission-field .select-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.permission-settings-status{min-height:1.5em;white-space:pre-wrap}
+.permission-settings-actions{justify-content:flex-end;margin-top:14px}
+/* 手机底栏可用宽度有限：权限与上下文按钮等宽，仅占 28px，隐藏文字和箭头；36px 高度对齐手机模型/Fast。
+ * 原右侧图标及发送按钮保持宽度。
+ * 回收原控制间距 2px 和外层间距 12px 的一部分，所有按钮强制单行；模型名称沿用原有省略行为。
+ * 同步核对 .composer-controls、.fast-button、.context-info 及 .send-button 的固定点击区，禁止缩小右侧图标来腾位置。 */
+@media(max-width:760px){
+  .composer-toolbar{gap:6px;flex-wrap:nowrap}
+  .composer-toolbar>.composer-controls{gap:0;flex-wrap:nowrap}
+  .composer-toolbar .permission-button{flex:0 0 28px;width:28px;max-width:28px;height:36px;gap:0;padding:0}
+  .permission-button>.permission-button-label,.permission-button>.ui-icon:last-child{display:none}
+  .composer-toolbar>.composer-send{flex:0 0 auto;flex-wrap:nowrap}
+  .instance-permissions-card{padding-inline:12px}
+}
 @media(max-width:760px){
  .appearance-panel-title{font-size:1.4rem;margin-bottom:24px}
  .appearance-section{margin-bottom:24px}

@@ -2818,7 +2818,7 @@ test("真实runner缺少外部driver时blocked且零提交，仅用本机tab替�
   });
   for (const caseId of [
     "side.same_id_name", "transport.cli_fallback", "scenario.approval",
-    "optimizer.no_injection", "android.background_resume", "queue.edit_cancel",
+    "optimizer.no_injection", "android.background_resume", "queue.edit_draft",
     "queue.dequeue_edit_race", "queue.dequeue_remove_race",
   ]) {
     await runRemoteAccessCase(caseId, context);
@@ -2846,7 +2846,7 @@ test("真实runner缺少外部driver时blocked且零提交，仅用本机tab替�
   assert.equal(Object.keys(context.report.actions).length, 0);
 });
 
-test("队列取消runner在fill未改变实际contenteditable时停止，不能取消或保存伪造编辑值", async t => {
+test("排队草稿runner在fill未改变实际contenteditable时停止，不能发送伪造编辑值", async t => {
   const outputDir = await sandbox(t), mainId = "unit-main", controlId = "unit-control";
   const markers = { main: `[remote-e2e:${runId}:main]`, control: `[remote-e2e:${runId}:control]` };
   const queue = ["A", "B", "C"].map(key => ({
@@ -2855,7 +2855,7 @@ test("队列取消runner在fill未改变实际contenteditable时停止，不能�
     text: `原正文${key}\n[remote-e2e:${runId}:queue-${key}]`,
   }));
   const drafts = { [mainId]: "", [controlId]: "" };
-  let selected = mainId, editing = false, cancelClicks = 0, editFills = 0;
+  let selected = mainId, editing = false, sendClicks = 0, editFills = 0;
   const locator = (selector, name) => ({
     filter() { return this; }, first() { return this; },
     locator(child) { return locator(selector, child); },
@@ -2866,14 +2866,14 @@ test("队列取消runner在fill未改变实际contenteditable时停止，不能�
       const thread = selector?.match(/data-thread-id="([^"]+)"/)?.[1];
       if (thread) selected = thread;
       if (name === "编辑消息") { editing = true; drafts[mainId] = queue[0].text; }
-      if (name === "取消编辑并恢复未发送草稿") cancelClicks++;
+      if (name === "发送消息") sendClicks++;
     },
     fill: async value => {
       if (editing) editFills++; // 模拟fill调用返回，但真实contenteditable保持原文。
       else drafts[selected] = value;
     },
   });
-  const tab = { id: "unit-queue-cancel-tab", url: async () => `${origin}/#thread=${selected}`,
+  const tab = { id: "unit-queue-draft-tab", url: async () => `${origin}/#thread=${selected}`,
     reload: async () => { throw new Error("此控制流反例不得刷新或创建真实对象"); },
     screenshot: async () => png,
     playwright: {
@@ -2882,7 +2882,7 @@ test("队列取消runner在fill未改变实际contenteditable时停止，不能�
       domSnapshot: async () => '- textbox "消息输入"\n',
       evaluate: async () => ({
         title: selected, loading: false, promptEditable: true, editing, prompt: drafts[selected], pendingText: "",
-        send: { action: editing ? "save" : drafts[selected] ? "send" : selected === mainId ? "stop" : "send", enabled: true },
+        send: { action: editing || drafts[selected] ? "send" : selected === mainId ? "stop" : "send", enabled: true },
         sidebar: [{ id: mainId, visible: true }, { id: controlId, visible: true }],
         turns: [{ id: "created", users: [{ text: selected === mainId ? markers.main : markers.control }], agents: [] },
           ...(selected === mainId ? [{ id: "active", users: [], agents: [] }] : [])],
@@ -2893,7 +2893,7 @@ test("队列取消runner在fill未改变实际contenteditable时停止，不能�
     perform: async () => { throw new Error("只读原生驱动不得执行写操作"); },
     observe: async request => {
       const { phase } = request.payload;
-      assert.ok(["before", "editing"].includes(phase), "未实际改稿时不应进入取消后阶段");
+      assert.ok(["before", "editing"].includes(phase), "未实际改稿时不应进入重新发送阶段");
       const input = [{ type: "text", text: `${queue[0].text}\n` }];
       const raw = { runId, caseId: request.caseId, origin, sourceFingerprint: request.sourceFingerprint,
         operation: request.operation, phase, threadId: mainId, capturedAt: new Date().toISOString(),
@@ -2918,17 +2918,17 @@ test("队列取消runner在fill未改变实际contenteditable时停止，不能�
   for (const [index, key] of ["A", "B", "C"].entries()) {
     const row = queue[index], actionId = `unit-queue-${key}`;
     ctx.report.queue[key] = { ...row, queueId: row.id, threadId: mainId, actionId };
-    ctx.report.actions[actionId] = { id: actionId, caseId: "queue.edit_cancel", status: "confirmed",
+    ctx.report.actions[actionId] = { id: actionId, caseId: "queue.edit_draft", status: "confirmed",
       kind: "queue-send", threadId: mainId, prompt: row.text, result: { queueId: row.id } };
   }
-  await runRemoteAccessCase("queue.edit_cancel", ctx);
-  const entry = ctx.report.cases.find(value => value.id === "queue.edit_cancel");
+  await runRemoteAccessCase("queue.edit_draft", ctx);
+  const entry = ctx.report.cases.find(value => value.id === "queue.edit_draft");
   assert.equal(entry.status, "failed");
   assert.match(entry.reason, /真实编辑器已改成与原文不同/);
   assert.equal(editFills, 1);
-  assert.equal(cancelClicks, 0);
+  assert.equal(sendClicks, 0);
   assert.equal(ctx.report.messageSubmissions, 0);
-  assert.equal(entry.evidence.some(value => value.kind === "queue-cancel-before-submit"), false);
+  assert.equal(entry.evidence.some(value => value.kind === "queue-edit-draft"), false);
 });
 
 test("离线租约直接核对acquire原始状态与最终inspect，false原状态不能被布尔或自填期待替代", async t => {

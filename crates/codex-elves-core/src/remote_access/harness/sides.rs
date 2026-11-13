@@ -839,6 +839,19 @@ impl Harness {
             }
             "turn/start"
         };
+        if method == "turn/start" {
+            let cwd = self
+                .projection
+                .lock()
+                .await
+                .sides
+                .threads
+                .get(id)
+                .and_then(|side| side.metadata["cwd"].as_str())
+                .unwrap_or("")
+                .to_owned();
+            super::super::permissions::apply_codex(payload, &mut params, &cwd, false)?;
+        }
         if method == "turn/start"
             && let Err(failure) = self.apply_fast_to_turn(id, &mut params).await
         {

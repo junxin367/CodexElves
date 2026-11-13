@@ -1608,6 +1608,7 @@ pub(crate) fn normalize_model(model: &Value) -> Option<Value> {
     Some(json!({
         "id": model.get("id").and_then(Value::as_str).unwrap_or(model_name),
         "model": model_name,
+        "requestModel":request_model,
         "displayName": model.get("displayName").and_then(Value::as_str).unwrap_or(model_name),
         "supportedReasoningEfforts": supported,
         "defaultReasoningEffort": model.get("defaultReasoningEffort").cloned().unwrap_or(Value::Null),

@@ -1,5 +1,5 @@
 import { activateRemoteChannels, clearRemoteChannels, requestRemote } from "./channels.js";
-import { safeInlineImageSource, fitMediaPreview } from "./attachments.js";
+import { safeInlineImageSource, fitMediaPreview, bindMediaPreviewDismiss } from "./attachments.js";
 import { mountWorkspacePreview } from "./session-tools.js";
 
 const appearanceKey = "codex-elves-preview-appearance";
@@ -101,7 +101,8 @@ function previewImage(link, image) {
   const picture = document.createElement("img"); picture.className = "image-preview-image"; picture.alt = image.alt || "";
   viewport.append(picture); panel.append(close, viewport); dialog.append(panel); document.body.append(dialog);
   const layout = fitMediaPreview(dialog, panel, viewport, null, { fillAvailable: true });
-  dialog.onclose = () => { layout.dispose(); dialog.remove(); };
+  const disposeDismiss = bindMediaPreviewDismiss(dialog, picture, viewport);
+  dialog.onclose = () => { disposeDismiss(); layout.dispose(); dialog.remove(); };
   picture.onload = () => layout.resize(); picture.src = source; dialog.showModal(); layout.resize(); close.focus();
 }
 

@@ -2348,5 +2348,97 @@ class HistoryEditTests(unittest.TestCase):
         self.assertEqual(len(native.edit_content(target, "重复添加的原图仍保留")), 3)
 
 
+class SharedPermissionTests(unittest.TestCase):
+    def fixture(self, cycle=("default", "acceptEdits", "plan"), draft=""):
+        native = NativeSession("/fixture/claude", "11111111-2222-4333-8444-555555555555", "1234abcd")
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        native.root = Path(directory.name)
+        native.permission_catalog = ["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"]
+        live = {"short": "1234abcd", "pid": 1, "sessionStatus": "idle"}
+        native.lookup = lambda: live
+        position, keys = [0], []
+        labels = {"default": "? for shortcuts", "acceptEdits": "accept edits on",
+                  "plan": "plan mode on", "bypassPermissions": "bypass permissions on"}
+        native.read_terminal_screen = lambda: [
+            "助手正文提及 bypass permissions", "────────────────", "❯ " + draft,
+            "────────────────", labels[cycle[position[0]]]
+        ]
+        def switch(data, **options):
+            keys.append((data, options["permission"]["mode"]))
+            position[0] = (position[0] + 1) % len(cycle)
+        native.terminal_input = switch
+        return native, live, position, keys
+
+    def test_permission_footer_ignores_assistant_body_and_requires_empty_prompt(self):
+        native, _, _, _ = self.fixture()
+        self.assertEqual(namespace["permission_footer_mode"](native.read_terminal_screen()), "default")
+        self.assertTrue(namespace["empty_permission_prompt"](native.read_terminal_screen()))
+        self.assertIsNone(namespace["permission_footer_mode"](["助手正文：bypass permissions"]))
+        self.assertFalse(namespace["empty_permission_prompt"](["❯ 草稿", "────────────────", "? for shortcuts"]))
+        self.assertFalse(namespace["empty_permission_prompt"](["❯ ", "继续输入的第二行", "────────────────"]))
+
+    def test_idle_permission_switch_uses_only_verified_shift_tab_and_keeps_session(self):
+        native, _, _, keys = self.fixture()
+        result = native.change_permission_mode("plan")
+        self.assertEqual(keys, [(b"\x1b[Z", "default"), (b"\x1b[Z", "acceptEdits")])
+        self.assertEqual(result["nativeSettings"]["permissionMode"], "plan")
+        self.assertEqual(native.native_id, "11111111-2222-4333-8444-555555555555")
+        self.assertEqual(native.permission_mode, "plan")
+
+    def test_busy_draft_unknown_or_unavailable_mode_never_sends_permission_keys(self):
+        for reason in ("busy", "draft", "unknown", "unavailable"):
+            native, live, _, keys = self.fixture(draft="未发送草稿" if reason == "draft" else "")
+            if reason == "busy":
+                live["sessionStatus"] = "busy"
+            elif reason == "unknown":
+                native.read_terminal_screen = lambda: ["────────────────", "❯ ", "────────────────", "unknown"]
+            with self.assertRaises(namespace["NativeError"]):
+                native.change_permission_mode("bypassPermissions" if reason == "unavailable" else "plan")
+            self.assertEqual(keys, [], reason)
+
+    def test_unreachable_mode_restores_original_before_reporting_failure(self):
+        native, _, position, keys = self.fixture(cycle=("default", "acceptEdits"))
+        with self.assertRaisesRegex(namespace["NativeError"], "已恢复原权限"):
+            native.change_permission_mode("plan")
+        self.assertEqual(position[0], 0)
+        self.assertEqual(len(keys), 2)
+        self.assertIsNone(native.permission_mode)
+
+    def test_configured_mode_reads_only_the_selected_instance_and_keeps_rules(self):
+        native, _, _, _ = self.fixture()
+        original = {"permissions": {"defaultMode": "acceptEdits", "deny": ["Write"]}, "hooks": {"Stop": []}}
+        path = native.root / "settings.json"
+        path.write_text(json.dumps(original))
+        result = native.change_permission_mode("configured")
+        self.assertEqual(result["nativeSettings"]["permissionMode"], "acceptEdits")
+        self.assertEqual(native.permission_mode, "configured")
+        self.assertEqual(json.loads(path.read_text()), original)
+
+    def test_existing_global_bypass_mode_can_be_kept_without_enabling_a_new_capability(self):
+        native, _, _, keys = self.fixture(cycle=("bypassPermissions",))
+        (native.root / "settings.json").write_text(json.dumps({"permissions": {"defaultMode": "bypassPermissions"}}))
+        self.assertNotIn("bypassPermissions", native.permission_modes(), "没有启动开关不能通过网页新开绕过能力")
+        result = native.change_permission_mode("configured")
+        self.assertEqual(result["nativeSettings"]["permissionMode"], "bypassPermissions")
+        self.assertEqual(keys, [], "原生状态栏已确认同一目标时不发送切换快捷键")
+
+    def test_native_launch_only_opens_bypass_when_explicitly_selected(self):
+        for mode in ("configured", "default", "bypassPermissions"):
+            native = NativeSession("/fixture/claude", "")
+            native.permission_mode = mode
+            native.permission_catalog = ["manual", "bypassPermissions"]
+            native.rpc = lambda _: {"jobs": [{"short": "1234abcd", "sessionId": "same-native-session"}]}
+            native.bind = MagicMock()
+            with patch.object(namespace["subprocess"], "run",
+                              return_value=SimpleNamespace(returncode=0, stdout=b"backgrounded: 1234abcd", stderr=b"")) as run:
+                native.start("fixture")
+            arguments = run.call_args.args[0]
+            self.assertEqual("--allow-dangerously-skip-permissions" in arguments, mode == "bypassPermissions")
+            self.assertEqual("--permission-mode" in arguments, mode != "configured")
+            if mode == "default":
+                self.assertEqual(arguments[arguments.index("--permission-mode") + 1], "manual")
+
+
 if __name__ == "__main__":
     unittest.main()

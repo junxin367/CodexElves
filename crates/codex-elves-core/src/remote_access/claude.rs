@@ -118,6 +118,11 @@ struct Conversation {
     title: String,
     model: String,
     effort: String,
+    // 用户要求权限只覆盖当前会话；缺字段的既有会话继续沿用原生权限，不自动提升访问范围。
+    #[serde(default)]
+    permission_mode: Option<String>,
+    #[serde(default)]
+    permission_revision: u64,
     created_at: u64,
     updated_at: u64,
     pinned: bool,
@@ -301,6 +306,9 @@ impl Conversation {
             "nativeCommands":self.native_control["commands"],
             "goalNotice":self.native_control["goalNotice"],
             "nativeSettings":self.native_control["settings"],
+            "permissionMode":self.permission_mode,
+            "permissionRevision":self.permission_revision,
+            "permissionModes":self.native_control["capabilities"]["permissionModes"],
             "nativeDialog":self.native_control["dialog"],
             "nativeId":self.native_id,"nativeJobId":self.native_job_id,
             "wslDistribution":self.config.distribution,
@@ -711,7 +719,8 @@ impl Claude {
         let c = self.conversation(parent.as_deref().unwrap_or(id)).await?;
         Ok(
             json!({"ok":true,"threadId":id,"cwd":c.cwd,"linuxCwd":c.linux_cwd,
-            "wslDistribution":c.config.distribution,"instanceId":c.config.instance_id(),"hostId":"local","backend":"claude"}),
+            "wslDistribution":c.config.distribution,"wslUser":c.config.user,
+            "instanceId":c.config.instance_id(),"hostId":"local","backend":"claude"}),
         )
     }
 
@@ -757,6 +766,8 @@ impl Claude {
             title: String::new(),
             model: String::new(),
             effort: String::new(),
+            permission_mode: None,
+            permission_revision: 0,
             created_at: 0,
             updated_at: 0,
             pinned: false,
@@ -970,6 +981,8 @@ impl Claude {
                 title: title.into(),
                 model: row["model"].as_str().unwrap_or("").into(),
                 effort: row["effort"].as_str().unwrap_or("").into(),
+                permission_mode: None,
+                permission_revision: 0,
                 created_at: row["createdAt"].as_u64().unwrap_or(0),
                 updated_at: row["updatedAt"].as_u64().unwrap_or(0),
                 pinned: false,
@@ -1221,9 +1234,11 @@ impl Claude {
             shared: false,
             resumed: false,
             native_id: uuid::Uuid::new_v4().to_string(),
+            permission_mode: None,
             ..c.clone()
         };
-        let catalog = self.spawn_stdio(&probe).await?.initialization.clone();
+        let mut catalog = self.spawn_stdio(&probe).await?.initialization.clone();
+        catalog["permissionModes"] = json!(super::permissions::claude_modes(&c.config).await);
         let path = self.directory.join("claude-shared.py");
         crate::settings::atomic_write(&path, include_bytes!("claude_shared.py"))?;
         let linux_path = Self::linux_cwd(
@@ -1273,6 +1288,19 @@ impl Claude {
             command.args(["--resume", &c.native_id]);
         } else {
             command.args(["--session-id", &c.native_id]);
+        }
+        if !c.id.is_empty()
+            && let Some(mode) = c
+                .permission_mode
+                .as_deref()
+                .filter(|mode| *mode != "configured")
+        {
+            let mode = supported_permission_mode(&c.config, mode).await?;
+            command.args(["--permission-mode", &mode]);
+            if mode == "bypassPermissions" {
+                // 只有用户为此会话明确选择完全访问时，才允许原生 CLI 提供绕过审批能力。
+                command.arg("--allow-dangerously-skip-permissions");
+            }
         }
         self.launch(c, command, None).await
     }
@@ -1421,6 +1449,7 @@ impl Claude {
                 let mut pending = c.queued_messages.clone();
                 pending.extend(c.remote_queue.native_intents());
                 json!({"subtype":"initialize","catalog":catalog,"model":c.model,"effort":c.effort,
+                    "permission_mode":c.permission_mode,
                     "clients":c.native_clients,"pending":pending,"native_control":c.native_control})
             } else {json!({"subtype":"initialize"})}, None)
             .await?;
@@ -1478,6 +1507,8 @@ impl Claude {
             title: String::new(),
             model: String::new(),
             effort: String::new(),
+            permission_mode: None,
+            permission_revision: 0,
             created_at: now_ms(),
             updated_at: now_ms(),
             pinned: false,
@@ -1657,6 +1688,12 @@ impl Claude {
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
         config.validate()?;
+        if let Some(mode) = payload.get("permissionMode") {
+            let mode = super::permissions::validate_mode("claude", mode)?;
+            if mode != "configured" {
+                supported_permission_mode(&config, mode).await?;
+            }
+        }
         let goal = payload["goalMode"] == true;
         let content = if goal {
             native_controls::goal_argument(payload)?;
@@ -1721,6 +1758,11 @@ impl Claude {
                 .collect(),
             model: String::new(),
             effort: String::new(),
+            permission_mode: payload
+                .get("permissionMode")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            permission_revision: u64::from(payload.get("permissionMode").is_some()),
             created_at: now_ms(),
             updated_at: now_ms(),
             pinned: false,
@@ -1858,6 +1900,9 @@ impl Claude {
                     return Err(error(409, "请等待 Claude 完成本轮或先停止生成"));
                 }
                 let content = input_content(payload)?;
+                if let Some(mode) = payload["permissionMode"].as_str() {
+                    c.permission_mode = Some(mode.to_owned());
+                }
                 let process = self
                     .processes
                     .lock()
@@ -1881,6 +1926,7 @@ impl Claude {
                         .enqueue_shared(id, &process, payload, authorization)
                         .await;
                 }
+                apply_permissions(&process, &mut c, payload, authorization).await?;
                 apply_model(&process, &mut c, payload, authorization).await?;
                 self.change(|saved| {
                     // CLI 可在网页切换模型期间继续产生消息；只更新设置，不能用旧快照覆盖实时历史。
@@ -1890,6 +1936,7 @@ impl Claude {
                         .context("Claude 会话不存在")?;
                     current.model = c.model;
                     current.effort = c.effort;
+                    current.permission_mode = c.permission_mode;
                     Ok(())
                 })
                 .await?;
@@ -2004,6 +2051,91 @@ impl Claude {
             }
             _ => Err(error(409, "此功能尚未适配 Claude 会话")),
         }
+    }
+
+    pub async fn permission_selection(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<super::permissions::Selection>> {
+        let c = self.conversation(id).await?;
+        Ok(c.permission_mode.map(|mode| super::permissions::Selection {
+            instance_id: c.config.instance_id(),
+            mode,
+            revision: c.permission_revision,
+        }))
+    }
+
+    pub async fn set_permissions(
+        self: &Arc<Self>,
+        id: &str,
+        mode: &str,
+        authorization: &RemoteAuthorization,
+    ) -> anyhow::Result<Value> {
+        let lock = self.lock(id).await;
+        let _guard = lock.lock().await;
+        let mut c = self.conversation(id).await?;
+        if c.active()
+            || !c.remote_queue.messages(&c.queued_messages).is_empty()
+            || !c.remote_queue.edits().is_empty()
+        {
+            return Err(error(
+                409,
+                "请等待当前 Claude 任务和待发消息结束后再修改权限",
+            ));
+        }
+        let process = self
+            .processes
+            .lock()
+            .await
+            .get(id)
+            .filter(|process| process.channel.live.load(Ordering::Acquire))
+            .cloned();
+        let process = match process {
+            Some(process) => process,
+            None => {
+                c.permission_mode = Some(mode.to_owned());
+                let process = self.spawn(&c).await?;
+                self.processes
+                    .lock()
+                    .await
+                    .insert(id.to_owned(), process.clone());
+                process
+            }
+        };
+        apply_permissions(
+            &process,
+            &mut c,
+            &json!({"permissionMode":mode}),
+            authorization,
+        )
+        .await?;
+        let revision = c
+            .permission_revision
+            .checked_add(1)
+            .ok_or_else(|| error(409, "会话权限版本已达上限"))?;
+        self.change(|saved| {
+            let current = saved
+                .conversations
+                .get_mut(id)
+                .context("Claude 会话不存在")?;
+            current.permission_mode = Some(mode.to_owned());
+            current.permission_revision = revision;
+            if let Some(actual) = c.native_control["settings"]["permissionMode"].as_str() {
+                if !current.native_control.is_object() {
+                    current.native_control = json!({});
+                }
+                if !current.native_control["settings"].is_object() {
+                    current.native_control["settings"] = json!({});
+                }
+                current.native_control["settings"]["permissionMode"] = json!(actual);
+            }
+            Ok(())
+        })
+        .await?;
+        let result = json!({"ok":true,"threadId":id,"instanceId":c.config.instance_id(),
+            "permissionMode":mode,"permissionRevision":revision,"appliesTo":"nextTurn"});
+        self.publish(json!({"method":"thread/settings/updated","params":result}));
+        Ok(result)
     }
 
     async fn start_turn(
@@ -3713,6 +3845,68 @@ fn model_selection<'a>(
     Ok((model, effort))
 }
 
+async fn supported_permission_mode(config: &WslConfig, mode: &str) -> anyhow::Result<String> {
+    let modes = super::permissions::claude_modes(config).await;
+    let selected = if modes.iter().any(|value| value == mode) {
+        mode
+    } else if mode == "default" && modes.iter().any(|value| value == "manual") {
+        "manual"
+    } else if mode == "manual" && modes.iter().any(|value| value == "default") {
+        "default"
+    } else {
+        return Err(error(
+            409,
+            "当前 Claude CLI 尚未确认支持所选权限模式，请重新读取实例权限",
+        ));
+    };
+    Ok(selected.to_owned())
+}
+
+async fn apply_permissions(
+    process: &Process,
+    c: &mut Conversation,
+    payload: &Value,
+    auth: &RemoteAuthorization,
+) -> anyhow::Result<()> {
+    let Some(mode) = payload.get("permissionMode") else {
+        return Ok(());
+    };
+    let mode = super::permissions::validate_mode("claude", mode)?;
+    let native_mode = if process.shared && mode == "configured" {
+        "configured".to_owned()
+    } else {
+        let configured;
+        let requested = if mode == "configured" {
+            configured = super::permissions::configured_claude_mode(
+                &auth.controller.state_dir,
+                &c.config.instance_id(),
+            )
+            .await?;
+            configured.as_str()
+        } else {
+            mode
+        };
+        supported_permission_mode(&c.config, requested).await?
+    };
+    let result = process
+        .control(
+            json!({"subtype":"set_permission_mode","mode":native_mode}),
+            Some(auth),
+        )
+        .await?;
+    if let Some(actual) = result["nativeSettings"]["permissionMode"].as_str() {
+        if !c.native_control.is_object() {
+            c.native_control = json!({});
+        }
+        if !c.native_control["settings"].is_object() {
+            c.native_control["settings"] = json!({});
+        }
+        c.native_control["settings"]["permissionMode"] = json!(actual);
+    }
+    c.permission_mode = Some(mode.to_owned());
+    Ok(())
+}
+
 async fn apply_model(
     process: &Process,
     c: &mut Conversation,
@@ -4108,6 +4302,8 @@ mod tests {
             title: "测试会话".into(),
             model: "test-model".into(),
             effort: "low".into(),
+            permission_mode: None,
+            permission_revision: 0,
             created_at: now_ms(),
             updated_at: now_ms(),
             pinned: false,
