@@ -80,7 +80,7 @@
   const codexOpenInActivationDebounceMs = 500;
   const codexOpenInServiceDiscoveryCooldownMs = 30000;
   const codexOpenInContextMissingCooldownMs = 5000;
-  const codexPromptOptimizeVersion = "20";
+  const codexPromptOptimizeVersion = "21";
   const codexPromptOptimizeButtonAttribute = "data-codex-prompt-optimize-button";
   const codexPromptOptimizePortalClass = "codex-prompt-optimize-portal";
   const codexPromptOptimizeSettingsOverlayClass = "codex-prompt-optimize-settings-overlay";
@@ -12319,16 +12319,18 @@
     return sync;
   }
 
-  async function promptOptimizeLoadBackendSettings() {
-    if (promptOptimizeBackendSettingsLoaded) return;
+  async function promptOptimizeLoadBackendSettings(force = false) {
+    if (promptOptimizeBackendSettingsLoaded && !force) return;
+    await promptOptimizeSettingsSync.catch(() => {});
     const stored = localStorage.getItem(codexPromptOptimizeSettingsKey);
-    if (stored) {
+    const result = await postJson("/prompt-optimize/settings", {});
+    if (result?.status !== "ok") throw new Error(result?.message || "提示词优化设置读取失败");
+    // 远程右键设置与桌面共用后端配置；仅后端尚无设置文件时迁移旧本页数据，避免重启把远程保存覆盖掉。
+    if (stored && result.exists !== true && !promptOptimizeBackendSettingsLoaded) {
       await promptOptimizePersistSettings(promptOptimizeReadSettings());
     } else {
-      const result = await postJson("/prompt-optimize/settings", {});
-      if (result?.status !== "ok") throw new Error(result?.message || "提示词优化设置读取失败");
       // 等待读取时用户可能已经保存新设置，不覆盖这次编辑。
-      if (!localStorage.getItem(codexPromptOptimizeSettingsKey)) {
+      if (localStorage.getItem(codexPromptOptimizeSettingsKey) === stored) {
         localStorage.setItem(codexPromptOptimizeSettingsKey, JSON.stringify(result.settings));
       }
     }
@@ -12586,6 +12588,8 @@
       try { await loadCodexModelCatalog(); } catch {}
       if (request.state !== "pending" || !promptOptimizeRuntimeCurrent()) return;
       if (!promptOptimizeFeatureEnabled()) throw new Error("CodexElves 桌面端增强功能已关闭，优化未执行");
+      await promptOptimizeLoadBackendSettings(true);
+      if (request.state !== "pending" || !promptOptimizeRuntimeCurrent()) return;
       const saved = promptOptimizeReadSettings();
       const settings = promptOptimizeResolvedSettings({
         ...saved, model: saved.model || String(payload.model || "").trim(),
@@ -12676,6 +12680,8 @@
         ?.focus?.();
       return promptOptimizeSettingsOverlay;
     }
+    try { await promptOptimizeLoadBackendSettings(true); }
+    catch (error) { showToast(error.message || "提示词优化设置读取失败"); return null; }
     await loadCodexModelCatalog();
     if (!promptOptimizeRuntimeCurrent()) return null;
     const settings = promptOptimizeResolvedSettings();
@@ -13944,6 +13950,17 @@
     state.requestId = requestId;
     promptOptimizeRefreshButtonState();
 
+    // 远程端保存后，桌面下一次优化读取同一配置；读取失败时保留原输入，避免静默沿用旧模板。
+    try {
+      await promptOptimizeLoadBackendSettings(true);
+    } catch (error) {
+      if (state.runToken === runToken && promptOptimizeRuntimeCurrent()) {
+        promptOptimizeSetIdle(state);
+        promptOptimizeRefreshButtonState();
+        showToast(error.message || "提示词优化设置读取失败");
+      }
+      return;
+    }
     try {
       await loadCodexModelCatalog();
     } catch {}

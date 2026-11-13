@@ -105,6 +105,9 @@ def bundledWebResources = [
     [source: "diagnostics.js", path: "/diagnostics.js", contentType: "application/javascript; charset=utf-8"],
     [source: "session-tools.js", path: "/session-tools.js", contentType: "application/javascript; charset=utf-8"],
     [source: "session-files.js", path: "/session-files.js", contentType: "application/javascript; charset=utf-8"],
+    // 主网页共用独立预览的目标校验；Android 不开放 PC 菜单，但内置包仍须包含导入依赖，避免离线启动缺资源。
+    [source: "workspace-preview.js", path: "/workspace-preview.js", contentType: "application/javascript; charset=utf-8"],
+    [source: "file-preview.html", path: "/file-preview.html", contentType: "text/html; charset=utf-8"],
     [source: "session-menu.js", path: "/session-menu.js", contentType: "application/javascript; charset=utf-8"],
     [source: "attachments.js", path: "/attachments.js", contentType: "application/javascript; charset=utf-8"],
     [source: "sha256.js", path: "/sha256.js", contentType: "application/javascript; charset=utf-8"],

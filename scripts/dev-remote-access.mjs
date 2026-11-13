@@ -49,6 +49,8 @@ const files = new Map([
   ["/select.js", ["select.js", "application/javascript; charset=utf-8"]],
   ["/session-tools.js", ["session-tools.js", "application/javascript; charset=utf-8"]],
   ["/session-files.js", ["session-files.js", "application/javascript; charset=utf-8"]],
+  ["/file-preview.html", ["file-preview.html", "text/html; charset=utf-8"]],
+  ["/workspace-preview.js", ["workspace-preview.js", "application/javascript; charset=utf-8"]],
   ["/session-menu.js", ["session-menu.js", "application/javascript; charset=utf-8"]],
   ["/attachments.js", ["attachments.js", "application/javascript; charset=utf-8"]],
   ["/sha256.js", ["sha256.js", "application/javascript; charset=utf-8"]],
@@ -166,9 +168,9 @@ function rejectUpgrade(socket, status, message) {
 function allowedApi(method, path) {
   return method === "GET" && (["/api/session", "/api/events"].includes(path)
     || /^\/api\/(?:receipts|images)\/[a-zA-Z0-9_-]+$/.test(path))
-    // 新设置的统一 Select 需要环境与指令接口；仅转发这两个固定路径，继续由正式后端核对登录和写权限。
+    // 设置仅转发固定路径，优化配置与环境、指令共用正式后端的登录和写权限校验。
     || method === "POST" && (["/api/connect", "/api/logout", "/api/workspace/context", "/api/workspace/changes", "/api/workspace/change", "/api/workspace/files", "/api/workspace/file",
-      "/api/settings/environments", "/api/settings/instructions"].includes(path)
+      "/api/settings/environments", "/api/settings/instructions", "/api/settings/prompt-optimization"].includes(path)
       || /^\/api\/(?:read|action)\/[a-zA-Z][a-zA-Z0-9_-]*$/.test(path));
 }
 function mappedCookie(req) {

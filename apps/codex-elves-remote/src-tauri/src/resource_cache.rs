@@ -204,11 +204,12 @@ struct Index {
     headers: String,
 }
 
+#[derive(Clone)]
 struct Session {
     origin: String,
     epoch: u64,
     current: Arc<Snapshot>,
-    next: Arc<Snapshot>,
+    next: Arc<RwLock<Arc<Snapshot>>>,
 }
 
 pub struct CachedResponse {
@@ -231,7 +232,7 @@ pub struct ResourceCache {
     enabled: AtomicBool,
     busy: AtomicBool,
     update_failed: AtomicBool,
-    update_lock: tokio::sync::Mutex<()>,
+    update_lock: Arc<tokio::sync::Mutex<()>>,
     network: reqwest::Client,
     loopback: reqwest::Client,
 }
@@ -414,10 +415,32 @@ impl ResourceCache {
             enabled: AtomicBool::new(false),
             busy: AtomicBool::new(false),
             update_failed: AtomicBool::new(false),
-            update_lock: tokio::sync::Mutex::new(()),
+            update_lock: Arc::new(tokio::sync::Mutex::new(())),
             network: client(false)?,
             loopback: client(true)?,
         }))
+    }
+    pub fn fork_view(&self, url: &Url) -> Arc<Self> {
+        // 独立窗口共用已校验候选及下载锁，当前资源和忙碌状态各自保存；新窗口导航不能混换主窗口正在使用的资源。
+        let session = self
+            .session
+            .read()
+            .unwrap()
+            .clone()
+            .filter(|session| session.origin == url.origin().ascii_serialization());
+        let epoch = session.as_ref().map_or(0, |session| session.epoch);
+        Arc::new(Self {
+            directory: self.directory.clone(),
+            builtin: self.builtin.clone(),
+            session: RwLock::new(session),
+            epoch: AtomicU64::new(epoch),
+            enabled: AtomicBool::new(self.enabled.load(Ordering::SeqCst)),
+            busy: AtomicBool::new(false),
+            update_failed: AtomicBool::new(false),
+            update_lock: self.update_lock.clone(),
+            network: self.network.clone(),
+            loopback: self.loopback.clone(),
+        })
     }
     pub fn enable(&self) {
         self.enabled.store(true, Ordering::SeqCst);
@@ -535,7 +558,7 @@ impl ResourceCache {
             origin: origin.clone(),
             epoch,
             current: snapshot.clone(),
-            next: snapshot,
+            next: Arc::new(RwLock::new(snapshot)),
         });
         let cache = self.clone();
         let url = url.clone();
@@ -592,7 +615,7 @@ impl ResourceCache {
             .unwrap()
             .as_ref()
             .filter(|session| session.epoch == epoch && session.origin == origin)
-            .map(|session| session.next.clone())
+            .map(|session| session.next.read().unwrap().clone())
             .context("连接已切换")?;
         if manifest.revision < old.manifest.revision {
             return Ok(());
@@ -612,7 +635,7 @@ impl ResourceCache {
                     .as_mut()
                     .filter(|value| value.epoch == epoch)
                 {
-                    session.next = snapshot;
+                    *session.next.write().unwrap() = snapshot;
                 }
             }
             return Ok(());
@@ -650,7 +673,7 @@ impl ResourceCache {
             .filter(|session| session.epoch == epoch)
         {
             // 完整候选仅供下次导航使用；正在阅读/发送的页面不热切换脚本，不自动刷新或重发任何请求。
-            session.next = snapshot;
+            *session.next.write().unwrap() = snapshot;
         }
         Ok(())
     }
@@ -712,7 +735,7 @@ impl ResourceCache {
             .as_mut()
             .filter(|value| value.origin == url.origin().ascii_serialization())
         {
-            session.current = session.next.clone();
+            session.current = session.next.read().unwrap().clone();
             self.busy.store(false, Ordering::SeqCst);
         }
     }
@@ -780,10 +803,11 @@ impl ResourceCache {
                 message: "",
             };
         };
-        let waiting = session.current.manifest.version != session.next.manifest.version;
+        let next = session.next.read().unwrap();
+        let waiting = session.current.manifest.version != next.manifest.version;
         CacheInfo {
             status: if waiting { "waiting" } else { "ready" },
-            version: Some(session.next.manifest.version.clone()),
+            version: Some(next.manifest.version.clone()),
             message: if waiting {
                 "新版网页资源已缓存，重新打开页面后启用"
             } else if self.update_failed.load(Ordering::SeqCst) {
@@ -958,6 +982,37 @@ mod tests {
         assert!(changed.validate().is_err());
     }
     #[test]
+    fn separate_window_navigation_and_activity_do_not_change_parent_resources() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = ResourceCache::new(directory.path().into()).unwrap();
+        let url = Url::parse("http://127.0.0.1:47200/").unwrap();
+        *cache.session.write().unwrap() = Some(Session {
+            origin: url.origin().ascii_serialization(),
+            epoch: 1,
+            current: Arc::new(sample(1, "old")),
+            next: Arc::new(RwLock::new(Arc::new(sample(2, "next")))),
+        });
+        cache.set_busy(true);
+        let window = cache.fork_view(&url);
+        assert!(Arc::ptr_eq(&window.update_lock, &cache.update_lock));
+        assert!(Arc::ptr_eq(&window.builtin, &cache.builtin));
+        assert_eq!(window.epoch.load(Ordering::SeqCst), 1);
+        assert!(!window.busy.load(Ordering::SeqCst));
+        window.begin_navigation(&url);
+        assert_eq!(&*window.response(&url, "GET").unwrap().bytes, b"next");
+        assert_eq!(&*cache.response(&url, "GET").unwrap().bytes, b"old");
+        assert!(cache.busy.load(Ordering::SeqCst));
+        let candidate = cache.session.read().unwrap().as_ref().unwrap().next.clone();
+        *candidate.write().unwrap() = Arc::new(sample(3, "latest"));
+        assert_eq!(&*window.response(&url, "GET").unwrap().bytes, b"next");
+        window.begin_navigation(&url);
+        assert_eq!(&*window.response(&url, "GET").unwrap().bytes, b"latest");
+        assert_eq!(&*cache.response(&url, "GET").unwrap().bytes, b"old");
+        let other = Url::parse("http://127.0.0.1:47201/").unwrap();
+        assert!(cache.fork_view(&other).response(&url, "GET").is_none());
+    }
+
+    #[test]
     fn snapshots_switch_only_on_navigation_and_never_cache_api_or_other_origins() {
         let directory = tempfile::tempdir().unwrap();
         let cache = ResourceCache::new(directory.path().into()).unwrap();
@@ -968,7 +1023,7 @@ mod tests {
             origin: url.origin().ascii_serialization(),
             epoch: 1,
             current: old,
-            next,
+            next: Arc::new(RwLock::new(next)),
         });
         assert_eq!(&*cache.response(&url, "GET").unwrap().bytes, b"old");
         assert!(

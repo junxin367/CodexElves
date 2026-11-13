@@ -13,6 +13,7 @@ axum = { version = "0.8", features = ["json", "tokio", "http1", "ws"], default-f
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"], default-features = false }
 base64.workspace = true
 calamine = { version = "0.38", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 csv = "1"
 directories.workspace = true
 flate2.workspace = true

@@ -1,8 +1,8 @@
 {
   "identifier": "content-appearance",
-  "description": "远程内容仅获配色同步及公开网页缓存权限，原生还会复核当前配置的服务来源。",
+  "description": "远程内容可同步配色、管理公开网页缓存及打开同来源的会话/文件预览窗口，原生逐次复核来源。",
   "local": true,
   "remote": {"urls": ["http://*:*/*", "https://*:*/*"]},
-  "webviews": ["remote-content"],
-  "permissions": ["remote-appearance", "remote-resource-cache"]
+  "webviews": ["remote-content", "remote-content-session-*"],
+  "permissions": ["remote-appearance", "remote-resource-cache", "remote-session-window"]
 }

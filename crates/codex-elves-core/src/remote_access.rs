@@ -53,6 +53,7 @@ mod preferences;
 mod primary_route;
 mod prompt_optimization;
 mod runtime_fallback;
+mod session_metrics;
 
 mod service;
 mod video;
@@ -70,6 +71,9 @@ const WEB_JS: &str = include_str!("../../../assets/remote-access/app.js");
 const WEB_SELECT_JS: &str = include_str!("../../../assets/remote-access/select.js");
 const WEB_SESSION_TOOLS_JS: &str = include_str!("../../../assets/remote-access/session-tools.js");
 const WEB_SESSION_FILES_JS: &str = include_str!("../../../assets/remote-access/session-files.js");
+const WEB_FILE_PREVIEW_HTML: &str = include_str!("../../../assets/remote-access/file-preview.html");
+const WEB_WORKSPACE_PREVIEW_JS: &str =
+    include_str!("../../../assets/remote-access/workspace-preview.js");
 const WEB_SESSION_MENU_JS: &str = include_str!("../../../assets/remote-access/session-menu.js");
 const WEB_ATTACHMENTS_JS: &str = include_str!("../../../assets/remote-access/attachments.js");
 const WEB_SHA256_JS: &str = include_str!("../../../assets/remote-access/sha256.js");
@@ -1842,6 +1846,27 @@ impl RemoteAccessController {
                 return Err(ApiError::new(409, "该 Codex 实例的执行接入尚未支持").into());
             }
         }
+        if action == "sessionMetrics" {
+            let id = thread_id.ok_or_else(|| ApiError::new(400, "缺少会话 ID"))?;
+            authorization.check().await?;
+            let metrics = if claude_thread {
+                self.claude.session_metrics(id).await?
+            } else {
+                let settings_path = self.state_dir.join("settings.json");
+                let id = id.to_owned();
+                tokio::task::spawn_blocking(move || {
+                    let Ok(settings) = SettingsStore::new(settings_path).load() else {
+                        return Value::Null;
+                    };
+                    let home = crate::codex_home::codex_home_dir_for_settings(&settings);
+                    session_metrics::codex(&home, &id)
+                })
+                .await
+                .unwrap_or(Value::Null)
+            };
+            return Ok(json!({"ok":true,"threadId":id,
+                "backend":if claude_thread {"claude"} else {"codex"},"metrics":metrics}));
+        }
         if action == "claudeUsage" {
             // 本地消费扫描只在用户展开额度详情时按需执行，不进入默认额度轮询或消息发送链路。
             let include_local = payload["includeLocal"] == true;
@@ -1868,7 +1893,7 @@ impl RemoteAccessController {
                 Err(ApiError::new(400, "额度读取仅支持 Claude 实例").into())
             };
         }
-        if action == "models"
+        if matches!(action, "models" | "skills")
             && (claude_thread || requested == Some("claude"))
             && self
                 .access_policy
@@ -1876,7 +1901,7 @@ impl RemoteAccessController {
                 .unwrap_or_else(|e| e.into_inner())
                 .read_only
         {
-            // 只读设备只查看已保存会话的模型名；不能为读取选项而启动可能加载 Hooks / MCP 的 CLI。
+            // 只读设备不启动可能加载 Hooks / MCP 的目录探测 CLI；模型和 Skill 共用此边界。
             return Ok(
                 json!({"ok":true,"backend":"claude","readOnly":true,"data":[],
                 "defaultModel":"","defaultReasoningEffort":""}),
@@ -1924,7 +1949,11 @@ impl RemoteAccessController {
                             )
                             .await
                     }
-                    "skills" => Ok(json!({"ok":true,"data":[],"errors":[],"backend":"claude"})),
+                    "skills" => {
+                        self.claude
+                            .session_skills(id, payload["forceReload"] == true)
+                            .await
+                    }
                     "queue" => self.claude.queue(id).await,
                     "queueEdit" => self.claude.queue_edit_state(&payload).await,
                     "sendState" => self.claude.queue_send_state(&payload).await,
@@ -1991,7 +2020,15 @@ impl RemoteAccessController {
                                 .await
                         }
                     }
-                    "skills" => Ok(json!({"ok":true,"data":[],"errors":[],"backend":"claude"})),
+                    "skills" => {
+                        let config = match selected_config {
+                            Some(config) => config,
+                            None => self.claude.config()?,
+                        };
+                        self.claude
+                            .skills_in(config, &cwd, payload["forceReload"] == true)
+                            .await
+                    }
                     "create" => {
                         if let Some(config) = selected_config {
                             self.claude
@@ -2687,6 +2724,17 @@ fn web_assets() -> &'static HashMap<&'static str, StaticWebAsset> {
                 ),
             ),
             (
+                "/file-preview.html",
+                StaticWebAsset::new("text/html; charset=utf-8", WEB_FILE_PREVIEW_HTML.as_bytes()),
+            ),
+            (
+                "/workspace-preview.js",
+                StaticWebAsset::new(
+                    "application/javascript; charset=utf-8",
+                    WEB_WORKSPACE_PREVIEW_JS.as_bytes(),
+                ),
+            ),
+            (
                 "/session-menu.js",
                 StaticWebAsset::new(
                     "application/javascript; charset=utf-8",
@@ -3115,6 +3163,8 @@ pub fn web_router(
         .route("/select.js", get(static_web_asset))
         .route("/session-tools.js", get(static_web_asset))
         .route("/session-files.js", get(static_web_asset))
+        .route("/file-preview.html", get(static_web_asset))
+        .route("/workspace-preview.js", get(static_web_asset))
         .route("/session-menu.js", get(static_web_asset))
         .route("/attachments.js", get(static_web_asset))
         .route("/sha256.js", get(static_web_asset))
@@ -3158,6 +3208,10 @@ pub fn web_router(
         .route(
             "/api/settings/instructions",
             post(preferences::instructions),
+        )
+        .route(
+            "/api/settings/prompt-optimization",
+            post(prompt_optimization::settings),
         )
         .route("/api/workspace/context", post(workspace::context))
         .route("/api/workspace/changes", post(workspace::changes))
@@ -3949,12 +4003,12 @@ async fn session(
         "capabilities":{"imageInput":native_write_available,"queuedImageRemoval":native_write_available,
         "queuedImageEditing":native_write_available,"queueEditRecovery":native_write_available,
         "queueSendRecovery":native_write_available,"projectlessCreation":native_write_available,
-        "promptOptimization":true,"messageEditModelSettings":native_write_available,
+        "promptOptimization":true,"promptOptimizationSettings":true,"messageEditModelSettings":native_write_available,
         "fastMode":runtime.cdp_injection_enabled && native_write_available,
         "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
         "sendText":native_write_available || service_connected,
         "sideThreads":true,"serviceSideThreads":true,"subagents":true,"serviceSubagents":true,
-        "desktopSessionSync":true,
+        "desktopSessionSync":true,"sessionMetrics":true,
         "claudeSessions":true,"claudeProjectTrust":true,"claudeSubscriptionUsage":true}}),
     ))
 }
@@ -4129,6 +4183,7 @@ async fn read(
             | "models"
             | "fast"
             | "claudeUsage"
+            | "sessionMetrics"
             | "projectTrust"
             | "skills"
             | "queue"
@@ -4152,6 +4207,9 @@ async fn read(
             return Err(ApiError::new(400, "会话观察标识无效"));
         }
         payload = json!({"threadIds":ids});
+    }
+    if action == "sessionMetrics" && notification_thread_id(&payload["threadId"]).is_none() {
+        return Err(ApiError::new(400, "会话统计标识无效"));
     }
     if matches!(action.as_str(), "queue" | "queueEdit" | "sendState") {
         validate_queued_action_payload(&action, &payload)?;

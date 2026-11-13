@@ -33,7 +33,7 @@ const MAX_STDERR_BYTES: usize = 8 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(40);
 // 多仓库按目录发现，最多扫描 2 万个目录、10 万个目录项或 5 秒；
-// 同时读取 4 个仓库，完整列表限 1 万项，避免大工作区拖垮手机与电脑端。
+// 用户要求变更列表最多同时读取 6 个仓库；完整列表限 1 万项，避免大工作区拖垮手机与电脑端。
 const MAX_REPOSITORIES: usize = 256;
 const MAX_REPOSITORY_DIRECTORIES: usize = 20_000;
 const MAX_REPOSITORY_ENTRIES: usize = 100_000;
@@ -1148,7 +1148,7 @@ impl WorkspaceRepositories {
 
     async fn listing(&self, authorization: &RemoteAuthorization) -> Result<Value, ApiError> {
         let deadline = tokio::time::Instant::now() + REPOSITORY_LIST_TIMEOUT;
-        // 保持目录顺序并限制四个并发任务，响应版本和达到列表上限后的取舍都保持稳定。
+        // 用户要求并发上限为 6；仍保持目录顺序，响应版本和达到列表上限后的取舍保持稳定。
         let reads = self.paths.iter().cloned().map(|path| {
             let root = self.root.clone();
             let authorization = authorization.clone();
@@ -1165,7 +1165,7 @@ impl WorkspaceRepositories {
                 (path, result)
             }
         });
-        let mut snapshots = stream::iter(reads).buffered(4);
+        let mut snapshots = stream::iter(reads).buffered(6);
         let mut repositories = Vec::new();
         let mut files = Vec::new();
         let mut truncated = self.truncated;
@@ -1930,7 +1930,8 @@ async fn git_configured(
 }
 
 async fn git_safe_read_config(cwd: &Path) -> Result<Vec<String>, ApiError> {
-    // 用户要求远程变更与本机 Git 一致：只恢复换行设置和有效忽略文件，
+    // 用户要求远程变更准确且高效：恢复换行、属性和忽略规则，
+    // 避免全局 binary 属性丢失后对字体等大文件重复进行文本转换检查；
     // 仍隔离钩子、过滤器和外部命令，不能整体重新启用全局配置。
     // 按 Git 自身的 include / worktree 优先级读取，后出现的同名配置覆盖前值。
     let output = git_process_with_config_sources(
@@ -1952,36 +1953,50 @@ async fn git_safe_read_config(cwd: &Path) -> Result<Vec<String>, ApiError> {
         return Err(ApiError::new(503, "无法读取 Git 换行设置"));
     }
     let mut config = parse_git_text_config(&output.bytes)?;
-    // 让 Git 按 include、仓库及工作树优先级取最终值，并展开 ~/ 等路径；
-    // 未显式配置时不覆盖 Git 自带的 XDG 默认忽略文件。
-    let excludes = git_process_with_config_sources(
+    // 属性和忽略路径合并读取，不增加每次 status/diff 的 Git 调用数。
+    // 由 Git 展开 ~/ 并按 include、仓库及工作树顺序返回；未配置时保留 XDG 默认路径。
+    let paths = git_process_with_config_sources(
         cwd,
         &[
             "config",
             "--null",
             "--includes",
             "--type=path",
-            "--get",
-            "core.excludesfile",
+            "--get-regexp",
+            r"^core\.(excludesfile|attributesfile)$",
         ],
         32 * 1024,
         &[],
         true,
     )
     .await?;
-    if excludes.truncated || !matches!(excludes.exit_code, Some(0 | 1)) {
-        return Err(ApiError::new(503, "无法读取 Git 全局忽略文件设置"));
+    if paths.truncated || !matches!(paths.exit_code, Some(0 | 1)) {
+        return Err(ApiError::new(503, "无法读取 Git 属性或忽略文件设置"));
     }
-    if excludes.exit_code == Some(0) {
-        let path = excludes
-            .bytes
-            .strip_suffix(&[0])
-            .filter(|path| !path.contains(&0))
-            .and_then(|path| std::str::from_utf8(path).ok())
-            .ok_or_else(|| ApiError::new(503, "Git 忽略文件路径格式无效"))?;
-        config.push(format!("core.excludesfile={path}"));
-    }
+    config.extend(parse_git_path_config(&paths.bytes)?);
     Ok(config)
+}
+
+fn parse_git_path_config(bytes: &[u8]) -> Result<Vec<String>, ApiError> {
+    let mut excludes = None;
+    let mut attributes = None;
+    for record in bytes
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+    {
+        let record = std::str::from_utf8(record)
+            .map_err(|_| ApiError::new(503, "Git 属性或忽略文件路径编码无效"))?;
+        let (key, path) = record
+            .split_once('\n')
+            .ok_or_else(|| ApiError::new(503, "Git 属性或忽略文件路径格式无效"))?;
+        // 后出现的同名设置优先，显式空值也必须保留；仅放行这两个数据文件路径。
+        match key {
+            "core.excludesfile" => excludes = Some(format!("{key}={path}")),
+            "core.attributesfile" => attributes = Some(format!("{key}={path}")),
+            _ => return Err(ApiError::new(503, "Git 属性或忽略文件设置无效")),
+        }
+    }
+    Ok([excludes, attributes].into_iter().flatten().collect())
 }
 
 fn parse_git_text_config(bytes: &[u8]) -> Result<Vec<String>, ApiError> {
@@ -4188,6 +4203,28 @@ mod tests {
         assert_eq!(snapshot.files[4].status, "U");
     }
 
+    #[test]
+    fn workspace_git_path_config_preserves_priority_empty_values_and_path_text() {
+        let config = parse_git_path_config(
+            b"core.attributesfile\n/first\0core.excludesfile\nignore\nrules\0core.attributesfile\n/final attrs\0",
+        )
+        .unwrap();
+        assert_eq!(
+            config,
+            [
+                "core.excludesfile=ignore\nrules",
+                "core.attributesfile=/final attrs",
+            ]
+        );
+        assert_eq!(
+            parse_git_path_config(b"core.attributesfile\n\0").unwrap(),
+            ["core.attributesfile="]
+        );
+        assert!(parse_git_path_config(b"filter.test.clean\ncommand\0").is_err());
+        assert!(parse_git_path_config(b"core.attributesfile\0").is_err());
+        assert!(parse_git_path_config(b"core.attributesfile\n\xff\0").is_err());
+    }
+
     #[tokio::test]
     async fn workspace_global_ignores_match_git_in_an_isolated_home() {
         let fixture = fixture_dir();
@@ -4317,10 +4354,126 @@ mod tests {
                 .contains(&"core.excludesfile=".to_owned())
         );
 
-        // 恢复忽略规则不能恢复会执行命令的全局过滤器。
+        // 全局 binary 属性必须保留；否则 autocrlf 会使未改动的 CRLF 资源被误判为修改。
+        let attribute_directory = home.join("attribute rules");
+        std::fs::create_dir_all(&attribute_directory).unwrap();
+        let global_attributes = attribute_directory.join("global.attributes");
+        std::fs::write(&global_attributes, "*.asset binary\n").unwrap();
+        std::fs::write(
+            home.join(".gitconfig"),
+            "[core]\nautocrlf = true\n[include]\npath = ignore-settings.gitconfig\n",
+        )
+        .unwrap();
         std::fs::write(
             &included,
-            "[core]\nexcludesFile = \"~/ignore rules/global.ignore\"\n[filter \"guard-test\"]\nclean = workspace-global-filter-that-must-not-execute\nrequired = true\n",
+            "[core]\nexcludesFile = \"~/ignore rules/global.ignore\"\nattributesFile = \"~/attribute rules/global.attributes\"\n",
+        )
+        .unwrap();
+        let asset = root.join("font.asset");
+        std::fs::write(&asset, "font header\r\nfont payload\r\n").unwrap();
+        assert!(
+            git_process_with_config_sources(
+                &root,
+                &["add", "--", "font.asset"],
+                16 * 1024,
+                &[],
+                true,
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        let original_index = std::fs::read(root.join(".git/index")).unwrap();
+        let files = compare_status(&root).await;
+        assert!(
+            files
+                .iter()
+                .any(|file| file.path == "font.asset" && file.section == "staged")
+        );
+        assert!(
+            files
+                .iter()
+                .all(|file| file.path != "font.asset" || file.section != "unstaged")
+        );
+        assert_eq!(
+            git_safe_read_config(&root)
+                .await
+                .unwrap()
+                .into_iter()
+                .find_map(|value| value
+                    .strip_prefix("core.attributesfile=")
+                    .map(PathBuf::from))
+                .unwrap(),
+            global_attributes
+        );
+
+        // 保留 binary 规则不能漏报真实内容变化。
+        std::fs::write(&asset, "changed font header\r\nfont payload\r\n").unwrap();
+        let files = compare_status(&root).await;
+        assert!(files.iter().any(|file| file.path == "font.asset"
+            && file.section == "unstaged"
+            && file.status == "M"));
+
+        // 仓库配置优先于全局属性文件；取消显式配置后继续保留 Git 的 XDG 默认规则。
+        let local_attributes = fixture.join("repository.attributes");
+        std::fs::write(&local_attributes, "*.asset text\n").unwrap();
+        assert!(
+            git_unchecked(
+                &root,
+                &[
+                    "config",
+                    "core.attributesFile",
+                    local_attributes.to_str().unwrap(),
+                ],
+                16 * 1024,
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        compare_status(&root).await;
+        assert_eq!(
+            git_safe_read_config(&root)
+                .await
+                .unwrap()
+                .into_iter()
+                .find_map(|value| value
+                    .strip_prefix("core.attributesfile=")
+                    .map(PathBuf::from))
+                .unwrap(),
+            local_attributes
+        );
+        assert!(
+            git_unchecked(
+                &root,
+                &["config", "--unset", "core.attributesFile"],
+                16 * 1024,
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        std::fs::write(&included, "[core]\n").unwrap();
+        std::fs::write(xdg_git.join("attributes"), "*.asset binary\n").unwrap();
+        compare_status(&root).await;
+        std::fs::write(&included, "[core]\nattributesFile = \"\"\n").unwrap();
+        compare_status(&root).await;
+        assert!(
+            git_safe_read_config(&root)
+                .await
+                .unwrap()
+                .contains(&"core.attributesfile=".to_owned())
+        );
+        assert_eq!(
+            std::fs::read(root.join(".git/index")).unwrap(),
+            original_index,
+            "状态读取不能更新用户的暂存索引"
+        );
+
+        // 恢复属性和忽略规则不能恢复会执行命令的全局过滤器。
+        std::fs::write(
+            &included,
+            "[core]\nexcludesFile = \"~/ignore rules/global.ignore\"\nattributesFile = \"~/attribute rules/global.attributes\"\n[filter \"guard-test\"]\nclean = workspace-global-filter-that-must-not-execute\nrequired = true\n",
         )
         .unwrap();
         std::fs::write(root.join(".gitattributes"), "* filter=guard-test\n").unwrap();

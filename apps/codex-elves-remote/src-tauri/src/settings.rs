@@ -94,6 +94,103 @@ pub fn is_titlebar_page(url: &Url) -> bool {
     url.path() == "/titlebar.html" && is_connection_page(&home)
 }
 
+pub fn session_window_url(source: &Url, thread_id: &str) -> anyhow::Result<Url> {
+    // 用户要求独立窗口打开同一会话；只接收会话标识，服务地址从已校验来源派生，不能传任意 URL 或凭据。
+    ensure_session_id(thread_id)?;
+    let mut url = source.clone();
+    url.set_path("/");
+    url.set_query(None);
+    url.set_fragment(None);
+    normalize_server_url(url.as_str())?;
+    url.set_query(Some("sessionWindow=1"));
+    url.set_fragment(Some(&format!("thread={thread_id}")));
+    Ok(url)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreviewWindowTarget {
+    pub kind: String,
+    pub path: String,
+    pub thread_id: Option<String>,
+    pub project_id: Option<String>,
+    pub line: Option<u32>,
+    pub section: Option<String>,
+    pub repository: Option<String>,
+}
+
+pub fn preview_window_url(source: &Url, target: &PreviewWindowTarget) -> anyhow::Result<Url> {
+    let valid_text = |value: &str, max| {
+        !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
+    };
+    if !valid_text(&target.path, 32768)
+        || !matches!(target.kind.as_str(), "file" | "change")
+        || target.line == Some(0)
+    {
+        bail!("文件预览参数无效。");
+    }
+    let mut fragment = url::form_urlencoded::Serializer::new(String::new());
+    fragment
+        .append_pair("kind", &target.kind)
+        .append_pair("path", &target.path);
+    match (&target.thread_id, &target.project_id) {
+        (Some(id), None) => {
+            ensure_session_id(id)?;
+            fragment.append_pair("threadId", id);
+        }
+        (None, Some(id)) if valid_text(id, 4096) => {
+            fragment.append_pair("projectId", id);
+        }
+        _ => bail!("预览必须指定唯一的会话或项目。"),
+    }
+    if target.kind == "change" {
+        let section = target.section.as_deref().unwrap_or("");
+        let repository = target.repository.as_deref().unwrap_or("");
+        if !matches!(section, "staged" | "unstaged" | "untracked")
+            || repository.len() > 16384
+            || repository.contains(['\\', ':', '\0'])
+            || repository.chars().any(char::is_control)
+            || !repository.is_empty()
+                && repository.split('/').any(|part| {
+                    part.is_empty()
+                        || matches!(part, "." | "..")
+                        || part.eq_ignore_ascii_case(".git")
+                })
+        {
+            bail!("文件差异归属无效。");
+        }
+        fragment
+            .append_pair("section", section)
+            .append_pair("repository", repository);
+    } else if target.section.is_some() || target.repository.is_some() {
+        bail!("文件预览不能携带差异分区。");
+    }
+    if let Some(line) = target.line {
+        fragment.append_pair("line", &line.to_string());
+    }
+    let mut url = source.clone();
+    url.set_path("/");
+    url.set_query(None);
+    url.set_fragment(None);
+    normalize_server_url(url.as_str())?;
+    // 文件只通过原会话/项目接口读取；原生仅构造同来源预览页，不读取网页指定的本机文件。
+    url.set_path("/file-preview.html");
+    url.set_fragment(Some(&fragment.finish()));
+    Ok(url)
+}
+
+fn ensure_session_id(value: &str) -> anyhow::Result<()> {
+    if value.is_empty()
+        || value.len() > 120
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+    {
+        bail!("会话标识无效。");
+    }
+    Ok(())
+}
+
 pub fn load(path: &Path) -> anyhow::Result<Settings> {
     match std::fs::read(path) {
         Ok(bytes) => {
@@ -121,6 +218,62 @@ pub fn save(path: &Path, settings: &Settings) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_preview_windows_keep_project_repository_and_partition_without_native_file_access() {
+        let source = Url::parse("https://remote.example.com:444/?old=1#old").unwrap();
+        let mut target: PreviewWindowTarget = serde_json::from_value(serde_json::json!({
+            "kind":"change","projectId":"project-1","path":"目录/说明 & #.md",
+            "repository":"backend/nested","section":"staged"
+        }))
+        .unwrap();
+        let url = preview_window_url(&source, &target).unwrap();
+        assert_eq!(url.origin(), source.origin());
+        assert_eq!(url.path(), "/file-preview.html");
+        assert!(url.query().is_none());
+        let values: std::collections::HashMap<_, _> =
+            url::form_urlencoded::parse(url.fragment().unwrap().as_bytes())
+                .into_owned()
+                .collect();
+        assert_eq!(values["path"], target.path);
+        assert_eq!(values["projectId"], "project-1");
+        assert_eq!(values["repository"], "backend/nested");
+        assert_eq!(values["section"], "staged");
+        target.thread_id = Some("another-thread".into());
+        assert!(preview_window_url(&source, &target).is_err());
+        target.thread_id = None;
+        target.repository = Some("../outside".into());
+        assert!(preview_window_url(&source, &target).is_err());
+        target.repository = Some("backend".into());
+        target.section = Some("unknown".into());
+        assert!(preview_window_url(&source, &target).is_err());
+        target.kind = "file".into();
+        assert!(preview_window_url(&source, &target).is_err());
+        target.section = None;
+        target.repository = None;
+        assert!(preview_window_url(&source, &target).is_ok());
+    }
+
+    #[test]
+    fn session_windows_keep_origin_and_only_accept_native_session_ids() {
+        let source = Url::parse("https://remote.example.com:444/?old=1#thread=previous").unwrap();
+        assert_eq!(
+            session_window_url(&source, "claude-abc_123")
+                .unwrap()
+                .as_str(),
+            "https://remote.example.com:444/?sessionWindow=1#thread=claude-abc_123"
+        );
+        for id in ["", "../file", "id&key=value", "会话", &"a".repeat(121)] {
+            assert!(session_window_url(&source, id).is_err(), "{id}");
+        }
+        for source in [
+            "file:///C:/x",
+            "http://tauri.localhost/",
+            "https://u:p@example.com/",
+        ] {
+            assert!(session_window_url(&Url::parse(source).unwrap(), "valid-id").is_err());
+        }
+    }
 
     #[test]
     fn service_addresses_are_normalized_without_persisting_credentials_or_routes() {

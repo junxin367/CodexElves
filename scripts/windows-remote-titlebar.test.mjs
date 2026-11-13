@@ -74,8 +74,8 @@ test("配色同步权限与连接设置、窗口控制按 WebView 分开", async
   const [appearance, connection, titlebar] = await Promise.all([
     capability("content-appearance"), capability("connection-page"), capability("titlebar"),
   ]);
-  assert.deepEqual(appearance.webviews, ["remote-content"]);
-  assert.deepEqual(appearance.permissions, ["remote-appearance", "remote-resource-cache"]);
+  assert.deepEqual(appearance.webviews, ["remote-content", "remote-content-session-*"]);
+  assert.deepEqual(appearance.permissions, ["remote-appearance", "remote-resource-cache", "remote-session-window"]);
   assert.ok(appearance.remote.urls.every(url => /^https?:/.test(url)));
   assert.equal(connection.local, true);
   assert.equal(connection.remote, undefined);
@@ -83,7 +83,7 @@ test("配色同步权限与连接设置、窗口控制按 WebView 分开", async
   assert.deepEqual(connection.permissions, ["remote-connection"]);
   assert.equal(titlebar.local, true);
   assert.equal(titlebar.remote, undefined);
-  assert.deepEqual(titlebar.webviews, ["remote-titlebar"]);
+  assert.deepEqual(titlebar.webviews, ["remote-titlebar", "remote-titlebar-session-*"]);
   assert.ok(titlebar.permissions.includes("core:window:allow-minimize"));
   assert.ok(titlebar.permissions.includes("core:window:allow-close"));
 });

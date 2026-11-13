@@ -1,5 +1,14 @@
 let menuSequence = 0;
 
+export function menuHorizontalLeft(anchor, menuWidth, viewport, padding = 8) {
+  // 用户要求按钮菜单按可视区域中线选择方向：按钮中心在左半边时左对齐，否则右对齐（中线归右）。
+  // 可视区域包含缩放/平移后的 left；两种方向均保留原来的 8px 边缘留白，不改变菜单宽度或上下定位。
+  const alignLeft = (anchor.left + anchor.right) / 2 < viewport.left + viewport.width / 2;
+  const preferred = alignLeft ? anchor.left : anchor.right - menuWidth;
+  return Math.max(viewport.left + padding,
+    Math.min(preferred, viewport.left + viewport.width - menuWidth - padding));
+}
+
 function element(tag, className = "", text = "") {
   const node = document.createElement(tag);
   node.className = className;
@@ -65,8 +74,8 @@ export function mountSessionMenu({
   trigger.setAttribute("aria-haspopup", "menu"); trigger.setAttribute("aria-expanded", "false");
   trigger.setAttribute("aria-controls", id);
   const desktop = () => !globalThis.matchMedia?.("(max-width: 760px)").matches;
-  // 用户要求 PC 点击图标后始终固定显示，再点图标才关闭；手机仍使用原遮罩、点击外部与返回关闭行为。
-  const pinned = desktop;
+  // 用户要求手机和 PC 的菜单功能点击后均保持展开；手机仅允许点普通页面隐藏，侧边会话页面除外。
+  const pinned = () => true;
 
   function listen(target, name, handler, options) {
     target.addEventListener(name, handler, options);
@@ -87,6 +96,7 @@ export function mountSessionMenu({
       relatedEnabled: value.relatedEnabled !== false,
       subagentsEnabled: value.subagentsEnabled ?? value.relatedEnabled !== false,
       sideThreadsEnabled: value.sideThreadsEnabled ?? value.relatedEnabled !== false,
+      sideThreadView: value.sideThreadView === true,
       serviceMode: value.serviceMode === true,
       createPending: value.createPending === true,
       authorization: JSON.stringify([deviceId, cacheScope]),
@@ -198,7 +208,7 @@ export function mountSessionMenu({
     if (restoreFocus && source?.isConnected && opened) source.focus();
   }
   function close(restoreFocus = false, force = false) {
-    // PC 不因外部点击、Escape、切换会话或普通工具操作关闭；授权变化、触发按钮失效和销毁仍须清理。
+    // 两端普通工具操作、切换会话和返回不自动关闭；图标、手机普通页面点击及生命周期清理显式关闭。
     if (!force && pinned()) return;
     stopPositionTracking();
     if (!opened) { cancelPress(); return; }
@@ -210,6 +220,12 @@ export function mountSessionMenu({
     layer.classList.remove("session-related-menu-suspended");
     layer.hidden = true;
     if (restoreFocus && trigger.isConnected && !trigger.disabled) trigger.focus();
+  }
+  function dismissForPageClick(event) {
+    // 只处理手机菜单外的真实点击，不拦截页面操作；侧边会话页面仍保持菜单展开。
+    if (!opened || suspended || desktop() || readContext().sideThreadView
+        || layer.contains(event.target) || trigger.contains(event.target)) return;
+    close(false, true);
   }
   function suspend() {
     if (!opened || suspended) return;
@@ -421,6 +437,12 @@ export function mountSessionMenu({
     create.dataset.menuKey = "create";
     create.classList.add("session-related-menu-heading-action");
     create.setAttribute("aria-label", "新建侧边会话"); create.title = "新建侧边会话";
+    if (desktop()) {
+      // PC 新建侧边会话沿用 Codex 快捷键；手机不新增键盘提示，按钮与快捷键共用创建权限。
+      const mac = /Mac/i.test(globalThis.navigator?.userAgentData?.platform || globalThis.navigator?.platform || "");
+      create.title += mac ? "（⌘⌥S）" : "（Ctrl+Alt+S）";
+      create.setAttribute("aria-keyshortcuts", mac ? "Meta+Alt+S" : "Control+Alt+S");
+    }
     create.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
     const sides = section("侧边会话", create);
     // 只展示当前运行方式明确支持的侧边会话；旧后台或切换模式后的旧缓存不能开放写操作。
@@ -507,7 +529,7 @@ export function mountSessionMenu({
     const anchorGap = 10;
     const top = Math.max(view.top + padding, Math.min(box.bottom + anchorGap, view.top + view.height - padding));
     menu.style.width = `${width}px`;
-    menu.style.left = `${Math.max(view.left + padding, Math.min(box.right - width, view.left + view.width - width - padding))}px`;
+    menu.style.left = `${menuHorizontalLeft(box, width, view, padding)}px`;
     menu.style.top = `${top}px`;
     menu.style.maxHeight = `${Math.max(0, Math.min(480, view.height * .8, view.top + view.height - top - padding))}px`;
     if (!actionMenu.hidden) {
@@ -516,7 +538,10 @@ export function mountSessionMenu({
       const y = contextPosition ? source.top + contextPosition.y : source.bottom;
       actionMenu.style.width = `${Math.min(180, view.width - padding * 2)}px`;
       const rect = actionMenu.getBoundingClientRect();
-      actionMenu.style.left = `${Math.max(view.left + padding, Math.min(x, view.left + view.width - rect.width - padding))}px`;
+      // 右键/长按继续以实际点击坐标定位；键盘打开的按钮菜单沿用统一的左右展开规则。
+      actionMenu.style.left = `${contextPosition
+        ? Math.max(view.left + padding, Math.min(x, view.left + view.width - rect.width - padding))
+        : menuHorizontalLeft(source, rect.width, view, padding)}px`;
       actionMenu.style.top = `${Math.max(view.top + padding, Math.min(y, view.top + view.height - rect.height - padding))}px`;
     }
   }
@@ -715,6 +740,7 @@ export function mountSessionMenu({
       suppressedClick = null; event.preventDefault(); event.stopImmediatePropagation();
     }
   }, true);
+  listen(window, "click", dismissForPageClick, true);
   listen(window, "scroll", event => {
     cancelPress({ suppress: true, blockContext: true });
     if (opened && !layer.contains(event.target)) fit();
@@ -735,6 +761,9 @@ export function mountSessionMenu({
   syncContext();
   return { toggle, open, close, suspend, resume, refresh, reposition: fit,
     isOpen: () => opened && !suspended, isSuspended: () => opened && suspended,
+    canCreateSideThread() {
+      return !disposed && canMutate(syncContext()) && cached?.data.canCreateSideThread !== false;
+    },
     updateContext() {
       const value = syncContext(), entry = entryFor(value);
       restore(entry);

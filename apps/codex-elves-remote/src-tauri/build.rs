@@ -16,6 +16,7 @@ fn main() {
                 "remote_cache_status",
                 "remote_cache_refresh",
                 "remote_cache_activity",
+                "remote_open_session_window",
             ]));
         tauri_build::try_build(attributes).expect("failed to build CodexElves Remote");
     }

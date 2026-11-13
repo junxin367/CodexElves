@@ -278,7 +278,8 @@ pub async fn handle_bridge_request(
             }
             Ok(json!({
                 "status": "ok",
-                "settings": crate::prompt_optimize::load_preferences(&directory)?
+                "settings": crate::prompt_optimize::load_preferences(&directory)?,
+                "exists": crate::prompt_optimize::preferences_exist(&directory)
             }))
         })(),
         "/diagnostics/log" => diagnostic_log_value(payload.clone()),

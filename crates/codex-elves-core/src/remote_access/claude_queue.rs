@@ -30,6 +30,9 @@ struct Message {
     reason: String,
     #[serde(default)]
     native_intent: Option<Value>,
+    // 历史编辑仅复用直接发送的在途回执；定位由后端核对生成，不接收网页指定的原生路径。
+    #[serde(default)]
+    native_edit: Option<Value>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -354,6 +357,30 @@ impl Claude {
         payload: &Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
+        self.enqueue_shared_input(id, process, payload, None, authorization)
+            .await
+    }
+
+    pub(super) async fn enqueue_shared_edit(
+        &self,
+        id: &str,
+        process: &Process,
+        payload: &Value,
+        native_edit: Value,
+        authorization: &RemoteAuthorization,
+    ) -> anyhow::Result<Value> {
+        self.enqueue_shared_input(id, process, payload, Some(native_edit), authorization)
+            .await
+    }
+
+    async fn enqueue_shared_input(
+        &self,
+        id: &str,
+        process: &Process,
+        payload: &Value,
+        native_edit: Option<Value>,
+        authorization: &RemoteAuthorization,
+    ) -> anyhow::Result<Value> {
         input_content(payload)?;
         let c = self.conversation(id).await?;
         let catalog = normalize_models(&process.initialization);
@@ -414,7 +441,14 @@ impl Claude {
                     return Ok(false);
                 }
                 // 普通消息只在确认执行中时排队；旧队列、awaiting 标记或未知状态不能替代执行证据。
-                let direct = !c.running_for_send();
+                if native_edit.is_some()
+                    && (c.active()
+                        || c.native_status["tempo"] != "idle"
+                        || !c.native_status["needs"].is_null())
+                {
+                    return Err(error(409, "请等待 Claude 结束当前执行后再编辑历史消息"));
+                }
+                let direct = native_edit.is_some() || !c.running_for_send();
                 if direct
                     && c.remote_queue
                         .messages
@@ -433,6 +467,7 @@ impl Claude {
                     direct,
                     reason: String::new(),
                     native_intent: None,
+                    native_edit: native_edit.clone(),
                 });
                 if c.remote_queue.paused && !c.active() && c.queued_messages.is_empty() {
                     c.remote_queue.awaiting_turn = None;
@@ -531,11 +566,34 @@ impl Claude {
         if !remove_if_unsent {
             self.remote_queue_changed(id).await;
         }
+        let mut edit_settings = None;
         let result = async {
             let mut c = self.conversation(id).await?;
             let catalog = normalize_models(&process.initialization);
             let (model, effort) = model_selection(&c, &message.payload, &catalog)?;
-            if model != c.model || effort != c.effort {
+            if let Some(edit) = &message.native_edit {
+                let (model, effort) = (model.to_owned(), effort.to_owned());
+                edit_settings = Some((model.clone(), effort.clone()));
+                return process
+                    .control(
+                        json!({"subtype":"shared_edit_message","client_id":message.id,
+                    "native_user_id":edit["native_user_id"],"history_head":edit["history_head"],
+                    "prompt":message.payload["prompt"],"model":model,"effort":effort}),
+                        Some(authorization),
+                    )
+                    .await;
+            }
+            let explicit_pending_setting = [("model", "model"), ("effort", "reasoningEffort")]
+                .into_iter()
+                .any(|(name, field)| {
+                    message.payload.get(field).is_some()
+                        && matches!(
+                            c.native_control["settings"]["changes"][name]["state"].as_str(),
+                            Some("pending" | "confirmation" | "confirming")
+                        )
+                });
+            // 待确认目标与实际模型分开保存；用户明确重新选择原值时也须交给 CLI，不能按旧实际值跳过。
+            if model != c.model || effort != c.effort || explicit_pending_setting {
                 apply_model(process, &mut c, &message.payload, authorization).await?;
             }
             self.change(|saved| {
@@ -581,6 +639,10 @@ impl Claude {
                     m.direct = false;
                 }
             } else if result.is_ok() {
+                if let Some((model, effort)) = &edit_settings {
+                    c.model = model.clone();
+                    c.effort = effort.clone();
+                }
                 c.remote_queue.messages.retain(|m| m.id != message.id);
                 c.remote_queue
                     .accepted
@@ -612,7 +674,9 @@ impl Claude {
             Ok(())
         })
         .await
-        .map_err(|e| ApiError::new(503, format!("消息投递状态保存失败：{e}")).after_admission())?;
+        .map_err(|e| {
+            dispatched_unknown(ApiError::new(503, format!("消息投递状态保存失败：{e}")))
+        })?;
         self.remote_queue_changed(id).await;
         result?;
         let c = self.conversation(id).await?;
@@ -1086,6 +1150,7 @@ mod tests {
             direct: false,
             reason: String::new(),
             native_intent: None,
+            native_edit: None,
         };
         let mut queue = RemoteQueue {
             messages: vec![original.clone()],
@@ -1138,6 +1203,7 @@ mod tests {
             direct: false,
             reason: String::new(),
             native_intent: None,
+            native_edit: None,
         };
         let mut queue = RemoteQueue {
             messages: vec![original],
@@ -1871,6 +1937,7 @@ mod tests {
             direct: false,
             reason: String::new(),
             native_intent: Some(json!({"clientUserMessageId":"C","deliveryConfirmed":false})),
+            native_edit: None,
         };
         let mut queue = RemoteQueue {
             messages: vec![message],

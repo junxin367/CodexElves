@@ -24,6 +24,39 @@ fn valid_usage(value: &Value) -> bool {
         && value["last"]["totalTokens"].as_u64().is_some()
 }
 
+pub(super) fn rollout_path(home: &Path, thread_id: &str) -> Option<PathBuf> {
+    // 统计只接受数据库中精确会话 ID 的路径；不扫描目录，也不接受网页传入路径或标题。
+    for db_path in crate::codex_sqlite::codex_session_db_paths_from_home(home) {
+        let Ok(db) = Connection::open_with_flags(
+            db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            continue;
+        };
+        let _ = db.busy_timeout(Duration::from_millis(100));
+        let Ok(Some(path)) = db
+            .query_row(
+                "SELECT rollout_path FROM threads WHERE id = ?1 LIMIT 1",
+                [thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+        else {
+            continue;
+        };
+        let path = PathBuf::from(path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            home.join(path)
+        };
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 pub(super) fn needs_usage(value: &Value, thread_id: &str) -> bool {
     value["ok"] == true
         && value["thread"]["id"].as_str() == Some(thread_id)

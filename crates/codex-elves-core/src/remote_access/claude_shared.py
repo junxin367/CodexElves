@@ -46,6 +46,13 @@ class Screen:
                     self.carry = text[start:]
                     break
                 kind = text[index + 1]
+                if kind in ("(", ")", "*", "+", "-", ".", "/"):
+                    # 原生 attach 会发送 ESC(B 等字符集切换；跨包保留完整序列，不能把 B 当成输入内容。
+                    if index + 2 >= len(text):
+                        self.carry = text[start:]
+                        break
+                    index += 3
+                    continue
                 if kind in ("]", "P", "_", "^"):
                     ends = [position for position in (text.find("\x07", index + 2),
                             text.find("\x1b\\", index + 2)) if position >= 0]
@@ -82,10 +89,17 @@ class Screen:
                             self.x = max(0, value - 1)
                         elif command == "J":
                             mode = numbers[0] if numbers else 0
-                            if mode in (2, 3):
+                            # 清屏必须同时处理光标所在行，否则短文本重绘会把上一帧的尾巴带进正文。
+                            # ED 3 仅清滚动历史；此缓冲只保存可见画面，不能因此清掉当前回复。
+                            if mode == 2:
                                 self.lines.clear()
                             elif mode == 0:
                                 self.lines = {row: line for row, line in self.lines.items() if row <= self.y}
+                                self.lines[self.y] = self.lines.get(self.y, [])[:self.x]
+                            elif mode == 1:
+                                self.lines = {row: line for row, line in self.lines.items() if row >= self.y}
+                                line = self.lines.get(self.y, [])
+                                self.lines[self.y] = [" "] * min(self.x + 1, len(line)) + line[self.x + 1:]
                         elif command == "K":
                             mode = numbers[0] if numbers else 0
                             if mode == 2:
@@ -173,6 +187,102 @@ def native_setting_command(row):
     return {"name": match[1], "value": match[2].strip()} if match else None
 
 
+def native_skill_command(row):
+    # 原生 Skill 调用用 command-message/name/args 包装；这里只识别候选，
+    # 必须再关联网页原输入或同 promptId 的原生技能展开记录，不能按 XML 文本改写用户引用。
+    if row.get("type") != "user" or row.get("isMeta") is True \
+            or row.get("entrypoint") not in ("cli", "sdk-cli") or not row.get("promptId"):
+        return None
+    content = row.get("message", {}).get("content")
+    if not isinstance(content, str):
+        return None
+    match = re.fullmatch(
+        r"\s*<command-message>([\w.:-]+)</command-message>\s*"
+        r"<command-name>/([\w.:-]+)</command-name>"
+        r"(?:\s*<command-args>([\s\S]*)</command-args>)?\s*", content)
+    if not match or match[2] in ("model", "effort", "compact", "goal"):
+        return None
+    arguments = (match[3] or "").strip()
+    return {"name": match[2], "text": "/" + match[2] + (" " + arguments if arguments else "")}
+
+
+def skill_input_key(text):
+    # 原生会规整命令与参数之间的空白；只用于 Skill 回执关联，参数内部的空白和其他正文保持原样。
+    parts = text.strip().split(maxsplit=1) if isinstance(text, str) else []
+    return parts[0] + (" " + parts[1].strip() if len(parts) > 1 else "") if parts else ""
+
+
+def after_delivery_intent(row, index, intent):
+    # 新意图用追加偏移跨越原生回退分支；旧存档继续兼容原有顺序索引。
+    return row.get("nativeOffset", -1) >= intent["_afterOffset"] if "_afterOffset" in intent \
+        else index >= intent.get("_after", 0)
+
+
+def normalize_skill_records(messages, pending):
+    candidates = [(index, row) for index, row in enumerate(messages)
+                  if row.get("nativeSkillCommand") and not row["nativeSkillCommand"].get("accepted")]
+    if not candidates:
+        return False
+    companions = {(row.get("parentUuid"), row.get("promptId")) for row in messages
+                  if row.get("type") == "user" and row.get("isMeta") is True
+                  and row.get("turnCompanion") is True and row.get("promptId")}
+    changed = False
+    for index, row in candidates:
+        command = row.get("nativeSkillCommand")
+        raw = row.get("message", {}).get("content")
+        intents = [intent for intent in pending if after_delivery_intent(row, index, intent)]
+        if any(intent.get("_nativeText") == raw for intent in intents):
+            # 网页明确发送的是 XML 引用时保持原文，即使另有内部伴随记录也不能误当命令。
+            row.pop("nativeSkillCommand", None)
+            continue
+        intent = next((intent for intent in intents if skill_input_key(intent.get("_nativeText")) == command["text"]), None)
+        if intent is None and (row.get("uuid"), row.get("promptId")) not in companions:
+            continue
+        row["message"] = {**row["message"], "content": command["text"]}
+        row["nativeSkillCommand"] = {"name": command["name"], "accepted": True}
+        changed = True
+    return changed
+
+
+def native_setting_dialog(text):
+    """仅识别原版完整的编号确认框；无编号、未知 Hook 面板等保留本机确认。"""
+    lines = [line.strip().strip("│").strip() for line in (text.splitlines() if isinstance(text, str) else text)]
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index] not in ("Switch model?", "Change effort level?"):
+            continue
+        body = lines[index:]
+        yes = next((i for i, line in enumerate(body)
+                    if re.fullmatch(r"(?:❯\s*)?1\.\s+Yes, switch to .+", line)), None)
+        if yes is None or yes + 1 >= len(body) or not re.fullmatch(
+                r"(?:❯\s*)?2\.\s+No, go back", body[yes + 1]):
+            return None
+        description = "\n".join(line for line in body[1:yes] if line)
+        if not any(hint in description for hint in (
+                "Your next response will be slower and use more tokens",
+                "A PreModelSwitch hook asked you to confirm")):
+            return None
+        target = body[yes].split("Yes, switch to ", 1)[1].strip()
+        return {"kind": "model" if lines[index] == "Switch model?" else "effort",
+                "target": target, "description": description}
+    return None
+
+
+def native_dialog(job, text, native_id):
+    if job.get("sessionStatus") != "waiting" or job.get("needs") != "dialog open":
+        return None
+    parsed = native_setting_dialog(text)
+    # 用户要求未知弹窗也可见，但不得猜按键；没有原生等待代次时只提供本机处理提示。
+    stamp = job.get("sessionStatusAtMs")
+    value = parsed or {"kind": "unknown", "target": "", "description": ""}
+    # attach 可能改变终端列宽；仅排版换行不构成新审批，实际说明或原生等待代次变化仍更换身份。
+    identity = [native_id, job.get("short"), stamp,
+                {key: " ".join(raw.split()) for key, raw in value.items()}]
+    return {**value, "id": "native-dialog-" + hashlib.sha256(
+        json.dumps(identity, sort_keys=True).encode()).hexdigest()[:32],
+        "statusAtMs": stamp, "remoteSupported": bool(parsed and stamp),
+        "state": "waiting"}
+
+
 def native_control_command(row):
     # 只识别原生 CLI 控制记录；用户引用相同 XML 不能被解释为目标或压缩操作。
     if not native_setting_source(row):
@@ -245,6 +355,44 @@ def real_user(row):
         for part in content)
 
 
+class NativeHistory:
+    """保留原生父子链；回退只改变展示分支，不改写 JSONL 或删除旧分支。"""
+    def __init__(self):
+        self.parents, self.head = {}, None
+        self.cut_before = None
+
+    def observe(self, row):
+        identity = row.get("uuid")
+        if not identity or row.get("isSidechain") or identity in self.parents:
+            return
+        parent = row.get("parentUuid", self.head)
+        if parent and parent not in self.parents:
+            # 旧存档/不完整控制记录的父节点可能缺失；没有完整回退证据时保留原有顺序，不能误删已确认消息。
+            parent = self.head
+        if row.get("subtype") == "compact_boundary":
+            # 压缩边界是上下文变换，历史仍连续；不能把压缩误判为用户回退。
+            logical = row.get("logicalParentUuid")
+            parent = logical if logical in self.parents else self.head
+        self.parents[identity] = parent
+        if row.get("type") in ("user", "assistant", "system", "attachment"):
+            self.head = identity
+            if self.cut_before and real_user(row) and identity != self.cut_before:
+                self.cut_before = None
+
+    def select(self, rows):
+        head = self.parents.get(self.cut_before) if self.cut_before else self.head
+        if not self.parents:
+            return rows
+        active = set()
+        while head and head not in active:
+            active.add(head)
+            head = self.parents.get(head)
+        return [row for row in rows if row.get("uuid") in active]
+
+    def current_head(self):
+        return self.parents.get(self.cut_before) if self.cut_before else self.head
+
+
 def native_turn_finished(messages):
     # 用户要求只有执行中才排队；原生完成、中断后仍可能用 blocked/needs 保存等待用户答复的说明。
     # 只认当前真实用户轮次的结束记录，不按回复文本猜测；后续新输入或工具调用使旧结束记录失效。
@@ -273,6 +421,74 @@ def preview_text_key(value):
     return "".join(value.split())
 
 
+def preview_prompt_key(content):
+    # 用户输入只折叠终端换行与缩进，不去掉 Markdown/标点，也不能用截取前缀或空文字认领回复。
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        text = "\n".join(part["text"] for part in content if isinstance(part, dict)
+                         and part.get("type") == "text" and isinstance(part.get("text"), str))
+    else:
+        return ""
+    return "".join(text.split())
+
+
+_PROGRESS_ACTIONS = ("reading", "writing", "editing", "creating", "deleting", "searching", "running", "executing")
+_PROGRESS_TARGETS = ("file", "files", "folder", "folders", "directory", "directories", "pattern", "patterns",
+                     "search", "searches", "shell command", "shell commands", "command", "commands", "tool", "tools")
+_PROGRESS_ACTION = "(?:" + "|".join(_PROGRESS_ACTIONS) + ")"
+_PROGRESS_TARGET = "(?:" + "|".join(sorted(_PROGRESS_TARGETS, key=len, reverse=True)) + ")"
+_PROGRESS_CLAUSE = rf"{_PROGRESS_ACTION}\s+\d+\s+{_PROGRESS_TARGET}"
+_PROGRESS_SEPARATOR = r"(?:\s*,\s*|\s+and\s+)"
+_PROGRESS_LINE = re.compile(
+    rf"\s*{_PROGRESS_CLAUSE}(?:{_PROGRESS_SEPARATOR}{_PROGRESS_CLAUSE})*"
+    r"(?:\s*[·•]\s*(?:\d+(?:\.\d+)?(?:ms|[hms])\s*)+)?(?:\.{3}|…)?\s*", re.IGNORECASE)
+# 只在尚未结束的最后一行延迟不完整的进度前缀，避免 Reading… 分包时先污染正文；
+# 一旦后续文字表明它是普通句子就正常展示，不能全局隐藏以这些单词开头的回复。
+_PROGRESS_ACTION_PREFIX = "(?:" + "|".join(sorted(
+    {word[:end] for word in _PROGRESS_ACTIONS for end in range(1, len(word) + 1)}, key=len, reverse=True)) + ")"
+_PROGRESS_TARGET_PREFIX = "(?:" + "|".join(sorted(
+    {word[:end] for word in _PROGRESS_TARGETS for end in range(1, len(word) + 1)}, key=len, reverse=True)) + ")"
+_PROGRESS_PARTIAL_CLAUSE = rf"(?:{_PROGRESS_ACTION_PREFIX}|{_PROGRESS_ACTION}\s+\d*|{_PROGRESS_ACTION}\s+\d+\s+{_PROGRESS_TARGET_PREFIX}?)?"
+_PROGRESS_PARTIAL = re.compile(
+    rf"\s*(?:{_PROGRESS_CLAUSE}{_PROGRESS_SEPARATOR})*{_PROGRESS_PARTIAL_CLAUSE}\s*|"
+    rf"\s*{_PROGRESS_CLAUSE}(?:{_PROGRESS_SEPARATOR}{_PROGRESS_CLAUSE})*"
+    r"(?:\s+a(?:n(?:d\s*)?)?|\s*,\s*|\s*[·•]\s*[\d.hms\s…]*|\.{1,3}|…)\s*", re.IGNORECASE)
+
+
+def terminal_progress_line(line, partial=False):
+    # 工具进度可组合多个动作；只匹配完整进度语法，正式原生正文始终保持原文。
+    # 识别前合并空白，避免终端长缩进在不完整语法分支中反复回溯；不改写实际展示文本。
+    line = " ".join(line.split())
+    return _PROGRESS_LINE.fullmatch(line) is not None or (
+        partial and bool(line) and _PROGRESS_PARTIAL.fullmatch(line) is not None)
+
+
+def terminal_reply_region(lines, prompt, occurrences):
+    if not prompt:
+        # 纯图片或被终端折叠的输入没有可核对文字时，等待原生历史；不能借用上一条输入框。
+        return []
+    anchors = [index for index, line in enumerate(lines) if line.startswith("❯ ")]
+    matches = []
+    for position, anchor in enumerate(anchors):
+        end = anchors[position + 1] if position + 1 < len(anchors) else len(lines)
+        prompt_end = next((index for index in range(anchor + 1, end)
+                           if re.match(r"^● |^[✻✽✶✢·*]\s|^[─╌]{8}|^\s*ctrl\+", lines[index])), end)
+        visible = "\n".join([lines[anchor][2:]] + lines[anchor + 1:prompt_end])
+        if preview_prompt_key(visible) == prompt:
+            matches.append((prompt_end, end))
+    # 重复输入必须在当前画面中出现到同一原生序次，不能把旧画面回复绑定到新 UUID。
+    # 终端尾部被截断、序次无法确认时仅停用临时预览，不影响发送、工具或正式历史。
+    if len(matches) < occurrences:
+        return []
+    start, end = matches[-1]
+    marker = next((index for index in range(end - 1, start - 1, -1)
+                   if lines[index].startswith("● ")), None)
+    if marker is None:
+        return []
+    return [lines[marker][2:]] + [line[2:] if line.startswith("  ") else line for line in lines[marker + 1:end]]
+
+
 class NativeSubagents:
     """只在列表/详情读取时观察原生子代理文件，不进入主会话的发送、250ms 轮询或权限处理。"""
     def __init__(self, root, native_id):
@@ -296,15 +512,16 @@ class NativeSubagents:
         if not path.resolve().is_relative_to(self.projects):
             raise RuntimeError("原生子代理记录不在所属会话目录内")
         stat = path.stat()
-        cached = self.logs.setdefault(str(path), {"offset": 0, "rows": [], "seen": set(), "signature": None})
+        cached = self.logs.setdefault(str(path), {"offset": 0, "rows": [], "seen": set(),
+                                                 "signature": None, "history": NativeHistory()})
         identity = (stat.st_dev, stat.st_ino)
         signature = (identity, stat.st_size, stat.st_mtime_ns)
         previous = cached["signature"]
         if previous and (previous[0] != identity or stat.st_size < cached["offset"]
                          or previous[1] == stat.st_size and previous[2] != stat.st_mtime_ns):
-            cached.update(offset=0, rows=[], seen=set())
+            cached.update(offset=0, rows=[], seen=set(), history=NativeHistory())
         if signature == previous:
-            return cached["rows"]
+            return cached["rows"] if agent_id else cached["history"].select(cached["rows"])
         with path.open("rb") as stream:
             stream.seek(cached["offset"])
             while True:
@@ -318,6 +535,8 @@ class NativeSubagents:
                     row = json.loads(line)
                 except ValueError:
                     continue
+                if isinstance(row, dict) and not agent_id:
+                    cached["history"].observe(row)
                 if (not isinstance(row, dict) or not row.get("uuid")
                         or row.get("type") not in ("user", "assistant", "system")
                         or row.get("sessionId", self.native_id) != self.native_id
@@ -357,7 +576,7 @@ class NativeSubagents:
                 cached["seen"].add(row["uuid"])
                 cached["rows"].append(value)
         cached["signature"] = signature
-        return cached["rows"]
+        return cached["rows"] if agent_id else cached["history"].select(cached["rows"])
 
     def collect(self, requested=None, include_messages=False):
         if requested is not None and not self.valid_id(requested):
@@ -383,6 +602,20 @@ class NativeSubagents:
             resumed_id = row.get("toolUseResult", {}).get("resumedAgentId")
             if self.valid_id(resumed_id):
                 resumes[resumed_id] = row["timestampMs"]
+        # 原生日志保留被回退的分支及其文件；仅排除明确属于失效调用的子代理，不删除磁盘记录。
+        all_rows = self.logs[str(parent)]["rows"]
+        discarded_calls = {
+            part["id"] for row in all_rows if isinstance(row.get("message", {}).get("content"), list)
+            for part in row["message"]["content"]
+            if isinstance(part, dict) and part.get("type") == "tool_use"
+            and part.get("name") in ("Agent", "Task") and part.get("id") not in calls
+        }
+        discarded_agents = {
+            row.get("toolUseResult", {}).get("agentId")
+            for row in all_rows if isinstance(row.get("message", {}).get("content"), list)
+            and any(part.get("type") == "tool_result" and part.get("tool_use_id") in discarded_calls
+                    for part in row["message"]["content"] if isinstance(part, dict))
+        }
         identities = set(agents)
         for path in directory.glob("agent-*"):
             match = re.fullmatch(r"agent-([A-Za-z0-9_-]{1,64})\.(?:jsonl|meta\.json)", path.name)
@@ -407,6 +640,9 @@ class NativeSubagents:
                     metadata = {}
             native = agents.get(identity, {})
             tool_id = metadata.get("toolUseId") or native.get("toolUseId", "")
+            if tool_id in discarded_calls or identity in discarded_agents:
+                discarded_agents.add(identity)
+                continue
             call = calls.get(tool_id, {})
             task = call.get("input", {})
             path = directory / f"agent-{identity}.jsonl"
@@ -482,7 +718,12 @@ class NativeSubagents:
             if include_messages:
                 entry["messages"] = rows
             result.append(entry)
-        return result
+        while True:
+            removed = {row["nativeId"] for row in result if row.get("parentAgentId") in discarded_agents}
+            if removed.issubset(discarded_agents):
+                break
+            discarded_agents.update(removed)
+        return [row for row in result if row["nativeId"] not in discarded_agents]
 
 
 def native_json(path):
@@ -601,6 +842,8 @@ class NativeDiscovery:
                             if row.get("type") == "custom-title" and isinstance(row.get("customTitle"), str):
                                 cached["customTitle"] = " ".join(row["customTitle"].split())[:120]
                             if real_user(row):
+                                if "parentUuid" in row and row["parentUuid"] is None:
+                                    cached["title"] = ""
                                 cached["real"] = True
                                 if not cached["title"]:
                                     content = row.get("message", {}).get("content", row.get("attachment", {}).get("prompt", ""))
@@ -674,6 +917,9 @@ class NativeDiscovery:
                                               "endedAtMs", "sessionStatus", "sessionStatusAtMs")}
         if job.get("sessionStatus") == "busy":
             status.update(tempo="active", state="working", endedAtMs=None)
+        elif job.get("sessionStatus") == "waiting":
+            # 新的原生确认框优先于旧轮次 done；等待确认不能变成空闲，也不能伪装执行中触发网页排队。
+            status.update(tempo="blocked", state="blocked", endedAtMs=None)
         elif not job or job.get("state") in ("done", "stopped", "failed", "ended") or job.get("outcome"):
             status["tempo"] = "idle"
         elif status.get("tempo") in ("active", "blocked") and messages is not None and native_turn_finished(messages):
@@ -720,11 +966,17 @@ class NativeDiscovery:
             reader.compaction = {**previous_compaction, "state": "unknown"}
         reader.restore_compaction_events(request.get("native_control") or {})
         reader.model = request.get("model", "")
+        reader.restore_settings(request.get("native_control") or {})
         reader.read_messages()
         row = self.rows[native]
+        reader.dialog = native_dialog(row["nativeStatus"], "", native)
         return {"type": "shared_snapshot", "native_id": native, "job_id": row["jobId"],
                 "native_status": self.status(row["nativeStatus"], reader.messages), "messages": reader.messages,
-                "clients": reader.clients, "pending": reader.pending, "requests": {},
+                "history_head": reader.history.current_head(),
+                "retired_usage": reader.retired_usage,
+                "clients": reader.clients, "pending": reader.pending,
+                "requests": {reader.dialog["id"]: {"subtype": "native_dialog", "dialog": reader.dialog}}
+                if reader.dialog else {},
                 "context_configuration": reader.context_configuration(), "updated_at": row["updatedAt"],
                 "native_control": reader.control_projection()}
 
@@ -744,6 +996,9 @@ class NativeSession:
         self.model = ""
         self.effort = ""
         self.messages = []
+        self.all_messages = []
+        self.history = NativeHistory()
+        self.retired_usage = []
         self.image_inputs = {}
         self.clients = {}
         self.pending = []
@@ -763,6 +1018,8 @@ class NativeSession:
         self.preview_user = ""
         self.preview_basis = ""
         self.preview_context_cache = None
+        self.preview_prompt_cache = None
+        self.preview_dirty = False
         self.delivery_started = False
         self.preview = ""
         self.preview_emitted = ""
@@ -780,6 +1037,12 @@ class NativeSession:
         self.compaction_events = {}
         self.compaction_event_id = ""
         self.subagents = None
+        self.setting_changes = {}
+        self.actual_settings = {}
+        self.setting_evidence_at = {}
+        self.setting_catalog = []
+        self.dialog = None
+        self.answered_dialog = ""
 
     def control_projection(self):
         current = self.compaction_events.get(self.compaction_event_id)
@@ -789,7 +1052,134 @@ class NativeSession:
         return {"goal": self.goal, "goalRevision": self.goal_revision, "goalNotice": self.goal_notice,
                 "compaction": self.compaction, "commands": self.native_commands,
                 "capabilities": self.native_capabilities, "compactionEvents": list(self.compaction_events.values()),
-                "compactionEventId": self.compaction_event_id}
+                "compactionEventId": self.compaction_event_id,
+                "settings": self.settings_projection(), "dialog": self.dialog}
+
+    def settings_projection(self):
+        return {**self.actual_settings, "changes": self.setting_changes}
+
+    def restore_settings(self, control):
+        settings = control.get("settings") or {}
+        for name in ("model", "effort"):
+            if isinstance(settings.get(name), str):
+                self.actual_settings[name] = settings[name]
+            change = (settings.get("changes") or {}).get(name)
+            if isinstance(change, dict) and change.get("id"):
+                self.setting_changes[name] = dict(change)
+
+    def resolve_setting_label(self, name, label):
+        if name == "effort":
+            value = label.lower().removesuffix(" effort")
+            return "" if value == "auto" else value if value in ("low", "medium", "high", "xhigh", "max") else None
+        for model in self.setting_catalog:
+            if label in (model.get("value"), model.get("resolvedModel"), model.get("displayName")):
+                return model["value"]
+        return None
+
+    def observe_used_setting(self, name, actual, row):
+        at = native_time(row.get("timestamp"))
+        if at < self.setting_evidence_at.get(name, 0):
+            return
+        self.actual_settings[name] = actual
+        self.setting_evidence_at[name] = at
+        change = self.setting_changes.get(name) or {}
+        if change.get("state") not in ("pending", "confirmation", "confirming") or at < change.get("issuedAt", 0):
+            return
+        def normalize(value):
+            resolved = self.resolve_setting_label(name, value)
+            return value if resolved is None else resolved
+        if normalize(actual) == normalize(change["requested"]):
+            state = "applied"
+        elif (change.get("dialogId") and at >= change.get("dialogAtMs", 0)
+              and self.job.get("sessionStatus") != "waiting"
+              and normalize(actual) == normalize(change.get("previous", ""))):
+            # CLI 的拒绝结果可能不写 JSONL；确认框之后的新请求实际使用原模型，也是保留原设置的证据。
+            state = "rejected"
+        else:
+            return
+        change.update(state=state, actual=actual, resultId=row["uuid"])
+        setattr(self, name, actual)
+
+    def observe_setting_record(self, row):
+        output = row.get("nativeSettingOutput")
+        at = native_time(row.get("timestamp"))
+        if output:
+            name, requested = output["name"], output["value"]
+            if name == "effort" and requested == "auto":
+                requested = ""
+            text = re.sub(r"\x1b\[[0-9;]*m", "", row["message"]["content"])
+            pattern = (r"<local-command-stdout>(Set model to|Kept model as|Current model:)\s+(?:`([^`]+)`|([^<\n]+))"
+                       if name == "model" else
+                       r"<local-command-stdout>(Set effort level to|Kept effort level as|Current effort level:)\s+(?:`([^`]+)`|([^<\n]+))")
+            match = re.search(pattern, text)
+            if not match:
+                return
+            state = "rejected" if match[1].startswith("Kept ") else "applied"
+            change = self.setting_changes.get(name) or {}
+            if at < max(self.setting_evidence_at.get(name, 0), change.get("issuedAt", 0)):
+                return
+            label = (match[2] or match[3]).strip()
+            actual = requested if state == "applied" and requested else self.resolve_setting_label(name, label)
+            if actual is None and state == "rejected":
+                actual = change.get("previous")
+            if actual is None:
+                return
+            matching = change.get("requested") == requested or change.get("source") == "native"
+            if not matching and change.get("state") in ("pending", "confirmation", "confirming"):
+                # 先前的命令回显不能覆盖后来明确选择的设置；仍更新实际值，后一个命令继续由 CLI 排队。
+                change["previous"] = actual
+            else:
+                self.setting_changes[name] = {
+                    "id": change["id"] if matching else output["commandId"], "requested": requested,
+                    "previous": change.get("previous", self.actual_settings.get(name, "")),
+                    "state": state, "actual": actual, "resultId": row["uuid"], "issuedAt": at,
+                    "dialogId": change.get("dialogId") if matching else None}
+        elif row.get("type") == "assistant" and row.get("isApiErrorMessage") is not True:
+            model = row.get("requestedModel") or row.get("message", {}).get("model")
+            if model and model != "<synthetic>":
+                self.observe_used_setting("model", model, row)
+            effort = row.get("effort")
+            if isinstance(effort, str):
+                self.observe_used_setting("effort", effort, row)
+            return
+        else:
+            return
+        self.actual_settings[name] = actual
+        self.setting_evidence_at[name] = at
+        setattr(self, name, actual)
+
+    def observe_dialog(self, job):
+        dialog = native_dialog(job, self.screen.text(), self.native_id)
+        if dialog and (dialog["id"] == self.answered_dialog or any(
+                change.get("dialogId") == dialog["id"] and change.get("state") == "confirming"
+                for change in self.setting_changes.values())):
+            dialog["state"] = "submitted"
+        self.dialog = dialog
+        if job.get("sessionStatus") in ("busy", "idle"):
+            for name, change in self.setting_changes.items():
+                if change.get("state") == "confirming" and change.get("decision") == "decline":
+                    # 原生取消不一定落盘：显式拒绝且确认框确已关闭后恢复原值，不能只凭按键写入宣告完成。
+                    actual = self.actual_settings.get(name, change.get("previous", ""))
+                    change.update(state="rejected", actual=actual)
+                    setattr(self, name, actual)
+        if not dialog or dialog["kind"] not in ("model", "effort"):
+            return
+        name = dialog["kind"]
+        change = self.setting_changes.get(name)
+        target = self.resolve_setting_label(name, dialog["target"])
+        if change and change.get("dialogId") == dialog["id"] and change["state"] in ("applied", "rejected"):
+            self.dialog = None
+            return
+        if change and target and change["requested"] != target and change["state"] in ("pending", "confirmation", "confirming"):
+            return
+        if not change or change["state"] in ("applied", "rejected"):
+            change = {"id": dialog["id"], "requested": target or dialog["target"],
+                      "previous": self.actual_settings.get(name, getattr(self, name)),
+                      "issuedAt": dialog["statusAtMs"] or 0, "source": "native"}
+            self.setting_changes[name] = change
+        change.update(state="confirming" if dialog["state"] == "submitted" else "confirmation",
+                      targetLabel=dialog["target"], dialogId=dialog["id"],
+                      dialogAtMs=dialog["statusAtMs"] or 0)
 
     def restore_compaction_events(self, control):
         # 正文状态行属于已观察到的原生活动；重连和下一条命令不能删除已确认的中断、失败记录。
@@ -1192,7 +1582,7 @@ class NativeSession:
         except (OSError, ValueError, KeyError, TypeError) as failure:
             raise NativeError("ERESUMECHECK", "无法只读确认原生会话未被占用，未恢复、创建副本或提交消息") from failure
 
-    def start(self, text):
+    def start(self, text=None):
         if self.native_id:
             self.check_history_resume()
         # 网页与 CLI 必须操作所选项目的同一目录；仅关闭后台默认的 worktree 隔离，不更改权限或提示。
@@ -1206,7 +1596,8 @@ class NativeSession:
         # 恢复历史时不附加新名称，保留原生自定义标题；新会话仍沿用既有命名。
         if not self.native_id:
             arguments += ["--name", f"elves-{uuid.uuid4().hex[:10]}"]
-        arguments += ["--", text]
+        if text is not None:
+            arguments += ["--", text]
         result = subprocess.run(arguments, stdin=subprocess.DEVNULL,
                                 capture_output=True, timeout=60)
         output = (result.stdout + result.stderr).decode("utf-8", "replace")
@@ -1271,14 +1662,16 @@ class NativeSession:
         # 查询期间 CLI 可能写入完成或新输入；准入和引导都使用这次查询后的原生历史。
         self.read_messages()
         status = NativeDiscovery.status(live or {}, self.messages)
-        if self.compaction.get("state") == "running":
+        if self.compaction.get("state") == "running" and status.get("sessionStatus") != "waiting":
             status.update(tempo="active", state="compacting")
         active_at_admission = status.get("tempo") == "active"
         # 自动续发必须以实时原生状态为准；CLI 恰好开始新任务时继续等，不能抢先把下一条塞入原生队列。
         if request.get("idle_only") and live:
-            if active_at_admission or status.get("tempo") == "blocked" and status.get("needs"):
+            if active_at_admission or status.get("tempo") == "blocked" and status.get("needs") \
+                    and status.get("needs") != "dialog open":
                 self.poll(force=True)
                 return {"deferred": True, "accepted": False}
+        # 原生弹窗等待不等于执行中；普通消息仍直接送入 CLI，由原生保留到确认完成，不退回网页队列。
         # 引导也只进入原生 next 队列；已有审批继续由 CLI 处理，不借此替用户批准、拒绝或取消工具。
         text = self.prepare_text(content, client_id)
         if self.native_id and self.short and (not live or live.get("outcome")):
@@ -1286,7 +1679,8 @@ class NativeSession:
         after = len(self.messages)
         intent = {"id": client_id, "clientUserMessageId": client_id,
                   "text": "\n".join(p.get("text", "") for p in content if p.get("type") == "text"),
-                  "content": content, "_nativeText": text, "_after": after, "deliveryConfirmed": False}
+                  "content": content, "_nativeText": text, "_after": after,
+                  "_afterOffset": self.log_offset, "deliveryConfirmed": False}
         # 只有选中的远程消息才到达这里；先报告派发意图，断线后可按原生记录核对，不能盲目重发。
         self.pending.append(intent)
         emit({"type": "shared_delivery_intent", "intent": intent})
@@ -1307,7 +1701,224 @@ class NativeSession:
         # accepted 仅代表原生入口接收，正文仍由随后关联到的原生用户消息确认，不能伪造执行完成。
         return {"nativeId": self.native_id, "jobId": self.short, "accepted": True}
 
-    def terminal_input(self, data):
+    def edit_message(self, request):
+        # 用户要求只有原生会话已结束执行才可编辑；不发送停止、不分叉、不改写原生日志或文件。
+        self.delivery_started = False
+        self.read_messages()
+        target = next((row for row in self.messages if row.get("uuid") == request.get("native_user_id")
+                       and row.get("nativeEditable") is True), None)
+        if target is None or request.get("history_head") != self.history.current_head():
+            raise NativeError("ESTALE", "原生历史已变化，请重新打开要编辑的消息")
+        prompt = request.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > 128 * 1024:
+            raise NativeError("EINVAL", "修改后的消息不能为空或超过 128 KiB")
+        content = self.edit_content(target, prompt)
+        live = self.lookup()
+        if live:
+            self.bind(live)
+        status = NativeDiscovery.status(live or {}, self.messages)
+        if (status.get("tempo") != "idle" or status.get("needs")
+                or live and live.get("sessionStatus") not in (None, "idle")
+                or self.compaction.get("state") == "running"):
+            raise NativeError("EBUSY", "请等待 Claude 结束当前执行后再编辑历史消息")
+        if not live or live.get("outcome"):
+            if self.short:
+                self.restore_job()
+            else:
+                self.start()
+        live = self.lookup()
+        if not live or live.get("outcome"):
+            raise NativeError("ESESSION", "原生后台尚未就绪，未提交历史编辑")
+        self.bind(live)
+        self.read_messages()
+        if request.get("history_head") != self.history.current_head():
+            raise NativeError("ESTALE", "原生历史已变化，未提交编辑")
+        choices = [row for row in self.messages if row.get("nativeEditable") is True]
+        index = next(index for index, row in enumerate(choices) if row["uuid"] == target["uuid"])
+        deferred = []
+        restored = False
+        menu_opened = False
+
+        def terminal_text():
+            while self.incoming is not None:
+                try:
+                    frame = self.incoming.get_nowait()
+                except queue.Empty:
+                    break
+                if isinstance(frame, dict) and "_stream" in frame:
+                    self.screen.feed(frame["_stream"])
+                else:
+                    deferred.append(frame)
+            return "\n".join(self.screen.text())
+
+        def screen_when(predicate, timeout=5):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                text = terminal_text()
+                if predicate(text):
+                    return text
+                time.sleep(0.04)
+            raise RuntimeError("无法确认原生回退界面，未自动重复操作")
+
+        def selected(text):
+            matches = re.findall(r"(?m)^\s*❯\s+(.+)$", text)
+            return matches[-1].strip() if matches else ""
+
+        def modal(text):
+            # 仅解析最后一个原生回退面板，不能把聊天正文里引用的编号选项当成“只恢复对话”按钮。
+            headings = list(re.finditer(r"(?m)^\s*Rewind\s*$", text))
+            return text[headings[-1].end():] if headings else ""
+
+        def input_area(text):
+            lines = text.splitlines()
+            borders = [index for index, line in enumerate(lines) if re.match(r"^[─╌]{8}", line)]
+            if len(borders) < 2:
+                return None
+            area = lines[borders[-2] + 1:borders[-1]]
+            return area if any(line.startswith("❯") for line in area) else None
+
+        original = target.get("message", {}).get("content", "")
+        original_text = original if isinstance(original, str) else "\n".join(
+            part.get("text", "") for part in original if part.get("type") == "text")
+        upload_lines = {"@" + path for path in target.get("remote_upload_paths", [])}
+        original_key = preview_prompt_key("\n".join(
+            line for line in original_text.splitlines() if line not in upload_lines))
+
+        def matches_prompt(value):
+            # 原生列表按终端宽度省略长问题；序次仍由完整原生 UUID 列表确定，只折叠末尾显示省略号。
+            key = preview_prompt_key(value.removesuffix("…").removesuffix("..."))
+            return bool(key and (original_key.startswith(key) or key.startswith(original_key))) \
+                if original_key else bool(re.search(r"image|图片", value, re.I))
+
+        try:
+            # 原生 /rewind 同时更新已连接终端与驻留上下文；先核对选择，再只确认 Restore conversation。
+            live = self.lookup()
+            fresh = NativeDiscovery.status(live or {}, self.messages)
+            if (fresh.get("tempo") != "idle" or fresh.get("needs")
+                    or not live or live.get("sessionStatus") not in (None, "idle")):
+                raise NativeError("EBUSY", "原生状态已变化，未提交历史编辑")
+            self.reply("/rewind", next_turn=False)
+            screen_when(lambda text: "Restore the code and/or conversation" in modal(text)
+                        and selected(modal(text)) == "(current)")
+            menu_opened = True
+            self.terminal_input(b"\x1b[A" * (len(choices) - index))
+            screen_when(lambda text: "Enter to continue" in modal(text) and matches_prompt(selected(modal(text))))
+            self.terminal_input(b"\r")
+            confirmation = modal(screen_when(lambda text: "Confirm you want to restore" in modal(text)
+                                       and re.search(r"(?m)^\s*(?:❯\s*)?\d+\.\s+Restore conversation\s*$", modal(text))))
+            quoted = "\n".join(re.sub(r"^\s*│\s?", "", line)
+                               for line in confirmation.splitlines() if re.match(r"^\s*│", line))
+            if original_key and original_key[:40] not in preview_prompt_key(quoted):
+                raise RuntimeError("原生回退目标未能核对，未确认回退")
+            target_option = re.search(r"(?m)^\s*(?:❯\s*)?(\d+)\.\s+Restore conversation\s*$", confirmation)
+            current_option = re.search(r"(?m)^\s*❯\s+(\d+)\.", confirmation)
+            if not current_option:
+                raise RuntimeError("无法核对原生回退选项，未确认回退")
+            distance = int(target_option[1]) - int(current_option[1])
+            # 此后原生可能已改变内存上下文；失败保留未知回执，不能当成未提交或自动重发。
+            self.delivery_started = True
+            self.terminal_input((b"\x1b[B" if distance >= 0 else b"\x1b[A") * abs(distance) + b"\r")
+            screen_when(lambda text: input_area(text) is not None
+                        and (self.lookup() or {}).get("sessionStatus") == "idle")
+            restored = True
+            self.history.cut_before = target["uuid"]
+            self.messages = self.history.select(self.all_messages)
+            self.preview = self.preview_emitted = self.preview_user = self.preview_basis = ""
+            self.preview_context_cache = self.preview_prompt_cache = None
+            # 原生会回填旧问题；Ctrl+U 清当前行、退格合并前一行，原文换行数+2覆盖首末空行，之后必须确认输入为空。
+            live = self.lookup()
+            if NativeDiscovery.status(live or {}, self.messages).get("tempo") != "idle":
+                raise RuntimeError("历史已回退，但原生状态已变化；修改消息待核对")
+            self.terminal_input(b"\x15\x7f" * (original_text.count("\n") + 2))
+            screen_when(lambda text: input_area(text) is not None
+                        and all(not line.removeprefix("❯").strip() for line in input_area(text)))
+            if request.get("model") != self.model:
+                self.change_setting("model", request.get("model", self.model))
+            if request.get("effort") != self.effort:
+                self.change_setting("effort", request.get("effort", self.effort))
+            result = self.send({"client_id": request["client_id"], "content": content, "idle_only": True})
+            if result.get("deferred"):
+                raise RuntimeError("历史已回退，但原生状态已变化；新消息待核对，未进入队列")
+            return {**result, "reverted": True}
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            if restored or self.delivery_started:
+                self.delivery_started = True
+                self.poll(force=True)
+            elif menu_opened:
+                # 尚未确认回退时仅退出本次打开的菜单，不中断任务。
+                try:
+                    for _ in range(2):
+                        live = self.lookup()
+                        if not live or live.get("sessionStatus") != "waiting" or not modal(terminal_text()):
+                            break
+                        self.terminal_input(b"\x1b")
+                except (OSError, RuntimeError):
+                    pass
+            raise
+        finally:
+            for frame in deferred:
+                self.incoming.put(frame)
+
+    def edit_content(self, target, prompt):
+        # 编辑文字保留原图；图片从原生消息/已读取附件还原，继续经现有上传入口进入同一 CLI。
+        content, total = [{"type": "text", "text": prompt}], 0
+        originals = target.get("web_images", [])
+        if originals:
+            # 网页原图清单是完整来源；不再叠加 CLI 转录的同一批图片，用户主动重复添加的原图仍保留。
+            blocks = [{"type": "image", "url": image["url"]} for image in originals]
+        else:
+            blocks = list(target.get("message", {}).get("content", [])) \
+                if isinstance(target.get("message", {}).get("content"), list) else []
+            start = self.messages.index(target) + 1
+            for row in self.messages[start:]:
+                if row.get("type") != "attachment":
+                    break
+                blocks.extend(row.get("message", {}).get("content", []))
+        for block in blocks:
+            if not isinstance(block, dict) or block.get("type") != "image":
+                continue
+            image = block.get("source", {})
+            url = block.get("url", "")
+            match = re.fullmatch(r"data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=\r\n]+)", url)
+            if match:
+                image = {"type": "base64", "media_type": match[1], "data": match[2]}
+            if (not isinstance(image, dict) or image.get("type") != "base64"
+                    or image.get("media_type") not in ("image/png", "image/jpeg", "image/gif", "image/webp")):
+                raise NativeError("EIMAGE", "原消息图片暂不可恢复，未回退历史")
+            try:
+                size = len(base64.b64decode(image.get("data"), validate=True))
+            except (ValueError, TypeError):
+                raise NativeError("EIMAGE", "原消息图片内容暂不可恢复，未回退历史") from None
+            total += size
+            # 与 remote_access.rs 的 8 张、单图 5 MiB、合计 12 MiB 同步；附件无法完整保留时不回退。
+            if len(content) > 8 or size > 5 * 1024 * 1024 or total > 12 * 1024 * 1024:
+                raise NativeError("EIMAGE", "原消息图片超过远程输入限制，请在原版 CLI 编辑；未回退历史")
+            content.append({"type": "image", "source": image})
+        return content
+
+    def verify_dialog(self, expected):
+        # 回答前读取同一后台的新终端快照，再核对原生等待代次；迟到点击不能落入新弹窗或聊天输入框。
+        screen = Screen()
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.settimeout(2)
+            connection.connect(self.address)
+            connection.sendall(json.dumps({"proto": 1, "op": "subscribe", "short": self.short,
+                                           "tail": 200}).encode() + b"\n")
+            with connection.makefile("rb") as stream:
+                for _ in range(4):
+                    line = stream.readline(1024 * 1024)
+                    if not line.endswith(b"\n"):
+                        break
+                    frame = json.loads(line)
+                    if frame.get("type") == "snapshot":
+                        screen.feed("".join(frame.get("streamTail", [])))
+                        current = native_dialog(self.lookup() or {}, screen.text(), self.native_id)
+                        if current and current["id"] == expected["id"] and current["remoteSupported"]:
+                            return
+                        break
+        raise NativeError("EDIALOGCHANGED", "原生确认界面已变化，请重新读取；未发送确认按键")
+
+    def terminal_input(self, data, dialog=None):
         job = self.lookup()
         if not job or job.get("outcome"):
             raise RuntimeError("原生 Claude 会话已停止")
@@ -1332,6 +1943,13 @@ class NativeSession:
                 response.extend(chunk)
             if not json.loads(response).get("ok"):
                 raise RuntimeError("无法连接原版 Claude 的交互界面")
+            if dialog:
+                self.verify_dialog(dialog)
+                # 按键一旦开始写入就不自动重试；同一确认即使回执丢失，也不能再次执行。
+                self.answered_dialog = dialog["id"]
+                change = self.setting_changes.get(dialog["kind"])
+                if change and change.get("dialogId") == dialog["id"]:
+                    change["state"] = "confirming"
             # 仅显式停止/审批使用原生按键；普通消息和引导都走原生消息入口。
             connection.sendall(data)
             time.sleep(0.15)
@@ -1339,6 +1957,9 @@ class NativeSession:
 
     def change_setting(self, name, value):
         old = getattr(self, name)
+        pending = self.setting_changes.get(name) or {}
+        if value == pending.get("requested") and pending.get("state") in ("pending", "confirmation", "confirming"):
+            return
         # 用户选定 Max 后必须实际应用到同一原生会话；从默认空值切换也需要发送原生命令。
         if self.native_id and value != old:
             job = self.lookup()
@@ -1346,7 +1967,17 @@ class NativeSession:
                 command = "model" if name == "model" else "effort"
                 # 模型设置也由原版命令入口决定立即应用还是排队，不增加网页忙碌锁。
                 self.short = job["short"]
+                self.read_messages()
+                previous = self.actual_settings.get(name, old)
+                issued_at = int(time.time() * 1000)
                 self.reply(f"/{command} {value or 'auto'}", next_turn=False)
+                # 命令受理不是设置生效；仅原生关联回显更新实际值，确认期间保留已收到的消息。
+                self.actual_settings.setdefault(name, previous)
+                self.setting_changes[name] = {"id": str(uuid.uuid4()), "requested": value,
+                    "previous": previous, "state": "pending", "issuedAt": issued_at}
+            else:
+                self.actual_settings[name] = value
+                self.setting_changes.pop(name, None)
         setattr(self, name, value)
 
     def answer(self, frame):
@@ -1357,6 +1988,23 @@ class NativeSession:
         if not request:
             raise RuntimeError("该原生请求已经结束")
         answer = response["response"]
+        if request.get("subtype") == "native_dialog":
+            dialog = request["dialog"]
+            if not dialog["remoteSupported"] or dialog["state"] != "waiting" or request_id == self.answered_dialog:
+                raise NativeError("EDIALOGCHANGED", "该确认已提交或需要在原版 Claude CLI 中处理")
+            if answer.get("behavior") not in ("allow", "deny"):
+                raise NativeError("EINVAL", "请选择确认切换或保留原设置")
+            change = self.setting_changes.get(dialog["kind"])
+            if change and change.get("dialogId") == dialog["id"]:
+                change["decision"] = "accept" if answer["behavior"] == "allow" else "decline"
+            try:
+                self.terminal_input(b"1" if answer["behavior"] == "allow" else b"2", dialog=dialog)
+                # 确认只操作原弹窗，不再发送原消息，也不伪造模型已经切换成功。
+                self.answered_dialog = request_id
+            finally:
+                if self.answered_dialog == request_id:
+                    self.poll(force=True)
+            return
         if request["tool_name"] == "AskUserQuestion":
             values = answer.get("updatedInput", {}).get("answers", {})
             if len(request["input"].get("questions", [])) != 1:
@@ -1422,6 +2070,7 @@ class NativeSession:
                 self.log_path = paths[0]
         if not self.log_path or not self.log_path.exists():
             return
+        previous_offset = self.log_offset
         stat = self.log_path.stat()
         identity = (stat.st_dev, stat.st_ino)
         # 用户要求重连补齐真实历史；原生日志替换或重写后不能沿用旧偏移，同一大小的新文件也须重新投影。
@@ -1429,7 +2078,11 @@ class NativeSession:
                 or stat.st_size < self.log_offset
                 or self.log_mtime is not None and stat.st_size == self.log_offset
                 and stat.st_mtime_ns != self.log_mtime):
-            self.messages, self.log_offset, self.seen = [], 0, set()
+            self.messages, self.all_messages, self.log_offset, self.seen = [], [], 0, set()
+            self.history = NativeHistory()
+            self.retired_usage = []
+            previous_offset = -1
+            self.preview_prompt_cache = None
             self.native_context = {}
             self.goal, self.goal_revision = None, ""
             self.goal_notice = ""
@@ -1455,6 +2108,7 @@ class NativeSession:
                     continue
                 if not isinstance(row, dict):
                     continue
+                self.history.observe(row)
                 if not row.get("isSidechain"):
                     self.observe_native_context(row)
                 if not row.get("uuid") or row.get("isSidechain"):
@@ -1464,6 +2118,7 @@ class NativeSession:
                 if row["uuid"] in self.seen:
                     continue
                 self.observe_control_record(row)
+                native_editable = row.get("type") == "user" and real_user(row)
                 notification = native_agent_notification(row)
                 if notification:
                     row["nativeAgentNotification"] = notification
@@ -1522,15 +2177,24 @@ class NativeSession:
                         # 必须能关联到同一原生命令；孤立回显或用户引用不能按文本前缀误删。
                         row["nativeSettingOutput"] = {"commandId": command["uuid"],
                                                       **command["nativeSettingCommand"]}
+                self.observe_setting_record(row)
+                skill = native_skill_command(row)
+                if skill:
+                    row["nativeSkillCommand"] = skill
                 self.seen.add(row["uuid"])
-                self.messages.append({key: row[key] for key in
+                # 原生回退菜单定位真实 user 节点；吸收在工具轮次中的 queued_command 仍保留正文，不伪造独立回退点。
+                row["nativeEditable"] = native_editable and not row.get("nativeControlCommand")
+                row["nativeOffset"] = position
+                self.all_messages.append({key: row[key] for key in
                                       ("type", "uuid", "parentUuid", "interruptedMessageId", "timestamp", "message", "subtype", "isMeta",
                                        "isCompactSummary", "isVisibleInTranscriptOnly",
                                        "isApiErrorMessage", "isUnmetered", "apiBlockIndex", "durationMs",
                                        "requestedModel", "effort", "filename", "remote_upload",
                                        "nativeSettingCommand", "nativeSettingOutput", "nativeControlCommand",
-                                       "nativeControlOutput", "attachment", "compactMetadata")
+                                       "nativeControlOutput", "attachment", "compactMetadata", "nativeEditable", "nativeOffset",
+                                       "nativeSkillCommand", "promptId", "turnCompanion")
                                       if key in row})
+                self.messages = self.all_messages
                 if notification:
                     self.messages[-1]["nativeAgentNotification"] = notification
                 result = row.get("toolUseResult")
@@ -1556,6 +2220,20 @@ class NativeSession:
                     self.messages[-1]["message"] = message
                 if row.get("timestamp"):
                     self.messages[-1]["timestampMs"] = native_time(row["timestamp"])
+        self.messages = self.history.select(self.all_messages)
+        # 只在原生记录变化时核对 Skill 展开，不给每次 250ms 状态轮询增加历史扫描。
+        if self.log_offset != previous_offset and normalize_skill_records(self.messages, self.pending):
+            self.preview_context_cache = self.preview_prompt_cache = None
+        if self.log_offset != previous_offset:
+            # 只在原生日志新增/重写时更新失效分支的数字账本；正文、图片不重复传输，不增加发送前磁盘工作。
+            active = {row["uuid"] for row in self.messages}
+            self.retired_usage = [
+                {"type": "assistant", "uuid": row["uuid"], "timestampMs": row.get("timestampMs"),
+                 "isApiErrorMessage": row.get("isApiErrorMessage"),
+                 "message": {key: row["message"][key] for key in ("id", "model", "usage") if key in row["message"]}}
+                for row in self.all_messages if row["uuid"] not in active
+                and row.get("type") == "assistant" and row.get("message", {}).get("usage")
+            ]
         # 原生 prompt 的 UUID 是原程序生成的；按已受理顺序关联网页 client ID，重连仍保留关联。
         mapped = set(self.clients)
         for index, row in enumerate(self.messages):
@@ -1572,8 +2250,11 @@ class NativeSession:
             else:
                 text = "\n".join(part.get("text", "") for part in content
                                  if part.get("type") == "text")
+            # 回退后当前分支的序号会变小；新增意图用原生追加偏移核对，不能因旧序号漏认新消息或认领旧同文消息。
             match = next((p for p in self.pending
-                          if index >= p.get("_after", 0) and text == p["_nativeText"]), None)
+                          if after_delivery_intent(row, index, p) and (text == p["_nativeText"]
+                          or row.get("nativeSkillCommand", {}).get("accepted")
+                          and text == skill_input_key(p["_nativeText"]))), None)
             if match:
                 self.clients[row["uuid"]] = match["clientUserMessageId"]
                 self.pending.remove(match)
@@ -1593,6 +2274,13 @@ class NativeSession:
         result = None
         if start is not None:
             user, records, known = self.messages[start], [], []
+            prompt = preview_prompt_key(user["message"]["content"])
+            prompt_identity = (self.native_id, self.log_identity, user["uuid"], prompt)
+            if self.preview_prompt_cache is None or self.preview_prompt_cache[0] != prompt_identity:
+                # 历史序次只在切换用户输入或重读日志后计算一次，不在每个流式片段重复扫描长历史。
+                occurrences = sum(real_user(row) and preview_prompt_key(row.get("message", {}).get("content")) == prompt
+                                  for row in self.messages[:start + 1]) if prompt else 0
+                self.preview_prompt_cache = (prompt_identity, occurrences)
             for row in self.messages[start + 1:]:
                 message = row.get("message")
                 if row.get("type") != "assistant" or not isinstance(message, dict):
@@ -1612,50 +2300,38 @@ class NativeSession:
                     known.extend(preview_text_key(text) for text in texts)
             basis = hashlib.sha256(json.dumps([user["uuid"], records], ensure_ascii=False,
                                                separators=(",", ":")).encode("utf-8")).hexdigest()
-            result = (user, basis, known)
+            result = (user, basis, known, prompt, self.preview_prompt_cache[1])
         self.preview_context_cache = (key, result)
         return result
 
     def stream_preview(self, chunk):
         self.screen.feed(chunk)
-        if self.job.get("tempo") != "active" or time.monotonic() - self.preview_at < 0.12:
+        self.preview_dirty = True
+        self.flush_preview()
+
+    def flush_preview(self):
+        if not self.preview_dirty or self.job.get("tempo") != "active" or time.monotonic() - self.preview_at < 0.12:
             return
         context = self.preview_context()
         if context is None:
             return
-        user, basis, known = context
+        self.preview_dirty = False
+        user, basis, known, prompt, occurrences = context
         if self.preview_user != user["uuid"] or self.preview_basis != basis:
             self.preview_user = user["uuid"]
             self.preview_basis = basis
             self.preview = self.preview_emitted = ""
         if native_turn_finished(self.messages):
             return
-        content = user["message"]["content"]
-        prompt = content if isinstance(content, str) else "\n".join(
-            part.get("text", "") for part in content if part.get("type") == "text")
         lines = self.screen.text()
-        anchor = next((index for index in range(len(lines) - 1, -1, -1)
-                       if lines[index].startswith("❯ ") and prompt[:20] in lines[index]), -1)
-        # 无法确认归属的终端片段不能当正文；失去 prompt/回复标记时保留已有预览，等待正式历史接替。
-        if anchor < 0:
-            return
-        end = next((index for index in range(anchor + 1, len(lines))
-                    if lines[index].startswith("❯ ")), len(lines))
-        region = lines[anchor + 1:end]
-        marker = next((index for index in range(len(region) - 1, -1, -1)
-                       if region[index].startswith("● ")), -1)
-        if marker >= 0:
-            region = [region[marker][2:]] + [line[2:] if line.startswith("  ") else line
-                                          for line in region[marker + 1:]]
-        else:
-            return
+        region = terminal_reply_region(lines, prompt, occurrences)
         body = []
-        for line in region:
+        last_line = max((index for index, line in enumerate(region) if line.strip()), default=-1)
+        for index, line in enumerate(region):
             # 用户要求执行进度不能混入回复正文；CLI 的耗时后缀同属状态行，
             # 必须在追加预览前截断，否则后续真实回复会被“仅接受前缀增长”的保护拒绝。
-            if re.match(r"^[✻✽✶✢·*]\s|^[─╌]{8}|^\s*⎿|^\s*ctrl\+|"
-                        r"^\s*Running \d+ (?:shell commands?|tools?)"
-                        r"(?:\s*[·•]\s*(?:\d+(?:\.\d+)?(?:ms|[hms])\s*)+)?(?:\.{3}|…)?\s*$", line):
+            if re.match(r"^[✻✽✶✢·*]\s|^[─╌]{8}|^\s*⎿|^\s*ctrl\+", line) \
+                    or terminal_progress_line(line, partial=index == last_line):
                 break
             body.append(line)
         text = "\n".join(body).strip()
@@ -1663,7 +2339,7 @@ class NativeSession:
         if not text or len(text.encode("utf-8")) > 64 * 1024 or re.match(r"^[A-Z][A-Za-z0-9_]+\(", text):
             return
         compact_text = preview_text_key(text)
-        if not compact_text or compact_text in preview_text_key(prompt) \
+        if not compact_text or compact_text in prompt \
                 or any(value and (compact_text in value or compact_text.startswith(value)) for value in known):
             return
         previous = preview_text_key(self.preview)
@@ -1692,10 +2368,13 @@ class NativeSession:
         # 正常连接与只读发现共用完成状态判断，done 不能因旧 tempo 继续显示执行中。
         status = NativeDiscovery.status(job, self.messages)
         # /compact 是本地原生命令，daemon 可能仍报 idle；只在原生画面明确显示压缩时补充执行状态。
-        if self.compaction.get("state") == "running":
+        if self.compaction.get("state") == "running" and status.get("sessionStatus") != "waiting":
             status.update(tempo="active", state="compacting")
+        self.observe_dialog(job)
         self.requests = {}
-        if status.get("tempo") == "blocked":
+        if self.dialog:
+            self.requests[self.dialog["id"]] = {"subtype": "native_dialog", "dialog": self.dialog}
+        elif status.get("tempo") == "blocked" and job.get("needs") != "dialog open":
             uses = {}
             for row in self.messages:
                 content = row.get("message", {}).get("content", [])
@@ -1715,20 +2394,28 @@ class NativeSession:
         preview = self.preview_context()
         signature = (self.log_identity, self.log_mtime, self.log_offset, json.dumps(status, sort_keys=True),
                      json.dumps(self.pending, sort_keys=True), json.dumps(context, sort_keys=True),
+                     json.dumps(self.requests, sort_keys=True),
                      json.dumps(self.control_projection(), sort_keys=True))
         if force or signature != self.signature:
             self.signature = signature
             emit({"type": "shared_snapshot", "native_id": self.native_id, "job_id": self.short,
                   "native_status": status, "messages": self.messages,
+                  "history_head": self.history.current_head(),
+                  "retired_usage": self.retired_usage,
                   "clients": self.clients, "pending": self.pending, "requests": self.requests,
                   "preview_basis": preview[1] if preview else None,
                   "context_configuration": context, "native_control": self.control_projection()})
+        # 120ms 节流内到达的最后一段必须补发；复用现有 250ms 轮询，不新增线程或读取。
+        # 先发布正式快照，让接收端建立同一轮次/正文基线，再补充仍有效的临时预览。
+        self.flush_preview()
 
     def control(self, request):
         subtype = request.get("subtype")
         if subtype == "initialize":
             self.model = request.get("model", "")
             self.effort = request.get("effort", "")
+            self.setting_catalog = request["catalog"].get("models", [])
+            self.restore_settings(request.get("native_control") or {})
             self.clients = request.get("clients", {})
             self.pending = request.get("pending", [])
             self.native_commands = (request.get("native_control") or {}).get("commands", [])
@@ -1742,6 +2429,8 @@ class NativeSession:
             return {**request["catalog"], "contextConfiguration": self.context_configuration()}
         if subtype == "shared_send":
             return self.send(request)
+        if subtype == "shared_edit_message":
+            return self.edit_message(request)
         if subtype == "shared_native_command":
             return self.native_command(request)
         if subtype == "shared_sync":
@@ -1763,7 +2452,7 @@ class NativeSession:
             self.answer({"response": request["response"]})
         else:
             raise RuntimeError("此原生 Claude 控制操作尚未适配")
-        return {}
+        return {"nativeSettings": self.settings_projection()}
 
 
 def main():
@@ -1815,7 +2504,7 @@ def main():
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as failure:
             # 用户要求接收确认不能倒退为未发送；shared_send 里的后续状态查询也可能返回 NativeError。
             # 只有发送函数明确保留“尚未准入”标记才可判为未投递，已开始或已接收后的错误只能待核对。
-            not_sent = not native.delivery_started if frame["request"].get("subtype") in ("shared_send", "shared_native_command") \
+            not_sent = not native.delivery_started if frame["request"].get("subtype") in ("shared_send", "shared_native_command", "shared_edit_message") \
                 else isinstance(failure, NativeError)
             response = {"subtype": "error", "request_id": request_id, "error": str(failure),
                         "not_sent": not_sent}

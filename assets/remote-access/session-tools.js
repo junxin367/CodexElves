@@ -120,10 +120,11 @@ export function mountSessionTools(options) {
   const { workspace, trigger, getContext, beforeOpen } = options;
   const desktopMedia = window.matchMedia("(min-width:761px)");
   const desktop = () => desktopMedia.matches && !isAndroidContainer() && !options.sidePanel;
-  const tabs = new Map();
+  const contexts = new Map();
   const owner = `workspace-reader-${Math.random().toString(36).slice(2)}`;
   const widthKey = "codexElvesWorkspacePanelWidth";
-  let disposed = false, mobile = null, active = null, sequence = 0, contextKey = "", drag = null;
+  let disposed = false, mobile = null, sequence = 0, contextKey = "", authorizationKey = "", drag = null;
+  let currentContext = null, displayedContext = null;
   // 默认 480px 便于并排阅读；仅用户拖动或键盘调整才保存，窗口临时变窄不能覆盖偏好。
   let preferredWidth = 480;
   try {
@@ -131,6 +132,7 @@ export function mountSessionTools(options) {
     if (Number.isFinite(saved) && saved >= 200 && saved <= 10000) preferredWidth = saved;
   } catch {}
   const dock = node("aside", "workspace-reader");
+  dock.id = `${owner}-panel`;
   dock.hidden = true; dock.inert = true;
   dock.setAttribute("aria-label", "文件、变更与侧边会话");
   const separator = node("div", "workspace-reader-resize");
@@ -142,15 +144,26 @@ export function mountSessionTools(options) {
   const tablist = node("div", "workspace-reader-tabs");
   tablist.setAttribute("role", "tablist");
   tablist.setAttribute("aria-label", "文件、变更与侧边会话标签页");
-  const add = control("+", "打开文件", () => openTab({ kind: "files" }), "workspace-reader-add");
-  const close = control("×", "关闭右侧标签面板", () => clearTabs(true), "workspace-reader-close");
+  const toggle = control("", "打开标签页", () => {
+    if (disposed || !desktop()) return;
+    updateContext(); beforeOpen?.();
+    currentContext.expanded = !currentContext.expanded; syncLayout();
+    toggle.focus({ preventScroll: true });
+  }, "icon-button workspace-reader-toggle");
+  toggle.hidden = true;
+  toggle.setAttribute("aria-controls", dock.id);
+  toggle.innerHTML = '<svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/><path class="workspace-reader-toggle-pane" d="M14 4h3a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3h-3z"/><path d="M14 4v16"/></svg>';
   const views = node("div", "workspace-reader-views");
-  toolbar.append(tablist, add, close); dock.append(separator, toolbar, views); workspace.append(dock);
+  const empty = node("div", "workspace-reader-empty", "从会话菜单打开文件、变更或侧边会话");
+  toolbar.append(tablist); dock.append(separator, toolbar, views, empty); workspace.append(dock);
+  trigger.after(toggle);
 
-  function identity() {
-    const context = getContext() || {};
+  function identity(context = getContext() || {}) {
     return JSON.stringify([context.deviceId || "", context.cacheScope || "",
       context.threadId ? ["thread", context.threadId] : context.creating ? ["project", context.projectId || ""] : null]);
+  }
+  function authorizationIdentity(context = getContext() || {}) {
+    return JSON.stringify([context.deviceId || "", context.cacheScope || ""]);
   }
   function mobilePages() {
     mobile ||= mountSessionToolPages({ ...options, isAvailable: () => !desktop() });
@@ -163,7 +176,7 @@ export function mountSessionTools(options) {
     const minimum = Math.min(320, Math.floor(available / 2));
     return { minimum, maximum: Math.max(minimum, available - 360) };
   }
-  function resize(width = preferredWidth, persist = false) {
+  function resize(width = currentContext?.width ?? preferredWidth, persist = false) {
     const { minimum, maximum } = widthBounds();
     const next = Math.round(Math.max(minimum, Math.min(maximum, width)));
     workspace.style.setProperty("--workspace-reader-width", `${next}px`);
@@ -173,64 +186,112 @@ export function mountSessionTools(options) {
     separator.setAttribute("aria-valuetext", `${next} 像素`);
     if (persist) {
       preferredWidth = next;
+      if (currentContext) currentContext.width = next;
       try { localStorage.setItem(widthKey, String(next)); } catch {}
     }
     return next;
   }
   function syncLayout() {
-    const visible = desktop() && tabs.size > 0;
+    // 用户要求 PC 按会话恢复标签及阅读状态；旧 DOM/iframe 留在原位置，只隐藏，避免移动 iframe 导致重新加载。
+    if (!dock.hidden && displayedContext) displayedContext.scrollLeft = tablist.scrollLeft;
+    const visible = desktop() && currentContext?.expanded === true;
+    const tabs = currentContext?.tabs;
     dock.hidden = !visible; dock.inert = !visible;
+    views.hidden = !tabs?.size; empty.hidden = !!tabs?.size;
     workspace.classList.toggle("workspace-reader-open", visible);
-    for (const record of tabs.values()) record.renderer.setVisible?.(visible && record.key === active);
-    if (visible) { mobile?.hide(); resize(); }
+    toggle.hidden = !desktop();
+    toggle.title = visible ? "隐藏标签页" : "打开标签页";
+    toggle.setAttribute("aria-label", toggle.title);
+    toggle.setAttribute("aria-expanded", String(visible));
+    // 用户要求开关固定在窗口右上角：展开时移到标签栏最右侧，收起时回到会话菜单右侧。
+    // 两处右内边距均为 24px，按钮均为 32px；需与 style.css 的标签栏和会话页头同步保持坐标。
+    if (visible) {
+      if (toggle.parentElement !== toolbar) toolbar.append(toggle);
+    } else if (toggle.parentElement !== trigger.parentElement) trigger.after(toggle);
+    for (const context of contexts.values()) for (const record of context.tabs.values()) {
+      const selected = context === currentContext && record.key === context.active;
+      record.tab.hidden = context !== currentContext;
+      record.view.hidden = !selected; record.view.inert = !selected;
+      record.renderer.setVisible?.(visible && selected);
+    }
+    displayedContext = currentContext;
+    if (visible) { mobile?.hide(); resize(); tablist.scrollLeft = currentContext.scrollLeft; }
     else finishDrag(false);
+  }
+  function hidePanel() {
+    // 用户要求隐藏后恢复原页面：只收起容器，保留标签 DOM、iframe、滚动和草稿，不调用 dispose 或重载。
+    if (currentContext) currentContext.expanded = false;
+    syncLayout();
+    toggle.focus({ preventScroll: true });
   }
   function tabKey(item) {
     if (item.kind === "side") return JSON.stringify(["side", item.threadId]);
+    if (item.kind === "side-creation") return JSON.stringify(["side-creation", item.requestId]);
     if (item.kind === "file") return JSON.stringify(["file", item.path.replaceAll("\\", "/")]);
     if (item.kind === "change") return JSON.stringify(["change", detailKey(item.file)]);
     return item.kind;
   }
-  function selectTab(record, focus = false) {
-    if (!record || disposed) return;
-    active = record.key;
-    for (const candidate of tabs.values()) {
+  function selectTab(record, focus = false, context = currentContext) {
+    if (!record || disposed || !context) return;
+    context.active = record.key;
+    for (const candidate of context.tabs.values()) {
       const selected = candidate === record;
-      candidate.view.hidden = !selected; candidate.view.inert = !selected;
       candidate.button.setAttribute("aria-selected", String(selected));
       candidate.button.tabIndex = selected ? 0 : -1;
       candidate.tab.classList.toggle("selected", selected);
     }
     syncLayout();
-    record.tab.scrollIntoView?.({ block: "nearest", inline: "nearest" });
-    if (focus) record.button.focus({ preventScroll: true });
+    if (context === currentContext) {
+      if (!dock.hidden) record.tab.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+      if (focus) record.button.focus({ preventScroll: true });
+    }
   }
-  function closeTab(key, focus = true) {
-    const record = tabs.get(key);
+  function closeTab(key, focus = true, context = currentContext) {
+    const tabs = context?.tabs, record = tabs?.get(key);
     if (!record) return;
     const order = [...tabs.keys()], index = order.indexOf(key);
     record.renderer.dispose(); record.tab.remove(); record.view.remove(); tabs.delete(key);
-    if (active === key) {
-      active = null;
-      selectTab(tabs.get(order[index + 1]) || tabs.get(order[index - 1]), focus);
+    if (!tabs.size) context.expanded = false;
+    if (context.active === key) {
+      context.active = null;
+      selectTab(tabs.get(order[index + 1]) || tabs.get(order[index - 1]), focus, context);
     }
     syncLayout();
-    if (!tabs.size && focus) trigger?.focus({ preventScroll: true });
+    if (!tabs.size && focus && context === currentContext) trigger?.focus({ preventScroll: true });
+    record.item.onClose?.();
   }
-  function clearTabs(focus = false) {
-    for (const key of [...tabs.keys()]) closeTab(key, false);
-    if (focus) trigger?.focus({ preventScroll: true });
+  function clearContexts() {
+    finishDrag(false);
+    for (const context of contexts.values())
+      for (const key of [...context.tabs.keys()]) closeTab(key, false, context);
+    contexts.clear(); currentContext = null;
+    syncLayout();
   }
   function updateContext() {
     if (disposed) return;
-    const next = identity();
-    // 用户要求标签可同时阅读；会话、项目或授权切换必须清空旧标签，关闭时也取消各自尚未完成的读取。
-    if (next !== contextKey) { contextKey = next; clearTabs(); }
+    const value = { ...(getContext() || {}) }, nextAuthorization = authorizationIdentity(value);
+    // 会话/新建项目分别保留标签、内容、选中项、显隐、宽度及标签滚动；注销或更换授权才释放全部页面与请求。
+    if (nextAuthorization !== authorizationKey) {
+      clearContexts(); authorizationKey = nextAuthorization;
+    }
+    const next = identity(value);
+    if (next !== contextKey || !currentContext) {
+      finishDrag(false);
+      contextKey = next;
+      if (!contexts.has(next)) contexts.set(next, {
+        key: next, value, tabs: new Map(), active: null, expanded: false, width: preferredWidth, scrollLeft: 0,
+      });
+      currentContext = contexts.get(next);
+      currentContext.value = value;
+      syncLayout();
+    } else currentContext.value = value;
     mobile?.updateContext();
   }
-  function openTab(item) {
+  function openTab(item, { reveal = true } = {}) {
     if (disposed) return;
     updateContext(); beforeOpen?.();
+    const context = currentContext, tabs = context.tabs;
+    if (reveal) context.expanded = true;
     const key = tabKey(item), existing = tabs.get(key);
     if (existing) {
       selectTab(existing);
@@ -238,49 +299,81 @@ export function mountSessionTools(options) {
       else if (item.kind === "change") void existing.renderer.openChange(item.file, item.list);
       else if (item.kind === "changes") existing.renderer.open("changes");
       else void existing.renderer.open();
-      return;
+      return existing;
     }
     const id = `${owner}-${++sequence}`;
-    const label = item.kind === "side" ? item.title : item.kind === "changes" ? "变更" : item.kind === "files" ? "打开文件"
+    const side = item.kind === "side" || item.kind === "side-creation";
+    const label = side ? item.title : item.kind === "changes" ? "变更" : item.kind === "files" ? "打开文件"
       : `${displayWorkspaceName((item.path || item.file.path).split(/[\\/]/).at(-1))}${item.kind === "change" ? " · 变更" : ""}`;
     const title = item.kind === "change" ? `${sections.find(([name]) => name === item.file.section)?.[1] || "变更"}：${displayedPath(item.file)}`
       : item.path ? displayWorkspacePath(item.path) : label;
     const tab = node("div", "workspace-reader-tab");
     tab.setAttribute("role", "presentation");
-    const button = control("", title, () => selectTab(record), "workspace-reader-tab-select");
+    const button = control("", title, () => { if (ownsTab()) selectTab(record); }, "workspace-reader-tab-select");
     button.id = `${id}-tab`; button.setAttribute("role", "tab");
     button.setAttribute("aria-controls", id);
     const symbol = node("span", "workspace-reader-tab-icon");
     symbol.innerHTML = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">${
-      item.kind === "side"
+      side
         ? '<path d="M3 3.5h14v10H8l-4 3v-3H3z"/><path d="M6 7h8M6 10h5"/>'
         : item.kind === "changes" || item.kind === "change"
         ? '<rect x="4" y="2.5" width="12" height="15" rx="2"/><path d="M7 7h6M10 4v6M7 13h6"/>'
         : '<path d="M11.5 2.5H5a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7z"/><path d="M11 2.5V7h5"/>'}</svg>`;
     symbol.setAttribute("aria-hidden", "true");
+    const updateRunning = running => {
+      // 用户要求侧边会话执行时原位换成已有旋转图标，完成/停止后恢复原 SVG；隐藏标签也继续同步原生状态。
+      symbol.classList.toggle("spinner", running);
+      button.title = running ? `${title}，正在执行` : title;
+      button.setAttribute("aria-label", button.title);
+    };
+    if (item.kind === "side") updateRunning(item.running === true);
     button.append(symbol, node("span", "workspace-reader-tab-label", label));
-    const remove = control("×", `关闭${label}`, () => closeTab(key), "workspace-reader-tab-close");
+    const remove = control("×", `关闭${label}`, () => { if (ownsTab()) closeTab(key); }, "workspace-reader-tab-close");
     tab.append(button, remove);
     const view = node("section", "workspace-reader-view");
     view.id = id; view.setAttribute("role", "tabpanel"); view.setAttribute("aria-labelledby", button.id);
     tablist.append(tab); views.append(view);
-    const ownsTab = () => !disposed && tabs.get(key) === record && contextKey === identity();
+    const retainsTab = () => !disposed && tabs.get(key) === record && contexts.get(context.key) === context
+      && authorizationKey === authorizationIdentity();
+    const ownsTab = () => retainsTab() && currentContext === context && context.key === identity();
+    // 用户要求 PC 中键点击关闭标签；按下时阻止浏览器自动滚屏，松开后复用正常关闭，不关闭服务端会话。
+    tab.addEventListener("mousedown", event => {
+      if (event.button === 1 && ownsTab()) event.preventDefault();
+    });
+    tab.addEventListener("auxclick", event => {
+      if (event.button !== 1 || !ownsTab()) return;
+      event.preventDefault(); event.stopPropagation(); closeTab(key);
+    });
     const embedded = { id, onClose: () => { if (ownsTab()) closeTab(key); },
       onOpenFile: (path, line) => { if (ownsTab()) openTab({ kind: "file", path, line }); },
       onOpenChange: (file, list) => { if (ownsTab()) openTab({ kind: "change", file, list }); } };
-    const rendererOptions = { ...options, workspace: view, beforeOpen: undefined, embedded };
+    // 后台标签的迟到读取只更新所属会话，不能从当前主会话借用 threadId/projectId；授权变化立即失效。
+    const rendererOptions = { ...options, workspace: view, beforeOpen: undefined, embedded,
+      getContext: () => authorizationIdentity(context.value) === authorizationIdentity() ? context.value : {} };
     // 每个标签保留自己的阅读 DOM、滚动和请求；详情不重复写变更列表的持久缓存。
-    const renderer = item.kind === "side" ? mountWorkspaceSideThread(view, item)
+    const renderer = item.kind === "side" ? mountWorkspaceSideThread(view, item, () => {
+      // 侧边 iframe 中的快捷键仍从当前主会话创建；只接受当前可见标签，不允许嵌套创建。
+      if (ownsTab() && desktop() && context.active === key) options.createSideThread?.();
+    }, running => {
+      if (retainsTab()) updateRunning(running);
+    }, (trigger, resource) => {
+      if (!ownsTab() || !desktop() || context.active !== key) return;
+      return resource.kind === "video"
+        ? options.openVideoPreview?.(trigger, resource.source, resource.poster, resource.name)
+        : options.openImagePreview?.(trigger, { originalImageSource: resource.source, alt: resource.name });
+    })
+      : item.kind === "side-creation" ? mountWorkspaceSideCreation(view)
       : item.kind === "changes" || item.kind === "change"
       ? mountSessionToolPages({ ...rendererOptions, cache: item.kind === "changes" ? options.cache : null })
       : mountSessionFiles(rendererOptions);
     const record = { key, item, tab, button, view, renderer };
     tabs.set(key, record); selectTab(record);
-    if (item.kind === "side") renderer.open();
+    if (side) renderer.open();
     else if (item.kind === "changes") renderer.open("changes");
     else if (item.kind === "change") void renderer.openChange(item.file, item.list);
     else if (item.kind === "files") void renderer.open();
     else void renderer.openFile(item.path, item.line);
+    return record;
   }
   function open(name) {
     if (!["files", "changes"].includes(name)) return;
@@ -294,20 +387,37 @@ export function mountSessionTools(options) {
     if (desktop()) openTab({ kind: "file", path, line });
     else mobilePages().openFile(path, line);
   }
-  function openSideThread(item) {
+  function openSideThread(item, { reveal = true } = {}) {
     if (!desktop() || disposed || typeof item?.id !== "string" || !/^[A-Za-z0-9_-]{1,120}$/.test(item.id)) return false;
     const parentThreadId = getContext()?.threadId;
     if (!parentThreadId || item.id === parentThreadId) return false;
     // 用户要求 PC 侧边会话与主聊天并排，共用文件/变更标签栏；重复点击只选中已有标签，不重载或重发。
-    openTab({ kind: "side", threadId: item.id, title: String(item.title || item.name || "侧边会话") });
+    openTab({ kind: "side", threadId: item.id, title: String(item.title || item.name || "侧边会话"),
+      running: item.running }, { reveal });
     return true;
+  }
+  function openSideCreation({ requestId, onClose }) {
+    if (!desktop() || disposed || !getContext()?.threadId) return null;
+    // 用户要求 PC 新建也直接进入右侧标签：这里只展示原操作的等待状态，不另发创建请求、不禁用主聊天。
+    const record = openTab({ kind: "side-creation", requestId, title: "新建侧边会话", onClose });
+    const context = currentContext, tabs = context.tabs;
+    return {
+      isVisible: () => !disposed && currentContext === context && context.key === identity()
+        && desktop() && context.expanded,
+      update(unknown) {
+        if (tabs.get(record.key) === record) record.renderer.update(unknown);
+      },
+      close() {
+        if (tabs.get(record.key) === record) closeTab(record.key, false, context);
+      }
+    };
   }
   function finishDrag(persist) {
     if (!drag) return;
     const previous = drag; drag = null;
     workspace.classList.remove("workspace-reader-resizing");
     if (separator.hasPointerCapture?.(previous.pointer)) separator.releasePointerCapture(previous.pointer);
-    resize(persist ? previous.current : preferredWidth, persist);
+    resize(persist ? previous.current : currentContext?.width ?? preferredWidth, persist);
   }
   separator.addEventListener("pointerdown", event => {
     if (event.button !== 0 || !event.isPrimary) return;
@@ -333,8 +443,18 @@ export function mountSessionTools(options) {
     if (next == null) return;
     event.preventDefault(); resize(next, true);
   });
+  tablist.addEventListener("wheel", event => {
+    if (event.ctrlKey || event.metaKey || tablist.scrollWidth <= tablist.clientWidth) return;
+    // 用户要求标签栏滚轮横向浏览：保留触控板主滚动方向，普通竖向滚轮映射到横向。
+    // deltaMode 为行时按 16px/行转换，为页时按标签栏可见宽度转换；缩放手势仍交给浏览器。
+    const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+    if (!delta) return;
+    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? tablist.clientWidth : 1;
+    event.preventDefault();
+    tablist.scrollLeft = Math.max(0, Math.min(tablist.scrollWidth - tablist.clientWidth, tablist.scrollLeft + delta * unit));
+  }, { passive: false });
   tablist.addEventListener("keydown", event => {
-    const records = [...tabs.values()], index = records.findIndex(record => record.button === event.target);
+    const records = [...(currentContext?.tabs.values() || [])], index = records.findIndex(record => record.button === event.target);
     if (index < 0 || event.altKey || event.ctrlKey || event.metaKey) return;
     const next = { ArrowLeft: (index - 1 + records.length) % records.length,
       ArrowRight: (index + 1) % records.length, Home: 0, End: records.length - 1 }[event.key];
@@ -343,10 +463,10 @@ export function mountSessionTools(options) {
   });
   dock.addEventListener("keydown", event => {
     if (event.key !== "Escape" || event.isComposing || document.querySelector("dialog[open]")) return;
-    event.preventDefault(); event.stopPropagation(); closeTab(active);
+    event.preventDefault(); event.stopPropagation(); hidePanel();
   });
   const observer = typeof ResizeObserver === "function" ? new ResizeObserver(() => {
-    if (desktop() && tabs.size && !drag) resize();
+    if (desktop() && currentContext?.expanded && !drag) resize();
   }) : null;
   observer?.observe(workspace);
   const sidebar = workspace.querySelector(":scope > .sidebar");
@@ -354,19 +474,34 @@ export function mountSessionTools(options) {
   desktopMedia.addEventListener("change", syncLayout);
   updateContext();
   return {
-    open, openFile, openSideThread, updateContext,
-    close: () => desktop() ? closeTab(active) : mobile?.close(),
+    open, openFile, openSideThread, openSideCreation, updateContext,
+    close: () => desktop() ? hidePanel() : mobile?.close(),
     dispose() {
       if (disposed) return;
-      finishDrag(false); clearTabs(); mobile?.dispose(); disposed = true;
+      clearContexts(); mobile?.dispose(); disposed = true;
       observer?.disconnect(); desktopMedia.removeEventListener("change", syncLayout);
-      dock.remove(); workspace.classList.remove("workspace-reader-open", "workspace-reader-resizing");
+      toggle.remove(); dock.remove(); workspace.classList.remove("workspace-reader-open", "workspace-reader-resizing");
       workspace.style.removeProperty("--workspace-reader-width");
     }
   };
 }
 
-function mountWorkspaceSideThread(workspace, item) {
+function mountWorkspaceSideCreation(workspace) {
+  const status = node("div", "side-creation-status");
+  status.setAttribute("role", "status");
+  const spinner = node("span", "spinner"), message = node("p", "", "正在创建侧边会话…");
+  status.append(spinner, message); workspace.append(status);
+  return {
+    open() {},
+    update(unknown) {
+      message.textContent = unknown ? "正在确认创建结果，可继续使用主会话。" : "正在创建侧边会话…";
+      spinner.hidden = unknown;
+    },
+    dispose() { status.remove(); }
+  };
+}
+
+function mountWorkspaceSideThread(workspace, item, createSideThread, updateRunning, openMediaPreview) {
   // 每个侧边会话使用独立页面上下文，隔离输入、选中会话、滚动和实时连接，不能借用主聊天的全局发送状态。
   // 专用入口仅允许同源嵌入，不修改普通首页的禁止嵌入策略；关闭标签只卸载页面，不关闭服务端会话。
   const frame = node("iframe", "workspace-side-thread");
@@ -374,17 +509,53 @@ function mountWorkspaceSideThread(workspace, item) {
   address.hash = new URLSearchParams({ thread: item.threadId }).toString();
   frame.src = address.href; frame.title = item.title;
   frame.referrerPolicy = "no-referrer";
-  let visible = false;
+  let visible = false, mediaPreview = null;
+  const closePreview = () => { mediaPreview?.close(); mediaPreview = null; };
   const sync = () => frame.contentWindow?.postMessage({
     type: "codex-elves-side-panel-visibility", visible,
   }, address.origin);
-  frame.addEventListener("load", sync);
+  const loaded = () => { closePreview(); sync(); };
+  const onMessage = event => {
+    if (event.source !== frame.contentWindow || event.origin !== address.origin) return;
+    if (event.data?.type === "codex-elves-side-panel-state" && event.data.threadId === item.threadId
+        && typeof event.data.running === "boolean") updateRunning?.(event.data.running);
+    else if (visible && event.data?.type === "codex-elves-create-side-thread") createSideThread?.();
+    else if (visible && event.data?.type === "codex-elves-workspace-media-preview"
+        && ["image", "video"].includes(event.data.kind) && typeof event.data.source === "string"
+        && typeof event.data.name === "string"
+        && (event.data.kind !== "video" || typeof event.data.poster === "string")) {
+      // 用户要求资源覆盖整页而非 iframe；同源、来源窗口及标签归属均核验，原预览器继续校验实际资源。
+      closePreview();
+      mediaPreview = openMediaPreview?.(frame, event.data) || null;
+    }
+  };
+  frame.addEventListener("load", loaded);
+  window.addEventListener("message", onMessage);
   workspace.append(frame);
-  return { open() {}, setVisible(value) { if (visible !== value) { visible = value; sync(); } },
-    dispose() { frame.removeEventListener("load", sync); frame.remove(); } };
+  return { open() {}, setVisible(value) {
+    if (visible !== value) { visible = value; if (!visible) closePreview(); sync(); }
+  },
+    dispose() {
+      frame.removeEventListener("load", loaded); window.removeEventListener("message", onMessage); frame.remove();
+      // 切换会话/项目/授权或关闭来源标签时结束其整页预览，不让旧资源留在新会话之上。
+      closePreview();
+    } };
 }
 
-function mountSessionToolPages({ workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, copyText, cache, embedded = null, isAvailable = () => true, request: transport = requestRemote }) {
+export function mountWorkspacePreview(options, target) {
+  // 独立预览复用原有文件/差异渲染器，只接收固定来源；不加载聊天，不创建新的原生会话。
+  const embedded = { id: "independent-preview", onClose() {} };
+  const renderer = target.kind === "change"
+    ? mountSessionToolPages({ ...options, embedded })
+    : mountSessionFiles({ ...options, embedded });
+  const open = () => target.kind === "change"
+    ? renderer.openChange({ path: target.path, section: target.section, repository: target.repository || "" })
+    : renderer.openFile(target.path, target.line);
+  void open();
+  return { dispose: () => renderer.dispose(), refresh: open };
+}
+
+function mountSessionToolPages({ workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, copyText, cache, onFileContextMenu, embedded = null, isAvailable = () => true, request: transport = requestRemote }) {
   let projectFiles = null;
   let disposed = false, opened = false, activePage = "changes", detailVisible = false, contextKey = "";
   let changesEpoch = 0, detailEpoch = 0, changesController = null, detailController = null;
@@ -968,6 +1139,11 @@ function mountSessionToolPages({ workspace, trigger, getContext, beforeOpen, onU
             if (embedded?.onOpenChange) embedded.onOpenChange(file, p.list);
             else void loadDetail(file);
           }, "session-tools-file");
+          // 差异窗口须保留仓库及暂存分区，不能把多仓库同名文件或已删除文件替换成工作区文件预览。
+          if (typeof onFileContextMenu === "function") button.addEventListener("contextmenu", event => {
+            if (ownsProject(p)) onFileContextMenu(event, { kind: "change", path: file.path,
+              section: file.section, repository: file.repository || "" }, { ...getContext() });
+          });
           const parts = fileParts(file), copy = node("span", "session-tools-file-copy");
           const directory = file.oldPath ? `${parts.directory} · 原路径：${displayWorkspacePath(file.oldPath)}` : parts.directory;
           copy.append(node("strong", "session-tools-file-name", parts.name), node("span", "session-tools-file-directory", directory));
@@ -1353,7 +1529,7 @@ function mountSessionToolPages({ workspace, trigger, getContext, beforeOpen, onU
   window.addEventListener("codex-elves-native-back", handleNativeBack);
   if (!embedded) projectFiles = mountSessionFiles({
     workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, copyText,
-    request: transport, isAvailable
+    request: transport, isAvailable, onFileContextMenu
   });
   updateContext();
 

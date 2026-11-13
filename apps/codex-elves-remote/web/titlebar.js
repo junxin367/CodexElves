@@ -34,7 +34,7 @@ async function operate(action) {
 }
 document.querySelector("#minimize").onclick = () => void operate(() => appWindow.minimize());
 maximize.onclick = () => void operate(() => appWindow.toggleMaximize());
-// 用户要求关闭仍收进托盘；走原窗口 CloseRequested 流程，不直接退出进程。
+// 主窗口关闭仍收进托盘，独立会话窗口关闭自身；都走当前窗口的原生 CloseRequested，不停止会话或退出程序。
 document.querySelector("#close").onclick = () => void operate(() => appWindow.close());
 document.addEventListener("contextmenu", event => event.preventDefault());
 

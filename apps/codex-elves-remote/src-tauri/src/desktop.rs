@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use anyhow::Context;
@@ -30,8 +31,62 @@ struct ClientState {
     auto_connect: AtomicBool,
     exiting: AtomicBool,
     connection: Mutex<Connection>,
-    titlebar_theme: Mutex<Option<ThemeSnapshot>>,
+    titlebar_theme: Mutex<HashMap<String, ThemeSnapshot>>,
+    session_windows: Mutex<HashMap<String, SessionWindow>>,
+    window_sequence: AtomicU64,
     cache: Arc<ResourceCache>,
+}
+
+struct SessionWindow {
+    origin: url::Origin,
+    cache: Arc<ResourceCache>,
+}
+
+fn content_label(window: &str) -> String {
+    if window == WINDOW_LABEL {
+        CONTENT_LABEL.into()
+    } else {
+        format!("{CONTENT_LABEL}-{window}")
+    }
+}
+
+fn titlebar_label(window: &str) -> String {
+    if window == WINDOW_LABEL {
+        TITLEBAR_LABEL.into()
+    } else {
+        format!("{TITLEBAR_LABEL}-{window}")
+    }
+}
+
+fn allows_service_url(state: &ClientState, window: &str, url: &Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    if window == WINDOW_LABEL {
+        let saved = state.settings.lock().unwrap().server_url.clone();
+        state.connection.lock().unwrap().allows(url, &saved)
+    } else {
+        state
+            .session_windows
+            .lock()
+            .unwrap()
+            .get(window)
+            .is_some_and(|entry| entry.origin == url.origin())
+    }
+}
+
+fn window_cache(state: &ClientState, window: &str) -> Result<Arc<ResourceCache>, String> {
+    if window == WINDOW_LABEL {
+        Ok(state.cache.clone())
+    } else {
+        state
+            .session_windows
+            .lock()
+            .unwrap()
+            .get(window)
+            .map(|entry| entry.cache.clone())
+            .ok_or_else(|| "独立会话窗口已关闭。".into())
+    }
 }
 
 #[derive(Serialize)]
@@ -114,12 +169,10 @@ async fn connect_remote(
 
 fn trusted_service_page(webview: &tauri::Webview, state: &ClientState) -> Result<Url, String> {
     let url = webview.url().map_err(|error| error.to_string())?;
-    let saved = state.settings.lock().unwrap().server_url.clone();
-    if webview.label() != CONTENT_LABEL
-        || webview.window().label() != WINDOW_LABEL
-        || !(settings::is_connection_page(&url)
-            || matches!(url.scheme(), "http" | "https")
-                && state.connection.lock().unwrap().allows(&url, &saved))
+    let window = webview.window();
+    if webview.label() != content_label(window.label())
+        || !(window.label() == WINDOW_LABEL && settings::is_connection_page(&url)
+            || allows_service_url(state, window.label(), &url))
     {
         return Err("只有当前服务页面可以管理网页资源缓存。".into());
     }
@@ -132,7 +185,7 @@ async fn remote_cache_status(
     state: tauri::State<'_, ClientState>,
 ) -> Result<CacheInfo, String> {
     trusted_service_page(&webview, &state)?;
-    Ok(state.cache.info())
+    Ok(window_cache(&state, webview.window().label())?.info())
 }
 
 #[tauri::command]
@@ -144,8 +197,7 @@ async fn remote_cache_refresh(
     url.set_path("/");
     url.set_query(None);
     url.set_fragment(None);
-    state
-        .cache
+    window_cache(&state, webview.window().label())?
         .refresh(&url)
         .await
         .map_err(|_| "网页资源更新检查未完成，仍保留当前可用缓存。".into())
@@ -158,7 +210,56 @@ async fn remote_cache_activity(
     busy: bool,
 ) -> Result<(), String> {
     trusted_service_page(&webview, &state)?;
-    state.cache.set_busy(busy);
+    window_cache(&state, webview.window().label())?.set_busy(busy);
+    Ok(())
+}
+
+#[tauri::command]
+async fn remote_open_session_window(
+    webview: tauri::Webview,
+    state: tauri::State<'_, ClientState>,
+    thread_id: Option<String>,
+    preview: Option<settings::PreviewWindowTarget>,
+) -> Result<(), String> {
+    let source = trusted_service_page(&webview, &state)?;
+    let url = match (thread_id.as_deref(), preview.as_ref()) {
+        (Some(id), None) => settings::session_window_url(&source, id),
+        (None, Some(target)) => settings::preview_window_url(&source, target),
+        _ => return Err("请选择一个会话或文件预览目标。".into()),
+    }
+    .map_err(|error| error.to_string())?;
+    let cache = window_cache(&state, webview.window().label())?.fork_view(&source);
+    let label = format!(
+        "session-{}",
+        state.window_sequence.fetch_add(1, Ordering::SeqCst)
+    );
+    // 独立窗口固定创建时的服务来源，共用同一 WebView 登录目录；不能改变主窗口连接地址或借用其他来源的权限。
+    state.session_windows.lock().unwrap().insert(
+        label.clone(),
+        SessionWindow {
+            origin: source.origin(),
+            cache: cache.clone(),
+        },
+    );
+    let app = webview.app_handle();
+    let result = (|| -> tauri::Result<()> {
+        let window = create_client_window(app, &label, url, cache)?;
+        let mut settings = state.settings.lock().unwrap().clone();
+        settings.window.x = None;
+        settings.window.y = None;
+        settings.window.maximized = false;
+        restore_window(&window, &settings)?;
+        let _ = window.set_focus();
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if let Some(window) = app.get_window(&label) {
+            let _ = window.close();
+        }
+        state.session_windows.lock().unwrap().remove(&label);
+        state.titlebar_theme.lock().unwrap().remove(&label);
+        return Err(format!("无法打开独立会话窗口：{error}"));
+    }
     Ok(())
 }
 
@@ -168,32 +269,30 @@ async fn remote_titlebar_theme(
     state: tauri::State<'_, ClientState>,
     theme: TitlebarTheme,
 ) -> Result<(), String> {
-    let url = webview.url().map_err(|error| error.to_string())?;
-    let saved = state.settings.lock().unwrap().server_url.clone();
-    if webview.label() != CONTENT_LABEL
-        || webview.window().label() != WINDOW_LABEL
-        || !(settings::is_connection_page(&url)
-            || matches!(url.scheme(), "http" | "https")
-                && state.connection.lock().unwrap().allows(&url, &saved))
-    {
-        return Err("只有当前服务页面可以同步标题栏配色。".into());
-    }
+    trusted_service_page(&webview, &state)?;
+    let window = webview.window();
     // 用户要求标题栏跟随外观模式及自定义颜色；跨页面只传严格校验的 RGB 数字，不开放连接设置或窗口控制。
     let snapshot = {
         let mut current = state.titlebar_theme.lock().unwrap();
-        if current.as_ref().is_some_and(|value| value.theme == theme) {
+        if current
+            .get(window.label())
+            .is_some_and(|value| value.theme == theme)
+        {
             return Ok(());
         }
         let snapshot = ThemeSnapshot {
             version: current
-                .as_ref()
+                .get(window.label())
                 .map_or(1, |value| value.version.saturating_add(1)),
             theme,
         };
-        *current = Some(snapshot.clone());
+        current.insert(window.label().to_owned(), snapshot.clone());
         snapshot
     };
-    if let Some(titlebar) = webview.app_handle().get_webview(TITLEBAR_LABEL) {
+    if let Some(titlebar) = webview
+        .app_handle()
+        .get_webview(&titlebar_label(window.label()))
+    {
         let payload = serde_json::to_string(&snapshot).map_err(|error| error.to_string())?;
         titlebar
             .eval(format!("window.__setRemoteTitlebarTheme?.({payload})"))
@@ -207,13 +306,24 @@ fn remote_titlebar_state(
     webview: tauri::Webview,
     state: tauri::State<'_, ClientState>,
 ) -> Result<Option<ThemeSnapshot>, String> {
-    if webview.label() != TITLEBAR_LABEL
-        || webview.window().label() != WINDOW_LABEL
+    let window = webview.window();
+    if webview.label() != titlebar_label(window.label())
+        || window.label() != WINDOW_LABEL
+            && !state
+                .session_windows
+                .lock()
+                .unwrap()
+                .contains_key(window.label())
         || !settings::is_titlebar_page(&webview.url().map_err(|error| error.to_string())?)
     {
         return Err("只有本地标题栏可以读取标题栏配色。".into());
     }
-    Ok(state.titlebar_theme.lock().unwrap().clone())
+    Ok(state
+        .titlebar_theme
+        .lock()
+        .unwrap()
+        .get(window.label())
+        .cloned())
 }
 
 fn show_window(app: &tauri::AppHandle) {
@@ -241,17 +351,21 @@ fn navigate_connection_page(app: &tauri::AppHandle, show: bool) {
     }
 }
 
-fn install_navigation_recovery(content: &tauri::Webview) -> tauri::Result<()> {
+fn install_navigation_recovery(
+    content: &tauri::Webview,
+    cache: Arc<ResourceCache>,
+) -> tauri::Result<()> {
     let app = content.app_handle().clone();
+    let main = content.window().label() == WINDOW_LABEL;
     content.with_webview(move |webview| {
         let recovery_app = app.clone();
         let result = unsafe {
             webview
                 .controller()
                 .CoreWebView2()
-                .and_then(|core| register_navigation_recovery(core, app))
+                .and_then(|core| register_navigation_recovery(core, app, cache, main))
         };
-        if result.is_err() {
+        if result.is_err() && main {
             recovery_app
                 .state::<ClientState>()
                 .connection
@@ -266,6 +380,8 @@ fn install_navigation_recovery(content: &tauri::Webview) -> tauri::Result<()> {
 unsafe fn register_navigation_recovery(
     core: webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
     app: tauri::AppHandle,
+    cache: Arc<ResourceCache>,
+    main: bool,
 ) -> windows::core::Result<()> {
     use webview2_com::{
         NavigationCompletedEventHandler, NavigationStartingEventHandler, take_pwstr,
@@ -286,8 +402,11 @@ unsafe fn register_navigation_recovery(
                 }
                 let mut id = 0;
                 args.NavigationId(&mut id)?;
+                cache.begin_navigation(&url);
+                if !main {
+                    return Ok(());
+                }
                 let state = start_app.state::<ClientState>();
-                state.cache.begin_navigation(&url);
                 let saved = state.settings.lock().unwrap().server_url.clone();
                 state.connection.lock().unwrap().started(id, &url, &saved);
                 Ok(())
@@ -297,6 +416,9 @@ unsafe fn register_navigation_recovery(
         core.add_NavigationCompleted(
             &NavigationCompletedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
+                if !main {
+                    return Ok(());
+                }
                 let mut successful = Default::default();
                 let mut id = 0;
                 args.IsSuccess(&mut successful)?;
@@ -433,14 +555,14 @@ fn layout_webviews(window: &tauri::Window) -> tauri::Result<()> {
     let title_height = ((TITLEBAR_HEIGHT * window.scale_factor()?).round() as u32).min(size.height);
     // 两块区域共用同一物理像素边界；缩放、最大化及跨 DPI 显示器移动时保持标题栏 36px，不按窗口高度拉伸。
     for (label, y, height) in [
-        (TITLEBAR_LABEL, 0, title_height),
+        (titlebar_label(window.label()), 0, title_height),
         (
-            CONTENT_LABEL,
+            content_label(window.label()),
             title_height,
             size.height.saturating_sub(title_height),
         ),
     ] {
-        if let Some(webview) = window.app_handle().get_webview(label) {
+        if let Some(webview) = window.app_handle().get_webview(&label) {
             webview.set_bounds(tauri::Rect {
                 position: tauri::PhysicalPosition::new(0, y as i32).into(),
                 size: tauri::PhysicalSize::new(size.width, height).into(),
@@ -557,6 +679,109 @@ fn open_external(url: Url) {
     });
 }
 
+fn create_client_window(
+    app: &tauri::AppHandle,
+    label: &str,
+    initial_url: Url,
+    cache: Arc<ResourceCache>,
+) -> tauri::Result<tauri::Window> {
+    let state = app.state::<ClientState>();
+    let directory = state.directory.clone();
+    let main = label == WINDOW_LABEL;
+    let window = tauri::window::WindowBuilder::new(app, label)
+        .title(TITLE)
+        .inner_size(1280.0, 860.0)
+        .min_inner_size(520.0, 420.0)
+        .decorations(false)
+        .shadow(true)
+        .resizable(true)
+        .minimizable(true)
+        .maximizable(true)
+        .visible(false)
+        .build()?;
+    let navigation_app = app.clone();
+    let navigation_window = label.to_owned();
+    let content_builder = tauri::webview::WebviewBuilder::new(
+        content_label(label),
+        WebviewUrl::External(Url::parse("about:blank").expect("valid blank URL")),
+    )
+    // 用户要求新程序窗口沿用同一登录状态；内容共用用户目录，窗口、标题栏与资源快照分别管理。
+    .data_directory(directory.join("webview"))
+    .initialization_script(include_str!("../../web/theme-bridge.js"))
+    .disable_drag_drop_handler()
+    .on_navigation(move |url| {
+        if url.as_str() == "about:blank" || main && settings::is_connection_page(url) {
+            return true;
+        }
+        if allows_service_url(
+            &navigation_app.state::<ClientState>(),
+            &navigation_window,
+            url,
+        ) {
+            return true;
+        }
+        open_external(url.clone());
+        false
+    })
+    .on_new_window(|url, _| {
+        open_external(url);
+        tauri::webview::NewWindowResponse::Deny
+    });
+    let content = window.add_child(
+        content_builder,
+        tauri::LogicalPosition::new(0.0, TITLEBAR_HEIGHT),
+        tauri::LogicalSize::new(1280.0, 860.0 - TITLEBAR_HEIGHT),
+    )?;
+    window.add_child(
+        tauri::webview::WebviewBuilder::new(
+            titlebar_label(label),
+            WebviewUrl::App("titlebar.html".into()),
+        )
+        .data_directory(directory.join("titlebar-webview"))
+        .disable_drag_drop_handler()
+        .on_navigation(settings::is_titlebar_page)
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny),
+        tauri::LogicalPosition::new(0.0, 0.0),
+        tauri::LogicalSize::new(1280.0, TITLEBAR_HEIGHT),
+    )?;
+    install_navigation_recovery(&content, cache.clone())?;
+    crate::native_cache::install(&content, cache, initial_url)?;
+    let event_window = window.clone();
+    window.on_window_event(move |event| match event {
+        WindowEvent::Moved(_) if main => remember_window(&event_window, false),
+        WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+            let _ = layout_webviews(&event_window);
+            if main {
+                remember_window(&event_window, false);
+            }
+        }
+        WindowEvent::CloseRequested { api, .. } if main => {
+            let app = event_window.app_handle();
+            if !app.state::<ClientState>().exiting.load(Ordering::SeqCst) {
+                // 主窗口关闭继续收进托盘；独立窗口关闭只销毁自身，不停止后台会话，也不改主窗口位置。
+                api.prevent_close();
+                remember_window(&event_window, true);
+                let _ = event_window.hide();
+            }
+        }
+        WindowEvent::Destroyed if !main => {
+            let state = event_window.app_handle().state::<ClientState>();
+            state
+                .session_windows
+                .lock()
+                .unwrap()
+                .remove(event_window.label());
+            state
+                .titlebar_theme
+                .lock()
+                .unwrap()
+                .remove(event_window.label());
+        }
+        _ => {}
+    });
+    Ok(window)
+}
+
 pub fn run() -> anyhow::Result<()> {
     let app = tauri::Builder::default()
         // 用户要求再次启动唤回托盘中的同一窗口，不额外创建客户端进程或连接。
@@ -570,7 +795,8 @@ pub fn run() -> anyhow::Result<()> {
             remote_titlebar_state,
             remote_cache_status,
             remote_cache_refresh,
-            remote_cache_activity
+            remote_cache_activity,
+            remote_open_session_window
         ])
         .on_menu_event(handle_menu_event)
         .setup(|app| {
@@ -594,89 +820,17 @@ pub fn run() -> anyhow::Result<()> {
                 auto_connect: AtomicBool::new(!settings.server_url.is_empty()),
                 exiting: AtomicBool::new(false),
                 connection: Mutex::new(Connection::default()),
-                titlebar_theme: Mutex::new(None),
+                titlebar_theme: Mutex::new(HashMap::new()),
+                session_windows: Mutex::new(HashMap::new()),
+                window_sequence: AtomicU64::new(1),
                 cache: cache.clone(),
             });
-            let window = tauri::window::WindowBuilder::new(app, WINDOW_LABEL)
-                .title(TITLE)
-                .inner_size(1280.0, 860.0)
-                .min_inner_size(520.0, 420.0)
-                .decorations(false)
-                .shadow(true)
-                .resizable(true)
-                .minimizable(true)
-                .maximizable(true)
-                .visible(false)
-                .build()?;
-            let navigation_app = app.handle().clone();
-            let content_builder = tauri::webview::WebviewBuilder::new(
-                CONTENT_LABEL,
-                WebviewUrl::External(Url::parse("about:blank")?),
-            )
-            .data_directory(directory.join("webview"))
-            .initialization_script(include_str!("../../web/theme-bridge.js"))
-            .disable_drag_drop_handler()
-            .on_navigation(move |url| {
-                if settings::is_connection_page(url) || url.as_str() == "about:blank" {
-                    return true;
-                }
-                let state = navigation_app.state::<ClientState>();
-                let configured = state.settings.lock().unwrap().server_url.clone();
-                if matches!(url.scheme(), "http" | "https")
-                    && state.connection.lock().unwrap().allows(url, &configured)
-                {
-                    return true;
-                }
-                open_external(url.clone());
-                false
-            })
-            .on_new_window(|url, _| {
-                open_external(url);
-                tauri::webview::NewWindowResponse::Deny
-            });
-            let content = window.add_child(
-                content_builder,
-                tauri::LogicalPosition::new(0.0, TITLEBAR_HEIGHT),
-                tauri::LogicalSize::new(1280.0, 860.0 - TITLEBAR_HEIGHT),
-            )?;
-            // 标题栏单独加载本地页面，远程服务无法覆盖它，也不获得其最小化、拖动等窗口权限。
-            window.add_child(
-                tauri::webview::WebviewBuilder::new(
-                    TITLEBAR_LABEL,
-                    WebviewUrl::App("titlebar.html".into()),
-                )
-                .data_directory(directory.join("titlebar-webview"))
-                .disable_drag_drop_handler()
-                .on_navigation(settings::is_titlebar_page)
-                .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny),
-                tauri::LogicalPosition::new(0.0, 0.0),
-                tauri::LogicalSize::new(1280.0, TITLEBAR_HEIGHT),
-            )?;
             // Windows Tauri 本地资源默认 Origin；先完成原生缓存接管，再打开连接页，防止自动连接抢在初始化前执行。
             let home = Url::parse("http://tauri.localhost/index.html")?;
             *app.state::<ClientState>().home.lock().unwrap() = Some(home.clone());
-            install_navigation_recovery(&content)?;
-            crate::native_cache::install(&content, cache, home)?;
+            let window = create_client_window(app.handle(), WINDOW_LABEL, home, cache)?;
             // 用户要求独立程序不显示“连接”“窗口”菜单栏；连接恢复、刷新和退出统一保留在托盘。
             install_tray(app)?;
-            let event_window = window.clone();
-            window.on_window_event(move |event| match event {
-                WindowEvent::Moved(_) => remember_window(&event_window, false),
-                WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                    let _ = layout_webviews(&event_window);
-                    remember_window(&event_window, false);
-                }
-                WindowEvent::CloseRequested { api, .. } => {
-                    let app = event_window.app_handle();
-                    if !app.state::<ClientState>().exiting.load(Ordering::SeqCst) {
-                        // 用户要求托盘管理：关闭保留客户端连接，只有托盘“退出程序”才结束进程。
-                        api.prevent_close();
-                        remember_window(&event_window, true);
-                        let _ = event_window.hide();
-                    }
-                }
-                _ => {}
-            });
             restore_window(&window, &settings)?;
             Ok(())
         })

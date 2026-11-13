@@ -1,5 +1,12 @@
 (() => {
   if (window.top !== window) return;
+  // 用户要求同一程序打开独立会话窗口；仅传会话 ID，URL、窗口和来源校验均由原生处理。
+  Object.defineProperty(window, "__CODEX_ELVES_SESSION_WINDOWS__", {
+    value: Object.freeze({
+      open: threadId => window.__TAURI__.core.invoke("remote_open_session_window", { threadId }),
+      openPreview: preview => window.__TAURI__.core.invoke("remote_open_session_window", { preview })
+    })
+  });
   let scheduled = false, previous = "", pending = null, running = false;
   async function flush() {
     if (running) return;

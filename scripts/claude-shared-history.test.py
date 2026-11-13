@@ -20,6 +20,202 @@ exec(compile(trust_source.read_text(encoding="utf-8"), str(trust_source), "exec"
 
 
 class SharedQueueHistoryTests(unittest.TestCase):
+    dialog_text = ("Switch model?\nYour next response will be slower and use more tokens\n"
+                   "This conversation is cached for the current model. Switching to Opus 5.5 means "
+                   "the full history gets re-read.\n❯ 1. Yes, switch to Opus 5.5\n  2. No, go back\n")
+
+    def waiting_dialog(self):
+        native = NativeSession("unused", "test-session", "saved-job")
+        native.initialized = True
+        native.model = "sonnet"
+        native.messages = [{"type": "system", "subtype": "turn_duration", "uuid": "old-done"}]
+        native.setting_catalog = [{"value": "opus", "displayName": "Opus 5.5"},
+                                  {"value": "sonnet", "displayName": "Sonnet 5.5"}]
+        native.actual_settings = {"model": "sonnet"}
+        native.job = {"short": "saved-job", "sessionId": "test-session", "state": "done", "tempo": "idle",
+                      "sessionStatus": "waiting", "sessionStatusAtMs": 2000, "needs": "dialog open"}
+        native.lookup = lambda: native.job
+        native.read_messages = lambda: None
+        native.context_configuration = lambda: {}
+        native.screen.feed(self.dialog_text)
+        return native
+
+    def test_model_dialog_waiting_survives_old_completion_and_keeps_the_original_message(self):
+        native = self.waiting_dialog()
+        native.pending = [{"clientUserMessageId": "original", "_nativeText": "原消息", "deliveryConfirmed": True}]
+        with contextlib.redirect_stdout(io.StringIO()):
+            native.poll()
+        status = NativeDiscovery.status(native.job, native.messages)
+        self.assertEqual((status["tempo"], status["state"], status["endedAtMs"]), ("blocked", "blocked", None))
+        request = next(iter(native.requests.values()))
+        self.assertEqual(request["subtype"], "native_dialog")
+        self.assertTrue(request["dialog"]["remoteSupported"])
+        self.assertEqual(native.settings_projection()["model"], "sonnet")
+        self.assertEqual(native.setting_changes["model"]["state"], "confirmation")
+        self.assertEqual(native.pending[0]["clientUserMessageId"], "original")
+        self.assertEqual(len(native.messages), 1, "确认框不能伪造新轮次或正文")
+
+    def test_unknown_or_unnumbered_dialog_only_prompts_local_confirmation(self):
+        native = self.waiting_dialog()
+        for text in ("Unknown native dialog\n1. Allow\n2. Cancel",
+                     self.dialog_text.replace("1. ", "").replace("2. ", "")):
+            native.screen = namespace["Screen"]()
+            native.screen.feed(text)
+            with contextlib.redirect_stdout(io.StringIO()):
+                native.poll()
+            request = next(iter(native.requests.values()))
+            self.assertEqual(request["dialog"]["kind"], "unknown")
+            self.assertFalse(request["dialog"]["remoteSupported"])
+            native.terminal_input = MagicMock()
+            with self.assertRaisesRegex(RuntimeError, "原版 Claude"):
+                native.answer({"response": {"request_id": request["dialog"]["id"],
+                    "response": {"behavior": "allow"}}})
+            native.terminal_input.assert_not_called()
+
+    def test_native_dialog_confirm_or_decline_sends_one_number_without_resending_messages(self):
+        for decision, key in (("allow", b"1"), ("deny", b"2")):
+            native = self.waiting_dialog()
+            native.terminal_input, native.reply = MagicMock(), MagicMock()
+            with contextlib.redirect_stdout(io.StringIO()):
+                native.poll()
+                identity = native.dialog["id"]
+                native.answer({"response": {"request_id": identity, "response": {"behavior": decision}}})
+                with self.assertRaisesRegex(RuntimeError, "已提交"):
+                    native.answer({"response": {"request_id": identity, "response": {"behavior": decision}}})
+            native.terminal_input.assert_called_once_with(key, dialog={
+                **native.dialog, "state": "waiting"})
+            native.reply.assert_not_called()
+            self.assertEqual(native.setting_changes["model"]["state"], "confirming")
+            self.assertEqual(native.actual_settings["model"], "sonnet")
+
+    def test_dialog_identity_changes_with_new_wait_epoch_but_not_cursor_navigation(self):
+        native = self.waiting_dialog()
+        first = namespace["native_dialog"](native.job, self.dialog_text, native.native_id)
+        moved = self.dialog_text.replace("❯ 1.", "  1.").replace("  2.", "❯ 2.")
+        self.assertEqual(first["id"], namespace["native_dialog"](native.job, moved, native.native_id)["id"])
+        wrapped = moved.replace("for the current model.", "for the\ncurrent model.")
+        self.assertEqual(first["id"], namespace["native_dialog"](native.job, wrapped, native.native_id)["id"])
+        newer = {**native.job, "sessionStatusAtMs": 2001}
+        self.assertNotEqual(first["id"], namespace["native_dialog"](newer, moved, native.native_id)["id"])
+        native.job = newer
+        native.terminal_input = MagicMock()
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "已经结束"):
+            native.answer({"response": {"request_id": first["id"], "response": {"behavior": "allow"}}})
+        native.terminal_input.assert_not_called()
+
+    def test_reconnect_keeps_submitted_dialog_locked_until_native_result_arrives(self):
+        native = self.waiting_dialog()
+        with contextlib.redirect_stdout(io.StringIO()):
+            native.poll()
+        native.setting_changes["model"]["state"] = "confirming"
+        resumed = self.waiting_dialog()
+        resumed.restore_settings(native.control_projection())
+        resumed.terminal_input = MagicMock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            resumed.poll()
+            self.assertEqual(resumed.dialog["state"], "submitted")
+            with self.assertRaisesRegex(RuntimeError, "已提交"):
+                resumed.answer({"response": {"request_id": resumed.dialog["id"],
+                    "response": {"behavior": "allow"}}})
+        resumed.terminal_input.assert_not_called()
+
+    def test_decline_without_command_history_waits_for_dialog_close_then_restores_original_model(self):
+        native = self.waiting_dialog()
+        native.terminal_input = MagicMock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            native.poll()
+            native.answer({"response": {"request_id": native.dialog["id"],
+                                       "response": {"behavior": "deny"}}})
+            self.assertEqual(native.setting_changes["model"]["state"], "confirming")
+            native.job.update(sessionStatus="idle", needs=None)
+            native.poll()
+        self.assertIsNone(native.dialog)
+        self.assertEqual(native.setting_changes["model"]["state"], "rejected")
+        self.assertEqual(native.model, "sonnet")
+        self.assertFalse(native.requests)
+
+    def test_local_cli_decision_without_command_history_uses_the_next_actual_request(self):
+        for actual, state in (("sonnet", "rejected"), ("opus", "applied")):
+            native = self.waiting_dialog()
+            with contextlib.redirect_stdout(io.StringIO()):
+                native.poll()
+            native.job.update(sessionStatus="busy", needs=None)
+            native.observe_setting_record({"type": "assistant", "uuid": "new", "timestamp": 3000,
+                                          "requestedModel": actual, "message": {"model": actual}})
+            self.assertEqual(native.setting_changes["model"]["state"], state)
+            self.assertEqual(native.model, actual)
+
+    def test_dialog_answer_revalidates_a_fresh_native_snapshot_before_sending_keys(self):
+        native = self.waiting_dialog()
+        expected = namespace["native_dialog"](native.job, self.dialog_text, native.native_id)
+        for same in (True, False):
+            connection = MagicMock()
+            connection.__enter__.return_value = connection
+            text = self.dialog_text if same else "Claude input is ready"
+            connection.makefile.return_value = io.BytesIO(
+                (json.dumps({"type": "snapshot", "streamTail": [text]}) + "\n").encode())
+            with patch.object(namespace["socket"], "socket", return_value=connection):
+                if same:
+                    native.verify_dialog(expected)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "界面已变化"):
+                        native.verify_dialog(expected)
+            self.assertEqual(len(connection.sendall.call_args_list), 1, "核对只能订阅，不能发送审批按键")
+            self.assertEqual(json.loads(connection.sendall.call_args.args[0])["op"], "subscribe")
+
+    def test_native_setting_result_roundtrips_through_history_and_reconnection(self):
+        rows = [
+            {"type": "assistant", "uuid": "previous", "timestamp": 1000, "message": {"model": "sonnet"}},
+            {"type": "user", "uuid": "command", "timestamp": 2000, "entrypoint": "cli", "message": {
+                "content": "<command-name>/model</command-name><command-message>model</command-message><command-args>opus</command-args>"}},
+            {"type": "user", "uuid": "result", "timestamp": 2000, "entrypoint": "cli", "parentUuid": "command",
+             "message": {"content": "<local-command-stdout>Set model to `Opus 5.5` and saved as your default for new sessions</local-command-stdout>"}},
+        ]
+        native = self.read(rows)
+        self.assertEqual(native.settings_projection()["model"], "opus")
+        self.assertEqual(native.setting_changes["model"]["state"], "applied")
+        resumed = NativeSession("unused", "test-session")
+        resumed.restore_settings(native.control_projection())
+        self.assertEqual(resumed.settings_projection(), native.settings_projection())
+        quote = {**rows[-1], "uuid": "quoted", "promptSource": "typed", "origin": {"kind": "human"}}
+        rows.append(quote)
+        self.assertEqual(self.read(rows).settings_projection()["model"], "opus")
+
+    def test_model_command_acceptance_and_native_results_are_separate(self):
+        for output, state, actual in (("Set model to `Opus 5.5`", "applied", "opus"),
+                                      ("Kept model as `Sonnet 5.5`", "rejected", "sonnet"),
+                                      ("Kept model as Sonnet 5.5", "rejected", "sonnet"),
+                                      ("Kept model as \x1b[1mSonnet 5.5\x1b[22m", "rejected", "sonnet")):
+            native = self.waiting_dialog()
+            native.reply = MagicMock()
+            with patch.object(namespace["time"], "time", return_value=1):
+                native.change_setting("model", "opus")
+                native.change_setting("model", "opus")
+            native.reply.assert_called_once_with("/model opus", next_turn=False)
+            self.assertEqual(native.settings_projection()["model"], "sonnet")
+            change_id = native.setting_changes["model"]["id"]
+            native.observe_setting_record({"type": "user", "uuid": "result", "timestamp": 3000,
+                "nativeSettingOutput": {"name": "model", "value": "opus", "commandId": "command"},
+                "message": {"content": f"<local-command-stdout>{output}</local-command-stdout>"}})
+            self.assertEqual(native.actual_settings["model"], actual)
+            self.assertEqual(native.model, actual)
+            self.assertEqual(native.setting_changes["model"]["id"], change_id)
+            self.assertEqual(native.setting_changes["model"]["state"], state)
+            native.observe_setting_record({"type": "assistant", "uuid": "old", "timestamp": 500,
+                                          "message": {"model": "old-model"}})
+            self.assertEqual(native.actual_settings["model"], actual)
+
+    def test_dialog_wait_does_not_defer_a_direct_send_to_the_web_queue(self):
+        native = self.waiting_dialog()
+        native.reply = MagicMock()
+        native.terminal_input = MagicMock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "new", "idle_only": True,
+                                  "content": [{"type": "text", "text": "待确认后处理"}]})
+        self.assertTrue(result["accepted"])
+        native.reply.assert_called_once_with("待确认后处理")
+        native.terminal_input.assert_not_called()
+
     def test_goal_statistics_use_only_native_numbers_and_reset_on_replacement(self):
         start = {"type": "attachment", "uuid": "goal", "timestamp": 1000,
                  "attachment": {"type": "goal_status", "condition": "目标", "met": False, "sentinel": True}}
@@ -510,7 +706,11 @@ class SharedQueueHistoryTests(unittest.TestCase):
         for status in ("Running 1 shell command · 2s…",
                        "Running 3 shell commands · 1m 2s...",
                        "Running 1 tool · 0.5s",
-                       "Running 2 tools • 250ms…"):
+                       "Running 2 tools • 250ms…",
+                       "Reading 2 files, running 2 shell commands · 3s...",
+                       "Reading 1 file, running 1 shell command · 3s…",
+                       "Searching 3 patterns, reading 2 files, running 1 shell command • 2m 3.5s...",
+                       "Editing 2 files and running 1 tool"):
             with self.subTest(status=status):
                 native = self.native_active()
                 native.messages[0]["message"]["content"] = "fixture prompt"
@@ -531,6 +731,162 @@ class SharedQueueHistoryTests(unittest.TestCase):
         frames = self.preview_frames(native,
             "❯ fixture prompt\n● Actual response continues: Running 1 shell command is an example.\n")
         self.assertEqual(frames[-1]["text"], "Actual response continues: Running 1 shell command is an example.")
+
+    def test_split_progress_fragments_never_become_a_reply_but_normal_sentences_do(self):
+        self.assertFalse(namespace["terminal_progress_line"]("Reading" + " " * 3000 + "!", partial=True))
+        for status in ("Reading 2 files, running 2 shell commands · 3s...",
+                       "Editing 2 files and running 1 tool • 250ms…"):
+            native = self.native_active()
+            native.messages[0]["message"]["content"] = "fixture prompt"
+            for length in range(1, len(status) + 1):
+                with self.subTest(fragment=status[:length]):
+                    self.assertEqual(self.preview_frames(native, f"❯ fixture prompt\n● {status[:length]}"), [])
+                    self.assertEqual(native.preview, "")
+            sentence = "Reading 2 files makes the check faster."
+            frames = self.preview_frames(native, f"❯ fixture prompt\n● {sentence}")
+            self.assertEqual(frames[-1]["text"], sentence)
+        native = self.native_active()
+        native.messages[0]["message"]["content"] = "fixture prompt"
+        frames = self.preview_frames(native, "❯ fixture prompt\n● Actual reply\n  Reading 2 fi")
+        self.assertEqual(frames[-1]["text"], "Actual reply")
+
+    def test_native_skill_wrapper_confirms_the_original_slash_input_once(self):
+        text = ("<command-message>simplify</command-message>\n"
+                "<command-name>/simplify</command-name>\n<command-args>probe</command-args>")
+        user = {"type": "user", "uuid": "skill-user", "entrypoint": "sdk-cli", "promptId": "skill-prompt",
+                "message": {"content": text}}
+        native = self.read([user], pending_text="/simplify probe")
+        self.assertEqual(native.messages[0]["message"]["content"], "/simplify probe")
+        self.assertEqual(native.clients, {"skill-user": "web-client"})
+        self.assertEqual(native.pending, [])
+        native.read_messages()
+        self.assertEqual(native.messages[0]["message"]["content"], "/simplify probe")
+        spaced = self.read([user], pending_text="/simplify   probe")
+        self.assertEqual(spaced.messages[0]["message"]["content"], "/simplify probe")
+        self.assertEqual(spaced.clients, {"skill-user": "web-client"})
+        self.assertEqual(spaced.pending, [])
+        companion = {"type": "user", "uuid": "skill-body", "parentUuid": "skill-user",
+                     "promptId": "skill-prompt", "isMeta": True, "turnCompanion": True,
+                     "message": {"content": [{"type": "text", "text": "Native skill body"}]}}
+        reopened = self.read([user, companion])
+        self.assertEqual(reopened.messages[0]["message"]["content"], "/simplify probe",
+                         "重读原生日志也按同一展开关系恢复显示，不依赖网页临时缓存")
+        self.assertFalse(namespace["real_user"](reopened.messages[1]))
+
+    def test_native_skill_wrapper_does_not_rewrite_literal_quotes_or_unrelated_companions(self):
+        text = ("<command-message>simplify</command-message>\n"
+                "<command-name>/simplify</command-name>\n<command-args>probe</command-args>")
+        user = {"type": "user", "uuid": "quoted-user", "entrypoint": "sdk-cli", "promptId": "quote-prompt",
+                "message": {"content": text}}
+        quote = self.read([user], pending_text=text)
+        self.assertEqual(quote.messages[0]["message"]["content"], text)
+        self.assertEqual(quote.clients, {"quoted-user": "web-client"})
+        self.assertIsNone(quote.messages[0].get("nativeSkillCommand"))
+        unrelated = {"type": "user", "uuid": "other-body", "parentUuid": "other-user",
+                     "promptId": "quote-prompt", "isMeta": True, "turnCompanion": True,
+                     "message": {"content": "Unrelated metadata"}}
+        native = self.read([user, unrelated])
+        self.assertEqual(native.messages[0]["message"]["content"], text)
+        self.assertEqual(native.clients, {})
+
+    def test_multiline_and_wrapped_prompt_matches_all_visible_input_not_a_prefix(self):
+        native = self.native_active()
+        native.messages[0]["message"]["content"] = "First line\nSecond requirement with more details"
+        frames = self.preview_frames(native,
+            "❯ First line\n  Second requirement with\n  more details\n\n● Actual response\n")
+        self.assertEqual(frames[-1]["text"], "Actual response")
+        self.assertEqual(namespace["terminal_reply_region"](
+            ["❯ First line", "  Second requirement with different details", "● Wrong response"],
+            namespace["preview_prompt_key"](native.messages[0]["message"]["content"]), 1), [])
+
+    def test_matching_twenty_character_prefix_cannot_claim_an_old_terminal_reply(self):
+        native = self.native_active()
+        prefix = "12345678901234567890"
+        native.messages[0]["message"]["content"] = prefix + " old question"
+        native.messages.extend([
+            {"type": "assistant", "uuid": "old-row", "message": {
+                "id": "old-reply", "content": [{"type": "text", "text": "Old reply"}]}},
+            {"type": "system", "subtype": "turn_duration"},
+            {"type": "user", "uuid": "new-user", "message": {"content": prefix + " new question"}},
+        ])
+        self.assertEqual(self.preview_frames(native, f"❯ {prefix} old question\n● Old reply\n"), [])
+        frames = self.preview_frames(native, f"❯ {prefix} new question\n● New reply\n")
+        self.assertEqual((frames[-1]["native_user_id"], frames[-1]["text"]), ("new-user", "New reply"))
+
+    def test_repeated_prompt_requires_its_native_occurrence_and_image_only_never_claims_old_text(self):
+        native = self.native_active()
+        native.messages[0]["message"]["content"] = "continue"
+        native.messages.extend([
+            {"type": "assistant", "uuid": "old-row", "message": {
+                "id": "old-reply", "content": [{"type": "text", "text": "Old reply"}]}},
+            {"type": "system", "subtype": "turn_duration"},
+            {"type": "user", "uuid": "new-user", "message": {"content": "continue"}},
+        ])
+        self.assertEqual(self.preview_frames(native, "❯ continue\n● Old reply\n"), [])
+        frames = self.preview_frames(native, "❯ continue\n● Old reply\n❯ continue\n● New reply\n")
+        self.assertEqual((frames[-1]["native_user_id"], frames[-1]["text"]), ("new-user", "New reply"))
+        self.assertEqual(self.preview_frames(native, "❯ continue\n● Old reply\n❯ continue\n"), [],
+                         "新输入已出现但还没有回复时，不能回退到前一次同名输入")
+        image_native = self.native_active()
+        image_native.messages[0]["message"]["content"] = [{"type": "image", "source": {}}]
+        self.assertEqual(self.preview_frames(image_native, "❯ Previous question\n● Previous reply\n"), [])
+
+    def test_screen_erase_display_clears_current_line_without_erasing_unrelated_visible_text(self):
+        screen = namespace["Screen"]()
+        screen.feed("before\r\nABCDE\r\nbelow\x1b[2;3H\x1b[")
+        screen.feed("J")
+        self.assertEqual(screen.text(), ["before", "AB"])
+        self.assertEqual((screen.x, screen.y), (2, 1), "清屏不移动光标")
+        screen = namespace["Screen"]()
+        screen.feed("before\r\nABCDE\r\nbelow\x1b[2;3H\x1b[1J")
+        self.assertEqual(screen.text(), ["", "   DE", "below"])
+        screen.feed("\x1b[3J")
+        self.assertEqual(screen.text(), ["", "   DE", "below"], "清滚动历史不能删除当前画面")
+        screen.feed("\x1b[2J")
+        self.assertEqual(screen.text(), [])
+
+    def test_throttled_last_fragment_flushes_on_existing_poll_without_new_stream_or_snapshot(self):
+        native = self.native_active()
+        native.messages[0]["message"]["content"] = "fixture prompt"
+        native.initialized = True
+        native.context_configuration = lambda: {}
+        native.observe_control_screen = lambda: None
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), patch("time.monotonic", return_value=100):
+            native.job["tempo"] = "active"
+            native.stream_preview("❯ fixture prompt\r\n● Actual")
+            NativeSession.poll(native)
+        self.assertEqual(native.preview, "Actual")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), patch("time.monotonic", return_value=100.05):
+            native.stream_preview(" response")
+        self.assertEqual(output.getvalue(), "")
+        self.assertTrue(native.preview_dirty)
+        with contextlib.redirect_stdout(output), patch("time.monotonic", return_value=100.2):
+            NativeSession.poll(native)
+        frames = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([frame["type"] for frame in frames], ["shared_preview"])
+        self.assertEqual(frames[0]["text"], "Actual response")
+        self.assertFalse(native.preview_dirty)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), patch("time.monotonic", return_value=100.4):
+            NativeSession.poll(native)
+        self.assertEqual(output.getvalue(), "", "补发后没有新片段时不得重复推送")
+
+    def test_pending_preview_is_rechecked_after_native_completion(self):
+        native = self.native_active()
+        native.messages[0]["message"]["content"] = "fixture prompt"
+        with contextlib.redirect_stdout(io.StringIO()), patch("time.monotonic", return_value=100):
+            native.job["tempo"] = "active"
+            native.stream_preview("❯ fixture prompt\r\n● Actual")
+        with patch("time.monotonic", return_value=100.05):
+            native.stream_preview(" stale fragment")
+        native.messages.append({"type": "system", "subtype": "turn_duration"})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), patch("time.monotonic", return_value=100.2):
+            native.flush_preview()
+        self.assertEqual(output.getvalue(), "")
+        self.assertFalse(native.preview_dirty)
 
     def test_preview_identity_is_scoped_to_the_current_native_user(self):
         native = self.native_active()
@@ -1574,6 +1930,207 @@ class LocalUsageLedgerTests(unittest.TestCase):
         self.assertEqual(self.collect()["fiveHour"]["usedTokens"], 110)
         self.request["windows"] = [{"key": "expired", "durationMs": 18000000, "resetsAt": self.now - 1}]
         self.assertEqual(self.collect(), {})
+
+
+class HistoryEditTests(unittest.TestCase):
+    def read(self, rows):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / "session.jsonl"
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        native = NativeSession("unused", "00000000-0000-4000-8000-000000000001", "00000000")
+        native.log_path = path
+        native.read_messages()
+        return native
+
+    def rows(self):
+        return [
+            {"type": "user", "uuid": "a", "parentUuid": None, "message": {"content": "问题A"}},
+            {"type": "attachment", "uuid": "hidden-context", "parentUuid": "a",
+             "attachment": {"type": "context"}},
+            {"type": "assistant", "uuid": "aa", "parentUuid": "hidden-context",
+             "message": {"id": "request-a", "model": "test-model", "content": [{"type": "text", "text": "回复A"}],
+                         "usage": {"input_tokens": 100, "output_tokens": 10}}},
+            {"type": "user", "uuid": "b", "parentUuid": "aa", "message": {"content": "很长的问题B"}},
+            {"type": "assistant", "uuid": "bb", "parentUuid": "b",
+             "message": {"id": "request-b", "model": "test-model", "content": [{"type": "text", "text": "回复B"}],
+                         "usage": {"input_tokens": 200, "output_tokens": 20}}},
+            {"type": "system", "uuid": "done", "parentUuid": "bb", "subtype": "turn_duration"},
+        ]
+
+    def test_native_rewind_selects_current_parent_chain_and_retains_numeric_usage_only(self):
+        rows = self.rows() + [
+            {"type": "user", "uuid": "replacement", "parentUuid": "aa", "message": {"content": "修改的问题B"}},
+            {"type": "assistant", "uuid": "new-reply", "parentUuid": "replacement",
+             "message": {"content": [{"type": "text", "text": "新回复"}]}}
+        ]
+        native = self.read(rows)
+        self.assertEqual([row["uuid"] for row in native.messages], ["a", "aa", "replacement", "new-reply"])
+        self.assertEqual(native.retired_usage[0]["message"], {
+            "id": "request-b", "model": "test-model", "usage": {"input_tokens": 200, "output_tokens": 20}})
+        native.read_messages()
+        self.assertEqual([row["uuid"] for row in native.messages], ["a", "aa", "replacement", "new-reply"])
+        self.assertTrue(all("content" not in row["message"] for row in native.retired_usage))
+
+    def test_native_terminal_charset_switch_does_not_invent_draft_text(self):
+        screen = namespace["Screen"]()
+        screen.feed("❯ \x1b(")
+        screen.feed("B\x0f")
+        self.assertEqual(screen.text(), ["❯"])
+
+    def test_new_input_after_rewind_is_confirmed_by_append_offset_instead_of_old_index(self):
+        native = self.read(self.rows())
+        native.pending = [{"clientUserMessageId": "edited-client", "_nativeText": "修改后的问题B",
+                           "_after": len(native.messages), "_afterOffset": native.log_offset}]
+        with native.log_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"type": "user", "uuid": "new-input", "parentUuid": "aa",
+                                     "message": {"content": "修改后的问题B"}}) + "\n")
+        native.read_messages()
+        self.assertEqual([row["uuid"] for row in native.messages], ["a", "aa", "new-input"])
+        self.assertEqual(native.clients["new-input"], "edited-client")
+        self.assertEqual(native.pending, [])
+
+    def test_editing_first_message_and_compaction_keep_distinct_history_semantics(self):
+        native = self.read(self.rows() + [
+            {"type": "user", "uuid": "new-root", "parentUuid": None, "message": {"content": "新起点"}},
+            {"type": "system", "uuid": "compact", "parentUuid": None, "subtype": "compact_boundary"},
+            {"type": "user", "uuid": "summary", "parentUuid": "compact", "isCompactSummary": True,
+             "message": {"content": "内部摘要"}},
+            {"type": "user", "uuid": "next", "parentUuid": "summary", "message": {"content": "继续"}},
+        ])
+        self.assertEqual([row["uuid"] for row in native.messages], ["new-root", "compact", "summary", "next"])
+        self.assertFalse(next(row for row in native.messages if row["uuid"] == "summary")["nativeEditable"])
+        self.assertEqual(len(native.retired_usage), 2)
+
+    def edit_fixture(self):
+        native = self.read(self.rows())
+        native.model, native.effort = "test-model", "max"
+        native.incoming = namespace["queue"].Queue()
+        native.read_messages = lambda: None
+        native.bind = lambda job: None
+        live = {"tempo": "idle", "state": "done", "sessionStatus": "idle"}
+        native.lookup = lambda: live
+        native.poll = lambda **options: None
+        sent, keys, stage = [], [], [0]
+        def screen(text):
+            native.incoming.put({"_stream": "\x1b[2J\x1b[H" + text.replace("\n", "\r\n")})
+        def reply(text, next_turn=True):
+            self.assertEqual((text, next_turn), ("/rewind", False))
+            screen("Rewind\nRestore the code and/or conversation\n❯ (current)\nEnter to continue")
+        def terminal(data):
+            keys.append(data)
+            if data == b"\x1b[A":
+                screen("Rewind\nRestore the code and/or conversation\n❯ 很长的问题…\nEnter to continue")
+            elif data == b"\r" and stage[0] == 0:
+                stage[0] = 1
+                body = next(row for row in native.messages if row["uuid"] == "b")["message"]["content"]
+                screen("Rewind\nConfirm you want to restore\n" + "\n".join("│ " + line for line in body.splitlines()) + "\n"
+                       "❯ 1. Restore code and conversation\n  2. Restore conversation\n  3. Never mind")
+            elif data == b"\x1b[B\r":
+                stage[0] = 2
+                screen("────────────────\n❯ 很长的问题B\n────────────────")
+            elif data.startswith(b"\x15"):
+                screen("────────────────\n❯ \n────────────────")
+        native.reply, native.terminal_input = reply, terminal
+        native.send = lambda request: sent.append(request) or {"accepted": True, "nativeId": native.native_id}
+        request = {"native_user_id": "b", "history_head": "done", "client_id": "new-message",
+                   "prompt": "修改后的问题B", "model": "test-model", "effort": "max"}
+        return native, request, sent, keys, live
+
+    def test_edit_uses_native_conversation_only_option_without_interrupt_or_fork(self):
+        native, request, sent, keys, _ = self.edit_fixture()
+        result = native.edit_message(request)
+        self.assertTrue(result["reverted"])
+        self.assertEqual(result["nativeId"], native.native_id)
+        self.assertEqual([row["uuid"] for row in native.messages], ["a", "aa"])
+        self.assertEqual(sent[0]["content"], [{"type": "text", "text": request["prompt"]}])
+        self.assertTrue(sent[0]["idle_only"])
+        self.assertEqual(keys, [b"\x1b[A", b"\r", b"\x1b[B\r", b"\x15\x7f\x15\x7f"])
+
+    def test_busy_or_stale_edit_does_not_open_menu_or_change_history(self):
+        for changes in ({"sessionStatus": "busy"}, {"sessionStatus": "waiting"}):
+            native, request, sent, keys, live = self.edit_fixture()
+            live.update(changes)
+            with self.assertRaises(namespace["NativeError"]):
+                native.edit_message(request)
+            self.assertFalse(sent)
+            self.assertFalse(keys)
+            self.assertFalse(native.delivery_started)
+        native, request, sent, keys, _ = self.edit_fixture()
+        request["history_head"] = "old"
+        with self.assertRaises(namespace["NativeError"]):
+            native.edit_message(request)
+        self.assertFalse(keys)
+
+    def test_failed_send_after_native_rewind_keeps_unknown_delivery(self):
+        native, request, sent, keys, _ = self.edit_fixture()
+        native.send = MagicMock(side_effect=namespace["NativeError"]("EBUSY"))
+        with self.assertRaises(namespace["NativeError"]):
+            native.edit_message(request)
+        self.assertTrue(native.delivery_started)
+        self.assertEqual(native.history.cut_before, "b")
+
+    def test_multiline_edit_confirmation_ignores_native_quote_borders(self):
+        native, request, sent, keys, _ = self.edit_fixture()
+        next(row for row in native.messages if row["uuid"] == "b")["message"]["content"] = "很长的问题B\n第二行原文\n第三行原文"
+        self.assertTrue(native.edit_message(request)["reverted"])
+        self.assertEqual(keys[-1], b"\x15\x7f" * 4)
+
+    def test_unconfirmed_edit_closes_only_its_own_two_level_rewind_menu(self):
+        native, request, sent, keys, live = self.edit_fixture()
+        reply, terminal = native.reply, native.terminal_input
+        escapes = []
+        def patched_reply(*args, **kwargs):
+            reply(*args, **kwargs)
+            live["sessionStatus"] = "waiting"
+        def patched_terminal(data):
+            if data == b"\x1b":
+                keys.append(data)
+                escapes.append(data)
+                if len(escapes) == 2:
+                    live["sessionStatus"] = "idle"
+                text = "Rewind\r\nEnter to continue" if len(escapes) == 1 else "────────────────\r\n❯ \r\n────────────────"
+                native.incoming.put({"_stream": "\x1b[2J\x1b[H" + text})
+            else:
+                terminal(data)
+                if data == b"\r":
+                    native.incoming.put({"_stream": "\x1b[2J\x1b[HRewind\r\nConfirm you want to restore\r\n"
+                        "│ 其他问题\r\n❯ 1. Restore code and conversation\r\n  2. Restore conversation"})
+        native.reply, native.terminal_input = patched_reply, patched_terminal
+        with self.assertRaisesRegex(RuntimeError, "回退目标"):
+            native.edit_message(request)
+        self.assertEqual(len(escapes), 2)
+        self.assertFalse(native.delivery_started)
+        self.assertFalse(sent)
+
+    def test_failed_edit_does_not_send_escape_when_cli_has_started_another_execution(self):
+        native, request, sent, keys, live = self.edit_fixture()
+        terminal = native.terminal_input
+        def patched_terminal(data):
+            terminal(data)
+            if data == b"\r":
+                live["sessionStatus"] = "busy"
+                native.incoming.put({"_stream": "\x1b[2J\x1b[HRewind\r\nConfirm you want to restore\r\n"
+                    "│ 其他问题\r\n❯ 1. Restore code and conversation\r\n  2. Restore conversation"})
+        native.terminal_input = patched_terminal
+        with self.assertRaisesRegex(RuntimeError, "回退目标"):
+            native.edit_message(request)
+        self.assertNotIn(b"\x1b", keys)
+        self.assertFalse(sent)
+
+    def test_edit_preserves_and_deduplicates_all_original_images(self):
+        native = self.read(self.rows())
+        target = native.messages[0]
+        target["web_images"] = [{"url": f"data:image/png;base64,{namespace['base64'].b64encode(bytes([i])).decode()}"}
+                                for i in range(8)]
+        target["message"]["content"] = [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="}}
+        ]
+        content = native.edit_content(target, "只修改文字")
+        self.assertEqual(len(content), 9)
+        self.assertEqual(content[0], {"type": "text", "text": "只修改文字"})
+        target["web_images"] = [target["web_images"][0], target["web_images"][0]]
+        self.assertEqual(len(native.edit_content(target, "重复添加的原图仍保留")), 3)
 
 
 if __name__ == "__main__":

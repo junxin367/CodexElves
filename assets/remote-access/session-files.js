@@ -646,6 +646,7 @@ export function mountPreviewControlsScroll({ body, controls, isActive = () => tr
 
 export function mountSessionFiles({
   workspace, trigger, getContext, beforeOpen, onUnauthorized, openImagePreview, copyText,
+  onFileContextMenu,
   embedded = null, isAvailable = () => true, request = requestRemote
 }) {
   const historyKey = "codexElvesFiles";
@@ -696,7 +697,7 @@ export function mountSessionFiles({
   });
   // 用户要求信息栏右侧为“自动换行 → 原始/紧凑布局”；参照 Markdown 源码/预览按钮，文字表示点击后的目标模式，不使用选中高亮。
   // 用户要求表格默认紧凑布局且保留手动切换；缺省状态按紧凑处理，第一次点击切换原始布局。
-  // 自动换行默认关闭；选择跟随文件页缓存，切换会话/授权时清空。
+  // 自动换行默认关闭；选择跟随文件页缓存。PC 切换会话保留所属标签，手机切换目标或更换授权时清空。
   const layoutButton = control("原始布局", () => {
     richView.layout = richView.layout === "original" ? "compact" : "original";
     renderSpreadsheetControlsChange();
@@ -879,6 +880,10 @@ export function mountSessionFiles({
     const button = control("", () => isFolder ? toggleDirectory(file.path)
       : embedded?.onOpenFile ? embedded.onOpenFile(file.path) : void openFile(file.path), "session-tools-file");
     button.title = displayWorkspacePath(file.path); button.disabled = file.kind === "unsupported";
+    // 用户要求“文件”中的文件右键可独立预览；目录与不支持项仍保持原来的交互。
+    if (!isFolder && file.kind !== "unsupported" && typeof onFileContextMenu === "function")
+      button.addEventListener("contextmenu", event => onFileContextMenu(event,
+        { kind: "file", path: file.path }, { ...getContext() }));
     button.style.setProperty("--file-depth", String(depth));
     button.dataset.path = file.path;
     button.dataset.depth = String(depth);

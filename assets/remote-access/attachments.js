@@ -12,6 +12,15 @@ const supportedMimes = new Set(["image/png", "image/jpeg", "image/webp", "image/
 const remoteVideoPattern = /^\/api\/videos\/[a-f0-9]{64}$/u;
 const MEDIA_RECOVERY_TIMEOUT_MS = 15_000;
 
+export function requestWorkspaceMediaPreview(resource) {
+  if (document.documentElement.dataset.workspaceSidePanel !== "true" || window.parent === window) return false;
+  // 用户要求 PC 标签中的资源在整个页面预览；只转交当前可见侧边页，手机整页及主会话仍走原入口。
+  // 仅传资源身份，由主页面沿用既有图片/视频校验与加载，不传 DOM、任意地址或新的文件读取权限。
+  if (document.documentElement.dataset.workspaceSidePanelVisible !== "false")
+    window.parent.postMessage({ ...resource, type: "codex-elves-workspace-media-preview" }, location.origin);
+  return true;
+}
+
 function loadVideoPoster(image, path, loaded = () => {}) {
   if (image.posterRecovery?.path === path) return;
   image.posterRecovery?.dispose();
@@ -122,6 +131,7 @@ export function fitMediaPreview(dialog, panel, media, dimensions, { fillAvailabl
 
 export function openVideoPreview(trigger, source, poster, name, prepareAccess = () => {}) {
   if (!remoteVideoPattern.test(source) || poster !== `${source}/poster`) return;
+  if (requestWorkspaceMediaPreview({ kind: "video", source, poster, name })) return;
   prepareAccess();
   document.querySelector("#video-preview-dialog")?.close();
   const dialog = document.createElement("dialog");
@@ -392,6 +402,7 @@ export function openVideoPreview(trigger, source, poster, name, prepareAccess = 
   dialog.showModal();
   layout.resize();
   play.focus();
+  return { close: () => { if (dialog.open) dialog.close(); } };
 }
 
 export function bindMessageVideos(root, prepareAccess = () => {}) {

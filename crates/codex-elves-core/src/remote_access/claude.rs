@@ -30,6 +30,9 @@ mod native_controls;
 #[path = "claude_subagents.rs"]
 mod subagents;
 
+#[path = "claude_skills.rs"]
+mod skills;
+
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 // 同一会话类型实例的完整模型目录缓存五分钟；新建与历史会话共用此期限。
 const MODEL_CATALOG_TTL: Duration = Duration::from_secs(300);
@@ -41,6 +44,12 @@ fn error(code: u16, message: impl Into<String>) -> anyhow::Error {
     ApiError::new(code, message.into()).into()
 }
 
+fn dispatched_unknown(mut failure: ApiError) -> ApiError {
+    // Claude 原生回退/发送失败保留具体原因；结果未知不等于设备授权失效，且不能触发自动重发。
+    failure.outcome_unknown = true;
+    failure
+}
+
 pub(super) fn api_error(failure: anyhow::Error) -> anyhow::Error {
     if failure.downcast_ref::<ApiError>().is_some() {
         failure
@@ -50,7 +59,7 @@ pub(super) fn api_error(failure: anyhow::Error) -> anyhow::Error {
             .is_some_and(|failure| failure.dispatched);
         let error = ApiError::new(503, format!("Claude 服务操作失败：{failure}"));
         if unknown {
-            error.after_admission().into()
+            dispatched_unknown(error).into()
         } else {
             error.into()
         }
@@ -142,6 +151,11 @@ struct Conversation {
     discovered: bool,
     #[serde(default)]
     native_title: String,
+    // 历史编辑按原生 UUID 定位；保留回退分支已发生的数字用量，不能把历史回退当成消费撤销。
+    #[serde(default)]
+    native_history_head: String,
+    #[serde(default)]
+    spent_requests: BTreeMap<String, Value>,
 }
 
 #[derive(Clone)]
@@ -175,8 +189,39 @@ fn claude_backend() -> String {
 }
 
 impl Conversation {
+    fn apply_native_settings(&mut self, settings: &Value) {
+        if !settings.is_object() {
+            return;
+        }
+        if !self.native_control.is_object() {
+            self.native_control = json!({});
+        }
+        self.native_control["settings"] = settings.clone();
+        // 用户要求区分命令受理与实际生效；只用原生确认后的值更新会话模型，待确认选择单独展示。
+        if let Some(model) = settings["model"].as_str() {
+            self.model = model.into();
+        }
+        if let Some(effort) = settings["effort"].as_str() {
+            self.effort = effort.into();
+        }
+    }
+
     fn displayed_turn(&self, turn: &Value) -> Value {
         let mut value = turn.clone();
+        if let Some(fields) = value.as_object_mut() {
+            fields.remove("_metricsRequests");
+            fields.remove("_metricsVersion");
+        }
+        if let Some(items) = value["items"].as_array_mut() {
+            for item in items
+                .iter_mut()
+                .filter(|item| item["type"] == "userMessage")
+            {
+                // 用户要求编辑任意历史用户消息；逐条保留原生定位，原生控制记录和内部摘要不可编辑。
+                item["messageMetadata"] = json!({"turnId":turn["id"],"messageId":item["id"],
+                    "editable":self.shared && turn["_nativeEditable"] == true});
+            }
+        }
         if let Some(preview) = self
             .live_preview
             .as_ref()
@@ -188,6 +233,15 @@ impl Conversation {
                 "status":if turn["status"]=="inProgress" {"inProgress"} else {"unknown"},"_nativePreview":true}));
         }
         value
+    }
+
+    fn metrics(&self) -> Value {
+        if self.spent_requests.is_empty() {
+            return super::session_metrics::claude(&self.turns);
+        }
+        let mut turns = self.turns.clone();
+        turns.push(json!({"_metricsRequests":self.spent_requests}));
+        super::session_metrics::claude(&turns)
     }
 
     fn running_for_send(&self) -> bool {
@@ -223,7 +277,9 @@ impl Conversation {
         let capabilities = json!({"sideThreads":false,"subagents":true,
             "goalComposer":self.shared && self.native_control["capabilities"]["goal"] == true,
             "goalPause":false,"goalResume":false,
-            "messageEdit":false,"queue":self.shared,"queueSendNow":false,
+            "messageEdit":self.shared && !self.native_history_head.is_empty(),
+            "messageEditHistory":self.shared,"messageEditModelSettings":self.shared,
+            "queue":self.shared,"queueSendNow":false,
             "remoteQueue":self.shared,"queueEditRecovery":self.shared,
             "queuedImageEditing":self.shared,"queuedImageRemoval":self.shared,
             "compact":self.shared && self.native_control["capabilities"]["compact"] == true});
@@ -231,12 +287,19 @@ impl Conversation {
             "projectId":self.project_id,"model":self.model,"reasoningEffort":self.effort,
             "createdAt":self.created_at,"updatedAt":self.updated_at,"recencyAt":self.updated_at,
             "pinned":self.pinned,"hasUnreadTurn":self.unread,"hostId":"local","ephemeral":false,
-            "status":{"type":if self.active() {"active"} else {"idle"}},
-            "editableMessage":null,"queuedMessages":self.remote_queue.messages(&self.queued_messages),
+            "status":if self.shared && self.native_status["sessionStatus"] == "waiting" {
+                json!({"type":"waiting","activeFlags":["waitingOnApproval"]})
+            } else {json!({"type":if self.active() {"active"} else {"idle"}})},
+            "editableMessage":null,"editHistoryHead":self.native_history_head,
+            "messageEditReady":self.shared && self.native_status["tempo"]=="idle"
+                && self.native_status["needs"].is_null() && self.native_status["sessionStatus"]!="waiting",
+            "queuedMessages":self.remote_queue.messages(&self.queued_messages),
             "queuedEdits":self.remote_queue.edits(),"goal":self.native_control["goal"],"tokenUsage":self.token_usage,
             "compaction":self.native_control["compaction"],
             "nativeCommands":self.native_control["commands"],
             "goalNotice":self.native_control["goalNotice"],
+            "nativeSettings":self.native_control["settings"],
+            "nativeDialog":self.native_control["dialog"],
             "nativeId":self.native_id,"nativeJobId":self.native_job_id,
             "wslDistribution":self.config.distribution,
             "instanceId":self.config.instance_id(),
@@ -319,10 +382,10 @@ impl Process {
             tokio::time::timeout(INITIALIZE_TIMEOUT, receiver)
                 .await
                 .map_err(|_| {
-                    ApiError::new(503, "Claude 控制请求已派发，回执等待超时").after_admission()
+                    dispatched_unknown(ApiError::new(503, "Claude 控制请求已派发，回执等待超时"))
                 })?
                 .map_err(|_| {
-                    ApiError::new(503, "Claude 控制请求已派发，连接已关闭").after_admission()
+                    dispatched_unknown(ApiError::new(503, "Claude 控制请求已派发，连接已关闭"))
                 })?
         }
         .await;
@@ -345,6 +408,7 @@ pub(super) struct Claude {
     processes: Mutex<HashMap<String, Arc<Process>>>,
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     metadata: Mutex<HashMap<String, (Instant, Value)>>,
+    skill_metadata: Mutex<HashMap<String, (Instant, Value)>>,
     // 用户要求账号额度按 WSL 实例隔离；只缓存白名单百分比与重置时间，不保存登录凭据。
     subscription_usage_cache: Mutex<HashMap<String, subscription_usage::CachedUsage>>,
     local_usage_cache: Mutex<HashMap<String, subscription_usage::CachedLocalUsage>>,
@@ -401,6 +465,7 @@ impl Claude {
             processes: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()),
             metadata: Mutex::new(HashMap::new()),
+            skill_metadata: Mutex::new(HashMap::new()),
             subscription_usage_cache: Mutex::new(HashMap::new()),
             local_usage_cache: Mutex::new(HashMap::new()),
             usage_prices: Mutex::new(subscription_usage::PriceCache::default()),
@@ -708,6 +773,8 @@ impl Claude {
             live_preview: None,
             discovered: true,
             native_title: String::new(),
+            native_history_head: String::new(),
+            spent_requests: BTreeMap::new(),
         };
         let process = self.launch(&probe, command, Some(json!({}))).await?;
         state.process = Some(process.clone());
@@ -919,6 +986,8 @@ impl Claude {
                 live_preview: None,
                 discovered: true,
                 native_title: title.into(),
+                native_history_head: String::new(),
+                spent_requests: BTreeMap::new(),
             };
             next.conversations.insert(c.id.clone(), c);
             changed = true;
@@ -1038,6 +1107,66 @@ impl Claude {
         thread["requestsEpoch"] = json!(self.epoch);
         thread["requestsRevision"] = json!(self.request_revision.load(Ordering::Acquire));
         Ok(json!({"ok":true,"thread":thread,"nativeBridge":"claude"}))
+    }
+
+    pub async fn session_metrics(self: &Arc<Self>, id: &str) -> anyhow::Result<Value> {
+        let backfill = {
+            let saved = self.saved.lock().await;
+            let c = saved
+                .conversations
+                .get(id)
+                .filter(|c| !c.deleted)
+                .ok_or_else(|| error(404, "Claude 会话不存在"))?;
+            if !c.shared || c.turns.iter().all(|turn| turn["_metricsVersion"] == 1) {
+                return Ok(c.metrics());
+            }
+            (
+                c.config.clone(),
+                c.native_id.clone(),
+                c.native_clients.clone(),
+                c.model.clone(),
+            )
+        };
+        // 旧存档只在独立统计请求中按需补读一次当前 JSONL；不进入 thread/send 路径，不取得发送锁、不启动 Claude。
+        let reader = self.native_reader(&backfill.0).await?;
+        let frame = reader
+            .control(
+                json!({"subtype":"read_history","native_id":backfill.1,
+            "clients":backfill.2,"pending":[],"model":backfill.3}),
+                None,
+            )
+            .await?;
+        anyhow::ensure!(
+            frame["native_id"] == backfill.1 && frame["messages"].is_array(),
+            "Claude 统计原生身份不匹配"
+        );
+        let projected = project_shared_history(&frame, "metrics-readonly");
+        let by_id: HashMap<_, _> = projected
+            .iter()
+            .filter_map(|turn| {
+                turn["id"]
+                    .as_str()
+                    .map(|id| (id, turn["_metricsRequests"].clone()))
+            })
+            .collect();
+        let mut saved = self.saved.lock().await;
+        let c = saved
+            .conversations
+            .get_mut(id)
+            .filter(|c| !c.deleted && c.native_id == backfill.1)
+            .ok_or_else(|| error(404, "Claude 会话不存在"))?;
+        // 补读期间原生快照或另一页可能已补齐数字，不能让较早的只读结果覆盖新统计。
+        if c.turns.iter().all(|turn| turn["_metricsVersion"] == 1) {
+            return Ok(c.metrics());
+        }
+        for turn in &mut c.turns {
+            if let Some(requests) = turn["id"].as_str().and_then(|id| by_id.get(id)) {
+                turn["_metricsRequests"] = requests.clone();
+            }
+            turn["_metricsVersion"] = json!(1);
+        }
+        // 只补内存数字，不持久化整份正文、不发布历史更新，也不改变未读、执行或回执状态。
+        Ok(c.metrics())
     }
 
     pub async fn history(self: &Arc<Self>, payload: &Value) -> anyhow::Result<Value> {
@@ -1216,11 +1345,17 @@ impl Claude {
                             let result = if response["subtype"] == "success" {
                                 Ok(response["response"].clone())
                             } else {
-                                let message = format!("Claude 控制请求失败：{}", response["error"]);
+                                let message = format!(
+                                    "Claude 控制请求失败：{}",
+                                    response["error"].as_str().unwrap_or("原生请求失败")
+                                );
                                 let failure = ApiError::new(
                                     match response["code"].as_str() {
-                                        Some("EBUSY" | "EUNSUPPORTED") => 409,
-                                        Some("EINVAL") => 400,
+                                        Some(
+                                            "EBUSY" | "EUNSUPPORTED" | "EDIALOGCHANGED" | "ESTALE"
+                                            | "ESESSION",
+                                        ) => 409,
+                                        Some("EINVAL" | "EIMAGE") => 400,
                                         Some("ENOENT") => 404,
                                         _ => 503,
                                     },
@@ -1229,7 +1364,7 @@ impl Claude {
                                 Err(if response["not_sent"] == true {
                                     failure.into()
                                 } else {
-                                    failure.after_admission().into()
+                                    dispatched_unknown(failure).into()
                                 })
                             };
                             let _ = sender.send(result);
@@ -1250,9 +1385,9 @@ impl Claude {
                 .unwrap_or_else(|| "Claude 进程已退出，请检查新测试环境中的安装和登录".into());
             // CLI 的 stderr 可能包含配置内容；不把原文传到远程页面或写入通用读取失败日志。
             for (_, sender) in read_channel.pending.lock().await.drain() {
-                let _ = sender.send(Err(ApiError::new(503, detail.clone())
-                    .after_admission()
-                    .into()));
+                let _ = sender.send(Err(
+                    dispatched_unknown(ApiError::new(503, detail.clone())).into()
+                ));
             }
             if let Some(service) = weak.upgrade() {
                 let mut processes = service.processes.lock().await;
@@ -1312,6 +1447,24 @@ impl Claude {
         {
             return Ok(data.clone());
         }
+        let process = self.catalog_process(config, cwd).await?;
+        let data = normalize_models(&process.initialization);
+        anyhow::ensure!(
+            data["data"].as_array().is_some_and(|m| !m.is_empty()),
+            "Claude 未返回可用模型"
+        );
+        self.metadata
+            .lock()
+            .await
+            .insert(key, (Instant::now(), data.clone()));
+        Ok(data)
+    }
+
+    async fn catalog_process(
+        self: &Arc<Self>,
+        config: WslConfig,
+        cwd: &str,
+    ) -> anyhow::Result<Arc<Process>> {
         let c = Conversation {
             backend: claude_backend(),
             id: String::new(),
@@ -1341,19 +1494,11 @@ impl Claude {
             live_preview: None,
             discovered: false,
             native_title: String::new(),
+            native_history_head: String::new(),
+            spent_requests: BTreeMap::new(),
         };
-        // 用户要求模型选择读取完整原生目录；只做 stdio 初始化，不创建共享任务连接或发送消息。
-        let process = self.spawn_stdio(&c).await?;
-        let data = normalize_models(&process.initialization);
-        anyhow::ensure!(
-            data["data"].as_array().is_some_and(|m| !m.is_empty()),
-            "Claude 未返回可用模型"
-        );
-        self.metadata
-            .lock()
-            .await
-            .insert(key, (Instant::now(), data.clone()));
-        Ok(data)
+        // 模型与 Skill 目录共用原生初始化方式；探测不恢复已有会话，不发送模型消息。
+        self.spawn_stdio(&c).await
     }
 
     pub async fn session_models(
@@ -1593,6 +1738,8 @@ impl Claude {
             live_preview: None,
             discovered: false,
             native_title: String::new(),
+            native_history_head: String::new(),
+            spent_requests: BTreeMap::new(),
         };
         let process = self.spawn(&c).await?;
         apply_model(&process, &mut c, payload, authorization).await?;
@@ -1654,6 +1801,52 @@ impl Claude {
             return Err(error(409, "已创建的 Claude 会话不能切换后端"));
         }
         match action {
+            "editMessage" => {
+                // 执行中禁止编辑，提交与普通发送共用已有会话锁；不停止任务、不把编辑重发放入队列。
+                if !c.shared || c.active() {
+                    return Err(error(409, "请等待 Claude 结束当前执行后再编辑历史消息"));
+                }
+                let turn = c
+                    .turns
+                    .iter()
+                    .find(|turn| {
+                        turn["id"] == payload["turnId"]
+                            && turn["_nativeEditable"] == true
+                            && turn["items"].as_array().is_some_and(|items| {
+                                items.iter().any(|item| {
+                                    item["type"] == "userMessage"
+                                        && item["id"] == payload["messageId"]
+                                })
+                            })
+                    })
+                    .ok_or_else(|| error(409, "原生历史消息已变化，请重新打开编辑"))?;
+                if c.native_history_head.is_empty()
+                    || payload["historyHead"] != c.native_history_head
+                {
+                    return Err(error(409, "原生历史已变化，请重新打开编辑"));
+                }
+                let edit = json!({"native_user_id":turn["_nativeUserId"],"history_head":c.native_history_head});
+                let existing = self
+                    .processes
+                    .lock()
+                    .await
+                    .get(id)
+                    .filter(|process| process.channel.live.load(Ordering::Acquire))
+                    .cloned();
+                let process = match existing {
+                    Some(process) => process,
+                    None => {
+                        let process = self.spawn(&c).await?;
+                        self.processes
+                            .lock()
+                            .await
+                            .insert(id.into(), process.clone());
+                        process
+                    }
+                };
+                self.enqueue_shared_edit(id, &process, payload, edit, authorization)
+                    .await
+            }
             "compact" | "setGoal" | "updateGoal" => {
                 self.native_command_action(&mut c, action, payload, authorization)
                     .await
@@ -2090,7 +2283,7 @@ impl Claude {
                     || job_id.len() == 8 && job_id.bytes().all(|byte| byte.is_ascii_hexdigit())),
             "Claude 原生会话身份无效"
         );
-        let (thread, turns, turn_ids, completed, usage_changed, changed) = self
+        let (thread, turns, turn_ids, completed, usage_changed, changed, reverted) = self
             .change(|saved| {
                 let c = saved
                     .conversations
@@ -2106,6 +2299,7 @@ impl Claude {
                 let previous_view = c.view();
                 if frame["native_control"].is_object() {
                     c.native_control = frame["native_control"].clone();
+                    c.apply_native_settings(&frame["native_control"]["settings"]);
                 }
                 let previous_queue = c.queue_snapshot(&self.epoch);
                 c.native_id = native_id.into();
@@ -2128,6 +2322,40 @@ impl Claude {
                 let mut projected = project_shared_history(frame, generation);
                 subagents::decorate_turns(id, &mut projected);
                 restore_shared_images(&c.turns, &mut projected);
+                let reverted = frame.get("history_head").is_some()
+                    && c.turns.iter().any(|old| {
+                        old["items"].as_array().is_some_and(|items| {
+                            items.iter().any(|item| item["type"] == "userMessage")
+                        }) && !projected.iter().any(|turn| turn["id"] == old["id"])
+                    });
+                if reverted {
+                    for old in c
+                        .turns
+                        .iter()
+                        .filter(|old| !projected.iter().any(|turn| turn["id"] == old["id"]))
+                    {
+                        for (request, usage) in
+                            old["_metricsRequests"].as_object().into_iter().flatten()
+                        {
+                            c.spent_requests
+                                .entry(request.clone())
+                                .or_insert_with(|| usage.clone());
+                        }
+                    }
+                }
+                if let Some(retired) = frame["retired_usage"]
+                    .as_array()
+                    .filter(|rows| !rows.is_empty())
+                {
+                    let mut ledger = json!({"_metricsRequests":c.spent_requests});
+                    for usage in retired {
+                        super::session_metrics::observe_claude(&mut ledger, usage);
+                    }
+                    c.spent_requests = serde_json::from_value(ledger["_metricsRequests"].clone())?;
+                }
+                if let Some(head) = frame.get("history_head") {
+                    c.native_history_head = head.as_str().unwrap_or("").into();
+                }
                 for turn in &mut projected {
                     // 已确认结束且无回复的输入保留正文与终态；后续新轮次不能让它再次等待启动。
                     if let Some(old) = c.turns.iter().find(|old| {
@@ -2214,6 +2442,7 @@ impl Claude {
                     completed,
                     usage_changed,
                     changed,
+                    reverted,
                 ))
             })
             .await?;
@@ -2233,6 +2462,10 @@ impl Claude {
             self.requests_changed(id).await;
         }
         // 用户要求沿用网页聊天组件；共享消息按原生 UUID 投影成完整轮次，不把终端画面塞进聊天区。
+        if reverted {
+            // 显式原生回退沿用已有缓存失效事件；已确认消息的防丢逻辑不能把被回退的旧分支补回来。
+            self.publish(json!({"method":"remote/threadReverted","params":{"threadId":id}}));
+        }
         if changed {
             self.publish(json!({"method":"claude/history/updated","params":{
                 "threadId":id,"thread":thread,"turns":turns,"turnIds":turn_ids,"completed":completed}}));
@@ -2422,6 +2655,16 @@ impl Claude {
             .cloned()
             .context("Claude 进程已退出")?;
         let original = &request["_claude"];
+        if original["subtype"] == "native_dialog"
+            && (original["dialog"]["remoteSupported"] != true
+                || original["dialog"]["state"] != "waiting"
+                || !matches!(payload["decision"].as_str(), Some("accept" | "decline")))
+        {
+            return Err(error(
+                409,
+                "该原生确认已提交或需在 Claude CLI 中处理，请重新读取状态",
+            ));
+        }
         let response = if request["method"] == "item/tool/requestUserInput" {
             let answers = payload["response"]["answers"]
                 .as_object()
@@ -3265,6 +3508,7 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
                 .as_str()
                 .unwrap_or(native_user);
             turns.push(json!({"id":client_id,"_nativeUserId":native_user,
+                "_nativeEditable":row["nativeEditable"] == true,
                 "_process":generation,"status":"completed","itemsView":"full","itemsComplete":true,
                 "turnStartedAtMs":row["timestampMs"],
                 "items":[{"id":client_id,"clientId":client_id,"type":"userMessage",
@@ -3298,6 +3542,12 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
             } else if row["subtype"] == "turn_duration" {
                 turn["_nativeDone"] = json!(true);
                 turn["turnCompletedAtMs"] = row["timestampMs"].clone();
+                if row["durationMs"]
+                    .as_u64()
+                    .is_some_and(|ms| ms <= 9_007_199_254_740_991)
+                {
+                    turn["durationMs"] = row["durationMs"].clone();
+                }
             } else if matches!(row["type"].as_str(), Some("assistant" | "user")) {
                 let mut native_frame = row.clone();
                 native_frame["message"]["content"] = content;
@@ -3385,6 +3635,7 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
     }
     let latest = turns.len().checked_sub(1);
     for (index, turn) in turns.iter_mut().enumerate() {
+        turn["_metricsVersion"] = json!(1);
         if turn["nativeInterruption"]["source"] == "claude"
             || Some(index) == latest && turn["status"] != "inProgress"
         {
@@ -3462,11 +3713,28 @@ async fn apply_model(
 ) -> anyhow::Result<()> {
     let catalog = normalize_models(&process.initialization);
     let (model, effort) = model_selection(c, payload, &catalog)?;
-    process
-        .control(json!({"subtype":"set_model","model":model}), Some(auth))
-        .await?;
-    if !effort.is_empty() || !c.effort.is_empty() {
-        process
+    let pending = |name: &str| {
+        process.shared
+            && matches!(
+                c.native_control["settings"]["changes"][name]["state"].as_str(),
+                Some("pending" | "confirmation" | "confirming")
+            )
+    };
+    let mut applied = json!({"nativeSettings":c.native_control["settings"]});
+    // 等待原生确认时继续发送普通消息，不能顺带把尚未生效的选择改回旧模型或重复发切换命令。
+    if payload["model"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty())
+        || !pending("model")
+    {
+        applied = process
+            .control(json!({"subtype":"set_model","model":model}), Some(auth))
+            .await?;
+    }
+    if (!effort.is_empty() || !c.effort.is_empty())
+        && (payload.get("reasoningEffort").is_some() || !pending("effort") && !pending("model"))
+    {
+        applied = process
             .control(
                 json!({"subtype":"apply_flag_settings","settings":{
             "effortLevel":if effort.is_empty() {Value::Null} else {json!(effort)}}}),
@@ -3475,8 +3743,18 @@ async fn apply_model(
             .await?;
     }
     let (model, effort) = (model.to_owned(), effort.to_owned());
-    c.model = model;
-    c.effort = effort;
+    if process.shared && applied["nativeSettings"].is_object() {
+        c.apply_native_settings(&applied["nativeSettings"]);
+        if !applied["nativeSettings"]["model"].is_string() {
+            c.model = model;
+        }
+        if !applied["nativeSettings"]["effort"].is_string() {
+            c.effort = effort;
+        }
+    } else {
+        c.model = model;
+        c.effort = effort;
+    }
     Ok(())
 }
 
@@ -3567,6 +3845,19 @@ pub(super) fn input_content(payload: &Value) -> anyhow::Result<Vec<Value>> {
 }
 
 fn permission_request(thread: &str, id: &str, request: &Value) -> anyhow::Result<Value> {
+    if request["subtype"] == "native_dialog" {
+        let dialog = &request["dialog"];
+        let supported = dialog["remoteSupported"] == true
+            && matches!(dialog["kind"].as_str(), Some("model" | "effort"))
+            && dialog["state"] == "waiting";
+        // 复用现有审批权限、请求版本与回执；未知原生弹窗只读提示，不开放任意终端输入。
+        return Ok(
+            json!({"id":id,"method":"item/commandExecution/requestApproval",
+            "params":{"threadId":thread,"nativeDialog":dialog,
+                "availableDecisions":if supported {json!(["accept","decline"])} else {json!([])}},
+            "_claude":request}),
+        );
+    }
     if request["subtype"] != "can_use_tool" {
         return Err(error(409, "Claude 发出了尚未支持的控制请求，未自动批准"));
     }
@@ -3594,6 +3885,8 @@ fn permission_request(thread: &str, id: &str, request: &Value) -> anyhow::Result
 }
 
 fn project_frame(turn: &mut Value, frame: &Value) -> Vec<Value> {
+    turn["_metricsVersion"] = json!(1);
+    super::session_metrics::observe_claude(turn, frame);
     let Some(items) = turn["items"].as_array_mut() else {
         return vec![];
     };
@@ -3824,6 +4117,8 @@ mod tests {
             live_preview: None,
             discovered: false,
             native_title: String::new(),
+            native_history_head: String::new(),
+            spent_requests: BTreeMap::new(),
             turns: vec![
                 json!({"id":"turn-1","_process":"new-process","status":"inProgress","items":[]}),
             ],
@@ -4437,6 +4732,58 @@ mod tests {
             ("claude-opus-5-5", "low")
         );
         assert!(model_selection(&c, &json!({"reasoningEffort":"max"}), &catalog).is_err());
+    }
+
+    #[test]
+    fn claude_native_dialogs_preserve_waiting_and_require_explicit_decisions() {
+        let (_, _, mut c) = fixture();
+        c.shared = true;
+        c.model = "sonnet".into();
+        c.native_status =
+            json!({"tempo":"blocked","sessionStatus":"waiting","needs":"dialog open"});
+        c.apply_native_settings(&json!({"model":"sonnet","changes":{"model":{
+            "id":"change","requested":"opus","previous":"sonnet","state":"confirmation"
+        }}}));
+        assert_eq!(c.view()["status"]["type"], "waiting");
+        assert!(!c.running_for_send(), "等待确认不能触发普通消息入网页队列");
+        assert_eq!(c.view()["model"], "sonnet");
+        assert_eq!(
+            c.view()["nativeSettings"]["changes"]["model"]["requested"],
+            "opus"
+        );
+        c.apply_native_settings(&json!({"model":"sonnet","changes":{"model":{
+            "id":"change","requested":"opus","state":"rejected"
+        }}}));
+        assert_eq!(c.model, "sonnet");
+        c.apply_native_settings(&json!({"model":"opus","changes":{"model":{"state":"applied"}}}));
+        assert_eq!(c.model, "opus");
+
+        for (kind, state, supported) in [
+            ("model", "waiting", true),
+            ("effort", "waiting", true),
+            ("model", "submitted", true),
+            ("unknown", "waiting", false),
+        ] {
+            let request = permission_request(
+                "thread",
+                "dialog",
+                &json!({
+                    "subtype":"native_dialog", "dialog":{"kind":kind,"state":state,
+                        "remoteSupported":supported,"target":"Opus 5.5","description":"原生提示"}
+                }),
+            )
+            .unwrap();
+            assert_eq!(request["method"], "item/commandExecution/requestApproval");
+            assert_eq!(request["params"]["nativeDialog"]["description"], "原生提示");
+            assert_eq!(
+                request["params"]["availableDecisions"],
+                if supported && state == "waiting" {
+                    json!(["accept", "decline"])
+                } else {
+                    json!([])
+                }
+            );
+        }
     }
 
     #[test]
@@ -5759,6 +6106,109 @@ mod tests {
         );
         assert_eq!(turns[0]["items"][1]["text"], "蓝色");
         assert_eq!(turns, project_shared_history(&frame, "connection"));
+    }
+
+    #[test]
+    fn history_edit_dispatch_unknown_keeps_native_failure_reason() {
+        let failure = dispatched_unknown(ApiError::new(503, "原生回退界面未能确认"));
+        assert!(failure.outcome_unknown);
+        assert_eq!(failure.code, 503);
+        assert_eq!(failure.message, "原生回退界面未能确认");
+    }
+
+    #[test]
+    fn history_edit_metadata_supports_earlier_messages_and_requires_native_idle() {
+        let (_directory, _service, mut c) = fixture();
+        c.shared = true;
+        c.native_history_head = "done".into();
+        c.native_status = json!({"tempo":"idle","sessionStatus":"idle"});
+        c.turns = project_shared_history(
+            &json!({"clients":{},"native_status":{"tempo":"idle"},"messages":[
+                {"type":"user","uuid":"first","nativeEditable":true,"message":{"content":"第一条"}},
+                {"type":"assistant","message":{"content":[{"type":"text","text":"回复"}]}},
+                {"type":"user","uuid":"second","nativeEditable":true,"message":{"content":"第二条"}},
+                {"type":"system","subtype":"turn_duration"}
+            ]}),
+            "generation",
+        );
+        assert_eq!(c.view()["capabilities"]["messageEdit"], true);
+        assert_eq!(c.view()["messageEditReady"], true);
+        for turn in &c.turns {
+            let item = &c.displayed_turn(turn)["items"][0];
+            assert_eq!(item["messageMetadata"]["editable"], true);
+            assert_eq!(item["messageMetadata"]["turnId"], turn["id"]);
+        }
+        c.native_status = json!({"tempo":"active","sessionStatus":"busy"});
+        assert_eq!(c.view()["messageEditReady"], false);
+        c.native_status = json!({"tempo":"unknown"});
+        assert_eq!(c.view()["messageEditReady"], false);
+    }
+
+    #[tokio::test]
+    async fn history_edit_retires_old_turns_and_preserves_consumed_metrics_after_restart() {
+        let (directory, service, mut c) = fixture();
+        c.shared = true;
+        c.turns.clear();
+        service
+            .change(|saved| {
+                saved.conversations.insert(c.id.clone(), c.clone());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let frame = |messages: Value, head: &str| {
+            json!({
+                "native_id":c.native_id,"job_id":"","history_head":head,
+                "native_status":{"tempo":"idle","sessionStatus":"idle"},"clients":{},"pending":[],
+                "requests":{},"messages":messages
+            })
+        };
+        let rows = json!([
+            {"type":"user","uuid":"first","nativeEditable":true,"message":{"content":"原问题"}},
+            {"type":"assistant","uuid":"old-answer","message":{"id":"old-request","model":"test-model",
+                "content":[{"type":"text","text":"原回复"}],"usage":{"input_tokens":100,"output_tokens":10}}},
+            {"type":"system","subtype":"turn_duration"}
+        ]);
+        service
+            .apply_shared_snapshot(
+                &c.id,
+                "generation",
+                &frame(rows, "old-head"),
+                json!({}),
+                true,
+            )
+            .await
+            .unwrap();
+        let mut replacement = frame(
+            json!([
+                {"type":"user","uuid":"replacement","nativeEditable":true,"message":{"content":"修改后的问题"}},
+                {"type":"assistant","uuid":"new-answer","message":{"id":"new-request","model":"test-model",
+                    "content":[{"type":"text","text":"新回复"}],"usage":{"input_tokens":200,"output_tokens":20}}},
+                {"type":"system","subtype":"turn_duration"}
+            ]),
+            "new-head",
+        );
+        replacement["retired_usage"] = json!([
+            {"type":"assistant","uuid":"older-answer","message":{"id":"older-request","model":"test-model",
+                "usage":{"input_tokens":30,"output_tokens":3}}}
+        ]);
+        for _ in 0..2 {
+            service
+                .apply_shared_snapshot(&c.id, "generation", &replacement, json!({}), true)
+                .await
+                .unwrap();
+        }
+        let current = service.conversation(&c.id).await.unwrap();
+        assert_eq!(current.turns.len(), 1);
+        assert_eq!(current.turns[0]["id"], "replacement");
+        assert_eq!(current.metrics()["totalTokens"], 363);
+        assert_eq!(current.metrics()["turnTokens"], 220);
+        assert_eq!(current.metrics()["steps"], 1);
+        let restored = Claude::new(directory.path()).unwrap();
+        let restored = restored.conversation(&c.id).await.unwrap();
+        assert_eq!(restored.native_id, c.native_id);
+        assert_eq!(restored.metrics()["totalTokens"], 363);
+        assert_eq!(restored.native_history_head, "new-head");
     }
 
     #[tokio::test]

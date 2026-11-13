@@ -41,6 +41,11 @@ export function createSelectComponent({ element, icon, button, togglePopup, open
   function commitSelectValue(node, value) {
     // 用户选择只触发一次 change；程序同步、重复选择和禁用项不能触发设置保存或切换目标。
     value = String(value ?? "");
+    // 提示词优化沿用注入版的手填模型能力；仅显式提供自定义选项校验的 Select 可以接收目录外的值。
+    if (!node.disabled && !node.selectOptions.some(option => option.value === value)) {
+      const custom = node.selectCustomOption?.(value);
+      if (custom?.value === value && !custom.disabled) node.selectOptions.push(custom);
+    }
     if (node.disabled || node.value === value
         || !node.selectOptions.some(option => option.value === value && !option.disabled)) return false;
     setSelectValue(node, value);

@@ -17,3 +17,8 @@ commands.allow = ["remote_titlebar_state"]
 identifier = "remote-resource-cache"
 description = "当前服务只可查看/检查公开网页资源缓存并告知前台忙碌状态，不可改变服务地址或读取设备凭据。"
 commands.allow = ["remote_cache_status", "remote_cache_refresh", "remote_cache_activity"]
+
+[[permission]]
+identifier = "remote-session-window"
+description = "当前服务可打开同来源的会话或文件预览窗口，不可指定任意地址、读取本机文件或控制其他窗口。"
+commands.allow = ["remote_open_session_window"]

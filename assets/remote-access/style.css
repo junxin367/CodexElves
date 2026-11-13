@@ -27,7 +27,7 @@ html.theme-transition{transition:--bg 300ms linear,--composer-bg 300ms linear,--
 .workspace.related-session-view.related-session-prepared>.conversation{animation:none}
 .workspace.related-session-view.related-session-exiting>.conversation{animation:related-session-exit .22s ease-out forwards;will-change:transform;pointer-events:none}
 .related-session-exit-layer{position:fixed;inset:0;z-index:299;overflow:hidden;pointer-events:none}
-.workspace.related-session-view .conversation-header :is(#open-sidebar,#connection-state,#open-session-tools){display:none!important}
+.workspace.related-session-view .conversation-header :is(#open-sidebar,#connection-state,#open-session-tools,.workspace-reader-toggle){display:none!important}
 .workspace.related-session-readonly .composer-area{display:none!important}
 #related-session-back{flex-shrink:0;min-height:var(--control-menu-height);padding:6px 9px;border:0;font-size:.85714rem;white-space:nowrap}
 .related-session-model{display:inline-flex;align-items:center;justify-content:flex-end;gap:5px;min-width:0;max-width:min(320px,36vw);flex-shrink:1;font-size:.78571rem;line-height:1.3;white-space:nowrap}
@@ -139,8 +139,16 @@ html{scrollbar-color:var(--muted) transparent}
 .composer-anchor{position:relative;min-width:0}
 /* 用户确认额度放在输入框下方现有空位：20px 高度复用 .composer-area 已有的至少 20px 下边距。
  * 绝对定位不参与布局，禁止为额度增加 margin/padding/行高或移动输入框；右侧保持原内侧对齐。 */
-.composer-anchor>.claude-usage{position:absolute;top:100%;right:12px;display:flex;align-items:center;justify-content:flex-end;gap:10px;max-width:calc(100% - 24px);height:20px;min-height:0;margin:0;padding:0 2px;border:0;border-radius:0;background:transparent;color:var(--text);font:inherit;font-size:calc(var(--font-size)*.785714);font-variant-numeric:tabular-nums;line-height:20px;white-space:nowrap;cursor:pointer}
+/* 用户确认两个额度的分隔圆点两侧各由 10px 收至 5px；单项名称与百分比仍保持下方 5px 间距。
+ * 原有“已用”前缀额外保留 5px 外边距，与新 gap 相加仍为原 10px，不连带改变前缀间距。 */
+.composer-anchor>.claude-usage{position:absolute;top:100%;right:12px;display:flex;align-items:center;justify-content:flex-end;gap:5px;max-width:calc(100% - 24px);height:20px;min-height:0;margin:0;padding:0 2px;border:0;border-radius:0;background:transparent;color:var(--text);font:inherit;font-size:calc(var(--font-size)*.785714);font-variant-numeric:tabular-nums;line-height:20px;white-space:nowrap;cursor:pointer}
+.composer-anchor>.claude-usage>span:first-child:not(.claude-usage-window){margin-inline-end:5px}
 .composer-anchor>.claude-usage:is(:hover,:active,[aria-expanded=true]){background:transparent}
+/* 用户确认“48tk/s 本轮 20步 1m 总 5m”放在输入框外侧左下方，与右侧额度共用既有 20px 空位。
+ * 12px 内侧对齐、.785714 × 默认 14px = 11px 字号与额度一致；只让统计避开额度宽度及 8px 空隙，不增高输入框或移动工具栏。 */
+.composer-anchor>.composer-metrics{position:absolute;top:100%;left:12px;display:inline-flex;align-items:center;gap:10px;max-width:calc(100% - 24px - var(--composer-quota-width,0px));height:20px;margin:0;padding:0 2px;color:var(--text);font-size:calc(var(--font-size)*.785714);font-variant-numeric:tabular-nums;line-height:20px;white-space:nowrap;overflow:hidden;cursor:default}
+.composer-metric-group{flex:0 0 auto}
+@media(max-width:760px){.composer-anchor>.composer-metrics{gap:7px}}
 .claude-usage-window{display:inline-flex;gap:5px}
 .claude-usage-percent{font-weight:400}
 .claude-usage-dot{color:var(--muted)}
@@ -185,6 +193,31 @@ html{scrollbar-color:var(--muted) transparent}
 .prompt-optimize-button{display:grid;place-items:center;flex:0 0 24px;width:24px;height:28px;padding:0;border-radius:6px;color:var(--muted);font:16px/1 "Segoe UI Emoji",system-ui,sans-serif}
 .prompt-optimize-button[data-state=loading]{animation:pulse 1s ease-in-out infinite}
 .prompt-optimize-button[data-state=optimized]{background:color-mix(in srgb,var(--green) 14%,transparent);color:var(--green)}
+/* 用户要求 PC 右键弹窗参考 Codex 注入版：600px、最大 760px、双列设置；输入控件沿用会话编辑区派生背景。 */
+.prompt-optimization-settings{width:min(600px,calc(100vw - 40px));max-height:min(760px,calc(100dvh - 40px));padding:0;border:1px solid var(--line);border-radius:18px;background:var(--bg);color:var(--text);box-shadow:0 24px 80px #0005;overflow:hidden}
+.prompt-optimization-settings[open]{display:flex;flex-direction:column}
+.prompt-optimization-settings::backdrop{background:#0008}
+.prompt-optimization-settings-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 12px;border-bottom:1px solid var(--line)}
+.prompt-optimization-settings-header h2{margin:0 0 4px;font-size:1.285714rem;line-height:1.3}
+.prompt-optimization-settings-header small{font-size:.857143rem}
+.prompt-optimization-settings-header>.icon-button{width:28px;height:28px;padding:0;font-size:22px}
+.prompt-optimization-settings-body{flex:1;min-height:0;padding:16px 20px 20px;overflow:auto;scrollbar-gutter:stable}
+.prompt-optimization-settings-body:empty{display:none}
+.prompt-optimization-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.prompt-optimization-settings-field{display:flex;flex-direction:column;gap:7px;min-width:0}
+.prompt-optimization-settings-field>span,.prompt-optimization-prompt-heading{font-size:.857143rem;color:var(--muted)}
+.prompt-optimization-settings .select-trigger{width:100%;min-width:0;min-height:36px;background:var(--composer-bg,var(--side))}
+.prompt-optimization-settings .select-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prompt-optimization-settings .select-trigger:is(:focus-visible,[aria-expanded=true]){background:var(--composer-hover,var(--hover))}
+@media(hover:hover) and (pointer:fine){.prompt-optimization-settings .select-trigger:hover:not(:disabled){background:var(--composer-hover,var(--hover))}}
+.prompt-optimization-context{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:36px;font-size:.857143rem;cursor:pointer}
+.prompt-optimization-settings-prompt{margin-top:18px}
+.prompt-optimization-prompt-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:7px}
+.prompt-optimization-prompt-heading>.text-button{padding:0;border:0;font-size:.857143rem;color:var(--muted)}
+.prompt-optimization-settings textarea{display:block;width:100%;min-height:210px;max-height:45dvh;padding:10px 12px;resize:vertical;background:var(--composer-bg,var(--side));font-family:var(--code-font-family);font-size:.857143rem;line-height:1.65}
+.prompt-optimization-settings-status{margin:0;padding:0 20px 14px;font-size:.857143rem;white-space:pre-wrap}
+.prompt-optimization-settings-status:empty{display:none}
+.prompt-optimization-settings-footer{display:flex;justify-content:flex-end;gap:8px;padding:12px 20px 16px;border-top:1px solid var(--line)}
 /* 圆心继续与输入框共用 --composer-bg；用户要求参考 Codex 后，详细提示改用控件表面 --control-bg。
  * 用户指定已达到进度部分宽 2px、未达到部分宽 1px，直径保持 18px；两层径向遮罩各保留 .5px 平滑内缘。
  * 上层径向遮罩和锥形渐变绘制 2px 进度，下层径向遮罩和默认 --line 底色绘制 1px 未达到部分。 */
@@ -198,7 +231,8 @@ html{scrollbar-color:var(--muted) transparent}
 .composer-toolbar .model-button{font-size:calc(var(--font-size)*.85);padding:5px 7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px;min-width:0;flex:0 1 auto}
 /* 用户要求 Fast 紧靠模型名称左侧，关闭为空心、开启为实心蓝色渐变流光。
  * 28px 点击区与上下文按钮对齐，手机沿用模型按钮的 36px 高度；18px 闪电保持两端布局一致。
- * 2.6s 为一轮扫光周期，250% 渐变背景让亮部平滑掠过，动画不改变图标或按钮尺寸。 */
+ * 用户要求放慢且只扫一整遍、再扫半遍停在中央：每遍 4s、播放 1.5 遍，共 6s。
+ * 250% 渐变从 125% 移到 -25%，半程正好为 50%；亮部也居于渐变中央，forwards 保持中央较亮，不循环或改变布局。 */
 .composer-toolbar .fast-button{display:grid;place-items:center;flex:0 0 28px;width:28px;height:28px;min-width:0;padding:0;border:0;border-radius:6px;background:transparent;color:var(--muted)}
 /* 桌面工具栏 gap 为 8px，模型前回收 6px 得到 2px；手机原 gap 已是 2px，必须取消回收，避免点击区重叠。 */
 .composer-toolbar .fast-button:not([hidden])+.model-button{margin-left:-6px}
@@ -206,14 +240,14 @@ html{scrollbar-color:var(--muted) transparent}
 .fast-bolt svg{display:block;width:100%;height:100%}
 .fast-button[aria-pressed=true]{color:#3b82f6}
 .fast-button[aria-pressed=true] .fast-bolt svg{fill:currentColor}
-.fast-button[aria-pressed=true] .fast-bolt::after{content:"";position:absolute;inset:0;background:linear-gradient(115deg,#1d4ed8 0%,#3b82f6 24%,#a5edff 40%,#38bdf8 50%,#2563eb 66%,#1d4ed8 100%);background-size:250% 100%;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='white' d='M13 2 3 14h8l-1 8 11-12h-8V2Z'/%3E%3C/svg%3E") center/contain no-repeat;animation:fast-flow 2.6s linear infinite;pointer-events:none}
+.fast-button[aria-pressed=true] .fast-bolt::after{content:"";position:absolute;inset:0;background:linear-gradient(115deg,#1d4ed8 0%,#3b82f6 28%,#38bdf8 42%,#a5edff 50%,#38bdf8 58%,#3b82f6 72%,#1d4ed8 100%);background-size:250% 100%;background-position:50% 50%;background-repeat:no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='white' d='M13 2 3 14h8l-1 8 11-12h-8V2Z'/%3E%3C/svg%3E") center/contain no-repeat;animation:fast-flow 4s linear 1.5 forwards;pointer-events:none}
 .fast-button:disabled .fast-bolt::after{animation-play-state:paused}
 .fast-button:focus-visible{outline:2px solid var(--accent);outline-offset:2px;background:var(--composer-hover,var(--hover))}
 @media(hover:hover) and (pointer:fine){.composer-toolbar .fast-button:hover:not(:disabled){background:var(--composer-hover,var(--hover))}}
 @media(max-width:760px),(pointer:coarse){.composer-toolbar .fast-button{height:36px;flex-basis:32px;width:32px}}
 @media(max-width:760px){.composer-toolbar .fast-button:not([hidden])+.model-button{margin-left:0}}
 /* 减少动态效果时只停流光，开启态仍保留实心渐变；不增加 JS 定时器或布局动画。 */
-@keyframes fast-flow{from{background-position:125% 50%}to{background-position:-125% 50%}}
+@keyframes fast-flow{from{background-position:125% 50%}to{background-position:-25% 50%}}
 /* 模型按钮在自己的输入框底色上高亮；菜单打开和键盘聚焦使用同色，触屏不保留鼠标 hover。 */
 .composer-toolbar .model-button:is(:focus-visible,[aria-expanded=true]){background:var(--composer-hover,var(--hover))}
 @media(hover:hover) and (pointer:fine){.composer-toolbar .model-button:hover:not(:disabled){background:var(--composer-hover,var(--hover))}}
@@ -333,8 +367,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .thread-row>.thread-state,.thread-row>.row-menu-button{grid-area:1/2;justify-self:center;margin-right:0}
 .thread-row>.thread-state{pointer-events:none}
 /* 用户要求侧栏参考原版 Codex：悬停、当前选中和菜单展开共用文字基色的透明覆盖层，不重复叠加。
- * 远程端沿用原生默认对比度：浅色 .04 + .03 * .45，深色 .06 + .03 * .6；
- * 与原生一致将 alpha 保留三位，分别为 5.3% 和 7.8%。--text 和 color-scheme 由 applyAppearance 同步。
+ * applyAppearance 按当前主题/模式的对比度生成 --sidebar-row-highlight，并与原生一致保留三位 alpha；
+ * 下方仅是脚本初始化前的默认回退，浅色 5.3%、深色 7.8%，不能覆盖用户调整后的内联变量。
  * 触屏不保留鼠标 hover 底色；最近、项目、置顶会话及项目行均随主题和自定义文字色重新合成。 */
 :root{--sidebar-row-highlight:light-dark(color-mix(in srgb,var(--text) 5.3%,transparent),color-mix(in srgb,var(--text) 7.8%,transparent))}
 @media(hover:hover) and (pointer:fine){.thread-row:hover,.project-header:hover{background:var(--sidebar-row-highlight)}}
@@ -344,7 +378,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .thread-row-recent>.thread-link{min-height:48px;padding:6px 8px;line-height:normal}
 .thread-copy{display:flex;flex:1;flex-direction:column;justify-content:center;min-width:0;overflow:hidden}
 .thread-row-recent .thread-label{line-height:20px}
-.thread-project{min-width:0;overflow:hidden;color:#7b7c7c;font-size:.78571rem;font-weight:400;line-height:16px;text-overflow:ellipsis;white-space:nowrap}
+/* 用户要求项目名与日期分组参考 Codex 的辅助文字层级：共用前景色和对比度派生的 muted，禁止固定灰色。 */
+.thread-project{min-width:0;overflow:hidden;color:var(--muted);font-size:.78571rem;font-weight:400;line-height:16px;text-overflow:ellipsis;white-space:nowrap}
 .thread-link:hover,.project-title:hover{background:transparent}
 .thread-link>.ui-icon{color:var(--muted)}
 .thread-state{width:10px;height:10px;flex-shrink:0;margin-right:4px;border-radius:50%}
@@ -474,6 +509,12 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .confirmation-content>div{min-width:0}
 .confirmation-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px}
 .confirmation-actions button{min-height:40px}
+/* 用户要求左侧会话菜单使用重命名弹窗；输入框沿用会话编辑框配色，PC 与手机共用现有确认框宽度。 */
+.thread-rename-dialog form{display:grid;gap:18px}
+.thread-rename-field{display:flex;flex-direction:column;gap:8px;font-size:.92857rem}
+.thread-rename-field input{width:100%;background:var(--composer-bg,var(--side))}
+.thread-rename-field input[aria-invalid=true]{border-color:var(--danger)}
+.thread-rename-dialog .thread-rename-error{margin:0;color:var(--danger);font-size:.85714rem}
 .danger-button{background:var(--danger);border-color:var(--danger);color:var(--bg)}
 .danger-button:hover{background:var(--danger);opacity:.85}
 #notice{inset:auto;top:max(24px,env(safe-area-inset-top));bottom:auto;left:50%;margin:0;max-height:var(--popup-max-height);overflow:auto;border:0;z-index:var(--layer-toast)}
@@ -709,7 +750,10 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .user-attachments button.message-image-link{padding:0;border:0;background:transparent;border-radius:8px}
 .user-attachments .message-image{width:var(--thumbnail-size);height:var(--thumbnail-size);max-width:var(--thumbnail-size);max-height:var(--thumbnail-size);object-fit:cover}
 .user-attachments .message-video-preview{flex:0 0 140px;margin:0}
-.image-preview-dialog{--preview-margin:16px;--preview-min-width:120px;width:90vw;max-width:90vw;max-height:var(--popup-max-height);height:fit-content;margin:auto;padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--text);overflow:hidden}
+/* 用户确认 PC/手机资源预览框内外共用一层 #000b 遮罩，不铺灰底、不重复叠加。
+ * 只移除底板和边框；最大宽度仍为 90vw、高度沿用 --popup-max-height（80dvh），
+ * fitMediaPreview 继续按整页视口扣除实际边距与文案，不能因透明效果取消尺寸上限。 */
+.image-preview-dialog{--preview-margin:16px;--preview-min-width:120px;width:90vw;max-width:90vw;max-height:var(--popup-max-height);height:fit-content;margin:auto;padding:0;border:0;border-radius:12px;background:transparent;color:#ededed;overflow:hidden}
 .image-preview-dialog::backdrop{background:#000b}
 #image-preview-dialog::backdrop,.image-preview-dialog.image-preview-presented{animation:image-preview-appear 160ms ease-out both}
 @keyframes image-preview-appear{from{opacity:0}to{opacity:1}}
@@ -721,7 +765,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .media-preview-loading-label>.spinner{width:18px;height:18px;border-color:#fff5;border-top-color:#fff;border-right-color:#fff}
 .media-preview-loading-cancel{pointer-events:auto;border-color:#fff6;color:#fff}
 .media-preview-loading-cancel:hover{background:#fff2}
-.image-preview-panel{position:relative;display:flex;flex-direction:column;align-items:center;min-width:0;max-height:calc(var(--popup-max-height) - 2px);margin:0;padding:44px 16px 14px;overflow:auto}
+.image-preview-panel{position:relative;display:flex;flex-direction:column;align-items:center;min-width:0;max-height:var(--popup-max-height);margin:0;padding:44px 16px 14px;overflow:auto}
 .image-preview-image{display:block;max-width:100%;max-height:calc(100dvh - 116px);width:auto;height:auto;object-fit:contain}
 .image-preview-panel>.image-preview-image{max-height:none}
 .image-preview-viewport{position:relative;display:grid;place-items:center;flex-shrink:0;min-height:0;width:100%;height:160px;overflow:hidden;touch-action:none;user-select:none;cursor:zoom-in}
@@ -730,23 +774,25 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .image-preview-viewport:focus-visible{outline:2px solid #7b9eff;outline-offset:-2px}
 .image-preview-viewport .image-preview-image{position:absolute;top:50%;left:50%;max-width:none;max-height:none;transform-origin:center;visibility:hidden;-webkit-user-drag:none}
 .image-preview-viewport .image-preview-image.image-preview-ready{visibility:visible}
-.image-preview-close{position:absolute;top:8px;right:8px;display:grid;place-items:center;width:var(--control-icon-size);height:var(--control-icon-size);padding:0;border-radius:50%;background:color-mix(in srgb,var(--bg) 88%,transparent);line-height:1;z-index:1}
-.image-preview-caption{max-width:100%;margin:10px 0 0;color:var(--muted);font-size:.78571rem;overflow-wrap:anywhere;text-align:center}
-.image-preview-unavailable{color:var(--muted)}
+.image-preview-close{position:absolute;top:8px;right:8px;display:grid;place-items:center;width:var(--control-icon-size);height:var(--control-icon-size);padding:0;border-radius:50%;background:#0004;border-color:#fff3;color:inherit;line-height:1;z-index:1}
+.image-preview-close:hover{background:#fff2}
+/* 透明预览始终叠在深色遮罩上，说明与关闭按钮使用浅色，浅色外观下同样保持可读。 */
+.image-preview-caption{max-width:100%;margin:10px 0 0;color:#ddd;text-shadow:0 1px 4px #000;font-size:.78571rem;overflow-wrap:anywhere;text-align:center}
+.image-preview-unavailable{color:#ddd}
 .message-video-preview{display:inline-flex;flex-direction:column;width:160px;max-width:100%;margin:8px 4px 4px 0;padding:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--side);color:var(--text);text-align:left;vertical-align:top;cursor:pointer}
 .message-video-cover{position:relative;display:grid;place-items:center;width:100%;aspect-ratio:16/9;background:#252830}
 .message-video-poster{display:block;width:100%;height:100%;object-fit:cover}
 .message-video-badge{position:absolute;display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:#0009;color:#fff;font-size:15px;pointer-events:none}
 .message-video-name{display:block;max-width:100%;padding:6px 8px;font-size:.78571rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .video-preview-dialog{--preview-min-width:280px}
-.video-preview-panel{position:relative;display:flex;flex-direction:column;align-items:center;padding:44px 16px 12px;min-width:0;max-height:calc(var(--popup-max-height) - 2px);overflow:auto}
+.video-preview-panel{position:relative;display:flex;flex-direction:column;align-items:center;padding:44px 16px 12px;min-width:0;max-height:var(--popup-max-height);overflow:auto}
 .video-preview-media{display:block;flex-shrink:0;max-width:100%;width:320px;height:180px;object-fit:contain;background:#111;border-radius:6px}
 .video-preview-controls{display:flex;align-self:stretch;align-items:center;gap:12px;min-width:0;margin-top:12px}
 .video-preview-play{flex:0 0 auto;border-radius:50%}
 .video-preview-play>.ui-icon{width:24px;height:24px}
 .video-preview-progress{flex:1 1 0;min-width:0;width:0;margin:0;padding:0;border:0;border-radius:0;background:transparent;accent-color:var(--accent)}
-.video-preview-time{flex:0 0 auto;font-size:.78571rem;font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--muted)}
-.video-preview-status{min-height:1.5em;margin:8px 0 0;font-size:.78571rem;color:var(--muted);text-align:center}
+.video-preview-time{flex:0 0 auto;font-size:.78571rem;font-variant-numeric:tabular-nums;white-space:nowrap;color:inherit}
+.video-preview-status{min-height:1.5em;margin:8px 0 0;font-size:.78571rem;color:inherit;text-align:center}
 @media(max-width:760px){.message-video-preview{width:140px}.video-preview-panel{padding:40px 8px 8px}.video-preview-controls{gap:8px}}
 .image-view-item,.image-view-item[open]{border-color:transparent;background:transparent}
 .image-view-summary{width:fit-content;max-width:100%;min-width:0}
@@ -764,7 +810,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .image-view-placeholder,.image-view-entry .attachment-placeholder{display:grid;width:var(--thumbnail-size);height:var(--thumbnail-size);margin:0;padding:6px;place-items:center;border:1px dashed var(--line);border-radius:8px;color:var(--muted);font-size:.71429rem;line-height:1.35;text-align:center}
 @media(max-width:760px){.user-attachments,.image-view-body{--thumbnail-size:50px}}
 @media(prefers-reduced-motion:reduce){.image-view-summary>.ui-icon{transition:none}}
-@media(max-width:760px){.image-preview-dialog{--preview-margin:8px}.image-preview-panel{max-height:calc(var(--popup-max-height) - 2px);padding:44px 8px 10px}.image-preview-image{max-height:calc(100dvh - 104px)}.image-preview-viewport .image-preview-image{max-height:none}}
+@media(max-width:760px){.image-preview-dialog{--preview-margin:8px}.image-preview-panel{max-height:var(--popup-max-height);padding:44px 8px 10px}.image-preview-image{max-height:calc(100dvh - 104px)}.image-preview-viewport .image-preview-image{max-height:none}}
 .agent-message{line-height:1.625}
 .markdown h1,.markdown h2,.markdown h3,.markdown h4,.markdown h5,.markdown h6{font-weight:600}
 .markdown h1{font-size:1.5em;line-height:1.33333;margin:1em 0 .5em}
@@ -1018,13 +1064,19 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .appearance-screen .appearance-heading{min-height:56px;padding:10px 16px;border-bottom:1px solid var(--line)}
 .appearance-screen .appearance-heading h2{font-size:1.07143rem;font-weight:600}
 .appearance-layout{display:flex;flex:1;min-width:0;min-height:0}
-.appearance-nav{display:flex;flex:0 0 max-content;width:max-content;min-width:116px;flex-direction:column;gap:3px;padding:16px 10px;border-right:1px solid var(--line);background:var(--side);overflow:auto}
-.appearance-nav-item{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;padding:8px 12px;border:0;border-radius:var(--radius-control);background:transparent;color:var(--muted);font:inherit;text-align:left;white-space:nowrap}
+/* 用户确认的设置导航：PC 宽 222px、默认行高 34px，按分组排布；图标随程序字号缩放。 */
+.appearance-nav{display:flex;flex:0 0 222px;width:222px;min-width:0;flex-direction:column;padding:20px 10px;border-right:1px solid var(--line);background:var(--side);overflow:auto}
+.appearance-nav-group{flex:none}
+.appearance-nav-group+.appearance-nav-group{margin-top:28px}
+.appearance-nav-group[hidden]{display:none}
+.appearance-nav-group-title{margin:0 0 7px;padding:0 10px;color:var(--muted);font-size:.92857rem;font-weight:500;line-height:1.53846}
+.appearance-nav-item{display:flex;align-items:center;gap:10px;width:100%;min-height:34px;padding:7px 10px;border:0;border-radius:10px;background:transparent;color:var(--muted);font:inherit;line-height:1.42857;text-align:left;white-space:nowrap}
 .appearance-nav-item:hover,.appearance-nav-item:focus-visible{background:var(--hover);color:var(--text)}
-.appearance-nav-item[aria-selected=true]{background:color-mix(in srgb,var(--accent) 11%,var(--side));box-shadow:inset 3px 0 var(--accent);color:var(--text);font-weight:600}
+/* 选中态采用效果稿的中性圆角底色，不加粗或显示强调色竖线；颜色由当前主题文字与侧栏背景派生。 */
+.appearance-nav-item[aria-selected=true]{background:color-mix(in srgb,var(--text) 8%,var(--side));color:var(--text)}
 .appearance-nav-item[hidden]{display:none}
-.appearance-nav-icon{display:grid;place-items:center;flex:0 0 20px;width:20px;height:20px}
-.appearance-nav-icon>.ui-icon{width:18px;height:18px}
+.appearance-nav-icon{display:grid;place-items:center;flex:0 0 1.14286rem;width:1.14286rem;height:1.14286rem}
+.appearance-nav-icon>.ui-icon{width:100%;height:100%}
 .appearance-panels{display:flex;flex:1;min-width:0;min-height:0;background:var(--bg)}
 .appearance-panels>.appearance-settings-page{flex:1;min-width:0;min-height:0;overflow:auto;padding:24px 28px;scrollbar-width:thin}
 .appearance-panel-title{margin:0 0 22px;font-size:1.14286rem;font-weight:600;line-height:1.4}
@@ -1052,30 +1104,55 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
     --content-padding-end:max(var(--layout-content-gutter,24px),calc(100% - 2 * var(--content-half-width) - var(--content-padding-start)))
   }
 }
-.workspace-reader{position:relative;isolation:isolate;display:flex;flex-direction:column;min-width:0;min-height:0;border-left:1px solid var(--line);background:var(--bg)}
-/* 标签栏沿用桌面顶部的 52px 最小高度；超出的标签横向滚动，切换时自动露出当前标签。 */
-.workspace-reader-toolbar{display:flex;align-items:center;flex:0 0 auto;gap:3px;min-width:0;min-height:52px;padding:8px 6px 5px;border-bottom:1px solid var(--line);background:var(--side)}
+/* 用户要求标签内容与主会话共用全窗口底色/底图：面板及嵌入页不再额外铺不透明底色或重复混合图片透明度。 */
+.workspace-reader{position:relative;isolation:isolate;display:flex;flex-direction:column;min-width:0;min-height:0;border-left:1px solid var(--line);background:transparent}
+/* 用户要求开关展开前后固定在窗口右上角：标签栏与 conversation-header 同为右留白 24px、最小高度 52px，
+   开关点击区 32px、图标 18px；需同步核对 session-tools.js 的按钮迁移，不能跟随会话菜单向左移动。 */
+.workspace-reader-toolbar{display:flex;align-items:center;flex:0 0 auto;gap:3px;min-width:0;min-height:52px;padding:6px 24px 6px 6px;border-bottom:1px solid var(--line);background:var(--side)}
+.workspace-reader-toggle{display:none;place-items:center;flex:0 0 32px;width:32px;height:32px;min-height:32px;padding:0}
+.workspace-reader-toggle>.ui-icon{width:18px;height:18px}
+.workspace-reader-toggle[aria-expanded=true] .workspace-reader-toggle-pane{fill:currentColor;fill-opacity:.14}
+@media(min-width:761px){.workspace-reader-toggle{display:grid}}
 .workspace-reader-tabs{display:flex;align-items:stretch;gap:3px;flex:1;min-width:0;overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;scrollbar-width:none}
 .workspace-reader-tabs::-webkit-scrollbar{display:none}
-.workspace-reader-tab{display:flex;align-items:center;flex:0 0 auto;min-width:92px;max-width:220px;margin-bottom:3px;border:1px solid transparent;border-radius:8px 8px 4px 4px;color:var(--muted)}
+/* 用户要求标签按可用空间收缩，100px 为最小宽度、220px 沿用原上限；全部缩到下限后才横向溢出滚动。 */
+.workspace-reader-tab{display:flex;align-items:center;flex:0 1 auto;min-width:100px;max-width:220px;margin-bottom:3px;border:1px solid transparent;border-radius:8px 8px 4px 4px;color:var(--muted)}
 .workspace-reader-tab.selected{border-color:var(--line);background:var(--bg);color:var(--text)}
 .workspace-reader-tab:hover{background:var(--hover)}
 .workspace-reader-tab-select{display:flex;align-items:center;gap:6px;flex:1;min-width:0;max-width:185px;height:32px;padding:5px 5px 5px 9px;border:0;border-radius:7px;color:inherit;font-size:.85714rem;text-align:left}
 .workspace-reader-tab-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .workspace-reader-tab-icon{display:inline-flex;flex-shrink:0;width:14px;height:14px;color:var(--muted)}
 .workspace-reader-tab-icon>svg{width:100%;height:100%}
-.workspace-reader-tab-close,.workspace-reader-add,.workspace-reader-close{display:grid;place-items:center;flex:0 0 auto;width:28px;height:28px;min-height:0;padding:0;border:0;border-radius:5px;color:var(--muted);font-size:18px;font-weight:400;line-height:1}
-.workspace-reader-tab-close{margin-right:3px;width:24px;height:24px;font-size:16px}
-.workspace-reader-add,.workspace-reader-close{align-self:flex-start;margin-top:2px}
-.workspace-reader-tab-select:focus-visible,.workspace-reader-tab-close:focus-visible,.workspace-reader-add:focus-visible,.workspace-reader-close:focus-visible{outline:2px solid var(--skill);outline-offset:-2px}
+/* 用户要求侧边执行时替换标签图标；复用 spinner 的旋转与主题配色，保持原标签图标的 14px 占位。 */
+.workspace-reader-tab-icon.spinner>svg{display:none}
+.workspace-reader-tab-close{display:grid;place-items:center;flex:0 0 auto;width:28px;height:28px;min-height:0;padding:0;border:0;border-radius:5px;color:var(--muted);font-size:18px;font-weight:400;line-height:1}
+/* 用户要求关闭按钮仅在对应标签悬停时显示；保留原 24px 占位，避免悬停时标题宽度跳动。键盘仍可用 Delete 关闭。 */
+.workspace-reader-tab-close{margin-right:3px;width:24px;height:24px;font-size:16px;visibility:hidden}
+.workspace-reader-tab:hover>.workspace-reader-tab-close{visibility:visible}
+.workspace-reader-tab-select:focus-visible,.workspace-reader-tab-close:focus-visible,.workspace-reader-toggle:focus-visible{outline:2px solid var(--skill);outline-offset:-2px}
 .workspace-reader-views{position:relative;flex:1;min-width:0;min-height:0;overflow:hidden}
+.workspace-reader-empty{display:grid;place-content:center;flex:1;min-width:0;padding:24px;color:var(--muted);font-size:.85714rem;text-align:center;line-height:1.6}
 .workspace-reader-view{position:absolute;inset:0;min-width:0;min-height:0;overflow:hidden}
-.workspace-side-thread{display:block;width:100%;height:100%;border:0;background:var(--bg);color-scheme:inherit}
-/* PC 侧边会话在右侧标签内独立编辑；主侧栏由外层保留，标签关闭按钮替代整页返回。 */
+.workspace-side-thread{display:block;width:100%;height:100%;border:0;background:transparent;color-scheme:inherit}
+/* 用户要求 PC 侧边会话不显示重复顶部信息：外层标签提供会话名，内页整段标题/路径/按钮均隐藏。
+   仅作用于 /side-thread 嵌入页，不能按 iframe 自身宽度判断 PC，也不能影响手机普通关联会话页。 */
 html[data-workspace-side-panel=true] .workspace{grid-template-columns:minmax(0,1fr)}
 html[data-workspace-side-panel=true] .workspace>.sidebar,html[data-workspace-side-panel=true] .sidebar-backdrop,html[data-workspace-side-panel=true] :is(#open-sidebar,#related-session-back){display:none!important}
 html[data-workspace-side-panel=true] .workspace>.conversation{animation:none}
-.workspace-reader-view>.session-tools-screen{position:absolute;inset:0;z-index:1;width:100%;height:100%;padding:0;transform:none;transition:none;will-change:auto}
+/* 仅 PC 侧边 iframe 穿透到父页面同一背景；手机关联整页仍保留原有不透明过渡底色。 */
+html[data-workspace-side-panel=true],html[data-workspace-side-panel=true] body,html[data-workspace-side-panel=true] .workspace.related-session-view>.conversation{background:transparent}
+html[data-workspace-side-panel=true] .conversation-header{display:none}
+/* 用户要求独立窗口只去除左侧列表；完整标题、编辑区、会话菜单和右侧多标签保持普通页面行为。 */
+html[data-session-window=true] .workspace{--sidebar-layout-width:0px;grid-template-columns:minmax(0,1fr)}
+html[data-session-window=true] .workspace>.sidebar,html[data-session-window=true] .sidebar-backdrop,html[data-session-window=true] #open-sidebar{display:none!important}
+@media(min-width:761px){html[data-session-window=true] .workspace.workspace-reader-open{grid-template-columns:minmax(0,1fr) var(--workspace-reader-width,480px)}}
+/* 独立文件预览沿用标签里的完整文件/差异组件，铺满内容窗口，不创建聊天或额外的右侧面板。 */
+.standalone-file-preview{background:var(--bg);font-family:var(--ui-font-family,inherit)}
+.standalone-file-preview>.session-tools-status{padding:20px}
+.standalone-preview-image{display:grid;place-items:center;overflow:auto}
+.standalone-preview-image>.image-preview-image{max-width:100%;max-height:100%}
+#notice.file-preview-notice{z-index:400}
+.workspace-reader-view>.session-tools-screen{position:absolute;inset:0;z-index:1;width:100%;height:100%;padding:0;background:transparent;transform:none;transition:none;will-change:auto}
 .workspace-reader-view .session-tools-back{display:none}
 .workspace-reader-view .session-tools-heading{gap:8px;padding-inline:12px}
 .workspace-reader-resize{position:absolute;z-index:3;inset:0 auto 0 -4px;width:8px;cursor:col-resize;touch-action:none;outline:none}
@@ -1178,10 +1255,13 @@ html[data-workspace-side-panel=true] .workspace>.conversation{animation:none}
 }
 @media(prefers-reduced-motion:reduce){.session-tools-screen{transition-duration:1ms}}
 @media(max-width:760px){
-  .appearance-nav{flex-basis:max-content;min-width:116px;padding:12px 8px}
-  .appearance-nav-item{min-height:44px;gap:8px;padding:8px;font-size:.85714rem}
-  .appearance-nav-icon{flex-basis:18px;width:18px;height:18px}
-  .appearance-nav-icon>.ui-icon{width:17px;height:17px}
+  /* 用户要求手机导航从效果稿首版 124px 收窄到默认 104px，并保留 44px 触摸行高；
+     7.42857rem = 104 / 默认 14px，放大程序字号时同步放宽，避免“自定义指令”等五字标题被截断。 */
+  .appearance-nav{flex-basis:max(104px,7.42857rem);width:max(104px,7.42857rem);padding:16px 4px}
+  .appearance-nav-group+.appearance-nav-group{margin-top:24px}
+  .appearance-nav-group-title{margin-bottom:5px;padding-inline:6px;font-size:.78571rem;line-height:1.81818}
+  .appearance-nav-item{min-height:44px;gap:6px;padding:8px 6px;border-radius:9px;font-size:.85714rem;line-height:1.5}
+  .appearance-nav-icon{flex-basis:1rem;width:1rem;height:1rem}
   .appearance-panels>.appearance-settings-page{padding:20px 16px}
   .appearance-screen .appearance-heading{padding:6px 12px}
   .appearance-screen .appearance-actions{padding-left:14px;padding-right:14px}
@@ -1405,8 +1485,8 @@ body{font-weight:var(--ui-font-weight,400)}
   }
   .appearance-panels{--layout-content-limit:1000px;--layout-content-gutter:28px}
   .appearance-panels>.appearance-settings-page{padding:32px 0 40px}
-  /* 142px 仅供首帧回退；打开后由 app.js 按导航的实际右边界更新，不固定导航宽度。 */
-  .appearance-page-content{width:calc(2 * var(--content-half-width));min-width:0;margin-inline-start:max(var(--layout-content-gutter),calc(50vw - var(--settings-content-offset,142px) - var(--content-half-width)))}
+  /* 222px 与 PC .appearance-nav 宽度同步，仅供首帧回退；打开后由 app.js 按导航的实际右边界更新。 */
+  .appearance-page-content{width:calc(2 * var(--content-half-width));min-width:0;margin-inline-start:max(var(--layout-content-gutter),calc(50vw - var(--settings-content-offset,222px) - var(--content-half-width)))}
   .appearance-screen,.appearance-screen[open],.appearance-screen.appearance-screen-visible{
     transform:none;transition:none;animation:none;will-change:auto
   }
@@ -1439,7 +1519,7 @@ body{font-weight:var(--ui-font-weight,400)}
 .instruction-content{display:block;width:100%;height:45dvh;min-height:180px;resize:vertical;font-size:var(--code-font-size,14px);line-height:1.7;tab-size:2}
 /* 正常读取后隐藏空状态，避免为已移除的提示保留一行。 */
 #instruction-status:empty{display:none}
-/* PC 固定菜单不拦截正文/侧栏点击，菜单自身仍可交互；手机不添加该类，沿用原遮罩和关闭行为。 */
+/* 手机和 PC 的固定菜单均不拦截页面点击，菜单自身仍可交互；手机普通页面点击隐藏由菜单模块处理，侧边会话除外。 */
 .session-related-menu-layer.session-menu-pinned{pointer-events:none}
 .session-menu-pinned>.session-related-menu{pointer-events:auto}
 @media(max-width:760px){

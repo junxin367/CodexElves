@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import nodeVm from "node:vm";
 import { createSidebarPreferenceStore } from "../assets/remote-access/recovery-store.js";
 import { createSelectComponent } from "../assets/remote-access/select.js";
+import { menuHorizontalLeft } from "../assets/remote-access/session-menu.js";
 
 function storage() {
   const records = new Map();
@@ -76,11 +77,87 @@ const sessionMenuSource = await readFile(new URL("../assets/remote-access/sessio
 const markdownRendererSource = await readFile(new URL("../assets/remote-access/markdown-renderer.js", import.meta.url), "utf8");
 const devServerSource = await readFile(new URL("./dev-remote-access.mjs", import.meta.url), "utf8");
 
-test("设置 Select 的调试代理只放行两个固定设置接口，不扩大到任意路径", () => {
+function claudeHistoryEditHarness() {
+  const id = "claude-11111111-2222-4333-8444-555555555555";
+  const first = { id: "first-message", type: "userMessage", text: "较早的问题",
+    messageMetadata: { turnId: "first-turn", messageId: "first-message", editable: true } };
+  const second = { id: "second-message", type: "userMessage",
+    messageMetadata: { turnId: "second-turn", messageId: "second-message", editable: true } };
+  const context = nodeVm.createContext({
+    selectedId: id, thread: { id, editableMessage: null, editHistoryHead: "native-head", messageEditReady: true,
+      capabilities: { messageEdit: true, messageEditHistory: true } },
+    turns: new Map([["first-turn", { id: "first-turn", items: [first] }],
+      ["second-turn", { id: "second-turn", items: [second] }]]),
+    claudeThreadId: value => value === id, threadReadOnly: () => false, relatedViewForThread: () => null,
+    connected: true, busy: false, stopping: false, pending: null, editingMessage: null, editingQueuedMessage: null,
+    compactionLocked: () => false, isActiveThread: () => false, rememberDraft() {},
+    messageCopyText: item => item.text, randomId: () => "edit-client", closeComposerMenus() {},
+    updateComposer() {}, renderMessages() {},
+  });
+  nodeVm.runInContext(sourceSection("function threadSentMessageEditAllowed(", "function rememberRelatedView(")
+    + sourceSection("function beginMessageEdit(", "function updateMessageEditor(")
+    + sourceSection("function syncEditableMessageMetadata(", "function historyPlaceholder("), context);
+  return { context, id, first };
+}
+
+test("Claude 历史编辑保留每条原生消息的编辑能力，并能选择较早问题", () => {
+  const { context, id, first } = claudeHistoryEditHarness();
+  context.syncEditableMessageMetadata();
+  assert.equal(first.messageMetadata.editable, true);
+  context.beginMessageEdit(id, first);
+  assert.equal(context.editingMessage.turnId, "first-turn");
+  assert.equal(context.editingMessage.historyHead, "native-head");
+  assert.equal(context.editingMessage.clientUserMessageId, "edit-client");
+  context.thread.messageEditReady = false;
+  assert.equal(context.threadSentMessageEditAllowed(id), false, "未知/执行中状态不能开放编辑");
+  context.thread.messageEditReady = true;
+  context.editingMessage = null; context.isActiveThread = () => true;
+  context.beginMessageEdit(id, first);
+  assert.equal(context.editingMessage, null);
+});
+
+test("Claude 历史编辑核对原生历史头与具体节点，Codex 保留原有最后一条校验", () => {
+  const { context, first } = claudeHistoryEditHarness();
+  const edit = { turnId: "first-turn", messageId: "first-message", historyHead: "native-head" };
+  assert.equal(context.messageEditStale(edit), false);
+  context.thread.editHistoryHead = "new-native-head";
+  assert.equal(context.messageEditStale(edit), true);
+  context.thread.editHistoryHead = edit.historyHead;
+  first.messageMetadata.editable = false;
+  assert.equal(context.messageEditStale(edit), true);
+  context.thread.capabilities = {};
+  context.thread.editableMessage = { turnId: "second-turn", messageId: "second-message" };
+  assert.equal(context.messageEditStale(edit), true);
+  assert.equal(context.messageEditStale(context.thread.editableMessage), false);
+});
+
+test("Claude 历史编辑的未知回执只核对同一新消息，排队证据不能确认编辑成功", async () => {
+  const id = "claude-11111111-2222-4333-8444-555555555555", calls = [];
+  let state = "queued";
+  const context = nodeVm.createContext({
+    selectedId: id, session: { device: { id: "device" }, capabilities: { queueSendRecovery: true } },
+    turns: new Map(), pendingSendRequest: null, claudeThreadId: value => value === id,
+    acceptedSendItem: () => null,
+    api: async (path, payload) => {
+      calls.push(path);
+      assert.equal(path, "/api/read/sendState");
+      return { confirmed: true, threadId: id, clientUserMessageId: payload.clientUserMessageId, deliveryState: state };
+    },
+  });
+  nodeVm.runInContext(sourceSection("async function confirmPendingSend(", "async function resolvePending("), context);
+  const current = { action: "editMessage", deviceId: "device",
+    payload: { threadId: id, clientUserMessageId: "edit-client" } };
+  assert.equal(await context.confirmPendingSend(current), null);
+  state = "accepted";
+  assert.equal((await context.confirmPendingSend(current)).deliveryState, "accepted");
+  assert.equal(calls.length, 2);
+});
+
+test("设置 Select 的调试代理只放行固定设置接口，不扩大到任意路径", () => {
   const context = nodeVm.createContext();
   nodeVm.runInContext(devServerSource.slice(devServerSource.indexOf("function allowedApi("),
     devServerSource.indexOf("function mappedCookie(")), context);
-  for (const path of ["/api/settings/environments", "/api/settings/instructions"])
+  for (const path of ["/api/settings/environments", "/api/settings/instructions", "/api/settings/prompt-optimization"])
     assert.equal(context.allowedApi("POST", path), true);
   for (const [method, path] of [["GET", "/api/settings/instructions"], ["POST", "/api/settings/other"],
     ["POST", "/api/settings/instructions/extra"], ["DELETE", "/api/settings/instructions"], ["POST", "/settings/instructions"]])
@@ -98,18 +175,23 @@ const vm = {
       sessionTypes: [{ id: "codex", label: "Codex" }, { id: "claude", label: "Claude" }],
       sessionInstances: [{ id: "codex:local", backend: "codex", label: "Codex · 本机", ready: true, legacyDefault: true },
         { id: "claude:wsl:test", backend: "claude", label: "Claude · WSL · test", ready: true, legacyDefault: true }],
-      drafts: new Map(), attachmentDrafts: new Map(),
+      drafts: new Map(), attachmentDrafts: new Map(), retiredSendPayloads: new WeakSet(),
       session: null, stream: null, EventSource: { OPEN: 1 }, modelsScope: "codex", modelLoadError: "",
-      modelDefaults: {}, goalVersion: 0, notifiedGoal: null,
+      modelDefaults: {}, modelChoiceVersion: 0, goalVersion: 0, notifiedGoal: null,
       renderClaudeControlNotices() {},
-      selectionVersion: 0,
+      selectionVersion: 0, modelChoiceVersion: 0,
+      claudePendingSetting: () => null,
       selectedDraftFast: false, remoteFastState: null, remoteFastRead: null, remoteFastWriting: null,
       remoteFastKey: () => "", updateRemoteFast() {},
       messageImageMediaReads: new WeakMap(), messageImageRefreshes: new Map(), messageImageReadSequence: 0,
       syncBackendModels() {}, setConnection() {},
       claudeUsageState: null, resetClaudeUsage() {}, syncClaudeUsage() {}, fitClaudeUsageTip() {},
+      resetComposerMetrics() {}, syncComposerMetrics() {}, fitComposerMetrics() {}, normalizeComposerMetrics: () => null,
+      promptOptimizationSettingsDialog: null,
       desktopObservationTimer: null, desktopObservationRequest: null, desktopObservationLast: null,
       scheduleDesktopObservation() {}, resetDesktopObservation() {},
+      syncWorkspaceSidePanelState() {},
+      workspaceSidePanel: false,
       appearance: { sessionTypes: { codex: true, claude: false }, sessionFilter: "all" },
       transcriptEvents: new Map(), claudeHistoryOrder: null,
     })) if (!Object.hasOwn(context, key)) context[key] = value;
@@ -1552,20 +1634,22 @@ test("多选筛选持久恢复时去重，混入全部项时以全部为准，�
   }
 });
 
-test("PC 会话菜单仅图标切换或生命周期清理会关闭，手机普通关闭行为保留", async () => {
+test("手机和 PC 会话菜单的普通操作保持展开，图标切换及生命周期清理可关闭", async () => {
   for (const desktop of [true, false]) {
     const context = vm.createContext({
       opened: true, suspended: false, ticker: null, cached: null,
-      pinned: () => desktop, clearInterval() {}, cancelPress() {}, hideContext() {}, stopPositionTracking() {},
+      desktop: () => desktop, clearInterval() {}, cancelPress() {}, hideContext() {}, stopPositionTracking() {},
       trigger: { isConnected: true, disabled: false, setAttribute() {}, focus() {} },
       layer: { hidden: false, hasAttribute: () => false, classList: { remove() {} } },
       open: async () => { context.opened = true; context.layer.hidden = false; },
     });
-    vm.runInContext(sessionMenuSource.slice(sessionMenuSource.indexOf("  function close("),
+    vm.runInContext(sessionMenuSource.slice(sessionMenuSource.indexOf("  const pinned ="),
+      sessionMenuSource.indexOf("\n\n  function listen("))
+      + sessionMenuSource.slice(sessionMenuSource.indexOf("  function close("),
       sessionMenuSource.indexOf("  function suspend(")) + sessionMenuSource.slice(
       sessionMenuSource.indexOf("  function toggle()"), sessionMenuSource.indexOf('  listen(trigger, "click"')), context);
     context.close(true);
-    assert.equal(context.opened, desktop, "外部点击、Escape 和普通操作共用关闭入口");
+    assert.equal(context.opened, true, "普通关闭入口不得让菜单功能点击或返回自动隐藏菜单");
     context.opened = true; context.layer.hidden = false;
     await context.toggle();
     assert.equal(context.opened, false, "再次点击图标必须关闭");
@@ -1573,6 +1657,28 @@ test("PC 会话菜单仅图标切换或生命周期清理会关闭，手机普�
     assert.equal(context.opened, true, "点击图标重新打开");
     context.close(false, true);
     assert.equal(context.opened, false, "授权变化或销毁必须清理菜单");
+  }
+});
+
+test("手机点击普通页面隐藏会话菜单，侧边会话页面及菜单内部点击保持展开", () => {
+  for (const desktop of [true, false]) {
+    for (const sideThreadView of [true, false]) {
+      for (const target of ["page", "menu", "trigger"]) {
+        let closed = false;
+        const context = vm.createContext({
+          opened: true, suspended: false, desktop: () => desktop,
+          readContext: () => ({ sideThreadView }),
+          layer: { contains: value => value === "menu" },
+          trigger: { contains: value => value === "trigger" },
+          close: (_restoreFocus, force) => { assert.equal(force, true); closed = true; },
+        });
+        vm.runInContext(sessionMenuSource.slice(sessionMenuSource.indexOf("  function dismissForPageClick("),
+          sessionMenuSource.indexOf("  function suspend(")), context);
+        context.dismissForPageClick({ target });
+        assert.equal(closed, !desktop && !sideThreadView && target === "page",
+          JSON.stringify({ desktop, sideThreadView, target }));
+      }
+    }
   }
 });
 
@@ -1586,8 +1692,8 @@ function sessionMenuPositionHarness({ width = 1200, height = 800, related = fals
   const context = nodeVm.createContext({
     opened: true, suspended: false, disposed: false, ticker: null, cached: null,
     positionFrame: null, positionSignature: "", contextSource: null, contextItem: null, contextPosition: null,
-    menu, context: {}, owns: () => true, canMutate: () => true, closeSideThread() {},
-    pinned: () => width > 760, desktop: () => width > 760,
+    menu, menuHorizontalLeft, context: {}, owns: () => true, canMutate: () => true, closeSideThread() {},
+    pinned: () => true, desktop: () => width > 760,
     clearInterval() {}, cancelPress() {}, focusEdge() {},
     document: { hidden: false, body: { append() {} } },
     window: { innerWidth: width, innerHeight: height,
@@ -1625,9 +1731,10 @@ test("会话菜单跟随侧栏、右侧面板及关联页动画移动，静止�
     const initialWrites = writes.length;
     h.frame();
     assert.equal(writes.length, initialWrites, "布局不变时只读锚点，不反复写样式");
-    for (const [left, top] of [[1000, 24], [850, 28], [1138, 20]]) {
+    for (const [left, top, expectedLeft] of [[1000, 24, 732], [500, 28, 500],
+      [584, 28, 316], [850, 28, 582], [1138, 20, 870]]) {
       h.move({ left, top }); h.frame();
-      assert.equal(context.menu.style.left, `${left + 32 - 300}px`);
+      assert.equal(context.menu.style.left, `${expectedLeft}px`);
       assert.equal(context.menu.style.top, `${top + 32 + 10}px`);
       assert.equal(frames.size, 1, "没有 resize 或 scroll 事件也持续跟随");
     }
@@ -2526,10 +2633,11 @@ test("路径仅在展示时去掉长路径前缀，分离 HEAD 与无分支状�
 
 test("WSL 映射文件名只在界面还原，展开目录与打开文件仍保留原始路径和目录层级", () => {
   const node = (tag, className = "", text = "") => ({
-    tag, className, textContent: text, children: [], dataset: {}, attributes: new Map(),
+    tag, className, textContent: text, children: [], dataset: {}, attributes: new Map(), events: new Map(),
     style: { setProperty() {} }, classList: { toggle() {} },
     append(...children) { this.children.push(...children); },
     setAttribute(name, value) { this.attributes.set(name, value); },
+    addEventListener(name, callback) { this.events.set(name, callback); },
   });
   const list = node("div"), opened = [];
   const context = vm.createContext({
@@ -2539,6 +2647,8 @@ test("WSL 映射文件名只在界面还原，展开目录与打开文件仍保�
     createWorkspaceRepository: () => null, bytesLabel: size => `${size} B`,
     toggleDirectory: path => opened.push(["directory", path]),
     openFile: path => opened.push(["file", path]),
+    getContext: () => ({ threadId: "original-thread" }),
+    onFileContextMenu: (event, preview, owner) => opened.push(["menu", preview.path, owner.threadId]),
     embedded: null,
   });
   vm.runInContext(sessionFiles.slice(sessionFiles.indexOf("export function displayWorkspacePath("),
@@ -2557,6 +2667,7 @@ test("WSL 映射文件名只在界面还原，展开目录与打开文件仍保�
   assert.equal(directoryButton.attributes.get("aria-level"), "1");
   directoryButton.click();
   assert.deepEqual(opened[0], ["directory", rawDirectory]);
+  assert.equal(directoryButton.events.has("contextmenu"), false);
 
   const rawName = "报告\uf05c第一版\uf03f.md", rawPath = `${rawDirectory}/${rawName}`;
   context.renderTreeRow({ name: rawName, path: rawPath, kind: "file", size: 128 }, 1, true);
@@ -2567,6 +2678,8 @@ test("WSL 映射文件名只在界面还原，展开目录与打开文件仍保�
   assert.equal(fileButton.attributes.get("aria-level"), "2");
   fileButton.click();
   assert.deepEqual(opened[1], ["file", rawPath]);
+  fileButton.events.get("contextmenu")({});
+  assert.deepEqual(opened[2], ["menu", rawPath, "original-thread"], "右键预览保留原始文件路径和来源会话");
 
   const parts = context.fileParts({ path: rawPath });
   assert.equal(parts.name, String.raw`报告\第一版?.md`);
@@ -4848,12 +4961,31 @@ function deferred() {
 }
 function installSentMessageDisplayHarness(context) {
   context.sentMessageDisplays ??= new Map();
+  context.retiredSendPayloads ??= new WeakSet();
   context.turns ??= new Map();
   vm.runInContext([
     sourceSection("function rememberSendDisplay(", "function queueDisplayMessages("),
     sourceSection("function queueMessageIdentity(", "function applyQueueSnapshot("),
   ].join("\n"), context);
 }
+test("显式历史回退后迟到成功回执不能复活旧输入，新消息仍可正常确认", () => {
+  const context = vm.createContext({
+    session: { device: { id: "device" } }, selectedId: "main",
+    privateInputScope: () => "scope",
+  });
+  installSentMessageDisplayHarness(context);
+  const old = { threadId: "main", clientUserMessageId: "old-client", prompt: "旧问题" };
+  const result = { ok: true, threadId: "main", clientUserMessageId: "old-client", deliveryState: "accepted" };
+  assert.equal(context.confirmSendDisplay(old, result), true);
+  context.clearSentMessageDisplays("main", { retire: true });
+  assert.equal(context.confirmSendDisplay(old, result), false);
+  assert.equal(context.sentMessageDisplays.size, 0);
+  const next = { threadId: "main", clientUserMessageId: "new-client", prompt: "新问题" };
+  const nextResult = { ...result, clientUserMessageId: "new-client" };
+  assert.equal(context.confirmSendDisplay(next, nextResult), true);
+  context.clearSentMessageDisplays("main");
+  assert.equal(context.confirmSendDisplay(next, nextResult), true, "普通展示缓存清理不撤销有效发送");
+});
 function queueReloadHarness() {
   const timers = new Map(), threadReads = [], historyReads = [], notices = [];
   let timerId = 0;
@@ -7565,6 +7697,107 @@ test("PC 打开侧边会话交给右侧标签，不切换主会话、不改主�
   assert.equal(ready, true);
 });
 
+test("PC 新建侧边直接显示右侧等待标签，成功沿用原回执且主会话始终可操作", async () => {
+  const h = sideCreationNavigationHarness(), opened = [];
+  let closed = 0;
+  h.context.sessionTools = {
+    openSideCreation: () => ({ update() {}, close: () => closed++ }),
+    openSideThread: item => { opened.push(item); return true; },
+  };
+  const operation = h.start();
+  assert.ok(operation.view.dock);
+  assert.equal(h.workspace.inert, false);
+  assert.equal(h.body.children.length, 0);
+  assert.equal(h.historyEntries.length, 1);
+  await h.context.runRelatedOperation("createSideThread");
+  assert.equal(h.writes.length, 1, "同一待确认创建不能重复派发");
+  h.prompt.value = "等待期间继续编辑的主会话草稿";
+  await h.complete(operation);
+  assert.equal(h.context.selectedId, "main");
+  assert.equal(h.prompt.value, "等待期间继续编辑的主会话草稿");
+  assert.equal(h.historyEntries.length, 1);
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].id, "created-side");
+  assert.equal(closed, 1);
+  assert.equal(h.context.sideCreationView, null);
+  assert.equal(operation.record.autoOpen, true);
+});
+
+test("PC 关闭新建等待标签后，迟到成功只登记侧边关系，不强行再打开", async () => {
+  const h = sideCreationNavigationHarness(), opened = [];
+  let dismiss;
+  h.context.sessionTools = {
+    openSideCreation: options => { dismiss = options.onClose; return { update() {}, close() {} }; },
+    openSideThread: item => { opened.push(item); return true; },
+  };
+  const operation = h.start();
+  dismiss();
+  assert.equal(operation.record.autoOpen, false);
+  assert.equal(h.context.sideCreationView, null);
+  assert.equal(h.context.relatedThreadOperations.size, 1);
+  await h.complete(operation);
+  assert.equal(opened.length, 0);
+  assert.equal(h.context.relatedThreadViews.get("created-side").parentThreadId, "main");
+  assert.equal(h.context.selectedId, "main");
+  assert.equal(h.backCalls, 0);
+  assert.equal(h.writes.length, 1);
+});
+
+test("PC 只隐藏等待面板时仍登记并接替创建结果，保留面板隐藏状态", async () => {
+  const h = sideCreationNavigationHarness(), opened = [];
+  h.context.sessionTools = {
+    openSideCreation: () => ({ isVisible: () => false, update() {}, close() {} }),
+    openSideThread: (item, options) => { opened.push({ item, options }); return true; },
+  };
+  const operation = h.start();
+  await h.complete(operation);
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].options.reveal, false);
+  assert.equal(operation.record.autoOpen, true, "只隐藏面板不能取消原创建操作的接替");
+  assert.equal(h.context.selectedId, "main");
+  assert.equal(h.writes.length, 1);
+});
+
+test("新建侧边快捷键兼容 Ctrl+Alt+S 与 Cmd+Option+S，手机和不可写会话不触发", () => {
+  const calls = [], forwarded = [];
+  const context = nodeVm.createContext({
+    workspaceSidePanel: false, isAndroidContainer: () => false, matchMedia: () => ({ matches: true }),
+    session: {}, creating: false, relatedSessionView: null, connected: true,
+    selectedId: "main", thread: { id: "main" }, sideThreadsEnabled: () => true, threadReadOnly: () => false,
+    document: { hidden: false, querySelector: () => null, documentElement: { dataset: {} } },
+    sessionMenu: { canCreateSideThread: () => true },
+    runRelatedOperation: async action => calls.push(action), notice() {},
+    window: { parent: { postMessage: (...args) => forwarded.push(args) } },
+    location: { origin: "http://127.0.0.1:45222" },
+  });
+  nodeVm.runInContext(sourceSection("function createDesktopSideThread(", "function showSideCreation("), context);
+  const key = changes => ({ key: "s", code: "KeyS", ctrlKey: true, altKey: true, metaKey: false,
+    preventDefault() { this.defaultPrevented = true; }, ...changes });
+  const windows = key();
+  assert.equal(context.handleSideThreadShortcut(windows), true);
+  assert.equal(windows.defaultPrevented, true);
+  assert.equal(context.handleSideThreadShortcut(key({ ctrlKey: false, metaKey: true, key: "ß" })), true);
+  for (const changes of [{ repeat: true }, { isComposing: true }, { shiftKey: true }, { altKey: false },
+    { getModifierState: () => true }, { code: "KeyA", key: "a" }])
+    assert.equal(context.handleSideThreadShortcut(key(changes)), false);
+  context.matchMedia = () => ({ matches: false });
+  assert.equal(context.handleSideThreadShortcut(key()), false);
+  context.matchMedia = () => ({ matches: true });
+  context.threadReadOnly = () => true;
+  assert.equal(context.handleSideThreadShortcut(key()), false);
+  context.threadReadOnly = () => false;
+  context.sessionMenu.canCreateSideThread = () => false;
+  assert.equal(context.handleSideThreadShortcut(key()), false);
+  assert.equal(calls.length, 2);
+  context.workspaceSidePanel = true;
+  assert.equal(context.handleSideThreadShortcut(key()), true);
+  assert.equal(forwarded.length, 1);
+  assert.equal(forwarded[0][0].type, "codex-elves-create-side-thread");
+  assert.equal(calls.length, 2, "侧边输入框只转交主页面，不从侧边再次派发");
+  context.document.documentElement.dataset.workspaceSidePanelVisible = "false";
+  assert.equal(context.handleSideThreadShortcut(key()), false);
+});
+
 test("隐藏的侧边标签即使请求打开确认也不标记已读，显示后沿用原确认流程", async () => {
   const calls = [], document = { hidden: false, documentElement: { dataset: { workspaceSidePanelVisible: "false" } } };
   const context = nodeVm.createContext({
@@ -7593,6 +7826,7 @@ test("侧边页面只接收同源父页面的可见状态，其他来源不能�
     workspaceSidePanel: true, window: { parent, addEventListener: (name, fn) => handlers.set(name, fn) },
     location: { origin: "http://127.0.0.1:45222" }, document,
     markVisibleThreadRead: async () => marked.push(true),
+    syncWorkspaceSidePanelState() {},
   });
   nodeVm.runInContext(sourceSection('window.addEventListener("message", event => {\n  if (!workspaceSidePanel',
     'window.addEventListener("storage", event => {'), context);
@@ -7606,6 +7840,48 @@ test("侧边页面只接收同源父页面的可见状态，其他来源不能�
   listener({ source: parent, origin: context.location.origin, data: { ...data, visible: false } });
   assert.equal(marked.length, 1);
   assert.equal(document.documentElement.dataset.workspaceSidePanelVisible, "false");
+});
+
+test("侧边标签执行状态沿用原生状态并去重，排队占位和等待用户不显示执行中", () => {
+  const sent = [], parent = { postMessage: (data, origin) => sent.push({ ...data, origin }) };
+  const context = nodeVm.createContext({
+    workspaceSidePanel: true, window: { parent }, location: { origin: "http://127.0.0.1:45222" },
+    workspaceSidePanelStateSignature: "", creating: false, selectedId: "side-a", connected: true, pageLeaving: false,
+    thread: { id: "side-a", status: { type: "active" } },
+  });
+  nodeVm.runInContext(sourceSection("function sidebarAttentionState(", "function desktopObservationIds(")
+    + sourceSection("function syncWorkspaceSidePanelState(", "let selectionToken ="), context);
+  context.syncWorkspaceSidePanelState();
+  assert.equal(sent.at(-1).running, true);
+  assert.equal(sent.at(-1).threadId, "side-a");
+  assert.equal(sent.at(-1).origin, context.location.origin);
+  context.syncWorkspaceSidePanelState();
+  assert.equal(sent.length, 1);
+  context.thread.status = { type: "idle" };
+  context.thread.queuedMessages = [{ text: "尚未执行" }];
+  context.syncWorkspaceSidePanelState();
+  assert.equal(sent.at(-1).running, false);
+  context.thread.status = { type: "pending" };
+  context.syncWorkspaceSidePanelState();
+  assert.equal(sent.length, 2);
+  context.thread.status = { type: "running" };
+  context.syncWorkspaceSidePanelState();
+  assert.equal(sent.at(-1).running, true);
+  context.thread.status = { type: "active", activeFlags: ["waitingOnApproval"] };
+  context.syncWorkspaceSidePanelState();
+  assert.equal(sent.at(-1).running, false);
+  context.thread.status = "active";
+  context.syncWorkspaceSidePanelState();
+  assert.equal(sent.at(-1).running, true);
+  context.connected = false;
+  context.syncWorkspaceSidePanelState();
+  assert.equal(sent.at(-1).running, false);
+  const count = sent.length;
+  context.syncWorkspaceSidePanelState(true);
+  assert.equal(sent.length, count + 1, "父页面握手后补发当前状态，不依赖之前的推送是否到达");
+  context.workspaceSidePanel = false;
+  context.syncWorkspaceSidePanelState(true);
+  assert.equal(sent.length, count + 1);
 });
 
 test("自动进入新建页保留用户已经展开的侧栏，显式新建仍关闭侧栏", async () => {
@@ -8791,6 +9067,11 @@ test("Claude 已接收但未启动时显示等待提示，执行与完成后自�
   assert.deepEqual(h.render(), [{ text: "已接收，等待 Claude 开始", ticking: false, live: false, running: false, work: [] }]);
   assert.equal(h.context.thread.status.type, "idle", "等待提示不能把未知/空闲改为执行或入队依据");
   assert.equal(turn.status, "pending");
+  h.context.thread.nativeDialog = { kind: "model", state: "waiting" };
+  assert.equal(h.render()[0].text, "已接收，等待确认模型切换");
+  h.context.thread.nativeDialog = { kind: "unknown", state: "waiting" };
+  assert.equal(h.render()[0].text, "已接收，等待 Claude 本机确认");
+  delete h.context.thread.nativeDialog;
   turn.status = "inProgress"; h.context.thread.status.type = "active";
   assert.match(h.render()[0].text, /^已处理 /);
   assert.equal(h.activities[0].running, true);
@@ -9141,6 +9422,42 @@ test("Claude 完整模型 ID 匹配原生别名，显示已选模型和推理等
   h.choices("model-options").find(node => node.dataset.choiceKey === "model:sonnet").onclick();
   assert.equal(h.context.selectedModel, "sonnet");
   assert.equal(h.context.selectedEffort, "medium");
+});
+
+test("Claude 模型确认期间展示待切换选择，拒绝后恢复原模型并保留后来选择", () => {
+  const h = claudeAliasModelMenuHarness();
+  h.context.thread.model = "sonnet";
+  h.context.thread.nativeSettings = { changes: { model: {
+    id: "switch", requested: "opus", previous: "sonnet", state: "confirmation"
+  } } };
+  assert.equal(h.context.currentModelId(), "opus");
+  assert.equal(h.context.claudePendingSetting("model").state, "confirmation");
+  h.context.thread.nativeSettings.changes.model.state = "rejected";
+  assert.equal(h.context.currentModelId(), "sonnet");
+  h.context.selectedModel = "legacy-haiku";
+  h.context.thread.nativeSettings.changes.model.state = "applied";
+  h.context.thread.model = "opus";
+  assert.equal(h.context.currentModelId(), "legacy-haiku", "迟到的原生结果不能覆盖新草稿选择");
+});
+
+test("Claude 发送回执释放已提交的模型草稿，迟到回执不清除后来选择", () => {
+  const h = claudeAliasModelMenuHarness(), c = h.context;
+  const payload = { threadId: c.selectedId, model: "opus", prompt: "原消息" };
+  Object.assign(c, {
+    submittedDrafts: new WeakMap(), failedInputRecoveries: new Map(), recoveryScope: "",
+    persistSmallInputRecoveries() {}, composerAttachmentsLoading: () => false,
+    matchingDraft: () => false, storedDraft: () => null, snapshotDraft: () => ({}),
+    selectedModel: "opus", selectedEffort: "max", modelChoiceVersion: 3,
+  });
+  c.submittedDrafts.set(payload, { modelChoice: { version: 3, model: "opus", effort: "max" } });
+  vm.runInContext(sourceSection("function clearSubmittedDraft(", "function resetComposerOptions("), c);
+  c.clearSubmittedDraft(payload, true);
+  assert.equal(c.selectedModel, "");
+  assert.equal(c.selectedEffort, "");
+  c.selectedModel = "opus"; c.selectedEffort = "high"; c.modelChoiceVersion = 4;
+  c.clearSubmittedDraft(payload, true);
+  assert.equal(c.selectedModel, "opus");
+  assert.equal(c.selectedEffort, "high", "即使重新选择相同模型，旧回执也不能清掉新等级");
 });
 
 test("Claude 模型匹配优先精确值，未知或未报告等级不猜测，Codex 不扩展别名规则", () => {
@@ -9578,6 +9895,40 @@ test("长时间编辑仅保留最近一百次独立修改，淘汰旧记录后�
   assert.equal(h.prompt.text, "150");
 });
 
+test("主会话保留背景透明度与铺法，侧边页不重绘图片或叠加透明度", () => {
+  const attributes = new Map();
+  const image = {
+    hidden: true, style: {},
+    getAttribute: name => attributes.get(name) ?? null,
+    removeAttribute: name => attributes.delete(name),
+    set src(value) { attributes.set("src", value); },
+  };
+  const context = nodeVm.createContext({
+    $: () => image, workspaceSidePanel: false,
+    remoteBackground: { dataUrl: "data:image/png;base64,cHJldmlldw==" },
+    appearance: { backgroundOpacity: 30, backgroundFit: "cover" },
+  });
+  nodeVm.runInContext(sourceSection("function syncRemoteBackground(", "function readRemoteBackgroundFile("), context);
+  context.syncRemoteBackground();
+  assert.equal(image.hidden, false);
+  assert.equal(image.style.opacity, "0.3");
+  assert.equal(image.style.objectFit, "cover");
+  assert.equal(image.getAttribute("src"), context.remoteBackground.dataUrl);
+  context.appearance.backgroundOpacity = 3;
+  context.appearance.backgroundFit = "contain";
+  context.syncRemoteBackground();
+  assert.equal(image.style.opacity, "0.03");
+  assert.equal(image.style.objectFit, "contain");
+  context.workspaceSidePanel = true;
+  context.syncRemoteBackground();
+  assert.equal(image.hidden, true);
+  assert.equal(image.getAttribute("src"), null);
+  context.workspaceSidePanel = false;
+  context.remoteBackground.dataUrl = "";
+  context.syncRemoteBackground();
+  assert.equal(image.hidden, true);
+});
+
 test("外观表面与原生 Codex 默认调色一致，并区分输入框、控件及浅色普通提示", () => {
   const context = nodeVm.createContext();
   nodeVm.runInContext(sourceSection("function mixColor(", "function applyAppearance("), context);
@@ -9765,4 +10116,285 @@ test("编辑区主题提示接管并恢复 title，保留无障碍说明，触�
   trigger.hidden = true; observers.at(-1).callback();
   assert.equal(nodes.length, 0);
   assert.equal(trigger.getAttribute("title"), "选择模型");
+});
+
+function composerMetricsHarness() {
+  const requests = [], timers = new Map(), properties = new Map(), remembered = [];
+  let now = 100000, timer = 0;
+  const node = { hidden: true, dataset: {}, attributes: {}, children: [],
+    style: { setProperty: (key, value) => properties.set(key, value) },
+    replaceChildren(...children) { this.children = children; },
+    setAttribute(key, value) { this.attributes[key] = value; } };
+  const quota = { hidden: false, getBoundingClientRect: () => ({ width: 118 }) };
+  const context = nodeVm.createContext({
+    composerMetricsState: null, session: { device: { id: "metrics-device", createdAtMs: 1 },
+      capabilities: { sessionMetrics: true }, runtime: { revision: 1 } },
+    thread: { id: "thread-a" }, selectedId: "thread-a", selectionVersion: 1, messageVersion: 0,
+    instance: "codex:local", backend: "codex", active: true, creating: false,
+    connected: true, pageLeaving: false, document: { hidden: false }, AbortController,
+    turns: new Map([["turn-current", { id: "turn-current", status: "inProgress" }]]),
+    privateInputScope: value => JSON.stringify(value.device),
+    activeInstanceId: () => context.instance, activeBackend: () => context.backend,
+    currentThreadDisplay: () => context.thread, isActiveThread: () => context.active,
+    rememberThreadDisplay: (value, options) => remembered.push({ value, options }),
+    element: (tag, className, textContent) => ({ tag, className, textContent }),
+    $: selector => selector === "#session-metrics" ? node : selector === "#claude-usage" ? quota : null,
+    Date: class extends Date { static now() { return now; } },
+    setTimeout(callback, delay) { const id = ++timer; timers.set(id, { callback, delay }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    api(path, payload, id, signal, options) {
+      let resolve, reject;
+      const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+      requests.push({ path, payload, signal, options, resolve, reject }); return promise;
+    },
+  });
+  nodeVm.runInContext(sourceSection("function composerMetricsNumber(", "function tokenCount("), context);
+  const value = overrides => ({ source: "codex-rollout", turnId: "turn-current",
+    inputTokens: 999952, outputTokens: 48, turnTokens: 1000000, steps: 20, totalTokens: 5000000,
+    durationMs: 1000, tokensPerSecond: 48, ...overrides });
+  return { context, requests, timers, node, quota, properties, remembered, value,
+    text: () => node.children.map(child => child.textContent).join("  "),
+    advance: amount => { now += amount; },
+    complete(index = 0, overrides = {}) {
+      requests[index].resolve({ ok: true, threadId: requests[index].payload.threadId,
+        backend: requests[index].payload.backend, metrics: value(overrides) });
+    },
+    flush: () => new Promise(resolve => setImmediate(resolve)) };
+}
+
+test("会话底栏统计按步数在前展示，百万与千单位一致，未知和非法字段不伪装为零", async () => {
+  const h = composerMetricsHarness(), c = h.context;
+  assert.equal(c.composerMetricsCompact(1000000), "1m");
+  assert.equal(c.composerMetricsCompact(12400), "12.4k");
+  assert.equal(c.composerMetricsCompact(null), "—");
+  c.syncComposerMetrics();
+  assert.equal(h.text(), "—tk/s  本轮 —步 —  总 —");
+  h.complete(); await h.flush();
+  assert.equal(h.text(), "48tk/s  本轮 20步 1m  总 5m");
+  assert.equal(h.node.hidden, false);
+  for (const invalid of [-1, NaN, Infinity, "20", true, Number.MAX_SAFE_INTEGER + 1])
+    assert.equal(c.normalizeComposerMetrics(h.value({ steps: invalid })).steps, null);
+  assert.equal(c.normalizeComposerMetrics(h.value({ steps: 0 })).steps, 0);
+  assert.equal(c.normalizeComposerMetrics(h.value({ source: "estimated" })), null);
+});
+
+test("会话底栏统计重复输入不增加读取，后台优先级且与发送状态无依赖", async () => {
+  const h = composerMetricsHarness(), c = h.context;
+  for (let index = 0; index < 10; ++index) c.syncComposerMetrics();
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.requests[0].path, "/api/read/sessionMetrics");
+  assert.equal(h.requests[0].options.resourcePriority, "background");
+  h.complete(); await h.flush();
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.properties.get("--composer-quota-width"), "126px");
+  h.quota.hidden = true; c.fitComposerMetrics();
+  assert.equal(h.properties.get("--composer-quota-width"), "0px");
+  assert.equal(h.timers.size, 1);
+  h.advance(2001); c.syncComposerMetrics();
+  assert.equal(h.requests.length, 2);
+});
+
+test("会话底栏统计切换实例和授权后中止旧请求，迟到结果不能覆盖新会话", async () => {
+  const h = composerMetricsHarness(), c = h.context;
+  c.syncComposerMetrics();
+  c.selectedId = "claude-thread-b"; c.thread = { id: c.selectedId };
+  c.instance = "claude:wsl:test"; c.backend = "claude"; ++c.selectionVersion;
+  c.session.device.id = "new-device";
+  c.syncComposerMetrics();
+  assert.equal(h.requests[0].signal.aborted, true);
+  h.complete(0); await h.flush();
+  assert.equal(c.composerMetricsState.value, null);
+  h.complete(1, { source: "claude-native" }); await h.flush();
+  assert.equal(h.text(), "48tk/s  本轮 20步 1m  总 5m");
+  assert.equal(h.remembered.length, 1);
+  assert.equal(h.remembered[0].value.id, "claude-thread-b");
+});
+
+test("会话底栏统计新轮次先清除上一轮数字，保留已知累计，拒绝错会话响应", async () => {
+  const h = composerMetricsHarness(), c = h.context;
+  c.syncComposerMetrics(); h.complete(); await h.flush();
+  c.turns.set("next", { id: "next", status: "inProgress" }); ++c.messageVersion;
+  c.syncComposerMetrics();
+  assert.equal(h.text(), "—tk/s  本轮 —步 —  总 5m");
+  h.requests[1].resolve({ ok: true, backend: "codex", threadId: "other-thread", metrics: h.value({ turnId: "next" }) });
+  await h.flush();
+  assert.equal(c.composerMetricsState.value.turnId, "turn-current");
+  assert.equal(h.text(), "—tk/s  本轮 —步 —  总 5m");
+});
+
+test("会话底栏统计读取失败保留最后实测值，离页停止轮询且旧服务不请求新接口", async () => {
+  const h = composerMetricsHarness(), c = h.context;
+  c.syncComposerMetrics(); h.complete(); await h.flush();
+  h.advance(2001); c.syncComposerMetrics();
+  h.requests[1].reject(new Error("暂时不可用")); await h.flush();
+  assert.equal(h.text(), "48tk/s  本轮 20步 1m  总 5m");
+  c.document.hidden = true; c.syncComposerMetrics();
+  assert.equal(h.node.hidden, true);
+  assert.equal(h.timers.size, 0);
+  c.document.hidden = false; c.session.capabilities.sessionMetrics = false; c.syncComposerMetrics();
+  assert.equal(h.requests.length, 2);
+});
+
+test("会话底栏统计离线中止读取，旧回执不回写且重新连接立即补读", async () => {
+  const h = composerMetricsHarness(), c = h.context;
+  c.syncComposerMetrics();
+  c.connected = false; c.syncComposerMetrics();
+  assert.equal(h.requests[0].signal.aborted, true);
+  h.complete(); await h.flush();
+  assert.equal(c.composerMetricsState.value, null);
+  assert.equal(h.requests.length, 1);
+  c.connected = true; c.syncComposerMetrics();
+  assert.equal(h.requests.length, 2);
+  h.complete(1); await h.flush();
+  assert.equal(h.text(), "48tk/s  本轮 20步 1m  总 5m");
+});
+
+function claudeSlashMenuHarness() {
+  const calls = [], writes = [];
+  function element(tag, className = "", text = "") {
+    return { tagName: tag, className, textContent: text, children: [], dataset: {}, attributes: {}, hidden: false,
+      style: { setProperty() {} }, scrollTop: 0,
+      append(...children) { this.children.push(...children); },
+      replaceChildren(...children) { this.children = children; },
+      setAttribute(key, value) { this.attributes[key] = value; },
+      getAttribute(key) { return this.attributes[key] ?? null; },
+      removeAttribute(key) { delete this.attributes[key]; },
+      scrollIntoView() {}, focus() {}, classList: { add() {} } };
+  }
+  const prompt = Object.assign(element("div"), { value: "/", selectionStart: 1, selectionEnd: 1,
+    setRangeText(text, start, end) {
+      this.value = this.value.slice(0, start) + text + this.value.slice(end);
+      this.selectionStart = this.selectionEnd = start + text.length;
+    } });
+  const menu = element("div"), project = { value: "project-a" };
+  const roots = { "#prompt": prompt, "#skill-menu": menu, "#project-select": project,
+    "#model-settings": element("div"), "#model-button": element("button") };
+  const flatten = node => [node, ...(node.children || []).flatMap(flatten)];
+  const $ = (selector, root) => roots[selector] || flatten(root || menu).find(node => selector.startsWith(".")
+    ? String(node.className || "").split(" ").includes(selector.slice(1)) : node.id === selector.slice(1)) || null;
+  const context = vm.createContext({
+    $, element, button: (text, title, click, className) => Object.assign(element("button", className, text), { title, onclick: click }),
+    creating: true, creationBackend: "claude", creationInstanceId: "claude:wsl:test", selectedId: null,
+    session: { device: { id: "device" }, capabilities: { claudeSessions: true, projectlessCreation: true } },
+    sidebar: { projects: [{ id: "project-a", roots: ["E:/project-a"] }] },
+    modelsScope: "claude:wsl:test", modelsLoadedAt: 0, modelsPromise: null, modelsRetryAt: 0,
+    modelDefaults: { nativeCapabilities: { goal: true, compact: true } },
+    document: { activeElement: prompt, hidden: false }, navigator: { onLine: true }, pageLeaving: false,
+    selectedSkills: [], selectedGoal: null, skillChoices: [], skillIndex: 0, skillScope: "", skillLoadVersion: 0,
+    skillRenderVersion: 0, skillLoading: null, appliedSkillCatalog: null, appliedGlobalSkills: null,
+    skillCatalogs: new Map(), skillScopeAliases: new Map(), skillCatalogRequests: new Map(), skillCatalogRetryAt: new Map(),
+    globalSkillChoices: [{ name: "codex-only", path: "C:/codex/SKILL.md", scope: "user" }],
+    globalSkillsLoadedAt: Date.now(), globalSkillsInvalidated: false, globalSkillEpoch: "epoch", skillCatalogRevision: 0,
+    catalogCacheMs: 3600000, catalogFallbackMs: 604800000, catalogRefreshAheadMs: 60000, catalogRetryMs: 15000,
+    catalogRefreshTimer: null, readScope: "device", readCache: { get: async () => null },
+    privateInputScope: value => value?.device.id, optionalCachedRead: promise => promise,
+    cacheDisplayData: (...values) => writes.push(values), setTimeout: () => 1, clearTimeout() {},
+    editingMessage: null, editingQueuedMessage: null, threadReadOnly: () => false,
+    compactCommandAvailable: () => true, goalComposerReason: () => "",
+    compactCommandMatches: query => ["compact", "压缩"].some(value => value.includes(query)),
+    goalCommandMatches: query => ["goal", "目标"].some(value => value.includes(query)),
+    skillIdentity: skill => `${skill.name}\0${skill.path}`, skillVisibleName: skill => skill.name,
+    currentThreadDisplay: () => null, contextUsage: () => null, compactUsageDescription: () => "",
+    compactCommandIcon: () => element("span"), goalComposerIcon: () => element("span"),
+    selectCompactCommand() {}, selectGoalCommand() {},
+    closePopup() {}, closeContextUsageTip() {}, fitComposerMenu() {},
+    closeSkillMenu: () => { menu.hidden = true; },
+    closeComposerMenus: () => { menu.hidden = true; },
+    updateComposer() {}, scheduleMessages() {}, rememberDraft() {}, notice() {},
+    api: (path, payload) => {
+      const request = { ...deferred(), path, payload };
+      calls.push(request); return request.promise;
+    },
+  });
+  vm.runInContext(sourceSection("function slashQuery()", "function compactCommandAvailable(")
+    + sourceSection("function slashMenuEntries(", "function compactCommandIcon(")
+    + sourceSection("function normalizeSlashIndex(", "function catalogFresh(")
+    + sourceSection("function catalogFresh(", "function selectCompactCommand("), context);
+  const skill = name => ({ name, command: name, path: `claude-skill:${name}`, backend: "claude",
+    scope: "native", description: `说明 ${name}`, argumentHint: "[参数]" });
+  const response = (name, instanceId = "claude:wsl:test") => ({ ok: true, backend: "claude", instanceId,
+    cwd: "E:/project-a", data: [skill(name)], nativeCapabilities: { compact: true, goal: true } });
+  return { context, prompt, menu, project, calls, writes, skill, response };
+}
+
+test("Claude 斜杠菜单复用 Skill 列表与压缩目标底栏，支持搜索、键盘和原生命令插入", () => {
+  const h = claudeSlashMenuHarness(), c = h.context;
+  c.skillChoices = [h.skill("review"), h.skill("plugin:check")];
+  c.renderSkillMenu();
+  assert.equal(h.menu.hidden, false);
+  assert.equal(h.menu.children[0].children.length, 2);
+  assert.equal(h.menu.children[1].className, "skill-menu-footer");
+  assert.equal(h.menu.children[1].children.length, 2);
+  assert.deepEqual(Array.from(c.slashMenuEntries(), entry => entry.type), ["skill", "skill", "compact", "goal"]);
+  c.moveSlashIndex(c.slashMenuEntries(), 1);
+  assert.equal(c.skillIndex, 1);
+  h.prompt.value = "/rev"; h.prompt.selectionStart = h.prompt.selectionEnd = 4;
+  assert.deepEqual(Array.from(c.slashMenuEntries(), entry => entry.skill?.name), ["review"]);
+  c.selectSkill(h.skill("review"));
+  assert.equal(h.prompt.value, "/review ");
+  assert.equal(c.selectedSkills.length, 0, "Claude 不发送 Codex 的 Skill 路径");
+  assert.equal(h.menu.hidden, true);
+  h.prompt.value = "解释 /"; h.prompt.selectionStart = h.prompt.selectionEnd = h.prompt.value.length;
+  assert.ok(c.slashMenuEntries().every(entry => entry.type !== "skill"), "原生 Skill 仅在消息开头调用");
+  c.modelDefaults.nativeCapabilities = { compact: false, goal: false };
+  assert.equal(c.slashMenuEntries().length, 0, "不声明原生能力时不显示管理入口");
+  c.modelDefaults.nativeCapabilities = { compact: true, goal: true };
+  h.prompt.value = "/"; h.prompt.selectionStart = h.prompt.selectionEnd = 1; c.skillChoices = [];
+  c.renderSkillMenu("Skill 暂不可用");
+  assert.equal(h.menu.children[1].children.length, 2, "Skill 读取失败不能隐藏已经确认的压缩和目标能力");
+});
+
+test("Claude Skill 目录与 Codex 全局目录隔离，同一实例项目复用缓存", async () => {
+  const h = claudeSlashMenuHarness(), c = h.context;
+  const active = c.activeSkillCatalogContext();
+  const loading = c.loadSkillChoices(active.scope, active.payload);
+  await new Promise(setImmediate);
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].payload.backend, "claude");
+  assert.equal(h.calls[0].payload.instanceId, "claude:wsl:test");
+  h.calls[0].resolve(h.response("review")); await loading;
+  assert.deepEqual(Array.from(c.skillChoices, skill => skill.name), ["review"]);
+  assert.equal(c.globalSkillChoices[0].name, "codex-only");
+  assert.ok(h.writes.every(([, key]) => key !== "global"));
+  await c.loadSkillChoices(active.scope, active.payload);
+  assert.equal(h.calls.length, 1);
+  c.creationBackend = "codex"; c.creationInstanceId = "codex:local";
+  const codex = c.activeSkillCatalogContext();
+  assert.notEqual(c.skillScopeKey(active.scope), c.skillScopeKey(codex.scope));
+});
+
+test("Claude Skill 读取迟到时不覆盖另一实例，授权切换后不写入旧目录", async () => {
+  const h = claudeSlashMenuHarness(), c = h.context;
+  const first = c.activeSkillCatalogContext(), a = c.loadSkillChoices(first.scope, first.payload);
+  await new Promise(setImmediate);
+  c.creationInstanceId = "claude:wsl:other"; c.modelsScope = "claude:wsl:other"; c.selectionVersion++;
+  const second = c.activeSkillCatalogContext(), b = c.loadSkillChoices(second.scope, second.payload);
+  await new Promise(setImmediate);
+  h.calls[0].resolve(h.response("old-instance")); await a;
+  assert.equal(c.skillChoices.length, 0);
+  h.calls[1].resolve(h.response("new-instance", "claude:wsl:other")); await b;
+  assert.equal(c.skillChoices[0].name, "new-instance");
+  const pending = c.loadSkillChoices(second.scope, second.payload, { force: true });
+  await new Promise(setImmediate);
+  const writes = h.writes.length;
+  c.session.device.id = "new-device";
+  h.calls[2].resolve(h.response("wrong-owner", "claude:wsl:other")); await pending;
+  assert.equal(h.writes.length, writes);
+  assert.equal(c.skillChoices[0].name, "new-instance");
+});
+
+test("Claude 无项目 Skill 目录刷新保持同一缓存键", async () => {
+  const h = claudeSlashMenuHarness(), c = h.context;
+  h.project.value = "";
+  const active = c.activeSkillCatalogContext();
+  const first = c.loadSkillChoices(active.scope, active.payload);
+  await new Promise(setImmediate);
+  h.calls[0].resolve({ ...h.response("review"), cwd: "" }); await first;
+  const key = c.skillScopeKey(active.scope);
+  const refreshed = c.loadSkillChoices(active.scope, active.payload, { force: true });
+  await new Promise(setImmediate);
+  h.calls[1].resolve({ ...h.response("simplify"), cwd: "" }); await refreshed;
+  assert.equal(c.skillScopeKey(active.scope), key);
+  assert.equal(c.skillCatalogs.size, 1);
+  assert.equal(c.skillChoices[0].name, "simplify");
 });

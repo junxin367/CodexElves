@@ -2,7 +2,7 @@
   "identifier": "titlebar",
   "description": "只有独立的本地标题栏可以控制当前窗口；远程内容页没有窗口控制权限。",
   "local": true,
-  "webviews": ["remote-titlebar"],
+  "webviews": ["remote-titlebar", "remote-titlebar-session-*"],
   "permissions": [
     "titlebar-state",
     "core:window:allow-minimize",
