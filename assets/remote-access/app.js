@@ -12193,6 +12193,9 @@ function renderMessages(keepScroll = true) {
       if (editedFiles) items.push(editedFiles);
     }
     if (turn.error) items.push(element("div", "turn-error", turn.error.message || "此轮执行失败"));
+    // 原生已结束但没有回复时保留已接收消息，结束等待提示；不把未知的结束原因说成用户主动停止。
+    if (turn._nativeEndedWithoutReply === true)
+      items.push(element("small", "turn-end muted", "本轮已结束，未生成回复"));
     if (turn.status === "interrupted") {
       // 用户要求原生中断按执行状态展示，不伪装成用户正文，也不据此推断用户按了哪个按钮。
       const native = turn.nativeInterruption?.source === "claude";

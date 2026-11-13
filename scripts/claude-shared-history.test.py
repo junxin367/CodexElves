@@ -205,6 +205,90 @@ class SharedQueueHistoryTests(unittest.TestCase):
             self.assertEqual(frame["native_status"]["tempo"], "idle")
             self.assertEqual(frame["requests"], {})
 
+    def activity_fixture(self, status="idle"):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        native = NativeSession("unused", "1234abcd-0000-4000-8000-000000000000", "1234abcd")
+        native.root = Path(folder.name)
+        native.read_messages = lambda: None
+        native.poll = lambda **kwargs: None
+        pid = namespace["os"].getpid()
+        started = (Path("/proc") / str(pid) / "stat").read_text().rsplit(") ", 1)[1].split()[19]
+        for directory in ("jobs/1234abcd", "daemon", "sessions"):
+            (native.root / directory).mkdir(parents=True, exist_ok=True)
+        stored = {"sessionId": native.native_id, "state": "done", "tempo": "idle",
+                  "lastTerminalAt": 2000, "updatedAt": 2000}
+        (native.root / "jobs/1234abcd/state.json").write_text(json.dumps(stored))
+        (native.root / "daemon/roster.json").write_text(json.dumps(
+            {"workers": {native.short: {"sessionId": native.native_id, "replPid": pid}}}))
+        record = {"pid": pid, "procStart": started, "sessionId": native.native_id,
+                  "jobId": native.short, "status": status, "statusUpdatedAt": 2100}
+        path = native.root / "sessions" / f"{pid}.json"
+        path.write_text(json.dumps(record))
+        native.rpc = lambda request: {"jobs": [{"short": native.short, "sessionId": native.native_id,
+                                               "tempo": "active", "state": "resuming"}]}
+        native.messages = [{"type": "user", "uuid": "old-user", "timestampMs": 1000,
+                            "message": {"content": "first"}},
+                           {"type": "system", "subtype": "turn_duration", "timestampMs": 2000}]
+        return native, path, record
+
+    def test_idle_live_session_overrides_active_host_and_second_message_sends_once(self):
+        native, _, _ = self.activity_fixture()
+        native.reply = MagicMock()
+        native.terminal_input = MagicMock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "second", "idle_only": True,
+                                  "content": [{"type": "text", "text": "second"}]})
+        self.assertTrue(result["accepted"])
+        self.assertNotIn("interruptedUserId", result)
+        native.reply.assert_called_once_with("second")
+        native.terminal_input.assert_not_called()
+        self.assertEqual(NativeDiscovery.status(native.lookup(), native.messages)["endedAtMs"], 2000)
+
+    def test_new_busy_live_session_overrides_old_completion_and_defers_second_send(self):
+        native, _, _ = self.activity_fixture("busy")
+        native.reply = MagicMock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "next", "idle_only": True,
+                                  "content": [{"type": "text", "text": "next"}]})
+        self.assertTrue(result["deferred"], "原生已进入新执行时，旧完成记录不能改成空闲")
+        native.reply.assert_not_called()
+        self.assertIsNone(NativeDiscovery.status(native.lookup(), native.messages)["endedAtMs"])
+
+    def test_job_metadata_update_is_not_a_turn_completion_timestamp(self):
+        native, _, _ = self.activity_fixture()
+        path = native.root / "jobs/1234abcd/state.json"
+        stored = json.loads(path.read_text())
+        stored.pop("lastTerminalAt")
+        stored["updatedAt"] = 3000
+        path.write_text(json.dumps(stored))
+        self.assertEqual(NativeDiscovery.status(native.lookup(), native.messages)["endedAtMs"], 0)
+
+    def test_native_status_rejects_other_sessions_and_reused_process_records(self):
+        native, path, record = self.activity_fixture("busy")
+        for changed in [
+            {"sessionId": "other-session"}, {"jobId": "ffffffff"},
+            {"pid": record["pid"] + 1}, {"procStart": "0"},
+        ]:
+            with self.subTest(changed=changed):
+                path.write_text(json.dumps({**record, **changed}))
+                status = NativeDiscovery.status(native.lookup(), native.messages)
+                self.assertEqual(status["tempo"], "idle")
+                self.assertIsNone(status["sessionStatus"])
+
+    def test_completed_history_corrects_host_activity_without_live_execution_evidence(self):
+        native = self.native_active()
+        native.messages.append({"type": "system", "subtype": "turn_duration", "timestampMs": 2000})
+        native.reply = MagicMock()
+        native.terminal_input = MagicMock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "after-done", "steer": True,
+                                  "content": [{"type": "text", "text": "next"}]})
+        self.assertTrue(result["accepted"])
+        self.assertNotIn("interruptedUserId", result)
+        native.reply.assert_called_once()
+        native.terminal_input.assert_not_called()
+
     def test_terminal_handshake_disconnect_and_oversize_do_not_send_keys_or_loop(self):
         native = NativeSession("unused", "test-session", "saved-job")
         native.lookup = lambda: {"tempo": "active"}
@@ -215,7 +299,7 @@ class SharedQueueHistoryTests(unittest.TestCase):
             with self.subTest(reply=reply), patch.object(namespace["socket"], "socket", return_value=connection), \
                     patch.object(Path, "read_text", return_value="fixture-auth"):
                 with self.assertRaisesRegex(RuntimeError, pattern):
-                    native.terminal_input(b"\x1b", require_active=True)
+                    native.terminal_input(b"\x1b")
             self.assertEqual(connection.sendall.call_count, 1, "只能发送握手，不能发送交互按键")
             self.assertLessEqual(connection.recv.call_count, 64 * 1024)
 
@@ -228,9 +312,18 @@ class SharedQueueHistoryTests(unittest.TestCase):
         with patch.object(namespace["socket"], "socket", return_value=connection), \
                 patch.object(Path, "read_text", return_value="fixture-auth"), \
                 patch.object(namespace["time"], "sleep"):
-            native.terminal_input(b"\x1b", require_active=True)
+            native.terminal_input(b"\x1b")
         self.assertEqual(connection.sendall.call_args_list[-1].args[0], b"\x1b")
         self.assertEqual(connection.sendall.call_count, 2)
+
+    def test_reply_uses_native_next_priority_and_keeps_setting_commands_separate(self):
+        native = NativeSession("unused", "test-session", "saved-job")
+        native.rpc = MagicMock(return_value={"ok": True})
+        native.reply("引导消息")
+        native.rpc.assert_called_once_with(
+            {"op": "reply", "short": "saved-job", "text": "引导消息", "nextTurn": True})
+        native.reply("/effort max", next_turn=False)
+        self.assertFalse(native.rpc.call_args.args[0]["nextTurn"], "模型设置仍使用原生命令解析")
 
     def test_history_replacement_with_same_length_reloads_native_records(self):
         native = self.read([{"type": "user", "uuid": "user-one", "message": {"content": "first"}}])
@@ -327,22 +420,22 @@ class SharedQueueHistoryTests(unittest.TestCase):
             result = native.send({"client_id": "idle-steer", "steer": True,
                                   "content": [{"type": "text", "text": "start new work"}]})
         self.assertTrue(result["accepted"])
-        self.assertFalse(result["steered"])
+        self.assertNotIn("interruptedUserId", result)
         self.assertEqual(replies, ["start new work"])
         self.assertEqual(keys, [], "不能把本次发送启动的轮次当成需要中断的旧轮次")
 
     def test_steer_does_not_interrupt_a_different_turn_started_during_delivery(self):
         native = self.native_active()
-        def reply(text, **kwargs):
+        def reply(text):
             native.messages.append({"type": "user", "uuid": "other-turn", "message": {"content": "another input"}})
-        native.reply = reply
+        native.reply = MagicMock(side_effect=reply)
         native.terminal_input = MagicMock()
         with contextlib.redirect_stdout(io.StringIO()):
             result = native.send({"client_id": "selected", "steer": True,
                                   "content": [{"type": "text", "text": "selected input"}]})
-        self.assertTrue(result["accepted"])
-        self.assertFalse(result["steered"])
+        self.assertTrue(result["accepted"], "轮次变化后由同一原生会话决定吸收时机，不停止新轮次")
         native.terminal_input.assert_not_called()
+        native.reply.assert_called_once_with("selected input")
 
     def test_interrupted_turn_waiting_for_user_can_accept_a_new_message(self):
         native = self.native_active()
@@ -468,28 +561,39 @@ class SharedQueueHistoryTests(unittest.TestCase):
 
     def test_single_steer_delivers_only_selected_message_and_preserves_draft(self):
         native = self.native_active()
-        replies, keys = [], []
-        native.reply = lambda text, **kwargs: replies.append(text)
-        native.terminal_input = lambda data, **kwargs: keys.append((data, kwargs))
+        native.reply = MagicMock()
+        native.terminal_input = MagicMock()
         with contextlib.redirect_stdout(io.StringIO()):
             result = native.send({"client_id": "C", "steer": True,
                                   "content": [{"type": "text", "text": "只投递 C"}]})
-        self.assertEqual(replies, ["只投递 C"])
-        self.assertEqual(keys, [(b"\x1b", {"require_active": True})])
+        native.reply.assert_called_once_with("只投递 C")
+        native.terminal_input.assert_not_called()
         self.assertTrue(result["accepted"])
-        self.assertEqual(result["interruptedUserId"], "active-user")
+        self.assertNotIn("interruptedUserId", result)
+        self.assertEqual(native.job["tempo"], "active", "引导受理不能伪造旧轮次结束")
         self.assertTrue(native.pending[0]["deliveryConfirmed"])
 
-    def test_interrupt_failure_after_acceptance_never_reports_message_as_unsent(self):
+    def test_steer_does_not_require_the_interactive_terminal(self):
         native = self.native_active()
-        native.reply = lambda *args, **kwargs: None
-        native.terminal_input = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("已进入问答"))
+        native.reply = MagicMock()
+        native.terminal_input = MagicMock(side_effect=AssertionError("引导不应连接终端发送按键"))
         with contextlib.redirect_stdout(io.StringIO()):
             result = native.send({"client_id": "C", "steer": True,
                                   "content": [{"type": "text", "text": "只投递 C"}]})
         self.assertTrue(result["accepted"])
-        self.assertFalse(result["steered"])
-        self.assertTrue(native.pending[0]["deliveryConfirmed"])
+        native.reply.assert_called_once()
+        native.terminal_input.assert_not_called()
+
+    def test_steer_does_not_wait_for_the_running_turn_to_stop(self):
+        native = self.native_active()
+        native.reply = MagicMock()
+        with patch.object(namespace["time"], "sleep", side_effect=AssertionError("引导不能等待旧轮次停止")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "C", "steer": True,
+                                  "content": [{"type": "text", "text": "selected"}]})
+        self.assertTrue(result["accepted"])
+        native.reply.assert_called_once_with("selected")
+        self.assertEqual(native.lookup()["tempo"], "active")
 
     def test_explicit_rejection_and_unknown_transport_keep_different_delivery_states(self):
         for failure, started, pending in [(namespace["NativeError"]("ENOREPLY"), False, 0),
@@ -509,11 +613,14 @@ class SharedQueueHistoryTests(unittest.TestCase):
                                  "tempo": "blocked", "needs": "permission"}
         replies = []
         native.reply = lambda *args, **kwargs: replies.append(args)
-        with self.assertRaises(namespace["NativeError"]):
-            native.send({"client_id": "C", "steer": True,
-                         "content": [{"type": "text", "text": "只投递 C"}]})
-        self.assertEqual(replies, [])
-        self.assertFalse(native.delivery_started)
+        native.terminal_input = MagicMock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "C", "steer": True,
+                                  "content": [{"type": "text", "text": "只投递 C"}]})
+        self.assertTrue(result["accepted"])
+        self.assertEqual(replies, [("只投递 C",)])
+        native.terminal_input.assert_not_called()
+        self.assertEqual(native.job["needs"], "permission", "原生审批继续保留")
 
     def test_recovery_uses_original_job_and_sends_only_the_new_message(self):
         native = NativeSession("native-cli", "test-session", "saved-job")

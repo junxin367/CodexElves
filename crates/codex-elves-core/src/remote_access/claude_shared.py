@@ -485,6 +485,69 @@ class NativeSubagents:
         return result
 
 
+def native_json(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def native_activity(root, job, native_id, *, stored=None, workers=None):
+    """后台列表负责定位进程；执行状态来自同一原生任务和存活会话的记录。"""
+    short = job.get("short", "")
+    if not isinstance(short, str) or not re.fullmatch(r"[0-9a-f]{8}", short):
+        return job
+    fields = ("tempo", "state", "needs", "detail", "outcome")
+    result = {**job, **dict.fromkeys(fields)}
+    stored = native_json(root / "jobs" / short / "state.json") if stored is None else stored
+    if (stored.get("resumeSessionId") or stored.get("sessionId")) == native_id:
+        result.update({key: stored.get(key) for key in fields})
+        if stored.get("state") in ("done", "stopped", "failed", "ended"):
+            # updatedAt 也会被重命名/设置更新，不能当作本轮完成时间。
+            result["endedAtMs"] = native_time(stored.get("lastTerminalAt") or stored.get("firstTerminalAt"))
+    if job.get("outcome"):
+        result["outcome"] = job["outcome"]
+    # 用户要求仅明确执行中才排队。daemon list 的 running/resuming 是宿主记录，
+    # 不能覆盖已结束轮次；只定向读取此 job 的 REPL，不扫描其他会话或启动 CLI。
+    if workers is None:
+        workers = native_json(root / "daemon" / "roster.json").get("workers", {})
+    worker = workers.get(short, {}) if isinstance(workers, dict) else {}
+    if not isinstance(worker, dict):
+        return result
+    pid = worker.get("replPid")
+    if worker.get("sessionId") not in (native_id, job.get("sessionId")) or type(pid) is not int or pid <= 1:
+        return result
+    record = native_json(root / "sessions" / f"{pid}.json")
+    if (record.get("pid") != pid or record.get("sessionId") != native_id
+            or record.get("jobId") != short or record.get("procStart") is None):
+        return result
+    try:
+        # /proc 的第 22 列为进程启动标识；先越过可能含空格的 comm，防止复用 PID 的旧登记误报执行中。
+        started = (Path("/proc") / str(pid) / "stat").read_text().rsplit(") ", 1)[1].split()[19]
+        if str(record["procStart"]) != started:
+            return result
+    except (OSError, IndexError):
+        return result
+    state = record.get("status")
+    if state not in ("busy", "idle", "waiting"):
+        return result
+    result["sessionStatus"] = state
+    result["sessionStatusAtMs"] = native_time(record.get("statusUpdatedAt"))
+    if state == "busy":
+        result.update(tempo="active", state="working", needs=None, outcome=None)
+        result.pop("endedAtMs", None)
+    elif state == "waiting":
+        result.update(tempo="blocked", state="blocked",
+                      needs=record.get("waitingFor") or result.get("needs"), outcome=None)
+        result.pop("endedAtMs", None)
+    else:
+        result.update(tempo="idle", needs=None)
+        if result.get("state") not in ("done", "stopped", "failed", "ended"):
+            result["state"] = "idle"
+    return result
+
+
 class NativeDiscovery:
     """只读原生目录；不调用 CLI、守护进程或模型，也不使用网页登记文件作为发现来源。"""
     def __init__(self, root=None):
@@ -573,7 +636,7 @@ class NativeDiscovery:
                     continue
                 raw_job = json.loads(path.read_text(encoding="utf-8"))
                 # 只保留会话归属/展示元数据；providerEnv、提示模板和认证信息不能进入发现缓存或返回值。
-                job = {key: raw_job[key] for key in ("sessionId", "resumeSessionId", "cwd", "name", "nameSource", "createdAt", "updatedAt",
+                job = {key: raw_job[key] for key in ("sessionId", "resumeSessionId", "cwd", "name", "nameSource", "createdAt", "updatedAt", "firstTerminalAt", "lastTerminalAt",
                        "tempo", "state", "needs", "detail", "outcome") if key in raw_job}
                 flags = raw_job.get("respawnFlags", [])
                 for index, flag in enumerate(flags[:-1]):
@@ -588,10 +651,11 @@ class NativeDiscovery:
                     jobs[native] = {**job, "short": path.parent.name}
             except (OSError, ValueError, KeyError, TypeError):
                 continue
+        workers = native_json(self.root / "daemon" / "roster.json").get("workers", {})
         for native, row in rows.items():
             job = jobs.get(native, {})
             row["jobId"] = job.get("short", "")
-            row["nativeStatus"] = self.status(job)
+            row["nativeStatus"] = self.status(native_activity(self.root, job, native, stored=job, workers=workers))
             if job.get("nameSource") == "user" and job.get("name") and not row["title"]:
                 row["title"] = str(job["name"])[:120]
             for key in ("cwd", "model", "effort"):
@@ -606,11 +670,17 @@ class NativeDiscovery:
 
     @staticmethod
     def status(job, messages=None):
-        status = {key: job.get(key) for key in ("tempo", "state", "needs", "detail", "outcome")}
-        if not job or job.get("state") in ("done", "stopped", "failed", "ended") or job.get("outcome"):
+        status = {key: job.get(key) for key in ("tempo", "state", "needs", "detail", "outcome",
+                                              "endedAtMs", "sessionStatus", "sessionStatusAtMs")}
+        if job.get("sessionStatus") == "busy":
+            status.update(tempo="active", state="working", endedAtMs=None)
+        elif not job or job.get("state") in ("done", "stopped", "failed", "ended") or job.get("outcome"):
             status["tempo"] = "idle"
-        elif status.get("tempo") == "blocked" and messages is not None and native_turn_finished(messages):
+        elif status.get("tempo") in ("active", "blocked") and messages is not None and native_turn_finished(messages):
+            # 原生完成证据也须纠正残留 active；新的 busy 会话状态仍优先，保留目标续跑等真实执行。
             status["tempo"] = "idle"
+        if status.get("tempo") == "idle":
+            status["needs"] = None
         return status
 
     def control(self, request):
@@ -1042,7 +1112,8 @@ class NativeSession:
         except (OSError, RuntimeError) as failure:
             # 查询超时或协议错误不等于原任务已结束，不能据此另起执行或重启正在工作的会话。
             raise RuntimeError("暂时无法核对原生 Claude 后台状态，未重新启动或提交消息") from failure
-        return next((job for job in jobs if (job.get("resumeSessionId") or job.get("sessionId")) == self.native_id), None)
+        job = next((job for job in jobs if (job.get("resumeSessionId") or job.get("sessionId")) == self.native_id), None)
+        return native_activity(self.root, job, self.native_id) if job else None
 
     def bind(self, job):
         self.job = job
@@ -1072,6 +1143,8 @@ class NativeSession:
             return
 
     def reply(self, text, next_turn=True):
+        # 用户要求原生引导：nextTurn=True 在 CLI 内对应 priority="next"，
+        # 当前工具调用结束后吸收消息；不是 Esc 中断，也不是等整轮结束才投递。
         deadline = time.monotonic() + 20
         while True:
             try:
@@ -1192,12 +1265,11 @@ class NativeSession:
         self.delivery_started = False
         client_id = request["client_id"]
         content = request["content"]
-        self.read_messages()
-        after = len(self.messages)
-        active_user = next((row.get("uuid", "") for row in reversed(self.messages) if real_user(row)), "")
         live = self.lookup() if self.native_id else None
         if live:
             self.bind(live)
+        # 查询期间 CLI 可能写入完成或新输入；准入和引导都使用这次查询后的原生历史。
+        self.read_messages()
         status = NativeDiscovery.status(live or {}, self.messages)
         if self.compaction.get("state") == "running":
             status.update(tempo="active", state="compacting")
@@ -1207,11 +1279,11 @@ class NativeSession:
             if active_at_admission or status.get("tempo") == "blocked" and status.get("needs"):
                 self.poll(force=True)
                 return {"deferred": True, "accepted": False}
-        if request.get("steer") and status.get("tempo") == "blocked" and status.get("needs"):
-            raise NativeError("EBUSY")
+        # 引导也只进入原生 next 队列；已有审批继续由 CLI 处理，不借此替用户批准、拒绝或取消工具。
         text = self.prepare_text(content, client_id)
         if self.native_id and self.short and (not live or live.get("outcome")):
             live = self.restore_job()
+        after = len(self.messages)
         intent = {"id": client_id, "clientUserMessageId": client_id,
                   "text": "\n".join(p.get("text", "") for p in content if p.get("type") == "text"),
                   "content": content, "_nativeText": text, "_after": after, "deliveryConfirmed": False}
@@ -1231,27 +1303,14 @@ class NativeSession:
             raise
         intent["deliveryConfirmed"] = True
         self.poll(force=True)
-        steered = False
-        current_user = next((row.get("uuid", "") for row in reversed(self.messages) if real_user(row)), "")
-        if request.get("steer") and active_at_admission and active_user and active_user == current_user \
-                and intent in self.pending and self.job.get("tempo") == "active":
-            # 只投递用户选中的一条；必要时使用 Esc 提前交给原生，保留 CLI 草稿，不提交其他远程待发项。
-            # 空闲时直接发送不能中断刚启动的新轮次；投递期间原生已切换用户轮次时也不补发 Esc。
-            try:
-                self.terminal_input(b"\x1b", require_active=True)
-                steered = True
-            except (OSError, ValueError, RuntimeError):
-                # 消息已被原生受理，中断失败也不能退回待发或再次提交。
-                pass
-        return {"nativeId": self.native_id, "jobId": self.short, "accepted": True,
-                "steered": steered, "interruptedUserId": active_user}
+        # 引导只投递选中的一条；由原生 next 队列决定吸收时机，前后均不发送中断按键或等待旧轮停止。
+        # accepted 仅代表原生入口接收，正文仍由随后关联到的原生用户消息确认，不能伪造执行完成。
+        return {"nativeId": self.native_id, "jobId": self.short, "accepted": True}
 
-    def terminal_input(self, data, require_active=False):
+    def terminal_input(self, data):
         job = self.lookup()
         if not job or job.get("outcome"):
             raise RuntimeError("原生 Claude 会话已停止")
-        if require_active and job.get("tempo") != "active":
-            raise RuntimeError("原生 Claude 已进入其他状态，未发送中断按键")
         with socket.socket(socket.AF_UNIX) as connection:
             connection.settimeout(5)
             connection.connect(self.address)
@@ -1273,9 +1332,10 @@ class NativeSession:
                 response.extend(chunk)
             if not json.loads(response).get("ok"):
                 raise RuntimeError("无法连接原版 Claude 的交互界面")
-            # 仅显式停止/审批使用原生按键；普通消息始终走整条入队入口。
+            # 仅显式停止/审批使用原生按键；普通消息和引导都走原生消息入口。
             connection.sendall(data)
             time.sleep(0.15)
+            return True
 
     def change_setting(self, name, value):
         old = getattr(self, name)
@@ -1288,19 +1348,6 @@ class NativeSession:
                 self.short = job["short"]
                 self.reply(f"/{command} {value or 'auto'}", next_turn=False)
         setattr(self, name, value)
-
-    def send_queue_now(self):
-        self.poll()
-        job = self.lookup()
-        if not self.pending:
-            raise RuntimeError("排队消息已经进入原生会话，请核对最新状态")
-        if not job or job.get("tempo") != "active":
-            raise RuntimeError("Claude 当前正在等待交互或已结束，请在原版 CLI 中核对")
-        self.bind(job)
-        active_user = next((row["uuid"] for row in reversed(self.messages) if real_user(row)), "")
-        # 原版仅提供整队立即执行；Esc 保留 CLI 草稿，不用会连同草稿提交的 Ctrl+Enter。
-        self.terminal_input(b"\x1b")
-        return {"scope": "all", "nativeUserId": active_user}
 
     def answer(self, frame):
         response = frame["response"]
@@ -1638,7 +1685,7 @@ class NativeSession:
         elif self.short:
             path = self.root / "jobs" / self.short / "state.json"
             if path.exists():
-                self.job = {**self.job, **json.loads(path.read_text())}
+                self.job = native_activity(self.root, {**self.job, "short": self.short}, self.native_id)
         self.observe_control_screen()
         self.read_messages()
         job = self.job
@@ -1699,8 +1746,6 @@ class NativeSession:
             return self.native_command(request)
         if subtype == "shared_sync":
             self.poll(force=True)
-        elif subtype == "shared_queue_now":
-            return self.send_queue_now()
         elif subtype == "set_model":
             self.change_setting("model", request.get("model", ""))
         elif subtype == "apply_flag_settings":

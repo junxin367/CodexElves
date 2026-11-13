@@ -8781,7 +8781,7 @@ function claudeExecutionFeedbackHarness(turn) {
   });
   nodeVm.runInContext(sourceSection("function finalMessageIndex(", "function updateActivitySummary(")
     + sourceSection("function renderMessages(", "function rememberTranscript("), context);
-  return { context, activities, render() { activities.length = 0; context.renderMessages(); return activities; } };
+  return { context, activities, root, render() { activities.length = 0; context.renderMessages(); return activities; } };
 }
 
 test("Claude 已接收但未启动时显示等待提示，执行与完成后自然接替，不改变真实执行状态", () => {
@@ -8818,6 +8818,20 @@ test("Claude 等待提示只属于最新已接收轮次，不将旧历史、未�
   h.context.turns.set("latest", { id: "latest", status: "completed",
     items: [{ id: "latest-reply", type: "agentMessage", text: "新轮次已结束" }] });
   assert.equal(h.render().length, 0, "旧轮次不能恢复为当前等待提示");
+});
+
+test("Claude 原生已结束且无回复时保留消息并结束等待，不伪造用户停止", () => {
+  const turn = { id: "ended", _nativeUserId: "native-ended", status: "completed",
+    _nativeDone: true, _nativeEndedWithoutReply: true,
+    items: [{ id: "input", type: "userMessage", text: "已接收的消息" }] };
+  const h = claudeExecutionFeedbackHarness(turn);
+  assert.equal(h.render().some(value => value.text.includes("等待 Claude")), false);
+  const texts = h.root.children.flatMap(node => node.children).map(node => node.textContent);
+  assert.ok(texts.includes("已接收的消息"));
+  assert.ok(texts.includes("本轮已结束，未生成回复"));
+  assert.ok(!texts.includes("已停止"));
+  h.render();
+  assert.equal(h.context.turns.get("ended").items.length, 1, "重复渲染不删除或重复已接收正文");
 });
 
 test("Claude 原生队列允许执行中继续发送，仅提交期间防重复", () => {

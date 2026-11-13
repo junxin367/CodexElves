@@ -203,11 +203,18 @@ impl Conversation {
 
     fn active(&self) -> bool {
         // 原版已回复的澄清也可能标为 blocked；只按生成活动或未完成轮次显示执行中，保留真正的工具等待。
-        self.shared && self.native_status["tempo"] == "active"
-            || self
-                .turns
-                .last()
-                .is_some_and(|t| t["status"] == "inProgress")
+        if self.shared {
+            // 与发送准入共用原生状态；已确认 idle/未知时，旧历史的 inProgress 不能继续撑住执行图标与队列。
+            return self.running_for_send()
+                || self.native_status["tempo"] == "blocked"
+                    && self
+                        .turns
+                        .last()
+                        .is_some_and(|t| t["status"] == "inProgress");
+        }
+        self.turns
+            .last()
+            .is_some_and(|t| t["status"] == "inProgress")
     }
 
     fn view(&self) -> Value {
@@ -2122,10 +2129,26 @@ impl Claude {
                 subagents::decorate_turns(id, &mut projected);
                 restore_shared_images(&c.turns, &mut projected);
                 for turn in &mut projected {
-                    if c.turns
-                        .iter()
-                        .any(|old| old["id"] == turn["id"] && old["_stopRequested"] == true)
+                    // 已确认结束且无回复的输入保留正文与终态；后续新轮次不能让它再次等待启动。
+                    if let Some(old) = c.turns.iter().find(|old| {
+                        old["id"] == turn["id"] && old["_nativeEndedWithoutReply"] == true
+                    }) && matches!(
+                        turn["status"].as_str(),
+                        Some("completed" | "pending" | "unknown")
+                    ) && turn["items"]
+                        .as_array()
+                        .is_some_and(|items| items.iter().all(|item| item["type"] == "userMessage"))
                     {
+                        turn["status"] = json!("completed");
+                        turn["_nativeDone"] = json!(true);
+                        turn["_nativeEndedWithoutReply"] = json!(true);
+                        turn["turnCompletedAtMs"] = old["turnCompletedAtMs"].clone();
+                    }
+                    if c.turns.iter().any(|old| {
+                        old["id"] == turn["id"]
+                            && old["_stopRequested"] == true
+                            && old["_nativeDone"] != true
+                    }) {
                         turn["_stopRequested"] = json!(true);
                         if turn["status"] != "inProgress" {
                             turn["status"] = json!("interrupted");
@@ -3318,7 +3341,30 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
         && turn["_nativeDone"] != true
         && turn["status"] != "failed"
     {
-        if matches!(
+        let accepted_without_reply = turn["_nativeUserId"]
+            .as_str()
+            .is_some_and(|native| frame["clients"][native].is_string())
+            && turn["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().all(|item| item["type"] == "userMessage"));
+        let ended_at = frame["native_status"]["endedAtMs"].as_u64();
+        let ended_without_reply = accepted_without_reply
+            && frame["native_status"]["tempo"] == "idle"
+            && matches!(
+                frame["native_status"]["state"].as_str(),
+                Some("done" | "ended")
+            )
+            && ended_at
+                .zip(turn["turnStartedAtMs"].as_u64())
+                .is_some_and(|(ended, started)| started > 0 && ended >= started);
+        if ended_without_reply {
+            // 用户要求取消后不无限等待：必须有晚于本条原生输入的结束时间，单独 idle 或旧完成记录均不够。
+            // 原生未给出取消原因时只陈述“已结束且无回复”，不伪造成功回复，也不移除已接收正文。
+            turn["status"] = json!("completed");
+            turn["_nativeDone"] = json!(true);
+            turn["_nativeEndedWithoutReply"] = json!(true);
+            turn["turnCompletedAtMs"] = json!(ended_at);
+        } else if matches!(
             frame["native_status"]["tempo"].as_str(),
             Some("active" | "blocked")
         ) {
@@ -3330,13 +3376,11 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
         } else {
             // 用户要求发送期间不闪现“已停止”：原生用户消息可先于工作状态落盘，idle/未知不是中断证据。
             // 已接收且尚无回复的网页输入保持待启动；缺少明确结束证据的旧历史保持未知，不能伪造完成或停止。
-            let accepted_input = turn["_nativeUserId"]
-                .as_str()
-                .is_some_and(|native| frame["clients"][native].is_string())
-                && turn["items"]
-                    .as_array()
-                    .is_some_and(|items| items.iter().all(|item| item["type"] == "userMessage"));
-            turn["status"] = json!(if accepted_input { "pending" } else { "unknown" });
+            turn["status"] = json!(if accepted_without_reply {
+                "pending"
+            } else {
+                "unknown"
+            });
         }
     }
     let latest = turns.len().checked_sub(1);
@@ -5470,6 +5514,95 @@ mod tests {
         let completed = project_shared_history(&frame, "connection");
         assert_eq!(completed[0]["status"], "completed");
         assert_eq!(completed[0]["_nativeDone"], true);
+    }
+
+    #[test]
+    fn shared_terminal_evidence_ends_only_the_matching_accepted_input_without_reply() {
+        let mut frame = json!({"clients":{"native-new":"web-new"},
+        "native_status":{"tempo":"idle","state":"done","endedAtMs":900},"messages":[
+            {"type":"user","uuid":"native-new","timestampMs":1000,"message":{"content":"new input"}}
+        ]});
+        assert_eq!(
+            project_shared_history(&frame, "connection")[0]["status"],
+            "pending"
+        );
+        frame["native_status"]["endedAtMs"] = json!(1100);
+        let turns = project_shared_history(&frame, "connection");
+        assert_eq!(turns[0]["status"], "completed");
+        assert_eq!(turns[0]["_nativeDone"], true);
+        assert_eq!(turns[0]["_nativeEndedWithoutReply"], true);
+        assert_eq!(turns[0]["turnCompletedAtMs"], 1100);
+        assert_eq!(turns[0]["items"][0]["content"][0]["text"], "new input");
+        frame["native_status"]["tempo"] = json!("active");
+        let running = project_shared_history(&frame, "connection");
+        assert_eq!(running[0]["status"], "inProgress");
+        assert!(running[0]["_nativeEndedWithoutReply"].is_null());
+    }
+
+    #[tokio::test]
+    async fn shared_snapshot_repairs_false_stop_and_preserves_confirmed_empty_end() {
+        let (_directory, service, mut c) = fixture();
+        c.shared = true;
+        let mut frame = json!({"native_id":c.native_id,"job_id":&c.native_id[..8],
+        "native_status":{"tempo":"idle"},"clients":{"native-old":"web-old"},
+        "pending":[],"requests":{},"messages":[
+            {"type":"user","uuid":"native-old","timestampMs":1000,"message":{"content":"first"}},
+            {"type":"assistant","message":{"id":"reply","content":[{"type":"text","text":"done"}]}},
+            {"type":"system","subtype":"turn_duration","timestampMs":2000}
+        ]});
+        c.turns = project_shared_history(&frame, "connection");
+        c.turns[0]["_stopRequested"] = json!(true);
+        c.turns[0]["status"] = json!("interrupted");
+        service
+            .change(|saved| {
+                saved.conversations.insert(c.id.clone(), c.clone());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        service
+            .apply_shared_snapshot(&c.id, "connection", &frame, json!({}), false)
+            .await
+            .unwrap();
+        let repaired = service.conversation(&c.id).await.unwrap();
+        assert_eq!(repaired.turns[0]["status"], "completed");
+        assert_ne!(repaired.turns[0]["_stopRequested"], true);
+        frame["messages"].as_array_mut().unwrap().push(json!({
+            "type":"user","uuid":"native-next","timestampMs":3000,"message":{"content":"second"}}));
+        frame["clients"]["native-next"] = json!("web-next");
+        frame["native_status"] = json!({"tempo":"idle","state":"done","endedAtMs":3100});
+        service
+            .apply_shared_snapshot(&c.id, "connection", &frame, json!({}), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            service.conversation(&c.id).await.unwrap().turns[1]["_nativeEndedWithoutReply"],
+            true
+        );
+        frame["messages"].as_array_mut().unwrap().push(json!({
+            "type":"user","uuid":"native-latest","timestampMs":4000,"message":{"content":"third"}}));
+        frame["native_status"] = json!({"tempo":"active"});
+        service
+            .apply_shared_snapshot(&c.id, "connection", &frame, json!({}), false)
+            .await
+            .unwrap();
+        let current = service.conversation(&c.id).await.unwrap();
+        assert_eq!(current.turns[1]["_nativeEndedWithoutReply"], true);
+        assert_eq!(current.turns[1]["turnCompletedAtMs"], 3100);
+        assert_eq!(current.turns[2]["status"], "inProgress");
+    }
+
+    #[test]
+    fn shared_idle_state_does_not_reuse_old_running_history() {
+        let (_directory, _service, mut c) = fixture();
+        c.shared = true;
+        for tempo in ["idle", "unknown"] {
+            c.native_status = json!({"tempo":tempo});
+            assert!(!c.running_for_send());
+            assert!(!c.active());
+        }
+        c.native_status = json!({"tempo":"blocked","needs":"permission"});
+        assert!(c.active(), "真实审批等待仍保留执行展示");
     }
 
     #[test]

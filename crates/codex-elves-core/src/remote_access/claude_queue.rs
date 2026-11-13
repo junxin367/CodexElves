@@ -129,7 +129,11 @@ impl RemoteQueue {
         {
             self.awaiting_turn = None;
             // 原生中断也带结束标记，只有正常完成允许续发；中断或失败必须保持暂停，不能误启动下一条。
-            if matches!(ended["status"].as_str(), Some("interrupted" | "failed")) && !self.paused {
+            if (matches!(ended["status"].as_str(), Some("interrupted" | "failed"))
+                || ended["_nativeEndedWithoutReply"] == true)
+                && !self.paused
+            {
+                // 接收后被原生结束且没有回复时停止自动续发；下一条用户主动发送仍按真实空闲状态直接投递。
                 self.paused = true;
                 self.revision += 1;
             }
@@ -581,16 +585,7 @@ impl Claude {
                 c.remote_queue
                     .accepted
                     .insert(message.id.clone(), fingerprint(&message.payload));
-                if let Ok(native) = &result
-                    && native["steered"] == true
-                    && let Some(turn) = c
-                        .turns
-                        .iter_mut()
-                        .find(|t| t["_nativeUserId"] == native["interruptedUserId"])
-                {
-                    turn["_stopRequested"] = json!(true);
-                    turn["status"] = json!("interrupted");
-                }
+                // 原生 next 引导只确认消息投递；不能把正在继续执行或已经完成的旧轮次标成“已停止”。
             } else if not_sent && remove_if_unsent {
                 // 明确未投递的新消息回到原输入框；已有待发消息的重试失败和送达未知仍保留原有核对机制。
                 c.remote_queue.messages.retain(|m| m.id != message.id);
@@ -1214,9 +1209,16 @@ mod tests {
         assert_eq!(result["scope"], "single");
         let sent = calls.lock().await.clone();
         assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["subtype"], "shared_send");
         assert_eq!(sent[0]["client_id"], "C");
         assert_eq!(sent[0]["steer"], true);
+        assert_eq!(sent[0]["idle_only"], false);
         let current = service.conversation(&c.id).await.unwrap();
+        assert_eq!(current.turns[0]["status"], "inProgress");
+        assert_ne!(
+            current.turns[0]["_stopRequested"], true,
+            "原生引导不能被解释为停止旧轮次"
+        );
         assert_eq!(
             current
                 .remote_queue
@@ -1262,6 +1264,22 @@ mod tests {
         queue.observe_turns(&turns, &frame["native_status"]);
         assert!(queue.awaiting_turn.is_none());
         assert!(!queue.paused, "真实完成后现有队列可自然续发，不误判为中断");
+    }
+
+    #[test]
+    fn native_empty_end_clears_waiting_but_does_not_auto_send_the_next_message() {
+        let mut queue = RemoteQueue {
+            awaiting_turn: Some("web-client".into()),
+            awaiting_started: false,
+            ..Default::default()
+        };
+        queue.observe_turns(
+            &[json!({"id":"web-client","status":"completed",
+            "_nativeDone":true,"_nativeEndedWithoutReply":true})],
+            &json!({"tempo":"idle"}),
+        );
+        assert!(queue.awaiting_turn.is_none());
+        assert!(queue.paused, "无回复的原生结束不能当作正常回复后自动续发");
     }
 
     #[test]
