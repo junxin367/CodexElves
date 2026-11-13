@@ -12,6 +12,9 @@ impl Harness {
         payload: Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
+        if action == "setFast" {
+            return self.set_fast(&payload, authorization).await;
+        }
         if action == "createSideThread" {
             return self.create_side(&payload, authorization).await;
         }
@@ -526,6 +529,9 @@ impl Harness {
                 params[target] = payload[source].clone();
             }
         }
+        // Fast 按保存成功后的偏好在新轮次派发时读取，排队消息不冻结入队时的旧档位。
+        self.apply_fast_to_turn(id, &mut params).await?;
+        let applied_tier = params["serviceTier"].clone();
         let (response, execution_transport) = if let Some(response) = self
             .owner_request(
                 id,
@@ -552,7 +558,15 @@ impl Harness {
         };
         let turn_id = required(&response["turn"], "id")?;
         self.projection.lock().await.started(id, turn_id);
-        self.remember_settings(id, payload).await?;
+        let mut remembered = payload.clone();
+        // 创建草稿中的旧 Fast 值不能在发送回执到达时覆盖执行期间后来保存的会话偏好。
+        if let Some(remembered) = remembered.as_object_mut() {
+            remembered.remove("fastMode");
+        }
+        if !applied_tier.is_null() {
+            remembered["serviceTier"] = applied_tier;
+        }
+        self.remember_settings(id, &remembered).await?;
         Ok(
             json!({"ok":true,"confirmed":true,"threadId":id,"turnId":turn_id,
             "clientUserMessageId":payload["clientUserMessageId"],"deliveryState":"accepted",
@@ -610,6 +624,10 @@ impl Harness {
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
         inputs(payload)?;
+        if payload["fastMode"] == true {
+            self.validate_fast_model(required(payload, "model")?)
+                .await?;
+        }
         let (cwd, project_id) =
             if let Some(id) = payload["projectId"].as_str().filter(|s| !s.is_empty()) {
                 // 新建属于实际写入，提交前重新核对项目根目录，不能用展示缓存决定写入位置。
@@ -645,7 +663,10 @@ impl Harness {
                 "method":"thread/started","params":{"thread":response["thread"]}
             }))
             .await;
-        self.remember_settings(&id, &response).await?;
+        let mut initial_settings = response.clone();
+        // 新会话的 Fast 仅取本次草稿；后续新会话仍默认关闭，不继承全局或其它会话。
+        initial_settings["fastMode"] = json!(payload["fastMode"] == true);
+        self.remember_settings(&id, &initial_settings).await?;
         self.loaded.lock().await.insert(
             id.clone(),
             self.runtime.connection().await?.generation.clone(),

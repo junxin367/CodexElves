@@ -1583,12 +1583,36 @@ pub(crate) fn normalize_model(model: &Value) -> Option<Value> {
             "description": "Maximum reasoning with automatic task delegation"
         }));
     }
+    let service_tiers = model
+        .get("serviceTiers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let request_model = model
+        .get("requestModel")
+        .or_else(|| model.get("request_model"))
+        .and_then(Value::as_str)
+        .unwrap_or(model_name);
+    // Fast 仅开放给实际请求的 GPT 模型及目录明确提供的档位；显式不支持、未知和非 GPT 保持关闭。
+    let fast_supported = request_model
+        .trim()
+        .rsplit('/')
+        .next()
+        .is_some_and(|slug| slug.to_ascii_lowercase().starts_with("gpt-"))
+        && !["supportsFast", "supports_fast", "fastModeSupported"]
+            .iter()
+            .any(|key| model.get(*key).and_then(Value::as_bool) == Some(false))
+        && service_tiers
+            .iter()
+            .any(|tier| matches!(tier["id"].as_str(), Some("priority" | "fast")));
     Some(json!({
         "id": model.get("id").and_then(Value::as_str).unwrap_or(model_name),
         "model": model_name,
         "displayName": model.get("displayName").and_then(Value::as_str).unwrap_or(model_name),
         "supportedReasoningEfforts": supported,
-        "defaultReasoningEffort": model.get("defaultReasoningEffort").cloned().unwrap_or(Value::Null)
+        "defaultReasoningEffort": model.get("defaultReasoningEffort").cloned().unwrap_or(Value::Null),
+        "serviceTiers":service_tiers,
+        "fastModeSupported":fast_supported
     }))
 }
 
@@ -2063,6 +2087,34 @@ pub(crate) fn normalize_subagent_thread(thread: &Value) -> anyhow::Result<Value>
     Ok(value)
 }
 
+// 小于此值视为 Unix 秒；与 assets/remote-access/native.js 的 timestamp()
+// 及 app.js 的 sidebarTimestamp() 使用同一阈值，三处需同步核对。
+const UNIX_SECONDS_LIMIT: u64 = 100_000_000_000;
+
+// 用户要求服务模式会话的排序和日期分组与 Codex App / CDP 一致：app-server 的
+// createdAt / updatedAt 是 Unix 秒，CDP 与 Claude 会话为毫秒，统一输出毫秒。
+// 已是毫秒的值（如侧边会话的 now_ms()）保持不变，重复规范化不会再次放大。
+fn thread_timestamp_ms(value: Option<&Value>) -> Value {
+    let Some(value) = value else {
+        return Value::Null;
+    };
+    if let Some(at) = value.as_u64() {
+        return json!(if at < UNIX_SECONDS_LIMIT {
+            at.saturating_mul(1000)
+        } else {
+            at
+        });
+    }
+    match value.as_f64() {
+        Some(at) if at.is_finite() && at > 0.0 => json!(if at < UNIX_SECONDS_LIMIT as f64 {
+            (at * 1000.0).round() as u64
+        } else {
+            at.round() as u64
+        }),
+        _ => value.clone(),
+    }
+}
+
 pub(crate) fn normalize_thread_metadata(thread: &Value) -> anyhow::Result<Value> {
     let id = thread["id"]
         .as_str()
@@ -2103,9 +2155,9 @@ pub(crate) fn normalize_thread_metadata(thread: &Value) -> anyhow::Result<Value>
         "id": id,
         "title": title,
         "cwd": cwd,
-        "createdAt": thread.get("createdAt").cloned().unwrap_or(Value::Null),
-        "updatedAt": thread.get("updatedAt").cloned().unwrap_or(Value::Null),
-        "recencyAt": thread.get("recencyAt").cloned().unwrap_or_else(|| thread.get("updatedAt").cloned().unwrap_or(Value::Null)),
+        "createdAt": thread_timestamp_ms(thread.get("createdAt")),
+        "updatedAt": thread_timestamp_ms(thread.get("updatedAt")),
+        "recencyAt": thread_timestamp_ms(thread.get("recencyAt").or_else(|| thread.get("updatedAt"))),
         "model": thread.get("model").cloned().unwrap_or(Value::Null),
         "reasoningEffort": thread.get("reasoningEffort").cloned().unwrap_or(Value::Null),
         "status": status.clone(),
@@ -2456,6 +2508,21 @@ mod tests {
         assert_eq!(thread["id"], "thread-1");
         assert_eq!(thread["title"], "主会话");
         assert_eq!(thread["viewKind"], "main");
+        assert_eq!(thread["createdAt"], 1000);
+        assert_eq!(thread["updatedAt"], 2000);
+        assert_eq!(thread["recencyAt"], 2000);
+        // app-server 返回 Unix 秒；侧栏日期分组与排序按毫秒比较，已是毫秒的值不能再放大。
+        let seconds = normalize_thread(&json!({
+            "id": "thread-seconds", "cwd": "C:/workspace",
+            "createdAt": 1792319939, "updatedAt": 1792320819
+        }))
+        .unwrap();
+        assert_eq!(seconds["createdAt"], 1_792_319_939_000_u64);
+        assert_eq!(seconds["updatedAt"], 1_792_320_819_000_u64);
+        assert_eq!(seconds["recencyAt"], 1_792_320_819_000_u64);
+        let millis = normalize_thread_metadata(&seconds).unwrap();
+        assert_eq!(millis["createdAt"], 1_792_319_939_000_u64);
+        assert_eq!(millis["updatedAt"], 1_792_320_819_000_u64);
         assert!(
             normalize_thread(&json!({
                 "id": "side-1",

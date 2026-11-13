@@ -4005,7 +4005,8 @@ async fn session(
         "queuedImageEditing":native_write_available,"queueEditRecovery":native_write_available,
         "queueSendRecovery":native_write_available,"projectlessCreation":native_write_available,
         "promptOptimization":true,"promptOptimizationSettings":true,"messageEditModelSettings":native_write_available,
-        "fastMode":runtime.cdp_injection_enabled && native_write_available,
+        "fastMode":native_write_available,
+        "serviceFastMode":!runtime.cdp_injection_enabled && native_write_available,
         "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
         "sendText":native_write_available || service_connected,
         "sideThreads":true,"serviceSideThreads":true,"subagents":true,"serviceSubagents":true,
@@ -6999,7 +7000,9 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  const q=JSON.parse(line);fs.appendFileSync(__dirname+'/requests.jsonl',JSON.stringify(q)+'\n');
  if(!q.method){if(approval){finish(approval.threadId);approval=null;}return;}
  if(q.method==='initialized')return;
- const p=q.params||{},pinPath=__dirname+'/native-pins.json';
+  const p=q.params||{},pinPath=__dirname+'/native-pins.json';
+  const fastPolicyPath=__dirname+'/fast-policy.json';
+  const fastPolicy=fs.existsSync(fastPolicyPath)?JSON.parse(fs.readFileSync(fastPolicyPath,'utf8')):{};
  const nativePins=fs.existsSync(pinPath)?JSON.parse(fs.readFileSync(pinPath,'utf8')):null;
  const pinnedSection='01984de2-8f74-7c91-a3b2-5c5e937cf318';
  const t=threads.get(p.threadId)||nativePins?.rows?.find(row=>row.id===p.threadId)||related.rows.find(row=>row.id===p.threadId);let result={};
@@ -7109,8 +7112,13 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     threads.delete(p.threadId);break;
  case 'thread/readState/update':result={readState:{firstUnread:null,revision:'r2'}};break;
  case 'skills/list':result={data:p.cwds.map(cwd=>({cwd,skills:[],errors:[]}))};break;
- case 'model/list':result={data:[{id:'gpt-test',model:'gpt-test',supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:null};break;
- case 'config/read':result={config:{model:'gpt-test',model_reasoning_effort:'high'}};break;
+ case 'model/list':result={data:[{id:'gpt-test',model:'gpt-test',serviceTiers:fastPolicy.noTiers?[]:[{id:'priority',name:'Fast'}],
+   supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:null};break;
+ case 'account/read':result={account:{type:fastPolicy.accountType||'apiKey'}};break;
+ case 'configRequirements/read':result=fastPolicy.requirementsMalformed?{requirements:'unknown'}:fastPolicy.requirementsUnknown?{}:
+   {requirements:fastPolicy.requirementsDenied?{featureRequirements:{fast_mode:false}}:null};break;
+ case 'config/read':result={config:{model:'gpt-test',model_reasoning_effort:'high',model_provider:fastPolicy.provider||'test',
+   features:{fast_mode:fastPolicy.configFast!==false},service_tier:fastPolicy.defaultTier||null}};break;
  default: output({id:q.id,error:{code:-32601,message:'unsupported: '+q.method}});return;
  }
  output({id:q.id,result});
@@ -7831,11 +7839,17 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         (directory, authorization, id)
     }
 
-    fn harness_history_requests(directory: &FsPath) -> Vec<Value> {
+    fn harness_engine_requests(directory: &FsPath) -> Vec<Value> {
         std::fs::read_to_string(directory.join("requests.jsonl"))
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect()
+    }
+
+    fn harness_history_requests(directory: &FsPath) -> Vec<Value> {
+        harness_engine_requests(directory)
+            .into_iter()
             .filter(|frame| frame["method"] == "thread/items/list")
             .collect()
     }
@@ -8947,6 +8961,353 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             let _ = server.await;
             controller.harness.release().await;
         }
+    }
+
+    #[tokio::test]
+    async fn harness_fast_running_toggle_applies_only_to_new_turns_and_queued_dispatch() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let created = controller.call_authorized("create",
+            json!({"projectId":"project-a","prompt":"wait approval current","model":"gpt-test"}),
+            &authorization).await.unwrap();
+        assert_eq!(created["ok"], true, "{created}");
+        let id = created["threadId"].as_str().unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let starts = |frames: Vec<Value>| {
+            frames
+                .into_iter()
+                .filter(|frame| frame["method"] == "turn/start")
+                .collect::<Vec<_>>()
+        };
+        let first = starts(harness_engine_requests(directory.path()));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0]["params"]["serviceTier"], "default");
+        let queued = controller.call_authorized("send",
+            json!({"threadId":id,"prompt":"wait approval queued fast","clientUserMessageId":"fast-queued-a"}),
+            &authorization).await.unwrap();
+        assert_eq!(queued["deliveryState"], "queued");
+        let fast_auth = controller.authorization(authorization.device.clone(), Some("setFast"));
+        let enabled = controller
+            .call_authorized(
+                "setFast",
+                json!({"threadId":id,"model":"gpt-test","enabled":true}),
+                &fast_auth,
+            )
+            .await
+            .unwrap();
+        assert_eq!(enabled["effectiveFrom"], "nextTurn");
+        assert_eq!(
+            starts(harness_engine_requests(directory.path())),
+            first,
+            "执行中开关只保存偏好，不启动、引导、重发或改写当前轮次"
+        );
+        let detail = controller
+            .call_authorized("thread", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(detail["thread"]["fastMode"], true);
+        assert_eq!(detail["thread"]["serviceTier"], "default");
+        let saved: Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("remote-harness-state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["settings"][id]["fastMode"], true);
+        let approve = controller.authorization(authorization.device.clone(), Some("approve"));
+        let request = &detail["thread"]["requests"][0];
+        controller
+            .call_authorized(
+                "approve",
+                json!({"threadId":id,"requestId":request["id"],
+            "method":request["method"],"decision":"accept"}),
+                &approve,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let result = controller
+                    .call_authorized(
+                        "sendState",
+                        json!({"threadId":id,"clientUserMessageId":"fast-queued-a"}),
+                        &authorization,
+                    )
+                    .await
+                    .unwrap();
+                if result["deliveryState"] == "accepted" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let second = starts(harness_engine_requests(directory.path()));
+        assert_eq!(second.len(), 2);
+        assert_eq!(
+            second[1]["params"]["serviceTier"], "priority",
+            "入队发生在开启之前，派发仍须读取最新 Fast 设置"
+        );
+        controller.call_authorized("send",
+            json!({"threadId":id,"prompt":"wait queued standard","clientUserMessageId":"fast-queued-b"}),
+            &authorization).await.unwrap();
+        controller
+            .call_authorized(
+                "setFast",
+                json!({"threadId":id,"model":"gpt-test","enabled":false}),
+                &fast_auth,
+            )
+            .await
+            .unwrap();
+        assert_eq!(starts(harness_engine_requests(directory.path())), second);
+        let detail = controller
+            .call_authorized("thread", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        let request = &detail["thread"]["requests"][0];
+        controller
+            .call_authorized(
+                "approve",
+                json!({"threadId":id,"requestId":request["id"],
+            "method":request["method"],"decision":"accept"}),
+                &approve,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let result = controller
+                    .call_authorized(
+                        "sendState",
+                        json!({"threadId":id,"clientUserMessageId":"fast-queued-b"}),
+                        &authorization,
+                    )
+                    .await
+                    .unwrap();
+                if result["deliveryState"] == "accepted" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let final_starts = starts(harness_engine_requests(directory.path()));
+        assert_eq!(final_starts.len(), 3);
+        assert_eq!(final_starts[0]["params"]["serviceTier"], "default");
+        assert_eq!(final_starts[1]["params"]["serviceTier"], "priority");
+        assert_eq!(final_starts[2]["params"]["serviceTier"], "default");
+        assert_eq!(
+            final_starts[1]["params"]["clientUserMessageId"],
+            "fast-queued-a"
+        );
+        assert_eq!(
+            final_starts[2]["params"]["clientUserMessageId"],
+            "fast-queued-b"
+        );
+        assert!(
+            !harness_engine_requests(directory.path())
+                .iter()
+                .any(|frame| matches!(
+                    frame["method"].as_str(),
+                    Some("turn/steer" | "turn/interrupt" | "thread/resume")
+                ))
+        );
+        let explicit = controller.call_authorized("create",
+            json!({"projectId":"project-a","prompt":"wait explicit fast","model":"gpt-test","fastMode":true}),
+            &authorization).await.unwrap();
+        let normal = controller.call_authorized("create",
+            json!({"projectId":"project-a","prompt":"wait default standard","model":"gpt-test"}),
+            &authorization).await.unwrap();
+        let final_starts = starts(harness_engine_requests(directory.path()));
+        assert_eq!(final_starts[3]["params"]["serviceTier"], "priority");
+        assert_eq!(final_starts[4]["params"]["serviceTier"], "default");
+        assert_ne!(explicit["threadId"], normal["threadId"]);
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+    }
+
+    #[tokio::test]
+    async fn harness_fast_respects_account_admin_model_and_readonly_boundaries() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let created = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"wait","model":"gpt-test"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        let fast_auth = controller.authorization(authorization.device.clone(), Some("setFast"));
+        let saved_fast = || {
+            let saved: Value = serde_json::from_slice(
+                &std::fs::read(directory.path().join("remote-harness-state.json")).unwrap(),
+            )
+            .unwrap();
+            saved["settings"][id]["fastMode"] == true
+        };
+        for policy in [
+            json!({"accountType":"unknown"}),
+            json!({"requirementsDenied":true}),
+            json!({"requirementsUnknown":true}),
+            json!({"requirementsMalformed":true}),
+            json!({"configFast":false}),
+            json!({"provider":"copilot"}),
+            json!({"noTiers":true}),
+        ] {
+            std::fs::write(
+                directory.path().join("fast-policy.json"),
+                serde_json::to_vec(&policy).unwrap(),
+            )
+            .unwrap();
+            let result = controller
+                .call_authorized(
+                    "setFast",
+                    json!({"threadId":id,"model":"gpt-test","enabled":true}),
+                    &fast_auth,
+                )
+                .await;
+            assert!(result.is_err(), "{policy}");
+            assert!(!saved_fast());
+        }
+        std::fs::write(directory.path().join("fast-policy.json"), b"{}").unwrap();
+        controller
+            .call_authorized(
+                "setFast",
+                json!({"threadId":id,"model":"gpt-test","enabled":true}),
+                &fast_auth,
+            )
+            .await
+            .unwrap();
+        std::fs::write(
+            directory.path().join("fast-policy.json"),
+            br#"{"requirementsDenied":true}"#,
+        )
+        .unwrap();
+        controller
+            .call_authorized("models", json!({"forceReload":true}), &authorization)
+            .await
+            .unwrap();
+        controller
+            .call_authorized(
+                "setFast",
+                json!({"threadId":id,"model":"gpt-test","enabled":false}),
+                &fast_auth,
+            )
+            .await
+            .unwrap();
+        assert!(!saved_fast());
+        controller.access_policy.write().unwrap().read_only = true;
+        let result = controller
+            .call_authorized(
+                "setFast",
+                json!({"threadId":id,"model":"gpt-test","enabled":false}),
+                &fast_auth,
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            harness_engine_requests(directory.path())
+                .iter()
+                .filter(|frame| frame["method"] == "turn/start")
+                .count(),
+            1
+        );
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
+    }
+
+    #[tokio::test]
+    async fn harness_fast_side_toggle_keeps_current_steer_and_ephemeral_preferences_separate() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let main = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"wait","model":"gpt-test"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let created = controller
+            .call_authorized(
+                "createSideThread",
+                json!({"threadId":main["threadId"]}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        let fast_auth = controller.authorization(authorization.device.clone(), Some("setFast"));
+        let send =
+            |client: &str| json!({"threadId":id,"prompt":"wait","clientUserMessageId":client});
+        controller
+            .call_authorized("send", send("side-first"), &authorization)
+            .await
+            .unwrap();
+        controller
+            .call_authorized(
+                "setFast",
+                json!({"threadId":id,"model":"gpt-test","enabled":true}),
+                &fast_auth,
+            )
+            .await
+            .unwrap();
+        controller
+            .call_authorized("send", send("side-steer"), &authorization)
+            .await
+            .unwrap();
+        let frames = harness_engine_requests(directory.path());
+        let first: Vec<_> = frames
+            .iter()
+            .filter(|frame| frame["method"] == "turn/start" && frame["params"]["threadId"] == id)
+            .collect();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0]["params"]["serviceTier"], "default");
+        let steer = frames
+            .iter()
+            .find(|frame| frame["method"] == "turn/steer")
+            .unwrap();
+        assert!(steer["params"].get("serviceTier").is_none());
+        let saved: Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("remote-harness-state.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(saved["settings"].get(id).is_none(), "临时侧边偏好不能落盘");
+        controller
+            .call_authorized("stop", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        controller
+            .call_authorized("send", send("side-next-fast"), &authorization)
+            .await
+            .unwrap();
+        controller
+            .call_authorized(
+                "setFast",
+                json!({"threadId":id,"model":"gpt-test","enabled":false}),
+                &fast_auth,
+            )
+            .await
+            .unwrap();
+        controller
+            .call_authorized("stop", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        controller
+            .call_authorized("send", send("side-next-standard"), &authorization)
+            .await
+            .unwrap();
+        let frames = harness_engine_requests(directory.path());
+        let starts: Vec<_> = frames
+            .iter()
+            .filter(|frame| frame["method"] == "turn/start" && frame["params"]["threadId"] == id)
+            .collect();
+        assert_eq!(starts.len(), 3);
+        assert_eq!(starts[1]["params"]["serviceTier"], "priority");
+        assert_eq!(starts[2]["params"]["serviceTier"], "default");
+        assert_eq!(controller.harness.audit.snapshot()["serviceCdpAttempts"], 0);
     }
 
     #[tokio::test]

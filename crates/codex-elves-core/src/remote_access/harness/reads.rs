@@ -428,6 +428,7 @@ impl Harness {
         ] {
             thread[key] = queue[key].clone();
         }
+        thread["fastMode"] = json!(self.fast_preference(id).await);
         Ok(json!({"ok":true,"thread":thread,"nativeBridge":"harness"}))
     }
 
@@ -659,17 +660,25 @@ impl Harness {
         if payload["forceReload"] == true {
             self.runtime.invalidate_read("model/list").await;
             self.runtime.invalidate_read("config/read").await;
+            self.runtime.invalidate_read("account/read").await;
+            self.runtime
+                .invalidate_read("configRequirements/read")
+                .await;
         }
         let (model_rows, config) = tokio::try_join!(
             self.list_all("model/list", json!({"limit":100,"includeHidden":false})),
             self.runtime
-                .read("config/read", json!({"cwd":null,"includeLayers":false}))
+                .read("config/read", json!({"cwd":null,"includeLayers":true}))
         )?;
         let models: Vec<_> = model_rows.iter().filter_map(normalize_model).collect();
+        let fast_availability = self
+            .fast_availability(&config, payload["forceReload"] == true)
+            .await;
         Ok(
             json!({"ok":true,"data":models,"ultraReasoningEnabled":models.iter().any(|m|
             m["supportedReasoningEfforts"].as_array().is_some_and(|efforts|
                 efforts.iter().any(|e|e["reasoningEffort"]=="ultra"))),
+            "fastModeAvailability":fast_availability,
             "defaultModel":config["config"]["model"],
             "defaultReasoningEffort":config["config"]["model_reasoning_effort"]}),
         )

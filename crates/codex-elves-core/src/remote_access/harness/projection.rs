@@ -609,6 +609,7 @@ impl Projection {
                     ("model", "model"),
                     ("reasoningEffort", "reasoningEffort"),
                     ("effort", "reasoningEffort"),
+                    ("fastMode", "fastMode"),
                 ] {
                     if let Some(value) = settings.get(source) {
                         thread[target] = value.clone();

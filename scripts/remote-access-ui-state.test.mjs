@@ -387,6 +387,20 @@ function desktopObservationHarness() {
   return { context, requests, scheduled, root };
 }
 
+test("服务模式秒级会话时间按毫秒进入今天分组，并与 Claude 毫秒时间正确排序", () => {
+  const context = vm.createContext({});
+  vm.runInContext(sourceSection("function sidebarTimestamp(", "function markSidebarThreadReadLocally("), context);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const now = Date.now();
+  // 旧后台或旧缓存仍可能给出 app-server 的 Unix 秒，不能因此全部落入“历史”。
+  assert.ok(context.sidebarUpdatedAt({ updatedAt: Math.floor(now / 1000) }) >= today.getTime());
+  assert.equal(context.sidebarUpdatedAt({ updatedAt: 1792320819000 }), 1792320819000, "毫秒保持不变");
+  assert.equal(context.sidebarUpdatedAt({ updatedAt: null, recencyAt: 1792320819 }), 1792320819000);
+  assert.equal(context.sidebarUpdatedAt({}), 0);
+  const codex = { updatedAt: Math.floor(now / 1000) }, claude = { updatedAt: now - 60_000 };
+  assert.ok(context.sidebarUpdatedAt(codex) > context.sidebarUpdatedAt(claude), "较新的 Codex 会话排在较早的 Claude 会话前");
+});
+
 test("桌面同步只观察当前会话与可见 Codex 列表项，关联详情沿用主会话", () => {
   const { context, root } = desktopObservationHarness();
   assert.deepEqual([...context.desktopObservationIds()], ["selected", "visible"]);
@@ -617,6 +631,111 @@ test("远程 Fast 直接使用模型目录、实例配置和会话详情，重�
   assert.equal(control.disabled, true); assert.match(control.title, /管理员/);
   context.claude = true; context.updateRemoteFast();
   assert.equal(control.hidden, true, "Claude 不借用 Codex 的 Fast 档位");
+});
+
+test("服务模式 Fast 明确声明独立能力后可在执行中切换，只保存后续轮次偏好", async () => {
+  const { context, control, attributes, writes } = remoteFastHarness();
+  context.session.runtime.cdpInjectionEnabled = false;
+  context.thread = { id: context.selectedId, model: context.model, status: { type: "active" } };
+  context.updateRemoteFast();
+  assert.equal(control.hidden, true, "旧服务不能借用 CDP 能力");
+  context.session.capabilities.serviceFastMode = true;
+  context.updateRemoteFast();
+  assert.equal(control.hidden, false);
+  assert.equal(control.disabled, false, "执行中不锁定未来轮次的 Fast 偏好");
+  const operation = context.toggleRemoteFast();
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].action, "setFast");
+  writes[0].resolve({ threadId: context.selectedId, model: context.model,
+    supported: true, enabled: true, effectiveFrom: "nextTurn" });
+  await operation;
+  assert.equal(attributes.get("aria-pressed"), "true");
+  assert.match(control.title, /后续轮次/);
+  assert.match(control.title, /当前任务档位保持不变/);
+  assert.equal(context.thread.status.type, "active");
+});
+
+test("Fast 在轮次异步准备后读取最新偏好，已构造的轮次和 steer 保持原档位", async () => {
+  const listeners = new Map(), disk = new Map(), gates = [], sent = [];
+  let holding = false, nextId = 0;
+  const key = "codex-elves-fast-session-v1:local:thread-fast-a";
+  const window = {
+    crypto: { randomUUID: () => `request-${++nextId}` }, setTimeout, clearTimeout,
+    addEventListener: (name, callback) => listeners.set(name, callback),
+    localStorage: {
+      getItem: name => disk.get(name) ?? null,
+      setItem: (name, value) => disk.set(name, value),
+      removeItem: name => disk.delete(name),
+    },
+    electronBridge: {
+      sendMessageFromView(payload) {
+        const { id, method } = payload.request;
+        sent.push(method);
+        const result = method === "account/read" ? { account: { type: "apiKey" } }
+          : method === "configRequirements/read" ? { requirements: null }
+            : method === "config/read" ? { config: { features: { fast_mode: true } } }
+              : { data: [{ id: "sol", model: "gpt-6.1-sol", serviceTiers: [{ id: "priority" }] }] };
+        const reply = () => listeners.get("message")({ data: {
+          type: "mcp-response", hostId: "local", message: { id, result }
+        } });
+        if (holding && method === "model/list") gates.push(reply);
+        else queueMicrotask(reply);
+      },
+    },
+  };
+  const module = { exports: {} };
+  const context = nodeVm.createContext({ window, module, console });
+  nodeVm.runInContext(composerFast, context);
+  const api = window.__codexElvesComposerFast;
+  await api.configure({
+    enabled: true, isGptModel: name => name.startsWith("gpt-"),
+    getContext: () => ({ hostId: "local", threadId: "thread-fast-a" }),
+    getModel: () => "gpt-6.1-sol", getMenu: () => null, getComposers: () => [],
+    isCopilotActive: async () => false,
+    getDispatcher: async () => ({ dispatchMessage() {} }),
+    notify: message => assert.fail(message),
+  });
+  const requests = [];
+  for (const [before, after] of [[false, true], [true, false]]) {
+    if (before) disk.set(key, "true"); else disk.delete(key);
+    holding = true;
+    const original = { threadId: "thread-fast-a", model: "gpt-6.1-sol", serviceTier: "default",
+      input: [{ type: "text", text: "next turn" }] };
+    const pending = api.patchTurnRequest(original);
+    while (!gates.length) await new Promise(resolve => setImmediate(resolve));
+    if (after) disk.set(key, "true"); else disk.delete(key);
+    holding = false; gates.shift()();
+    const request = await pending;
+    assert.equal(request.serviceTier, after ? "priority" : "default");
+    assert.equal(original.serviceTier, "default", "不得修改原请求对象");
+    requests.push(request);
+  }
+  assert.equal(requests[0].serviceTier, "priority", "后一次关闭不能改写已发起轮次");
+  const steer = { hostId: "local", request: { method: "turn/steer",
+    params: { threadId: "thread-fast-a", input: [{ type: "text", text: "continue" }] } } };
+  assert.equal(await module.exports.patchMessage("mcp-request", steer), steer);
+  assert.equal(Object.hasOwn(steer.request.params, "serviceTier"), false);
+  assert.equal(sent.includes("turn/start"), false, "改偏好和准备请求不能启动额外轮次");
+  await api.configure({ enabled: false });
+});
+
+test("服务模式 Fast 被管理员禁用后仍可关闭旧偏好，不能再次开启", async () => {
+  const { context, control, writes } = remoteFastHarness();
+  context.session.runtime.cdpInjectionEnabled = false;
+  context.session.capabilities.serviceFastMode = true;
+  context.rememberRemoteFastPreference(context.selectedId, true);
+  context.modelDefaults.fastModeAvailability = { available: false, reason: "管理员关闭 Fast" };
+  context.updateRemoteFast();
+  assert.equal(context.remoteFastState.supported, false);
+  assert.equal(control.disabled, false);
+  assert.match(control.title, /点击关闭后续轮次/);
+  const operation = context.toggleRemoteFast();
+  assert.equal(writes[0].payload.enabled, false, "只允许清除已保存偏好");
+  writes[0].resolve({ threadId: context.selectedId, model: context.model, supported: true, enabled: false });
+  await operation;
+  assert.equal(control.disabled, true);
+  await context.toggleRemoteFast();
+  assert.equal(writes.length, 1);
 });
 
 test("远程 Fast 只在保存确认后点亮，防止连点且迟到写入不改变新会话", async () => {

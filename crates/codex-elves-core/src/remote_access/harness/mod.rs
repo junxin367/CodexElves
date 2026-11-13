@@ -3,6 +3,7 @@
 mod catalog;
 mod commands;
 mod desktop;
+mod fast;
 mod pins;
 mod projection;
 mod projects;
@@ -361,7 +362,7 @@ impl Harness {
                 .settings
                 .entry(id.to_owned())
                 .or_insert_with(|| json!({}));
-            for key in ["model", "reasoningEffort", "serviceTier"] {
+            for key in ["model", "reasoningEffort", "serviceTier", "fastMode"] {
                 if let Some(value) = settings.get(key) {
                     current[key] = value.clone();
                 }
@@ -522,6 +523,7 @@ impl Harness {
             "notifications" => Ok(self.projection.lock().await.notifications(&payload)),
             "sidebar" => self.sidebar().await,
             "models" => self.models(&payload).await,
+            "fast" => self.fast_state(&payload).await,
             "skills" => self.skills(&payload).await,
             "thread" => self.thread(&payload).await,
             "history" => self.history(&payload).await,

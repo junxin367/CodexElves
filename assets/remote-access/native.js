@@ -1145,6 +1145,7 @@
       throw failure(error.code || 503, error.message || "模型或思考深度切换失败，请稍后重试");
     }
   }
+  // 秒/毫秒阈值需与 codex_service.rs UNIX_SECONDS_LIMIT、app.js sidebarTimestamp() 同步，保证两种模式排序一致。
   const timestamp = value => typeof value === "number" ? (value < 100_000_000_000 ? value * 1000 : value) : 0;
   let nativeCatalog = new Map();
   let sidebarPriorityOptions = { enabled: true, showPinned: false, showScheduled: false, scheduledIds: new Set() };

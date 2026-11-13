@@ -15,7 +15,26 @@ use crate::codex_service::{ServiceDispatchGuard, spawn_service};
 use crate::desktop_owner_ipc::{WriteFrame, guarded_write};
 
 const TIMEOUT: Duration = Duration::from_secs(45);
+// 用户要求服务模式新建后能立即打开会话：30 秒覆盖创建和首轮准备，
+// 仅对本连接刚创建、尚未成功读取元数据的持久会话处理短暂空文件。
+// 首次失败后最多等待 3 秒、重试 5 次；100/200/400/800/1000ms 共 2.5 秒，余量留给 RPC。
+const NEW_THREAD_METADATA_WINDOW: Duration = Duration::from_secs(30);
+const NEW_THREAD_METADATA_RETRY_BUDGET: Duration = Duration::from_secs(3);
+const NEW_THREAD_METADATA_RETRY_DELAYS_MS: [u64; 5] = [100, 200, 400, 800, 1000];
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
+
+fn is_empty_rollout_metadata_failure(failure: &anyhow::Error) -> bool {
+    failure
+        .downcast_ref::<super::super::ApiError>()
+        .is_some_and(|error| {
+            let message = error.message.to_ascii_lowercase();
+            error.code == 503
+                && !error.outcome_unknown
+                && message.contains("failed to read session metadata")
+                && message.contains("rollout at ")
+                && message.trim_end().ends_with(" is empty")
+        })
+}
 
 #[derive(Debug)]
 pub(super) struct UnsupportedMethod;
@@ -48,6 +67,7 @@ pub(super) struct Connection {
     write_gate: Mutex<()>,
     pending: Pending,
     next_id: AtomicU64,
+    new_thread_metadata: Mutex<HashMap<String, Instant>>,
     reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -186,6 +206,7 @@ impl Runtime {
             write_gate: Mutex::new(()),
             pending,
             next_id: AtomicU64::new(1),
+            new_thread_metadata: Mutex::new(HashMap::new()),
             reader: Mutex::new(Some(reader)),
         });
         let initialized = connection
@@ -248,18 +269,15 @@ impl Runtime {
         });
         let max_age = match method {
             "project/list" => Duration::from_secs(30),
-            "model/list" | "config/read" => Duration::from_secs(30),
+            "model/list" | "config/read" | "account/read" | "configRequirements/read" => {
+                Duration::from_secs(30)
+            }
             "skills/list" => Duration::from_secs(5),
             _ => Duration::from_millis(200),
         };
         let key = serde_json::to_string(&json!([connection.generation, method, params]))?;
         self.reads
-            .read(
-                scope,
-                key,
-                max_age,
-                connection.request(method, params.clone(), None),
-            )
+            .read(scope, key, max_age, connection.read(method, params.clone()))
             .await
     }
 
@@ -358,6 +376,50 @@ impl Runtime {
 }
 
 impl Connection {
+    async fn read(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        if method != "thread/read" {
+            return self.request(method, params, None).await;
+        }
+        let thread_id = params["threadId"].as_str().unwrap_or("");
+        let created_at = self
+            .new_thread_metadata
+            .lock()
+            .await
+            .get(thread_id)
+            .copied()
+            .filter(|at| at.elapsed() < NEW_THREAD_METADATA_WINDOW);
+        let mut result = self.request(method, params.clone(), None).await;
+        if let Some(created_at) = created_at {
+            let deadline = (created_at + NEW_THREAD_METADATA_WINDOW)
+                .min(Instant::now() + NEW_THREAD_METADATA_RETRY_BUDGET);
+            for delay_ms in NEW_THREAD_METADATA_RETRY_DELAYS_MS {
+                let Err(failure) = &result else { break };
+                let delay = Duration::from_millis(delay_ms);
+                if !is_empty_rollout_metadata_failure(failure) || Instant::now() + delay >= deadline
+                {
+                    break;
+                }
+                // 只重复同一连接的只读请求；创建、发送、恢复和结果未知的写入均不得重放。
+                tokio::time::sleep(delay).await;
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let Ok(next) =
+                    tokio::time::timeout(remaining, self.request(method, params.clone(), None))
+                        .await
+                else {
+                    break;
+                };
+                result = next;
+            }
+        }
+        if result.is_ok() {
+            self.new_thread_metadata.lock().await.remove(thread_id);
+        }
+        result
+    }
+
     async fn write(
         &self,
         frame: Value,
@@ -416,6 +478,15 @@ impl Connection {
                 failure
             });
         }
-        Ok(frame.get("result").cloned().unwrap_or(Value::Null))
+        let result = frame.get("result").cloned().unwrap_or(Value::Null);
+        if method == "thread/start"
+            && result["thread"]["ephemeral"] != true
+            && let Some(id) = result["thread"]["id"].as_str().filter(|id| !id.is_empty())
+        {
+            let mut threads = self.new_thread_metadata.lock().await;
+            threads.retain(|_, at| at.elapsed() < NEW_THREAD_METADATA_WINDOW);
+            threads.insert(id.to_owned(), Instant::now());
+        }
+        Ok(result)
     }
 }

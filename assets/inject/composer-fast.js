@@ -1,6 +1,6 @@
 (() => {
   const root = typeof window === "object" ? window : {};
-  const version = "10";
+  const version = "11";
   if (root.__codexElvesComposerFast?.version === version) return;
   root.__codexElvesComposerFast?.configure?.({ enabled: false });
   const attribute = "data-codex-elves-fast";
@@ -182,8 +182,6 @@
     // 新建请求由原生 startConversation 显式传入草稿，禁止把全局 service_tier 当作会话默认值。
     const target = { hostId: "local", threadId: threadId(params.threadId) || threadId(context?.threadId),
       draftId: context?.draftId };
-    const fast = target.threadId ? configuredFast(target)
-      : contextKey(target) && context?.fast === true;
     const state = await readSnapshot(true);
     if (!allowed(state)) return payload;
     // 用户要求 Fast 不依赖原生入口：在最终发送边界补齐等级，覆盖普通发送和出队发送。
@@ -191,6 +189,9 @@
     const model = params.collaborationMode?.settings?.model || params.model;
     const tier = modelCapability(state, model);
     if (!tier) return payload;
+    // 用户要求执行中切换仅影响之后的新轮次；异步准备结束后读取最新偏好，不改写已派发请求或 steer。
+    const fast = target.threadId ? configuredFast(target)
+      : contextKey(target) && context?.fast === true;
     // flex/ultrafast 等其他等级仍由原生逻辑负责；显式开启本会话 Fast 时才选择 Fast。
     const selected = params.serviceTier ?? state.config.service_tier;
     if (!fast && selected != null && !["fast", "priority", "default"].includes(selected)) return payload;

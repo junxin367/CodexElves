@@ -5463,8 +5463,9 @@ function currentEffort() {
     : creating && !selectedModel ? defaultModelEffort(currentModel()) : "";
 }
 function remoteFastKey() {
-  // 用户要求 Fast 按真实会话隔离；服务模式不能借用切换前的 CDP 能力，迟到保存不能点亮新输入区。
-  if (!session?.capabilities?.fastMode || session.runtime?.cdpInjectionEnabled === false
+  // 用户要求两种模式均按真实会话保存 Fast；服务模式须明确声明独立能力，不能借用旧 CDP 能力。
+  if (!session?.capabilities?.fastMode
+      || session.runtime?.cdpInjectionEnabled === false && session.capabilities.serviceFastMode !== true
       || isClaude() || !currentModelId() || !creating && !selectedId) return "";
   return JSON.stringify([privateInputScope(session), activeInstanceId(), draftKey(), currentModelId(),
     selectionVersion, session.runtime?.revision ?? 0]);
@@ -5507,7 +5508,10 @@ function updateRemoteFast() {
   const preference = creating ? selectedDraftFast : currentThreadDisplay()?.fastMode;
   const preferenceKnown = typeof preference === "boolean";
   const supported = directoryReady && availability?.available === true && modelSupported && preferenceKnown;
-  const state = remoteFastState = { key, supported, enabled: supported && preference,
+  // 服务已保存的 Fast 在管理员随后禁用时仍允许关闭，避免后续发送因旧偏好一直受阻；不能借此开启。
+  const canDisable = directoryReady && session.runtime?.cdpInjectionEnabled === false
+    && session.capabilities.serviceFastMode === true && preference === true;
+  const state = remoteFastState = { key, supported, canDisable, enabled: supported && preference,
     reason: !directoryReady ? modelLoadError || "正在读取模型目录"
       : !modelSupported ? "当前模型未声明 Fast 能力"
         : availability?.available !== true ? availability?.reason || "当前实例暂未提供 Fast 配置"
@@ -5520,22 +5524,27 @@ function updateRemoteFast() {
   control.setAttribute("aria-busy", String(writing || !directoryReady
     || modelSupported && (availability?.available === null || availability?.available === true && !preferenceKnown)));
   control.setAttribute("aria-label", enabled ? "关闭本会话 Fast" : "开启本会话 Fast");
-  control.disabled = !state?.supported || !!writing || !connected || busy || stopping || !!pending
+  // 执行中允许保存后续轮次偏好；这里只锁保存或提交待确认，不能按 isActiveThread() 禁用。
+  control.disabled = (!state?.supported && !state?.canDisable) || !!writing || !connected || busy || stopping || !!pending
     || threadReadOnly() || threadDeletionLocked() || !!editingMessage || !!editingQueuedMessage
     || !sessionInstanceEnabled(activeInstanceId());
-  control.title = writing ? "正在保存 Fast 设置"
-    : state.reason || (enabled ? "本会话 Fast 已开启，点击关闭" : "本会话 Fast 已关闭，点击开启");
+  // 执行中只改变之后新发起的轮次（含尚未派发的队列），当前任务内的模型调用不改变档位。
+  control.title = writing ? "正在保存后续轮次的 Fast 设置"
+    : !supported && canDisable ? `${state.reason}；点击关闭后续轮次 Fast 设置`
+    : state.reason || (enabled ? "后续轮次 Fast 已开启，点击关闭；当前任务档位保持不变"
+      : "后续轮次 Fast 已关闭，点击开启；当前任务档位保持不变");
   composerTooltips?.update?.(control, control.title);
 }
 async function toggleRemoteFast() {
   const control = $("#fast-button"), key = remoteFastKey();
-  if (!key || control?.disabled || remoteFastState?.key !== key || !remoteFastState.supported) return;
+  if (!key || control?.disabled || remoteFastState?.key !== key
+      || !remoteFastState.supported && !remoteFastState.canDisable) return;
   if (creating) {
     selectedDraftFast = !selectedDraftFast;
     updateComposer();
     return;
   }
-  const id = selectedId, model = currentModelId(), enabled = !remoteFastState.enabled;
+  const id = selectedId, model = currentModelId(), enabled = currentThreadDisplay()?.fastMode !== true;
   const context = remoteFastContext();
   if (remoteFastWrites.has(context.preferenceKey)) return;
   const operation = { key };
@@ -9124,8 +9133,15 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
     if (sidebarRequest?.promise === promise) sidebarRequest = null;
   }
 }
+// 用户要求服务模式会话的排序和今天/昨天分组与 Codex App 一致：服务端已统一输出毫秒，
+// 这里兼容旧缓存中的 Unix 秒。阈值 1e11 与 native.js timestamp() 及
+// codex_service.rs UNIX_SECONDS_LIMIT 同步。
+function sidebarTimestamp(value) {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return value < 100_000_000_000 ? value * 1000 : value;
+}
 function sidebarUpdatedAt(item) {
-  return item.updatedAt || item.recencyAt || item.createdAt || 0;
+  return sidebarTimestamp(item.updatedAt) || sidebarTimestamp(item.recencyAt) || sidebarTimestamp(item.createdAt);
 }
 function markSidebarThreadReadLocally(id, value = sidebar) {
   if (!value || typeof id !== "string" || !id) return;
@@ -9267,7 +9283,7 @@ function renderSidebar() {
   const matches = item => typeMatches(item) && searchMatches(item);
   const sortThreads = (items, mode) => mode === "updated_at"
     ? [...items].sort((left, right) => sidebarUpdatedAt(right) - sidebarUpdatedAt(left)
-      || (right.createdAt || 0) - (left.createdAt || 0) || left.id.localeCompare(right.id))
+      || sidebarTimestamp(right.createdAt) - sidebarTimestamp(left.createdAt) || left.id.localeCompare(right.id))
     : [...items];
   const allowedProjectThreadLimits = new Set([5, 10, 20, 50]);
   const projectThreadLimit = allowedProjectThreadLimits.has(appearance.projectThreadLimit)
@@ -9434,7 +9450,7 @@ function renderSidebar() {
     } else {
       const available = new Set(mergedRecent.filter(eligible).map(item => item.id));
       const created = mergedRecent.filter(item => eligible(item) && !recentPriorityKnownIds.has(item.id)
-        && item.createdAt >= Math.floor(recentPriorityOpenedAt / 1000) * 1000);
+        && sidebarTimestamp(item.createdAt) >= Math.floor(recentPriorityOpenedAt / 1000) * 1000);
       recentPriorityIds = new Set([
         ...created.map(item => item.id), ...[...recentPriorityIds].filter(id => available.has(id)),
         ...candidates.map(item => item.id)

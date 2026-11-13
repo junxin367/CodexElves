@@ -169,6 +169,7 @@ impl SideThread {
         view["viewKind"] = json!("side");
         view["serviceSide"] = json!(true);
         view["serviceTier"] = self.metadata["serviceTier"].clone();
+        view["fastMode"] = json!(self.metadata["fastMode"] == true);
         view["parentThreadId"] = json!(self.parent);
         view["ephemeral"] = json!(true);
         view["sideHistoryVersion"] = json!(1);
@@ -838,6 +839,16 @@ impl Harness {
             }
             "turn/start"
         };
+        if method == "turn/start"
+            && let Err(failure) = self.apply_fast_to_turn(id, &mut params).await
+        {
+            // Fast 准备失败发生在任何轮次写入之前，不能把此消息留成“已发送待核对”。
+            if let Some(side) = self.projection.lock().await.sides.threads.get_mut(id) {
+                side.sent.remove(client);
+            }
+            return Err(failure);
+        }
+        let applied_tier = params["serviceTier"].clone();
         let response = self
             .runtime
             .request_in_generation(&generation, method, params, authorization)
@@ -866,6 +877,9 @@ impl Harness {
             "deliveryState":"accepted","nativeBridge":"harness","executionTransport":"app-server-stdio"});
         if side.closed || side.expired || side.generation != generation {
             return Ok(result);
+        }
+        if method == "turn/start" && !applied_tier.is_null() {
+            side.metadata["serviceTier"] = applied_tier;
         }
         if let Some(sent) = side.sent.get_mut(client) {
             sent.1 = result.clone();
