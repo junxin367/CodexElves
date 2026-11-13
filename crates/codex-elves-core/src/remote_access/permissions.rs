@@ -106,9 +106,7 @@ impl SessionPermissions {
         );
         let bytes = serde_json::to_vec(&next)?;
         let permit = authorization.prepare_dispatch().await?;
-        crate::bridge::CdpDispatchPermit::commit(permit, || {
-            crate::settings::atomic_write(&self.path, &bytes)
-        })?;
+        permit.commit(|| crate::settings::atomic_write(&self.path, &bytes))?;
         *selections = next;
         Ok(revision)
     }
@@ -476,10 +474,9 @@ pub(super) async fn settings(
             .prepare_dispatch()
             .await
             .map_err(super::authorization_error)?;
-        crate::bridge::CdpDispatchPermit::commit(permit, || {
-            save_file(&target.path, &text, &revision)
-        })
-        .map_err(super::authorization_error)?;
+        permit
+            .commit(|| save_file(&target.path, &text, &revision))
+            .map_err(super::authorization_error)?;
     }
     let (text, revision) = read_file(&target.path)?;
     let settings = global_view(&target.backend, &text)?;
@@ -499,7 +496,7 @@ pub(super) async fn settings(
         .into_response())
 }
 
-/// 与 native.js 的会话预设保持一致；“帮我批准”交给原生自动审核，不能退化为人工审批或完全访问。
+/// 用户要求与 Codex App 权限行为保持一致；“帮我批准”交给原生自动审核，不能退化为人工审批或完全访问。
 pub(super) fn codex_preset(mode: &str, cwd: &str) -> Result<Value, ApiError> {
     let (approval, sandbox) = match mode {
         "read-only" => ("on-request", json!({"type":"readOnly"})),

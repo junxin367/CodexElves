@@ -9,7 +9,7 @@ import { remoteAccessValidation, type PrimaryProvider, type RemoteAccessCredenti
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const FIXED_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$/;
-const DESKTOP_WAITING_GUIDANCE = "Codex 桌面当前未连接；公网入口仍可测试和切换，远程网页会等待桌面恢复后就绪。";
+const SERVICE_WAITING_GUIDANCE = "Codex 会话服务正在准备；公网入口仍可测试和切换，远程网页会在服务连接后就绪。";
 
 export function RemoteAccessScreen({
   settings,
@@ -132,16 +132,14 @@ export function RemoteAccessScreen({
     catch { setMessage("复制失败，请手动选择文本复制"); }
   };
   const zrok = status?.zrok;
-  const desktopReady = status?.status === "ok" && status.nativeConnected === true;
+  // 用户要求远程 Codex 仅使用服务模式；可用状态和提示不得再依赖桌面注入。
   const serviceReady = status?.status === "ok" && status.serviceConnected === true;
-  const remoteReady = desktopReady || serviceReady;
-  const desktopGuidance = !settings.enabled
-    ? "请先启用上方「远程会话网页」，再重启 Codex 并等待主界面就绪，最后启动公网。"
-    : desktopReady
-      ? "Codex 桌面已连接，可以启动公网。后续重启 Codex 时，请等待主界面恢复后再刷新远程网页。"
-      : serviceReady
-        ? "Codex CLI service 已连接，主会话列表和文本消息可用；侧边会话、审批和其他原生能力需等待桌面注入恢复。"
-      : DESKTOP_WAITING_GUIDANCE;
+  const remoteReady = serviceReady;
+  const serviceGuidance = !settings.enabled
+    ? "请先启用上方「远程会话网页」，等待会话服务就绪后启动公网。"
+    : serviceReady
+      ? "Codex 会话服务已连接，可以启动公网。会话、侧边会话和审批均由服务处理。"
+      : SERVICE_WAITING_GUIDANCE;
   const publicUrl = zrok?.publicUrl || "";
   const zrokInput = zrokValue.trim();
   const zrokEmail = EMAIL_PATTERN.test(zrokInput);
@@ -213,7 +211,7 @@ export function RemoteAccessScreen({
       case "ready":
         return remoteReady
           ? <span className="zrok-status-badge connected"><span className="zrok-status-dot" />可访问</span>
-          : <span className="zrok-status-badge connecting" title="公网已连通，等待 Codex 桌面连接后才能读取会话。"><span className="zrok-status-dot" />等待 Codex 就绪</span>;
+          : <span className="zrok-status-badge connecting" title="公网已连通，等待 Codex 会话服务连接后即可读取会话。"><span className="zrok-status-dot" />等待服务就绪</span>;
       case "checking":
         return <span className="zrok-status-badge connecting"><span className="zrok-status-dot" />正在检查</span>;
       case "downloading":
@@ -480,13 +478,13 @@ export function RemoteAccessScreen({
                   variant="secondary"
                   className="h-9"
                   disabled={zrokActionDisabled}
-                  aria-describedby="remote-desktop-guidance"
+                  aria-describedby="remote-service-guidance"
                   onClick={() => void handleZrokAction()}
                 >
                   {busy ? "处理中…" : zrokActionLabel}
                 </Button>
               </div>
-              <p id="remote-desktop-guidance" className="remote-access-hint" role="status" aria-live="polite">{desktopGuidance}</p>
+              <p id="remote-service-guidance" className="remote-access-hint" role="status" aria-live="polite">{serviceGuidance}</p>
               {zrokToken && fixedNameValue && !fixedNameValid ? <small className="remote-access-inline-error">固定公网名称需为 3–63 位小写字母、数字或连字符，且首尾必须是字母或数字。</small> : null}
               {!zrokToken && !normalizedFixedName ? <small>输入邮箱时发送注册邮件；输入 token 时同时填写固定公网名称。点击右侧按钮后，当前邮箱或 token 会保存到本机 CodexElves 设置并在下次打开时回显。</small> : null}
             </div>

@@ -45,10 +45,10 @@ fn prepare_bundled_resources() {
                 .unwrap()
                 .to_string_lossy()
                 .replace('\\', "/");
-            // 与 Android 的公开网页包一致；原生注入、缓存恢复页及开发/许可证文本不作为可执行缓存入口。
+            // 与 Android 的公开网页包一致；缓存恢复页及开发/许可证文本不作为可执行缓存入口。
             if matches!(
                 relative.as_str(),
-                "native.js" | "cache-recovery.html" | "cache-recovery.js"
+                "cache-recovery.html" | "cache-recovery.js"
             ) {
                 continue;
             }

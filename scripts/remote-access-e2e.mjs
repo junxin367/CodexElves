@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import {
   sourceFingerprint, createEvidenceReference, verifyEvidenceReference, screenshotFileType,
-  verifyNativeEvidence, verifyRemoteAccessReport, verifyRuntimeEvidence, verifySideNamePhase,
+  verifyNativeEvidence, verifyRemoteAccessReport, verifyRuntimeEvidence,
   verifyQuestionReceiptRecoveryStage,
   verifyQueueRecoveryStage, classifyQueueRecoveryTransition, verifyQueueRecoveryTerminal,
   verifyQueueEditCancelEditingFacts,
@@ -18,11 +18,11 @@ import {
 import { withRemoteAccessEnvironmentLease, restoreRemoteAccessEnvironmentLease,
   validateRemoteAccessEnvironmentScope } from "./remote-access-e2e-environment.mjs";
 
-export const REMOTE_ACCESS_E2E_VERSION = "2.5.10";
+export const REMOTE_ACCESS_E2E_VERSION = "2.5.12";
 
 export const REMOTE_ACCESS_E2E_CASES = Object.freeze([
   { id: "read.ready", suite: "read", title: "真实页面与连接可用" },
-  { id: "read.runtime_version", suite: "read", title: "安装版本、原生适配器与网页版本证据" },
+  { id: "read.runtime_version", suite: "read", title: "安装版本、服务协议与网页版本证据" },
   { id: "session.create", suite: "session", title: "普通创建两个独立测试会话" },
   { id: "read.select_refresh", suite: "read", title: "主会话选择、切换与刷新" },
   { id: "session.model", suite: "session", title: "模型选择、协议归属及发送后的实际模型" },
@@ -35,13 +35,7 @@ export const REMOTE_ACCESS_E2E_CASES = Object.freeze([
   { id: "queue.steer", suite: "queue", title: "引导指定排队消息进入实际执行" },
   { id: "session.stop", suite: "session", title: "停止实际执行并恢复输入" },
   { id: "read.main_read_state", suite: "read", title: "主会话新回复未读、打开已读、刷新保持及再次未读" },
-  { id: "side.default_name", suite: "side", title: "远程新建侧边会话默认名" },
   { id: "lifecycle.side_create", suite: "lifecycle", title: "创建并标记侧边会话" },
-  { id: "side.first_message_name", suite: "side", title: "首条消息后侧边名称与同 ID 原生标签一致" },
-  { id: "side.same_id_name", suite: "side", title: "同一侧边 ID 的远程与 Codex 标题一致" },
-  { id: "side.desktop_created", suite: "side", title: "Codex 创建的侧边按 ID 进入远程列表" },
-  { id: "side.desktop_rename", suite: "side", title: "Codex 改名及连续改名同步" },
-  { id: "side.custom_name_refresh", suite: "side", title: "刷新保留自定义名且后续消息不覆盖" },
   { id: "side.multiple", suite: "side", title: "多个侧边会话独立切换及父子身份" },
   { id: "lifecycle.side_switch", suite: "lifecycle", title: "侧边会话与主会话往返切换" },
   { id: "lifecycle.side_refresh", suite: "lifecycle", title: "侧边会话刷新及主会话归属" },
@@ -58,12 +52,10 @@ export const REMOTE_ACCESS_E2E_CASES = Object.freeze([
   { id: "optimizer.restore", suite: "optimizer", title: "提示词优化和恢复原文" },
   { id: "optimizer.cancel", suite: "optimizer", title: "提示词优化取消后原文保持" },
   { id: "optimizer.late_result", suite: "optimizer", title: "编辑与跨会话切换后迟到结果不覆盖" },
-  { id: "optimizer.no_injection", suite: "optimizer", title: "无原生注入且 CLI 不可用时独立优化、取消、恢复与只读授权" },
+  { id: "optimizer.no_injection", suite: "optimizer", title: "会话服务不可用时独立优化、取消、恢复与只读授权" },
   { id: "context.switch_update", suite: "context", title: "上下文圆环跨会话与新轮次更新" },
   { id: "context.zero_missing", suite: "context", title: "上下文零值和缺失字段实际显示" },
-  { id: "transport.native", suite: "transport", title: "正常发送使用原生通道" },
-  { id: "transport.cli_fallback", suite: "transport", title: "CDP 失效仅对可兜底会话使用 CLI" },
-  { id: "transport.native_takeover", suite: "transport", title: "CDP 恢复后原生接管且不重发" },
+  { id: "transport.service", suite: "transport", title: "正常发送使用服务通道" },
   { id: "recovery.reconnect", suite: "recovery", title: "断线重连恢复真实会话及草稿" },
   { id: "recovery.native_restart", suite: "recovery", title: "原生重启后恢复会话、活动轮和草稿" },
   { id: "recovery.unknown_receipt", suite: "recovery", title: "未知回执只核对原请求且没有重复写入" },
@@ -222,7 +214,6 @@ async function state(ctx) {
         alt: node.getAttribute("alt") || "", loaded: node.complete && node.naturalWidth > 0,
       })),
       approvalText: text("#approval-area"), pendingText: text("#pending-area"), goalText: text("#goal-area"),
-      desktopGuidance: visible(document.querySelector("#desktop-connection-guidance")),
       expired: visible(document.querySelector("#side-thread-expired")),
       editor: document.querySelector(".message-editor-input")?.value ?? null,
       canCreate: !!document.querySelector("#new-chat") && !document.querySelector("#new-chat").disabled,
@@ -1018,21 +1009,8 @@ const fact = (name, value, op = "equals") => ({ fact: name, op, value });
 
 // 这些契约来自脚本源码，离线验证不能采信报告自填的成功状态或预期。
 export const REMOTE_ACCESS_E2E_CONTRACTS = Object.freeze({
-  "side.default_name": { defaultSideTabTitle: true, sideName: { key: "side", phases: ["default"] } },
-  "side.first_message_name": { expectedFacts: { surface: "codex-desktop" },
-    sideName: { key: "side", phases: ["first-message"], afterMessage: true } },
-  "side.same_id_name": { expectedFacts: { surface: "codex-desktop" },
-    sideName: { key: "side", phases: ["same-id"] } },
-  "side.desktop_created": { expectedFacts: { surface: "codex-desktop" },
-    sideName: { key: "desktopSide", phases: ["desktop-created"] } },
-  "side.desktop_rename": { expectedFacts: { surface: "codex-desktop" },
-    sideName: { key: "side", phases: ["rename-1", "rename-2"], custom: true } },
-  "side.custom_name_refresh": { expectedFacts: { surface: "codex-desktop" },
-    sideName: { key: "side", phases: ["custom-after-next-message"], afterMessage: true, custom: true } },
   "queue.automatic": { requiresNaturalQueue: true },
-  "transport.native": { expectedFacts: { transport: "native", submissionCount: 1, duplicateCount: 0 } },
-  "transport.cli_fallback": { expectedFacts: { transport: "cli", fallbackScope: "thread", globalReadOnly: false, submissionCount: 1, duplicateCount: 0 } },
-  "transport.native_takeover": { expectedFacts: { transport: "native", nativeTakeover: true, replayedSubmissionCount: 0 } },
+  "transport.service": { expectedFacts: { transport: "service", submissionCount: 1, duplicateCount: 0 } },
   "recovery.reconnect": { expectedFacts: { connected: true, draftPreserved: true, duplicateCount: 0 } },
   "recovery.native_restart": { expectedFacts: { connected: true, nativeRestarted: true, draftPreserved: true, duplicateCount: 0 } },
   "recovery.unknown_receipt": { expectedFacts: { receiptState: "completed", originalRequestCount: 1, replayedSubmissionCount: 0 } },
@@ -1055,7 +1033,7 @@ export const REMOTE_ACCESS_E2E_CONTRACTS = Object.freeze({
   "scenario.compaction": { expectedFacts: { compactionStatus: "completed", usableAfterCompaction: true } },
   "scenario.goal": { expectedFacts: { goalCreated: true, goalExecuted: true } },
   "optimizer.restore": { requiredUiRestores: 1 },
-  "optimizer.no_injection": { requiredUiRestores: 1, expectedFacts: { nativeConnected: false, serviceConnected: false,
+  "optimizer.no_injection": { requiredUiRestores: 1, expectedFacts: { serviceConnected: false,
     optimizationState: "completed", threadSubmissionCount: 0 } },
   "android.installed_version": { expectedFacts: { packageName: "com.junxin367.codexelves", signatureMatchesRelease: true, installedAssetsMatch: true } },
   "android.background_resume": { expectedFacts: { resumed: true, draftPreserved: true, duplicateCount: 0 } },
@@ -1065,11 +1043,11 @@ export const REMOTE_ACCESS_E2E_CONTRACTS = Object.freeze({
 });
 
 const restoreResources = Object.freeze({
-  "restore-cdp": "cdp", "restore-service": "service", "restore-network": "tab-network",
+  "restore-service": "service", "restore-network": "tab-network",
   "restore-upstream": "upstream", "restore-receipts": "receipts", "restore-side-create-delivery": "side-create-delivery",
 });
 const faultResources = Object.freeze({
-  "optimizer.no_injection": ["cdp", "service"], "transport.cli_fallback": ["cdp"],
+  "optimizer.no_injection": ["service"],
   "recovery.reconnect": ["tab-network"], "recovery.native_restart": ["native-process"],
   "recovery.unknown_receipt": ["receipts"], "recovery.question_receipt": ["receipts"],
   "side.late_creation": ["side-create-delivery"],
@@ -1374,72 +1352,6 @@ async function captureObservation(ctx, label) {
   return evidence;
 }
 
-const sideNameCapture = captureObservation;
-
-async function sideNameRead(ctx, key, phase) {
-  const side = owned(ctx, key);
-  const result = await driverStep(ctx, "desktop", "observe-thread", { key, payload: { phase },
-    facts: [fact("nativeTabThreadId", side.id), fact("visibleThreadId", side.id)] });
-  const records = result.records.filter(record => record.facts.threadId === side.id
-    && record.facts.nativeTabThreadId === side.id && record.facts.visibleThreadId === side.id
-    && typeof record.facts.nativeTabTitle === "string" && record.facts.nativeTabTitle.trim()
-    && record.facts.visibleTitle === record.facts.nativeTabTitle);
-  invariant(records.length === 1, "侧边命名必须有一条同 ID、非空且与 Codex 可见标签一致的原始 tab.title 观察");
-  return records[0];
-}
-
-async function sideNameEvidence(ctx, key, expectedTitle, phase, afterMessageActionId) {
-  driver(ctx, "desktop", ["observe-thread"]);
-  const side = owned(ctx, key);
-  const beforeUi = await sideNameCapture(ctx, `${phase}-before-native`);
-  const started = Date.now();
-  let previous, current;
-  // 这是采样稳定窗口，不是产品命名算法；不要求首条消息一定改变默认名。
-  while (Date.now() - started < (ctx.options.timeoutMs ?? 45_000)) {
-    current = await sideNameRead(ctx, key, phase);
-    if (previous && previous.facts.nativeTabTitle === current.facts.nativeTabTitle
-      && new Date(current.facts.capturedAt).getTime() - new Date(previous.facts.capturedAt).getTime() >= 1_000) break;
-    previous = current;
-    await new Promise(done => setTimeout(done, 1_000));
-  }
-  invariant(previous && current && previous !== current
-    && previous.facts.nativeTabTitle === current.facts.nativeTabTitle
-    && new Date(current.facts.capturedAt).getTime() - new Date(previous.facts.capturedAt).getTime() >= 1_000,
-  "同 ID 原生侧边名称未在两次独立观察中稳定");
-  const title = current.facts.nativeTabTitle;
-  if (expectedTitle !== undefined) invariant(title === expectedTitle, "原生侧边自定义名称被覆盖或未生效");
-  await wait(ctx, "侧边详情逐字同步同 ID 原生标签", value =>
-    value.threadId === side.id && value.related && value.title === title && !value.loading);
-  const detailUi = await sideNameCapture(ctx, `${phase}-detail`);
-  await backToMain(ctx); await ensureMenu(ctx);
-  await wait(ctx, "父会话列表逐字同步准确侧边 ID 的原生名称", value => value.threadId === side.parentThreadId
-    && value.sideEntries.filter(entry => entry.id === side.id).length === 1
-    && value.sideEntries.some(entry => entry.id === side.id && entry.title.trim() === title && entry.visible));
-  const listUi = await sideNameCapture(ctx, `${phase}-list`);
-  await openSide(ctx, key);
-  const reloadStartedAt = iso();
-  await reloadPage(ctx);
-  await wait(ctx, "新文档侧边详情保持原生名称和准确身份", value =>
-    value.threadId === side.id && value.related && value.title === title && value.promptEditable && !value.loading);
-  const reloadedUi = await sideNameCapture(ctx, `${phase}-reloaded`);
-  const afterReload = await sideNameRead(ctx, key, `${phase}-after-reload`);
-  invariant(afterReload.facts.nativeTabTitle === title, "刷新后原生侧边名称已变化，不能用旧名称观察通过");
-  const evidence = { phase, threadId: side.id, parentThreadId: side.parentThreadId,
-    beforeUi, detailUi, listUi, reloadedUi, reloadStartedAt,
-    nativeReads: [previous, current, afterReload], afterMessageActionId };
-  await verifySideNamePhase(evidence, {
-    runId: ctx.report.runId, caseId: ctx.current.id, origin: ctx.origin,
-    sourceFingerprint: ctx.report.sourceFingerprint, runStartedAt: ctx.report.runStartedAt,
-    threadId: side.id, parentThreadId: side.parentThreadId, expectedTitle,
-    messageAction: afterMessageActionId ? ctx.report.actions[afterMessageActionId] : undefined,
-    defaultBlank: ctx.current.id === "side.default_name",
-  }, { baseDir: ctx.outputDir });
-  await note(ctx, "side-name", evidence);
-  side.title = title;
-  await checkpoint(ctx);
-  return title;
-}
-
 async function modelEffortIsolation(ctx) {
   const models = ctx.options.models;
   if (!Array.isArray(models) || models.length !== 2 || models[0].id === models[1].id && models[0].effort === models[1].effort)
@@ -1501,10 +1413,10 @@ const handlers = {
   async "read.runtime_version"(ctx) {
     const evidence = ctx.options.versionEvidence;
     if (!evidence?.managerVersion || !evidence.managerExecutableSha256 || !evidence.codexVersion
-      || !evidence.remoteAssetSha256 || evidence.adapterVersion == null || !evidence.verifiedAt
+      || !evidence.remoteAssetSha256 || evidence.serviceProtocolVersion == null || !evidence.verifiedAt
       || !evidence.records?.length || !evidence.managerExecutable || !evidence.remoteAsset
       || !evidence.browserAsset || !evidence.browserAssetEvidence)
-      block("缺少当前安装程序、原生适配器或浏览器实际加载脚本的证据；源码和另行下载的资源不能代替运行版本");
+      block("缺少当前安装程序、服务协议或浏览器实际加载脚本的证据；源码和另行下载的资源不能代替运行版本");
     invariant(/^[a-fA-F0-9]{64}$/.test(evidence.managerExecutableSha256)
       && /^[a-fA-F0-9]{64}$/.test(evidence.remoteAssetSha256), "运行资产 SHA-256 格式无效");
     await verifyRuntimeEvidence(evidence, {
@@ -1936,91 +1848,6 @@ const handlers = {
 };
 
 Object.assign(handlers, {
-  async "side.default_name"(ctx) {
-    driver(ctx, "desktop", ["observe-thread"]);
-    const side = await createSideBlank(ctx);
-    const observation = await state(ctx);
-    invariant(observation.threadId === side.id && observation.related && observation.title
-      && observation.turns.length === 0, "首次发送前侧边默认名或空会话状态不正确");
-    await sideNameEvidence(ctx, "side", undefined, "default");
-    await verifyNative(ctx, { threadIds: [side.id], parentThreadId: side.parentThreadId,
-      defaultSideTabTitle: true, expectedFacts: { nativeTabThreadId: side.id, nativeTabTitle: side.title } });
-  },
-  async "side.first_message_name"(ctx) {
-    const side = owned(ctx, "side");
-    if (!side.firstMessageText) block("需先完成 lifecycle.side_create 的首条真实消息");
-    await openSide(ctx);
-    const first = Object.values(ctx.report.actions).find(value => value.marker === side.marker
-      && value.status === "confirmed" && value.kind === "send" && (value.threadId || value.result?.threadId) === side.id);
-    if (!first) block("缺少同一侧边首条真实消息的已确认动作身份");
-    const expected = await sideNameEvidence(ctx, "side", undefined, "first-message", first.id);
-    await verifyNative(ctx, { actions: [], threadIds: [side.id], parentThreadId: side.parentThreadId,
-      expectedFacts: { nativeTabThreadId: side.id, nativeTabTitle: expected } });
-  },
-  async "side.same_id_name"(ctx) {
-    driver(ctx, "desktop", ["observe-thread"]);
-    await openSide(ctx);
-    await sideNameEvidence(ctx, "side", undefined, "same-id");
-  },
-  async "side.desktop_created"(ctx) {
-    driver(ctx, "desktop", ["create-side", "observe-thread"]);
-    permit(ctx, "allowSideSessions"); permit(ctx, "allowCreate");
-    await idle(ctx);
-    const spec = message(ctx, "desktopSide");
-    const result = await driverStep(ctx, "desktop", "create-side", {
-      mutation: true, messageSpec: spec, payload: { parentThreadId: owned(ctx, "main").id },
-      facts: [fact("parentThreadId", owned(ctx, "main").id), fact("messageMarker", spec.marker), fact("createdSideCount", 1)],
-    });
-    const proof = result.records.find(value => value.rawFacts?.createdThreadId);
-    invariant(proof, "Codex 侧边创建回执缺少 createdThreadId 原始字段");
-    const raw = JSON.parse((await readFile(proof.evidencePath, "utf8")).replace(/^\uFEFF/, ""));
-    const id = jsonPointer(raw, proof.rawFacts.createdThreadId);
-    invariant(typeof id === "string" && id && !ctx.report.initialThreadIds.includes(id)
-      && !Object.values(ctx.report.threads).some(value => value.id === id), "桌面创建的侧边不是全新唯一 ID");
-    const creation = Object.values(ctx.report.actions).find(value => value.caseId === ctx.current.id && value.kind === "create-side");
-    ctx.report.threads.desktopSide = { id, key: "desktopSide", marker: spec.marker, parentThreadId: owned(ctx, "main").id,
-      runId: ctx.report.runId, createdBy: "external-created-this-run", creationActionId: creation.id,
-      createdAt: iso(), kind: "side" };
-    await checkpoint(ctx);
-    await ensureMenu(ctx);
-    await wait(ctx, "Codex 创建侧边按准确 ID 出现在远程菜单", value => value.sideEntries.some(entry => entry.id === id));
-    await openSide(ctx, "desktopSide");
-    const final = await finalReply(ctx, { ...spec, threadId: id });
-    ctx.report.threads.desktopSide.title = final.title;
-    await sideNameEvidence(ctx, "desktopSide", undefined, "desktop-created");
-    await backToMain(ctx);
-  },
-  async "side.desktop_rename"(ctx) {
-    driver(ctx, "desktop", ["rename-side-tab", "observe-thread"]);
-    permit(ctx, "allowSessionMetadata");
-    await openSide(ctx);
-    for (const sequence of [1, 2]) {
-      const title = `侧边 ${ctx.report.runId} ${sequence}`;
-      await driverStep(ctx, "desktop", "rename-side-tab", { key: "side", mutation: true,
-        payload: { title, sequence, nativeTabThreadId: owned(ctx, "side").id },
-        facts: [fact("nativeTabThreadId", owned(ctx, "side").id), fact("nativeTabTitle", title),
-          fact("visibleTitle", title), fact("visibleThreadId", owned(ctx, "side").id)] });
-      await wait(ctx, `连续改名第 ${sequence} 次同步到准确侧边`, value => value.threadId === owned(ctx, "side").id && value.title === title);
-      await sideNameEvidence(ctx, "side", title, `rename-${sequence}`);
-      owned(ctx, "side").customTitle = title;
-    }
-    owned(ctx, "side").title = owned(ctx, "side").customTitle;
-  },
-  async "side.custom_name_refresh"(ctx) {
-    const side = owned(ctx, "side");
-    if (!side.customTitle) block("需先通过 Codex 连续改名建立本轮自定义名称");
-    await openSide(ctx);
-    await reloadPage(ctx);
-    await wait(ctx, "刷新后侧边自定义名保持", value => value.threadId === side.id && value.title === side.customTitle && value.promptEditable);
-    await ensureOwnedMarker(ctx, side);
-    const spec = await send(ctx, message(ctx, "side-custom-name-next"), { key: "side" });
-    await finalReply(ctx, spec);
-    invariant((await state(ctx)).title === side.customTitle, "后续消息覆盖了自定义侧边标题");
-    await sideNameEvidence(ctx, "side", side.customTitle, "custom-after-next-message", spec.actionId);
-    await backToMain(ctx); await ensureMenu(ctx);
-    invariant((await state(ctx)).sideEntries.some(value => value.id === side.id && value.title.trim() === side.customTitle),
-      "父会话菜单未保留侧边自定义标题");
-  },
   async "side.multiple"(ctx) {
     const second = await createSideBlank(ctx, "side2"); await markSide(ctx, "side2");
     const side = owned(ctx, "side");
@@ -2219,47 +2046,45 @@ Object.assign(handlers, {
     await selectOwned(ctx, "main");
   },
   async "optimizer.no_injection"(ctx) {
-    driver(ctx, "environment", ["disconnect-cdp", "disconnect-service", "restore-cdp", "restore-service",
+    driver(ctx, "environment", ["disconnect-service", "restore-service",
       "observe-optimization", "observe-authorization"]);
     const readOnlyTab = ctx.options.readOnlyTab;
     if (!readOnlyTab?.playwright || !readOnlyTab.url || !readOnlyTab.screenshot)
       block("需显式绑定同一专用测试会话的 readOnlyTab，以真实只读授权检查独立优化权限");
     permit(ctx, "allowFaults");
     if (ctx.options.authorization?.maxOptimizations - (ctx.report.optimizationSubmissions || 0) < 2)
-      block("无原生注入优化案例至少需要两次独立优化额度（完成/恢复一次、取消一次）");
+      block("独立优化案例至少需要两次独立优化额度（完成/恢复一次、取消一次）");
     await idle(ctx);
     const originalTab = ctx.tab;
     try {
-      await driverStep(ctx, "environment", "disconnect-cdp", { mutation: true,
-        facts: [fact("nativeConnected", false)], payload: { sequence: "optimizer" } });
       await driverStep(ctx, "environment", "disconnect-service", { mutation: true,
-        facts: [fact("nativeConnected", false), fact("serviceConnected", false)], payload: { scope: "cli-service-only" } });
+        facts: [fact("serviceConnected", false)], payload: { scope: "cli-service-only" } });
       const spec = await optimizationStart(ctx, "main", "without-native");
-      const optimized = await wait(ctx, "两条会话通道都不可用时独立优化实际完成", value =>
+      const optimized = await wait(ctx, "会话服务不可用时独立优化实际完成", value =>
         value.optimizer.state === "optimized" && value.prompt.trim() && value.prompt !== spec.text,
       ctx.options.optimizationTimeoutMs ?? 180_000);
       await finalDriverContract(ctx, "environment", "observe-optimization", {
         originalInput: spec.text, optimizedPrompt: optimized.prompt });
       const beforeUi = await capture(ctx, "without-native-optimized");
       await click(ctx, ctx.tab.playwright.getByRole("button", { name: "恢复原提示词", exact: true }));
-      await wait(ctx, "无原生注入时仍能恢复原文", value => value.prompt === spec.text && value.optimizer.state === "idle");
+      await wait(ctx, "会话服务不可用时仍能恢复原文", value => value.prompt === spec.text && value.optimizer.state === "idle");
       const afterUi = await capture(ctx, "without-native-original-restored");
       await note(ctx, "local-ui-restore", { threadId: owned(ctx, "main").id, originalInput: spec.text,
         optimizedPrompt: optimized.prompt, beforeUi, afterUi });
       await ctx.tab.playwright.locator("#prompt").fill("");
       const cancelSpec = await optimizationStart(ctx, "main", "without-native-cancel");
       if ((await state(ctx)).optimizer.state !== "loading")
-        block("无原生注入的第二次优化已完成，未建立真实取消窗口，不自动增加调用");
+        block("会话服务不可用的第二次优化已完成，未建立真实取消窗口，不自动增加调用");
       await action(ctx, "cancel-without-native", { kind: "cancelPromptOptimize", threadId: owned(ctx, "main").id }, async () => {
         await click(ctx, ctx.tab.playwright.getByRole("button", { name: "取消提示词优化", exact: true }));
-        await wait(ctx, "无原生注入取消后原文保持", value => value.optimizer.state === "idle" && value.prompt === cancelSpec.text);
+        await wait(ctx, "会话服务不可用取消后原文保持", value => value.optimizer.state === "idle" && value.prompt === cancelSpec.text);
         return { originalInput: cancelSpec.text };
       });
       await driverStep(ctx, "environment", "observe-optimization", { payload: { originalInput: cancelSpec.text, waitForTerminal: true },
-        facts: [fact("nativeConnected", false), fact("serviceConnected", false),
+        facts: [fact("serviceConnected", false),
           fact("optimizationState", ["cancelled", "completed"], "oneOf"), fact("originalInput", cancelSpec.text),
           fact("threadSubmissionCount", 0)] });
-      invariant((await state(ctx)).prompt === cancelSpec.text, "无原生注入取消后迟到结果覆盖原文");
+      invariant((await state(ctx)).prompt === cancelSpec.text, "会话服务不可用取消后迟到结果覆盖原文");
       await ctx.tab.playwright.locator("#prompt").fill("");
       // 只读授权页由调用方明确绑定；这里只读取可见控件，不修改授权或发送请求。
       ctx.tab = readOnlyTab;
@@ -2269,13 +2094,13 @@ Object.assign(handlers, {
         "显式只读授权没有限制独立优化或写入控件");
       await capture(ctx, "explicit-readonly-without-native");
       await driverStep(ctx, "environment", "observe-authorization", { payload: { tabId: readOnlyTab.id, scope: "explicit-read-only" },
-        facts: [fact("nativeConnected", false), fact("serviceConnected", false),
+        facts: [fact("serviceConnected", false),
           fact("readOnly", true), fact("promptOptimizationAllowed", false)] });
     } finally {
       ctx.tab = originalTab;
-      await restoreLeasedResources(ctx, ["service", "cdp"]);
+      await restoreLeasedResources(ctx, ["service"]);
     }
-    await wait(ctx, "优化独立性测试结束后原生与 CLI 恢复", value => value.threadId === owned(ctx, "main").id && value.promptEditable);
+    await wait(ctx, "优化独立性测试结束后会话服务恢复", value => value.threadId === owned(ctx, "main").id && value.promptEditable);
     await verifyNative(ctx, { threadIds: [owned(ctx, "main").id], ...REMOTE_ACCESS_E2E_CONTRACTS["optimizer.no_injection"] });
   },
   async "recovery.draft"(ctx) {
@@ -2345,47 +2170,12 @@ async function finalDriverContract(ctx, name, operation, payload = {}, key = "ma
 }
 
 Object.assign(handlers, {
-  async "transport.native"(ctx) {
+  async "transport.service"(ctx) {
     await idle(ctx);
     const spec = await send(ctx, message(ctx, "transport-native"));
     const final = await finalReply(ctx, spec);
     await verifyNative(ctx, { threadIds: [spec.threadId], turnIds: [userTurn(final, spec).id],
-      ...REMOTE_ACCESS_E2E_CONTRACTS["transport.native"] });
-  },
-  async "transport.cli_fallback"(ctx) {
-    driver(ctx, "environment", ["disconnect-cdp", "restore-cdp", "observe-transport"]);
-    permit(ctx, "allowFaults");
-    await idle(ctx);
-    try {
-      await driverStep(ctx, "environment", "disconnect-cdp", { mutation: true,
-        facts: [fact("cdpConnected", false), fact("serviceConnected", true)], payload: { scope: "test-service" } });
-      const usable = await wait(ctx, "CDP 失效后普通会话仍可编辑创建", value => value.promptEditable && value.canCreate);
-      invariant(!usable.desktopGuidance || usable.send.enabled, "CDP 降级导致全局会话只读");
-      const spec = await send(ctx, message(ctx, "transport-cli"));
-      const final = await finalReply(ctx, spec);
-      await selectOwned(ctx, "control");
-      invariant((await state(ctx)).promptEditable && (await state(ctx)).canCreate, "局部降级扩散到另一普通会话");
-      await selectOwned(ctx, "main");
-      await finalDriverContract(ctx, "environment", "observe-transport", {
-        marker: spec.marker, turnId: userTurn(final, spec).id, verifyOnlyEligibleThreadFallback: true,
-      });
-      ctx.report.transport = { fallbackThreadId: spec.threadId, fallbackTurnId: userTurn(final, spec).id, marker: spec.marker };
-    } finally {
-      await restoreLeasedResources(ctx, ["cdp"]);
-    }
-  },
-  async "transport.native_takeover"(ctx) {
-    driver(ctx, "environment", ["observe-transport"]);
-    if (!ctx.report.transport?.fallbackTurnId) block("需先完成同轮真实 CLI 局部兜底和 CDP 恢复");
-    await idle(ctx);
-    const spec = await send(ctx, message(ctx, "transport-takeover"));
-    const final = await finalReply(ctx, spec);
-    await finalDriverContract(ctx, "environment", "observe-transport", {
-      marker: spec.marker, newTurnId: userTurn(final, spec).id, originalFallbackTurnId: ctx.report.transport.fallbackTurnId,
-    });
-    invariant(final.turns.filter(turn => turn.users.some(value => value.text.includes(ctx.report.transport.marker))).length === 1,
-      "原生接管后重发了 CLI 已完成消息");
-    await verifyNative(ctx, { threadIds: [spec.threadId], ...REMOTE_ACCESS_E2E_CONTRACTS["transport.native_takeover"] });
+      ...REMOTE_ACCESS_E2E_CONTRACTS["transport.service"] });
   },
   async "recovery.reconnect"(ctx) {
     driver(ctx, "environment", ["disconnect-network", "restore-network", "observe-recovery"]);
@@ -3355,12 +3145,6 @@ const requiredSteps = value => Object.freeze(value.split(" ").map(entry => {
 }));
 export const REMOTE_ACCESS_E2E_REQUIRED_DRIVER_STEPS = Object.freeze(Object.fromEntries(Object.entries({
   "queue.edit_draft": "native:observe-queue-edit-cancel*2",
-  "side.default_name": "desktop:observe-thread*3",
-  "side.first_message_name": "desktop:observe-thread*3",
-  "side.same_id_name": "desktop:observe-thread*3",
-  "side.desktop_created": "desktop:create-side desktop:observe-thread*3",
-  "side.desktop_rename": "desktop:rename-side-tab*2 desktop:observe-thread*6",
-  "side.custom_name_refresh": "desktop:observe-thread*3",
   "read.side_aggregate": "native:observe-side-aggregate*4",
   "read.cross_client": "desktop:open-thread*4",
   "project.pin_unpin": "desktop:create-project desktop:observe-project*3",
@@ -3368,11 +3152,9 @@ export const REMOTE_ACCESS_E2E_REQUIRED_DRIVER_STEPS = Object.freeze(Object.from
   "composer.image": "files:choose-image",
   "optimizer.cancel": "native:wait-optimization-terminal",
   "optimizer.late_result": "native:wait-optimization-terminal",
-  "optimizer.no_injection": "environment:disconnect-cdp environment:disconnect-service environment:observe-optimization*2 environment:observe-authorization environment:restore-service environment:restore-cdp",
+  "optimizer.no_injection": "environment:disconnect-service environment:observe-optimization*2 environment:observe-authorization environment:restore-service",
   "context.switch_update": "native:observe-context*4",
   "context.zero_missing": "native:observe-context*2",
-  "transport.cli_fallback": "environment:disconnect-cdp environment:restore-cdp environment:observe-transport",
-  "transport.native_takeover": "environment:observe-transport",
   "recovery.reconnect": "environment:disconnect-network environment:restore-network environment:observe-recovery",
   "recovery.native_restart": "environment:restart-native environment:observe-recovery",
   "recovery.unknown_receipt": "environment:drop-next-action-receipt environment:restore-receipts environment:observe-original-receipt",

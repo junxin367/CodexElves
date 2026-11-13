@@ -241,7 +241,7 @@ impl Harness {
                 if !missing_thread_read(&failure) {
                     return Err(failure);
                 }
-                // 桌面持有的临时子智能体可能只存在于其内存；使用既有只读 IPC，不启用 CDP 或接管。
+                // 桌面持有的临时子智能体可能只存在于其内存；使用既有只读 IPC，不启用桌面注入或接管。
                 let Some(mut owner) = self.owner_view_snapshot(id).await? else {
                     return Err(failure);
                 };

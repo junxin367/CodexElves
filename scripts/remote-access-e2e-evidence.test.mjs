@@ -13,7 +13,7 @@ import { runInNewContext } from "node:vm";
 import {
   createEvidenceReference, verifyEvidenceReference, jsonPointer, screenshotFileType,
   listRemoteAccessSourceInputs, sourceFingerprint, verifyNativeEvidence,
-  verifyRuntimeEvidence, verifyRemoteAccessReport, verifyNaturalQueueHistory, verifySideNamePhase,
+  verifyRuntimeEvidence, verifyRemoteAccessReport, verifyNaturalQueueHistory,
   verifyQuestionReceiptRecoveryFacts, verifyQuestionReceiptRecoveryStage,
   verifyQueueEditCancelFacts, verifyQueueEditCancelStage,
   classifyQueueRecoveryTransition, verifyQueueRecoveryTerminal,
@@ -1145,7 +1145,6 @@ async function sourceRepository(t) {
     "Cargo.toml": "[workspace]\nmembers=[]\n",
     "Cargo.lock": "# fixture\n",
     "assets/remote-access/app.js": "export const app = 1;\n",
-    "assets/remote-access/native.js": "export const native = 1;\n",
     "assets/remote-access/recovery-store.js": "export const recovery = 1;\n",
     "assets/remote-access/markdown.js": "export const markdown = 1;\n",
     "assets/remote-access/nested/platform.js": "export const platform = 1;\n",
@@ -1392,7 +1391,7 @@ test("修改曾漏掉的输入逐项使源码指纹失效", async t => {
 
 test("源码输入丢失时拒绝生成看似有效的指纹", async t => {
   const { root } = await sourceRepository(t);
-  await rm(join(root, "assets/remote-access/native.js"));
+  await rm(join(root, "assets/remote-access/app.js"));
   await assert.rejects(sourceFingerprint({ root }), /缺少必需输入/);
 });
 
@@ -1533,7 +1532,7 @@ async function runtimeFixture(t, loadedBody = "// runtime asset") {
   const remoteAsset = await createEvidenceReference(await put(root, "installed-app.js", "// runtime asset"), { baseDir: root });
   const fields = {
     managerVersion: "1.2.3", managerExecutableSha256: managerExecutable.sha256,
-    codexVersion: "9.0.0", remoteAssetSha256: remoteAsset.sha256, adapterVersion: 102,
+    codexVersion: "9.0.0", remoteAssetSha256: remoteAsset.sha256, serviceProtocolVersion: 6,
   };
   const record = await proof(root, fields);
   const browserAsset = await createEvidenceReference(await put(root, "browser-app.js", loadedBody), { baseDir: root });
@@ -2366,267 +2365,6 @@ test("报告按源码固定次数核验驱动步骤，删除中间步骤或重�
   assert.equal((await verifyRemoteAccessReport(report, options)).passed, false);
 });
 
-test("默认侧边名只核同ID原生tab.title，不限制语言编号或ephemeral元数据title", async t => {
-  const root = await sandbox(t);
-  const request = baseRequest({
-    actions: [], threadIds: ["side-1"], turnIds: [], expectedFacts: {}, defaultSideTabTitle: true,
-  });
-  for (const nativeTabTitle of ["Side Chat", "侧边聊天 3", "チャット β", "讨论 Ω — 尚未发送"]) {
-    const record = await proof(root, { threadId: "side-1", title: null, nativeTabThreadId: "side-1", nativeTabTitle });
-    const observed = { ...request, expectedFacts: { nativeTabThreadId: "side-1", nativeTabTitle } };
-    assert.equal((await verifyNativeEvidence([record], observed, { baseDir: root })).length, 1);
-    await assert.rejects(verifyNativeEvidence([record], {
-      ...observed, expectedFacts: { nativeTabThreadId: "side-1", nativeTabTitle: "侧边聊天 999" },
-    }, { baseDir: root }), /nativeTabTitle/);
-  }
-  for (const changes of [
-    { nativeTabTitle: "" }, { nativeTabTitle: null },
-    { nativeTabTitle: "Side Chat 1", nativeTabThreadId: "another-side" },
-  ]) {
-    const record = await proof(root, {
-      threadId: "side-1", title: null, nativeTabThreadId: "side-1", nativeTabTitle: "Side Chat 1", ...changes,
-    });
-    await assert.rejects(verifyNativeEvidence([record], request, { baseDir: root }), /nativeTabThreadId\/nativeTabTitle/);
-  }
-});
-
-async function sideNameFixture(t, title = "分析 OAuth 回调与令牌刷新（原生摘要，不取正文前十字符）") {
-  const { root, report, options } = await reportFixture(t);
-  const caseId = "side.first_message_name", threadId = "thread-main", parentThreadId = "parent-main";
-  const marker = `[remote-e2e:${runId}:side]`, expected = "SIDE-FIRST-ACK";
-  const start = Date.now() - 20_000;
-  const at = offset => new Date(start + offset).toISOString();
-  const messageAction = {
-    id: `${runId}:lifecycle.side_create:send-side`, caseId: "lifecycle.side_create",
-    kind: "send", status: "confirmed", threadId: null, marker, expected,
-    startedAt: at(-1_000), finishedAt: at(-500), result: { threadId },
-  };
-  report.runStartedAt = report.startedAt = at(-10_000);
-  report.finishedAt = at(1_900);
-  report.actions = { [messageAction.id]: messageAction };
-  report.threads = { side: { id: threadId, parentThreadId, runId, marker, kind: "side" } };
-  async function uiCapture(label, offset, list = false, before = false) {
-    const observation = {
-      at: at(offset), threadId: list ? parentThreadId : threadId, related: !list,
-      title: before ? "尚未同步的远程旧名" : title, loading: false, promptEditable: true,
-      send: { action: "send" },
-      sideEntries: list ? [{ id: threadId, title, visible: true }] : [],
-      turns: [{ id: "first-real-turn", users: [{ text: marker }], agents: [{ text: expected }] }],
-    };
-    return {
-      kind: "ui", threadId: observation.threadId, at: at(offset), observation,
-      files: {
-        dom: await createEvidenceReference(await put(root, `${label}.dom.txt`, `- heading "${observation.title}"\n- text: ${title}\n`), { baseDir: root }),
-        screenshot: await createEvidenceReference(await put(root, `${label}.png`, png), { baseDir: root }),
-        observation: await createEvidenceReference(await put(root, `${label}.observation.json`, JSON.stringify(observation)), { baseDir: root }),
-      },
-    };
-  }
-  const beforeUi = await uiCapture("side-before", 0, false, true);
-  const detailUi = await uiCapture("side-detail", 1_300);
-  const listUi = await uiCapture("side-list", 1_400, true);
-  const reloadedUi = await uiCapture("side-reloaded", 1_600);
-  const nativeReads = [];
-  const drivers = [];
-  for (const [index, offset] of [100, 1_200, 1_700].entries()) {
-    const readId = `side-read-${index}`;
-    const record = await proof(root, {
-      caseId, operation: "observe-thread", capturedAt: at(offset),
-      sourceFingerprint: report.sourceFingerprint, parentThreadId,
-      receiptId: undefined, turnId: undefined, actionId: undefined, readId,
-      title: null, nativeTabThreadId: threadId, nativeTabTitle: title,
-      visibleThreadId: threadId, visibleTitle: title, surface: "codex-desktop",
-    }, { source: "desktop-ui", actionId: undefined, turnId: undefined, readId }, `side-read-${index}.json`);
-    nativeReads.push(record);
-    drivers.push({
-      kind: "driver", driver: "desktop", operation: "observe-thread", records: [record],
-      uiEvidence: [{ dom: detailUi.files.dom, screenshot: detailUi.files.screenshot }],
-      request: {
-        runId, caseId, origin, sourceFingerprint: report.sourceFingerprint,
-        runStartedAt: report.runStartedAt, capturedAfter: at(offset - 10),
-        contractVersion: "remote-e2e-driver/2", operation: "observe-thread",
-        actions: [], threadIds: [threadId], turnIds: [], parentThreadId,
-        expectedFacts: { surface: "codex-desktop", nativeTabThreadId: threadId, visibleThreadId: threadId },
-        payload: { phase: index < 2 ? "first-message" : "first-message-after-reload" },
-      },
-    });
-  }
-  const stage = {
-    kind: "side-name", phase: "first-message", threadId, parentThreadId,
-    afterMessageActionId: messageAction.id, beforeUi, detailUi, listUi, reloadedUi,
-    nativeReads, reloadStartedAt: at(1_500),
-  };
-  report.cases = [{
-    id: caseId, required: true, status: "passed", stepsCompleted: true, inProgress: false,
-    attempts: [{ status: "passed", finishedAt: report.finishedAt }],
-    evidence: [beforeUi, detailUi, listUi, reloadedUi, ...drivers, stage],
-  }];
-  options.requiredCases = [{ id: caseId }];
-  options.caseContracts = { [caseId]: {
-    ...REMOTE_ACCESS_E2E_CONTRACTS[caseId], requiredDriverSteps: REMOTE_ACCESS_E2E_REQUIRED_DRIVER_STEPS[caseId],
-  } };
-  const request = {
-    runId, caseId, origin, sourceFingerprint: report.sourceFingerprint,
-    runStartedAt: report.runStartedAt, capturedBefore: report.finishedAt,
-    threadId, parentThreadId, messageAction,
-  };
-  return { root, report, options, stage, request, drivers, title };
-}
-
-test("首条消息后以同ID原生稳定标题验收详情、列表和刷新，允许摘要及默认名未改变", async t => {
-  for (const title of ["原生生成的长摘要：OAuth 回调排查与令牌续期", "チャット β", "侧边聊天 42"]) {
-    const { root, report, options, stage, request } = await sideNameFixture(t, title);
-    assert.equal((await verifySideNamePhase(stage, request, { baseDir: root })).title, title);
-    assert.equal((await verifyRemoteAccessReport(report, options)).passed, true);
-  }
-});
-
-test("侧边命名门禁拒绝缺步骤、同名错ID、报告伪改、旧观察和只报passed", async t => {
-  const { report, options } = await sideNameFixture(t);
-  const mutations = [
-    value => { value.cases[0].evidence = value.cases[0].evidence.filter(item => item.kind !== "side-name"); },
-    value => { value.cases[0].evidence.at(-1).nativeReads.pop(); },
-    value => { value.cases[0].evidence.at(-1).nativeReads[1] = value.cases[0].evidence.at(-1).nativeReads[0]; },
-    value => { value.cases[0].evidence.at(-1).threadId = "same-name-other-side"; },
-    value => { value.cases[0].evidence.at(-1).parentThreadId = "other-parent"; },
-    value => { value.cases[0].evidence.at(-1).detailUi.observation.threadId = "same-name-other-side"; },
-    value => { value.cases[0].evidence.at(-1).detailUi.observation.title = "前十字符派生错误标题"; },
-    value => { value.cases[0].evidence.at(-1).listUi.observation.sideEntries[0].id = "same-name-other-side"; },
-    value => { value.cases[0].evidence.at(-1).reloadedUi = value.cases[0].evidence.at(-1).detailUi; },
-    value => { value.cases[0].evidence.at(-1).reloadStartedAt = value.runStartedAt; },
-    value => { value.cases[0].evidence.at(-1).afterMessageActionId = "other-message"; },
-    value => { value.cases[0].evidence.at(-1).nativeReads = [{ passed: true }, { passed: true }, { passed: true }]; },
-    value => { value.cases[0].evidence.find(item => item.kind === "driver").request.payload.phase = "old-phase"; },
-    value => { value.actions[Object.keys(value.actions)[0]].marker = "other-first-message"; },
-    value => { value.actions[Object.keys(value.actions)[0]].finishedAt = value.finishedAt; },
-  ];
-  for (const [index, mutate] of mutations.entries()) {
-    const changed = structuredClone(report);
-    mutate(changed);
-    assert.equal((await verifyRemoteAccessReport(changed, options)).passed, false, `反例 ${index}`);
-  }
-});
-
-test("原始侧边采样本身出现错ID、旧名、旧时间或重复读取身份时必须失败", async t => {
-  for (const changes of [
-    { nativeTabThreadId: "same-name-other-side" }, { visibleThreadId: "same-name-other-side" },
-    { nativeTabTitle: "迟到的旧名" }, { visibleTitle: "错误可见名称" },
-    { parentThreadId: "other-parent" }, { capturedAt: new Date(Date.now() - 60_000).toISOString() },
-    { readId: "side-read-0" }, { capturedAt: undefined },
-  ]) {
-    const { root, stage, request } = await sideNameFixture(t);
-    const record = stage.nativeReads[1];
-    const path = join(root, record.evidencePath);
-    const raw = { ...JSON.parse(await readFile(path, "utf8")), ...changes };
-    await writeFile(path, JSON.stringify(raw));
-    Object.assign(record, await createEvidenceReference(path, { baseDir: root }));
-    record.evidencePath = record.path;
-    if (changes.readId) record.readId = changes.readId;
-    await assert.rejects(verifySideNamePhase(stage, request, { baseDir: root }), /原始|侧边|名称|取证|threadId|parentThreadId|visibleThreadId|nativeTabThreadId/);
-  }
-});
-
-test("稳定窗口不足、同ID自定义名被后续消息覆盖、非空默认会话不能通过", async t => {
-  const { root, stage, request, title } = await sideNameFixture(t);
-  await assert.rejects(verifySideNamePhase(stage, { ...request, expectedTitle: "已设置的自定义名称" }, { baseDir: root }), /自定义名称/);
-  assert.equal((await verifySideNamePhase(stage, { ...request, expectedTitle: title }, { baseDir: root })).title, title);
-  await assert.rejects(verifySideNamePhase(stage, { ...request, defaultBlank: true }, { baseDir: root }), /空侧边/);
-  const record = stage.nativeReads[1], path = join(root, record.evidencePath);
-  const raw = JSON.parse(await readFile(path, "utf8"));
-  raw.capturedAt = new Date(Date.parse(stage.beforeUi.observation.at) + 900).toISOString();
-  await writeFile(path, JSON.stringify(raw));
-  Object.assign(record, await createEvidenceReference(path, { baseDir: root }));
-  record.evidencePath = record.path;
-  await assert.rejects(verifySideNamePhase(stage, request, { baseDir: root }), /稳定/);
-});
-
-test("存在后来同阶段原始观察时，不能挑更早同名快照绕过新名称", async t => {
-  for (const phase of ["first-message", "first-message-after-reload"]) {
-    const { root, report, options, stage, drivers } = await sideNameFixture(t);
-    const original = drivers[phase.endsWith("after-reload") ? 2 : 1];
-    const index = phase.endsWith("after-reload") ? 2 : 1;
-    const raw = JSON.parse(await readFile(join(root, stage.nativeReads[index].evidencePath), "utf8"));
-    const capturedAt = new Date(Date.parse(raw.capturedAt) + 50).toISOString();
-    const record = await proof(root, {
-      ...raw, capturedAt, readId: "newer-real-read", nativeTabTitle: "原生后来改名", visibleTitle: "原生后来改名",
-    }, { source: "desktop-ui", actionId: undefined, turnId: undefined, readId: "newer-real-read" }, `newer-${index}.json`);
-    report.cases[0].evidence.push({
-      ...original, records: [record], request: { ...original.request,
-        capturedAfter: raw.capturedAt, payload: { phase } },
-    });
-    const result = await verifyRemoteAccessReport(report, options);
-    assert.equal(result.passed, false);
-    assert.match(result.problems.join("\n"), /最新.*原始观察/);
-  }
-});
-
-test("自定义名验收从原生改名动作取权威值，不能借旧消息或自填customTitle通过", async t => {
-  const { root, report, options, stage, drivers, title } = await sideNameFixture(t, "用户指定的原生名称 Ω");
-  const caseId = "side.custom_name_refresh", phase = "custom-after-next-message";
-  const messageAction = Object.values(report.actions)[0];
-  delete report.actions[messageAction.id];
-  messageAction.id = `${runId}:${caseId}:send-side-custom-name-next`;
-  messageAction.caseId = caseId;
-  report.actions[messageAction.id] = messageAction;
-  stage.phase = phase;
-  stage.afterMessageActionId = messageAction.id;
-  report.threads.side.customTitle = "此报告字段不能取代原生值";
-  report.cases[0].id = caseId;
-  for (const [index, driver] of drivers.entries()) {
-    driver.request.caseId = caseId;
-    driver.request.payload.phase = index < 2 ? phase : `${phase}-after-reload`;
-    const record = stage.nativeReads[index], path = join(root, record.evidencePath);
-    const raw = JSON.parse(await readFile(path, "utf8"));
-    raw.caseId = caseId;
-    await writeFile(path, JSON.stringify(raw));
-    const reference = await createEvidenceReference(path, { baseDir: root });
-    Object.assign(record, reference, { evidencePath: reference.path });
-  }
-  const sendRecord = await proof(root, {
-    caseId, sourceFingerprint: report.sourceFingerprint, actionId: messageAction.id,
-    threadId: stage.threadId, turnId: "first-real-turn", receiptId: "custom-send-receipt",
-    receiptState: "completed", operation: "send", capturedAt: messageAction.finishedAt,
-  }, { actionId: messageAction.id }, "custom-message.json");
-  const sendRequest = baseRequest({
-    caseId, sourceFingerprint: report.sourceFingerprint, runStartedAt: report.runStartedAt,
-    actions: [messageAction], turnIds: ["first-real-turn"], expectedFacts: { turnStatus: "completed" },
-  });
-  report.cases[0].evidence.push({ kind: "native", request: sendRequest, records: [sendRecord] });
-  const renameAction = {
-    id: `${runId}:side.desktop_rename:driver-desktop-rename-side-tab-2`,
-    caseId: "side.desktop_rename", kind: "rename-side-tab", status: "confirmed",
-    threadId: stage.threadId, startedAt: report.runStartedAt, finishedAt: messageAction.startedAt,
-  };
-  const renameRecord = await proof(root, {
-    caseId: "side.desktop_rename", sourceFingerprint: report.sourceFingerprint,
-    actionId: renameAction.id, operation: "rename-side-tab", receiptState: "completed",
-    capturedAt: messageAction.startedAt, receiptId: "native-rename-2", turnId: undefined,
-    nativeTabThreadId: stage.threadId, nativeTabTitle: title,
-    visibleThreadId: stage.threadId, visibleTitle: title,
-  }, { actionId: renameAction.id, turnId: undefined }, "custom-rename.json");
-  renameAction.result = { records: [renameRecord] };
-  report.actions[renameAction.id] = renameAction;
-  options.requiredCases = [{ id: caseId }];
-  options.caseContracts = { [caseId]: {
-    ...REMOTE_ACCESS_E2E_CONTRACTS[caseId], requiredDriverSteps: REMOTE_ACCESS_E2E_REQUIRED_DRIVER_STEPS[caseId],
-  } };
-  let result = await verifyRemoteAccessReport(report, options);
-  assert.deepEqual(result.problems, []);
-  assert.equal(result.passed, true);
-  const oldMessage = structuredClone(report);
-  Object.values(oldMessage.actions).find(value => value.kind === "send").caseId = "lifecycle.side_create";
-  assert.match((await verifyRemoteAccessReport(oldMessage, options)).problems.join("\n"), /借用了其他案例/);
-  const renamePath = join(root, renameRecord.evidencePath);
-  const raw = JSON.parse(await readFile(renamePath, "utf8"));
-  raw.nativeTabTitle = raw.visibleTitle = "真实原生自定义名称，不是后来覆盖的名称";
-  await writeFile(renamePath, JSON.stringify(raw));
-  const reference = await createEvidenceReference(renamePath, { baseDir: root });
-  Object.assign(renameRecord, reference, { evidencePath: reference.path });
-  result = await verifyRemoteAccessReport(report, options);
-  assert.equal(result.passed, false);
-  assert.match(result.problems.join("\n"), /自定义名称/);
-});
-
 test("真实native操作别名兼容editMessage/pinProject/setGoal，错误operation仍拒绝", async t => {
   const root = await sandbox(t);
   for (const [kind, operation] of [
@@ -2817,7 +2555,7 @@ test("真实runner缺少外部driver时blocked且零提交，仅用本机tab替�
     },
   });
   for (const caseId of [
-    "side.same_id_name", "transport.cli_fallback", "scenario.approval",
+    "scenario.approval",
     "optimizer.no_injection", "android.background_resume", "queue.edit_draft",
     "queue.dequeue_edit_race", "queue.dequeue_remove_race",
   ]) {

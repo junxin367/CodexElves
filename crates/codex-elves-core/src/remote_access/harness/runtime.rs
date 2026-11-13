@@ -345,7 +345,7 @@ impl Runtime {
     pub async fn check_health(&self) -> anyhow::Result<()> {
         let connection = self.connection().await?;
         let mut health = self.health.lock().await;
-        // 用户要求服务健康不依赖 CDP；5 秒内复用探测结果，限制每分钟最多 12 次只读 RPC，
+        // 用户要求服务健康不依赖桌面注入；5 秒内复用探测结果，限制每分钟最多 12 次只读 RPC，
         // 单次最多等 3 秒；不 resume 会话或发送消息，也不以普通读取缓存冒充引擎可用。
         if let Some((at, generation, result)) = &*health
             && generation == &connection.generation

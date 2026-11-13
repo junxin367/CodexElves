@@ -10,7 +10,7 @@ import { promisify, isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 import { Buffer } from "node:buffer";
 
-export const REMOTE_ACCESS_EVIDENCE_VERSION = "1.3.6";
+export const REMOTE_ACCESS_EVIDENCE_VERSION = "1.3.8";
 const executeFile = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 const hashPattern = /^[a-fA-F0-9]{64}$/;
@@ -36,7 +36,7 @@ const inputRoots = [
   "scripts/publish-android-release.ps1", ".github/workflows/android-apk.yml",
 ];
 const essentialInputs = [
-  "assets/remote-access/native.js", "assets/remote-access/app.js",
+  "assets/remote-access/app.js",
   "crates/codex-elves-core/src/remote_access.rs",
   "crates/codex-elves-core/src/codex_service.rs",
   "crates/codex-elves-core/src/prompt_optimize.rs",
@@ -1047,7 +1047,7 @@ export async function verifyNativeEvidence(records, request = {}, options = {}) 
     "FIFO 专项契约没有绑定两条原入队动作");
   }
   const mandatory = requestComparisons(request);
-  invariant(actions.length || request.expectedReadState || request.defaultSideTabTitle === true || mandatory.some(value =>
+  invariant(actions.length || request.expectedReadState || mandatory.some(value =>
     !["origin", "sourceFingerprint", "threadId", "turnId"].includes(value.fact)),
   "原生核验缺少由 runner 定义的动作或预期语义");
   const verified = [];
@@ -1129,11 +1129,6 @@ export async function verifyNativeEvidence(records, request = {}, options = {}) 
   for (const turnId of request.turnIds || [])
     invariant(verified.some(record => record.facts.turnId === turnId), `缺少轮次的原始证据：${turnId}`);
   verifyCorrelatedExpectations(verified.map(record => record.facts), mandatory, "runner 固定契约");
-  if (request.defaultSideTabTitle === true) {
-    invariant(verified.some(record => record.facts.nativeTabThreadId === record.facts.threadId
-      && nonempty(record.facts.nativeTabTitle)),
-    "原始 nativeTabThreadId/nativeTabTitle 未证明同一侧边标签的默认名称");
-  }
   if (request.naturalQueue) {
     const { threadId, previousTurnId, entries } = request.naturalQueue;
     invariant(Array.isArray(entries) && entries.length >= 2, "FIFO runner 没有登记两条原消息");
@@ -1162,10 +1157,13 @@ export async function verifyRuntimeEvidence(evidence, request = {}, options = {}
   invariant(evidence && typeof evidence === "object", "缺少运行版本证据");
   const expectedFacts = {};
   for (const name of ["managerVersion", "managerExecutableSha256", "codexVersion",
-    "remoteAssetSha256", "adapterVersion"]) {
+    "remoteAssetSha256", "serviceProtocolVersion"]) {
     invariant(evidence[name] !== undefined && evidence[name] !== null && evidence[name] !== "", `运行版本证据缺少 ${name}`);
     expectedFacts[name] = evidence[name];
   }
+  // 协议 6 起固定使用服务模式；与 remote_access/service.rs 及 Windows 构建基线同步核对。
+  invariant(Number.isSafeInteger(evidence.serviceProtocolVersion) && evidence.serviceProtocolVersion >= 6,
+    "运行服务尚未提供仅服务模式的协议");
   invariant(hashPattern.test(evidence.managerExecutableSha256) && hashPattern.test(evidence.remoteAssetSha256),
     "运行资产 SHA-256 格式无效");
   const manager = await verifyEvidenceReference(evidence.managerExecutable, options);
@@ -1629,148 +1627,6 @@ async function verifyQuestionReceiptRecovery(entry, report, driverStages, option
   }, options);
 }
 
-/** 同 ID tab.title 是唯一名称依据；稳定采样不推导语言、编号、长度或首条正文。 */
-export async function verifySideNamePhase(stage, request, options = {}) {
-  const { threadId, parentThreadId, messageAction, expectedTitle, defaultBlank } = request;
-  invariant(nonempty(threadId) && nonempty(parentThreadId)
-    && stage.threadId === threadId && stage.parentThreadId === parentThreadId,
-  "侧边命名阶段缺少准确的本轮侧边及父 ID");
-  const captures = {};
-  for (const name of ["beforeUi", "detailUi", "listUi", "reloadedUi"]) {
-    const ui = stage[name];
-    const { dom } = await verifyUiEvidence(ui, options);
-    const artifact = await verifyEvidenceReference(ui.files.observation, options);
-    const observation = JSON.parse(artifact.bytes.toString("utf8").replace(/^\uFEFF/, ""));
-    invariant(isDeepStrictEqual(observation, ui.observation), "侧边命名 UI 观察与原始 JSON 文件不一致");
-    invariant(Number.isFinite(timestamp(observation.at)), "侧边命名 UI 缺少实际观察时间");
-    verifyFreshness({ capturedAt: observation.at }, request);
-    captures[name] = { observation, dom };
-  }
-  const before = captures.beforeUi.observation;
-  invariant(before.threadId === threadId && before.related === true && !before.loading,
-    "侧边命名起点未显示准确侧边");
-  if (defaultBlank) invariant(Array.isArray(before.turns) && before.turns.length === 0,
-    "默认名必须在首条消息前的空侧边验证");
-  if (messageAction) {
-    invariant(stage.afterMessageActionId === messageAction.id && messageAction.status === "confirmed"
-      && messageAction.kind === "send" && actionThreadId(messageAction) === threadId
-      && nonempty(messageAction.marker) && nonempty(messageAction.expected)
-      && timestamp(before.at) >= timestamp(messageAction.finishedAt),
-    "侧边命名未绑定同一会话的已确认真实消息");
-    const turns = (before.turns || []).filter(turn => turn.users?.some(user => user.text.includes(messageAction.marker)));
-    invariant(turns.length === 1 && nonempty(turns[0].id) && !turns[0].id.startsWith("pending-")
-      && !turns[0].error && turns[0].agents?.some(agent => agent.text.includes(messageAction.expected))
-      && !["stop", "sending"].includes(before.send?.action),
-    "侧边命名起点没有同一真实消息完成后的原始 UI 证据");
-  }
-  invariant(Array.isArray(stage.nativeReads) && stage.nativeReads.length === 3,
-    "侧边命名缺少两次稳定原生采样及刷新后的独立核对");
-  const reads = [];
-  for (const record of stage.nativeReads) {
-    const [verified] = await verifyNativeEvidence([record], {
-      ...request, actions: [], threadIds: [threadId], capturedAfter: before.at,
-      expectedFacts: { threadId, parentThreadId, nativeTabThreadId: threadId,
-        visibleThreadId: threadId, surface: "codex-desktop", operation: "observe-thread" },
-    }, options);
-    invariant(nonempty(verified.facts.nativeTabTitle)
-      && verified.facts.visibleTitle === verified.facts.nativeTabTitle,
-    "侧边命名没有同一观察中的原生及 Codex 可见名称");
-    reads.push(verified);
-  }
-  invariant(new Set(reads.map(sideReadKey)).size === 3
-    && new Set(reads.map(record => [record.facts.receiptId, record.facts.readId, record.facts.eventId]
-      .filter(value => value !== undefined).join(":"))).size === 3,
-  "侧边命名重复使用同一原始读取身份");
-  const title = reads[1].facts.nativeTabTitle;
-  invariant(reads.every(record => record.facts.nativeTabTitle === title)
-    && timestamp(reads[1].facts.capturedAt) - timestamp(reads[0].facts.capturedAt) >= 1_000,
-  "同 ID 原生名称没有稳定，或刷新后观察已是另一名称");
-  if (expectedTitle !== undefined) invariant(title === expectedTitle, "原生侧边自定义名称被后续消息覆盖或回退");
-  for (const name of ["detailUi", "reloadedUi"]) {
-    const { observation, dom } = captures[name];
-    invariant(observation.threadId === threadId && observation.related === true
-      && !observation.loading && observation.title === title && domContainsText(dom.bytes, title),
-    "侧边详情名称、ID 或原始 DOM 与同 ID 原生标签不一致");
-  }
-  const list = captures.listUi;
-  const rows = (list.observation.sideEntries || []).filter(entry => entry.id === threadId);
-  invariant(list.observation.threadId === parentThreadId && rows.length === 1
-    && rows[0].visible === true && rows[0].title.trim() === title && domContainsText(list.dom.bytes, title),
-  "侧边列表名称或准确父子 ID 与原生标签不一致");
-  const times = [before.at, reads[0].facts.capturedAt, reads[1].facts.capturedAt,
-    captures.detailUi.observation.at, list.observation.at, stage.reloadStartedAt,
-    captures.reloadedUi.observation.at, reads[2].facts.capturedAt].map(timestamp);
-  invariant(times.every(Number.isFinite) && times.every((value, index) => !index || value >= times[index - 1]),
-    "侧边命名阶段使用旧观察或刷新前后的取证顺序错误");
-  invariant(captures.reloadedUi.observation.promptEditable === true, "刷新后的侧边未恢复可用状态");
-  return { title, reads, beforeAt: times[0], finishedAt: times.at(-1) };
-}
-
-async function verifySideNames(entry, report, contract, driverStages, options) {
-  const definition = contract.sideName;
-  if (!definition) return;
-  const side = report.threads?.[definition.key];
-  invariant(side?.runId === report.runId && nonempty(side.id) && nonempty(side.parentThreadId),
-    "侧边命名缺少本轮登记的准确侧边对象");
-  const phases = entry.evidence.filter(value => value.kind === "side-name");
-  invariant(phases.length === definition.phases.length
-    && phases.every((value, index) => value.phase === definition.phases[index]),
-  "侧边命名缺少源码要求的完整阶段");
-  let previous;
-  for (const phase of phases) {
-    const messageAction = definition.afterMessage ? report.actions?.[phase.afterMessageActionId] : undefined;
-    if (definition.afterMessage) invariant(messageAction, "侧边命名缺少首条或后续真实消息动作");
-    if (definition.afterMessage)
-      invariant(messageAction.caseId === (entry.id === "side.first_message_name" ? "lifecycle.side_create" : entry.id),
-        "侧边命名借用了其他案例的消息，不能证明本阶段首条或后续发送");
-    if (entry.id === "side.first_message_name") invariant(messageAction.marker === side.marker, "首条名称验收借用了其他消息");
-    let expectedTitle;
-    if (definition.custom) {
-      const sequence = phase.phase === "rename-1" ? 1 : 2;
-      const rename = Object.values(report.actions || {}).filter(action =>
-        action.caseId === "side.desktop_rename" && action.kind === "rename-side-tab"
-        && action.threadId === side.id && action.status === "confirmed"
-        && action.id.endsWith(`-${sequence}`));
-      invariant(rename.length === 1, "自定义名称缺少对应的原生改名动作");
-      const result = await verifyNativeEvidence(rename[0].result?.records, {
-        runId: report.runId, caseId: "side.desktop_rename", origin: report.origin,
-        sourceFingerprint: report.sourceFingerprint, runStartedAt: report.runStartedAt || report.startedAt,
-        capturedBefore: report.finishedAt, actions: [rename[0]], threadIds: [side.id],
-      }, options);
-      const native = result.filter(record => record.facts.nativeTabThreadId === side.id
-        && nonempty(record.facts.nativeTabTitle) && record.facts.visibleThreadId === side.id
-        && record.facts.visibleTitle === record.facts.nativeTabTitle);
-      invariant(native.length === 1, "自定义名称没有同 ID 原生改名后的原始标签");
-      expectedTitle = native[0].facts.nativeTabTitle;
-    }
-    for (const [index, record] of (phase.nativeReads || []).entries())
-      invariant(driverStages.some(({ step, records }) => step.driver === "desktop"
-        && step.operation === "observe-thread"
-        && step.request.payload?.phase === (index < 2 ? phase.phase : `${phase.phase}-after-reload`)
-        && records.some(candidate => sideReadKey(candidate) === sideReadKey(record))),
-      "侧边命名采样未关联本阶段真实 desktop/observe-thread");
-    for (const [suffix, selected] of [["", phase.nativeReads?.slice(0, 2)], ["-after-reload", phase.nativeReads?.slice(2)]]) {
-      const observed = driverStages.filter(({ step }) => step.driver === "desktop"
-        && step.operation === "observe-thread" && step.request.payload?.phase === `${phase.phase}${suffix}`)
-        .flatMap(({ records }) => records.filter(record => record.facts.threadId === side.id
-          && record.facts.nativeTabThreadId === side.id && record.facts.visibleThreadId === side.id))
-        .sort((left, right) => timestamp(left.facts.capturedAt) - timestamp(right.facts.capturedAt));
-      const latest = observed.slice(-(suffix ? 1 : 2));
-      invariant(selected?.length === latest.length
-        && selected.every((record, index) => sideReadKey(record) === sideReadKey(latest[index])),
-      "侧边命名没有采用该阶段最新的原始观察，不能择取更早同名快照");
-    }
-    const actual = await verifySideNamePhase(phase, {
-      runId: report.runId, caseId: entry.id, origin: report.origin,
-      sourceFingerprint: report.sourceFingerprint, runStartedAt: report.runStartedAt || report.startedAt,
-      capturedBefore: report.finishedAt, threadId: side.id, parentThreadId: side.parentThreadId,
-      messageAction, expectedTitle, defaultBlank: entry.id === "side.default_name",
-    }, options);
-    invariant(!previous || actual.beforeAt >= previous.finishedAt, "连续改名阶段沿用了前一阶段的旧观察");
-    previous = actual;
-  }
-}
-
 function domContainsText(bytes, text) {
   const dom = bytes.toString("utf8");
   const normalized = value => value.replace(/\s+/gu, " ").trim();
@@ -2004,7 +1860,6 @@ export async function verifyRemoteAccessReport(reportOrPath, {
         for (const evidence of step.uiEvidence || []) await verifyDriverUiEvidence(evidence, options);
       }
       verifyEnvironmentLeaseHistory(verifiedDriverStages, report, entry);
-      await verifySideNames(entry, report, caseContract, verifiedDriverStages, options);
       if (entry.id === "queue.edit_cancel" || caseContract.requiresQueueEditCancel === true)
         await verifyQueueEditCancel(entry, report, verifiedDriverStages, options);
       if (entry.id === "recovery.question_receipt" || caseContract.requiresQuestionReceiptRecovery === true)

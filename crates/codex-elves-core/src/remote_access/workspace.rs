@@ -326,9 +326,7 @@ pub(super) async fn open_browser(
         .await
         .map_err(super::authorization_error)?;
     tokio::task::spawn_blocking(move || {
-        crate::bridge::CdpDispatchPermit::commit(permit, || {
-            launch_system_browser(&target).map_err(anyhow::Error::from)
-        })
+        permit.commit(|| launch_system_browser(&target).map_err(anyhow::Error::from))
     })
     .await
     .map_err(|_| ApiError::new(503, "无法启动系统默认浏览器"))?
@@ -2811,7 +2809,7 @@ mod tests {
         let mut key: Value = serde_json::from_slice(&std::fs::read(&key_path).unwrap()).unwrap();
         key["value"] = json!("");
         std::fs::write(key_path, serde_json::to_vec(&key).unwrap()).unwrap();
-        let controller = RemoteAccessController::new(
+        let controller = RemoteAccessController::with_test_bridge(
             Arc::new(WorkspaceTestBridge { cwd: root.clone() }),
             state.path().to_owned(),
         )

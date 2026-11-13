@@ -726,7 +726,6 @@ mod tests {
             key_id: "key".into(),
             state: state.into(),
             request_id: None,
-            runtime_revision: None,
         };
         let mut store = Store::open(directory.path()).unwrap();
         store
@@ -795,7 +794,6 @@ mod tests {
                 key_id: "key".into(),
                 state: "queued".into(),
                 request_id: None,
-                runtime_revision: None,
             }],
         );
         data.wait_queue("thread", None, false);

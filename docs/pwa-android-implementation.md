@@ -14,7 +14,7 @@
 | `version` | 根据有序资源条目的路径、Content-Type、大小和 SHA-256 计算的整体摘要 |
 | `files` | 按路径排序的静态网页文件清单，含路径、Content-Type、字节数和 SHA-256 |
 
-清单不把 API、会话内容或附件列为静态文件。`/app-resources.json` 是清单接口本身，不是清单文件条目；`/api/` 和 `/native.js` 属于保留路径。网页模块、样式、图标和 PWA 文件按服务器与 Android Gradle 的资源表维护。
+清单不把 API、会话内容或附件列为静态文件。`/app-resources.json` 是清单接口本身，不是清单文件条目；`/api/` 属于保留路径。网页模块、样式、图标和 PWA 文件按服务器与 Android Gradle 的资源表维护。
 
 Android 和 PWA 都校验清单版本、路径、文件类型、大小和摘要。资源地址必须保持服务 Origin；重定向、重复路径、路径穿越、摘要不匹配或客户端不支持的 `minShellVersion` 都会阻止该次更新。
 

@@ -135,7 +135,7 @@ impl Harness {
         normalize_thread_response(&identity)?;
         let already_pinned = identity["thread"]["section"]["id"] == PINNED_SECTION_ID;
         if already_pinned != pinned {
-            // 用户要求两种模式操作同一份置顶；只经 stdio 写原生分区，不恢复会话，也不调用 CDP。
+            // 用户要求服务与桌面共用同一份置顶；只经 stdio 写原生分区，不恢复会话。
             // 取消非置顶会话不执行移动，避免误清除它所在的自定义分区；重复置顶不改变原生顺序。
             self.runtime.request("thread/section/move", json!({
                 "threadId":id,"sectionId":if pinned { json!(PINNED_SECTION_ID) } else { Value::Null },

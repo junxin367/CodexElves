@@ -117,7 +117,7 @@ async function manifestVersion(files) {
 function validateResourcePath(path) {
   if (path === "/") return true;
   if (!resourcePathPattern.test(path) || path.includes("\\") || path === "/api" || path.startsWith("/api/")
-      || path === "/native.js" || path === manifestPath || recoveryPaths.has(path))
+      || path === manifestPath || recoveryPaths.has(path))
     return false;
   const url = new URL(path, self.location.origin);
   return url.origin === self.location.origin && url.pathname === path && !url.search && !url.hash;

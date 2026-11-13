@@ -248,11 +248,7 @@ mod tests {
     }
 
     fn observation(snapshot: Value) -> OwnerSnapshot {
-        OwnerSnapshot {
-            owner: "desktop".into(),
-            revision: 1,
-            snapshot,
-        }
+        OwnerSnapshot { snapshot }
     }
 
     async fn wait_for(projection: &Mutex<Projection>, ready: impl Fn(&Projection) -> bool) {

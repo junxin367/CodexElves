@@ -1,5 +1,5 @@
 //! 远程会话服务：统一维护执行引擎、会话归属、队列、编辑事务、审批和事件。
-//! 用户要求关闭 CDP 后完整切换；本模块不包含 CDP、页面脚本或注入回退。
+//! 用户要求 Codex 仅保留服务模式；本模块不包含页面脚本或桌面注入回退。
 mod catalog;
 mod commands;
 mod desktop;
@@ -210,44 +210,15 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(test)]
     pub async fn prepare(self: &Arc<Self>) -> anyhow::Result<()> {
         execution::Scope::service(self.audit.clone(), "prepare", &json!({}), None)
             .run(self.start())
             .await
     }
 
-    pub async fn prepare_auto_fallback(self: &Arc<Self>) -> anyhow::Result<()> {
-        // 普通监听器测试不得意外启动用户的 Codex；自动切换验收必须显式提供隔离引擎。
-        #[cfg(test)]
-        anyhow::ensure!(
-            self.runtime.has_test_process(),
-            "自动切换测试缺少隔离执行引擎"
-        );
-        execution::Scope::service(
-            self.audit.clone(),
-            "automatic-service-probe",
-            &json!({}),
-            None,
-        )
-        .run(async {
-            self.start().await?;
-            // 切换前重新做最多 3 秒的只读健康检查，不借用 CDP、目录缓存或 thread/resume。
-            let response = tokio::time::timeout(
-                Duration::from_secs(3),
-                self.runtime
-                    .request("thread/list", json!({"limit":1,"archived":false}), None),
-            )
-            .await
-            .context("服务模式健康检查超时")??;
-            anyhow::ensure!(response["data"].is_array(), "服务模式健康检查返回无效");
-            Ok(())
-        })
-        .await
-    }
-
     pub async fn prewarm(self: &Arc<Self>) -> anyhow::Result<()> {
-        // 用户要求即使开启 CDP 也异步提前准备服务模式；这里只读共享目录，
-        // 不改设备开关、enabled 派发标志或会话归属，不调用 resume / turn/start。
+        // 用户要求 Codex 仅使用服务模式；预热只读目录，不改变会话归属或启动任务。
         execution::Scope::service(self.audit.clone(), "prewarm", &json!({}), None)
             .run(async {
                 self.start().await?;
@@ -277,45 +248,6 @@ impl Harness {
         } else {
             self.catalog.reset().await;
         }
-    }
-
-    pub async fn can_leave(&self, device_id: &str) -> anyhow::Result<()> {
-        if self
-            .projection
-            .lock()
-            .await
-            .sides
-            .threads
-            .values()
-            .any(|side| !side.closed && side.device == device_id)
-        {
-            return Err(error(409, "请先关闭服务模式侧边会话后再切换"));
-        }
-        let state = self.store.lock().await;
-        if state
-            .data
-            .queues
-            .values()
-            .flatten()
-            .any(|message| message.device_id == device_id)
-            || self.projection.lock().await.active.keys().any(|id| {
-                state
-                    .data
-                    .thread_devices
-                    .get(id)
-                    .is_some_and(|owner| owner == device_id)
-            })
-        {
-            return Err(error(
-                409,
-                "请先完成或停止当前任务，并处理待发送消息后再切换",
-            ));
-        }
-        Ok(())
-    }
-
-    pub async fn owns(&self, id: &str) -> bool {
-        self.loaded.lock().await.contains_key(id)
     }
 
     pub async fn idle(&self) -> bool {
@@ -470,7 +402,7 @@ impl Harness {
                 if error.downcast_ref::<ApiError>().is_some() {
                     return error;
                 }
-                // 用户要求 IPC 故障不能冒充无持有者；未发送和已发送待核对必须分别保留，均不回退 CDP。
+                // 用户要求 IPC 故障不能冒充无持有者；未发送和已发送待核对必须分别保留，均不回退到其他执行通道。
                 let dispatched = error
                     .downcast_ref::<crate::desktop_owner_ipc::DispatchFailure>()
                     .is_some_and(|failure| failure.dispatched);
@@ -562,7 +494,6 @@ impl Harness {
             "queueEdit" => self.queue_edit(&payload).await,
             "sendState" => self.send_state(&payload).await,
             "relatedThreads" => self.related_sides(&payload).await,
-            "dispose" => Ok(json!({"ok":true})),
             _ => {
                 let authorization = authorization.context("会话写操作缺少设备授权")?;
                 let id = payload["threadId"].as_str().unwrap_or("$workspace");
@@ -719,11 +650,9 @@ impl Harness {
         authorization.request_id = message.request_id.clone();
         execution::Scope::new(
             self.audit.clone(),
-            true,
             "queue-dispatch",
             &json!({"threadId":id}),
             Some(&authorization),
-            message.runtime_revision,
         )
         .recorded(async {
             self.dispatch_queued_inner(id, message, &authorization)
@@ -899,9 +828,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "只读验证已安装引擎，需显式指定会话和轮次，并隔离 CDP 与桌面 IPC"]
+    #[ignore = "只读验证已安装引擎，需显式指定会话和轮次，并隔离桌面 IPC"]
     async fn installed_engine_history_reentry_smoke() {
-        assert!(execution::cdp_disabled());
         assert!(
             std::env::var("CODEX_ELVES_TEST_IPC_PIPE")
                 .unwrap_or_default()
@@ -978,13 +906,11 @@ mod tests {
             service.loaded.lock().await.is_empty(),
             "只读核对不能接管或恢复用户会话"
         );
-        let audit = service.audit.snapshot();
-        assert_eq!(audit["serviceCdpAttempts"], 0);
         println!(
             "HISTORY_REENTRY_VERIFIED {}",
             json!({"initialItems":first.len(),
             "uniqueItemsAfterPaging":ids.len(),"pages":pages,"inputVisibleOnReentry":true,
-            "serviceCdpAttempts":audit["serviceCdpAttempts"],"ownedThreads":0})
+            "ownedThreads":0})
         );
         service.release().await;
     }
@@ -1112,13 +1038,12 @@ mod tests {
             ids(sidebar["pinnedThreads"].as_array().unwrap()),
             ids(&expected)
         );
-        assert_eq!(service.audit.snapshot()["serviceCdpAttempts"], 0);
         println!(
             "HARNESS_NATIVE_PINS {}",
             json!({
                 "nativePinnedCount":expected.len(),
                 "displayedPinnedCount":sidebar["pinnedThreads"].as_array().unwrap().len(),
-                "serviceCdpAttempts":0,"readOnly":true
+                "readOnly":true
             })
         );
         service.release().await;
@@ -1181,7 +1106,7 @@ mod tests {
                     .map(|project| &project["id"])
                     .collect::<Vec<_>>(),
                 expected_order,
-                "真实列表顺序应与 CDP 的桌面置顶和项目顺序一致"
+                "真实列表顺序应与桌面置顶和项目顺序一致"
             );
         }
         let assigned = sidebar["recent"]

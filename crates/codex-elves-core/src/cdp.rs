@@ -19,8 +19,6 @@ pub struct CdpTarget {
 }
 
 pub async fn list_targets(debug_port: u16) -> anyhow::Result<Vec<CdpTarget>> {
-    // 用户要求服务模式即使被错误路由，也要在发现桌面调试目标之前拒绝 CDP。
-    crate::remote_access::execution::check_cdp_allowed("target-discovery")?;
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(CDP_HTTP_TIMEOUT)

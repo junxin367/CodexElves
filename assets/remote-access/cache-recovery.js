@@ -6,7 +6,7 @@ import { sha256Hex } from "./sha256.js";
   const hexPattern = /^[a-f0-9]{64}$/;
   const pathPattern = /^\/(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/;
   const excludedPaths = new Set([
-    "/api", "/native.js", "/app-resources.json", "/cache-recovery.html", "/cache-recovery.js"
+    "/api", "/app-resources.json", "/cache-recovery.html", "/cache-recovery.js"
   ]);
   const contentTypes = new Set([
     "application/javascript; charset=utf-8", "application/manifest+json; charset=utf-8",

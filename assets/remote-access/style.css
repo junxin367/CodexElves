@@ -1034,7 +1034,6 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .queued-steer-button>.ui-icon{width:14px;height:14px}
 .queued-steer-button:hover{color:var(--text)}
 .connection-state.pending{color:var(--muted)}
-.desktop-connection-guidance{flex-shrink:0;padding:12px 18px;border-bottom:1px solid var(--line);background:var(--side);color:var(--text);font-size:.85714rem;line-height:1.8;overflow-wrap:anywhere}
 .conversation-header .connection-state{display:flex;align-items:center;justify-content:flex-end;min-height:32px;padding:0;border:0;background:transparent;line-height:1.2;flex-shrink:0}
 .conversation-header .connection-state.online{white-space:nowrap}
 .conversation-header .icon-button>.ui-icon{width:18px;height:18px}
@@ -1611,8 +1610,6 @@ body{font-weight:var(--ui-font-weight,400)}
 .appearance-advanced[open]>summary>span{transform:rotate(90deg)}
 .appearance-advanced>.appearance-section{margin-top:16px}
 .appearance-instructions-card{padding:16px}
-.appearance-runtime-card>.appearance-hint{padding:0 16px}
-.appearance-runtime-card>.appearance-notification-row{padding:12px 16px}
 .session-instance-group{overflow:hidden;border:1px solid var(--line);border-radius:16px;background:color-mix(in srgb,var(--composer-bg) 68%,var(--bg))}
 .session-instance-group>h4{margin:0;padding:14px 16px;border-bottom:1px solid var(--line)}
 .session-instance-group>.appearance-notification-row{margin:0;border-radius:0;padding:12px 16px}

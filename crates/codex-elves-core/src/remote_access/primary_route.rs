@@ -666,7 +666,8 @@ mod tests {
         let token_config = br#"{"version":"3","agent":{"authtoken":"isolated_test_token"}}"#;
         std::fs::write(&token_path, token_config).unwrap();
         let controller =
-            RemoteAccessController::new(Arc::new(Bridge), directory.path().into()).unwrap();
+            RemoteAccessController::with_test_bridge(Arc::new(Bridge), directory.path().into())
+                .unwrap();
         controller.running.store(true, Ordering::SeqCst);
         controller.primary.selection.write().unwrap().provider = Provider::Frp;
         let mut settings = RemoteAccessSettings {
@@ -696,7 +697,8 @@ mod tests {
     async fn frp_candidate_only_serves_probes_and_leaves_zrok_online() {
         let directory = tempfile::tempdir().unwrap();
         let controller =
-            RemoteAccessController::new(Arc::new(Bridge), directory.path().into()).unwrap();
+            RemoteAccessController::with_test_bridge(Arc::new(Bridge), directory.path().into())
+                .unwrap();
         *controller.public_origin.write().unwrap() = Some("https://existing.shares.zrok.io".into());
         *controller.primary.probe.write().unwrap() = Some(Probe {
             origin: "http://trial.example.com:39400".into(),
@@ -787,7 +789,8 @@ mod tests {
     async fn frp_active_host_requires_its_verified_ingress_and_keeps_ngrok_cors() {
         let directory = tempfile::tempdir().unwrap();
         let controller =
-            RemoteAccessController::new(Arc::new(Bridge), directory.path().into()).unwrap();
+            RemoteAccessController::with_test_bridge(Arc::new(Bridge), directory.path().into())
+                .unwrap();
         *controller.primary.selection.write().unwrap() = Selection {
             provider: Provider::Frp,
             origin: Some("https://entry.example.com:39399".into()),
@@ -947,7 +950,8 @@ mod tests {
     async fn frp_status_reports_when_draft_differs_from_active() {
         let directory = tempfile::tempdir().unwrap();
         let controller =
-            RemoteAccessController::new(Arc::new(Bridge), directory.path().into()).unwrap();
+            RemoteAccessController::with_test_bridge(Arc::new(Bridge), directory.path().into())
+                .unwrap();
         let active = frp_tunnel::Saved {
             config: frp_tunnel::Config {
                 server_addr: "relay.example.com".into(),
@@ -983,7 +987,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         super::super::configure_access_key(directory.path(), "test-http-access-key").unwrap();
         let controller =
-            RemoteAccessController::new(Arc::new(Bridge), directory.path().into()).unwrap();
+            RemoteAccessController::with_test_bridge(Arc::new(Bridge), directory.path().into())
+                .unwrap();
         controller.configure_secondary_channel(true);
         controller.publish_access_policy(&RemoteAccessSettings {
             enabled: true,

@@ -586,17 +586,19 @@ pub(super) async fn instructions(
             .prepare_dispatch()
             .await
             .map_err(super::authorization_error)?;
-        crate::bridge::CdpDispatchPermit::commit(permit, || {
-            let parent = path
-                .parent()
-                .ok_or_else(|| ApiError::new(400, "指令目录无效"))?;
-            std::fs::create_dir_all(parent)
-                .map_err(|_| ApiError::new(403, "无法创建指令目录，请检查所选环境的文件权限"))?;
-            // 用户要求保存实际原生指令；同一目录原子替换，并用读取版本防止覆盖其他窗口的新内容。
-            save_instruction(&path, content, &revision)?;
-            Ok(())
-        })
-        .map_err(super::authorization_error)?;
+        permit
+            .commit(|| {
+                let parent = path
+                    .parent()
+                    .ok_or_else(|| ApiError::new(400, "指令目录无效"))?;
+                std::fs::create_dir_all(parent).map_err(|_| {
+                    ApiError::new(403, "无法创建指令目录，请检查所选环境的文件权限")
+                })?;
+                // 用户要求保存实际原生指令；同一目录原子替换，并用读取版本防止覆盖其他窗口的新内容。
+                save_instruction(&path, content, &revision)?;
+                Ok(())
+            })
+            .map_err(super::authorization_error)?;
         (text, exists, revision) = read_instruction(&path)?;
     }
     authorization
@@ -738,10 +740,15 @@ mod tests {
             .collect();
         let instances = super::super::instances::catalog(&environments);
         assert_eq!(instances.len(), 3);
+        assert!(instances.iter().all(|instance| instance.ready));
+        assert!(instances.iter().any(
+            |instance| instance.backend == "codex" && instance.connection_modes == ["service"]
+        ));
         assert!(
             instances
                 .iter()
-                .all(|instance| instance.ready && instance.connection_modes == ["native"])
+                .filter(|instance| instance.backend == "claude")
+                .all(|instance| instance.connection_modes == ["native"])
         );
         assert!(instances.iter().all(|instance| instance.status == "可接入"));
     }

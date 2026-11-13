@@ -122,7 +122,7 @@ impl Harness {
             self.desktop_projects(),
             self.native_pinned_threads()
         )?;
-        // 用户要求项目效果对齐 CDP：只列出已保存项目，并保留 project/list 的桌面顺序；
+        // 用户要求项目效果对齐桌面：只列出已保存项目，并保留 project/list 的桌面顺序；
         // 会话工作目录不能补成项目，否则无项目会话和历史临时目录会进入新建选择器。
         let mut projects: Vec<Value> = project_rows
             .into_iter()
@@ -234,7 +234,7 @@ impl Harness {
                 });
             project["pinned"] = json!(pinned);
         }
-        // 与 CDP 一样先展示置顶项目，再按桌面项目顺序排列；未记录的新项目保留引擎顺序。
+        // 先展示置顶项目，再按桌面项目顺序排列；未记录的新项目保留引擎顺序。
         projects.sort_by_key(|project| {
             let pinned = project["pinned"] == true;
             let order = if pinned {
@@ -287,7 +287,7 @@ impl Harness {
             );
         }
         let id = required(payload, "projectId")?;
-        // 用户要求与 CDP 的已保存项目一致；旧缓存的合成项目不能再用于文件、Skill 或新建，
+        // 用户要求与桌面已保存项目一致；旧缓存的合成项目不能再用于文件、Skill 或新建，
         // 无项目会话仍可通过 threadId 读取自己的工作目录，不为项目查询遍历会话。
         let (projects, desktop) = tokio::try_join!(
             self.list_all("project/list", json!({"limit":100})),
@@ -500,7 +500,7 @@ impl Harness {
             }
         }
         if let Some(turn_id) = payload["turnId"].as_str() {
-            // 用户要求服务模式可以实际翻页；网页沿用 CDP 契约发送 itemCursor，不能误读成轮次 cursor。
+            // 用户要求服务模式可以实际翻页；网页用 itemCursor 表示消息游标，不能误读成轮次 cursor。
             let item_cursor = history_cursor(&payload["itemCursor"], "消息分页游标")?;
             let page = self
                 .history_turn_items(id, turn_id, &payload["turnStatus"], item_cursor)

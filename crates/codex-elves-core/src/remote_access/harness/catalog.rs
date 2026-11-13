@@ -11,7 +11,7 @@ use super::projection::Projection;
 use super::runtime::Runtime;
 use crate::codex_service::normalize_thread;
 
-// 用户要求非 CDP 首屏及重复进入保持流畅：先给最近 100 条，完整目录后台补齐；
+// 用户要求服务模式首屏及重复进入保持流畅：先给最近 100 条，完整目录后台补齐；
 // 热目录最多每 3 秒补读首页，每 60 秒完整核对删除和归档，失败后等待 5 秒再试。
 const PAGE_SIZE: usize = 100;
 const HEAD_MAX_AGE: Duration = Duration::from_secs(3);
@@ -793,7 +793,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     }
 
     #[tokio::test]
-    async fn migrating_desktop_projects_keep_cdp_ids_memberships_order_and_pin_overrides() {
+    async fn migrating_desktop_projects_keep_ids_memberships_order_and_pin_overrides() {
         let (directory, process) = engine_fixture().await;
         let service = super::super::Harness::new(directory.path()).unwrap();
         service.install_test_process(process).await;
@@ -950,24 +950,12 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         }
     }
 
-    struct NativeOnly;
-
-    #[async_trait::async_trait]
-    impl crate::remote_access::NativeRemoteBridge for NativeOnly {
-        async fn call(&self, _action: &str, _payload: Value) -> anyhow::Result<Value> {
-            Ok(json!({"ok":true,"origin":"cdp","epoch":"native","cursor":0,"events":[]}))
-        }
-    }
-
     async fn listening_controller(
         directory: &std::path::Path,
         process: crate::codex_service::RunningService,
     ) -> (TestController, u16) {
-        let controller = crate::remote_access::RemoteAccessController::new(
-            Arc::new(NativeOnly),
-            directory.to_owned(),
-        )
-        .unwrap();
+        let controller =
+            crate::remote_access::RemoteAccessController::new(directory.to_owned()).unwrap();
         controller.harness.install_test_process(process).await;
         let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = reservation.local_addr().unwrap().port();
@@ -999,7 +987,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     }
 
     #[tokio::test]
-    async fn harness_startup_prewarms_before_any_remote_read_without_blocking_cdp() {
+    async fn harness_startup_prewarms_before_any_remote_read_without_blocking_listener() {
         let (directory, process) = engine_fixture().await;
         std::fs::write(directory.path().join("hold-first"), "").unwrap();
         let (guard, port) = listening_controller(directory.path(), process).await;
@@ -1012,19 +1000,9 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         .await;
         assert!(
             controller
-                .runtime_for("unconnected-device")
-                .await
-                .cdp_injection_enabled
-        );
-        assert!(
-            !controller
                 .harness
                 .enabled
                 .load(std::sync::atomic::Ordering::Acquire)
-        );
-        assert_eq!(
-            controller.native.call("models", json!({})).await.unwrap()["origin"],
-            "cdp"
         );
         let response = reqwest::Client::builder()
             .no_proxy()
@@ -1070,7 +1048,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     }
 
     #[tokio::test]
-    async fn harness_prewarm_failure_and_cancellation_leave_cdp_and_listener_available() {
+    async fn harness_prewarm_failure_and_cancellation_leave_listener_available() {
         for fail_models in [false, true] {
             let (directory, process) = engine_fixture().await;
             std::fs::write(directory.path().join("hold-first"), "").unwrap();
@@ -1090,10 +1068,6 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 std::fs::write(directory.path().join("continue"), "").unwrap();
                 wait_until(async || controller.harness.catalog.state.lock().await.complete).await;
             }
-            assert_eq!(
-                controller.native.call("models", json!({})).await.unwrap()["origin"],
-                "cdp"
-            );
             assert!(controller.live.lock().await.error.is_none());
             controller
                 .reconcile(crate::settings::RemoteAccessSettings::default())

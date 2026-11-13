@@ -56,21 +56,22 @@ pub(super) async fn settings(
             .prepare_dispatch()
             .await
             .map_err(super::authorization_error)?;
-        // PC 远程右键设置与桌面注入版共用同一文件；保存只修改优化偏好，不进入 CDP、CLI 或模型请求。
-        crate::bridge::CdpDispatchPermit::commit(permit, || {
-            if super::hash(&load_preferences(directory)?.to_string()) != revision {
-                return Err(
-                    ApiError::new(409, "提示词优化设置已变化，请重新打开设置后保存").into(),
-                );
-            }
-            crate::prompt_optimize::save_preferences(directory, &payload["settings"]).map_err(
-                |_| {
-                    ApiError::new(500, "无法保存提示词优化设置，请检查本机配置目录的写入权限")
-                        .into()
-                },
-            )
-        })
-        .map_err(super::authorization_error)?;
+        // PC 远程右键设置与桌面注入版共用同一文件；保存只修改优化偏好，不进入会话引擎或模型请求。
+        permit
+            .commit(|| {
+                if super::hash(&load_preferences(directory)?.to_string()) != revision {
+                    return Err(
+                        ApiError::new(409, "提示词优化设置已变化，请重新打开设置后保存").into(),
+                    );
+                }
+                crate::prompt_optimize::save_preferences(directory, &payload["settings"]).map_err(
+                    |_| {
+                        ApiError::new(500, "无法保存提示词优化设置，请检查本机配置目录的写入权限")
+                            .into()
+                    },
+                )
+            })
+            .map_err(super::authorization_error)?;
         preferences = load_preferences(directory).map_err(|e| ApiError::new(400, e.to_string()))?;
     }
     let profile = backend.active_relay_profile();

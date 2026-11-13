@@ -18,8 +18,6 @@ pub(super) struct Queued {
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_revision: Option<u64>,
 }
 
 impl Queued {
@@ -39,7 +37,6 @@ impl Queued {
             key_id: authorization.device.key_id.clone(),
             state: "queued".into(),
             request_id: authorization.request_id.clone(),
-            runtime_revision: super::execution::runtime_revision(),
         }
     }
 
@@ -253,7 +250,6 @@ mod tests {
                             key_id: "key-a".into(),
                             state: state.into(),
                             request_id: None,
-                            runtime_revision: None,
                         }],
                     );
                     Ok(())

@@ -266,7 +266,7 @@ impl Harness {
     ) -> anyhow::Result<Value> {
         let mut store = self.store.lock().await;
         let permit = authorization.prepare_dispatch().await?;
-        crate::bridge::CdpDispatchPermit::commit(permit, || {
+        permit.commit(|| {
             store.commit(|data| {
             match action {
                 "pinThread"|"pinProject" => {
@@ -366,7 +366,7 @@ impl Harness {
             message.state = "direct-sending".into();
         }
         let permit = authorization.prepare_dispatch().await?;
-        crate::bridge::CdpDispatchPermit::commit(permit, || {
+        permit.commit(|| {
             store.commit(|data| {
                 let queue = data.queues.entry(id.to_owned()).or_default();
                 if queue.len() >= 100 {
@@ -659,7 +659,7 @@ impl Harness {
                 // 新建属于实际写入，提交前重新核对项目根目录，不能用展示缓存决定写入位置。
                 self.runtime.invalidate_read("project/list").await;
                 let context = self.workspace_context(&json!({"projectId":id})).await?;
-                // 展示 ID 与 CDP 相同；实际创建必须使用已验证的引擎项目 ID。
+                // 展示沿用桌面项目 ID；实际创建必须使用已验证的引擎项目 ID。
                 (
                     required(&context, "cwd")?.to_owned(),
                     Some(required(&context, "serverProjectId")?.to_owned()),
@@ -995,7 +995,7 @@ impl Harness {
             .unwrap_or_else(|| json!({"clientUserMessageId":uuid::Uuid::new_v4().to_string()}));
         let mut store = self.store.lock().await;
         let permit = authorization.prepare_dispatch().await?;
-        crate::bridge::CdpDispatchPermit::commit(permit, || {
+        permit.commit(|| {
             store.commit(|data|{
             data.answered_questions.insert(key.clone(),json!({"state":if skip {"skipped"} else {"sending"},"clientUserMessageId":message["clientUserMessageId"]}));Ok(())
         })
@@ -1211,11 +1211,11 @@ impl Harness {
             let permit = authorization.prepare_dispatch().await?;
             let mut projection = self.projection.lock().await;
             let side = projection.sides.threads.get_mut(id).unwrap();
-            crate::bridge::CdpDispatchPermit::commit(permit, || side.change_queue(change))?;
+            permit.commit(|| side.change_queue(change))?;
         } else {
             let mut store = self.store.lock().await;
             let permit = authorization.prepare_dispatch().await?;
-            crate::bridge::CdpDispatchPermit::commit(permit, || store.commit(change))?;
+            permit.commit(|| store.commit(change))?;
         }
         let snapshot = self.queue(id).await;
         for key in [

@@ -97,7 +97,6 @@ export function mountSessionMenu({
       subagentsEnabled: value.subagentsEnabled ?? value.relatedEnabled !== false,
       sideThreadsEnabled: value.sideThreadsEnabled ?? value.relatedEnabled !== false,
       sideThreadView: value.sideThreadView === true,
-      serviceMode: value.serviceMode === true,
       createPending: value.createPending === true,
       authorization: JSON.stringify([deviceId, cacheScope]),
       connected: value.connected === true, owner: JSON.stringify([deviceId, cacheScope, threadId,
@@ -601,8 +600,8 @@ export function mountSessionMenu({
       return Promise.resolve(cached?.data || null);
     }
     if (entry.request) return entry.request.promise;
-    // 服务模式每秒检查一次，快照最多复用 2 秒；与正文的 2 秒补读一起覆盖桌面持有会话的状态变化。
-    if (entry.snapshot && !entry.dirty && Date.now() - entry.snapshot.loadedAtMs < (value.serviceMode ? 2000 : refreshAgeMs))
+    // 用户要求 Codex 仅使用服务模式：每秒检查一次，快照最多复用 2 秒，与正文补读同步覆盖状态变化。
+    if (entry.snapshot && !entry.dirty && Date.now() - entry.snapshot.loadedAtMs < 2000)
       return Promise.resolve(entry.snapshot.data);
     const version = entry.revision, job = { promise: null };
     entry.dirty = false; entry.again = false;
@@ -617,7 +616,7 @@ export function mountSessionMenu({
       if (accepts(entry, version)) {
         entry.dirty = true;
         if (owns(value.owner)) {
-          if (value.serviceMode && cached) {
+          if (cached) {
             // 子智能体查询失败时保留可查看的旧结果，但必须标明未同步，不能继续显示为完整的最新列表。
             applySnapshot(entry, { ...cached, data: { ...cached.data,
               subagentsComplete: false, subagentsLoading: false, subagentsStale: true,
@@ -659,7 +658,7 @@ export function mountSessionMenu({
       syncContext();
       if (opened) {
         updatePermissions(); updateTimes();
-        if (context?.serviceMode && context.connected && !document.hidden && !suspended)
+        if (context?.connected && !document.hidden && !suspended)
           void refresh({ background: true });
       }
     }, 1000);

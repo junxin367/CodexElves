@@ -9,29 +9,22 @@ const assetSource = readFileSync(resolve(repositoryRoot, "crates/codex-elves-cor
 const buildId = assetSource.match(/pub const DIAGNOSTIC_BUILD_ID:\s*&str\s*=\s*"([^"]+)"/)?.[1];
 if (!buildId) throw new Error("无法读取当前注入构建标识。");
 
-function verifyRemoteRuntimeSources({ backend, service, workspace, app, native }) {
+function verifyRemoteRuntimeSources({ backend, service, workspace, app }) {
   const failures = [];
-  // 用户要求服务模式不依赖 CDP，且切回会话恢复压缩记录；保留协议 5，桥接 135 同步压缩生命周期字段。
+  // 用户要求远程 Codex 仅保留服务模式；协议 6 不再提供模式切换或桌面 CDP 后端。
   const protocol = Number(service.match(/const PROTOCOL_VERSION:\s*u32\s*=\s*(\d+);/)?.[1]);
-  const bridge = Number(native.match(/window\.__codexElvesRemoteAccess\?\.version === (\d+)/)?.[1]);
-  const readStart = backend.indexOf("async fn read(");
-  const readEnd = backend.indexOf('return Err(ApiError::new(404, "不支持的读取操作"))', readStart);
-  if (!Number.isSafeInteger(protocol) || protocol < 5)
-    failures.push("后台协议不能低于 5，否则可能继续复用缺少服务隔离的旧后台");
-  if (readStart < 0 || readEnd <= readStart || !backend.slice(readStart, readEnd).includes('| "runtime"')
-      || !backend.includes('if action == "runtime"') || !backend.includes('if action == "setRuntime"'))
-    failures.push("后台缺少运行模式读取或切换接口");
-  if (!app.includes('api("/api/read/runtime"') || !app.includes('mutate("setRuntime"'))
-    failures.push("远程页面缺少运行模式读取或切换入口");
+  if (!Number.isSafeInteger(protocol) || protocol < 6)
+    failures.push("后台协议不能低于 6");
+  if (!backend.includes("self.harness.call(action, payload, Some(authorization))")
+      || backend.includes("NativeCdpBridge") || backend.includes("NativePreferredRemoteBridge")
+      || app.includes('mutate("setRuntime"') || app.includes('id="appearance-runtime-entry"'))
+    failures.push("远程 Codex 必须只使用服务模式，不能保留模式切换入口");
   if (!backend.includes('.route("/api/workspace/context", post(workspace::context))')
       || !workspace.includes("async fn branch_metadata(")
       || !app.includes('api("/api/workspace/context"'))
     failures.push("后台或新建页面缺少真实分支信息读取");
-  if (!Number.isSafeInteger(bridge) || bridge < 135 || !native.includes(`version: ${bridge}, call`)
-      || !native.includes("const needsSideContext =") || !native.includes("async function compactThreadContext("))
-    failures.push("原生桥缺少已交付的侧边会话恢复或上下文压缩恢复");
   if (failures.length) throw new Error(`Windows 构建基线不完整：\n${failures.join("\n")}`);
-  return { protocol, bridge };
+  return { protocol };
 }
 
 const runtimeContract = verifyRemoteRuntimeSources({
@@ -39,7 +32,6 @@ const runtimeContract = verifyRemoteRuntimeSources({
   service: readFileSync(resolve(repositoryRoot, "crates/codex-elves-core/src/remote_access/service.rs"), "utf8"),
   workspace: readFileSync(resolve(repositoryRoot, "crates/codex-elves-core/src/remote_access/workspace.rs"), "utf8"),
   app: readFileSync(resolve(repositoryRoot, "assets/remote-access/app.js"), "utf8"),
-  native: readFileSync(resolve(repositoryRoot, "assets/remote-access/native.js"), "utf8"),
 });
 
 // 用户要求更新后远程功能可用；共享 Cargo 产物可能被另一工作树覆盖，
@@ -55,7 +47,6 @@ const programs = [
     ...rendererSources,
     "assets/remote-access/app.js",
     "assets/remote-access/channels.js",
-    "assets/remote-access/native.js",
     "assets/remote-access/pwa.js",
     "assets/remote-access/recovery-store.js",
     "assets/remote-access/session-files.js",
@@ -92,6 +83,6 @@ if (failures.length) {
   process.exitCode = 1;
 } else {
   console.log(sourceOnly
-    ? `Windows 源码基线核对通过：后台协议 ${runtimeContract.protocol}、原生桥 ${runtimeContract.bridge}，分支信息、运行模式和压缩恢复完整。`
-    : `Windows 构建输入核对通过：${buildId}，远程页面、原生桥和桌面注入均与当前源码一致。`);
+    ? `Windows 源码基线核对通过：后台协议 ${runtimeContract.protocol}，服务模式和分支信息读取完整。`
+    : `Windows 构建输入核对通过：${buildId}，远程页面和桌面注入均与当前源码一致。`);
 }

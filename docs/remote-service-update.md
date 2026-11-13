@@ -43,7 +43,7 @@ $updatePlan = Join-Path (Get-Location) (
 ```
 
 `-ProgramPath` 必须指向实际候选程序，并与 `-SkipBuild` 一起使用。
-脚本会核对候选程序内嵌的全部远程资源、原生桥和资源号，拒绝使用网页资源与当前源码不一致的旧产物。
+脚本会核对候选程序内嵌的全部远程资源和资源号，拒绝使用网页资源与当前源码不一致的旧产物。
 默认构建从 Cargo 的 `compiler-artifact.executable` 读取真实产物位置，兼容共享 `CARGO_TARGET_DIR` 或显式目标配置。
 
 其他参数：

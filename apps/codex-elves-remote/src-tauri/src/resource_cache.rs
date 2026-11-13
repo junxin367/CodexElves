@@ -74,10 +74,7 @@ fn valid_path(path: &str) -> bool {
             && !path.starts_with("/api/")
             && !matches!(
                 path,
-                "/native.js"
-                    | "/app-resources.json"
-                    | "/cache-recovery.html"
-                    | "/cache-recovery.js"
+                "/app-resources.json" | "/cache-recovery.html" | "/cache-recovery.js"
             )
 }
 fn manifest_version(files: &[Resource]) -> String {
@@ -957,7 +954,6 @@ mod tests {
         for path in [
             "/api",
             "/api/session",
-            "/native.js",
             "/app-resources.json",
             "/../x.js",
             "/x%2f.js",
@@ -1104,9 +1100,7 @@ mod tests {
         let snapshot = Snapshot::bundled();
         let paths: HashSet<_> = snapshot.files.keys().map(String::as_str).collect();
         assert!(paths.contains("/") && paths.contains("/app.js") && paths.contains("/style.css"));
-        assert!(
-            !paths.contains("/native.js") && !paths.iter().any(|path| path.starts_with("/api/"))
-        );
+        assert!(!paths.iter().any(|path| path.starts_with("/api/")));
         assert!(!valid_headers("Set-Cookie: session=not-allowed\r\n"));
         assert!(!valid_headers("X-Frame-Options: DENY\nSet-Cookie: x\r\n"));
         assert!(valid_headers(DEFAULT_HEADERS));

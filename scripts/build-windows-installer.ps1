@@ -143,7 +143,7 @@ Write-Output "[INFO] makensis: $NsisPath"
 Write-Output "[INFO] Cargo target: $CargoTargetDir"
 
 $BuildInputVerifier = Join-Path $RepoRoot "scripts\verify-windows-build-inputs.mjs"
-# 用户要求已修复功能不能因构建基线回退；编译前核对运行模式协议及压缩恢复，复制前后再核对完整资源。
+# 用户要求已修复功能不能因构建基线回退；编译前核对服务协议及压缩恢复，复制前后再核对完整资源。
 Invoke-Checked -FilePath $NodePath -Arguments @($BuildInputVerifier, $RepoRoot, "--source-only") -WorkingDirectory $RepoRoot
 Invoke-Checked -FilePath $NpmPath -Arguments @("run", "build") -WorkingDirectory $ManagerDir
 Invoke-Checked -FilePath $NodePath -Arguments @($BuildInputVerifier, $RepoRoot, $ReleaseDir) -WorkingDirectory $RepoRoot

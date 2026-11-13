@@ -122,7 +122,7 @@ impl Harness {
                 self.runtime.read(method, params).await
             }
         };
-        // 服务模式直接核对引擎的账号、配置和管理员要求，不读取或调用 CDP 注入状态。
+        // 服务模式直接核对引擎的账号、配置和管理员要求，不读取或调用桌面注入状态。
         let environment = tokio::try_join!(
             read("account/read", json!({"refreshToken":false})),
             read("configRequirements/read", json!({}))
@@ -246,14 +246,14 @@ impl Harness {
             if side.closed || side.expired || side.closing {
                 return Err(error(410, "侧边会话已过期，Fast 设置未保存"));
             }
-            crate::bridge::CdpDispatchPermit::commit(permit, || {
+            permit.commit(|| {
                 side.metadata["fastMode"] = json!(enabled);
                 Ok(())
             })?;
         } else {
             drop(projection);
             let mut store = self.store.lock().await;
-            crate::bridge::CdpDispatchPermit::commit(permit, || {
+            permit.commit(|| {
                 store.commit(|data| {
                     data.settings
                         .entry(id.to_owned())

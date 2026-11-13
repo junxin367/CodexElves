@@ -332,9 +332,11 @@ mod tests {
     ) {
         let directory = tempfile::tempdir().unwrap();
         configure_access_key(directory.path(), "browser-fixture-key").unwrap();
-        let controller =
-            RemoteAccessController::new(Arc::new(NoNative), directory.path().to_path_buf())
-                .unwrap();
+        let controller = RemoteAccessController::with_test_bridge(
+            Arc::new(NoNative),
+            directory.path().to_path_buf(),
+        )
+        .unwrap();
         controller.publish_access_policy(&RemoteAccessSettings {
             enabled: true,
             read_only: false,

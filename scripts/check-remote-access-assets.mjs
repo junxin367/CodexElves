@@ -6,7 +6,7 @@ const root = resolve(import.meta.dirname, "..");
 const assetRoot = resolve(root, "assets/remote-access");
 const devServerPath = resolve(root, "scripts/dev-remote-access.mjs");
 const productionRoutePath = resolve(root, "crates/codex-elves-core/src/remote_access.rs");
-const excludedFromWeb = new Set(["native.js"]);
+
 
 async function walk(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -81,7 +81,6 @@ const servedFiles = routeFiles(await readFile(devServerPath, "utf8"));
 const productionFiles = routeFiles(await readFile(productionRoutePath, "utf8"));
 for (const path of jsFiles) {
   const file = relative(assetRoot, path);
-  if (excludedFromWeb.has(file)) continue;
   if (!servedFiles.has(file)) {
     errors.push(`scripts/dev-remote-access.mjs 未提供远程 JS：${file}`);
   }

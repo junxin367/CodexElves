@@ -9,7 +9,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use codex_elves_core::install::SILENT_BINARY;
 use codex_elves_core::models::{DeleteResult, DeleteStatus};
-use codex_elves_core::remote_access::NativeCdpBridge;
 use codex_elves_core::script_market::{self, MarketScript, ScriptMarketManifest};
 use codex_elves_core::settings::{
     BackendSettings, RelayProfile, ResponsesWebsocketCapability, SettingsStore,
@@ -893,9 +892,41 @@ pub async fn delete_local_session(
 }
 
 async fn delete_local_session_in_codex(session_id: &str) -> anyhow::Result<DeleteResult> {
-    // 用户要求新版 Codex 也能从管理器永久删除：复用已适配原生 RPC 的删除入口，
-    // 保留派生会话清理和缺失 rollout 恢复，不再单独依赖旧 manager.requestClient。
-    let response = NativeCdpBridge::delete_local_thread(session_id).await?;
+    // 用户要求删除远程 CDP，同时保留管理器的本地永久删除；这里只调用桌面增强已有的本机删除入口。
+    let status = codex_elves_core::status::StatusStore::default()
+        .load_latest()?
+        .filter(|status| matches!(status.status.as_str(), "running" | "running_degraded"))
+        .context("请先通过 CodexElves 启动 Codex 桌面应用")?;
+    let port = status.debug_port.context("Codex 桌面连接不可用")?;
+    let targets = codex_elves_core::cdp::list_targets(port).await?;
+    let target = codex_elves_core::cdp::pick_injectable_codex_page_target(&targets)?;
+    let websocket = target
+        .web_socket_debugger_url
+        .context("Codex 桌面连接不可用")?;
+    let expression = format!(
+        r#"(async () => {{
+            const id = {};
+            const remove = window.__codexElvesNativeDeleteThread;
+            if (typeof remove !== "function") throw new Error("Codex 本地删除增强尚未就绪，请重启 Codex");
+            const result = await remove({{session_id:"local:" + id}});
+            return {{...result,ok:true,threadId:result?.session_id,deleted:true}};
+        }})()"#,
+        serde_json::to_string(session_id)?,
+    );
+    let result = codex_elves_core::bridge::evaluate_script_value_with_timeout(
+        &websocket,
+        &expression,
+        std::time::Duration::from_secs(45),
+    )
+    .await?;
+    anyhow::ensure!(
+        result.pointer("/result/exceptionDetails").is_none(),
+        "Codex 原生删除未确认完成，请核对会话后再操作"
+    );
+    let response = result
+        .pointer("/result/result/value")
+        .cloned()
+        .context("Codex 原生删除没有返回结果")?;
     delete_result_from_native(session_id, &response)
 }
 

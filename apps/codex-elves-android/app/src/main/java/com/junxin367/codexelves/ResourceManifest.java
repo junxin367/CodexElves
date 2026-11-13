@@ -136,7 +136,7 @@ final class ResourceManifest {
             }
         }
         if (decoded.equals("/api") || decoded.startsWith("/api/")
-            || decoded.equals("/app-resources.json") || decoded.equals("/native.js")) {
+            || decoded.equals("/app-resources.json")) {
             throw new IOException("资源路径进入保留命名空间");
         }
         return decoded;

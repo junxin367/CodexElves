@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-// 用户要求优化非 CDP 读取：只合并只读请求，写入及派发前校验始终直读。
+// 用户要求优化服务读取：只合并只读请求，写入及派发前校验始终直读。
 // 64 项 × 每项最多 256 KiB，将额外响应缓存限制在约 16 MiB 内。
 const MAX_ENTRIES: usize = 64;
 const MAX_VALUE_BYTES: usize = 256 * 1024;

@@ -439,7 +439,8 @@ function queueCapability(name, id = selectedId) {
     ? thread?.id === id && thread.capabilities?.[name] === true : session?.capabilities?.[name] === true;
 }
 function backendAvailable(value = session) {
-  return isClaude() ? value?.capabilities?.claudeSessions === true : value?.nativeConnected || value?.serviceConnected;
+  // 用户要求 Codex 仅使用服务模式；旧桌面连接标记不能让服务离线的实例显示为可发送。
+  return isClaude() ? value?.capabilities?.claudeSessions === true : value?.serviceConnected === true;
 }
 function approvalsAllowed() { return isClaude() ? session?.claudeAllowApprovals === true : session?.allowApprovals === true; }
 function backendCapability(name) {
@@ -1688,7 +1689,6 @@ function openAppearance() {
         <button type="button" id="appearance-types-entry" class="appearance-nav-item" aria-controls="appearance-types-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>会话实例</span></button>
         <button type="button" id="appearance-permissions-entry" class="appearance-nav-item" aria-controls="appearance-permissions-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>权限</span></button>
         <button type="button" id="appearance-instructions-entry" class="appearance-nav-item" aria-controls="appearance-instructions-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>自定义指令</span></button>
-        <button type="button" id="appearance-runtime-entry" class="appearance-nav-item" aria-controls="appearance-runtime-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>运行模式</span></button>
       </div>
       <!-- 通知事件、诊断日志及其“工具”分组仅在 Android App 显示，PC 与手机浏览器不留空分组。 -->
       <div id="appearance-nav-tools" class="appearance-nav-group" role="group" aria-labelledby="appearance-nav-tools-title" hidden>
@@ -1768,14 +1768,6 @@ function openAppearance() {
     <div id="appearance-diagnostics-field" class="appearance-field" hidden><span>运行日志</span><div class="appearance-action-buttons"><button type="button" id="appearance-diagnostics-export" disabled>导出</button><button type="button" id="appearance-diagnostics-send" disabled>发送到电脑</button></div></div>
     <p id="appearance-diagnostics-status" class="appearance-notification-status" role="status" hidden></p>
     </section>
-    <section id="appearance-runtime-page" class="appearance-body appearance-settings-page" hidden>
-    <h3 class="appearance-panel-title">运行模式</h3>
-    <section class="appearance-section"><h4>连接方式</h4><div class="appearance-card appearance-runtime-card">
-    <!-- 用户要求实例名省略“本机/WSL”标签；运行模式仍仅适用于本机 Codex。 -->
-    <p class="appearance-hint">适用实例：Codex。这里选择本机 Codex 的连接方式；各 WSL Claude 实例使用各自的原生连接。</p>
-    <label class="appearance-notification-row"><span id="appearance-runtime-mode" aria-live="polite">CDP 模式</span><input id="appearance-cdp-injection" class="appearance-notification-switch" type="checkbox" role="switch" aria-label="切换运行模式，当前为 CDP 模式" checked disabled></label>
-    <p id="appearance-runtime-status" class="appearance-notification-status" role="status" hidden></p>
-    </div></section></section>
     </div></div>
     <div class="appearance-actions"><button type="button" class="appearance-version" id="appearance-app-version" hidden disabled></button><div class="appearance-action-buttons"><button type="button" id="appearance-reset">恢复默认</button><button id="instruction-reload" type="button" hidden>重新读取</button><button id="instruction-save" type="button" class="primary" hidden disabled>保存指令</button><button type="button" class="primary" id="appearance-close">完成</button></div></div>`;
   document.body.append(dialog);
@@ -1813,75 +1805,6 @@ function openAppearance() {
   const entryButton = $("#appearance-notifications-entry", dialog);
   const diagnosticsEntry = $("#appearance-diagnostics-entry", dialog);
   const diagnosticsPage = $("#appearance-diagnostics-page", dialog);
-  const runtimeEntry = $("#appearance-runtime-entry", dialog);
-  const runtimePage = $("#appearance-runtime-page", dialog);
-  const runtimeSwitch = $("#appearance-cdp-injection", dialog);
-  const runtimeMode = $("#appearance-runtime-mode", dialog);
-  const runtimeStatus = $("#appearance-runtime-status", dialog);
-  let runtimeSettings = session?.runtime || null, runtimeBusy = false;
-  const updateRuntimeSwitch = () => {
-    if (!dialog.isConnected) return;
-    const latest = session?.runtime;
-    if (typeof latest?.cdpInjectionEnabled === "boolean" && Number.isSafeInteger(latest.revision)
-        && latest.revision >= (runtimeSettings?.revision ?? -1)) runtimeSettings = latest;
-    // 用户要求开关表达两种模式的切换：名称始终跟随当前选择，保存失败后一起回退。
-    if (!runtimeBusy) runtimeSwitch.checked = runtimeSettings?.cdpInjectionEnabled !== false;
-    runtimeMode.textContent = runtimeSwitch.checked ? "CDP 模式" : "服务模式";
-    runtimeSwitch.setAttribute("aria-label", `切换运行模式，当前为 ${runtimeMode.textContent}`);
-    runtimeSwitch.setAttribute("aria-busy", String(runtimeBusy));
-    // 未确认写入或正在编辑的草稿继续由原后端处理，避免切换后丢失编辑事务。
-    runtimeSwitch.disabled = runtimeBusy || !runtimeSettings || !session || session.readOnly || !connected
-      || busy || stopping || !!pending || !!editingMessage || !!editingQueuedMessage;
-    if (!runtimeBusy && (runtimeStatus.hidden || runtimeStatus.dataset.runtimeFallback === "true")) {
-      // 设置初始化和运行中刷新共用自动降级、恢复文案，避免旧函数名使整个设置窗口无法打开。
-      const message = runtimeAutomaticMessage(runtimeSettings);
-      runtimeStatus.textContent = message;
-      runtimeStatus.hidden = !message;
-      runtimeStatus.dataset.runtimeFallback = message ? "true" : "";
-    }
-  };
-  dialog.updateRemoteRuntimeSwitch = updateRuntimeSwitch;
-  updateRuntimeSwitch();
-  const readRuntimeSettings = async () => {
-    const deviceId = session?.device.id;
-    try {
-      const response = await api("/api/read/runtime", {});
-      if (!dialog.isConnected || session?.device.id !== deviceId) return;
-      if (typeof response.runtime?.cdpInjectionEnabled !== "boolean"
-          || !Number.isSafeInteger(response.runtime.revision)) throw new Error("运行模式数据无效，请重试。");
-      if (response.runtime.revision < (runtimeSettings?.revision ?? -1)) return;
-      runtimeSettings = response.runtime;
-      updateRuntimeSwitch();
-    } catch (error) {
-      if (!dialog.isConnected) return;
-      delete runtimeStatus.dataset.runtimeFallback;
-      runtimeStatus.textContent = error.message;
-      runtimeStatus.hidden = false;
-    }
-  };
-  // 用户要求默认开启且仅当前设备生效；按设备授权保存，失败时恢复服务器确认值。
-  runtimeSwitch.onchange = async () => {
-    if (runtimeBusy || !runtimeSettings) return;
-    const enabled = runtimeSwitch.checked;
-    runtimeBusy = true; runtimeStatus.hidden = true; delete runtimeStatus.dataset.runtimeFallback; updateRuntimeSwitch();
-    try {
-      const result = await mutate("setRuntime", {
-        cdpInjectionEnabled: enabled, expectedRevision: runtimeSettings.revision
-      }, { reliable: true });
-      runtimeSettings = result.runtime;
-      applyRemoteRuntime(result.runtime);
-      await refreshConnectedSession();
-    } catch (error) {
-      if (dialog.isConnected) {
-        delete runtimeStatus.dataset.runtimeFallback;
-        runtimeStatus.textContent = error.message; runtimeStatus.hidden = false;
-      }
-      await readRuntimeSettings();
-    } finally {
-      runtimeBusy = false;
-      updateRuntimeSwitch();
-    }
-  };
   const resetButton = $("#appearance-reset", dialog);
   const notificationVersionButton = $("#appearance-app-version", dialog);
   if (androidContainer) {
@@ -1932,7 +1855,6 @@ function openAppearance() {
   customizationEntry.querySelector(".appearance-nav-icon").append(icon("sun"));
   entryButton.querySelector(".appearance-nav-icon").append(icon("globe"));
   diagnosticsEntry.querySelector(".appearance-nav-icon").append(icon("tools"));
-  runtimeEntry.querySelector(".appearance-nav-icon").append(icon("settings"));
   $("#appearance-types-entry", dialog).querySelector(".appearance-nav-icon").append(icon("allSessions"));
   $("#appearance-permissions-entry", dialog).querySelector(".appearance-nav-icon").append(icon("shield"));
   $("#appearance-instructions-entry", dialog).querySelector(".appearance-nav-icon").append(icon("edit"));
@@ -2051,11 +1973,6 @@ function openAppearance() {
   diagnosticsEntry.onclick = () => {
     if (!dialog.isConnected || !dialog.open || diagnosticsEntry.hidden) return;
     showAppearancePage(diagnosticsPage, "诊断日志", diagnosticsEntry);
-  };
-  runtimeEntry.onclick = () => {
-    if (!dialog.isConnected || !dialog.open) return;
-    showAppearancePage(runtimePage, "运行模式", runtimeEntry);
-    void readRuntimeSettings();
   };
   if (androidContainer) entryButton.onclick = () => {
     if (!dialog.isConnected || !dialog.open) return;
@@ -3204,15 +3121,15 @@ function subagentsEnabled() {
   // Claude 仅在当前后台明确声明读取能力时复用子代理列表/只读详情；侧边会话能力独立处理。
   if (isClaude()) return thread?.capabilities?.subagents === true;
   // 子智能体与侧边会话使用独立能力字段，兼容旧后台并分别约束只读与写入入口。
-  return session?.runtime?.cdpInjectionEnabled !== false || session?.capabilities?.serviceSubagents === true;
+  return session?.capabilities?.serviceSubagents === true;
 }
 function sideThreadsEnabled() {
   if (isClaude()) return false;
   // 用户选择服务独立管理临时侧边会话；只有新后台声明能力时开放，旧后台仍保持禁用。
-  return session?.runtime?.cdpInjectionEnabled !== false || session?.capabilities?.serviceSideThreads === true;
+  return session?.capabilities?.serviceSideThreads === true;
 }
 function serviceSideThread() {
-  return session?.runtime?.cdpInjectionEnabled === false && thread?.id === selectedId && thread?.serviceSide === true;
+  return thread?.id === selectedId && thread?.serviceSide === true;
 }
 function threadReadOnly(id = selectedId) {
   return !!session?.readOnly || !!id && (
@@ -3442,12 +3359,11 @@ function scheduleRelatedSessionCheck() {
   clearTimeout(relatedSessionCheckTimer);
   relatedSessionCheckTimer = null;
   const view = normalizeRelatedView(relatedSessionView, selectedId);
-    if (view && (isClaude() || session?.runtime?.cdpInjectionEnabled === false || sideThreadExpired())
+  if (view
       && (view.kind === "subagent" ? subagentsEnabled() : sideThreadsEnabled())
       && connected && !document.hidden) {
     const id = selectedId, scope = privateInputScope(session), version = selectionVersion;
-    // Claude 子代理按原生记录每 2 秒补读，独立于 Codex 的 CDP 模式；只读刷新不恢复或重跑任务。
-    // Codex 保留服务模式 2 秒、CDP 过期页 10 秒的既有周期，隐藏/离页时停止。
+    // 用户要求 Codex 仅保留服务模式；关联会话统一每 2 秒只读补齐，隐藏或离页时停止，不恢复执行。
     relatedSessionCheckTimer = setTimeout(async () => {
       relatedSessionCheckTimer = null;
       if (scope !== privateInputScope(session) || selectedId !== id || version !== selectionVersion
@@ -3455,39 +3371,11 @@ function scheduleRelatedSessionCheck() {
       try { await reloadThread(); } catch {}
       if (scope === privateInputScope(session) && selectedId === id && version === selectionVersion)
         scheduleRelatedSessionCheck();
-    }, isClaude() || session?.runtime?.cdpInjectionEnabled === false ? 2000 : 10000);
+    }, 2000);
     return;
   }
-  if (!view || view.kind !== "side" || !selectedId || !session || sideThreadExpired(selectedId) || !connected) return;
-  const id = selectedId, scope = privateInputScope(session), version = selectionVersion;
-  relatedSessionCheckTimer = setTimeout(async () => {
-    relatedSessionCheckTimer = null;
-    if (scope !== privateInputScope(session) || selectedId !== id || version !== selectionVersion
-        || !normalizeRelatedView(relatedSessionView, id) || sideThreadExpired(id) || !connected) return;
-    try {
-      const currentView = normalizeRelatedView(relatedSessionView, id);
-      const parentThreadId = currentView?.parentThreadId || currentView?.openedFromThreadId;
-      const [threadResult, related] = await Promise.all([
-        api("/api/read/thread", { threadId: id }),
-        parentThreadId ? api("/api/read/relatedThreads", { threadId: parentThreadId }) : null
-      ]);
-      if (related && !related.sideThreads.some(item => item?.id === id)) {
-        await retireNativeSideThreads([id]);
-        return;
-      }
-      if (threadResult?.thread?.id !== id) throw Object.assign(new Error("侧边会话读取结果不匹配"), { code: 409 });
-    } catch (error) {
-      if (scope === privateInputScope(session) && isMissingThreadError(error, id)
-          && selectedId === id && version === selectionVersion
-          && normalizeRelatedView(relatedSessionView, id)?.kind === "side") {
-        await retireExpiredSideThread(id).catch(expiredError => notice(expiredError.message, true));
-        return;
-      }
-    }
-    if (scope === privateInputScope(session) && selectedId === id && version === selectionVersion)
-      scheduleRelatedSessionCheck();
-  }, 10000);
 }
+
 function isMissingThreadError(error, id) {
   const code = Number(error?.code);
   if (!validRelatedThreadId(id) || [401, 403].includes(code) || code >= 500 && code !== 503
@@ -4162,7 +4050,7 @@ function cachedReadingPosition(snapshot, position) {
 }
 function sidebarSnapshot(value) {
   const { unreadSideThreads, ...snapshot } = value;
-  // 用户要求项目对齐 CDP；升级后的离线缓存也只保留已保存项目，旧合成项目的会话回到最近列表。
+  // 用户要求项目对齐桌面已保存项目；升级后的离线缓存也只保留已保存项目，旧合成项目的会话回到最近列表。
   const projects = value.projects.filter(project => !project.synthetic);
   const projectIds = new Set(projects.map(project => project.id));
   const displayThread = item => {
@@ -4531,7 +4419,7 @@ function cancelPromptOptimization(record) {
 function updatePromptOptimization() {
   const control = $("#prompt-optimize");
   if (!control) return;
-  // 用户要求提示词优化独立于会话类型：Claude 实例也显示，复用独立优化服务和桌面设置，不依赖原生 CLI/CDP 能力。
+  // 用户要求提示词优化独立于会话类型：Claude 实例也显示，复用独立优化服务和桌面设置，不依赖会话执行引擎能力。
   control.hidden = false;
   const scope = promptOptimizationScope(), signature = promptOptimizationSignature();
   for (const record of promptOptimizations.values()) {
@@ -4812,7 +4700,7 @@ function refreshNewChatBranch() {
     return;
   }
   // 用户要求新建页展示所选项目的当前分支；按授权、运行方式和本次选择隔离，晚到响应不能串到另一项目。
-  const key = JSON.stringify([privateInputScope(session), session.runtime?.revision ?? null, creationProject, selectionToken]);
+  const key = JSON.stringify([privateInputScope(session), nativeConnectionVersion ?? null, creationProject, selectionToken]);
   if (creationBranchRead?.key === key && creationBranchRead.badge === badge) return creationBranchRead.promise;
   // 与现有 15 秒连接/侧栏轮询同步刷新，不因输入、展开菜单或重复渲染而频繁启动 Git。
   if (creationBranchSnapshot?.key === key && Date.now() - creationBranchSnapshot.loadedAt < 15000) {
@@ -4825,7 +4713,7 @@ function refreshNewChatBranch() {
   setWorkspaceBranch(badge, creationBranchSnapshot?.key === key ? creationBranchSnapshot.git : null, "读取分支…");
   const current = () => creationBranchRead === record && !record.controller.signal.aborted
     && creating && session && $("#new-chat-branch") === badge
-    && JSON.stringify([privateInputScope(session), session.runtime?.revision ?? null, creationProject, selectionToken]) === key;
+    && JSON.stringify([privateInputScope(session), nativeConnectionVersion ?? null, creationProject, selectionToken]) === key;
   record.promise = api("/api/workspace/context", { projectId: creationProject }, undefined, record.controller.signal)
     .then(result => {
       if (!current()) return;
@@ -5399,7 +5287,7 @@ function composerMetricsContext() {
   if (!owner || !instanceId || creating || !selectedId || thread?.id !== selectedId
       || thread.viewKind === "subagent" || pageLeaving || document.hidden
       || session?.capabilities?.sessionMetrics !== true) return null;
-  return { key: JSON.stringify([owner, instanceId, selectedId, selectionVersion, session.runtime?.revision ?? 0]),
+  return { key: JSON.stringify([owner, instanceId, selectedId, selectionVersion, nativeConnectionVersion]),
     payload: { threadId: selectedId, instanceId, backend: activeBackend() } };
 }
 function resetComposerMetrics() {
@@ -5764,9 +5652,9 @@ async function loadModels(force = false, { includeAvailable = false } = {}) {
   if (!sessionInstanceEnabled(activeInstanceId())) return [];
   const scope = privateInputScope(session);
   const context = modelContext(), contextKey = modelContextKey();
-  const runtimeRevision = session?.runtime?.revision ?? 0;
+  const connectionGeneration = nativeConnectionVersion;
   const current = () => scope && privateInputScope(session) === scope
-    && (session?.runtime?.revision ?? 0) === runtimeRevision && modelContextKey() === contextKey;
+    && (nativeConnectionVersion) === connectionGeneration && modelContextKey() === contextKey;
   // 缓存只保存实例的完整目录；打开选择器复用新鲜目录，过期时才显式读取可用模型。
   if (!force && catalogUsable({ loadedAt: modelsLoadedAt })
       && (!includeAvailable || !catalogNeedsRefresh({ loadedAt: modelsLoadedAt }))
@@ -5805,7 +5693,7 @@ async function loadModels(force = false, { includeAvailable = false } = {}) {
       nativeCapabilities: result.nativeCapabilities,
       // 模型能力、实例限制共用同一目录及刷新周期；身份标记防止旧授权或运行方式的展示结果串用。
       fastModeAvailability: result.fastModeAvailability, fastModelAliases: result.fastModelAliases,
-      fastModeOwner: JSON.stringify([scope, context.instanceId, runtimeRevision]) };
+      fastModeOwner: JSON.stringify([scope, context.instanceId, connectionGeneration]) };
     modelsLoadedAt = Date.now();
     modelsRetryAt = result.fastModeAvailability?.available === null ? modelsLoadedAt + catalogRetryMs : 0;
     modelLoadError = "";
@@ -5885,18 +5773,18 @@ function currentEffort() {
     : creating && !selectedModel ? defaultModelEffort(currentModel()) : "";
 }
 function remoteFastKey() {
-  // 用户要求两种模式均按真实会话保存 Fast；服务模式须明确声明独立能力，不能借用旧 CDP 能力。
+  // 用户要求 Codex 仅使用服务模式；Fast 必须由当前服务明确声明能力，并按会话保存。
   if (!session?.capabilities?.fastMode
-      || session.runtime?.cdpInjectionEnabled === false && session.capabilities.serviceFastMode !== true
+      || session.capabilities.serviceFastMode !== true
       || isClaude() || !currentModelId() || !creating && !selectedId) return "";
   return JSON.stringify([privateInputScope(session), activeInstanceId(), draftKey(), currentModelId(),
-    selectionVersion, session.runtime?.revision ?? 0]);
+    selectionVersion, nativeConnectionVersion]);
 }
 function remoteFastContext() {
   const key = remoteFastKey();
   if (!key) return null;
   const instanceId = activeInstanceId();
-  const owner = JSON.stringify([privateInputScope(session), instanceId, session.runtime?.revision ?? 0]);
+  const owner = JSON.stringify([privateInputScope(session), instanceId, nativeConnectionVersion]);
   return { key, owner, instanceId,
     preferenceKey: creating ? null : JSON.stringify([owner, selectedId]) };
 }
@@ -5920,9 +5808,8 @@ function updateRemoteFast() {
   control.hidden = !key;
   if (!key) return;
   const context = remoteFastContext();
-  const serviceMode = session.runtime?.cdpInjectionEnabled === false;
-  const model = currentModel() || (serviceMode ? models.find(model => model.id === currentModelId()
-    || model.requestModel === currentModelId()) : null);
+  const model = currentModel() || models.find(model => model.id === currentModelId()
+    || model.requestModel === currentModelId());
   const directoryReady = modelsScope === modelContextKey() && modelDefaults.fastModeOwner === context.owner
     && catalogUsable({ loadedAt: modelsLoadedAt });
   const availability = directoryReady ? modelDefaults.fastModeAvailability : null;
@@ -5934,20 +5821,17 @@ function updateRemoteFast() {
     ?? model?.requestModel ?? model?.request_model ?? model?.model ?? currentModelId();
   const serviceModelSupported = typeof requestModel === "string"
     && /^gpt-\d/i.test(requestModel.trim().split("/").at(-1) || "");
-  const modelSupported = serviceMode ? serviceModelSupported : !!model && (model.fastModeSupported === true
-    || model.fastModeSupported == null && /^gpt-\d/i.test(model.model?.split("/").at(-1) || ""))
-    && Array.isArray(model.serviceTiers) && model.serviceTiers.some(tier => ["priority", "fast"].includes(tier?.id));
+  const modelSupported = serviceModelSupported;
   // 用户要求选择不支持 Fast 的模型时隐藏按钮；沿用实际请求模型及目录能力判断，切回支持模型后恢复原偏好。
   control.hidden = !modelSupported;
   const preference = creating ? selectedDraftFast : currentThreadDisplay()?.fastMode;
   const preferenceKnown = typeof preference === "boolean";
   const supported = directoryReady && availability?.available === true && modelSupported && preferenceKnown;
   // 服务已保存的 Fast 在管理员随后禁用时仍允许关闭，避免后续发送因旧偏好一直受阻；不能借此开启。
-  const canDisable = directoryReady && session.runtime?.cdpInjectionEnabled === false
-    && session.capabilities.serviceFastMode === true && preference === true;
+  const canDisable = directoryReady && session.capabilities.serviceFastMode === true && preference === true;
   const state = remoteFastState = { key, supported, canDisable, enabled: supported && preference,
     reason: !directoryReady ? modelLoadError || "正在读取模型目录"
-      : !modelSupported ? serviceMode ? "当前请求模型不是 GPT，不能开启 Fast" : "当前模型未声明 Fast 能力"
+      : !modelSupported ? "当前请求模型不是 GPT，不能开启 Fast"
         : availability?.available !== true ? availability?.reason || "当前实例暂未提供 Fast 配置"
           : !preferenceKnown ? "正在读取会话设置" : "" };
   const operation = context.preferenceKey && remoteFastWrites.get(context.preferenceKey);
@@ -5988,7 +5872,7 @@ async function toggleRemoteFast() {
   try {
     const result = await mutate("setFast", { ...modelContext(), threadId: id, model, enabled });
     if (remoteFastWrites.get(context.preferenceKey) !== operation
-        || JSON.stringify([privateInputScope(session), context.instanceId, session.runtime?.revision ?? 0]) !== context.owner) return;
+        || JSON.stringify([privateInputScope(session), context.instanceId, nativeConnectionVersion]) !== context.owner) return;
     if (result.threadId !== id || result.model !== model || result.supported !== true || result.enabled !== enabled)
       throw new Error("Fast 设置尚未确认，请重新读取会话");
     rememberRemoteFastPreference(id, enabled);
@@ -7630,7 +7514,7 @@ function readConnectionSession(signal, recoveryObservation = undefined, { resour
         connectionRtt = { deviceId: latest.device.id, nativeVersion, connectionVersion, milliseconds: elapsed };
       }
       const result = session && session.device.id === deviceId && nativeVersion !== nativeConnectionVersion
-        ? { ...latest, nativeConnected: session.nativeConnected, serviceConnected: session.serviceConnected } : latest;
+        ? { ...latest, serviceConnected: session.serviceConnected } : latest;
       sessionRecoveryReads.set(result, { expected, requestGeneration: request.recoveryGeneration });
       return result;
     })()
@@ -7670,7 +7554,6 @@ async function syncConnectionState(source = stream, { recoveryProbe = false } = 
     await reconnectChangedAuthorization();
     return false;
   }
-  if (latest.runtime) applyRemoteRuntime(latest.runtime);
   session = latest;
   setConnection(backendAvailable(latest) && source?.readyState === EventSource.OPEN);
   renderApprovals();
@@ -8905,7 +8788,6 @@ function shell() {
     </aside>
     <main class="conversation">
       <header class="conversation-header"><button id="open-sidebar" class="icon-button" type="button" aria-label="打开侧边栏" aria-controls="session-sidebar"></button><div class="thread-heading"><div class="thread-title-line"><span id="thread-backend-icon" class="thread-backend-icon" aria-hidden="true" hidden></span><strong id="thread-title">远程会话</strong></div><span id="thread-path" class="muted"></span></div><button id="connection-state" class="connection-state pending" type="button" aria-live="polite" title="${connectionRttDescription}" aria-label="连接中…。${connectionRttDescription}">连接中…</button><button id="open-session-tools" class="icon-button session-tools-trigger" type="button" title="会话菜单" aria-label="会话菜单" aria-haspopup="menu" aria-expanded="false"></button><span id="related-session-model" class="related-session-model muted" hidden></span><button id="related-session-back" class="text-button" type="button" aria-label="返回主会话" hidden>返回</button></header>
-      <div id="desktop-connection-guidance" class="desktop-connection-guidance" role="status" aria-live="polite" hidden>Codex 桌面尚未连接或正在重启。请在电脑端 CodexElves 管理器右上角点击「重启 Codex」；若已点击，请等待 Codex 主界面完全打开、能够正常查看会话后，再刷新远程网页。</div>
       <div class="messages-shell"><div id="messages" class="messages" role="log" aria-label="会话消息"></div><button id="scroll-to-bottom" class="scroll-to-bottom" type="button" aria-label="跳转到最新消息" hidden></button></div>
       <div class="composer-area"><div class="composer-context"><div id="queued-area" hidden></div><div id="goal-area" hidden></div></div><div id="pending-area"></div><div id="project-select-slot" hidden></div><div class="composer-anchor"><div id="approval-area" class="approval-area" aria-live="polite"></div><div id="side-thread-expired" class="side-thread-expired-banner" role="status" hidden><strong>侧边会话已过期</strong><span>该会话已结束，当前仅可查看已保留的消息。</span></div><form id="composer" class="composer">
         <div class="composer-input"><div class="composer-input-content">
@@ -9217,9 +9099,8 @@ function shell() {
         subagentsEnabled: subagentsEnabled(),
         sideThreadsEnabled: sideThreadsEnabled(),
         sideThreadView: relatedSessionView?.kind === "side",
-        // Claude 的列表按原生文件观察，菜单打开时沿用每秒只读核对，不依赖 Codex 的 CDP 事件。
-        serviceMode: isClaude() || session?.runtime?.cdpInjectionEnabled === false,
-        relatedScope: JSON.stringify(session?.runtime),
+        // Claude 和 Codex 的关联列表均由服务读取，菜单打开时沿用每秒只读核对。
+        relatedScope: JSON.stringify([session?.device.id, nativeConnectionVersion]),
         createPending: [...relatedThreadOperations.values()].some(record => ownsRelatedOperation(record)
           && record.parentThreadId === (parentThreadId || selectedId) && record.action === "createSideThread") };
     },
@@ -9366,9 +9247,9 @@ function shell() {
     $("#model-settings").hidden = false; $("#model-button").setAttribute("aria-expanded", "true");
     const cached = !!modelsLoadedAt;
     const menu = $("#model-settings"), owner = privateInputScope(session), contextKey = modelContextKey();
-    const runtimeRevision = session?.runtime?.revision ?? 0;
+    const connectionGeneration = nativeConnectionVersion;
     const current = () => $("#model-settings") === menu && !menu.hidden && privateInputScope(session) === owner
-      && modelContextKey() === contextKey && (session?.runtime?.revision ?? 0) === runtimeRevision;
+      && modelContextKey() === contextKey && (nativeConnectionVersion) === connectionGeneration;
     if (cached) {
       renderModelMenu(); $('#model-settings [aria-checked="true"]:not(:disabled)')?.focus();
     } else menu.replaceChildren();
@@ -9615,7 +9496,7 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
   }
 }
 // 用户要求服务模式会话的排序和今天/昨天分组与 Codex App 一致：服务端已统一输出毫秒，
-// 这里兼容旧缓存中的 Unix 秒。阈值 1e11 与 native.js timestamp() 及
+// 这里兼容旧缓存中的 Unix 秒。阈值 1e11 与服务时间戳转换及
 // codex_service.rs UNIX_SECONDS_LIMIT 同步。
 function sidebarTimestamp(value) {
   if (!Number.isFinite(value) || value <= 0) return 0;
@@ -9681,8 +9562,7 @@ function resetDesktopObservation() {
   previous?.controller.abort();
 }
 function scheduleDesktopObservation() {
-  if (pageLeaving || document.hidden || !session?.capabilities?.desktopSessionSync
-      || session.runtime?.cdpInjectionEnabled !== false) {
+  if (pageLeaving || document.hidden || !session?.capabilities?.desktopSessionSync) {
     resetDesktopObservation();
     return;
   }
@@ -9693,13 +9573,12 @@ function scheduleDesktopObservation() {
 }
 async function syncDesktopObservation() {
   desktopObservationTimer = null;
-  if (pageLeaving || document.hidden || !session?.capabilities?.desktopSessionSync
-      || session.runtime?.cdpInjectionEnabled !== false) return;
+  if (pageLeaving || document.hidden || !session?.capabilities?.desktopSessionSync) return;
   if (desktopObservationRequest && (desktopObservationRequest.generation !== foregroundReadGeneration
       || desktopObservationRequest.deviceId !== session.device.id
-      || desktopObservationRequest.revision !== session.runtime.revision)) resetDesktopObservation();
+      || desktopObservationRequest.revision !== nativeConnectionVersion)) resetDesktopObservation();
   if (desktopObservationRequest) { desktopObservationRequest.again = true; return; }
-  const ids = desktopObservationIds(), deviceId = session.device.id, revision = session.runtime.revision;
+  const ids = desktopObservationIds(), deviceId = session.device.id, revision = nativeConnectionVersion;
   const signature = JSON.stringify([deviceId, revision, ids]), now = Date.now();
   // 12 秒内合并重复渲染，确保既有 15 秒轮询仍能在后端 45 秒到期前续上观察。
   if (desktopObservationLast?.signature === signature && now - desktopObservationLast.at < 12000) return;
@@ -9709,7 +9588,7 @@ async function syncDesktopObservation() {
     await api("/api/read/observeThreads", { threadIds: ids }, undefined, request.controller.signal,
       { resourcePriority: "background" });
     if (!request.controller.signal.aborted && request.generation === foregroundReadGeneration
-        && session?.device.id === deviceId && session.runtime?.revision === revision)
+        && session?.device.id === deviceId && nativeConnectionVersion === revision)
       desktopObservationLast = { signature, at: now };
   } catch {
     // 观察失败由后台重连和下一次连接轮询恢复，不阻塞输入或修改已有发送回执。
@@ -13717,7 +13596,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   suppressAutomaticNewChat = false;
   const navigationVersion = ++relatedSelectionVersion;
   const nextRelatedView = relatedView === undefined ? relatedViewForThread(id) : normalizeRelatedView(relatedView, id);
-  if (session.runtime?.cdpInjectionEnabled === false && nextRelatedView
+  if (nextRelatedView
       && (nextRelatedView.kind === "side" ? !sideThreadsEnabled() : !subagentsEnabled())) {
     const parent = nextRelatedView.openedFromThreadId || nextRelatedView.parentThreadId;
     if (validRelatedThreadId(parent) && parent !== id)
@@ -15972,7 +15851,6 @@ function syncPendingFeedbackTimer() {
   }, Math.min(...remaining));
 }
 function updateComposer() {
-  $("#appearance-dialog")?.updateRemoteRuntimeSwitch?.();
   sessionTools?.updateContext();
   syncRelatedSessionLayout();
   syncWorkspaceSidePanelState();
@@ -16504,9 +16382,6 @@ function setConnection(value) {
   else if (connectionRtt && (connectionRtt.deviceId !== session?.device.id
       || connectionRtt.nativeVersion !== nativeConnectionVersion
       || connectionRtt.connectionVersion !== connectionCycleVersion)) connectionRtt = null;
-  const guidance = $("#desktop-connection-guidance");
-  if (guidance) guidance.hidden = isClaude() || session?.runtime?.cdpInjectionEnabled === false
-    || session?.nativeConnected !== false || session?.serviceConnected === true;
   renderConnectionIndicator();
   updateComposer();
   if (thread?.requests?.some(request => request.method === "remote/requestUserInputAsync")) renderApprovals();
@@ -16628,46 +16503,6 @@ function scheduleSidebarRefresh() {
   clearTimeout(sidebarTimer);
   sidebarTimer = setTimeout(() => void loadSidebar(null, { fresh: true }).catch(() => {}), 1200);
 }
-function runtimeAutomaticMessage(runtime) {
-  if (runtime?.cdpInjectionEnabled === false && runtime.fallbackReason === "cdp-unavailable")
-    return "电脑端 CDP 暂不可用，已自动切换为服务模式；CDP 恢复稳定且服务任务结束后会自动切回。";
-  return runtime?.cdpInjectionEnabled === true && runtime.fallbackReason === "cdp-recovered"
-    ? "电脑端 CDP 已恢复，已自动切回 CDP 模式。" : "";
-}
-function applyRemoteRuntime(runtime) {
-  if (!session || typeof runtime?.cdpInjectionEnabled !== "boolean"
-      || !Number.isSafeInteger(runtime.revision)
-      || (session.runtime?.revision ?? -1) > runtime.revision) return;
-  const changed = session.runtime?.cdpInjectionEnabled !== runtime.cdpInjectionEnabled;
-  session.runtime = runtime;
-  session.capabilities = { ...session.capabilities,
-    sideThreads: runtime.cdpInjectionEnabled || session.capabilities?.serviceSideThreads === true,
-    subagents: runtime.cdpInjectionEnabled || session.capabilities?.serviceSubagents === true };
-  if (changed) {
-    ++nativeConnectionVersion;
-    cancelConnectionProbe();
-    retireForegroundReads("运行方式已切换");
-    // 切换后保留已有目录展示，静默读取新后端；旧后端的迟到响应不能回填。
-    modelsLoadedAt = 0; modelsPromise = null; modelsRetryAt = 0;
-    if ($("#model-button")) void loadModels(true).catch(() => {});
-    sessionMenu?.close();
-    sessionMenu?.invalidate();
-    if ($("#messages")) renderMessages();
-    if (!runtime.cdpInjectionEnabled) {
-      stopRelatedSessionTimers();
-      dismissSideCreation({ canceled: true });
-      if (relatedSessionView?.kind === "side" || relatedSessionView && !subagentsEnabled())
-        void returnToParentSession().catch(() => {});
-      else scheduleRelatedSessionCheck();
-    }
-    // 用户要求故障后自动切回：两种自动切换都只退役旧读取，原发送回执和编辑草稿继续保留，同一版本只提示一次。
-    const message = runtimeAutomaticMessage(runtime);
-    if (message) notice(message);
-  }
-  sessionMenu?.updateContext();
-  $("#appearance-dialog")?.updateRemoteRuntimeSwitch?.();
-  scheduleDesktopObservation();
-}
 function receiveClaudeHistory(params) {
   const id = params.threadId;
   // 临时正文不改变其他会话的标题、未读或队列；只让正式快照触发侧栏读取，避免流式片段反复刷新列表。
@@ -16732,11 +16567,6 @@ function receiveClaudeHistory(params) {
 }
 function receive(event) {
   if (handleRemoteChannelEvent(event)) return;
-  if (event.method === "remote/runtimeChanged") {
-    applyRemoteRuntime(event.params?.runtime);
-    void withRecoveryErrorSilence(() => refreshConnectedSession()).catch(() => {});
-    return;
-  }
   const rawParams = event.params || {};
   const eventThreadId = rawParams.threadId ?? rawParams.conversationId ?? rawParams.thread?.id;
   if (event.method === "claude/history/updated") {
@@ -16751,11 +16581,9 @@ function receive(event) {
   if (event.method === "remote/unauthorized") { requireAuthentication(); return; }
   if (["remote/disconnected", "remote/reconnected"].includes(event.method)) {
     const available = event.method === "remote/reconnected";
-    const nativeAvailable = event.params?.nativeConnected ?? available;
-    const serviceAvailable = event.params?.serviceConnected ?? false;
+    const serviceAvailable = event.params?.serviceConnected ?? available;
     ++nativeConnectionVersion;
     if (session) {
-      session.nativeConnected = nativeAvailable;
       session.serviceConnected = serviceAvailable;
     }
     setConnection(backendAvailable() && stream?.readyState === EventSource.OPEN);
@@ -16773,7 +16601,7 @@ function receive(event) {
       if (rawParams.threadId === selectedId) scheduleReload();
       return;
     }
-    // 服务重启可能保留相同的设备和模式版本；全量重连不能被 12 秒的旧订阅去重窗口挡住。
+    // 服务重启可能保留同一设备授权；全量重连不能被 12 秒的旧订阅去重窗口挡住。
     resetDesktopObservation();
     scheduleDesktopObservation();
     void withRecoveryErrorSilence(() => refreshConnectedSession()).catch(() => {});

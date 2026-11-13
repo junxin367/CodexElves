@@ -1804,7 +1804,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         releaseSummary: [
           "CodexElves 0.7.0",
           "",
-          "- 新增独立服务模式，CDP 持续不可用时自动切换",
+          "- Codex 远程会话统一使用独立服务模式",
           "- 支持服务侧边会话与子智能体只读查看，完善历史及状态恢复",
           "- 改善多仓库文件预览、Fast 会话隔离及手机端交互",
         ].join("\n"),
@@ -1983,7 +1983,8 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           : { status: "failed", message: "zrok 固定公网尚未启动。" } as T);
       }
       return Promise.resolve({ status: "ok", enabled: remote.enabled, running,
-        nativeConnected: running, settings: remote, ...browserPreviewRemoteCredentials,
+        serviceConnected: running,
+        settings: remote, ...browserPreviewRemoteCredentials,
         addresses: [`http://${remote.bindHost}:${remote.port}`],
         primary: {
           provider: browserPreviewPrimary, publicUrl: browserPreviewPrimary === "frp" ? browserPreviewFrpActiveOrigin : publicUrl,

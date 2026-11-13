@@ -20,8 +20,8 @@ const NATIVE_FAST_UNLOCK_SCRIPT: &str =
 const COMPOSER_FAST_SCRIPT: &str = include_str!("../../../assets/inject/composer-fast.js");
 const NATIVE_RPC_COMPAT_SCRIPT: &str = include_str!("../../../assets/inject/native-rpc-compat.js");
 // 保留主线缓存修复、Token 编号解析与侧边 Fast；
-// 分支信息、多仓库变更、运行模式和压缩恢复使用同一构建标识，便于核对网页和后台是否来自同一包。
-// 原生桥 139 的队列引导只做轻量 ID 防重，不再在发送锁内拉取完整历史。
+// 分支信息、多仓库变更和压缩恢复使用同一构建标识，便于核对网页和后台是否来自同一包。
+// 远程 Codex 固定使用服务模式，本地桌面注入增强独立保留。
 pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261113-remote-fast-next-turn-r30";
 
 pub fn statsig_cache_script() -> String {
@@ -41,7 +41,7 @@ pub fn renderer_bootstrap_script() -> &'static str {
 }
 
 pub fn renderer_features_script() -> &'static str {
-    // 用户要求只调整原生活动列表的展示；远程原生桥由 remote_access 独立加载。
+    // 用户要求保留本地活动列表增强；远程 Codex 由独立服务执行。
     RENDERER_FEATURES_SCRIPT
 }
 

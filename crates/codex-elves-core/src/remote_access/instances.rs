@@ -94,7 +94,7 @@ pub(super) fn catalog(environments: &[Environment]) -> Vec<Instance> {
                     .get(kind.id)
                     .cloned()
                     .unwrap_or_default();
-                // 本机 Codex 也可经已连接桌面接入；其服务能力仍由既有运行状态报告。
+                // 本机 Codex 保留固定实例标识；CLI 的实际发现和连接结果由会话服务报告。
                 if executable.is_empty() && !(local && kind.id == "codex") {
                     return None;
                 }
@@ -121,8 +121,9 @@ pub(super) fn catalog(environments: &[Environment]) -> Vec<Instance> {
                     .into(),
                     legacy_default: local && kind.id == "codex"
                         || environment.configured && kind.id == "claude",
-                    connection_modes: if local && kind.id == "codex" {
-                        vec!["cdp", "service"]
+                    // 用户要求 Codex 实例仅保留服务模式；接口不能再宣告桌面注入，未接入的实例保持无可用连接方式。
+                    connection_modes: if ready && kind.id == "codex" {
+                        vec!["service"]
                     } else if ready {
                         vec!["native"]
                     } else {

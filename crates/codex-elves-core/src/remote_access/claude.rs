@@ -546,7 +546,7 @@ impl Claude {
         });
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(test)]
     pub async fn release(&self) {
         self.processes.lock().await.clear();
         self.discovery.lock().await.clear();

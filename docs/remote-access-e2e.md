@@ -35,32 +35,25 @@
 | 队列常规 | `queue.automatic`、`queue.edit_draft`、`queue.edit_save`、`queue.reorder`、`queue.remove`、`queue.steer` | 两条消息按 FIFO 自然承接；取回后作为普通未发送草稿，不显示编辑栏和取消按钮，未发送不恢复队列，重新发送回到原位置；再核对修改、键盘排序、删除及引导 |
 | 队列边界 | `queue.after_stop`、`queue.after_failure`、`queue.approval_wait`、`queue.compaction` | 停止/真实上游失败后保留原队列，明确引导恢复；审批/压缩期间不抢先消费，结束后只消费一次 |
 | 队列并发与恢复 | `queue.dequeue_edit_race`、`queue.dequeue_remove_race`、`queue.cross_session` | 等到真实原生出队窗口再操作；接受明确过期拒绝，不接受未知结果；原对象只能删除或消费一次；跨会话刷新保持同 ID |
-| 侧边命名六项 | `side.default_name`、`side.first_message_name`、`side.same_id_name`、`side.desktop_created`、`side.desktop_rename`、`side.custom_name_refresh` | 首条消息前按同一真实 thread ID 核对原生默认标签，不写死默认语言或编号；默认名且首次出现有效用户文字时，按合并空白后的前 15 个 Unicode 码点计算期望，必须同时核对原生 tab 写入和远程列表、详情及刷新；已有自定义名不套用十五字符限制，两次连续改名分别留证并验证后续消息保持 |
 | 侧边基础 | `lifecycle.side_create`、`lifecycle.side_switch`、`lifecycle.side_refresh`、`side.multiple` | 真实创建并首次发送标记；主侧往返；侧边刷新；两个不同侧边按 ID 独立切换且父子关系一致 |
 | 侧边生命周期 | `side.late_creation`、`side.close_running`、`side.delete_parent`、`lifecycle.side_close` | 延迟实际创建响应后不抢占控制会话；运行中关闭经预览批准且终止执行；删除单独新建父会话后无孤立/活动侧边；普通关闭刷新后保持消失 |
 | 已读 | `read.main_read_state`、`read.side_read_state`、`read.side_aggregate`、`read.cross_client` | 两轮真实新回复经历未读→阅读→刷新保持→再次未读；多侧边逐个清除聚合；Codex 阅读同步远程，下一轮再次未读 |
 | 项目与会话元数据 | `project.pin_unpin`、`project.search_preferences`、`lifecycle.pin`、`lifecycle.rename` | 本轮专用项目置顶和取消并刷新；搜索指定项目，切换本客户端最近/项目视图并刷新保持；会话置顶；Codex 改名同步远程。项目手动顺序属于另一类原生数据，不能用修改桌面偏好代替客户端偏好验收 |
 | 输入 | `composer.multiline`、`composer.image`、`composer.skill`、`composer.edit_latest` | 多行草稿切换刷新后逐字发送；真实系统图片选择器、预览、原生附件哈希；当前项目 Skill 的真实选择和原生输入；最新已发消息取消编辑、修改、单次重发及刷新 |
-| 提示词优化 | `optimizer.restore`、`optimizer.cancel`、`optimizer.late_result`、`optimizer.no_injection` | 真实优化后恢复原文；pending 时取消；后来编辑及跨会话草稿不被迟到结果覆盖；最后一项专指**无 Codex 原生注入且 CLI 服务也不可用**时独立优化/取消/恢复，显式只读授权仍禁止写入，结束恢复环境 |
+| 提示词优化 | `optimizer.restore`、`optimizer.cancel`、`optimizer.late_result`、`optimizer.no_injection` | 真实优化后恢复原文；pending 时取消；后来编辑及跨会话草稿不被迟到结果覆盖；最后一项专指**会话服务不可用**时独立优化/取消/恢复，显式只读授权仍禁止写入，结束恢复环境 |
 | 上下文 | `context.switch_update`、`context.zero_missing` | main→control→main 不串值，新实际 turn 更新最后请求用量；两个同轮专用真实会话分别提供零值和缺失原生字段，验证 0% 与“—”。不得改写 tokenUsage 制造夹具 |
-| 通道 | `transport.native`、`transport.cli_fallback`、`transport.native_takeover` | 正常原生发送；真实断开 CDP 后仅合资格会话走 CLI，不使所有会话只读；恢复后原生接管，CLI 原消息不重放 |
+| 通道 | `transport.service` | 正常发送固定使用服务通道，单次提交且不重复发送 |
 | 恢复 | `recovery.reconnect`、`recovery.native_restart`、`recovery.unknown_receipt`、`recovery.draft` | 真实断线重连、原生重启后身份/轮次/草稿保持；只核对原未知回执；主侧与控制会话的文字/图片草稿切换刷新保持 |
 | 回答回执恢复 | `recovery.question_receipt` | completed 多题刷新后单次回答；只丢准确回答回包并暂阻断原回执读取；新文档实际 GET 原 ID，原锁消失、删除入口恢复；两会话草稿及旧完整历史保留，无重答或额外业务写入 |
 | 原生特殊场景 | `scenario.approval`、`scenario.question`、`scenario.question_completed`、`scenario.compaction`、`scenario.goal` | runner 真实发起并点击具体审批、填写获准回答、压缩已有上下文、创建获准目标并观察执行；completed 问答先取得原轮 completed 和原生未答状态，再刷新/回答/刷新核对，不能在原轮结束前抢答；已移除返回 passed 的自定义 scenarioHandlers |
 | Android | `android.installed_version`、`android.background_resume`、`android.back_navigation`、`android.notification`、`android.resource_update` | 读取实际安装 APK/签名/资源；填写设备草稿后后台/恢复；浮层先关再返回父会话；点真实通知按 ID 打开且跨端已读；真实资源更新重载及失败后保留上一个有效版本 |
 | 永久删除 | `lifecycle.delete_preview`、`lifecycle.delete_confirm` | 最后才删除 control，避免破坏其他案例前置；预览、取消、动作当时批准、真实 deleted 回执及刷新消失 |
 
-13 个 suite 均可单独选择。单独执行不会自动创建前置对象或扩大授权。顺序见导出的 `REMOTE_ACCESS_E2E_CASES`：侧边默认名在首次发送前检查，关闭在已读/草稿案例后，control 永久删除在全部依赖案例后。
+13 个 suite 均可单独选择。单独执行不会自动创建前置对象或扩大授权。顺序见导出的 `REMOTE_ACCESS_E2E_CASES`：关闭在已读/草稿案例后，control 永久删除在全部依赖案例后。
 
 覆盖边界：当前矩阵没有子智能体列表/只读详情或变更/文件页面的专用处理器，不能用侧边案例或菜单入口存在替代。`session.model` 也不替代 UF-09 的“侧边成功发送新模型后往返、刷新及不重选续发”。已有目标的暂停/开始/删除按 UF-03 另核，不能从 `scenario.goal` 等待完成推导已验。浏览器入口需要 FRP 线路及受支持的 Android 原生能力，普通 Chrome 页面不提供该原生能力；App 缓存是客户端恢复机制，不是单独的工具菜单页。现行功能与权限边界见 [远程会话工具](remote-session-tools.md) 和 [远程访问](remote-access.md)，本段不增加执行或通过状态。
 
-临时侧边的权威名称来自同一 thread ID 对应的原生 `tab.title`，证据字段为 `nativeTabThreadId/nativeTabTitle`。`getConversation.title`、thread.name 可以为 null，不能强制通过不支持临时会话的元数据 RPC 改名，也不能只看远程乐观状态。`side.first_message_name` 不发送新消息，使用 `lifecycle.side_create` 已确认的首条消息动作及其准确会话中的完成回复作为起点；若发送前仍为默认名且该消息含有效文字，须独立按产品规则计算前 15 个 Unicode 码点，并核对其已写入同一原生标签。发送前已有自定义名时，验证原名保持；纯图片、空文字、待提交或压缩输入不产生自动名。仅证明远程与原生同名不足以证明自动命名规则正确。`rename-side-tab` 驱动使用真实原生标签的命名能力；普通主会话改名使用 `rename-thread`。
-
-每个命名阶段执行两次独立的 `desktop/observe-thread`，原始 `capturedAt` 至少间隔 1000 毫秒且 `nativeTabTitle` 相同后才继续。这个间隔是验收采样窗口，不是产品命名规则。每条原始观察必须同时包含 `threadId/parentThreadId/nativeTabThreadId/nativeTabTitle/visibleThreadId/visibleTitle/surface/capturedAt`，其中 `threadId/nativeTabThreadId/visibleThreadId` 均指向当前准确侧边，`parentThreadId` 指向其真实父会话，`visibleTitle` 与同条记录的 `nativeTabTitle` 一致。字段仍使用已有原始 JSON Pointer，不新增由驱动自报的 `stable` 或 `passed` 字段；标题必须来自实际原生 tab，不能从 `request.expectations` 或远程标题复制生成。
-
-runner 将详情、父会话菜单中的唯一同 ID 行、整页刷新后详情分别保存为 DOM、截图及带哈希的 `files.observation` 原始只读观察 JSON，随后再做一次新的原生标签读取。`side-name` 阶段记录关联这三份原生读取和前后界面文件；默认名另须证明首次发送前没有 turn。离线门禁从文件重新读取，核对 ID、标题、读取身份、消息完成起点与时间顺序，并确认每份采样关联本阶段的真实 driver 步骤。同名其他 ID、旧读取复用、缺少刷新证据、刷新后回到旧名均失败。自定义名必须与对应原生改名动作的原始结果一致，后续消息不能覆盖；连续两次改名的阶段不得交叉复用。
-
-`scripts/remote-access-e2e-evidence.test.mjs` 的既有正反例允许原生长摘要、其他语言及首条后名称未改变，仅能证明名称同步门禁，不能直接作为默认名自动生成场景的合格判据。自定义名场景不受自动命名的十五字符上限限制；自动命名场景须另行核对默认名前提、有效文字、前十五字符算法及真实原生写入。错误 ID、旧时间、重复 read ID、不同阶段拼接、报告伪改及只报 `passed` 仍不能通过。既有执行器和门禁的算法断言需另行补齐，本次仅修正文档，不改测试代码或通过状态；离线契约回归不能替代真实命名 E2E。2.3.0 及更早的命名通过结果不能继承到 2.4.0。
+服务侧边由独立执行引擎管理，不与桌面侧边标签同步。依赖桌面 `tab.title` 的六项旧验收案例已移除；创建、发送、历史、已读及关闭仍核对服务回执与准确的父子会话 ID。
 
 ## 真实 Chrome 起步
 
@@ -148,7 +141,7 @@ runner在取消点击前单独落盘`*-queue-cancel-editor.json`：`threadId/edi
 | native / `observe-question-recovery`，`answered` | 原生回答轮已 completed，完整历史和逐题接受状态；必须在 unknown 删除菜单取证之前读取，不能借用恢复后的终态解释此前禁用 |
 | environment / `release-question-receipt-on-reload` | 只在该 tab 的新文档开始后放开原回执读取；提前自动查询成功只能算即时恢复，不能算本例通过 |
 | native / `observe-question-recovery`，`history` | 恢复后完整历史、空队列、同实体逐题 `lastSubmission` |
-| environment / `observe-question-recovery`，`delivery` | 覆盖提问至末次草稿检查的完整 CDP 网络事件和实际 GET 响应正文；当前客户端回执元数据及设备身份 |
+| environment / `observe-question-recovery`，`delivery` | 覆盖提问至末次草稿检查的完整浏览器网络事件和实际 GET 响应正文；当前客户端回执元数据及设备身份 |
 
 七份观察按 `before → pendingInitial → pending → unknown → answered → history → delivery` 留存，其中原生读取五次、环境读取两次。每份使用 `rawFacts` 指向实际原始字段，并带不同读取标识、phase、时间、origin 和源码指纹。完整历史阶段提供 `historyRequest/nativeTurns/queuedMessages`；pending 阶段提供 `requestId/originatingTurnId/nativeQuestionStates`；unknown 阶段提供 `answerReceipt/clientReceipts/device`；answered 和 history 补 `nativeQuestionStates`；delivery 提供 `networkStartedAt/networkFinishedAt/eventsTruncated/networkEvents/responseBodies/clientReceipts/device`。`nativeQuestionStates` 保留原生 `{key,sourceTurnId,sourceTurnStatus,state}` 结构，不能只返回“已回答=true”。
 
@@ -206,20 +199,20 @@ runner 会执行固定步骤、保存远程页观察并读取 rawFacts 自行断
 | `desktop` | observe-thread、create-side、rename-side-tab、rename-thread、open-thread；create-project、observe-project。必须使用真实 Codex UI，并保存 visibleThreadId/visibleTitle/nativeTabThreadId/nativeTabTitle 等原始观察，不通过同名标题猜 ID |
 | `files` | choose-image：响应 runner 已打开的真实系统图片选择器，选择明确文件；证明 fileName/fileSha256/pickerUsed，保留实际 UI 图与树 |
 | `native` | observe-context、wait-optimization-terminal、observe-draft、observe-request、observe-question-recovery、observe-project-membership、observe-side-aggregate、observe-queue-boundary、observe-dequeue-window、observe-queue-race、observe-side-lifecycle、observe-late-side-create、observe-compaction、observe-goal、observe-scenario。只读原始 RPC/bridge/日志及真实回执 |
-| `environment` | acquire-environment-lease、restore-environment-resource、inspect-environment-lease；真实 disconnect-cdp、disconnect-service、disconnect-network、restart-native、drop-next-action-receipt、start-question-recovery-observation、drop-question-answer-receipt、release-question-receipt-on-reload、delay-side-create-delivery、fail-active-upstream；observe-transport/recovery/original-receipt/question-recovery/optimization/authorization。只操作原始证据核对的独立实例或授权 tab 租约，不伪造响应 |
+| `environment` | acquire-environment-lease、restore-environment-resource、inspect-environment-lease；真实 disconnect-service、disconnect-network、restart-native、drop-next-action-receipt、start-question-recovery-observation、drop-question-answer-receipt、release-question-receipt-on-reload、delay-side-create-delivery、fail-active-upstream；observe-transport/recovery/original-receipt/question-recovery/optimization/authorization。只操作原始证据核对的独立实例或授权 tab 租约，不伪造响应 |
 | `android` | observe-installed、open-thread、fill-draft、background-app、resume-app、open-model-menu、press-back、observe-navigation、observe-notification、tap-notification、observe-notification-navigation、check/apply-resource-update、reload-webview、attempt-unavailable-resource-update、observe-resource-update。每步均有实际设备 UI 与版本/原生回执 |
 
 当前仓库不捆绑某台电脑或设备的私有适配器。未接入以上驱动、没有可压缩的真实上下文、没有审批/问答请求、没有可捕获的真实并发/取消窗口或没有正式安装设备时，报告列明缺少的 operation/夹具并保持受阻；不是用 manual 标记或成功布尔值补成通过。
 
-所有故障案例还必须传入 `environmentTarget`。独立服务格式为 `{kind:"dedicated-test-service",instanceId,origin,servicePort,processId,workspace,nativeProcessId?}`，instanceId/workspace 含本轮 runId；重启时还要准确 nativeProcessId。tab 范围为 `{kind:"authorized-tab",instanceId,origin,servicePort,tabId}`，只允许该 tab 的网络、回执或创建响应延迟，不能断开全局 CDP/CLI、上游或重启用户进程。**45222 是本轮受保护的用户服务，不能用于故障演练；allowFaults 不扩大这一边界。** 缺少目标或不满足隔离身份时，在调用驱动 perform 前阻塞。
+所有故障案例还必须传入 `environmentTarget`。独立服务格式为 `{kind:"dedicated-test-service",instanceId,origin,servicePort,processId,workspace,nativeProcessId?}`，instanceId/workspace 含本轮 runId；重启时还要准确 nativeProcessId。tab 范围为 `{kind:"authorized-tab",instanceId,origin,servicePort,tabId}`，只允许该 tab 的网络、回执或创建响应延迟，不能断开全局会话服务、上游或重启用户进程。**45222 是本轮受保护的用户服务，不能用于故障演练；allowFaults 不扩大这一边界。** 缺少目标或不满足隔离身份时，在调用驱动 perform 前阻塞。
 
-租约获取必须用原始 JSON 同时确认 leaseKey、leaseOwnerRunId、instanceId、scopeKind、processId、workspace、servicePort，以及适用的 nativeProcessId/tabId；不能只检查调用方输入。所有后续环境步骤绑定同一份租约。获取前登记恢复责任，驱动先保存 originalState；故障 perform 已执行而证据/截图失败时，仍逐资源尝试恢复，并核对实际 currentState 等于原状态。某个恢复失败不跳过其他恢复；CLI 原来关闭则保持关闭。旧 restore-cdp 等内部调用也转为按租约恢复资源，不会无条件启用服务。
+租约获取必须用原始 JSON 同时确认 leaseKey、leaseOwnerRunId、instanceId、scopeKind、processId、workspace、servicePort，以及适用的 nativeProcessId/tabId；不能只检查调用方输入。所有后续环境步骤绑定同一份租约。获取前登记恢复责任，驱动先保存 originalState；故障 perform 已执行而证据/截图失败时，仍逐资源尝试恢复，并核对实际 currentState 等于原状态。某个恢复失败不跳过其他恢复；CLI 原来关闭则保持关闭。资源恢复调用也转为按租约恢复资源，不会无条件启用服务。
 
 `scripts/remote-access-e2e-environment.mjs` 的本机控制流测试覆盖“真实状态先改变、随后取证失败”“首项恢复失败”“租约获取取证失败”“原服务关闭”“保护用户服务”“tab 越界”和“进程结束后的冷恢复”。这些辅助 mock 测试验证恢复调度，不算真实故障 E2E。
 
-### 已提供的问答回执 CDP 驱动
+### 已提供的问答回执浏览器自动化驱动
 
-`scripts/remote-access-e2e-receipt-driver.mjs` 提供 `createQuestionReceiptRecoveryDriver`。调用方传入已经明确绑定的 `tab/cdp`、输出目录、`authorized-tab` scope、真实 `readClientMetadata` 和新标签创建记录；驱动不发现浏览器、不读取登录密钥、不代替 UI 发送业务请求。创建记录必须保留实际 tab ID、runId、创建时间、初始 URL，以及没有既有 Fetch 拦截的明确所有权。
+`scripts/remote-access-e2e-receipt-driver.mjs` 提供 `createQuestionReceiptRecoveryDriver`。调用方传入已经明确绑定的浏览器标签页及其网络自动化句柄、输出目录、`authorized-tab` scope、真实 `readClientMetadata` 和新标签创建记录；该驱动只用于浏览器网络取证，不属于远程 Codex 执行路径。驱动不发现浏览器、不读取登录密钥、不代替 UI 发送业务请求。创建记录必须保留实际 tab ID、runId、创建时间、初始 URL，以及没有既有 Fetch 拦截的明确所有权。
 
 ```js
 const environment = createQuestionReceiptRecoveryDriver({
@@ -238,7 +231,7 @@ const environment = createQuestionReceiptRecoveryDriver({
 
 Browser Use 自身可能产生 `Fetch.requestPaused(resourceType=Document)`。这些事件在基线、观察和清理阶段都保留原始记录，但不登记为本驱动暂停请求、不接管、不发送continue/fail，也不要求本驱动解除。基线中的未知非Document暂停仍拒绝；常规阶段只控制与本驱动Fetch/XHR patterns匹配的事件。
 
-`drop-question-answer-receipt.payload.receiptReadFault` 缺省为 `network-error`，保留网络失败变体；正式刷新专项显式选择 `pause`，仅挂起准确原 ID 的 GET，避免反复失败污染连接状态。release 登记真实主 frame/loader，撤销已知旧文档 GET；release 至新 Document 之间到达的旧 GET 仍撤销，只放行新主文档同 loader 的读取。每个 Fetch request 只有一个控制任务；取消须有成功的 CDP 确认或匹配的原始 Network 终态，不能按错误文案吞掉失败。收集新文档实际 GET 正文及完成事件后才验收恢复。`environment.close()` 是撤回本驱动控制的收尾入口，不得用它重答或重新启动故障。
+`drop-question-answer-receipt.payload.receiptReadFault` 缺省为 `network-error`，保留网络失败变体；正式刷新专项显式选择 `pause`，仅挂起准确原 ID 的 GET，避免反复失败污染连接状态。release 登记真实主 frame/loader，撤销已知旧文档 GET；release 至新 Document 之间到达的旧 GET 仍撤销，只放行新主文档同 loader 的读取。每个 Fetch request 只有一个控制任务；取消须有成功的 浏览器网络确认或匹配的原始 Network 终态，不能按错误文案吞掉失败。收集新文档实际 GET 正文及完成事件后才验收恢复。`environment.close()` 是撤回本驱动控制的收尾入口，不得用它重答或重新启动故障。
 
 驱动接入协议和保存的 DOM 观察都按 JSON 值归一化。Chrome 插件、Node 和 VM 之间对象原型可以不同；不得把 JSON 完全相同的数据因 `Object`/`Array` 原型差异判成错 scope 或伪造观察。字段、值、类型、额外键、原 leaseKey 和真实 tab/origin 仍需完整核对。
 
@@ -291,10 +284,10 @@ Browser Use 自身可能产生 `Fetch.requestPaused(resourceType=Document)`。�
 
 ## 运行版本与 Android 版本
 
-`versionEvidence` 包含实际 managerVersion/managerExecutableSha256/codexVersion/remoteAssetSha256/adapterVersion/verifiedAt，另有：
+`versionEvidence` 包含实际 managerVersion/managerExecutableSha256/codexVersion/remoteAssetSha256/serviceProtocolVersion/verifiedAt。`serviceProtocolVersion` 读取同一后台健康接口的 `protocolVersion`，要求不低于 6；不再读取已删除的桌面会话桥版本。另有：
 
 - `managerExecutable`、`remoteAsset`：实际运行资产的 `{path,sha256,size}` 引用；可复制取证，不能以待构建源码/历史安装包代替。
-- `browserAsset`：浏览器实际收到的 `/app.js` 内容文件引用。`browserAssetEvidence` 为同一次加载的 CDP 原始记录引用，包含 `capture`（runId/caseId/origin/sourceFingerprint/capturedAt）、`request`（Network.requestWillBeSent）、`response`（Network.responseReceived）及 `body`（Network.getResponseBody 返回值）。请求 ID 必须一致、资源类型必须是 Script，正文哈希必须与目标网页资产相同；后台预取、另行下载及 Service Worker 中的旧脚本不能替代实际加载。保存本案所需字段时排除 Cookie 和 Authorization。
+- `browserAsset`：浏览器实际收到的 `/app.js` 内容文件引用。`browserAssetEvidence` 为同一次加载的 浏览器网络原始记录引用，包含 `capture`（runId/caseId/origin/sourceFingerprint/capturedAt）、`request`（Network.requestWillBeSent）、`response`（Network.responseReceived）及 `body`（Network.getResponseBody 返回值）。请求 ID 必须一致、资源类型必须是 Script，正文哈希必须与目标网页资产相同；后台预取、另行下载及 Service Worker 中的旧脚本不能替代实际加载。保存本案所需字段时排除 Cookie 和 Authorization。
 - `evidencePaths`：原始版本 JSON 的引用数组；`records` 按上述 rawFacts 核对这些版本、origin/sourceFingerprint/capturedAt。
 - `sourceCommit` 可单独记录源码，不作为安装或运行证明。
 

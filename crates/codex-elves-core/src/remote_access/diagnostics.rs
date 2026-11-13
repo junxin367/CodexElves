@@ -741,7 +741,7 @@ fn prune_reports(directory: &FsPath, active: &[String]) -> anyhow::Result<()> {
 
 impl RemoteAccessController {
     pub(super) async fn diagnostics_admin(&self, payload: Value) -> anyhow::Result<Value> {
-        if payload["mode"] == "execution" {
+        if payload["mode"] == "audit" {
             return Ok(json!({
                 "status":"ok","processId":std::process::id(),"buildId":crate::assets::DIAGNOSTIC_BUILD_ID,
                 "serviceConnected":self.harness_connected.load(Ordering::SeqCst),
@@ -849,8 +849,6 @@ pub(super) async fn upload(
     headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    use crate::bridge::CdpDispatchPermit;
-
     let device = authorized(&state, &headers).await?;
     // Media credentials never carry diagnostics, even if this handler is reused directly.
     if channels::media_authorization(&headers) {
@@ -999,9 +997,11 @@ mod tests {
             .tempdir_in(temp_root)
             .unwrap();
         configure_access_key(directory.path(), "isolated-diagnostics-key").unwrap();
-        let controller =
-            RemoteAccessController::new(Arc::new(OfflineBridge), directory.path().to_owned())
-                .unwrap();
+        let controller = RemoteAccessController::with_test_bridge(
+            Arc::new(OfflineBridge),
+            directory.path().to_owned(),
+        )
+        .unwrap();
         controller.publish_access_policy(&RemoteAccessSettings {
             enabled: true,
             ..Default::default()

@@ -96,7 +96,7 @@ impl DesktopProjects {
                 .position(|project| project["id"] == id || project["serverProjectId"] == id)
         };
         let id = thread["id"].as_str().unwrap_or("");
-        // 用户要求保留 CDP 的真实归属：迁移未完成时读取桌面明确记录，不能把引擎的 null
+        // 用户要求保留桌面项目的真实归属：迁移未完成时读取桌面明确记录，不能把引擎的 null
         // 当成已移出项目；迁移完成后以引擎为准，避免旧记录覆盖后续移动或移出操作。
         let legacy = !self.saved.is_empty()
             && self.migration["threadAssignmentsMigrated"] != true
@@ -125,7 +125,7 @@ impl DesktopProjects {
                 return None;
             }
         }
-        // 与 CDP 的旧数据兼容规则一致：缺少明确归属时，仅唯一命中已有项目才能关联。
+        // 保留既有项目迁移的兼容规则：缺少明确归属时，仅唯一命中已有项目才能关联。
         let cwd = thread["cwd"].as_str()?;
         let mut matches = projects.iter().enumerate().filter(|(_, project)| {
             project["roots"].as_array().is_some_and(|roots| {

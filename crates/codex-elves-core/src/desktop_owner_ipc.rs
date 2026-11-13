@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
+#[cfg(test)]
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -30,16 +31,9 @@ fn pipe_path() -> String {
     PIPE_PATH.to_owned()
 }
 
-pub(crate) enum OwnerSend {
-    NoOwner,
-    Handled(Value),
-    AuthorizationDenied(anyhow::Error),
-}
-
 #[derive(Debug)]
 pub(crate) struct DispatchFailure {
     pub dispatched: bool,
-    pub authorization_denied: bool,
     message: String,
 }
 
@@ -99,7 +93,6 @@ pub(crate) async fn guarded_write(
             let message = format!("{error:#}");
             error.context(DispatchFailure {
                 dispatched: false,
-                authorization_denied: true,
                 message,
             })
         })?,
@@ -110,10 +103,7 @@ pub(crate) async fn guarded_write(
     let sender = sender.clone();
     let dispatched = Arc::new(AtomicBool::new(false));
     let queued = Arc::clone(&dispatched);
-    let attempted = Arc::new(AtomicBool::new(false));
-    let queue_attempted = Arc::clone(&attempted);
     let commit = permit.commit(Box::new(move || {
-        queue_attempted.store(true, Ordering::Release);
         sender
             .try_send(frame)
             .map_err(|_| anyhow::anyhow!("Codex 请求写入队列不可用"))?;
@@ -124,7 +114,6 @@ pub(crate) async fn guarded_write(
         let message = format!("{error:#}");
         return Err(error.context(DispatchFailure {
             dispatched: dispatched.load(Ordering::Acquire),
-            authorization_denied: !attempted.load(Ordering::Acquire),
             message,
         }));
     }
@@ -136,25 +125,17 @@ pub(crate) async fn guarded_write(
         .await
         .map_err(|_| DispatchFailure {
             dispatched: true,
-            authorization_denied: false,
             message: "Codex 请求已派发，等待写入结果超时".to_string(),
         })?
         .map_err(|_| DispatchFailure {
             dispatched: true,
-            authorization_denied: false,
             message: "Codex 请求已派发，写入连接已关闭".to_string(),
         })?
         .map_err(|message| DispatchFailure {
             dispatched: true,
-            authorization_denied: false,
             message,
         })?;
     Ok(())
-}
-
-#[async_trait]
-pub(crate) trait OwnerPreflight: Send + Sync {
-    async fn check_queues(&self, thread_id: &str, snapshot: &Value) -> anyhow::Result<()>;
 }
 
 pub(crate) fn require_main_thread(thread: &Value, thread_id: &str) -> anyhow::Result<()> {
@@ -166,7 +147,7 @@ pub(crate) fn require_main_thread(thread: &Value, thread_id: &str) -> anyhow::Re
             && thread
                 .get("sideConversation")
                 .is_none_or(|value| value == false),
-        "此发送兜底仅支持持久普通主会话"
+        "此操作仅支持持久普通主会话"
     );
     ensure!(
         thread["threadSource"] == "user"
@@ -178,36 +159,11 @@ pub(crate) fn require_main_thread(thread: &Value, thread_id: &str) -> anyhow::Re
     );
     ensure!(
         thread.get("hostId").is_none_or(|host| host == "local"),
-        "此发送兜底仅支持本机主会话"
+        "此操作仅支持本机主会话"
     );
     ensure!(
         thread.get("canAcceptDirectInput") != Some(&Value::Bool(false)),
         "此会话不接受直接输入"
-    );
-    Ok(())
-}
-
-fn require_idle_snapshot(snapshot: &Value, thread_id: &str) -> anyhow::Result<()> {
-    require_main_thread(snapshot, thread_id)?;
-    ensure!(
-        snapshot["hostId"] == "local"
-            && snapshot["sessionId"] == thread_id
-            && snapshot["resumeState"] == "resumed"
-            && snapshot["threadRuntimeStatus"]["type"] == "idle",
-        "同主会话发送兜底仅支持状态明确且空闲的会话"
-    );
-    ensure!(
-        snapshot["requests"].as_array().is_some_and(Vec::is_empty),
-        "会话存在待处理请求或请求状态未知，未发送"
-    );
-    ensure!(
-        snapshot.get("threadGoal").is_some_and(Value::is_null),
-        "会话仍有目标任务，未通过普通发送兜底派发"
-    );
-    let turns = snapshot_turns(snapshot);
-    ensure!(
-        !turns.iter().any(|turn| turn["status"] == "inProgress"),
-        "会话仍在运行，未通过普通发送兜底派发"
     );
     Ok(())
 }
@@ -291,8 +247,6 @@ fn normalize_owner_turn(mut turn: Value) -> Value {
 }
 
 pub(crate) struct OwnerSnapshot {
-    pub owner: String,
-    pub revision: u64,
     pub snapshot: Value,
 }
 
@@ -345,7 +299,6 @@ pub(crate) async fn request_owner(
             let message = format!("{error:#}");
             Err(error.context(DispatchFailure {
                 dispatched: true,
-                authorization_denied: false,
                 message,
             }))
         }
@@ -361,22 +314,6 @@ pub(crate) async fn request_owner(
     _guard: Option<&dyn ServiceDispatchGuard>,
 ) -> anyhow::Result<Option<Value>> {
     Ok(None)
-}
-
-#[cfg(not(windows))]
-pub(crate) async fn available() -> bool {
-    false
-}
-
-#[cfg(windows)]
-pub(crate) async fn available() -> bool {
-    let Ok(stream) = tokio::net::windows::named_pipe::ClientOptions::new().open(pipe_path()) else {
-        return false;
-    };
-    Session::new(stream, "", RPC_TIMEOUT)
-        .initialize()
-        .await
-        .is_ok()
 }
 
 #[cfg(not(windows))]
@@ -410,13 +347,7 @@ async fn watch_with_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     session.owner = Some(owner.clone());
     let snapshot = session.fresh_snapshot().await?;
     require_main_thread(&snapshot, thread_id)?;
-    changes
-        .send(OwnerSnapshot {
-            owner: owner.clone(),
-            revision: session.revision.unwrap(),
-            snapshot,
-        })
-        .await?;
+    changes.send(OwnerSnapshot { snapshot }).await?;
     loop {
         let message = tokio::select! {
             _ = changes.closed() => return Ok(()),
@@ -443,13 +374,7 @@ async fn watch_with_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
             None => session.fresh_snapshot().await?,
         };
         require_main_thread(&snapshot, thread_id)?;
-        changes
-            .send(OwnerSnapshot {
-                owner: owner.clone(),
-                revision: session.revision.unwrap(),
-                snapshot,
-            })
-            .await?;
+        changes.send(OwnerSnapshot { snapshot }).await?;
     }
 }
 
@@ -535,63 +460,6 @@ async fn read_snapshot_with_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 's
     result
 }
 
-fn response_error(thread_id: &str, error: &anyhow::Error, dispatched: bool) -> Value {
-    let dispatched = error
-        .downcast_ref::<DispatchFailure>()
-        .map_or(dispatched, |failure| failure.dispatched);
-    json!({
-        "ok": false,
-        "threadId": thread_id,
-        "notSent": !dispatched,
-        "outcomeUnknown": dispatched,
-        "code": 503,
-        "message": format!("{error:#}"),
-        "nativeBridge": "desktop-owner-ipc"
-    })
-}
-
-#[cfg(not(windows))]
-pub(crate) async fn try_send(
-    _payload: &Value,
-    _params: Value,
-    _preflight: &dyn OwnerPreflight,
-    _guard: Option<&dyn ServiceDispatchGuard>,
-) -> OwnerSend {
-    OwnerSend::NoOwner
-}
-
-#[cfg(windows)]
-pub(crate) async fn try_send(
-    payload: &Value,
-    params: Value,
-    preflight: &dyn OwnerPreflight,
-    guard: Option<&dyn ServiceDispatchGuard>,
-) -> OwnerSend {
-    let thread_id = params["threadId"].as_str().unwrap_or_default();
-    if payload.get("hostId").is_some_and(|host| host != "local") {
-        return OwnerSend::Handled(response_error(
-            thread_id,
-            &anyhow::anyhow!("此发送兜底仅支持本机主会话"),
-            false,
-        ));
-    }
-    let stream = match tokio::net::windows::named_pipe::ClientOptions::new().open(pipe_path()) {
-        Ok(stream) => stream,
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            return OwnerSend::NoOwner;
-        }
-        Err(error) => {
-            return OwnerSend::Handled(response_error(thread_id, &error.into(), false));
-        }
-    };
-    send_with_stream(stream, payload, params, preflight, guard, RPC_TIMEOUT).await
-}
-
 struct Session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> {
     reader: tokio::io::ReadHalf<S>,
     writer: mpsc::Sender<WriteFrame>,
@@ -601,7 +469,6 @@ struct Session<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> {
     owner: Option<String>,
     snapshot: Option<Value>,
     following: bool,
-    changed_after_snapshot: bool,
     revision: Option<u64>,
     timeout: Duration,
 }
@@ -625,7 +492,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Session<S> {
             owner: None,
             snapshot: None,
             following: false,
-            changed_after_snapshot: true,
             revision: None,
             timeout,
         }
@@ -687,7 +553,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Session<S> {
             && message["method"] == "thread-stream-state-changed"
             && message["params"]["conversationId"] == self.thread_id
         {
-            self.changed_after_snapshot = true;
             ensure!(
                 message["sourceClientId"].as_str() == self.owner.as_deref()
                     && message["params"]["hostId"] == "local"
@@ -827,7 +692,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Session<S> {
                 let message = self.read_frame().await?;
                 self.observe(&message).await?;
                 if let Some(snapshot) = self.snapshot.take() {
-                    self.changed_after_snapshot = false;
                     return Ok(snapshot);
                 }
             }
@@ -838,115 +702,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Session<S> {
     }
 }
 
-async fn send_with_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
-    stream: S,
-    payload: &Value,
-    mut params: Value,
-    preflight: &dyn OwnerPreflight,
-    guard: Option<&dyn ServiceDispatchGuard>,
-    timeout: Duration,
-) -> OwnerSend {
-    let thread_id = params["threadId"].as_str().unwrap_or_default().to_string();
-    let mut session = Session::new(stream, &thread_id, timeout);
-    let mut dispatched = false;
-    let result: anyhow::Result<Option<Value>> = async {
-        session.initialize().await?;
-        let Some(owner) = session.discover(None).await? else {
-            return Ok(None);
-        };
-        session.owner = Some(owner.clone());
-        let settings = session
-            .request(
-                "thread-follower-read-model-settings",
-                json!({"conversationId":thread_id}),
-                1,
-                Some(&owner),
-            )
-            .await?;
-        ensure!(
-            settings["result"]["settings"]["threadSource"] == "user"
-                && settings["result"]["settings"]["resumeState"] == "resumed",
-            "无法确认桌面 owner 持有持久主会话"
-        );
-        let snapshot = session.fresh_snapshot().await?;
-        require_idle_snapshot(&snapshot, &thread_id)?;
-        preflight.check_queues(&thread_id, &snapshot).await?;
-        // Queue checks can involve I/O. Re-read both owner and snapshot after them.
-        ensure!(
-            session.discover(Some(&owner)).await?.as_deref() == Some(owner.as_str()),
-            "桌面会话 owner 已变化"
-        );
-        let snapshot = session.fresh_snapshot().await?;
-        require_idle_snapshot(&snapshot, &thread_id)?;
-        ensure!(
-            session.discover(None).await?.as_deref() == Some(owner.as_str()),
-            "桌面会话 owner 已变化"
-        );
-        ensure!(
-            !session.changed_after_snapshot,
-            "桌面会话在派发前出现新状态，未发送"
-        );
-
-        let message_id = payload
-            .get("clientUserMessageId")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                params["clientUserMessageId"]
-                    .as_str()
-                    .filter(|id| !id.is_empty())
-            })
-            .map(str::to_string)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        params["clientUserMessageId"] = json!(&message_id);
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let message = json!({
-            "type":"request","requestId":request_id,"sourceClientId":session.client_id,
-            "method":"thread-follower-start-turn","version":2,"targetClientId":owner,
-            "params":{"conversationId":thread_id,"turnStart":{
-                "request":params,"context":{"inheritThreadSettings":true}
-            }},"timeoutMs":timeout.as_millis() as u64
-        });
-        // Guarded enqueue is the final pre-dispatch operation. No connection or
-        // preflight wait is allowed between permit acquisition and this enqueue.
-        session.write(&message, guard).await?;
-        dispatched = true;
-        let response = session
-            .wait_response(&request_id, "thread-follower-start-turn", Some(&owner))
-            .await?;
-        let turn = &response["result"]["result"]["turn"];
-        let turn_id = turn["id"]
-            .as_str()
-            .filter(|id| !id.is_empty())
-            .context("桌面已接受请求但未返回轮次身份")?;
-        Ok(Some(json!({
-            "ok":true,"threadId":thread_id,"turnId":turn_id,
-            "clientUserMessageId":message_id,"status":turn["status"],
-            "deliveryState":"accepted","nativeBridge":"desktop-owner-ipc"
-        })))
-    }
-    .await;
-    if session.following {
-        let _ = session.following(false).await;
-    }
-    match result {
-        Ok(Some(response)) => OwnerSend::Handled(response),
-        Ok(None) => OwnerSend::NoOwner,
-        Err(error)
-            if error
-                .downcast_ref::<DispatchFailure>()
-                .is_some_and(|failure| failure.authorization_denied) =>
-        {
-            OwnerSend::AuthorizationDenied(error)
-        }
-        Err(error) => OwnerSend::Handled(response_error(&thread_id, &error, dispatched)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
 
     const THREAD: &str = "main-thread";
     const OWNER: &str = "owner-client";
@@ -960,27 +718,6 @@ mod tests {
             "threadRuntimeStatus":{"type":"idle"},"requests":[],"threadGoal":null,
             "turnHistory":{"kind":"canonical","history":{"isComplete":true,"entitiesByKey":{}}}
         })
-    }
-
-    struct QueueCheck(bool);
-    #[async_trait]
-    impl OwnerPreflight for QueueCheck {
-        async fn check_queues(&self, _: &str, _: &Value) -> anyhow::Result<()> {
-            ensure!(self.0, "队列状态未知");
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
-    struct Peer {
-        snapshot: Option<Value>,
-        change_owner: bool,
-        bad_snapshot_version: bool,
-        bad_reply_method: bool,
-        wrong_reply_id: bool,
-        close_after_write: bool,
-        timeout_after_write: bool,
-        writes: Arc<AtomicUsize>,
     }
 
     async fn read_peer<S: AsyncRead + Unpin>(stream: &mut S) -> anyhow::Result<Value> {
@@ -1144,14 +881,10 @@ mod tests {
         let (changes, mut observations) = mpsc::channel(8);
         let watcher = tokio::spawn(async move { watch_with_stream(client, THREAD, changes).await });
         let first = observations.recv().await.unwrap();
-        assert_eq!(first.owner, OWNER);
-        assert_eq!(first.revision, 1);
         assert_eq!(first.snapshot["threadRuntimeStatus"]["type"], "idle");
         let second = observations.recv().await.unwrap();
-        assert_eq!(second.revision, 2);
         assert_eq!(second.snapshot["threadRuntimeStatus"]["type"], "active");
         let third = observations.recv().await.unwrap();
-        assert_eq!(third.revision, 4);
         assert_eq!(
             third.snapshot["turns"][0]["items"][0]["text"],
             "实际完整状态"
@@ -1192,7 +925,7 @@ mod tests {
             let (changes, mut observations) = mpsc::channel(8);
             let watcher =
                 tokio::spawn(async move { watch_with_stream(client, THREAD, changes).await });
-            assert_eq!(observations.recv().await.unwrap().revision, 1);
+            assert_eq!(observations.recv().await.unwrap().snapshot["id"], THREAD);
             assert!(
                 tokio::time::timeout(Duration::from_secs(1), watcher)
                     .await
@@ -1203,217 +936,6 @@ mod tests {
             assert!(observations.recv().await.is_none());
             peer_task.await.unwrap();
         }
-    }
-
-    async fn run_peer<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S, peer: Peer) {
-        let mut discovery = 0;
-        while let Ok(message) = read_peer(&mut stream).await {
-            let method = message["method"].as_str().unwrap_or_default();
-            if message["type"] == "broadcast" {
-                if message["params"]["following"] == false {
-                    return;
-                }
-                let response = json!({
-                    "type":"broadcast","method":"thread-stream-state-changed",
-                    "version":if peer.bad_snapshot_version { 10 } else { 11 },
-                    "sourceClientId":OWNER,"targetClientIds":[CLIENT],
-                    "params":{"conversationId":THREAD,"hostId":"local",
-                        "change":{"type":"snapshot","revision":1,
-                        "conversationState":peer.snapshot.clone().unwrap_or_else(snapshot)}}
-                });
-                if write_peer(&mut stream, response).await.is_err() {
-                    return;
-                }
-                continue;
-            }
-            let mut owner = OWNER;
-            let result = match method {
-                "initialize" => {
-                    owner = CLIENT;
-                    json!({"clientId":CLIENT})
-                }
-                "thread-owner-discovery" => {
-                    discovery += 1;
-                    if peer.change_owner && discovery >= 2 {
-                        owner = "replacement-owner";
-                    }
-                    json!({"supportsUntrustedAppInput":true})
-                }
-                "thread-follower-read-model-settings" => {
-                    json!({"settings":{"threadSource":"user","resumeState":"resumed"}})
-                }
-                "thread-follower-start-turn" => {
-                    assert_eq!(message["version"], 2);
-                    assert_eq!(message["targetClientId"], OWNER);
-                    assert_eq!(message["params"]["conversationId"], THREAD);
-                    assert_eq!(
-                        message["params"]["turnStart"]["request"]["threadId"],
-                        THREAD
-                    );
-                    assert_eq!(
-                        message["params"]["turnStart"]["request"]["clientUserMessageId"],
-                        "stable-message"
-                    );
-                    peer.writes.fetch_add(1, Ordering::SeqCst);
-                    if peer.close_after_write {
-                        return;
-                    }
-                    if peer.timeout_after_write {
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                        return;
-                    }
-                    json!({"result":{"turn":{"id":"accepted-turn","status":"inProgress"}}})
-                }
-                _ => panic!("unexpected IPC method {method}"),
-            };
-            let reply_method = if peer.bad_reply_method && method == "thread-follower-start-turn" {
-                "different-method"
-            } else {
-                method
-            };
-            let response = json!({
-                "type":"response","requestId":if peer.wrong_reply_id && method=="thread-follower-start-turn" {
-                    json!("unrelated-request")
-                } else { message["requestId"].clone() },
-                "method":reply_method,"resultType":"success","handledByClientId":owner,"result":result
-            });
-            if write_peer(&mut stream, response).await.is_err() {
-                return;
-            }
-        }
-    }
-
-    async fn exercise(peer: Peer, queues: bool, guard: Option<&dyn ServiceDispatchGuard>) -> Value {
-        let (client, server) = tokio::io::duplex(64 * 1024);
-        let task = tokio::spawn(run_peer(server, peer));
-        let result = send_with_stream(
-            client,
-            &json!({"clientUserMessageId":"stable-message"}),
-            json!({"threadId":THREAD,"input":[{"type":"text","text":"offline test"}]}),
-            &QueueCheck(queues),
-            guard,
-            Duration::from_millis(60),
-        )
-        .await;
-        task.abort();
-        match result {
-            OwnerSend::Handled(value) => value,
-            OwnerSend::NoOwner => panic!("owner route must not fall back to an independent writer"),
-            OwnerSend::AuthorizationDenied(error) => {
-                assert!(
-                    error
-                        .downcast_ref::<DispatchFailure>()
-                        .unwrap()
-                        .authorization_denied
-                );
-                json!({"ok":false,"notSent":true,"outcomeUnknown":false,"authorizationDenied":true})
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn existing_owner_receipt_keeps_stable_client_and_turn_identity() {
-        let peer = Peer::default();
-        let writes = Arc::clone(&peer.writes);
-        let response = exercise(peer, true, None).await;
-        assert_eq!(response["ok"], true);
-        assert_eq!(response["turnId"], "accepted-turn");
-        assert_eq!(response["clientUserMessageId"], "stable-message");
-        assert_eq!(writes.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn owner_changes_protocol_changes_busy_and_unknown_queue_refuse_before_write() {
-        let mut busy = snapshot();
-        busy["threadRuntimeStatus"]["type"] = json!("active");
-        for (peer, queues) in [
-            (
-                Peer {
-                    change_owner: true,
-                    ..Peer::default()
-                },
-                true,
-            ),
-            (
-                Peer {
-                    bad_snapshot_version: true,
-                    ..Peer::default()
-                },
-                true,
-            ),
-            (
-                Peer {
-                    snapshot: Some(busy),
-                    ..Peer::default()
-                },
-                true,
-            ),
-            (Peer::default(), false),
-        ] {
-            let writes = Arc::clone(&peer.writes);
-            let response = exercise(peer, queues, None).await;
-            assert_eq!(response["ok"], false);
-            assert_eq!(response["notSent"], true, "{response}");
-            assert_eq!(response["outcomeUnknown"], false);
-            assert_eq!(writes.load(Ordering::SeqCst), 0);
-        }
-    }
-
-    #[tokio::test]
-    async fn write_then_disconnect_timeout_or_unbound_response_is_unknown_and_never_replayed() {
-        for peer in [
-            Peer {
-                close_after_write: true,
-                ..Peer::default()
-            },
-            Peer {
-                timeout_after_write: true,
-                ..Peer::default()
-            },
-            Peer {
-                bad_reply_method: true,
-                ..Peer::default()
-            },
-            Peer {
-                wrong_reply_id: true,
-                ..Peer::default()
-            },
-        ] {
-            let writes = Arc::clone(&peer.writes);
-            let response = exercise(peer, true, None).await;
-            assert_eq!(response["ok"], false);
-            assert_eq!(response["notSent"], false, "{response}");
-            assert_eq!(response["outcomeUnknown"], true);
-            assert_eq!(writes.load(Ordering::SeqCst), 1);
-        }
-    }
-
-    struct RevokedGuard;
-    struct RevokedPermit;
-    #[async_trait]
-    impl ServiceDispatchGuard for RevokedGuard {
-        async fn prepare_dispatch(&self) -> anyhow::Result<Box<dyn ServiceDispatchPermit>> {
-            Ok(Box::new(RevokedPermit))
-        }
-    }
-    impl ServiceDispatchPermit for RevokedPermit {
-        fn commit(
-            self: Box<Self>,
-            _dispatch: Box<dyn FnOnce() -> anyhow::Result<()> + Send>,
-        ) -> anyhow::Result<()> {
-            bail!("派发前授权已撤销")
-        }
-    }
-
-    #[tokio::test]
-    async fn authorization_commit_rejection_prevents_the_final_queue_insertion() {
-        let peer = Peer::default();
-        let writes = Arc::clone(&peer.writes);
-        let response = exercise(peer, true, Some(&RevokedGuard)).await;
-        assert_eq!(response["notSent"], true);
-        assert_eq!(response["outcomeUnknown"], false);
-        assert_eq!(response["authorizationDenied"], true);
-        assert_eq!(writes.load(Ordering::SeqCst), 0);
     }
 
     #[derive(Debug)]
@@ -1445,18 +967,7 @@ mod tests {
         .unwrap_err();
         assert!(error.downcast_ref::<AuthorizationMarker>().is_some());
         let failure = error.downcast_ref::<DispatchFailure>().unwrap();
-        assert!(failure.authorization_denied);
         assert!(!failure.dispatched);
-    }
-
-    #[test]
-    fn idle_snapshot_accepts_absent_or_false_side_conversation_and_rejects_true() {
-        let mut value = snapshot();
-        assert!(require_idle_snapshot(&value, THREAD).is_ok());
-        value.as_object_mut().unwrap().remove("sideConversation");
-        assert!(require_idle_snapshot(&value, THREAD).is_ok());
-        value["sideConversation"] = json!(true);
-        assert!(require_idle_snapshot(&value, THREAD).is_err());
     }
 
     #[test]
@@ -1575,32 +1086,5 @@ mod tests {
                 .to_string()
                 .contains("大小")
         );
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn windows_named_pipe_transport_routes_without_starting_a_process() {
-        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
-        let pipe = format!(r"\\.\pipe\codex-elves-owner-test-{}", uuid::Uuid::new_v4());
-        let server = ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(&pipe)
-            .unwrap();
-        let task = tokio::spawn(async move {
-            server.connect().await.unwrap();
-            run_peer(server, Peer::default()).await;
-        });
-        let client = ClientOptions::new().open(&pipe).unwrap();
-        let result = send_with_stream(
-            client,
-            &json!({"clientUserMessageId":"stable-message"}),
-            json!({"threadId":THREAD,"input":[{"type":"text","text":"offline pipe"}]}),
-            &QueueCheck(true),
-            None,
-            RPC_TIMEOUT,
-        )
-        .await;
-        assert!(matches!(result, OwnerSend::Handled(ref value) if value["ok"] == true));
-        task.await.unwrap();
     }
 }

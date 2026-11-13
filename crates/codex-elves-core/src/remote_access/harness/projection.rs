@@ -561,7 +561,7 @@ impl Projection {
             return;
         }
         if method == "thread/section/changed" {
-            // 原生置顶或取消置顶后沿用网页现有侧栏刷新事件，不要求客户端借用 CDP 同步。
+            // 原生置顶或取消置顶后沿用网页现有侧栏刷新事件，不要求客户端借用桌面注入同步。
             self.push(json!({"method":"remote/sidebarChanged","params":{"reason":"section"}}));
             return;
         }

@@ -16,7 +16,6 @@ const MAX_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 pub(super) struct SideThread {
     pub parent: String,
     pub generation: String,
-    pub device: String,
     pub metadata: Value,
     pub turns: Vec<Value>,
     pub closed: bool,
@@ -39,7 +38,6 @@ mod tests {
         SideThread {
             parent: "main".into(),
             generation: "engine".into(),
-            device: "device".into(),
             metadata: json!({"id":"side","cwd":"test","name":"侧边聊天","ephemeral":true,"status":{"type":"idle"}}),
             turns: Vec::new(),
             closed: false,
@@ -686,7 +684,6 @@ impl Harness {
         let side = SideThread {
             parent: parent.to_owned(),
             generation: connection.generation.clone(),
-            device: authorization.device.id.clone(),
             metadata,
             turns: Vec::new(),
             closed: false,
@@ -750,7 +747,7 @@ impl Harness {
                     return Err(error(410, "侧边会话已关闭，内容已释放"));
                 }
                 // 已读只修改当前保留正文的标记，不依赖已过期的引擎连接，也不恢复临时会话。
-                return crate::bridge::CdpDispatchPermit::commit(permit, || {
+                return permit.commit(|| {
                     let side = projection.sides.threads.get_mut(id).unwrap();
                     if side.unread {
                         side.unread = false;
@@ -767,7 +764,7 @@ impl Harness {
                 return Ok(json!({"ok":true,"threadId":id,"parentThreadId":parent,"closed":true}));
             }
             if side.expired {
-                return crate::bridge::CdpDispatchPermit::commit(permit, || {
+                return permit.commit(|| {
                     projection.close_side(id);
                     Ok(json!({"ok":true,"threadId":id,"parentThreadId":parent,"closed":true}))
                 });
@@ -813,7 +810,7 @@ impl Harness {
                 // 用户主动停止只结束当前任务；尚未派发的侧边消息保持暂停，不能被迟到完成事件自动续发。
                 let permit = authorization.prepare_dispatch().await?;
                 let mut projection = self.projection.lock().await;
-                crate::bridge::CdpDispatchPermit::commit(permit, || {
+                permit.commit(|| {
                     let side = projection.sides.threads.get_mut(id).unwrap();
                     side.queue.pause_queue(id, "消息已暂停");
                     side.queue_revision += 1;
@@ -984,7 +981,7 @@ impl Harness {
                     "侧边会话的待发送内容已达 16 MiB，请先处理现有队列",
                 ));
             }
-            let response = crate::bridge::CdpDispatchPermit::commit(permit, || {
+            let response = permit.commit(|| {
                 side.queue
                     .queues
                     .entry(id.to_owned())
@@ -1210,7 +1207,7 @@ impl Harness {
         {
             return Err(error(409, "消息正在发送或待核对"));
         }
-        crate::bridge::CdpDispatchPermit::commit(permit, || {
+        permit.commit(|| {
             queued.state = "sending".into();
             side.queue_revision += 1;
             Ok(())
@@ -1296,7 +1293,7 @@ impl Harness {
             .iter()
             .find(|(_, request)| request["params"]["threadId"] == id && request["id"] == request_id)
             .map(|(key, _)| key.clone());
-        crate::bridge::CdpDispatchPermit::commit(permit, || {
+        permit.commit(|| {
             if let Some(key) = key {
                 projection.resolve(&key);
             }
