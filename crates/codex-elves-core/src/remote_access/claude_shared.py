@@ -1,7 +1,9 @@
 """原版 Claude 后台会话的 WSL 连接端；不运行模型、不修改 CLI、设置或权限。"""
 import argparse
 import base64
+import contextlib
 from datetime import datetime
+import fcntl
 import hashlib
 import html
 import json
@@ -26,6 +28,24 @@ class NativeError(RuntimeError):
     def __init__(self, code, message=None):
         self.code = code
         super().__init__(message or f"原版 Claude 未接受操作（{code}）")
+
+
+# 原生 rewind_conversation 明确拒绝时返回的原因；这些答复都表示记录未被修改。
+# 未列出的原因统一按“不支持”报告，不猜测是否已回退。
+REWIND_REFUSALS = {
+    "target_not_found": ("ESTALE", "原生会话里找不到要编辑的消息（可能已被压缩或回退），请刷新后重试"),
+    "stale_target": ("ESTALE", "原生会话有网页尚未显示的新内容，请刷新后重新编辑"),
+    "unseen_later_turn": ("ESTALE", "原生会话有网页尚未显示的新内容，请刷新后重新编辑"),
+    "state_changed": ("ESTALE", "原生会话状态已变化，请刷新后重新编辑"),
+    "turn_running": ("EBUSY", "Claude 仍在执行，请等待结束后再编辑"),
+    "commands_queued": ("EBUSY", "Claude 仍有排队中的输入，请等待处理后再编辑"),
+    "prompt_pending": ("EBUSY", "Claude 仍有待处理的输入，请等待处理后再编辑"),
+    "usage_limited": ("EBUSY", "当前用量受限，原版暂不允许回退"),
+    "poll_tool_result_target": ("EUNSUPPORTED", "该消息位于工具调用过程中，原版不支持从这里编辑"),
+    "target_splits_tool_call": ("EUNSUPPORTED", "该消息位于工具调用过程中，原版不支持从这里编辑"),
+    "delivered_poll_events_in_range": ("EUNSUPPORTED", "该消息之后有已送达的后台事件，原版不支持从这里编辑"),
+    "persist_failed": ("ESESSION", "原版未能保存回退记录，未修改历史"),
+}
 
 
 class Screen:
@@ -463,6 +483,14 @@ class NativeHistory:
         self.cut_before = None
 
     def observe(self, row):
+        if row.get("type") == "last-prompt":
+            # 用户要求网页编辑采用结构化回退（B 方案）：原生 rewind_conversation 成功后只追加
+            # {"type":"last-prompt","explicit":true,"rewound":true,"cutUuid":目标}，不写新的消息节点。
+            # 按该标记把展示分支切到目标之前，与重启后的原生 CLI 一致；终端 /rewind 不写此标记（2.1.323 实测）。
+            cut = row.get("cutUuid")
+            if row.get("explicit") is True and row.get("rewound") is True and cut in self.parents:
+                self.cut_before = cut
+            return
         identity = row.get("uuid")
         if not identity or row.get("isSidechain") or identity in self.parents:
             return
@@ -1192,6 +1220,8 @@ class NativeSession:
         self.permission_catalog = []
         self.permission_launch_key = None
         self.permission_launch_flags = []
+        self.session_cwd = ""
+        self.lock_folder = Path(f"/tmp/codex-elves-claude-{os.getuid()}")
 
     def control_projection(self):
         current = self.compaction_events.get(self.compaction_event_id)
@@ -1989,8 +2019,183 @@ class NativeSession:
         # accepted 仅代表原生入口接收，正文仍由随后关联到的原生用户消息确认，不能伪造执行完成。
         return {"nativeId": self.native_id, "jobId": self.short, "accepted": True}
 
+    @contextlib.contextmanager
+    def edit_lock(self):
+        # 用户要求只禁止同时编辑历史：同一 WSL 用户下连接同一原生会话的多个连接端（如正式服务与验收服务）
+        # 串行执行编辑，第二个编辑直接拒绝；不阻止原版终端，终端打开回退面板时由 waiting 状态拒绝。
+        folder = self.lock_folder
+        folder.mkdir(mode=0o700, exist_ok=True)
+        if folder.is_symlink() or folder.stat().st_uid != os.getuid():
+            raise NativeError("ESESSION", "编辑锁目录归属异常，未修改历史")
+        handle = os.open(folder / f"edit-{uuid.UUID(self.native_id)}.lock",
+                         os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise NativeError("EBUSY", "该会话正在由另一个网页编辑历史，请稍后重试") from None
+            yield
+        finally:
+            os.close(handle)
+
+    def session_holders(self):
+        # 两个进程不能同时写同一份原生记录：交接前后确认没有任何 CLI 进程（后台或终端）打开该会话。
+        holders = []
+        for path in (self.root / "sessions").glob("*.json"):
+            record = native_json(path)
+            if record.get("sessionId") != self.native_id:
+                continue
+            try:
+                pid = int(record.get("pid", path.stem))
+                if pid <= 1:
+                    continue
+                os.kill(pid, 0)
+            except (TypeError, ValueError, ProcessLookupError):
+                continue
+            except PermissionError:
+                pass
+            holders.append(pid)
+        return holders
+
+    def job_alive(self):
+        try:
+            return self.rpc({"op": "has", "short": self.short}).get("alive") is True
+        except (FileNotFoundError, ConnectionRefusedError):
+            return False
+
+    def stop_job(self):
+        # 用户要求（B 方案）：编辑前用原版 claude stop 停止同一后台会话，让 print 进程独占记录完成回退；
+        # 已连接的原版终端会提示会话已退出，需重新 claude attach，这是用户已确认接受的代价。
+        result = subprocess.run([self.cli, "stop", self.short], stdin=subprocess.DEVNULL,
+                                capture_output=True, timeout=30)
+        if result.returncode:
+            raise NativeError("ESESSION", "原生后台会话未能停止，未修改历史")
+        deadline = time.monotonic() + 15
+        while True:
+            try:
+                alive = self.job_alive()
+            except (OSError, NativeError):
+                alive = True
+            if not alive and not self.session_holders():
+                return
+            if time.monotonic() >= deadline:
+                raise NativeError("ESESSION", "原生后台会话仍未退出，未修改历史")
+            time.sleep(0.2)
+
+    @staticmethod
+    def background_work(lines):
+        # 用户要求交接只在完全空闲时进行：停止进程会结束后台命令、监控和后台子代理。
+        # 2.1.323 实测后台命令运行时，原生底栏显示“1 shell · ↓ to manage”，结束后提示消失。
+        # 订阅流只重绘变化区域，分隔线未必在画面里；因此只看画面最底部三行（输入框与底栏），
+        # 并要求带箭头的“↓ to manage”，正文里的同样文字不算。画面为空返回 None 表示无法确认。
+        bottom = [line.strip() for line in lines if line.strip()][-3:]
+        if not bottom:
+            return None
+        return "↓ to manage" in " ".join(bottom)
+
+    def current_screen(self):
+        # 后台会话画面由订阅流持续投影到 self.screen；编辑在主循环内同步执行，
+        # 先补齐已到达但未处理的画面帧，其他输入（网页控制请求）按原顺序放回。
+        deferred = []
+        while self.incoming is not None:
+            try:
+                frame = self.incoming.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(frame, dict) and "_stream" in frame:
+                self.stream_preview(frame["_stream"])
+            else:
+                deferred.append(frame)
+        for frame in deferred:
+            self.incoming.put(frame)
+        return self.screen.text()
+
+    def run_rewind(self, target, last_seen, cwd):
+        # 用户要求（B 方案）用结构化接口回退，不再模拟按键操作 /rewind 菜单。原生 print 进程按 stream-json
+        # 控制协议先 initialize，再发送 rewind_conversation；last_seen 为网页当前分支的最后一条 user 记录，
+        # 原生发现网页尚未显示的新轮次会拒绝。该进程不发送用户消息、不调用模型；--strict-mcp-config 与
+        # disableAllHooks 只作用于这个短进程，避免为一次回退启动 MCP 或触发用户 Hook。
+        # 成功返回原生答复；明确拒绝抛 NativeError（记录未修改）；发出回退请求后失去答复抛 RuntimeError（结果未知）。
+        process = subprocess.Popen(
+            [self.cli, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+             "--strict-mcp-config", "--settings", '{"disableAllHooks":true}', "--resume", self.native_id],
+            cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        lines = queue.Queue()
+
+        def drain():
+            for line in process.stdout:
+                lines.put(line)
+            lines.put(None)
+
+        reader = threading.Thread(target=drain, daemon=True)
+        reader.start()
+
+        def request(subtype, timeout, **fields):
+            identity = uuid.uuid4().hex
+            process.stdin.write(json.dumps({"type": "control_request", "request_id": identity,
+                                            "request": {"subtype": subtype, **fields}}).encode() + b"\n")
+            process.stdin.flush()
+            deadline = time.monotonic() + timeout
+            while True:
+                line = lines.get(timeout=max(0.01, deadline - time.monotonic()))
+                if line is None:
+                    raise EOFError("原生回退进程已退出")
+                try:
+                    frame = json.loads(line)
+                except ValueError:
+                    continue
+                response = frame.get("response") if isinstance(frame, dict) and frame.get("type") == "control_response" else None
+                if isinstance(response, dict) and response.get("request_id") == identity:
+                    return response
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("原生回退进程未答复")
+
+        lost = (OSError, ValueError, EOFError, TimeoutError, queue.Empty)
+        try:
+            try:
+                ready = request("initialize", 60)
+            except lost:
+                raise NativeError("ESESSION", "无法启动原生回退进程，未修改历史") from None
+            if ready.get("subtype") != "success":
+                raise NativeError("ESESSION", "原生回退进程初始化失败，未修改历史")
+            # 从发出回退请求起记录可能已被修改；此后失去答复只能按未知处理，不能当作未修改。
+            self.delivery_started = True
+            try:
+                response = request("rewind_conversation", 30, target_message_uuid=target,
+                                   last_seen_user_message_uuid=last_seen)
+            except lost:
+                raise RuntimeError("原生回退结果未知，修改后的消息未发送，请刷新核对历史") from None
+        finally:
+            with contextlib.suppress(OSError):
+                process.stdin.close()
+            try:
+                process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            reader.join(timeout=5)
+            with contextlib.suppress(OSError):
+                process.stdout.close()
+        value = response.get("response") if response.get("subtype") == "success" else None
+        if isinstance(value, dict) and value.get("rewound") is True:
+            return value
+        self.delivery_started = False
+        reason = value.get("reason") if isinstance(value, dict) else None
+        if not isinstance(reason, str) or not reason:
+            raise NativeError("EUNSUPPORTED", "当前原版 Claude 未接受结构化回退，未修改历史")
+        code, message = REWIND_REFUSALS.get(reason, ("EUNSUPPORTED", f"原版 Claude 拒绝回退（{reason}），未修改历史"))
+        raise NativeError(code, message)
+
     def edit_message(self, request):
-        # 用户要求只有原生会话已结束执行才可编辑；不发送停止、不分叉、不改写原生日志或文件。
+        # 用户要求（2026-11-13 确认 B 方案）：网页编辑历史改为交接。停止同一后台会话 → print 进程用
+        # rewind_conversation 结构化回退 → claude respawn 恢复同一会话 → 发送修改后的消息。
+        # 必须保持原 UUID 与后台短 ID；已连接的原版终端会提示会话退出，需重新 claude attach。
+        # 仅在完全空闲时允许：无执行中轮次、无后台任务、无待确认弹窗、无压缩、无其他网页编辑。
+        # 不模拟按键操作 /rewind 菜单，失败时恢复会话并如实区分“未修改”和“结果未知”。
         self.delivery_started = False
         self.read_messages()
         target = next((row for row in self.messages if row.get("uuid") == request.get("native_user_id")
@@ -2001,151 +2206,78 @@ class NativeSession:
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > 128 * 1024:
             raise NativeError("EINVAL", "修改后的消息不能为空或超过 128 KiB")
         content = self.edit_content(target, prompt)
-        live = self.lookup()
-        if live:
-            self.bind(live)
-        status = NativeDiscovery.status(live or {}, self.messages)
-        if (status.get("tempo") != "idle" or status.get("needs")
-                or live and live.get("sessionStatus") not in (None, "idle")
-                or self.compaction.get("state") == "running"):
-            raise NativeError("EBUSY", "请等待 Claude 结束当前执行后再编辑历史消息")
-        if not live or live.get("outcome"):
-            if self.short:
-                self.restore_job()
-            else:
-                self.start()
-        live = self.lookup()
-        if not live or live.get("outcome"):
-            raise NativeError("ESESSION", "原生后台尚未就绪，未提交历史编辑")
-        self.bind(live)
-        self.read_messages()
-        if request.get("history_head") != self.history.current_head():
-            raise NativeError("ESTALE", "原生历史已变化，未提交编辑")
-        choices = [row for row in self.messages if row.get("nativeEditable") is True]
-        index = next(index for index, row in enumerate(choices) if row["uuid"] == target["uuid"])
-        deferred = []
-        restored = False
-        menu_opened = False
-
-        def terminal_text():
-            while self.incoming is not None:
-                try:
-                    frame = self.incoming.get_nowait()
-                except queue.Empty:
-                    break
-                if isinstance(frame, dict) and "_stream" in frame:
-                    self.screen.feed(frame["_stream"])
-                else:
-                    deferred.append(frame)
-            return "\n".join(self.screen.text())
-
-        def screen_when(predicate, timeout=5):
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                text = terminal_text()
-                if predicate(text):
-                    return text
-                time.sleep(0.04)
-            raise RuntimeError("无法确认原生回退界面，未自动重复操作")
-
-        def selected(text):
-            matches = re.findall(r"(?m)^\s*❯\s+(.+)$", text)
-            return matches[-1].strip() if matches else ""
-
-        def modal(text):
-            # 仅解析最后一个原生回退面板，不能把聊天正文里引用的编号选项当成“只恢复对话”按钮。
-            headings = list(re.finditer(r"(?m)^\s*Rewind\s*$", text))
-            return text[headings[-1].end():] if headings else ""
-
-        def input_area(text):
-            lines = text.splitlines()
-            borders = [index for index, line in enumerate(lines) if re.match(r"^[─╌]{8}", line)]
-            if len(borders) < 2:
-                return None
-            area = lines[borders[-2] + 1:borders[-1]]
-            return area if any(line.startswith("❯") for line in area) else None
-
-        original = target.get("message", {}).get("content", "")
-        original_text = original if isinstance(original, str) else "\n".join(
-            part.get("text", "") for part in original if part.get("type") == "text")
-        upload_lines = {"@" + path for path in target.get("remote_upload_paths", [])}
-        original_key = preview_prompt_key("\n".join(
-            line for line in original_text.splitlines() if line not in upload_lines))
-
-        def matches_prompt(value):
-            # 原生列表按终端宽度省略长问题；序次仍由完整原生 UUID 列表确定，只折叠末尾显示省略号。
-            key = preview_prompt_key(value.removesuffix("…").removesuffix("..."))
-            return bool(key and (original_key.startswith(key) or key.startswith(original_key))) \
-                if original_key else bool(re.search(r"image|图片", value, re.I))
-
-        try:
-            # 原生 /rewind 同时更新已连接终端与驻留上下文；先核对选择，再只确认 Restore conversation。
+        with self.edit_lock():
             live = self.lookup()
-            fresh = NativeDiscovery.status(live or {}, self.messages)
-            if (fresh.get("tempo") != "idle" or fresh.get("needs")
-                    or not live or live.get("sessionStatus") not in (None, "idle")):
-                raise NativeError("EBUSY", "原生状态已变化，未提交历史编辑")
-            self.reply("/rewind", next_turn=False)
-            screen_when(lambda text: "Restore the code and/or conversation" in modal(text)
-                        and selected(modal(text)) == "(current)")
-            menu_opened = True
-            self.terminal_input(b"\x1b[A" * (len(choices) - index))
-            screen_when(lambda text: "Enter to continue" in modal(text) and matches_prompt(selected(modal(text))))
-            self.terminal_input(b"\r")
-            confirmation = modal(screen_when(lambda text: "Confirm you want to restore" in modal(text)
-                                       and re.search(r"(?m)^\s*(?:❯\s*)?\d+\.\s+Restore conversation\s*$", modal(text))))
-            quoted = "\n".join(re.sub(r"^\s*│\s?", "", line)
-                               for line in confirmation.splitlines() if re.match(r"^\s*│", line))
-            if original_key and original_key[:40] not in preview_prompt_key(quoted):
-                raise RuntimeError("原生回退目标未能核对，未确认回退")
-            target_option = re.search(r"(?m)^\s*(?:❯\s*)?(\d+)\.\s+Restore conversation\s*$", confirmation)
-            current_option = re.search(r"(?m)^\s*❯\s+(\d+)\.", confirmation)
-            if not current_option:
-                raise RuntimeError("无法核对原生回退选项，未确认回退")
-            distance = int(target_option[1]) - int(current_option[1])
-            # 此后原生可能已改变内存上下文；失败保留未知回执，不能当成未提交或自动重发。
-            self.delivery_started = True
-            self.terminal_input((b"\x1b[B" if distance >= 0 else b"\x1b[A") * abs(distance) + b"\r")
-            screen_when(lambda text: input_area(text) is not None
-                        and (self.lookup() or {}).get("sessionStatus") == "idle")
-            restored = True
-            self.history.cut_before = target["uuid"]
-            self.messages = self.history.select(self.all_messages)
+            if live:
+                self.bind(live)
+            self.read_messages()
+            if request.get("history_head") != self.history.current_head():
+                raise NativeError("ESTALE", "原生历史已变化，未提交编辑")
+            status = NativeDiscovery.status(live or {}, self.messages)
+            if (status.get("tempo") != "idle" or status.get("needs")
+                    or live and live.get("sessionStatus") not in (None, "idle")
+                    or self.compaction.get("state") == "running"):
+                raise NativeError("EBUSY", "请等待 Claude 结束当前执行后再编辑历史消息")
+            was_live = bool(live and not live.get("outcome"))
+            if was_live:
+                background = self.background_work(self.current_screen())
+                if background is None:
+                    # 连接端尚未收到画面时才单独订阅一次快照。
+                    try:
+                        background = self.background_work(self.read_terminal_screen())
+                    except (OSError, ValueError, RuntimeError):
+                        background = None
+                if background is None:
+                    raise NativeError("EBUSY", "暂时无法确认 Claude 后台任务状态，未修改历史")
+                if background:
+                    raise NativeError("EBUSY", "Claude 仍有后台任务在运行；编辑会停止会话并结束这些任务，请等任务结束后再编辑")
+            elif self.session_holders():
+                raise NativeError("ESESSIONOPEN", "原生会话仍在其他 CLI 中打开，未修改历史")
+            last_seen = next((row["uuid"] for row in reversed(self.messages)
+                              if row.get("type") == "user" and not row.get("isMeta")), None)
+            cwd = self.session_cwd or self.job.get("cwd") or ""
+            if not isinstance(cwd, str) or not cwd.startswith("/") or not Path(cwd).is_dir():
+                raise NativeError("ESESSION", "找不到原生会话的项目目录，未修改历史")
+            if was_live:
+                self.stop_job()
+            try:
+                self.run_rewind(target["uuid"], last_seen, cwd)
+            except Exception:
+                # 回退未完成：恢复原本在运行的同一后台会话；结果未知时也须恢复，再由网页按原生记录核对。
+                if was_live:
+                    with contextlib.suppress(OSError, RuntimeError, subprocess.SubprocessError):
+                        self.restore_job()
+                raise
+            # 回退已被原生确认；修改后的消息尚未发送，后续失败按“未发送”报告并把文字退回输入框。
+            self.delivery_started = False
+            self.read_messages()
+            if any(row.get("uuid") == target["uuid"] for row in self.messages):
+                self.history.cut_before = target["uuid"]
+                self.messages = self.history.select(self.all_messages)
             self.preview = self.preview_emitted = self.preview_user = self.preview_basis = ""
             self.preview_context_cache = self.preview_prompt_cache = None
-            # 原生会回填旧问题；Ctrl+U 清当前行、退格合并前一行，原文换行数+2覆盖首末空行，之后必须确认输入为空。
-            live = self.lookup()
-            if NativeDiscovery.status(live or {}, self.messages).get("tempo") != "idle":
-                raise RuntimeError("历史已回退，但原生状态已变化；修改消息待核对")
-            self.terminal_input(b"\x15\x7f" * (original_text.count("\n") + 2))
-            screen_when(lambda text: input_area(text) is not None
-                        and all(not line.removeprefix("❯").strip() for line in input_area(text)))
+            try:
+                reopened = bool(self.short) and self.job_alive()
+            except (OSError, NativeError):
+                reopened = True
+            if reopened or self.session_holders():
+                # 交接期间若终端抢先 claude attach，新进程可能载入了回退前的状态；不能再发消息覆盖。
+                raise NativeError("ESESSION", "编辑期间原生会话被重新打开，回退可能未生效；修改后的消息未发送，请刷新核对")
+            try:
+                if self.short:
+                    self.restore_job()
+                else:
+                    self.start()
+            except (OSError, RuntimeError, subprocess.SubprocessError) as failure:
+                raise NativeError("ESESSION", "历史已回退，但原生会话未能重新启动；修改后的消息未发送，可直接重新发送") from failure
             if request.get("model") != self.model:
                 self.change_setting("model", request.get("model", self.model))
             if request.get("effort") != self.effort:
                 self.change_setting("effort", request.get("effort", self.effort))
             result = self.send({"client_id": request["client_id"], "content": content, "idle_only": True})
             if result.get("deferred"):
-                raise RuntimeError("历史已回退，但原生状态已变化；新消息待核对，未进入队列")
+                raise RuntimeError("历史已回退，但原生会话已开始新的执行；修改后的消息未发送，请稍后重新发送")
             return {**result, "reverted": True}
-        except (OSError, RuntimeError, subprocess.SubprocessError):
-            if restored or self.delivery_started:
-                self.delivery_started = True
-                self.poll(force=True)
-            elif menu_opened:
-                # 尚未确认回退时仅退出本次打开的菜单，不中断任务。
-                try:
-                    for _ in range(2):
-                        live = self.lookup()
-                        if not live or live.get("sessionStatus") != "waiting" or not modal(terminal_text()):
-                            break
-                        self.terminal_input(b"\x1b")
-                except (OSError, RuntimeError):
-                    pass
-            raise
-        finally:
-            for frame in deferred:
-                self.incoming.put(frame)
 
     def edit_content(self, target, prompt):
         # 编辑文字保留原图；图片从原生消息/已读取附件还原，继续经现有上传入口进入同一 CLI。
@@ -2549,6 +2681,10 @@ class NativeSession:
                 if not isinstance(row, dict):
                     continue
                 self.history.observe(row)
+                if (not self.session_cwd and not row.get("isSidechain") and isinstance(row.get("cwd"), str)
+                        and row["cwd"].startswith("/")):
+                    # 原生按会话启动目录保存记录；交接回退的 print 进程须在同一目录 --resume 才能找到原记录。
+                    self.session_cwd = row["cwd"]
                 if not row.get("isSidechain"):
                     self.observe_native_context(row)
                 if not row.get("uuid") or row.get("isSidechain"):

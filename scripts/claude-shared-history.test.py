@@ -2,6 +2,7 @@
 import json
 import contextlib
 import io
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -2218,120 +2219,221 @@ class HistoryEditTests(unittest.TestCase):
         self.assertEqual(len(native.retired_usage), 2)
 
     def edit_fixture(self):
+        # 用户确认的 B 方案：停止同一后台会话 → print 进程结构化回退 → respawn 同一会话 → 发送修改；全程不发终端按键。
         native = self.read(self.rows())
+        folder = native.log_path.parent
+        native.lock_folder = folder / "locks"
+        native.session_cwd = str(folder)
         native.model, native.effort = "test-model", "max"
-        native.incoming = namespace["queue"].Queue()
         native.read_messages = lambda: None
         native.bind = lambda job: None
-        live = {"tempo": "idle", "state": "done", "sessionStatus": "idle"}
-        native.lookup = lambda: live
         native.poll = lambda **options: None
-        sent, keys, stage = [], [], [0]
-        def screen(text):
-            native.incoming.put({"_stream": "\x1b[2J\x1b[H" + text.replace("\n", "\r\n")})
-        def reply(text, next_turn=True):
-            self.assertEqual((text, next_turn), ("/rewind", False))
-            screen("Rewind\nRestore the code and/or conversation\n❯ (current)\nEnter to continue")
-        def terminal(data):
-            keys.append(data)
-            if data == b"\x1b[A":
-                screen("Rewind\nRestore the code and/or conversation\n❯ 很长的问题…\nEnter to continue")
-            elif data == b"\r" and stage[0] == 0:
-                stage[0] = 1
-                body = next(row for row in native.messages if row["uuid"] == "b")["message"]["content"]
-                screen("Rewind\nConfirm you want to restore\n" + "\n".join("│ " + line for line in body.splitlines()) + "\n"
-                       "❯ 1. Restore code and conversation\n  2. Restore conversation\n  3. Never mind")
-            elif data == b"\x1b[B\r":
-                stage[0] = 2
-                screen("────────────────\n❯ 很长的问题B\n────────────────")
-            elif data.startswith(b"\x15"):
-                screen("────────────────\n❯ \n────────────────")
-        native.reply, native.terminal_input = reply, terminal
+        live = {"short": "00000000", "tempo": "idle", "state": "done", "sessionStatus": "idle"}
+        native.lookup = lambda: live
+        footer = ["正文引用：1 shell · ↓ to manage", "────────────────", "❯ ", "────────────────",
+                  "⏵⏵ auto mode on (shift+tab to cycle)"]
+        native.current_screen = lambda: list(footer)
+        native.read_terminal_screen = MagicMock(side_effect=namespace["NativeError"]("EQUESTIONCHANGED"))
+        calls, sent = [], []
+        native.stop_job = lambda: calls.append("stop")
+        native.job_alive = lambda: False
+        native.session_holders = lambda: []
+
+        def rewind(target, last_seen, cwd):
+            calls.append(("rewind", target, last_seen, cwd))
+            native.delivery_started = True
+            return {"rewound": True, "targetMessageUuid": target}
+        native.run_rewind = rewind
+        native.restore_job = lambda: calls.append("respawn")
+        native.start = lambda text=None: calls.append("start")
+        native.terminal_input = lambda *args, **options: calls.append("keys")
+        native.reply = lambda *args, **options: calls.append("reply")
         native.send = lambda request: sent.append(request) or {"accepted": True, "nativeId": native.native_id}
         request = {"native_user_id": "b", "history_head": "done", "client_id": "new-message",
                    "prompt": "修改后的问题B", "model": "test-model", "effort": "max"}
-        return native, request, sent, keys, live
+        return native, request, sent, calls, live, footer
 
-    def test_edit_uses_native_conversation_only_option_without_interrupt_or_fork(self):
-        native, request, sent, keys, _ = self.edit_fixture()
+    def test_edit_hands_off_with_structured_rewind_and_keeps_the_same_session(self):
+        native, request, sent, calls, _, _ = self.edit_fixture()
         result = native.edit_message(request)
         self.assertTrue(result["reverted"])
         self.assertEqual(result["nativeId"], native.native_id)
+        # 正文里出现“to manage”不算后台任务；last_seen 取网页当前分支最后一条 user 记录。
+        self.assertEqual(calls, ["stop", ("rewind", "b", "b", native.session_cwd), "respawn"])
         self.assertEqual([row["uuid"] for row in native.messages], ["a", "aa"])
         self.assertEqual(sent[0]["content"], [{"type": "text", "text": request["prompt"]}])
         self.assertTrue(sent[0]["idle_only"])
-        self.assertEqual(keys, [b"\x1b[A", b"\r", b"\x1b[B\r", b"\x15\x7f\x15\x7f"])
 
-    def test_busy_or_stale_edit_does_not_open_menu_or_change_history(self):
-        for changes in ({"sessionStatus": "busy"}, {"sessionStatus": "waiting"}):
-            native, request, sent, keys, live = self.edit_fixture()
-            live.update(changes)
-            with self.assertRaises(namespace["NativeError"]):
+    def test_busy_background_or_stale_edit_does_not_stop_or_rewind(self):
+        for case in ("busy", "waiting", "background", "no-footer", "stale"):
+            native, request, sent, calls, live, footer = self.edit_fixture()
+            if case == "background":
+                # 订阅流只重绘变化区域：底栏可能只剩被改写的后半段，也没有分隔线。
+                footer[:] = ["回复正文", "                  · 1 shell · ↓ to manage"]
+            elif case == "no-footer":
+                footer[:] = []
+            elif case == "stale":
+                request["history_head"] = "old"
+            else:
+                live["sessionStatus"] = case
+            with self.assertRaises(namespace["NativeError"]) as raised:
                 native.edit_message(request)
-            self.assertFalse(sent)
-            self.assertFalse(keys)
-            self.assertFalse(native.delivery_started)
-        native, request, sent, keys, _ = self.edit_fixture()
-        request["history_head"] = "old"
-        with self.assertRaises(namespace["NativeError"]):
-            native.edit_message(request)
-        self.assertFalse(keys)
+            self.assertEqual(calls, [], case)
+            self.assertFalse(sent, case)
+            self.assertFalse(native.delivery_started, case)
+            self.assertEqual(raised.exception.code, "ESTALE" if case == "stale" else "EBUSY", case)
 
-    def test_failed_send_after_native_rewind_keeps_unknown_delivery(self):
-        native, request, sent, keys, _ = self.edit_fixture()
+    def test_current_screen_applies_pending_frames_and_keeps_web_requests_in_order(self):
+        native = NativeSession("unused", "00000000-0000-4000-8000-000000000001", "00000000")
+        native.incoming = namespace["queue"].Queue()
+        native.incoming.put({"_stream": "\x1b[2J\x1b[H回复\r\n  · 1 shell · ↓ to manage"})
+        native.incoming.put('{"type":"control_request","request_id":"1"}')
+        native.incoming.put('{"type":"control_request","request_id":"2"}')
+        self.assertTrue(native.background_work(native.current_screen()))
+        native.incoming.put({"_stream": "\r\x1b[K⏵⏵ auto mode on"})
+        self.assertFalse(native.background_work(native.current_screen()))
+        self.assertEqual([native.incoming.get_nowait() for _ in range(2)],
+                         ['{"type":"control_request","request_id":"1"}', '{"type":"control_request","request_id":"2"}'])
+
+    def test_refused_rewind_restores_the_same_session_without_changing_history(self):
+        native, request, sent, calls, _, _ = self.edit_fixture()
+        def refuse(target, last_seen, cwd):
+            calls.append("rewind")
+            raise namespace["NativeError"]("ESTALE", "原生会话有网页尚未显示的新内容，请刷新后重新编辑")
+        native.run_rewind = refuse
+        with self.assertRaisesRegex(namespace["NativeError"], "尚未显示"):
+            native.edit_message(request)
+        self.assertEqual(calls, ["stop", "rewind", "respawn"])
+        self.assertFalse(sent)
+        self.assertFalse(native.delivery_started)
+        self.assertIsNone(native.history.cut_before)
+        self.assertEqual([row["uuid"] for row in native.messages], ["a", "aa", "b", "bb", "done"])
+
+    def test_lost_rewind_answer_keeps_unknown_delivery_and_restores_the_session(self):
+        native, request, sent, calls, _, _ = self.edit_fixture()
+        def lost(target, last_seen, cwd):
+            calls.append("rewind")
+            native.delivery_started = True
+            raise RuntimeError("原生回退结果未知，修改后的消息未发送，请刷新核对历史")
+        native.run_rewind = lost
+        with self.assertRaisesRegex(RuntimeError, "结果未知"):
+            native.edit_message(request)
+        self.assertEqual(calls, ["stop", "rewind", "respawn"])
+        self.assertTrue(native.delivery_started)
+        self.assertFalse(sent)
+
+    def test_session_reopened_during_handoff_is_reported_without_respawn_or_send(self):
+        native, request, sent, calls, _, _ = self.edit_fixture()
+        native.job_alive = lambda: True
+        with self.assertRaisesRegex(namespace["NativeError"], "重新打开"):
+            native.edit_message(request)
+        self.assertEqual(calls, ["stop", ("rewind", "b", "b", native.session_cwd)])
+        self.assertFalse(sent)
+        self.assertFalse(native.delivery_started)
+
+    def test_failed_respawn_after_rewind_reports_the_edit_as_unsent(self):
+        native, request, sent, calls, _, _ = self.edit_fixture()
+        native.restore_job = MagicMock(side_effect=RuntimeError("原版 Claude 后台恢复失败"))
+        with self.assertRaisesRegex(namespace["NativeError"], "未发送"):
+            native.edit_message(request)
+        self.assertFalse(native.delivery_started)
+        self.assertEqual(native.history.cut_before, "b")
+        self.assertFalse(sent)
+
+    def test_failed_send_after_rewind_keeps_the_rewound_history(self):
+        native, request, sent, calls, _, _ = self.edit_fixture()
         native.send = MagicMock(side_effect=namespace["NativeError"]("EBUSY"))
         with self.assertRaises(namespace["NativeError"]):
             native.edit_message(request)
-        self.assertTrue(native.delivery_started)
         self.assertEqual(native.history.cut_before, "b")
+        self.assertEqual(calls, ["stop", ("rewind", "b", "b", native.session_cwd), "respawn"])
 
-    def test_multiline_edit_confirmation_ignores_native_quote_borders(self):
-        native, request, sent, keys, _ = self.edit_fixture()
-        next(row for row in native.messages if row["uuid"] == "b")["message"]["content"] = "很长的问题B\n第二行原文\n第三行原文"
-        self.assertTrue(native.edit_message(request)["reverted"])
-        self.assertEqual(keys[-1], b"\x15\x7f" * 4)
-
-    def test_unconfirmed_edit_closes_only_its_own_two_level_rewind_menu(self):
-        native, request, sent, keys, live = self.edit_fixture()
-        reply, terminal = native.reply, native.terminal_input
-        escapes = []
-        def patched_reply(*args, **kwargs):
-            reply(*args, **kwargs)
-            live["sessionStatus"] = "waiting"
-        def patched_terminal(data):
-            if data == b"\x1b":
-                keys.append(data)
-                escapes.append(data)
-                if len(escapes) == 2:
-                    live["sessionStatus"] = "idle"
-                text = "Rewind\r\nEnter to continue" if len(escapes) == 1 else "────────────────\r\n❯ \r\n────────────────"
-                native.incoming.put({"_stream": "\x1b[2J\x1b[H" + text})
-            else:
-                terminal(data)
-                if data == b"\r":
-                    native.incoming.put({"_stream": "\x1b[2J\x1b[HRewind\r\nConfirm you want to restore\r\n"
-                        "│ 其他问题\r\n❯ 1. Restore code and conversation\r\n  2. Restore conversation"})
-        native.reply, native.terminal_input = patched_reply, patched_terminal
-        with self.assertRaisesRegex(RuntimeError, "回退目标"):
+    def test_stopped_session_is_rewound_only_when_no_other_cli_holds_it(self):
+        native, request, sent, calls, _, _ = self.edit_fixture()
+        native.lookup = lambda: None
+        native.session_holders = lambda: [4321]
+        with self.assertRaises(namespace["NativeError"]) as raised:
             native.edit_message(request)
-        self.assertEqual(len(escapes), 2)
+        self.assertEqual(raised.exception.code, "ESESSIONOPEN")
+        self.assertEqual(calls, [])
+        native, request, sent, calls, _, _ = self.edit_fixture()
+        native.lookup = lambda: None
+        native.edit_message(request)
+        self.assertEqual(calls, [("rewind", "b", "b", native.session_cwd), "respawn"])
+
+    def test_concurrent_web_edits_of_one_session_are_rejected(self):
+        native, request, sent, calls, _, _ = self.edit_fixture()
+        other = NativeSession("unused", native.native_id, "00000000")
+        other.lock_folder = native.lock_folder
+        with other.edit_lock():
+            with self.assertRaises(namespace["NativeError"]) as raised:
+                native.edit_message(request)
+        self.assertEqual(raised.exception.code, "EBUSY")
+        self.assertEqual(calls, [])
+        native.edit_message(request)
+        self.assertEqual(calls[-1], "respawn")
+
+    def test_structured_rewind_marker_cuts_branch_until_the_edited_message_arrives(self):
+        marker = {"type": "last-prompt", "leafUuid": "aa", "explicit": True, "rewound": True, "cutUuid": "b"}
+        native = self.read(self.rows() + [marker])
+        self.assertEqual([row["uuid"] for row in native.messages], ["a", "aa"])
+        self.assertEqual(native.history.current_head(), "aa")
+        with native.log_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"type": "user", "uuid": "edited", "parentUuid": "aa",
+                                     "message": {"content": "修改后的问题B"}}) + "\n")
+        native.read_messages()
+        self.assertEqual([row["uuid"] for row in native.messages], ["a", "aa", "edited"])
+        plain = self.read(self.rows() + [{"type": "last-prompt", "leafUuid": "done"},
+                                         {"type": "last-prompt", "leafUuid": "aa", "explicit": True}])
+        self.assertEqual([row["uuid"] for row in plain.messages], ["a", "aa", "b", "bb", "done"])
+
+    def test_structured_rewind_uses_print_control_protocol_without_user_messages(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        cli = root / "claude"
+        cli.write_text("\n".join([
+            "#!/usr/bin/env python3",
+            "import json, os, sys",
+            "with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'calls.jsonl'), 'a') as log:",
+            "    log.write(json.dumps({'argv': sys.argv[1:], 'cwd': os.getcwd()}) + '\\n')",
+            "print(json.dumps({'type': 'system', 'subtype': 'noise'}), flush=True)",
+            "for line in sys.stdin:",
+            "    frame = json.loads(line)",
+            "    request, identity = frame['request'], frame['request_id']",
+            "    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'calls.jsonl'), 'a') as log:",
+            "        log.write(json.dumps({'request': request}) + '\\n')",
+            "    if request['subtype'] == 'initialize':",
+            "        value = {'subtype': 'success', 'request_id': identity, 'response': {}}",
+            "    elif request['target_message_uuid'] == 'unsupported':",
+            "        value = {'subtype': 'error', 'request_id': identity, 'error': 'unknown subtype'}",
+            "    elif request['last_seen_user_message_uuid'] != request['target_message_uuid']:",
+            "        value = {'subtype': 'success', 'request_id': identity,",
+            "                 'response': {'rewound': False, 'reason': 'unseen_later_turn'}}",
+            "    else:",
+            "        value = {'subtype': 'success', 'request_id': identity,",
+            "                 'response': {'rewound': True, 'targetMessageUuid': request['target_message_uuid']}}",
+            "    print(json.dumps({'type': 'control_response', 'response': value}), flush=True)",
+        ]) + "\n", encoding="utf-8")
+        cli.chmod(0o755)
+        native = NativeSession(str(cli), "00000000-0000-4000-8000-000000000001", "00000000")
+        self.assertTrue(native.run_rewind("b", "b", str(root))["rewound"])
+        self.assertTrue(native.delivery_started)
+        with self.assertRaises(namespace["NativeError"]) as raised:
+            native.run_rewind("b", "a", str(root))
+        self.assertEqual(raised.exception.code, "ESTALE")
         self.assertFalse(native.delivery_started)
-        self.assertFalse(sent)
-
-    def test_failed_edit_does_not_send_escape_when_cli_has_started_another_execution(self):
-        native, request, sent, keys, live = self.edit_fixture()
-        terminal = native.terminal_input
-        def patched_terminal(data):
-            terminal(data)
-            if data == b"\r":
-                live["sessionStatus"] = "busy"
-                native.incoming.put({"_stream": "\x1b[2J\x1b[HRewind\r\nConfirm you want to restore\r\n"
-                    "│ 其他问题\r\n❯ 1. Restore code and conversation\r\n  2. Restore conversation"})
-        native.terminal_input = patched_terminal
-        with self.assertRaisesRegex(RuntimeError, "回退目标"):
-            native.edit_message(request)
-        self.assertNotIn(b"\x1b", keys)
-        self.assertFalse(sent)
+        with self.assertRaises(namespace["NativeError"]) as raised:
+            native.run_rewind("unsupported", "unsupported", str(root))
+        self.assertEqual(raised.exception.code, "EUNSUPPORTED")
+        records = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
+        launch = records[0]
+        self.assertEqual(os.path.realpath(launch["cwd"]), os.path.realpath(root))
+        self.assertEqual(launch["argv"][:6], ["-p", "--input-format", "stream-json", "--output-format",
+                                              "stream-json", "--verbose"])
+        self.assertEqual(launch["argv"][-2:], ["--resume", native.native_id])
+        subtypes = [record["request"]["subtype"] for record in records if "request" in record]
+        self.assertEqual(subtypes, ["initialize", "rewind_conversation"] * 3)
 
     def test_edit_preserves_and_deduplicates_all_original_images(self):
         native = self.read(self.rows())
