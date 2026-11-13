@@ -1358,7 +1358,8 @@ class LocalUsageLedgerTests(unittest.TestCase):
         result = self.collect()["fiveHour"]
         self.assertEqual(result["usedTokens"], 710)
         self.assertAlmostEqual(result["usedCostUsd"], 300e-6 + 30 * 5e-6 + 300e-7 + 30 * 1.25e-6 + 50 * 2e-6)
-        self.assertEqual(result["forecastTokens"], 1420)
+        self.assertNotIn("forecastTokens", result, "账本不再按经过时间推算额度")
+        self.assertNotIn("forecastCostUsd", result)
 
     def test_unknown_prices_do_not_hide_tokens_or_invent_cost(self):
         self.write(self.row())
@@ -1366,7 +1367,6 @@ class LocalUsageLedgerTests(unittest.TestCase):
         result = self.collect()["fiveHour"]
         self.assertEqual(result["usedTokens"], 110)
         self.assertIsNone(result["usedCostUsd"])
-        self.assertIsNone(result["forecastCostUsd"])
 
     def test_window_boundaries_and_replay_timestamp_do_not_move_spend(self):
         start = self.now - 9000000

@@ -4436,7 +4436,8 @@ function claudeUsageWindows(value, now = Date.now()) {
     const reset = data.resetsAt == null ? null : typeof data.resetsAt === "string" ? Date.parse(data.resetsAt)
       : typeof data.resetsAt === "number" ? data.resetsAt * (data.resetsAt < 1e12 ? 1000 : 1) : NaN;
     if (reset != null && (!Number.isFinite(reset) || reset <= now || reset > 8640000000000000)) return [];
-    return [{ key, short, label, used: Math.round(used), resetAt: reset }];
+    // 展示百分比仍取整，预估总额度必须使用原生小数比例，不能把显示值当作分母。
+    return [{ key, short, label, used: Math.round(used), usedPercentage: used, resetAt: reset }];
   });
 }
 function claudeUsageResetText(resetAt, now = Date.now()) {
@@ -4455,6 +4456,12 @@ function claudeUsageCompact(value, money = false) {
   const text = unit ? `${(value / unit[0]).toFixed(money || unit[0] >= 1e6 ? 2 : 1)}${unit[1]}`
     : money ? value.toFixed(2) : String(Math.round(value));
   return money ? `$${text}` : text;
+}
+function claudeUsageEstimatedTotal(used, usedPercentage) {
+  // 用户要求预估整个窗口的总额度：已消耗 ÷ 原生已用比例；0% 或未知时不推测，不按经过时间外推。
+  if (!claudeUsageNumber(used) || !claudeUsageNumber(usedPercentage) || usedPercentage <= 0 || usedPercentage > 100) return null;
+  const total = used / (usedPercentage / 100);
+  return claudeUsageNumber(total) ? total : null;
 }
 function claudeUsageMetrics(window, now = Date.now()) {
   const metrics = claudeUsageState?.details?.value?.[window.key];
@@ -4553,13 +4560,13 @@ function renderClaudeUsageTip(windows) {
     track.setAttribute("aria-hidden", "true"); fill.style.width = `${100 - window.used}%`; track.append(fill);
     const metrics = claudeUsageMetrics(window), numbers = element("div", "claude-usage-metrics");
     const stats = element("div", "claude-usage-stats");
-    for (const forecast of [false, true]) {
-      const item = element("span", `claude-usage-metric ${forecast ? "claude-usage-forecast" : "claude-usage-consumed"}`);
-      const cost = metrics?.[forecast ? "forecastCostUsd" : "usedCostUsd"];
-      const tokens = metrics?.[forecast ? "forecastTokens" : "usedTokens"];
-      item.title = `${forecast ? "按窗口开始至今的平均速度预测窗口结束总消耗" : "本窗口已消耗"}；仅此 WSL 本地原生日志；金额按公开模型价格估算`;
-      item.setAttribute("aria-label", `${forecast ? "预测" : "已消耗"} ${claudeUsageCompact(cost, true)} / ${claudeUsageCompact(tokens)} Token`);
-      item.append(icon(forecast ? "usageForecast" : "usageConsumed"),
+    for (const estimated of [false, true]) {
+      const item = element("span", `claude-usage-metric ${estimated ? "claude-usage-forecast" : "claude-usage-consumed"}`);
+      const cost = estimated ? claudeUsageEstimatedTotal(metrics?.usedCostUsd, window.usedPercentage) : metrics?.usedCostUsd;
+      const tokens = estimated ? claudeUsageEstimatedTotal(metrics?.usedTokens, window.usedPercentage) : metrics?.usedTokens;
+      item.title = `${estimated ? "预估总额度（已消耗 ÷ 原生已用比例）" : "本窗口已消耗"}；仅此 WSL 本地原生日志；金额按公开模型价格估算`;
+      item.setAttribute("aria-label", `${estimated ? "预估总额度" : "已消耗"} ${claudeUsageCompact(cost, true)} / ${claudeUsageCompact(tokens)} Token`);
+      item.append(icon(estimated ? "usageForecast" : "usageConsumed"),
         element("span", "", claudeUsageCompact(cost, true)), element("span", "claude-usage-slash", "/"),
         element("span", "", claudeUsageCompact(tokens)));
       stats.append(item);

@@ -570,7 +570,7 @@ test("Claude 额度详情支持鼠标与点击，数据失效时关闭浮层并�
   assert.equal(context.claudeUsageState.tip, null);
 });
 
-test("Claude 本地详情独立加载，不替换原生百分比，并按窗口校验金额和预测", async () => {
+test("Claude 本地详情独立加载，不替换原生百分比，并按窗口校验金额和预估总额度", async () => {
   const { context, trigger, requests, nodes, usage, advance } = claudeUsageHarness();
   const flush = () => new Promise(resolve => setImmediate(resolve));
   context.mountClaudeUsage(); context.syncClaudeUsage();
@@ -581,6 +581,7 @@ test("Claude 本地详情独立加载，不替换原生百分比，并按窗口�
   const response = usage(99), reset = Date.parse(response.fiveHour.resetsAt);
   response.fiveHour.metrics = { source: "claude-wsl-local-journal", observedAtMs: context.Date.now(),
     windowStartMs: reset - 18000000, windowEndMs: reset,
+    // 兼容旧后台仍返回时间预测的情况：页面必须忽略它，按原生 24% 反推总额度。
     usedCostUsd: 12.84, usedTokens: 684200, forecastCostUsd: 18.60, forecastTokens: 991100 };
   requests[1].resolve({ ok: true, backend: "claude", instanceId: context.instance, usage: response });
   await flush();
@@ -588,8 +589,10 @@ test("Claude 本地详情独立加载，不替换原生百分比，并按窗口�
   const metric = nodes[0].children[1].children[2].children[0].children;
   assert.equal(metric[0].children[1].textContent, "$12.84");
   assert.equal(metric[0].children[3].textContent, "684.2k");
-  assert.equal(metric[1].children[1].textContent, "$18.60");
-  assert.equal(metric[1].children[3].textContent, "991.1k");
+  assert.equal(metric[1].children[1].textContent, "$53.50");
+  assert.equal(metric[1].children[3].textContent, "2.85M");
+  assert.match(metric[1].title, /预估总额度/);
+  assert.match(metric[1].attributes["aria-label"], /预估总额度/);
   const windows = context.claudeUsageWindows(context.claudeUsageState.value);
   assert.equal(context.claudeUsageMetrics(windows[0]).usedTokens, 684200);
   context.claudeUsageState.details.value.fiveHour.windowEndMs++;
@@ -602,6 +605,25 @@ test("Claude 本地详情独立加载，不替换原生百分比，并按窗口�
   assert.equal(context.claudeUsageCompact(0, true), "$0.00");
   assert.equal(context.claudeUsageCompact(7900000), "7.90M");
   assert.equal(context.claudeUsageResetText(context.Date.now() + 25 * 60000), "25分钟后");
+});
+
+test("Claude 预估总额度按未取整的原生已用比例反推，零值和缺失比例保持未知", () => {
+  const { context, usage } = claudeUsageHarness();
+  const estimate = context.claudeUsageEstimatedTotal, format = context.claudeUsageCompact;
+  assert.equal(format(estimate(28.34, 12), true), "$236.17");
+  assert.equal(format(estimate(42530000, 12)), "354.42M");
+  const [window] = context.claudeUsageWindows(usage(12.4));
+  assert.equal(window.used, 12);
+  assert.equal(window.usedPercentage, 12.4);
+  assert.equal(format(estimate(28.34, window.usedPercentage), true), "$228.55");
+  assert.equal(format(estimate(42530000, window.usedPercentage)), "342.98M");
+  assert.equal(estimate(28.34, 100), 28.34);
+  assert.equal(estimate(0, 12), 0);
+  for (const percent of [0, null, undefined, -1, 101, NaN, Infinity, true, "12"])
+    assert.equal(estimate(28.34, percent), null);
+  for (const used of [null, undefined, -1, NaN, Infinity, true, "28.34"])
+    assert.equal(estimate(used, 12), null);
+  assert.equal(estimate(Number.MAX_SAFE_INTEGER, .01), null);
 });
 
 test("Claude 详情关闭、实例和授权切换时忽略迟到结果，失败只影响本地数字", async () => {

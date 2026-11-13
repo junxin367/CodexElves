@@ -221,7 +221,7 @@ def collect(request, root=None, cache_path=None):
     for window in request.get("windows", []):
         end, duration = timestamp(window.get("resetsAt")), window.get("durationMs")
         if end is not None and number(duration) and duration > 0 and end - duration < now < end:
-            windows[window["key"]] = (int(end - duration), end, duration)
+            windows[window["key"]] = (int(end - duration), end)
     if not windows:
         return {}
     # 保留至少七天的数字账本；暂缺周额度时，也不能提前丢掉已经发生的消耗。
@@ -297,23 +297,18 @@ def collect_database(request, database, root, windows, cutoff, now):
     database.commit()
     models = request.get("prices") or {}
     result = {}
-    for key, (start, end, duration) in windows.items():
+    for key, (start, end) in windows.items():
         items = [json.loads(row[0]) for row in database.execute("SELECT data FROM events WHERE at>=? AND at<=?",
                                                                (start, now))]
         valid = complete and not any(item.get("invalid") for item in items)
         tokens = sum(item.get("tokens", 0) for item in items) if valid else None
         costs = [estimate_cost(item, models) for item in items] if valid else [None]
         cost = sum(costs) if all(value is not None for value in costs) else None
-        # 用户确认：按窗口开始至今的平均消耗速度，预测窗口结束时的总消耗，不是额外剩余消耗。
-        factor = duration / (now - start)
-        forecast_cost = cost * factor if cost is not None else None
-        forecast_tokens = tokens * factor if tokens is not None else None
+        # 用户要求预估总额度改为已消耗 ÷ 原生已用比例；本地账本只导出实耗，由网页结合账号比例计算。
         result[key] = {"source": "claude-wsl-local-journal", "observedAtMs": now,
                        "windowStartMs": start, "windowEndMs": end,
                        "usedCostUsd": cost if number(cost) else None,
-                       "usedTokens": tokens if number(tokens) else None,
-                       "forecastCostUsd": forecast_cost if number(forecast_cost) else None,
-                       "forecastTokens": forecast_tokens if number(forecast_tokens) else None}
+                       "usedTokens": tokens if number(tokens) else None}
     return result
 
 
