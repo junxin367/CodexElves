@@ -1,6 +1,6 @@
 (() => {
   const root = typeof window === "object" ? window : {};
-  const version = "9";
+  const version = "10";
   if (root.__codexElvesComposerFast?.version === version) return;
   root.__codexElvesComposerFast?.configure?.({ enabled: false });
   const attribute = "data-codex-elves-fast";
@@ -15,6 +15,7 @@
   let snapshot = null;
   let snapshotAt = 0;
   let loading = null;
+  let environmentLoading = null;
   let refreshing = null;
   let writing = false;
   let revision = 0;
@@ -45,6 +46,14 @@
     return root.localStorage?.getItem(key) === "true";
   }
 
+  function notifyPreferenceChange(id) {
+    // 同窗口保存和其它原生窗口的 storage 更新共用通知，网页仍从原生会话偏好读取。
+    if (enabled && threadId(id) && typeof root.CustomEvent === "function")
+      root.dispatchEvent?.(new root.CustomEvent("codex-elves-fast-changed", {
+        detail: { threadId: threadId(id) }
+      }));
+  }
+
   function writePreference(context, value) {
     const key = contextKey(context);
     if (!key) throw new Error("未识别到当前本机会话，Fast 设置未改变");
@@ -57,6 +66,7 @@
     if (value === true) root.localStorage.setItem(key, "true");
     else root.localStorage.removeItem(key);
     if (readPreference(context) !== (value === true)) throw new Error("Fast 会话设置保存失败");
+    notifyPreferenceChange(context.threadId);
   }
 
   function currentContext(anchor) {
@@ -103,16 +113,31 @@
     if (message?.id) finish(message.id, message.result, message.error);
   }
 
-  async function readSnapshot(force = false) {
-    if (!force && snapshot && Date.now() - snapshotAt < 10000) return snapshot;
-    if (loading) return loading;
-    loading = (async () => {
+  async function readEnvironment() {
+    if (environmentLoading) return environmentLoading;
+    environmentLoading = (async () => {
       const [account, requirements, configResponse, copilot] = await Promise.all([
         request("account/read", { refreshToken: false }),
         request("configRequirements/read"),
         request("config/read", { includeLayers: false, cwd: null }),
         adapters.isCopilotActive(),
       ]);
+      return {
+        account: account?.account?.type, requirements, copilot,
+        config: {
+          service_tier: configResponse?.config?.service_tier,
+          features: { fast_mode: configResponse?.config?.features?.fast_mode },
+        },
+      };
+    })().finally(() => { environmentLoading = null; });
+    return environmentLoading;
+  }
+
+  async function readSnapshot(force = false) {
+    if (!force && snapshot && Date.now() - snapshotAt < 10000) return snapshot;
+    if (loading) return loading;
+    loading = (async () => {
+      const environment = await readEnvironment();
       const models = [];
       let cursor = null;
       const cursors = new Set();
@@ -123,16 +148,7 @@
         if (cursor && cursors.has(cursor)) throw new Error("模型列表分页异常");
         if (cursor) cursors.add(cursor);
       } while (cursor && models.length < 2000);
-      const next = {
-        account: account?.account?.type,
-        requirements,
-        config: {
-          service_tier: configResponse?.config?.service_tier,
-          features: { fast_mode: configResponse?.config?.features?.fast_mode },
-        },
-        models,
-        copilot,
-      };
+      const next = { ...environment, models };
       snapshot = next;
       snapshotAt = Date.now();
       return next;
@@ -385,6 +401,19 @@
     },
     refresh,
     remoteState,
+    async remoteAvailability() {
+      // 用户要求模型能力复用模型目录；此处只读实例的账号/管理员/配置，不再请求 model/list。
+      if (!enabled) return { available: false, reason: "本机 Fast 增强尚未启用" };
+      if (!dispatcher) await installDispatcher();
+      const state = snapshot && Date.now() - snapshotAt < 10000 ? snapshot : await readEnvironment();
+      const available = allowed(state);
+      return { available, reason: available ? "" : "当前账号或配置未开放 Fast" };
+    },
+    remotePreference(context) {
+      // 会话详情只读取已保存的布尔偏好，不探测账号、模型或其它会话。
+      if (!enabled || context?.hostId !== "local" || !threadId(context.threadId) || !root.localStorage) return null;
+      return readPreference(context);
+    },
     async setRemoteState(context, model, value, assertCurrent = () => {}) {
       if (context?.hostId !== "local" || !threadId(context.threadId) || typeof value !== "boolean")
         throw new Error("Fast 会话参数无效");
@@ -437,7 +466,10 @@
   }
   root.addEventListener?.("message", onMessage);
   root.addEventListener?.("storage", (event) => {
-    if (event.key?.startsWith(preferencePrefix)) void refresh();
+    if (event.key?.startsWith(`${preferencePrefix}local:`)) {
+      notifyPreferenceChange(event.key.slice(`${preferencePrefix}local:`.length));
+      void refresh();
+    }
   });
   root.__codexElvesComposerFast = api;
 })();

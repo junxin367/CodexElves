@@ -269,16 +269,6 @@ function ensureLocalFileMenu() {
   localFileMenu.setAttribute("aria-label", "文件引用操作");
   localFileMenuLayer.append(localFileMenu);
   document.body.append(localFileMenuLayer);
-  localFileMenuLayer.addEventListener("pointerdown", event => {
-    if (event.target !== localFileMenuLayer) return;
-    event.preventDefault();
-    closeLocalFileMenu();
-  });
-  localFileMenuLayer.addEventListener("click", event => {
-    if (event.target !== localFileMenuLayer) return;
-    event.preventDefault();
-    closeLocalFileMenu();
-  });
   return localFileMenu;
 }
 
@@ -408,6 +398,11 @@ document.addEventListener("click", event => {
   void loadRenderer({ retry: true });
 });
 
+// 用户要求文件右键菜单点外部即收起；外层允许点击穿透，须在捕获阶段处理，且不拦截原控件的点击。
+document.addEventListener("pointerdown", event => {
+  if (localFileMenuClose && !localFileMenu?.contains(event.target)) closeLocalFileMenu();
+}, true);
+
 document.addEventListener("keydown", event => {
   if (event.key === "Escape" && !localFileMenuLayer?.hidden) {
     event.preventDefault();
@@ -416,4 +411,6 @@ document.addEventListener("keydown", event => {
 }, true);
 
 window.addEventListener("resize", closeLocalFileMenu);
-window.addEventListener("scroll", closeLocalFileMenu, true);
+window.addEventListener("blur", closeLocalFileMenu);
+// 首次右键后可能还有正文布局/跟随产生的异步 scroll，不能据此立即关闭；用户滚轮或外部按下仍即时收起。
+window.addEventListener("wheel", closeLocalFileMenu, { capture: true, passive: true });

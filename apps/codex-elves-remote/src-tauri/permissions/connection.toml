@@ -5,13 +5,13 @@ commands.allow = ["remote_client_state", "connect_remote"]
 
 [[permission]]
 identifier = "remote-appearance"
-description = "当前服务仅可同步经过校验的标题栏 RGB 配色，不可操作窗口或修改连接设置。"
+description = "当前服务仅可同步经过校验的原生应用顶栏 RGB 配色，不可操作窗口或修改连接设置。"
 commands.allow = ["remote_titlebar_theme"]
 
 [[permission]]
-identifier = "titlebar-state"
-description = "本地标题栏可以读取最近的同步配色。"
-commands.allow = ["remote_titlebar_state"]
+identifier = "remote-taskbar-badge"
+description = "当前服务的主窗口仅可同步未读会话数字角标，不可操作窗口或修改连接设置。"
+commands.allow = ["remote_unread_badge"]
 
 [[permission]]
 identifier = "remote-resource-cache"

@@ -288,7 +288,9 @@ impl Conversation {
             "createdAt":self.created_at,"updatedAt":self.updated_at,"recencyAt":self.updated_at,
             "pinned":self.pinned,"hasUnreadTurn":self.unread,"hostId":"local","ephemeral":false,
             "status":if self.shared && self.native_status["sessionStatus"] == "waiting" {
-                json!({"type":"waiting","activeFlags":["waitingOnApproval"]})
+                json!({"type":"waiting","activeFlags":[if self.native_status["needs"] == "input needed" {
+                    "waitingOnUserInput"
+                } else {"waitingOnApproval"}]})
             } else {json!({"type":if self.active() {"active"} else {"idle"}})},
             "editableMessage":null,"editHistoryHead":self.native_history_head,
             "messageEditReady":self.shared && self.native_status["tempo"]=="idle"
@@ -1353,7 +1355,7 @@ impl Claude {
                                     match response["code"].as_str() {
                                         Some(
                                             "EBUSY" | "EUNSUPPORTED" | "EDIALOGCHANGED" | "ESTALE"
-                                            | "ESESSION",
+                                            | "ESESSION" | "EQUESTIONCHANGED",
                                         ) => 409,
                                         Some("EINVAL" | "EIMAGE") => 400,
                                         Some("ENOENT") => 404,
@@ -2655,6 +2657,11 @@ impl Claude {
             .cloned()
             .context("Claude 进程已退出")?;
         let original = &request["_claude"];
+        if original["nativeQuestion"].is_object()
+            && original["nativeQuestion"]["state"] != "waiting"
+        {
+            return Err(error(409, "回答已经提交，正在核对原生结果，不会重复提交"));
+        }
         if original["subtype"] == "native_dialog"
             && (original["dialog"]["remoteSupported"] != true
                 || original["dialog"]["state"] != "waiting"
@@ -2682,6 +2689,7 @@ impl Claude {
                     .and_then(|a| a["answers"].as_array())
                     .and_then(|a| a.first())
                     .and_then(Value::as_str)
+                    .filter(|answer| !answer.trim().is_empty())
                     .context("请回答所有问题")?;
                 values.insert(key.into(), json!(answer));
             }
@@ -3873,7 +3881,7 @@ fn permission_request(thread: &str, id: &str, request: &Value) -> anyhow::Result
             })
             .collect();
         return Ok(json!({"id":id,"method":"item/tool/requestUserInput",
-            "params":{"threadId":thread,"questions":questions},"_claude":request}));
+            "params":{"threadId":thread,"questions":questions,"nativeQuestion":request["nativeQuestion"]},"_claude":request}));
     }
     Ok(
         json!({"id":id,"method":"item/commandExecution/requestApproval",
@@ -4784,6 +4792,34 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn claude_live_questions_share_question_cards_and_keep_all_questions() {
+        let (_directory, _service, mut c) = fixture();
+        c.shared = true;
+        c.native_status =
+            json!({"tempo":"blocked","sessionStatus":"waiting","needs":"input needed"});
+        assert_eq!(
+            c.view()["status"],
+            json!({"type":"waiting","activeFlags":["waitingOnUserInput"]})
+        );
+        assert!(!c.running_for_send());
+        let raw = json!({"subtype":"can_use_tool","tool_name":"AskUserQuestion",
+        "nativeQuestion":{"id":"live-question","state":"waiting"},
+        "input":{"questions":[
+            {"question":"选择分支？","options":[{"label":"test"},{"label":"pre-production"}]},
+            {"question":"只有主分支怎么办？","options":[{"label":"master"},{"label":"跳过"}]}
+        ]}});
+        let request = permission_request("thread", "live-question", &raw).unwrap();
+        assert_eq!(request["method"], "item/tool/requestUserInput");
+        assert_eq!(request["params"]["questions"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            request["params"]["questions"][1]["id"],
+            "只有主分支怎么办？"
+        );
+        assert_eq!(request["params"]["nativeQuestion"]["state"], "waiting");
+        assert_eq!(request["_claude"], raw);
     }
 
     #[test]

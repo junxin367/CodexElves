@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [],
     "security": {
-      "capabilities": ["connection-page", "titlebar", "content-appearance"],
+      "capabilities": ["connection-page", "content-appearance"],
       "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost https://ipc.localhost; object-src 'none'; base-uri 'none'"
     }
   },

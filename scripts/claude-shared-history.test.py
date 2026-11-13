@@ -20,6 +20,221 @@ exec(compile(trust_source.read_text(encoding="utf-8"), str(trust_source), "exec"
 
 
 class SharedQueueHistoryTests(unittest.TestCase):
+    def waiting_questions(self):
+        native = self.waiting_dialog()
+        questions = [
+            {"question": "选择目标分支？", "options": [{"label": "test"}, {"label": "pre-production"}]},
+            {"question": "仅有主分支怎么办？", "options": [{"label": "master"}, {"label": "跳过"}]},
+        ]
+        native.job.update(needs="input needed", block={"questions": questions})
+        native.screen = namespace["Screen"]()
+        native.screen.feed("← ☐ 分支 ☐ 主分支 ✔ Submit →\n选择目标分支？\n"
+                           "❯ 1. test\n2. pre-production\n3. Type something.\n")
+        return native
+
+    def test_live_questions_are_visible_before_any_tool_use_is_written_to_history(self):
+        native = self.waiting_questions()
+        with contextlib.redirect_stdout(io.StringIO()):
+            native.poll()
+        request = next(iter(native.requests.values()))
+        self.assertEqual(request["tool_name"], "AskUserQuestion")
+        self.assertEqual(len(request["input"]["questions"]), 2)
+        self.assertEqual(request["nativeQuestion"]["state"], "waiting")
+        self.assertIsNone(native.dialog)
+        native.job.update(sessionStatus="idle", needs=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            native.poll()
+        self.assertEqual(native.requests, {}, "旧 block 不能在原生已恢复执行后继续弹问答")
+
+    def test_native_question_identity_is_stable_and_retires_when_waiting_or_options_change(self):
+        native = self.waiting_questions()
+        request = namespace["native_question_request"](native.job, native.native_id)
+        original = request["nativeQuestion"]["id"]
+        self.assertEqual(original, namespace["native_question_request"](native.job, native.native_id)["nativeQuestion"]["id"])
+        native.job["sessionStatusAtMs"] += 1
+        self.assertNotEqual(original, namespace["native_question_request"](native.job, native.native_id)["nativeQuestion"]["id"])
+        native.job["sessionStatusAtMs"] -= 1
+        native.job["block"]["questions"][0]["options"][0]["label"] = "另一个分支"
+        self.assertNotEqual(original, namespace["native_question_request"](native.job, native.native_id)["nativeQuestion"]["id"])
+
+    def test_history_discovery_restores_live_questions_without_starting_or_contacting_cli(self):
+        native, session_path, record = self.activity_fixture("waiting")
+        record["waitingFor"] = "input needed"
+        session_path.write_text(json.dumps(record))
+        job_path = native.root / "jobs/1234abcd/state.json"
+        stored = json.loads(job_path.read_text())
+        stored.update(block={"questions": [{"question": "选择分支？", "options": [{"label": "test"}, {"label": "main"}],
+                                           "privateField": "must-not-be-cached"}]},
+                      providerEnv={"SECRET": "must-not-be-cached"})
+        job_path.write_text(json.dumps(stored))
+        logs = native.root / "projects/fixture"
+        logs.mkdir(parents=True)
+        (logs / f"{native.native_id}.jsonl").write_text(json.dumps({"type": "user", "uuid": "input",
+            "cwd": "/fixture", "sessionId": native.native_id, "timestamp": 1000,
+            "message": {"content": "原问题"}}) + "\n")
+        reader = NativeDiscovery(native.root)
+        with patch.object(NativeSession, "rpc", side_effect=AssertionError("只读发现不能调用 CLI")):
+            frame = reader.control({"subtype": "read_history", "native_id": native.native_id})
+        request = next(iter(frame["requests"].values()))
+        self.assertEqual(request["input"]["questions"][0]["question"], "选择分支？")
+        self.assertEqual(frame["native_status"]["sessionStatus"], "waiting")
+        self.assertNotIn("must-not-be-cached", json.dumps(reader.jobs))
+        self.assertNotIn("must-not-be-cached", json.dumps(frame))
+
+    def test_question_review_matches_full_answers_and_ignores_native_diff_column(self):
+        native = self.waiting_questions()
+        questions = native.job["block"]["questions"]
+        lines = ["← ☒ 分支 ☒ 主分支 ✔ Submit →", "Review your answers      Diff unavailable",
+                 "│ ● 选择目标分支？", "→ pre-production", "● 仅有主分支怎么办？", "→ master",
+                 "Ready to submit your answers?", "❯ 1. Submit answers", "2. Cancel"]
+        page = namespace["native_question_page"](lines, questions)
+        self.assertEqual(page["index"], 2)
+        answers = {"选择目标分支？": "pre-production", "仅有主分支怎么办？": "master"}
+        self.assertTrue(namespace["native_question_review_matches"](page["review"], questions, answers))
+        self.assertFalse(namespace["native_question_review_matches"](
+            page["review"], questions, {**answers, "仅有主分支怎么办？": "跳过"}))
+        underscored = [line.replace("→ master", "→ feature_a") for line in page["review"]]
+        self.assertFalse(namespace["native_question_review_matches"](
+            underscored, questions, {**answers, "仅有主分支怎么办？": "featurea"}),
+            "答案中的下划线不是 Markdown 标记，不能在核对时丢掉")
+
+    def test_live_question_checkbox_display_enriches_multi_select_without_changing_request_id(self):
+        native = self.waiting_questions()
+        native.screen = namespace["Screen"]()
+        native.screen.feed("← ☐ 分支 ☐ 主分支 ✔ Submit →\n选择目标分支？\n"
+                           "❯ 1. [ ] test\n2. [x] pre-production\n3. [ ] Type something\nSubmit\n")
+        raw = namespace["native_question_request"](native.job, native.native_id)
+        identity = raw["nativeQuestion"]["id"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            native.poll()
+        self.assertEqual(next(iter(native.requests)), identity)
+        self.assertTrue(native.requests[identity]["input"]["questions"][0]["multiSelect"])
+        self.assertNotIn("multiSelect", native.job["block"]["questions"][0], "显示补充不能反写原生问题")
+        page = namespace["native_question_page"](native.screen.text(), raw["input"]["questions"])
+        self.assertTrue(page["multi"])
+        self.assertEqual(page["choices"]["Type something"], "3")
+
+    def test_multiple_native_questions_are_submitted_together_without_replying_as_a_chat_message(self):
+        native = self.waiting_questions()
+        with contextlib.redirect_stdout(io.StringIO()):
+            native.poll()
+        request = next(iter(native.requests.values()))
+        pages = [
+            {"index": 0, "choices": {"test": "1", "pre-production": "2", "Type something.": "3"}, "multi": False},
+            {"index": 1, "choices": {"master": "1", "跳过": "2", "Type something.": "3"}, "multi": False},
+            {"index": 2, "review": ["Review your answers", "● 选择目标分支？", "→ pre-production",
+                                      "● 仅有主分支怎么办？", "→ master", "Ready to submit your answers?"]},
+        ]
+        stage, keys = [0], []
+        native.read_question_page = lambda _request, index=None: pages[stage[0]]
+        def key(data, **options):
+            keys.append((data, options.get("final_question", False)))
+            stage[0] = min(stage[0] + 1, 2)
+        native.terminal_input = key
+        native.rpc = MagicMock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            native.answer({"response": {"request_id": request["nativeQuestion"]["id"],
+                "response": {"updatedInput": {"answers": {"选择目标分支？": "pre-production", "仅有主分支怎么办？": "master"}}}}})
+        self.assertEqual(keys, [(b"2", False), (b"1", False), (b"1", True)])
+        native.rpc.assert_not_called()
+        self.assertEqual(native.question_reply["state"], "submitted")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "已提交"):
+            native.answer({"response": {"request_id": request["nativeQuestion"]["id"], "response": {}}})
+        self.assertEqual(len(keys), 3)
+        restored = self.waiting_questions()
+        restored.restore_question_reply(native.control_projection())
+        with contextlib.redirect_stdout(io.StringIO()):
+            restored.poll()
+        self.assertEqual(next(iter(restored.requests.values()))["nativeQuestion"]["state"], "submitted")
+
+    def test_question_answers_reject_missing_values_and_terminal_control_sequences_without_keys(self):
+        native = self.waiting_questions()
+        request = namespace["native_question_request"](native.job, native.native_id)
+        native.terminal_input = MagicMock()
+        for values in ({}, {"选择目标分支？": "test"},
+                       {"选择目标分支？": "test", "仅有主分支怎么办？": "\x1b[201~command"}):
+            with self.assertRaises(namespace["NativeError"]):
+                native.answer_questions(request, values)
+        native.terminal_input.assert_not_called()
+
+    def test_native_multi_select_keeps_custom_answer_selected_and_uses_native_review_tab(self):
+        native = self.waiting_questions()
+        native.job["block"]["questions"] = native.job["block"]["questions"][:1]
+        request = namespace["native_question_request"](native.job, native.native_id)
+        state = {"focus": 1, "other": False, "text": "", "review": False}
+        keys = []
+        def page(_request, index=None):
+            if state["review"]:
+                return {"index": 1, "review": ["Review your answers", "● 选择目标分支？",
+                    "→ " + json.dumps(state["text"], ensure_ascii=False), "Ready to submit your answers?"]}
+            labels = ["test", "pre-production", state["text"] or "Type something"]
+            lines = [("❯ " if state["focus"] == i else "") + f"{i}. "
+                     + ("[x] " if i == 3 and state["other"] else "[ ] ") + label
+                     for i, label in enumerate(labels, 1)]
+            lines.append(("❯ " if state["focus"] == 4 else "") + "Submit")
+            return {"index": 0, "choices": {label: str(i) for i, label in enumerate(labels, 1)},
+                    "multi": True, "lines": lines}
+        def key(data, **options):
+            keys.append((data, options.get("final_question", False)))
+            if data == b"3":
+                state["other"] = not state["other"]
+            elif data == b"\x1b[B":
+                state["focus"] += 1
+            elif data == b"\x1b[A":
+                state["focus"] -= 1
+            elif data.startswith(b"\x15\x1b[200~"):
+                state["text"] = data[len(b"\x15\x1b[200~"):-len(b"\x1b[201~")].decode()
+            elif data == b"\t":
+                self.assertEqual(state["focus"], 1, "在普通选项位置切换到汇总，不能在文字输入或 Submit 位置发送数字")
+                self.assertTrue(state["other"])
+                state["review"] = True
+        native.read_question_page, native.terminal_input = page, key
+        with contextlib.redirect_stdout(io.StringIO()):
+            native.answer_questions(request, {"选择目标分支？": "/custom, answer"})
+        self.assertEqual(keys[-3:], [(b"3", False), (b"\t", False), (b"1", True)])
+        self.assertGreater([data for data, _ in keys].index(b"3"),
+                           next(i for i, (data, _) in enumerate(keys) if data.startswith(b"\x15\x1b[200~")),
+                           "离开文字输入焦点后才能用数字键勾选 Other")
+        self.assertNotIn(b"\r", [data for data, _ in keys])
+        self.assertEqual(native.question_reply["state"], "submitted")
+
+    def test_native_predefined_multi_answers_select_checkboxes_instead_of_one_quoted_custom_value(self):
+        native = self.waiting_questions()
+        native.job["block"]["questions"] = native.job["block"]["questions"][:1]
+        request = namespace["native_question_request"](native.job, native.native_id)
+        stage = [0]
+        pages = [
+            {"index": 0, "multi": True, "choices": {"test": "1", "pre-production": "2", "Type something": "3"}},
+            {"index": 1, "review": ["Review your answers", "● 选择目标分支？",
+                                  "→ test, pre-production", "Ready to submit your answers?"]},
+        ]
+        native.read_question_page = lambda *args: pages[stage[0]]
+        native.submit_multi_question = MagicMock(side_effect=lambda *args: stage.__setitem__(0, 1))
+        native.terminal_input = MagicMock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            native.answer_questions(request, {"选择目标分支？": "pre-production, test"})
+        native.submit_multi_question.assert_called_once_with(request, 0, ["1", "2"])
+        native.terminal_input.assert_called_once_with(b"1", question=request, final_question=True)
+
+    def test_stale_question_cannot_write_after_native_dialog_disappears(self):
+        native = self.waiting_questions()
+        request = namespace["native_question_request"](native.job, native.native_id)
+        native.job.update(sessionStatus="busy", needs=None)
+        native.terminal_input = MagicMock()
+        with self.assertRaisesRegex(RuntimeError, "已经结束或变化"):
+            native.answer_questions(request, {"选择目标分支？": "test", "仅有主分支怎么办？": "master"})
+        native.terminal_input.assert_not_called()
+
+    def test_waiting_input_without_structured_questions_has_a_readonly_notice(self):
+        native = self.waiting_questions()
+        native.job.pop("block")
+        with contextlib.redirect_stdout(io.StringIO()):
+            native.poll()
+        request = next(iter(native.requests.values()))
+        self.assertEqual(request["subtype"], "native_dialog")
+        self.assertFalse(request["dialog"]["remoteSupported"])
+        self.assertIn("等待回答", request["dialog"]["description"])
+
     dialog_text = ("Switch model?\nYour next response will be slower and use more tokens\n"
                    "This conversation is cached for the current model. Switching to Opus 5.5 means "
                    "the full history gets re-read.\n❯ 1. Yes, switch to Opus 5.5\n  2. No, go back\n")

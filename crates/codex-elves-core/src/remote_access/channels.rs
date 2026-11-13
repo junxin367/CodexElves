@@ -164,7 +164,11 @@ pub(super) fn request_path(method: &Method, path: &str) -> bool {
         || method == Method::POST
             && (matches!(
                 path,
-                "/api/logout" | "/api/diagnostics" | "/api/settings/instructions"
+                "/api/logout"
+                    | "/api/diagnostics"
+                    | "/api/settings/instructions"
+                    // 打开本机浏览器有副作用，不能归入允许自动重试的文件读取。
+                    | "/api/workspace/open-browser"
             ) || path.strip_prefix("/api/action/").is_some_and(|action| {
                 !action.is_empty()
                     && action.len() <= 64

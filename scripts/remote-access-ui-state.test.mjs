@@ -67,6 +67,8 @@ test("存储事件只匹配当前授权范围", () => {
 
 const app = await readFile(new URL("../assets/remote-access/app.js", import.meta.url), "utf8");
 const native = await readFile(new URL("../assets/remote-access/native.js", import.meta.url), "utf8");
+const composerFast = await readFile(new URL("../assets/inject/composer-fast.js", import.meta.url), "utf8");
+const currentModelCatalogCacheVersion = Number(app.match(/const modelCatalogCacheVersion = (\d+)/)[1]);
 const channels = await readFile(new URL("../assets/remote-access/channels.js", import.meta.url), "utf8");
 const diagnostics = await readFile(new URL("../assets/remote-access/diagnostics.js", import.meta.url), "utf8");
 const platform = await readFile(new URL("../assets/remote-access/platform.js", import.meta.url), "utf8");
@@ -76,6 +78,155 @@ const sessionFiles = await readFile(new URL("../assets/remote-access/session-fil
 const sessionMenuSource = await readFile(new URL("../assets/remote-access/session-menu.js", import.meta.url), "utf8");
 const markdownRendererSource = await readFile(new URL("../assets/remote-access/markdown-renderer.js", import.meta.url), "utf8");
 const devServerSource = await readFile(new URL("./dev-remote-access.mjs", import.meta.url), "utf8");
+
+function localFileBrowserHarness({ android = false, desktop = true, nativeClient = false } = {}) {
+  const opened = [], requests = [], notices = [];
+  const context = nodeVm.createContext({
+    URL, location: new URL("http://127.0.0.1:45222/#thread=thread-1"),
+    selectedId: "thread-1", relatedSessionView: null, creating: false, workspaceSidePanel: false,
+    isAndroidContainer: () => android, matchMedia: () => ({ matches: desktop }),
+    window: { ...(nativeClient ? { __TAURI__: { core: { invoke() {} } } } : {}),
+      open: (...args) => { opened.push(["web", ...args]); return {}; } },
+    openAndroidBrowser: async url => { opened.push(["android", url]); },
+    api: async (path, payload) => { requests.push([path, JSON.parse(JSON.stringify(payload))]); return { ok: true }; },
+    notice: (...args) => notices.push(args),
+  });
+  nodeVm.runInContext(sourceSection("function currentFileBrowserThreadId(",
+    'window.addEventListener("codex-elves-open-local-file"'), context);
+  return { context, opened, requests, notices };
+}
+
+test("PC 文件浏览器菜单调用本机默认浏览器接口，不构造 HTTP 预览地址或打开内置窗口", async () => {
+  const h = localFileBrowserHarness();
+  await h.context.openLocalFileInBrowser("docs/文件 #1.html");
+  assert.deepEqual(h.requests, [["/api/workspace/open-browser", {
+    threadId: "thread-1", path: "docs/文件 #1.html"
+  }]]);
+  assert.deepEqual(h.opened, []);
+  assert.deepEqual(h.notices, []);
+});
+
+test("窄版 Windows 客户端和 PC 侧边会话仍调用系统默认浏览器，侧边使用原项目身份", async () => {
+  const h = localFileBrowserHarness({ desktop: false, nativeClient: true });
+  await h.context.openLocalFileInBrowser("AGENTS.md");
+  assert.equal(h.requests.length, 1);
+  const side = localFileBrowserHarness({ desktop: false });
+  side.context.workspaceSidePanel = true;
+  side.context.relatedSessionView = { kind: "side", openedFromThreadId: "parent-thread" };
+  await side.context.openLocalFileInBrowser("README.md");
+  assert.equal(side.requests[0][1].threadId, "parent-thread");
+  assert.deepEqual(side.opened, []);
+});
+
+test("Android 与手机网页保留原文件打开方式，不请求电脑端默认浏览器", async () => {
+  for (const android of [true, false]) {
+    const h = localFileBrowserHarness({ android, desktop: false });
+    await h.context.openLocalFileInBrowser("docs/index.html");
+    assert.deepEqual(h.requests, []);
+    assert.equal(h.opened[0][0], android ? "android" : "web");
+    assert.equal(new URL(h.opened[0][1]).pathname, "/api/workspace/view/thread-1/docs/index.html");
+    assert.deepEqual(h.notices, []);
+  }
+});
+
+test("PC 原生文件打开失败只提示实际错误，不回退到 HTTP 预览或自动重复打开", async () => {
+  const h = localFileBrowserHarness();
+  h.context.api = async () => { throw new Error("文件不存在或已被删除"); };
+  await h.context.openLocalFileInBrowser("removed.md");
+  assert.deepEqual(h.opened, []);
+  assert.deepEqual(h.notices, [["文件不存在或已被删除", true]]);
+  h.context.selectedId = null;
+  await h.context.openLocalFileInBrowser("AGENTS.md");
+  assert.equal(h.notices.at(-1)[0], "当前会话没有可用的工作区文件");
+});
+
+function clientUnreadBadgeHarness() {
+  const counts = [], requests = [], intervals = [];
+  const context = nodeVm.createContext({
+    AbortController, workspaceSidePanel: false, pageLeaving: false, initialAuthenticationRequired: false,
+    document: { hidden: true }, navigator: { onLine: true },
+    window: { __CODEX_ELVES_UNREAD_BADGE__: { setCount: count => counts.push(count) } },
+    session: { device: { id: "device-a" } }, sidebar: null,
+    privateInputScope: value => value?.device?.id,
+    enabledInstanceIds: () => ["codex:local", "claude:wsl:test"],
+    filterDeletedSidebar() {}, filterSideThreadSidebar() {}, mergeIncompleteSidebar: (_, value) => value,
+    setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; },
+    clearInterval() {},
+    api: async (path, payload, _, signal, options) => {
+      assert.equal(path, "/api/read/sidebar");
+      assert.equal(options.resourcePriority, "background");
+      const request = { ...deferred(), payload, signal };
+      requests.push(request);
+      return request.promise;
+    },
+  });
+  nodeVm.runInContext(sourceSection("let clientUnreadBadgeTimer =", "async function loadSidebar("), context);
+  return { context, counts, requests, intervals };
+}
+
+test("独立客户端角标按未读主会话去重，最近/项目/置顶重复与子会话不增加数字", () => {
+  const { context } = clientUnreadBadgeHarness();
+  const main = { id: "codex-a", hasUnreadTurn: true };
+  const value = {
+    recent: [main, { id: "claude-b", hasUnreadTurn: true },
+      { id: "side", hasUnreadTurn: true }, { id: "agent", threadSource: "subagent", hasUnreadTurn: true },
+      { id: "child", parentThreadId: "codex-a", hasUnreadTurn: true },
+      { id: "archived", archived: true, hasUnreadTurn: true },
+      { id: "read", hasUnreadTurn: false, priority: { attentionState: "unread" } }],
+    pinnedThreads: [main],
+    projects: [{ threads: [main, { id: "only-project", hasUnreadTurn: true }] }],
+    sideThreadIds: ["side"],
+  };
+  assert.equal(context.clientUnreadThreadCount(value), 3);
+  value.recent[1].hasUnreadTurn = false;
+  assert.equal(context.clientUnreadThreadCount(value), 2);
+  assert.equal(context.clientUnreadThreadCount(null), 0);
+});
+
+test("后台角标读取共享请求并合并后续刷新，不更新聊天正文或侧栏对象", async () => {
+  const { context, counts, requests } = clientUnreadBadgeHarness();
+  const original = { recent: [], projects: [], pinnedThreads: [] };
+  context.sidebar = original;
+  const first = context.refreshClientUnreadBadge(), second = context.refreshClientUnreadBadge();
+  assert.equal(requests.length, 1);
+  requests[0].resolve({ recent: [{ id: "a", hasUnreadTurn: true }], pinnedThreads: [], projects: [] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.length, 2);
+  requests[1].resolve({ recent: [], pinnedThreads: [], projects: [] });
+  await Promise.all([first, second]);
+  assert.deepEqual(counts, [1, 0]);
+  assert.equal(context.sidebar, original);
+});
+
+test("角标授权切换和回到前台拒绝旧结果，网络错误不伪造清零", async () => {
+  for (const reason of ["authorization", "visible", "network"]) {
+    const { context, counts, requests } = clientUnreadBadgeHarness();
+    const operation = context.refreshClientUnreadBadge();
+    if (reason === "authorization") context.session = { device: { id: "device-b" } };
+    if (reason === "visible") context.document.hidden = false;
+    if (reason === "network") requests[0].reject(new Error("暂时离线"));
+    else requests[0].resolve({ recent: [{ id: "stale", hasUnreadTurn: true }] });
+    await operation;
+    assert.deepEqual(counts, [], reason);
+  }
+});
+
+test("仅独立客户端后台保留十五秒角标轮询，停止后清零且迟到读取不能恢复旧数字", async () => {
+  const { context, counts, requests, intervals } = clientUnreadBadgeHarness();
+  context.startClientUnreadBadgePolling();
+  assert.equal(intervals[0].delay, 15000);
+  assert.equal(requests.length, 1);
+  context.stopClientUnreadBadgePolling(true);
+  assert.equal(requests[0].signal.aborted, true);
+  requests[0].resolve({ recent: [{ id: "late", hasUnreadTurn: true }] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(counts, [0]);
+  delete context.window.__CODEX_ELVES_UNREAD_BADGE__;
+  await context.refreshClientUnreadBadge();
+  context.startClientUnreadBadgePolling();
+  assert.equal(requests.length, 1, "普通网页没有新增后台查询");
+  assert.equal(intervals.length, 1);
+});
 
 function claudeHistoryEditHarness() {
   const id = "claude-11111111-2222-4333-8444-555555555555";
@@ -181,12 +332,15 @@ const vm = {
       renderClaudeControlNotices() {},
       selectionVersion: 0, modelChoiceVersion: 0,
       claudePendingSetting: () => null,
-      selectedDraftFast: false, remoteFastState: null, remoteFastRead: null, remoteFastWriting: null,
-      remoteFastKey: () => "", updateRemoteFast() {},
+      selectedDraftFast: false, remoteFastState: null, remoteFastWriting: null, fastModeVersion: 0,
+      remoteFastWrites: new Map(),
+      remoteFastKey: () => "", updateRemoteFast() {}, rememberRemoteFastPreference() {},
+      reconcileRemoteFastPreference: value => value,
       messageImageMediaReads: new WeakMap(), messageImageRefreshes: new Map(), messageImageReadSequence: 0,
       syncBackendModels() {}, setConnection() {},
       claudeUsageState: null, resetClaudeUsage() {}, syncClaudeUsage() {}, fitClaudeUsageTip() {},
       resetComposerMetrics() {}, syncComposerMetrics() {}, fitComposerMetrics() {}, normalizeComposerMetrics: () => null,
+      syncClientUnreadBadge() {}, startClientUnreadBadgePolling() {}, stopClientUnreadBadgePolling() {},
       promptOptimizationSettingsDialog: null,
       desktopObservationTimer: null, desktopObservationRequest: null, desktopObservationLast: null,
       scheduleDesktopObservation() {}, resetDesktopObservation() {},
@@ -387,54 +541,80 @@ test("桥接版本升级清理旧实例，守卫与公布版本一致", () => {
 });
 
 function remoteFastHarness() {
-  const attributes = new Map(), reads = [], writes = [], notices = [];
+  const attributes = new Map(), reads = [], writes = [], notices = [], refreshes = [];
   const control = { disabled: true, hidden: true, setAttribute: (key, value) => attributes.set(key, value) };
   const context = nodeVm.createContext({
     session: { device: { id: "fast-device" }, capabilities: { fastMode: true }, runtime: { revision: 1 } },
     selectedId: "thread-fast-a", creating: false, selectionVersion: 1, connected: true,
     busy: false, stopping: false, pending: null, editingMessage: null, editingQueuedMessage: null,
-    selectedDraftFast: false, remoteFastState: null, remoteFastRead: null, remoteFastWriting: null,
-    model: "gpt-fast", claude: false, readOnly: false,
+    selectedDraftFast: false, remoteFastState: null, remoteFastWriting: null, fastModeVersion: 0,
+    remoteFastWrites: new Map(), composerTooltips: null, threadDisplays: new Map(), thread: null,
+    modelsScope: "codex", modelsLoadedAt: 1000, modelLoadError: "",
+    models: [
+      { model: "gpt-6.1-sol", serviceTiers: [{ id: "priority" }] },
+      { model: "gpt-6.1-other", serviceTiers: [{ id: "fast" }] },
+      { model: "gpt-6.1-unsupported", serviceTiers: [] },
+      { model: "gpt-6.1-denied", serviceTiers: [{ id: "priority" }], fastModeSupported: false },
+      { model: "claude-opus", serviceTiers: [{ id: "priority" }] },
+      { model: "sol-alias", serviceTiers: [{ id: "priority" }], fastModeSupported: true },
+    ],
+    modelDefaults: { fastModeAvailability: { available: true },
+      fastModeOwner: JSON.stringify(["fast-device", "codex:local", 1]) },
+    now: 1000, Date: { now: () => context.now },
+    model: "gpt-6.1-sol", instanceId: "codex:local", claude: false, readOnly: false,
     $: selector => selector === "#fast-button" ? control : null,
     privateInputScope: value => value.device.id,
-    activeInstanceId: () => "codex:local",
+    activeInstanceId: () => context.instanceId,
+    modelContextKey: () => context.instanceId === "codex:local" ? "codex" : context.instanceId,
     currentModelId: () => context.model,
+    currentModel: () => context.models.find(model => model.model === context.model) || null,
+    catalogUsable: ({ loadedAt }) => context.now - loadedAt < 604800000,
     draftKey: () => context.selectedId || "$new:project",
     modelContext: () => ({ ...(context.selectedId ? { threadId: context.selectedId } : { projectId: "project" }) }),
     isClaude: () => context.claude,
+    validRelatedThreadId: id => typeof id === "string" && id.startsWith("thread-fast-"),
+    threadDeleted: () => false, claudeThreadId: () => false, threadEphemeralState: () => false,
+    contextUsage: () => null, normalizeComposerMetrics: () => null, cacheDisplayData() {},
     threadReadOnly: () => context.readOnly, threadDeletionLocked: () => false, sessionInstanceEnabled: () => true,
     api: (path, payload) => { const result = deferred(); reads.push({ path, payload, ...result }); return result.promise; },
     mutate: (action, payload) => { const result = deferred(); writes.push({ action, payload, ...result }); return result.promise; },
+    loadModels: async () => refreshes.push("models"), reloadThread: async () => refreshes.push("thread"),
     notice: message => notices.push(message),
   });
+  nodeVm.runInContext(sourceSection("function threadDisplayKey(", "function rememberBackgroundThreadDisplay("), context);
   nodeVm.runInContext(app.slice(app.indexOf("function remoteFastKey("), app.indexOf("function renderModelMenu(")), context);
+  for (const id of ["thread-fast-a", "thread-fast-b"])
+    context.rememberThreadDisplay({ id, model: "gpt-6.1-sol", fastMode: false });
   context.updateComposer = () => context.updateRemoteFast();
   const flush = () => new Promise(resolve => setImmediate(resolve));
-  return { context, control, attributes, reads, writes, notices, flush };
+  return { context, control, attributes, reads, writes, notices, refreshes, flush };
 }
 
-test("远程 Fast 读取按会话和模型隔离，重复重绘不重复请求，迟到状态不污染新会话", async () => {
+test("远程 Fast 直接使用模型目录、实例配置和会话详情，重绘不发独立读取", () => {
   const h = remoteFastHarness(), { context, attributes, control, reads } = h;
   for (let i = 0; i < 5; ++i) context.updateRemoteFast();
-  assert.equal(reads.length, 1);
+  assert.equal(reads.length, 0);
   assert.equal(attributes.get("aria-pressed"), "false");
-  assert.equal(control.disabled, true);
-  context.selectedId = "thread-fast-b"; ++context.selectionVersion;
+  assert.equal(control.disabled, false);
+  context.rememberRemoteFastPreference("thread-fast-a", true);
   context.updateRemoteFast();
-  assert.equal(reads.length, 2);
-  reads[1].resolve({ supported: true, enabled: false });
-  await h.flush();
-  reads[0].resolve({ supported: true, enabled: true });
-  await h.flush();
+  assert.equal(attributes.get("aria-pressed"), "true");
+  context.selectedId = "thread-fast-b"; ++context.selectionVersion; context.updateRemoteFast();
   assert.equal(attributes.get("aria-pressed"), "false");
   assert.equal(control.disabled, false);
   for (let i = 0; i < 10; ++i) context.updateRemoteFast();
-  assert.equal(reads.length, 2, "消息和输入重绘不能额外探测 Fast");
-  context.model = "unsupported-model"; context.updateRemoteFast();
-  reads[2].resolve({ supported: false, enabled: false, reason: "当前模型未声明 Fast 能力" });
-  await h.flush();
-  assert.equal(control.disabled, true);
-  assert.match(control.title, /未声明 Fast/);
+  assert.equal(reads.length, 0, "消息和输入重绘不能额外探测 Fast");
+  for (const model of ["gpt-6.1-unsupported", "gpt-6.1-denied", "unknown", "claude-opus"]) {
+    context.model = model; context.updateRemoteFast();
+    assert.equal(control.disabled, true);
+    assert.equal(attributes.get("aria-pressed"), "false");
+    assert.match(control.title, /未声明 Fast/);
+  }
+  context.model = "sol-alias"; context.updateRemoteFast();
+  assert.equal(control.disabled, false, "原生目录明确声明的 GPT 别名可使用 Fast");
+  context.modelDefaults.fastModeAvailability = { available: false, reason: "管理员关闭 Fast" };
+  context.updateRemoteFast();
+  assert.equal(control.disabled, true); assert.match(control.title, /管理员/);
   context.claude = true; context.updateRemoteFast();
   assert.equal(control.hidden, true, "Claude 不借用 Codex 的 Fast 档位");
 });
@@ -442,7 +622,6 @@ test("远程 Fast 读取按会话和模型隔离，重复重绘不重复请求�
 test("远程 Fast 只在保存确认后点亮，防止连点且迟到写入不改变新会话", async () => {
   const h = remoteFastHarness(), { context, attributes, control, reads, writes } = h;
   context.updateRemoteFast();
-  reads[0].resolve({ supported: true, enabled: false }); await h.flush();
   const first = context.toggleRemoteFast();
   await context.toggleRemoteFast();
   assert.equal(writes.length, 1);
@@ -452,32 +631,253 @@ test("远程 Fast 只在保存确认后点亮，防止连点且迟到写入不�
   assert.equal(attributes.get("aria-pressed"), "false", "请求开始不能冒充保存成功");
   assert.equal(control.disabled, true);
   context.selectedId = "thread-fast-b"; ++context.selectionVersion; context.updateRemoteFast();
-  reads[1].resolve({ supported: true, enabled: false }); await h.flush();
-  writes[0].resolve({ threadId: "thread-fast-a", model: "gpt-fast", supported: true, enabled: true });
+  writes[0].resolve({ threadId: "thread-fast-a", model: "gpt-6.1-sol", supported: true, enabled: true });
   await first;
   assert.equal(attributes.get("aria-pressed"), "false");
   assert.equal(control.disabled, false);
   const second = context.toggleRemoteFast();
-  writes[1].resolve({ threadId: "thread-fast-b", model: "gpt-fast", supported: true, enabled: true });
+  writes[1].resolve({ threadId: "thread-fast-b", model: "gpt-6.1-sol", supported: true, enabled: true });
   await second;
   assert.equal(attributes.get("aria-pressed"), "true");
   context.readOnly = true; context.updateRemoteFast();
   assert.equal(control.disabled, true);
+  assert.equal(reads.length, 0);
 });
 
 test("远程新会话 Fast 默认关闭，草稿开关不修改其他原生会话或提前提交", async () => {
   const h = remoteFastHarness(), { context, attributes, reads, writes } = h;
+  context.rememberRemoteFastPreference("thread-fast-a", true);
   context.selectedId = null; context.creating = true; context.updateRemoteFast();
-  reads[0].resolve({ supported: true, enabled: true }); await h.flush();
-  assert.equal(attributes.get("aria-pressed"), "false", "服务返回旧会话状态也不能开启新草稿");
+  assert.equal(attributes.get("aria-pressed"), "false", "旧会话状态不能开启新草稿");
   await context.toggleRemoteFast();
   assert.equal(attributes.get("aria-pressed"), "true");
   assert.equal(context.selectedDraftFast, true);
   assert.equal(writes.length, 0);
   await context.toggleRemoteFast();
   assert.equal(attributes.get("aria-pressed"), "false");
+  assert.equal(reads.length, 0);
 });
 
+test("Fast 随原有会话展示复用，A→B→A 和新草稿均不重复读取模型能力", () => {
+  const h = remoteFastHarness(), { context, reads, attributes } = h;
+  context.rememberRemoteFastPreference("thread-fast-a", true);
+  context.updateRemoteFast();
+  context.selectedId = "thread-fast-b"; ++context.selectionVersion; context.updateRemoteFast();
+  context.selectedId = "thread-fast-a"; ++context.selectionVersion;
+  context.remoteFastState = null; context.updateRemoteFast();
+  assert.equal(reads.length, 0);
+  assert.equal(attributes.get("aria-pressed"), "true");
+  context.selectedId = null; context.creating = true; ++context.selectionVersion; context.updateRemoteFast();
+  assert.equal(reads.length, 0);
+  assert.equal(attributes.get("aria-pressed"), "false");
+});
+
+test("Fast 换模型只读取同一目录，非支持模型不能改写真实会话开关", async () => {
+  const h = remoteFastHarness(), { context, reads, writes, attributes } = h;
+  context.rememberRemoteFastPreference("thread-fast-a", true);
+  context.updateRemoteFast();
+  context.model = "gpt-6.1-unsupported"; context.updateRemoteFast();
+  assert.equal(attributes.get("aria-pressed"), "false");
+  context.model = "gpt-6.1-sol"; context.updateRemoteFast();
+  assert.equal(attributes.get("aria-pressed"), "true");
+  context.model = "gpt-6.1-other"; context.updateRemoteFast();
+  const save = context.toggleRemoteFast();
+  writes[0].resolve({ threadId: context.selectedId, model: "gpt-6.1-other", supported: true, enabled: false });
+  await save;
+  context.model = "gpt-6.1-sol"; context.updateRemoteFast();
+  assert.equal(attributes.get("aria-pressed"), "false", "同一会话切回旧模型也使用最新关闭状态");
+  assert.equal(reads.length, 0);
+});
+
+test("Fast 复用目录的有效期，不另设更短的 TTL；会话详情未到时不猜测开关", () => {
+  const h = remoteFastHarness(), { context, reads, control, attributes } = h;
+  context.rememberRemoteFastPreference("thread-fast-a", true);
+  context.updateRemoteFast();
+  context.now += 300001; context.updateRemoteFast();
+  assert.equal(reads.length, 0);
+  assert.equal(control.disabled, false);
+  assert.equal(attributes.get("aria-pressed"), "true");
+  assert.equal(attributes.get("aria-busy"), "false");
+  assert.doesNotMatch(control.title, /正在读取/);
+  context.selectedId = "thread-fast-new"; context.updateRemoteFast();
+  assert.equal(control.disabled, true); assert.match(control.title, /正在读取会话设置/);
+  context.rememberThreadDisplay({ id: context.selectedId, fastMode: false });
+  context.updateRemoteFast();
+  assert.equal(control.disabled, false);
+  assert.equal(reads.length, 0);
+});
+
+test("Fast 保存中切走再切回仍等待同一写入，成功后更新会话详情", async () => {
+  const h = remoteFastHarness(), { context, reads, writes, control, attributes } = h;
+  context.updateRemoteFast();
+  const operation = context.toggleRemoteFast();
+  context.selectedId = "thread-fast-b"; ++context.selectionVersion; context.updateRemoteFast();
+  assert.equal(control.disabled, false);
+  context.selectedId = "thread-fast-a"; ++context.selectionVersion; context.remoteFastState = null;
+  context.updateRemoteFast();
+  assert.equal(control.disabled, true);
+  assert.match(control.title, /正在保存/);
+  assert.equal(reads.length, 0);
+  writes[0].resolve({ threadId: "thread-fast-a", model: "gpt-6.1-sol", supported: true, enabled: true });
+  await operation;
+  assert.equal(control.disabled, false);
+  assert.equal(attributes.get("aria-pressed"), "true");
+  assert.equal(reads.length, 0);
+  assert.equal(context.currentThreadDisplay().fastMode, true);
+});
+
+test("Fast 目录不跨授权、实例或运行模式，迟到保存也不能串用", async () => {
+  for (const change of ["device", "runtime", "instance"]) {
+    const h = remoteFastHarness(), { context, reads, control } = h;
+    context.updateRemoteFast();
+    const operation = context.toggleRemoteFast();
+    if (change === "device") context.session.device.id = "other-device";
+    else if (change === "runtime") ++context.session.runtime.revision;
+    else context.instanceId = "codex:wsl:test";
+    context.updateRemoteFast();
+    assert.equal(control.disabled, true);
+    h.writes[0].resolve({ threadId: "thread-fast-a", model: "gpt-6.1-sol", supported: true, enabled: true });
+    await operation;
+    assert.equal(control.disabled, true);
+    assert.equal(reads.length, 0);
+  }
+  const h = remoteFastHarness(), { context, writes, attributes } = h;
+  context.updateRemoteFast();
+  const readVersion = context.fastModeVersion;
+  const operation = context.toggleRemoteFast();
+  writes[0].resolve({ threadId: context.selectedId, model: "gpt-6.1-sol", supported: true, enabled: true });
+  await operation;
+  const delayed = context.reconcileRemoteFastPreference({ id: context.selectedId, fastMode: false }, readVersion);
+  context.rememberThreadDisplay(delayed); context.updateRemoteFast();
+  assert.equal(attributes.get("aria-pressed"), "true");
+  context.session.runtime.cdpInjectionEnabled = false; context.updateRemoteFast();
+  assert.equal(h.control.hidden, true);
+});
+
+test("Fast 保存失败保留已确认开关，通过原模型目录和会话详情核对", async () => {
+  const h = remoteFastHarness(), { context, writes, attributes } = h;
+  context.updateRemoteFast();
+  const operation = context.toggleRemoteFast();
+  writes[0].reject(new Error("管理员已关闭 Fast"));
+  await operation; await h.flush();
+  assert.equal(attributes.get("aria-pressed"), "false");
+  assert.deepEqual(h.refreshes, ["models", "thread"]);
+  assert.deepEqual(h.notices, ["管理员已关闭 Fast"]);
+  assert.equal(h.reads.length, 0);
+});
+
+function nativeFastCatalogHarness() {
+  const requests = [], events = [], storage = new Map(), listeners = new Map(), unsubscribe = [];
+  const state = { now: 1000 };
+  const responses = {
+    "account/read": { account: { type: "apiKey" } },
+    "configRequirements/read": { requirements: null },
+    "config/read": { config: { features: { fast_mode: true } } },
+    "model/list": { data: [
+      { id: "sol", model: "gpt-6.1-sol", serviceTiers: [{ id: "priority" }] },
+      { id: "other", model: "claude-opus", serviceTiers: [{ id: "priority" }] },
+    ], nextCursor: null },
+  };
+  const window = {
+    crypto: { randomUUID: () => String(requests.length) }, setTimeout, clearTimeout,
+    localStorage: { getItem: key => storage.get(key) ?? null,
+      setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
+    document: { querySelectorAll: () => [], querySelector: () => null },
+    addEventListener(type, handler) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(handler);
+    },
+    removeEventListener: (type, handler) => listeners.get(type)?.delete(handler),
+    dispatchEvent: event => { for (const handler of listeners.get(event.type) || []) handler(event); },
+    CustomEvent: class { constructor(type, { detail }) { this.type = type; this.detail = detail; } },
+    __codexElvesNativeFastUnlock: { runtime: { isGptModel: model => /^gpt-\d/.test(model) } },
+    electronBridge: { sendMessageFromView({ request }) {
+      requests.push(request.method);
+      queueMicrotask(() => window.dispatchEvent({ type: "message", data: { type: "mcp-response",
+        hostId: "local", message: { id: request.id, result: responses[request.method] } } }));
+      return Promise.resolve();
+    } },
+  };
+  const dispatcher = { dispatchMessage() {} };
+  const context = nodeVm.createContext({ window, Date: { now: () => state.now } });
+  nodeVm.runInContext(composerFast, context);
+  const api = window.__codexElvesComposerFast;
+  Object.assign(context, {
+    array: value => Array.isArray(value) ? value : [], unsubscribe,
+    isDeletedThread: () => false, emit: event => events.push(event),
+    nativeModelCatalog: async () => responses["model/list"].data,
+    defaultModelSettings: async () => ({ defaultModel: "gpt-6.1-sol" }),
+  });
+  nodeVm.runInContext(native.slice(native.indexOf("  const onFastPreferenceChanged ="), native.lastIndexOf("})();")), context);
+  const options = { enabled: true, getDispatcher: async () => dispatcher, isCopilotActive: async () => false,
+    isGptModel: model => /^gpt-\d/.test(model), getModel: () => "gpt-6.1-sol",
+    getContext: () => ({ hostId: "local", threadId: "thread-desktop-a" }), getComposers: () => [] };
+  const readModels = () => nodeVm.runInContext(`(async () => { switch ("models") {
+    ${native.slice(native.indexOf('        case "models": {'), native.indexOf('        case "skills": return'))}
+  } })()`, context);
+  return { context, window, api, options, requests, events, state, responses, storage, unsubscribe, readModels };
+}
+
+test("原生模型目录保留 Fast 档位与实例限制，读取环境和会话偏好均不再请求模型表", async () => {
+  const h = nativeFastCatalogHarness();
+  await h.api.configure(h.options);
+  h.requests.length = 0;
+  h.state.now += 11000;
+  const models = await h.readModels();
+  assert.deepEqual(Array.from(models.data[0].serviceTiers, tier => tier.id), ["priority"]);
+  assert.equal(models.data[0].fastModeSupported, true);
+  assert.equal(models.data[1].fastModeSupported, false, "非 GPT 不能仅因档位字段而开放 Fast");
+  assert.equal(models.fastModeAvailability.available, true);
+  assert.deepEqual(h.requests.sort(), ["account/read", "config/read", "configRequirements/read"]);
+  h.requests.length = 0;
+  assert.equal(h.api.remotePreference({ hostId: "local", threadId: "thread-desktop-a" }), false);
+  assert.equal(h.api.remotePreference({ hostId: "other", threadId: "thread-desktop-a" }), null);
+  assert.equal(h.requests.length, 0);
+  h.window.__codexElvesComposerFast.remoteAvailability = async () => { throw Error("临时不可读"); };
+  const partial = await h.readModels();
+  assert.equal(partial.data.length, 2, "Fast 失败不能阻断普通模型目录");
+  assert.equal(partial.fastModeAvailability.available, null);
+  assert.equal(h.requests.length, 0);
+});
+
+test("原生 Fast 保存仍重新校验权限，保存及跨窗口变更各同步一次会话设置事件", async () => {
+  const h = nativeFastCatalogHarness(), target = { hostId: "local", threadId: "thread-fast-a" };
+  await h.api.configure(h.options);
+  h.requests.length = 0;
+  await h.api.setRemoteState(target, "gpt-6.1-sol", true);
+  assert.equal(h.requests.filter(method => method === "model/list").length, 1, "保存沿用原生写前模型校验");
+  assert.equal(h.events.length, 1);
+  assert.equal(h.events[0].method, "thread/settings/updated");
+  assert.equal(h.events[0].params.threadId, target.threadId);
+  assert.equal(h.events[0].params.fastMode, true);
+  const ui = remoteFastHarness();
+  Object.assign(ui.context, {
+    messageVersion: 0, sending: null, handleRemoteChannelEvent: () => false,
+    scheduleRelatedMenuRefresh() {}, normalizeDisplayedUserMessage: value => value,
+    rememberBackgroundThreadDisplay() {}, receiveCompactionLifecycle() {}, scheduleReload() {},
+  });
+  nodeVm.runInContext(sourceSection("function receive(event) {", "function disconnect()"), ui.context);
+  ui.context.receive(h.events[0]);
+  assert.equal(ui.attributes.get("aria-pressed"), "true");
+  const key = `codex-elves-fast-session-v1:local:${target.threadId}`;
+  h.storage.delete(key);
+  h.window.dispatchEvent({ type: "storage", key });
+  assert.equal(h.events.length, 2);
+  assert.equal(h.events[1].params.fastMode, false);
+  ui.context.receive(h.events[1]);
+  assert.equal(ui.attributes.get("aria-pressed"), "false");
+  const readVersion = ui.context.fastModeVersion;
+  ui.context.receive({ method: "thread/settings/updated", params: { threadId: "thread-fast-b", fastMode: true } });
+  assert.equal(ui.context.reconcileRemoteFastPreference({ id: "thread-fast-a", fastMode: true }, readVersion).fastMode,
+    true, "其它会话的设置事件不能覆盖当前会话刚读取的状态");
+  h.responses["configRequirements/read"] = { requirements: { featureRequirements: { fast_mode: false } } };
+  await assert.rejects(h.api.setRemoteState(target, "gpt-6.1-sol", true), /未开放 Fast/);
+  assert.equal(h.api.remotePreference(target), false, "缓存曾允许也不能绕过最新管理员限制");
+  assert.equal(h.events.length, 2);
+  for (const dispose of h.unsubscribe) dispose();
+  h.window.dispatchEvent({ type: "storage", key });
+  assert.equal(h.events.length, 2, "桥接卸载后不再发送旧设置事件");
+});
 test("Claude 完整历史同步移除旧摘要轮次，迟到的历史响应不能复活摘要", async () => {
   const id = "claude-00000000-0000-4000-8000-000000000001", summary = { id: "compact", _nativeUserId: "summary-native", items: [{ id: "summary-item" }] };
   const turns = new Map([[summary.id, summary], ["real", { id: "real", _nativeUserId: "native-real", items: [] }], ["pending", { id: "pending", items: [] }]]);
@@ -8179,6 +8579,7 @@ function sharedOrdinaryDraftHarness(initial = null) {
       stopActivityTimer() {}, stopGoalLiveTimer() {}, finishQueueDrag() {}, stopRelatedSessionTimers() {},
       rememberTranscript() {}, rememberReadingPosition() {}, closeContextUsageTip() {}, retireForegroundReads() {},
       stopCatalogRefresh() {}, stopConnectionPoll() {}, cancelConnectionProbe() {},
+      stopClientUnreadBadgePolling() {},
       notice() { assert.fail("内存恢复存储不应报错"); },
       recoveryStorageMessage: error => error.message,
       recoveryStore: {
@@ -8861,18 +9262,19 @@ test("注入配置无法读取时保留其它等级且不开放 Ultra，原生�
   assert.deepEqual(missing.efforts((await missing.context.nativeModelCatalog())[0]), ["xhigh"]);
 });
 
-test("模型列表显式关闭 Ultra 时网页不展示该等级，并保存带版本的目录缓存", async () => {
+test("模型目录统一保存 Fast 档位、实例限制和缓存身份，Ultra 仍遵循原生配置", async () => {
   const writes = [];
   const context = {
     models: [], modelsPromise: null, modelsLoadedAt: 0, modelsRetryAt: 0,
-    modelDefaults: {}, modelCatalogCacheVersion: 1, catalogFallbackMs: 10000,
+    modelDefaults: {}, modelCatalogCacheVersion: currentModelCatalogCacheVersion, catalogFallbackMs: 10000,
     session: { device: { id: "device-a" } }, privateInputScope: () => "device-a",
     cacheDisplayData: (...args) => writes.push(args),
     catalogUsable: () => false, scheduleCatalogRefresh() {}, updateComposer() {}, $: () => ({ hidden: true }),
     api: async path => {
       assert.equal(path, "/api/read/models");
       return { defaultModel: "gpt-6.1-sol", defaultReasoningEffort: "xhigh", ultraReasoningEnabled: false,
-        data: [{ model: "gpt-6.1-sol", supportedReasoningEfforts: [
+        fastModeAvailability: { available: true }, data: [{ model: "gpt-6.1-sol",
+          serviceTiers: [{ id: "priority" }], fastModeSupported: true, supportedReasoningEfforts: [
           { reasoningEffort: "xhigh" }, { reasoningEffort: "max" }, { reasoningEffort: "ultra" },
         ] }] };
     },
@@ -8881,27 +9283,80 @@ test("模型列表显式关闭 Ultra 时网页不展示该等级，并保存带�
   vm.runInContext(sourceSection("async function loadModels(", "function rememberedNewChatModel("), context);
   const models = await context.loadModels(true);
   assert.deepEqual(Array.from(models[0].supportedReasoningEfforts, effort => effort.reasoningEffort), ["xhigh", "max"]);
-  assert.equal(writes[0][2].version, 1);
+  assert.equal(writes[0][2].version, currentModelCatalogCacheVersion);
   assert.equal(context.modelDefaults.reasoningEffort, "xhigh");
+  assert.equal(writes[0][2].models[0].serviceTiers[0].id, "priority");
+  assert.equal(writes[0][2].models[0].fastModeSupported, true);
+  assert.equal(writes[0][2].defaults.fastModeAvailability.available, true);
+  assert.equal(writes[0][2].defaults.fastModeOwner, JSON.stringify(["device-a", "codex:local", 0]));
 });
 
-test("升级后的远程页面拒绝恢复未按 Codex 配置过滤的旧模型目录缓存", async () => {
-  for (const version of [undefined, 1]) {
-    const modelCatalog = { version, loadedAt: Date.now(), models: [
-      { model: "gpt-6.1-sol", supportedReasoningEfforts: [{ reasoningEffort: "xhigh" }] },
+test("模型目录恢复保留 Fast 元数据，缺失 Fast 或 Ultra 过滤的旧目录重新读取", async () => {
+  const owner = JSON.stringify(["device-a", "codex:local", 1]);
+  for (const version of [undefined, 1, 2, currentModelCatalogCacheVersion]) {
+    const modelCatalog = { version, loadedAt: Date.now(),
+      defaults: { fastModeAvailability: { available: true }, fastModeOwner: owner }, models: [
+      { model: "gpt-6.1-sol", serviceTiers: [{ id: "priority" }],
+        fastModeSupported: true, supportedReasoningEfforts: [{ reasoningEffort: "xhigh" }] },
     ] };
     const context = {
       URLSearchParams, location: { hash: "" }, session: { device: { id: "device-a" } },
       readScope: null, readGeneration: 0, sidebar: null, privateInputScope: () => "device-a",
-      models: [], modelsLoadedAt: 0, modelDefaults: {}, modelCatalogCacheVersion: 1,
+      models: [], modelsLoadedAt: 0, modelDefaults: {}, modelCatalogCacheVersion: currentModelCatalogCacheVersion,
       readCache: { activate: async () => {}, get: async (_scope, kind) => kind === "models" ? modelCatalog : null },
       optionalCachedRead: value => value, catalogUsable: () => true,
     };
     vm.createContext(context);
     vm.runInContext(sourceSection("async function restoreReadViews(", "function clearPrivateInputs("), context);
     await context.restoreReadViews(context.session);
-    assert.equal(context.models.length, version === 1 ? 1 : 0);
+    assert.equal(context.models.length, version === currentModelCatalogCacheVersion ? 1 : 0);
+    if (version === currentModelCatalogCacheVersion) {
+      assert.equal(context.modelDefaults.fastModeAvailability.available, true);
+      assert.equal(context.modelDefaults.fastModeOwner, owner);
+      assert.equal(context.models[0].serviceTiers[0].id, "priority");
+    }
   }
+});
+
+test("Fast 环境暂不可读时复用目录重试，不清空模型；普通目录失败保留最后已确认能力", async () => {
+  const calls = [], delays = [], state = { now: 1000, available: null, fail: false };
+  const context = {
+    models: [], modelsPromise: null, modelsLoadedAt: 0, modelsRetryAt: 0, modelDefaults: {},
+    modelCatalogCacheVersion: currentModelCatalogCacheVersion, catalogFallbackMs: 604800000,
+    catalogRetryMs: 10000, catalogCacheMs: 600000, catalogRefreshAheadMs: 60000,
+    session: { device: { id: "device-a" }, runtime: { revision: 1 } },
+    privateInputScope: () => "device-a", Date: { now: () => state.now },
+    cacheDisplayData() {}, updateComposer() {}, $: () => null,
+    catalogUsable: value => value.loadedAt > 0, catalogFresh: () => true, catalogNeedsRefresh: () => false,
+    pageLeaving: false, document: { hidden: false }, navigator: { onLine: true },
+    stopCatalogRefresh() {}, activeSkillCatalogContext: () => null, skillCatalogs: new Map(),
+    catalogRefreshTimer: null, setTimeout: (_callback, delay) => { delays.push(delay); return 1; },
+    refreshCachedCatalogs() {},
+    api: async path => {
+      calls.push(path);
+      if (state.fail) throw Error("目录临时不可读");
+      return { data: [{ model: "gpt-6.1-sol", serviceTiers: [{ id: "priority" }] }],
+        fastModeAvailability: { available: state.available } };
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(sourceSection("async function loadModels(", "function rememberedNewChatModel(")
+    + sourceSection("function scheduleCatalogRefresh(", "function refreshCachedCatalogs("), context);
+  await context.loadModels(true);
+  assert.equal(context.models.length, 1);
+  assert.equal(context.modelsRetryAt, 11000);
+  assert.equal(delays.at(-1), 10000, "Fast 失败沿用目录调度器稍后重试");
+  await context.loadModels();
+  assert.deepEqual(calls, ["/api/read/models"]);
+  state.available = true; state.now = 11000;
+  await context.loadModels();
+  assert.equal(calls.length, 2);
+  assert.equal(context.modelDefaults.fastModeAvailability.available, true);
+  assert.equal(context.modelsRetryAt, 0);
+  state.fail = true;
+  await assert.rejects(context.loadModels(true), /临时不可读/);
+  assert.equal(context.modelDefaults.fastModeAvailability.available, true);
+  assert.equal(context.models[0].serviceTiers[0].id, "priority");
 });
 
 function initialPageHarness({ cdp = false, readOnly = false, suppress = false } = {}) {
@@ -9059,6 +9514,131 @@ function claudeExecutionFeedbackHarness(turn) {
     + sourceSection("function renderMessages(", "function rememberTranscript("), context);
   return { context, activities, root, render() { activities.length = 0; context.renderMessages(); return activities; } };
 }
+
+test("Claude 恢复后单独压缩的状态行始终位于已经完成的回复之后", () => {
+  const turn = { id: "restored", _nativeUserId: "native-restored", _nativeDone: true,
+    status: "completed", durationMs: 59000, items: [
+      { id: "input", type: "userMessage" },
+      { id: "tool", type: "dynamicToolCall", status: "completed" },
+      { id: "reply", type: "agentMessage", text: "压缩前已经完成的回复" },
+    ] };
+  const h = claudeExecutionFeedbackHarness(turn);
+  h.context.transcriptEventTypes.add("contextCompaction");
+  for (const status of ["inProgress", "unknown", "completed", "failed", "interrupted"]) {
+    turn.items[3] = { id: "compact", type: "contextCompaction", backend: "claude", source: "manual",
+      remoteInlineEvent: true, remoteCompactionLifecycle: true, status,
+      completed: ["completed", "failed", "interrupted"].includes(status) };
+    h.render();
+    const order = Array.from(h.root.children[0].children, node => node.dataset.key || "activity");
+    assert.deepEqual(order, ["restored:input", "activity", "restored:reply", "restored:compact"],
+      `${status} 状态及重复重绘均须保留原生先后顺序，不能把旧回复挪到压缩提示后`);
+  }
+});
+
+test("Claude 回复生成前的压缩仍保留原位置，不统一移动到最终回复之后", () => {
+  const turn = { id: "during", _nativeUserId: "native-during", status: "completed", items: [
+    { id: "input", type: "userMessage" },
+    { id: "tool", type: "dynamicToolCall", status: "completed" },
+    { id: "compact", type: "contextCompaction", source: "automatic", status: "completed",
+      completed: true, remoteInlineEvent: true, remoteCompactionLifecycle: true },
+    { id: "reply", type: "agentMessage", text: "压缩后生成的回复" },
+  ] };
+  const h = claudeExecutionFeedbackHarness(turn);
+  h.context.transcriptEventTypes.add("contextCompaction");
+  h.render();
+  assert.deepEqual(Array.from(h.root.children[0].children, node => node.dataset.key || "activity"),
+    ["during:input", "activity", "during:compact", "during:reply"]);
+});
+
+test("Claude 回复后的压缩保持末尾位置，尾随工具完成记录仍按原逻辑归入活动", () => {
+  const turn = { id: "trailing", _nativeUserId: "native-trailing", status: "completed", items: [
+    { id: "input", type: "userMessage" },
+    { id: "tool-before", type: "dynamicToolCall", status: "completed" },
+    { id: "reply", type: "agentMessage", text: "已完成的最终回复", phase: "final_answer" },
+    { id: "tool-after", type: "dynamicToolCall", status: "completed" },
+    { id: "compact-first", type: "contextCompaction", source: "manual", status: "completed",
+      completed: true, remoteCompactionLifecycle: true },
+    { id: "compact-second", type: "contextCompaction", source: "manual", status: "completed",
+      completed: true, remoteCompactionLifecycle: true },
+  ] };
+  const h = claudeExecutionFeedbackHarness(turn);
+  h.context.transcriptEventTypes.add("contextCompaction");
+  h.render();
+  assert.deepEqual(h.activities[0].work, ["tool-before", "tool-after"]);
+  assert.deepEqual(Array.from(h.root.children[0].children, node => node.dataset.key || "activity"),
+    ["trailing:input", "activity", "trailing:reply", "trailing:compact-first", "trailing:compact-second"]);
+});
+
+test("Claude 实时问答等待不继续显示工具运行计时", () => {
+  const turn = { id: "asked", _nativeUserId: "native-asked", status: "inProgress",
+    turnStartedAtMs: Date.now() - 60000, items: [
+      { id: "input", type: "userMessage" },
+      { id: "read", type: "dynamicToolCall", status: "completed" },
+    ] };
+  const h = claudeExecutionFeedbackHarness(turn);
+  h.context.thread.status = { type: "waiting", activeFlags: ["waitingOnUserInput"] };
+  assert.ok(h.render().every(activity => !activity.running && !activity.ticking),
+    "原生等待回答时不能把已经完成的工具继续计时");
+});
+
+test("Claude 实时多问复用问答输入，完整发送选项及自由回答，缺答时保留草稿", () => {
+  const make = (tag, textContent = "") => ({ tag, textContent, children: [], attributes: {},
+    append(...items) { this.children.push(...items); },
+    setAttribute(key, value) { this.attributes[key] = value; } });
+  const answers = [], notices = [], draft = new Map();
+  const context = nodeVm.createContext({
+    requestThreadId: "claude-question",
+    request: { params: { questions: [
+      { id: "branch", question: "选择分支？", options: [{ label: "test" }, { label: "pre-production" }] },
+      { id: "master", question: "主分支怎么处理？", options: [{ label: "master" }, { label: "跳过" }] },
+    ] } },
+    card: make("section"), actions: make("div"),
+    element: (tag, _className, text) => make(tag, text),
+    button: (text, _label, action) => Object.assign(make("button", text), { action }),
+    blockingApprovalDraft: () => draft, isClaude: () => true,
+    reply: (action, value) => answers.push({ action, value }),
+    notice: text => notices.push(text),
+  });
+  const source = sourceSection('    } else if (request.method === "item/tool/requestUserInput") {',
+    '    } else if (request.method === "item/permissions/requestApproval") {');
+  nodeVm.runInContext(`{${source.slice(source.indexOf("{") + 1)}}`, context);
+  const [first, second] = context.card.children, submit = context.actions.children[0];
+  first.children[0].children[1].action();
+  submit.action();
+  assert.equal(answers.length, 0);
+  assert.equal(notices[0], "请回答所有问题");
+  second.children[1].value = "保留 master，自定义回答";
+  second.children[1].oninput();
+  submit.action();
+  assert.equal(answers.length, 1);
+  assert.equal(answers[0].action, "answer");
+  assert.deepEqual(JSON.parse(JSON.stringify(answers[0].value)), {
+    response: { answers: { branch: { answers: ["pre-production"] },
+      master: { answers: ["保留 master，自定义回答"] } } },
+  });
+  assert.equal(draft.get("branch"), "pre-production");
+  assert.equal(draft.get("master"), "保留 master，自定义回答");
+});
+
+test("Claude 补齐多选显示不清除问答草稿，新问题和已提交状态仍有独立身份", () => {
+  const context = nodeVm.createContext({ session: { device: { id: "device" } },
+    blockingRequestState: () => ({ sourceVersion: 1 }), approvalDrafts: new Map() });
+  nodeVm.runInContext(sourceSection("function approvalReplyKey(", "function applyBlockingRequestsSnapshot("), context);
+  const request = { id: "native-question-one", method: "item/tool/requestUserInput",
+    params: { nativeQuestion: { id: "native-question-one", state: "waiting" },
+      questions: [{ id: "q", question: "选择？", options: [{ label: "A" }, { label: "B" }] }] } };
+  const identity = context.blockingApprovalIdentity("thread", request);
+  const draft = context.blockingApprovalDraft("thread", request);
+  draft.set("q", "A");
+  request.params.questions[0].multiSelect = true;
+  assert.equal(context.blockingApprovalIdentity("thread", request), identity);
+  assert.equal(context.blockingApprovalDraft("thread", request).get("q"), "A");
+  request.params.nativeQuestion.state = "submitted";
+  assert.notEqual(context.blockingApprovalIdentity("thread", request), identity);
+  request.params.nativeQuestion.state = "waiting";
+  request.id = request.params.nativeQuestion.id = "native-question-two";
+  assert.notEqual(context.blockingApprovalIdentity("thread", request), identity);
+});
 
 test("Claude 已接收但未启动时显示等待提示，执行与完成后自然接替，不改变真实执行状态", () => {
   const turn = { id: "accepted", _nativeUserId: "native-accepted", status: "pending",
@@ -10094,7 +10674,7 @@ test("编辑区主题提示接管并恢复 title，保留无障碍说明，触�
     },
   });
   nodeVm.runInContext(sourceSection("function installComposerTooltips(", "\nlet composerTooltips ="), context);
-  context.installComposerTooltips();
+  const tooltip = context.installComposerTooltips();
   const trigger = element("button");
   trigger.setAttribute("title", "选择模型"); trigger.setAttribute("aria-describedby", "existing-help");
   listeners.get("pointerover")({ target: trigger, pointerType: "touch" });
@@ -10116,6 +10696,16 @@ test("编辑区主题提示接管并恢复 title，保留无障碍说明，触�
   trigger.hidden = true; observers.at(-1).callback();
   assert.equal(nodes.length, 0);
   assert.equal(trigger.getAttribute("title"), "选择模型");
+  trigger.hidden = false;
+  trigger.setAttribute("title", "正在读取 Fast 能力");
+  listeners.get("pointerover")({ target: trigger, pointerType: "mouse" });
+  tooltip.update(trigger, "本会话 Fast 已关闭，点击开启");
+  flush();
+  assert.equal(nodes[0].textContent, "本会话 Fast 已关闭，点击开启", "200ms 等待期间也采用最新状态");
+  tooltip.update(trigger, "本会话 Fast 已开启，点击关闭");
+  assert.equal(nodes[0].textContent, "本会话 Fast 已开启，点击关闭", "保持悬停时及时接替旧提示");
+  listeners.get("pointerout")({ target: trigger, relatedTarget: null });
+  assert.equal(trigger.getAttribute("title"), "本会话 Fast 已开启，点击关闭");
 });
 
 function composerMetricsHarness() {

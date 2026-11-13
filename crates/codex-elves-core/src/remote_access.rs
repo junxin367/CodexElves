@@ -3218,6 +3218,7 @@ pub fn web_router(
         .route("/api/workspace/change", post(workspace::change))
         .route("/api/workspace/files", post(workspace::files))
         .route("/api/workspace/file", post(workspace::file))
+        .route("/api/workspace/open-browser", post(workspace::open_browser))
         .route(
             "/api/workspace/view/{thread_id}/{*path}",
             get(workspace::view),

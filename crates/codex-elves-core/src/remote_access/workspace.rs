@@ -291,6 +291,146 @@ pub(super) async fn file(
     browse_workspace(state, headers, payload, true).await
 }
 
+pub(super) async fn open_browser(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Result<Response, ApiError> {
+    let device = super::authorized(&state, &headers).await?;
+    let authorization = state
+        .controller
+        .authorization(device, Some("openFileInBrowser"));
+    authorization
+        .check()
+        .await
+        .map_err(super::authorization_error)?;
+    let requested = payload
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty() && path.len() <= 16 * 1024)
+        .ok_or_else(|| ApiError::new(400, "文件路径无效"))?
+        .to_owned();
+    let cwd = super::workspace_context(&state, &payload, &authorization).await?;
+    let target = tokio::time::timeout(REQUEST_TIMEOUT, async {
+        let git_root = git(
+            &cwd,
+            &["rev-parse", "--show-toplevel"],
+            32 * 1024,
+            &authorization,
+        )
+        .await?;
+        let root = if git_root.success && !git_root.truncated {
+            let value = String::from_utf8(git_root.bytes)
+                .map_err(|_| ApiError::new(422, "项目目录编码无法识别"))?;
+            PathBuf::from(value.trim_end_matches(['\r', '\n']))
+        } else {
+            cwd.clone()
+        };
+        tokio::task::spawn_blocking(move || {
+            let root = std::fs::canonicalize(root)
+                .map_err(|_| ApiError::new(404, "当前项目目录已失效"))?;
+            if !workspace_root_matches(&cwd, &root) {
+                return Err(ApiError::new(403, "项目目录与当前会话不一致"));
+            }
+            local_browser_file_url(&root, &requested)
+        })
+        .await
+        .map_err(|_| ApiError::new(503, "无法确认项目文件路径"))?
+    })
+    .await
+    .map_err(|_| ApiError::new(504, "确认项目文件超时，请重试"))??;
+    // 浏览器启动是本机操作：沿用设备及只读策略，启动前再次核对授权，不读取文件正文或重试打开。
+    let permit = authorization
+        .prepare_dispatch()
+        .await
+        .map_err(super::authorization_error)?;
+    tokio::task::spawn_blocking(move || {
+        crate::bridge::CdpDispatchPermit::commit(permit, || {
+            launch_system_browser(&target).map_err(anyhow::Error::from)
+        })
+    })
+    .await
+    .map_err(|_| ApiError::new(503, "无法启动系统默认浏览器"))?
+    .map_err(super::authorization_error)?;
+    Ok(no_store(json!({"ok": true})))
+}
+
+fn local_browser_file_url(root: &Path, requested: &str) -> Result<reqwest::Url, ApiError> {
+    let relative = project_relative_path(root, requested, false)?;
+    // 复用文件预览的根目录、符号链接和重解析点校验；只取原文件地址，不写临时副本或受 4 MiB 预览限制。
+    let _file =
+        open_local(root, &relative)?.ok_or_else(|| ApiError::new(404, "文件不存在或已被删除"))?;
+    reqwest::Url::from_file_path(root.join(relative))
+        .map_err(|_| ApiError::new(422, "无法转换本地文件地址"))
+}
+
+#[cfg(windows)]
+fn launch_system_browser(target: &reqwest::Url) -> Result<(), ApiError> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
+    use windows::Win32::UI::Shell::{
+        AL_EFFECTIVE, ASSOCF_INIT_FIXED_PROGID, ASSOCSTR_EXECUTABLE, AT_URLPROTOCOL,
+        ApplicationAssociationRegistration, AssocQueryStringW, IApplicationAssociationRegistration,
+    };
+    use windows::core::{PCWSTR, PWSTR, w};
+
+    // 用户要求使用系统默认浏览器而非 .md 默认编辑器；通过系统接口取得实际 HTTPS 默认应用，不猜浏览器或解析命令字符串。
+    let _com = crate::windows_integration::ComApartment::init()
+        .map_err(|_| ApiError::new(503, "无法读取系统默认浏览器"))?;
+    let registration: IApplicationAssociationRegistration = unsafe {
+        CoCreateInstance(
+            &ApplicationAssociationRegistration,
+            None,
+            CLSCTX_INPROC_SERVER,
+        )
+    }
+    .map_err(|_| ApiError::new(503, "无法读取系统默认浏览器"))?;
+    let association =
+        unsafe { registration.QueryCurrentDefault(w!("https"), AT_URLPROTOCOL, AL_EFFECTIVE) }
+            .map_err(|_| ApiError::new(503, "请先在系统设置中选择默认浏览器"))?;
+    let mut executable = vec![0u16; 32_768];
+    let mut length = executable.len() as u32;
+    let result = unsafe {
+        let result = AssocQueryStringW(
+            ASSOCF_INIT_FIXED_PROGID,
+            ASSOCSTR_EXECUTABLE,
+            PCWSTR(association.as_ptr()),
+            w!("open"),
+            PWSTR(executable.as_mut_ptr()),
+            &mut length,
+        );
+        CoTaskMemFree(Some(association.as_ptr().cast()));
+        result
+    };
+    result.ok().map_err(|_| {
+        ApiError::new(
+            503,
+            "无法识别系统默认浏览器，请先在系统设置中选择默认浏览器",
+        )
+    })?;
+    if length < 2 || length as usize > executable.len() {
+        return Err(ApiError::new(503, "系统默认浏览器路径无效"));
+    }
+    let browser = OsString::from_wide(&executable[..length as usize - 1]);
+    // 原文件使用 file:// 地址作为单独参数传入；不走 cmd、内置浏览器、HTTP 文件代理或临时副本。
+    std::process::Command::new(browser)
+        .arg(target.as_str())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| ApiError::new(503, "无法启动系统默认浏览器，请检查其安装状态"))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn launch_system_browser(_: &reqwest::Url) -> Result<(), ApiError> {
+    Err(ApiError::new(
+        501,
+        "当前服务系统尚不支持直接调用默认浏览器打开本地文件",
+    ))
+}
+
 pub(super) async fn view(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -3412,6 +3552,64 @@ mod tests {
         assert_eq!(
             docs["repository"],
             json!({"name": "docs", "git": {"branch": "docs-current", "detachedHead": null}})
+        );
+    }
+
+    #[test]
+    fn project_file_browser_native_target_uses_original_file_url() {
+        let fixture = fixture_dir();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let relative = "预览 页面 #1.html";
+        let path = root.join(relative);
+        std::fs::write(&path, "<!doctype html>").unwrap();
+        let target = local_browser_file_url(&root, relative).unwrap();
+        assert_eq!(target.scheme(), "file");
+        assert_eq!(
+            std::fs::canonicalize(target.to_file_path().unwrap()).unwrap(),
+            path
+        );
+        assert!(target.query().is_none() && target.fragment().is_none());
+        // 只交给系统浏览器打开原文件；不能复用 HTTP 预览的大小限制或接受项目外路径。
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(MAX_TEXT_BYTES as u64 + 1).unwrap();
+        assert_eq!(local_browser_file_url(&root, relative).unwrap(), target);
+        for invalid in [
+            "../private.html",
+            ".git/config",
+            "https://example.invalid/a.html",
+        ] {
+            assert!(local_browser_file_url(&root, invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(
+            local_browser_file_url(&root, "missing.html")
+                .unwrap_err()
+                .code,
+            404
+        );
+    }
+
+    #[tokio::test]
+    async fn project_file_browser_native_open_preserves_device_and_read_only_policy() {
+        let (_fixture, _state, repo) = fixture_repo().await;
+        let (state, headers) = fixture_web_state(&repo);
+        let request = json!({"threadId": "thread-1", "path": "AGENTS.md"});
+        assert_eq!(
+            open_browser(
+                State(state.clone()),
+                HeaderMap::new(),
+                Json(request.clone())
+            )
+            .await
+            .unwrap_err()
+            .code,
+            401
+        );
+        assert_eq!(
+            open_browser(State(state), headers, Json(request))
+                .await
+                .unwrap_err()
+                .code,
+            403
         );
     }
 

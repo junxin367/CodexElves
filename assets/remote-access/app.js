@@ -148,10 +148,12 @@ const promptOptimizations = new Map();
 let promptOptimizationSettingsDialog = null;
 let selectedSkills = [], selectedModel = "", selectedEffort = "", selectedGoal = null;
 let modelChoiceVersion = 0;
-let selectedDraftFast = false, remoteFastState = null, remoteFastRead = null, remoteFastWriting = null;
+let selectedDraftFast = false, remoteFastState = null, remoteFastWriting = null, fastModeVersion = 0;
+// 用户要求 Fast 复用模型目录和会话详情；这里只协调尚未完成的保存，不另建模型能力或会话开关缓存。
+const remoteFastWrites = new Map();
 let models = [], modelsPromise = null, modelsLoadedAt = 0, modelQuery = "", skillChoices = [], skillIndex = 0, skillLoadVersion = 0, skillScope = "";
-// 目录增加原生命令能力，旧缓存需补读一次；后续仍按实例共用目录。
-const modelCatalogCacheVersion = 2;
+// 目录增加模型 serviceTiers 和实例 Fast 配置；旧缓存缺失这些字段，升级后补读一次。
+const modelCatalogCacheVersion = 3;
 let modelDefaults = { model: "", reasoningEffort: "" };
 const newChatModels = new Map();
 let skillLoading = null, creationProject = "", threadReadVersion = 0, tokenUsageVersion = 0, notifiedTokenUsage = null;
@@ -1194,8 +1196,17 @@ function localFileBrowserUrl(path) {
   url.hash = "";
   return url.href;
 }
-function openLocalFileInBrowser(path) {
+async function openLocalFileInBrowser(path) {
   try {
+    // 用户要求 PC 的“浏览器”直接打开原文件；由已授权本地服务调用默认浏览器，不打开内置窗口或文件 HTTP 地址。
+    if (!isAndroidContainer() && (workspaceSidePanel || typeof window.__TAURI__?.core?.invoke === "function"
+        || matchMedia("(min-width:761px)").matches)) {
+      const threadId = currentFileBrowserThreadId();
+      if (!threadId || typeof path !== "string" || !path.trim())
+        throw new Error("当前会话没有可用的工作区文件");
+      await api("/api/workspace/open-browser", { threadId, path });
+      return;
+    }
     const url = localFileBrowserUrl(path);
     if (isAndroidContainer()) {
       return openAndroidBrowser(url).catch(error => notice(error.message || "无法打开浏览器", true));
@@ -3867,6 +3878,7 @@ function rememberThreadDisplay(value = thread, { persist = true } = {}) {
     ...(value.instanceId ? { instanceId: value.instanceId, instanceLabel: value.instanceLabel,
       wslDistribution: value.wslDistribution, wslUser: value.wslUser } : {}),
     model: value.model || "", reasoningEffort: value.reasoningEffort || "",
+    ...(typeof value.fastMode === "boolean" ? { fastMode: value.fastMode } : {}),
     ...(normalizeComposerMetrics(value.sessionMetrics) ? { sessionMetrics: normalizeComposerMetrics(value.sessionMetrics) } : {}),
     // 用户要求缺容量时仍保留真实最后请求用量；缓存不能把已知 Token 一并丢掉，也不能伪造百分比。
     tokenUsage: usage || typeof value.tokenUsage?.last?.totalTokens === "number"
@@ -4037,7 +4049,7 @@ async function restoreReadViews(value) {
       && saved.savedSidebar.projects.every(project => validSummary(project) && Array.isArray(project.threads)
         && project.threads.every(validSummary)))
     sidebar = sidebarSnapshot(saved.savedSidebar);
-  // 用户要求注入路径跟随 Codex 配置；旧缓存尚未过滤 Ultra，升级后必须重新读取。
+  // 用户要求模型能力共用目录；缺失 Fast 元数据或未过滤 Ultra 的旧缓存必须重新读取。
   if (saved.modelCatalog?.version === modelCatalogCacheVersion && Array.isArray(saved.modelCatalog.models)
       && saved.modelCatalog.models.every(model => model && typeof model.model === "string"
         && (model.supportedReasoningEfforts == null || Array.isArray(model.supportedReasoningEfforts)))
@@ -4045,7 +4057,9 @@ async function restoreReadViews(value) {
     models = saved.modelCatalog.models;
     modelDefaults = { model: saved.modelCatalog.defaults?.model || "",
       reasoningEffort: saved.modelCatalog.defaults?.reasoningEffort || "",
-      nativeCapabilities: saved.modelCatalog.defaults?.nativeCapabilities };
+      nativeCapabilities: saved.modelCatalog.defaults?.nativeCapabilities,
+      fastModeAvailability: saved.modelCatalog.defaults?.fastModeAvailability,
+      fastModeOwner: saved.modelCatalog.defaults?.fastModeOwner };
     modelsLoadedAt = saved.modelCatalog.loadedAt;
   }
   if (saved.globalSkills && Array.isArray(saved.globalSkills.data)
@@ -4086,7 +4100,8 @@ function clearPrivateInputs({ persisted = true } = {}) {
   if (!previousScope) try { previousScope = sessionStorage.getItem("codex-elves-input-owner"); } catch {}
   ++recoveryGeneration; recoveryScope = null;
   selectedDraftFast = false;
-  remoteFastState = remoteFastRead = remoteFastWriting = null;
+  remoteFastState = remoteFastWriting = null;
+  remoteFastWrites.clear(); ++fastModeVersion;
   sessionInstances = []; sessionInstanceRequest = null;
   resetRelatedSessions({ persisted: true });
   drafts.clear(); skillDrafts.clear(); attachmentDrafts.clear(); goalDrafts.clear();
@@ -5232,6 +5247,26 @@ function installComposerTooltips() {
   // 仅接管编辑区和关联菜单的 title，保留原 aria-label；触屏及已有独立上下文提示继续沿用原交互。
   const scope = ".composer-area,.composer-popover,.composer-add-popup,.queued-message-popup";
   let pending = null, timer = null, node = null, observer = null;
+  function position() {
+    if (!pending || !node) return;
+    const view = window.visualViewport, left = view?.offsetLeft || 0, top = view?.offsetTop || 0;
+    const width = view?.width || window.innerWidth, height = view?.height || window.innerHeight;
+    const anchor = pending.trigger.getBoundingClientRect(), box = node.getBoundingClientRect();
+    node.style.left = `${Math.max(left + 8, Math.min(anchor.left + (anchor.width - box.width) / 2, left + width - box.width - 8))}px`;
+    const above = anchor.top - box.height - 6;
+    node.style.top = `${Math.max(top + 8, Math.min(above >= top + 8 ? above : anchor.bottom + 6, top + height - box.height - 8))}px`;
+  }
+  function update(trigger, title) {
+    if (pending?.trigger !== trigger) return;
+    // Fast 等异步状态变化时更新同一提示，含 200ms 等待期间；移开鼠标后也恢复最新文案。
+    pending.title = String(title || "").trim();
+    trigger.removeAttribute("title");
+    if (!pending.title) { close(); return; }
+    if (node && node.textContent !== pending.title) {
+      node.textContent = pending.title;
+      position();
+    }
+  }
   function close() {
     clearTimeout(timer); timer = null;
     observer?.disconnect(); observer = null;
@@ -5260,19 +5295,14 @@ function installComposerTooltips() {
     // 原生 Codex 普通提示默认延迟 200ms，避免移动鼠标经过工具栏时连续闪烁。
     timer = setTimeout(() => {
       if (!trigger.isConnected || trigger.closest("[hidden],[inert]")) { close(); return; }
-      node = element("div", "composer-tooltip", title);
+      node = element("div", "composer-tooltip", pending.title);
       node.id = "composer-hover-tooltip"; node.setAttribute("role", "tooltip");
       const descriptions = (trigger.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
       trigger.setAttribute("aria-describedby", [...new Set([...descriptions, node.id])].join(" "));
       if (typeof node.showPopover === "function") node.setAttribute("popover", "manual");
       document.body.append(node);
       if (node.hasAttribute("popover")) node.showPopover();
-      const view = window.visualViewport, left = view?.offsetLeft || 0, top = view?.offsetTop || 0;
-      const width = view?.width || window.innerWidth, height = view?.height || window.innerHeight;
-      const anchor = trigger.getBoundingClientRect(), box = node.getBoundingClientRect();
-      node.style.left = `${Math.max(left + 8, Math.min(anchor.left + (anchor.width - box.width) / 2, left + width - box.width - 8))}px`;
-      const above = anchor.top - box.height - 6;
-      node.style.top = `${Math.max(top + 8, Math.min(above >= top + 8 ? above : anchor.bottom + 6, top + height - box.height - 8))}px`;
+      position();
       observer = new MutationObserver(() => {
         if (!trigger.isConnected || trigger.closest("[hidden],[inert]")) close();
       });
@@ -5302,7 +5332,7 @@ function installComposerTooltips() {
   window.addEventListener("blur", close);
   window.visualViewport?.addEventListener("resize", close);
   window.visualViewport?.addEventListener("scroll", close);
-  return { close };
+  return { close, update };
 }
 let composerTooltips = null;
 function compactUsageDescription(usage) {
@@ -5317,7 +5347,8 @@ async function loadModels(force = false, { includeAvailable = false } = {}) {
     && (session?.runtime?.revision ?? 0) === runtimeRevision && modelContextKey() === contextKey;
   // 缓存只保存实例的完整目录；打开选择器复用新鲜目录，过期时才显式读取可用模型。
   if (!force && catalogUsable({ loadedAt: modelsLoadedAt })
-      && (!includeAvailable || !catalogNeedsRefresh({ loadedAt: modelsLoadedAt }))) {
+      && (!includeAvailable || !catalogNeedsRefresh({ loadedAt: modelsLoadedAt }))
+      && !(modelDefaults.fastModeAvailability?.available === null && Date.now() >= modelsRetryAt)) {
     if (catalogNeedsRefresh({ loadedAt: modelsLoadedAt }) && Date.now() >= modelsRetryAt)
       void loadModels(true).catch(() => {});
     scheduleCatalogRefresh();
@@ -5349,8 +5380,12 @@ async function loadModels(force = false, { includeAvailable = false } = {}) {
     }));
     models = nextModels;
     modelDefaults = { model: result.defaultModel || "", reasoningEffort: result.defaultReasoningEffort || "",
-      nativeCapabilities: result.nativeCapabilities };
-    modelsLoadedAt = Date.now(); modelsRetryAt = 0;
+      nativeCapabilities: result.nativeCapabilities,
+      // 模型能力、实例限制共用同一目录及刷新周期；身份标记防止旧授权或运行方式的展示结果串用。
+      fastModeAvailability: result.fastModeAvailability,
+      fastModeOwner: JSON.stringify([scope, context.instanceId, runtimeRevision]) };
+    modelsLoadedAt = Date.now();
+    modelsRetryAt = result.fastModeAvailability?.available === null ? modelsLoadedAt + catalogRetryMs : 0;
     modelLoadError = "";
     cacheDisplayData("models", contextKey === "codex" ? "global" : contextKey, { version: modelCatalogCacheVersion, models, defaults: modelDefaults, loadedAt: modelsLoadedAt },
       { maxAge: catalogFallbackMs });
@@ -5428,10 +5463,32 @@ function currentEffort() {
     : creating && !selectedModel ? defaultModelEffort(currentModel()) : "";
 }
 function remoteFastKey() {
-  // 用户要求 Fast 按真实会话隔离；授权、实例、选中会话和模型任一变化时，迟到的读取不能点亮新输入区。
-  if (!session?.capabilities?.fastMode || isClaude() || !currentModelId() || !creating && !selectedId) return "";
+  // 用户要求 Fast 按真实会话隔离；服务模式不能借用切换前的 CDP 能力，迟到保存不能点亮新输入区。
+  if (!session?.capabilities?.fastMode || session.runtime?.cdpInjectionEnabled === false
+      || isClaude() || !currentModelId() || !creating && !selectedId) return "";
   return JSON.stringify([privateInputScope(session), activeInstanceId(), draftKey(), currentModelId(),
     selectionVersion, session.runtime?.revision ?? 0]);
+}
+function remoteFastContext() {
+  const key = remoteFastKey();
+  if (!key) return null;
+  const instanceId = activeInstanceId();
+  const owner = JSON.stringify([privateInputScope(session), instanceId, session.runtime?.revision ?? 0]);
+  return { key, owner, instanceId,
+    preferenceKey: creating ? null : JSON.stringify([owner, selectedId]) };
+}
+function rememberRemoteFastPreference(id, enabled) {
+  if (typeof enabled !== "boolean" || !validRelatedThreadId(id) || threadDeleted(id)) return;
+  // 读取只会回填当前选中会话；后台其他会话的变更不能阻止它接收自己的新快照。
+  if (id === selectedId) ++fastModeVersion;
+  if (thread?.id === id) thread.fastMode = enabled;
+  rememberThreadDisplay({ id, fastMode: enabled });
+}
+function reconcileRemoteFastPreference(value, readVersion) {
+  if (readVersion === fastModeVersion) return value;
+  // 保存或实时事件比读取更新时，沿用同一会话已确认的开关，不能被迟到的会话快照覆盖。
+  const display = threadDisplays.get(threadDisplayKey(value?.id));
+  return typeof display?.fastMode === "boolean" ? { ...value, fastMode: display.fastMode } : value;
 }
 function updateRemoteFast() {
   const control = $("#fast-button");
@@ -5439,31 +5496,36 @@ function updateRemoteFast() {
   const key = remoteFastKey();
   control.hidden = !key;
   if (!key) return;
-  const state = remoteFastState?.key === key ? remoteFastState : null;
-  const writing = remoteFastWriting?.key === key;
-  const enabled = !!state?.supported && (creating ? selectedDraftFast : state.enabled);
+  const context = remoteFastContext(), model = currentModel();
+  const directoryReady = modelsScope === modelContextKey() && modelDefaults.fastModeOwner === context.owner
+    && catalogUsable({ loadedAt: modelsLoadedAt });
+  const availability = directoryReady ? modelDefaults.fastModeAvailability : null;
+  // 原生目录包含别名的 GPT 判定；旧服务缺少判定时仅接受明确的 GPT 名称，未知/非 GPT 不开放。
+  const modelSupported = !!model && (model.fastModeSupported === true
+    || model.fastModeSupported == null && /^gpt-\d/i.test(model.model?.split("/").at(-1) || ""))
+    && Array.isArray(model.serviceTiers) && model.serviceTiers.some(tier => ["priority", "fast"].includes(tier?.id));
+  const preference = creating ? selectedDraftFast : currentThreadDisplay()?.fastMode;
+  const preferenceKnown = typeof preference === "boolean";
+  const supported = directoryReady && availability?.available === true && modelSupported && preferenceKnown;
+  const state = remoteFastState = { key, supported, enabled: supported && preference,
+    reason: !directoryReady ? modelLoadError || "正在读取模型目录"
+      : !modelSupported ? "当前模型未声明 Fast 能力"
+        : availability?.available !== true ? availability?.reason || "当前实例暂未提供 Fast 配置"
+          : !preferenceKnown ? "正在读取会话设置" : "" };
+  const operation = context.preferenceKey && remoteFastWrites.get(context.preferenceKey);
+  if (operation) { operation.key = key; remoteFastWriting = operation; }
+  const writing = !!operation || remoteFastWriting?.key === key;
+  const enabled = state.enabled;
   control.setAttribute("aria-pressed", String(enabled));
-  control.setAttribute("aria-busy", String(!!writing || !state));
+  control.setAttribute("aria-busy", String(writing || !directoryReady
+    || modelSupported && (availability?.available === null || availability?.available === true && !preferenceKnown)));
   control.setAttribute("aria-label", enabled ? "关闭本会话 Fast" : "开启本会话 Fast");
   control.disabled = !state?.supported || !!writing || !connected || busy || stopping || !!pending
     || threadReadOnly() || threadDeletionLocked() || !!editingMessage || !!editingQueuedMessage
     || !sessionInstanceEnabled(activeInstanceId());
-  control.title = writing ? "正在保存 Fast 设置" : !state ? "正在读取 Fast 能力"
+  control.title = writing ? "正在保存 Fast 设置"
     : state.reason || (enabled ? "本会话 Fast 已开启，点击关闭" : "本会话 Fast 已关闭，点击开启");
-  if (state || remoteFastRead?.key === key || !connected) return;
-  const request = { key };
-  remoteFastRead = request;
-  // 能力读取只在上下文变化后异步执行一次；输入重绘和消息发送均不等待它。
-  void api("/api/read/fast", { ...modelContext(), model: currentModelId() }).then(result => {
-    if (remoteFastKey() !== key || remoteFastRead !== request) return;
-    remoteFastState = { key, supported: result.supported === true, enabled: result.enabled === true, reason: result.reason || "" };
-  }).catch(error => {
-    if (remoteFastKey() === key && remoteFastRead === request)
-      remoteFastState = { key, supported: false, enabled: false, reason: error.message || "Fast 状态读取失败" };
-  }).finally(() => {
-    if (remoteFastRead === request) remoteFastRead = null;
-    if (remoteFastKey() === key) updateComposer();
-  });
+  composerTooltips?.update?.(control, control.title);
 }
 async function toggleRemoteFast() {
   const control = $("#fast-button"), key = remoteFastKey();
@@ -5474,21 +5536,27 @@ async function toggleRemoteFast() {
     return;
   }
   const id = selectedId, model = currentModelId(), enabled = !remoteFastState.enabled;
+  const context = remoteFastContext();
+  if (remoteFastWrites.has(context.preferenceKey)) return;
   const operation = { key };
+  remoteFastWrites.set(context.preferenceKey, operation);
   remoteFastWriting = operation;
   updateComposer();
   try {
     const result = await mutate("setFast", { ...modelContext(), threadId: id, model, enabled });
-    if (remoteFastKey() !== key || remoteFastWriting !== operation) return;
+    if (remoteFastWrites.get(context.preferenceKey) !== operation
+        || JSON.stringify([privateInputScope(session), context.instanceId, session.runtime?.revision ?? 0]) !== context.owner) return;
     if (result.threadId !== id || result.model !== model || result.supported !== true || result.enabled !== enabled)
       throw new Error("Fast 设置尚未确认，请重新读取会话");
-    remoteFastState = { key, supported: true, enabled, reason: "" };
+    rememberRemoteFastPreference(id, enabled);
   } catch (error) {
-    if (remoteFastKey() === key) {
-      remoteFastState = null;
+    if (remoteFastContext()?.preferenceKey === context.preferenceKey) {
       notice(error.message || "Fast 设置保存失败", true);
+      // 写入失败只核对现有目录和会话详情，不清空已确认状态，不恢复独立的 Fast 探测。
+      void Promise.allSettled([loadModels(true), reloadThread()]);
     }
   } finally {
+    if (remoteFastWrites.get(context.preferenceKey) === operation) remoteFastWrites.delete(context.preferenceKey);
     if (remoteFastWriting === operation) remoteFastWriting = null;
     updateComposer();
   }
@@ -5847,7 +5915,8 @@ function scheduleCatalogRefresh() {
   const deadlines = [], time = Date.now();
   const due = loadedAt => loadedAt + catalogCacheMs - catalogRefreshAheadMs;
   if (modelsLoadedAt && !modelsPromise)
-    deadlines.push(Math.max(catalogFresh({ loadedAt: modelsLoadedAt }) ? due(modelsLoadedAt) : time, modelsRetryAt));
+    deadlines.push(Math.max(modelDefaults.fastModeAvailability?.available === null ? time
+      : catalogFresh({ loadedAt: modelsLoadedAt }) ? due(modelsLoadedAt) : time, modelsRetryAt));
   const context = activeSkillCatalogContext(), key = context && skillScopeKey(context.scope);
   const record = key && skillCatalogs.get(key);
   const claude = context?.payload.backend === "claude";
@@ -8912,8 +8981,77 @@ function mergeIncompleteSidebar(previous, current) {
       threads: mergeRows(oldProjects.get(project.id)?.threads || [], project.threads) }))
   };
 }
+let clientUnreadBadgeTimer = null, clientUnreadBadgeRequest = null;
+function clientUnreadBadgeAvailable() {
+  return !workspaceSidePanel && typeof window.__CODEX_ELVES_UNREAD_BADGE__?.setCount === "function";
+}
+function clientUnreadThreadCount(value) {
+  const unread = new Set(), sideIds = new Set(value?.sideThreadIds || []);
+  // 对照本机 Windows Codex：按未读主会话去重，不按消息/轮次累加；
+  // 最近、项目、置顶重复出现仍只算 1，侧边子会话/子代理不单独增加任务栏数字。
+  for (const item of [...(value?.recent || []), ...(value?.pinnedThreads || []),
+    ...(value?.projects || []).flatMap(project => project.threads || [])]) {
+    if (!item?.id || item.archived === true || sideIds.has(item.id)
+        || item.parentThreadId && item.parentThreadId !== item.id
+        || item.threadSource === "subagent" || item.source?.subAgent || item.source?.subagent) continue;
+    const hasUnread = typeof item.hasUnreadTurn === "boolean"
+      ? item.hasUnreadTurn : item.priority?.attentionState === "unread";
+    if (hasUnread) unread.add(item.id);
+  }
+  return unread.size;
+}
+function syncClientUnreadBadge(value = sidebar) {
+  if (!clientUnreadBadgeAvailable()) return;
+  // 数字来自完整的当前侧栏快照，搜索、分组折叠及会话实例快捷筛选不改变未读总数。
+  window.__CODEX_ELVES_UNREAD_BADGE__.setCount(session && !initialAuthenticationRequired
+    ? clientUnreadThreadCount(value) : 0);
+}
+async function refreshClientUnreadBadge() {
+  if (!clientUnreadBadgeAvailable() || !session || pageLeaving || !document.hidden
+      || initialAuthenticationRequired || navigator.onLine === false) return;
+  if (clientUnreadBadgeRequest) {
+    clientUnreadBadgeRequest.again = true;
+    return clientUnreadBadgeRequest.promise;
+  }
+  const scope = privateInputScope(session), instances = enabledInstanceIds();
+  const request = { controller: new AbortController(), again: false, promise: null };
+  const current = () => clientUnreadBadgeRequest === request && !request.controller.signal.aborted
+    && document.hidden && !pageLeaving && session && privateInputScope(session) === scope
+    && JSON.stringify(enabledInstanceIds()) === JSON.stringify(instances);
+  clientUnreadBadgeRequest = request;
+  request.promise = (async () => {
+    try {
+      do {
+        request.again = false;
+        const value = await api("/api/read/sidebar", { cursor: null, enabledInstanceIds: instances },
+          undefined, request.controller.signal, { resourcePriority: "background" });
+        if (!current()) return;
+        filterDeletedSidebar(value);
+        filterSideThreadSidebar(value);
+        syncClientUnreadBadge(mergeIncompleteSidebar(sidebar, value));
+      } while (request.again && current());
+    } catch { /* 后台读取失败保留最后确认的数字，不伪造零值或阻塞聊天。 */ }
+    finally { if (clientUnreadBadgeRequest === request) clientUnreadBadgeRequest = null; }
+  })();
+  return request.promise;
+}
+function stopClientUnreadBadgePolling(clear = false) {
+  clearInterval(clientUnreadBadgeTimer); clientUnreadBadgeTimer = null;
+  clientUnreadBadgeRequest?.controller.abort();
+  clientUnreadBadgeRequest = null;
+  if (clear && clientUnreadBadgeAvailable()) window.__CODEX_ELVES_UNREAD_BADGE__.setCount(0);
+}
+function startClientUnreadBadgePolling() {
+  stopClientUnreadBadgePolling();
+  if (!clientUnreadBadgeAvailable() || !session || !document.hidden || pageLeaving) return;
+  // 仅独立客户端主窗口在后台保留轻量未读刷新；实时事件沿用原 1.2 秒合并，
+  // 无事件或断线后以 15 秒只读查询补齐，不恢复正文、模型、用量等前台轮询。
+  void refreshClientUnreadBadge();
+  clientUnreadBadgeTimer = setInterval(() => void refreshClientUnreadBadge(), 15000);
+}
 async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "foreground" } = {}) {
-  if (pageLeaving || document.hidden) return;
+  if (pageLeaving) return;
+  if (document.hidden) return refreshClientUnreadBadge();
   const generation = foregroundReadGeneration;
   if (sidebarRequest?.deviceId === session?.device.id && sidebarRequest.generation === generation) {
     promoteReadPriority(sidebarRequest, resourcePriority);
@@ -9093,6 +9231,7 @@ function renderSidebar() {
   restoreSidebarPreferences();
   filterDeletedSidebar(sidebar);
   filterSideThreadSidebar(sidebar);
+  syncClientUnreadBadge();
   const scrollTop = root.scrollTop;
   const popupState = activePopup && root.contains(activePopup.trigger)
     ? { id: activePopup.trigger.id, index: activePopup.index, focused: activePopup.node.contains(document.activeElement), position: activePopup.position } : null;
@@ -12776,6 +12915,8 @@ function renderMessages(keepScroll = true) {
     };
     let work = [];
     const content = [];
+    // 用户要求恢复后单独压缩仍位于旧回复之后；最后回复独立展示时，只暂存其后的时间线事件，保留此前事件和活动折叠位置。
+    const afterFinalEvents = [];
     const historyGap = historyGapIndex(turn);
     const flushActivity = () => {
       if (!work.length) return;
@@ -12790,6 +12931,10 @@ function renderMessages(keepScroll = true) {
       }
       const item = turnItems[index];
       if (index === finalIndex) continue;
+      if (finalIndex >= 0 && index > finalIndex && transcriptEventTypes.has(item.type)) {
+        afterFinalEvents.push(item);
+        continue;
+      }
       if (isSubagentItem(item) && ["wait", "wait_agent"].includes(subagentTool(item))) continue;
       if (item.type === "reasoning" && !reasoningPreviewText(item) && !(turnRunning && item === turnItems.at(-1))) continue;
       if (["agentMessage", "plan"].includes(item.type) && !textContent(item).trim()) continue;
@@ -12825,7 +12970,10 @@ function renderMessages(keepScroll = true) {
       const activity = renderActivity(turn, part.work, live, part.collapsible, renderMessage, part === header, part.historyLoad);
       activityKeys.add(activity.dataset.activityKey); items.push(activity);
     }
-    if (finalIndex >= 0) items.push(renderMessage(turnItems[finalIndex]));
+    if (finalIndex >= 0) {
+      items.push(renderMessage(turnItems[finalIndex]));
+      for (const item of afterFinalEvents) items.push(renderMessage(item));
+    }
     if (finalIndex >= 0 && (turn.status !== "inProgress" || turnItems[finalIndex].phase === "final_answer")) {
       const editedFiles = renderEditedFiles(turn, group.querySelector(":scope > .edited-files-card"));
       if (editedFiles) items.push(editedFiles);
@@ -13035,7 +13183,8 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   restoreDraft(id); resetComposerOptions(); restoreQueuedMessageEdit();
   notifiedTokenUsage = null; notifiedGoal = null;
   notifiedQuestions = null;
-  const read = ++threadReadVersion, usageVersion = tokenUsageVersion, runtimeVersion = statusVersion, transcriptReadVersion = messageVersion,
+  const read = ++threadReadVersion, usageVersion = tokenUsageVersion, fastReadVersion = fastModeVersion,
+    runtimeVersion = statusVersion, transcriptReadVersion = messageVersion,
     questionReadVersion = questionVersion,
     requestsReadVersion = blockingRequestState(id).generation,
     goalReadVersion = goalVersion, compactionReadVersion = compactionVersion, queueReadVersion = queueVersion;
@@ -13065,7 +13214,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
     ]), 50) || [];
     if (version !== selectionVersion || selectedId !== id || owner !== readScope || threadDeleted(id)) return;
     if (display?.id === id && persistentThreadDisplayAllowed(id, display))
-      rememberThreadDisplay({ ...display,
+      rememberThreadDisplay({ ...reconcileRemoteFastPreference(display, fastReadVersion),
         ...(usageVersion !== tokenUsageVersion ? { tokenUsage: notifiedTokenUsage } : {}),
         ...(goalReadVersion !== goalVersion ? { goal: notifiedGoal } : {}),
         ...(queueReadVersion !== queueVersion && Array.isArray(notifiedQueue)
@@ -13105,7 +13254,7 @@ async function selectThread(id, { closeSidebar = true, force = false, relatedVie
   try {
     const result = await api("/api/read/thread", { threadId: id }, undefined, controller.signal);
     if (version !== selectionVersion || read !== threadReadVersion || selectedId !== id || threadDeleted(id)) return;
-    thread = result.thread;
+    thread = reconcileRemoteFastPreference(result.thread, fastReadVersion);
     if (thread?.id !== id) throw new Error("会话返回内容与当前会话不一致");
     threadReadFailed = false;
     applyRelatedThreadMetadata(thread);
@@ -13689,7 +13838,8 @@ async function reloadThread() {
     do {
       if (generation !== foregroundReadGeneration || request.controller.signal.aborted) return;
       request.again = false;
-      const read = ++threadReadVersion, usageVersion = tokenUsageVersion, transcriptReadVersion = messageVersion,
+      const read = ++threadReadVersion, usageVersion = tokenUsageVersion, fastReadVersion = fastModeVersion,
+        transcriptReadVersion = messageVersion,
         questionReadVersion = questionVersion, requestsReadVersion = blockingRequestState(id).generation,
         runtimeVersion = statusVersion, goalReadVersion = goalVersion, compactionReadVersion = compactionVersion,
         queueReadVersion = queueVersion;
@@ -13725,7 +13875,7 @@ async function reloadThread() {
         latest.queuedMessages = notifiedQueue;
         if (notifiedQueueEdits) latest.queuedEdits = notifiedQueueEdits;
       }
-      thread = latest;
+      thread = reconcileRemoteFastPreference(latest, fastReadVersion);
       if (thread?.id !== id) throw new Error("会话返回内容与当前会话不一致");
       threadReadFailed = false;
       rememberThreadDisplay();
@@ -14374,7 +14524,11 @@ function approvalReplyKey(id, request, deviceId = session?.device.id) {
   return JSON.stringify([deviceId, id, blockingRequestState(id).sourceVersion, request.id, request.method]);
 }
 function blockingApprovalIdentity(id, request) {
-  return JSON.stringify([approvalReplyKey(id, request), request.params]);
+  let params = request.params;
+  // Claude 问题身份已绑定原生内容与等待代次；补齐多选显示属性时保留已填写答案，原生问题变更仍会更换 ID。
+  if (params?.nativeQuestion && Array.isArray(params.questions))
+    params = { ...params, questions: params.questions.map(({ multiSelect, ...question }) => question) };
+  return JSON.stringify([approvalReplyKey(id, request), params]);
 }
 function blockingApprovalDraft(id, request) {
   const key = blockingApprovalIdentity(id, request);
@@ -14813,6 +14967,7 @@ function renderApprovals() {
     const asyncQuestion = request.method === "remote/requestUserInputAsync";
     const questionKey = asyncQuestion ? JSON.stringify([session.device.id, requestThreadId, request.id]) : null;
     const requestSignature = JSON.stringify([blockingApprovalIdentity(requestThreadId, request),
+      request.params?.nativeQuestion ? request.params.questions?.map(question => question.multiSelect === true) : null,
       threadReadOnly(), approvalsAllowed(), connected,
       asyncQuestion ? [questionReplyReceipts.get(questionKey)?.state,
         pendingFeedbackReady(questionReplyReceipts.get(questionKey))] : null]);
@@ -14847,6 +15002,11 @@ function renderApprovals() {
       card.append(element("pre", "approval-description", typeof description === "string" ? description : JSON.stringify(description, null, 2)));
     }
     if (threadReadOnly() || !approvalsAllowed()) { card.append(element("small", "muted", isClaude() ? "此设备没有远程审批权限。" : "请在 Codex 桌面处理，此设备没有审批权限。")); cards.push(card); continue; }
+    // Claude 实时问答复用既有问答卡；原生最终提交后仅核对结果，多端或重连不能再次发送同一组回答。
+    if (request.params?.nativeQuestion?.state === "submitted") {
+      card.append(element("small", "muted", "回答已提交，等待 Claude 确认结果。"));
+      cards.push(card); continue;
+    }
     const requestIdentity = blockingApprovalIdentity(requestThreadId, request);
     const reply = (action, value) => submitBlockingRequest(requestThreadId, request, action, value, requestIdentity);
     const actions = element("div", "approval-actions");
@@ -14896,9 +15056,14 @@ function renderApprovals() {
         }
         fields.push([question.id, input]); label.append(choices, input); card.append(label);
       }
-      actions.append(button("提交回答", "提交所有问题的回答", () => reply("answer", {
-        response: { answers: Object.fromEntries(fields.map(([id, input]) => [id, { answers: [input.value] }])) }
-      }), "primary"));
+      actions.append(button("提交回答", "提交所有问题的回答", () => {
+        if (isClaude() && fields.some(([, input]) => !input.value.trim())) {
+          notice("请回答所有问题", true); return;
+        }
+        return reply("answer", {
+          response: { answers: Object.fromEntries(fields.map(([id, input]) => [id, { answers: [input.value] }])) }
+        });
+      }, "primary"));
     } else if (request.method === "item/permissions/requestApproval") {
       card.append(element("pre", "approval-description", JSON.stringify(request.params?.permissions, null, 2)));
       actions.append(button("仅本轮授予", "仅本轮授予所列权限", () => reply("answer", { response: { grant: true, scope: "turn" } }), "primary"),
@@ -15133,6 +15298,8 @@ function updateComposer() {
   syncRelatedSessionLayout();
   syncWorkspaceSidePanelState();
   if (!$("#composer")) return;
+  // 先恢复当前会话的缓存及保存状态，再决定发送按钮是否等待该会话的 Fast 写入。
+  updateRemoteFast();
   const sessionTypeEnabled = sessionInstanceEnabled(activeInstanceId());
   const backendSelect = $("#new-chat-backend");
   const distribution = JSON.stringify([availableSessionInstances(), appearance.sessionInstances, creationInstanceId]);
@@ -15285,7 +15452,6 @@ function updateComposer() {
     $("#model-button").append(document.createTextNode(" "), element("span", "model-effort muted", state));
     $("#model-button").title += ` · ${state}，原生确认后生效`;
   }
-  updateRemoteFast();
   syncRelatedModelDisplay();
   updateContextUsage();
   syncClaudeUsage();
@@ -15963,6 +16129,10 @@ function receive(event) {
     return;
   }
   if (typeof eventThreadId === "string" && threadDeleted(eventThreadId)) return;
+  if (event.method === "thread/settings/updated" && typeof params.fastMode === "boolean") {
+    rememberRemoteFastPreference(params.threadId, params.fastMode);
+    if (params.threadId === selectedId) updateComposer();
+  }
   rememberBackgroundThreadDisplay(event, params);
   if (event.method === "remote/requestsChanged" || event.method === "serverRequest/resolved") {
     const id = params.threadId ?? params.conversationId;
@@ -16153,6 +16323,7 @@ function receive(event) {
   }
 }
 function disconnect() {
+  stopClientUnreadBadgePolling(true);
   resetDesktopObservation();
   resetClaudeUsage();
   resetComposerMetrics();
@@ -16348,6 +16519,7 @@ function suspendPage() {
   resetClaudeUsage();
   resetComposerMetrics();
   pageLeaving = true;
+  stopClientUnreadBadgePolling(true);
   retireForegroundReads();
   stopCatalogRefresh();
   stream?.close(); stream = null;
@@ -16582,8 +16754,11 @@ document.addEventListener("visibilitychange", () => {
     stopConnectionPoll();
     cancelConnectionProbe();
     clearTimeout(streamRetry); streamRetry = null;
+    startClientUnreadBadgePolling();
     return;
   }
+  stopClientUnreadBadgePolling();
+  syncClientUnreadBadge();
   recordRuntimeDiagnostic("page.visible");
   if (pageLeaving) { resumePage(); return; }
   syncClaudeUsage();

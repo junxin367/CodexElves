@@ -12,7 +12,7 @@ fn main() {
                 "remote_client_state",
                 "connect_remote",
                 "remote_titlebar_theme",
-                "remote_titlebar_state",
+                "remote_unread_badge",
                 "remote_cache_status",
                 "remote_cache_refresh",
                 "remote_cache_activity",

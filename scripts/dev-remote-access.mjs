@@ -169,7 +169,7 @@ function allowedApi(method, path) {
   return method === "GET" && (["/api/session", "/api/events"].includes(path)
     || /^\/api\/(?:receipts|images)\/[a-zA-Z0-9_-]+$/.test(path))
     // 设置仅转发固定路径，优化配置与环境、指令共用正式后端的登录和写权限校验。
-    || method === "POST" && (["/api/connect", "/api/logout", "/api/workspace/context", "/api/workspace/changes", "/api/workspace/change", "/api/workspace/files", "/api/workspace/file",
+    || method === "POST" && (["/api/connect", "/api/logout", "/api/workspace/context", "/api/workspace/changes", "/api/workspace/change", "/api/workspace/files", "/api/workspace/file", "/api/workspace/open-browser",
       "/api/settings/environments", "/api/settings/instructions", "/api/settings/prompt-optimization"].includes(path)
       || /^\/api\/(?:read|action)\/[a-zA-Z][a-zA-Z0-9_-]*$/.test(path));
 }

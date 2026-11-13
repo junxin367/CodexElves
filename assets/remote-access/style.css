@@ -496,6 +496,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .appearance-actions{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
 .appearance-actions button,.confirmation-actions button,.goal-edit-actions button,.approval-actions button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:40px;line-height:1.4}
 .appearance-action-buttons{display:flex;flex:0 1 auto;flex-wrap:wrap;justify-content:flex-end;gap:12px;margin-left:auto}
+/* 用户要求设置底部按钮更紧凑：默认 14px 字号约为 20px 行高 + 上下各 5px 留白 + 2px 边框，即 32px；字号放大时自然撑高，保留原按钮间距。 */
+.appearance-action-buttons>button{min-height:32px;padding:5px 12px}
 .appearance-actions .appearance-version{flex:0 1 auto;max-width:100%;min-width:0;min-height:0;margin-right:auto;padding:0;border:0;border-radius:0;background:transparent;color:#3b82f6;font-size:.75rem;font-weight:700;line-height:1.4;text-align:left;overflow-wrap:anywhere}
 .appearance-actions .appearance-version:disabled{cursor:default}
 .confirmation-dialog{width:min(400px,calc(100% - 32px));max-height:var(--popup-max-height);padding:24px;border:1px solid var(--line);border-radius:var(--radius-popup);background:var(--bg);color:var(--text)}
@@ -588,7 +590,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .messages-shell{position:relative;display:flex;flex:1;min-width:0;min-height:0}
 /* 用户要求按钮对齐消息列/输入框的内容中轴：(容器宽 + 左留白 - 右留白) / 2；
    复用内容留白变量随侧栏展开/收起更新；窄屏两侧留白对称，在下方断点回到 50%，不移动消息列或输入框。 */
-.scroll-to-bottom{position:absolute;left:calc(50% + (var(--content-padding-start) - var(--content-padding-end)) / 2);bottom:12px;transform:translateX(-50%);display:grid;place-items:center;width:var(--control-icon-size);height:var(--control-icon-size);padding:0;border:1px solid var(--line);border-radius:50%;background:var(--bg);color:var(--muted);box-shadow:0 2px 8px #0002;z-index:2}
+/* 用户要求圆圈外边框加粗为 2px，保留原按钮直径和随主题变化的边框色。 */
+.scroll-to-bottom{position:absolute;left:calc(50% + (var(--content-padding-start) - var(--content-padding-end)) / 2);bottom:12px;transform:translateX(-50%);display:grid;place-items:center;width:var(--control-icon-size);height:var(--control-icon-size);padding:0;border:2px solid var(--line);border-radius:50%;background:var(--bg);color:var(--muted);box-shadow:0 2px 8px #0002;z-index:2}
 .scroll-to-bottom[data-state=latest]>.ui-icon{transform:rotate(180deg)}
 .scroll-working-dots{display:flex;align-items:center;gap:3px}
 .scroll-working-dots>span{width:3px;height:3px;border-radius:50%;background:currentColor;animation:scroll-working-dot 1.2s ease-in-out infinite}

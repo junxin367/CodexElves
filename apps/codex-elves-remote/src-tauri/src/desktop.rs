@@ -12,6 +12,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Manager, PhysicalPosition, WebviewUrl, WindowEvent};
 use url::Url;
 
+use crate::app_bar;
 use crate::appearance::{ThemeSnapshot, TitlebarTheme};
 use crate::connection::{Completion, Connection};
 use crate::resource_cache::{CacheInfo, ResourceCache};
@@ -20,9 +21,6 @@ use crate::settings::{self, Settings};
 const TITLE: &str = "CodexElves 远程会话";
 const WINDOW_LABEL: &str = "main";
 const CONTENT_LABEL: &str = "remote-content";
-const TITLEBAR_LABEL: &str = "remote-titlebar";
-// 用户确认是最上方标题栏，后续调整为固定 36 个逻辑像素，按 Windows DPI 缩放；标题栏和远程内容分别占用独立 WebView。
-const TITLEBAR_HEIGHT: f64 = 36.0;
 
 struct ClientState {
     directory: PathBuf,
@@ -32,6 +30,7 @@ struct ClientState {
     exiting: AtomicBool,
     connection: Mutex<Connection>,
     titlebar_theme: Mutex<HashMap<String, ThemeSnapshot>>,
+    unread_badge: Mutex<Option<u32>>,
     session_windows: Mutex<HashMap<String, SessionWindow>>,
     window_sequence: AtomicU64,
     cache: Arc<ResourceCache>,
@@ -47,14 +46,6 @@ fn content_label(window: &str) -> String {
         CONTENT_LABEL.into()
     } else {
         format!("{CONTENT_LABEL}-{window}")
-    }
-}
-
-fn titlebar_label(window: &str) -> String {
-    if window == WINDOW_LABEL {
-        TITLEBAR_LABEL.into()
-    } else {
-        format!("{TITLEBAR_LABEL}-{window}")
     }
 }
 
@@ -271,7 +262,7 @@ async fn remote_titlebar_theme(
 ) -> Result<(), String> {
     trusted_service_page(&webview, &state)?;
     let window = webview.window();
-    // 用户要求标题栏跟随外观模式及自定义颜色；跨页面只传严格校验的 RGB 数字，不开放连接设置或窗口控制。
+    // 沿用旧网页的命令名以兼容缓存；只传实际颜色帧，原生应用顶栏不向网页开放窗口控制。
     let snapshot = {
         let mut current = state.titlebar_theme.lock().unwrap();
         if current
@@ -289,41 +280,32 @@ async fn remote_titlebar_theme(
         current.insert(window.label().to_owned(), snapshot.clone());
         snapshot
     };
-    if let Some(titlebar) = webview
-        .app_handle()
-        .get_webview(&titlebar_label(window.label()))
-    {
-        let payload = serde_json::to_string(&snapshot).map_err(|error| error.to_string())?;
-        titlebar
-            .eval(format!("window.__setRemoteTitlebarTheme?.({payload})"))
-            .map_err(|error| error.to_string())?;
-    }
+    app_bar::update_theme(&window, snapshot).map_err(|error| error.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-fn remote_titlebar_state(
+fn remote_unread_badge(
     webview: tauri::Webview,
     state: tauri::State<'_, ClientState>,
-) -> Result<Option<ThemeSnapshot>, String> {
+    count: u32,
+) -> Result<(), String> {
+    trusted_service_page(&webview, &state)?;
     let window = webview.window();
-    if webview.label() != titlebar_label(window.label())
-        || window.label() != WINDOW_LABEL
-            && !state
-                .session_windows
-                .lock()
-                .unwrap()
-                .contains_key(window.label())
-        || !settings::is_titlebar_page(&webview.url().map_err(|error| error.to_string())?)
-    {
-        return Err("只有本地标题栏可以读取标题栏配色。".into());
+    // 对照 Codex：任务栏使用主窗口的未读会话总数，独立会话/预览窗口不能重复上报或覆盖它。
+    if window.label() != WINDOW_LABEL || webview.label() != CONTENT_LABEL {
+        return Err("仅主窗口可以同步未读会话角标。".into());
     }
-    Ok(state
-        .titlebar_theme
-        .lock()
-        .unwrap()
-        .get(window.label())
-        .cloned())
+    let mut current = state.unread_badge.lock().unwrap();
+    if *current == Some(count) {
+        return Ok(());
+    }
+    let icon = crate::taskbar::icon(count).map_err(|error| error.to_string())?;
+    window
+        .set_overlay_icon(icon)
+        .map_err(|error| error.to_string())?;
+    *current = Some(count);
+    Ok(())
 }
 
 fn show_window(app: &tauri::AppHandle) {
@@ -331,6 +313,13 @@ fn show_window(app: &tauri::AppHandle) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+        // 收进托盘期间可能已更新未读数；重新显示任务栏按钮时恢复最后确认的角标。
+        let count = *app.state::<ClientState>().unread_badge.lock().unwrap();
+        if let Some(count) = count
+            && let Ok(icon) = crate::taskbar::icon(count)
+        {
+            let _ = window.set_overlay_icon(icon);
+        }
     }
 }
 
@@ -344,6 +333,11 @@ fn navigate_connection_page(app: &tauri::AppHandle, show: bool) {
     state.connection.lock().unwrap().cancel();
     let home = state.home.lock().unwrap().clone();
     if let (Some(webview), Some(home)) = (app.get_webview(CONTENT_LABEL), home) {
+        // 修改连接地址时清除上一服务的角标；不把旧授权下的未读数带到新连接页。
+        if let Some(window) = app.get_window(WINDOW_LABEL) {
+            let _ = window.set_overlay_icon(None);
+            *state.unread_badge.lock().unwrap() = None;
+        }
         let _ = webview.navigate(home);
         if show {
             show_window(app);
@@ -552,22 +546,19 @@ fn layout_webviews(window: &tauri::Window) -> tauri::Result<()> {
         return Ok(());
     }
     let size = window.inner_size()?;
-    let title_height = ((TITLEBAR_HEIGHT * window.scale_factor()?).round() as u32).min(size.height);
-    // 两块区域共用同一物理像素边界；缩放、最大化及跨 DPI 显示器移动时保持标题栏 36px，不按窗口高度拉伸。
-    for (label, y, height) in [
-        (titlebar_label(window.label()), 0, title_height),
-        (
-            content_label(window.label()),
-            title_height,
-            size.height.saturating_sub(title_height),
-        ),
-    ] {
-        if let Some(webview) = window.app_handle().get_webview(&label) {
-            webview.set_bounds(tauri::Rect {
-                position: tauri::PhysicalPosition::new(0, y as i32).into(),
-                size: tauri::PhysicalSize::new(size.width, height).into(),
-            })?;
-        }
+    let scale = window.scale_factor()?;
+    let title_height = ((app_bar::HEIGHT * scale).round() as u32).min(size.height);
+    // 原生应用顶栏与网页共用物理像素边界；跨 DPI、最大化及还原时仍固定为 36 个逻辑像素。
+    app_bar::resize(window, size.width, title_height, scale)?;
+    if let Some(webview) = window
+        .app_handle()
+        .get_webview(&content_label(window.label()))
+    {
+        webview.set_bounds(tauri::Rect {
+            position: tauri::PhysicalPosition::new(0, title_height as i32).into(),
+            size: tauri::PhysicalSize::new(size.width, size.height.saturating_sub(title_height))
+                .into(),
+        })?;
     }
     Ok(())
 }
@@ -699,13 +690,14 @@ fn create_client_window(
         .maximizable(true)
         .visible(false)
         .build()?;
+    app_bar::install(&window, TITLE, main)?;
     let navigation_app = app.clone();
     let navigation_window = label.to_owned();
-    let content_builder = tauri::webview::WebviewBuilder::new(
+    let mut content_builder = tauri::webview::WebviewBuilder::new(
         content_label(label),
         WebviewUrl::External(Url::parse("about:blank").expect("valid blank URL")),
     )
-    // 用户要求新程序窗口沿用同一登录状态；内容共用用户目录，窗口、标题栏与资源快照分别管理。
+    // 用户要求新程序窗口沿用同一登录状态；内容共用用户目录，窗口、原生应用顶栏与资源快照分别管理。
     .data_directory(directory.join("webview"))
     .initialization_script(include_str!("../../web/theme-bridge.js"))
     .disable_drag_drop_handler()
@@ -727,23 +719,27 @@ fn create_client_window(
         open_external(url);
         tauri::webview::NewWindowResponse::Deny
     });
+    if main {
+        content_builder =
+            content_builder.initialization_script(include_str!("../../web/unread-bridge.js"));
+    }
     let content = window.add_child(
         content_builder,
-        tauri::LogicalPosition::new(0.0, TITLEBAR_HEIGHT),
-        tauri::LogicalSize::new(1280.0, 860.0 - TITLEBAR_HEIGHT),
+        tauri::LogicalPosition::new(0.0, app_bar::HEIGHT),
+        tauri::LogicalSize::new(1280.0, 860.0 - app_bar::HEIGHT),
     )?;
-    window.add_child(
-        tauri::webview::WebviewBuilder::new(
-            titlebar_label(label),
-            WebviewUrl::App("titlebar.html".into()),
-        )
-        .data_directory(directory.join("titlebar-webview"))
-        .disable_drag_drop_handler()
-        .on_navigation(settings::is_titlebar_page)
-        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny),
-        tauri::LogicalPosition::new(0.0, 0.0),
-        tauri::LogicalSize::new(1280.0, TITLEBAR_HEIGHT),
-    )?;
+    // 用户要求 PC 独立程序禁用网页默认右键菜单；所有会话窗口共用此入口，
+    // 原生设置同时覆盖侧边 iframe，保留网页自身交互与托盘菜单。
+    content.with_webview(|webview| unsafe {
+        if let Err(error) = webview
+            .controller()
+            .CoreWebView2()
+            .and_then(|core| core.Settings())
+            .and_then(|settings| settings.SetAreDefaultContextMenusEnabled(false))
+        {
+            eprintln!("禁用网页默认右键菜单失败：{error}");
+        }
+    })?;
     install_navigation_recovery(&content, cache.clone())?;
     crate::native_cache::install(&content, cache, initial_url)?;
     let event_window = window.clone();
@@ -755,6 +751,7 @@ fn create_client_window(
                 remember_window(&event_window, false);
             }
         }
+        WindowEvent::Focused(active) => app_bar::set_active(&event_window, *active),
         WindowEvent::CloseRequested { api, .. } if main => {
             let app = event_window.app_handle();
             if !app.state::<ClientState>().exiting.load(Ordering::SeqCst) {
@@ -792,7 +789,7 @@ pub fn run() -> anyhow::Result<()> {
             remote_client_state,
             connect_remote,
             remote_titlebar_theme,
-            remote_titlebar_state,
+            remote_unread_badge,
             remote_cache_status,
             remote_cache_refresh,
             remote_cache_activity,
@@ -821,6 +818,7 @@ pub fn run() -> anyhow::Result<()> {
                 exiting: AtomicBool::new(false),
                 connection: Mutex::new(Connection::default()),
                 titlebar_theme: Mutex::new(HashMap::new()),
+                unread_badge: Mutex::new(None),
                 session_windows: Mutex::new(HashMap::new()),
                 window_sequence: AtomicU64::new(1),
                 cache: cache.clone(),

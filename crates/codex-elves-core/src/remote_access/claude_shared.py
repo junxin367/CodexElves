@@ -283,6 +283,107 @@ def native_dialog(job, text, native_id):
         "state": "waiting"}
 
 
+def native_questions(block):
+    raw = block.get("questions") if isinstance(block, dict) else None
+    if not isinstance(raw, list) or not raw:
+        return None
+    questions, names = [], set()
+    for row in raw:
+        if not isinstance(row, dict) or not isinstance(row.get("question"), str) or not row["question"].strip():
+            return None
+        if row["question"] in names or not isinstance(row.get("options"), list):
+            return None
+        names.add(row["question"])
+        options = [{"label": option["label"], "description": option.get("description")
+                    if isinstance(option.get("description"), str) else ""}
+                   for option in row["options"] if isinstance(option, dict) and isinstance(option.get("label"), str)]
+        questions.append({"question": row["question"], "options": options,
+                          **{key: row[key] for key in ("header", "multiSelect") if key in row}})
+    return questions
+
+
+def native_question_request(job, native_id):
+    # 原生问答在回答前可能只存在于实时 block，不能等待 JSONL 出现 AskUserQuestion 才展示。
+    if job.get("sessionStatus") != "waiting" or job.get("needs") != "input needed":
+        return None
+    questions = native_questions(job.get("block"))
+    if not questions:
+        # 原生没有提供完整问题结构时也必须显示等待原因，不能退回“仍在执行”或猜测审批按键。
+        identity = [native_id, job.get("short"), job.get("sessionStatusAtMs"), "input needed"]
+        return {"subtype": "native_dialog", "dialog": {
+            "id": "native-question-" + hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:32],
+            "kind": "unknown", "target": "", "state": "waiting", "remoteSupported": False,
+            "description": "Claude 正在等待回答，但原生未提供完整问题数据，请在同一 CLI 会话中处理。"}}
+    stamp = job.get("sessionStatusAtMs")
+    if not stamp:
+        return None
+    identity = [native_id, job.get("short"), stamp, questions]
+    request_id = "native-question-" + hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:32]
+    return {"subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": questions},
+            "nativeQuestion": {"id": request_id, "statusAtMs": stamp, "state": "waiting"}}
+
+
+def question_screen_lines(lines):
+    # 只解析问答左栏；原版右侧 diff 面板可能占同一终端行，连续空白分栏不能混入答案。
+    # 多选的焦点行是“❯    Submit”；先折叠光标后的缩进，不能把这个原生提交按钮当右栏截掉。
+    return [re.split(r"\s{3,}", re.sub(r"^❯\s+", "❯ ", line.strip().strip("│").strip()), maxsplit=1)[0]
+            for line in lines]
+
+
+def question_text_key(text):
+    return re.sub(r"[\s`*_│]", "", text)
+
+
+def native_question_page(lines, questions):
+    lines = question_screen_lines(lines)
+    starts = [index for index, line in enumerate(lines) if "✔ Submit" in line and ("←" in line or "→" in line)]
+    # 单问单选的原版面板没有 Submit 标签，选择后直接提交；仍须从当前问题和编号选项核对界面。
+    body = lines[starts[-1] + 1:] if starts else lines if len(questions) == 1 else []
+    if "Review your answers" in body and "Ready to submit your answers?" in body:
+        return {"index": len(questions), "review": body}
+    option_start = next((i for i in range(len(body) - 1, -1, -1)
+                         if re.match(r"^(?:❯\s*)?1\.\s", body[i])), None)
+    if option_start is None:
+        return None
+    heading = question_text_key("".join(body[:option_start]))
+    matches = [i for i, question in enumerate(questions) if question_text_key(question["question"]) in heading]
+    if len(matches) != 1:
+        return None
+    choices, multi = {}, False
+    for line in body[option_start:]:
+        match = re.match(r"^(?:❯\s*)?([1-9])\.\s+(.*)$", line)
+        if match:
+            checkbox = re.match(r"^\[[^\]]\]\s+(.*)$", match[2])
+            multi = multi or checkbox is not None
+            choices[checkbox[1] if checkbox else match[2]] = match[1]
+    return {"index": matches[0], "choices": choices, "lines": body,
+            "multi": multi}
+
+
+def native_question_review_matches(lines, questions, answers):
+    entries, question, answer = [], [], None
+    for line in lines[lines.index("Review your answers") + 1:]:
+        if line == "Ready to submit your answers?":
+            break
+        if line.startswith("● "):
+            if answer is not None:
+                entries.append(("".join(question), "".join(answer)))
+            question, answer = [line[2:]], None
+        elif line.startswith("→ "):
+            answer = [line[2:]]
+        elif answer is not None:
+            answer.append(line)
+        elif question:
+            question.append(line)
+    if answer is not None:
+        entries.append(("".join(question), "".join(answer)))
+    return len(entries) == len(questions) and all(
+        question_text_key(label) == question_text_key(row["question"])
+        and re.sub(r"\s", "", value) == re.sub(r"\s", "", answers[row["question"]])
+        for (label, value), row in zip(entries, questions))
+
+
 def native_control_command(row):
     # 只识别原生 CLI 控制记录；用户引用相同 XML 不能被解释为目标或压缩操作。
     if not native_setting_source(row):
@@ -739,7 +840,7 @@ def native_activity(root, job, native_id, *, stored=None, workers=None):
     short = job.get("short", "")
     if not isinstance(short, str) or not re.fullmatch(r"[0-9a-f]{8}", short):
         return job
-    fields = ("tempo", "state", "needs", "detail", "outcome")
+    fields = ("tempo", "state", "needs", "detail", "outcome", "block")
     result = {**job, **dict.fromkeys(fields)}
     stored = native_json(root / "jobs" / short / "state.json") if stored is None else stored
     if (stored.get("resumeSessionId") or stored.get("sessionId")) == native_id:
@@ -881,6 +982,10 @@ class NativeDiscovery:
                 # 只保留会话归属/展示元数据；providerEnv、提示模板和认证信息不能进入发现缓存或返回值。
                 job = {key: raw_job[key] for key in ("sessionId", "resumeSessionId", "cwd", "name", "nameSource", "createdAt", "updatedAt", "firstTerminalAt", "lastTerminalAt",
                        "tempo", "state", "needs", "detail", "outcome") if key in raw_job}
+                # 已有会话首次打开也要恢复实时问答；只保留问题与选项，不带入原始 job 的其他私有字段。
+                questions = native_questions(raw_job.get("block"))
+                if questions:
+                    job["block"] = {"questions": questions}
                 flags = raw_job.get("respawnFlags", [])
                 for index, flag in enumerate(flags[:-1]):
                     if flag in ("--model", "--effort"):
@@ -967,16 +1072,20 @@ class NativeDiscovery:
         reader.restore_compaction_events(request.get("native_control") or {})
         reader.model = request.get("model", "")
         reader.restore_settings(request.get("native_control") or {})
+        reader.restore_question_reply(request.get("native_control") or {})
         reader.read_messages()
         row = self.rows[native]
         reader.dialog = native_dialog(row["nativeStatus"], "", native)
+        question = native_question_request(
+            {**self.jobs.get(native, {}), **row["nativeStatus"], "short": row["jobId"]}, native)
+        requests = reader.question_requests(question) if question else (
+            {reader.dialog["id"]: {"subtype": "native_dialog", "dialog": reader.dialog}} if reader.dialog else {})
         return {"type": "shared_snapshot", "native_id": native, "job_id": row["jobId"],
                 "native_status": self.status(row["nativeStatus"], reader.messages), "messages": reader.messages,
                 "history_head": reader.history.current_head(),
                 "retired_usage": reader.retired_usage,
                 "clients": reader.clients, "pending": reader.pending,
-                "requests": {reader.dialog["id"]: {"subtype": "native_dialog", "dialog": reader.dialog}}
-                if reader.dialog else {},
+                "requests": requests,
                 "context_configuration": reader.context_configuration(), "updated_at": row["updatedAt"],
                 "native_control": reader.control_projection()}
 
@@ -1043,6 +1152,8 @@ class NativeSession:
         self.setting_catalog = []
         self.dialog = None
         self.answered_dialog = ""
+        self.question_reply = None
+        self.question_layout = {"id": "", "multi": set()}
 
     def control_projection(self):
         current = self.compaction_events.get(self.compaction_event_id)
@@ -1053,7 +1164,30 @@ class NativeSession:
                 "compaction": self.compaction, "commands": self.native_commands,
                 "capabilities": self.native_capabilities, "compactionEvents": list(self.compaction_events.values()),
                 "compactionEventId": self.compaction_event_id,
-                "settings": self.settings_projection(), "dialog": self.dialog}
+                "settings": self.settings_projection(), "dialog": self.dialog,
+                "questionReply": self.question_reply}
+
+    def restore_question_reply(self, control):
+        reply = control.get("questionReply")
+        if isinstance(reply, dict) and isinstance(reply.get("id"), str) and reply.get("state") == "submitted":
+            self.question_reply = dict(reply)
+
+    def question_requests(self, request):
+        if not request.get("nativeQuestion"):
+            return {request["dialog"]["id"]: request}
+        identity = request["nativeQuestion"]["id"]
+        if self.question_layout["id"] != identity:
+            self.question_layout = {"id": identity, "multi": set()}
+        # 当前 CLI 的 block 摘要没有多选字段；仅按同一原生问题实际显示的复选框补齐，不按问题文字猜测。
+        questions = request["input"]["questions"]
+        page = native_question_page(self.screen.text(), questions)
+        if page and page["index"] < len(questions) and page.get("multi"):
+            self.question_layout["multi"].add(page["index"])
+        for index in self.question_layout["multi"]:
+            questions[index]["multiSelect"] = True
+        if self.question_reply and self.question_reply.get("id") == identity:
+            request["nativeQuestion"]["state"] = "submitted"
+        return {identity: request}
 
     def settings_projection(self):
         return {**self.actual_settings, "changes": self.setting_changes}
@@ -1896,8 +2030,8 @@ class NativeSession:
             content.append({"type": "image", "source": image})
         return content
 
-    def verify_dialog(self, expected):
-        # 回答前读取同一后台的新终端快照，再核对原生等待代次；迟到点击不能落入新弹窗或聊天输入框。
+    def read_terminal_screen(self):
+        # 仅在用户回答时订阅一次新画面；每次读取等候最多 2 秒，最多 4 帧、每帧 1 MiB，不增加发送轮询。
         screen = Screen()
         with socket.socket(socket.AF_UNIX) as connection:
             connection.settimeout(2)
@@ -1912,13 +2046,147 @@ class NativeSession:
                     frame = json.loads(line)
                     if frame.get("type") == "snapshot":
                         screen.feed("".join(frame.get("streamTail", [])))
-                        current = native_dialog(self.lookup() or {}, screen.text(), self.native_id)
-                        if current and current["id"] == expected["id"] and current["remoteSupported"]:
-                            return
-                        break
+                        return screen.text()
+        raise NativeError("EQUESTIONCHANGED", "暂时无法读取原生交互界面，未发送交互按键")
+
+    def verify_dialog(self, expected):
+        # 回答前读取同一后台的新终端快照，再核对原生等待代次；迟到点击不能落入新弹窗或聊天输入框。
+        screen = self.read_terminal_screen()
+        current = native_dialog(self.lookup() or {}, screen, self.native_id)
+        if current and current["id"] == expected["id"] and current["remoteSupported"]:
+            return
         raise NativeError("EDIALOGCHANGED", "原生确认界面已变化，请重新读取；未发送确认按键")
 
-    def terminal_input(self, data, dialog=None):
+    def check_question(self, expected):
+        current = native_question_request(self.lookup() or {}, self.native_id)
+        identity = expected["nativeQuestion"]["id"]
+        if not current or current.get("nativeQuestion", {}).get("id") != identity:
+            raise NativeError("EQUESTIONCHANGED", "原生问题已经结束或变化，请重新读取；未提交回答")
+        if self.question_reply and self.question_reply.get("id") == identity:
+            raise NativeError("EQUESTIONCHANGED", "回答已经提交，请等待原生结果；不会重复提交")
+
+    def read_question_page(self, request, index=None):
+        # 原生面板重绘沿用同一问题身份；只等最多 2 秒，不把旧页面上的按键盲目发送到下一问。
+        deadline = time.monotonic() + 2
+        while True:
+            self.check_question(request)
+            page = native_question_page(self.read_terminal_screen(), request["input"]["questions"])
+            if page and (index is None or page["index"] == index):
+                return page
+            if time.monotonic() >= deadline:
+                raise NativeError("EQUESTIONCHANGED", "原生问答界面未按预期切换，回答尚未提交，请在 CLI 核对后重试")
+            time.sleep(0.1)
+
+    def submit_multi_question(self, request, index, selected):
+        page = self.read_question_page(request, index)
+        # 原版多选勾选时已保存答案。先回到首个普通选项以退出文字输入，数字键才不会污染答案或触发 Submit。
+        # 最多跨过全部选项、Other、Submit 和底部 Chat 入口；每一步都重新核对同一问题。
+        for _ in range(len(request["input"]["questions"][index]["options"]) + 3):
+            if any(re.match(r"^❯\s*1\.\s+\[", line) for line in page["lines"]):
+                break
+            self.terminal_input(b"\x1b[A", question=request)
+            page = self.read_question_page(request, index)
+        else:
+            raise NativeError("EQUESTIONCHANGED", "未找到原生多选位置，未提交回答")
+        checkboxes = [(match[1], match[2] != " ") for line in page["lines"]
+                      if (match := re.match(r"^(?:❯\s*)?([1-9])\.\s+\[([^\]])\]", line))]
+        if not set(selected).issubset(number for number, _ in checkboxes):
+            raise NativeError("EQUESTIONCHANGED", "原生多选选项已变化，未提交回答")
+        # 网页提交的是完整答案集合；清掉原生面板尚未提交的旧勾选，再按选项顺序恢复本次选择。
+        for number, checked in checkboxes:
+            if checked:
+                self.terminal_input(number.encode(), question=request)
+        for number in selected:
+            self.terminal_input(number.encode(), question=request)
+        # 在普通选项焦点上用原生 Tab 切到下一问/汇总；不能在 Submit 焦点上发送数字选择。
+        self.terminal_input(b"\t", question=request)
+
+    def answer_questions(self, request, values):
+        questions = request["input"]["questions"]
+        if not isinstance(values, dict) or any(
+                not isinstance(values.get(q["question"]), str) or not values[q["question"]].strip()
+                for q in questions):
+            raise NativeError("EINVAL", "请回答所有问题")
+        answers = {q["question"]: values[q["question"]].strip() for q in questions}
+        # 自由回答经原版输入框粘贴；拒绝终端控制字符，答案不能变成快捷键或退出粘贴后的命令。
+        if any(re.search(r"[\x00-\x1f\x7f]", value) for value in answers.values()):
+            raise NativeError("EINVAL", "回答请使用单行文字，不能包含终端控制字符")
+        identity = request["nativeQuestion"]["id"]
+        try:
+            for index, question in enumerate(questions):
+                page = self.read_question_page(request)
+                for _ in range(len(questions) + 1):
+                    if page["index"] == index:
+                        break
+                    direction = b"\x1b[Z" if page["index"] > index else b"\t"
+                    destination = page["index"] + (-1 if page["index"] > index else 1)
+                    self.terminal_input(direction, question=request)
+                    page = self.read_question_page(request, destination)
+                if page["index"] != index:
+                    raise NativeError("EQUESTIONCHANGED", "无法定位原生问题，未提交回答")
+                answer = answers[question["question"]]
+                choices = page["choices"]
+                if "Type something." not in choices and "Type something" not in choices:
+                    raise NativeError("EQUESTIONCHANGED", "原生正在编辑回答或使用不同面板，请在 CLI 核对后重试")
+                single_final = len(questions) == 1 and not page["multi"]
+                parts = answer.split(", ")
+                labels = [option["label"] for option in question["options"]]
+                predefined = page["multi"] and len(set(parts)) == len(parts) and all(part in labels for part in parts)
+                if predefined:
+                    selected = [label for label in labels if label in parts]
+                    if any(label not in choices for label in selected):
+                        raise NativeError("EQUESTIONCHANGED", "原生多选选项未完整显示，请在 CLI 核对")
+                    self.submit_multi_question(request, index, [choices[label] for label in selected])
+                    # 与原版多选编码一致：含逗号分隔符或引号的单项使用 JSON 引号，其余按选项顺序连接。
+                    answers[question["question"]] = ", ".join(
+                        json.dumps(label, ensure_ascii=False) if ', ' in label or '"' in label else label
+                        for label in selected)
+                elif answer in choices and not page["multi"]:
+                    self.terminal_input(choices[answer].encode(), question=request, final_question=single_final)
+                else:
+                    other = choices.get("Type something.") or choices.get("Type something")
+                    if not other:
+                        raise NativeError("EQUESTIONCHANGED", "此原生面板暂不支持网页填写，请在 CLI 回答")
+                    if not page["multi"]:
+                        self.terminal_input(other.encode(), question=request)
+                    # 只有当前问题的 Other 输入获得焦点后才粘贴；不向普通聊天输入框发送回答。
+                    focused = self.read_question_page(request, index)
+                    if page["multi"]:
+                        # 原版多选的数字键只勾选、不移动焦点；先移到 Other 输入，离开输入后再核对勾选状态。
+                        for _ in range(int(other) + 1):
+                            selected = next((int(match[1]) for line in focused["lines"]
+                                             if (match := re.match(r"^❯\s*([1-9])\.", line))), None)
+                            if selected == int(other):
+                                break
+                            if selected is None:
+                                raise NativeError("EQUESTIONCHANGED", "原生多选焦点已变化，未粘贴回答")
+                            self.terminal_input(b"\x1b[B" if selected < int(other) else b"\x1b[A",
+                                                question=request)
+                            focused = self.read_question_page(request, index)
+                    if not any(re.match(rf"^❯\s*{other}\.", line) for line in focused["lines"]):
+                        raise NativeError("EQUESTIONCHANGED", "原生回答输入框没有获得焦点，未粘贴答案")
+                    self.terminal_input(b"\x15\x1b[200~" + answer.encode() + b"\x1b[201~", question=request)
+                    if not page["multi"]:
+                        self.terminal_input(b"\r", question=request, final_question=single_final)
+                    else:
+                        self.submit_multi_question(request, index, [other])
+                        answers[question["question"]] = (
+                            json.dumps(answer, ensure_ascii=False) if ', ' in answer or '"' in answer else answer)
+                if single_final:
+                    self.question_reply = {"id": identity, "state": "submitted"}
+                    return
+                self.read_question_page(request, index + 1)
+            page = self.read_question_page(request, len(questions))
+            if not native_question_review_matches(page["review"], questions, answers):
+                raise NativeError("EQUESTIONCHANGED", "原生汇总与本次回答不一致，未提交，请在 CLI 核对")
+            # 多问必须核对完整汇总后一次提交；不用 reply(text)，该入口只回答第一问。
+            self.terminal_input(b"1", question=request, final_question=True)
+            self.question_reply = {"id": identity, "state": "submitted"}
+        finally:
+            if self.question_reply and self.question_reply.get("id") == identity:
+                self.poll(force=True)
+
+    def terminal_input(self, data, dialog=None, question=None, final_question=False):
         job = self.lookup()
         if not job or job.get("outcome"):
             raise RuntimeError("原生 Claude 会话已停止")
@@ -1950,6 +2218,11 @@ class NativeSession:
                 change = self.setting_changes.get(dialog["kind"])
                 if change and change.get("dialogId") == dialog["id"]:
                     change["state"] = "confirming"
+            if question:
+                self.check_question(question)
+                if final_question:
+                    # 最后提交按键开始写入后即保留回执，断线或多端迟到点击不能再提交同一问题。
+                    self.question_reply = {"id": question["nativeQuestion"]["id"], "state": "submitted"}
             # 仅显式停止/审批使用原生按键；普通消息和引导都走原生消息入口。
             connection.sendall(data)
             time.sleep(0.15)
@@ -1988,6 +2261,11 @@ class NativeSession:
         if not request:
             raise RuntimeError("该原生请求已经结束")
         answer = response["response"]
+        if request.get("nativeQuestion"):
+            if request["nativeQuestion"]["state"] != "waiting":
+                raise NativeError("EQUESTIONCHANGED", "回答已提交，正在等待原生结果")
+            self.answer_questions(request, answer.get("updatedInput", {}).get("answers", {}))
+            return
         if request.get("subtype") == "native_dialog":
             dialog = request["dialog"]
             if not dialog["remoteSupported"] or dialog["state"] != "waiting" or request_id == self.answered_dialog:
@@ -2372,7 +2650,10 @@ class NativeSession:
             status.update(tempo="active", state="compacting")
         self.observe_dialog(job)
         self.requests = {}
-        if self.dialog:
+        question = native_question_request(job, self.native_id)
+        if question:
+            self.requests = self.question_requests(question)
+        elif self.dialog:
             self.requests[self.dialog["id"]] = {"subtype": "native_dialog", "dialog": self.dialog}
         elif status.get("tempo") == "blocked" and job.get("needs") != "dialog open":
             uses = {}
@@ -2416,6 +2697,7 @@ class NativeSession:
             self.effort = request.get("effort", "")
             self.setting_catalog = request["catalog"].get("models", [])
             self.restore_settings(request.get("native_control") or {})
+            self.restore_question_reply(request.get("native_control") or {})
             self.clients = request.get("clients", {})
             self.pending = request.get("pending", [])
             self.native_commands = (request.get("native_control") or {}).get("commands", [])

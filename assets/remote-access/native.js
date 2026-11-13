@@ -1,6 +1,6 @@
 (() => {
-  // 用户要求兼容新版子代理列表及队列编辑；守卫与底部版本同步递增，先清理旧桥接，保留队列及图片约束。
-  if (window.__codexElvesRemoteAccess?.version === 148) return;
+  // Fast 能力和开关随模型目录、会话详情同步；守卫与底部版本同步递增，先清理旧桥接。
+  if (window.__codexElvesRemoteAccess?.version === 149) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -7500,15 +7500,34 @@
             runtime.goal = runtimeGoal(coldConversation.coldGoal);
           const status = manager.getThreadRuntimeStatusEvidence(thread.id)
             || thread.threadRuntimeStatus || thread.status || runtime.status;
-          return { ok: true, thread: { ...summary(thread), ...runtime, status, ...view } };
+          let fastMode = null;
+          try {
+            const preference = window.__codexElvesComposerFast?.remotePreference?.({ hostId: "local", threadId: thread.id });
+            if (typeof preference === "boolean") fastMode = preference;
+          } catch (error) { reportNativeCallbackFailure("thread_fast_preference", error); }
+          return { ok: true, thread: { ...summary(thread), ...runtime, status, ...view, fastMode } };
         }
         case "models": {
           const models = (await nativeModelCatalog()).map(model => ({
             id: model.id, model: model.model, displayName: model.displayName,
             supportedReasoningEfforts: array(model.supportedReasoningEfforts),
-            defaultReasoningEffort: model.defaultReasoningEffort
+            defaultReasoningEffort: model.defaultReasoningEffort,
+            // 模型自身的 Fast 声明跟随同一份模型目录缓存，不能丢弃后再单独探测。
+            serviceTiers: array(model.serviceTiers),
+            // GPT 别名按原生配置识别，网页不另存别名表，也不能给非 GPT 模型开放 Fast。
+            fastModeSupported: window.__codexElvesNativeFastUnlock?.runtime?.isGptModel?.(model.model) === true
+              && array(model.serviceTiers).some(tier => ["priority", "fast"].includes(tier?.id))
           }));
+          let fastModeAvailability = { available: false, reason: "请更新电脑端 Fast 增强" };
+          try {
+            if (typeof window.__codexElvesComposerFast?.remoteAvailability === "function")
+              fastModeAvailability = await window.__codexElvesComposerFast.remoteAvailability();
+          } catch {
+            // Fast 配置暂不可读不能阻断普通模型目录；由已有目录重试机制稍后核对。
+            fastModeAvailability = { available: null, reason: "Fast 配置暂不可用，稍后重试" };
+          }
           return { ok: true, data: models,
+            fastModeAvailability,
             ultraReasoningEnabled: models.some(model => model.supportedReasoningEfforts.some(effort => effort.reasoningEffort === "ultra")),
             ...await defaultModelSettings() };
         }
@@ -7818,7 +7837,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 148, call,
+    version: 149, call,
     async deleteLocalThread(payload) {
       // 管理器允许清理本机历史和派生会话；复用原生删除，不继承远程页面对子智能体的只读限制。
       try {
@@ -7892,4 +7911,15 @@
     },
     epoch
   };
+  const onFastPreferenceChanged = event => {
+    const id = event.detail?.threadId;
+    if (typeof id !== "string" || !/^[A-Za-z0-9_.-]{8,128}$/.test(id) || isDeletedThread(id)) return;
+    let fastMode;
+    try { fastMode = window.__codexElvesComposerFast?.remotePreference?.({ hostId: "local", threadId: id }); }
+    catch { return; }
+    if (typeof fastMode === "boolean")
+      emit({ method: "thread/settings/updated", params: { threadId: id, fastMode } });
+  };
+  window.addEventListener?.("codex-elves-fast-changed", onFastPreferenceChanged);
+  unsubscribe.push(() => window.removeEventListener?.("codex-elves-fast-changed", onFastPreferenceChanged));
 })();

@@ -87,13 +87,6 @@ pub fn is_connection_page(url: &Url) -> bool {
         && url.password().is_none()
 }
 
-pub fn is_titlebar_page(url: &Url) -> bool {
-    // 标题栏只允许自身的本地页面；它与连接页分开授权，任何远程 URL 都不能进入标题栏。
-    let mut home = url.clone();
-    home.set_path("/");
-    url.path() == "/titlebar.html" && is_connection_page(&home)
-}
-
 pub fn session_window_url(source: &Url, thread_id: &str) -> anyhow::Result<Url> {
     // 用户要求独立窗口打开同一会话；只接收会话标识，服务地址从已校验来源派生，不能传任意 URL 或凭据。
     ensure_session_id(thread_id)?;
@@ -336,23 +329,22 @@ mod tests {
     }
 
     #[test]
-    fn titlebar_and_connection_pages_have_separate_local_origins_and_routes() {
+    fn only_the_local_connection_page_retains_connection_permissions() {
+        for value in [
+            "http://tauri.localhost/index.html",
+            "tauri://localhost/index.html",
+        ] {
+            assert!(is_connection_page(&Url::parse(value).unwrap()));
+        }
         for value in [
             "http://tauri.localhost/titlebar.html",
             "tauri://localhost/titlebar.html",
-        ] {
-            let url = Url::parse(value).unwrap();
-            assert!(is_titlebar_page(&url));
-            assert!(!is_connection_page(&url));
-        }
-        for value in [
-            "http://tauri.localhost/index.html",
             "http://tauri.localhost:39399/titlebar.html",
             "https://remote.example.com/titlebar.html",
             "http://tauri.localhost.evil.example/titlebar.html",
             "http://tauri.localhost/titlebar.html?remote=1",
         ] {
-            assert!(!is_titlebar_page(&Url::parse(value).unwrap()), "{value}");
+            assert!(!is_connection_page(&Url::parse(value).unwrap()), "{value}");
         }
     }
 
