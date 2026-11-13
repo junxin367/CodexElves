@@ -15591,12 +15591,16 @@ function renderApprovals() {
     if (nativeDialog) {
       const kind = nativeDialog.kind === "model" ? "模型" : "思考深度";
       const planDialog = nativeDialog.kind === "plan";
+      const rewindDialog = nativeDialog.kind === "rewind";
       const title = nativeDialog.kind === "unknown" ? "Claude 正在等待本机确认"
-        : nativeDialog.state === "submitted" ? "正在确认原生操作结果"
-        : planDialog ? "Claude 已写好计划，等待你确认" : `切换${kind}需要确认`;
+        : nativeDialog.state === "submitted" ? (rewindDialog ? "正在关闭终端回退菜单" : "正在确认原生操作结果")
+        : planDialog ? "Claude 已写好计划，等待你确认"
+        : rewindDialog ? "原版终端打开了回退菜单（/rewind）" : `切换${kind}需要确认`;
       card.append(element("strong", "approval-title", title));
       if (nativeDialog.target) card.append(element("p", "approval-reason", `目标${kind}：${nativeDialog.target}`));
-      if (planDialog && nativeDialog.description) {
+      if (rewindDialog) {
+        for (const line of claudeRewindDialogText(nativeDialog)) card.append(element("p", "approval-reason", line));
+      } else if (planDialog && nativeDialog.description) {
         // 计划正文取自原生计划文件，按 Markdown 展示，便于在网页上审阅后再批准。
         const plan = element("div", "approval-description markdown approval-plan");
         setMarkdown(plan, nativeDialog.description);
@@ -15650,6 +15654,16 @@ function renderApprovals() {
             void reply("approve", { decision: "decline", feedback: text });
           }));
         }
+      } else if (nativeDialog.remoteSupported && nativeDialog.state === "waiting" && nativeDialog.kind === "rewind") {
+        // 用户要求网页可关闭原版终端的回退菜单：只取消、不回退，确认回退只能在终端操作（连接端 answer_rewind）。
+        // 终端那边有人正在选择时会被打断，所以先二次确认。
+        actions.append(button("关闭终端回退菜单", "等同在终端取消回退，不会回退任何内容", async () => {
+          const deviceId = session?.device.id;
+          if (!await confirmAction("关闭终端回退菜单",
+            "将取消原版终端里打开的回退菜单，不会回退任何内容。如果终端那边有人正在操作，会被打断。", "关闭菜单")) return;
+          if (!card.isConnected || session?.device.id !== deviceId || threadReadOnly() || !approvalsAllowed()) return;
+          void reply("approve", { decision: "decline" });
+        }));
       }
     } else if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval"].includes(request.method)) {
       const allowed = request.params?.availableDecisions;
@@ -15743,6 +15757,15 @@ function isActiveThread() {
   return ["active", "inProgress", "running", "pending"].includes(statusType);
 }
 let expandedClaudeGoalNotice = "";
+// 用户要求网页能看出原版终端打开了回退菜单（/rewind，2.1.323 实测）：菜单打开期间网页消息只进入原生队列，
+// 终端完成或取消回退后才执行；终端确认回退时，这些消息接在回退点之后执行。
+function claudeRewindDialogText(dialog) {
+  const message = String(dialog?.description || "").split(/\s+/).filter(Boolean).join(" ").slice(0, 200);
+  return [dialog?.step === "confirm"
+    ? `终端正在确认回退到这条消息之前：${message || "（未读到消息原文）"}`
+    : "终端正在选择要回退到哪条消息之前。",
+  "此时发送的消息会先排队，等终端完成或取消回退后再执行；如果终端确认回退，这些消息会接在回退点之后执行。"];
+}
 // 计划审批批准项的中文按钮；原生措辞随权限配置变化（2.1.323 实测 auto mode / manually approve edits），未知措辞保留原文。
 function claudePlanOptionLabel(label) {
   const text = String(label || "").trim();

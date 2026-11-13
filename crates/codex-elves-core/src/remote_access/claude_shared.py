@@ -334,6 +334,46 @@ def native_plan_dialog(text, root=None):
     return {"kind": "plan", "target": "", "description": plan, "planPath": path, "options": options}
 
 
+REWIND_CANCEL_OPTION = "Never mind"
+
+
+def native_rewind_dialog(text):
+    """原版终端的回退菜单（/rewind，2.1.323 实测）。
+
+    用户要求网页能看出终端打开了回退菜单，并可从网页关闭（只取消，见 answer_rewind）。菜单打开期间原生状态为
+    waiting / dialog open，网页消息只进入原生队列，菜单关闭后才执行；终端确认回退时，排队消息接在回退点之后执行。
+    菜单分两页：选消息页标题下为 “Restore the code and/or conversation to the point before…”，底栏
+    “Enter to continue · Esc to cancel”；确认页为 “Confirm you want to restore to the point before you sent
+    this message:”，以 “│” 引用所选消息，下列编号选项（含 “Never mind”）。两页都必须完整匹配才识别。
+    """
+    raw = text.splitlines() if isinstance(text, str) else list(text)
+    lines = [line.strip().strip("│").strip() for line in raw]
+    index = next((i for i in range(len(lines) - 1, -1, -1) if lines[i] == "Rewind"), None)
+    # 原生菜单的标题、说明与列表之间隔有空行（实测），按非空行依次匹配。
+    rest = [line for line in lines[index + 1:] if line] if index is not None else []
+    if not rest:
+        return None
+    heading, body = rest[0], rest[1:]
+    if heading.startswith("Restore the code and/or conversation"):
+        if not any("Esc to cancel" in line for line in body):
+            return None
+        return {"kind": "rewind", "target": "", "description": "", "step": "select", "options": []}
+    if not heading.startswith("Confirm you want to restore"):
+        return None
+    quoted = [line.strip()[1:].strip() for line in raw[index + 1:] if line.strip().startswith("│")]
+    message = "\n".join(line for line in quoted
+                        if line and not re.fullmatch(r"\((?:[^()]*\bago|just now)\)", line))
+    options = []
+    for line in body:
+        match = re.fullmatch(r"(?:❯\s*)?(\d)\.\s+(.+)", line)
+        if match:
+            options.append({"index": int(match[1]), "label": match[2].strip()})
+    if ([option["index"] for option in options] != list(range(1, len(options) + 1))
+            or not any(option["label"] == REWIND_CANCEL_OPTION for option in options)):
+        return None
+    return {"kind": "rewind", "target": "", "description": message[:2000], "step": "confirm", "options": options}
+
+
 def native_dialog(job, text, native_id, root=None):
     if job.get("sessionStatus") != "waiting":
         return None
@@ -341,7 +381,7 @@ def native_dialog(job, text, native_id, root=None):
     plan = native_plan_dialog(text, root)
     if plan is None and job.get("needs") != "dialog open":
         return None
-    parsed = plan or native_setting_dialog(text)
+    parsed = plan or native_setting_dialog(text) or native_rewind_dialog(text)
     # 用户要求未知弹窗也可见，但不得猜按键；没有原生等待代次时只提供本机处理提示。
     stamp = job.get("sessionStatusAtMs")
     value = parsed or {"kind": "unknown", "target": "", "description": ""}
@@ -2849,6 +2889,9 @@ class NativeSession:
             if dialog["kind"] == "plan":
                 self.answer_plan(request_id, dialog, answer)
                 return
+            if dialog["kind"] == "rewind":
+                self.answer_rewind(request_id, dialog, answer)
+                return
             if answer.get("behavior") not in ("allow", "deny"):
                 raise NativeError("EINVAL", "请选择确认切换或保留原设置")
             change = self.setting_changes.get(dialog["kind"])
@@ -2897,6 +2940,52 @@ class NativeSession:
         finally:
             if self.answered_dialog == request_id:
                 self.poll(force=True)
+
+    def answer_rewind(self, request_id, dialog, answer):
+        # 用户要求网页只能关闭原版终端的回退菜单：等同在终端取消，不回退任何内容；确认回退只能在终端操作。
+        # 2.1.323 实测：选消息页按 Esc 关闭整个菜单；确认页选 “Never mind” 或按 Esc 都只退回选消息页。
+        # 因此确认页先选 “Never mind”，重新读取画面确认已回到选消息页后再按 Esc；每次发送前 verify_dialog 都核对画面。
+        if answer.get("behavior") != "deny":
+            raise NativeError("EUNSUPPORTED", "网页只能关闭终端回退菜单，确认回退请在原版 Claude CLI 中操作")
+        sent = False
+        try:
+            if dialog.get("step") == "confirm":
+                option = next((item for item in dialog.get("options", [])
+                               if item["label"] == REWIND_CANCEL_OPTION), None)
+                if option is None:
+                    raise NativeError("EUNSUPPORTED", "回退确认页没有取消选项，请在原版 Claude CLI 中处理")
+                self.terminal_input(str(option["index"]).encode(), dialog=dialog)
+                self.answered_dialog, sent = request_id, True
+                listing = self.wait_rewind_list()
+                if listing is None:
+                    return
+                try:
+                    self.terminal_input(b"\x1b", dialog=listing)
+                    self.answered_dialog = listing["id"]
+                except NativeError:
+                    # 已退回选消息页；画面再次变化（如终端有人在操作）时不追加按键，网页按最新画面显示。
+                    pass
+                return
+            self.terminal_input(b"\x1b", dialog=dialog)
+            self.answered_dialog, sent = request_id, True
+        finally:
+            if sent:
+                self.poll(force=True)
+
+    def wait_rewind_list(self):
+        # 只等 2 秒让回退菜单回到选消息页；等不到（菜单已关闭、画面变化或读取失败）就不再发送按键。
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                screen = self.read_terminal_screen()
+            except NativeError:
+                screen = []
+            current = native_dialog(self.lookup() or {}, screen, self.native_id, self.root)
+            if current and current["kind"] == "rewind" and current.get("step") == "select" and current["remoteSupported"]:
+                return current
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.2)
 
     def retain_web_images(self, row, intent=None):
         # 用户要求已受理网页图片在历史/重连仍完整：优先保留原输入，其次读取该 client 专属原图，不以原生附件转录数量为准。

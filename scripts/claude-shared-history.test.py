@@ -1972,6 +1972,84 @@ class PlanDialogTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "EINVAL")
 
 
+class RewindDialogTests(unittest.TestCase):
+    # 画面取自 2.1.323 实测（测试 WSL，120 列，原样保留空行）：终端执行 /rewind 后的选消息页与确认页。
+    select = ("❯ 只回复 R1-OK\n● R1-OK\n" + "▔" * 40 + "\n   Rewind\n\n"
+              "   Restore the code and/or conversation to the point before…\n\n     只回复 R1-OK\n     No code changes\n\n"
+              "   ❯ 只回复 R2-OK\n     No code changes\n\n\n     ↓ 1 more\n\n   Enter to continue · Esc to cancel\n")
+    confirm = ("❯ 只回复 R1-OK\n● R1-OK\n" + "▔" * 40 + "\n   Rewind\n\n"
+               "   Confirm you want to restore to the point before you sent this message:\n\n   │ 只回复 R2-OK\n"
+               "   │ (5m ago)\n\n   The conversation goes back to before this message.\n   The code will be unchanged.\n\n"
+               "   ❯ 1. Restore conversation\n     2. Summarize from here\n     3. Summarize up to here\n"
+               "     4. Never mind\n")
+
+    def native(self, screen):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        native = NativeSession("unused", "test-session", "rewind-job")
+        native.root = Path(folder.name)
+        native.initialized = True
+        native.job = {"short": "rewind-job", "sessionId": "test-session", "tempo": "blocked", "state": "blocked",
+                      "sessionStatus": "waiting", "sessionStatusAtMs": 4000, "needs": "dialog open"}
+        native.lookup = lambda: native.job
+        native.read_messages = lambda: None
+        native.context_configuration = lambda: {}
+        native.screen.feed(screen)
+        with contextlib.redirect_stdout(io.StringIO()):
+            native.poll()
+        return native
+
+    def answer(self, native, behavior="deny"):
+        with contextlib.redirect_stdout(io.StringIO()):
+            native.answer({"response": {"request_id": native.dialog["id"], "response": {"behavior": behavior}}})
+
+    def test_rewind_menu_pages_are_recognized_from_the_native_screen(self):
+        native = self.native(self.select)
+        dialog = native.dialog
+        self.assertEqual((dialog["kind"], dialog["step"], dialog["remoteSupported"], dialog["state"]),
+                         ("rewind", "select", True, "waiting"))
+        self.assertEqual(list(native.requests), [dialog["id"]])
+        moved = self.select.replace("   ❯ 只回复 R2-OK", "     只回复 R2-OK").replace("     只回复 R1-OK", "   ❯ 只回复 R1-OK")
+        self.assertNotEqual(moved, self.select)
+        self.assertEqual(namespace["native_dialog"](native.job, moved, "test-session")["id"], dialog["id"],
+                         "在选消息页移动光标不是新的菜单")
+        confirm = self.native(self.confirm).dialog
+        self.assertEqual((confirm["kind"], confirm["step"], confirm["description"]), ("rewind", "confirm", "只回复 R2-OK"))
+        self.assertEqual([option["label"] for option in confirm["options"]],
+                         ["Restore conversation", "Summarize from here", "Summarize up to here", "Never mind"])
+        self.assertNotEqual(confirm["id"], dialog["id"])
+        parse = namespace["native_rewind_dialog"]
+        self.assertIsNone(parse(self.select.replace("Esc to cancel", "")), "没有原生底栏时不认作菜单")
+        self.assertIsNone(parse(self.confirm.replace("4. Never mind", "4. Something else")), "没有取消项时不开放网页关闭")
+        self.assertIsNone(parse("● Rewind\n   Rewind\n正文\n"))
+        idle = {**native.job, "sessionStatus": "idle", "needs": None}
+        self.assertIsNone(namespace["native_dialog"](idle, self.select, "test-session"), "原生不在等待时不识别")
+
+    def test_rewind_menu_can_only_be_closed_from_the_web(self):
+        native, sent = self.native(self.select), []
+        native.terminal_input = lambda keys, dialog=None, **_: sent.append((keys, dialog["step"]))
+        self.answer(native)
+        self.assertEqual(sent, [(b"\x1b", "select")])
+        self.assertEqual(native.dialog["state"], "submitted", "已提交的关闭不能被另一端重复提交")
+        # 确认页：先选 Never mind 退回选消息页，重新读到选消息页后再按 Esc。
+        native, sent = self.native(self.confirm), []
+        native.terminal_input = lambda keys, dialog=None, **_: sent.append((keys, dialog["step"]))
+        native.read_terminal_screen = lambda: self.select.splitlines()
+        self.answer(native)
+        self.assertEqual(sent, [(b"4", "confirm"), (b"\x1b", "select")])
+        # 退回后读不到选消息页（终端已关闭菜单）时不追加按键。
+        native, sent = self.native(self.confirm), []
+        native.terminal_input = lambda keys, dialog=None, **_: sent.append((keys, dialog["step"]))
+        native.read_terminal_screen = lambda: ["❯", "⏵⏵ auto mode on (shift+tab to cycle)"]
+        self.answer(native)
+        self.assertEqual(sent, [(b"4", "confirm")])
+        native = self.native(self.select)
+        native.terminal_input = lambda *_args, **_kwargs: self.fail("网页不能确认回退")
+        with self.assertRaises(namespace["NativeError"]) as raised:
+            self.answer(native, "allow")
+        self.assertEqual(raised.exception.code, "EUNSUPPORTED")
+
+
 class NativeSubagentHistoryTests(unittest.TestCase):
     """原生子代理协议的回归：使用真实格式的合成记录，不启动模型或读取用户日志。"""
     def setUp(self):

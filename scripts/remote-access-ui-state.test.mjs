@@ -6155,6 +6155,17 @@ test("Claude 内置工具按原生动作展示，工作摘要不把内置工具�
   assert.equal(context.workGroupSummary([claude("Glob", { pattern: "**/*.rs" })]).text, "浏览了文件");
 });
 
+test("Claude 终端回退菜单提示说明消息排队与回退后的执行位置", () => {
+  const context = nodeVm.createContext({});
+  nodeVm.runInContext(sourceSection("function claudeRewindDialogText(", "function claudePlanOptionLabel("), context);
+  const queued = "此时发送的消息会先排队，等终端完成或取消回退后再执行；如果终端确认回退，这些消息会接在回退点之后执行。";
+  assert.deepEqual([...context.claudeRewindDialogText({ kind: "rewind", step: "select", description: "" })],
+    ["终端正在选择要回退到哪条消息之前。", queued]);
+  assert.deepEqual([...context.claudeRewindDialogText({ kind: "rewind", step: "confirm", description: "只回复\n  R2-OK" })],
+    ["终端正在确认回退到这条消息之前：只回复 R2-OK", queued]);
+  assert.equal(context.claudeRewindDialogText({ step: "confirm" })[0], "终端正在确认回退到这条消息之前：（未读到消息原文）");
+});
+
 test("Claude 自动续跑起点与后台任务提示使用中文，未知原生写法保留原文", () => {
   const context = nodeVm.createContext({});
   nodeVm.runInContext(sourceSection("function claudeTaskNotificationText(", "function renderTranscriptEvent("), context);

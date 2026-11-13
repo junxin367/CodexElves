@@ -2879,6 +2879,16 @@ impl Claude {
                 "该原生确认已提交或需在 Claude CLI 中处理，请重新读取状态",
             ));
         }
+        // 用户要求网页只能关闭终端回退菜单（decline），不能从网页确认回退。
+        if original["subtype"] == "native_dialog"
+            && original["dialog"]["kind"] == "rewind"
+            && payload["decision"] != "decline"
+        {
+            return Err(error(
+                409,
+                "网页只能关闭终端回退菜单，确认回退请在原版 Claude CLI 中操作",
+            ));
+        }
         let response = if request["method"] == "item/tool/requestUserInput" {
             let answers = payload["response"]["answers"]
                 .as_object()
@@ -4180,14 +4190,22 @@ fn permission_request(thread: &str, id: &str, request: &Value) -> anyhow::Result
     if request["subtype"] == "native_dialog" {
         let dialog = &request["dialog"];
         // plan：计划模式审批框，批准项编号与修改意见由连接端 answer_plan 按原生交互发送。
+        // rewind：原版终端打开的回退菜单；用户要求网页只能关闭（取消），确认回退只能在终端操作。
+        let kind = dialog["kind"].as_str();
         let supported = dialog["remoteSupported"] == true
-            && matches!(dialog["kind"].as_str(), Some("model" | "effort" | "plan"))
+            && matches!(kind, Some("model" | "effort" | "plan" | "rewind"))
             && dialog["state"] == "waiting";
+        let decisions = if !supported {
+            json!([])
+        } else if kind == Some("rewind") {
+            json!(["decline"])
+        } else {
+            json!(["accept", "decline"])
+        };
         // 复用现有审批权限、请求版本与回执；未知原生弹窗只读提示，不开放任意终端输入。
         return Ok(
             json!({"id":id,"method":"item/commandExecution/requestApproval",
-            "params":{"threadId":thread,"nativeDialog":dialog,
-                "availableDecisions":if supported {json!(["accept","decline"])} else {json!([])}},
+            "params":{"threadId":thread,"nativeDialog":dialog,"availableDecisions":decisions},
             "_claude":request}),
         );
     }
@@ -5207,11 +5225,13 @@ mod tests {
         c.apply_native_settings(&json!({"model":"opus","changes":{"model":{"state":"applied"}}}));
         assert_eq!(c.model, "opus");
 
-        for (kind, state, supported) in [
-            ("model", "waiting", true),
-            ("effort", "waiting", true),
-            ("model", "submitted", true),
-            ("unknown", "waiting", false),
+        for (kind, state, supported, decisions) in [
+            ("model", "waiting", true, json!(["accept", "decline"])),
+            ("effort", "waiting", true, json!(["accept", "decline"])),
+            ("model", "submitted", true, json!([])),
+            ("unknown", "waiting", false, json!([])),
+            // 终端回退菜单只允许网页关闭（取消），不提供确认回退。
+            ("rewind", "waiting", true, json!(["decline"])),
         ] {
             let request = permission_request(
                 "thread",
@@ -5224,14 +5244,7 @@ mod tests {
             .unwrap();
             assert_eq!(request["method"], "item/commandExecution/requestApproval");
             assert_eq!(request["params"]["nativeDialog"]["description"], "原生提示");
-            assert_eq!(
-                request["params"]["availableDecisions"],
-                if supported && state == "waiting" {
-                    json!(["accept", "decline"])
-                } else {
-                    json!([])
-                }
-            );
+            assert_eq!(request["params"]["availableDecisions"], decisions);
         }
     }
 
