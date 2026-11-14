@@ -1598,6 +1598,17 @@ class NativeSession:
         self.job = live
         expected_short = self.short
 
+        # 用户要求普通发送不被重复应用同一权限阻断：原生状态栏已是目标模式时只确认，不发送快捷键。
+        # 这里允许保留原生草稿、执行和审批等待；只有确实需要切换模式时，才要求下方的空闲、空输入框检查。
+        observed = permission_footer_mode(self.read_terminal_screen())
+        current_job = self.lookup()
+        if (observed == target and current_job and current_job["short"] == expected_short
+                and not current_job.get("outcome")):
+            self.permission_mode = requested
+            self.actual_settings["permissionMode"] = observed
+            self.signature = None
+            return {"nativeSettings": self.settings_projection()}
+
         def read_current():
             job = self.lookup()
             if (not job or job["short"] != expected_short or job.get("outcome")

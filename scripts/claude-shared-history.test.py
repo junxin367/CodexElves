@@ -2841,6 +2841,19 @@ class SharedPermissionTests(unittest.TestCase):
         self.assertEqual(native.native_id, "11111111-2222-4333-8444-555555555555")
         self.assertEqual(native.permission_mode, "plan")
 
+    def test_same_permission_preserves_native_draft_and_waiting_without_sending_keys(self):
+        for status, draft in (("idle", "保留原生未发送草稿"), ("busy", ""), ("waiting", "")):
+            with self.subTest(status=status, draft=draft):
+                native, live, _, keys = self.fixture(cycle=("acceptEdits",), draft=draft)
+                live["sessionStatus"] = status
+                if status == "waiting":
+                    live["needs"] = "permission prompt"
+                original_screen = native.read_terminal_screen()
+                result = native.change_permission_mode("acceptEdits")
+                self.assertEqual(result["nativeSettings"]["permissionMode"], "acceptEdits")
+                self.assertEqual(native.read_terminal_screen(), original_screen)
+                self.assertEqual(keys, [], "相同权限只确认状态，不能向草稿或审批面板发送快捷键")
+
     def test_busy_draft_unknown_or_unavailable_mode_never_sends_permission_keys(self):
         for reason in ("busy", "draft", "unknown", "unavailable"):
             native, live, _, keys = self.fixture(draft="未发送草稿" if reason == "draft" else "")
