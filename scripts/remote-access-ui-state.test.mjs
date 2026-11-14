@@ -1457,7 +1457,7 @@ test("Claude 缓存到期时刷新仍在等待则显示满额占位，不因在�
   await new Promise(resolve => setImmediate(resolve));
   h.advance(150000); c.syncClaudeUsage();
   assert.equal(c.claudeUsageState.pending, true);
-  const resetDelay = 8 * 60 * 60 * 1000 + 18 * 60 * 1000 - 150000 + 5;
+  const resetDelay = 2 * 60 * 60 * 1000 + 18 * 60 * 1000 - 150000 + 5;
   assert.ok([...h.timers.values()].some(timer => timer.delay === resetDelay),
     "后台刷新期间仍须保留窗口重置计时");
   h.advance(72 * 60 * 60 * 1000 - 150000 + 1);
@@ -1574,10 +1574,9 @@ test("Claude 额度刷新期间与失败后保留有效缓存，并按原采集�
   h.advance(89000);
   h.context.claudeUsageState.checkedAt = h.context.Date.now();
   h.context.scheduleClaudeUsageUpdate();
-  const resetDelay = 8 * 60 * 60 * 1000 + 18 * 60 * 1000 - 150000 + 5;
-  assert.ok([...h.timers.values()].some(timer => timer.delay === resetDelay),
-    "窗口重置计时独立于下次刷新退避");
-  h.advance(cacheAgeMs - 150000 + 1);
+  assert.ok([...h.timers.values()].some(timer => timer.delay === 60005),
+    "失败后仍按一分钟刷新周期重试");
+  h.advance(72 * 60 * 60 * 1000 - 150000 + 1);
   h.context.renderClaudeUsage();
   assert.equal(h.trigger.hidden, true, "72 小时后不能把失败后的旧缓存继续当作有效数据");
   assert.equal(h.context.claudeUsageState.tip, null);
