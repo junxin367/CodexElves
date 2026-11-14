@@ -337,6 +337,7 @@ const vm = {
       draftPermissionChoices: new Map(), permissionSelections: new Map(), permissionWrites: new Map(),
       instancePermissionCatalogs: new Map(), instancePermissionReads: new Map(),
       permissionLabel, permissionModeKnown, permissionOptions, $: () => null,
+      rememberedNewChatSettings: () => ({}), newClaudePermissionMode: () => "",
       remoteFastKey: () => "", updateRemoteFast() {}, rememberRemoteFastPreference() {},
       reconcileRemoteFastPreference: value => value,
       messageImageMediaReads: new WeakMap(), messageImageRefreshes: new Map(), messageImageReadSequence: 0,
@@ -3114,7 +3115,7 @@ function composerPermissionHarness({ creating = false, backend = "codex" } = {})
     activeInstanceId: () => backend === "claude" ? "claude:wsl:fixture" : "codex:local",
     draftKey: () => "$new:fixture", snapshotDraft: () => ({ text: "草稿" }),
     storeDraft: (key, value) => context.draftPermissionChoices.set(key, value.permissionMode),
-    rememberNewChatSettings() {},
+    rememberNewChatSettings() {}, newClaudePermissionMode: () => "",
     $: () => button, sessionInstanceEnabled: () => true, threadReadOnly: () => false,
     connected: true, busy: false, stopping: false, pending: null, editingMessage: null, editingQueuedMessage: null,
     isActiveThread: () => false, threadDeletionLocked: () => false,
@@ -7618,6 +7619,90 @@ test("新建发送保留显式和旧草稿权限，Claude 展示实例默认时�
   }
 });
 
+test("Claude 新建发送等待完整目录与同一权限读取，恢复 Max 和权限且不误用展示默认值", async () => {
+  for (const scenario of ["remembered", "unsupported-permission", "explicit-draft", "changed-project", "catalog-failure"]) {
+    const h = sendRecoveryHarness(), c = h.context, catalog = deferred(), permissionRead = deferred();
+    const instanceId = "claude:wsl:codex-elves-claude-test", permissionRequests = [];
+    Object.assign(c, {
+      creating: true, creationBackend: "claude", creationInstanceId: instanceId,
+      selectedId: null, thread: null, newChatModels: new Map(), localStorage: storage(),
+      models: [], modelDefaults: {}, currentThreadDisplay: () => c.thread,
+      sessionInstanceEnabled: () => true, updateComposerPermissions() {},
+      loadModels: async (_force, options) => {
+        assert.equal(options.includeAvailable, true);
+        await catalog.promise;
+        c.models = [{ model: "gpt-6.1-sol", defaultReasoningEffort: "high",
+          supportedReasoningEfforts: [{ reasoningEffort: "high" }, { reasoningEffort: "max" }] }];
+        c.modelDefaults = { model: "gpt-6.1-sol", reasoningEffort: "high" };
+        return c.models;
+      },
+      selectCreatedThread: async () => {},
+    });
+    c.session.capabilities.sessionPermissions = true;
+    const sendApi = c.api;
+    c.api = (path, payload, ...args) => {
+      if (path !== "/api/settings/permissions") return sendApi(path, payload, ...args);
+      permissionRequests.push({ path, payload });
+      return permissionRead.promise;
+    };
+    vm.runInContext(sourceSection("function rememberInstancePermissionCatalog(", "function updateComposerPermissions("), c);
+    vm.runInContext(sourceSection("function rememberedNewChatModel(", "function fitComposerMenu("), c);
+    c.rememberNewChatSettings({ model: "gpt-6.1-sol", reasoningEffort: "max",
+      permissionMode: scenario === "unsupported-permission" ? "bypassPermissions" : "plan" });
+    c.newChatModels.clear();
+    if (scenario === "explicit-draft") {
+      const snapshot = c.snapshotDraft;
+      c.snapshotDraft = () => ({ ...snapshot(), permissionMode: "acceptEdits" });
+    }
+    const query = c.$;
+    c.$ = (selector, root) => selector === "#project-select" ? { value: "project" }
+      : selector === "#permission-button" ? { value: "acceptEdits", dataset: {} } : query(selector, root);
+    const readingPermissions = c.loadInstancePermissionCatalog(instanceId);
+    const sending = c.sendMessage();
+    assert.equal(permissionRequests.length, 1, "发送复用已经开始的权限读取");
+    if (scenario === "changed-project") { c.creationProject = "other-project"; ++c.selectionVersion; }
+    if (scenario !== "catalog-failure") catalog.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.actions.length, 0, "权限目录未返回时不能提前发送");
+    permissionRead.resolve({ backend: "claude", instanceId, settings: { permissionMode: "acceptEdits" },
+      supportedModes: ["default", "acceptEdits", "plan"] });
+    await readingPermissions;
+    if (scenario === "catalog-failure") catalog.reject(new Error("隔离模型目录读取失败"));
+    await new Promise(resolve => setImmediate(resolve));
+    if (scenario === "changed-project" || scenario === "catalog-failure") {
+      await sending;
+      assert.equal(h.actions.length, 0);
+      assert.equal(h.prompt.value, h.originalText);
+      if (scenario === "catalog-failure") assert.match(h.notices.at(-1), /模型目录读取失败/);
+      continue;
+    }
+    assert.equal(h.actions.length, 1);
+    assert.equal(h.actions[0].payload.instanceId, instanceId);
+    assert.equal(h.actions[0].payload.model, "gpt-6.1-sol");
+    assert.equal(h.actions[0].payload.reasoningEffort, "max");
+    assert.equal(h.actions[0].payload.permissionMode, scenario === "explicit-draft" ? "acceptEdits"
+      : scenario === "unsupported-permission" ? "configured" : "plan");
+    assert.deepEqual({ ...permissionRequests[0].payload }, { instanceId });
+    h.complete(0); await sending;
+    assert.equal(h.prompt.value, "", "恢复的权限属于发送参数，不能阻止成功后的输入框清空");
+  }
+});
+
+test("继承权限的回执匹配原始草稿，不清除后来显式修改的权限或文字", () => {
+  for (const backend of ["codex", "claude"]) {
+    const h = sendRecoveryHarness(), c = h.context;
+    const draft = c.snapshotDraft();
+    const payload = { backend, projectId: "project", prompt: draft.text, permissionMode: "plan" };
+    c.submittedDrafts.set(payload, draft);
+    assert.equal(c.matchingDraft(draft, payload), true);
+    assert.equal(c.matchingDraft({ ...draft, permissionMode: "plan" }, payload), false,
+      "后来显式选择即使与发送时的默认权限相同，也属于新草稿");
+    assert.equal(c.matchingDraft({ ...draft, text: "后来编辑的文字" }, payload), false);
+    c.submittedDrafts.delete(payload);
+    assert.equal(c.matchingDraft(draft, payload), false, "没有原始提交快照时保留原权限匹配约束");
+  }
+});
+
 test("远程新建首条携带草稿 Fast 布尔值，开启时明确默认模型，发送不再额外查询能力", async () => {
   for (const enabled of [false, true]) {
     const h = sendRecoveryHarness(), { context } = h;
@@ -10907,6 +10992,129 @@ function codexDefaultModelHarness(disk = storage()) {
   });
   return { ...h, disk };
 }
+
+function claudeNewChatPreferenceHarness(disk = storage(), instanceId = "claude:wsl:codex-elves-claude-test") {
+  const h = claudeAliasModelMenuHarness(), c = h.context;
+  Object.assign(c, {
+    creating: true, selectedId: null, thread: null, creationBackend: "claude",
+    creationInstanceId: instanceId, selectedModel: "", selectedEffort: "",
+    isClaude: () => c.creationBackend === "claude", activeBackend: () => c.creationBackend,
+    activeInstanceId: () => c.creationInstanceId,
+    session: { device: { id: "claude-preferences-device", createdAtMs: 1 }, capabilities: {} },
+    privateInputScope: value => JSON.stringify([value.device.id, value.device.createdAtMs]),
+    localStorage: disk, newChatModels: new Map(),
+    modelDefaults: { model: "gpt-6.1-sol", reasoningEffort: "high" },
+    models: [
+      { model: "gpt-6.1-sol", defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: ["low", "medium", "high", "max"].map(reasoningEffort => ({ reasoningEffort })) },
+      { model: "haiku", resolvedModel: "haiku-5.5", defaultReasoningEffort: "low",
+        supportedReasoningEfforts: [{ reasoningEffort: "low" }] },
+    ],
+  });
+  const scope = c.privateInputScope(c.session);
+  c.instancePermissionCatalogs.set(instanceId, { scope, defaultMode: "acceptEdits",
+    modes: ["default", "acceptEdits", "plan", "auto", "bypassPermissions"], loadedAt: Date.now() });
+  return { ...h, disk };
+}
+
+test("Claude 新建记住模型和思考等级，重复新建及刷新后继续使用 Max", () => {
+  const h = claudeNewChatPreferenceHarness(), c = h.context;
+  c.renderModelMenu();
+  h.choices("effort-options").find(node => node.dataset.choiceKey === "effort:max").onclick();
+  c.selectedModel = c.selectedEffort = "";
+  assert.equal(c.currentModelId(), "gpt-6.1-sol");
+  assert.equal(c.currentEffort(), "max");
+  const reopened = claudeNewChatPreferenceHarness(h.disk);
+  assert.equal(reopened.context.currentModelId(), "gpt-6.1-sol");
+  assert.equal(reopened.context.currentEffort(), "max");
+});
+
+test("Claude 模型、权限和等级按实例及授权隔离，Codex 偏好不串用", () => {
+  const a = claudeNewChatPreferenceHarness(), bId = "claude:wsl:other-fixture";
+  a.context.rememberNewChatSettings({ model: "gpt-6.1-sol", reasoningEffort: "max", permissionMode: "plan" });
+  const b = claudeNewChatPreferenceHarness(a.disk, bId);
+  assert.equal(b.context.currentEffort(), "high");
+  assert.equal(b.context.newClaudePermissionMode(), "");
+  b.context.rememberNewChatSettings({ model: "haiku", reasoningEffort: "low", permissionMode: "acceptEdits" });
+  const reopened = claudeNewChatPreferenceHarness(a.disk);
+  assert.equal(reopened.context.currentEffort(), "max");
+  assert.equal(reopened.context.newClaudePermissionMode(), "plan");
+  const codex = codexDefaultModelHarness(a.disk);
+  codex.context.session = a.context.session;
+  assert.equal(codex.context.rememberedNewChatModel(), null);
+  assert.equal(codex.context.rememberedNewChatSettings().permissionMode, undefined);
+  reopened.context.session.device.createdAtMs = 2;
+  assert.equal(reopened.context.rememberedNewChatModel(), null);
+  assert.equal(reopened.context.newClaudePermissionMode(), "");
+});
+
+test("Claude 已有会话修改模型和等级不覆盖新建偏好，原生模型目录更新后校验旧选择", () => {
+  const h = claudeNewChatPreferenceHarness(), c = h.context;
+  c.rememberNewChatSettings({ model: "gpt-6.1-sol", reasoningEffort: "max", permissionMode: "plan" });
+  c.creating = false; c.selectedId = "claude-existing";
+  c.thread = { model: "gpt-6.1-sol", reasoningEffort: "high" };
+  c.renderModelMenu();
+  h.choices("effort-options").find(node => node.dataset.choiceKey === "effort:low").onclick();
+  assert.equal(c.currentEffort(), "low");
+  assert.equal(claudeNewChatPreferenceHarness(h.disk).context.currentEffort(), "max");
+  c.creating = true; c.selectedId = null; c.selectedModel = c.selectedEffort = "";
+  c.models[0].supportedReasoningEfforts = [{ reasoningEffort: "low" }];
+  c.models[0].defaultReasoningEffort = "low";
+  assert.equal(c.currentEffort(), "low", "已失效的 Max 及原生旧默认 High 均不能继续发送");
+  c.models.shift(); c.modelDefaults = { model: "haiku", reasoningEffort: "low" };
+  assert.equal(c.currentModelId(), "haiku");
+  assert.equal(c.currentEffort(), "low");
+});
+
+test("Claude 兼容旧模型记录和完整模型 ID，权限恢复按 CLI 模式及 manual 别名校验", () => {
+  const h = claudeNewChatPreferenceHarness(), c = h.context, scope = c.newChatPreferenceScope();
+  h.disk.setItem(`codex-elves-new-chat-model:${scope}`, "haiku-5.5");
+  assert.equal(c.rememberedNewChatModel(), c.models[1]);
+  c.rememberNewChatSettings({ model: "haiku-5.5", reasoningEffort: "low", permissionMode: "default" });
+  const reopened = claudeNewChatPreferenceHarness(h.disk), next = reopened.context;
+  assert.equal(next.rememberedNewChatModel(), next.models[1]);
+  assert.equal(next.currentEffort(), "low");
+  const catalog = next.instancePermissionCatalogs.get(next.activeInstanceId());
+  catalog.modes = ["manual", "acceptEdits"];
+  assert.equal(next.newClaudePermissionMode(), "manual");
+  next.rememberNewChatSettings({ permissionMode: "bypassPermissions" });
+  assert.equal(next.newClaudePermissionMode(), "", "CLI 未开放绕过时沿用实例默认，不恢复旧绕过选择");
+  next.rememberNewChatSettings({ permissionMode: "dontAsk" });
+  assert.equal(next.newClaudePermissionMode(), "", "旧兼容模式不作为新的自动权限覆盖");
+});
+
+test("Claude 权限按钮恢复新建记忆，已有会话切换权限不覆盖该偏好", async () => {
+  const disk = storage();
+  function open() {
+    const h = composerPermissionHarness({ creating: true, backend: "claude" }), c = h.context;
+    Object.assign(c, { localStorage: disk, newChatModels: new Map(), selectedId: null, thread: null });
+    nodeVm.runInContext(sourceSection("function rememberedNewChatModel(", "function fitComposerMenu("), c);
+    c.instancePermissionCatalogs.get(c.activeInstanceId()).defaultMode = "acceptEdits";
+    return h;
+  }
+  const first = open(), c = first.context;
+  c.updateComposerPermissions();
+  assert.equal(first.button.value, "acceptEdits");
+  first.button.value = "plan";
+  await c.changeComposerPermissions();
+  c.draftPermissionChoices.clear();
+  c.updateComposerPermissions();
+  assert.equal(first.button.value, "plan");
+  const reopened = open(), next = reopened.context;
+  next.updateComposerPermissions();
+  assert.equal(reopened.button.value, "plan");
+  assert.equal(next.instancePermissionCatalogs.get(next.activeInstanceId()).defaultMode, "acceptEdits");
+  assert.equal(reopened.requests.length, 0, "恢复选择不写入实例全局权限");
+  next.creating = false; next.selectedId = "claude-existing";
+  next.thread = { id: "claude-existing", nativeSettings: { permissionMode: "acceptEdits" } };
+  next.updateComposerPermissions();
+  assert.equal(reopened.button.value, "acceptEdits", "已有会话使用自身实际权限");
+  reopened.button.value = "default";
+  await next.changeComposerPermissions();
+  const later = open();
+  later.context.updateComposerPermissions();
+  assert.equal(later.button.value, "plan", "已有会话的权限选择不能覆盖新建默认值");
+});
 
 test("Codex 新建按模型记住思考深度，刷新和再次新建不恢复全局 xhigh", () => {
   const h = codexDefaultModelHarness();
