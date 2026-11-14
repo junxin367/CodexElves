@@ -342,10 +342,14 @@ function updateComposerPermissions() {
       && sessionInstanceEnabled(activeInstanceId())) void loadInstancePermissionCatalog(activeInstanceId());
   let supported = codex ? null : catalog?.modes || [];
   if (isClaude() && !creating && supported) {
-    // 共享 CLI 只能切换原生已开放的模式；未在启动时允许绕过审批的会话不能被网页补开。
+    // 共享 CLI 只能切换原生已开放的模式；启动参数或实例全局配置均未允许时不能由网页补开。
     const runtimeModes = Array.isArray(display?.permissionModes) ? display.permissionModes
       : ["default", "manual", "acceptEdits", "plan"];
+    // 用户要求实例全局已将默认权限设为 bypassPermissions 时，视为该实例已明确允许绕过权限；
+    // 这样已有会话也能显示该选项，后端会用同一实例配置再次校验，不能只靠前端放开。
+    const instanceAllowsBypass = catalog?.defaultMode === "bypassPermissions";
     supported = supported.filter(mode => runtimeModes.includes(mode)
+      || instanceAllowsBypass && mode === "bypassPermissions"
       || ["default", "manual"].includes(mode) && runtimeModes.some(value => ["default", "manual"].includes(value)));
   }
   const options = permissionOptions(activeBackend(), supported);
@@ -364,14 +368,15 @@ function updateComposerPermissions() {
   control.dataset.saving = String(saving);
   control.setAttribute("aria-busy", String(saving));
   control.hidden = session?.capabilities?.sessionPermissions !== true;
-  const waiting = isActiveThread() || (display?.queuedMessages || []).length > 0;
+  const waiting = isActiveThread(), queued = (display?.queuedMessages || []).length > 0;
   control.disabled = !sessionInstanceEnabled(activeInstanceId()) || threadReadOnly() || !connected || busy
     || stopping || !!pending || !!editingMessage || !!editingQueuedMessage || threadDeletionLocked()
-    || saving || !creating && (!selectedId || waiting);
+    || saving || !creating && (!selectedId || queued);
   const label = permissionLabel(activeBackend(), codex ? choice : effectiveMode, creating);
   control.setAttribute("aria-label", `选择会话权限，当前为${label}`);
   control.title = saving ? "正在保存会话权限"
-    : waiting ? `当前权限：${label}；任务及待发消息结束后可修改`
+    : queued ? `当前权限：${label}；已有待发消息按原选择执行，仅后续新轮次使用新选择`
+    : waiting ? `当前权限：${label}；当前任务继续使用原权限，仅后续新轮次使用新选择`
     : catalog?.error ? `实例权限读取失败：${catalog.error}；点击重新读取`
     : !codex && !supported.length ? "暂无法确认该 Claude CLI 支持的权限模式，点击重新读取"
     : `当前权限：${label}；仅此会话的后续新轮次生效`;

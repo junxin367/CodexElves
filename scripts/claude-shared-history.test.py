@@ -2870,10 +2870,10 @@ class SharedPermissionTests(unittest.TestCase):
         self.assertEqual(native.permission_mode, "configured")
         self.assertEqual(json.loads(path.read_text()), original)
 
-    def test_existing_global_bypass_mode_can_be_kept_without_enabling_a_new_capability(self):
+    def test_existing_global_bypass_mode_is_available_when_instance_configuration_allows_it(self):
         native, _, _, keys = self.fixture(cycle=("bypassPermissions",))
         (native.root / "settings.json").write_text(json.dumps({"permissions": {"defaultMode": "bypassPermissions"}}))
-        self.assertNotIn("bypassPermissions", native.permission_modes(), "没有启动开关不能通过网页新开绕过能力")
+        self.assertIn("bypassPermissions", native.permission_modes(), "实例全局配置已明确允许绕过权限")
         result = native.change_permission_mode("configured")
         self.assertEqual(result["nativeSettings"]["permissionMode"], "bypassPermissions")
         self.assertEqual(keys, [], "原生状态栏已确认同一目标时不发送切换快捷键")

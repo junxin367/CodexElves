@@ -1557,9 +1557,16 @@ class NativeSession:
         if not self.short:
             return list(modes)
         flags = self.launch_permission_flags()
-        bypass = any(flag in flags for flag in (
+        # 用户要求实例全局明确设置 bypassPermissions 时，已有原生会话也应显示并允许该模式；
+        # 显式启动参数仍然优先作为能力证据，配置读取失败时保持原有收敛行为，不扩大权限。
+        configured_bypass = False
+        try:
+            configured_bypass = self.configured_permission_mode() == "bypassPermissions"
+        except NativeError:
+            pass
+        bypass = configured_bypass or any(flag in flags for flag in (
             "--allow-dangerously-skip-permissions", "--dangerously-skip-permissions", "bypassPermissions"))
-        # 原生共享会话只能选择已提供的运行模式；未在启动时开放的绕过能力不能由网页补开。
+        # 原生共享会话只能选择已提供的运行模式；启动参数和实例配置都未开放时不能由网页补开。
         return [mode for mode in modes if (mode != "bypassPermissions" or bypass)
                 and (mode != "dontAsk" or mode in flags)]
 

@@ -2135,14 +2135,40 @@ impl Claude {
         let lock = self.lock(id).await;
         let _guard = lock.lock().await;
         let mut c = self.conversation(id).await?;
-        if c.active()
-            || !c.remote_queue.messages(&c.queued_messages).is_empty()
-            || !c.remote_queue.edits().is_empty()
-        {
-            return Err(error(
-                409,
-                "请等待当前 Claude 任务和待发消息结束后再修改权限",
-            ));
+        let queued = !c.remote_queue.messages(&c.queued_messages).is_empty()
+            || !c.remote_queue.edits().is_empty();
+        if queued {
+            return Err(error(409, "请等待 Claude 待发消息结束后再修改权限"));
+        }
+        if c.active() {
+            // 用户要求执行中可以修改权限；当前原生轮次继续使用原权限，新选择只在下一轮开始前应用。
+            let requested = if mode == "configured" {
+                super::permissions::configured_claude_mode(&self.directory, &c.config.instance_id())
+                    .await?
+            } else {
+                mode.to_owned()
+            };
+            supported_permission_mode(&c.config, &requested).await?;
+            authorization.check().await?;
+            c.permission_mode = Some(mode.to_owned());
+            let revision = c
+                .permission_revision
+                .checked_add(1)
+                .ok_or_else(|| error(409, "会话权限版本已达上限"))?;
+            self.change(|saved| {
+                let current = saved
+                    .conversations
+                    .get_mut(id)
+                    .context("Claude 会话不存在")?;
+                current.permission_mode = Some(mode.to_owned());
+                current.permission_revision = revision;
+                Ok(())
+            })
+            .await?;
+            let result = json!({"ok":true,"threadId":id,"instanceId":c.config.instance_id(),
+                "permissionMode":mode,"permissionRevision":revision,"appliesTo":"nextTurn"});
+            self.publish(json!({"method":"thread/settings/updated","params":result}));
+            return Ok(result);
         }
         let process = self
             .processes

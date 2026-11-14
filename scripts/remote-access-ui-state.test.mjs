@@ -3173,7 +3173,7 @@ test("Codex 权限只展示 App 四项，旧只读归类展示但不修改已保
   assert.equal(h.button.popupHelp.label, "了解更多");
 });
 
-test("新会话权限保留在本实例草稿中，运行及未确认发送期间禁止切换", async () => {
+test("新会话权限保留在本实例草稿中，执行中允许修改且仅后续轮次生效", async () => {
   const h = composerPermissionHarness({ creating: true });
   h.context.updateComposerPermissions();
   assert.equal(h.button.value, "configured");
@@ -3184,7 +3184,7 @@ test("新会话权限保留在本实例草稿中，运行及未确认发送期�
   h.context.creating = false;
   h.context.isActiveThread = () => true;
   h.context.updateComposerPermissions();
-  assert.equal(h.button.disabled, true);
+  assert.equal(h.button.disabled, false);
   h.context.isActiveThread = () => false;
   h.context.thread.queuedMessages = [{ id: "awaiting" }];
   h.context.updateComposerPermissions();
