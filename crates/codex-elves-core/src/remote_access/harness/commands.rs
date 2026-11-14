@@ -177,9 +177,23 @@ impl Harness {
                 Ok(json!({"ok":true,"threadId":id}))
             }
             "deleteThread" => {
-                self.runtime
-                    .request("thread/delete", json!({"threadId":id}), Some(authorization))
-                    .await?;
+                // 用户要求删除由桌面 Codex 持有 writer 的会话时复用原 owner；
+                // 只有没有桌面 owner 才允许服务 runtime 接管，避免第二个 writer 返回 409。
+                if self
+                    .owner_request(
+                        &id,
+                        "thread/delete",
+                        json!({"threadId":id}),
+                        1,
+                        Some(authorization),
+                    )
+                    .await?
+                    .is_none()
+                {
+                    self.runtime
+                        .request("thread/delete", json!({"threadId":id}), Some(authorization))
+                        .await?;
+                }
                 self.store.lock().await.commit(|data| {
                     data.queues.remove(&id);
                     data.edits.retain(|_, e| e.thread_id != id);
