@@ -5667,7 +5667,8 @@ test("失败与中断的工具条目不能渲染成功勾号", () => {
 });
 
 test("Claude 内置工具按原生动作展示，工作摘要不把内置工具称为集成", () => {
-  const context = nodeVm.createContext({ nativeConnectionVersion: 1, URL, skillReadInfo: () => null, reasoningPreviewText: () => "" });
+  const context = nodeVm.createContext({ nativeConnectionVersion: 1, URL, skillReadInfo: () => null, reasoningPreviewText: () => "",
+    commandText: item => item.command || "" });
   nodeVm.runInContext(sourceSection("function readableToolName(", "function reasoningPreviewText("), context);
   nodeVm.runInContext(sourceSection("function workGroupSummary(", "function renderCommandGroup("), context);
   const claude = (tool, args = {}) => ({ type: "dynamicToolCall", source: "claude", tool, arguments: args, status: "completed" });
@@ -5689,9 +5690,141 @@ test("Claude 内置工具按原生动作展示，工作摘要不把内置工具�
     { type: "mcpToolCall", source: "claude", server: "fetch", tool: "fetch", status: "completed" },
     { type: "commandExecution", command: "ls", status: "completed", exitCode: 0 }
   ]);
-  assert.equal(summary.text, "已使用 fetch 集成浏览了文件使用了工具运行了命令");
+  // 用户 2026-11-14 澄清后：Claude 分组标题按动作计数（对应原版「Read 1 file, ran 1 command」），MCP 仍按 Codex 写法显示集成。
+  assert.equal(summary.text, "已使用 fetch 集成，读取了 1 个文件，使用了 1 个工具，列出了 1 个目录");
+  assert.equal(summary.icon, "eye");
   assert.equal(summary.description, "1 条命令，3 次工具调用");
-  assert.equal(context.workGroupSummary([claude("Glob", { pattern: "**/*.rs" })]).text, "浏览了文件");
+  assert.equal(context.workGroupSummary([claude("Glob", { pattern: "**/*.rs" })]).text, "搜索了 1 次");
+  // Codex 会话的分组标题保持原有写法。
+  assert.equal(context.workGroupSummary([{ type: "commandExecution", command: "ls", status: "completed", exitCode: 0 }]).text, "运行了命令");
+});
+
+// Claude 区别效果用到的纯函数与卡片渲染，在真实 app.js 片段上运行；DOM 用最小节点模型。
+function claudeCardHarness() {
+  function element(tag, className = "", text = "") {
+    const node = { tagName: tag.toUpperCase(), className, ownText: text == null ? "" : String(text), children: [], attributes: {},
+      hidden: false, style: { values: {}, setProperty(name, value) { this.values[name] = value; } },
+      append(...children) { this.children.push(...children); },
+      replaceChildren(...children) { this.children = children; },
+      setAttribute(name, value) { this.attributes[name] = value; },
+      get textContent() { return this.ownText + this.children.map(child => child?.textContent ?? child).join(""); },
+      set textContent(value) { this.ownText = String(value); this.children = []; },
+    };
+    node.classList = { add(...names) { node.className += ` ${names.join(" ")}`; } };
+    return node;
+  }
+  const context = nodeVm.createContext({ nativeConnectionVersion: 1, URL, thread: { cwd: "/w" },
+    element, icon: name => element("svg", `icon-${name}`), skillReadInfo: () => null, commandText: item => item.command || "",
+    button: (text, label, action, className = "") => Object.assign(element("button", className, text), { title: label, click: action }),
+    isSubagentItem: () => false, transcriptEventTypes: new Set(), renderToolOutput: () => {} });
+  nodeVm.runInContext(sourceSection("function toolResultParts(", "function renderGenericToolOutput("), context);
+  nodeVm.runInContext(sourceSection("function renderGenericToolOutput(", "function renderToolOutput("), context);
+  nodeVm.runInContext(sourceSection("function editedFileStatus(", "const editedFileDiffLimit"), context);
+  nodeVm.runInContext(sourceSection("function readableToolName(", "function reasoningPreviewText("), context);
+  nodeVm.runInContext(sourceSection("function renderItem(", "function reconcileChildren("), context);
+  const lines = node => node.children.flatMap(child => child?.className?.includes?.("session-tools-diff-line")
+    ? [{ kind: child.className.split(" ").at(-1), number: child.children.length > 1 ? child.children[0].textContent : null,
+      text: child.children.at(-1).textContent }] : child?.children ? lines(child) : []);
+  return { context, element, lines };
+}
+
+test("Claude 读取与搜索在 Codex 卡片中显示结果摘要和行号，噪声工具隐藏，Codex 条目不受影响", () => {
+  const { context, element, lines } = claudeCardHarness();
+  const claude = (tool, text, extra = {}) => ({ id: tool, type: "dynamicToolCall", source: "claude", tool, status: "completed",
+    arguments: { file_path: "/w/calc.py" }, contentItems: [{ type: "inputText", text }], ...extra });
+  const read = claude("Read", "1\tdef add(a, b):\n2\t    return a + b\n\n<system-reminder>原生提示</system-reminder>");
+  assert.deepEqual(JSON.parse(JSON.stringify(context.claudeNumberedLines(read.contentItems[0].text))), [
+    { kind: "context", number: 1, text: "def add(a, b):" }, { kind: "context", number: 2, text: "    return a + b" }]);
+  assert.equal(context.claudeNumberedLines("1\tdef add(a, b):\n这一行不是编号行"), null, "编号行之后有其他正文时按原文显示");
+  assert.equal(context.claudeToolResultLabel(read), "2 行");
+  assert.equal(context.claudeToolResultLabel(claude("Grep", "Found 2 files\ndocs/a.md\ndocs/b.md")), "找到 2 个文件");
+  assert.equal(context.claudeToolResultLabel(claude("Grep", "No files found")), "没有匹配");
+  assert.equal(context.claudeToolResultLabel(claude("Glob", "a.txt\nb.txt\nc.txt")), "3 个文件");
+  assert.equal(context.claudeToolResultLabel({ ...read, status: "failed" }), "");
+  assert.equal(context.claudeToolResultLabel({ ...read, source: undefined }), "", "Codex 工具不显示 Claude 摘要");
+  // 卡片：沿用 Codex 通用工具卡片（图标 + 中文动作），状态位显示结果摘要。
+  const card = context.renderItem(read, null, true, false);
+  assert.match(card.textContent, /读取文件 · calc\.py2 行$/);
+  assert.equal(card.children[0].children[0].className, "icon-eye");
+  // 展开：行号栏复用侧边变更面板的行样式，原生提示不显示。
+  const body = element("div");
+  context.renderGenericToolOutput(body, read);
+  assert.deepEqual(lines(body), [{ kind: "context", number: "1", text: "def add(a, b):" },
+    { kind: "context", number: "2", text: "    return a + b" }]);
+  const failed = element("div");
+  context.renderGenericToolOutput(failed, claude("Glob", "<tool_use_error>Error: No such tool available: Glob</tool_use_error>",
+    { status: "failed" }));
+  assert.match(failed.textContent, /^纯文本Error: No such tool available: Glob/);
+  assert.doesNotMatch(failed.textContent, /tool_use_error/, "原生错误去掉 <tool_use_error> 标签");
+  // 成功的 ToolSearch、TaskList、TaskGet 不显示；失败时仍显示。
+  assert.equal(context.claudeHiddenTool(claude("ToolSearch", "")), true);
+  assert.equal(context.claudeHiddenTool(claude("TaskList", "")), true);
+  assert.equal(context.claudeHiddenTool(claude("ToolSearch", "", { status: "failed" })), false);
+  assert.equal(context.claudeHiddenTool({ ...claude("ToolSearch", ""), source: undefined }), false);
+  assert.match(sourceSection("function renderActivity(", "function queueReorderAvailable("), /!claudeHiddenTool\(item\)/);
+});
+
+test("Claude 文件修改在 Codex 卡片中区分新建与修改，显示增删计数和带行号的差异", () => {
+  const { context, element, lines } = claudeCardHarness();
+  const diff = "@@ -1,3 +1,3 @@\n def add(a, b):\n-    return a - b\n+    return a + b\n@@ -9,1 +9,2 @@\n main()\n+print(1)";
+  const update = { id: "edit", type: "fileChange", source: "claude", status: "completed",
+    changes: [{ path: "/w/calc.py", kind: { type: "update", move_path: null }, diff }] };
+  const created = { id: "write", type: "fileChange", source: "claude", status: "completed",
+    changes: [{ path: "/w/hello.txt", kind: { type: "add" }, diff: "alpha\nbeta\ngamma\n" }] };
+  assert.deepEqual(JSON.parse(JSON.stringify(context.claudeFileChangeStats(update))), { additions: 2, deletions: 1 });
+  assert.equal(context.claudeFileChangeCreated(update), false);
+  assert.equal(context.claudeFileChangeCreated(created), true);
+  const updateCard = context.renderItem(update, null, true, false);
+  assert.match(updateCard.textContent, /^修改文件calc\.py\+2-1$/);
+  const createdCard = context.renderItem(created, null, true, false);
+  assert.match(createdCard.textContent, /^新建文件hello\.txt\+3-0$/);
+  // Codex 文件修改保持原样：标题「修改文件」，不加计数。
+  assert.equal(context.renderItem({ ...update, source: undefined }, null, true, false).textContent, "修改文件calc.py");
+  // 展开：删除行用旧行号，新增与上下文行用新行号，与侧边变更面板一致；新建文件逐行按新增编号。
+  const updateBody = element("div");
+  context.renderClaudeFileChangeOutput(updateBody, update);
+  assert.deepEqual(lines(updateBody).map(row => [row.kind, row.number]), [["hunk", null], ["context", "1"], ["delete", "2"],
+    ["add", "2"], ["hunk", null], ["context", "9"], ["add", "10"]]);
+  const createdBody = element("div");
+  context.renderClaudeFileChangeOutput(createdBody, created);
+  assert.deepEqual(lines(createdBody).map(row => `${row.kind}:${row.number}:${row.text}`), ["add:1:+alpha", "add:2:+beta", "add:3:+gamma"]);
+});
+
+test("Claude 工作分组按原版动作计数，Bash 按命令内容归类", () => {
+  const { context } = claudeCardHarness();
+  nodeVm.runInContext(`var reasoningPreviewText = () => "";\n${sourceSection("function workGroupSummary(", "function renderCommandGroup(")}`, context);
+  const bash = (command, status = "completed") => ({ type: "commandExecution", source: "claude", command, status, exitCode: status === "failed" ? 2 : 0 });
+  const tool = (name, status = "completed") => ({ type: "dynamicToolCall", source: "claude", tool: name, status, arguments: {} });
+  assert.equal(context.claudeCommandKind("grep -rn \"def \" ."), "search");
+  assert.equal(context.claudeCommandKind("cd /w && ls -la"), "list");
+  assert.equal(context.claudeCommandKind("LANG=C cat a.txt"), "read");
+  assert.equal(context.claudeCommandKind("/usr/bin/find . -name '*.txt'"), "search");
+  assert.equal(context.claudeCommandKind("python3 calc.py"), "run");
+  // 实测会话的一组工具：原版显示为「Read 1 file, searched for 4 patterns, ran 2 shell commands, listed 1 directory」。
+  const summary = context.workGroupSummary([tool("Read"), tool("Grep", "failed"), bash("grep -rn \"def \" /w"), tool("Glob", "failed"),
+    bash("find /w/data -name '*.txt'"), bash("python3 calc.py"), bash("seq 1 40"), bash("ls /nonexistent-dir", "failed")]);
+  assert.equal(summary.text, "读取了 1 个文件，搜索了 4 次，运行了 2 条命令，列出了 1 个目录");
+  assert.equal(summary.icon, "eye");
+  assert.match(summary.description, /3 项失败/);
+  const edits = context.workGroupSummary([
+    { type: "fileChange", source: "claude", status: "completed", changes: [{ path: "/w/a.py" }, { path: "/w/b.py" }] },
+    { type: "fileChange", source: "claude", status: "completed", changes: [{ path: "/w/a.py" }] }]);
+  assert.equal(edits.text, "编辑了 2 个文件");
+  assert.equal(edits.icon, "fileChange");
+  // 执行中仍沿用 Codex 的当前动作文字。
+  assert.equal(context.workGroupSummary([tool("Read"), bash("sleep 8", "inProgress")], true).text, "正在运行命令");
+});
+
+test("Claude 任务清单沿用 Codex 清单，上方显示原版任务统计", () => {
+  const context = nodeVm.createContext({ nativeConnectionVersion: 1,
+    element: (_tag, className, text) => ({ className, textContent: text }) });
+  nodeVm.runInContext(sourceSection("function claudePlanTitle(", "function genericToolPresentation("), context);
+  const title = context.claudePlanTitle([{ step: "检查输出", status: "completed" }, { step: "整理结果", status: "inProgress" },
+    { step: "提交报告", status: "pending" }]);
+  assert.equal(title.className, "turn-plan-title");
+  assert.equal(title.textContent, "任务清单 · 3 个任务（1 个已完成，1 个进行中，1 个待办）");
+  assert.match(sourceSection("function renderMessages(", "function rememberTranscript("),
+    /if \(isClaude\(\)\) items\.push\(claudePlanTitle\(turn\.plan\)\);\n\s+items\.push\(plan\);/);
 });
 
 test("Claude 终端回退菜单提示说明消息排队与回退后的执行位置", () => {
