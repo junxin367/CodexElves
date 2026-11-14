@@ -10858,6 +10858,49 @@ test("Claude 发送回执释放已提交的模型草稿，迟到回执不清除�
   assert.equal(c.selectedEffort, "high", "即使重新选择相同模型，旧回执也不能清掉新等级");
 });
 
+test("新建会话发送成功后，显式权限草稿和图片不会阻止编辑框清空", () => {
+  const key = "$new:project", prompt = { value: "原消息" };
+  const image = { kind: "inline", name: "附件.png", mime: "image/png",
+    dataUrl: "data:image/png;base64,AA==", size: 2, width: 10, height: 10 };
+  let cleared = 0;
+  const draftPermissionChoices = new Map([[key, "guardian-approvals"]]);
+  const drafts = new Map([[key, prompt.value]]), attachments = new Map([[key, [image]]]);
+  const context = vm.createContext({
+    nativeConnectionVersion: 1, session: { device: { id: "device-a", createdAtMs: 1 } },
+    selectedId: null, creating: true, creationProject: "project", creationBackend: "codex", creationInstanceId: "codex:local",
+    selectedSkills: [], selectedGoal: null, selectedModel: "", selectedEffort: "", modelChoiceVersion: 1,
+    draftPermissionChoices, drafts, skillDrafts: new Map(), attachmentDrafts: attachments, goalDrafts: new Map(),
+    failedInputRecoveries: new Map(), submittedDrafts: new WeakMap(), recoveryScope: "scope",
+    persistSmallInputRecoveries() {}, composerAttachmentsLoading: () => false,
+    composerPrompt: text => String(text).trim(), sameSkills: (left, right) =>
+      JSON.stringify(left.map(skill => `${skill.name || ""}\0${skill.path || ""}`))
+        === JSON.stringify(right.map(skill => `${skill.name || ""}\0${skill.path || ""}`)),
+    newDraftKey: project => `$new:${project || ""}`,
+    storedDraft: draftKey => ({ text: drafts.get(draftKey) || "", skills: [], attachments: attachments.get(draftKey) || [],
+      goalMode: null, ...(draftPermissionChoices.has(draftKey)
+        ? { permissionMode: draftPermissionChoices.get(draftKey) } : {}) }),
+    snapshotDraft: () => ({ text: prompt.value, skills: [], attachments: attachments.get(key) || [], goalMode: null,
+      ...(draftPermissionChoices.has(key) ? { permissionMode: draftPermissionChoices.get(key) } : {}) }),
+    deleteDraft: draftKey => {
+      drafts.delete(draftKey); attachments.delete(draftKey); draftPermissionChoices.delete(draftKey);
+    },
+    $: () => prompt, isClaude: () => false,
+    clearComposerAttachments: () => { ++cleared; attachments.delete(key); },
+    renderSelectedSkills() {}, recoveryStore: { remove() {} }, notice() {},
+  });
+  const payload = { projectId: "project", backend: "codex", instanceId: "codex:local",
+    prompt: prompt.value, permissionMode: "guardian-approvals",
+    images: [{ name: image.name, mime: image.mime, dataUrl: image.dataUrl, size: image.size }] };
+  context.submittedDrafts.set(payload, { text: prompt.value, skills: [], attachments: [image],
+    goalMode: null, permissionMode: "guardian-approvals" });
+  context.payload = payload;
+  vm.runInContext(sourceSection("function matchingDraft(", "function resetComposerOptions("), context);
+  context.clearSubmittedDraft(payload, true);
+  assert.equal(prompt.value, "", "清理草稿前删除权限选择不能阻止编辑框清空");
+  assert.equal(cleared, 1);
+  assert.equal(context.draftPermissionChoices.has(key), false);
+});
+
 test("Claude 模型匹配优先精确值，未知或未报告等级不猜测，Codex 不扩展别名规则", () => {
   const h = claudeAliasModelMenuHarness();
   h.context.models.push({ model: "claude-opus-5-5", supportedReasoningEfforts: [{ reasoningEffort: "low" }] });

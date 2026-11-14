@@ -4392,8 +4392,10 @@ function clearSubmittedDraft(payload, current = true) {
   }
   try { persistSmallInputRecoveries(); } catch {}
   if (current && composerAttachmentsLoading()) return;
+  // 新建会话清理前先固定当前编辑器快照；显式权限属于匹配字段，deleteDraft 会同步删除权限选择。
+  const currentDraft = current ? snapshotDraft() : null;
   if (matchingDraft(storedDraft(key), payload)) deleteDraft(key);
-  if (current && matchingDraft(snapshotDraft(), payload)) {
+  if (currentDraft && matchingDraft(currentDraft, payload)) {
     $("#prompt").value = ""; selectedSkills = []; selectedGoal = null; clearComposerAttachments(); renderSelectedSkills();
   }
 }
