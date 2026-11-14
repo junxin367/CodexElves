@@ -2,11 +2,11 @@
 
 ## 适用范围
 
-本文件适用于整个仓库。处理 `BigPizzaV3/CodexPlusPlus` 原仓库提交、冲突解决、重命名维护、协议代理、管理器 UI、安装包构建、GitHub 发版及发布验收时，必须优先遵守本文件。
+本文件适用于整个仓库，覆盖协议代理、管理器 UI、远程会话、安装包构建、GitHub 发版及发布验收。
 
 ## 核心原则
 
-保留 CodexElves 的本地产品形态。合并上游只能带入仍然有价值的 bugfix、兼容性修复和安全修复，不能恢复已移除功能，不能把项目改回 CodexPlusPlus / Codex++ / codex-plus 命名，不能破坏本地代理和管理器交互改造。
+保留 CodexElves 的产品形态、项目命名、本地代理和管理器交互。
 
 ## 用户特定要求的代码注释
 
@@ -20,15 +20,6 @@
 - 仅用于调试、效果确认或临时验收的截图、效果图和录屏保留在本机 `temp/`，不纳入 Git 提交或推送；“提交所有代码”也不包含这些临时材料。
 - 提交前检查新增图片及录屏，排除临时预览产物。正式产品资源及用户明确要求入库的文档配图按其用途处理。
 - 验收文档保留文字结果，不引用未入库的临时图片；已有本地截图不因排除提交而删除。
-
-## 上游合并流程
-
-1. 合并前先运行 `git fetch upstream main`，再用 `git log --oneline HEAD..upstream/main` 查看新增提交。
-2. 对每个上游提交先看 `git show --stat` 和补丁内容，只合入有效修复；遇到品牌、路径、版本或已移除功能相关变更时，手工映射到当前代码。
-3. 如果上游提交仍使用 `codex-plus-*` 路径，必须映射到当前 `codex-elves-*` 路径，不能直接接收上游目录重命名。
-4. 如果上游提交只改版本号、上游品牌、赞助/社区/推荐内容、Zed、mobile relay，默认跳过。
-5. 如果用手工 cherry-pick 方式合入修复，需要再用 `git merge -s ours --no-ff upstream/main` 记录上游基线，避免后续重复出现同一提交。
-6. 合并过程中不要暂存 `.zeroone/hook-debug/stop-await-submission.ndjson`，这是本地钩子日志。
 
 ## 项目命名硬约束
 
@@ -60,32 +51,17 @@
 - 该地址是用户明确要求保留的 fork 源插件市场，属于外部第三方数据源仓库名，**不属于本产品品牌**；因此其中出现的 `CodexPlusPlus` 字样是有意保留的例外，不受上述品牌硬约束限制。
 - 涉及文件：`crates/codex-elves-core/src/script_market.rs` 的 `DEFAULT_MARKET_INDEX_URL`。
 - 品牌关键词扫描时必须排除 `README.md` 顶部 fork 来源说明和脚本市场数据源地址，不能因这些有意保留的来源信息命中 `CodexPlusPlus` 就判定违规。
+- 依赖锁文件中的第三方包 sponsor 元数据不属于产品赞助功能，不应作为违规命中。
 
-## 已移除功能禁止回流
+## 产品行为约束
 
-合并或修复时不得恢复以下功能、入口、资源、文案或测试断言：
+开发和维护时必须保持以下行为：
 
-- 概览页顶部官方中转站推荐
-- 推荐内容
-- Zed 相关功能、配置、测试和文案
-- 请作者喝咖啡、赞助商、赞助二维码、赞助图片
-- Discord 社区、Telegram 频道
-- README 中的赞助商、交流与支持、友情链接
-- mobile relay / 移动端中继相关 app、crate、入口和测试
-- 已废弃功能的测试断言
-- 工作区 Checkpoint 自动快照、发送拦截、轮次封存及管理入口；会话发送、回执和正文更新不得再依赖工作区快照。既有磁盘快照不自动删除。
-
-如果上游修复依赖这些模块，先提取可复用的纯修复逻辑，不能把模块整体恢复。
-
-## 本地改造必须保留
-
-合并后必须保持以下本地行为：
-
-- 桌面端及管理器版本号以根 `Cargo.toml` 的 `workspace.package.version` 为准，不得因合并上游而被上游版本覆盖。Android 版本独立维护于 `apps/codex-elves-android/version.properties`，不随管理器版本号同步。普通编译不调整 Android 版本；管理端发版需要同步发布 Android 时，按下方发布规则递增 Android 独立版本和 `versionCode`，并保持现有正式签名证书。
-- 默认本地代理端口保持当前项目端口，不恢复旧端口 `57321`。
+- 桌面端及管理器版本号以根 `Cargo.toml` 的 `workspace.package.version` 为准。Android 版本独立维护于 `apps/codex-elves-android/version.properties`，不随管理器版本号同步。普通编译不调整 Android 版本；管理端发版需要同步发布 Android 时，按下方发布规则递增 Android 独立版本和 `versionCode`，并保持现有正式签名证书。
+- 默认本地协议代理端口保持 `45221`。
 - 管理器关闭按钮默认最小化到托盘；再次打开 manager 时如果在托盘中，必须显示主窗口。
 - manager 打开时保持上一次窗口位置，不能跨显示器跳回旧位置。
-- 设置页“界面主题”只删除 UI，不删除底层功能。
+- 设置页不提供“界面主题”入口；保留顶部主题切换入口及底层主题功能。
 - 工具与插件页背景高度必须随内容撑开，不能固定高度导致内容溢出。
 - 会话管理页同步目标和删除提示文案保留当前间距优化。
 - 快捷入口中文不能乱码；NSIS 编译必须使用 `/INPUTCHARSET UTF8`。
@@ -95,7 +71,7 @@
 
 不得破坏当前协议代理设计：
 
-- 用户通过“启用本地代理”显式开关控制代理，不依赖上游协议字段暗示是否走代理。
+- 用户通过“启用本地代理”显式开关控制代理，是否走代理以该开关为准。
 - 模型列表按协议分别维护：Responses API、Chat Completions、Anthropic。
 - 展示模型列表时聚合排序，但配置仍保留协议归属。
 - Responses API 模型请求不得被翻译成 Chat Completions；必须直接调用 Responses 上游 Base URL。
@@ -125,7 +101,7 @@
 - 使用 `CodexElves` 插件入口和菜单命名。
 - 纯 API 模式下仍要恢复可用的 fast/service tier 控制位置。
 - 请求模型下拉层级必须高于周边面板，点击空白处不能误触模型列表。
-- 插件入口、工具与插件、会话管理、模型配置等现有交互不能因上游 UI patch 回退。
+- 保留插件入口、工具与插件、会话管理、模型配置等现有交互。
 
 ## 远程会话发送与显示约束
 
@@ -175,7 +151,7 @@
 
 - 用户只要求编译远程客户端时，执行 `.\scripts\build-windows-remote.ps1`，只生成独立 EXE 和对应构建信息，不附带管理器或 Android 构建。
 - 客户端使用独立配置与 WebView2 登录缓存，只连接用户填写的远程服务，不启动本机 launcher、管理器或远程后台。
-- 独立程序最顶部使用 Rust / Win32 实现的原生应用顶栏，显示程序标题并供后续扩展程序菜单，固定为 36 个逻辑像素，随 DPI 缩放。背景、文字和分隔线逐帧跟随会话页实际配色及渐变，不在原生端另启一套动画。保留窗口拖动、缩放、最小化、最大化及还原，主窗口关闭收进托盘，独立会话窗口关闭自身，再次启动唤回原窗口。本次不预设程序菜单，不恢复“连接”“窗口”菜单栏，连接设置、刷新及退出入口保留在托盘。
+- 独立程序最顶部使用 Rust / Win32 实现的原生应用顶栏，显示程序标题，固定为 36 个逻辑像素，随 DPI 缩放。背景、文字和分隔线逐帧跟随会话页实际配色及渐变，不在原生端另启一套动画。保留窗口拖动、缩放、最小化、最大化及还原，主窗口关闭收进托盘，独立会话窗口关闭自身，再次启动唤回原窗口。不预设程序菜单，不恢复“连接”“窗口”菜单栏，连接设置、刷新及退出入口保留在托盘。
 - 应用顶栏不创建 WebView，窗口操作仅由原生控件处理；远程内容仅允许同步经过校验的 RGB 配色、任务栏未读数字以及管理公开网页资源缓存，连接设置仍仅授权内置连接页，不能扩大其他原生命令权限。保留 `remote_titlebar_theme` 命令名以兼容既有网页缓存，但不得恢复本地标题栏网页及其窗口控制授权。
 - Windows 任务栏角标按当前启用实例的未读主会话 ID 去重，置顶、最近和项目中重复出现只算一次；侧边子会话、子代理、归档会话不单独计数。搜索、折叠和快捷筛选不改变总数，读完后减少、为零时清除，超过 99 仅在图标上显示 `99+`。只由主窗口上报，不按窗口累加；后台沿用实时事件并以 15 秒只读查询补齐，发送不等待角标结果，更换授权或连接地址时清除旧计数。
 - 地址输入错误或网络加载失败后返回可编辑连接页并保留本次输入；只有成功加载的地址才能保存为下次自动连接目标。远程网页不得获得本机连接设置命令权限。
@@ -222,36 +198,6 @@
 - 发布后确认对应 Android Release 已公开，包含 `CodexElves-<versionName>-android.apk` 和 `android-update.json`；下载两项附件，核对版本、`versionCode`、APK 大小和 SHA-256 与更新清单及本次正式构建一致，并确认桌面 Latest 标记和 `latest.json` 未被 Android 发布覆盖。
 - 最终分别报告桌面和 Android 状态：`已发布`、`已构建未发布`、`进行中`、`失败/受阻` 或 `跳过（附依据）`，并提供对应运行记录、Release 或产物位置。只要求检查、诊断或本地编译时，不得擅自创建、推送发布标签或触发远程发布；发现未发布应明确列为待完成项。
 
-## 合并后的强制检查
+## 管理器前端检查入口
 
-合并上游或改名相关变更后，至少执行：
-
-```powershell
-cargo fmt --check
-cargo check --workspace
-npm run check
-cargo test -p codex-elves-core --test launcher
-cargo test -p codex-elves-core --test protocol_proxy
-git diff --check
-```
-
-合并后必须做关键词扫描。运行时代码、README、安装脚本、资源路径中不得出现旧品牌或已移除功能关键词：
-
-```powershell
-# 注：脚本市场数据源 script_market.rs 和 README.md 顶部 fork 来源说明含有意保留的 fork 来源名，不算违规。
-git grep -n -E "codex-plus|codex_plus|CodexPlusPlus|Codex\\+\\+" -- apps crates assets scripts README.md README_EN.md Cargo.toml ":(exclude)crates/codex-elves-core/src/script_market.rs" | Select-String -NotMatch "^README\\.md:1:当前项目 fork 自 \\[BigPizzaV3/CodexPlusPlus\\]\\(https://github\\.com/BigPizzaV3/CodexPlusPlus\\)$"
-git grep -n -i -E "discord|telegram|官方中转站|推荐内容|请作者|咖啡|mobile.?relay|(^|[^a-z])zed([^a-z]|$)" -- apps crates assets scripts README.md README_EN.md Cargo.toml
-git grep -n -i -E "sponsor|赞助" -- README.md README_EN.md apps/codex-elves-manager/src apps/codex-elves-manager/src-tauri crates assets scripts
-```
-
-允许依赖锁文件里出现第三方包的 sponsor 元数据；不允许用户可见文案、资源或运行时代码恢复赞助功能。
-
-## 停止条件
-
-出现以下情况时停止合并并说明原因：
-
-- 上游修复无法和 CodexElves 重命名共存。
-- 上游修复必须恢复已移除功能才能编译。
-- 协议代理改造测试无法通过。
-- 构建脚本无法生成 `dist/windows` 安装包。
-- 需要恢复 `.zeroone`、历史工作树或用户未授权文件变更。
+在仓库根目录执行管理器前端检查时，使用 `npm --prefix apps/codex-elves-manager run check`。
