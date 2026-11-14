@@ -1560,6 +1560,65 @@ class SharedQueueHistoryTests(unittest.TestCase):
         for message in (None, "API diagnostics"):
             self.assertFalse(namespace["native_interruption"]({"type": "api-request-blob", "message": message}))
 
+    def tool_interruption_rows(self):
+        return [
+            {"type": "user", "uuid": "question", "message": {"content": "原问题"}},
+            {"type": "assistant", "uuid": "tool-call", "parentUuid": "question",
+             "message": {"id": "tool-response", "content": [
+                 {"type": "tool_use", "id": "denied-tool", "name": "Bash", "input": {}}]}},
+            {"type": "user", "uuid": "denial", "parentUuid": "tool-call", "promptId": "native-stop",
+             "toolDenialKind": "user-rejected", "sourceToolAssistantUUID": "tool-call",
+             "message": {"content": [{"type": "tool_result", "tool_use_id": "denied-tool",
+                                      "is_error": True, "content": "原生拒绝结果"}]}},
+            {"type": "user", "uuid": "tool-control", "parentUuid": "denial", "promptId": "native-stop",
+             "entrypoint": "cli", "message": {"role": "user", "content": [
+                 {"type": "text", "text": "[Request interrupted by user for tool use]"}]}},
+        ]
+
+    def test_native_tool_interruption_uses_denial_ancestry_without_rewriting_history_or_consuming_input(self):
+        marker = "[Request interrupted by user for tool use]"
+        rows = self.tool_interruption_rows()
+        native = self.read(rows, pending_text=marker)
+        control = native.messages[-1]
+        self.assertEqual(control["nativeToolInterruption"], {
+            "responseId": "tool-response", "toolUseId": "denied-tool", "toolResultId": "denial"})
+        self.assertNotIn("interruptedMessageId", control, "不能伪造原生未提供的字段")
+        self.assertFalse(namespace["real_user"](control))
+        self.assertFalse(control["nativeEditable"])
+        self.assertTrue(namespace["native_turn_finished"](native.messages))
+        self.assertEqual(native.clients, {})
+        self.assertEqual(len(native.pending), 1)
+        self.assertEqual(native.log_path.read_text(encoding="utf-8"),
+                         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
+        quoted = {"type": "user", "uuid": "literal", "parentUuid": "tool-control", "promptId": "human-input",
+                  "entrypoint": "cli", "message": {"content": [{"type": "text", "text": marker}]}}
+        with_quote = self.read(rows + [quoted], pending_text=marker)
+        self.assertTrue(namespace["real_user"](with_quote.messages[-1]))
+        self.assertEqual(with_quote.clients, {"literal": "web-client"})
+
+    def test_native_tool_interruption_preserves_identical_text_without_the_complete_native_denial_chain(self):
+        changes = [
+            (3, "promptId", "different-input"),
+            (3, "entrypoint", "other"),
+            (3, "parentUuid", "tool-call"),
+            (2, "toolDenialKind", "hook-denied"),
+            (2, "sourceToolAssistantUUID", "missing-call"),
+            (2, "promptId", None),
+        ]
+        for index, field, value in changes:
+            with self.subTest(field=field, value=value):
+                rows = self.tool_interruption_rows()
+                rows[index][field] = value
+                native = self.read(rows)
+                self.assertTrue(namespace["real_user"](native.messages[-1]))
+                self.assertNotIn("nativeToolInterruption", native.messages[-1])
+        for field, value in (("is_error", False), ("tool_use_id", "different-tool")):
+            rows = self.tool_interruption_rows()
+            rows[2]["message"]["content"][0][field] = value
+            native = self.read(rows)
+            self.assertTrue(namespace["real_user"](native.messages[-1]))
+            self.assertNotIn("nativeToolInterruption", native.messages[-1])
+
     def queued(self, **changes):
         return {"type": "attachment", "uuid": "absorbed-user",
                 "timestamp": "2026-11-11T07:03:46Z", "renderedRole": "system",

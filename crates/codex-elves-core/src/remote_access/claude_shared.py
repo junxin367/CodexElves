@@ -179,11 +179,53 @@ def native_interruption(row):
     if not isinstance(message, dict):
         return False
     content = message.get("content")
-    return (isinstance(row.get("interruptedMessageId"), str)
-            and bool(row["interruptedMessageId"].strip()) and isinstance(content, list)
+    reference = row.get("interruptedMessageId")
+    if not isinstance(reference, str) or not reference.strip():
+        interruption = row.get("nativeToolInterruption")
+        reference = interruption.get("responseId") if isinstance(interruption, dict) else None
+    return (isinstance(reference, str) and bool(reference.strip()) and isinstance(content, list)
             and len(content) == 1 and isinstance(content[0], dict) and content[0].get("type") == "text"
             and isinstance(content[0].get("text"), str) and content[0]["text"].strip() in
             ("[Request interrupted by user]", "[Request interrupted by user for tool use]"))
+
+
+def native_tool_interruption(row, previous):
+    # 2.1.325 实际历史中，工具拒绝后的中断没有 interruptedMessageId。
+    # 用户要求历史也显示“已停止”：必须核对同一 promptId、拒绝结果父节点及原始工具调用，不能只按英文隐藏。
+    message = row.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if (row.get("type") != "user" or row.get("entrypoint") != "cli"
+            or not isinstance(content, list) or len(content) != 1
+            or not isinstance(content[0], dict) or content[0].get("type") != "text"
+            or content[0].get("text") != "[Request interrupted by user for tool use]"):
+        return None
+    prompt = row.get("promptId")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return None
+    parent = next((value for value in reversed(previous) if value.get("uuid") == row.get("parentUuid")), None)
+    if (not parent or parent.get("type") != "user" or parent.get("promptId") != prompt
+            or parent.get("toolDenialKind") != "user-rejected"):
+        return None
+    result = parent.get("message", {}).get("content")
+    if (not isinstance(result, list) or len(result) != 1 or not isinstance(result[0], dict)
+            or result[0].get("type") != "tool_result" or result[0].get("is_error") is not True):
+        return None
+    tool = result[0].get("tool_use_id")
+    assistant_id = parent.get("sourceToolAssistantUUID")
+    if not isinstance(tool, str) or not tool.strip() or not isinstance(assistant_id, str) or not assistant_id:
+        return None
+    assistant = next((value for value in reversed(previous) if value.get("uuid") == assistant_id), None)
+    if not assistant or assistant.get("type") != "assistant":
+        return None
+    response = assistant.get("message", {})
+    blocks = response.get("content")
+    reference = response.get("id")
+    if (not isinstance(reference, str) or not reference.strip() or not isinstance(blocks, list)
+            or not any(isinstance(part, dict) and part.get("type") == "tool_use"
+                       and part.get("id") == tool for part in blocks)):
+        return None
+    # 只增加只读投影的关联证据，不补写原生 JSONL，也不伪造原本缺失的 interruptedMessageId。
+    return {"responseId": reference, "toolUseId": tool, "toolResultId": parent["uuid"]}
 
 
 def native_setting_source(row):
@@ -926,10 +968,13 @@ class NativeSubagents:
                     continue
                 if row["type"] in ("user", "assistant") and not isinstance(row.get("message"), dict):
                     continue
+                interruption = native_tool_interruption(row, cached["rows"])
                 value = {key: row[key] for key in ("type", "uuid", "parentUuid", "timestamp", "subtype",
                          "agentId", "parentAgentId", "isMeta", "isApiErrorMessage", "isCompactSummary",
                          "isVisibleInTranscriptOnly", "apiBlockIndex", "requestedModel", "effort",
-                         "interruptedMessageId") if key in row}
+                         "interruptedMessageId", "promptId", "toolDenialKind", "sourceToolAssistantUUID") if key in row}
+                if interruption:
+                    value["nativeToolInterruption"] = interruption
                 value["timestampMs"] = native_time(row.get("timestamp"))
                 if (agent_id and row["type"] == "user"
                         and isinstance(row.get("origin"), dict) and row["origin"].get("kind") == "coordinator"):
@@ -3206,6 +3251,9 @@ class NativeSession:
                 task_notification = native_task_notification(row) or self.scheduled_prompt(row)
                 if task_notification:
                     row["nativeTaskNotification"] = task_notification
+                interruption = native_tool_interruption(row, self.all_messages)
+                if interruption:
+                    row["nativeToolInterruption"] = interruption
                 native_editable = row.get("type") == "user" and real_user(row)
                 if row.get("type") == "attachment":
                     attachment = row.get("attachment", {})
@@ -3273,7 +3321,8 @@ class NativeSession:
                 row["nativeEditable"] = native_editable and not row.get("nativeControlCommand")
                 row["nativeOffset"] = position
                 self.all_messages.append({key: row[key] for key in
-                                      ("type", "uuid", "parentUuid", "interruptedMessageId", "timestamp", "message", "subtype", "isMeta",
+                                      ("type", "uuid", "parentUuid", "interruptedMessageId", "nativeToolInterruption",
+                                       "toolDenialKind", "sourceToolAssistantUUID", "timestamp", "message", "subtype", "isMeta",
                                        "isCompactSummary", "isVisibleInTranscriptOnly",
                                        "isApiErrorMessage", "isUnmetered", "apiBlockIndex", "durationMs",
                                        "requestedModel", "effort", "filename", "remote_upload",

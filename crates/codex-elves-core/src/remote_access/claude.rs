@@ -3492,12 +3492,18 @@ fn restore_shared_images(previous: &[Value], current: &mut [Value]) {
 
 fn native_interruption(row: &Value) -> Option<(&str, &str)> {
     // 用户要求只修正经原生元数据确认的中断，不能误删用户引用或仅文字相同的消息。
+    // 工具中断可能缺少直接回复 ID；连接端必须先核对同一原生 prompt、工具拒绝结果及调用链再提供关联。
     if row["type"] != "user" {
         return None;
     }
     let response = row["interruptedMessageId"]
         .as_str()
-        .filter(|id| !id.trim().is_empty())?;
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| {
+            row["nativeToolInterruption"]["responseId"]
+                .as_str()
+                .filter(|id| !id.trim().is_empty())
+        })?;
     let content = row["message"]["content"].as_array()?;
     if content.len() != 1 || content[0]["type"] != "text" {
         return None;
@@ -6249,6 +6255,49 @@ mod tests {
     }
 
     #[test]
+    fn manual_compaction_boundary_before_summary_stays_after_the_completed_reply() {
+        // Claude 2.1.325 实际日志把 compact_boundary 写在 compact summary 前；
+        // 压缩是在上一轮已返回后手动触发时，状态行必须仍落在该回复之后。
+        let frame = json!({"messages":[
+            {"type":"user","uuid":"question","timestamp":"2026-11-14T05:40:00Z",
+                "message":{"content":"问题"}},
+            {"type":"assistant","uuid":"reply","timestamp":"2026-11-14T05:40:10Z",
+                "message":{"id":"reply","content":[{"type":"text","text":"已完成回复"}]}},
+            {"type":"system","uuid":"turn-end","subtype":"turn_duration",
+                "timestamp":"2026-11-14T05:40:11Z"},
+            {"type":"system","uuid":"boundary","subtype":"compact_boundary",
+                "timestamp":"2026-11-14T05:46:27Z",
+                "compactMetadata":{"trigger":"manual","preTokens":1000,"postTokens":100}},
+            {"type":"user","uuid":"summary","parentUuid":"boundary","isCompactSummary":true,
+                "isVisibleInTranscriptOnly":true,
+                "message":{"content":"This session is being continued from a previous conversation."}},
+            {"type":"user","uuid":"compact-command","parentUuid":"summary","nativeControlCommand":{"name":"compact","value":""},
+                "message":{"content":"<command-name>/compact</command-name><command-message>compact</command-message><command-args></command-args>"}},
+            {"type":"user","uuid":"compact-output","parentUuid":"compact-command",
+                "nativeControlOutput":{"name":"compact","value":""},
+                "message":{"content":"<local-command-stdout>Compacted</local-command-stdout>"}}
+        ],"native_control":{"compactionEvents":[
+            {"id":"operation","status":"completed","nativeId":"boundary","source":"manual",
+                "afterUuid":"turn-end","completedAtMs":2000}
+        ]}});
+        let turns = project_shared_history(&frame, "manual-after-reply");
+        assert_eq!(turns.len(), 1);
+        let items = turns[0]["items"].as_array().unwrap();
+        let reply = items
+            .iter()
+            .position(|item| item["type"] == "agentMessage" && item["text"] == "已完成回复")
+            .unwrap_or_else(|| panic!("reply missing: {items:?}"));
+        let compact = items
+            .iter()
+            .position(|item| item["type"] == "contextCompaction")
+            .unwrap();
+        assert!(
+            reply < compact,
+            "手动压缩状态行必须在已完成回复之后：{items:?}"
+        );
+    }
+
+    #[test]
     fn native_controls_compaction_usage_is_replaced_only_by_a_later_real_request() {
         let request = json!({"type":"assistant","message":{"id":"before","model":"fixture",
             "usage":{"input_tokens":10000,"output_tokens":12}}});
@@ -6569,6 +6618,47 @@ mod tests {
         assert_eq!(turns[0]["status"], "interrupted");
         assert_eq!(turns[1]["status"], "inProgress");
         assert!(turns[1]["nativeInterruption"].is_null());
+    }
+
+    #[test]
+    fn shared_native_interruption_uses_verified_tool_ancestry_and_retires_the_old_bubble() {
+        let frame = json!({"native_status":{"tempo":"idle"},"clients":{},"messages":[
+            {"type":"user","uuid":"question","message":{"content":"原问题"}},
+            {"type":"assistant","uuid":"tool-call","message":{"id":"tool-response","content":[
+                {"type":"tool_use","id":"denied-tool","name":"Bash","input":{}}]}},
+            {"type":"user","uuid":"denial","parentUuid":"tool-call","message":{"content":[
+                {"type":"tool_result","tool_use_id":"denied-tool","is_error":true,"content":"原生拒绝结果"}]}},
+            {"type":"user","uuid":"tool-control","parentUuid":"denial","timestampMs":20,
+                "nativeToolInterruption":{"responseId":"tool-response","toolUseId":"denied-tool","toolResultId":"denial"},
+                "message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}},
+            {"type":"system","subtype":"turn_duration","timestampMs":30}
+        ]});
+        let mut legacy = frame.clone();
+        legacy["messages"][3]
+            .as_object_mut()
+            .unwrap()
+            .remove("nativeToolInterruption");
+        let previous = project_shared_history(&legacy, "old");
+        assert_eq!(previous.len(), 2);
+        let current = project_shared_history(&frame, "new");
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0]["status"], "interrupted");
+        assert_eq!(current[0]["nativeInterruption"]["id"], "tool-control");
+        assert_eq!(
+            current[0]["nativeInterruption"]["responseId"],
+            "tool-response"
+        );
+        assert_eq!(
+            current[0]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["type"] == "userMessage")
+                .count(),
+            1
+        );
+        let baseline = repaired_history_baseline(&previous, &frame).unwrap();
+        assert!(!shared_history_has_new_content(&baseline, &current));
     }
 
     #[test]
