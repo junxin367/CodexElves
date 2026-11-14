@@ -10875,18 +10875,9 @@ function toolResultParts(item) {
   return parts;
 }
 function renderGenericToolOutput(body, item) {
+  // 用户要求回退 Claude 特殊渲染：工具结果、文件修改和工作分组保持原有通用展示。
   body.classList.add("generic-tool-body");
-  const claude = item.source === "claude";
-  const parts = toolResultParts(item).map(part => claude && part.type === "text" ? { ...part, text: claudeToolText(part.text) } : part);
-  // Claude Read 结果带行号前缀时按行号栏显示（样式同侧边变更面板的上下文行），不再把「1→」前缀混在正文里。
-  const numbered = claude && ["Read", "NotebookRead"].includes(item.tool) && parts.length === 1 && parts[0].type === "text"
-    ? claudeNumberedLines(parts[0].text) : null;
-  if (numbered) {
-    const frame = element("div", "claude-file-diff");
-    renderClaudeRows(frame, numbered);
-    body.append(frame);
-    return;
-  }
+  const parts = toolResultParts(item);
   if (!parts.length) {
     body.append(element("p", "tool-result-empty muted",
       ["inProgress", "running"].includes(item.status) ? "工具尚未返回结果。" : "此工具没有返回可展示的内容。"));
@@ -10930,10 +10921,6 @@ function renderToolOutput(details, item) {
   // Claude 网页搜索带原生结果正文，展开时按通用结果显示，不输出条目 JSON。
   if (["mcpToolCall", "dynamicToolCall"].includes(item.type) || item.type === "webSearch" && item.source === "claude") {
     renderGenericToolOutput(body, item); details.append(body); return;
-  }
-  // Claude 文件修改展开后显示带行号、红绿底色的差异（原版在会话中直接显示差异），Codex 文件修改仍为原始补丁文本。
-  if (item.type === "fileChange" && item.source === "claude") {
-    renderClaudeFileChangeOutput(body, item); details.append(body); return;
   }
   const content = item.type === "commandExecution" ? item.aggregatedOutput || item.output || ""
     : item.type === "reasoning" ? [item.summary, item.content].flatMap(value => Array.isArray(value) ? value.map(entry => entry.text || entry) : [value || ""]).join("\n\n")
@@ -11278,166 +11265,6 @@ function claudeToolPresentation(item) {
     default: return { icon: "tools", description: readableToolName(item) };
   }
 }
-// 用户 2026-11-14 澄清：Claude 会话最终仍按 Codex 原有渲染效果展示（活动折叠、工作分组、工具卡片），只增加 Claude 的
-// 区别和特殊效果：Bash 保持命令卡片（用户满意其图标）；Read、Edit 等不能再混成同一种卡片；Claude 任务清单要显示。
-// 以下函数只作用于 source 为 claude 的条目或 Claude 会话，Codex 会话不受影响；样式见 style.css 的 .claude-* 规则。
-
-// 原生错误结果外层的 <tool_use_error> 标签不显示，与 Claude 原版一致。
-function claudeToolText(value) {
-  return String(value ?? "").replace(/<\/?tool_use_error>/g, "");
-}
-// Read 结果每行带「行号 + 制表符或 →」前缀（Claude Code 2.1.325 实测）。只解析开头连续的编号行，
-// 其后只允许原生追加的 <system-reminder> 提示；出现其他内容时返回 null，按原文显示，避免截掉正文。
-function claudeNumberedLines(text) {
-  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n"), rows = [];
-  let index = 0;
-  for (; index < lines.length; index++) {
-    const match = /^\s*(\d+)(?:\t|→)(.*)$/.exec(lines[index]);
-    if (!match) break;
-    rows.push({ kind: "context", number: Number(match[1]), text: match[2] });
-  }
-  const rest = lines.slice(index).join("\n").trim();
-  return rows.length && (!rest || /^<system-reminder>[\s\S]*<\/system-reminder>$/.test(rest)) ? rows : null;
-}
-// 读取、搜索类工具在卡片右侧显示结果摘要，对应原版「Read 20 lines」「Found 2 files」；格式无法确认时不显示。
-function claudeToolResultLabel(item) {
-  if (item?.source !== "claude" || item.type !== "dynamicToolCall" || item.status !== "completed") return "";
-  const text = claudeToolText(toolResultParts(item).filter(part => part.type === "text").map(part => part.text).join("\n"));
-  const lines = text.replace(/\r\n?/g, "\n").split("\n").map(line => line.trim()).filter(Boolean);
-  switch (String(item.tool || "")) {
-    case "Read": case "NotebookRead": {
-      const rows = claudeNumberedLines(text);
-      return rows ? `${rows.length} 行` : "";
-    }
-    case "Grep": {
-      if (/^No (?:files|matches) found/i.test(lines[0] || "")) return "没有匹配";
-      const found = /^Found (\d+) (file|line|match|occurrence)/i.exec(lines[0] || "");
-      if (!found) return "";
-      const unit = { file: "个文件", line: "行", match: "处匹配", occurrence: "处匹配" }[found[2].toLowerCase()];
-      return `找到 ${found[1]} ${unit}`;
-    }
-    case "Glob":
-      if (/^No files found/i.test(lines[0] || "")) return "没有找到文件";
-      return lines.length ? `${lines.filter(line => !line.startsWith("(")).length} 个文件` : "";
-    default: return "";
-  }
-}
-// Claude 原版不显示成功的 ToolSearch（加载延迟工具）和 TaskList/TaskGet（任务已合入轮次末尾的任务清单）；失败时仍显示原生报错。
-function claudeHiddenTool(item) {
-  return item?.source === "claude" && item.type === "dynamicToolCall" && item.status === "completed"
-    && ["ToolSearch", "TaskList", "TaskGet"].includes(String(item.tool || ""));
-}
-// Claude 原版按命令内容归类 Bash：grep/find 等计为搜索，ls/tree 计为列目录，cat/head 等计为读取，其余为运行命令。
-// 跳过开头的 cd 段与环境变量赋值，管道和 && 只看第一段实际命令。
-function claudeCommandKind(command) {
-  const segments = String(command || "").trim().split(/\s*(?:&&|\|\||;|\|)\s*/)
-    .map(part => part.split(/\s+/).filter(word => word && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)))
-    .filter(words => words.length && words[0] !== "cd");
-  const name = String(segments[0]?.[0] || "").split("/").at(-1);
-  if (["grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "fd", "locate"].includes(name)) return "search";
-  if (["ls", "tree", "exa", "eza", "du"].includes(name)) return "list";
-  if (["cat", "head", "tail", "less", "more", "bat", "nl", "wc"].includes(name)) return "read";
-  return "run";
-}
-// Claude 工作分组标题按动作计数，对应原版「Searched for 3 patterns, read 1 file, ran 2 shell commands」，
-// 取代 Codex 的「浏览了文件运行了命令」；顺序按首次出现，图标取第一类动作，失败数仍只放在分组说明里（与 Codex 一致）。
-// MCP 调用不在这里计数，仍由 workGroupSummary 按 Codex 原有写法显示「已使用 X 集成」。
-const claudeWorkWords = {
-  read: ["读取了", "个文件", "eye"], search: ["搜索了", "次", "search"], list: ["列出了", "个目录", "folderClosed"],
-  run: ["运行了", "条命令", "terminal"], edit: ["编辑了", "个文件", "fileChange"], fetch: ["读取了", "个网页", "globe"],
-  web: ["搜索了", "次网页", "globe"], tool: ["使用了", "个工具", "tools"]
-};
-function claudeWorkCategory(item) {
-  if (item?.type === "commandExecution") return skillReadInfo(item) ? "" : claudeCommandKind(commandText(item));
-  if (item?.type === "fileChange") return "edit";
-  if (item?.type === "webSearch") return "web";
-  if (item?.type !== "dynamicToolCall") return "";
-  return { Read: "read", NotebookRead: "read", Grep: "search", Glob: "search", LS: "list", WebFetch: "fetch" }[item.tool] || "tool";
-}
-function claudeWorkSummary(items) {
-  const counts = new Map(), paths = new Set();
-  for (const item of items) {
-    const category = claudeWorkCategory(item);
-    if (!category) continue;
-    counts.set(category, (counts.get(category) || 0) + 1);
-    if (category === "edit") for (const change of item.changes || []) if (change?.path) paths.add(editedFilePathKey(change.path));
-  }
-  if (counts.has("edit") && paths.size) counts.set("edit", paths.size);
-  const parts = [...counts].map(([category, count]) => `${claudeWorkWords[category][0]} ${count} ${claudeWorkWords[category][1]}`);
-  return { text: parts.join("，"), icon: counts.size ? claudeWorkWords[[...counts.keys()][0]][2] : "" };
-}
-// Claude 文件修改：全部为新建时显示「新建文件」，对应原版 Write；差异按侧边「变更」面板的规则编号（删除行用旧行号）。
-function claudeFileChangeCreated(item) {
-  const changes = (item?.changes || []).filter(Boolean);
-  return changes.length > 0 && changes.every(change => editedFileKind(change.kind) === "新增");
-}
-function claudeDiffRows(change) {
-  const diff = String(change?.diff || "").replace(/\r\n?/g, "\n");
-  const lines = diff.split("\n");
-  if (lines.at(-1) === "") lines.pop();
-  // 新建文件时原生给出完整正文而不是补丁：每行按新增行编号。
-  if (editedFileKind(change?.kind) === "新增" && !/^@@ /m.test(diff))
-    return lines.map((text, index) => ({ kind: "add", number: index + 1, text: `+${text}` }));
-  const rows = [];
-  let before = null, after = null;
-  for (const line of lines) {
-    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
-    if (hunk) { before = Number(hunk[1]); after = Number(hunk[2]); rows.push({ kind: "hunk", text: line }); }
-    else if (before !== null && line.startsWith("+")) rows.push({ kind: "add", number: after++, text: line });
-    else if (before !== null && line.startsWith("-")) rows.push({ kind: "delete", number: before++, text: line });
-    else if (before !== null && line.startsWith(" ")) { before++; rows.push({ kind: "context", number: after++, text: line }); }
-    else rows.push({ kind: "meta", text: line });
-  }
-  return rows;
-}
-function claudeFileChangeStats(item) {
-  let additions = 0, deletions = 0;
-  for (const change of item?.changes || []) for (const row of claudeDiffRows(change)) {
-    if (row.kind === "add") additions++;
-    else if (row.kind === "delete") deletions++;
-  }
-  return { additions, deletions };
-}
-// 行号栏与红绿底色复用侧边「变更」面板的 .session-tools-diff 行样式（Codex 原有效果）；默认自动换行，避免手机横向滚动。
-// 超过 400 行时分段显示，避免一次插入过多节点。
-function renderClaudeRows(host, rows) {
-  const block = element("div", "session-tools-diff session-tools-diff-wrap");
-  const digits = rows.reduce((width, row) => row.number == null ? width : Math.max(width, String(row.number).length), 2);
-  block.style.setProperty("--line-number-width", `${digits + 1.2}ch`);
-  let shown = 0;
-  const more = button("", "显示更多行", () => append(), "text-button claude-rows-more");
-  const append = () => {
-    for (const row of rows.slice(shown, shown + 400)) {
-      const line = element("div", `session-tools-diff-line ${row.kind}`);
-      if (row.number != null) line.append(element("span", "session-tools-line-number", String(row.number)));
-      line.append(element("code", "", row.text));
-      block.append(line);
-    }
-    shown = Math.min(rows.length, shown + 400);
-    more.hidden = shown >= rows.length;
-    more.textContent = `显示更多（还有 ${rows.length - shown} 行）`;
-  };
-  append();
-  host.append(block, more);
-}
-function renderClaudeFileChangeOutput(body, item) {
-  const changes = (item.changes || []).filter(change => change && (change.path || change.diff));
-  for (const change of changes) {
-    const frame = element("div", "claude-file-diff");
-    if (changes.length > 1) frame.append(element("div", "claude-file-diff-path", editedFileDisplayPath(change.path)));
-    const rows = claudeDiffRows(change);
-    if (rows.length) renderClaudeRows(frame, rows);
-    else frame.append(element("p", "tool-result-empty muted", "此次修改没有可显示的差异。"));
-    body.append(frame);
-  }
-  if (!changes.length) body.append(element("p", "tool-result-empty muted", "此次修改没有可显示的差异。"));
-}
-// Claude 任务清单（TaskCreate/TaskUpdate/TodoWrite 合成的 turn.plan）上方的统计行，对应原版「2 tasks (1 done, 1 in progress, 0 open)」。
-function claudePlanTitle(plan) {
-  const count = status => plan.filter(step => step.status === status).length;
-  return element("div", "turn-plan-title",
-    `任务清单 · ${plan.length} 个任务（${count("completed")} 个已完成，${count("inProgress")} 个进行中，${count("pending")} 个待办）`);
-}
 function genericToolPresentation(item) {
   if (item.source === "claude" && item.type === "dynamicToolCall") return claudeToolPresentation(item);
   const surfaces = [
@@ -11551,8 +11378,7 @@ function renderItem(item, previous, inActivity = false, running = false) {
     : item.type === "fileChange" ? (item.changes || []).map(change => String(change.path || "").split(/[\\/]/).at(-1)).join("、") : "";
   if (genericTool) {
     const presentation = genericToolPresentation(item);
-    // Claude 读取、搜索类工具成功时在状态位显示结果摘要（如「20 行」「找到 2 个文件」），Codex 工具不受影响。
-    const state = failed ? "失败" : interrupted ? "已中断" : unknown ? "状态未知" : active ? "" : claudeToolResultLabel(item);
+    const state = failed ? "失败" : interrupted ? "已中断" : unknown ? "状态未知" : "";
     const visual = icon(failed ? "warning" : interrupted ? "stop" : presentation.icon);
     const chevron = icon("chevron");
     chevron.classList.add("tool-chevron");
@@ -11567,22 +11393,12 @@ function renderItem(item, previous, inActivity = false, running = false) {
     const background = item.type === "commandExecution" && typeof item.backgroundStatus === "string" ? item.backgroundStatus : "";
     const backgroundLabel = { running: "已转入后台", completed: "后台已完成", failed: "后台失败",
       killed: "后台已停止", stopped: "后台已停止", unknown: "后台结果未知" }[background] || "";
-    // Claude 文件修改：全部为新建时标题为「新建文件」（对应原版 Write），完成后在文件名右侧显示「+N -M」，
-    // 计数样式复用已编辑文件卡片；Codex 文件修改保持原样。
-    const claudeChange = item.type === "fileChange" && item.source === "claude";
     const label = element("strong", "", item.type === "reasoning" ? active ? "正在思考" : unknown || failed || interrupted ? "思考" : "已完成思考"
-      : item.type === "commandExecution" ? active && !background ? "正在运行" : backgroundLabel || (unknown || failed || interrupted ? "执行命令" : "已运行")
-      : claudeChange && claudeFileChangeCreated(item) ? "新建文件" : titles[item.type] || item.type);
-    const stats = claudeChange && !active && !failed && !interrupted && !unknown ? claudeFileChangeStats(item) : null;
-    const counts = stats && stats.additions + stats.deletions ? element("span", "edited-files-counts") : null;
-    if (counts) {
-      counts.setAttribute("aria-label", `新增 ${stats.additions} 行，删除 ${stats.deletions} 行`);
-      counts.append(element("span", "diff-added", `+${stats.additions}`), element("span", "diff-deleted", `-${stats.deletions}`));
-    }
+      : item.type === "commandExecution" ? active && !background ? "正在运行" : backgroundLabel || (unknown || failed || interrupted ? "执行命令" : "已运行") : titles[item.type] || item.type);
     summary.append(!active && !failed && !interrupted && !unknown && ["commandExecution", "fileChange"].includes(item.type)
       ? icon(item.type === "commandExecution" ? "terminal" : "fileChange")
       : element("span", `tool-state${active ? " spinner" : ""}`, active ? "" : failed ? "!" : interrupted ? "■" : unknown ? "?" : "✓"),
-      label, element("span", "tool-description", name), ...(counts ? [counts] : []),
+      label, element("span", "tool-description", name),
       element("small", "muted", active && !background ? "进行中" : item.exitCode != null && item.exitCode !== 0 ? `退出码 ${item.exitCode}`
         : failed ? "失败" : interrupted ? "已中断" : unknown ? "状态未知" : ""));
     if (["commandExecution", "reasoning"].includes(item.type)) {
@@ -12171,9 +11987,6 @@ function workGroupSummary(items, running = false) {
   const integrations = names.length > 0 && !names.includes("浏览器");
   const edited = changes.length ? "编辑了多个文件" : "";
   let text = `${name ? `已使用 ${name}${integrations ? " 集成" : ""}` : ""}${explored ? "浏览了文件" : ""}${usedTools ? "使用了工具" : ""}${searches.length ? "搜索了网页" : ""}${edited}${commands.length ? "运行了命令" : ""}` || (reasoning.length ? "思考" : "已完成操作");
-  // Claude 分组标题按动作计数（claudeWorkSummary），图标取第一类动作；执行中仍沿用下方 Codex 的当前动作文字和图标。
-  const claudeWork = items.some(item => item.source === "claude") ? claudeWorkSummary(items) : null;
-  if (claudeWork?.text) text = [name ? `已使用 ${name}${integrations ? " 集成" : ""}` : "", claudeWork.text].filter(Boolean).join("，");
   let currentTool = null, thinking = false;
   if (running) {
     const current = items.at(-1);
@@ -12199,7 +12012,7 @@ function workGroupSummary(items, running = false) {
   ].filter(Boolean);
   return {
     text, thinking, description: counts.join("，"),
-    icon: currentTool?.icon || (!running && claudeWork?.icon) || (names.length === 1 && ["Chrome", "Edge"].includes(name) || !tools.length && searches.length
+    icon: currentTool?.icon || (names.length === 1 && ["Chrome", "Edge"].includes(name) || !tools.length && searches.length
       ? "globe" : tools.length ? "tools" : changes.length ? "fileChange" : "terminal")
   };
 }
@@ -12349,9 +12162,7 @@ function renderActivity(turn, work, running, collapsible, renderMessage, showSum
       thinking.setAttribute("role", "status");
       children.push(thinking);
     }
-    // Claude 成功的 ToolSearch、TaskList、TaskGet 不显示（claudeHiddenTool），与原版一致。
-    const visibleWork = work.filter(item => (!["agentMessage", "plan"].includes(item.type) || textContent(item).trim())
-      && !claudeHiddenTool(item));
+    const visibleWork = work.filter(item => !["agentMessage", "plan"].includes(item.type) || textContent(item).trim());
     const isCommandRecord = item => item.type === "commandExecution" ? !skillReadInfo(item)
       : ["fileChange", "mcpToolCall", "dynamicToolCall", "webSearch", "reasoning"].includes(item.type);
     for (let index = 0; index < visibleWork.length;) {
@@ -13505,6 +13316,12 @@ function historyGapIndex(turn) {
   while (index > 0 && transcriptEventTypes.has(items[index - 1].type) && !items[index - 1].remoteHistoryContext) index--;
   return index;
 }
+// 用户要求 Claude 和 Codex 都保留 TODO 统计标题；仅统计原生 turn.plan 的状态，随计划更新，不从正文推测任务。
+function renderTurnPlanTitle(plan) {
+  const count = status => plan.filter(step => step.status === status).length;
+  return element("div", "turn-plan-title",
+    `${plan.length} 个任务（${count("completed")} 个已完成，${count("inProgress")} 个进行中，${count("pending")} 个待办）`);
+}
 function renderMessages(keepScroll = true) {
   cancelAnimationFrame(messageFrame); messageFrame = null;
   const root = $("#messages");
@@ -13660,9 +13477,7 @@ function renderMessages(keepScroll = true) {
     if (turn.plan?.length) {
       const plan = element("ul", "turn-plan");
       for (const step of turn.plan) plan.append(element("li", step.status, `${step.status === "completed" ? "✓" : step.status === "inProgress" ? "◌" : "○"} ${step.step}`));
-      // Claude 任务清单沿用 Codex 清单样式，只在上方加原版的任务统计（claudePlanTitle）。
-      if (isClaude()) items.push(claudePlanTitle(turn.plan));
-      items.push(plan);
+      items.push(renderTurnPlanTitle(turn.plan), plan);
     }
     reconcileChildren(group, items);
     if (items.length) children.push(group);

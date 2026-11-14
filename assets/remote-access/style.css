@@ -671,6 +671,9 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .spinner{display:inline-block;width:12px;height:12px;border:1.5px solid var(--line);border-top-color:var(--muted);border-right-color:var(--muted);border-radius:50%;animation:thread-spin 1s linear infinite;flex-shrink:0}
 /* 用户要求文字左侧不闪烁：禁用高亮平铺并保留底色，循环首尾均让高亮带处于文字外。 */
 .working-label{background:linear-gradient(100deg,var(--muted) 25%,var(--text) 50%,var(--muted) 75%) var(--muted) no-repeat;background-size:240% 100%;background-position:150% 0;background-clip:text;-webkit-background-clip:text;color:transparent;animation:working-shimmer 2s linear infinite}
+/* Claude 与 Codex 共用任务统计标题，沿用任务清单字号、颜色与行高；标题和清单之间只保留 2px 间距。 */
+.turn-plan-title{margin:10px 0 2px;font-size:.85714rem;color:var(--muted);line-height:1.8}
+.turn-plan-title+.turn-plan{margin-top:0}
 .turn-plan{list-style:none;margin:10px 0;padding:0;font-size:.85714rem;color:var(--muted);line-height:1.8}
 .turn-plan>.inProgress{color:var(--text)}
 .turn-plan>.completed{text-decoration:line-through}
@@ -1653,13 +1656,3 @@ body{font-weight:var(--ui-font-weight,400)}
  .appearance-card .appearance-font input{min-width:48px;width:80px}
  .appearance-field-copy>small{font-size:.78571rem}
 }
-/* 用户 2026-11-14 澄清：Claude 会话按 Codex 原有渲染效果展示，只增加 Claude 的区别和特殊效果。
-   Claude 文件修改的差异与 Read 行号栏复用侧边「变更」面板的 .session-tools-diff 行样式（Codex 原有效果），
-   这里只补外框、圆角和最大高度；.turn-plan-title 是 Claude 任务清单上方的统计行。
-   修改时同步核对 app.js 的 renderClaudeRows、renderClaudeFileChangeOutput、claudePlanTitle。 */
-.claude-file-diff{margin:4px 0 8px;border:1px solid var(--line);border-radius:8px;overflow:hidden}
-.claude-file-diff-path{padding:5px 10px;border-bottom:1px solid var(--line);color:var(--muted);font-size:.78571rem;overflow-wrap:anywhere}
-.claude-file-diff>.session-tools-diff{max-height:min(360px,50vh);border:0}
-.claude-file-diff>.claude-rows-more{margin:4px 8px}
-.tool-item>summary>.edited-files-counts{flex-shrink:0}
-.turn-plan-title{margin:10px 0 -6px;color:var(--muted);font-size:.85714rem}
