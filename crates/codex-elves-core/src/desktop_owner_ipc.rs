@@ -187,7 +187,113 @@ fn lifecycle_status(value: &Value) -> Option<&str> {
         .or_else(|| value["status"].as_str())
 }
 
-fn normalize_owner_turn(mut turn: Value) -> Value {
+const UNIX_SECONDS_LIMIT: u64 = 100_000_000_000;
+
+fn timestamp_ms(value: &Value) -> Option<u64> {
+    if let Some(value) = value.as_u64().filter(|value| *value > 0) {
+        return Some(if value < UNIX_SECONDS_LIMIT {
+            value.saturating_mul(1000)
+        } else {
+            value
+        });
+    }
+    value
+        .as_f64()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| {
+            if value < UNIX_SECONDS_LIMIT as f64 {
+                (value * 1000.0).round() as u64
+            } else {
+                value.round() as u64
+            }
+        })
+}
+
+fn milliseconds_value(value: &Value) -> Option<u64> {
+    if let Some(value) = value.as_u64().filter(|value| *value > 0) {
+        return Some(value);
+    }
+    value
+        .as_f64()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value.round() as u64)
+}
+
+fn timestamp_by_id(value: &Value, id: &str) -> Option<u64> {
+    value.get(id).and_then(milliseconds_value)
+}
+
+fn turn_started_at_ms(turn: &Value) -> Option<u64> {
+    milliseconds_value(&turn["turnStartedAtMs"]).or_else(|| timestamp_ms(&turn["startedAt"]))
+}
+
+fn turn_completed_at_ms(turn: &Value) -> Option<u64> {
+    milliseconds_value(&turn["turnCompletedAtMs"]).or_else(|| timestamp_ms(&turn["completedAt"]))
+}
+
+fn project_message_timestamps(turn: &mut Value) {
+    let turn_started_at_ms = turn_started_at_ms(turn);
+    let turn_completed_at_ms = turn_completed_at_ms(turn);
+    let aeon_assistant_started_at_ms_by_id = turn["aeonAssistantMessageStartedAtMsById"].clone();
+    let assistant_started_at_ms_by_id = turn["assistantMessageStartedAtMsById"].clone();
+    let final_assistant_started_at_ms = milliseconds_value(&turn["finalAssistantStartedAtMs"]);
+    let Some(items) = turn["items"].as_array_mut() else {
+        return;
+    };
+    let first_user_id = items.iter().find_map(|item| {
+        matches!(
+            item["type"].as_str(),
+            Some("userMessage" | "steeringUserMessage")
+        )
+        .then(|| item["id"].as_str())
+        .flatten()
+        .map(str::to_owned)
+    });
+    let assistant_ids: Vec<String> = items
+        .iter()
+        .filter(|item| item["type"] == "agentMessage")
+        .filter_map(|item| item["id"].as_str().map(str::to_owned))
+        .collect();
+    let last_assistant_id = assistant_ids.last().cloned();
+
+    // 用户要求恢复 Codex 服务模式消息时间；只使用原生消息/轮次时间，不能用页面渲染时刻补造时间。
+    for item in items {
+        let item_type = item["type"].as_str();
+        let id = item["id"].as_str().unwrap_or_default();
+        let existing = milliseconds_value(&item["sentAtMs"])
+            .or_else(|| milliseconds_value(&item["messageMetadata"]["sentAtMs"]));
+        let sent_at_ms = match item_type {
+            Some("userMessage" | "steeringUserMessage") => existing
+                .or_else(|| milliseconds_value(&item["startedAtMs"]))
+                .or_else(|| {
+                    (first_user_id.as_deref() == Some(id))
+                        .then_some(turn_started_at_ms)
+                        .flatten()
+                }),
+            Some("agentMessage") if item["delivery"] != "async" => existing
+                .or_else(|| milliseconds_value(&item["startedAtMs"]))
+                .or_else(|| timestamp_by_id(&aeon_assistant_started_at_ms_by_id, id))
+                .or_else(|| timestamp_by_id(&assistant_started_at_ms_by_id, id))
+                .or_else(|| {
+                    (last_assistant_id.as_deref() == Some(id))
+                        .then_some(final_assistant_started_at_ms)
+                        .flatten()
+                })
+                // 部分服务版本只提供轮次结束时间；这是原生生命周期时间，仍优于隐藏消息时间。
+                .or_else(|| {
+                    (last_assistant_id.as_deref() == Some(id))
+                        .then_some(turn_completed_at_ms)
+                        .flatten()
+                }),
+            _ => None,
+        };
+        if let Some(sent_at_ms) = sent_at_ms {
+            item["sentAtMs"] = json!(sent_at_ms);
+        }
+    }
+}
+
+pub(crate) fn normalize_owner_turn(mut turn: Value) -> Value {
     let running = matches!(
         lifecycle_status(&turn["status"]),
         Some("inProgress" | "active" | "running")
@@ -243,6 +349,7 @@ fn normalize_owner_turn(mut turn: Value) -> Value {
         item["status"] = json!(status);
         item["remoteItemCompleted"] = json!(complete);
     }
+    project_message_timestamps(&mut turn);
     turn
 }
 
@@ -764,6 +871,46 @@ mod tests {
         assert_eq!(completed["items"][0]["status"], "completed");
         assert_eq!(completed["items"][0]["startedAtMs"], 1793490014982u64);
         assert_eq!(completed["items"][0]["completedAtMs"], 1793490029985u64);
+    }
+
+    #[test]
+    fn owner_message_timestamps_project_real_user_and_assistant_times() {
+        let projected = normalize_owner_turn(json!({
+            "turnId":"turn","status":"completed",
+            "turnStartedAtMs":1000,"turnCompletedAtMs":5000,
+            "assistantMessageStartedAtMsById":{"answer":3200},
+            "items":[
+                {"id":"user","type":"userMessage","content":[]},
+                {"id":"answer","type":"agentMessage","text":"完成"},
+                {"id":"async","type":"agentMessage","delivery":"async","text":"后台通知"}
+            ]
+        }));
+        assert_eq!(projected["items"][0]["sentAtMs"], 1000);
+        assert_eq!(projected["items"][1]["sentAtMs"], 3200);
+        assert!(projected["items"][2].get("sentAtMs").is_none());
+
+        let preserved = normalize_owner_turn(json!({
+            "turnId":"turn","status":"completed",
+            "turnStartedAtMs":1000,"turnCompletedAtMs":5000,
+            "finalAssistantStartedAtMs":3300,
+            "items":[
+                {"id":"user","type":"userMessage","sentAtMs":1500,"content":[]},
+                {"id":"answer","type":"agentMessage","startedAtMs":2800,"text":"完成"}
+            ]
+        }));
+        assert_eq!(preserved["items"][0]["sentAtMs"], 1500);
+        assert_eq!(preserved["items"][1]["sentAtMs"], 2800);
+
+        let final_fallback = normalize_owner_turn(json!({
+            "turnId":"turn","status":"completed",
+            "turnStartedAtMs":1000,"turnCompletedAtMs":5000,
+            "finalAssistantStartedAtMs":3300,
+            "items":[
+                {"id":"user","type":"userMessage","content":[]},
+                {"id":"answer","type":"agentMessage","text":"完成"}
+            ]
+        }));
+        assert_eq!(final_fallback["items"][1]["sentAtMs"], 3300);
     }
 
     #[test]

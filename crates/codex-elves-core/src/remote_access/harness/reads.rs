@@ -540,6 +540,7 @@ impl Harness {
             let turn_id = required(turn, "id")?.to_owned();
             pagination.insert(turn_id, items.pagination());
             items.apply_to(turn);
+            *turn = crate::desktop_owner_ipc::normalize_owner_turn(turn.clone());
         }
         let history = json!({"ok":true,"scope":"turns","threadId":id,"data":turns,
             "nextCursor":next_cursor,"backwardsCursor":page["backwardsCursor"],

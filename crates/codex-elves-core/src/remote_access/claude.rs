@@ -186,6 +186,70 @@ impl SharedPreview {
     }
 }
 
+fn claude_timestamp_ms(value: &Value) -> Option<u64> {
+    value.as_u64().filter(|value| *value > 0).or_else(|| {
+        value
+            .as_f64()
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .map(|value| value.round() as u64)
+    })
+}
+
+fn project_claude_message_timestamps(turn: &mut Value) {
+    let turn_started_at_ms = claude_timestamp_ms(&turn["turnStartedAtMs"])
+        .or_else(|| claude_timestamp_ms(&turn["startedAt"]));
+    let turn_completed_at_ms = claude_timestamp_ms(&turn["turnCompletedAtMs"])
+        .or_else(|| claude_timestamp_ms(&turn["completedAt"]));
+    let final_assistant_started_at_ms = claude_timestamp_ms(&turn["finalAssistantStartedAtMs"]);
+    let Some(items) = turn["items"].as_array_mut() else {
+        return;
+    };
+    let first_user_id = items.iter().find_map(|item| {
+        (item["type"] == "userMessage")
+            .then(|| item["id"].as_str())
+            .flatten()
+            .map(str::to_owned)
+    });
+    let assistant_ids: Vec<String> = items
+        .iter()
+        .filter(|item| item["type"] == "agentMessage")
+        .filter_map(|item| item["id"].as_str().map(str::to_owned))
+        .collect();
+    let last_assistant_id = assistant_ids.last().cloned();
+
+    // 用户要求 Claude 与 Codex 的消息操作栏统一显示真实时间；只复用原生记录时间，不使用网页渲染时刻。
+    for item in items {
+        let id = item["id"].as_str().unwrap_or_default();
+        let existing = claude_timestamp_ms(&item["sentAtMs"])
+            .or_else(|| claude_timestamp_ms(&item["messageMetadata"]["sentAtMs"]));
+        let sent_at_ms = match item["type"].as_str() {
+            Some("userMessage") => existing
+                .or_else(|| claude_timestamp_ms(&item["startedAtMs"]))
+                .or_else(|| {
+                    (first_user_id.as_deref() == Some(id))
+                        .then_some(turn_started_at_ms)
+                        .flatten()
+                }),
+            Some("agentMessage") if item["delivery"] != "async" => existing
+                .or_else(|| claude_timestamp_ms(&item["startedAtMs"]))
+                .or_else(|| {
+                    (last_assistant_id.as_deref() == Some(id))
+                        .then_some(final_assistant_started_at_ms)
+                        .flatten()
+                })
+                .or_else(|| {
+                    (last_assistant_id.as_deref() == Some(id))
+                        .then_some(turn_completed_at_ms)
+                        .flatten()
+                }),
+            _ => None,
+        };
+        if let Some(sent_at_ms) = sent_at_ms {
+            item["sentAtMs"] = json!(sent_at_ms);
+        }
+    }
+}
+
 fn shared_preview_basis(frame: &Value) -> Option<&str> {
     frame["preview_basis"]
         .as_str()
@@ -216,6 +280,7 @@ impl Conversation {
 
     fn displayed_turn(&self, turn: &Value) -> Value {
         let mut value = turn.clone();
+        project_claude_message_timestamps(&mut value);
         if let Some(fields) = value.as_object_mut() {
             fields.remove("_metricsRequests");
             fields.remove("_metricsVersion");
@@ -2285,10 +2350,12 @@ impl Claude {
                 }
             })
             .collect();
+        let started_at_ms = now_ms();
         let turn = json!({"id":turn_id,"status":"inProgress","itemsView":"full","itemsComplete":true,
             "_process":process.channel.generation,
-            "startedAt":now_ms(),"turnStartedAtMs":now_ms(),
-            "items":[{"type":"userMessage","id":user_id,"clientId":user_id,"content":view_content}]});
+            "startedAt":started_at_ms,"turnStartedAtMs":started_at_ms,
+            "items":[{"type":"userMessage","id":user_id,"clientId":user_id,
+                "content":view_content,"sentAtMs":started_at_ms}]});
         self.change(|saved| {
             let c = saved
                 .conversations
@@ -4368,7 +4435,7 @@ fn project_frame(turn: &mut Value, frame: &Value) -> Vec<Value> {
             if changes.iter().any(|changed| changed["id"] == id) {
                 id = format!("{message}-final-{index}");
             }
-            let item = match block["type"].as_str() {
+            let mut item = match block["type"].as_str() {
                 Some("text") => {
                     json!({"id":id,"type":"agentMessage","text":block["text"],"status":"completed"})
                 }
@@ -4385,6 +4452,9 @@ fn project_frame(turn: &mut Value, frame: &Value) -> Vec<Value> {
                 },
                 _ => continue,
             };
+            if item["type"] == "agentMessage" && frame["timestampMs"].is_number() {
+                item["sentAtMs"] = frame["timestampMs"].clone();
+            }
             // stream_event 的部分内容与最终 assistant 使用同一个原生消息 ID，避免回复重复。
             if let Some(old) = items.iter_mut().find(|i| i["id"] == item["id"]) {
                 *old = item.clone();
@@ -5137,6 +5207,33 @@ mod tests {
         assert_eq!(turn["items"].as_array().unwrap().len(), 2);
         assert_eq!(turn["items"][0]["text"], "你好 Claude");
         assert_eq!(turn["items"][1]["text"], "第二个独立正文块");
+    }
+
+    #[test]
+    fn claude_message_timestamps_project_for_user_and_assistant() {
+        let turns = project_shared_history(
+            &json!({"native_status":{"tempo":"idle"},"messages":[
+                {"type":"user","uuid":"user-1","timestampMs":1000,
+                    "message":{"content":"问题"}},
+                {"type":"assistant","uuid":"assistant-1","timestampMs":2000,
+                    "message":{"id":"reply-1","content":[{"type":"text","text":"回复"}]}},
+                {"type":"system","subtype":"turn_duration","timestampMs":3000}
+            ]}),
+            "timestamps",
+        );
+        assert_eq!(turns[0]["items"][0]["sentAtMs"], 1000);
+        assert_eq!(turns[0]["items"][1]["sentAtMs"], 2000);
+
+        let mut legacy = json!({
+            "id":"legacy","turnStartedAtMs":1000,"turnCompletedAtMs":3000,
+            "items":[
+                {"id":"user","type":"userMessage","content":[]},
+                {"id":"reply","type":"agentMessage","text":"回复"}
+            ]
+        });
+        project_claude_message_timestamps(&mut legacy);
+        assert_eq!(legacy["items"][0]["sentAtMs"], 1000);
+        assert_eq!(legacy["items"][1]["sentAtMs"], 3000);
     }
 
     #[test]

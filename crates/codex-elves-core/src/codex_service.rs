@@ -847,12 +847,18 @@ mod tests {
         let snapshot = json!({"turnHistory":{"kind":"canonical","history":{
             "isComplete":true,"entitiesByKey":{
                 "tail":{"turnId":"accepted-turn","status":"completed","turnStartedAtMs":1000,
+                    "turnCompletedAtMs":2000,
                     "params":{"clientUserMessageId":"stable-message"},
-                    "items":[{"type":"agentMessage","text":"done"}]}
+                    "items":[
+                        {"id":"input","type":"userMessage","content":[]},
+                        {"id":"answer","type":"agentMessage","text":"done"}
+                    ]}
             }
         }}});
         let history = owner_snapshot_history(&snapshot, "main").unwrap();
         assert_eq!(history["data"][0]["id"], "accepted-turn");
+        assert_eq!(history["data"][0]["items"][0]["sentAtMs"], 1000);
+        assert_eq!(history["data"][0]["items"][1]["sentAtMs"], 2000);
         assert_eq!(
             history["data"][0]["params"]["clientUserMessageId"],
             "stable-message"
