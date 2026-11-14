@@ -325,6 +325,13 @@ function updateComposerPermissions() {
   const control = $("#permission-button");
   if (!control) return;
   const display = currentThreadDisplay();
+  // 用户要求侧边继承创建时的主会话权限且不显示权限按钮；加载中也按关联视图隐藏，避免短暂闪出入口。
+  if (!creating && (relatedSessionView?.kind === "side" || display?.viewKind === "side" || display?.serviceSide === true)) {
+    control.hidden = true;
+    control.disabled = true;
+    control.dataset.saving = "false";
+    return;
+  }
   if (!creating && display?.permissionMode)
     rememberPermissionSelection(selectedId, display.permissionMode, display.permissionRevision || 0);
   const saved = permissionSelections.get(selectedId);
@@ -413,7 +420,7 @@ function updateComposerPermissions() {
 }
 async function changeComposerPermissions() {
   const control = $("#permission-button");
-  if (!control || control.disabled) return;
+  if (!control || control.hidden || control.disabled) return;
   const mode = control.value;
   if (creating) {
     storeDraft(draftKey(), { ...snapshotDraft(), permissionMode: mode });
@@ -425,6 +432,8 @@ async function changeComposerPermissions() {
   const id = selectedId, instanceId = activeInstanceId(), scope = privateInputScope(session);
   if (!id || permissionWrites.has(id)) return;
   const writing = { scope, mode };
+  let finishPermissionWrite, saved = false;
+  writing.completion = new Promise(resolve => { finishPermissionWrite = resolve; });
   permissionWrites.set(id, writing);
   updateComposer();
   try {
@@ -434,6 +443,7 @@ async function changeComposerPermissions() {
     if (result?.threadId !== id || result.permissionMode !== mode || result.instanceId !== instanceId)
       throw new Error("会话权限保存结果尚未确认，请重新读取会话后核对。");
     rememberPermissionSelection(id, mode, result.permissionRevision || 0);
+    saved = true;
     notice(result.appliesTo === "immediate" ? "会话权限已生效。"
       : result.permissionPending === true ? "权限选择已保存，等待原生可安全切换时生效；当前会话可继续使用。"
       : "已保存，仅本会话的后续新轮次使用所选权限。");
@@ -441,6 +451,7 @@ async function changeComposerPermissions() {
     if (scope === privateInputScope(session)) notice(error.message, true);
   } finally {
     if (permissionWrites.get(id) === writing) permissionWrites.delete(id);
+    finishPermissionWrite(saved);
     if (scope === privateInputScope(session) && selectedId === id) updateComposer();
   }
 }
@@ -3843,13 +3854,25 @@ async function runRelatedOperation(action, item = null) {
     await resolveRelatedOperation(existing, { allowSelection: true });
     return;
   }
+  let creationSettings = {};
+  if (action === "createSideThread") {
+    // 与 App 等待主会话设置保存的行为一致；权限失败或等待期间切换会话/授权时不能继承旧值创建。
+    const writing = permissionWrites.get(parentThreadId);
+    if (writing?.scope === scope && !await writing.completion) return;
+    if (selectedId !== parentThreadId || thread?.id !== parentThreadId || relatedSessionView
+        || record.selectionToken !== selectionToken || scope !== privateInputScope(session)
+        || !connected || threadReadOnly(parentThreadId) || relatedThreadOperations.has(key)) return;
+    // 创建时冻结当前模型和深度，包括下拉菜单已选但尚未发送的值；不写回主会话或新建会话默认值。
+    const model = currentModelId();
+    if (model) creationSettings = { model, reasoningEffort: currentEffort() || null };
+  }
   relatedThreadOperations.set(key, record);
   try { persistRelatedOperations(true); }
   catch (error) { relatedThreadOperations.delete(key); throw error; }
   updateComposer();
   if (action === "createSideThread") showSideCreation(record);
   try {
-    const payload = action === "createSideThread" ? { threadId: parentThreadId }
+    const payload = action === "createSideThread" ? { threadId: parentThreadId, ...creationSettings }
       : { threadId: item.id, parentThreadId };
     const result = await mutate(action, payload, { receiptId: record.id });
     await finishRelatedOperation(record, result, { allowSelection: true });

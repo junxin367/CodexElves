@@ -107,6 +107,10 @@ PC 从侧边会话、文件或变更标签打开图片及视频时，使用主�
 
 侧边列表来自当前服务内存中的父子登记。通过 `thread/fork` 创建 `ephemeral=true` 分支，继承父会话上下文和工作目录，正文只展示创建后的输入与输出。临时侧边不能再创建下一层侧边，也不进入普通主会话列表。
 
+创建时追加侧边专用开发者指令，并通过 `thread/inject_items` 在继承历史之后写入任务边界；只有边界初始化成功才登记为可发送会话。主会话历史只供参考，侧边不继续其中的任务、不操作子代理；工作区修改和跨会话发送需要边界后的用户明确授权。内部边界不进入正文，初始化失败不降级、不重复注入，并尝试释放本次分支；释放结果未知时保留待核对状态。
+
+模型与思考深度取创建时主会话的当前选择，权限保存尚未完成时先等待。侧边独立保留继承的原生权限，编辑区隐藏权限选择按钮，服务端拒绝侧边权限修改；主会话之后的权限变化不改写已有侧边。原生返回的自定义批准策略、沙盒限制和命名权限配置保持原样，不折算成更宽松的预设。
+
 加号要求已选有效主会话、当前连接可用、可写、服务声明侧边能力，且没有同一主会话尚待确认的创建请求。PC 在右侧标签显示创建状态，手机和 Android 使用可返回的整页。关闭等待页只取消自动打开，不撤销已提交创建；迟到成功登记到原主会话。
 
 PC 快捷键保持 Windows/Linux 的 `Ctrl+Alt+S` 和 macOS 的 `⌘⌥S`，与菜单使用相同权限和防重规则。按键长按、输入法组合和 AltGr 不触发创建。
@@ -245,7 +249,7 @@ Git 项目以当前 worktree 根目录为边界；非 Git 项目以会话实际�
 | `POST /api/workspace/file` | `threadId` 或 `projectId`、`path`，可选 `ifRevision` | 文件 `kind/size/text` 或 `mime/dataUrl`，及 `truncated/revision` |
 | `GET /api/workspace/view/<threadId>/<path>` | 已有会话和项目内路径 | 经授权的原始文件响应；HTML 使用隔离策略，响应不缓存 |
 | `POST /api/read/relatedThreads` | 主会话 `threadId` | `subagents/completedSubagents/completedSubagentCount/sideThreads/canCreateSideThread` 及子智能体读取完整性状态 |
-| `POST /api/action/createSideThread` | 主会话 `threadId`，稳定 `Idempotency-Key` | 操作回执；成功结果包含新 `threadId/parentThreadId`，可包含首屏 `thread` |
+| `POST /api/action/createSideThread` | 主会话 `threadId`、可选 `model/reasoningEffort`，稳定 `Idempotency-Key`；权限由服务端继承 | 操作回执；成功结果包含新 `threadId/parentThreadId`，可包含首屏 `thread` |
 | `POST /api/action/closeSideThread` | 侧边 `threadId/parentThreadId`，稳定 `Idempotency-Key` | 操作回执；成功结果为同一会话及 `closed=true` |
 | `GET /api/receipts/<id>` | 原操作 ID | 查询 `pending/completed/failed/unknown`，不重复执行原操作 |
 | `GET /api/browser/tunnel` | 当前设备授权及合法的浏览器转发协议消息 | WebSocket 转发电脑网络，不是任意会话操作或磁盘路径读取接口 |

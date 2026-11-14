@@ -1140,6 +1140,10 @@ impl RemoteAccessController {
             if claude::Claude::is_subagent_id(id) {
                 return Err(ApiError::new(403, "子智能体仅支持只读查看").into());
             }
+            // 用户要求侧边继承主会话权限且没有独立切换入口；接口同样禁止保存侧边权限覆盖。
+            if self.harness.known_side(id).await {
+                return Err(ApiError::new(409, "侧边会话沿用创建时继承的主会话权限").into());
+            }
             // 只确认原会话身份，不恢复执行；实例来自服务端会话，不能由客户端改投环境。
             let context = self
                 .call_backend("workspaceContext", payload.clone(), authorization)
@@ -1167,7 +1171,10 @@ impl RemoteAccessController {
             self.publish_event(json!({"method":"thread/settings/updated","params":result}));
             return Ok(result);
         }
-        if matches!(action, "send" | "setGoal" | "editMessage" | "steerQueued") {
+        if matches!(
+            action,
+            "send" | "setGoal" | "editMessage" | "steerQueued" | "createSideThread"
+        ) {
             if let Some(selection) = match payload["threadId"].as_str() {
                 Some(id) if claude::Claude::owns_id(id) => {
                     self.claude.permission_selection(id).await?
@@ -1200,7 +1207,9 @@ impl RemoteAccessController {
             permissions::validate_mode(backend, mode)?;
             // 覆盖值由服务器重新解析，不能信任客户端提供的任意批准策略或文件目录。
             payload.as_object_mut().unwrap().remove("permissionConfig");
-            if backend == "codex" && action != "create" && payload["permissionMode"] == "configured"
+            if backend == "codex"
+                && !matches!(action, "create" | "createSideThread")
+                && payload["permissionMode"] == "configured"
             {
                 payload["permissionConfig"] = self.harness.configured_permissions().await?;
             }
@@ -1270,6 +1279,7 @@ impl RemoteAccessController {
         if let Some(id) = detail_id
             && let Some(selection) = self.permissions.get(&id).await
             && value["thread"].is_object()
+            && value["thread"]["serviceSide"] != true
         {
             value["thread"]["permissionMode"] = json!(selection.mode);
             value["thread"]["permissionRevision"] = json!(selection.revision);
@@ -3619,16 +3629,36 @@ fn validate_related_threads_payload(action: &str, payload: &Value) -> Result<(),
         .as_object()
         .ok_or_else(|| ApiError::new(400, "关联会话参数无效"))?;
     let close = action == "closeSideThread";
-    if object.len() != if close { 2 } else { 1 }
-        || object
-            .keys()
-            .any(|key| key != "threadId" && !(close && key == "parentThreadId"))
+    let create = action == "createSideThread";
+    if close && object.len() != 2
+        || object.keys().any(|key| {
+            key != "threadId"
+                && !(close && key == "parentThreadId"
+                    || create && matches!(key.as_str(), "model" | "reasoningEffort"))
+        })
         || notification_thread_id(&payload["threadId"]).is_none()
         || close
             && (notification_thread_id(&payload["parentThreadId"]).is_none()
                 || payload["threadId"] == payload["parentThreadId"])
     {
         return Err(ApiError::new(400, "关联会话标识无效"));
+    }
+    // 用户要求继承模型与深度；创建入口只新增这两项选择，权限仍从父会话读取。
+    // 模型名限制为 256 个 UTF-8 字节，避免误把大段文本当作模型 ID；与 app.js 的创建请求字段同步核对。
+    if create
+        && (object.get("model").is_some_and(|model| {
+            model.as_str().is_none_or(|value| {
+                value.trim().is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+            })
+        }) || object.get("reasoningEffort").is_some_and(|effort| {
+            !effort.is_null()
+                && !matches!(
+                    effort.as_str(),
+                    Some("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max")
+                )
+        }))
+    {
+        return Err(ApiError::new(400, "侧边会话的模型或思考深度选择无效"));
     }
     Ok(())
 }
@@ -6225,7 +6255,7 @@ mod tests {
         let script = directory.path().join("engine.cjs");
         std::fs::write(&script,r#"
 const fs=require('node:fs'),readline=require('node:readline'),crypto=require('node:crypto');
-const threads=new Map(),goals=new Map();let approval=null,related={rows:[],loaded:[]};
+const threads=new Map(),goals=new Map(),modelContexts=new Map();let approval=null,related={rows:[],loaded:[]};
 const output=v=>process.stdout.write(JSON.stringify(v)+'\n');
 const event=(method,params)=>output({method,params});
 const logTurn=(t,type,turn)=>{if(t?.path)fs.appendFileSync(t.path,JSON.stringify({
@@ -6235,6 +6265,19 @@ const pageRows=(rows,p,prefix)=>{
   const start=p.cursor?Number(String(p.cursor).slice(prefix.length+1)):0,limit=p.limit||100;
   const end=Math.min(start+limit,ordered.length);
   return {data:ordered.slice(start,end),nextCursor:end<ordered.length?`${prefix}:${end}`:null};
+};
+const permissionSnapshot=(p,base={})=>{
+  const mode=p.sandbox||(p.permissions===':read-only'?'read-only':p.permissions===':danger-full-access'?'danger-full-access':null);
+  const config=p.config||{};
+  const sandbox=p.sandboxPolicy||(mode==='read-only'?{type:'readOnly'}:mode==='danger-full-access'?{type:'dangerFullAccess'}
+    :mode==='workspace-write'?{type:'workspaceWrite',writableRoots:config['sandbox_workspace_write.writable_roots']||[p.cwd||__dirname],
+      networkAccess:config['sandbox_workspace_write.network_access']||false,
+      excludeTmpdirEnvVar:config['sandbox_workspace_write.exclude_tmpdir_env_var']||false,
+      excludeSlashTmp:config['sandbox_workspace_write.exclude_slash_tmp']||false}:base.sandbox||{type:'readOnly'});
+  return {approvalPolicy:p.approvalPolicy??base.approvalPolicy??'on-request',
+    approvalsReviewer:p.approvalsReviewer??base.approvalsReviewer??'user',sandbox,
+    activePermissionProfile:p.permissions?{id:p.permissions}:mode||p.sandboxPolicy?null:base.activePermissionProfile??null,
+    runtimeWorkspaceRoots:p.runtimeWorkspaceRoots??base.runtimeWorkspaceRoots??[p.cwd||__dirname]};
 };
 const finish=(id,status='completed')=>{
   const t=threads.get(id),turn=t?.turns.at(-1);if(!turn)return;
@@ -6250,6 +6293,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   const p=q.params||{},pinPath=__dirname+'/native-pins.json';
   const fastPolicyPath=__dirname+'/fast-policy.json';
   const fastPolicy=fs.existsSync(fastPolicyPath)?JSON.parse(fs.readFileSync(fastPolicyPath,'utf8')):{};
+  const sidePolicyPath=__dirname+'/side-policy.json';
+  const sidePolicy=fs.existsSync(sidePolicyPath)?JSON.parse(fs.readFileSync(sidePolicyPath,'utf8')):{};
  const nativePins=fs.existsSync(pinPath)?JSON.parse(fs.readFileSync(pinPath,'utf8')):null;
  const pinnedSection='01984de2-8f74-7c91-a3b2-5c5e937cf318';
  const t=threads.get(p.threadId)||nativePins?.rows?.find(row=>row.id===p.threadId)||related.rows.find(row=>row.id===p.threadId);let result={};
@@ -6292,6 +6337,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  case 'thread/start':{
    const id=crypto.randomUUID();const thread={id,cwd:p.cwd,name:'隔离会话',ephemeral:false,threadSource:'user',source:'appServer',
      projectId:p.projectId,status:{type:'idle'},turns:[],createdAt:1,updatedAt:1,path:__dirname+'/'+id+'.jsonl'};
+   modelContexts.set(id,{items:[],developerInstructions:p.developerInstructions||'',model:p.model||'gpt-6.1-sol',
+     reasoningEffort:p.config?.model_reasoning_effort||'high',permissions:permissionSnapshot(p)});
    threads.set(id,thread);result={thread,model:'gpt-6.1-sol',reasoningEffort:'high',cwd:p.cwd};
    event('thread/started',{thread});break;
  }
@@ -6299,12 +6346,25 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    if(!t||t.ephemeral){output({id:q.id,error:{code:-32600,message:'invalid fork parent'}});return;}
    const id=crypto.randomUUID(),thread={...t,id,ephemeral:true,path:null,forkedFromId:p.threadId,
      parentThreadId:null,turns:[],status:{type:'idle'}};
-   threads.set(id,thread);result={thread,model:'gpt-6.1-sol',reasoningEffort:'high',cwd:t.cwd};
+   // fork 的界面轮次可以为空，但模型历史必须保留父上下文，避免测试漏掉主任务被继续执行的问题。
+   const inherited=modelContexts.get(p.threadId)||{items:[],developerInstructions:''};
+   const permissions={...permissionSnapshot(p,inherited.permissions),...sidePolicy.forkPermissions};
+   const model=p.model??inherited.model??'gpt-6.1-sol',reasoningEffort=p.config?.model_reasoning_effort??inherited.reasoningEffort??'high';
+   modelContexts.set(id,{...inherited,items:[...inherited.items],developerInstructions:p.developerInstructions??inherited.developerInstructions,
+     model,reasoningEffort,permissions});
+   threads.set(id,thread);result={thread,model,reasoningEffort,cwd:t.cwd,...permissions};
    event('thread/started',{thread});break;
  }
+ case 'thread/inject_items':{
+   if(!t){output({id:q.id,error:{code:-32600,message:'unknown thread'}});return;}
+   if(!sidePolicy.boundaryError||sidePolicy.acceptBoundaryBeforeError)modelContexts.get(p.threadId).items.push(...p.items);
+   if(sidePolicy.boundaryError){output({id:q.id,error:{code:sidePolicy.boundaryError,message:'side boundary fixture failure'}});return;}
+   break;
+ }
  case 'thread/unsubscribe':
+   if(t?.ephemeral&&sidePolicy.unsubscribeError){output({id:q.id,error:{code:sidePolicy.unsubscribeError,message:'side unsubscribe fixture failure'}});return;}
    if(!t){result={status:'notLoaded'};break;}
-   threads.delete(p.threadId);event('thread/closed',{threadId:p.threadId});result={status:'unsubscribed'};break;
+   threads.delete(p.threadId);modelContexts.delete(p.threadId);event('thread/closed',{threadId:p.threadId});result={status:'unsubscribed'};break;
  case 'thread/read': if(!t){output({id:q.id,error:{code:-32600,message:'unknown thread'}});return;}
    if(nativePins?.confirmFailure&&nativePins.moved){output({id:q.id,error:{code:-32000,message:'confirmation failed'}});return;}
    if(t.ephemeral&&p.includeTurns&&related.snapshotError){output({id:q.id,error:related.snapshotError});return;}
@@ -6336,6 +6396,13 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  }
  case 'thread/goal/clear':goals.delete(p.threadId);event('thread/goal/cleared',{threadId:p.threadId});break;
  case 'turn/start':{
+   const context=modelContexts.get(p.threadId);
+   if(context){
+     context.model=p.model??context.model;context.reasoningEffort=p.effort??context.reasoningEffort;
+     context.permissions=permissionSnapshot(p,context.permissions);
+     context.items.push({type:'message',role:'user',content:p.input.map(item=>item.type==='text'?{type:'input_text',text:item.text}:item)});
+     fs.appendFileSync(__dirname+'/model-inputs.jsonl',JSON.stringify({threadId:p.threadId,...context})+'\n');
+   }
    const turn={id:crypto.randomUUID(),status:'inProgress',items:[{id:crypto.randomUUID(),type:'userMessage',content:p.input,clientUserMessageId:p.clientUserMessageId}]};
    t.turns.push(turn);t.status={type:'active'};logTurn(t,'task_started',turn);
    event('turn/started',{threadId:p.threadId,turn});result={turn};
@@ -6368,6 +6435,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  case 'configRequirements/read':result=fastPolicy.requirementsMalformed?{requirements:'unknown'}:fastPolicy.requirementsUnknown?{}:
    {requirements:fastPolicy.requirementsDenied?{featureRequirements:{fast_mode:false}}:null};break;
  case 'config/read':result={config:{model:'gpt-6.1-sol',model_reasoning_effort:'high',model_provider:fastPolicy.provider||'test',
+   developer_instructions:sidePolicy.developerInstructions??null,
    approval_policy:fastPolicy.approvalPolicy||'on-request',sandbox_mode:fastPolicy.sandboxMode||'workspace-write',
    sandbox_workspace_write:{writable_roots:[],network_access:false},
    features:{fast_mode:fastPolicy.configFast!==false},service_tier:fastPolicy.defaultTier||null}};break;
@@ -8234,6 +8302,437 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 .is_ok()
         );
         controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_service_side_boundary_separates_active_parent_history_from_new_instructions() {
+        let (directory, authorization) = harness_fixture().await;
+        std::fs::write(
+            directory.path().join("side-policy.json"),
+            serde_json::to_vec(&json!({
+                "developerInstructions":"Keep the configured project instruction."
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let controller = &authorization.controller;
+        let main = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"wait parent-only active task"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let parent = main["threadId"].as_str().unwrap();
+        let created = controller
+            .call_authorized(
+                "createSideThread",
+                json!({"threadId":parent}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        let requests = harness_engine_requests(directory.path());
+        let fork_index = requests
+            .iter()
+            .position(|request| request["method"] == "thread/fork")
+            .unwrap();
+        let instructions = requests[fork_index]["params"]["developerInstructions"]
+            .as_str()
+            .unwrap();
+        assert!(instructions.starts_with("Keep the configured project instruction."));
+        assert!(instructions.contains("reference context only"));
+        assert!(instructions.contains("Do not continue, execute, or complete"));
+        assert!(instructions.contains("Do not interact with existing or new sub-agents"));
+        assert!(
+            instructions
+                .contains("unless the user explicitly requests that mutation after the boundary")
+        );
+        let inject_index = requests
+            .iter()
+            .position(|request| {
+                request["method"] == "thread/inject_items" && request["params"]["threadId"] == id
+            })
+            .unwrap();
+        assert!(fork_index < inject_index);
+        let boundary = &requests[inject_index]["params"]["items"][0];
+        assert_eq!(boundary["role"], "user");
+        assert_eq!(boundary["content"][0]["type"], "input_text");
+        let boundary_text = boundary["content"][0]["text"].as_str().unwrap();
+        assert!(boundary_text.starts_with("Side conversation boundary."));
+        assert!(boundary_text.contains(&json!({"threadId":parent}).to_string()));
+        assert!(
+            !requests.iter().any(|request| {
+                request["params"]["threadId"] == id && request["method"] == "turn/start"
+            }),
+            "边界注入不能自行启动侧边任务"
+        );
+        assert_eq!(
+            controller
+                .call_authorized("history", json!({"threadId":id}), &authorization)
+                .await
+                .unwrap()["data"],
+            json!([]),
+            "边界消息只进入模型上下文，不进入聊天正文"
+        );
+        controller
+            .call_authorized(
+                "send",
+                json!({"threadId":id,"prompt":"wait side-only new question","clientUserMessageId":"side-boundary-message"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let contexts: Vec<Value> =
+            std::fs::read_to_string(directory.path().join("model-inputs.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+        let context = contexts
+            .iter()
+            .find(|value| value["threadId"] == id)
+            .unwrap();
+        assert_eq!(context["developerInstructions"], instructions);
+        let texts: Vec<_> = context["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["content"][0]["text"].as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "wait parent-only active task",
+                boundary_text,
+                "wait side-only new question"
+            ],
+            "父任务必须仍在边界前，侧边新要求必须位于边界后"
+        );
+        let requests = harness_engine_requests(directory.path());
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request["method"] == "thread/inject_items")
+                .count(),
+            1,
+            "发送不会再次插入边界，避免把已有侧边要求变成历史参考"
+        );
+        assert!(!requests.iter().any(|request| {
+            request["params"]["threadId"] == parent
+                && matches!(
+                    request["method"].as_str(),
+                    Some("turn/steer" | "turn/interrupt")
+                )
+        }));
+        let history = controller
+            .call_authorized("history", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap()
+            .to_string();
+        assert!(history.contains("side-only new question"));
+        assert!(!history.contains("parent-only active task"));
+        assert!(!history.contains("Side conversation boundary."));
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_service_side_inherits_selected_model_effort_and_parent_permissions() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let main = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"wait parent","model":"parent-model",
+                    "reasoningEffort":"high","permissionMode":"guardian-approvals"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let parent = main["threadId"].as_str().unwrap();
+        let created = controller
+            .call_authorized(
+                "createSideThread",
+                json!({"threadId":parent,"model":"parent-selected","reasoningEffort":"xhigh"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let id = created["threadId"].as_str().unwrap();
+        assert_eq!(created["thread"]["model"], "parent-selected");
+        assert_eq!(created["thread"]["reasoningEffort"], "xhigh");
+        assert_eq!(created["thread"]["permissionMode"], "guardian-approvals");
+        assert_eq!(
+            created["thread"]["capabilities"]["sessionPermissions"],
+            false
+        );
+        let calls = harness_engine_requests(directory.path());
+        let fork = calls
+            .iter()
+            .find(|call| call["method"] == "thread/fork")
+            .unwrap();
+        assert_eq!(fork["params"]["model"], "parent-selected");
+        assert_eq!(fork["params"]["config"]["model_reasoning_effort"], "xhigh");
+        assert_eq!(fork["params"]["config"]["thread_unload_delay_secs"], 0);
+        assert_eq!(fork["params"]["approvalPolicy"], "on-request");
+        assert_eq!(fork["params"]["approvalsReviewer"], "auto_review");
+        assert_eq!(fork["params"]["sandbox"], "workspace-write");
+        assert_eq!(
+            fork["params"]["config"]["sandbox_workspace_write.writable_roots"],
+            json!([created["thread"]["cwd"]])
+        );
+        controller
+            .call_authorized(
+                "setPermissions",
+                json!({"threadId":parent,"permissionMode":"full-access"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        controller
+            .call_authorized(
+                "send",
+                json!({"threadId":id,"prompt":"wait first side","clientUserMessageId":"inherited-permissions",
+                    "permissionMode":"full-access"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let second = controller
+            .call_authorized(
+                "createSideThread",
+                json!({"threadId":parent,"model":"second-selected","reasoningEffort":"low"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let second_id = second["threadId"].as_str().unwrap();
+        controller
+            .call_authorized(
+                "send",
+                json!({"threadId":second_id,"prompt":"wait second side","clientUserMessageId":"second-permissions",
+                    "permissionMode":"read-only"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let calls = harness_engine_requests(directory.path());
+        let first_turn = calls
+            .iter()
+            .find(|call| call["method"] == "turn/start" && call["params"]["threadId"] == id)
+            .unwrap();
+        assert_eq!(first_turn["params"]["approvalPolicy"], "on-request");
+        assert_eq!(first_turn["params"]["approvalsReviewer"], "auto_review");
+        assert_eq!(
+            first_turn["params"]["sandboxPolicy"]["type"],
+            "workspaceWrite"
+        );
+        let second_turn = calls
+            .iter()
+            .find(|call| call["method"] == "turn/start" && call["params"]["threadId"] == second_id)
+            .unwrap();
+        assert_eq!(second["thread"]["model"], "second-selected");
+        assert_eq!(second["thread"]["reasoningEffort"], "low");
+        assert_eq!(second_turn["params"]["approvalPolicy"], "never");
+        assert_eq!(
+            second_turn["params"]["sandboxPolicy"]["type"],
+            "dangerFullAccess"
+        );
+        let failure = controller
+            .call_authorized(
+                "setPermissions",
+                json!({"threadId":id,"permissionMode":"full-access"}),
+                &authorization,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failure.downcast_ref::<ApiError>().unwrap().code, 409);
+        assert!(controller.permissions.get(id).await.is_none());
+        assert_eq!(
+            controller
+                .call_authorized("thread", json!({"threadId":id}), &authorization)
+                .await
+                .unwrap()["thread"]["permissionMode"],
+            "guardian-approvals",
+            "父会话后续改变权限不能覆盖已有侧边"
+        );
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_service_side_preserves_native_profiles_and_custom_permission_boundaries() {
+        for named in [false, true] {
+            let (directory, authorization) = harness_fixture().await;
+            let sandbox = json!({"type":"workspaceWrite","writableRoots":[directory.path().join("scoped")],
+                "networkAccess":false,"excludeTmpdirEnvVar":true,"excludeSlashTmp":true});
+            let approval = json!({"reject":{"sandbox_approval":true,"rules":true}});
+            std::fs::write(
+                directory.path().join("side-policy.json"),
+                serde_json::to_vec(&json!({"forkPermissions":{
+                    "approvalPolicy":approval,"approvalsReviewer":"user","sandbox":sandbox,
+                    "activePermissionProfile":named.then(|| json!({"id":"fixture-restricted-profile"})),
+                    "runtimeWorkspaceRoots":[directory.path().join("scoped")]
+                }}))
+                .unwrap(),
+            )
+            .unwrap();
+            let controller = &authorization.controller;
+            let main = controller
+                .call_authorized(
+                    "create",
+                    json!({"projectId":"project-a","prompt":"wait parent"}),
+                    &authorization,
+                )
+                .await
+                .unwrap();
+            let created = controller
+                .call_authorized(
+                    "createSideThread",
+                    json!({"threadId":main["threadId"]}),
+                    &authorization,
+                )
+                .await
+                .unwrap();
+            let id = created["threadId"].as_str().unwrap();
+            controller
+                .call_authorized("send", json!({"threadId":id,"prompt":"wait side","clientUserMessageId":"profile-side"}), &authorization)
+                .await
+                .unwrap();
+            let calls = harness_engine_requests(directory.path());
+            let turn = &calls
+                .iter()
+                .find(|call| call["method"] == "turn/start" && call["params"]["threadId"] == id)
+                .unwrap()["params"];
+            assert_eq!(turn["approvalPolicy"], approval);
+            assert_eq!(
+                turn["runtimeWorkspaceRoots"],
+                json!([directory.path().join("scoped")])
+            );
+            if named {
+                assert_eq!(turn["permissions"], "fixture-restricted-profile");
+                assert!(
+                    turn.get("sandboxPolicy").is_none(),
+                    "配置 ID 与沙盒覆盖不能同时发送"
+                );
+            } else {
+                assert_eq!(
+                    turn["sandboxPolicy"], sandbox,
+                    "不能扩大目录、网络或临时目录权限"
+                );
+                assert!(turn.get("permissions").is_none());
+            }
+            controller.harness.release().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn harness_service_side_boundary_failure_never_opens_or_replays_an_unisolated_fork() {
+        for (policy, outcome_unknown, inject) in [
+            (json!({"boundaryError":-32601}), false, true),
+            (
+                json!({"boundaryError":-32603,"acceptBoundaryBeforeError":true}),
+                false,
+                true,
+            ),
+            (
+                json!({"boundaryError":-32603,"acceptBoundaryBeforeError":true,"unsubscribeError":-32603}),
+                true,
+                true,
+            ),
+            (json!({"forkPermissions":{"sandbox":null}}), false, false),
+        ] {
+            let (directory, authorization) = harness_fixture().await;
+            std::fs::write(
+                directory.path().join("side-policy.json"),
+                serde_json::to_vec(&policy).unwrap(),
+            )
+            .unwrap();
+            let controller = &authorization.controller;
+            let main = controller
+                .call_authorized(
+                    "create",
+                    json!({"projectId":"project-a","prompt":"wait parent-only active task"}),
+                    &authorization,
+                )
+                .await
+                .unwrap();
+            let parent = main["threadId"].as_str().unwrap();
+            let failure = controller
+                .call_authorized(
+                    "createSideThread",
+                    json!({"threadId":parent}),
+                    &authorization,
+                )
+                .await
+                .unwrap_err();
+            let failure = failure.downcast_ref::<ApiError>().unwrap();
+            assert_eq!(failure.code, 503);
+            assert_eq!(failure.outcome_unknown, outcome_unknown);
+            assert!(failure.message.contains("侧边会话初始化失败"));
+            let requests = harness_engine_requests(directory.path());
+            let writes: Vec<_> = requests
+                .iter()
+                .filter(|request| {
+                    matches!(
+                        request["method"].as_str(),
+                        Some("thread/fork" | "thread/inject_items" | "thread/unsubscribe")
+                    )
+                })
+                .collect();
+            assert_eq!(
+                writes.len(),
+                if inject { 3 } else { 2 },
+                "创建、注入和释放均只能派发一次"
+            );
+            assert_eq!(writes[0]["method"], "thread/fork");
+            assert_eq!(
+                writes[1]["method"],
+                if inject {
+                    "thread/inject_items"
+                } else {
+                    "thread/unsubscribe"
+                }
+            );
+            assert_eq!(writes.last().unwrap()["method"], "thread/unsubscribe");
+            let id = writes[1]["params"]["threadId"].as_str().unwrap();
+            assert_ne!(id, parent);
+            assert_eq!(writes.last().unwrap()["params"]["threadId"], id);
+            assert_eq!(
+                controller
+                    .call_authorized("relatedThreads", json!({"threadId":parent}), &authorization)
+                    .await
+                    .unwrap()["sideThreads"],
+                json!([])
+            );
+            assert!(
+                controller
+                    .call_authorized(
+                        "send",
+                        json!({"threadId":id,"prompt":"must not run","clientUserMessageId":"unisolated-side"}),
+                        &authorization,
+                    )
+                    .await
+                    .is_err(),
+                "即使关闭结果未知，也不能绕过登记向未初始化侧边发送"
+            );
+            assert!(
+                !harness_engine_requests(directory.path())
+                    .iter()
+                    .any(|request| {
+                        request["params"]["threadId"] == id && request["method"] == "turn/start"
+                    })
+            );
+            assert!(
+                controller
+                    .call_authorized("thread", json!({"threadId":parent}), &authorization)
+                    .await
+                    .is_ok(),
+                "边界失败不能关闭父会话"
+            );
+            controller.harness.release().await;
+        }
     }
 
     #[tokio::test]
@@ -10268,6 +10767,35 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 );
             }
         }
+        for effort in [json!("xhigh"), Value::Null] {
+            assert!(validate_related_threads_payload(
+                "createSideThread",
+                &json!({"threadId":"parent-1","model":"selected-model","reasoningEffort":effort})
+            ).is_ok());
+        }
+        for payload in [
+            json!({"threadId":"parent-1","model":""}),
+            json!({"threadId":"parent-1","model":"bad\nmodel"}),
+            json!({"threadId":"parent-1","model":42}),
+            json!({"threadId":"parent-1","reasoningEffort":"unbounded"}),
+            json!({"threadId":"parent-1","permissionMode":"full-access"}),
+            json!({"threadId":"parent-1","permissionConfig":{"approvalPolicy":"never"}}),
+            json!({"threadId":"parent-1","permissions":":danger-full-access"}),
+        ] {
+            assert_eq!(
+                validate_related_threads_payload("createSideThread", &payload)
+                    .unwrap_err()
+                    .code,
+                400
+            );
+        }
+        assert!(
+            validate_related_threads_payload(
+                "relatedThreads",
+                &json!({"threadId":"parent-1","model":"selected-model"})
+            )
+            .is_err()
+        );
         assert!(
             validate_related_threads_payload(
                 "closeSideThread",

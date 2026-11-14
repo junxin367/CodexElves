@@ -3099,7 +3099,7 @@ function composerPermissionHarness({ creating = false, backend = "codex" } = {})
   const button = { dataset: {}, value: "", disabled: false,
     setAttribute: (name, value) => attributes.set(name, String(value)) };
   const context = nodeVm.createContext({ nativeConnectionVersion: 1,
-    creating, selectedId: "thread-a", thread: { id: "thread-a" },
+    creating, selectedId: "thread-a", thread: { id: "thread-a" }, relatedSessionView: null,
     session: { device: { id: "device-a" }, capabilities: { sessionPermissions: true } },
     draftPermissionChoices: new Map(), permissionSelections: new Map(), permissionWrites: new Map(),
     instancePermissionCatalogs: new Map(backend === "claude" ? [["claude:wsl:fixture", {
@@ -3150,6 +3150,51 @@ test("编辑区权限覆盖只保存当前会话，迟到版本不能覆盖新�
   h.context.selectedId = "thread-a"; h.context.thread = { id: "thread-a" };
   h.context.updateComposerPermissions();
   assert.equal(h.button.value, "configured", "新授权不能使用旧授权的会话选择");
+});
+
+test("PC 侧边与手机关联侧边均隐藏权限入口，回主会话恢复且隐藏入口不能提交", async () => {
+  for (const view of [
+    { thread: { id: "thread-a", serviceSide: true } },
+    { thread: { id: "thread-a", viewKind: "side" } },
+    { thread: { id: "thread-a" }, relatedSessionView: { kind: "side", threadId: "thread-a" } },
+  ]) {
+    const h = composerPermissionHarness();
+    h.context.thread = view.thread;
+    h.context.relatedSessionView = view.relatedSessionView || null;
+    h.context.updateComposerPermissions();
+    assert.equal(h.button.hidden, true);
+    assert.equal(h.button.disabled, true);
+    assert.equal(h.button.dataset.saving, "false");
+    h.button.value = "full-access";
+    await h.context.changeComposerPermissions();
+    assert.equal(h.requests.length, 0);
+    h.context.thread = { id: "thread-a", permissionMode: "auto" };
+    h.context.relatedSessionView = null;
+    h.context.updateComposerPermissions();
+    assert.equal(h.button.hidden, false);
+    assert.equal(h.button.disabled, false);
+    assert.equal(h.button.value, "auto");
+  }
+});
+
+test("主会话权限保存提供完成结果，供侧边创建等待成功且失败不误报已保存", async () => {
+  for (const fail of [false, true]) {
+    const h = composerPermissionHarness();
+    let finish;
+    h.context.mutate = () => new Promise((resolve, reject) => {
+      finish = () => fail ? reject(new Error("权限保存失败"))
+        : resolve({ threadId: "thread-a", instanceId: "codex:local", permissionMode: "auto", permissionRevision: 2 });
+    });
+    h.context.updateComposerPermissions();
+    h.button.value = "auto";
+    const change = h.context.changeComposerPermissions();
+    const writing = h.context.permissionWrites.get("thread-a");
+    assert.ok(writing.completion);
+    finish();
+    await change;
+    assert.equal(await writing.completion, !fail);
+    assert.equal(h.context.permissionWrites.size, 0);
+  }
 });
 
 test("Codex 权限只展示 App 四项，旧只读归类展示但不修改已保存权限", () => {
@@ -7033,7 +7078,7 @@ function sideExpiryHarness(response) {
   const device = { id: "side-device", createdAtMs: 1 }, scope = JSON.stringify([device.id, device.createdAtMs]);
   const view = { scope, threadId: id, parentThreadId: parent, kind: "side", name: "已保留的侧边会话" };
   Object.assign(context, {
-    session: { device, readOnly: false }, selectedId: id, selectionVersion: 1,
+    session: { device, readOnly: false, capabilities: { serviceSideThreads: true } }, selectedId: id, selectionVersion: 1,
     relatedSessionView: view, relatedThreadViews: new Map([[id, view]]), relatedNavigationOwner: "local-page",
     thread: { id, title: "已保留的侧边会话", viewKind: "side", parentThreadId: parent, ephemeral: true },
     turns: new Map([["saved-turn", { id: "saved-turn", items: [{ type: "agentMessage", text: "保留已有消息" }] }]]),
@@ -7059,7 +7104,7 @@ function sideExpiryHarness(response) {
     recoveryErrorSilenceDepth: 0, syncHistoryButtons() {},
     retireNativeSideThreads() { assert.fail("读取失败不得伪造原生关闭事件"); },
     setTimeout(callback, delay) {
-      if (delay !== 10000) return setTimeout(callback, delay);
+      if (delay !== 2000) return setTimeout(callback, delay);
       const token = {}; scheduled.set(token, callback); return token;
     },
     clearTimeout(token) { if (!scheduled.delete(token)) clearTimeout(token); },
@@ -7237,27 +7282,25 @@ test("静默恢复时最新历史读取失败仍保留待补读状态，不误�
   h.assertRetained();
 });
 
-test("父会话的中文或英文缺失失败不误判当前侧边，准确侧边缺失才显示过期提示", async () => {
-  for (const parentFails of [true, false]) {
+test("服务侧边定时补读只读当前侧边，准确中文或英文缺失才显示过期提示", async () => {
+  for (const available of [true, false]) {
     for (const language of ["zh", "en"]) {
       let fixture;
       fixture = sideExpiryHarness(({ path, options }) => {
         const body = JSON.parse(options.body);
-        if (path === "/api/read/thread") return parentFails
+        assert.equal(path, "/api/read/thread");
+        assert.equal(body.threadId, fixture.id);
+        return available
           ? jsonResponse({ thread: { id: body.threadId } })
           : jsonResponse({ ok: false, message: language === "zh" ? "会话已关闭或不存在"
             : `thread not loaded: ${fixture.id}` }, 404);
-        assert.equal(path, "/api/read/relatedThreads");
-        return parentFails ? jsonResponse({ ok: false, message: language === "zh" ? "会话已关闭或不存在"
-          : `unknown thread: ${fixture.parent}` }, 404)
-          : jsonResponse({ sideThreads: [{ id: fixture.id }] });
       });
       await fixture.runCheck();
-      assert.equal(fixture.context.sideThreadExpired(), !parentFails);
-      assert.equal(fixture.nodes.get("#composer").hidden, !parentFails);
-      assert.equal(fixture.nodes.get("#side-thread-expired").hidden, parentFails);
+      assert.equal(fixture.context.sideThreadExpired(), !available);
+      assert.equal(fixture.nodes.get("#composer").hidden, !available);
+      assert.equal(fixture.nodes.get("#side-thread-expired").hidden, available);
       fixture.assertRetained();
-      assert.equal(fixture.calls.length, 2, "轮询只保留原有两项读取");
+      assert.equal(fixture.calls.length, 1, "服务侧边不借父会话的关联列表判断自身存活");
     }
   }
 });
@@ -9043,7 +9086,8 @@ function sideCreationNavigationHarness() {
   };
   const context = {
     URLSearchParams, AbortController, clearTimeout, setTimeout, location, history, sessionStorage: disk,
-    session: { device: { id: "creation-device", createdAtMs: 1 }, capabilities: {} },
+    session: { device: { id: "creation-device", createdAtMs: 1 },
+      capabilities: { serviceSideThreads: true, serviceSubagents: true } },
     selectedId: "main", selectionVersion: 1, selectionToken: "main-selection",
     relatedSelectionVersion: 0, relatedNavigationOwner: "current-page", relatedSessionView: null,
     relatedThreadViews: new Map(), relatedThreadOperations: new Map(), sideCreationView: null,
@@ -9051,6 +9095,8 @@ function sideCreationNavigationHarness() {
     relatedOperationStorageKey: "operations", relatedReturnTranscript: null, relatedExitTransition: null,
     relatedBackPending: false, relatedMenuTimer: null, relatedOperationTimer: null,
     thread: { id: "main", title: "M" }, creating: false, connected: true, pageLeaving: false,
+    permissionWrites: new Map(), currentModelId: () => context.thread?.model || "",
+    currentEffort: () => context.thread?.reasoningEffort || "",
     historyInitialized: true, historyLoading: false, selectionController: null, historyCursor: null,
     threadRequest: null, historyRequest: null, threadReadFailed: false, latestHistoryReadFailed: false,
     transcriptChecking: false, historyError: "", sideThreadExpired: () => false,
@@ -9154,6 +9200,53 @@ test("PC 打开侧边会话交给右侧标签，不切换主会话、不改主�
   assert.equal(h.prompt.value, beforeDraft);
   assert.equal(JSON.stringify(h.historyEntries), beforeHistory);
   assert.equal(ready, true);
+});
+
+test("新建侧边继承主会话尚未发送的模型和深度，创建后更改主会话不改原请求", async () => {
+  const h = sideCreationNavigationHarness();
+  h.context.thread.model = "parent-previous";
+  h.context.thread.reasoningEffort = "low";
+  h.context.currentModelId = () => "parent-selected";
+  h.context.currentEffort = () => "xhigh";
+  const operation = h.start();
+  assert.equal(h.writes.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.writes[0].payload)),
+    { threadId: "main", model: "parent-selected", reasoningEffort: "xhigh" });
+  h.context.currentModelId = () => "later-choice";
+  await h.complete(operation);
+  assert.equal(h.writes.length, 1);
+  assert.equal(h.writes[0].payload.model, "parent-selected");
+});
+
+test("侧边创建等待主会话权限保存，重复点击仅创建一次", async () => {
+  const h = sideCreationNavigationHarness();
+  let finish;
+  h.context.permissionWrites.set("main", { scope: h.context.privateInputScope(h.context.session),
+    completion: new Promise(resolve => { finish = resolve; }) });
+  const first = h.start(), second = h.start();
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.context.relatedThreadOperations.size, 0);
+  finish(true);
+  await h.settle();
+  assert.equal(h.writes.length, 1);
+  await h.complete(first);
+  await second.promise;
+});
+
+test("等待主会话权限期间保存失败或切换会话，不创建侧边也不留待核对操作", async () => {
+  for (const changedThread of [false, true]) {
+    const h = sideCreationNavigationHarness();
+    let finish;
+    h.context.permissionWrites.set("main", { scope: h.context.privateInputScope(h.context.session),
+      completion: new Promise(resolve => { finish = resolve; }) });
+    const operation = h.start();
+    if (changedThread) h.context.selectedId = "other";
+    finish(changedThread);
+    await operation.promise;
+    assert.equal(h.writes.length, 0);
+    assert.equal(h.context.relatedThreadOperations.size, 0);
+    assert.equal(h.context.sideCreationView, null);
+  }
 });
 
 test("PC 新建侧边直接显示右侧等待标签，成功沿用原回执且主会话始终可操作", async () => {

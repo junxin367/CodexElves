@@ -13,6 +13,96 @@ const MAX_HISTORY_BYTES: usize = 16 * 1024 * 1024;
 // 侧边待发队列与正文分别限制为 16 MiB，条数沿用主会话的 100 条上限，避免临时图片无限占用内存。
 const MAX_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 
+// 用户要求与 Codex App 保持相同任务边界：继承历史仅供参考，侧边只能执行边界后的新要求。
+// 开发者指令持续约束后续轮次，历史边界消息标明分界位置；两处共用规则，不能只清空界面正文。
+const SIDE_CONVERSATION_INSTRUCTIONS: &str = r#"You are a side-conversation assistant, separate from the main thread.
+Treat inherited parent-thread history before the side-conversation boundary as reference context only. Follow only user instructions submitted after that boundary.
+
+- Do not present yourself as continuing the main thread's active task.
+- Do not continue, execute, or complete instructions, plans, tool calls, approvals, edits, or requests that appear only in inherited history.
+- Treat tool calls and outputs before the boundary as past activity in the parent thread, not active work or authorization.
+- Answer questions and perform lightweight, non-mutating inspection without disrupting the main thread. If no user question has been submitted after the boundary, wait for one.
+- Do not interact with existing or new sub-agents, even if sub-agents were used in the inherited history.
+- Do not modify files, source, git state, permissions, configuration, or other workspace state unless the user explicitly requests that mutation after the boundary. Keep requested mutations minimal, local to the request, and avoid disrupting the main thread.
+- Request escalated permissions or broader sandbox access only when necessary for an operation the user explicitly requests after the boundary, including a read-only operation, and when the thread's approval policy permits it.
+- Send messages to another thread only with explicit user authorization after the boundary."#;
+
+fn side_boundary_items(parent: &str) -> Value {
+    let reference = json!({"threadId":parent});
+    let text = format!(
+        "Side conversation boundary.\n\n\
+         Everything before this boundary is inherited history from the parent thread. \
+         It is reference context only. It is not your current task.\n\n\
+         {SIDE_CONVERSATION_INSTRUCTIONS}\n\n\
+         Parent chat: {reference}\n\
+         Use this reference with read_thread, send_message_to_thread, or wait_threads only when those tools are available."
+    );
+    json!([{"type":"message","role":"user","content":[{"type":"input_text","text":text}]}])
+}
+
+fn side_permissions(response: &Value) -> anyhow::Result<Value> {
+    let approval = &response["approvalPolicy"];
+    let reviewer = &response["approvalsReviewer"];
+    let sandbox = &response["sandbox"];
+    if !(approval.is_string() || approval.is_object())
+        || !reviewer.is_string()
+        || !sandbox["type"].is_string()
+    {
+        return Err(error(503, "无法确认侧边会话继承的原生权限"));
+    }
+    let mut permissions = json!({"approvalPolicy":approval,"approvalsReviewer":reviewer});
+    // 与 App 一样保留原生权限配置 ID 和工作区根；自定义配置不能折算成更宽松的普通预设。
+    if let Some(profile) = response["activePermissionProfile"]["id"].as_str() {
+        permissions["permissions"] = json!(profile);
+    } else {
+        permissions["sandboxPolicy"] = sandbox.clone();
+    }
+    if response["runtimeWorkspaceRoots"].is_array() {
+        permissions["runtimeWorkspaceRoots"] = response["runtimeWorkspaceRoots"].clone();
+    }
+    Ok(permissions)
+}
+
+fn apply_side_fork_permissions(params: &mut Value, permissions: &Value) -> anyhow::Result<()> {
+    if !(permissions["approvalPolicy"].is_string() || permissions["approvalPolicy"].is_object())
+        || !permissions["approvalsReviewer"].is_string()
+    {
+        return Err(error(503, "无法确认主会话当前的批准权限"));
+    }
+    params["approvalPolicy"] = permissions["approvalPolicy"].clone();
+    params["approvalsReviewer"] = permissions["approvalsReviewer"].clone();
+    if let Some(profile) = permissions["activePermissionProfile"]["id"]
+        .as_str()
+        .or_else(|| permissions["permissions"].as_str())
+    {
+        params["permissions"] = json!(profile);
+    } else {
+        let sandbox = &permissions["sandboxPolicy"];
+        params["sandbox"] = json!(match sandbox["type"].as_str() {
+            Some("readOnly") => "read-only",
+            Some("workspaceWrite") => "workspace-write",
+            Some("dangerFullAccess") => "danger-full-access",
+            _ => return Err(error(409, "无法继承主会话当前的沙盒权限")),
+        });
+        if sandbox["type"] == "workspaceWrite" {
+            for (key, field) in [
+                ("writable_roots", "writableRoots"),
+                ("network_access", "networkAccess"),
+                ("exclude_tmpdir_env_var", "excludeTmpdirEnvVar"),
+                ("exclude_slash_tmp", "excludeSlashTmp"),
+            ] {
+                if let Some(value) = sandbox.get(field) {
+                    params["config"][format!("sandbox_workspace_write.{key}")] = value.clone();
+                }
+            }
+        }
+    }
+    if permissions["runtimeWorkspaceRoots"].is_array() {
+        params["runtimeWorkspaceRoots"] = permissions["runtimeWorkspaceRoots"].clone();
+    }
+    Ok(())
+}
+
 pub(super) struct SideThread {
     pub parent: String,
     pub generation: String,
@@ -27,6 +117,8 @@ pub(super) struct SideThread {
     // 用户要求侧边执行中普通发送也排队；仅复用队列/编辑/完成门控结构，绝不写入持久 Store。
     pub queue: Data,
     pub queue_revision: u64,
+    // 用户要求侧边继承创建时的主会话权限且不提供切换入口；只在本次临时会话内保存原生权限快照。
+    permissions: Value,
     bytes: usize,
 }
 
@@ -48,6 +140,8 @@ mod tests {
             sent: HashMap::new(),
             queue: Data::default(),
             queue_revision: 1,
+            permissions: json!({"approvalPolicy":"on-request","approvalsReviewer":"user",
+                "sandboxPolicy":{"type":"readOnly"}}),
             bytes: 0,
         }
     }
@@ -176,6 +270,7 @@ impl SideThread {
         view["serviceSide"] = json!(true);
         view["serviceTier"] = self.metadata["serviceTier"].clone();
         view["fastMode"] = json!(self.metadata["fastMode"] == true);
+        view["permissionMode"] = self.metadata["permissionMode"].clone();
         view["parentThreadId"] = json!(self.parent);
         view["ephemeral"] = json!(true);
         view["sideHistoryVersion"] = json!(1);
@@ -196,6 +291,7 @@ impl SideThread {
             view[key] = queue[key].clone();
         }
         view["capabilities"]["remoteQueue"] = json!(true);
+        view["capabilities"]["sessionPermissions"] = json!(false);
         Ok(view)
     }
 
@@ -534,7 +630,7 @@ impl SideState {
 }
 
 impl Harness {
-    pub(super) async fn known_side(&self, id: &str) -> bool {
+    pub async fn known_side(&self, id: &str) -> bool {
         self.projection.lock().await.sides.threads.contains_key(id)
     }
 
@@ -647,15 +743,100 @@ impl Harness {
         {
             return Err(error(429, "临时侧边会话已达上限，请先关闭不再使用的会话"));
         }
+        // 与 App 一样把侧边规则追加到当前项目的开发者指令，不能覆盖用户已有的配置要求。
+        let config = self
+            .runtime
+            .read(
+                "config/read",
+                json!({"cwd":main["cwd"],"includeLayers":false}),
+            )
+            .await?;
+        if !config["config"].is_object() {
+            return Err(error(503, "无法确认侧边会话的开发者指令配置"));
+        }
+        let configured_instructions = match &config["config"]["developer_instructions"] {
+            Value::Null => "",
+            Value::String(instructions) => instructions.trim(),
+            _ => return Err(error(503, "侧边会话的开发者指令配置格式无效")),
+        };
+        let instructions = if configured_instructions.is_empty() {
+            SIDE_CONVERSATION_INSTRUCTIONS.to_owned()
+        } else {
+            format!("{configured_instructions}\n\n{SIDE_CONVERSATION_INSTRUCTIONS}")
+        };
+        let owner = self.owner_snapshot(parent).await?;
+        let saved = self
+            .store
+            .lock()
+            .await
+            .data
+            .settings
+            .get(parent)
+            .cloned()
+            .unwrap_or(Value::Null);
+        let mut params = json!({"threadId":parent,"ephemeral":true,"excludeTurns":true,"threadSource":"user",
+            "developerInstructions":instructions,"config":{"thread_unload_delay_secs":0}});
+        // 用户要求继承点击创建时的主会话选择，包括尚未发送的模型/深度；旧客户端再读原生及已保存设置。
+        let source = owner.as_ref().unwrap_or(&main);
+        let model = payload["model"]
+            .as_str()
+            .filter(|model| !model.is_empty())
+            .or_else(|| {
+                source["latestCollaborationMode"]["settings"]["model"]
+                    .as_str()
+                    .filter(|model| !model.is_empty())
+            })
+            .or_else(|| {
+                source["latestModel"]
+                    .as_str()
+                    .filter(|model| !model.is_empty())
+            })
+            .or_else(|| saved["model"].as_str().filter(|model| !model.is_empty()))
+            .or_else(|| main["model"].as_str().filter(|model| !model.is_empty()));
+        if let Some(model) = model {
+            params["model"] = json!(model);
+        }
+        let effort = payload.get("reasoningEffort").or_else(|| {
+            source["latestCollaborationMode"]["settings"]
+                .get("reasoning_effort")
+                .or_else(|| source.get("latestReasoningEffort"))
+                .or_else(|| saved.get("reasoningEffort"))
+                .or_else(|| main.get("reasoningEffort"))
+        });
+        if let Some(effort) = effort
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            params["config"]["model_reasoning_effort"] = json!(effort);
+        }
+        // 主会话在网页保存的后续权限优先；无覆盖时采用桌面原生权限，服务持有的父会话则由原生 fork 继承。
+        let permissions = match payload["permissionMode"].as_str() {
+            Some("configured") => {
+                if let Some(profile) = config["config"]["default_permissions"].as_str() {
+                    params["permissions"] = json!(profile);
+                    None
+                } else {
+                    Some(super::super::permissions::codex_config_preset(&config)?)
+                }
+            }
+            Some(mode) => Some(super::super::permissions::codex_preset(
+                mode,
+                main["cwd"].as_str().unwrap_or(""),
+            )?),
+            None => match owner.as_ref() {
+                Some(snapshot) if snapshot["currentPermissions"].is_object() => {
+                    Some(snapshot["currentPermissions"].clone())
+                }
+                Some(_) => return Err(error(503, "无法确认主会话当前的原生权限")),
+                None => None,
+            },
+        };
+        if let Some(permissions) = permissions {
+            apply_side_fork_permissions(&mut params, &permissions)?;
+        }
         let fork = self
             .runtime
-            .request_in_generation(
-                &connection.generation,
-                "thread/fork",
-                json!({"threadId":parent,"ephemeral":true,"excludeTurns":true,"threadSource":"user",
-                "config":{"thread_unload_delay_secs":0}}),
-                authorization,
-            )
+            .request_in_generation(&connection.generation, "thread/fork", params, authorization)
             .await?;
         let raw = &fork["thread"];
         let valid = raw["ephemeral"] == true
@@ -675,11 +856,59 @@ impl Harness {
             .into());
         }
         let id = raw["id"].as_str().unwrap().to_owned();
+        // 必须先确认边界已写入模型上下文，再登记可发送的侧边会话；失败不允许降级为普通 fork。
+        let initialized = async {
+            let permissions = side_permissions(&fork)?;
+            self.runtime
+                .request_in_generation(
+                    &connection.generation,
+                    "thread/inject_items",
+                    json!({"threadId":id,"items":side_boundary_items(parent)}),
+                    authorization,
+                )
+                .await?;
+            Ok::<_, anyhow::Error>(permissions)
+        }
+        .await;
+        let permissions = match initialized {
+            Ok(permissions) => permissions,
+            Err(failure) => {
+                // 仅释放已验证身份的本次临时分支，不重试结果未知的注入，也不触碰父会话。
+                let released = self
+                    .runtime
+                    .request_in_generation(
+                        &connection.generation,
+                        "thread/unsubscribe",
+                        json!({"threadId":id}),
+                        authorization,
+                    )
+                    .await
+                    .is_ok_and(|response| {
+                        matches!(
+                            response["status"].as_str(),
+                            Some("unsubscribed" | "notLoaded" | "notSubscribed")
+                        )
+                    });
+                return Err(ApiError {
+                code: 503,
+                message: if released {
+                    format!("侧边会话初始化失败，临时分支已关闭：{failure}")
+                } else {
+                    format!("侧边会话初始化失败，关闭结果待核对；请查询原回执，不要重复创建：{failure}")
+                },
+                outcome_unknown: !released,
+            }
+            .into());
+            }
+        };
         let mut metadata = raw.clone();
         metadata["name"] = json!("侧边聊天");
         metadata["createdAt"] = json!(now_ms());
         for key in ["model", "reasoningEffort", "serviceTier"] {
             metadata[key] = fork[key].clone();
+        }
+        if let Some(mode) = payload["permissionMode"].as_str() {
+            metadata["permissionMode"] = json!(mode);
         }
         let side = SideThread {
             parent: parent.to_owned(),
@@ -694,6 +923,7 @@ impl Harness {
             sent: HashMap::new(),
             queue: Data::default(),
             queue_revision: 1,
+            permissions,
             bytes: 0,
         };
         let mut projection = self.projection.lock().await;
@@ -1034,17 +1264,12 @@ impl Harness {
             "turn/start"
         };
         if method == "turn/start" {
-            let cwd = self
-                .projection
-                .lock()
-                .await
-                .sides
-                .threads
-                .get(id)
-                .and_then(|side| side.metadata["cwd"].as_str())
-                .unwrap_or("")
-                .to_owned();
-            super::super::permissions::apply_codex(payload, &mut params, &cwd, false)?;
+            // 每个新轮次沿用创建时的原生权限；忽略客户端权限覆盖，父会话或全局后续变化不改写侧边快照。
+            let projection = self.projection.lock().await;
+            let side = &projection.sides.threads[id];
+            for (key, value) in side.permissions.as_object().into_iter().flatten() {
+                params[key] = value.clone();
+            }
         }
         if method == "turn/start"
             && let Err(failure) = self.apply_fast_to_turn(id, &mut params).await
