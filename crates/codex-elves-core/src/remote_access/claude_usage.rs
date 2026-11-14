@@ -6,7 +6,8 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-const CACHE_TTL: Duration = Duration::from_secs(60);
+// 用户要求 Claude 额度与本地统计缓存保留 72 小时；前端仍按刷新周期发起读取，命中缓存时不重复启动 CLI。
+const CACHE_TTL: Duration = Duration::from_secs(72 * 60 * 60);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_CONTROL_FRAME: usize = 512 * 1024;
 const PRICE_SOURCE: &str =
@@ -92,7 +93,9 @@ impl Claude {
             return Ok(empty);
         }
         let usage = match native_usage(config).await {
-            Ok(value) => normalize_usage(&value, now_ms()),
+            Ok((value, account_email)) => {
+                normalize_usage_with_account(&value, now_ms(), account_email.as_deref())
+            }
             // 旧 CLI、不适用的认证或读取失败均保持未知；不回退到凭据读取、HTTP 或第三方服务。
             Err(_) => Value::Null,
         };
@@ -304,7 +307,7 @@ async fn local_metrics(config: &WslConfig, windows: Value, prices: Value) -> any
     Ok(value)
 }
 
-async fn native_usage(config: &WslConfig) -> anyhow::Result<Value> {
+async fn native_usage(config: &WslConfig) -> anyhow::Result<(Value, Option<String>)> {
     let mut command = Claude::wsl(config)?;
     // 用户要求所有额度读取经过原 WSL 的 Claude：仅初始化与 get_usage，不发送 user 帧、不恢复任务。
     // 此专用元数据进程不持久化会话；只在本进程关闭 Hooks/MCP，原实例设置及正常执行能力保持原样。
@@ -334,21 +337,24 @@ async fn native_usage(config: &WslConfig) -> anyhow::Result<Value> {
     let mut writer = child.stdin.take().context("Claude stdin 不可用")?;
     let mut reader = BufReader::new(child.stdout.take().context("Claude stdout 不可用")?);
     let outcome = tokio::time::timeout(QUERY_TIMEOUT, async {
-        control(
+        let initialization = control(
             &mut reader,
             &mut writer,
             "quota-initialize",
             json!({"subtype":"initialize"}),
         )
         .await?;
+        // 用户要求弹窗显示已登录账号；邮箱只来自对应 WSL Claude CLI 的 initialize.account.email。
+        let account_email = normalize_account_email(initialization["account"]["email"].as_str());
         // 原生 get_usage 支持跳过行为分析；额度读取不得扫描近七天的全部会话正文。
-        control(
+        let usage = control(
             &mut reader,
             &mut writer,
             "quota-read",
             json!({"subtype":"get_usage","skip_behaviors":true}),
         )
-        .await
+        .await?;
+        Ok::<_, anyhow::Error>((usage, account_email))
     })
     .await;
     drop(writer);
@@ -396,7 +402,29 @@ async fn control(
     anyhow::bail!("Claude 未返回对应额度控制响应")
 }
 
+fn normalize_account_email(value: Option<&str>) -> Option<String> {
+    let email = value?.trim();
+    if email.is_empty()
+        || email.len() > 320
+        || email.matches('@').count() != 1
+        || email
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return None;
+    }
+    Some(email.to_owned())
+}
+
 fn normalize_usage(value: &Value, observed_at: u64) -> Value {
+    normalize_usage_with_account(value, observed_at, None)
+}
+
+fn normalize_usage_with_account(
+    value: &Value,
+    observed_at: u64,
+    account_email: Option<&str>,
+) -> Value {
     // 原生 CLI 负责判断账号订阅；API Key、Bedrock、Vertex 或缺少 profile scope 时不显示额度。
     if value["rate_limits_available"] != true {
         return Value::Null;
@@ -416,6 +444,10 @@ fn normalize_usage(value: &Value, observed_at: u64) -> Value {
         });
     let mut result = json!({"source":"claude-native-usage","observedAtMs":observed_at,
         "subscriptionType":subscription_type});
+    if let Some(account_email) = normalize_account_email(account_email) {
+        // 用户要求只透传登录邮箱，不导出 initialize 中的 Token、组织内部字段或其他账号对象。
+        result["accountEmail"] = json!(account_email);
+    }
     let mut count = 0;
     for (native, field) in [("five_hour", "fiveHour"), ("seven_day", "sevenDay")] {
         let window = &value["rate_limits"][native];
@@ -453,17 +485,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_account_plan_windows_are_exported_without_private_account_fields() {
+    fn account_email_is_exported_without_private_account_fields() {
         let raw = json!({"rate_limits_available":true,"subscription_type":"max",
             "account":{"token":"must-not-export"},"session":{"total_cost_usd":123},
             "rate_limits":{"five_hour":{"utilization":0,"resets_at":"2026-11-13T01:00:00Z"},
                 "seven_day":{"utilization":52.4,"resets_at":1794618000},
                 "extra_usage":{"used_credits":99}}});
-        let result = normalize_usage(&raw, 1234);
+        let result = normalize_usage_with_account(&raw, 1234, Some("user@example.test"));
         assert_eq!(result["fiveHour"]["usedPercentage"], 0.0);
         assert_eq!(result["sevenDay"]["usedPercentage"], 52.4);
         assert_eq!(result["observedAtMs"], 1234);
         assert_eq!(result["subscriptionType"], "max");
+        assert_eq!(result["accountEmail"], "user@example.test");
         assert!(!result.to_string().contains("must-not-export"));
         assert!(!result.to_string().contains("used_credits"));
         for changes in [
@@ -476,6 +509,28 @@ mod tests {
             }
             assert!(normalize_usage(&invalid, 1234).is_null());
         }
+    }
+
+    #[test]
+    fn invalid_account_email_is_not_exported() {
+        let raw = json!({"rate_limits_available":true,
+            "rate_limits":{"five_hour":{"used_percentage":24,"resets_at":1794618000}}});
+        for email in [
+            "",
+            "user",
+            "user@@example.test",
+            "user\n@example.test",
+            "<img src=x>@example.test",
+            &"x".repeat(321),
+        ] {
+            let result = normalize_usage_with_account(&raw, 1234, Some(email));
+            assert!(result.get("accountEmail").is_none());
+            assert_eq!(result["fiveHour"]["usedPercentage"], 24.0);
+        }
+        assert!(
+            normalize_usage(&raw, 1234).get("accountEmail").is_none(),
+            "未提供邮箱时保持旧额度输出形状"
+        );
     }
 
     #[test]

@@ -48,6 +48,10 @@ Section "Install"
   File "${ROOT}\dist\windows\app\codex-elves-manager.exe"
   File "${ROOT}\dist\windows\app\codex-elves-task-board.exe"
   File "${ROOT}\dist\windows\app\codex-elves-remote.exe"
+  ; 用户要求服务模式不依赖 Codex App；随安装包部署经过清单校验的本地工具运行时。
+  SetOutPath "$INSTDIR\tools"
+  File /r "${ROOT}\dist\windows\app\tools\*"
+  SetOutPath "$INSTDIR"
 
   Delete "$DESKTOP\CodexElves 绠＄悊宸ュ叿.lnk"
   Delete "$DESKTOP\CodexElves Manager.lnk"
@@ -105,6 +109,7 @@ Section "Uninstall"
   Delete "$INSTDIR\codex-elves-task-board.exe"
   ; 只移除程序；远程客户端设置和登录缓存位于独立用户数据目录，升级及卸载不在此清除。
   Delete "$INSTDIR\codex-elves-remote.exe"
+  RMDir /r "$INSTDIR\tools"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 

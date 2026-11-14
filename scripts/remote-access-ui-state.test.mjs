@@ -1137,11 +1137,23 @@ test("Claude 额度区分缺失、真实 0%、非法和过期窗口，秒数与 
   assert.equal(context.claudeUsageWindows(value).length, 2);
   assert.equal(context.claudeUsageResetText(null), "时间未知");
   const stale = usage();
-  advance(180001);
-  assert.equal(context.claudeUsageWindows(stale).length, 0, "后台停留过久不能继续显示旧额度");
+  advance(72 * 60 * 60 * 1000 + 1);
+  assert.equal(context.claudeUsageWindows(stale).length, 0, "后台停留超过 72 小时不能继续显示旧额度");
   const expired = usage();
   expired.fiveHour.resetsAt = "2026-11-12T08:00:00Z";
   assert.equal(context.claudeUsageWindows(expired).length, 1, "窗口到期不能自动推断已用 0%");
+});
+
+test("Claude 首次读取前按满额显示，真实额度返回后立即替换", async () => {
+  const h = claudeUsageHarness(), flush = () => new Promise(resolve => setImmediate(resolve));
+  h.context.mountClaudeUsage(); h.context.syncClaudeUsage();
+  assert.equal(h.trigger.hidden, false);
+  assert.equal(h.trigger.children[1].children[1].textContent, "100%");
+  assert.match(h.trigger.attributes["aria-label"], /当前按满额显示/);
+  h.requests[0].resolve({ ok: true, backend: "claude", instanceId: h.context.instance, usage: h.usage() });
+  await flush();
+  assert.equal(h.trigger.children[1].children[1].textContent, "76%");
+  assert.doesNotMatch(h.trigger.attributes["aria-label"], /当前按满额显示/);
 });
 
 test("Claude 额度按授权和实例隔离，切换后拒绝迟到响应，停用或后台页面不读取", async () => {
@@ -1165,7 +1177,7 @@ test("Claude 额度按授权和实例隔离，切换后拒绝迟到响应，停�
   assert.equal(timers.size, 1);
   context.session.device.createdAtMs = 2;
   context.syncClaudeUsage();
-  assert.equal(trigger.hidden, true, "同设备重新授权也不能沿用旧账号快照");
+  assert.equal(trigger.hidden, false, "重新授权先按满额占位，不能沿用旧账号快照");
   assert.equal(requests.length, 3);
   context.document.hidden = true;
   context.syncClaudeUsage();
@@ -1217,7 +1229,7 @@ test("Claude 额度详情仅点击开关，悬停和聚焦不展开，数据失�
   assert.equal(requests[1].signal.aborted, true, "关闭弹窗取消客户端读取");
   assert.equal(nodes[0].isConnected, false);
   trigger.onclick();
-  advance(180001);
+  advance(72 * 60 * 60 * 1000 + 1);
   context.renderClaudeUsage();
   assert.equal(trigger.hidden, true);
   assert.equal(context.claudeUsageState.tip, null);
@@ -1251,7 +1263,7 @@ test("Claude 本地详情独立加载，不替换原生百分比，并按窗口�
   context.claudeUsageState.details.value.fiveHour.windowEndMs++;
   assert.equal(context.claudeUsageMetrics(windows[0]), null, "不能复用上一额度窗口的数字");
   context.claudeUsageState.details.value.fiveHour.windowEndMs--;
-  advance(180001);
+  advance(72 * 60 * 60 * 1000 + 1);
   assert.equal(context.claudeUsageMetrics(windows[0]), null, "不显示过期本地数据");
   for (const invalid of [null, undefined, NaN, Infinity, -1, true, "100", 1e20])
     assert.equal(context.claudeUsageCompact(invalid), "—");
@@ -1300,7 +1312,8 @@ test("Claude 详情关闭、实例和授权切换时忽略迟到结果，失败�
   context.instance = "claude:wsl:other";
   context.syncClaudeUsage();
   assert.equal(context.claudeUsageState.details, null);
-  assert.equal(trigger.hidden, true);
+  assert.equal(trigger.hidden, false, "切换到新实例时先显示满额占位");
+  assert.equal(context.claudeUsageState.value, null);
 });
 
 function claudeUsageWithMetrics(h, value = h.usage(), tokens = 684200) {
@@ -1409,12 +1422,12 @@ test("Claude 空额度响应保留仍有效缓存且不刷新采集时间，过�
   assert.equal(c.claudeUsageState.value.observedAtMs, observed);
   h.trigger.onclick();
   assert.equal(h.nodes.at(-1).children[1].children[2].children[0].children[0].children[3].textContent, "684.2k");
-  h.advance(120000); c.renderClaudeUsage();
+  h.advance(72 * 60 * 60 * 1000 + 1); c.renderClaudeUsage();
   assert.equal(h.trigger.hidden, true);
   assert.equal(c.claudeUsageState.tip, null);
 });
 
-test("Claude 使用和预测单项先保留缓存，部分新数据不抹除金额且不延长旧金额有效期", async () => {
+test("Claude 使用和预测单项先保留缓存，部分新数据不抹除金额", async () => {
   const h = claudeUsageHarness(), c = h.context, flush = () => new Promise(resolve => setImmediate(resolve));
   const initial = claudeUsageWithMetrics(h), oldAt = c.Date.now();
   c.mountClaudeUsage(); c.syncClaudeUsage();
@@ -1433,21 +1446,24 @@ test("Claude 使用和预测单项先保留缓存，部分新数据不抹除金�
   assert.equal(c.claudeUsageState.details.value.fiveHour.tokensObservedAtMs, c.Date.now());
   h.advance(120001);
   const window = c.claudeUsageWindows(c.claudeUsageState.value)[0], metrics = c.claudeUsageMetrics(window);
-  assert.equal(metrics.usedCostUsd, null, "新 Token 到达不能延长旧金额的三分钟有效期");
+  assert.equal(metrics.usedCostUsd, 12.84, "72 小时缓存内保留旧金额");
   assert.equal(metrics.usedTokens, 700000);
 });
 
-test("Claude 缓存到期时即使刷新仍在等待也停止展示，不因在途请求延长快照寿命", async () => {
+test("Claude 缓存到期时刷新仍在等待则显示满额占位，不因在途请求延长旧快照", async () => {
   const h = claudeUsageHarness(), c = h.context;
   c.syncClaudeUsage();
   h.requests[0].resolve({ ok: true, backend: "claude", instanceId: c.instance, usage: claudeUsageWithMetrics(h) });
   await new Promise(resolve => setImmediate(resolve));
   h.advance(150000); c.syncClaudeUsage();
   assert.equal(c.claudeUsageState.pending, true);
-  const expiry = [...h.timers.values()].find(timer => timer.delay === 30005);
-  assert.ok(expiry, "后台刷新期间仍须保留原采集时间的失效计时");
-  h.advance(30006); expiry.callback();
-  assert.equal(h.trigger.hidden, true);
+  const resetDelay = 8 * 60 * 60 * 1000 + 18 * 60 * 1000 - 150000 + 5;
+  assert.ok([...h.timers.values()].some(timer => timer.delay === resetDelay),
+    "后台刷新期间仍须保留窗口重置计时");
+  h.advance(72 * 60 * 60 * 1000 - 150000 + 1);
+  c.renderClaudeUsage();
+  assert.equal(h.trigger.hidden, false);
+  assert.equal(h.trigger.children[1].children[1].textContent, "100%");
   assert.equal(h.requests.length, 2, "失效检查不能在旧请求等待时另起并发查询");
 });
 
@@ -1472,6 +1488,28 @@ test("Claude 订阅等级按效果图紧随标题，缺失和非法值不渲染�
     assert.equal(h.nodes[0].children.length, 3, "只保留标题及两个额度窗口，缺少等级时不添加提示块");
     assert.equal(h.nodes[0].children[1].children[0].children[1].textContent, "剩余 76%");
   }
+});
+
+test("Claude 额度弹窗顶部显示当前实例的登录邮箱", async () => {
+  const h = claudeUsageHarness(), value = h.usage();
+  value.accountEmail = "xxxz@example.com";
+  h.context.mountClaudeUsage(); h.context.syncClaudeUsage();
+  h.requests[0].resolve({ ok: true, backend: "claude", instanceId: h.context.instance, usage: value });
+  await new Promise(resolve => setImmediate(resolve));
+  h.trigger.onclick();
+  const header = h.nodes[0].children[0];
+  assert.equal(header.children[0].textContent, "xxxz@example.com");
+  assert.equal(header.children[0].title, "xxxz@example.com");
+  assert.match(h.trigger.attributes["aria-label"], /登录账号 xxxz@example\.com/);
+
+  const invalidHarness = claudeUsageHarness(), invalid = invalidHarness.usage();
+  invalid.accountEmail = "<b>invalid</b>";
+  invalidHarness.context.mountClaudeUsage(); invalidHarness.context.syncClaudeUsage();
+  invalidHarness.requests[0].resolve({ ok: true, backend: "claude", instanceId: invalidHarness.context.instance, usage: invalid });
+  await new Promise(resolve => setImmediate(resolve));
+  invalidHarness.trigger.onclick();
+  assert.equal(invalidHarness.nodes.at(-1).children[0].children[0].textContent, "账号信息",
+    "异常邮箱不能直接进入标题");
 });
 
 test("Claude 等级随实例缓存恢复并跟随新响应更新，未返回时不沿用旧等级", async () => {
@@ -1507,13 +1545,13 @@ test("Claude 额度缓存跨同实例会话、前后台和实例往返复用，�
   assert.equal(h.context.claudeUsageMetrics(h.context.claudeUsageWindows(h.context.claudeUsageState.value)[0]).usedTokens, 684200);
   assert.equal(h.requests.length, 1, "回到前台先使用缓存，不重复请求");
   h.context.instance = "claude:wsl:b"; h.context.syncClaudeUsage();
-  assert.equal(h.trigger.hidden, true, "另一实例不能显示旧实例缓存");
+  assert.equal(h.trigger.hidden, false, "另一实例先按满额占位，不能显示旧实例缓存");
   h.context.instance = "claude:wsl:a"; h.context.syncClaudeUsage(); h.trigger.onclick();
   assert.equal(h.requests[1].signal.aborted, true);
   assert.equal(h.context.claudeUsageState.details.value.fiveHour.usedTokens, 684200);
   assert.equal(h.requests.length, 2, "切回实例立即恢复已缓存详情");
   h.context.session.device.createdAtMs = 2; h.context.syncClaudeUsage();
-  assert.equal(h.trigger.hidden, true);
+  assert.equal(h.trigger.hidden, false, "重新授权先按满额占位，不能恢复旧账号缓存");
   assert.equal(h.context.claudeUsageState.details, null, "重新授权不能恢复上一授权的数字");
 });
 
@@ -1536,10 +1574,12 @@ test("Claude 额度刷新期间与失败后保留有效缓存，并按原采集�
   h.advance(89000);
   h.context.claudeUsageState.checkedAt = h.context.Date.now();
   h.context.scheduleClaudeUsageUpdate();
-  assert.ok([...h.timers.values()].some(timer => timer.delay === 30005), "失效检查独立于下次刷新退避");
-  h.advance(30001);
+  const resetDelay = 8 * 60 * 60 * 1000 + 18 * 60 * 1000 - 150000 + 5;
+  assert.ok([...h.timers.values()].some(timer => timer.delay === resetDelay),
+    "窗口重置计时独立于下次刷新退避");
+  h.advance(cacheAgeMs - 150000 + 1);
   h.context.renderClaudeUsage();
-  assert.equal(h.trigger.hidden, true, "三分钟后不能把失败后的旧缓存继续当作有效数据");
+  assert.equal(h.trigger.hidden, true, "72 小时后不能把失败后的旧缓存继续当作有效数据");
   assert.equal(h.context.claudeUsageState.tip, null);
   h.context.resetClaudeUsage(); h.context.syncClaudeUsage();
   assert.equal(h.context.claudeUsageState.value, null, "过期缓存不能在切回会话时复活");

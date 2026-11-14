@@ -2061,7 +2061,10 @@ class NativeSession:
         live = self.lookup() if self.native_id else None
         if live:
             self.bind(live)
-        if self.native_id and self.short and (not live or live.get("outcome")):
+        if self.native_id and self.short and (
+                not live or live.get("outcome")
+                or live.get("state") in ("done", "stopped", "failed", "ended")
+                and live.get("sessionStatus") not in ("busy", "idle", "waiting")):
             live = self.restore_job()
         command = {"id": request["id"], "name": name, "argument": argument,
                    "state": "pending", "issuedAt": int(time.time() * 1000),
@@ -2524,7 +2527,10 @@ class NativeSession:
         # 远程队列由本程序管理：普通消息直接送入原生普通回复入口，只有点击“引导”的消息
         # 才使用 nextTurn=True；已有审批继续由 CLI 处理，不借此替用户批准、拒绝或取消工具。
         text = self.prepare_text(content, client_id)
-        if self.native_id and self.short and (not live or live.get("outcome")):
+        if self.native_id and self.short and (
+                not live or live.get("outcome")
+                or live.get("state") in ("done", "stopped", "failed", "ended")
+                and live.get("sessionStatus") not in ("busy", "idle", "waiting")):
             live = self.restore_job()
         after = len(self.messages)
         intent = {"id": client_id, "clientUserMessageId": client_id,
@@ -2630,6 +2636,36 @@ class NativeSession:
             if time.monotonic() >= deadline:
                 raise NativeError("ESESSION", "原生后台会话仍未退出，未修改历史")
             time.sleep(0.2)
+
+    def shutdown(self):
+        # 远程服务关闭时只回收安全的空闲后台 job；执行、审批、问答、草稿或后台任务
+        # 均保留原生会话，避免服务重启把正在执行的消息变成未核对结果。
+        live = self.lookup() if self.native_id else None
+        if (not live or live.get("outcome")
+                or live.get("state") in ("done", "stopped", "failed", "ended")
+                and live.get("sessionStatus") not in ("busy", "idle", "waiting")):
+            return {"stopped": True, "alreadyStopped": True}
+        self.bind(live)
+        self.read_messages()
+        status = NativeDiscovery.status(live, self.messages)
+        if (status.get("tempo") != "idle" or status.get("needs") or self.pending
+                or self.compaction.get("state") == "running"):
+            return {"stopped": False, "reason": "active"}
+        lines = self.current_screen()
+        if not lines:
+            try:
+                lines = self.read_terminal_screen()
+            except (OSError, ValueError, RuntimeError, NativeError):
+                return {"stopped": False, "reason": "screen_unknown"}
+        if native_input_state(lines) != "empty":
+            return {"stopped": False, "reason": "native_draft"}
+        background = self.background_work(lines)
+        if background is None:
+            return {"stopped": False, "reason": "screen_unknown"}
+        if background:
+            return {"stopped": False, "reason": "background_work"}
+        self.stop_job()
+        return {"stopped": True, "jobId": self.short}
 
     @staticmethod
     def background_work(lines):
@@ -3758,6 +3794,8 @@ class NativeSession:
             return {**request["catalog"], "contextConfiguration": self.context_configuration()}
         if subtype == "shared_send":
             return self.send(request)
+        if subtype == "shared_shutdown":
+            return self.shutdown()
         if subtype == "shared_edit_message":
             return self.edit_message(request)
         if subtype == "shared_native_command":

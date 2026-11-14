@@ -804,6 +804,11 @@ impl RemoteAccessController {
     pub async fn reconcile(self: &Arc<Self>, settings: RemoteAccessSettings) {
         // Publish restrictions before any file lock, native call, or tunnel await.
         self.publish_access_policy(&settings);
+        // 远程服务关闭时停止 Codex 队列派发；真正释放 app-server 仍由 Harness 按空闲状态判断。
+        self.harness
+            .enabled
+            .store(settings.enabled, Ordering::Release);
+        self.claude.set_reconnect_enabled(settings.enabled);
         let zrok_target = zrok_target(&settings);
         let key_error = self
             .reload_access_key()
@@ -830,6 +835,10 @@ impl RemoteAccessController {
             live.settings = Some(settings.clone());
             self.reconcile_primary(&mut live, &settings).await;
             drop(live);
+            if !settings.enabled {
+                self.harness.stop_preparation().await;
+                self.claude.release().await;
+            }
             self.prune_stale_public_devices().await;
             return;
         }
@@ -854,6 +863,7 @@ impl RemoteAccessController {
         live.error = None;
         if !settings.enabled {
             self.harness.stop_preparation().await;
+            self.claude.release().await;
             live.ngrok.stop().await;
             live.zrok.reconcile(false, &zrok_target).await;
             if finished || was_enabled {}
@@ -880,6 +890,10 @@ impl RemoteAccessController {
             Err(error) => live.error = Some(error.to_string()),
         }
         self.reconcile_primary(&mut live, &settings).await;
+        if settings.enabled && (!was_enabled || finished) {
+            // 服务重新启用或监听器重建后，恢复 Claude 连接端以接收仍在运行的原生会话事件。
+            self.claude.reconnect();
+        }
         drop(live);
         self.prune_stale_public_devices().await;
     }
@@ -3301,6 +3315,8 @@ async fn session(
     let native_write_available = service_connected;
     Ok(Json(json!({"ok":true,"device":device.public(),
         "serviceConnected":service_connected,
+        // 用户要求服务模式自带 rg 并可诊断实际来源；状态仅向已授权会话返回，不修改用户 PATH。
+        "toolRuntime":crate::tool_runtime::current().diagnostic_value(),
         "readOnly":policy.read_only,"allowApprovals":policy.allow_approvals && native_write_available,
         "claudeAllowApprovals":policy.allow_approvals,
         "claudeWslDistribution":state.controller.claude.wsl_distribution(),
@@ -12256,6 +12272,9 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             .unwrap()
             .0;
         assert_eq!(capabilities["capabilities"]["goalComposer"], true);
+        assert!(capabilities["toolRuntime"]["source"].is_string());
+        assert!(capabilities["toolRuntime"]["verification"].is_string());
+        assert!(capabilities["toolRuntime"]["paths"].is_object());
         let completed = invoke(state.clone(), "setGoal", headers.clone(), payload.clone())
             .await
             .unwrap()

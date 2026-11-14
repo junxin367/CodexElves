@@ -1251,6 +1251,50 @@ class SharedQueueHistoryTests(unittest.TestCase):
         self.assertEqual(len(native.pending), 1)
         self.assertEqual(native.pending[0]["_after"], 1)
 
+    def test_stopped_native_job_is_respawned_before_sending_after_service_release(self):
+        native = NativeSession("native-cli", "test-session", "saved-job")
+        native.read_messages = lambda: None
+        native.poll = lambda **kwargs: None
+        stopped = {"short": "saved-job", "sessionId": "test-session", "tempo": "idle",
+                   "state": "stopped"}
+        recovered = {**stopped, "state": "idle"}
+        native.lookup = lambda: stopped
+        native.restore_job = MagicMock(return_value=recovered)
+        replies = []
+        native.reply = lambda text, next_turn=True: replies.append((text, next_turn))
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "released-job",
+                                  "content": [{"type": "text", "text": "恢复后发送"}]})
+        native.restore_job.assert_called_once_with()
+        self.assertEqual(replies, [("恢复后发送", False)])
+        self.assertTrue(result["accepted"])
+
+    def test_shutdown_stops_only_an_idle_native_job_without_draft_or_background_work(self):
+        native = NativeSession("native-cli", "test-session", "saved-job")
+        native.read_messages = lambda: None
+        live = {"short": "saved-job", "sessionId": "test-session", "tempo": "idle",
+                "state": "idle", "sessionStatus": "idle"}
+        native.lookup = lambda: live
+        native.read_terminal_screen = lambda: ["❯ ", "────────────────", "? for shortcuts"]
+        native.rpc = lambda operation: {"ok": True, "alive": False} if operation["op"] == "has" else {}
+        with patch.object(namespace["subprocess"], "run") as run:
+            run.return_value.returncode = 0
+            result = native.shutdown()
+        self.assertTrue(result["stopped"])
+        self.assertEqual(run.call_args.args[0], ["native-cli", "stop", "saved-job"])
+
+    def test_shutdown_keeps_busy_native_job_running(self):
+        native = NativeSession("native-cli", "test-session", "saved-job")
+        native.read_messages = lambda: None
+        live = {"short": "saved-job", "sessionId": "test-session", "tempo": "active",
+                "state": "working", "sessionStatus": "busy"}
+        native.lookup = lambda: live
+        with patch.object(namespace["subprocess"], "run") as run:
+            result = native.shutdown()
+        self.assertFalse(result["stopped"])
+        self.assertEqual(result["reason"], "active")
+        run.assert_not_called()
+
     def test_idle_cli_version_skew_respawns_same_job_before_sending(self):
         native = NativeSession("native-cli", "test-session", "saved-job")
         native.read_messages = lambda: None

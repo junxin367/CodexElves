@@ -252,17 +252,32 @@ impl Harness {
     }
 
     pub async fn idle(&self) -> bool {
-        let queues_empty = self
-            .store
-            .lock()
-            .await
-            .data
-            .queues
-            .values()
-            .all(Vec::is_empty);
+        if !self.runtime.can_release().await {
+            // 连接已经异常断开时，Projection 会清空 active；此时不能把未知执行当成空闲释放引擎。
+            return false;
+        }
+        let store = self.store.lock().await;
+        let queues_empty = store.data.queues.values().all(Vec::is_empty);
+        let edits_empty = store.data.edits.is_empty();
+        let queue_gates_empty = store.data.queue_gates.is_empty();
+        drop(store);
         let projection = self.projection.lock().await;
+        let threads_safe = projection.threads.values().all(|thread| {
+            let status = thread["status"]
+                .as_str()
+                .or_else(|| thread["status"]["type"].as_str());
+            !matches!(
+                status,
+                Some("active" | "inProgress" | "running" | "waiting" | "unknown")
+            ) && thread["requests"].as_array().is_none_or(Vec::is_empty)
+        });
         queues_empty
+            && edits_empty
+            && queue_gates_empty
             && projection.active.is_empty()
+            && projection.requests.is_empty()
+            && projection.compactions.is_empty()
+            && threads_safe
             && projection.sides.threads.values().all(|side| side.closed)
     }
 

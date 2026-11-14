@@ -342,6 +342,14 @@ impl Runtime {
         self.health.lock().await.take();
     }
 
+    pub async fn can_release(&self) -> bool {
+        let connection = self.connection.lock().await.clone();
+        let Some(connection) = connection else {
+            return true;
+        };
+        connection.alive.load(Ordering::Acquire) && connection.pending.lock().await.is_empty()
+    }
+
     pub async fn check_health(&self) -> anyhow::Result<()> {
         let connection = self.connection().await?;
         let mut health = self.health.lock().await;

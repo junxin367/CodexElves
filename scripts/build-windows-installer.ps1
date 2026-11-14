@@ -105,6 +105,8 @@ $RepoRoot = Resolve-RepoRoot
 $ResolvedVersion = Resolve-WorkspaceVersion -RepoRoot $RepoRoot
 $ManagerDir = Join-Path $RepoRoot "apps\codex-elves-manager"
 $DistAppDir = Join-Path $RepoRoot "dist\windows\app"
+$ToolsSourceDir = Join-Path $RepoRoot "tools"
+$DistToolsDir = Join-Path $DistAppDir "tools"
 $InstallerScriptDir = Join-Path $RepoRoot "scripts\installer\windows"
 $InstallerScript = Join-Path $InstallerScriptDir "CodexElves.nsi"
 $InstallerPath = Join-Path $RepoRoot "dist\windows\CodexElves-$ResolvedVersion-windows-x64-setup.exe"
@@ -123,6 +125,8 @@ else {
 }
 $ReleaseDir = Join-Path $CargoTargetDir "release-fast"
 $ReleaseMirrorDir = Join-Path $CargoTargetDir "release"
+$ReleaseToolsDir = Join-Path $ReleaseDir "tools"
+$ReleaseMirrorToolsDir = Join-Path $ReleaseMirrorDir "tools"
 
 $NpmPath = Resolve-ToolPath -Name "npm.cmd" -ExplicitPath "" -FallbackPaths @()
 $NodePath = Resolve-ToolPath -Name "node.exe" -ExplicitPath "" -FallbackPaths @()
@@ -143,8 +147,10 @@ Write-Output "[INFO] makensis: $NsisPath"
 Write-Output "[INFO] Cargo target: $CargoTargetDir"
 
 $BuildInputVerifier = Join-Path $RepoRoot "scripts\verify-windows-build-inputs.mjs"
+$ToolRuntimeVerifier = Join-Path $RepoRoot "scripts\verify-tool-runtime.mjs"
 # 用户要求已修复功能不能因构建基线回退；编译前核对服务协议及压缩恢复，复制前后再核对完整资源。
 Invoke-Checked -FilePath $NodePath -Arguments @($BuildInputVerifier, $RepoRoot, "--source-only") -WorkingDirectory $RepoRoot
+Invoke-Checked -FilePath $NodePath -Arguments @($ToolRuntimeVerifier, $RepoRoot, "--source-only") -WorkingDirectory $RepoRoot
 Invoke-Checked -FilePath $NpmPath -Arguments @("run", "build") -WorkingDirectory $ManagerDir
 Invoke-Checked -FilePath $NodePath -Arguments @($BuildInputVerifier, $RepoRoot, $ReleaseDir) -WorkingDirectory $RepoRoot
 
@@ -167,6 +173,13 @@ foreach ($artifact in @($LauncherExe, $ManagerExe, $TaskBoardExe, $RemoteClientE
     Copy-Item -LiteralPath $artifact -Destination $DistAppDir -Force
 }
 
+# 用户要求服务模式不依赖 Codex App；工具必须与实际 release-fast 可执行文件、安装输入和兼容镜像同时存在。
+foreach ($toolsDestination in @($ReleaseToolsDir, $DistToolsDir, $ReleaseMirrorToolsDir)) {
+    New-Item -ItemType Directory -Path $toolsDestination -Force | Out-Null
+    Copy-Item -Path (Join-Path $ToolsSourceDir "*") -Destination $toolsDestination -Recurse -Force
+}
+Invoke-Checked -FilePath $NodePath -Arguments @($ToolRuntimeVerifier, $RepoRoot, $ReleaseDir) -WorkingDirectory $RepoRoot
+Invoke-Checked -FilePath $NodePath -Arguments @($ToolRuntimeVerifier, $RepoRoot, $DistAppDir) -WorkingDirectory $RepoRoot
 Invoke-Checked -FilePath $NodePath -Arguments @($BuildInputVerifier, $RepoRoot, $DistAppDir) -WorkingDirectory $RepoRoot
 
 # 校验独立客户端为 x64 GUI 程序，并保留单独交付的便携 EXE；安装包同时嵌入上述同一份客户端。

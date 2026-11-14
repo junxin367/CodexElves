@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use base64::Engine;
+use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -37,6 +38,7 @@ mod skills;
 mod tools;
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(20);
 // 同一会话类型实例的完整模型目录缓存五分钟；新建与历史会话共用此期限。
 const MODEL_CATALOG_TTL: Duration = Duration::from_secs(300);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -496,6 +498,7 @@ pub(super) struct Claude {
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     metadata: Mutex<HashMap<String, (Instant, Value)>>,
     skill_metadata: Mutex<HashMap<String, (Instant, Value)>>,
+    reconnect_enabled: AtomicBool,
     // 用户要求账号额度按 WSL 实例隔离；只缓存白名单百分比与重置时间，不保存登录凭据。
     subscription_usage_cache: Mutex<HashMap<String, subscription_usage::CachedUsage>>,
     local_usage_cache: Mutex<HashMap<String, subscription_usage::CachedLocalUsage>>,
@@ -553,6 +556,7 @@ impl Claude {
             locks: Mutex::new(HashMap::new()),
             metadata: Mutex::new(HashMap::new()),
             skill_metadata: Mutex::new(HashMap::new()),
+            reconnect_enabled: AtomicBool::new(true),
             subscription_usage_cache: Mutex::new(HashMap::new()),
             local_usage_cache: Mutex::new(HashMap::new()),
             usage_prices: Mutex::new(subscription_usage::PriceCache::default()),
@@ -569,7 +573,30 @@ impl Claude {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        // 共享会话由原版后台进程继续运行；网页服务恢复时只重新连接，不重发用户消息。
+        // 服务关闭时空闲 job 由 release 安全停止，执行中的原生会话继续运行；
+        // 网页服务恢复时按原会话 ID 重连或按需 respawn，不重发用户消息。
+        self.reconnect();
+        let service = Arc::downgrade(self);
+        runtime.spawn(async move {
+            // 用户改为远程服务调度：750ms 只检查已确认空闲的会话，每次最多投递一条，接收流独立运行。
+            let mut tick = tokio::time::interval(Duration::from_millis(750));
+            loop {
+                tick.tick().await;
+                let Some(service) = service.upgrade() else {
+                    break;
+                };
+                service.drain_remote_queues().await;
+            }
+        });
+    }
+
+    pub fn reconnect(self: &Arc<Self>) {
+        if !self.reconnect_enabled.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
         let service = Arc::downgrade(self);
         runtime.spawn(async move {
             let Some(service) = service.upgrade() else {
@@ -585,9 +612,24 @@ impl Claude {
                 .cloned()
                 .collect();
             for conversation in conversations {
+                if !service.reconnect_enabled.load(Ordering::Acquire) {
+                    break;
+                }
                 let lock = service.lock(&conversation.id).await;
                 let _guard = lock.lock().await;
+                if service
+                    .processes
+                    .lock()
+                    .await
+                    .get(&conversation.id)
+                    .is_some_and(|process| process.channel.live.load(Ordering::Acquire))
+                {
+                    continue;
+                }
                 if let Ok(process) = service.spawn(&conversation).await {
+                    if !service.reconnect_enabled.load(Ordering::Acquire) {
+                        continue;
+                    }
                     service
                         .processes
                         .lock()
@@ -600,27 +642,46 @@ impl Claude {
                 }
             }
         });
-        let service = Arc::downgrade(self);
-        runtime.spawn(async move {
-            // 用户改为远程服务调度：750ms 只检查已确认空闲的会话，每次最多投递一条，接收流独立运行。
-            let mut tick = tokio::time::interval(Duration::from_millis(750));
-            loop {
-                tick.tick().await;
-                let Some(service) = service.upgrade() else {
-                    break;
-                };
-                service.drain_remote_queues().await;
-            }
-        });
     }
 
-    #[cfg(test)]
+    pub fn set_reconnect_enabled(&self, enabled: bool) {
+        self.reconnect_enabled.store(enabled, Ordering::Release);
+    }
+
     pub async fn release(&self) {
-        self.processes.lock().await.clear();
+        let processes: Vec<_> = self
+            .processes
+            .lock()
+            .await
+            .drain()
+            .map(|(_, process)| process)
+            .collect();
+        let shutdowns =
+            processes
+                .into_iter()
+                .filter(|process| process.shared)
+                .map(|process| async move {
+                    let _ = tokio::time::timeout(
+                        RELEASE_TIMEOUT,
+                        process.control(json!({"subtype":"shared_shutdown"}), None),
+                    )
+                    .await;
+                });
+        join_all(shutdowns).await;
         self.discovery.lock().await.clear();
         self.observed.lock().await.clear();
+        self.requests.lock().await.clear();
         // 等读取任务收到 stdin 关闭并回收本后端启动的 WSL 进程。
         tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    async fn shutdown_process(&self, process: &Arc<Process>) -> anyhow::Result<Value> {
+        tokio::time::timeout(
+            RELEASE_TIMEOUT,
+            process.control(json!({"subtype":"shared_shutdown"}), None),
+        )
+        .await
+        .context("Claude 原生后台会话关闭等待超时")?
     }
 
     pub fn wsl_distribution(&self) -> Option<String> {
@@ -2150,6 +2211,21 @@ impl Claude {
                     return Err(error(409, "请先停止 Claude 当前任务后再删除会话"));
                 }
                 authorization.check().await?;
+                if action == "deleteThread" && c.shared && c.resumed && !c.native_job_id.is_empty()
+                {
+                    let process = match self.processes.lock().await.get(id).cloned() {
+                        Some(process) => process,
+                        None => {
+                            let process = self.spawn(&c).await?;
+                            process
+                        }
+                    };
+                    let result = self.shutdown_process(&process).await?;
+                    anyhow::ensure!(
+                        result["stopped"] == true,
+                        "Claude 原生会话仍在执行或等待交互，未删除远程会话"
+                    );
+                }
                 self.change(|saved| {
                     let c = saved
                         .conversations

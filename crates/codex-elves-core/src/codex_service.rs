@@ -218,6 +218,13 @@ async fn spawn_candidate(
     codex_home: &Path,
 ) -> anyhow::Result<RunningService> {
     let mut command = candidate_command(candidate);
+    // 用户要求服务模式独立于 Codex App；为 app-server 及其命令子进程注入 CodexElves 自带工具，
+    // 只修改子进程环境，不写入用户或系统 PATH。
+    let tool_runtime = crate::tool_runtime::apply_to_command(&mut command);
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "remote_access.codex_service.tool_runtime",
+        json!({"runtime":tool_runtime.diagnostic_value()}),
+    );
 
     let working_directory = std::env::current_dir().context("读取 CodexElves 工作目录失败")?;
     // 服务模式只指定 Codex 数据目录；保留真实 HOME/USERPROFILE，避免 Cargo、Git 等工具读错用户配置。

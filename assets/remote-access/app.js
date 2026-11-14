@@ -5044,7 +5044,7 @@ function claudeUsageContext() {
   return { key: JSON.stringify([owner, instanceId]), owner, instanceId, canRead: connected && (creating || !!current),
     payload: { backend: "claude", instanceId, ...(!creating ? { threadId: selectedId } : {}) } };
 }
-const claudeUsageRefreshMs = 60000, claudeUsageMaxAgeMs = 180000;
+const claudeUsageRefreshMs = 60000, claudeUsageMaxAgeMs = 72 * 60 * 60 * 1000;
 const claudeUsageCache = new Map();
 function rememberClaudeUsage(state = claudeUsageState) {
   const owner = privateInputScope(session);
@@ -5057,7 +5057,7 @@ function rememberClaudeUsage(state = claudeUsageState) {
     // 用户要求打开时先显示缓存；仅在内存中按授权和实例保存最近有效数据，切会话/前后台不丢失。
     claudeUsageCache.set(state.key, { owner, value: state.value, checkedAt: state.checkedAt,
       details: state.details, detailsRead: state.detailsRead });
-    // 最多保留 16 个最近使用实例，且仍受三分钟真实采集时间约束，不保存 DOM、请求或凭据。
+    // 最多保留 16 个最近使用实例，且仍受 72 小时真实采集时间约束，不保存 DOM、请求或凭据。
     while (claudeUsageCache.size > 16) claudeUsageCache.delete(claudeUsageCache.keys().next().value);
   }
 }
@@ -5076,6 +5076,17 @@ function claudeUsageWindows(value, now = Date.now()) {
     return [{ key, short, label, used: Math.round(used), remaining: Math.round(100 - used), usedPercentage: used, resetAt: reset }];
   });
 }
+function claudeUsageDefaultWindows() {
+  // 用户要求真实额度返回前先显示满额占位；占位只用于当前可读取实例，不写入缓存或本地统计。
+  return [["fiveHour", "5h", "5 小时"], ["sevenDay", "7d", "7 天"]].map(([key, short, label]) =>
+    ({ key, short, label, used: 0, remaining: 100, usedPercentage: 0, resetAt: null, default: true }));
+}
+function claudeUsageDisplayWindows(state, now = Date.now()) {
+  const windows = claudeUsageWindows(state?.value, now);
+  if (windows.length) return windows;
+  // 首次查询、缓存刷新在途或会话详情尚未完成时先显示满额；已完成的失败/权限响应不伪造额度。
+  return state && (state.checkedAt === 0 || state.pending) ? claudeUsageDefaultWindows() : [];
+}
 function claudeUsageSubscription(value) {
   const raw = value?.subscriptionType;
   const type = typeof raw === "string" ? raw.trim() : "";
@@ -5084,6 +5095,11 @@ function claudeUsageSubscription(value) {
     return { type, label: type[0].toUpperCase() + type.slice(1) };
   }
   return { type: null, label: "" };
+}
+function claudeUsageAccount(value) {
+  const email = typeof value?.accountEmail === "string" ? value.accountEmail.trim() : "";
+  // 用户要求弹窗顶部显示对应 Claude 实例已登录的邮箱；缓存或旧客户端返回异常值时不直接展示。
+  return email && email.length <= 320 && email.includes("@") && !/[\s\u0000-\u001f\u007f]/u.test(email) ? email : "";
 }
 function claudeUsageResetText(resetAt, now = Date.now()) {
   if (resetAt == null) return "时间未知";
@@ -5227,9 +5243,9 @@ function fitClaudeUsageTip() {
   if (box.bottom <= top || box.top >= top + height || box.right <= left || box.left >= left + width) {
     closeClaudeUsageTip(); return;
   }
-  // 用户要求弹层总宽固定 300px（含两侧各 14px 内边距与 1px 边框），不随内容扩展；
-  // 仅在可视区域不足 316px 时由 maxWidth 收窄，保留两侧各 8px 防越界间距。
-  tip.node.style.width = "300px";
+  // 用户要求弹层总宽固定 320px（含两侧各 14px 内边距与 1px 边框），不随内容扩展；
+  // 仅在可视区域不足 336px 时由 maxWidth 收窄，保留两侧各 8px 防越界间距。
+  tip.node.style.width = "320px";
   tip.node.style.maxWidth = `${Math.max(0, width - padding * 2)}px`;
   const above = Math.max(0, box.top - top - gap - padding);
   const below = Math.max(0, top + height - box.bottom - gap - padding);
@@ -5245,9 +5261,15 @@ function renderClaudeUsageTip(windows) {
   if (!tip) return;
   if (!windows.length) { closeClaudeUsageTip(); return; }
   const subscription = claudeUsageSubscription(claudeUsageState.value);
+  const account = claudeUsageAccount(claudeUsageState.value);
   const title = element("div", "claude-usage-title");
-  // 用户要求弹出的菜单统一称为“账号信息”，标题右侧继续保留 CLI 返回的真实订阅等级。
-  title.append(element("span", "claude-usage-title-text", "账号信息"));
+  // 用户要求弹窗顶部优先显示当前实例已登录账号；没有邮箱时继续显示“账号信息”。
+  const titleText = element("span", "claude-usage-title-text", account || "账号信息");
+  if (account) {
+    titleText.title = account;
+    titleText.setAttribute("aria-label", `登录账号：${account}`);
+  }
+  title.append(titleText);
   // 用户确认缺少等级时直接不显示，不添加未知标签、占位或说明，也不使用效果图里的示例等级补齐。
   if (subscription.type) {
     const badge = element("span", "claude-usage-subscription", subscription.label);
@@ -5285,11 +5307,13 @@ function renderClaudeUsageTip(windows) {
 function renderClaudeUsage() {
   const trigger = $("#claude-usage");
   if (!trigger) return;
-  const windows = claudeUsageWindows(claudeUsageState?.value);
+  const windows = claudeUsageDisplayWindows(claudeUsageState);
   trigger.hidden = !windows.length;
   fitComposerMetrics();
   if (!windows.length) { closeClaudeUsageTip(); return; }
-  const signature = JSON.stringify(["remaining", ...windows.map(window => [window.key, window.remaining])]);
+  const isDefault = windows[0]?.default === true;
+  const signature = JSON.stringify([isDefault ? "default" : "remaining",
+    ...windows.map(window => [window.key, window.remaining])]);
   if (trigger.dataset.usage !== signature) {
     trigger.dataset.usage = signature;
     const nodes = [element("span", "", "剩余")];
@@ -5300,7 +5324,8 @@ function renderClaudeUsage() {
       nodes.push(row);
     }
     trigger.replaceChildren(...nodes);
-    trigger.setAttribute("aria-label", `Claude 账号信息，${windows.map(window => `${window.label}剩余 ${window.remaining}%`).join("，")}，查看重置时间`);
+    const account = claudeUsageAccount(claudeUsageState.value);
+    trigger.setAttribute("aria-label", `Claude ${account ? `登录账号 ${account}，` : "账号信息，"}${isDefault ? "真实额度读取中，当前按满额显示，" : ""}${windows.map(window => `${window.label}剩余 ${window.remaining}%`).join("，")}，查看重置时间`);
   }
   renderClaudeUsageTip(windows);
   fitComposerMetrics();
@@ -5316,7 +5341,7 @@ function scheduleClaudeUsageUpdate() {
     ? Object.values(state.details?.value || {}).flatMap(metrics =>
       [metrics?.observedAtMs, metrics?.costObservedAtMs, metrics?.tokensObservedAtMs]) : [])]
     .filter(claudeUsageNumber).map(at => at + claudeUsageMaxAgeMs).filter(at => at > now);
-  // 刷新和三分钟数据失效分别计时；失败退避不能延长真实数据寿命，窗口到期也不能继续显示旧额度。
+  // 刷新和 72 小时数据失效分别计时；失败退避不能延长真实数据寿命，窗口到期也不能继续显示旧额度。
   const deadlines = [...(context.canRead && !state.pending ? [state.checkedAt + claudeUsageRefreshMs] : []), ...expiry,
     ...windows.filter(window => window.resetAt != null).map(window => window.resetAt)];
   if (!deadlines.length) { state.timer = null; return; }
@@ -5354,7 +5379,9 @@ function syncClaudeUsage() {
         const value = result.usage, windows = claudeUsageWindows(value);
         // 读取暂未返回有效窗口时保留该实例仍有效的快照；采集时间不更新，超时/重置仍按原边界失效。
         if (!windows.length && claudeUsageWindows(state.value).length) return;
+        const account = claudeUsageAccount(value);
         state.value = windows.length ? { source: value.source, observedAtMs: value.observedAtMs,
+          ...(account ? { accountEmail: account } : {}),
           ...(Object.hasOwn(value, "subscriptionType") ? { subscriptionType: claudeUsageSubscription(value).type } : {}),
           ...Object.fromEntries(windows.map(window => [window.key,
             { usedPercentage: window.usedPercentage, resetsAt: window.resetAt }])) } : null;
@@ -5382,7 +5409,7 @@ function syncClaudeUsage() {
 }
 function showClaudeUsageTip() {
   syncClaudeUsage();
-  const state = claudeUsageState, trigger = $("#claude-usage"), windows = claudeUsageWindows(state?.value);
+  const state = claudeUsageState, trigger = $("#claude-usage"), windows = claudeUsageDisplayWindows(state);
   if (!trigger?.isConnected || trigger.hidden || !windows.length) return;
   if (state.tip) {
     renderClaudeUsageTip(windows); loadClaudeUsageDetails(); return;
