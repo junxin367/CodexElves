@@ -717,18 +717,21 @@ try {
     goalComposerRecoveries.set(state.threadId, record);
   }
 } catch {}
+function validQueuedMessageEdit(edit) {
+  return !!edit && typeof edit.threadId === "string" && typeof edit.editId === "string"
+    && typeof edit.deviceId === "string" && typeof edit.message?.id === "string"
+    && typeof edit.originalText === "string" && typeof edit.text === "string"
+    && typeof edit.backup?.text === "string" && validSkillSelection(edit.backup.skills)
+    && (edit.backup.goalMode == null || typeof edit.backup.goalMode === "string" && /^[a-zA-Z0-9-]{1,100}$/.test(edit.backup.goalMode))
+    && (!(edit.imageRemoval === true || edit.imageEditing === true)
+      || validQueuedImageSources(edit.originalImageSources) && Array.isArray(edit.attachments))
+    && !(edit.imageEditing === true && edit.imageRemoval !== true)
+    && ["starting", "editing"].includes(edit.state);
+}
 try {
   const stored = JSON.parse(sessionStorage.getItem("codex-elves-queue-edits") || "[]");
   if (Array.isArray(stored)) for (const edit of stored) {
-    if (!edit || typeof edit.threadId !== "string" || typeof edit.editId !== "string"
-        || typeof edit.deviceId !== "string" || typeof edit.message?.id !== "string"
-        || typeof edit.originalText !== "string" || typeof edit.text !== "string"
-        || typeof edit.backup?.text !== "string" || !validSkillSelection(edit.backup.skills)
-        || edit.backup.goalMode != null && (typeof edit.backup.goalMode !== "string" || !/^[a-zA-Z0-9-]{1,100}$/.test(edit.backup.goalMode))
-        || (edit.imageRemoval === true || edit.imageEditing === true)
-          && (!validQueuedImageSources(edit.originalImageSources) || !Array.isArray(edit.attachments))
-        || edit.imageEditing === true && edit.imageRemoval !== true
-        || !["starting", "editing"].includes(edit.state)) continue;
+    if (!validQueuedMessageEdit(edit)) continue;
     queuedEdits.set(edit.threadId, edit);
   }
 } catch {}
@@ -4400,9 +4403,9 @@ async function restorePrivateInputs(value, { expected = null, requestGeneration 
   const currentGeneration = recoveryGeneration;
   recoveryScope = scope;
   try { sessionStorage.setItem("codex-elves-input-owner", scope); } catch {}
-  const [savedDrafts, savedPending, savedFailures, activeReceipts] = await Promise.all([
+  const [savedDrafts, savedPending, savedFailures, activeReceipts, savedQueueEdits] = await Promise.all([
     recoveryStore.list(scope, "draft"), recoveryStore.list(scope, "pending"), recoveryStore.list(scope, "failed"),
-    recoveryStore.list(scope, "active")
+    recoveryStore.list(scope, "active"), recoveryStore.list(scope, "queue-edit")
   ]);
   if (currentGeneration !== recoveryGeneration || privateInputScope(session) !== scope) return;
   const hydrate = record => {
@@ -4425,11 +4428,17 @@ async function restorePrivateInputs(value, { expected = null, requestGeneration 
     if (latest) pending = { ...latest, recoveryRef: latest.id };
   }
   if (pending?.draft) submittedDrafts.set(pending.payload, pending.draft);
+  // 用户要求客户端重开后直接恢复最后的编辑正文和附件；恢复记录与普通草稿分开，不能跨授权借用。
+  for (const { id, value: edit } of savedQueueEdits)
+    if (validQueuedMessageEdit(edit) && edit.editId === id && edit.deviceId === value.device.id
+        && edit.recoveryScope === scope && !queuedEdits.has(edit.threadId))
+      queuedEdits.set(edit.threadId, edit);
   for (const { id: savedId, value: draft } of savedDrafts) {
     const id = savedId.startsWith("$new:claude:") && value.claudeInstanceId
       ? newDraftKey(savedId.slice("$new:claude:".length), "claude", value.claudeInstanceId) : savedId;
     if (typeof draft?.text !== "string" || !validSkillSelection(draft.skills) || !Array.isArray(draft.attachments)
-        || drafts.has(id) || id !== savedId && savedDrafts.some(entry => entry.id === id)) continue;
+        || id !== savedId && savedDrafts.some(entry => entry.id === id)) continue;
+    if (drafts.has(id)) continue;
     if (id !== savedId) {
       // 旧默认 Claude 草稿先持久化到实例键再移除旧键；迁移失败保留原数据，不影响其他环境草稿。
       await recoveryStore.put(scope, [{ kind: "draft", id, value: draft }]);
@@ -4526,6 +4535,33 @@ function restoreDraft(key) {
   setComposerAttachments(attachmentDrafts.get(key) || []);
   renderSelectedSkills();
 }
+function persistQueuedEditDraft(edit, remove = false) {
+  if (!recoveryScope || !session || edit?.deviceId !== session.device.id
+      || threadEphemeralState(edit.threadId) === true) return Promise.resolve();
+  const scope = recoveryScope, generation = recoveryGeneration, key = `$queue-edit:${edit.editId}`;
+  let job = draftWrites.get(key);
+  if (job?.scope === scope) { job.again = true; job.remove = remove; job.edit = edit; return job.promise; }
+  job = { scope, edit, again: false, remove, promise: null };
+  job.promise = (async () => {
+    do {
+      job.again = false;
+      if (generation !== recoveryGeneration || scope !== recoveryScope) return;
+      // 普通草稿和队列编辑使用不同记录；编辑文字时不能覆盖其他窗口后来保存的普通输入。
+      const value = { ...job.edit, message: { ...job.edit.message }, backup: { ...job.edit.backup }, recoveryScope: scope };
+      if (job.remove) await recoveryStore.remove(scope, "queue-edit", edit.editId);
+      else await recoveryStore.put(scope, [{ kind: "queue-edit", id: edit.editId, value }]);
+      draftStorageError = "";
+    } while (job.again);
+  })().catch(error => {
+    if (generation === recoveryGeneration && scope === recoveryScope && draftStorageError !== error.name) {
+      draftStorageError = error.name || "Error";
+      notice(recoveryStorageMessage(error), true);
+    }
+    throw error;
+  }).finally(() => { if (draftWrites.get(key) === job) draftWrites.delete(key); });
+  draftWrites.set(key, job);
+  return job.promise;
+}
 function persistQueuedEdits(required = false) {
   try {
     if (queuedEdits.size) sessionStorage.setItem("codex-elves-queue-edits", JSON.stringify([...queuedEdits.values()]));
@@ -4534,6 +4570,9 @@ function persistQueuedEdits(required = false) {
     if (required) throw new Error("无法保存队列编辑草稿，操作未提交。请允许此网页使用浏览器会话存储。");
     notice("无法保存队列编辑草稿，请保持页面打开并完成发送。", true);
   }
+  if (typeof persistQueuedEditDraft === "function" && selectedId && queuedEdits.get(selectedId)?.deviceId
+      && queuedEdits.get(selectedId).deviceId === session?.device?.id)
+    void persistQueuedEditDraft(queuedEdits.get(selectedId)).catch(() => {});
 }
 function rememberQueuedMessageEdit(required = false) {
   if (editingQueuedMessage?.state !== "editing" || !$("#prompt")) return;
@@ -8230,6 +8269,13 @@ function mergeTranscriptEvents(entries) {
     });
   }
 }
+function completedManualCompactionAfterReply(item, items, index) {
+  // 用户要求上一轮回复完成后手动点击压缩时，完成提示必须位于该轮最终回复之后；
+  // 只有后面没有新的可见用户输入时才适用，自动压缩和后续新问题保持原生顺序。
+  return item?.type === "contextCompaction" && item.source === "manual" && completedItem(item)
+    && !items.some((candidate, candidateIndex) => candidateIndex > index
+      && candidate.type === "userMessage" && !candidate.remoteCompactionInput && !candidate.remoteHistoryContext);
+}
 function enrichTurnTranscriptEvents(turn) {
   const items = [...(turn.items || [])];
   const turnStatus = typeof turn.status === "string" ? turn.status : turn.status?.type;
@@ -8280,6 +8326,14 @@ function enrichTurnTranscriptEvents(turn) {
         ? beforeInput() : items.length;
       items.splice(insertion, 0, entry.item);
     }
+  }
+  // 用户要求手动压缩在“上一轮回复完成后点击压缩”时显示在会话末尾；
+  // 旧服务或迟到快照可能把同一条完成事件插到最终回复前，只在其后没有新用户输入时调整。
+  const manualCompactions = items.filter((item, index) =>
+    completedManualCompactionAfterReply(item, items, index));
+  if (manualCompactions.length) {
+    const moving = new Set(manualCompactions);
+    items.splice(0, items.length, ...items.filter(item => !moving.has(item)), ...manualCompactions);
   }
   const projected = items.find(item => item.type === "userMessage" && item.remoteCompactionInput === true);
   if (projected) {
@@ -12877,6 +12931,22 @@ function queueSnapshotRemovedMessage(previous, next) {
     return id && !nextIds.has(id);
   });
 }
+function reconcileQueuedEditRecovery(threadId, edits) {
+  if (!Array.isArray(edits)) return;
+  const activeIds = new Set(edits.map(edit => edit?.editId).filter(id => typeof id === "string"));
+  for (const [id, edit] of queuedEdits) {
+    if (id !== threadId || activeIds.has(edit.editId)) continue;
+    const current = pending;
+    if (queuedEditActions.has(current?.action) && current.deviceId === session?.device?.id
+        && current.payload?.threadId === threadId && current.payload?.editId === edit.editId) continue;
+    if (editingQueuedMessage === edit) finishQueuedMessageEdit(edit);
+    else {
+      queuedEdits.delete(id);
+      persistQueuedEdits();
+      if (typeof persistQueuedEditDraft === "function") void persistQueuedEditDraft(edit, true).catch(() => {});
+    }
+  }
+}
 function applyQueueSnapshot(id, messages, edits, snapshot = null, { authoritative = false, readVersion = null } = {}) {
   if (id !== selectedId || !Array.isArray(messages)) return false;
   const previousMessages = thread?.id === id && Array.isArray(thread.queuedMessages)
@@ -12897,13 +12967,15 @@ function applyQueueSnapshot(id, messages, edits, snapshot = null, { authoritativ
   }
   notifiedQueue = messages; ++queueVersion;
   if (Array.isArray(edits)) notifiedQueueEdits = edits;
+  reconcileQueuedEditRecovery(id, edits);
   if (thread?.id === id) {
     thread.queuedMessages = messages;
     if (Array.isArray(edits)) thread.queuedEdits = edits;
   }
   rememberThreadDisplay({ id, queuedMessages: messages, queueSnapshotVersion });
   const sentDisplayChanged = reconcileSentMessageDisplays(id, messages);
-  renderQueueArea();
+  if (typeof restoreUnfinishedQueuedMessageEdit === "function" && restoreUnfinishedQueuedMessageEdit()) updateComposer();
+  else renderQueueArea();
   if (sentDisplayChanged || messages.some(message => confirmedSendDisplayFor(message))) renderMessages();
   if (removedMessage) scheduleReload();
   return true;
@@ -13126,19 +13198,15 @@ function renderQueueArea() {
   root.dataset.queueThread = selectedId || "";
   root.dataset.queueDevice = session?.device.id || "";
   const queue = renderQueuedMessages(messages, previous);
-  const recovery = !threadReadOnly() && !editingQueuedMessage && thread?.queuedEdits?.find(edit => typeof edit.editId === "string"
+  const recovery = !threadReadOnly() && !editingQueuedMessage && thread?.queuedEdits?.find(edit => edit.state !== "editing"
+    && typeof edit.editId === "string"
     && !(queuedEditActions.has(pending?.action) && pending.payload?.editId === edit.editId));
   const children = queue ? [queue] : [];
   if (recovery) {
     const row = element("div", "queued-edit-recovery");
-    const status = element("p", "queued-edit-recovery-text",
-      recovery.state === "editing" ? "有一条排队消息尚未编辑完成" : "正在确认队列编辑结果。");
+    const status = element("p", "queued-edit-recovery-text", "正在确认队列编辑结果。");
     row.append(status);
-    if (recovery.state === "editing") {
-      const resume = button("继续编辑", "取回尚未完成的队列编辑", () => resumeQueuedMessageEdit(recovery), "text-button");
-      resume.disabled = busy || !!pending || !!editingMessage || !connected || threadReadOnly() || compactionLocked();
-      row.append(resume);
-    } else renderQueuedEditRecoveryControls(row, selectedId, recovery.editId);
+    renderQueuedEditRecoveryControls(row, selectedId, recovery.editId);
     children.push(row);
   }
   root.hidden = !children.length;
@@ -13274,9 +13342,31 @@ async function dismissQueuedMessageEdit(threadId, editId) {
   }
   finally { busy = false; updateComposer(); }
 }
-function resumeQueuedMessageEdit(summary) {
-  if (busy || pending || editingMessage || editingQueuedMessage || !connected || threadReadOnly()
-      || compactionLocked() || !selectedId || thread?.id !== selectedId || summary.state !== "editing") return;
+function restoreUnfinishedQueuedMessageEdit() {
+  if (busy || pending || editingMessage || editingQueuedMessage && editingQueuedMessage.state !== "starting" || !connected || threadReadOnly()
+      || stopping || compactionLocked() || !selectedId || thread?.id !== selectedId) return false;
+  const summary = thread.queuedEdits?.find(edit => edit.state === "editing"
+    && typeof edit.editId === "string" && typeof edit.messageId === "string" && typeof edit.originalText === "string");
+  if (!summary) return false;
+  const local = queuedEdits.get(selectedId);
+  if (local && (local.deviceId !== session?.device.id || local.editId !== summary.editId)) return false;
+  if (editingQueuedMessage && local !== editingQueuedMessage) return false;
+  if (local?.state === "starting" && editingQueuedMessage === local) {
+    // 本地停在取回中、服务端已确认同一编辑时只补齐状态；存在任何待确认回执时仍不能走到这里。
+    local.state = "editing"; persistQueuedEdits(); restoreQueuedMessageEdit(); return true;
+  }
+  const currentDraft = snapshotDraft();
+  const isBackupDraft = local && JSON.stringify({
+    text: currentDraft.text, skills: currentDraft.skills, attachments: currentDraft.attachments,
+    goalMode: currentDraft.goalMode
+  }) === JSON.stringify({
+    text: local.backup?.text || "", skills: local.backup?.skills || [],
+    attachments: local.backup?.attachments || [], goalMode: local.backup?.goalMode || null
+  });
+  if (!inputDraftEmpty(currentDraft) && !isBackupDraft) return false;
+  if (local) { restoreQueuedMessageEdit(); return true; }
+  // 用户要求未完成的编辑直接回到输入框，不再显示“继续编辑”引导。
+  // 只恢复已确认 editing 的本地视图，不重新取出、取消或发送；已有普通草稿和待确认回执优先保留。
   rememberDraft();
   const edit = {
     threadId: selectedId, editId: summary.editId, deviceId: session.device.id, state: "editing",
@@ -13285,10 +13375,9 @@ function resumeQueuedMessageEdit(summary) {
     backup: snapshotDraft(), model: selectedModel, effort: selectedEffort, modelChoiceVersion
   };
   queuedEdits.set(selectedId, edit);
-  try { persistQueuedEdits(true); }
-  catch (error) { queuedEdits.delete(selectedId); notice(error.message, true); return; }
+  persistQueuedEdits();
   restoreQueuedMessageEdit();
-  closeComposerMenus(); updateComposer(); $("#prompt").focus({ preventScroll: true });
+  return true;
 }
 async function removeQueuedMessage(threadId, messageId) {
   if (!threadId || !messageId || threadReadOnly(threadId) || !connected || busy || stopping || pending) return;
@@ -13461,6 +13550,7 @@ function finishQueuedMessageEdit(edit) {
   if (!edit) return;
   if (queuedEdits.get(edit.threadId) !== edit) return;
   queuedEdits.delete(edit.threadId);
+  if (typeof persistQueuedEditDraft === "function") void persistQueuedEditDraft(edit, true).catch(() => {});
   if (selectedId === edit.threadId && thread?.id === edit.threadId) {
     thread.queuedEdits = (thread.queuedEdits || []).filter(value => value.editId !== edit.editId);
     if (notifiedQueueEdits) notifiedQueueEdits = notifiedQueueEdits.filter(value => value.editId !== edit.editId);
@@ -13715,6 +13805,11 @@ function renderMessages(keepScroll = true) {
       }
       const item = turnItems[index];
       if (index === finalIndex) continue;
+      if (finalIndex >= 0 && index < finalIndex
+          && completedManualCompactionAfterReply(item, turnItems, index)) {
+        afterFinalEvents.push(item);
+        continue;
+      }
       if (finalIndex >= 0 && index > finalIndex && transcriptEventTypes.has(item.type)) {
         afterFinalEvents.push(item);
         continue;
@@ -16175,6 +16270,7 @@ function updateComposer() {
   syncRelatedSessionLayout();
   syncWorkspaceSidePanelState();
   if (!$("#composer")) return;
+  if (typeof restoreUnfinishedQueuedMessageEdit === "function") restoreUnfinishedQueuedMessageEdit();
   // 先恢复当前会话的缓存及保存状态，再决定发送按钮是否等待该会话的 Fast 写入。
   updateRemoteFast();
   if ($("#permission-button")) updateComposerPermissions();

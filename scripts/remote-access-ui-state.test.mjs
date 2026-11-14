@@ -5125,6 +5125,8 @@ function queuedEditPersistenceHarness({ storageFails = false } = {}) {
   Object.assign(context, {
     selectedId: edit.threadId, thread: { id: edit.threadId }, editingQueuedMessage: edit,
     queuedEdits: new Map([[edit.threadId, edit]]), queueVersion: 1, queuedActionBusy: new Set(),
+    recoveryScope: null, recoveryGeneration: 0, draftWrites: new Map(),
+    threadEphemeralState: () => false,
     session: { capabilities: {} }, connected: true, busy: false, stopping: false, pending: null,
     $: () => prompt, composerAttachmentSnapshot: () => structuredClone(attachments),
     composerAttachmentsLoading: () => false, composerHasAttachments: () => false,
@@ -5141,9 +5143,11 @@ function queuedEditPersistenceHarness({ storageFails = false } = {}) {
       },
       removeItem() { assert.fail("仍有队列编辑时不能删除其存储"); },
     },
+    persistInputDraft: async () => {},
     mutate: async (action, payload) => { submissions.push({ action, payload }); return {}; },
   });
   vm.runInContext([
+    sourceSection("function persistQueuedEditDraft(", "function persistQueuedEdits("),
     sourceSection("function persistQueuedEdits(", "function restoreQueuedMessageEdit("),
     sourceSection("function handlePromptInput(", 'document.addEventListener("pointerdown"'),
     sourceSection("async function submitQueuedMessageEdit(", "function syncEditableMessageMetadata("),
@@ -5243,6 +5247,233 @@ test("队列编辑存储失败时保留最新草稿、提示一次并阻止提�
   assert.equal(edit.state, "editing");
   assert.equal(context.busy, false);
   assert.equal(context.queuedActionBusy.size, 0);
+});
+
+function unfinishedQueueEditHarness() {
+  const disk = storage(), notices = [], writes = [];
+  disk.removeItem = key => disk.records.delete(key);
+  const prompt = { value: "", focus() { assert.fail("自动恢复不能弹出手机键盘"); } };
+  const summary = { editId: "unfinished-edit", messageId: "queued-original", state: "editing", originalText: "取回时原文" };
+  const context = nodeVm.createContext({
+    session: { device: { id: "device-a" } }, selectedId: "main",
+    thread: { id: "main", queuedEdits: [summary] },
+    busy: false, stopping: false, pending: null, editingMessage: null, editingQueuedMessage: null,
+    connected: true, readonly: false, compacting: false, queuedEdits: new Map(),
+    recoveryScope: null, recoveryGeneration: 0, draftWrites: new Map(),
+    threadEphemeralState: () => false,
+    threadReadOnly: () => context.readonly, compactionLocked: () => context.compacting,
+    selectedModel: "selected-model", selectedEffort: "high", modelChoiceVersion: 1,
+    selectedSkills: [], selectedGoal: null, attachments: [],
+    $: () => prompt, sessionStorage: disk,
+    persistInputDraft: async id => writes.push(id),
+    snapshotDraft: () => ({ text: prompt.value, skills: context.selectedSkills,
+      attachments: context.attachments, goalMode: context.selectedGoal }),
+    rememberDraft() {}, renderSelectedSkills() {},
+    setComposerAttachments: (images, options) => { context.attachments = images; context.attachmentOptions = options; },
+    notice: (text, error) => notices.push({ text, error }),
+    mutate() { assert.fail("自动恢复只能恢复输入，不能写服务端队列或发送"); },
+  });
+  nodeVm.runInContext([
+    sourceSection("function inputDraftEmpty(", "function persistInputDraft("),
+    sourceSection("function persistQueuedEditDraft(", "function persistQueuedEdits("),
+    sourceSection("function persistQueuedEdits(", "function matchingDraft("),
+    sourceSection("function restoreUnfinishedQueuedMessageEdit(", "async function removeQueuedMessage("),
+  ].join("\n"), context);
+  return { context, prompt, summary, disk, notices, writes };
+}
+
+test("未完成队列编辑在重新打开后直接恢复原输入和 editId，不显示引导也不自动提交", () => {
+  const h = unfinishedQueueEditHarness();
+  assert.equal(h.context.restoreUnfinishedQueuedMessageEdit(), true);
+  assert.equal(h.prompt.value, "取回时原文");
+  assert.equal(h.context.editingQueuedMessage.editId, h.summary.editId);
+  assert.equal(h.context.editingQueuedMessage.message.id, h.summary.messageId);
+  assert.equal(h.context.editingQueuedMessage.state, "editing");
+  assert.equal(h.context.selectedModel, "selected-model");
+  assert.equal(h.context.selectedEffort, "high");
+  assert.equal(h.context.attachmentOptions.readOnly, true, "只有服务记录时仍由服务保留原图，不伪造可删除图片");
+  assert.deepEqual(h.writes, []);
+  h.prompt.value = "恢复后继续修改";
+  assert.equal(h.context.restoreUnfinishedQueuedMessageEdit(), false);
+  assert.equal(h.prompt.value, "恢复后继续修改", "重复状态刷新不能把新修改还原");
+  assert.deepEqual(h.notices, []);
+});
+
+test("自动恢复队列编辑保留已有普通文字、Skill、附件和目标，不覆盖输入", () => {
+  for (const change of [
+    h => { h.prompt.value = "刚输入的普通草稿"; },
+    h => { h.context.selectedSkills = [{ name: "skill", path: "/skill" }]; },
+    h => { h.context.attachments = [{ kind: "inline", dataUrl: "data:image/png;base64,AQID" }]; },
+    h => { h.context.selectedGoal = "goal-draft"; },
+  ]) {
+    const h = unfinishedQueueEditHarness();
+    change(h);
+    const before = structuredClone(h.context.snapshotDraft());
+    assert.equal(h.context.restoreUnfinishedQueuedMessageEdit(), false);
+    assert.deepEqual(structuredClone(h.context.snapshotDraft()), before);
+    assert.equal(h.context.editingQueuedMessage, null);
+    assert.deepEqual(h.writes, []);
+  }
+});
+
+test("重开时输入框中的内容若只是取回前备份，会被未完成编辑正文替换；用户新改内容不会被覆盖", () => {
+  const h = unfinishedQueueEditHarness();
+  const edit = { threadId: "main", editId: h.summary.editId, deviceId: "device-a", state: "editing",
+    message: { id: h.summary.messageId }, originalText: h.summary.originalText, text: "重启前的队列修改",
+    attachments: [], originalImageSources: [], imageRemoval: false, imageEditing: false,
+    backup: { text: "取回前备份", skills: [], attachments: [], goalMode: null } };
+  h.context.queuedEdits.set("main", edit);
+  h.context.snapshotDraft = () => ({ text: h.prompt.value, skills: [], attachments: [], goalMode: null });
+  h.prompt.value = "取回前备份";
+  assert.equal(h.context.restoreUnfinishedQueuedMessageEdit(), true);
+  assert.equal(h.prompt.value, edit.text);
+  const next = unfinishedQueueEditHarness();
+  next.context.queuedEdits.set("main", edit);
+  next.context.snapshotDraft = () => ({ text: next.prompt.value, skills: [], attachments: [], goalMode: null });
+  next.prompt.value = "用户刚输入的新内容";
+  assert.equal(next.context.restoreUnfinishedQueuedMessageEdit(), false);
+  assert.equal(next.prompt.value, "用户刚输入的新内容");
+});
+
+test("自动恢复队列编辑遇到未知回执、其他编辑、只读、离线或会话变化时不解除保护", () => {
+  for (const change of [
+    h => { h.context.pending = { id: "original-receipt", action: "editQueued" }; },
+    h => { h.context.busy = true; }, h => { h.context.stopping = true; },
+    h => { h.context.editingMessage = { id: "history-message" }; },
+    h => { h.context.readonly = true; }, h => { h.context.connected = false; },
+    h => { h.context.compacting = true; }, h => { h.context.thread.id = "another-thread"; },
+    h => { h.summary.state = "unknown"; },
+    h => { h.context.queuedEdits.set("main", { editId: h.summary.editId, deviceId: "another-device" }); },
+  ]) {
+    const h = unfinishedQueueEditHarness();
+    change(h);
+    const pending = h.context.pending;
+    assert.equal(h.context.restoreUnfinishedQueuedMessageEdit(), false);
+    assert.equal(h.context.editingQueuedMessage, null);
+    assert.equal(h.context.pending, pending);
+    assert.deepEqual(h.writes, []);
+  }
+});
+
+test("取回中断后仅在服务端确认同一编辑且没有待确认回执时恢复编辑正文", () => {
+  const h = unfinishedQueueEditHarness();
+  const edit = { editId: h.summary.editId, threadId: "main", deviceId: "device-a", state: "starting",
+    message: { id: h.summary.messageId }, text: "要继续编辑的原消息",
+    backup: { text: "取回前的普通草稿", skills: [], attachments: [] } };
+  h.context.queuedEdits.set("main", edit);
+  h.context.editingQueuedMessage = edit;
+  h.prompt.value = edit.backup.text;
+  h.context.pending = { id: "original-request", action: "beginQueuedEdit" };
+  assert.equal(h.context.restoreUnfinishedQueuedMessageEdit(), false);
+  assert.equal(edit.state, "starting");
+  h.context.pending = null;
+  assert.equal(h.context.restoreUnfinishedQueuedMessageEdit(), true);
+  assert.equal(edit.state, "editing");
+  assert.equal(h.prompt.value, edit.text);
+  assert.equal(edit.backup.text, "取回前的普通草稿");
+});
+
+test("未完成队列编辑只从可继续编辑的状态恢复，正常编辑不再出现继续编辑引导", () => {
+  const h = cachedControlsHarness();
+  h.context.thread = { id: "main", queuedMessages: [], queuedEdits: [
+    { state: "editing", editId: "recoverable", messageId: "original", originalText: "输入内容" }
+  ] };
+  h.context.renderQueuedEditRecoveryControls = node => node.append({ text: "核对编辑状态" });
+  h.context.renderQueueArea();
+  assert.equal(h.queue.querySelector(".queued-edit-recovery"), null);
+  h.context.thread.queuedEdits[0].state = "unknown";
+  h.context.renderQueueArea();
+  assert.equal(h.queue.querySelector(".queued-edit-recovery-text").text, "正在确认队列编辑结果。");
+  assert.equal(h.queue.hidden, false, "真正未知的结果仍保留核对入口");
+});
+
+test("服务端已返回编辑完成后，刷新不会再次恢复旧编辑记录；待确认回执仍保留", () => {
+  const h = cachedControlsHarness();
+  const edit = { threadId: "main", editId: "finished-edit", deviceId: "device-a", state: "editing",
+    message: { id: "original" }, originalText: "原文", text: "已修改", backup: { text: "" } };
+  h.context.session = { device: { id: "device-a" } };
+  h.context.queuedEdits = new Map([["main", edit]]);
+  h.context.selectedId = "main"; h.context.thread = { id: "main", queuedMessages: [], queuedEdits: [] };
+  h.context.pending = null; h.context.restoreQueuedMessageEdit = () => assert.fail("完成的编辑不能再次恢复");
+  h.context.renderQueueArea = () => {};
+  h.context.persistQueuedEdits = () => {};
+  h.context.persistQueuedEditDraft = (_edit, remove) => { assert.equal(remove, true); return Promise.resolve(); };
+  nodeVm.runInContext(sourceSection("function reconcileQueuedEditRecovery(", "function applyQueueSnapshot("), h.context);
+  h.context.reconcileQueuedEditRecovery("main", []);
+  assert.equal(h.context.queuedEdits.size, 0);
+  const pending = { action: "editQueued", deviceId: "device-a", payload: { threadId: "main", editId: "pending-edit" } };
+  const waiting = { ...edit, editId: "pending-edit" };
+  h.context.queuedEdits = new Map([["main", waiting]]);
+  h.context.pending = pending;
+  h.context.persistQueuedEditDraft = () => assert.fail("待确认编辑不能清理");
+  h.context.reconcileQueuedEditRecovery("main", []);
+  assert.equal(h.context.queuedEdits.get("main"), waiting);
+});
+
+test("客户端丢失会话存储后，从持久草稿恢复最新队列修改和附件，完成后清理编辑身份", async () => {
+  for (const backupText of ["", "编辑前的普通草稿"]) {
+  const backup = { text: backupText, skills: [], attachments: [], goalMode: null };
+  const shared = sharedOrdinaryDraftHarness(), first = shared.page("first", backup);
+  shared.disk.set("main", structuredClone(backup));
+  const edit = { threadId: "main", editId: "durable-edit", deviceId: "shared-device", state: "editing",
+    message: { id: "original-message" }, originalText: "取回原文", text: "取回原文",
+    backup, attachments: [], modelChoiceVersion: 1, model: "model", effort: "high" };
+  first.context.editingQueuedMessage = edit;
+  first.context.queuedEdits.set("main", edit);
+  first.context.sessionStorage = { setItem() {}, removeItem() {} };
+  first.context.composerAttachmentSnapshot = () => first.context.currentAttachments;
+  nodeVm.runInContext([
+    sourceSection("function persistQueuedEditDraft(", "function persistQueuedEdits("),
+    sourceSection("function persistQueuedEdits(", "function restoreQueuedMessageEdit("),
+  ].join("\n"), first.context);
+  first.prompt.value = "重启前最后修改的内容";
+  first.context.currentAttachments = [{ kind: "inline", name: "草稿.png", dataUrl: "data:image/png;base64,AQID" }];
+  first.context.rememberQueuedMessageEdit();
+  await first.settled();
+  const saved = shared.disk.get("main");
+  const savedEdit = shared.disk.get(`$queue-edit:${edit.editId}`);
+  assert.equal(saved.text, backup.text, "编辑稿不能替换原普通草稿备份");
+  assert.ok(savedEdit, `队列编辑持久化记录缺失：${JSON.stringify(shared.writes)}`);
+  assert.equal(savedEdit.text, first.prompt.value);
+  assert.equal(savedEdit.attachments[0].name, "草稿.png");
+  const reopened = shared.page("reopened"), context = reopened.context;
+  Object.assign(context, {
+    pending: null, submittedDrafts: new WeakMap(), goalComposerRecoveries: new Map(), failedInputRecoveries: new Map(),
+    privateInputScope: value => JSON.stringify([value.device.id, value.device.createdAtMs]),
+    validSkillSelection: Array.isArray, validQueuedImageSources: Array.isArray,
+    sessionStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    renderSelectedSkills() {}, selectedModel: "", selectedEffort: "", modelChoiceVersion: 1,
+    setComposerAttachments: value => { context.currentAttachments = value; },
+    thread: { id: "main", queuedEdits: [{ editId: edit.editId }] }, notifiedQueueEdits: null,
+  });
+  context.recoveryStore.activate = async () => {};
+  context.recoveryStore.list = async (_scope, kind) => {
+    if (kind === "draft")
+      return [...shared.disk].filter(([id]) => !id.startsWith("$queue-edit:"))
+        .map(([id, value]) => ({ id, value: structuredClone(value) }));
+    if (kind === "queue-edit")
+      return [...shared.disk].filter(([id]) => id.startsWith("$queue-edit:"))
+        .map(([id, value]) => ({ id: id.slice("$queue-edit:".length), value: structuredClone(value) }));
+    return [];
+  };
+  nodeVm.runInContext([
+    sourceSection("function validQueuedMessageEdit(", 'try {\n  const stored = JSON.parse(sessionStorage.getItem("codex-elves-queue-edits")'),
+    sourceSection("async function restorePrivateInputs(", "function restoreSmallInputRecoveries("),
+    sourceSection("function restoreDraft(", "function matchingDraft("),
+    sourceSection("function finishQueuedMessageEdit(", "function completeQueuedEditAction("),
+  ].join("\n"), context);
+  await context.restorePrivateInputs(context.session);
+  context.restoreQueuedMessageEdit();
+  assert.equal(reopened.prompt.value, "重启前最后修改的内容");
+  assert.equal(context.editingQueuedMessage.editId, edit.editId);
+  assert.equal(context.currentAttachments[0].name, "草稿.png");
+  context.finishQueuedMessageEdit(context.editingQueuedMessage);
+  await reopened.settled();
+  assert.equal(reopened.prompt.value, backup.text);
+  assert.equal(context.editingQueuedMessage, null);
+  assert.equal(shared.disk.get("main")?.queuedEdit, undefined, "完成后不能在下次重开时复活旧编辑");
+  if (!backupText) assert.equal(shared.disk.has("main"), false, "空普通草稿也不能遗留编辑恢复记录");
+  }
 });
 
 function queuedEditFeedbackHarness() {
@@ -5780,6 +6011,27 @@ test("Claude 首次生效提示位于对应问题前，中途变更保持原生�
   for (let index = 0; index < 3; index++) turn = context.enrichTurnTranscriptEvents(turn);
   assert.deepEqual([...turn.items.map(item => item.id)], ["initial-change", "input", "first", "inline-change", "second"]);
   assert.equal(turn.items.filter(item => item.type === "modelChanged").length, 2);
+});
+
+test("手动压缩完成事件误插到最终回复前时，重排到该轮末尾；回复前压缩保持原位", () => {
+  const context = { transcriptEvents: new Map(), itemVersions: new Map() };
+  vm.createContext(context);
+  context.nativeConnectionVersion ??= 1;
+  vm.runInContext([
+    sourceSection("const transcriptEventTypes =", "async function mutate("),
+    sourceSection("function completedItem(", "function mergeHistoryTurn("),
+  ].join("\n"), context);
+  const input = { id: "input", type: "userMessage" };
+  const reply = { id: "reply", type: "agentMessage", text: "已完成回复" };
+  const manual = { id: "manual", type: "contextCompaction", source: "manual", status: "completed", completed: true };
+  assert.equal(context.completedItem(manual), true);
+  const moved = context.enrichTurnTranscriptEvents({ id: "after-reply", items: [input, manual, reply] });
+  assert.deepEqual([...moved.items.map(item => item.id)], ["input", "reply", "manual"]);
+  const before = context.enrichTurnTranscriptEvents({ id: "before-reply", items: [input,
+    { ...manual, source: "automatic" }, reply],
+    status: "inProgress" });
+  // “压缩后生成回复”的情形没有回复在压缩前，不能套用末尾修复规则。
+  assert.deepEqual([...before.items.map(item => item.id)], ["input", "manual", "reply"]);
 });
 
 test("压缩历史仅有时间字段时，切回会话即可显示进行中或已完成", () => {
@@ -6515,6 +6767,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 function installSentMessageDisplayHarness(context) {
+  context.restoreUnfinishedQueuedMessageEdit ??= () => false;
   context.sentMessageDisplays ??= new Map();
   context.retiredSendPayloads ??= new WeakSet();
   context.turns ??= new Map();
@@ -9877,6 +10130,7 @@ function sharedOrdinaryDraftHarness(initial = null) {
       drafts: new Map(), skillDrafts: new Map(), attachmentDrafts: new Map(), goalDrafts: new Map(),
       selectedSkills: loaded.skills, selectedGoal: loaded.goalMode, currentAttachments: loaded.attachments,
       editingQueuedMessage: null, pageLeaving: false, stream: null, streamRetry: null, sessionMenu: null,
+      queuedEdits: new Map(), threadEphemeralState: () => false,
       $: () => prompt, clearTimeout, randomId: () => `${name}-changed-goal`,
       composerAttachmentSnapshot: () => context.currentAttachments.map(image => ({ ...image })),
       syncSelectedSkillsFromPrompt() {}, forgetPromptCanonicalText() {}, syncPromptTrailingBreak() {},
@@ -9891,14 +10145,16 @@ function sharedOrdinaryDraftHarness(initial = null) {
         async put(owner, records) {
           assert.equal(owner, scope);
           for (const record of records) {
-            assert.equal(record.kind, "draft");
+            assert.ok(["draft", "queue-edit"].includes(record.kind));
             const value = structuredClone(record.value);
-            disk.set(record.id, value); writes.push({ page: name, kind: "put", value });
+            disk.set(record.kind === "queue-edit" ? `$queue-edit:${record.id}` : record.id, value);
+            writes.push({ page: name, kind: record.kind, value });
           }
         },
         async remove(owner, kind, key) {
-          assert.equal(owner, scope); assert.equal(kind, "draft");
-          disk.delete(key); writes.push({ page: name, kind: "remove" });
+          assert.equal(owner, scope); assert.ok(["draft", "queue-edit"].includes(kind));
+          disk.delete(kind === "queue-edit" ? `$queue-edit:${key}` : key);
+          writes.push({ page: name, kind: kind === "draft" ? "remove" : "remove-queue-edit" });
         },
       },
     };
@@ -10043,6 +10299,7 @@ function cachedControlsHarness(existing = null) {
       : selector === "#goal-area" ? goal : selector === "#queued-area" ? queue : null,
     threadReadOnly: () => false, connected: true, busy: false, stopping: false, pending: null,
     queuedActionBusy: new Set(), editingQueuedMessage: null, editingMessage: null, queueReorder: null,
+    queuedEditActions: new Set(["beginQueuedEdit", "editQueued", "cancelQueuedEdit", "dismissQueuedEdit"]),
     queueDrag: null, queuedEditCheckVersion: 0, compactionLocked: () => false,
     goalEditPending: null, goalEditDraft: null, renderGoalEditor() {}, updateGoalLiveView() {}, stopGoalLiveTimer() {},
     syncPendingFeedbackTimer() {}, pendingFeedbackReady: () => true,
@@ -10736,6 +10993,9 @@ function claudeExecutionFeedbackHarness(turn) {
     historyGapIndex: () => 0, userMessageHasSkills: () => false, subagentsEnabled: () => false,
     isSubagentItem: () => false, transcriptEventTypes: new Set(), reasoningPreviewText: () => "",
     isActiveThread: () => context.thread.status.type === "active",
+    completedItem: item => item?.remoteItemCompleted === true || Number.isFinite(item?.completedAtMs)
+      || item?.type === "contextCompaction" && item.completed === true
+      || ["completed", "failed", "interrupted"].includes(item?.status),
     threadReadOnly: () => false, threadSentMessageEditAllowed: () => false, compactionLocked: () => false,
     renderItem: item => makeNode(item.text || item.type), renderMessageActions() {}, renderEditedFiles: () => null,
     renderActivity: (value, work, running) => {
@@ -10747,7 +11007,8 @@ function claudeExecutionFeedbackHarness(turn) {
     reconcileChildren: (node, children) => { node.children = children; },
     resizeEditorInput() {}, syncActivityTimer() {}, syncHistoryButtons() {}, updateScrollControl() {}, scheduleHistoryLoad() {},
   });
-  nodeVm.runInContext(sourceSection("function finalMessageIndex(", "function updateActivitySummary(")
+  nodeVm.runInContext(sourceSection("function completedManualCompactionAfterReply(", "function enrichTurnTranscriptEvents(")
+    + sourceSection("function finalMessageIndex(", "function updateActivitySummary(")
     + sourceSection("function renderMessages(", "function rememberTranscript("), context);
   return { context, activities, root, render() { activities.length = 0; context.renderMessages(); return activities; } };
 }
@@ -10770,6 +11031,21 @@ test("Claude 恢复后单独压缩的状态行始终位于已经完成的回复�
     assert.deepEqual(order, ["restored:input", "activity", "restored:reply", "restored:compact"],
       `${status} 状态及重复重绘均须保留原生先后顺序，不能把旧回复挪到压缩提示后`);
   }
+});
+
+test("Claude 正文渲染兜底把迟到的手动完成压缩放到最终回复之后", () => {
+  const turn = { id: "render-fallback", _nativeUserId: "native-render-fallback",
+    status: "completed", items: [
+      { id: "input", type: "userMessage" },
+      { id: "compact", type: "contextCompaction", source: "manual", status: "completed",
+        completed: true, remoteInlineEvent: true, remoteCompactionLifecycle: true },
+      { id: "reply", type: "agentMessage", text: "已完成回复", phase: "final_answer" },
+    ] };
+  const h = claudeExecutionFeedbackHarness(turn);
+  h.context.transcriptEventTypes.add("contextCompaction");
+  h.render();
+  assert.deepEqual(Array.from(h.root.children[0].children, node => node.dataset.key || "activity"),
+    ["render-fallback:input", "render-fallback:reply", "render-fallback:compact"]);
 });
 
 test("Claude 回复生成前的压缩仍保留原位置，不统一移动到最终回复之后", () => {
