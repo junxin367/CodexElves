@@ -9887,7 +9887,8 @@ async function loadSidebar(cursor = null, { fresh = false, resourcePriority = "f
     if (sidebarRequest?.promise === promise) sidebarRequest = null;
   }
 }
-// 用户要求服务模式会话的排序和今天/昨天分组与 Codex App 一致：服务端已统一输出毫秒，
+// 用户要求服务模式会话按优先级、今天、昨天、前天、近四个星期日历日和历史分组；
+// 服务端已统一输出毫秒，
 // 这里兼容旧缓存中的 Unix 秒。阈值 1e11 与服务时间戳转换及
 // codex_service.rs UNIX_SECONDS_LIMIT 同步。
 function sidebarTimestamp(value) {
@@ -9896,6 +9897,32 @@ function sidebarTimestamp(value) {
 }
 function sidebarUpdatedAt(item) {
   return sidebarTimestamp(item.updatedAt) || sidebarTimestamp(item.recencyAt) || sidebarTimestamp(item.createdAt);
+}
+function sidebarRecentDateGroups(items, now = Date.now()) {
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const starts = Array.from({ length: 7 }, (_, offset) => {
+    const date = new Date(today);
+    date.setDate(date.getDate() - offset);
+    return date;
+  });
+  const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
+  const labels = ["今天", "昨天", "前天", ...starts.slice(3).map(date => `星期${weekdays[date.getDay()]}`)];
+  const groups = labels.map((label, index) => ({
+    key: index < 3 ? ["today", "yesterday", "before-yesterday"][index] : `weekday-${index}`,
+    label,
+    items: []
+  }));
+  const history = { key: "history", label: "历史", items: [] };
+  for (const item of Array.isArray(items) ? items : []) {
+    const timestamp = sidebarUpdatedAt(item);
+    const index = starts.findIndex((start, offset) => timestamp >= start.getTime()
+      && (offset === 0 || timestamp < starts[offset - 1].getTime()));
+    (index >= 0 ? groups[index] : history).items.push(item);
+  }
+  // 用户要求最近会话依次显示优先级、今天、昨天、前天、近四个星期日历日和历史；
+  // 空分组由 appendSection 跳过，但固定返回顺序，避免跨周、跨月时改变位置。
+  return [...groups, history];
 }
 function markSidebarThreadReadLocally(id, value = sidebar) {
   if (!value || typeof id !== "string" || !id) return;
@@ -10225,17 +10252,9 @@ function renderSidebar() {
     }
     const dated = recent.filter(item => !recentPriorityIds.has(item.id));
     const visible = search ? dated : dated.slice(0, recentLimit);
-    const today = new Date(); today.setHours(0, 0, 0, 0);
-    const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
-    const todayAt = today.getTime(), yesterdayAt = yesterday.getTime();
-    const todayThreads = [], yesterdayThreads = [], historyThreads = [];
-    for (const item of visible) {
-      const timestamp = sidebarUpdatedAt(item);
-      (timestamp >= todayAt ? todayThreads : timestamp >= yesterdayAt ? yesterdayThreads : historyThreads).push(item);
-    }
-    for (const [label, items] of [["今天", todayThreads], ["昨天", yesterdayThreads], ["历史", historyThreads]]) {
-      const children = items.map(item => row(item, "recent", true));
-      if (label === "历史") {
+    for (const group of sidebarRecentDateGroups(visible)) {
+      const children = group.items.map(item => row(item, "recent", true));
+      if (group.key === "history") {
         if (visible.length < dated.length)
           children.push(button("显示更多会话", "显示更多会话", () => { recentLimit += 40; renderSidebar(); }, "load-more"));
         else if (sidebar.nextCursor)
@@ -10243,8 +10262,7 @@ function renderSidebar() {
             void loadSidebar(sidebar.nextCursor).catch(error => notice(error.message, true));
           }, "load-more"));
       }
-      appendSection(`list:${label === "今天" ? "today" : label === "昨天" ? "yesterday" : "history"}`,
-        label, children);
+      appendSection(`list:${group.key}`, group.label, children);
     }
   }
   if (preferences.mode === "project" && sidebar.nextCursor) root.append(button("加载更多会话", "加载更多会话", () => {

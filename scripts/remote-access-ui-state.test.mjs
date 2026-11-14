@@ -405,6 +405,25 @@ test("服务模式秒级会话时间按毫秒进入今天分组，并与 Claude 
   assert.ok(context.sidebarUpdatedAt(codex) > context.sidebarUpdatedAt(claude), "较新的 Codex 会话排在较早的 Claude 会话前");
 });
 
+test("最近会话按今天、昨天、前天、近四个星期日历日和历史分组", () => {
+  const context = vm.createContext({ nativeConnectionVersion: 1 });
+  vm.runInContext(sourceSection("function sidebarTimestamp(", "function markSidebarThreadReadLocally("), context);
+  const now = new Date(2026, 10, 15, 12, 0, 0);
+  const items = Array.from({ length: 8 }, (_, offset) => {
+    const date = new Date(now);
+    date.setDate(date.getDate() - offset);
+    return { id: `day-${offset}`, updatedAt: date.getTime() };
+  });
+  const old = new Date(now);
+  old.setDate(old.getDate() - 10);
+  items.push({ id: "history", updatedAt: old.getTime() });
+  const groups = context.sidebarRecentDateGroups(items, now.getTime());
+  assert.deepEqual(Array.from(groups, group => group.label),
+    ["今天", "昨天", "前天", "星期四", "星期三", "星期二", "星期一", "历史"]);
+  assert.deepEqual(Array.from(groups, group => Array.from(group.items, item => item.id)),
+    [["day-0"], ["day-1"], ["day-2"], ["day-3"], ["day-4"], ["day-5"], ["day-6"], ["day-7", "history"]]);
+});
+
 test("桌面同步只观察当前会话与可见 Codex 列表项，关联详情沿用主会话", () => {
   const { context, root } = desktopObservationHarness();
   assert.deepEqual([...context.desktopObservationIds()], ["selected", "visible"]);
