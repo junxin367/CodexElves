@@ -1462,6 +1462,22 @@ def permission_live_shortcut(lines):
     return bool(re.search(r"shift\s*\+\s*tab\s+to\s+cycle", footer, re.I))
 
 
+def native_history_updated_at(rows):
+    # 用户要求服务重启只恢复原生历史，不改变最近会话顺序；更新时间必须来自原生记录，
+    # 缺失时由 Rust 保留已有值，不能用服务当前时间伪造一次活动。
+    latest = 0
+    for row in rows:
+        meaningful = (real_user(row)
+                      or row.get("type") == "assistant" and row.get("isApiErrorMessage") is not True
+                      or row.get("subtype") == "turn_duration")
+        if not meaningful:
+            continue
+        at = row.get("timestampMs")
+        if isinstance(at, (int, float)) and at > latest:
+            latest = int(at)
+    return latest
+
+
 class NativeSession:
     def __init__(self, cli, native_id, job_id=""):
         self.cli = cli
@@ -3550,18 +3566,22 @@ class NativeSession:
                                              "decision_reason": job.get("needs", "")}
         context = self.context_configuration()
         preview = self.preview_context()
+        updated_at = native_history_updated_at(self.all_messages or self.messages)
         signature = (self.log_identity, self.log_mtime, self.log_offset, json.dumps(status, sort_keys=True),
                      json.dumps(self.pending, sort_keys=True), json.dumps(context, sort_keys=True),
-                     json.dumps(self.requests, sort_keys=True),
+                     json.dumps(self.requests, sort_keys=True), updated_at,
                      json.dumps(self.control_projection(), sort_keys=True))
         if force or signature != self.signature:
             self.signature = signature
+            # 用户要求重启恢复不能把历史 Claude 会话排到活跃 Codex 会话前面；
+            # shared_snapshot 必须携带原生日志最后活动时间，不能让服务端回退到 now_ms()。
             emit({"type": "shared_snapshot", "native_id": self.native_id, "job_id": self.short,
                   "native_status": status, "messages": self.messages,
                   "history_head": self.history.current_head(),
                   "retired_usage": self.retired_usage,
                   "clients": self.clients, "pending": self.pending, "requests": self.requests,
                   "preview_basis": preview[1] if preview else None,
+                  "updated_at": updated_at or None,
                   "context_configuration": context, "native_control": self.control_projection()})
         # 120ms 节流内到达的最后一段必须补发；复用现有 250ms 轮询，不新增线程或读取。
         # 先发布正式快照，让接收端建立同一轮次/正文基线，再补充仍有效的临时预览。

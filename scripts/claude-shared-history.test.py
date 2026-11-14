@@ -632,6 +632,24 @@ class SharedQueueHistoryTests(unittest.TestCase):
             self.assertEqual(frame["native_status"]["tempo"], "idle")
             self.assertEqual(frame["requests"], {})
 
+    def test_shared_snapshot_reports_native_last_activity_for_reconnect_sorting(self):
+        native = self.waiting_dialog()
+        native.messages = [
+            {"type": "user", "uuid": "real-user", "timestampMs": 1000,
+             "message": {"content": "真实问题"}},
+            {"type": "assistant", "uuid": "reply", "timestampMs": 2000,
+             "message": {"content": []}},
+            {"type": "system", "uuid": "compact", "subtype": "compact_boundary", "timestampMs": 9000},
+            {"type": "system", "uuid": "done", "subtype": "turn_duration", "timestampMs": 3000},
+        ]
+        native.all_messages = native.messages
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            native.poll(force=True)
+        frame = json.loads(output.getvalue())
+        self.assertEqual(frame["updated_at"], 3000,
+                         "恢复快照必须使用原生最后活动时间，不能把压缩边界或服务当前时间当作最近活动")
+
     def activity_fixture(self, status="idle"):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)

@@ -2647,9 +2647,11 @@ impl Claude {
                 });
                 let history_changed = projected != c.turns;
                 if history_changed {
-                    c.updated_at = frame["updated_at"]
-                        .as_u64()
-                        .map_or_else(now_ms, |at| c.updated_at.max(at));
+                    // 用户要求服务重启只恢复原生历史，不改变最近会话顺序；
+                    // 快照没有可信原生时间戳时保留旧值，不能用服务当前时间伪造活动。
+                    if let Some(at) = frame["updated_at"].as_u64() {
+                        c.updated_at = c.updated_at.max(at);
+                    }
                     // 用户要求已读不因重连、状态变化或预览替换恢复蓝点；首次发现导入不置未读，后续新增正文仍沿用原判断。
                     if track_unread && !initial_import {
                         let repaired = repaired_history_baseline(&c.turns, frame);
@@ -5404,6 +5406,11 @@ mod tests {
             {"type":"assistant","message":{"id":"reply","content":[{"type":"text","text":"回复"}]}}
         ]});
         service.ingest_shared(&c.id, "first", &frame).await.unwrap();
+        assert_eq!(
+            service.conversation(&c.id).await.unwrap().updated_at,
+            c.updated_at,
+            "重启恢复快照缺少原生时间戳时不能把会话更新时间改成当前时间"
+        );
         assert!(service.conversation(&c.id).await.unwrap().unread);
         service
             .command("markRead", &json!({"threadId":c.id}), &auth)
