@@ -12,7 +12,7 @@ const target = "windows-x64";
 if (manifest.schemaVersion !== 1) {
   throw new Error(`不支持的工具清单版本: ${manifest.schemaVersion}`);
 }
-const toolIds = ["rg", "node", "node_repl"];
+const toolIds = ["rg", "node_repl"];
 const specs = Object.fromEntries(toolIds.map((toolId) => {
   const definition = manifest.tools?.[toolId];
   const spec = definition?.targets?.[target];
@@ -56,11 +56,9 @@ function checkBinary(path, spec, label) {
 
 function probeTool(toolId, path, spec, label) {
   const args = toolId === "node_repl" ? ["--help"] : ["--version"];
-  const expected = toolId === "node"
-    ? `v${spec.version}`
-    : toolId === "node_repl"
-      ? "node_repl MCP stdio server"
-      : spec.version;
+  const expected = toolId === "node_repl"
+    ? "node_repl MCP stdio server"
+    : spec.version;
   const probe = spawnSync(path, args, {
     encoding: "utf8",
     windowsHide: true,

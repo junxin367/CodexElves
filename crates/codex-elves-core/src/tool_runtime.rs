@@ -10,14 +10,12 @@ use tokio::process::Command;
 
 const TOOL_MANIFEST: &str = "tool-manifest.json";
 const RG_TOOL_ID: &str = "rg";
-const NODE_TOOL_ID: &str = "node";
 const NODE_REPL_TOOL_ID: &str = "node_repl";
 
 #[derive(Debug, Clone)]
 pub struct ToolRuntimeInfo {
     pub tools_dir: Option<PathBuf>,
     pub rg_path: Option<PathBuf>,
-    pub node_path: Option<PathBuf>,
     pub node_repl_path: Option<PathBuf>,
     pub source: &'static str,
     pub verification: &'static str,
@@ -31,16 +29,13 @@ impl ToolRuntimeInfo {
             "paths": {
                 "toolsDir": self.tools_dir.as_ref().map(|path| path.to_string_lossy().to_string()),
                 "rgPath": self.rg_path.as_ref().map(|path| path.to_string_lossy().to_string()),
-                "nodePath": self.node_path.as_ref().map(|path| path.to_string_lossy().to_string()),
                 "nodeReplPath": self.node_repl_path.as_ref().map(|path| path.to_string_lossy().to_string()),
             },
             "toolsDir": self.tools_dir.as_ref().map(|path| path.to_string_lossy().to_string()),
             "rgPath": self.rg_path.as_ref().map(|path| path.to_string_lossy().to_string()),
-            "nodePath": self.node_path.as_ref().map(|path| path.to_string_lossy().to_string()),
             "nodeReplPath": self.node_repl_path.as_ref().map(|path| path.to_string_lossy().to_string()),
             "available": {
                 "rg": self.rg_path.is_some(),
-                "node": self.node_path.is_some(),
                 "nodeRepl": self.node_repl_path.is_some(),
             },
         })
@@ -86,9 +81,6 @@ fn apply_to_command_with(
     if let Some(path) = info.rg_path.as_ref() {
         command.env("CODEX_ELVES_RG_PATH", path);
     }
-    if let Some(path) = info.node_path.as_ref() {
-        command.env("CODEX_ELVES_NODE_PATH", path);
-    }
     if let Some(path) = info.node_repl_path.as_ref() {
         command.env("CODEX_ELVES_NODE_REPL_PATH", path);
     }
@@ -104,9 +96,8 @@ fn discover_with(candidates: Vec<PathBuf>, original_path: Option<OsString>) -> T
         let Some(manifest) = read_manifest(&tools_dir) else {
             continue;
         };
-        let (Some(rg_path), Some(node_path), Some(node_repl_path)) = (
+        let (Some(rg_path), Some(node_repl_path)) = (
             verified_tool_path(&tools_dir, &manifest, RG_TOOL_ID),
-            verified_tool_path(&tools_dir, &manifest, NODE_TOOL_ID),
             verified_tool_path(&tools_dir, &manifest, NODE_REPL_TOOL_ID),
         ) else {
             continue;
@@ -114,20 +105,17 @@ fn discover_with(candidates: Vec<PathBuf>, original_path: Option<OsString>) -> T
         return ToolRuntimeInfo {
             tools_dir: Some(tools_dir),
             rg_path: Some(rg_path),
-            node_path: Some(node_path),
             node_repl_path: Some(node_repl_path),
             source: "bundled",
             verification: "sha256",
         };
     }
     let rg_path = find_on_path(RG_TOOL_ID, original_path.as_ref());
-    let node_path = find_on_path(NODE_TOOL_ID, original_path.as_ref());
     let node_repl_path = find_on_path(NODE_REPL_TOOL_ID, original_path.as_ref());
-    if rg_path.is_some() || node_path.is_some() || node_repl_path.is_some() {
+    if rg_path.is_some() || node_repl_path.is_some() {
         return ToolRuntimeInfo {
             tools_dir: None,
             rg_path,
-            node_path,
             node_repl_path,
             source: "path",
             verification: "external",
@@ -136,7 +124,6 @@ fn discover_with(candidates: Vec<PathBuf>, original_path: Option<OsString>) -> T
     ToolRuntimeInfo {
         tools_dir: None,
         rg_path: None,
-        node_path: None,
         node_repl_path: None,
         source: "unavailable",
         verification: "none",
@@ -349,7 +336,6 @@ mod tests {
         assert_eq!(info.verification, "sha256");
         for (name, expected_path) in [
             ("rg.exe", info.rg_path.clone().unwrap()),
-            ("node.exe", info.node_path.clone().unwrap()),
             ("node_repl.exe", info.node_repl_path.clone().unwrap()),
         ] {
             let mut probe = Command::new(
