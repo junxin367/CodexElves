@@ -2,6 +2,7 @@
 //! 用户要求 Codex 仅保留服务模式；本模块不包含页面脚本或桌面注入回退。
 mod catalog;
 mod commands;
+mod defaults;
 mod desktop;
 mod fast;
 mod pins;
@@ -485,6 +486,10 @@ impl Harness {
             "notifications" => Ok(self.projection.lock().await.notifications(&payload)),
             "sidebar" => self.sidebar().await,
             "models" => self.models(&payload).await,
+            "newSessionDefaults" => self
+                .creation_defaults(&payload)
+                .await
+                .map(|(defaults, _)| defaults),
             "fast" => self.fast_state(&payload).await,
             "skills" => self.skills(&payload).await,
             "thread" => self.thread(&payload).await,

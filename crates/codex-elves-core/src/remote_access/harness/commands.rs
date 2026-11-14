@@ -650,6 +650,21 @@ impl Harness {
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
         inputs(payload)?;
+        // 用户要求新建时按 App 解析默认值，并在派发前重新核对目标项目；显式草稿选择始终优先。
+        let (defaults, config) = self.creation_defaults(payload).await?;
+        let mut resolved = payload.clone();
+        for key in ["model", "reasoningEffort", "permissionMode"] {
+            if resolved[key].as_str().is_none_or(|value| value.is_empty())
+                && (key != "reasoningEffort" || resolved["model"] == defaults["model"])
+                && defaults[key].is_string()
+            {
+                resolved[key] = defaults[key].clone();
+            }
+        }
+        if resolved["permissionMode"] == "configured" {
+            resolved["permissionConfig"] = super::super::permissions::codex_config_preset(&config)?;
+        }
+        let payload = &resolved;
         if payload["fastMode"] == true {
             self.validate_fast_model(required(payload, "model")?)
                 .await?;
@@ -680,6 +695,15 @@ impl Harness {
             params["model"] = json!(model);
         }
         super::super::permissions::apply_codex(payload, &mut params, &cwd, true)?;
+        if let Some(effort) = payload["reasoningEffort"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        {
+            if !params["config"].is_object() {
+                params["config"] = json!({});
+            }
+            params["config"]["model_reasoning_effort"] = json!(effort);
+        }
         let response = self
             .runtime
             .request("thread/start", params, Some(authorization))
@@ -710,11 +734,13 @@ impl Harness {
             Ok(mut sent) => {
                 sent["conversationId"] = json!(&id);
                 sent["status"] = json!("created");
+                sent["permissionMode"] = payload["permissionMode"].clone();
                 sent["firstTurn"] = json!({"status":"accepted"});
                 Ok(sent)
             }
             Err(error) => Ok(
                 json!({"ok":false,"code":409,"threadId":id,"conversationId":id,
+                "permissionMode":payload["permissionMode"],
                 "outcomeUnknown":true,"message":format!("会话已创建，首条消息结果待核对：{error}"),
                 "firstTurn":{"status":"outcome-unknown"}}),
             ),

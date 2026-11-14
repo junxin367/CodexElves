@@ -1200,7 +1200,8 @@ impl RemoteAccessController {
             permissions::validate_mode(backend, mode)?;
             // 覆盖值由服务器重新解析，不能信任客户端提供的任意批准策略或文件目录。
             payload.as_object_mut().unwrap().remove("permissionConfig");
-            if backend == "codex" && payload["permissionMode"] == "configured" {
+            if backend == "codex" && action != "create" && payload["permissionMode"] == "configured"
+            {
                 payload["permissionConfig"] = self.harness.configured_permissions().await?;
             }
         }
@@ -1227,13 +1228,14 @@ impl RemoteAccessController {
             .as_str()
             .filter(|id| action == "thread" && !claude::Claude::owns_id(id))
             .map(str::to_owned);
-        let creation_mode = (action == "create"
+        let codex_creation = action == "create"
             && payload["backend"] != "claude"
             && !payload["instanceId"]
                 .as_str()
-                .is_some_and(|id| id.starts_with("claude:")))
-        .then(|| payload.get("permissionMode").cloned())
-        .flatten();
+                .is_some_and(|id| id.starts_with("claude:"));
+        let creation_mode = codex_creation
+            .then(|| payload.get("permissionMode").cloned())
+            .flatten();
         let creation_instance = payload["instanceId"]
             .as_str()
             .unwrap_or("codex:local")
@@ -1242,7 +1244,10 @@ impl RemoteAccessController {
             .then(|| payload["threadId"].as_str().map(str::to_owned))
             .flatten();
         let mut value = self.call_backend(action, payload, authorization).await?;
-        if let Some(mode) = creation_mode.and_then(|mode| mode.as_str().map(str::to_owned)) {
+        if let Some(mode) = creation_mode
+            .or_else(|| codex_creation.then(|| value["permissionMode"].clone()))
+            .and_then(|mode| mode.as_str().map(str::to_owned))
+        {
             if let Some(id) = value["conversationId"]
                 .as_str()
                 .or_else(|| value["threadId"].as_str())
@@ -3292,7 +3297,7 @@ async fn session(
         "queueSendRecovery":native_write_available,"projectlessCreation":native_write_available,
         "promptOptimization":true,"promptOptimizationSettings":true,"messageEditModelSettings":native_write_available,
         "fastMode":native_write_available,
-        "sessionPermissions":true,"instancePermissions":true,
+        "sessionPermissions":true,"instancePermissions":true,"codexSessionDefaults":true,
         "serviceFastMode":native_write_available,
         "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
         "sendText":native_write_available || service_connected,
@@ -3469,6 +3474,7 @@ async fn read(
             | "history"
             | "thread"
             | "models"
+            | "newSessionDefaults"
             | "fast"
             | "claudeUsage"
             | "sessionMetrics"
@@ -6851,8 +6857,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             .find(|frame| frame["method"] == "turn/start")
             .unwrap();
         assert_eq!(turn["params"]["threadId"], other["threadId"]);
-        assert!(turn["params"].get("sandboxPolicy").is_none());
-        assert!(turn["params"].get("approvalPolicy").is_none());
+        assert_eq!(turn["params"]["sandboxPolicy"]["type"], "workspaceWrite");
+        assert_eq!(turn["params"]["approvalPolicy"], "on-request");
         let detail = controller
             .call_authorized(
                 "thread",
@@ -6861,7 +6867,85 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             )
             .await
             .unwrap();
-        assert!(detail["thread"].get("permissionMode").is_none());
+        assert_eq!(detail["thread"]["permissionMode"], "auto");
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_new_session_defaults_match_desktop_and_apply_to_the_first_turn() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        std::fs::write(
+            directory.path().join(".codex-global-state.json"),
+            serde_json::to_vec(&json!({
+                "electron-renderer-content-owner":"fixture",
+                "electron-owner-atoms:fixture":{"permission-selection-by-host-id:local":
+                    {"kind":"agent-mode","agentMode":"full-access"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let defaults = controller
+            .call_authorized(
+                "newSessionDefaults",
+                json!({"instanceId":"codex:local","projectId":"project-a"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(defaults["model"], "gpt-6.1-sol");
+        assert_eq!(defaults["reasoningEffort"], "high");
+        assert_eq!(defaults["permissionMode"], "full-access");
+        assert!(
+            !harness_engine_requests(directory.path())
+                .iter()
+                .any(|frame| frame["method"] == "thread/start")
+        );
+        let created = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"wait defaults"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["permissionMode"], "full-access");
+        let frames = harness_engine_requests(directory.path());
+        let start = frames
+            .iter()
+            .find(|frame| frame["method"] == "thread/start")
+            .unwrap();
+        let turn = frames
+            .iter()
+            .find(|frame| frame["method"] == "turn/start")
+            .unwrap();
+        assert_eq!(start["params"]["model"], defaults["model"]);
+        assert_eq!(
+            start["params"]["config"]["model_reasoning_effort"],
+            defaults["reasoningEffort"]
+        );
+        assert_eq!(start["params"]["sandbox"], "danger-full-access");
+        assert_eq!(turn["params"]["effort"], defaults["reasoningEffort"]);
+        assert_eq!(turn["params"]["approvalPolicy"], "never");
+        assert_eq!(turn["params"]["sandboxPolicy"]["type"], "dangerFullAccess");
+        assert!(
+            frames
+                .iter()
+                .filter(|frame| frame["method"] == "config/read"
+                    && frame["params"]["cwd"] == start["params"]["cwd"])
+                .count()
+                >= 2,
+            "新建页读取及实际创建都必须核对目标项目配置；Fast 目录的全局读取独立保留"
+        );
+        let detail = controller
+            .call_authorized(
+                "thread",
+                json!({"threadId":created["threadId"]}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail["thread"]["permissionMode"], "full-access");
         controller.harness.release().await;
     }
 

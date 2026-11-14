@@ -3114,6 +3114,7 @@ function composerPermissionHarness({ creating = false, backend = "codex" } = {})
     activeInstanceId: () => backend === "claude" ? "claude:wsl:fixture" : "codex:local",
     draftKey: () => "$new:fixture", snapshotDraft: () => ({ text: "草稿" }),
     storeDraft: (key, value) => context.draftPermissionChoices.set(key, value.permissionMode),
+    rememberNewChatSettings() {},
     $: () => button, sessionInstanceEnabled: () => true, threadReadOnly: () => false,
     connected: true, busy: false, stopping: false, pending: null, editingMessage: null, editingQueuedMessage: null,
     isActiveThread: () => false, threadDeletionLocked: () => false,
@@ -7510,6 +7511,7 @@ function sendRecoveryHarness() {
     threadDeletionLocked: () => false, threadDeleted: () => false, threadReadOnly: () => false,
     composerAttachmentsLoading: () => false, composerAttachmentsPayload: () => [], goalPrefix: () => null,
     composerPrompt: text => text, compactionLocked: () => false, rememberedNewChatModel: () => null,
+    codexCreationDefaultsState: null, loadModels: async () => [],
     isActiveThread: () => false,
     randomId: () => `send-${++nextId}`, goalComposerAction: () => false, updateComposer() {},
     recoveryStore: { activate: async () => {}, put: async () => {}, remove: async () => {}, clear: async () => {} },
@@ -7549,6 +7551,40 @@ function sendRecoveryHarness() {
   });
   return { context, actions, draftRemovals, notices, reads, prompt, originalText, complete };
 }
+
+test("Codex 新建发送等待模型目录，默认设置先返回时仍保留记住的模型和深度", async () => {
+  const h = sendRecoveryHarness(), c = h.context;
+  const defaults = deferred(), catalog = deferred();
+  let catalogReady = false;
+  Object.assign(c, {
+    creating: true, selectedId: null,
+    isClaude: () => false, activeBackend: () => "codex", activeInstanceId: () => "codex:local",
+    codexCreationDefaultsKey: () => "same-project-and-authorization",
+    loadCodexCreationDefaults: () => defaults.promise,
+    loadModels: async () => { await catalog.promise; catalogReady = true; },
+    rememberedNewChatModel: () => catalogReady ? { model: "remembered-model" } : null,
+    currentModelId: () => catalogReady ? "remembered-model" : "native-model",
+    currentEffort: () => catalogReady ? "high" : "xhigh",
+    newCodexPermissionMode: () => "full-access",
+    selectCreatedThread: async () => {},
+  });
+  c.session.capabilities.codexSessionDefaults = c.session.capabilities.sessionPermissions = true;
+  const query = c.$;
+  c.$ = (selector, root) => selector === "#project-select" ? { value: "project" }
+    : selector === "#permission-button" ? { value: "full-access", dataset: {} } : query(selector, root);
+  const sending = c.sendMessage();
+  defaults.resolve({ model: "native-model", reasoningEffort: "xhigh" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.actions.length, 0, "目录尚未返回时不能发送原生默认模型");
+  catalog.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.actions.length, 1);
+  assert.equal(h.actions[0].payload.model, "remembered-model");
+  assert.equal(h.actions[0].payload.reasoningEffort, "high");
+  assert.equal(h.actions[0].payload.permissionMode, "full-access");
+  h.complete(0);
+  await sending;
+});
 
 test("新建发送保留显式和旧草稿权限，Claude 展示实例默认时仍传配置继承", async () => {
   for (const [backend, draftMode, displayMode, expected] of [
@@ -7602,6 +7638,40 @@ test("远程新建首条携带草稿 Fast 布尔值，开启时明确默认模�
     if (enabled) assert.equal(h.actions[0].payload.model, "gpt-default");
     h.complete(0); await sending;
     assert.equal(h.actions.length, 1, "Fast 能力展示不成为每次发送的串行前置请求");
+  }
+});
+
+test("Codex 新建将已解析的模型、思考深度和权限一并送达，读取期间换项目则取消发送", async () => {
+  for (const changeProject of [false, true]) {
+    const h = sendRecoveryHarness(), c = h.context, defaults = deferred();
+    Object.assign(c, { creating: true, selectedId: null, isClaude: () => false,
+      currentModelId: () => "gpt-default", currentEffort: () => "medium",
+      newCodexPermissionMode: () => "full-access", selectionVersion: 1,
+      codexCreationDefaultsKey: () => `project-${c.selectionVersion}`,
+      loadCodexCreationDefaults: () => defaults.promise,
+      loadModels: async () => [], codexCreationDefaultsState: null,
+      selectCreatedThread: async () => {} });
+    c.session.capabilities.codexSessionDefaults = true;
+    c.session.capabilities.sessionPermissions = true;
+    const query = c.$;
+    c.$ = (selector, root) => selector === "#project-select" ? { value: "project" }
+      : selector === "#permission-button" ? { value: "full-access", dataset: {} } : query(selector, root);
+    const sending = c.sendMessage();
+    assert.equal(h.actions.length, 0);
+    if (changeProject) ++c.selectionVersion;
+    defaults.resolve({ model: "gpt-default", reasoningEffort: "medium", permissionMode: "full-access" });
+    await new Promise(resolve => setImmediate(resolve));
+    if (changeProject) {
+      await sending;
+      assert.equal(h.actions.length, 0);
+      assert.equal(h.prompt.value, h.originalText);
+    } else {
+      assert.equal(h.actions.length, 1);
+      assert.equal(h.actions[0].payload.model, "gpt-default");
+      assert.equal(h.actions[0].payload.reasoningEffort, "medium");
+      assert.equal(h.actions[0].payload.permissionMode, "full-access");
+      h.complete(0); await sending;
+    }
   }
 });
 
@@ -10821,6 +10891,124 @@ function claudeAliasModelMenuHarness() {
   const choices = group => menu.querySelector(`.${group}`).children.filter(node => node.tag === "button");
   return { context, menu, choices };
 }
+
+function codexDefaultModelHarness(disk = storage()) {
+  const h = claudeAliasModelMenuHarness(), { context } = h;
+  Object.assign(context, {
+    creating: true, selectedId: null, thread: null, creationBackend: "codex",
+    creationInstanceId: "codex:local", selectedModel: "", selectedEffort: "",
+    isClaude: () => false, activeInstanceId: () => "codex:local",
+    session: { device: { id: "codex-default-device", createdAtMs: 1 }, capabilities: {} },
+    privateInputScope: value => JSON.stringify([value.device.id, value.device.createdAtMs]),
+    localStorage: disk, newChatModels: new Map(),
+    modelDefaults: { model: "gpt-fixture", reasoningEffort: "xhigh" },
+    models: [{ model: "gpt-fixture", defaultReasoningEffort: "xhigh",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"].map(reasoningEffort => ({ reasoningEffort })) }],
+  });
+  return { ...h, disk };
+}
+
+test("Codex 新建按模型记住思考深度，刷新和再次新建不恢复全局 xhigh", () => {
+  const h = codexDefaultModelHarness();
+  h.context.renderModelMenu();
+  h.choices("effort-options").find(node => node.dataset.choiceKey === "effort:high").onclick();
+  h.context.selectedModel = h.context.selectedEffort = "";
+  assert.equal(h.context.currentModelId(), "gpt-fixture");
+  assert.equal(h.context.currentEffort(), "high");
+  const reopened = codexDefaultModelHarness(h.disk);
+  assert.equal(reopened.context.currentEffort(), "high");
+  reopened.context.rememberNewChatSettings({ model: "gpt-fixture", reasoningEffort: "low" });
+  assert.equal(codexDefaultModelHarness(h.disk).context.currentEffort(), "low",
+    "未选择权限的空字段不能使第二次刷新时的模型深度记忆失效");
+  reopened.context.models[0].supportedReasoningEfforts = [{ reasoningEffort: "medium" }];
+  reopened.context.models[0].defaultReasoningEffort = "medium";
+  // 目录能力变化后不复用已失效的记忆等级，即使全局配置还保存着 xhigh。
+  reopened.context.session.capabilities.codexSessionDefaults = true;
+  reopened.context.creationProject = ""; reopened.context.selectionVersion = 1;
+  reopened.context.codexCreationDefaultsState = { key: reopened.context.codexCreationDefaultsKey(),
+    value: { model: "gpt-fixture", reasoningEffort: "medium" } };
+  assert.equal(reopened.context.currentEffort(), "medium");
+});
+
+test("Codex 新建偏好按授权隔离，旧模型记录可迁移，已有会话保持自己的模型和深度", () => {
+  const h = codexDefaultModelHarness();
+  const scope = h.context.newChatPreferenceScope();
+  h.disk.setItem(`codex-elves-new-chat-model:${scope}`, "gpt-fixture");
+  assert.equal(h.context.rememberedNewChatModel(), h.context.models[0]);
+  h.context.rememberNewChatSettings({ model: "gpt-fixture", reasoningEffort: "low", permissionMode: "full-access" });
+  h.context.creating = false; h.context.selectedId = "existing";
+  h.context.thread = { id: "existing", model: "existing-model", reasoningEffort: "max" };
+  assert.equal(h.context.currentModelId(), "existing-model");
+  assert.equal(h.context.currentEffort(), "max");
+  h.context.creating = true; h.context.selectedId = null;
+  h.context.session.device.createdAtMs = 2;
+  assert.equal(h.context.rememberedNewChatModel(), null);
+  assert.equal(h.context.rememberedNewChatSettings().permissionMode, undefined);
+});
+
+test("Codex 切换模型保留仍受支持的深度，目标模型不支持时才使用其默认值", () => {
+  const h = codexDefaultModelHarness(), c = h.context;
+  c.rememberNewChatSettings({ model: "gpt-fixture", reasoningEffort: "high" });
+  c.models.push(
+    { model: "gpt-second", defaultReasoningEffort: "xhigh",
+      supportedReasoningEfforts: [{ reasoningEffort: "high" }, { reasoningEffort: "xhigh" }] },
+    { model: "gpt-small", defaultReasoningEffort: "low", supportedReasoningEfforts: [{ reasoningEffort: "low" }] },
+  );
+  c.renderModelMenu();
+  h.choices("model-options").find(node => node.dataset.choiceKey === "model:gpt-second").onclick();
+  assert.equal(c.currentEffort(), "high");
+  h.choices("model-options").find(node => node.dataset.choiceKey === "model:gpt-small").onclick();
+  assert.equal(c.currentEffort(), "low");
+  c.selectedModel = c.selectedEffort = "";
+  assert.equal(c.currentModelId(), "gpt-small");
+  assert.equal(c.currentEffort(), "low");
+});
+
+test("Codex 新建权限优先显式草稿和有效记忆，再采用 App 默认，管理员禁用后不会沿用旧权限", async () => {
+  const h = composerPermissionHarness({ creating: true }), c = h.context;
+  Object.assign(c, {
+    newChatModels: new Map(), localStorage: storage(), creationProject: "project-a", selectionVersion: 1,
+    selectedModel: "", selectedEffort: "", models: [], modelDefaults: {},
+  });
+  nodeVm.runInContext(sourceSection("function rememberedNewChatModel(", "function fitComposerMenu("), c);
+  c.session.capabilities.codexSessionDefaults = true;
+  c.codexCreationDefaultsState = { key: c.codexCreationDefaultsKey(), value: {
+    model: "gpt-fixture", reasoningEffort: "medium", permissionMode: "full-access",
+    permissionModes: ["auto", "guardian-approvals", "full-access", "configured"]
+  } };
+  c.updateComposerPermissions();
+  assert.equal(h.button.value, "full-access", "未选择时应显示 App 权限，不能固定为自定义");
+  h.button.value = "guardian-approvals";
+  await c.changeComposerPermissions();
+  c.draftPermissionChoices.clear();
+  c.updateComposerPermissions();
+  assert.equal(h.button.value, "guardian-approvals");
+  c.codexCreationDefaultsState.value.permissionModes = ["auto", "configured"];
+  c.codexCreationDefaultsState.value.permissionMode = "auto";
+  c.updateComposerPermissions();
+  assert.equal(h.button.value, "auto");
+  assert.equal(h.requests.length, 0);
+});
+
+test("Codex 默认设置的迟到响应不能覆盖后来选择的项目或授权", async () => {
+  const h = codexDefaultModelHarness(), c = h.context, reads = [];
+  Object.assign(c, { creationProject: "project-a", selectionVersion: 1, codexCreationDefaultsState: null,
+    connected: true, notice() {}, api: async (_path, payload) => {
+      const pending = deferred(); reads.push({ payload, ...pending }); return pending.promise;
+    } });
+  c.session.capabilities.codexSessionDefaults = true;
+  const first = c.loadCodexCreationDefaults();
+  c.creationProject = "project-b"; ++c.selectionVersion;
+  const second = c.loadCodexCreationDefaults();
+  const reply = model => ({ ok: true, model, reasoningEffort: "medium",
+    permissionMode: "auto", permissionModes: ["auto", "configured"] });
+  reads[1].resolve(reply("project-b-model"));
+  await second;
+  reads[0].resolve(reply("project-a-model"));
+  assert.equal(await first, null);
+  assert.equal(c.codexCreationDefaults().model, "project-b-model");
+  assert.equal(c.currentModelId(), "project-b-model");
+});
 
 test("队列编辑中选择模型和深度仅更新后续选择，不改写队列消息", () => {
   const h = claudeAliasModelMenuHarness();

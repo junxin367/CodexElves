@@ -162,6 +162,7 @@ let models = [], modelsPromise = null, modelsLoadedAt = 0, modelQuery = "", skil
 const modelCatalogCacheVersion = 4;
 let modelDefaults = { model: "", reasoningEffort: "" };
 const newChatModels = new Map();
+let codexCreationDefaultsState = null;
 let skillLoading = null, creationProject = "", threadReadVersion = 0, tokenUsageVersion = 0, notifiedTokenUsage = null;
 let creationBackend = "codex", modelsScope = "codex", modelLoadError = "";
 let creationInstanceId = "codex:local", sessionInstances = [], sessionInstanceRequest = null;
@@ -320,10 +321,13 @@ function updateComposerPermissions() {
   if (!creating && display?.permissionMode)
     rememberPermissionSelection(selectedId, display.permissionMode, display.permissionRevision || 0);
   const saved = permissionSelections.get(selectedId);
-  const choice = creating ? draftPermissionChoices.get(draftKey())
-    : saved?.scope === privateInputScope(session) ? saved.mode : display?.permissionMode;
-  const mode = choice || (creating ? "configured" : "");
   const codex = !isClaude();
+  const nativeDefaultsEnabled = codex && creating && session?.capabilities?.codexSessionDefaults === true;
+  if (nativeDefaultsEnabled) syncCodexCreationDefaults();
+  const choice = creating ? draftPermissionChoices.get(draftKey())
+      ?? (nativeDefaultsEnabled ? newCodexPermissionMode() : undefined)
+    : saved?.scope === privateInputScope(session) ? saved.mode : display?.permissionMode;
+  const mode = choice || (creating && !nativeDefaultsEnabled ? "configured" : "");
   const catalogRecord = instancePermissionCatalogs.get(activeInstanceId());
   const catalog = catalogRecord?.scope === privateInputScope(session) ? catalogRecord : null;
   // 未显式覆盖的 Claude 会话显示原生实际模式，新建草稿读取所选实例配置；展示不能静默保存权限。
@@ -340,7 +344,7 @@ function updateComposerPermissions() {
   control.popupNote = codex ? "" : "“绕过权限”仅在该实例 CLI 支持且已允许时显示";
   if (!codex && !catalog && connected && session?.capabilities?.sessionPermissions === true
       && sessionInstanceEnabled(activeInstanceId())) void loadInstancePermissionCatalog(activeInstanceId());
-  let supported = codex ? null : catalog?.modes || [];
+  let supported = codex ? nativeDefaultsEnabled ? codexCreationDefaults()?.permissionModes || null : null : catalog?.modes || [];
   if (isClaude() && !creating && supported) {
     // 共享 CLI 只能切换原生已开放的模式；启动参数或实例全局配置均未允许时不能由网页补开。
     const runtimeModes = Array.isArray(display?.permissionModes) ? display.permissionModes
@@ -354,7 +358,7 @@ function updateComposerPermissions() {
   }
   const options = permissionOptions(activeBackend(), supported);
   // 旧只读 Codex 仍按原权限执行；Claude 的 manual/default 只选中同一项，不增加第六种模式。
-  const displayMode = codex ? mode === "read-only" ? "auto" : mode || "configured"
+  const displayMode = codex ? mode === "read-only" ? "auto" : mode || (nativeDefaultsEnabled ? "" : "configured")
     : options.find(option => option.value === effectiveMode
       || ["default", "manual"].includes(effectiveMode) && ["default", "manual"].includes(option.value))?.value || "";
   const signature = JSON.stringify([activeBackend(), displayMode, options]);
@@ -372,7 +376,8 @@ function updateComposerPermissions() {
   control.disabled = !sessionInstanceEnabled(activeInstanceId()) || threadReadOnly() || !connected || busy
     || stopping || !!pending || !!editingMessage || !!editingQueuedMessage || threadDeletionLocked()
     || saving || !creating && !selectedId;
-  const label = permissionLabel(activeBackend(), codex ? choice : effectiveMode, creating);
+  const label = nativeDefaultsEnabled && !mode ? "权限"
+    : permissionLabel(activeBackend(), codex ? choice : effectiveMode, creating);
   // 用户要求切换不能影响正常会话：选中值与 CLI 实际权限分别展示，待生效不冒充已切换，也不锁住发送。
   const permissionRecord = display?.nativeSettings?.changes?.permissionMode;
   const permissionChange = permissionRecord?.requested === mode ? permissionRecord : null;
@@ -394,6 +399,7 @@ function updateComposerPermissions() {
     : queued ? `当前权限：${label}；已有待发消息按原选择执行，仅后续新轮次使用新选择`
     : waiting ? codex ? `当前权限：${label}；仅后续新轮次生效`
       : `当前权限：${label}；原生允许时切换，无法安全切换时保存待生效，不中断当前任务`
+    : nativeDefaultsEnabled && !mode ? "正在读取 Codex App 默认权限"
     : catalog?.error ? `实例权限读取失败：${catalog.error}；点击重新读取`
     : !codex && !supported.length ? "暂无法确认该 Claude CLI 支持的权限模式，点击重新读取"
     : `当前权限：${label}；仅此会话的后续新轮次生效`;
@@ -404,6 +410,8 @@ async function changeComposerPermissions() {
   const mode = control.value;
   if (creating) {
     storeDraft(draftKey(), { ...snapshotDraft(), permissionMode: mode });
+    // 用户要求下次新建沿用所选权限；只记住当前远程授权的 Codex 新建偏好，不修改原生全局配置。
+    if (!isClaude()) rememberNewChatSettings({ permissionMode: mode });
     updateComposerPermissions();
     return;
   }
@@ -4420,6 +4428,7 @@ function clearSubmittedDraft(payload, current = true) {
 }
 function resetComposerOptions() {
   selectedModel = selectedEffort = "";
+  codexCreationDefaultsState = null;
   ++modelChoiceVersion;
   selectedDraftFast = false;
   remoteFastState = null;
@@ -5743,29 +5752,115 @@ async function loadModels(force = false, { includeAvailable = false } = {}) {
   }
 }
 function rememberedNewChatModel() {
+  return modelForId(rememberedNewChatSettings().model);
+}
+function newChatPreferenceScope() {
   const owner = privateInputScope(session), scope = owner && `${owner}${activeInstanceId() === "codex:local" ? "" : `:${activeInstanceId()}`}`;
-  if (!scope) return null;
+  return scope || "";
+}
+function rememberedNewChatSettings() {
+  const scope = newChatPreferenceScope();
+  if (!scope) return {};
   if (!newChatModels.has(scope)) {
     let model = "";
     try { model = localStorage.getItem(`codex-elves-new-chat-model:${scope}`) || ""; } catch {}
-    newChatModels.set(scope, model);
+    let settings = { model };
+    if (activeInstanceId() === "codex:local") {
+      try {
+        const saved = JSON.parse(localStorage.getItem(`codex-elves-new-chat-settings:${scope}`) || "null");
+        if (saved?.version === 1 && typeof saved.model === "string"
+            && (saved.reasoningEffort == null || typeof saved.reasoningEffort === "string")
+            && (saved.permissionMode == null || saved.permissionMode === "" || permissionModeKnown("codex", saved.permissionMode))) {
+          settings = { model: saved.model, reasoningEffort: saved.reasoningEffort || "",
+            permissionMode: saved.permissionMode || "" };
+        }
+      } catch {}
+    }
+    newChatModels.set(scope, settings);
   }
-  return modelForId(newChatModels.get(scope));
+  const settings = newChatModels.get(scope);
+  // 旧模型偏好和 Claude 实例仍兼容字符串记录；新字段仅供 Codex 新建使用。
+  return typeof settings === "string" ? { model: settings } : settings || {};
+}
+function rememberNewChatSettings(patch) {
+  if (activeInstanceId() !== "codex:local") return;
+  const scope = newChatPreferenceScope();
+  if (!scope) return;
+  const settings = { ...rememberedNewChatSettings(), ...patch };
+  newChatModels.set(scope, settings);
+  try {
+    localStorage.setItem(`codex-elves-new-chat-settings:${scope}`, JSON.stringify({ version: 1, ...settings, model: settings.model || "" }));
+    if (settings.model) localStorage.setItem(`codex-elves-new-chat-model:${scope}`, settings.model);
+  } catch {}
 }
 function rememberNewChatModel(model) {
-  const owner = privateInputScope(session), scope = owner && `${owner}${activeInstanceId() === "codex:local" ? "" : `:${activeInstanceId()}`}`;
+  if (activeInstanceId() === "codex:local") {
+    rememberNewChatSettings({ model, reasoningEffort: currentEffort() });
+    return;
+  }
+  const scope = newChatPreferenceScope();
   if (!scope) return;
   newChatModels.set(scope, model);
   try { localStorage.setItem(`codex-elves-new-chat-model:${scope}`, model); } catch {}
 }
-function defaultModelEffort(model) {
+function codexCreationDefaultsKey() {
+  return creating && session?.capabilities?.codexSessionDefaults === true && !isClaude()
+    ? JSON.stringify([privateInputScope(session), nativeConnectionVersion, creationProject, selectionVersion]) : "";
+}
+function codexCreationDefaults() {
+  const key = codexCreationDefaultsKey();
+  return key && codexCreationDefaultsState?.key === key ? codexCreationDefaultsState.value || null : null;
+}
+function syncCodexCreationDefaults() {
+  const key = codexCreationDefaultsKey();
+  if (key && codexCreationDefaultsState?.key !== key && connected)
+    void loadCodexCreationDefaults().catch(() => {});
+}
+async function loadCodexCreationDefaults(force = false) {
+  const key = codexCreationDefaultsKey();
+  if (!key) return null;
+  const previous = codexCreationDefaultsState;
+  if (previous?.key === key) {
+    if (previous.promise) return previous.promise;
+    if (!force && previous.value) return previous.value;
+    if (!force && previous.error) throw new Error(previous.error);
+  }
+  const record = { key, value: null, promise: null, error: "" };
+  codexCreationDefaultsState = record;
+  const current = () => codexCreationDefaultsState === record && codexCreationDefaultsKey() === key;
+  const request = api("/api/read/newSessionDefaults", { backend: "codex", instanceId: activeInstanceId(), projectId: creationProject })
+    .then(result => {
+      if (!current()) return null;
+      if (result?.ok !== true || typeof result.model !== "string" || !permissionModeKnown("codex", result.permissionMode)
+          || !Array.isArray(result.permissionModes) || result.permissionModes.some(mode => !permissionModeKnown("codex", mode))
+          || result.reasoningEffort != null && typeof result.reasoningEffort !== "string")
+        throw new Error("Codex 新会话默认设置返回无效，请重新读取");
+      record.value = result;
+      return result;
+    }).catch(error => {
+      if (current()) { record.error = error.message; notice(`无法读取 Codex 新会话默认设置：${error.message}`, true); }
+      throw error;
+    }).finally(() => {
+      record.promise = null;
+      if (current()) updateComposer();
+    });
+  record.promise = request;
+  return request;
+}
+function newCodexPermissionMode() {
+  const defaults = codexCreationDefaults();
+  const remembered = rememberedNewChatSettings().permissionMode;
+  return remembered && defaults?.permissionModes.includes(remembered) ? remembered : defaults?.permissionMode || "";
+}
+function defaultModelEffort(model, preferred = "") {
   const efforts = (model?.supportedReasoningEfforts || []).filter(effort => effort.reasoningEffort !== "minimal");
-  return efforts.find(value => value.reasoningEffort === model?.defaultReasoningEffort)?.reasoningEffort
+  return efforts.find(value => value.reasoningEffort === preferred)?.reasoningEffort
+    || efforts.find(value => value.reasoningEffort === model?.defaultReasoningEffort)?.reasoningEffort
     || efforts.find(value => value.reasoningEffort === "medium")?.reasoningEffort || efforts[0]?.reasoningEffort || "";
 }
 function currentModelId() {
   return selectedModel || (selectedId ? claudePendingSetting("model")?.requested || currentThreadDisplay()?.model
-    : creating && rememberedNewChatModel()?.model || modelDefaults.model) || "";
+    : creating && rememberedNewChatModel()?.model || codexCreationDefaults()?.model || modelDefaults.model) || "";
 }
 function modelForId(id) {
   if (typeof id !== "string" || !id) return null;
@@ -5794,6 +5889,16 @@ function currentEffort() {
     if (pending && (!selectedModel || modelIdentityMatches(selectedModel, display?.model)))
       return pending.requested || "";
     return modelIdentityMatches(model, display?.model) ? display.reasoningEffort || "" : "";
+  }
+  if (creating && !isClaude()) {
+    const remembered = rememberedNewChatSettings(), catalog = currentModel();
+    // 用户要求深度和模型成对记忆；旧模型失效、能力变化或切换模型后不能套用另一模型的等级。
+    if (modelIdentityMatches(model, remembered.model) && (catalog?.supportedReasoningEfforts || [])
+        .some(effort => effort.reasoningEffort === remembered.reasoningEffort)) return remembered.reasoningEffort;
+    const defaults = codexCreationDefaults();
+    if (defaults && modelIdentityMatches(model, defaults.model)) return defaults.reasoningEffort || defaultModelEffort(catalog);
+    if (session?.capabilities?.codexSessionDefaults === true)
+      return defaults || rememberedNewChatModel() ? defaultModelEffort(catalog) : "";
   }
   return modelIdentityMatches(model, modelDefaults.model) ? modelDefaults.reasoningEffort
     : creating && !selectedModel ? defaultModelEffort(currentModel()) : "";
@@ -5955,8 +6060,10 @@ function renderModelMenu() {
   const visibleModels = models.filter(model => `${model.displayName || ""} ${model.model}`.toLowerCase().includes(modelQuery.trim().toLowerCase()));
   for (const model of visibleModels) group.append(choice(model.displayName || model.model, matchedModel === model, () => {
     if (currentModel() !== model) {
+      // 用户要求 Codex 换模型沿用 App 的逻辑：原深度仍受支持时保留，否则采用目标模型默认值。
+      const previousEffort = isClaude() ? "" : currentEffort();
       selectedModel = model.model;
-      selectedEffort = defaultModelEffort(model);
+      selectedEffort = defaultModelEffort(model, previousEffort);
     }
     if (creating) rememberNewChatModel(model.model);
     applyModelMenuChoice();
@@ -5972,7 +6079,11 @@ function renderModelMenu() {
   for (const effort of supportedEfforts) {
     efforts.append(choice(effortLabels[effort.reasoningEffort] || effort.reasoningEffort,
       selectedReasoning === effort.reasoningEffort,
-      () => { selectedEffort = effort.reasoningEffort; applyModelMenuChoice(); }, null, `effort:${effort.reasoningEffort}`));
+      () => {
+        selectedEffort = effort.reasoningEffort;
+        if (creating && !isClaude()) rememberNewChatSettings({ model: currentModelId(), reasoningEffort: selectedEffort });
+        applyModelMenuChoice();
+      }, null, `effort:${effort.reasoningEffort}`));
   }
   if (!efforts.children.length) efforts.append(element("p", "popover-empty muted", "此模型暂无可选思考深度"));
   menu.append(efforts);
@@ -16164,6 +16275,21 @@ async function sendMessage() {
   if (remoteFastWriting?.key === remoteFastKey()) { notice("正在保存 Fast 设置，请稍后发送"); return; }
   if ($("#permission-button")?.dataset?.saving === "true") { notice("正在保存权限，请稍后发送"); return; }
   if (composerAttachmentsLoading()) { notice("图片正在读取，请稍后发送"); return; }
+  const nativeCodexDefaults = creating && !isClaude() && session.capabilities?.codexSessionDefaults === true;
+  if (nativeCodexDefaults) {
+    const key = codexCreationDefaultsKey();
+    try {
+      // 用户要求新建沿用有效的模型和深度；目录未就绪时不能把已记住的模型误判为失效。
+      const [defaults] = await Promise.all([loadCodexCreationDefaults(true), loadModels()]);
+      if (!defaults) return;
+    } catch (error) {
+      if (codexCreationDefaultsKey() === key && !codexCreationDefaultsState?.error)
+        notice(`无法确认新会话模型：${error.message}`, true);
+      return;
+    }
+    // 默认值读取期间切换项目、授权或已有会话时，本次发送失效；不能将旧项目配置带给新目标。
+    if (codexCreationDefaultsKey() !== key || busy || stopping || pending || !connected) return;
+  }
   let draft = snapshotDraft();
   const prefix = goalPrefix(draft.text, draft.skills);
   if (prefix) {
@@ -16196,8 +16322,8 @@ async function sendMessage() {
   const queueReadVersion = queueVersion;
   const rememberedModel = creating && !selectedModel ? rememberedNewChatModel() : null;
   const model = selectedModel || rememberedModel?.model
-    || (selectedEffort || creating && selectedDraftFast ? currentModelId() : ""),
-    reasoningEffort = selectedEffort || (rememberedModel ? currentEffort() : "");
+    || (selectedEffort || nativeCodexDefaults || creating && selectedDraftFast ? currentModelId() : ""),
+    reasoningEffort = selectedEffort || (rememberedModel || nativeCodexDefaults ? currentEffort() : "");
   // 用户要求 Codex 执行期间仅保留模型/深度选择，排队消息不携带新设置；停止或完成后的新发送才应用。
   const modelChoiceApplies = creating || isClaude() || !isActiveThread();
   const payload = {
@@ -16210,7 +16336,8 @@ async function sendMessage() {
     ...(modelChoiceApplies && model ? { model } : {}),
     // 展示归类不能扩大旧草稿权限；未显式选择的 Claude 草稿继续继承实例配置，不把展示值固化为会话覆盖。
     ...(creating && session.capabilities?.sessionPermissions === true && (draft.permissionMode || $("#permission-button")?.value)
-      ? { permissionMode: draft.permissionMode || (isClaude() ? "configured" : $("#permission-button").value) } : {}),
+      ? { permissionMode: draft.permissionMode || (isClaude() ? "configured"
+        : nativeCodexDefaults ? newCodexPermissionMode() : $("#permission-button").value) } : {}),
     // 新建只传本次草稿的显式选择；已有会话由原生会话偏好控制，发送不增加额外设置请求。
     ...(creating && session.capabilities?.fastMode && !isClaude() ? {
       fastMode: remoteFastState?.key === remoteFastKey() && remoteFastState.supported && selectedDraftFast
