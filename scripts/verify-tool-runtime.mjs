@@ -12,9 +12,22 @@ const target = "windows-x64";
 if (manifest.schemaVersion !== 1) {
   throw new Error(`不支持的工具清单版本: ${manifest.schemaVersion}`);
 }
-const spec = manifest.tools?.rg?.targets?.[target];
-if (!spec?.path || isAbsolute(spec.path) || !/^[0-9a-f]{64}$/i.test(spec.sha256 || "")) {
-  throw new Error("rg 工具清单缺少有效的 Windows x64 路径或 SHA-256");
+const toolIds = ["rg", "node", "node_repl"];
+const specs = Object.fromEntries(toolIds.map((toolId) => {
+  const definition = manifest.tools?.[toolId];
+  const spec = definition?.targets?.[target];
+  if (!spec?.path || isAbsolute(spec.path) || !/^[0-9a-f]{64}$/i.test(spec.sha256 || "")) {
+    throw new Error(`${toolId} 工具清单缺少有效的 Windows x64 路径或 SHA-256`);
+  }
+  return [toolId, { ...definition, ...spec }];
+}));
+for (const toolId of toolIds) {
+  for (const license of specs[toolId].licenses || []) {
+    const licensePath = resolveToolPath(sourceTools, license);
+    if (!existsSync(licensePath)) {
+      throw new Error(`${toolId} 工具许可证文件不存在: ${licensePath}`);
+    }
+  }
 }
 
 function resolveToolPath(base, relativePath) {
@@ -31,7 +44,7 @@ function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-function checkBinary(path, label) {
+function checkBinary(path, spec, label) {
   if (!existsSync(path) || !statSync(path).isFile()) {
     throw new Error(`${label}不存在: ${path}`);
   }
@@ -41,21 +54,39 @@ function checkBinary(path, label) {
   }
 }
 
-const sourcePath = resolveToolPath(sourceTools, spec.path);
-checkBinary(sourcePath, "源码 rg");
-
-if (mode !== "--source-only") {
-  const installedTools = resolve(mode, "tools");
-  const installedPath = resolveToolPath(installedTools, spec.path);
-  checkBinary(installedPath, "安装输入 rg");
-  const probe = spawnSync(installedPath, ["--version"], {
+function probeTool(toolId, path, spec, label) {
+  const args = toolId === "node_repl" ? ["--help"] : ["--version"];
+  const expected = toolId === "node"
+    ? `v${spec.version}`
+    : toolId === "node_repl"
+      ? "node_repl MCP stdio server"
+      : spec.version;
+  const probe = spawnSync(path, args, {
     encoding: "utf8",
     windowsHide: true,
   });
-  if (probe.status !== 0 || !String(probe.stdout || "").includes(manifest.tools.rg.version)) {
-    throw new Error(`安装输入 rg 版本探测失败，期望 ${manifest.tools.rg.version}`);
+  const output = `${probe.stdout || ""}\n${probe.stderr || ""}`;
+  if (probe.error || probe.status !== 0 || !output.includes(expected)) {
+    throw new Error(`${label}版本探测失败，期望 ${expected}`);
   }
-  console.log(`工具运行时核对通过：rg ${manifest.tools.rg.version}，SHA-256 ${spec.sha256}`);
+}
+
+for (const toolId of toolIds) {
+  const spec = specs[toolId];
+  const path = resolveToolPath(sourceTools, spec.path);
+  checkBinary(path, spec, `源码 ${toolId}`);
+  probeTool(toolId, path, spec, `源码 ${toolId}`);
+}
+
+if (mode !== "--source-only") {
+  const installedTools = resolve(mode, "tools");
+  for (const toolId of toolIds) {
+    const spec = specs[toolId];
+    const installedPath = resolveToolPath(installedTools, spec.path);
+    checkBinary(installedPath, spec, `安装输入 ${toolId}`);
+    probeTool(toolId, installedPath, spec, `安装输入 ${toolId}`);
+  }
+  console.log(`工具运行时核对通过：${toolIds.join(", ")}，源码和安装输入 SHA-256 一致`);
 } else {
-  console.log(`工具源码核对通过：rg ${manifest.tools.rg.version}，SHA-256 ${spec.sha256}`);
+  console.log(`工具源码核对通过：${toolIds.join(", ")}，SHA-256 已核对`);
 }

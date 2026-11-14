@@ -1,6 +1,34 @@
 {
   "schemaVersion": 1,
   "tools": {
+    "node": {
+      "name": "Node.js",
+      "version": "24.14.0",
+      "source": "Codex App bundled runtime",
+      "licenses": [
+        "windows-x64/LICENSE-NODE.txt"
+      ],
+      "targets": {
+        "windows-x64": {
+          "path": "windows-x64/node.exe",
+          "sha256": "63C259C81E5D472B5F11C8D506070130CB04A1ECF84B80377A34ED6EC9048088"
+        }
+      }
+    },
+    "node_repl": {
+      "name": "Node REPL MCP server",
+      "version": "24.14.0",
+      "source": "Codex App bundled runtime",
+      "licenses": [
+        "windows-x64/LICENSE-NODE.txt"
+      ],
+      "targets": {
+        "windows-x64": {
+          "path": "windows-x64/node_repl.exe",
+          "sha256": "D203A942481258E0E5125E38CF30A9ED95F78AC9D3CC6A71B2678DCB47728B35"
+        }
+      }
+    },
     "rg": {
       "name": "ripgrep",
       "version": "15.2.0",

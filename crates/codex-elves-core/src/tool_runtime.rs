@@ -10,11 +10,15 @@ use tokio::process::Command;
 
 const TOOL_MANIFEST: &str = "tool-manifest.json";
 const RG_TOOL_ID: &str = "rg";
+const NODE_TOOL_ID: &str = "node";
+const NODE_REPL_TOOL_ID: &str = "node_repl";
 
 #[derive(Debug, Clone)]
 pub struct ToolRuntimeInfo {
     pub tools_dir: Option<PathBuf>,
     pub rg_path: Option<PathBuf>,
+    pub node_path: Option<PathBuf>,
+    pub node_repl_path: Option<PathBuf>,
     pub source: &'static str,
     pub verification: &'static str,
 }
@@ -27,9 +31,18 @@ impl ToolRuntimeInfo {
             "paths": {
                 "toolsDir": self.tools_dir.as_ref().map(|path| path.to_string_lossy().to_string()),
                 "rgPath": self.rg_path.as_ref().map(|path| path.to_string_lossy().to_string()),
+                "nodePath": self.node_path.as_ref().map(|path| path.to_string_lossy().to_string()),
+                "nodeReplPath": self.node_repl_path.as_ref().map(|path| path.to_string_lossy().to_string()),
             },
             "toolsDir": self.tools_dir.as_ref().map(|path| path.to_string_lossy().to_string()),
             "rgPath": self.rg_path.as_ref().map(|path| path.to_string_lossy().to_string()),
+            "nodePath": self.node_path.as_ref().map(|path| path.to_string_lossy().to_string()),
+            "nodeReplPath": self.node_repl_path.as_ref().map(|path| path.to_string_lossy().to_string()),
+            "available": {
+                "rg": self.rg_path.is_some(),
+                "node": self.node_path.is_some(),
+                "nodeRepl": self.node_repl_path.is_some(),
+            },
         })
     }
 }
@@ -73,6 +86,12 @@ fn apply_to_command_with(
     if let Some(path) = info.rg_path.as_ref() {
         command.env("CODEX_ELVES_RG_PATH", path);
     }
+    if let Some(path) = info.node_path.as_ref() {
+        command.env("CODEX_ELVES_NODE_PATH", path);
+    }
+    if let Some(path) = info.node_repl_path.as_ref() {
+        command.env("CODEX_ELVES_NODE_REPL_PATH", path);
+    }
     info
 }
 
@@ -85,20 +104,31 @@ fn discover_with(candidates: Vec<PathBuf>, original_path: Option<OsString>) -> T
         let Some(manifest) = read_manifest(&tools_dir) else {
             continue;
         };
-        let Some(path) = verified_rg_path(&tools_dir, &manifest) else {
+        let (Some(rg_path), Some(node_path), Some(node_repl_path)) = (
+            verified_tool_path(&tools_dir, &manifest, RG_TOOL_ID),
+            verified_tool_path(&tools_dir, &manifest, NODE_TOOL_ID),
+            verified_tool_path(&tools_dir, &manifest, NODE_REPL_TOOL_ID),
+        ) else {
             continue;
         };
         return ToolRuntimeInfo {
             tools_dir: Some(tools_dir),
-            rg_path: Some(path),
+            rg_path: Some(rg_path),
+            node_path: Some(node_path),
+            node_repl_path: Some(node_repl_path),
             source: "bundled",
             verification: "sha256",
         };
     }
-    if let Some(path) = find_on_path("rg", original_path.as_ref()) {
+    let rg_path = find_on_path(RG_TOOL_ID, original_path.as_ref());
+    let node_path = find_on_path(NODE_TOOL_ID, original_path.as_ref());
+    let node_repl_path = find_on_path(NODE_REPL_TOOL_ID, original_path.as_ref());
+    if rg_path.is_some() || node_path.is_some() || node_repl_path.is_some() {
         return ToolRuntimeInfo {
             tools_dir: None,
-            rg_path: Some(path),
+            rg_path,
+            node_path,
+            node_repl_path,
             source: "path",
             verification: "external",
         };
@@ -106,6 +136,8 @@ fn discover_with(candidates: Vec<PathBuf>, original_path: Option<OsString>) -> T
     ToolRuntimeInfo {
         tools_dir: None,
         rg_path: None,
+        node_path: None,
+        node_repl_path: None,
         source: "unavailable",
         verification: "none",
     }
@@ -155,14 +187,14 @@ fn read_manifest(tools_dir: &Path) -> Option<Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
-fn verified_rg_path(tools_dir: &Path, manifest: &Value) -> Option<PathBuf> {
+fn verified_tool_path(tools_dir: &Path, manifest: &Value, tool_id: &str) -> Option<PathBuf> {
     let target = if cfg!(windows) && env::consts::ARCH == "x86_64" {
         "windows-x64"
     } else {
         return None;
     };
-    let relative = manifest["tools"][RG_TOOL_ID]["targets"][target]["path"].as_str()?;
-    let expected = manifest["tools"][RG_TOOL_ID]["targets"][target]["sha256"]
+    let relative = manifest["tools"][tool_id]["targets"][target]["path"].as_str()?;
+    let expected = manifest["tools"][tool_id]["targets"][target]["sha256"]
         .as_str()?
         .to_ascii_lowercase();
     let relative_path = Path::new(relative);
@@ -280,19 +312,19 @@ mod tests {
                 "sha256":"0000000000000000000000000000000000000000000000000000000000000000"
             }}}}
         });
-        assert!(verified_rg_path(&tool_dir, &manifest).is_none());
+        assert!(verified_tool_path(&tool_dir, &manifest, RG_TOOL_ID).is_none());
         let traversal = serde_json::json!({
             "tools":{"rg":{"targets":{"windows-x64":{
                 "path":"../rg.exe",
                 "sha256":"0000000000000000000000000000000000000000000000000000000000000000"
             }}}}
         });
-        assert!(verified_rg_path(&tool_dir, &traversal).is_none());
+        assert!(verified_tool_path(&tool_dir, &traversal, RG_TOOL_ID).is_none());
     }
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn bundled_rg_is_resolved_without_codex_app_or_parent_path() {
+    async fn bundled_tools_are_resolved_without_codex_app_or_parent_path() {
         let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("tools");
@@ -302,10 +334,10 @@ mod tests {
         let where_path = PathBuf::from(&system_root)
             .join("System32")
             .join("where.exe");
-        let mut command = Command::new(where_path);
+        let mut command = Command::new(where_path.clone());
         command.arg("rg.exe");
         command.env_clear();
-        command.env("SystemRoot", system_root);
+        command.env("SystemRoot", system_root.clone());
         command.env("PATHEXT", ".COM;.EXE;.BAT;.CMD");
         let info = apply_to_command_with(
             &mut command,
@@ -315,27 +347,52 @@ mod tests {
 
         assert_eq!(info.source, "bundled");
         assert_eq!(info.verification, "sha256");
-        let rg_path = info.rg_path.clone().unwrap();
-        let output = command.output().await.unwrap();
-        assert!(
-            output.status.success(),
-            "where.exe failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let resolved = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .next()
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .and_then(|path| fs::canonicalize(path).ok())
-            .unwrap();
-        assert_eq!(
-            fs::canonicalize(rg_path).unwrap(),
-            resolved,
-            "where.exe returned {}",
-            resolved.display()
-        );
+        for (name, expected_path) in [
+            ("rg.exe", info.rg_path.clone().unwrap()),
+            ("node.exe", info.node_path.clone().unwrap()),
+            ("node_repl.exe", info.node_repl_path.clone().unwrap()),
+        ] {
+            let mut probe = Command::new(
+                PathBuf::from(
+                    env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows")),
+                )
+                .join("System32")
+                .join("where.exe"),
+            );
+            probe.arg(name);
+            probe.env_clear();
+            probe.env("SystemRoot", system_root.clone());
+            probe.env("PATHEXT", ".COM;.EXE;.BAT;.CMD");
+            let output = {
+                apply_to_command_with(
+                    &mut probe,
+                    vec![PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../..")
+                        .join("tools")],
+                    Some(OsString::from(r"C:\codex-elves-test-empty-path")),
+                );
+                probe.output().await.unwrap()
+            };
+            assert!(
+                output.status.success(),
+                "where.exe failed for {name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let resolved = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .and_then(|path| fs::canonicalize(path).ok())
+                .unwrap();
+            assert_eq!(
+                fs::canonicalize(expected_path).unwrap(),
+                resolved,
+                "where.exe returned {} for {name}",
+                resolved.display()
+            );
+        }
         assert_eq!(env::var_os("PATH"), parent_path);
     }
 }

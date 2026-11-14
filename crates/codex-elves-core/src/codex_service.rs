@@ -225,6 +225,8 @@ async fn spawn_candidate(
         "remote_access.codex_service.tool_runtime",
         json!({"runtime":tool_runtime.diagnostic_value()}),
     );
+    // 用户要求 Node REPL 与 Codex App 使用同一 CLI 入口；node_repl 通过此环境变量定位当前 Codex。
+    command.env("CODEX_CLI_PATH", &candidate.path);
 
     let working_directory = std::env::current_dir().context("读取 CodexElves 工作目录失败")?;
     // 服务模式只指定 Codex 数据目录；保留真实 HOME/USERPROFILE，避免 Cargo、Git 等工具读错用户配置。

@@ -12275,6 +12275,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         assert!(capabilities["toolRuntime"]["source"].is_string());
         assert!(capabilities["toolRuntime"]["verification"].is_string());
         assert!(capabilities["toolRuntime"]["paths"].is_object());
+        assert_eq!(capabilities["toolRuntime"]["available"]["node"], true);
+        assert_eq!(capabilities["toolRuntime"]["available"]["nodeRepl"], true);
         let completed = invoke(state.clone(), "setGoal", headers.clone(), payload.clone())
             .await
             .unwrap()
