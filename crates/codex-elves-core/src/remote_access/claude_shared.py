@@ -1455,6 +1455,21 @@ def empty_permission_prompt(lines):
     return end is not None and not any(line.strip() for line in trailing[:end])
 
 
+def native_input_state(lines):
+    """判断原生输入框是空闲、含草稿还是无法确认。"""
+    positions = [index for index, line in enumerate(lines) if re.match(r"^\s*❯", line)]
+    if not positions:
+        return "unknown"
+    position = positions[-1]
+    if re.sub(r"^\s*❯", "", lines[position]).strip():
+        return "draft"
+    trailing = lines[position + 1:]
+    end = next((index for index, line in enumerate(trailing) if re.match(r"^\s*[─╌━]{6,}", line)), None)
+    if end is None:
+        return "unknown"
+    return "draft" if any(line.strip() for line in trailing[:end]) else "empty"
+
+
 def permission_live_shortcut(lines):
     # 只有当前实例的原生状态栏明确提示此快捷键时，才确认执行中可用；其它版本保留空闲后切换。
     separators = [index for index, line in enumerate(lines) if re.match(r"^\s*[─╌━]{6,}", line)]
@@ -1548,7 +1563,13 @@ class NativeSession:
         self.permission_launch_key = None
         self.permission_launch_flags = []
         self.permission_retry_at = 0
+        # bypassPermissions 依赖会话启动权限；同一会话只允许一次自动 respawn，
+        # 避免旧 CLI 无法实时切换时每次轮询都重启原生进程。
+        self.permission_respawn_key = None
         self.session_cwd = ""
+        # Claude CLI 升级后，旧会话进程可能仍在运行；记录自动迁移状态，让网页能解释延迟，
+        # 并确保同一条消息只在确认新进程接管同一会话后重试一次。
+        self.version_recovery = None
         self.lock_folder = Path(f"/tmp/codex-elves-claude-{os.getuid()}")
 
     def control_projection(self):
@@ -1562,7 +1583,8 @@ class NativeSession:
                 "compactionEvents": list(self.compaction_events.values()),
                 "compactionEventId": self.compaction_event_id,
                 "settings": self.settings_projection(), "dialog": self.dialog,
-                "questionReply": self.question_reply}
+                "questionReply": self.question_reply,
+                "versionRecovery": self.version_recovery}
 
     def restore_question_reply(self, control):
         reply = control.get("questionReply")
@@ -1662,6 +1684,8 @@ class NativeSession:
         if requested not in ("configured", "default", "manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"):
             raise NativeError("EINVAL", "Claude 权限模式无效")
         previous = self.setting_changes.get("permissionMode") or {}
+        if previous.get("requested") != requested:
+            self.permission_respawn_key = None
         change = {**previous} if previous.get("requested") == requested else {
             "id": str(uuid.uuid4()), "requested": requested, "issuedAt": int(time.time() * 1000)}
         self.permission_retry_at = time.monotonic() + 1
@@ -1746,6 +1770,26 @@ class NativeSession:
                 if value != current or time.monotonic() >= deadline:
                     return value
                 time.sleep(0.04)
+
+        if mode == "bypassPermissions":
+            # 用户选择“绕过权限”时必须确认原生实际模式已经切换；旧 CLI 或执行中的会话
+            # 不能靠网页显示的目标值冒充已生效，空闲时先接管同一 UUID，再按原生循环核对底栏。
+            current_job = self.lookup()
+            if (not current_job or current_job.get("sessionStatus") != "idle"
+                    or current_job.get("needs")):
+                raise NativeError("EPERMISSIONBUSY", "当前轮次尚未结束，绕过权限将在会话空闲后自动应用")
+            # respawn 会重建原生输入界面；用户已有未发送草稿时必须先保留选择，
+            # 不能为了切换权限覆盖草稿或把它误当成已应用。
+            if native_input_state(self.read_terminal_screen()) != "empty":
+                raise NativeError("EPERMISSIONDRAFT", "原生 CLI 正在编辑草稿或显示交互面板，绕过权限将在安全状态应用")
+            respawn_key = (expected_short, current_job.get("cliVersion"), target)
+            if self.permission_respawn_key != respawn_key:
+                self.permission_respawn_key = respawn_key
+                try:
+                    self.restore_job()
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    self.permission_respawn_key = None
+                    raise
 
         original = current = read_current()
         if current != target:
@@ -2215,6 +2259,80 @@ class NativeSession:
         job = next((job for job in jobs if (job.get("resumeSessionId") or job.get("sessionId")) == self.native_id), None)
         return native_activity(self.root, job, self.native_id) if job else None
 
+    def daemon_version(self):
+        try:
+            version = self.rpc({"op": "ping"}).get("version")
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return version if isinstance(version, str) and version else None
+
+    def worker_version_mismatch(self, live):
+        worker = live.get("cliVersion") if isinstance(live, dict) else None
+        if not isinstance(worker, str) or not worker:
+            return None
+        controller = self.daemon_version()
+        if not controller or controller == worker:
+            return None
+        return {"workerVersion": worker, "controllerVersion": controller}
+
+    @staticmethod
+    def version_recovery_blocked(live):
+        # 用户要求升级不能打断当前任务或抢走权限/问答面板；这些状态只登记待恢复，
+        # 等原生会话自己回到 idle 后再由远程队列触发同一会话的 respawn。
+        if not isinstance(live, dict) or live.get("outcome"):
+            return False
+        if live.get("sessionStatus") == "waiting" or live.get("needs"):
+            return True
+        if live.get("sessionStatus") not in (None, "idle"):
+            return True
+        return live.get("tempo") == "active" or live.get("state") in ("working", "compacting")
+
+    def version_recovery_input_state(self):
+        # 版本恢复会重建原生输入界面；发送前必须确认没有未提交草稿，无法读取时也不能冒险重启。
+        return native_input_state(self.read_terminal_screen())
+
+    def recover_version_skew(self, live, *, force=False):
+        mismatch = self.worker_version_mismatch(live) if not force else None
+        if not force and mismatch is None:
+            return live
+        if not isinstance(live, dict):
+            return live
+        if self.version_recovery_blocked(live):
+            details = mismatch or {
+                "workerVersion": live.get("cliVersion"),
+                "controllerVersion": self.daemon_version(),
+            }
+            self.version_recovery = {"state": "pending", "reason": "cli_version_skew", **details}
+            self.signature = None
+            return None
+        details = mismatch or {
+            "workerVersion": live.get("cliVersion"),
+            "controllerVersion": self.daemon_version(),
+        }
+        try:
+            input_state = self.version_recovery_input_state()
+        except (OSError, ValueError, RuntimeError, NativeError):
+            input_state = "unknown"
+        if input_state != "empty":
+            self.version_recovery = {"state": "pending",
+                                     "reason": "native_draft" if input_state == "draft"
+                                     else "interaction_unknown", **details}
+            self.signature = None
+            return None
+        self.version_recovery = {"state": "recovering", "reason": "cli_version_skew", **details}
+        self.signature = None
+        try:
+            recovered = self.restore_job(expected_cli_version=details.get("controllerVersion"))
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            self.version_recovery = {"state": "failed", "reason": "cli_version_skew", **details}
+            self.signature = None
+            raise
+        self.version_recovery = {"state": "ready", "reason": "cli_version_skew",
+                                 "workerVersion": recovered.get("cliVersion") or details.get("workerVersion"),
+                                 "controllerVersion": details.get("controllerVersion")}
+        self.signature = None
+        return recovered
+
     def bind(self, job):
         self.job = job
         self.short = job["short"]
@@ -2242,9 +2360,9 @@ class NativeSession:
         except (OSError, ValueError):
             return
 
-    def reply(self, text, next_turn=True):
-        # 用户要求原生引导：nextTurn=True 在 CLI 内对应 priority="next"，
-        # 当前工具调用结束后吸收消息；不是 Esc 中断，也不是等整轮结束才投递。
+    def reply(self, text, next_turn=False):
+        # 远程队列自己管理普通消息，默认走原生普通回复；只有点击“引导”时显式传 next_turn=True，
+        # 才在 CLI 内对应 priority="next"，等待当前工具调用结束后吸收消息。
         deadline = time.monotonic() + 20
         while True:
             try:
@@ -2332,7 +2450,7 @@ class NativeSession:
             raise RuntimeError("原版 Claude 未返回同一 UUID，未替换原会话、历史或停止其他任务")
         self.bind(job)
 
-    def restore_job(self):
+    def restore_job(self, expected_cli_version=None):
         # 用户要求恢复同一原生会话：已有后台 ID 用原版 respawn 重新连接；
         # --bg --resume 遇到残留的运行标记会自动创建副本，不能用它代替原会话。
         expected_short = self.short
@@ -2343,7 +2461,8 @@ class NativeSession:
         deadline = time.monotonic() + 20
         while True:
             job = self.lookup()
-            if job and job.get("short") == expected_short and not job.get("outcome"):
+            if (job and job.get("short") == expected_short and not job.get("outcome")
+                    and (not expected_cli_version or job.get("cliVersion") == expected_cli_version)):
                 self.bind(job)
                 # respawn 复用原生任务保存的启动参数；网页最近选择的模型/等级仍需由原生命令应用。
                 for name in ("model", "effort"):
@@ -2375,6 +2494,7 @@ class NativeSession:
         self.delivery_started = False
         client_id = request["client_id"]
         content = request["content"]
+        steer = bool(request.get("steer"))
         live = self.lookup() if self.native_id else None
         if live:
             self.bind(live)
@@ -2390,8 +2510,19 @@ class NativeSession:
                     and status.get("needs") != "dialog open":
                 self.poll(force=True)
                 return {"deferred": True, "accepted": False}
-        # 原生弹窗等待不等于执行中；普通消息仍直接送入 CLI，由原生保留到确认完成，不退回网页队列。
-        # 引导也只进入原生 next 队列；已有审批继续由 CLI 处理，不借此替用户批准、拒绝或取消工具。
+        if live and self.worker_version_mismatch(live):
+            # 普通消息虽然使用 nextTurn=False，也必须先把旧 worker 恢复到当前控制器版本；
+            # 否则普通轮次会在旧进程上启动，随后点击“引导”只能被版本错位 deferred。
+            recovered = self.recover_version_skew(live)
+            if recovered is None:
+                self.poll(force=True)
+                return {"deferred": True, "accepted": False,
+                        "versionRecovery": self.version_recovery}
+            live = recovered
+            self.read_messages()
+            status = NativeDiscovery.status(live or {}, self.messages)
+        # 远程队列由本程序管理：普通消息直接送入原生普通回复入口，只有点击“引导”的消息
+        # 才使用 nextTurn=True；已有审批继续由 CLI 处理，不借此替用户批准、拒绝或取消工具。
         text = self.prepare_text(content, client_id)
         if self.native_id and self.short and (not live or live.get("outcome")):
             live = self.restore_job()
@@ -2407,7 +2538,24 @@ class NativeSession:
         try:
             if live and not live.get("outcome"):
                 self.bind(live)
-                self.reply(text)
+                try:
+                    self.reply(text, next_turn=steer)
+                except NativeError as failure:
+                    if failure.code != "ESKEW":
+                        raise
+                    # CLI 在检查版本不一致后才返回 ESKEW，消息尚未进入旧 worker；
+                    # 仅在安全状态下接管同一会话，并最多重新提交这一次，避免重复发送。
+                    recovered = self.recover_version_skew(live, force=True)
+                    if recovered is None:
+                        self.pending.remove(intent)
+                        self.delivery_started = False
+                        self.poll(force=True)
+                        return {"deferred": True, "accepted": False,
+                                "versionRecovery": self.version_recovery}
+                    self.bind(recovered)
+                    # 竞态恢复不能改变消息语义；普通消息仍是 nextTurn=False，
+                    # 只有用户点击“引导”时才保留 nextTurn=True。
+                    self.reply(text, next_turn=steer)
             else:
                 self.start(text)
         except NativeError:

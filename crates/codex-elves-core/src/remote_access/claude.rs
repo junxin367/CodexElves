@@ -317,6 +317,9 @@ impl Conversation {
             "permissionRevision":self.permission_revision,
             "permissionModes":self.native_control["capabilities"]["permissionModes"],
             "nativeDialog":self.native_control["dialog"],
+            // 用户要求控制器升级后旧会话自动恢复；网页需要显示恢复中/等待当前轮次/恢复失败状态，
+            // 不能让消息只停留在“发送失败”而失去可解释的处理进度。
+            "versionRecovery":self.native_control["versionRecovery"],
             // 原生底栏汇报的后台任务摘要（如 “1 shell”），仅共享会话在线且画面可读时存在，网页负责翻译展示。
             "backgroundTasks":if self.shared {self.native_status["background"].clone()} else {Value::Null},
             "nativeId":self.native_id,"nativeJobId":self.native_job_id,
@@ -2014,6 +2017,15 @@ impl Claude {
                     .get(id)
                     .cloned()
                     .ok_or_else(|| error(409, "原生会话尚未连接，请稍后核对队列"))?;
+                self.change(|saved| {
+                    let conversation = saved
+                        .conversations
+                        .get_mut(id)
+                        .context("Claude 会话不存在")?;
+                    conversation.remote_queue.mark_steer(message_id)?;
+                    Ok(())
+                })
+                .await?;
                 self.dispatch_remote(id, message_id, &process, true, authorization, false)
                     .await
             }

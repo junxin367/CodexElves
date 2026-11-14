@@ -26,6 +26,10 @@ struct Message {
     // 直接发送的在途/未知记录仅用于核对原回执；只有原生明确忙碌后才成为可见等待项。
     #[serde(default)]
     direct: bool,
+    // 用户点击“引导”后即使首次投递被版本错位 deferred，也必须保留 nextTurn 语义，
+    // 不能在稍后自动续发时退化成普通消息。
+    #[serde(default)]
+    steer: bool,
     #[serde(default)]
     reason: String,
     #[serde(default)]
@@ -222,6 +226,21 @@ impl RemoteQueue {
         while self.accepted.len() > 4096 {
             self.accepted.pop_first();
         }
+    }
+
+    pub(super) fn mark_steer(&mut self, id: &str) -> anyhow::Result<()> {
+        let message = self
+            .messages
+            .iter_mut()
+            .find(|message| message.id == id)
+            .ok_or_else(|| error(409, "队列消息已变化"))?;
+        anyhow::ensure!(
+            matches!(message.state.as_str(), "queued" | "paused"),
+            "此消息正在编辑或发送"
+        );
+        message.steer = true;
+        self.revision += 1;
+        Ok(())
     }
 
     pub(super) fn messages(&self, native: &[Value]) -> Vec<Value> {
@@ -467,6 +486,7 @@ impl Claude {
                     key_id: authorization.device.key_id.clone(),
                     state: "queued".into(),
                     direct,
+                    steer: false,
                     reason: String::new(),
                     native_intent: None,
                     native_edit: native_edit.clone(),
@@ -617,6 +637,7 @@ impl Claude {
             process
                 .control(
                     json!({"subtype":"shared_send","client_id":message.id,
+                    // 远程队列自行管理普通消息顺序；只有点击“引导”才把 steer=true 交给原生 nextTurn。
                     "content":input_content(&message.payload)?,"steer":steer,
                     // 普通直接发送允许由 CLI 保留到审批完成；只有网页队列的自动续发才要求原生空闲。
                     "idle_only":!steer && !remove_if_unsent}),
@@ -771,7 +792,7 @@ impl Claude {
                 continue;
             }
             let _ = self
-                .dispatch_remote(&id, &message.id, &process, false, &auth, false)
+                .dispatch_remote(&id, &message.id, &process, message.steer, &auth, false)
                 .await;
         }
     }
@@ -1178,6 +1199,7 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0]["subtype"], "set_permission_mode");
         assert_eq!(calls[1]["subtype"], "shared_send");
+        assert_eq!(calls[1]["steer"], false);
         assert_eq!(calls[1]["idle_only"], false);
         let current = service.conversation(&c.id).await.unwrap();
         assert_eq!(current.permission_mode.as_deref(), Some("plan"));
@@ -1225,6 +1247,7 @@ mod tests {
             key_id: "key".into(),
             state: "queued".into(),
             direct: false,
+            steer: false,
             reason: String::new(),
             native_intent: None,
             native_edit: None,
@@ -1278,6 +1301,7 @@ mod tests {
             key_id: "key".into(),
             state: "queued".into(),
             direct: false,
+            steer: false,
             reason: String::new(),
             native_intent: None,
             native_edit: None,
@@ -1387,6 +1411,47 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn deferred_steer_keeps_next_turn_when_the_queue_retries() {
+        let (_directory, _auth_directory, service, c, auth, calls, replies) = fixture().await;
+        service
+            .command("send", &payload(&c, "B"), &auth)
+            .await
+            .unwrap();
+        replies.lock().await.push_back(Reply::Deferred);
+        let result = service
+            .command(
+                "steerQueued",
+                &json!({"threadId":c.id,"messageId":"B"}),
+                &auth,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["deliveryState"], "queued");
+        let queued = service.conversation(&c.id).await.unwrap();
+        assert!(queued.remote_queue.messages[0].steer);
+
+        service
+            .change(|saved| {
+                let current = saved.conversations.get_mut(&c.id).unwrap();
+                current.native_status = json!({"tempo":"idle"});
+                current.turns[0]["status"] = json!("completed");
+                Ok(())
+            })
+            .await
+            .unwrap();
+        replies.lock().await.push_back(Reply::Accepted);
+        service.drain_remote_queues().await;
+        let sent: Vec<_> = calls
+            .lock()
+            .await
+            .iter()
+            .filter(|call| call["subtype"] == "shared_send")
+            .cloned()
+            .collect();
+        assert_eq!(sent.last().unwrap()["steer"], true);
     }
 
     #[test]
@@ -2143,6 +2208,7 @@ mod tests {
             key_id: "key".into(),
             state: "sending".into(),
             direct: false,
+            steer: false,
             reason: String::new(),
             native_intent: Some(json!({"clientUserMessageId":"C","deliveryConfirmed":false})),
             native_edit: None,

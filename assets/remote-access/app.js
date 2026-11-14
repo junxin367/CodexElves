@@ -13791,6 +13791,7 @@ function renderMessages(keepScroll = true) {
     const content = [];
     // 用户要求恢复后单独压缩仍位于旧回复之后；最后回复独立展示时，只暂存其后的时间线事件，保留此前事件和活动折叠位置。
     const afterFinalEvents = [];
+    const trailingManualCompactions = [];
     const historyGap = historyGapIndex(turn);
     const flushActivity = () => {
       if (!work.length) return;
@@ -13807,11 +13808,12 @@ function renderMessages(keepScroll = true) {
       if (index === finalIndex) continue;
       if (finalIndex >= 0 && index < finalIndex
           && completedManualCompactionAfterReply(item, turnItems, index)) {
-        afterFinalEvents.push(item);
+        trailingManualCompactions.push(item);
         continue;
       }
       if (finalIndex >= 0 && index > finalIndex && transcriptEventTypes.has(item.type)) {
-        afterFinalEvents.push(item);
+        (completedManualCompactionAfterReply(item, turnItems, index)
+          ? trailingManualCompactions : afterFinalEvents).push(item);
         continue;
       }
       if (isSubagentItem(item) && ["wait", "wait_agent"].includes(subagentTool(item))) continue;
@@ -13880,6 +13882,9 @@ function renderMessages(keepScroll = true) {
       for (const step of turn.plan) plan.append(element("li", step.status, `${step.status === "completed" ? "✓" : step.status === "inProgress" ? "◌" : "○"} ${step.step}`));
       items.push(renderTurnPlanTitle(turn.plan), plan);
     }
+    // 用户要求手动压缩位于本轮所有收尾内容之后；“已编辑文件”和任务清单由这里追加，
+    // 必须先渲染这些结果再放压缩提示，避免提示出现在文件卡片和任务统计之前。
+    for (const item of trailingManualCompactions) items.push(renderMessage(item));
     reconcileChildren(group, items);
     if (items.length) children.push(group);
   }
@@ -16265,6 +16270,13 @@ function syncPendingFeedbackTimer() {
     updateComposer();
   }, Math.min(...remaining));
 }
+function queuedEditHasOriginalImages(edit) {
+  // 用户要求普通队列消息恢复到输入框后按普通消息编辑；只有原消息确实带图片时，
+  // 才显示“原图片会保留”提示，不能因为处于队列编辑态就误报图片限制。
+  return edit?.imageRemoval === true || edit?.imageEditing === true
+    || Array.isArray(edit?.originalImageSources) && edit.originalImageSources.length > 0
+    || Array.isArray(edit?.attachments) && edit.attachments.length > 0;
+}
 function updateComposer() {
   sessionTools?.updateContext();
   syncRelatedSessionLayout();
@@ -16311,7 +16323,8 @@ function updateComposer() {
   const unsupportedImages = !editing && hasAttachments && !backendCapability("imageInput")
     || !!editingQueuedMessage?.imageEditing && composerAttachmentsPayload().length > 0
       && !queueCapability("queuedImageEditing");
-  const queueImageNote = editingQueuedMessage?.state === "editing" && !editingQueuedMessage.imageEditing
+  const queueImageNote = editingQueuedMessage?.state === "editing"
+    && queuedEditHasOriginalImages(editingQueuedMessage) && !editingQueuedMessage.imageEditing
     ? editingQueuedMessage.imageRemoval
       ? "当前运行的服务仅支持删除原图；更新程序后可添加图片。"
       : queueCapability("queuedImageEditing")

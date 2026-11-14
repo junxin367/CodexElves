@@ -5299,6 +5299,23 @@ test("未完成队列编辑在重新打开后直接恢复原输入和 editId，�
   assert.deepEqual(h.notices, []);
 });
 
+test("普通队列消息恢复编辑不显示图片保留提示，原消息有图片时才显示资格", () => {
+  const context = vm.createContext({});
+  vm.runInContext(sourceSection("function queuedEditHasOriginalImages(", "function updateComposer("), context);
+  assert.equal(context.queuedEditHasOriginalImages({
+    state: "editing", imageRemoval: false, imageEditing: false,
+    attachments: [], originalImageSources: []
+  }), false);
+  assert.equal(context.queuedEditHasOriginalImages({
+    state: "editing", imageRemoval: false, imageEditing: false,
+    attachments: [{ source: "remote-image" }], originalImageSources: ["remote-image"]
+  }), true);
+  assert.equal(context.queuedEditHasOriginalImages({
+    state: "editing", imageRemoval: true, imageEditing: false,
+    attachments: [], originalImageSources: ["remote-image"]
+  }), true);
+});
+
 test("自动恢复队列编辑保留已有普通文字、Skill、附件和目标，不覆盖输入", () => {
   for (const change of [
     h => { h.prompt.value = "刚输入的普通草稿"; },
@@ -11046,6 +11063,31 @@ test("Claude 正文渲染兜底把迟到的手动完成压缩放到最终回复�
   h.render();
   assert.deepEqual(Array.from(h.root.children[0].children, node => node.dataset.key || "activity"),
     ["render-fallback:input", "render-fallback:reply", "render-fallback:compact"]);
+});
+
+test("Claude 手动压缩位于已编辑文件和任务清单之后", () => {
+  const turn = { id: "render-tail", _nativeUserId: "native-render-tail",
+    status: "failed", plan: [{ step: "保留任务清单", status: "completed" }], items: [
+      { id: "input", type: "userMessage" },
+      { id: "reply", type: "agentMessage", text: "You've hit your 5-hour limit",
+        phase: "final_answer" },
+      { id: "compact", type: "contextCompaction", source: "manual", status: "completed",
+        completed: true, remoteInlineEvent: true, remoteCompactionLifecycle: true },
+    ] };
+  const h = claudeExecutionFeedbackHarness(turn);
+  const editedFiles = { dataset: { key: "edited-files" } };
+  const planTitle = { dataset: { key: "plan-title" } };
+  h.context.renderEditedFiles = () => editedFiles;
+  h.context.renderTurnPlanTitle = () => planTitle;
+  h.context.transcriptEventTypes.add("contextCompaction");
+  h.render();
+  const children = h.root.children[0].children;
+  const compact = children.find(node => node.dataset.key === "render-tail:compact");
+  assert.ok(compact, "手动压缩节点必须被渲染");
+  assert.ok(children.indexOf(editedFiles) < children.indexOf(compact),
+    "压缩提示必须位于已编辑文件卡片之后");
+  assert.ok(children.indexOf(planTitle) < children.indexOf(compact),
+    "压缩提示必须位于任务清单之后");
 });
 
 test("Claude 回复生成前的压缩仍保留原位置，不统一移动到最终回复之后", () => {

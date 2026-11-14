@@ -429,7 +429,7 @@ class SharedQueueHistoryTests(unittest.TestCase):
             result = native.send({"client_id": "new", "idle_only": True,
                                   "content": [{"type": "text", "text": "待确认后处理"}]})
         self.assertTrue(result["accepted"])
-        native.reply.assert_called_once_with("待确认后处理")
+        native.reply.assert_called_once_with("待确认后处理", next_turn=False)
 
     def test_pending_permission_does_not_block_a_message_or_answer_the_native_dialog(self):
         native = self.waiting_dialog()
@@ -442,7 +442,7 @@ class SharedQueueHistoryTests(unittest.TestCase):
             result = native.send({"client_id": "permission-pending", "idle_only": True,
                                   "content": [{"type": "text", "text": "仍正常投递"}]})
         self.assertTrue(result["accepted"])
-        native.reply.assert_called_once_with("仍正常投递")
+        native.reply.assert_called_once_with("仍正常投递", next_turn=False)
         native.terminal_input.assert_not_called()
         self.assertEqual(native.setting_changes["permissionMode"]["state"], "pending")
         native.terminal_input.assert_not_called()
@@ -686,7 +686,7 @@ class SharedQueueHistoryTests(unittest.TestCase):
                                   "content": [{"type": "text", "text": "second"}]})
         self.assertTrue(result["accepted"])
         self.assertNotIn("interruptedUserId", result)
-        native.reply.assert_called_once_with("second")
+        native.reply.assert_called_once_with("second", next_turn=False)
         native.terminal_input.assert_not_called()
         self.assertEqual(NativeDiscovery.status(native.lookup(), native.messages)["endedAtMs"], 2000)
 
@@ -764,7 +764,7 @@ class SharedQueueHistoryTests(unittest.TestCase):
     def test_reply_uses_native_next_priority_and_keeps_setting_commands_separate(self):
         native = NativeSession("unused", "test-session", "saved-job")
         native.rpc = MagicMock(return_value={"ok": True})
-        native.reply("引导消息")
+        native.reply("引导消息", next_turn=True)
         native.rpc.assert_called_once_with(
             {"op": "reply", "short": "saved-job", "text": "引导消息", "nextTurn": True})
         native.reply("/effort max", next_turn=False)
@@ -871,7 +871,7 @@ class SharedQueueHistoryTests(unittest.TestCase):
 
     def test_steer_does_not_interrupt_a_different_turn_started_during_delivery(self):
         native = self.native_active()
-        def reply(text):
+        def reply(text, **kwargs):
             native.messages.append({"type": "user", "uuid": "other-turn", "message": {"content": "another input"}})
         native.reply = MagicMock(side_effect=reply)
         native.terminal_input = MagicMock()
@@ -880,7 +880,7 @@ class SharedQueueHistoryTests(unittest.TestCase):
                                   "content": [{"type": "text", "text": "selected input"}]})
         self.assertTrue(result["accepted"], "轮次变化后由同一原生会话决定吸收时机，不停止新轮次")
         native.terminal_input.assert_not_called()
-        native.reply.assert_called_once_with("selected input")
+        native.reply.assert_called_once_with("selected input", next_turn=True)
 
     def test_interrupted_turn_waiting_for_user_can_accept_a_new_message(self):
         native = self.native_active()
@@ -1171,7 +1171,7 @@ class SharedQueueHistoryTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             result = native.send({"client_id": "C", "steer": True,
                                   "content": [{"type": "text", "text": "只投递 C"}]})
-        native.reply.assert_called_once_with("只投递 C")
+        native.reply.assert_called_once_with("只投递 C", next_turn=True)
         native.terminal_input.assert_not_called()
         self.assertTrue(result["accepted"])
         self.assertNotIn("interruptedUserId", result)
@@ -1197,7 +1197,7 @@ class SharedQueueHistoryTests(unittest.TestCase):
             result = native.send({"client_id": "C", "steer": True,
                                   "content": [{"type": "text", "text": "selected"}]})
         self.assertTrue(result["accepted"])
-        native.reply.assert_called_once_with("selected")
+        native.reply.assert_called_once_with("selected", next_turn=True)
         self.assertEqual(native.lookup()["tempo"], "active")
 
     def test_explicit_rejection_and_unknown_transport_keep_different_delivery_states(self):
@@ -1217,13 +1217,13 @@ class SharedQueueHistoryTests(unittest.TestCase):
         native.lookup = lambda: {"short": "saved-job", "sessionId": "test-session",
                                  "tempo": "blocked", "needs": "permission"}
         replies = []
-        native.reply = lambda *args, **kwargs: replies.append(args)
+        native.reply = lambda *args, **kwargs: replies.append((args, kwargs))
         native.terminal_input = MagicMock()
         with contextlib.redirect_stdout(io.StringIO()):
             result = native.send({"client_id": "C", "steer": True,
                                   "content": [{"type": "text", "text": "只投递 C"}]})
         self.assertTrue(result["accepted"])
-        self.assertEqual(replies, [("只投递 C",)])
+        self.assertEqual(replies, [(("只投递 C",), {"next_turn": True})])
         native.terminal_input.assert_not_called()
         self.assertEqual(native.job["needs"], "permission", "原生审批继续保留")
 
@@ -1245,11 +1245,164 @@ class SharedQueueHistoryTests(unittest.TestCase):
                                   "content": [{"type": "text", "text": "新的补充"}]})
         self.assertEqual(run.call_args.args[0], ["native-cli", "respawn", "saved-job"])
         self.assertEqual(replies, [("/model gpt-6.1-sol", False),
-                                  ("/effort max", False), ("新的补充", True)])
+                                  ("/effort max", False), ("新的补充", False)])
         self.assertEqual(result["nativeId"], "test-session")
         self.assertEqual(result["jobId"], "saved-job")
         self.assertEqual(len(native.pending), 1)
         self.assertEqual(native.pending[0]["_after"], 1)
+
+    def test_idle_cli_version_skew_respawns_same_job_before_sending(self):
+        native = NativeSession("native-cli", "test-session", "saved-job")
+        native.read_messages = lambda: None
+        native.poll = lambda **kwargs: None
+        live = {"short": "saved-job", "sessionId": "test-session", "tempo": "idle",
+                "sessionStatus": "idle", "cliVersion": "2.1.323"}
+        recovered = {**live, "cliVersion": "2.1.325"}
+        native.lookup = lambda: live
+        native.daemon_version = lambda: "2.1.325"
+        native.read_terminal_screen = lambda: ["❯ ", "────────────────", "? for shortcuts"]
+        native.restore_job = MagicMock(return_value=recovered)
+        replies = []
+        native.reply = lambda text, next_turn=True: replies.append((text, next_turn))
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "version-skew", "steer": True,
+                                  "content": [{"type": "text", "text": "版本恢复后发送"}]})
+        native.restore_job.assert_called_once_with(expected_cli_version="2.1.325")
+        self.assertEqual(replies, [("版本恢复后发送", True)])
+        self.assertEqual(native.version_recovery["state"], "ready")
+        self.assertTrue(result["accepted"])
+
+    def test_idle_cli_version_skew_ordinary_message_recovers_before_normal_reply(self):
+        native = NativeSession("native-cli", "test-session", "saved-job")
+        native.read_messages = lambda: None
+        native.poll = lambda **kwargs: None
+        live = {"short": "saved-job", "sessionId": "test-session", "tempo": "idle",
+                "sessionStatus": "idle", "cliVersion": "2.1.323"}
+        recovered = {**live, "cliVersion": "2.1.325"}
+        native.lookup = lambda: live
+        native.daemon_version = lambda: "2.1.325"
+        native.read_terminal_screen = lambda: ["❯ ", "────────────────", "? for shortcuts"]
+        native.restore_job = MagicMock(return_value=recovered)
+        replies = []
+        native.reply = lambda text, next_turn=True: replies.append((text, next_turn))
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "ordinary-version-skew",
+                                  "content": [{"type": "text", "text": "普通消息"}]})
+        self.assertEqual(replies, [("普通消息", False)])
+        native.restore_job.assert_called_once_with(expected_cli_version="2.1.325")
+        self.assertEqual(native.version_recovery["state"], "ready")
+        self.assertTrue(result["accepted"])
+
+    def test_busy_cli_version_skew_ordinary_message_defers_before_starting_old_worker(self):
+        native = NativeSession("native-cli", "test-session", "saved-job")
+        native.read_messages = lambda: None
+        native.poll = lambda **kwargs: None
+        live = {"short": "saved-job", "sessionId": "test-session", "tempo": "active",
+                "state": "working", "sessionStatus": "busy", "cliVersion": "2.1.323"}
+        native.lookup = lambda: live
+        native.daemon_version = lambda: "2.1.325"
+        native.restore_job = MagicMock(side_effect=AssertionError("执行中不能自动重启旧会话"))
+        native.reply = MagicMock(side_effect=AssertionError("普通消息不能投递到旧 worker"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "ordinary-version-skew-busy",
+                                  "content": [{"type": "text", "text": "稍后发送"}]})
+        self.assertTrue(result["deferred"])
+        self.assertFalse(result["accepted"])
+        self.assertEqual(native.version_recovery["state"], "pending")
+        native.restore_job.assert_not_called()
+        native.reply.assert_not_called()
+
+    def test_busy_cli_version_skew_defers_without_stopping_the_old_worker(self):
+        native = NativeSession("native-cli", "test-session", "saved-job")
+        native.read_messages = lambda: None
+        native.poll = lambda **kwargs: None
+        live = {"short": "saved-job", "sessionId": "test-session", "tempo": "active",
+                "state": "working", "sessionStatus": "busy", "cliVersion": "2.1.323"}
+        native.lookup = lambda: live
+        native.daemon_version = lambda: "2.1.325"
+        native.restore_job = MagicMock(side_effect=AssertionError("执行中不能自动重启旧会话"))
+        native.reply = MagicMock(side_effect=AssertionError("执行中不能投递版本错位消息"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "version-skew-busy", "steer": True,
+                                  "content": [{"type": "text", "text": "稍后发送"}]})
+        self.assertTrue(result["deferred"])
+        self.assertFalse(result["accepted"])
+        self.assertEqual(native.version_recovery["state"], "pending")
+        native.restore_job.assert_not_called()
+        native.reply.assert_not_called()
+        self.assertEqual(native.pending, [])
+
+    def test_idle_cli_version_skew_with_native_draft_defers_without_respawn(self):
+        native = NativeSession("native-cli", "test-session", "saved-job")
+        native.read_messages = lambda: None
+        native.poll = lambda **kwargs: None
+        live = {"short": "saved-job", "sessionId": "test-session", "tempo": "idle",
+                "sessionStatus": "idle", "cliVersion": "2.1.323"}
+        native.lookup = lambda: live
+        native.daemon_version = lambda: "2.1.325"
+        native.read_terminal_screen = lambda: ["❯ 用户尚未发送的草稿", "────────────────", "? for shortcuts"]
+        native.restore_job = MagicMock(side_effect=AssertionError("不能覆盖原生草稿"))
+        native.reply = MagicMock(side_effect=AssertionError("草稿存在时不能发送"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "ordinary-version-skew-draft",
+                                  "content": [{"type": "text", "text": "稍后发送"}]})
+        self.assertTrue(result["deferred"])
+        self.assertFalse(result["accepted"])
+        self.assertEqual(native.version_recovery["state"], "pending")
+        self.assertEqual(native.version_recovery["reason"], "native_draft")
+        native.restore_job.assert_not_called()
+        native.reply.assert_not_called()
+
+    def test_eskew_after_admission_recovers_once_before_resubmitting(self):
+        native = NativeSession("native-cli", "test-session", "saved-job")
+        native.read_messages = lambda: None
+        native.poll = lambda **kwargs: None
+        live = {"short": "saved-job", "sessionId": "test-session", "tempo": "idle",
+                "sessionStatus": "idle"}
+        recovered = {**live, "cliVersion": "2.1.325"}
+        native.lookup = lambda: live
+        native.recover_version_skew = MagicMock(return_value=recovered)
+        calls = []
+
+        def reply(text, next_turn=True):
+            calls.append((text, next_turn))
+            if len(calls) == 1:
+                raise namespace["NativeError"]("ESKEW")
+
+        native.reply = reply
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "version-skew-race", "steer": True,
+                                  "content": [{"type": "text", "text": "只重试一次"}]})
+        native.recover_version_skew.assert_called_once_with(live, force=True)
+        self.assertEqual(calls, [("只重试一次", True), ("只重试一次", True)])
+        self.assertTrue(result["accepted"])
+        self.assertEqual(len(native.pending), 1)
+
+    def test_eskew_after_admission_preserves_ordinary_next_turn(self):
+        native = NativeSession("native-cli", "test-session", "saved-job")
+        native.read_messages = lambda: None
+        native.poll = lambda **kwargs: None
+        live = {"short": "saved-job", "sessionId": "test-session", "tempo": "idle",
+                "sessionStatus": "idle"}
+        recovered = {**live, "cliVersion": "2.1.325"}
+        native.lookup = lambda: live
+        native.read_terminal_screen = lambda: ["❯ ", "────────────────", "? for shortcuts"]
+        native.recover_version_skew = MagicMock(return_value=recovered)
+        calls = []
+
+        def reply(text, next_turn=True):
+            calls.append((text, next_turn))
+            if len(calls) == 1:
+                raise namespace["NativeError"]("ESKEW")
+
+        native.reply = reply
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "ordinary-version-skew-race",
+                                  "content": [{"type": "text", "text": "普通消息只重试一次"}]})
+        native.recover_version_skew.assert_called_once_with(live, force=True)
+        self.assertEqual(calls, [("普通消息只重试一次", False), ("普通消息只重试一次", False)])
+        self.assertTrue(result["accepted"])
+        self.assertEqual(len(native.pending), 1)
 
     def test_unknown_native_lookup_does_not_restart_or_resubmit(self):
         native = NativeSession("native-cli", "test-session", "saved-job")
@@ -2932,6 +3085,51 @@ class SharedPermissionTests(unittest.TestCase):
         self.assertEqual(result["nativeSettings"]["permissionMode"], "plan")
         self.assertEqual(native.native_id, "11111111-2222-4333-8444-555555555555")
         self.assertEqual(native.permission_mode, "plan")
+
+    def test_bypass_permission_idle_session_respawns_same_uuid_and_confirms_native_mode(self):
+        native, live, position, keys = self.fixture(cycle=("default", "bypassPermissions"))
+        native.restore_job = MagicMock(side_effect=lambda: position.__setitem__(0, 1))
+        result = native.change_permission_mode("bypassPermissions")
+        native.restore_job.assert_called_once_with()
+        self.assertEqual(result["nativeSettings"]["permissionMode"], "bypassPermissions")
+        self.assertEqual(native.actual_settings["permissionMode"], "bypassPermissions")
+        self.assertEqual(native.permission_mode, "bypassPermissions")
+        self.assertEqual(keys, [])
+        self.assertEqual(live["sessionStatus"], "idle")
+
+    def test_bypass_permission_busy_session_waits_without_respawn(self):
+        native, live, _, keys = self.fixture(cycle=("default", "bypassPermissions"))
+        live["sessionStatus"] = "busy"
+        native.restore_job = MagicMock(side_effect=AssertionError("执行中不能重启会话"))
+        result = native.change_permission_mode("bypassPermissions")
+        self.assertTrue(result["permissionPending"])
+        self.assertEqual(native.setting_changes["permissionMode"]["state"], "pending")
+        native.restore_job.assert_not_called()
+        self.assertEqual(keys, [])
+
+    def test_bypass_permission_preserves_native_draft_without_respawn(self):
+        native, live, _, keys = self.fixture(cycle=("default", "bypassPermissions"), draft="保留草稿")
+        native.restore_job = MagicMock(side_effect=AssertionError("草稿存在时不能重启会话"))
+        result = native.change_permission_mode("bypassPermissions")
+        self.assertTrue(result["permissionPending"])
+        self.assertEqual(native.setting_changes["permissionMode"]["state"], "pending")
+        self.assertIn("草稿", native.setting_changes["permissionMode"]["reason"])
+        native.restore_job.assert_not_called()
+        self.assertEqual(keys, [])
+        self.assertEqual(live["sessionStatus"], "idle")
+
+    def test_pending_bypass_permission_respawns_after_current_turn_becomes_idle(self):
+        native, live, position, keys = self.fixture(cycle=("default", "bypassPermissions"))
+        live["sessionStatus"] = "busy"
+        native.change_permission_mode("bypassPermissions")
+        native.permission_retry_at = 0
+        native.restore_job = MagicMock(side_effect=lambda: position.__setitem__(0, 1))
+        live["sessionStatus"] = "idle"
+        native.retry_permission_mode(live)
+        native.restore_job.assert_called_once_with()
+        self.assertEqual(native.actual_settings["permissionMode"], "bypassPermissions")
+        self.assertEqual(native.setting_changes["permissionMode"]["state"], "applied")
+        self.assertEqual(keys, [])
 
     def test_same_permission_preserves_native_draft_and_waiting_without_sending_keys(self):
         for status, draft in (("idle", "保留原生未发送草稿"), ("busy", ""), ("waiting", "")):
