@@ -1596,6 +1596,11 @@ body{font-weight:var(--ui-font-weight,400)}
 .appearance-card #appearance-background-status{margin:0;padding:10px 16px}
 .appearance-card .appearance-reading-font-hint{margin:0;padding:0 16px 12px}
 .appearance-card #appearance-auto-light-setting>p{margin:0;padding:0 16px 12px;color:var(--muted);font-size:.85714rem}
+/* 用户要求回顾开关放在会话设置中；复用卡片行间距，读取未完成时使用居中的半透明滑块表达未知。 */
+#appearance-claude-recap>.appearance-hint{margin:0;padding:12px 16px 0}
+#appearance-claude-recap>.appearance-hint:empty{display:none}
+#appearance-claude-recap>.appearance-action-buttons{padding:12px 16px}
+#claude-recap-enabled:indeterminate::after{transform:translateX(6px);opacity:.5}
 .appearance-mode-card .appearance-theme-options{gap:10px}
 .appearance-card .appearance-field>.appearance-theme-options{max-width:none}
 .appearance-mode-option{display:flex;flex-direction:column;align-items:center;gap:5px;min-width:0;padding:4px;border:1px solid transparent;border-radius:10px;background:transparent;color:var(--muted);font:inherit}

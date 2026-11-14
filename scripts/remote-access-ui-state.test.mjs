@@ -3019,6 +3019,158 @@ function permissionRecord(id, settings, revision = "r1") {
     path: "/isolated/config", revision, settings, supportedModes: ["manual", "acceptEdits", "plan"] };
 }
 
+function claudeRecapHarness(api) {
+  const select = selectComponentHarness();
+  const element = (tag, className = "", text = "") => ({ ...select.element(tag, className, text), className });
+  const page = element("section"); page.isConnected = true;
+  const instances = [
+    { id: "codex:local", backend: "codex", label: "Codex" },
+    { id: "claude-a", backend: "claude", label: "Claude · A", ready: true },
+    { id: "claude-b", backend: "claude", label: "Claude · B", ready: true }
+  ];
+  let scope = "device-a", readOnly = false;
+  const context = nodeVm.createContext();
+  nodeVm.runInContext(sourceSection("function mountClaudeRecapSettings(", "const appearanceFontFamilies ="), context);
+  const settings = context.mountClaudeRecapSettings({
+    page, element, selectControl: select.selectControl, setSelectOptions: select.setSelectOptions, api,
+    getInstances: () => instances, loadInstances: async () => {},
+    readOnly: () => readOnly, authorizationScope: () => scope
+  });
+  const find = predicate => {
+    const visit = node => predicate(node) ? node : node.children?.map(visit).find(Boolean);
+    return visit(page);
+  };
+  return { settings, instances, page,
+    control: () => find(node => node.id === "claude-recap-enabled"),
+    status: () => find(node => node.id === "claude-recap-status").textContent,
+    async toggle(enabled) { const control = this.control(); control.checked = enabled; await control.onchange(); },
+    revoke() { scope = "device-b"; }, setReadOnly() { readOnly = true; }
+  };
+}
+const recapRecord = (id, enabled = true, revision = "r1") =>
+  ({ instanceId: id, backend: "claude", enabled, revision, explicit: true, readOnly: false });
+
+test("Claude 回顾默认关闭失败按实例提示，不冒充成功并按授权隔离重复提示", () => {
+  const notices = [], context = nodeVm.createContext({ notice: (...value) => notices.push(value) });
+  nodeVm.runInContext(sourceSection("const claudeRecapDefaultWarnings =", "async function loadSessionInstances("), context);
+  const result = {
+    instances: [{ id: "claude-a", label: "Claude · A" }],
+    claudeRecapDefaults: [{ instanceId: "claude-a", initialized: false, error: "配置为只读" }]
+  };
+  context.reportClaudeRecapDefaults(result, "device-a");
+  assert.match(notices[0][0], /Claude · A.*未能默认关闭.*配置为只读/);
+  assert.equal(notices[0][1], true);
+  context.reportClaudeRecapDefaults(result, "device-a");
+  assert.equal(notices.length, 1);
+  context.reportClaudeRecapDefaults(result, "device-b");
+  assert.equal(notices.length, 2);
+  context.reportClaudeRecapDefaults({ claudeRecapDefaults: [{ instanceId: "claude-a", initialized: true }] }, "device-a");
+  context.reportClaudeRecapDefaults(result, "device-a");
+  assert.equal(notices.length, 3, "恢复成功后再次失败需要重新提示");
+  context.reportClaudeRecapDefaults({}, "device-a");
+  assert.equal(notices.length, 3, "兼容没有初始化结果字段的旧服务");
+});
+
+test("Claude 回顾实例目录的迟到结果不能向新授权显示默认关闭失败提示", async () => {
+  const response = deferred(), notices = [], catalogs = [];
+  const context = nodeVm.createContext({
+    session: { device: { id: "same-device" }, scope: "authorization-a" }, sessionInstanceRequest: null,
+    privateInputScope: value => value.scope, api: () => response.promise,
+    applySessionCatalog: result => catalogs.push(result), notice: (...value) => notices.push(value)
+  });
+  nodeVm.runInContext(sourceSection("const claudeRecapDefaultWarnings =", "function renderSessionInstances("), context);
+  const reading = context.loadSessionInstances();
+  context.session.scope = "authorization-b";
+  response.resolve({ claudeRecapDefaults: [{ instanceId: "claude-a", error: "旧授权失败" }] });
+  await reading;
+  assert.equal(catalogs.length, 0);
+  assert.equal(notices.length, 0);
+});
+
+test("Claude 回顾开关只保存所选实例的原生配置，确认回执后才改变开关状态", async () => {
+  const requests = [], save = deferred();
+  const h = claudeRecapHarness(async (path, body) => {
+    assert.equal(path, "/api/settings/claude-recap");
+    requests.push(JSON.parse(JSON.stringify(body)));
+    return body.operation === "save" ? save.promise : recapRecord(body.instanceId);
+  });
+  await h.settings.show("claude-b");
+  assert.equal(h.control().checked, true);
+  const pending = h.toggle(false);
+  assert.equal(h.control().disabled, true);
+  assert.equal(h.control().checked, true, "等待保存时保持最后确认的原生状态");
+  assert.deepEqual(requests, [{ instanceId: "claude-b" }, {
+    instanceId: "claude-b", operation: "save", enabled: false, expectedRevision: "r1"
+  }]);
+  save.resolve(recapRecord("claude-b", false, "r2"));
+  await pending;
+  assert.equal(h.control().checked, false);
+  assert.equal(h.control().disabled, false);
+  assert.match(h.status(), /已关闭/);
+});
+
+test("Claude 回顾读取按实例及授权隔离，迟到回包不能覆盖另一个实例或已关闭窗口", async () => {
+  const late = deferred();
+  const h = claudeRecapHarness(async (_path, body) =>
+    body.instanceId === "claude-a" ? late.promise : recapRecord("claude-b", false));
+  const pending = h.settings.show("claude-a");
+  await new Promise(resolve => setImmediate(resolve));
+  await h.settings.show("claude-b");
+  late.resolve(recapRecord("claude-a", true));
+  await pending;
+  assert.equal(h.control().checked, false);
+  const saving = deferred();
+  const revoked = claudeRecapHarness(async (_path, body) =>
+    body.operation === "save" ? saving.promise : recapRecord(body.instanceId));
+  await revoked.settings.show("claude-a");
+  const write = revoked.toggle(false);
+  revoked.revoke();
+  saving.resolve(recapRecord("claude-a", false, "r2"));
+  await write;
+  assert.doesNotMatch(revoked.status(), /已关闭/);
+  h.settings.dispose();
+  await h.toggle(true);
+  assert.equal(h.control().disabled, true);
+});
+
+test("Claude 回顾保存结果未知时禁止重复写入，重新读取后才恢复操作；只读访问不能修改", async () => {
+  let saves = 0;
+  const h = claudeRecapHarness(async (_path, body) => {
+    if (body.operation === "save") { saves++; throw new Error("结果未知"); }
+    return recapRecord(body.instanceId, false, "r2");
+  });
+  await h.settings.show("claude-a");
+  await h.toggle(true);
+  assert.equal(h.control().checked, false);
+  assert.equal(h.control().disabled, true);
+  assert.match(h.status(), /重新读取核对/);
+  await h.toggle(true);
+  assert.equal(saves, 1);
+  await h.settings.show();
+  assert.equal(h.control().disabled, false);
+  h.setReadOnly();
+  await h.toggle(true);
+  assert.equal(saves, 1);
+  assert.equal(h.control().disabled, true);
+});
+
+test("Claude 回顾读取失败或实例不可用时保持未知，不能冒用 Codex 或虚报关闭", async () => {
+  let reads = 0;
+  const h = claudeRecapHarness(async () => { reads++; throw new Error("配置格式无效"); });
+  await h.settings.show("claude-a");
+  assert.equal(h.control().disabled, true);
+  assert.equal(h.control().indeterminate, true);
+  assert.match(h.status(), /配置格式无效/);
+  h.instances.splice(1);
+  await h.settings.show();
+  assert.equal(reads, 1);
+  assert.match(h.status(), /所选 Claude 实例暂不可用/);
+  const empty = claudeRecapHarness(async () => { throw new Error("不应读取 Codex 配置"); });
+  empty.instances.splice(1);
+  await empty.settings.show("codex:local");
+  assert.match(empty.status(), /尚未检测到 Claude/);
+});
+
 test("实例全局权限草稿按实例隔离，保存只包含所选实例改动的字段", async () => {
   const requests = [];
   const h = permissionSettingsHarness(async (path, body) => {
@@ -5784,7 +5936,7 @@ test("Claude 终端回退菜单提示说明消息排队与回退后的执行位�
   assert.equal(context.claudeRewindDialogText({ step: "confirm" })[0], "终端正在确认回退到这条消息之前：（未读到消息原文）");
 });
 
-test("Claude 自动续跑起点与后台任务提示使用中文，未知原生写法保留原文", () => {
+test("Claude 自动续跑提示使用中文，recap 沿用原生前缀，未知写法保留原文", () => {
   const context = nodeVm.createContext({ nativeConnectionVersion: 1,});
   nodeVm.runInContext(sourceSection("function claudeTaskNotificationText(", "function renderTranscriptEvent("), context);
   nodeVm.runInContext(sourceSection("function claudeBackgroundLabel(", "function renderClaudeControlNotices("), context);
@@ -5809,7 +5961,7 @@ test("Claude 自动续跑起点与后台任务提示使用中文，未知原生�
     { label: "终端执行了 /resume", description: "已在后台运行" });
   assert.equal(event({ type: "claudeLocalCommand", name: "/skills", output: null }).description, "尚未收到命令输出。");
   assert.equal(event({ type: "claudeLocalCommand", name: "/skills", output: "" }).description, "命令没有输出。");
-  assert.equal(event({ type: "claudeNotice", kind: "awaySummary", text: "已问候" }).label, "离开期间回顾：已问候");
+  assert.equal(event({ type: "claudeNotice", kind: "awaySummary", text: "已问候" }).label, "※ recap: 已问候");
   assert.deepEqual(event({ type: "claudeNotice", kind: "stopHook", prevented: true, reason: "测试未通过", errors: ["exit 2"] }),
     { label: "Stop Hook 阻止了继续执行", description: "测试未通过\nexit 2" });
   assert.equal(event({ type: "claudeNotice", kind: "informational", text: "x".repeat(130) }).label, `Claude 提示：${"x".repeat(120)}…`);

@@ -1,6 +1,7 @@
-//! 实例的原生全局权限与远程会话覆盖分开保存；会话菜单不得改写用户配置文件。
+//! 实例的原生全局配置与远程会话覆盖分开保存；会话菜单不得改写用户配置文件。
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -303,6 +304,105 @@ fn save_file(path: &Path, text: &str, expected: &str) -> anyhow::Result<()> {
     result
 }
 
+async fn save_settings_file(
+    target: &ConfigFile,
+    text: &str,
+    changes: &Value,
+    expected: &str,
+    authorization: &RemoteAuthorization,
+) -> Result<(), ApiError> {
+    let config = target
+        .claude_config
+        .as_ref()
+        .filter(|config| !config.distribution.is_empty());
+    #[cfg(test)]
+    let config = config.filter(|config| config.executable != "/fixture/claude");
+    let Some(config) = config else {
+        let permit = authorization
+            .prepare_dispatch()
+            .await
+            .map_err(super::authorization_error)?;
+        return permit
+            .commit(|| save_file(&target.path, text, expected))
+            .map_err(super::authorization_error);
+    };
+    // 用户要求保存原生配置时保留 Linux 权限；不能用 Windows Permissions 经 UNC 重建文件。
+    // 只向所属发行版/用户发送一个允许的设置值，文件内容和凭据留在原实例内。
+    let mut command = tokio::process::Command::new("wsl.exe");
+    command
+        .args([
+            "--distribution",
+            &config.distribution,
+            "--user",
+            &config.user,
+            "--exec",
+            "python3",
+            "-u",
+            "-c",
+            include_str!("claude_config_file.py"),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(crate::windows_create_hidden_process());
+    let mut child = command
+        .spawn()
+        .map_err(|_| ApiError::new(503, "无法启动所选 WSL 实例的配置写入程序"))?;
+    let input = child
+        .stdin
+        .take()
+        .ok_or_else(|| ApiError::new(503, "Claude 配置写入连接不可用"))?;
+    let timeout = Duration::from_secs(15);
+    let (writer, _) = crate::desktop_owner_ipc::spawn_writer(input, timeout);
+    let mut bytes = serde_json::to_vec(&json!({
+        "path":target.display, "changes":changes, "expectedRevision":expected
+    }))
+    .unwrap();
+    bytes.push(b'\n');
+    let unknown = || {
+        let mut failure = ApiError::new(503, "无法确认 Claude 配置保存结果，请重新读取核对");
+        failure.outcome_unknown = true;
+        failure
+    };
+    crate::desktop_owner_ipc::guarded_write(&writer, bytes, Some(authorization), timeout)
+        .await
+        .map_err(|failure| {
+            if failure
+                .downcast_ref::<crate::desktop_owner_ipc::DispatchFailure>()
+                .is_some_and(|failure| failure.dispatched)
+            {
+                unknown()
+            } else {
+                super::authorization_error(failure)
+            }
+        })?;
+    drop(writer);
+    let output = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .map_err(|_| unknown())?
+        .map_err(|_| unknown())?;
+    if !output.status.success() || output.stdout.len() > 4096 {
+        return Err(unknown());
+    }
+    let response: Value = serde_json::from_slice(&output.stdout).map_err(|_| unknown())?;
+    if response["ok"] != true {
+        let code = response["code"].as_u64().unwrap_or(503) as u16;
+        return Err(ApiError::new(
+            if [400, 403, 409, 413, 422, 503].contains(&code) {
+                code
+            } else {
+                503
+            },
+            response["message"]
+                .as_str()
+                .unwrap_or("Claude 配置保存失败，请重新读取核对"),
+        ));
+    }
+    Ok(())
+}
+
 fn global_view(backend: &str, text: &str) -> Result<Value, ApiError> {
     if backend == "codex" {
         let document = text
@@ -470,13 +570,14 @@ pub(super) async fn settings(
             ));
         }
         text = updated_config(&target.backend, &text, &payload["settings"])?;
-        let permit = authorization
-            .prepare_dispatch()
-            .await
-            .map_err(super::authorization_error)?;
-        permit
-            .commit(|| save_file(&target.path, &text, &revision))
-            .map_err(super::authorization_error)?;
+        save_settings_file(
+            &target,
+            &text,
+            &payload["settings"],
+            &revision,
+            &authorization,
+        )
+        .await?;
     }
     let (text, revision) = read_file(&target.path)?;
     let settings = global_view(&target.backend, &text)?;
@@ -491,6 +592,163 @@ pub(super) async fn settings(
             "path":target.display, "revision":revision, "settings":settings,
             "supportedModes":supported_modes,
             "readOnly":state.settings.read_only
+        })),
+    )
+        .into_response())
+}
+
+fn claude_recap_config(text: &str) -> Result<Value, ApiError> {
+    let document: Value = if text.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(text.trim_start_matches('\u{feff}'))
+            .map_err(|_| ApiError::new(422, "Claude 配置格式无效，未覆盖原文件"))?
+    };
+    if !document.is_object() {
+        return Err(ApiError::new(422, "Claude 配置必须为 JSON 对象"));
+    }
+    if document
+        .get("awaySummaryEnabled")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(ApiError::new(422, "Claude 离开期间回顾配置必须为布尔值"));
+    }
+    Ok(document)
+}
+
+fn updated_claude_recap(text: &str, enabled: bool) -> Result<String, ApiError> {
+    let mut document = claude_recap_config(text)?;
+    // 用户要求开关控制原生回顾生成；只修改所选实例的 Session recap 配置，保留权限、模型及其他设置。
+    document["awaySummaryEnabled"] = json!(enabled);
+    let mut output = serde_json::to_string_pretty(&document).unwrap();
+    let ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    if ending == "\r\n" {
+        output = output.replace('\n', ending);
+    }
+    if text.starts_with('\u{feff}') {
+        output.insert(0, '\u{feff}');
+    }
+    output.push_str(ending);
+    Ok(output)
+}
+
+fn missing_claude_recap_default(text: &str) -> Result<Option<String>, ApiError> {
+    let document = claude_recap_config(text)?;
+    // 用户要求识别到的 Claude 实例默认关闭回顾；仅补缺失值，手动开启或关闭后再次检测都不得覆盖。
+    if document.get("awaySummaryEnabled").is_some() {
+        return Ok(None);
+    }
+    updated_claude_recap(text, false).map(Some)
+}
+
+pub(super) async fn initialize_claude_recaps(
+    environments: &[super::preferences::Environment],
+    authorization: &RemoteAuthorization,
+    read_only: bool,
+) -> Vec<Value> {
+    let mut results = Vec::new();
+    for instance in super::instances::catalog(environments)
+        .into_iter()
+        .filter(|instance| instance.backend == "claude" && instance.ready)
+    {
+        let result = async {
+            let target = config_target(environments, &instance.id)?;
+            let _serial = CONFIG_WRITE.get_or_init(|| Mutex::new(())).lock().await;
+            let (text, revision) = read_file(&target.path)?;
+            let Some(updated) = missing_claude_recap_default(&text)? else {
+                return Ok(false);
+            };
+            if read_only {
+                return Err(ApiError::new(403, "当前为只读访问，未自动关闭回顾"));
+            }
+            save_settings_file(
+                &target,
+                &updated,
+                &json!({"awaySummaryEnabled":false}),
+                &revision,
+                authorization,
+            )
+            .await?;
+            Ok(true)
+        }
+        .await;
+        results.push(match result {
+            Ok(initialized) => json!({"instanceId":instance.id,"initialized":initialized}),
+            // 初始化失败不能阻止检测其他实例，也不能被当成已关闭；网页必须展示具体失败原因。
+            Err(failure) => json!({
+                "instanceId":instance.id,"initialized":false,"error":failure.message,"code":failure.code
+            }),
+        });
+    }
+    results
+}
+
+pub(super) async fn claude_recap_settings(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Result<Response, ApiError> {
+    let device = super::authorized(&state, &headers).await?;
+    let instance = payload["instanceId"]
+        .as_str()
+        .filter(|value| !value.is_empty() && value.len() <= 160)
+        .ok_or_else(|| ApiError::new(400, "请选择 Claude 会话实例"))?;
+    let write = match payload["operation"].as_str().unwrap_or("read") {
+        "read" => false,
+        "save" => true,
+        _ => return Err(ApiError::new(400, "回顾配置操作无效")),
+    };
+    if write && state.settings.read_only {
+        return Err(ApiError::new(403, "当前为只读访问"));
+    }
+    let enabled = if write {
+        Some(
+            payload["enabled"]
+                .as_bool()
+                .ok_or_else(|| ApiError::new(400, "回顾开关必须为布尔值"))?,
+        )
+    } else {
+        None
+    };
+    let authorization = state
+        .controller
+        .authorization(device, write.then_some("setClaudeRecap"));
+    let environments = super::preferences::detect(&state.controller.state_dir, false).await;
+    let target = config_target(&environments, instance)?;
+    if target.backend != "claude" {
+        return Err(ApiError::new(400, "离开期间回顾仅支持 Claude 会话实例"));
+    }
+    // 与权限设置共用文件锁及版本检查，防止两个设置页互相覆盖同一实例的 settings.json。
+    let _serial = CONFIG_WRITE.get_or_init(|| Mutex::new(())).lock().await;
+    let (text, revision) = read_file(&target.path)?;
+    if let Some(enabled) = enabled {
+        if payload["expectedRevision"].as_str() != Some(&revision) {
+            return Err(ApiError::new(409, "实例配置已变化，请重新读取后再保存"));
+        }
+        let updated = updated_claude_recap(&text, enabled)?;
+        save_settings_file(
+            &target,
+            &updated,
+            &json!({"awaySummaryEnabled":enabled}),
+            &revision,
+            &authorization,
+        )
+        .await?;
+    }
+    let (text, revision) = read_file(&target.path)?;
+    let document = claude_recap_config(&text)?;
+    authorization
+        .check()
+        .await
+        .map_err(super::authorization_error)?;
+    // 原生未配置时默认开启；返回值只包含这一项配置，不能将整个配置文件或凭据返回网页。
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({
+            "ok":true, "instanceId":instance, "backend":"claude",
+            "enabled":document["awaySummaryEnabled"].as_bool().unwrap_or(true),
+            "explicit":document.get("awaySummaryEnabled").is_some(),
+            "revision":revision, "readOnly":state.settings.read_only
         })),
     )
         .into_response())
@@ -686,6 +944,123 @@ sandbox_mode = \"workspace-write\" # 沙盒说明\nmodel = \"fixture\"\n\n\
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn claude_recap_toggle_preserves_other_native_settings_and_file_format() {
+        let original = json!({
+            "permissions":{"defaultMode":"manual","deny":["Write"]},
+            "model":"fixture-model","hooks":{"Stop":[{"command":"fixture"}]},
+            "env":{"FIXTURE_SECRET":"must-stay-local"}
+        });
+        let text = format!(
+            "\u{feff}{}\r\n",
+            serde_json::to_string_pretty(&original)
+                .unwrap()
+                .replace('\n', "\r\n")
+        );
+        let disabled = updated_claude_recap(&text, false).unwrap();
+        assert!(disabled.starts_with('\u{feff}'));
+        assert!(disabled.ends_with("\r\n"));
+        assert!(!disabled.replace("\r\n", "").contains('\n'));
+        let mut expected = original;
+        expected["awaySummaryEnabled"] = json!(false);
+        assert_eq!(claude_recap_config(&disabled).unwrap(), expected);
+        let enabled = updated_claude_recap(&disabled, true).unwrap();
+        expected["awaySummaryEnabled"] = json!(true);
+        assert_eq!(claude_recap_config(&enabled).unwrap(), expected);
+        assert_eq!(
+            updated_claude_recap("", false).unwrap(),
+            "{\n  \"awaySummaryEnabled\": false\n}\n"
+        );
+        for invalid in ["{broken", "[]", "null", r#"{"awaySummaryEnabled":"false"}"#] {
+            assert!(updated_claude_recap(invalid, false).is_err());
+        }
+    }
+
+    #[test]
+    fn claude_recap_default_only_fills_absent_values_and_preserves_explicit_choices() {
+        let original = r#"{"model":"unchanged","permissions":{"defaultMode":"manual"}}"#;
+        let updated = missing_claude_recap_default(original).unwrap().unwrap();
+        let mut expected: Value = serde_json::from_str(original).unwrap();
+        expected["awaySummaryEnabled"] = json!(false);
+        assert_eq!(claude_recap_config(&updated).unwrap(), expected);
+        assert!(missing_claude_recap_default(&updated).unwrap().is_none());
+        for enabled in [true, false] {
+            let explicit = updated_claude_recap(original, enabled).unwrap();
+            assert!(missing_claude_recap_default(&explicit).unwrap().is_none());
+        }
+        assert!(missing_claude_recap_default("{broken").is_err());
+        assert!(missing_claude_recap_default(r#"{"awaySummaryEnabled":null}"#).is_err());
+    }
+
+    #[test]
+    fn claude_recap_saves_share_revision_checks_with_permission_updates() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        std::fs::write(&path, r#"{"permissions":{"defaultMode":"manual"}}"#).unwrap();
+        let (text, revision) = read_file(&path).unwrap();
+        let stale_toggle = updated_claude_recap(&text, false).unwrap();
+        let permissions =
+            updated_config("claude", &text, &json!({"permissionMode":"acceptEdits"})).unwrap();
+        save_file(&path, &permissions, &revision).unwrap();
+        assert!(save_file(&path, &stale_toggle, &revision).is_err());
+        let (latest, revision) = read_file(&path).unwrap();
+        save_file(
+            &path,
+            &updated_claude_recap(&latest, false).unwrap(),
+            &revision,
+        )
+        .unwrap();
+        let saved = claude_recap_config(&read_file(&path).unwrap().0).unwrap();
+        assert_eq!(saved["permissions"]["defaultMode"], "acceptEdits");
+        assert_eq!(saved["awaySummaryEnabled"], false);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn claude_recap_configuration_targets_are_bound_to_distribution_and_user() {
+        let make_environment = |id: &str, distribution: &str, user: &str| {
+            serde_json::from_value::<super::super::preferences::Environment>(json!({
+                "id":id, "label":distribution, "distribution":distribution, "user":user,
+                "home":format!("/home/{user}"), "claudeExecutable":"/fixture/bin/claude",
+                "executables":{"claude":"/fixture/bin/claude"}, "configured":false, "error":null,
+                "codexHome":format!("/home/{user}/.codex"), "claudeHome":format!("/home/{user}/.claude")
+            }))
+            .unwrap()
+        };
+        let environments = vec![
+            make_environment("one", "fixture-a", "one"),
+            make_environment("two", "fixture-a", "two"),
+            make_environment("three", "fixture-b", "one"),
+        ];
+        let targets: Vec<_> = environments
+            .iter()
+            .map(|environment| {
+                let id = super::super::instances::id(
+                    "claude",
+                    &environment.distribution,
+                    &environment.user,
+                );
+                let target = config_target(&environments, &id).unwrap();
+                assert_eq!(target.backend, "claude");
+                assert_eq!(
+                    target.path,
+                    super::super::preferences::wsl_path(
+                        &environment.distribution,
+                        &format!("{}/settings.json", environment.claude_home),
+                    )
+                    .unwrap()
+                );
+                target.path
+            })
+            .collect();
+        assert_ne!(targets[0], targets[1]);
+        if cfg!(windows) {
+            assert_ne!(targets[0], targets[2]);
+        }
+        assert!(config_target(&environments, "claude:local").is_err());
+        assert!(config_target(&environments, "claude:wsl:unknown").is_err());
     }
 
     #[test]

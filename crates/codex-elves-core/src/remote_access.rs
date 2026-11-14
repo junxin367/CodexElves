@@ -2525,6 +2525,10 @@ pub fn web_router(
         )
         .route("/api/settings/permissions", post(permissions::settings))
         .route(
+            "/api/settings/claude-recap",
+            post(permissions::claude_recap_settings),
+        )
+        .route(
             "/api/settings/prompt-optimization",
             post(prompt_optimization::settings),
         )
@@ -12876,6 +12880,436 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             .next()
             .unwrap()
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn claude_recap_settings_reject_unauthorized_read_only_and_invalid_writes() {
+        let (_directory, mut state) = login_lock_test_state();
+        let payload = json!({"instanceId":"claude:fixture","operation":"save","enabled":false});
+        assert_eq!(
+            permissions::claude_recap_settings(
+                State(state.clone()),
+                HeaderMap::new(),
+                Json(payload.clone()),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            401
+        );
+        let response = login_lock_attempt(&state, LOGIN_TEST_KEY, "192.0.2.1:1000")
+            .await
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&login_cookie(&response)).unwrap(),
+        );
+        state.settings.read_only = true;
+        assert_eq!(
+            permissions::claude_recap_settings(
+                State(state.clone()),
+                headers.clone(),
+                Json(payload.clone()),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            403
+        );
+        state.settings.read_only = false;
+        for invalid in [
+            json!({"instanceId":"claude:fixture","operation":"save","enabled":"false"}),
+            json!({"instanceId":"claude:fixture","operation":"delete"}),
+            json!({"operation":"save","enabled":false}),
+        ] {
+            assert_eq!(
+                permissions::claude_recap_settings(
+                    State(state.clone()),
+                    headers.clone(),
+                    Json(invalid),
+                )
+                .await
+                .unwrap_err()
+                .code,
+                400
+            );
+        }
+        state.controller.auth.lock().await.devices.clear();
+        assert_eq!(
+            permissions::claude_recap_settings(State(state), headers, Json(payload))
+                .await
+                .unwrap_err()
+                .code,
+            401
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_recap_detected_defaults_preserve_choices_and_require_write_authorization() {
+        let (directory, state) = login_lock_test_state();
+        state
+            .controller
+            .publish_access_policy(&RemoteAccessSettings {
+                enabled: true,
+                read_only: false,
+                ..RemoteAccessSettings::default()
+            });
+        let response = login_lock_attempt(&state, LOGIN_TEST_KEY, "192.0.2.1:1000")
+            .await
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&login_cookie(&response)).unwrap(),
+        );
+        let device = authorized(&state, &headers).await.unwrap();
+        let authorization = state
+            .controller
+            .authorization(device, Some("initializeClaudeRecap"));
+        let fixture_root = std::fs::canonicalize(directory.path()).unwrap();
+        let environment = |index| {
+            let path = fixture_root.join(format!("claude-{index}"));
+            let path_text = path.to_string_lossy().replace('\\', "/");
+            let path_text = path_text.strip_prefix("//?/").unwrap_or(&path_text);
+            let home = if cfg!(windows) {
+                format!("/mnt/{}/{}", path_text[..1].to_lowercase(), &path_text[3..])
+            } else {
+                path_text.to_owned()
+            };
+            serde_json::from_value::<preferences::Environment>(json!({
+                "id":format!("fixture-{index}"), "label":"fixture", "distribution":"fixture",
+                "user":format!("fixture-{index}"), "home":home, "claudeExecutable":"/fixture/claude",
+                "executables":{"claude":"/fixture/claude"}, "configured":false, "error":null,
+                "codexHome":"", "claudeHome":home
+            }))
+            .unwrap()
+        };
+        let environments: Vec<_> = (0..4).map(environment).collect();
+        let settings = |index| {
+            directory
+                .path()
+                .join(format!("claude-{index}/settings.json"))
+        };
+        for (index, text) in [
+            (0, r#"{"model":"preserved"}"#),
+            (1, r#"{"awaySummaryEnabled":true,"model":"preserved"}"#),
+            (2, r#"{"awaySummaryEnabled":false}"#),
+            (3, "{broken"),
+        ] {
+            std::fs::create_dir_all(settings(index).parent().unwrap()).unwrap();
+            std::fs::write(settings(index), text).unwrap();
+        }
+        let original_true = std::fs::read(settings(1)).unwrap();
+        let results =
+            permissions::initialize_claude_recaps(&environments, &authorization, false).await;
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[0]["initialized"], true, "{results:?}");
+        assert_eq!(results[1]["initialized"], false);
+        assert_eq!(results[2]["initialized"], false);
+        assert_eq!(results[3]["code"], 422);
+        let saved: Value = serde_json::from_slice(&std::fs::read(settings(0)).unwrap()).unwrap();
+        assert_eq!(
+            saved,
+            json!({"model":"preserved","awaySummaryEnabled":false})
+        );
+        assert_eq!(std::fs::read(settings(1)).unwrap(), original_true);
+        assert_eq!(std::fs::read_to_string(settings(3)).unwrap(), "{broken");
+        // 用户手动开启后再检测，默认初始化不得覆盖，且已有显式配置不能产生无意义重写。
+        std::fs::write(settings(0), r#"{"awaySummaryEnabled":true}"#).unwrap();
+        let repeated =
+            permissions::initialize_claude_recaps(&environments[..3], &authorization, false).await;
+        assert!(
+            repeated
+                .iter()
+                .all(|value| value["initialized"] == false && value.get("error").is_none())
+        );
+        assert_eq!(
+            std::fs::read_to_string(settings(0)).unwrap(),
+            r#"{"awaySummaryEnabled":true}"#
+        );
+        let missing = [environment(4)];
+        let read_only = permissions::initialize_claude_recaps(&missing, &authorization, true).await;
+        assert_eq!(read_only[0]["code"], 403);
+        assert!(!settings(4).exists());
+        state
+            .controller
+            .publish_access_policy(&RemoteAccessSettings {
+                enabled: true,
+                read_only: true,
+                ..RemoteAccessSettings::default()
+            });
+        let denied = permissions::initialize_claude_recaps(&missing, &authorization, false).await;
+        assert_eq!(denied[0]["code"], 403);
+        assert!(!settings(4).exists());
+        state.controller.auth.lock().await.devices.clear();
+        let revoked = permissions::initialize_claude_recaps(&missing, &authorization, false).await;
+        assert_eq!(revoked[0]["code"], 401);
+        assert!(!settings(4).exists());
+    }
+
+    #[tokio::test]
+    async fn claude_recap_http_detection_toggle_conflict_and_revocation_roundtrip() {
+        let (directory, state) = login_lock_test_state();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let config_root = root.join("isolated-claude");
+        std::fs::create_dir_all(&config_root).unwrap();
+        let text = config_root.to_string_lossy().replace('\\', "/");
+        let text = text.strip_prefix("//?/").unwrap_or(&text);
+        let home = if cfg!(windows) {
+            format!("/mnt/{}/{}", text[..1].to_lowercase(), &text[3..])
+        } else {
+            text.to_owned()
+        };
+        let config_path = config_root.join("settings.json");
+        std::fs::write(
+            &config_path,
+            r#"{"model":"gpt-6.1-sol","env":{"FIXTURE_SECRET":"must-not-be-returned"}}"#,
+        )
+        .unwrap();
+        let environment: preferences::Environment = serde_json::from_value(json!({
+            "id":"fixture", "label":"fixture", "distribution":"fixture", "user":"fixture",
+            "home":home, "claudeExecutable":"/fixture/claude",
+            "executables":{"claude":"/fixture/claude"}, "configured":true, "error":null,
+            "codexHome":"", "claudeHome":home
+        }))
+        .unwrap();
+        let instance = instances::id("claude", "fixture", "fixture");
+        preferences::fixture_environments(directory.path(), vec![environment]).await;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let settings = RemoteAccessSettings {
+            enabled: true,
+            read_only: false,
+            port: listener.local_addr().unwrap().port(),
+            ..RemoteAccessSettings::default()
+        };
+        state.controller.publish_access_policy(&settings);
+        let router = web_router(state.controller.clone(), settings.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let base = format!("http://127.0.0.1:{}", settings.port);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let request = |path: &str, payload: Value, cookie: &str| {
+            client
+                .post(format!("{base}{path}"))
+                .header("Origin", &base)
+                .header("Cookie", cookie)
+                .json(&payload)
+        };
+        let endpoint = "/api/settings/claude-recap";
+        let original = std::fs::read(&config_path).unwrap();
+        assert_eq!(
+            request("/api/settings/environments", json!({}), "")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(std::fs::read(&config_path).unwrap(), original);
+        let connected = request("/api/connect", json!({"key":LOGIN_TEST_KEY}), "")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(connected.status(), StatusCode::OK);
+        let cookie = connected.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        // 同时识别同一个未配置实例时只允许一次初始化，不能创建重复写入或覆盖其他字段。
+        let first = request("/api/settings/environments", json!({"force":true}), &cookie).send();
+        let second = request("/api/settings/environments", json!({"force":true}), &cookie).send();
+        let (first, second) = tokio::join!(first, second);
+        let first = first.unwrap().json::<Value>().await.unwrap();
+        let second = second.unwrap().json::<Value>().await.unwrap();
+        assert_ne!(
+            first["claudeRecapDefaults"][0]["initialized"],
+            second["claudeRecapDefaults"][0]["initialized"]
+        );
+        let read = request(endpoint, json!({"instanceId":instance}), &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(read["enabled"], false);
+        assert_eq!(read["explicit"], true);
+        assert!(!read.to_string().contains("must-not-be-returned"));
+        let saved = request(endpoint, json!({"instanceId":instance,"operation":"save","enabled":true,"expectedRevision":read["revision"]}), &cookie)
+            .send().await.unwrap().json::<Value>().await.unwrap();
+        assert_eq!(saved["enabled"], true);
+        let chosen = std::fs::read(&config_path).unwrap();
+        let detected = request("/api/settings/environments", json!({"force":true}), &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(detected["claudeRecapDefaults"][0]["initialized"], false);
+        assert_eq!(std::fs::read(&config_path).unwrap(), chosen);
+        assert_eq!(request(endpoint, json!({"instanceId":instance,"operation":"save","enabled":false,"expectedRevision":read["revision"]}), &cookie)
+            .send().await.unwrap().status(), StatusCode::CONFLICT);
+        assert_eq!(std::fs::read(&config_path).unwrap(), chosen);
+        assert_eq!(
+            request(
+                endpoint,
+                json!({"instanceId":"claude:wsl:unknown"}),
+                &cookie
+            )
+            .send()
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        std::fs::write(&config_path, "{broken").unwrap();
+        let invalid = request("/api/settings/environments", json!({}), &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(invalid["claudeRecapDefaults"][0]["code"], 422);
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), "{broken");
+        std::fs::write(&config_path, r#"{"model":"gpt-6.1-sol"}"#).unwrap();
+        state
+            .controller
+            .publish_access_policy(&RemoteAccessSettings {
+                read_only: true,
+                ..settings
+            });
+        let denied = request("/api/settings/environments", json!({}), &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(denied["claudeRecapDefaults"][0]["code"], 403);
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            r#"{"model":"gpt-6.1-sol"}"#
+        );
+        state.controller.auth.lock().await.devices.clear();
+        assert_eq!(
+            request(endpoint, json!({"instanceId":instance}), &cookie)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        server.abort();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "需要指定测试实例中事先创建的隔离配置；不访问真实用户配置"]
+    async fn claude_recap_native_wsl_file_preserves_linux_permissions() {
+        let root = std::env::var("CODEX_ELVES_RECAP_TEST_ROOT")
+            .expect("请设置 CODEX_ELVES_RECAP_TEST_ROOT 指向测试实例的隔离配置目录");
+        assert!(root.starts_with("/home/elves-test/workspaces/temp/codex-elves-recap-"));
+        assert!(!root.split('/').any(|part| part == ".."));
+        let inspect = || {
+            let output = std::process::Command::new("wsl.exe")
+                .args([
+                    "-d", "codex-elves-claude-test", "-u", "elves-test", "--", "python3", "-c",
+                    "import json,sys;from pathlib import Path;p=Path(sys.argv[1]);s=p.stat();print(json.dumps({'mode':s.st_mode&0o777,'uid':s.st_uid,'gid':s.st_gid}))",
+                    &format!("{root}/settings.json"),
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()
+        };
+        let before = inspect();
+        assert_eq!(
+            before["mode"], 0o600,
+            "原生夹具必须从仅本人可读写的权限开始"
+        );
+        let (directory, mut state) = login_lock_test_state();
+        state.settings.read_only = false;
+        state
+            .controller
+            .publish_access_policy(&RemoteAccessSettings {
+                enabled: true,
+                read_only: false,
+                ..RemoteAccessSettings::default()
+            });
+        let environment: preferences::Environment = serde_json::from_value(json!({
+            "id":"native-recap-test", "label":"test", "distribution":"codex-elves-claude-test", "user":"elves-test",
+            "home":"/home/elves-test", "claudeExecutable":"/home/elves-test/.local/bin/claude",
+            "executables":{"claude":"/home/elves-test/.local/bin/claude"}, "configured":true, "error":null,
+            "codexHome":"", "claudeHome":root
+        })).unwrap();
+        preferences::fixture_environments(directory.path(), vec![environment]).await;
+        let instance = instances::id("claude", "codex-elves-claude-test", "elves-test");
+        let response = login_lock_attempt(&state, LOGIN_TEST_KEY, "192.0.2.1:1000")
+            .await
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&login_cookie(&response)).unwrap(),
+        );
+        let detected = preferences::environments(
+            State(state.clone()),
+            headers.clone(),
+            Json(json!({"force":true})),
+        )
+        .await
+        .unwrap();
+        let detected: Value = serde_json::from_slice(
+            &axum::body::to_bytes(detected.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            detected["claudeRecapDefaults"][0].get("error").is_none(),
+            "{detected}"
+        );
+        assert_eq!(inspect(), before);
+        for enabled in [true, false] {
+            let read = permissions::claude_recap_settings(
+                State(state.clone()),
+                headers.clone(),
+                Json(json!({"instanceId":instance})),
+            )
+            .await
+            .unwrap();
+            let read: Value = serde_json::from_slice(
+                &axum::body::to_bytes(read.into_body(), 16 * 1024)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let saved = permissions::claude_recap_settings(State(state.clone()), headers.clone(), Json(json!({
+                "instanceId":instance,"operation":"save","enabled":enabled,"expectedRevision":read["revision"]
+            }))).await.unwrap();
+            let saved: Value = serde_json::from_slice(
+                &axum::body::to_bytes(saved.into_body(), 16 * 1024)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved["enabled"], enabled);
+            assert_eq!(inspect(), before, "原生 Linux 文件的权限和所有者必须保留");
+        }
     }
 
     #[tokio::test]

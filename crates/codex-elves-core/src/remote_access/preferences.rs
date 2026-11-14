@@ -43,6 +43,17 @@ pub(super) struct Environment {
 type DetectionCache = Option<(PathBuf, Instant, Vec<Environment>)>;
 static ENVIRONMENTS: OnceLock<Mutex<DetectionCache>> = OnceLock::new();
 static INSTRUCTION_WRITE: OnceLock<Mutex<()>> = OnceLock::new();
+#[cfg(test)]
+static TEST_ENVIRONMENTS: OnceLock<Mutex<BTreeMap<PathBuf, Vec<Environment>>>> = OnceLock::new();
+
+#[cfg(test)]
+pub(super) async fn fixture_environments(directory: &Path, values: Vec<Environment>) {
+    TEST_ENVIRONMENTS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .await
+        .insert(directory.to_path_buf(), values);
+}
 
 fn response(value: Value) -> Response {
     ([(header::CACHE_CONTROL, "no-store")], Json(value)).into_response()
@@ -246,6 +257,17 @@ async fn probe_wsl(distribution: String, configured: &Value) -> Environment {
 }
 
 pub(super) async fn detect(directory: &Path, force: bool) -> Vec<Environment> {
+    #[cfg(test)]
+    if let Some(values) = TEST_ENVIRONMENTS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .await
+        .get(directory)
+        .cloned()
+    {
+        // HTTP 回归只访问本次夹具；force 检测也不能枚举或改写开发机上的真实 Claude 配置。
+        return values;
+    }
     let mut cache = ENVIRONMENTS.get_or_init(|| Mutex::new(None)).lock().await;
     if !force
         && let Some((path, at, values)) = cache.as_ref()
@@ -281,8 +303,19 @@ pub(super) async fn environments(
     Json(payload): Json<Value>,
 ) -> Result<Response, ApiError> {
     let device = super::authorized(&state, &headers).await?;
-    let authorization = state.controller.authorization(device, None);
+    let authorization = state.controller.authorization(device.clone(), None);
     let values = detect(&state.controller.state_dir, payload["force"] == true).await;
+    // 用户要求已检测到的 Claude 实例在未配置回顾时默认关闭；检测函数本身仍只读，
+    // 默认值写入在设备授权下单独执行，并保留用户已显式选择的值及只读访问边界。
+    let recap_authorization = state
+        .controller
+        .authorization(device, Some("initializeClaudeRecap"));
+    let recap_defaults = super::permissions::initialize_claude_recaps(
+        &values,
+        &recap_authorization,
+        state.settings.read_only,
+    )
+    .await;
     let mut instances = super::instances::catalog(&values);
     state
         .controller
@@ -294,7 +327,8 @@ pub(super) async fn environments(
         .await
         .map_err(super::authorization_error)?;
     Ok(response(
-        json!({"ok":true,"environments":values,"types":super::instances::TYPES,"instances":instances}),
+        json!({"ok":true,"environments":values,"types":super::instances::TYPES,"instances":instances,
+            "claudeRecapDefaults":recap_defaults}),
     ))
 }
 
