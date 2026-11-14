@@ -3173,7 +3173,39 @@ test("Codex 权限只展示 App 四项，旧只读归类展示但不修改已保
   assert.equal(h.button.popupHelp.label, "了解更多");
 });
 
-test("新会话权限保留在本实例草稿中，执行中允许修改且仅后续轮次生效", async () => {
+test("Claude 权限待生效时说明实际权限和原因，不阻断消息或继续选择", () => {
+  const h = composerPermissionHarness({ backend: "claude" });
+  h.context.thread.permissionMode = "plan";
+  h.context.thread.nativeSettings = { permissionMode: "acceptEdits",
+    changes: { permissionMode: { requested: "plan", state: "pending", reason: "原生正在等待审批" } } };
+  h.context.updateComposerPermissions();
+  assert.equal(h.button.dataset.permissionPending, "true");
+  assert.equal(h.button.disabled, false);
+  assert.match(h.button.title, /待生效/);
+  assert.match(h.button.title, /接受编辑/);
+  assert.match(h.button.popupNote, /原生正在等待审批/);
+  assert.equal(h.context.permissionWrites.size, 0);
+  h.context.thread.nativeSettings = { permissionMode: "plan",
+    changes: { permissionMode: { requested: "plan", state: "applied" } } };
+  h.context.updateComposerPermissions();
+  assert.equal(h.button.dataset.permissionPending, "false");
+  assert.doesNotMatch(h.button.popupNote, /待生效/);
+});
+
+test("Claude 权限保存分别提示立即生效与等待原生安全切换", async () => {
+  for (const immediate of [true, false]) {
+    const h = composerPermissionHarness({ backend: "claude" });
+    h.context.updateComposerPermissions();
+    h.context.mutate = async (_action, payload) => ({ ...payload, permissionRevision: 2,
+      appliesTo: immediate ? "immediate" : "whenReady", permissionPending: !immediate });
+    h.button.value = "plan";
+    await h.context.changeComposerPermissions();
+    assert.match(h.notices.at(-1)[0], immediate ? /已生效/ : /等待原生可安全切换/);
+    assert.equal(h.context.permissionWrites.size, 0);
+  }
+});
+
+test("新会话权限保留在本实例草稿中，执行与已有队列均允许保存后续权限", async () => {
   const h = composerPermissionHarness({ creating: true });
   h.context.updateComposerPermissions();
   assert.equal(h.button.value, "configured");
@@ -3188,7 +3220,7 @@ test("新会话权限保留在本实例草稿中，执行中允许修改且仅�
   h.context.isActiveThread = () => false;
   h.context.thread.queuedMessages = [{ id: "awaiting" }];
   h.context.updateComposerPermissions();
-  assert.equal(h.button.disabled, true);
+  assert.equal(h.button.disabled, false);
   h.context.thread.queuedMessages = [];
   h.context.pending = { state: "unknown" };
   h.context.updateComposerPermissions();

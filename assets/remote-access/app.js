@@ -371,12 +371,29 @@ function updateComposerPermissions() {
   const waiting = isActiveThread(), queued = (display?.queuedMessages || []).length > 0;
   control.disabled = !sessionInstanceEnabled(activeInstanceId()) || threadReadOnly() || !connected || busy
     || stopping || !!pending || !!editingMessage || !!editingQueuedMessage || threadDeletionLocked()
-    || saving || !creating && (!selectedId || queued);
+    || saving || !creating && !selectedId;
   const label = permissionLabel(activeBackend(), codex ? choice : effectiveMode, creating);
-  control.setAttribute("aria-label", `选择会话权限，当前为${label}`);
+  // 用户要求切换不能影响正常会话：选中值与 CLI 实际权限分别展示，待生效不冒充已切换，也不锁住发送。
+  const permissionRecord = display?.nativeSettings?.changes?.permissionMode;
+  const permissionChange = permissionRecord?.requested === mode ? permissionRecord : null;
+  const nativePermission = display?.nativeSettings?.permissionMode;
+  const desiredPermission = mode === "configured" ? catalog?.defaultMode : effectiveMode;
+  const samePermission = nativePermission === desiredPermission
+    || ["default", "manual"].includes(nativePermission) && ["default", "manual"].includes(desiredPermission);
+  const permissionPending = !codex && !creating && (permissionChange?.state === "pending"
+    || !!mode && !!desiredPermission && !!nativePermission && !samePermission);
+  const selectedLabel = permissionLabel(activeBackend(), mode || effectiveMode, creating);
+  const pendingDescription = `已选${selectedLabel}，待生效；当前原生权限：${nativePermission
+    ? permissionLabel(activeBackend(), nativePermission, false) : "尚未确认"}。${permissionChange?.reason
+    || "原生允许时自动切换，不中断任务或阻断消息。"}`;
+  control.dataset.permissionPending = String(permissionPending);
+  if (permissionPending) control.popupNote = pendingDescription;
+  control.setAttribute("aria-label", permissionPending ? `选择会话权限，已选${selectedLabel}，待生效` : `选择会话权限，当前为${label}`);
   control.title = saving ? "正在保存会话权限"
+    : permissionPending ? pendingDescription
     : queued ? `当前权限：${label}；已有待发消息按原选择执行，仅后续新轮次使用新选择`
-    : waiting ? `当前权限：${label}；当前任务继续使用原权限，仅后续新轮次使用新选择`
+    : waiting ? codex ? `当前权限：${label}；仅后续新轮次生效`
+      : `当前权限：${label}；原生允许时切换，无法安全切换时保存待生效，不中断当前任务`
     : catalog?.error ? `实例权限读取失败：${catalog.error}；点击重新读取`
     : !codex && !supported.length ? "暂无法确认该 Claude CLI 支持的权限模式，点击重新读取"
     : `当前权限：${label}；仅此会话的后续新轮次生效`;
@@ -402,7 +419,9 @@ async function changeComposerPermissions() {
     if (result?.threadId !== id || result.permissionMode !== mode || result.instanceId !== instanceId)
       throw new Error("会话权限保存结果尚未确认，请重新读取会话后核对。");
     rememberPermissionSelection(id, mode, result.permissionRevision || 0);
-    notice("已保存，仅本会话的后续新轮次使用所选权限。");
+    notice(result.appliesTo === "immediate" ? "会话权限已生效。"
+      : result.permissionPending === true ? "权限选择已保存，等待原生可安全切换时生效；当前会话可继续使用。"
+      : "已保存，仅本会话的后续新轮次使用所选权限。");
   } catch (error) {
     if (scope === privateInputScope(session)) notice(error.message, true);
   } finally {
@@ -13465,9 +13484,10 @@ function renderMessages(keepScroll = true) {
         ? "已撤回：Claude 在开始回复前停止，原文已放回原版终端输入框，不会进入对话"
         : "本轮已结束，未生成回复"));
     if (turn.status === "interrupted") {
-      // 用户要求原生中断按执行状态展示，不伪装成用户正文，也不据此推断用户按了哪个按钮。
+      // 用户要求 Claude 与 Codex 的轮次中断统一显示“已停止”；原生原文仅保留在悬浮说明，工具状态独立展示。
+      // 仅使用已确认的中断状态，不伪装成用户正文，也不据此推断用户按了哪个按钮。
       const native = turn.nativeInterruption?.source === "claude";
-      const note = element("small", "turn-end muted", native ? "请求已中断" : "已停止");
+      const note = element("small", "turn-end muted", "已停止");
       if (native) {
         note.dataset.nativeInterruption = turn.nativeInterruption.id;
         note.title = `Claude 原生中断记录：${turn.nativeInterruption.text}`;

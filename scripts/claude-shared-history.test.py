@@ -430,6 +430,21 @@ class SharedQueueHistoryTests(unittest.TestCase):
                                   "content": [{"type": "text", "text": "待确认后处理"}]})
         self.assertTrue(result["accepted"])
         native.reply.assert_called_once_with("待确认后处理")
+
+    def test_pending_permission_does_not_block_a_message_or_answer_the_native_dialog(self):
+        native = self.waiting_dialog()
+        native.reply = MagicMock()
+        native.terminal_input = MagicMock()
+        native.read_terminal_screen = lambda: self.dialog_text.splitlines()
+        changed = native.change_permission_mode("plan")
+        self.assertTrue(changed["permissionPending"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = native.send({"client_id": "permission-pending", "idle_only": True,
+                                  "content": [{"type": "text", "text": "仍正常投递"}]})
+        self.assertTrue(result["accepted"])
+        native.reply.assert_called_once_with("仍正常投递")
+        native.terminal_input.assert_not_called()
+        self.assertEqual(native.setting_changes["permissionMode"]["state"], "pending")
         native.terminal_input.assert_not_called()
 
     def test_goal_statistics_use_only_native_numbers_and_reset_on_replacement(self):
@@ -2817,7 +2832,7 @@ class SharedPermissionTests(unittest.TestCase):
                   "plan": "plan mode on", "bypassPermissions": "bypass permissions on"}
         native.read_terminal_screen = lambda: [
             "助手正文提及 bypass permissions", "────────────────", "❯ " + draft,
-            "────────────────", labels[cycle[position[0]]]
+            "────────────────", labels[cycle[position[0]]] + " (shift+tab to cycle)"
         ]
         def switch(data, **options):
             keys.append((data, options["permission"]["mode"]))
@@ -2854,24 +2869,77 @@ class SharedPermissionTests(unittest.TestCase):
                 self.assertEqual(native.read_terminal_screen(), original_screen)
                 self.assertEqual(keys, [], "相同权限只确认状态，不能向草稿或审批面板发送快捷键")
 
-    def test_busy_draft_unknown_or_unavailable_mode_never_sends_permission_keys(self):
-        for reason in ("busy", "draft", "unknown", "unavailable"):
+    def test_running_permission_switch_uses_native_cycle_without_interrupt_or_submission(self):
+        native, live, _, keys = self.fixture()
+        live["sessionStatus"] = "busy"
+        result = native.change_permission_mode("plan")
+        self.assertFalse(result.get("permissionPending", False))
+        self.assertEqual(result["nativeSettings"]["permissionMode"], "plan")
+        self.assertEqual(result["nativeSettings"]["changes"]["permissionMode"]["state"], "applied")
+        self.assertEqual([data for data, _ in keys], [b"\x1b[Z", b"\x1b[Z"])
+        self.assertEqual(live["sessionStatus"], "busy")
+
+    def test_instance_without_native_live_shortcut_defers_until_idle(self):
+        native, live, _, keys = self.fixture()
+        screen = native.read_terminal_screen
+        native.read_terminal_screen = lambda: [line.replace(" (shift+tab to cycle)", "") for line in screen()]
+        live["sessionStatus"] = "busy"
+        result = native.change_permission_mode("plan")
+        self.assertTrue(result["permissionPending"])
+        self.assertEqual(keys, [])
+        live["sessionStatus"] = "idle"
+        native.permission_retry_at = 0
+        native.retry_permission_mode(live)
+        self.assertEqual(native.actual_settings["permissionMode"], "plan")
+        self.assertEqual(native.setting_changes["permissionMode"]["state"], "applied")
+
+    def test_waiting_draft_unknown_or_unavailable_mode_stays_pending_without_sending_keys(self):
+        for reason in ("waiting", "draft", "unknown", "unavailable"):
             native, live, _, keys = self.fixture(draft="未发送草稿" if reason == "draft" else "")
-            if reason == "busy":
-                live["sessionStatus"] = "busy"
+            if reason == "waiting":
+                live.update(sessionStatus="waiting", needs="permission prompt")
             elif reason == "unknown":
                 native.read_terminal_screen = lambda: ["────────────────", "❯ ", "────────────────", "unknown"]
-            with self.assertRaises(namespace["NativeError"]):
-                native.change_permission_mode("bypassPermissions" if reason == "unavailable" else "plan")
+            result = native.change_permission_mode("bypassPermissions" if reason == "unavailable" else "plan")
+            self.assertTrue(result["permissionPending"], reason)
+            self.assertEqual(result["nativeSettings"]["changes"]["permissionMode"]["state"], "pending")
+            self.assertTrue(result["nativeSettings"]["changes"]["permissionMode"]["reason"])
             self.assertEqual(keys, [], reason)
 
-    def test_unreachable_mode_restores_original_before_reporting_failure(self):
+    def test_unreachable_mode_restores_original_and_preserves_pending_choice(self):
         native, _, position, keys = self.fixture(cycle=("default", "acceptEdits"))
-        with self.assertRaisesRegex(namespace["NativeError"], "已恢复原权限"):
-            native.change_permission_mode("plan")
+        result = native.change_permission_mode("plan")
+        self.assertTrue(result["permissionPending"])
+        self.assertIn("已恢复原权限", result["nativeSettings"]["changes"]["permissionMode"]["reason"])
         self.assertEqual(position[0], 0)
         self.assertEqual(len(keys), 2)
-        self.assertIsNone(native.permission_mode)
+        self.assertEqual(native.permission_mode, "plan")
+        self.assertEqual(native.actual_settings["permissionMode"], "default")
+
+    def test_pending_permission_retries_only_after_native_interaction_has_finished(self):
+        native, live, _, keys = self.fixture()
+        live.update(sessionStatus="waiting", needs="permission prompt")
+        native.change_permission_mode("plan")
+        native.permission_retry_at = 0
+        native.retry_permission_mode(live)
+        self.assertEqual(keys, [])
+        live.update(sessionStatus="idle", needs=None)
+        native.retry_permission_mode(live)
+        self.assertEqual(native.actual_settings["permissionMode"], "plan")
+        self.assertEqual(native.setting_changes["permissionMode"]["state"], "applied")
+
+    def test_pending_permission_restores_only_the_current_saved_choice(self):
+        native, live, _, _ = self.fixture(draft="保留草稿")
+        native.change_permission_mode("plan")
+        saved = {"settings": native.settings_projection()}
+        reopened = NativeSession("/fixture/claude", native.native_id, native.short)
+        reopened.permission_mode = "plan"
+        reopened.restore_settings(saved)
+        self.assertEqual(reopened.setting_changes["permissionMode"], native.setting_changes["permissionMode"])
+        other_choice = NativeSession("/fixture/claude", native.native_id, native.short)
+        other_choice.permission_mode = "acceptEdits"
+        other_choice.restore_settings(saved)
+        self.assertNotIn("permissionMode", other_choice.setting_changes)
 
     def test_configured_mode_reads_only_the_selected_instance_and_keeps_rules(self):
         native, _, _, _ = self.fixture()

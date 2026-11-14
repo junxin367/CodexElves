@@ -1410,6 +1410,13 @@ def empty_permission_prompt(lines):
     return end is not None and not any(line.strip() for line in trailing[:end])
 
 
+def permission_live_shortcut(lines):
+    # 只有当前实例的原生状态栏明确提示此快捷键时，才确认执行中可用；其它版本保留空闲后切换。
+    separators = [index for index, line in enumerate(lines) if re.match(r"^\s*[─╌━]{6,}", line)]
+    footer = " ".join(lines[separators[-1] + 1:]) if separators else ""
+    return bool(re.search(r"shift\s*\+\s*tab\s+to\s+cycle", footer, re.I))
+
+
 class NativeSession:
     def __init__(self, cli, native_id, job_id=""):
         self.cli = cli
@@ -1479,6 +1486,7 @@ class NativeSession:
         self.permission_catalog = []
         self.permission_launch_key = None
         self.permission_launch_flags = []
+        self.permission_retry_at = 0
         self.session_cwd = ""
         self.lock_folder = Path(f"/tmp/codex-elves-claude-{os.getuid()}")
 
@@ -1530,6 +1538,10 @@ class NativeSession:
                 self.setting_changes[name] = dict(change)
         if settings.get("permissionMode") in ("default", "manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"):
             self.actual_settings["permissionMode"] = settings["permissionMode"]
+        permission = (settings.get("changes") or {}).get("permissionMode")
+        if (isinstance(permission, dict) and permission.get("id")
+                and permission.get("requested") == self.permission_mode):
+            self.setting_changes["permissionMode"] = dict(permission)
 
     def launch_permission_flags(self):
         key = (self.short, self.job.get("pid"), self.job.get("cliVersion"))
@@ -1578,12 +1590,46 @@ class NativeSession:
             settings = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
             mode = settings.get("permissions", {}).get("defaultMode", "default")
         except (OSError, ValueError, AttributeError):
-            raise NativeError("ECONFIG", "无法读取 Claude 实例的全局权限，未发送消息") from None
+            raise NativeError("ECONFIG", "无法读取 Claude 实例的全局权限，已暂缓切换权限") from None
         if mode not in ("default", "manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"):
-            raise NativeError("ECONFIG", "Claude 实例的默认权限模式无效，未发送消息")
+            raise NativeError("ECONFIG", "Claude 实例的默认权限模式无效，已暂缓切换权限")
         return mode
 
     def change_permission_mode(self, requested):
+        # 用户要求切换权限不能阻断普通消息：目标选择与原生实际权限分开保存。
+        # 审批、草稿或画面暂不可读时只登记待生效，不发送取消/提交按键，也不把正常发送报成失败。
+        if requested not in ("configured", "default", "manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"):
+            raise NativeError("EINVAL", "Claude 权限模式无效")
+        previous = self.setting_changes.get("permissionMode") or {}
+        change = {**previous} if previous.get("requested") == requested else {
+            "id": str(uuid.uuid4()), "requested": requested, "issuedAt": int(time.time() * 1000)}
+        self.permission_retry_at = time.monotonic() + 1
+        try:
+            result = self._change_permission_mode(requested)
+            pending = result.get("permissionPending") is True
+            change.update(state="pending" if pending else "applied")
+            change.pop("reason", None)
+            if not pending:
+                change["actual"] = self.actual_settings.get("permissionMode")
+        except (OSError, ValueError, RuntimeError) as failure:
+            # 有效选择的原生切换失败只影响权限生效状态；连接端稍后在安全画面重试，消息仍走原生投递入口。
+            self.permission_mode = requested
+            change.update(state="pending", reason=str(failure))
+            result = {"permissionPending": True}
+        if change != previous:
+            self.setting_changes["permissionMode"] = change
+            self.signature = None
+        return {**result, "nativeSettings": self.settings_projection()}
+
+    def retry_permission_mode(self, job):
+        change = self.setting_changes.get("permissionMode") or {}
+        if (change.get("state") != "pending" or time.monotonic() < self.permission_retry_at
+                or not job or job.get("outcome") or job.get("needs")
+                or job.get("sessionStatus") not in ("idle", "busy")):
+            return
+        self.change_permission_mode(change["requested"])
+
+    def _change_permission_mode(self, requested):
         modes = ("default", "manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions")
         mode = self.configured_permission_mode() if requested == "configured" else requested
         if mode not in modes:
@@ -1597,6 +1643,7 @@ class NativeSession:
         self.short = live["short"]
         self.job = live
         expected_short = self.short
+        allow_busy = False
 
         # 用户要求普通发送不被重复应用同一权限阻断：原生状态栏已是目标模式时只确认，不发送快捷键。
         # 这里允许保留原生草稿、执行和审批等待；只有确实需要切换模式时，才要求下方的空闲、空输入框检查。
@@ -1610,17 +1657,34 @@ class NativeSession:
             return {"nativeSettings": self.settings_projection()}
 
         def read_current():
+            nonlocal allow_busy
             job = self.lookup()
             if (not job or job["short"] != expected_short or job.get("outcome")
-                    or job.get("sessionStatus") != "idle" or job.get("needs")):
-                raise NativeError("EPERMISSIONBUSY", "原生会话不再空闲，请结束当前操作后再修改权限")
+                    or job.get("sessionStatus") not in ("idle", "busy") or job.get("needs")):
+                raise NativeError("EPERMISSIONBUSY", "原生会话正在等待交互，权限将在可安全切换时生效")
             lines = self.read_terminal_screen()
             if not empty_permission_prompt(lines):
                 raise NativeError("EPERMISSIONDRAFT", "原生 CLI 正在编辑或显示交互面板，未发送权限快捷键")
+            if job.get("sessionStatus") == "busy":
+                allow_busy = allow_busy or permission_live_shortcut(lines)
+                if not allow_busy:
+                    raise NativeError("EPERMISSIONBUSY", "当前实例未确认支持执行中切换，权限将在空闲后生效")
             value = permission_footer_mode(lines)
             if value is None:
-                raise NativeError("EPERMISSIONUNKNOWN", "无法识别原生权限状态栏，未继续切换或发送消息")
+                raise NativeError("EPERMISSIONUNKNOWN", "无法识别原生权限状态栏，已暂缓切换权限")
+            self.actual_settings["permissionMode"] = value
             return value
+
+        def switch(current):
+            self.terminal_input(b"\x1b[Z", permission={"short": expected_short, "mode": current,
+                                                    "allowBusy": allow_busy})
+            # 原生按键接收与终端重绘异步完成；短暂等待状态栏变化，避免将旧一帧误判成模式循环结束。
+            deadline = time.monotonic() + 0.6
+            while True:
+                value = read_current()
+                if value != current or time.monotonic() >= deadline:
+                    return value
+                time.sleep(0.04)
 
         original = current = read_current()
         if current != target:
@@ -1628,7 +1692,7 @@ class NativeSession:
             if mode not in supported and not (target == "default" and any(
                     value in supported for value in ("default", "manual"))):
                 raise NativeError("EPERMISSIONMODE",
-                    "该原生共享会话未开放所选权限模式，请在新建会话时选择；未更改权限或发送消息")
+                    "该原生共享会话未开放所选权限模式，选择暂未生效；可在新建会话时选择")
         visited = set()
         for _ in range(8):
             if current == target:
@@ -1640,18 +1704,17 @@ class NativeSession:
             if current in visited:
                 break
             visited.add(current)
-            # 与原生 Shift+Tab 相同，仅在同一空闲且空输入框中操作，每一步都重新确认状态栏。
-            self.terminal_input(b"\x1b[Z", permission={"short": expected_short, "mode": current})
-            current = read_current()
+            # Claude Code 2.1.325 实测支持执行中 Shift+Tab；仅在同一会话、无交互面板且空输入框时操作，
+            # 每一步重新核对原生状态栏，不能取消任务、覆盖草稿或替用户处理审批。
+            current = switch(current)
         for _ in range(8):
             if current == original:
                 self.actual_settings["permissionMode"] = original
                 raise NativeError("EPERMISSIONMODE",
-                    "原生会话未提供所选权限模式，已恢复原权限；未发送消息，可在新建会话时选择")
-            self.terminal_input(b"\x1b[Z", permission={"short": expected_short, "mode": current})
-            current = read_current()
+                    "原生会话未提供所选权限模式，已恢复原权限，选择暂未生效；可在新建会话时选择")
+            current = switch(current)
         self.actual_settings.pop("permissionMode", None)
-        raise NativeError("EPERMISSIONUNKNOWN", "原生权限状态待核对，未发送消息，请在 CLI 确认当前模式")
+        raise NativeError("EPERMISSIONUNKNOWN", "原生权限状态待核对，已暂停切换权限，请在 CLI 确认当前模式")
 
     def resolve_setting_label(self, name, label):
         if name == "effort":
@@ -2849,7 +2912,8 @@ class NativeSession:
                 current = self.lookup() or {}
                 lines = self.read_terminal_screen()
                 if (current.get("short") != permission["short"] or current.get("outcome")
-                        or current.get("sessionStatus") != "idle" or current.get("needs")
+                        or current.get("sessionStatus") not in ("idle", "busy") or current.get("needs")
+                        or current.get("sessionStatus") == "busy" and not permission.get("allowBusy")
                         or not empty_permission_prompt(lines)
                         or permission_footer_mode(lines) != permission["mode"]):
                     raise NativeError("EPERMISSIONCHANGED", "原生输入或权限状态已变化，未发送切换按键")
@@ -3397,6 +3461,7 @@ class NativeSession:
         self.observe_control_screen()
         self.read_messages()
         job = self.job
+        self.retry_permission_mode(live)
         # 正常连接与只读发现共用完成状态判断，done 不能因旧 tempo 继续显示执行中。
         status = NativeDiscovery.status(job, self.messages)
         # /compact 是本地原生命令，daemon 可能仍报 idle；只在原生画面明确显示压缩时补充执行状态。

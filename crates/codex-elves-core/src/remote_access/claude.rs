@@ -2137,11 +2137,10 @@ impl Claude {
         let mut c = self.conversation(id).await?;
         let queued = !c.remote_queue.messages(&c.queued_messages).is_empty()
             || !c.remote_queue.edits().is_empty();
-        if queued {
-            return Err(error(409, "请等待 Claude 待发消息结束后再修改权限"));
-        }
-        if c.active() {
-            // 用户要求执行中可以修改权限；当前原生轮次继续使用原权限，新选择只在下一轮开始前应用。
+        if queued || c.active() && !c.shared {
+            // 用户要求执行中允许选择权限且不影响会话；旧 stdio 会话保留下一轮生效，
+            // 共享 CLI 则交给连接端安全切换，遇到审批、草稿等交互时记录待生效，不停止任务。
+            // 已有待发消息保留入队时的权限；新选择仅保存给后续新消息，不能被旧队列投递覆盖。
             let requested = if mode == "configured" {
                 super::permissions::configured_claude_mode(&self.directory, &c.config.instance_id())
                     .await?
@@ -2166,7 +2165,8 @@ impl Claude {
             })
             .await?;
             let result = json!({"ok":true,"threadId":id,"instanceId":c.config.instance_id(),
-                "permissionMode":mode,"permissionRevision":revision,"appliesTo":"nextTurn"});
+                "permissionMode":mode,"permissionRevision":revision,
+                "permissionPending":true,"appliesTo":"nextTurn"});
             self.publish(json!({"method":"thread/settings/updated","params":result}));
             return Ok(result);
         }
@@ -2216,11 +2216,29 @@ impl Claude {
                 }
                 current.native_control["settings"]["permissionMode"] = json!(actual);
             }
+            if c.native_control["settings"]["changes"]["permissionMode"].is_object() {
+                if !current.native_control.is_object() {
+                    current.native_control = json!({});
+                }
+                if !current.native_control["settings"].is_object() {
+                    current.native_control["settings"] = json!({});
+                }
+                if !current.native_control["settings"]["changes"].is_object() {
+                    current.native_control["settings"]["changes"] = json!({});
+                }
+                current.native_control["settings"]["changes"]["permissionMode"] =
+                    c.native_control["settings"]["changes"]["permissionMode"].clone();
+            }
             Ok(())
         })
         .await?;
+        let pending =
+            c.native_control["settings"]["changes"]["permissionMode"]["state"] == "pending";
         let result = json!({"ok":true,"threadId":id,"instanceId":c.config.instance_id(),
-            "permissionMode":mode,"permissionRevision":revision,"appliesTo":"nextTurn"});
+            "permissionMode":mode,"permissionRevision":revision,
+            "permissionPending":pending,
+            "nativePermissionMode":c.native_control["settings"]["permissionMode"],
+            "appliesTo":if pending {"whenReady"} else {"immediate"}});
         self.publish(json!({"method":"thread/settings/updated","params":result}));
         Ok(result)
     }
@@ -4069,7 +4087,20 @@ async fn apply_permissions(
         }
         c.native_control["settings"]["permissionMode"] = json!(actual);
     }
-    c.permission_mode = Some(mode.to_owned());
+    if result["nativeSettings"]["changes"]["permissionMode"].is_object() {
+        if !c.native_control.is_object() {
+            c.native_control = json!({});
+        }
+        if !c.native_control["settings"].is_object() {
+            c.native_control["settings"] = json!({});
+        }
+        if !c.native_control["settings"]["changes"].is_object() {
+            c.native_control["settings"]["changes"] = json!({});
+        }
+        c.native_control["settings"]["changes"]["permissionMode"] =
+            result["nativeSettings"]["changes"]["permissionMode"].clone();
+    }
+    // 用户选择与当前投递所用权限分开：旧队列消息应用自己的权限时，不能覆盖用户后来保存的会话选择。
     Ok(())
 }
 

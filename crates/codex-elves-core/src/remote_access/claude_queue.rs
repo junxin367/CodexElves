@@ -571,7 +571,8 @@ impl Claude {
         let mut edit_settings = None;
         let result = async {
             let mut c = self.conversation(id).await?;
-            // 权限只在实际开始新轮次前应用；运行中的 next 引导不得改变该轮已经确定的权限。
+            // 用户要求权限不能阻断消息：普通投递交由连接端确认或登记待生效，原生审批和草稿继续保留；
+            // 显式 next 引导仍不改写当前轮次权限。
             if !steer {
                 apply_permissions(process, &mut c, &message.payload, authorization).await?;
             }
@@ -616,7 +617,9 @@ impl Claude {
             process
                 .control(
                     json!({"subtype":"shared_send","client_id":message.id,
-                "content":input_content(&message.payload)?,"steer":steer,"idle_only":!steer}),
+                    "content":input_content(&message.payload)?,"steer":steer,
+                    // 普通直接发送允许由 CLI 保留到审批完成；只有网页队列的自动续发才要求原生空闲。
+                    "idle_only":!steer && !remove_if_unsent}),
                     Some(authorization),
                 )
                 .await
@@ -996,6 +999,7 @@ mod tests {
         SyncIdle,
         SyncActive,
         SyncRejected,
+        PermissionPending,
     }
 
     async fn fixture() -> (
@@ -1126,6 +1130,10 @@ mod tests {
                     )
                     .into()),
                     Reply::Unknown => Err(ApiError::new(503, "回执未知").after_admission().into()),
+                    Reply::PermissionPending => Ok(json!({"permissionPending":true,
+                        "nativeSettings":{"permissionMode":"acceptEdits","changes":{
+                            "permissionMode":{"id":"pending-permission","requested":"configured",
+                            "state":"pending","reason":"原生正在等待审批"}}}})),
                     Reply::SyncIdle | Reply::SyncActive | Reply::SyncRejected => unreachable!(),
                 };
                 if let Some(sender) = channel
@@ -1143,6 +1151,60 @@ mod tests {
 
     fn payload(c: &Conversation, id: &str) -> Value {
         json!({"threadId":c.id,"clientUserMessageId":id,"prompt":format!("正文-{id}")})
+    }
+
+    #[tokio::test]
+    async fn permission_pending_during_native_approval_does_not_block_direct_send() {
+        let (_directory, _auth_directory, service, c, auth, calls, replies) = fixture().await;
+        service
+            .change(|saved| {
+                let current = saved.conversations.get_mut(&c.id).unwrap();
+                current.native_status = json!({"tempo":"blocked","sessionStatus":"waiting",
+                    "needs":"permission prompt"});
+                current.permission_mode = Some("plan".into());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        replies
+            .lock()
+            .await
+            .extend([Reply::PermissionPending, Reply::Accepted]);
+        let mut input = payload(&c, "permission-followup");
+        input["permissionMode"] = json!("configured");
+        let result = service.command("send", &input, &auth).await.unwrap();
+        assert_eq!(result["deliveryState"], "accepted");
+        let calls = calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["subtype"], "set_permission_mode");
+        assert_eq!(calls[1]["subtype"], "shared_send");
+        assert_eq!(calls[1]["idle_only"], false);
+        let current = service.conversation(&c.id).await.unwrap();
+        assert_eq!(current.permission_mode.as_deref(), Some("plan"));
+        assert_eq!(current.turns[0]["status"], "inProgress");
+        assert_ne!(current.turns[0]["_stopRequested"], true);
+    }
+
+    #[tokio::test]
+    async fn permission_change_while_running_preserves_the_turn_and_reports_pending_state() {
+        let (_directory, _auth_directory, service, c, auth, calls, replies) = fixture().await;
+        replies.lock().await.push_back(Reply::PermissionPending);
+        let result = service
+            .set_permissions(&c.id, "configured", &auth)
+            .await
+            .unwrap();
+        assert_eq!(result["permissionPending"], true);
+        assert_eq!(result["appliesTo"], "whenReady");
+        assert_eq!(result["nativePermissionMode"], "acceptEdits");
+        let current = service.conversation(&c.id).await.unwrap();
+        assert_eq!(current.permission_mode.as_deref(), Some("configured"));
+        assert_eq!(current.turns[0]["status"], "inProgress");
+        assert_eq!(
+            current.native_control["settings"]["changes"]["permissionMode"]["state"],
+            "pending"
+        );
+        assert_eq!(calls.lock().await.len(), 1);
+        assert_eq!(calls.lock().await[0]["subtype"], "set_permission_mode");
     }
 
     #[test]
