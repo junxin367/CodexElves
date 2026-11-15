@@ -77,7 +77,9 @@ export function sidebarTimestamp(value) {
   return value < 100_000_000_000 ? value * 1000 : value;
 }
 export function sidebarUpdatedAt(item) {
-  return sidebarTimestamp(item.updatedAt) || sidebarTimestamp(item.recencyAt) || sidebarTimestamp(item.createdAt);
+  // 用户要求区分桌面浏览与真实活动：打开/恢复旧会话可能更新 updatedAt，
+  // 排序和日期分组须优先使用原生 recencyAt；仅旧数据缺失时回退。与服务目录的 recency_at 分页保持一致。
+  return sidebarTimestamp(item.recencyAt) || sidebarTimestamp(item.updatedAt) || sidebarTimestamp(item.createdAt);
 }
 export function sidebarRecentDateGroups(items, now = Date.now()) {
   const today = new Date(now);

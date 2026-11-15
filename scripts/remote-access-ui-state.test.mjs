@@ -381,6 +381,50 @@ test("服务模式秒级会话时间按毫秒进入今天分组，并与 Claude 
   assert.ok(context.sidebarUpdatedAt(codex) > context.sidebarUpdatedAt(claude), "较新的 Codex 会话排在较早的 Claude 会话前");
 });
 
+test("最近会话按原生活动时间排序，桌面仅打开和已读更新不改变顺序或日期分组", () => {
+  const context = vm.createContext({ nativeConnectionVersion: 1 });
+  vm.runInContext(sourceSection("function sidebarTimestamp(", "function markSidebarThreadReadLocally("), context);
+  const now = new Date(2026, 10, 15, 20, 45).getTime();
+  const yesterday = new Date(2026, 10, 14, 18).getTime();
+  const oldActivity = new Date(2026, 9, 22, 18).getTime();
+  const current = { id: "current", recencyAt: now - 60_000, updatedAt: now - 60_000 };
+  const recent = { id: "recent", recencyAt: yesterday, updatedAt: yesterday };
+  const old = { id: "old", recencyAt: oldActivity, updatedAt: oldActivity };
+  const rows = [old, recent, current];
+  const order = () => [...rows].sort((left, right) =>
+    context.sidebarUpdatedAt(right) - context.sidebarUpdatedAt(left)).map(item => item.id);
+  assert.deepEqual(order(), ["current", "recent", "old"]);
+  for (const row of [recent, old]) {
+    // Codex App 打开旧会话会更新元数据；相同活动时间下的只读变化不能把它推到最近。
+    row.updatedAt = now + 1_000;
+    row.hasUnreadTurn = false;
+    row.status = { type: "idle" };
+  }
+  assert.deepEqual(order(), ["current", "recent", "old"]);
+  const groups = context.sidebarRecentDateGroups(rows, now);
+  assert.deepEqual(Array.from(groups.find(group => group.key === "today").items, item => item.id), ["current"]);
+  assert.deepEqual(Array.from(groups.find(group => group.key === "yesterday").items, item => item.id), ["recent"]);
+  assert.deepEqual(Array.from(groups.find(group => group.key === "history").items, item => item.id), ["old"]);
+});
+
+test("最近会话在桌面真实执行和新建后更新，并兼容缺少活动时间的旧数据及 Claude", () => {
+  const context = vm.createContext({ nativeConnectionVersion: 1 });
+  vm.runInContext(sourceSection("function sidebarTimestamp(", "function markSidebarThreadReadLocally("), context);
+  const now = new Date(2026, 10, 15, 20, 45).getTime();
+  const current = { id: "current", recencyAt: now - 60_000, updatedAt: now - 60_000 };
+  const old = { id: "old", recencyAt: now - 86_400_000, updatedAt: now };
+  assert.ok(context.sidebarUpdatedAt(old) < context.sidebarUpdatedAt(current));
+  old.recencyAt = now;
+  assert.ok(context.sidebarUpdatedAt(old) > context.sidebarUpdatedAt(current), "真实执行推进原生活动时间后必须重排");
+  assert.equal(context.sidebarUpdatedAt({ createdAt: now }), now, "新建会话仍可按创建时间进入最近列表");
+  for (const recencyAt of [undefined, null, 0, -1, NaN, "unknown"]) {
+    assert.equal(context.sidebarUpdatedAt({ recencyAt, updatedAt: now }), now, "旧数据缺少有效活动时间时回退到更新时间");
+  }
+  assert.equal(context.sidebarUpdatedAt({ recencyAt: Math.floor(now / 1000), updatedAt: now + 60_000 }), now,
+    "旧缓存秒级活动时间仍应优先于毫秒元数据时间");
+  assert.equal(context.sidebarUpdatedAt({ backend: "claude", recencyAt: now, updatedAt: now }), now);
+});
+
 test("最近会话按今天、昨天、前天、近四个星期日历日和历史分组", () => {
   const context = vm.createContext({ nativeConnectionVersion: 1 });
   vm.runInContext(sourceSection("function sidebarTimestamp(", "function markSidebarThreadReadLocally("), context);

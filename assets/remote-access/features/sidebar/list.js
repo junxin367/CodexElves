@@ -415,7 +415,7 @@ export function renderSidebar() {
       ]));
       for (const item of mergedRecent) recentPriorityKnownIds.add(item.id);
     }
-    // 日期分组始终按最近更新展示，不继承桌面的手动会话顺序。
+    // 日期分组始终按原生最近活动展示；仅打开旧会话不重排，也不继承桌面的手动会话顺序。
     const recent = sortThreads(mergedRecent.filter(matches), "updated_at");
     const recentById = new Map(recent.map(item => [item.id, item]));
     const priority = [...recentPriorityIds].flatMap(id => recentById.has(id) ? [recentById.get(id)] : []);

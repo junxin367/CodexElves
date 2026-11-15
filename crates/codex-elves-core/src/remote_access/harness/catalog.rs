@@ -14,6 +14,9 @@ use crate::codex_service::normalize_thread;
 // 用户要求服务模式首屏及重复进入保持流畅：先给最近 100 条，完整目录后台补齐；
 // 热目录最多每 3 秒补读首页，每 60 秒完整核对删除和归档，失败后等待 5 秒再试。
 const PAGE_SIZE: usize = 100;
+// 用户要求桌面仅打开旧会话不改变最近排序；updated_at 会受恢复/元数据更新影响。
+// 首屏、后台分页与网页 sidebarUpdatedAt 均使用原生最近活动时间，保留新建和真实执行同步。
+const RECENT_SORT_KEY: &str = "recency_at";
 const HEAD_MAX_AGE: Duration = Duration::from_secs(3);
 const FULL_MAX_AGE: Duration = Duration::from_secs(60);
 const RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -107,7 +110,7 @@ impl Catalog {
         let page = runtime
             .request(
                 "thread/list",
-                json!({"limit":PAGE_SIZE,"archived":false,"sortKey":"updated_at"}),
+                json!({"limit":PAGE_SIZE,"archived":false,"sortKey":RECENT_SORT_KEY}),
                 None,
             )
             .await?;
@@ -197,7 +200,7 @@ impl Catalog {
                     let page = runtime
                         .request(
                             "thread/list",
-                            json!({"limit":PAGE_SIZE,"archived":false,"sortKey":"updated_at","cursor":cursor}),
+                            json!({"limit":PAGE_SIZE,"archived":false,"sortKey":RECENT_SORT_KEY,"cursor":cursor}),
                             None,
                         )
                         .await?;
@@ -534,6 +537,13 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         assert!(complete);
         let requests = std::fs::read_to_string(directory.path().join("reads.jsonl")).unwrap();
         assert_eq!(requests.lines().count(), 3);
+        for request in requests.lines() {
+            let request: Value = serde_json::from_str(request).unwrap();
+            assert_eq!(
+                request["params"]["sortKey"], "recency_at",
+                "首屏和后台分页都必须按原生活动时间读取，不能因打开旧会话而挤掉真正最近的会话"
+            );
+        }
         assert!(projection.lock().await.sequence > 0);
     }
 
