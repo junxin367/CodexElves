@@ -39,7 +39,7 @@ import { messageImageReadSequence, setMessageImageReadSequence } from "../messag
 import { markVisibleThreadRead } from "../messages/user-content.js";
 import { applyQueueRead } from "../queue/queue.js";
 import { notifiedQueue, notifiedQueueEdits, queueVersion, syncEditableMessageMetadata } from "../queue/state.js";
-import { claudeThreadId, normalizeRelatedView } from "../session/capabilities.js";
+import { claudeThreadId, normalizeRelatedView, privateInputScope } from "../session/capabilities.js";
 import {
   foregroundReadGeneration, recoveryErrorSilenceDepth, refreshTimer, setRefreshTimer
 } from "../session/connection-state.js";
@@ -404,15 +404,21 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
 export async function reloadThread() {
   if (pageLeaving || document.hidden || !selectedId || threadDeleted(selectedId)) return;
   clearTimeout(refreshTimer); setRefreshTimer(null);
-  const generation = foregroundReadGeneration;
-  if (threadRequest?.version === selectionVersion && threadRequest.generation === generation) {
+  const generation = foregroundReadGeneration, scope = privateInputScope(session);
+  const id = selectedId, version = selectionVersion;
+  if (threadRequest?.version === version && threadRequest.generation === generation
+      && threadRequest.threadId === id && threadRequest.scope === scope) {
     threadRequest.again = true; return threadRequest.promise;
   }
-  const id = selectedId, version = selectionVersion;
-  const request = { version, generation, controller: new AbortController(), again: false, promise: null };
+  const request = { threadId: id, version, generation, scope, controller: new AbortController(), again: false, promise: null };
+  // 用户要求删除成功后不再弹旧读取错误；成功与失败必须核对同一会话、授权及读取代次。
+  // transcript.js 负责主动取消，event-sync.js 在最终展示错误前再次核对，不能吞掉当前会话的真实失败。
+  const isCurrentRead = () => !pageLeaving && !request.controller.signal.aborted
+    && generation === foregroundReadGeneration && version === selectionVersion
+    && selectedId === id && scope === privateInputScope(session) && !threadDeleted(id);
   request.promise = (async () => {
     do {
-      if (generation !== foregroundReadGeneration || request.controller.signal.aborted) return;
+      if (!isCurrentRead()) return;
       request.again = false;
       const read = setThreadReadVersion(threadReadVersion + 1), usageVersion = tokenUsageVersion, fastReadVersion = fastModeVersion,
         transcriptReadVersion = messageVersion,
@@ -423,12 +429,11 @@ export async function reloadThread() {
       let latest;
       try { ({ thread: latest } = await api("/api/read/thread", { threadId: id }, undefined, request.controller.signal)); }
       catch (error) {
-        if (generation !== foregroundReadGeneration || request.controller.signal.aborted) return;
+        if (!isCurrentRead() || read !== threadReadVersion) return;
         if (version === selectionVersion && selectedId === id) setThreadReadFailed(true);
         if (version === selectionVersion && selectedId === id && isMissingThreadError(error, id)) {
           await historyRead.catch(() => {});
-          if (generation !== foregroundReadGeneration || request.controller.signal.aborted
-              || version !== selectionVersion || selectedId !== id || !isMissingThreadError(error, id)) return;
+          if (!isCurrentRead() || read !== threadReadVersion || !isMissingThreadError(error, id)) return;
           await clearMissingThreadSelection(id);
           return;
         }
@@ -437,8 +442,7 @@ export async function reloadThread() {
         if (request.again && version === selectionVersion) continue;
         throw error;
       }
-      if (generation !== foregroundReadGeneration || request.controller.signal.aborted
-          || version !== selectionVersion || read !== threadReadVersion || selectedId !== id || threadDeleted(id)) return;
+      if (!isCurrentRead() || read !== threadReadVersion) return;
       if (questionReadVersion !== questionVersion && !notifiedQuestions) {
         request.again = true;
         continue;
@@ -469,7 +473,7 @@ export async function reloadThread() {
       $("#thread-path").textContent = threadLocation(thread); syncThreadHash(id);
       updateComposer(); renderApprovals();
       await historyRead;
-    } while (request.again && generation === foregroundReadGeneration && version === selectionVersion && selectedId === id);
+    } while (request.again && isCurrentRead());
   })();
   setThreadRequest(request);
   try { await request.promise; }

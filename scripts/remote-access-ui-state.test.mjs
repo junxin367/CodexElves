@@ -6882,7 +6882,7 @@ function queueReloadHarness() {
     AbortController, performance, pageLeaving: false, document: { hidden: false },
     selectedId: "main", selectionVersion: 1, foregroundReadGeneration: 0,
     thread: { id: "main", queuedMessages: [{ id: "queued-a", text: "引导消息" }] },
-    threadRequest: null, threadReadVersion: 0,
+    threadRequest: null, threadReadVersion: 0, threadReadFailed: false,
     tokenUsageVersion: 0, questionVersion: 0, statusVersion: 0, goalVersion: 0, compactionVersion: 0, messageVersion: 0,
     queueVersion: 0, queueSnapshotVersion: null, retiredQueueEpochs: new Set(),
     notifiedQueue: null, notifiedQueueEdits: null, pendingSteer: null,
@@ -6890,6 +6890,7 @@ function queueReloadHarness() {
     session: { device: { id: "device-a", createdAtMs: 1 } }, recoveryGeneration: 0,
     privateInputScope: value => JSON.stringify([value?.device?.id, value?.device?.createdAtMs]),
     threadDeleted: () => false, threadReadOnly: () => false, compactionLocked: () => false,
+    isMissingThreadError: () => false,
     blockingRequestState: () => ({ generation: 0 }),
     queueMessageText: message => message?.text || "", $: selector => nodes.get(selector),
     setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
@@ -6901,9 +6902,9 @@ function queueReloadHarness() {
     replaceTranscriptEvents() {}, refreshTranscriptEvents() {}, syncEditableMessageMetadata() {},
     reconcileCompaction() {}, syncThreadHash() {}, updateComposer() {}, renderApprovals() {},
     loadHistory: async () => { historyReads.push(context.selectedId); },
-    api: async path => {
+    api: async (path, _payload, _requestId, signal) => {
       assert.equal(path, "/api/read/thread");
-      const read = deferred(); threadReads.push(read); return read.promise;
+      const read = { ...deferred(), signal }; threadReads.push(read); return read.promise;
     },
     mutate: async (action, payload, options) => {
       assert.equal(action, "steerQueued");
@@ -6968,6 +6969,141 @@ test("主动读取开始后的新刷新事件仍触发下一次读取，不丢�
   completeRead(1);
   await read;
   assert.equal(context.threadRequest, null);
+});
+
+test("删除、切换会话或授权后迟到详情错误不弹提示，也不触发旧请求的后续刷新", async () => {
+  for (const reason of ["deleted", "selection", "authorization", "generation", "read-version", "leaving"]) {
+    const h = queueReloadHarness(), { context } = h;
+    context.scheduleReload(); h.runTimers();
+    const request = context.threadRequest;
+    request.again = true;
+    if (reason === "deleted") context.threadDeleted = id => id === "main";
+    if (reason === "selection") {
+      context.selectedId = "next"; context.selectionVersion++;
+      context.thread = { id: "next", title: "当前会话" };
+    }
+    if (reason === "authorization") context.session = { device: { id: "device-a", createdAtMs: 2 } };
+    if (reason === "generation") context.foregroundReadGeneration++;
+    if (reason === "read-version") context.threadReadVersion++;
+    if (reason === "leaving") context.pageLeaving = true;
+    const currentThread = context.thread;
+    h.threadReads[0].reject(Object.assign(new Error("Codex 操作失败：thread not loaded: main"), { code: 409 }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.threadReads.length, 1, `${reason}: 过期请求不能继续读取`);
+    await request.promise;
+    assert.deepEqual(h.notices, [], reason);
+    assert.equal(context.threadReadFailed, false, reason);
+    assert.equal(context.thread, currentThread, reason);
+    assert.equal(h.threadReads.length, 1, reason);
+  }
+});
+
+test("当前会话的真实详情读取失败继续提示，不冒充已删除或读取成功", async () => {
+  for (const code of [409, 503]) {
+    const h = queueReloadHarness(), { context } = h;
+    context.scheduleReload(); h.runTimers();
+    const failure = Object.assign(new Error("当前会话读取失败"), { code });
+    const rejected = assert.rejects(context.threadRequest.promise, error => error === failure);
+    h.threadReads[0].reject(failure);
+    await rejected;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(h.notices, [failure.message]);
+    assert.equal(context.threadReadFailed, true);
+    assert.equal(context.thread.id, "main");
+    assert.equal(context.threadDeleted("main"), false);
+    assert.equal(h.threadReads.length, 1);
+  }
+});
+
+test("授权变化后的详情读取不复用旧请求，旧请求结束也不释放新请求", async () => {
+  const h = queueReloadHarness(), { context } = h;
+  const oldRead = context.reloadThread();
+  context.session = { device: { id: "device-a", createdAtMs: 2 } };
+  const newRead = context.reloadThread(), current = context.threadRequest;
+  assert.equal(h.threadReads.length, 2);
+  h.threadReads[0].reject(Object.assign(new Error("旧授权读取失败"), { code: 409 }));
+  await oldRead;
+  assert.equal(context.threadRequest, current);
+  const failure = Object.assign(new Error("当前授权读取失败"), { code: 503 });
+  const rejected = assert.rejects(newRead, error => error === failure);
+  h.threadReads[1].reject(failure);
+  await rejected;
+});
+
+test("切换会话后旧详情成功回包不覆盖当前内容，也不继续旧读取", async () => {
+  const h = queueReloadHarness(), { context } = h;
+  const pending = context.reloadThread();
+  context.threadRequest.again = true;
+  context.selectedId = "next"; context.selectionVersion++;
+  const current = context.thread = { id: "next", title: "新会话内容", queuedMessages: [] };
+  h.completeRead(0);
+  await pending;
+  assert.equal(context.thread, current);
+  assert.deepEqual(h.notices, []);
+  assert.equal(h.threadReads.length, 1);
+});
+
+function installMessageResetHarness(context) {
+  Object.assign(context, {
+    messageImageRefreshes: new Map(), composerScroll: null, clearPendingFeedbackTimer() {},
+    stopActivityTimer() {}, finishQueueDrag() {}, cancelAnimationFrame() {},
+    historyController: new AbortController(), historyRequest: {},
+    selectionController: new AbortController(), historyLoadFrame: null, messageFrame: null,
+    renderedItems: new Map(), renderedTurns: new Map(), renderedActivities: new Map(),
+    itemVersions: new Map(), turnVersions: new Map(), turnFieldVersions: new Map(), partialItems: new Set(),
+  });
+  vm.runInContext(sourceSection("function resetMessages()", "function rememberTranscript("), context);
+}
+
+test("删除后页面重置取消显示读取，保留写回执；旧请求结束不清理新会话读取", async () => {
+  const h = queueReloadHarness(), { context } = h;
+  installMessageResetHarness(context);
+  const write = new AbortController();
+  const pending = context.pending = { id: "retained-write", state: "unknown", controller: write };
+  const drafts = context.drafts = new Map([["next", "下一会话草稿"]]);
+  const history = context.historyController, selection = context.selectionController;
+  const oldRead = context.reloadThread();
+  context.resetMessages();
+  assert.equal(h.threadReads[0].signal.aborted, true);
+  assert.equal(history.signal.aborted, true);
+  assert.equal(selection.signal.aborted, true);
+  assert.equal(context.threadRequest, null);
+  assert.equal(context.historyRequest, null);
+  assert.equal(write.signal.aborted, false);
+  assert.equal(context.pending, pending);
+  assert.equal(context.drafts, drafts);
+  context.selectedId = "next"; context.selectionVersion++;
+  context.thread = { id: "next", title: "新会话内容", queuedMessages: [] };
+  const newRead = context.reloadThread(), nextRequest = context.threadRequest;
+  assert.equal(h.threadReads.length, 2);
+  h.threadReads[0].reject(Object.assign(new Error("已删除会话的迟到错误"), { code: 409 }));
+  await oldRead;
+  assert.equal(context.threadRequest, nextRequest);
+  assert.equal(h.threadReads[1].signal.aborted, false);
+  const failure = Object.assign(new Error("新会话仍需报告的错误"), { code: 503 });
+  const rejected = assert.rejects(newRead, error => error === failure);
+  h.threadReads[1].reject(failure);
+  await rejected;
+  assert.equal(context.pending, pending);
+  assert.equal(write.signal.aborted, false);
+});
+
+test("详情错误已进入展示队列后再删除会话，也不能覆盖成功提示", async () => {
+  for (const retire of [true, false]) {
+    const h = queueReloadHarness(), { context } = h;
+    const failure = Object.assign(new Error("Codex 操作失败：thread not loaded: main"), { code: 409 });
+    context.reloadThread = () => {
+      const promise = Promise.reject(failure);
+      if (retire) queueMicrotask(() => {
+        context.threadDeleted = id => id === "main";
+        context.selectedId = null; context.selectionVersion++;
+      });
+      return promise;
+    };
+    context.scheduleReload(); h.runTimers();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(h.notices, retire ? [] : [failure.message]);
+  }
 });
 
 function queuedReceiptHarness({ disk = storage(), refresh = async () => {} } = {}) {
@@ -7851,7 +7987,7 @@ test("旧会话和旧授权的迟到读取不改变当前页，reload等待历�
     context.syncRelatedSessionLayout();
     response.resolve(jsonResponse({ ok: false, message: "会话已关闭或不存在" }, 404));
     history.resolve();
-    await captured;
+    assert.equal(await captured, undefined, path);
     assert.equal(context.thread.sideThreadExpired, undefined, path);
     assert.equal(context.relatedThreadViews.get(id)?.expired, undefined, path);
     assert.equal(nodes.get("#composer").hidden, false, path);
@@ -7918,6 +8054,57 @@ function sidebarDeletionHarness() {
   const persisted = () => JSON.parse(disk.get(context.threadDeletionStorageKey));
   return { context, reply, calls, notices, target, control, failReply, persisted, assertControlRetained };
 }
+
+test("删除成功回执后迟到详情409只保留成功提示，不恢复会话或重发删除", async () => {
+  const h = sidebarDeletionHarness(), { context } = h;
+  const read = deferred(), timers = [], sidebarReads = [], locations = [];
+  Object.assign(context, {
+    AbortController, performance, pageLeaving: false, document: { hidden: false },
+    selectedId: h.target.id, thread: { id: h.target.id }, selectionVersion: 1, foregroundReadGeneration: 0,
+    threadRequest: null, threadReadVersion: 0, threadReadFailed: false,
+    tokenUsageVersion: 0, questionVersion: 0, statusVersion: 0, compactionVersion: 0, messageVersion: 0,
+    queueVersion: 0, queueSnapshotVersion: null, retiredQueueEpochs: new Set(),
+    privateInputScope: value => JSON.stringify([value?.device?.id, value?.device?.createdAtMs ?? null]),
+    blockingRequestState: () => ({ generation: 0 }), loadHistory: async () => {}, isMissingThreadError: () => false,
+    setTimeout(callback) { timers.push(callback); return timers.length; }, clearTimeout() {}, refreshTimer: null,
+    api: async (path, payload, _id, signal) => {
+      assert.equal(path, "/api/read/thread"); assert.equal(payload.threadId, h.target.id);
+      read.signal = signal;
+      return read.promise;
+    },
+    location: { hash: `#thread=${h.target.id}`, pathname: "/", search: "" },
+    history: { replaceState(_state, _title, value) { locations.push(value); } },
+    loadSidebar: async () => { sidebarReads.push(true); }, stopGoalLiveTimer() {},
+    showWelcome() {
+      context.resetMessages();
+      context.selectionVersion++; context.threadReadVersion++;
+      context.selectedId = null; context.thread = null; context.creating = true;
+    },
+  });
+  installMessageResetHarness(context);
+  vm.runInContext(sourceSection("async function reloadThread()", "function retireMissingEphemeralTranscript(")
+    + sourceSection("function scheduleReload()", "function scheduleSidebarRefresh("), context);
+  context.scheduleReload(); timers.shift()();
+  const oldRequest = context.threadRequest;
+  const deletion = context.deleteSidebarThread(h.target);
+  await new Promise(resolve => setImmediate(resolve));
+  h.reply.resolve({ ok: true, deleted: true, threadId: h.target.id, status: "local_deleted" });
+  await deletion;
+  assert.equal(read.signal.aborted, true);
+  assert.equal(context.threadDeleted(h.target.id), true);
+  assert.equal(context.selectedId, null);
+  assert.equal(context.drafts.has(h.target.id), false);
+  assert.equal(context.sidebar.recent.some(item => item.id === h.target.id), false);
+  assert.deepEqual(locations, ["/"]);
+  read.reject(Object.assign(new Error(`Codex 操作失败：thread not loaded: ${h.target.id}`), { code: 409 }));
+  await oldRequest.promise;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(h.notices, [{ message: "会话已永久删除", error: false }]);
+  assert.equal(context.threadDeletions.get(context.threadDeletionKey(h.target.id)).state, "deleted");
+  assert.equal(context.drafts.get(h.control.id), "另一会话草稿");
+  assert.equal(h.calls.length, 1);
+  assert.equal(sidebarReads.length, 1);
+});
 
 test("删除挂起期间同设备同会话的原生删除事实先生效，迟到HTTP失败不得重建unknown或提示失败", async () => {
   const h = sidebarDeletionHarness();

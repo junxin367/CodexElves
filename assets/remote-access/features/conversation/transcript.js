@@ -11,7 +11,8 @@ import {
   setHistoryAutoFailed, setHistoryController, setHistoryError, setHistoryLoadFrame,
   setHistoryLoadVisibleItems, setHistoryLoading, setHistoryLoadingOlder, setHistoryLoadingTurnId,
   setHistoryLoadingVersion, setHistoryRequest, setHistoryScrollTop, setLatestHistoryReadFailed,
-  setMessageFrame, setRecentHistoryPage, setTranscriptChecking, turnFieldVersions, turnVersions
+  setMessageFrame, setRecentHistoryPage, setThreadRequest, setTranscriptChecking, threadRequest,
+  turnFieldVersions, turnVersions
 } from "./history-state.js";
 import {
   selectionController, setRelatedReturnTranscript, setSelectionController, setThreadReadFailed
@@ -44,6 +45,11 @@ export function resetMessages() {
   historyController?.abort(); setHistoryController(null);
   setHistoryRequest(null);
   selectionController?.abort(); setSelectionController(null);
+  // 删除后回到新建页或切换会话时，一并退役详情重读；只取消显示读取，不触碰写请求与原回执。
+  // 先释放请求引用，旧请求结束时不能清除下一会话的新读取。
+  const previousThreadRequest = threadRequest;
+  setThreadRequest(null);
+  previousThreadRequest?.controller.abort();
   setHistoryLoading(false); setHistoryLoadingVersion(-1); setHistoryLoadingTurnId(null); setHistoryLoadingOlder(false); setHistoryError("");
   setThreadReadFailed(false); setLatestHistoryReadFailed(false);
   cancelAnimationFrame(historyLoadFrame); setHistoryLoadFrame(null); setHistoryAutoFailed(false);
