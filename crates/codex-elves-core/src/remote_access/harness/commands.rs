@@ -177,23 +177,12 @@ impl Harness {
                 Ok(json!({"ok":true,"threadId":id}))
             }
             "deleteThread" => {
-                // 用户要求删除由桌面 Codex 持有 writer 的会话时复用原 owner；
-                // 只有没有桌面 owner 才允许服务 runtime 接管，避免第二个 writer 返回 409。
-                if self
-                    .owner_request(
-                        &id,
-                        "thread/delete",
-                        json!({"threadId":id}),
-                        1,
-                        Some(authorization),
-                    )
-                    .await?
-                    .is_none()
-                {
-                    self.runtime
-                        .request("thread/delete", json!({"threadId":id}), Some(authorization))
-                        .await?;
-                }
+                // 用户要求远程删除返回真实结果：thread/delete 属于 App Server，桌面 owner IPC 没有此方法。
+                // 仅调用原生删除一次；其他进程的 writer 由原生接口明确拒绝，不能抢占、换通道或自动重试。
+                self.runtime
+                    .request("thread/delete", json!({"threadId":id}), Some(authorization))
+                    .await
+                    .map_err(|failure| delete_failure(&id, failure))?;
                 self.store.lock().await.commit(|data| {
                     data.queues.remove(&id);
                     data.edits.retain(|_, e| e.thread_id != id);
@@ -1269,6 +1258,25 @@ impl Harness {
         self.queue_changed(id).await;
         Ok(response)
     }
+}
+
+fn delete_failure(id: &str, failure: anyhow::Error) -> anyhow::Error {
+    // 原生 -32600 的这一精确错误在删除前拒绝写入；保留其他错误及其 unknown 状态，避免误放开重复删除。
+    if failure
+        .downcast_ref::<super::ApiError>()
+        .is_some_and(|error| {
+            error.code == 409
+                && !error.outcome_unknown
+                && error.message
+                    == format!("Codex 操作失败：thread {id} already has an active writer")
+        })
+    {
+        return error(
+            409,
+            "会话仍由 Codex 桌面或其他客户端占用，本次未删除。请在持有该会话的客户端中删除，或退出该客户端释放会话后重试。",
+        );
+    }
+    failure
 }
 
 pub(super) fn payload_hash(payload: &Value) -> String {

@@ -38,6 +38,7 @@ pub fn install(
     content: &tauri::Webview,
     cache: Arc<ResourceCache>,
     home: Url,
+    clear_service_workers: bool,
 ) -> tauri::Result<()> {
     let content_ready = content.clone();
     let interception_cache = cache.clone();
@@ -66,7 +67,7 @@ pub fn install(
         let result = unsafe {
             platform.controller().CoreWebView2().and_then(|core| {
                 register(&core, &platform.environment(), interception_cache)?;
-                initialize(core, callback.clone())
+                initialize(core, callback.clone(), clear_service_workers)
             })
         };
         if result.is_err() {
@@ -78,7 +79,27 @@ pub fn install(
 unsafe fn initialize(
     core: ICoreWebView2,
     finish: Arc<dyn Fn(bool) + Send + Sync>,
+    clear_service_workers: bool,
 ) -> windows::core::Result<()> {
+    // 独立窗口沿用主窗口已接管的共享 profile；与 desktop::create_client_window 同步，不能重复清理主窗口的 Service Worker。
+    if !clear_service_workers {
+        let complete = finish.clone();
+        let result = unsafe {
+            core.AddScriptToExecuteOnDocumentCreated(
+                &HSTRING::from(CACHE_BOOTSTRAP),
+                &AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(
+                    move |result, _| {
+                        complete(result.is_ok());
+                        Ok(())
+                    },
+                )),
+            )
+        };
+        if result.is_err() {
+            finish(false);
+        }
+        return Ok(());
+    }
     let profile = unsafe {
         core.cast::<ICoreWebView2_13>()?
             .Profile()?

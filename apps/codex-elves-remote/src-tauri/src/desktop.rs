@@ -22,10 +22,23 @@ const TITLE: &str = "CodexElves 远程会话";
 const WINDOW_LABEL: &str = "main";
 const CONTENT_LABEL: &str = "remote-content";
 
+#[derive(Clone)]
+struct SharedWebviewEnvironment(
+    webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment,
+);
+
+// Wry 对 Windows 新窗口 opener 的同一 Environment 也采用此跨线程边界；
+// 实际创建 Controller 仍回到 Tauri 主线程，不能在工作线程直接调用 COM。
+unsafe impl Send for SharedWebviewEnvironment {}
+unsafe impl Sync for SharedWebviewEnvironment {}
+
 struct ClientState {
     directory: PathBuf,
     settings: Mutex<Settings>,
     home: Mutex<Option<Url>>,
+    // Windows WebView2 要求共用同一用户数据目录的 WebView 复用同一 Environment；
+    // 独立会话窗口必须沿用主窗口环境，否则第二个环境会与正在运行的 profile 竞争并卡住。
+    webview_environment: Mutex<Option<SharedWebviewEnvironment>>,
     auto_connect: AtomicBool,
     exiting: AtomicBool,
     connection: Mutex<Connection>,
@@ -219,6 +232,12 @@ async fn remote_open_session_window(
         _ => return Err("请选择一个会话或文件预览目标。".into()),
     }
     .map_err(|error| error.to_string())?;
+    let environment = state
+        .webview_environment
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "远程客户端网页环境尚未就绪，请稍后重试。".to_owned())?;
     let cache = window_cache(&state, webview.window().label())?.fork_view(&source);
     let label = format!(
         "session-{}",
@@ -234,7 +253,7 @@ async fn remote_open_session_window(
     );
     let app = webview.app_handle();
     let result = (|| -> tauri::Result<()> {
-        let window = create_client_window(app, &label, url, cache)?;
+        let window = create_client_window(app, &label, url, cache, Some(environment.0), false)?;
         let mut settings = state.settings.lock().unwrap().clone();
         settings.window.x = None;
         settings.window.y = None;
@@ -747,6 +766,8 @@ fn create_client_window(
     label: &str,
     initial_url: Url,
     cache: Arc<ResourceCache>,
+    environment: Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment>,
+    clear_service_workers: bool,
 ) -> tauri::Result<tauri::Window> {
     let state = app.state::<ClientState>();
     let directory = state.directory.clone();
@@ -791,6 +812,10 @@ fn create_client_window(
         open_external(url);
         tauri::webview::NewWindowResponse::Deny
     });
+    if let Some(environment) = environment {
+        // 子窗口与主窗口共享登录 Cookie、IndexedDB 和资源 profile；必须复用同一 WebView2 环境。
+        content_builder = content_builder.with_environment(environment);
+    }
     if main {
         content_builder =
             content_builder.initialization_script(include_str!("../../web/unread-bridge.js"));
@@ -811,7 +836,17 @@ fn create_client_window(
         }
     })?;
     install_navigation_recovery(&content, cache.clone())?;
-    crate::native_cache::install(&content, cache, initial_url)?;
+    crate::native_cache::install(&content, cache, initial_url, clear_service_workers)?;
+    if main {
+        let environment_app = app.clone();
+        content.with_webview(move |webview| {
+            *environment_app
+                .state::<ClientState>()
+                .webview_environment
+                .lock()
+                .unwrap() = Some(SharedWebviewEnvironment(webview.environment()));
+        })?;
+    }
     let event_window = window.clone();
     window.on_window_event(move |event| match event {
         WindowEvent::Moved(_) if main => remember_window(&event_window, false),
@@ -884,6 +919,7 @@ pub fn run() -> anyhow::Result<()> {
                 directory: directory.clone(),
                 settings: Mutex::new(settings.clone()),
                 home: Mutex::new(None),
+                webview_environment: Mutex::new(None),
                 auto_connect: AtomicBool::new(!settings.server_url.is_empty()),
                 exiting: AtomicBool::new(false),
                 connection: Mutex::new(Connection::default()),
@@ -896,7 +932,7 @@ pub fn run() -> anyhow::Result<()> {
             // Windows Tauri 本地资源默认 Origin；先完成原生缓存接管，再打开连接页，防止自动连接抢在初始化前执行。
             let home = Url::parse("http://tauri.localhost/index.html")?;
             *app.state::<ClientState>().home.lock().unwrap() = Some(home.clone());
-            let window = create_client_window(app.handle(), WINDOW_LABEL, home, cache)?;
+            let window = create_client_window(app.handle(), WINDOW_LABEL, home, cache, None, true)?;
             // 用户要求独立程序不显示“连接”“窗口”菜单栏；连接恢复、刷新和退出统一保留在托盘。
             install_tray(app)?;
             restore_window(&window, &settings)?;

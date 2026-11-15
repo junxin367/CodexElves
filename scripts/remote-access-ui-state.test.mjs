@@ -8010,6 +8010,49 @@ test("删除尚无原生确认时迟到HTTP失败仍保留准确原回执unknown
   h.assertControlRetained();
 });
 
+test("桌面占用明确拒绝删除时解除目标锁定并保留会话和草稿", async () => {
+  const h = sidebarDeletionHarness();
+  const deletion = h.context.deleteSidebarThread(h.target);
+  await new Promise(resolve => setImmediate(resolve));
+  const message = "会话仍由 Codex 桌面占用，本次未删除。";
+  h.reply.reject(Object.assign(new Error(message), { code: 409, operationState: "failed" }));
+  await deletion;
+  assert.equal(h.context.threadDeletions.has(h.context.threadDeletionKey(h.target.id)), false);
+  assert.equal(h.context.drafts.get(h.target.id), "删除目标草稿");
+  assert.equal(h.context.sidebar.recent.some(item => item.id === h.target.id), true);
+  assert.deepEqual(h.notices, [{ message, error: true }]);
+  assert.equal(h.calls.length, 1);
+  h.assertControlRetained();
+});
+
+test("旧版删除unknown回执使用删除提示且核对时绝不重发", async () => {
+  const h = sidebarDeletionHarness();
+  const deletion = h.context.deleteSidebarThread(h.target);
+  await new Promise(resolve => setImmediate(resolve));
+  const legacy = "送达状态未知，请查看原生会话，不要重复发送";
+  const expected = "删除结果尚未确认，请在原生客户端核对，勿重复删除。";
+  h.reply.reject(Object.assign(new Error(legacy), { operationState: "unknown", outcomeUnknown: true }));
+  await deletion;
+  const key = h.context.threadDeletionKey(h.target.id);
+  const record = h.context.threadDeletions.get(key);
+  assert.equal(record.state, "unknown");
+  assert.deepEqual(h.notices, [{ message: expected, error: true }]);
+  const reads = [];
+  h.context.threadDeletionChecks = new Set();
+  h.context.api = async path => {
+    reads.push(path);
+    return { state: "unknown", result: { message: legacy } };
+  };
+  vm.runInContext(sourceSection("async function checkThre"), h.context);
+  await h.context.checkThreadDeletion(record);
+  assert.deepEqual(reads, ["/api/receipts/original-delete-receipt"]);
+  assert.equal(h.context.threadDeletions.get(key).state, "unknown");
+  assert.equal(h.context.drafts.get(h.target.id), "删除目标草稿");
+  assert.deepEqual(h.notices.at(-1), { message: expected, error: true });
+  assert.equal(h.calls.length, 1);
+  h.assertControlRetained();
+});
+
 test("服务模式返回明确删除回执后立即清理目标，不提示未确认", async () => {
   const h = sidebarDeletionHarness();
   let refreshed = 0;

@@ -104,6 +104,13 @@ export function threadDeletionConflict(id) {
       && ["submitting", "pending", "unknown"].includes(reply.state))
     || [...questionReplyReceipts.values()].some(reply => reply.deviceId === session?.device.id && reply.threadId === id);
 }
+function deletionMessage(message) {
+  // 用户上报的旧删除回执误用了发送文案；只修正文案，原 unknown 回执和禁止重发约束保持不变。
+  return ["送达状态未知，请查看原生会话，不要重复发送",
+    "服务曾重启，消息送达状态未知，请查看原生会话，不要重复发送",
+    "送达状态未知，请在会话中确认，勿重复发送"].includes(message)
+    ? "删除结果尚未确认，请在原生客户端核对，勿重复删除。" : message;
+}
 export async function deleteSidebarThread(item) {
   if (!session || session.readOnly || !connected || threadDeletionConflict(item.id)) return;
   const deviceId = session.device.id, key = threadDeletionKey(item.id, deviceId);
@@ -136,7 +143,7 @@ export async function deleteSidebarThread(item) {
         setThreadDeletion(key, { ...record, state: error.operationState === "pending" ? "pending" : "unknown" });
       else setThreadDeletion(key, null);
     }
-    if (session?.device.id === deviceId && !threadDeleted(item.id, deviceId)) notice(error.message, true);
+    if (session?.device.id === deviceId && !threadDeleted(item.id, deviceId)) notice(deletionMessage(error.message), true);
   } finally {
     if (threadDeletions.get(key)?.state === "confirming") threadDeletions.delete(key);
     if (session?.device.id === deviceId) { renderSidebar(); updateComposer(); }
@@ -159,7 +166,7 @@ export async function checkThreadDeletion(record) {
       if (session?.device.id === record.deviceId) notice(result?.message || "会话未删除，可重新操作", true);
     } else {
       setThreadDeletion(key, { ...record, state: receipt.state === "pending" ? "pending" : "unknown" });
-      if (session?.device.id === record.deviceId) notice(result?.message || "删除结果尚未确认，请在本机核对；不会自动重试删除。", true);
+      if (session?.device.id === record.deviceId) notice(deletionMessage(result?.message) || "删除结果尚未确认，请在本机核对；不会自动重试删除。", true);
     }
   } catch (error) {
     if (session?.device.id === record.deviceId)

@@ -7,6 +7,15 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 const base = new URL("../apps/codex-elves-remote/", import.meta.url);
 const bridge = await readFile(new URL("web/theme-bridge.js", base), "utf8");
 
+test("独立窗口复用主 WebView2 环境且不重复清理共享 profile", async () => {
+  const desktop = await readFile(new URL("src-tauri/src/desktop.rs", base), "utf8");
+  const nativeCache = await readFile(new URL("src-tauri/src/native_cache.rs", base), "utf8");
+  assert.match(desktop, /content_builder = content_builder\.with_environment\(environment\)/);
+  assert.match(desktop, /native_cache::install\(&content, cache, initial_url, clear_service_workers\)/);
+  assert.match(nativeCache, /if !clear_service_workers \{/);
+  assert.match(nativeCache, /ClearBrowsingData\(/);
+});
+
 test("外观连续变化合并为最新颜色并串行同步，模式来自实际页面", async () => {
   const frames = [], requests = [], completions = [], variables = new Map([
     ["--bg", "#181818"], ["--text", "#ededed"], ["--line", "#343434"],

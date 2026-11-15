@@ -1774,11 +1774,24 @@ impl RemoteAccessController {
                         json!({"ok":false,"notSent":true,"code":error.code,"message":error.message}),
                     );
                 }
-                Err(_) => {
+                Err(error) => {
                     // 服务引擎可能已接受操作；连接中断不能据此宣告失败或自动重发。
                     receipt.state = "unknown".into();
-                    receipt.result =
-                        Some(json!({"message":"送达状态未知，请查看原生会话，不要重复发送"}));
+                    // 用户要求删除失败能定位原因；删除回执不能套用发送提示，类型化原生错误也不能被吞掉。
+                    receipt.result = Some(if action == "deleteThread" {
+                        let message = error.downcast_ref::<ApiError>().map_or_else(
+                            || "删除结果尚未确认，请在原生客户端核对，勿重复删除。".to_owned(),
+                            |error| {
+                                format!(
+                                    "删除结果尚未确认：{}。请在原生客户端核对，勿重复删除。",
+                                    error.message
+                                )
+                            },
+                        );
+                        json!({"ok":false,"outcomeUnknown":true,"message":message})
+                    } else {
+                        json!({"message":"送达状态未知，请查看原生会话，不要重复发送"})
+                    });
                 }
             }
             let response = receipt_value(receipt);
@@ -6206,7 +6219,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  case 'thread/revert':t.turns=t.turns.filter(turn=>turn.id!==p.beforeTurnId);result={thread:t};break;
   case 'thread/delete':
     if(t?.name==='reject-delete'){output({id:q.id,error:{code:-32001,message:'fixture deletion rejected'}});return;}
-    threads.delete(p.threadId);break;
+    if(t?.name==='busy-delete'){output({id:q.id,error:{code:-32600,message:`thread ${p.threadId} already has an active writer`}});return;}
+    threads.delete(p.threadId);related.rows=related.rows.filter(row=>row.id!==p.threadId);break;
  case 'thread/readState/update':result={readState:{firstUnread:null,revision:'r2'}};break;
  case 'skills/list':result={data:p.cwds.map(cwd=>({cwd,skills:[],errors:[]}))};break;
  case 'model/list':result={data:[{id:'gpt-6.1-sol',model:'gpt-6.1-sol',serviceTiers:fastPolicy.noTiers?[]:[{id:'priority',name:'Fast'}],
@@ -6494,13 +6508,95 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             )
             .await
             .unwrap();
-        assert_ne!(receipt["state"], "completed");
+        assert_eq!(receipt["state"], "unknown");
         assert_ne!(receipt["result"]["deleted"], true);
+        assert_eq!(receipt["result"]["outcomeUnknown"], true);
+        let message = receipt["result"]["message"].as_str().unwrap();
+        assert!(message.contains("删除结果尚未确认"));
+        assert!(message.contains("fixture deletion rejected"));
+        assert!(!message.contains("发送"));
         let thread = controller
             .call_authorized("thread", json!({"threadId":id}), &authorization)
             .await
             .unwrap();
         assert_eq!(thread["thread"]["id"], id);
+        controller.harness.enabled.store(false, Ordering::Release);
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_delete_unloaded_thread_uses_only_app_server_and_keeps_rejection_receipt() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let id = uuid::Uuid::new_v4().to_string();
+        // 导入一条由其他客户端创建、从未在本服务 resume 的主会话，覆盖旧 owner IPC 误路由。
+        controller
+            .harness
+            .seed_test_subagents(json!({"rows":[{
+                "id":id,"name":"busy-delete","cwd":directory.path(),
+                "ephemeral":false,"forkedFromId":null,"threadSource":"user","source":"vscode",
+                "status":{"type":"idle"},"turns":[],"createdAt":1,"updatedAt":1
+            }]}))
+            .await
+            .unwrap();
+        let delete = |request_id: &str| {
+            controller.execute(
+                authorization.device.clone(),
+                request_id.to_owned(),
+                "deleteThread".into(),
+                json!({"threadId":id}),
+            )
+        };
+        let rejected = delete("delete-owned").await.unwrap();
+        assert_eq!(rejected["state"], "failed");
+        assert_eq!(rejected["result"]["code"], 409);
+        assert_eq!(rejected["result"]["notSent"], true);
+        assert!(
+            rejected["result"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("本次未删除")
+        );
+        assert_eq!(delete("delete-owned").await.unwrap(), rejected);
+        assert_eq!(
+            harness_engine_requests(directory.path())
+                .iter()
+                .filter(|frame| frame["method"] == "thread/delete")
+                .count(),
+            1,
+            "核对原拒绝回执不能重复派发删除"
+        );
+        // 模拟持有者释放；只允许用户使用新的请求标识明确再次删除，旧失败回执保持原样。
+        controller
+            .call_authorized(
+                "rename",
+                json!({"threadId":id,"title":"released"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let completed = delete("delete-released").await.unwrap();
+        assert_eq!(completed["state"], "completed");
+        assert_eq!(completed["result"]["deleted"], true);
+        assert_eq!(delete("delete-owned").await.unwrap(), rejected);
+        let audit = controller.harness.audit.snapshot();
+        let records: Vec<_> = audit["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|record| record["action"] == "deleteThread")
+            .collect();
+        assert_eq!(records.len(), 2);
+        for record in records {
+            assert_eq!(record["transports"], json!(["app-server-stdio"]));
+        }
+        assert_eq!(
+            harness_engine_requests(directory.path())
+                .iter()
+                .filter(|frame| frame["method"] == "thread/delete")
+                .count(),
+            2
+        );
         controller.harness.enabled.store(false, Ordering::Release);
         controller.harness.release().await;
     }
@@ -6532,7 +6628,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             json!({"ok":true,"threadId":id,"executionTransport":"app-server-stdio","outcomeUnknown":true}),
             json!({"ok":true,"threadId":id,"executionTransport":"app-server-stdio","deleted":false}),
             json!({"ok":true,"threadId":id,"executionTransport":"app-server-stdio","status":"partial"}),
-            json!({"ok":true,"threadId":id,"executionTransport":"app-server-stdio"}),
+            json!({"ok":true,"threadId":id,"executionTransport":"desktop-ipc"}),
             json!({"ok":true,"threadId":"fedcba98-7654-4321-8abc-0123456789ab","executionTransport":"app-server-stdio"}),
         ] {
             let mut changed = receipt.clone();
