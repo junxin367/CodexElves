@@ -1,7 +1,8 @@
 # Windows 正式远程服务更新
 
 适用于修改远程网页资源或兼容现有管理协议的服务代码后，直接更新正在使用的正式入口。
-当前网页资源通过 Rust `include_str!` / `include_bytes!` 内嵌，更新需要短暂切换远程服务进程。
+当前网页资源由 `crates/codex-elves-core/build.rs` 按目录规则生成 `include_bytes!` 内嵌，更新需要短暂切换远程服务进程；
+Prepare 按同一规则扫描 `assets/remote-access/` 计算目标资源清单，并核对候选程序已内嵌全部资源。
 脚本只编译服务宿主 `codex-elves-manager.exe`，通过原 launcher 拉起新后台，保留正在运行的管理器和本地代理。
 无需生成或执行安装包。
 

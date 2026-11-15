@@ -26,7 +26,7 @@ const deferredResourcePaths = new Set([
   "/icons/icon-192.png", "/icons/icon-512.png", "/icons/apple-touch-icon.png"
 ]);
 const criticalResourceOrder = [
-  "/", "/style.css", "/platform.js", "/pwa.js", "/markdown.js", "/app.js", "/select.js",
+  "/", "/style.css", "/platform.js", "/pwa.js", "/markdown.js", "/app.js",
   "/events-client.js", "/recovery-store.js", "/attachments.js", "/message-actions.js",
   "/events-worker.js", "/channels.js", "/diagnostics.js", "/session-tools.js", "/session-files.js", "/workspace-preview.js", "/session-menu.js"
 ];
@@ -431,10 +431,17 @@ async function notifyRecovery(path, error) {
     `当前版本资源暂不可用，请保留输入内容后重试或重新打开页面。${error.message}`, path);
 }
 
+// 入口 app.js 拆分出的 ui/core/features 模块同属首屏脚本，按目录紧随入口下载，新增模块无需在此登记；
+// 排序只影响后台安装的下载先后，清单中的非延后资源仍全部下载并校验。
+const criticalModuleDirectories = ["/ui/", "/core/", "/features/"];
+
 function requiredResources(manifest) {
+  const entryRank = criticalResourceOrder.indexOf("/app.js");
   const rank = path => {
     const index = criticalResourceOrder.indexOf(path);
-    return index < 0 ? criticalResourceOrder.length : index;
+    if (index >= 0) return index;
+    return criticalModuleDirectories.some(directory => path.startsWith(directory))
+      ? entryRank + 0.5 : criticalResourceOrder.length;
   };
   return manifest.files.filter(file => !deferredResourcePaths.has(file.path))
     .sort((first, second) => rank(first.path) - rank(second.path));

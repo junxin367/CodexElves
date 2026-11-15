@@ -277,12 +277,12 @@ Git 项目以当前 worktree 根目录为边界；非 Git 项目以会话实际�
 | 规则范围 | 主要实现 |
 | --- | --- |
 | 菜单、完成项展开、长按关闭与菜单缓存 | [`session-menu.js`](../assets/remote-access/session-menu.js) 的 `mountSessionMenu` |
-| 关联会话布局、创建回执、关闭/过期与返回 | [`app.js`](../assets/remote-access/app.js) 的 `syncRelatedSessionLayout`、`runRelatedOperation`、`retireNativeSideThreads`、`retireExpiredSideThread` |
+| 关联会话布局、创建回执、关闭/过期与返回 | [`features/session/related.js`](../assets/remote-access/features/session/related.js) 的 `syncRelatedSessionLayout`、`runRelatedOperation`、`retireNativeSideThreads`、`retireExpiredSideThread` |
 | 服务子智能体、侧边创建/标题/模型/历史 | `remote_access/harness/subagents.rs`、`sides.rs`、`reads.rs` |
 | 变更页与文件页 | [`session-tools.js`](../assets/remote-access/session-tools.js)、[`session-files.js`](../assets/remote-access/session-files.js) |
 | 工作区身份、鉴权与服务路由 | [`remote_access.rs`](../crates/codex-elves-core/src/remote_access.rs)、[`codex_service.rs`](../crates/codex-elves-core/src/codex_service.rs) |
 | 本地 Git、文件、版本协商及浏览器文件响应 | [`workspace.rs`](../crates/codex-elves-core/src/remote_access/workspace.rs) |
 | 线路选择与单次写入 | [`channels.js`](../assets/remote-access/channels.js) |
-| 展示缓存 | [`recovery-store.js`](../assets/remote-access/recovery-store.js) 与 `app.js` 的缓存接线 |
+| 展示缓存 | [`recovery-store.js`](../assets/remote-access/recovery-store.js)，缓存实例见 [`core/stores.js`](../assets/remote-access/core/stores.js)，会话展示缓存接线见 [`features/session/thread-cache.js`](../assets/remote-access/features/session/thread-cache.js) |
 
 功能使用说明见 [远程会话](remote-access.md)，验收方法与证据边界见 [远程回归说明](remote-access-e2e.md)。

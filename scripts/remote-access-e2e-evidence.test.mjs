@@ -1395,6 +1395,17 @@ test("源码输入丢失时拒绝生成看似有效的指纹", async t => {
   await assert.rejects(sourceFingerprint({ root }), /缺少必需输入/);
 });
 
+test("已跟踪但在工作区删除的输入不计入指纹，必需输入被删除仍拒绝", async t => {
+  const { root } = await sourceRepository(t);
+  await executeFile("git", ["-C", root, "add", "-A"], { windowsHide: true });
+  await rm(join(root, "assets/remote-access/markdown.js"));
+  const inputs = await listRemoteAccessSourceInputs({ root });
+  assert.ok(!inputs.includes("assets/remote-access/markdown.js"));
+  assert.match(await sourceFingerprint({ root }), /^[0-9a-f]{64}$/);
+  await rm(join(root, "assets/remote-access/app.js"));
+  await assert.rejects(sourceFingerprint({ root }), /缺少必需输入/);
+});
+
 test("证据引用按原始字节核对 SHA256、大小和相对路径", async t => {
   const root = await sandbox(t);
   const file = await put(root, "capture.json", "\uFEFF{\"ok\":true}\r\n");

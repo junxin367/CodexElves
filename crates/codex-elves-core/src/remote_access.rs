@@ -62,47 +62,12 @@ pub use frp_tunnel::program_directory as frp_program_directory;
 pub use service::{ensure_running as ensure_service_running, run as run_service};
 use zrok_tunnel::ZrokTunnelService;
 
-const WEB_HTML: &str = include_str!("../../../assets/remote-access/index.html");
-const WEB_JS: &str = include_str!("../../../assets/remote-access/app.js");
-const WEB_SELECT_JS: &str = include_str!("../../../assets/remote-access/select.js");
-const WEB_PERMISSIONS_JS: &str = include_str!("../../../assets/remote-access/permissions.js");
-const WEB_SESSION_TOOLS_JS: &str = include_str!("../../../assets/remote-access/session-tools.js");
-const WEB_SESSION_FILES_JS: &str = include_str!("../../../assets/remote-access/session-files.js");
-const WEB_FILE_PREVIEW_HTML: &str = include_str!("../../../assets/remote-access/file-preview.html");
-const WEB_WORKSPACE_PREVIEW_JS: &str =
-    include_str!("../../../assets/remote-access/workspace-preview.js");
-const WEB_SESSION_MENU_JS: &str = include_str!("../../../assets/remote-access/session-menu.js");
-const WEB_ATTACHMENTS_JS: &str = include_str!("../../../assets/remote-access/attachments.js");
-const WEB_SHA256_JS: &str = include_str!("../../../assets/remote-access/sha256.js");
-const WEB_RECOVERY_STORE_JS: &str = include_str!("../../../assets/remote-access/recovery-store.js");
-const WEB_EVENTS_CLIENT_JS: &str = include_str!("../../../assets/remote-access/events-client.js");
-const WEB_CHANNELS_JS: &str = include_str!("../../../assets/remote-access/channels.js");
-const WEB_DIAGNOSTICS_JS: &str = include_str!("../../../assets/remote-access/diagnostics.js");
-const WEB_EVENTS_WORKER_JS: &str = include_str!("../../../assets/remote-access/events-worker.js");
-const WEB_CSS: &str = include_str!("../../../assets/remote-access/style.css");
-const WEB_MARKDOWN_JS: &str = include_str!("../../../assets/remote-access/markdown.js");
-const WEB_MARKDOWN_RENDERER_JS: &str =
-    include_str!("../../../assets/remote-access/markdown-renderer.js");
-const WEB_MESSAGE_ACTIONS_JS: &str =
-    include_str!("../../../assets/remote-access/message-actions.js");
-const WEB_VENDOR_MARKED_JS: &str =
-    include_str!("../../../assets/remote-access/vendor/marked.esm.js");
-const WEB_VENDOR_DOMPURIFY_JS: &str =
-    include_str!("../../../assets/remote-access/vendor/dompurify.esm.js");
-const WEB_VENDOR_MERMAID_JS: &str =
-    include_str!("../../../assets/remote-access/vendor/mermaid.esm.js");
-const WEB_PLATFORM_JS: &str = include_str!("../../../assets/remote-access/platform.js");
-const WEB_PWA_JS: &str = include_str!("../../../assets/remote-access/pwa.js");
-const WEB_SERVICE_WORKER_JS: &str = include_str!("../../../assets/remote-access/sw.js");
+// 网页资源由 build.rs 按统一目录规则生成（见 scripts/remote-access-resources.mjs）；
+// 缓存恢复页不属于任一版本壳，单独内嵌并以 no-store 提供。
+include!(concat!(env!("OUT_DIR"), "/remote_web_assets.rs"));
 const WEB_CACHE_RECOVERY_HTML: &str =
     include_str!("../../../assets/remote-access/cache-recovery.html");
 const WEB_CACHE_RECOVERY_JS: &str = include_str!("../../../assets/remote-access/cache-recovery.js");
-const WEB_MANIFEST_WEBMANIFEST: &str =
-    include_str!("../../../assets/remote-access/manifest.webmanifest");
-const WEB_ICON_192_PNG: &[u8] = include_bytes!("../../../assets/remote-access/icons/icon-192.png");
-const WEB_ICON_512_PNG: &[u8] = include_bytes!("../../../assets/remote-access/icons/icon-512.png");
-const WEB_APPLE_TOUCH_ICON_PNG: &[u8] =
-    include_bytes!("../../../assets/remote-access/icons/apple-touch-icon.png");
 const COOKIE_NAME: &str = "codex_elves_device";
 const HARNESS_READ_GUIDANCE: &str = "远程会话服务暂时不可用，请稍后重试。";
 const MAX_DEVICES: usize = 32;
@@ -2012,197 +1977,10 @@ impl StaticWebAsset {
 
 fn web_assets() -> &'static HashMap<&'static str, StaticWebAsset> {
     WEB_ASSETS.get_or_init(|| {
-        HashMap::from([
-            (
-                "/",
-                StaticWebAsset::new("text/html; charset=utf-8", WEB_HTML.as_bytes()),
-            ),
-            (
-                "/app.js",
-                StaticWebAsset::new("application/javascript; charset=utf-8", WEB_JS.as_bytes()),
-            ),
-            (
-                "/select.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_SELECT_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/permissions.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_PERMISSIONS_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/session-tools.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_SESSION_TOOLS_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/session-files.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_SESSION_FILES_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/file-preview.html",
-                StaticWebAsset::new("text/html; charset=utf-8", WEB_FILE_PREVIEW_HTML.as_bytes()),
-            ),
-            (
-                "/workspace-preview.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_WORKSPACE_PREVIEW_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/session-menu.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_SESSION_MENU_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/attachments.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_ATTACHMENTS_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/sha256.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_SHA256_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/recovery-store.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_RECOVERY_STORE_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/events-client.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_EVENTS_CLIENT_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/events-worker.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_EVENTS_WORKER_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/channels.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_CHANNELS_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/diagnostics.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_DIAGNOSTICS_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/markdown.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_MARKDOWN_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/markdown-renderer.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_MARKDOWN_RENDERER_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/vendor/marked.esm.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_VENDOR_MARKED_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/vendor/dompurify.esm.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_VENDOR_DOMPURIFY_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/vendor/mermaid.esm.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_VENDOR_MERMAID_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/message-actions.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_MESSAGE_ACTIONS_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/platform.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_PLATFORM_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/pwa.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_PWA_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/sw.js",
-                StaticWebAsset::new(
-                    "application/javascript; charset=utf-8",
-                    WEB_SERVICE_WORKER_JS.as_bytes(),
-                ),
-            ),
-            (
-                "/style.css",
-                StaticWebAsset::new("text/css; charset=utf-8", WEB_CSS.as_bytes()),
-            ),
-            (
-                "/manifest.webmanifest",
-                StaticWebAsset::new(
-                    "application/manifest+json; charset=utf-8",
-                    WEB_MANIFEST_WEBMANIFEST.as_bytes(),
-                ),
-            ),
-            (
-                "/icons/icon-192.png",
-                StaticWebAsset::new("image/png", WEB_ICON_192_PNG),
-            ),
-            (
-                "/icons/icon-512.png",
-                StaticWebAsset::new("image/png", WEB_ICON_512_PNG),
-            ),
-            (
-                "/icons/apple-touch-icon.png",
-                StaticWebAsset::new("image/png", WEB_APPLE_TOUCH_ICON_PNG),
-            ),
-        ])
+        REMOTE_WEB_ASSETS
+            .iter()
+            .map(|&(path, content_type, bytes)| (path, StaticWebAsset::new(content_type, bytes)))
+            .collect()
     })
 }
 
@@ -2291,34 +2069,8 @@ fn strong_etag(bytes: &[u8]) -> HeaderValue {
 }
 
 fn is_static_web_asset_path(path: &str) -> bool {
-    matches!(
-        path,
-        "/" | "/app-resources.json"
-            | "/app.js"
-            | "/select.js"
-            | "/permissions.js"
-            | "/attachments.js"
-            | "/sha256.js"
-            | "/recovery-store.js"
-            | "/events-client.js"
-            | "/events-worker.js"
-            | "/channels.js"
-            | "/diagnostics.js"
-            | "/markdown.js"
-            | "/markdown-renderer.js"
-            | "/vendor/marked.esm.js"
-            | "/vendor/dompurify.esm.js"
-            | "/vendor/mermaid.esm.js"
-            | "/message-actions.js"
-            | "/platform.js"
-            | "/pwa.js"
-            | "/sw.js"
-            | "/style.css"
-            | "/manifest.webmanifest"
-            | "/icons/icon-192.png"
-            | "/icons/icon-512.png"
-            | "/icons/apple-touch-icon.png"
-    )
+    // 版本壳资源统一按 no-cache 提供并以 ETag 复验；/side-thread 等别名路由不在此列。
+    path == "/app-resources.json" || web_assets().contains_key(path)
 }
 
 fn accepts_gzip(headers: &HeaderMap) -> bool {
@@ -2482,41 +2234,17 @@ pub fn web_router(
         controller,
         settings,
     };
-    Router::new()
-        .route("/", get(static_web_asset))
+    // 版本壳资源按生成表逐项注册（含 "/"），新增网页模块无需在此登记。
+    let static_routes = REMOTE_WEB_ASSETS
+        .iter()
+        .fold(Router::new(), |router, &(path, _, _)| {
+            router.route(path, get(static_web_asset))
+        });
+    static_routes
         .route("/side-thread", get(static_web_asset))
         .route("/app-resources.json", get(static_web_asset))
-        .route("/app.js", get(static_web_asset))
-        .route("/select.js", get(static_web_asset))
-        .route("/permissions.js", get(static_web_asset))
-        .route("/session-tools.js", get(static_web_asset))
-        .route("/session-files.js", get(static_web_asset))
-        .route("/file-preview.html", get(static_web_asset))
-        .route("/workspace-preview.js", get(static_web_asset))
-        .route("/session-menu.js", get(static_web_asset))
-        .route("/attachments.js", get(static_web_asset))
-        .route("/sha256.js", get(static_web_asset))
-        .route("/recovery-store.js", get(static_web_asset))
-        .route("/events-client.js", get(static_web_asset))
-        .route("/events-worker.js", get(static_web_asset))
-        .route("/channels.js", get(static_web_asset))
-        .route("/diagnostics.js", get(static_web_asset))
-        .route("/markdown.js", get(static_web_asset))
-        .route("/markdown-renderer.js", get(static_web_asset))
-        .route("/vendor/marked.esm.js", get(static_web_asset))
-        .route("/vendor/dompurify.esm.js", get(static_web_asset))
-        .route("/vendor/mermaid.esm.js", get(static_web_asset))
-        .route("/message-actions.js", get(static_web_asset))
-        .route("/platform.js", get(static_web_asset))
-        .route("/pwa.js", get(static_web_asset))
-        .route("/sw.js", get(static_web_asset))
         .route("/cache-recovery.html", get(cache_recovery_asset))
         .route("/cache-recovery.js", get(cache_recovery_asset))
-        .route("/style.css", get(static_web_asset))
-        .route("/manifest.webmanifest", get(static_web_asset))
-        .route("/icons/icon-192.png", get(static_web_asset))
-        .route("/icons/icon-512.png", get(static_web_asset))
-        .route("/icons/apple-touch-icon.png", get(static_web_asset))
         .route("/api/login-status", get(login_status))
         .route("/api/entry-check", get(|| async { StatusCode::NOT_FOUND }))
         .route("/api/connect", post(connect))

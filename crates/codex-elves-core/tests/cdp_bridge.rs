@@ -264,17 +264,17 @@ fn remote_related_back_after_reload_uses_confirmed_parent_instead_of_old_history
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let script = r#"
 const assert=require("node:assert/strict");
-const source=require("node:fs").readFileSync(process.argv[1],"utf8");
-const from=source.indexOf("async function returnToParentSession(");
-const to=source.indexOf("function showSideCreation(",from);
+(async()=>{
+// 远程网页已按模块拆分：经共享辅助脚本在单个模块内截取函数源码（已去掉 import/export）。
+const {loadRemoteAppSource}=await import(require("node:url").pathToFileURL(process.argv[1]).href);
+const source=(await loadRemoteAppSource()).section("async function returnToParentSession(","function showSideCreation(");
 let backs=0,selections=[];
 const env={selectedId:"side",relatedHistoryKey:"related",relatedNavigationOwner:"current",
   relatedBackPending:false,relatedSessionView:{threadId:"side",parentThreadId:"parent",returnToParent:true},
   normalizeRelatedView:value=>value,validRelatedThreadId:value=>!!value,
   history:{state:{related:{threadId:"side",returnToParent:true}},back:()=>backs++},
   syncRelatedSessionLayout:()=>{},selectThread:async(id,options)=>selections.push([id,options])};
-const back=new Function("env",`with(env){${source.slice(from,to)}return returnToParentSession;}`)(env);
-(async()=>{
+const back=new Function("env",`with(env){${source}return returnToParentSession;}`)(env);
   await back();
   assert.equal(backs,0,"重载后的旧历史不能直接后退");
   assert.equal(selections[0][0],"parent");
@@ -288,7 +288,7 @@ const back=new Function("env",`with(env){${source.slice(from,to)}return returnTo
     let output = Command::new("node")
         .arg("-e")
         .arg(script)
-        .arg(repo.join("assets/remote-access/app.js"))
+        .arg(repo.join("scripts/remote-access-source.mjs"))
         .output()
         .unwrap();
     assert!(
@@ -298,13 +298,39 @@ const back=new Function("env",`with(env){${source.slice(from,to)}return returnTo
     );
 }
 
+/// 远程网页已拆分为入口 app.js 与 ui/core/features 模块；源码断言按全部模块合并后的文本核对，
+/// 不依赖具体实现位于哪个模块。
+fn remote_web_app_source(repo: &std::path::Path) -> String {
+    fn collect(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(&path, files);
+            } else if path.extension().is_some_and(|extension| extension == "js") {
+                files.push(path);
+            }
+        }
+    }
+    let root = repo.join("assets/remote-access");
+    let mut modules = Vec::new();
+    for directory in ["ui", "core", "features"] {
+        collect(&root.join(directory), &mut modules);
+    }
+    modules.sort();
+    std::iter::once(root.join("app.js"))
+        .chain(modules)
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn remote_refresh_keeps_main_thread_refresh_independent_from_sidebar_failure() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
         .expect("core crate should live under crates/codex-elves-core");
-    let script = std::fs::read_to_string(repo.join("assets/remote-access/app.js")).unwrap();
+    let script = remote_web_app_source(repo);
     assert!(script.contains("const sidebarRead = loadSidebar(null, { fresh }).catch(() => null);"));
     assert!(script.contains("await (id ? selectedId"));
     assert!(script.contains("await sidebarRead;"));
@@ -3809,11 +3835,12 @@ fn remote_prompt_optimization_keeps_draft_restore_and_edit_race_without_native_c
         .parent()
         .unwrap();
     let output = Command::new("node").arg("-e").arg(r##"
-const fs = require("node:fs"), vm = require("node:vm"), assert = require("node:assert/strict");
-const source = fs.readFileSync(process.argv[1], "utf8");
-const start = source.indexOf("function promptOptimizationScope()");
-const end = source.indexOf("function newChatProjectOptions(", start);
-assert.ok(start >= 0 && end > start);
+const vm = require("node:vm"), assert = require("node:assert/strict");
+(async () => {
+// 远程网页已按模块拆分：提示词优化位于独立模块，截取到模块末尾；跨模块状态 setter 由辅助脚本补齐。
+const { loadRemoteAppSource } = await import(require("node:url").pathToFileURL(process.argv[1]).href);
+const remote = await loadRemoteAppSource();
+const source = remote.section("function promptOptimizationScope()");
 const control = { dataset: {}, setAttribute() {} };
 const prompt = { value: "原始输入", disabled: false, focus() {} };
 let readOnly = false, responder, calls = 0, sequence = 0;
@@ -3831,8 +3858,7 @@ const context = {
   api: async (...args) => { calls++; return responder(...args); }
 };
 vm.createContext(context);
-vm.runInContext(source.slice(start, end), context);
-(async () => {
+remote.wireVm(vm).runInContext(source, context);
   context.updatePromptOptimization();
   assert.equal(control.disabled, false, "优化不能依赖 Codex 连接");
   responder = async () => ({ state: "completed", result: { state: "completed", text: "优化输入" } });
@@ -3853,7 +3879,7 @@ vm.runInContext(source.slice(start, end), context);
   readOnly = false; prompt.disabled = true; context.updatePromptOptimization();
   assert.equal(control.disabled, true, "保留编辑和删除等输入锁定");
 })().catch(error => { console.error(error); process.exitCode = 1; });
-"##).arg(repo.join("assets/remote-access/app.js")).output().unwrap();
+"##).arg(repo.join("scripts/remote-access-source.mjs")).output().unwrap();
     assert!(
         output.status.success(),
         "{}",

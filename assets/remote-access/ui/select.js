@@ -1,5 +1,11 @@
 // 远程页面统一使用主题设置的 Select；值更新、禁用选项和 change 事件在组件内处理。
 // 弹层由宿主提供，共用现有的定位、搜索、键盘导航、焦点恢复和 dialog 顶层规则。
+// createSelectComponent 保留依赖注入以便测试替换 DOM；页面直接使用本模块导出的默认实例，弹层宿主为 ui/popup.js。
+
+import { button, element } from "./dom.js";
+import { icon } from "./icons.js";
+import { activePopup, openPopup, registerSelectCommitter, renderPopup, togglePopup } from "./popup.js";
+
 export function createSelectComponent({ element, icon, button, togglePopup, openPopup, refreshPopup = () => {} }) {
   function setSelectValue(node, value) {
     value = String(value ?? "");
@@ -56,3 +62,10 @@ export function createSelectComponent({ element, icon, button, togglePopup, open
 
   return { selectControl, setSelectValue, setSelectOptions, commitSelectValue };
 }
+
+// 页面默认实例：弹层由 ui/popup.js 提供，重绘仅作用于当前打开的同一触发器。
+export const { selectControl, setSelectValue, setSelectOptions, commitSelectValue } = createSelectComponent({
+  element, icon, button, togglePopup, openPopup,
+  refreshPopup(node) { if (activePopup?.trigger === node) renderPopup(); }
+});
+registerSelectCommitter(commitSelectValue);

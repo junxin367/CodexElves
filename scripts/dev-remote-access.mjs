@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { STATUS_CODES, createServer, request } from "node:http";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { listRemoteWebResources, remoteAccessRoot } from "./remote-access-resources.mjs";
 
 const { values } = parseArgs({
   options: {
@@ -29,7 +30,7 @@ const eventsTransport = values["events-transport"];
 if (!["sse", "websocket"].includes(eventsTransport))
   throw new Error("事件传输方式必须是 sse 或 websocket");
 
-const assets = resolve(import.meta.dirname, "../assets/remote-access");
+const assets = remoteAccessRoot;
 const hosts = new Set([`localhost:${port}`, `127.0.0.1:${port}`]);
 const cookieName = "codex_elves_device";
 const devCookieName = "codex_elves_dev_device";
@@ -43,38 +44,10 @@ export function createRemoteEventStream() {
   return stream;
 }
 `;
-const files = new Map([
-  ["/", ["index.html", "text/html; charset=utf-8"]],
-  ["/app.js", ["app.js", "application/javascript; charset=utf-8"]],
-  ["/select.js", ["select.js", "application/javascript; charset=utf-8"]],
-  ["/permissions.js", ["permissions.js", "application/javascript; charset=utf-8"]],
-  ["/session-tools.js", ["session-tools.js", "application/javascript; charset=utf-8"]],
-  ["/session-files.js", ["session-files.js", "application/javascript; charset=utf-8"]],
-  ["/file-preview.html", ["file-preview.html", "text/html; charset=utf-8"]],
-  ["/workspace-preview.js", ["workspace-preview.js", "application/javascript; charset=utf-8"]],
-  ["/session-menu.js", ["session-menu.js", "application/javascript; charset=utf-8"]],
-  ["/attachments.js", ["attachments.js", "application/javascript; charset=utf-8"]],
-  ["/sha256.js", ["sha256.js", "application/javascript; charset=utf-8"]],
-  ["/recovery-store.js", ["recovery-store.js", "application/javascript; charset=utf-8"]],
-  ["/events-client.js", ["events-client.js", "application/javascript; charset=utf-8"]],
-  ["/events-worker.js", ["events-worker.js", "application/javascript; charset=utf-8"]],
-  ["/channels.js", ["channels.js", "application/javascript; charset=utf-8"]],
-  ["/diagnostics.js", ["diagnostics.js", "application/javascript; charset=utf-8"]],
-  ["/markdown.js", ["markdown.js", "application/javascript; charset=utf-8"]],
-  ["/markdown-renderer.js", ["markdown-renderer.js", "application/javascript; charset=utf-8"]],
-  ["/message-actions.js", ["message-actions.js", "application/javascript; charset=utf-8"]],
-  ["/platform.js", ["platform.js", "application/javascript; charset=utf-8"]],
-  ["/pwa.js", ["pwa.js", "application/javascript; charset=utf-8"]],
-  ["/sw.js", ["sw.js", "application/javascript; charset=utf-8"]],
-  ["/vendor/marked.esm.js", ["vendor/marked.esm.js", "application/javascript; charset=utf-8"]],
-  ["/vendor/dompurify.esm.js", ["vendor/dompurify.esm.js", "application/javascript; charset=utf-8"]],
-  ["/vendor/mermaid.esm.js", ["vendor/mermaid.esm.js", "application/javascript; charset=utf-8"]],
-  ["/style.css", ["style.css", "text/css; charset=utf-8"]],
-  ["/manifest.webmanifest", ["manifest.webmanifest", "application/manifest+json; charset=utf-8"]],
-  ["/icons/icon-192.png", ["icons/icon-192.png", "image/png"]],
-  ["/icons/icon-512.png", ["icons/icon-512.png", "image/png"]],
-  ["/icons/apple-touch-icon.png", ["icons/apple-touch-icon.png", "image/png"]]
-]);
+// 网页资源按 scripts/remote-access-resources.mjs 的统一规则在启动时从目录生成，新增或拆分模块无需在此登记；
+// 文件内容每次请求时读取，只有新增或删除资源文件后需要重启调试服务器。
+const files = new Map((await listRemoteWebResources(assets))
+  .map(({ route, file, contentType }) => [route, [file, contentType]]));
 const recoveryFiles = new Map([
   ["/cache-recovery.html", ["cache-recovery.html", "text/html; charset=utf-8"]],
   ["/cache-recovery.js", ["cache-recovery.js", "application/javascript; charset=utf-8"]]

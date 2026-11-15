@@ -98,40 +98,29 @@ def generatedWebAssets = layout.buildDirectory.dir("generated/webAssets")
 def remoteAssets = new File(repositoryRoot, "assets/remote-access")
 def resourceRevisionFile = new File(remoteAssets, "resource-revision.txt")
 
-def bundledWebResources = [
-    [source: "index.html", path: "/", contentType: "text/html; charset=utf-8"],
-    [source: "app.js", path: "/app.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "select.js", path: "/select.js", contentType: "application/javascript; charset=utf-8"],
-    // 权限菜单与实例设置共用该模块，Android 内置网页须与远程页面保留同一导入依赖。
-    [source: "permissions.js", path: "/permissions.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "diagnostics.js", path: "/diagnostics.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "session-tools.js", path: "/session-tools.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "session-files.js", path: "/session-files.js", contentType: "application/javascript; charset=utf-8"],
-    // 主网页共用独立预览的目标校验；Android 不开放 PC 菜单，但内置包仍须包含导入依赖，避免离线启动缺资源。
-    [source: "workspace-preview.js", path: "/workspace-preview.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "file-preview.html", path: "/file-preview.html", contentType: "text/html; charset=utf-8"],
-    [source: "session-menu.js", path: "/session-menu.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "attachments.js", path: "/attachments.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "sha256.js", path: "/sha256.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "events-client.js", path: "/events-client.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "events-worker.js", path: "/events-worker.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "channels.js", path: "/channels.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "markdown.js", path: "/markdown.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "markdown-renderer.js", path: "/markdown-renderer.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "vendor/marked.esm.js", path: "/vendor/marked.esm.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "vendor/dompurify.esm.js", path: "/vendor/dompurify.esm.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "vendor/mermaid.esm.js", path: "/vendor/mermaid.esm.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "message-actions.js", path: "/message-actions.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "platform.js", path: "/platform.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "pwa.js", path: "/pwa.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "recovery-store.js", path: "/recovery-store.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "sw.js", path: "/sw.js", contentType: "application/javascript; charset=utf-8"],
-    [source: "style.css", path: "/style.css", contentType: "text/css; charset=utf-8"],
-    [source: "manifest.webmanifest", path: "/manifest.webmanifest", contentType: "application/manifest+json; charset=utf-8"],
-    [source: "icons/icon-192.png", path: "/icons/icon-192.png", contentType: "image/png"],
-    [source: "icons/icon-512.png", path: "/icons/icon-512.png", contentType: "image/png"],
-    [source: "icons/apple-touch-icon.png", path: "/icons/apple-touch-icon.png", contentType: "image/png"]
+// 内置网页包按 scripts/remote-access-resources.mjs 的统一规则扫描 assets/remote-access 生成：
+// 按扩展名确定 MIME，index.html 提供为 "/"，缓存恢复页独立提供、不进入版本清单。
+// 新增或拆分网页模块无需在此登记；规则变化须同步服务端 build.rs、Windows 客户端 build.rs 与调试服务器。
+def remoteResourceContentTypes = [
+    "html": "text/html; charset=utf-8",
+    "js": "application/javascript; charset=utf-8",
+    "mjs": "application/javascript; charset=utf-8",
+    "css": "text/css; charset=utf-8",
+    "png": "image/png",
+    "webmanifest": "application/manifest+json; charset=utf-8"
 ]
+def separatelyServedResources = ["cache-recovery.html", "cache-recovery.js"]
+def bundledWebResources = {
+    def resources = []
+    remoteAssets.eachFileRecurse(groovy.io.FileType.FILES) { file ->
+        def source = remoteAssets.toPath().relativize(file.toPath()).toString().replace(File.separatorChar, '/' as char)
+        def dot = source.lastIndexOf('.')
+        def contentType = dot > source.lastIndexOf('/') ? remoteResourceContentTypes[source.substring(dot + 1)] : null
+        if (contentType == null || separatelyServedResources.contains(source)) return
+        resources << [source: source, path: source == "index.html" ? "/" : "/" + source, contentType: contentType]
+    }
+    resources.sort { a, b -> a.path <=> b.path }
+}
 
 def unsignedLongBigEndian = { long value ->
     byte[] result = new byte[8]
@@ -165,7 +154,7 @@ tasks.register("prepareBundledWebAssets") {
         def filesRoot = new File(outputRoot, "web/files")
         filesRoot.mkdirs()
 
-        def entries = bundledWebResources.collect { resource ->
+        def entries = bundledWebResources().collect { resource ->
             def source = new File(remoteAssets, resource.source)
             if (!source.isFile()) {
                 throw new GradleException("缺少 Android 内置网页资源：${resource.source}")

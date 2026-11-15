@@ -227,7 +227,7 @@ HTTP 成功不代表响应正文已完整读取。成功响应的正文读取或
 
 | 层次 | 资源和触发条件 | 对当前会话的影响 |
 | --- | --- | --- |
-| 基础页面 | HTML、CSS、`app.js`、事件连接、草稿恢复、附件和轻量 Markdown 入口；HTML 预加载直接模块依赖 | 优先完成登录、会话选择、消息读取和输入；不等待图表及格式库 |
+| 基础页面 | HTML、CSS、入口 `app.js` 及其静态依赖的 `ui/`、`core/`、`features/` 模块、事件连接、草稿恢复、附件和轻量 Markdown 入口；HTML 预加载入口的全部静态依赖 | 优先完成登录、会话选择、消息读取和输入；不等待图表及格式库 |
 | 正文格式及辅助资源 | 首次有正文时并行导入 `markdown-renderer.js`、Marked、DOMPurify；图标和格式库也进入空闲预下载队列 | 加载期间显示安全转义的纯文本；失败保留正文并提供有限重试，成功后原地恢复 Markdown、Skill、附件等显示 |
 | 图表 | Mermaid 静态文件随空闲队列预下载，仅在图表靠近可视区约 200 px 时导入并执行 | 较小的可选资源先准备；已挂载但离屏的图表暂不渲染；切换后清理旧观察项，回到会话后重新登记 |
 
@@ -251,7 +251,7 @@ Android APK 使用独立版本。设置页面底部左侧从原生外壳读取�
 
 ### 本机前端调试
 
-发布或修改远程网页资源后，先在 `apps/codex-elves-manager/` 执行 `npm run check`。该检查会按 ES module 语法解析 `assets/remote-access/` 下的 JavaScript，验证本地静态 `import` 目标存在，并核对开发入口和 Rust 远程服务是否都提供这些资源；`npm run build` 也会自动执行同一门禁。网页资源发生变化时同步递增 `assets/remote-access/resource-revision.txt`，让 Android/WebView 资源缓存识别新版本。
+发布或修改远程网页资源后，先在 `apps/codex-elves-manager/` 执行 `npm run check`。该检查会按 ES module 语法解析 `assets/remote-access/` 下的 JavaScript，验证本地 `import` 目标均为已提供的网页资源且具名导入在目标模块中存在、模块分层没有反向依赖、`index.html` 预加载覆盖入口的全部静态依赖，并核对服务端、Android 与 Windows 客户端的资源扫描规则一致；`npm run build` 也会自动执行同一门禁。网页资源按目录统一规则自动登记，新增或拆分模块无需修改服务端或调试入口，结构与约定见 [远程会话网页架构](remote-access-web-architecture.md)。网页资源发生变化时同步递增 `assets/remote-access/resource-revision.txt`，让 Android/WebView 资源缓存识别新版本。
 
 需要保持现有 `codex-elves.exe` 和真实会话运行时，在仓库根目录启动独立调试入口：
 
@@ -261,7 +261,7 @@ node .\scripts\dev-remote-access.mjs
 
 打开 `http://localhost:1432/`，使用现有远程访问密钥登录。需要直接查看指定会话时，可在地址后追加 `#thread=<会话 ID>`。调试入口只监听 `127.0.0.1`，默认将会话 API、图片和实时事件转发给现有 `http://127.0.0.1:45222`；不会启动或替换 launcher，不需要管理员权限或安装包。端口已占用时用 `--port 1433`，后端端口不同时用 `--upstream http://127.0.0.1:45223`。
 
-网页资源每次从 `assets/remote-access/` 读取，修改 JS/CSS 后刷新调试页即可；浏览器禁止缓存这些调试资源。默认使用 SSE 兼容旧版后端；后端已支持 WebSocket 时可指定 `--events-transport websocket`，仅转发 `/api/events/ws` 升级请求，不开放其它套接字或任意代理路径。调试页使用独立命名的设备 cookie，仍保留后端的登录校验、HttpOnly、SameSite 和 Secure 属性，不读取、保存或输出访问密钥。入口会检查本机 Host、同源 Origin 和跨站请求，再将合法请求转发给固定的本机后端。
+网页资源每次从 `assets/remote-access/` 读取，修改 JS/CSS 后刷新调试页即可；新增或删除资源文件后需重启调试入口，资源表在启动时按目录生成；浏览器禁止缓存这些调试资源。默认使用 SSE 兼容旧版后端；后端已支持 WebSocket 时可指定 `--events-transport websocket`，仅转发 `/api/events/ws` 升级请求，不开放其它套接字或任意代理路径。调试页使用独立命名的设备 cookie，仍保留后端的登录校验、HttpOnly、SameSite 和 Secure 属性，不读取、保存或输出访问密钥。入口会检查本机 Host、同源 Origin 和跨站请求，再将合法请求转发给固定的本机后端。
 
 管理器中「生成」仅填入候选访问密钥，点击右侧「保存」后才生效；明文及校验摘要保存在本机，输入框默认遮挡明文。成功保存不同的新密钥会撤销已有设备授权。若经用户明确同意，在浏览器中将已有设备授权复用于调试页，则两页共享同一设备授权，任一页点击「退出」都会使另一页失去授权。
 

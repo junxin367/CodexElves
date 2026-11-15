@@ -737,11 +737,15 @@ function sourceInputAllowed(path) {
 
 /** 使用 Git 的 ignore 规则，包括尚未提交但未被忽略的新模块。 */
 export async function listRemoteAccessSourceInputs({ root = repositoryRoot } = {}) {
-  const { stdout } = await executeFile("git", [
-    "-C", resolve(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...inputRoots,
-  ], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, windowsHide: true });
-  const paths = [...new Set(stdout.split("\0").filter(Boolean).map(path => path.replaceAll("\\", "/")))]
-    .filter(sourceInputAllowed).sort();
+  const list = async (...flags) => (await executeFile("git", [
+    "-C", resolve(root), "ls-files", "-z", ...flags, "--", ...inputRoots,
+  ], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, windowsHide: true })).stdout
+    .split("\0").filter(Boolean).map(path => path.replaceAll("\\", "/"));
+  // 工作区已删除但尚未提交删除的跟踪文件（如模块合并后移除的旧文件）不再属于当前源码，
+  // 不能因索引中仍有记录而读取失败；必需输入被删除时仍由下方核对拒绝生成指纹。
+  const deleted = new Set(await list("--deleted"));
+  const paths = [...new Set(await list("--cached", "--others", "--exclude-standard"))]
+    .filter(path => !deleted.has(path) && sourceInputAllowed(path)).sort();
   for (const path of essentialInputs) invariant(paths.includes(path), `源码指纹缺少必需输入：${path}`);
   return paths;
 }

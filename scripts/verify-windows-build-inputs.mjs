@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { listRemoteWebResources } from "./remote-access-resources.mjs";
 
 const repositoryRoot = resolve(process.argv[2] || resolve(import.meta.dirname, ".."));
 const sourceOnly = process.argv[3] === "--source-only";
@@ -8,6 +9,11 @@ const binaryDirectory = resolve(sourceOnly ? resolve(repositoryRoot, "target/rel
 const assetSource = readFileSync(resolve(repositoryRoot, "crates/codex-elves-core/src/assets.rs"), "utf8");
 const buildId = assetSource.match(/pub const DIAGNOSTIC_BUILD_ID:\s*&str\s*=\s*"([^"]+)"/)?.[1];
 if (!buildId) throw new Error("无法读取当前注入构建标识。");
+
+const remoteAccessDirectory = resolve(repositoryRoot, "assets/remote-access");
+// 网页资源清单与服务端、Android、Windows 客户端内嵌规则一致，打包核对覆盖全部资源而非手工挑选的部分文件。
+const remoteWebResources = await listRemoteWebResources(remoteAccessDirectory);
+const remoteWebSources = remoteWebResources.map(resource => `assets/remote-access/${resource.file}`);
 
 function verifyRemoteRuntimeSources({ backend, service, workspace, app }) {
   const failures = [];
@@ -31,7 +37,9 @@ const runtimeContract = verifyRemoteRuntimeSources({
   backend: readFileSync(resolve(repositoryRoot, "crates/codex-elves-core/src/remote_access.rs"), "utf8"),
   service: readFileSync(resolve(repositoryRoot, "crates/codex-elves-core/src/remote_access/service.rs"), "utf8"),
   workspace: readFileSync(resolve(repositoryRoot, "crates/codex-elves-core/src/remote_access/workspace.rs"), "utf8"),
-  app: readFileSync(resolve(repositoryRoot, "assets/remote-access/app.js"), "utf8"),
+  // 远程网页已拆分为入口与 ui/core/features 模块，运行时合同按全部网页脚本合并后核对。
+  app: remoteWebResources.filter(resource => /\.m?js$/.test(resource.file))
+    .map(resource => readFileSync(resolve(remoteAccessDirectory, resource.file), "utf8")).join("\n"),
 });
 
 // 用户要求更新后远程功能可用；共享 Cargo 产物可能被另一工作树覆盖，
@@ -43,31 +51,9 @@ const rendererSources = [
 ];
 const programs = [
   ["codex-elves.exe", rendererSources],
-  ["codex-elves-manager.exe", [
-    ...rendererSources,
-    "assets/remote-access/app.js",
-    "assets/remote-access/channels.js",
-    "assets/remote-access/pwa.js",
-    "assets/remote-access/recovery-store.js",
-    "assets/remote-access/session-files.js",
-    "assets/remote-access/workspace-preview.js",
-    "assets/remote-access/file-preview.html",
-    "assets/remote-access/session-menu.js",
-    "assets/remote-access/session-tools.js",
-    "assets/remote-access/style.css",
-  ]],
+  ["codex-elves-manager.exe", [...rendererSources, ...remoteWebSources]],
   // 用户要求独立客户端内置网页缓存；打包时也核对其内置资源，不能把旧网页包随新 EXE 一起交付。
-  ["codex-elves-remote.exe", [
-    "assets/remote-access/app.js",
-    "assets/remote-access/channels.js",
-    "assets/remote-access/pwa.js",
-    "assets/remote-access/recovery-store.js",
-    "assets/remote-access/session-files.js",
-    "assets/remote-access/workspace-preview.js",
-    "assets/remote-access/file-preview.html",
-    "assets/remote-access/session-tools.js",
-    "assets/remote-access/style.css",
-  ], false],
+  ["codex-elves-remote.exe", remoteWebSources, false],
 ];
 const failures = [];
 for (const [name, sources, requireBuildId = true] of sourceOnly ? [] : programs) {

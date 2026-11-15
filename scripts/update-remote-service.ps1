@@ -235,26 +235,33 @@ function Assert-RemoteUpdateState($Expected, [string]$Directory) {
 }
 
 function Get-RemoteUpdateSource([string]$Repository) {
-    $source = Get-Content -LiteralPath (Join-Path $Repository "crates/codex-elves-core/src/remote_access.rs") -Raw
     $assetRoot = Join-Path $Repository "assets/remote-access"
-    $constants = @{}
-    $includes = [regex]::Matches($source, 'const\s+(\w+):\s*[^=]+=\s*include_(?:str|bytes)!\("\.\./\.\./\.\./assets/remote-access/([^"]+)"\);')
-    foreach ($include in $includes) { $constants[$include.Groups[1].Value] = Join-Path $assetRoot $include.Groups[2].Value }
-    $start = $source.IndexOf("fn web_assets()")
-    if ($start -lt 0) { throw "无法识别网页资源定义。" }
-    $end = $source.IndexOf("struct AppResourcesManifest", $start)
-    if ($start -lt 0 -or $end -le $start) { throw "无法识别网页资源定义。" }
-    $routes = [regex]::Matches($source.Substring($start, $end - $start),
-        '"(/[^"]*)"\s*,\s*StaticWebAsset::new\(\s*"([^"]+)"\s*,\s*(\w+)(?:\.as_bytes\(\))?\s*,?\s*\)')
-    $files = foreach ($route in $routes) {
-        $path = $constants[$route.Groups[3].Value]
-        if (-not $path) { throw "网页资源缺少源码映射：$($route.Groups[1].Value)" }
+    # 网页资源清单与服务端内嵌规则一致（scripts/remote-access-resources.mjs、crates/codex-elves-core/build.rs）：
+    # 扫描 assets/remote-access 全部子目录，按扩展名（区分大小写）确定 MIME，index.html 提供为 "/"；
+    # 缓存恢复页独立内嵌、不进入版本清单，但仍须内嵌在候选程序中。规则变化时须同步上述实现。
+    $separatelyServed = @("cache-recovery.html", "cache-recovery.js")
+    $rootPath = [IO.Path]::GetFullPath($assetRoot).TrimEnd([char[]]@('\', '/'))
+    $embedded = [Collections.Generic.List[string]]::new()
+    $files = foreach ($item in Get-ChildItem -LiteralPath $rootPath -File -Recurse -Force) {
+        $relative = $item.FullName.Substring($rootPath.Length + 1).Replace('\', '/')
+        $contentType = switch -CaseSensitive ($item.Extension) {
+            ".html" { "text/html; charset=utf-8" }
+            ".js" { "application/javascript; charset=utf-8" }
+            ".mjs" { "application/javascript; charset=utf-8" }
+            ".css" { "text/css; charset=utf-8" }
+            ".png" { "image/png" }
+            ".webmanifest" { "application/manifest+json; charset=utf-8" }
+            default { $null }
+        }
+        if (-not $contentType) { continue }
+        $embedded.Add($item.FullName)
+        if ($relative -cin $separatelyServed) { continue }
         [pscustomobject]@{
-            path = $route.Groups[1].Value; contentType = $route.Groups[2].Value
-            size = (Get-Item -LiteralPath $path).Length; sha256 = Get-RemoteUpdateHash $path
+            path = if ($relative -ceq "index.html") { "/" } else { "/$relative" }
+            contentType = $contentType; size = $item.Length; sha256 = Get-RemoteUpdateHash $item.FullName
         }
     }
-    if (@($files).Count -lt 3 -or "/app.js" -notin $files.path -or "/style.css" -notin $files.path) {
+    if (@($files).Count -lt 3 -or "/app.js" -cnotin $files.path -or "/style.css" -cnotin $files.path) {
         throw "网页资源映射不完整。"
     }
     $revisionPath = Join-Path $assetRoot "resource-revision.txt"
@@ -265,7 +272,7 @@ function Get-RemoteUpdateSource([string]$Repository) {
     if (-not $protocol.Success) { throw "无法识别服务管理协议。" }
     [pscustomobject]@{
         revision = $revision; files = @($files | Sort-Object path)
-        embeddedPaths = @(@($constants.Values) + @($revisionPath) | Sort-Object -Unique)
+        embeddedPaths = @(@($embedded) + @($revisionPath) | Sort-Object -Unique)
         managementProtocolVersion = [int]$protocol.Groups[1].Value
     }
 }
