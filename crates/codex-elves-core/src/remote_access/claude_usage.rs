@@ -3,11 +3,17 @@ use super::{Claude, WslConfig, now_ms};
 use anyhow::Context;
 use serde_json::{Value, json};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-// 用户要求 Claude 额度与本地统计缓存保留 72 小时；前端仍按刷新周期发起读取，命中缓存时不重复启动 CLI。
-const CACHE_TTL: Duration = Duration::from_secs(72 * 60 * 60);
+// 用户要求打开 Claude 会话时编辑区底部额度能立即显示，同时数据要及时刷新（2026-11-15 调整，原为统一缓存 72 小时）：
+// - 最近一次成功读取的 CLI 原始结果按原采集时间保留 72 小时，只用于先行显示，读取失败不覆盖、不延长采集时间；
+// - 距上次读取超过 60 秒（与网页 claudeUsageRefreshMs 一致）即重新经原生 CLI 读取：已有保留结果时先返回并在后台刷新，
+//   响应带 refreshing 让网页提前复查；没有可显示结果时等待本次读取。失败同样按 60 秒退避，不反复启动 CLI。
+// 本地统计详情同样 60 秒刷新、72 小时保留。网页 features/composer/claude-usage.js 的刷新周期与显示上限须同步核对。
+const USAGE_REFRESH: Duration = Duration::from_secs(60);
+const USAGE_RETENTION_MS: u64 = 72 * 60 * 60 * 1000;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_CONTROL_FRAME: usize = 512 * 1024;
 const PRICE_SOURCE: &str =
@@ -18,15 +24,19 @@ const MAX_PRICE_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) struct CachedUsage {
     config: WslConfig,
+    // 最近一次 CLI 读取（成功或失败）的完成时间：60 秒内复用，也作为失败退避。
     checked: Instant,
-    response: Value,
+    // 最近一次读到有效额度的原始响应；失败不覆盖，按其 observedAtMs 保留 72 小时。
+    retained: Option<Value>,
 }
 
 pub(super) struct CachedLocalUsage {
     config: WslConfig,
+    // 最近一次本地扫描（成功或失败）的完成时间：60 秒内不重复扫描日志。
     checked: Instant,
     windows: Value,
-    metrics: Value,
+    // 同一窗口最近一次成功的统计及其采集时间（毫秒），保留 72 小时供普通读取附带。
+    retained: Option<(u64, Value)>,
 }
 
 #[derive(Default)]
@@ -39,7 +49,7 @@ pub(super) struct PriceCache {
 
 impl Claude {
     pub async fn session_subscription_usage(
-        &self,
+        self: &Arc<Self>,
         id: &str,
         allow_probe: bool,
         include_local: bool,
@@ -50,7 +60,7 @@ impl Claude {
     }
 
     pub async fn subscription_usage(
-        &self,
+        self: &Arc<Self>,
         config: WslConfig,
         allow_probe: bool,
         include_local: bool,
@@ -77,20 +87,46 @@ impl Claude {
         Ok(response)
     }
 
-    async fn account_usage(&self, config: &WslConfig, allow_probe: bool) -> anyhow::Result<Value> {
+    async fn account_usage(
+        self: &Arc<Self>,
+        config: &WslConfig,
+        allow_probe: bool,
+    ) -> anyhow::Result<Value> {
+        let instance = config.instance_id();
+        // 先查缓存且不持有实例锁：其他请求或后台刷新正在等待 CLI 时，打开会话仍能立即拿到保留结果。
+        let (cached, refresh) = cached_usage(
+            self.subscription_usage_cache.lock().await.get(&instance),
+            config,
+            allow_probe,
+        );
+        if refresh {
+            let lock = self.lock(&format!("subscription-usage:{instance}")).await;
+            // 已有读取在途时不再排队后台任务；在途读取完成后网页复查即可拿到新结果。
+            if lock.try_lock().is_ok() {
+                let claude = Arc::clone(self);
+                let config = config.clone();
+                tokio::spawn(async move {
+                    let _ = claude.read_account_usage(&config).await;
+                });
+            }
+        }
+        match cached {
+            Some(response) => Ok(response),
+            None => self.read_account_usage(config).await,
+        }
+    }
+
+    async fn read_account_usage(&self, config: &WslConfig) -> anyhow::Result<Value> {
         let instance = config.instance_id();
         let lock = self.lock(&format!("subscription-usage:{instance}")).await;
         let _guard = lock.lock().await;
-        if let Some(cached) = self.subscription_usage_cache.lock().await.get(&instance)
-            && cached.config == *config
-            && cached.checked.elapsed() < CACHE_TTL
-        {
-            return Ok(cached.response.clone());
-        }
-        let empty = json!({"ok":true,"backend":"claude","instanceId":instance,"usage":null});
-        // 只读设备可查看同一实例的新鲜缓存，但不能因此启动可能加载用户配置的 CLI。
-        if !allow_probe {
-            return Ok(empty);
+        // 等锁期间其他请求或后台刷新可能刚完成读取：60 秒内（含失败退避）直接复用，不重复启动 CLI。
+        if let (Some(response), false) = cached_usage(
+            self.subscription_usage_cache.lock().await.get(&instance),
+            config,
+            true,
+        ) {
+            return Ok(response);
         }
         let usage = match native_usage(config).await {
             Ok((value, account_email)) => {
@@ -99,14 +135,23 @@ impl Claude {
             // 旧 CLI、不适用的认证或读取失败均保持未知；不回退到凭据读取、HTTP 或第三方服务。
             Err(_) => Value::Null,
         };
-        let mut response = empty;
-        response["usage"] = usage;
-        self.subscription_usage_cache.lock().await.insert(
+        let response = json!({"ok":true,"backend":"claude","instanceId":instance,"usage":usage});
+        let mut cache = self.subscription_usage_cache.lock().await;
+        // 读取失败不覆盖同一实例仍保留的有效结果，也不刷新它的采集时间。
+        let retained = if response["usage"].is_object() {
+            Some(response.clone())
+        } else {
+            cache
+                .get(&instance)
+                .filter(|cached| cached.config == *config)
+                .and_then(|cached| cached.retained.clone())
+        };
+        cache.insert(
             instance,
             CachedUsage {
                 config: config.clone(),
                 checked: Instant::now(),
-                response: response.clone(),
+                retained,
             },
         );
         Ok(response)
@@ -120,42 +165,64 @@ impl Claude {
         }
         let lock = self.lock(&format!("subscription-local:{instance}")).await;
         let _guard = lock.lock().await;
-        if let Some(cached) = self.cached_local_usage(config, usage).await {
-            return cached;
-        }
-        if !allow_probe {
-            return Value::Null;
+        // 60 秒内（含失败退避）不重复扫描日志，直接返回同窗口仍保留的统计；只读设备也只看保留结果。
+        let recent = self
+            .local_usage_cache
+            .lock()
+            .await
+            .get(&instance)
+            .is_some_and(|cached| {
+                cached.config == *config
+                    && cached.windows == windows
+                    && cached.checked.elapsed() < USAGE_REFRESH
+            });
+        if recent || !allow_probe {
+            return self
+                .cached_local_usage(config, usage)
+                .await
+                .unwrap_or(Value::Null);
         }
         let prices = self.local_usage_prices().await;
         let metrics = local_metrics(config, windows.clone(), prices)
             .await
             .unwrap_or(Value::Null);
-        // 失败只让详情显示未知；不清空原生额度，不阻断会话或反复启动扫描。
-        self.local_usage_cache.lock().await.insert(
+        // 失败只让详情显示未知；不清空原生额度，不阻断会话或反复启动扫描，也不覆盖同窗口已保留的统计。
+        let succeeded = ["fiveHour", "sevenDay"]
+            .iter()
+            .any(|key| metrics[*key].is_object());
+        let mut cache = self.local_usage_cache.lock().await;
+        let retained = if succeeded {
+            Some((now_ms(), metrics.clone()))
+        } else {
+            cache
+                .get(&instance)
+                .filter(|cached| cached.config == *config && cached.windows == windows)
+                .and_then(|cached| cached.retained.clone())
+        };
+        cache.insert(
             instance,
             CachedLocalUsage {
                 config: config.clone(),
                 checked: Instant::now(),
                 windows,
-                metrics: metrics.clone(),
+                retained: retained.clone(),
             },
         );
-        metrics
+        if succeeded {
+            metrics
+        } else {
+            retained.map_or(Value::Null, |(_, metrics)| metrics)
+        }
     }
 
     async fn cached_local_usage(&self, config: &WslConfig, usage: &Value) -> Option<Value> {
-        if let Some(cached) = self
-            .local_usage_cache
-            .lock()
-            .await
-            .get(&config.instance_id())
-            && cached.config == *config
+        let cache = self.local_usage_cache.lock().await;
+        let cached = cache.get(&config.instance_id())?;
+        let (collected, metrics) = cached.retained.as_ref()?;
+        (cached.config == *config
             && cached.windows == local_windows(usage)
-            && cached.checked.elapsed() < CACHE_TTL
-        {
-            return Some(cached.metrics.clone());
-        }
-        None
+            && within_retention(Some(*collected)))
+        .then(|| metrics.clone())
     }
 
     async fn local_usage_prices(&self) -> Value {
@@ -194,6 +261,44 @@ impl Claude {
         }
         cache.models.clone()
     }
+}
+
+/// 用缓存回答额度读取，返回（响应，是否需要后台刷新）；响应为 None 表示没有可显示结果，须等待本次 CLI 读取。
+fn cached_usage(
+    cached: Option<&CachedUsage>,
+    config: &WslConfig,
+    allow_probe: bool,
+) -> (Option<Value>, bool) {
+    let cached = cached.filter(|cached| cached.config == *config);
+    let recent = cached.is_some_and(|cached| cached.checked.elapsed() < USAGE_REFRESH);
+    let retained = cached
+        .and_then(|cached| cached.retained.as_ref())
+        .filter(|response| within_retention(response["usage"]["observedAtMs"].as_u64()));
+    match retained {
+        // 超过刷新周期：先返回保留结果供底部立即显示，后台经 CLI 刷新，网页据 refreshing 提前复查。
+        Some(response) if allow_probe && !recent => {
+            let mut response = response.clone();
+            response["refreshing"] = json!(true);
+            (Some(response), true)
+        }
+        Some(response) => (Some(response.clone()), false),
+        // 只读设备只看保留结果，不能因此启动可能加载用户配置的 CLI；刷新周期内的失败按退避返回未知。
+        None if !allow_probe || recent => (
+            Some(
+                json!({"ok":true,"backend":"claude","instanceId":config.instance_id(),"usage":null}),
+            ),
+            false,
+        ),
+        None => (None, false),
+    }
+}
+
+/// 原采集时间仍在 72 小时保留期内（允许 30 秒时钟误差），与网页 claudeUsageMaxAgeMs 的判断一致。
+fn within_retention(observed_at: Option<u64>) -> bool {
+    let now = now_ms();
+    observed_at.is_some_and(|at| {
+        at > 0 && at <= now + 30_000 && now.saturating_sub(at) < USAGE_RETENTION_MS
+    })
 }
 
 fn local_windows(usage: &Value) -> Value {
@@ -639,7 +744,7 @@ mod tests {
             CachedUsage {
                 config: config.clone(),
                 checked: Instant::now(),
-                response: response.clone(),
+                retained: Some(response.clone()),
             },
         );
         assert_eq!(
@@ -671,13 +776,16 @@ mod tests {
                     .is_null()
             );
         }
+        // 保留期按原采集时间计算：超过 72 小时不能再显示（用毫秒时间模拟，避免 Instant 回拨超过开机时长而溢出）。
         claude
             .subscription_usage_cache
             .lock()
             .await
             .get_mut(&config.instance_id())
             .unwrap()
-            .checked = Instant::now() - CACHE_TTL;
+            .retained
+            .as_mut()
+            .unwrap()["usage"]["observedAtMs"] = json!(now_ms() - USAGE_RETENTION_MS);
         assert!(
             claude
                 .subscription_usage(config, false, false)
@@ -685,6 +793,84 @@ mod tests {
                 .unwrap()["usage"]
                 .is_null()
         );
+    }
+
+    #[test]
+    fn usage_cache_refreshes_after_a_minute_and_keeps_retained_result_for_display() {
+        let config = WslConfig::default();
+        let response = |observed: u64| {
+            json!({"ok":true,"backend":"claude","instanceId":config.instance_id(),
+                "usage":{"source":"claude-native-usage","observedAtMs":observed,
+                    "fiveHour":{"usedPercentage":24,"resetsAt":null}}})
+        };
+        let empty =
+            json!({"ok":true,"backend":"claude","instanceId":config.instance_id(),"usage":null});
+        let entry = |age: Duration, retained: Option<Value>| CachedUsage {
+            config: config.clone(),
+            checked: Instant::now() - age,
+            retained,
+        };
+        let stale = USAGE_REFRESH + Duration::from_secs(1);
+        let fresh = response(now_ms());
+        let recent = entry(Duration::ZERO, Some(fresh.clone()));
+        assert_eq!(
+            cached_usage(Some(&recent), &config, true),
+            (Some(fresh), false),
+            "一分钟内直接复用，不启动 CLI"
+        );
+        let older = response(now_ms() - 30 * 60 * 1000);
+        let expired = entry(stale, Some(older.clone()));
+        let mut refreshing = older.clone();
+        refreshing["refreshing"] = json!(true);
+        assert_eq!(
+            cached_usage(Some(&expired), &config, true),
+            (Some(refreshing), true),
+            "超过一分钟先返回保留结果供立即显示，并在后台刷新"
+        );
+        assert_eq!(
+            cached_usage(Some(&expired), &config, false),
+            (Some(older.clone()), false),
+            "只读设备只看保留结果，不触发刷新"
+        );
+        assert_eq!(
+            cached_usage(
+                Some(&entry(Duration::ZERO, Some(older.clone()))),
+                &config,
+                true
+            ),
+            (Some(older), false),
+            "刷新失败后的退避期内保留原结果和原采集时间"
+        );
+        assert_eq!(
+            cached_usage(Some(&entry(Duration::ZERO, None)), &config, true),
+            (Some(empty.clone()), false),
+            "失败退避期内不重复启动 CLI"
+        );
+        assert_eq!(
+            cached_usage(Some(&entry(stale, None)), &config, true),
+            (None, false),
+            "没有可显示结果时等待本次读取"
+        );
+        let outdated = entry(stale, Some(response(now_ms() - USAGE_RETENTION_MS)));
+        assert_eq!(
+            cached_usage(Some(&outdated), &config, true),
+            (None, false),
+            "超过 72 小时的结果不能再显示"
+        );
+        assert_eq!(
+            cached_usage(Some(&outdated), &config, false),
+            (Some(empty.clone()), false)
+        );
+        let other = WslConfig {
+            user: "another-user".into(),
+            ..config.clone()
+        };
+        assert_eq!(
+            cached_usage(Some(&recent), &other, true),
+            (None, false),
+            "其他实例或用户不能复用"
+        );
+        assert_eq!(cached_usage(None, &config, false), (Some(empty), false));
     }
 
     #[test]
@@ -749,7 +935,7 @@ mod tests {
             CachedUsage {
                 config: config.clone(),
                 checked: Instant::now(),
-                response: response.clone(),
+                retained: Some(response.clone()),
             },
         );
         assert_eq!(
@@ -767,7 +953,7 @@ mod tests {
                 config: config.clone(),
                 checked: Instant::now(),
                 windows: local_windows(&response["usage"]),
-                metrics: metrics.clone(),
+                retained: Some((now_ms(), metrics.clone())),
             },
         );
         let cached = claude
@@ -807,7 +993,7 @@ mod tests {
             .await
             .get_mut(&config.instance_id())
             .unwrap()
-            .checked = Instant::now() - CACHE_TTL;
+            .retained = Some((now_ms() - USAGE_RETENTION_MS, metrics.clone()));
         assert!(
             claude
                 .subscription_usage(config.clone(), false, false)
@@ -830,15 +1016,31 @@ mod tests {
                 config: config.clone(),
                 checked: Instant::now(),
                 windows: local_windows(&usage),
-                metrics: Value::Null,
+                retained: None,
             },
         );
-        assert_eq!(
-            claude.cached_local_usage(&config, &usage).await,
-            Some(Value::Null),
-            "已缓存的失败与从未读取必须区分，避免反复扫描"
+        assert!(
+            claude.local_usage(&config, &usage, true).await.is_null(),
+            "已缓存的失败与从未读取必须区分，一分钟内不反复扫描"
         );
-        assert!(claude.local_usage(&config, &usage, true).await.is_null());
+        assert!(claude.usage_prices.lock().await.attempted.is_none());
+        assert!(
+            claude.cached_local_usage(&config, &usage).await.is_none(),
+            "失败不产生可随普通读取附带的详情"
+        );
+        let metrics = json!({"fiveHour":{"source":"claude-wsl-local-journal","usedTokens":110}});
+        claude
+            .local_usage_cache
+            .lock()
+            .await
+            .get_mut(&config.instance_id())
+            .unwrap()
+            .retained = Some((now_ms() - 600_000, metrics.clone()));
+        assert_eq!(
+            claude.local_usage(&config, &usage, true).await,
+            metrics,
+            "失败退避期间仍返回同窗口保留的统计，且不重新扫描"
+        );
         assert!(claude.usage_prices.lock().await.attempted.is_none());
         let changed = WslConfig {
             executable: "/other/claude".into(),

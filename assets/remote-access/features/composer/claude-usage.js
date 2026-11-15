@@ -28,7 +28,13 @@ function claudeUsageContext() {
   return { key: JSON.stringify([owner, instanceId]), owner, instanceId, canRead: connected && (creating || !!current),
     payload: { backend: "claude", instanceId, ...(!creating ? { threadId: selectedId } : {}) } };
 }
-const claudeUsageRefreshMs = 60000, claudeUsageMaxAgeMs = 72 * 60 * 60 * 1000;
+// 用户要求打开 Claude 会话时底部额度先显示缓存、数据又要及时刷新：每 60 秒读取一次，电脑端距上次读取超过 60 秒即经 CLI 重新读取；
+// 72 小时只是原采集时间的显示上限，不是刷新周期。电脑端先返回保留结果并在后台刷新（refreshing）时，5 秒后复查以尽快换上新数据。
+// 电脑端 crates/codex-elves-core/src/remote_access/claude_usage.rs 的 USAGE_REFRESH / USAGE_RETENTION_MS 须同步核对。
+const claudeUsageRefreshMs = 60000, claudeUsageFollowUpMs = 5000, claudeUsageMaxAgeMs = 72 * 60 * 60 * 1000;
+function claudeUsageRefreshDelay(state) {
+  return state?.refreshing ? claudeUsageFollowUpMs : claudeUsageRefreshMs;
+}
 const claudeUsageCache = new Map();
 function rememberClaudeUsage(state = claudeUsageState) {
   const owner = privateInputScope(session);
@@ -40,7 +46,7 @@ function rememberClaudeUsage(state = claudeUsageState) {
   if (state.owner === owner && claudeUsageWindows(state.value).length) {
     // 用户要求打开时先显示缓存；仅在内存中按授权和实例保存最近有效数据，切会话/前后台不丢失。
     claudeUsageCache.set(state.key, { owner, value: state.value, checkedAt: state.checkedAt,
-      details: state.details, detailsRead: state.detailsRead });
+      refreshing: state.refreshing === true, details: state.details, detailsRead: state.detailsRead });
     // 最多保留 16 个最近使用实例，且仍受 72 小时真实采集时间约束，不保存 DOM、请求或凭据。
     while (claudeUsageCache.size > 16) claudeUsageCache.delete(claudeUsageCache.keys().next().value);
   }
@@ -326,7 +332,7 @@ function scheduleClaudeUsageUpdate() {
       [metrics?.observedAtMs, metrics?.costObservedAtMs, metrics?.tokensObservedAtMs]) : [])]
     .filter(claudeUsageNumber).map(at => at + claudeUsageMaxAgeMs).filter(at => at > now);
   // 刷新和 72 小时数据失效分别计时；失败退避不能延长真实数据寿命，窗口到期也不能继续显示旧额度。
-  const deadlines = [...(context.canRead && !state.pending ? [state.checkedAt + claudeUsageRefreshMs] : []), ...expiry,
+  const deadlines = [...(context.canRead && !state.pending ? [state.checkedAt + claudeUsageRefreshDelay(state)] : []), ...expiry,
     ...windows.filter(window => window.resetAt != null).map(window => window.resetAt)];
   if (!deadlines.length) { state.timer = null; return; }
   state.timer = setTimeout(() => {
@@ -343,14 +349,14 @@ export function syncClaudeUsage() {
     resetClaudeUsage({ hideTrigger: false });
     const cached = claudeUsageCache.get(context.key);
     claudeUsageState = { key: context.key, owner: context.owner, value: cached?.value || null,
-      checkedAt: cached?.checkedAt || 0, pending: false, controller: null, timer: null, tip: null,
+      checkedAt: cached?.checkedAt || 0, refreshing: cached?.refreshing === true, pending: false, controller: null, timer: null, tip: null,
       details: cached?.details || null, detailsRead: cached?.detailsRead || null, detailsPending: false, detailsController: null };
   }
   const state = claudeUsageState;
   if (!context.canRead) pauseClaudeUsage(state);
   renderClaudeUsage();
   if (!context.canRead) { scheduleClaudeUsageUpdate(); return; }
-  if (!state.pending && Date.now() - state.checkedAt >= claudeUsageRefreshMs) {
+  if (!state.pending && Date.now() - state.checkedAt >= claudeUsageRefreshDelay(state)) {
     state.pending = true;
     const controller = new AbortController();
     state.controller = controller;
@@ -360,6 +366,8 @@ export function syncClaudeUsage() {
         if (claudeUsageState !== state || state.controller !== controller || controller.signal.aborted) return;
         if (result?.ok !== true || result.backend !== "claude" || result.instanceId !== context.instanceId)
           throw new Error("Claude 额度响应无效");
+        // 电脑端先返回保留结果并在后台经 CLI 刷新时按 5 秒复查，新结果到达后恢复 60 秒周期。
+        state.refreshing = result.refreshing === true;
         const value = result.usage, windows = claudeUsageWindows(value);
         // 读取暂未返回有效窗口时保留该实例仍有效的快照；采集时间不更新，超时/重置仍按原边界失效。
         if (!windows.length && claudeUsageWindows(state.value).length) return;
@@ -377,7 +385,10 @@ export function syncClaudeUsage() {
         }
       })
       .catch(error => {
-        if (claudeUsageState === state && state.controller === controller && [401, 403].includes(error.code)) {
+        if (claudeUsageState !== state || state.controller !== controller) return;
+        // 请求失败或响应无效时不按刷新在途提前复查，回到 60 秒退避。
+        state.refreshing = false;
+        if ([401, 403].includes(error.code)) {
           state.value = null; state.details = null; claudeUsageCache.delete(state.key);
         }
       })

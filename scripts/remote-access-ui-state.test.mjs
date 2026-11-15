@@ -1178,6 +1178,31 @@ test("Claude 首次读取前按满额显示，真实额度返回后立即替换"
   assert.doesNotMatch(h.trigger.attributes["aria-label"], /当前按满额显示/);
 });
 
+test("Claude 打开会话先显示电脑端保留额度，后台刷新时 5 秒复查，新数据到达后恢复一分钟周期", async () => {
+  const h = claudeUsageHarness(), flush = () => new Promise(resolve => setImmediate(resolve));
+  const retained = h.usage(40);
+  h.advance(2 * 3600000);
+  h.context.mountClaudeUsage(); h.context.syncClaudeUsage();
+  h.requests[0].resolve({ ok: true, backend: "claude", instanceId: h.context.instance, usage: retained, refreshing: true });
+  await flush();
+  assert.equal(h.trigger.children[1].children[1].textContent, "60%", "打开会话立即显示保留结果，不等待 CLI");
+  assert.equal(h.context.claudeUsageState.value.observedAtMs, retained.observedAtMs, "保留结果沿用原采集时间");
+  assert.ok([...h.timers.values()].some(timer => timer.delay === 5005), "电脑端后台刷新期间 5 秒后复查");
+  h.advance(4000); h.context.syncClaudeUsage();
+  assert.equal(h.requests.length, 1, "复查间隔内不重复读取");
+  h.advance(1000); h.context.syncClaudeUsage();
+  assert.equal(h.requests.length, 2);
+  h.requests[1].resolve({ ok: true, backend: "claude", instanceId: h.context.instance, usage: h.usage(30) });
+  await flush();
+  assert.equal(h.trigger.children[1].children[1].textContent, "70%", "复查拿到新数据后立即替换");
+  assert.ok([...h.timers.values()].some(timer => timer.delay === 60005), "新数据到达后恢复一分钟刷新周期");
+  h.advance(5000); h.context.syncClaudeUsage();
+  assert.equal(h.requests.length, 2, "未标记刷新时不提前读取");
+  h.advance(55000); h.context.syncClaudeUsage();
+  h.requests[2].reject(new Error("临时网络失败")); await flush();
+  assert.equal(h.context.claudeUsageState.refreshing, false, "请求失败不按刷新在途提前复查");
+});
+
 test("Claude 额度按授权和实例隔离，切换后拒绝迟到响应，停用或后台页面不读取", async () => {
   const { context, trigger, requests, timers, usage } = claudeUsageHarness();
   const flush = () => new Promise(resolve => setImmediate(resolve));
