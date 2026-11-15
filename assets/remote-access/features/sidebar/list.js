@@ -1,6 +1,7 @@
 // 侧栏列表：分页读取、最近/项目分组渲染与客户端未读角标同步；本地已读、优先显示、桌面端观察与折叠分组等状态在 list-state.js。
 
 import { $, button, element } from "../../ui/dom.js";
+import { copyText } from "../../ui/clipboard.js";
 import { icon } from "../../ui/icons.js";
 import { notice } from "../../ui/notice.js";
 import { activePopup, closePopup, fitPopup, openPopup } from "../../ui/popup.js";
@@ -41,6 +42,40 @@ import { checkThreadDeletion, deleteSidebarThread, threadDeletionConflict } from
 function clientUnreadBadgeAvailable() {
   return !workspaceSidePanel && typeof window.__CODEX_ELVES_UNREAD_BADGE__?.setCount === "function";
 }
+
+// 用户要求会话列表右键菜单移除“打开会话”，改为复制可复用的会话命令和项目路径；
+// CLI 命令仅在后端提供原生连接命令时显示，项目路径仅复制当前列表项明确提供的 cwd。
+export function threadMenuOptions(item, {
+  pinned = false, deletion = null, deleting = false, independentWindow = false,
+  deletionCheckPending = false, deletionConflict = false,
+  openWindow, togglePinned, rename, deleteThread
+} = {}) {
+  const command = typeof item?.cliCommand === "string" ? item.cliCommand.trim() : "";
+  const projectPath = typeof item?.cwd === "string" ? item.cwd.trim() : "";
+  const options = [];
+  if (command) options.push({
+    value: "copyCommand", label: "复制会话命令", icon: "copy", action: () => void copyText(command)
+  });
+  if (projectPath) options.push({
+    value: "copyProjectPath", label: "复制项目路径", icon: "copy", action: () => void copyText(projectPath)
+  });
+  if (independentWindow) options.push({
+    value: "openWindow", label: "打开独立窗口", icon: "window",
+    disabled: !!deletion, action: openWindow
+  });
+  options.push(
+    { label: pinned ? "取消置顶会话" : "置顶会话", icon: "pin", disabled: !!deletion, action: togglePinned },
+    { value: "rename", label: "重命名", icon: "edit", disabled: !!deletion, action: rename },
+    { value: "deleteThread",
+      label: deleting ? deletion?.state === "submitting" ? "正在删除会话…" : "核对删除结果" : "删除会话",
+      icon: "trash", danger: true,
+      disabled: deleting ? deletion?.state === "submitting" || deletionCheckPending
+        : !!deletion || deletionConflict,
+      action: deleteThread }
+  );
+  return options;
+}
+
 export function syncClientUnreadBadge(value = sidebar) {
   if (!clientUnreadBadgeAvailable()) return;
   // 数字来自完整的当前侧栏快照，搜索、分组折叠及会话实例快捷筛选不改变未读总数。
@@ -265,19 +300,16 @@ export function renderSidebar() {
       const pinned = pinnedIds.has(item.id) || item.pinned;
       const deletion = threadDeletions.get(threadDeletionKey(item.id));
       const deleting = deletion && deletion.state !== "confirming";
-      const menu = rowMenu(domId("thread-menu", `${scope}:${item.id}`), `${item.title} 的会话菜单`, [
-        { label: "打开会话", icon: "chat", action: () => void openThread(item).catch(error => notice(error.message, true)) },
-        ...(independentThreadWindowAvailable() ? [{ value: "openWindow", label: "打开独立窗口", icon: "window",
-          disabled: !!deletion, action: () => openIndependentThreadWindow(item) }] : []),
-        { label: pinned ? "取消置顶会话" : "置顶会话", icon: "pin", disabled: !!deletion,
-          action: () => changeSidebar({ threadId: item.id, pinned: !pinned }) },
-        { value: "rename", label: "重命名", icon: "edit", disabled: !!deletion,
-          action: () => renameSidebarThread(item) },
-        { value: "deleteThread", label: deleting ? deletion.state === "submitting" ? "正在删除会话…" : "核对删除结果" : "删除会话",
-          icon: "trash", danger: true, disabled: deleting ? deletion.state === "submitting" || threadDeletionChecks.has(threadDeletionKey(item.id))
-            : !!deletion || threadDeletionConflict(item.id),
-          action: () => deleting ? checkThreadDeletion(deletion) : deleteSidebarThread(item) }
-      ]);
+      const menu = rowMenu(domId("thread-menu", `${scope}:${item.id}`), `${item.title} 的会话菜单`,
+        threadMenuOptions(item, {
+          pinned, deletion, deleting, independentWindow: independentThreadWindowAvailable(),
+          deletionCheckPending: threadDeletionChecks.has(threadDeletionKey(item.id)),
+          deletionConflict: threadDeletionConflict(item.id),
+          openWindow: () => openIndependentThreadWindow(item),
+          togglePinned: () => changeSidebar({ threadId: item.id, pinned: !pinned }),
+          rename: () => renameSidebarThread(item),
+          deleteThread: () => deleting ? checkThreadDeletion(deletion) : deleteSidebarThread(item)
+        }));
       menu.popupClassName = "thread-row-popup";
       container.append(menu);
       bindSidebarRowMenu(container, menu);

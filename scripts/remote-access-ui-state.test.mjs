@@ -2083,6 +2083,32 @@ test("会话菜单分离子智能体读取和侧边写入，并按连接代次�
   assert.deepEqual(Array.from(context.permissions(context.readContext())), [false, false]);
 });
 
+test("会话列表右键菜单移除打开会话并复制可用命令和项目路径", () => {
+  const copied = [], context = nodeVm.createContext({
+    copyText: value => copied.push(value),
+  });
+  nodeVm.runInContext(sourceSection("function threadMenuOptions(", "function syncClientUnreadBadge("), context);
+  const callbacks = {
+    openWindow() {}, togglePinned() {}, rename() {}, deleteThread() {},
+  };
+  const options = context.threadMenuOptions({
+    id: "claude-01234567-89ab-4cde-8fab-0123456789ab",
+    cliCommand: "wsl.exe --distribution claude-us --user junes claude attach 1234",
+    cwd: "E:\\workspace\\CodexElves",
+  }, { ...callbacks, independentWindow: true });
+  assert.deepEqual(Array.from(options, option => option.label), [
+    "复制会话命令", "复制项目路径", "打开独立窗口", "置顶会话", "重命名", "删除会话"
+  ]);
+  options[0].action(); options[1].action();
+  assert.deepEqual(copied, [
+    "wsl.exe --distribution claude-us --user junes claude attach 1234",
+    "E:\\workspace\\CodexElves",
+  ]);
+  const withoutCommand = context.threadMenuOptions({ cwd: "E:\\workspace\\CodexElves" }, callbacks);
+  assert.equal(withoutCommand.some(option => option.label === "复制会话命令"), false);
+  assert.equal(withoutCommand.some(option => option.label === "打开会话"), false);
+});
+
 test("Claude 原生子代理身份走本类型路由，读取能力独立于侧边会话且详情保持只读", () => {
   const parent = "claude-00000000-0000-4000-8000-000000000001";
   const child = "claude-agent-00000000-0000-4000-8000-000000000001-agent_fixture";
@@ -5981,6 +6007,7 @@ function toolRenderer() {
     element, icon: () => element("svg"),
     isSubagentItem: () => false, transcriptEventTypes: new Set(),
     skillReadInfo: () => null, renderToolOutput: () => {},
+    claudeQuestionReplies: () => null, renderClaudeQuestionReply: () => element("article"),
     genericToolPresentation: () => ({ description: "测试工具", icon: "tool" }),
     commandText: item => item.command || "",
   };
@@ -11073,12 +11100,13 @@ test("Claude 类型跟随已有会话身份，新建草稿和能力与 Codex 分
 });
 
 function claudeExecutionFeedbackHarness(turn) {
+  const initialTurns = Array.isArray(turn) ? turn : [turn];
   const makeNode = (textContent = "") => ({ dataset: {}, children: [], textContent,
     scrollTop: 0, scrollHeight: 0, querySelector: () => null, append(...children) { this.children.push(...children); } });
   const root = makeNode(), activities = [];
   const context = nodeVm.createContext({ nativeConnectionVersion: 1,
     selectedId: "claude-fixture", thread: { id: "claude-fixture", status: { type: "idle" } },
-    turns: new Map([[turn.id, turn]]), renderedItems: new Map(), renderedTurns: new Map(), renderedActivities: new Map(),
+    turns: new Map(initialTurns.map(value => [value.id, value])), renderedItems: new Map(), renderedTurns: new Map(), renderedActivities: new Map(),
     messageFrame: null, followMessages: true, composerScroll: null, relatedSessionView: null,
     editingMessage: null, editingQueuedMessage: null, pending: null, busy: false, stopping: false, connected: true,
     historyError: "", historyCursor: null, historyInitialized: true, historyScrollTop: 0, markdownRenderVersion: 0,
@@ -11095,6 +11123,7 @@ function claudeExecutionFeedbackHarness(turn) {
       || ["completed", "failed", "interrupted"].includes(item?.status),
     threadReadOnly: () => false, threadSentMessageEditAllowed: () => false, compactionLocked: () => false,
     renderItem: item => makeNode(item.text || item.type), renderMessageActions() {}, renderEditedFiles: () => null,
+    claudeQuestionReplies: () => null, renderClaudeQuestionReply: () => makeNode(),
     renderActivity: (value, work, running) => {
       const presentation = context.activityPresentation(value, running);
       activities.push({ ...presentation, running, work: Array.from(work, item => item.id) });
@@ -11145,7 +11174,7 @@ test("Claude 正文渲染兜底把迟到的手动完成压缩放到最终回复�
     ["render-fallback:input", "render-fallback:reply", "render-fallback:compact"]);
 });
 
-test("Claude 手动压缩位于已编辑文件和任务清单之后", () => {
+test("Claude 手动压缩位于已编辑文件之后，任务清单固定在正文末尾", () => {
   const turn = { id: "render-tail", _nativeUserId: "native-render-tail",
     status: "failed", plan: [{ step: "保留任务清单", status: "completed" }], items: [
       { id: "input", type: "userMessage" },
@@ -11166,8 +11195,69 @@ test("Claude 手动压缩位于已编辑文件和任务清单之后", () => {
   assert.ok(compact, "手动压缩节点必须被渲染");
   assert.ok(children.indexOf(editedFiles) < children.indexOf(compact),
     "压缩提示必须位于已编辑文件卡片之后");
-  assert.ok(children.indexOf(planTitle) < children.indexOf(compact),
-    "压缩提示必须位于任务清单之后");
+  const plan = h.root.children.at(-1);
+  assert.equal(plan.dataset.planScope, "claude-session");
+  assert.equal(plan.children[0], planTitle);
+  assert.ok(h.root.children.indexOf(plan) > 0 && h.root.children.indexOf(plan) > h.root.children.indexOf(h.root.children[0]),
+    "Claude 任务清单必须位于所有轮次之后");
+});
+
+test("Claude 任务清单只显示最新快照并随正文刷新保持在最下方", () => {
+  const first = { id: "plan-first", _nativeUserId: "native-plan-first", status: "completed",
+    plan: [{ step: "旧任务", status: "completed" }],
+    items: [{ id: "input", type: "userMessage" }, { id: "reply", type: "agentMessage", text: "第一轮" }] };
+  const second = { id: "plan-second", _nativeUserId: "native-plan-second", status: "completed",
+    plan: [{ step: "新任务", status: "inProgress" }],
+    items: [{ id: "input", type: "userMessage" }, { id: "reply", type: "agentMessage", text: "第二轮" }] };
+  const h = claudeExecutionFeedbackHarness([first, second]);
+  h.context.renderTurnPlanTitle = plan => h.context.element("div", "turn-plan-title", `${plan.length} 个任务`);
+  h.render();
+  let plan = h.root.children.at(-1);
+  assert.equal(plan.dataset.planScope, "claude-session");
+  assert.deepEqual(Array.from(h.root.children, node => node.dataset.planScope || "turn"), ["turn", "turn", "claude-session"]);
+  assert.equal(plan.children[1].children[0].textContent, "◌ 新任务");
+  assert.equal(h.root.children[0].children.some(node => node.dataset.planScope), false,
+    "旧轮次不能继续显示过期清单");
+
+  second.plan = [
+    { step: "新任务", status: "completed" },
+    { step: "收尾", status: "pending" },
+  ];
+  h.render();
+  plan = h.root.children.at(-1);
+  assert.equal(plan.children[0].textContent, "2 个任务");
+  assert.deepEqual(Array.from(plan.children[1].children, node => node.textContent), ["✓ 新任务", "○ 收尾"]);
+
+  second.plan = [];
+  h.render();
+  assert.equal(h.root.children.at(-1).dataset.planScope, undefined,
+    "最新清单为空时不能继续显示旧快照");
+});
+
+test("Claude 提问回答保留未回答题目并按受鉴权地址显示截图，拒答回退工具卡片", () => {
+  const context = nodeVm.createContext({});
+  nodeVm.runInContext(sourceSection("function claudeQuestionReplies(", "function renderClaudeQuestionReply("), context);
+  const item = {
+    type: "dynamicToolCall", source: "claude", tool: "AskUserQuestion", status: "completed",
+    arguments: { questions: [
+      { question: "选择方案？", header: "方案" },
+      { question: "提交吗？", header: "提交" },
+    ] },
+    questionAnswers: [
+      { question: "选择方案？", answer: "方案一", images: [{ url: "inline:answer-image" }] },
+      { question: "提交吗？", answer: null, images: [] },
+    ],
+    remoteImages: [{ source: "inline:answer-image", url: "/api/images/answer-image-12345678901234567890" }],
+  };
+  const replies = context.claudeQuestionReplies(item);
+  assert.equal(replies.length, 2);
+  assert.equal(replies[0].answer, "方案一");
+  assert.equal(replies[0].images[0].source, "inline:answer-image");
+  assert.equal(replies[0].images[0].asset.url, "/api/images/answer-image-12345678901234567890");
+  assert.equal(replies[1].answer, null);
+  assert.equal(context.claudeQuestionReplies({
+    ...item, questionAnswers: [{ question: "选择方案？", answer: null, images: [] }],
+  }), null, "拒答或没有结构化答案时保留原生工具卡片");
 });
 
 test("Claude 回复生成前的压缩仍保留原位置，不统一移动到最终回复之后", () => {

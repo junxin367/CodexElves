@@ -78,6 +78,10 @@ export function renderMessages(keepScroll = true) {
   if (reconcileSentMessageDisplays(selectedId, currentThreadDisplay()?.queuedMessages)) renderQueueArea();
   const sorted = withSentMessageDisplays();
   const lastRealTurn = [...sorted].reverse().find(turn => turns.has(turn.id));
+  // 用户要求 Claude 原生任务清单属于整个会话：用原生轮次标记识别 Claude，
+  // 后续只保留按时间顺序遇到的最新 plan，统一放到正文所有轮次之后。
+  const claudeSession = sorted.some(turn => turn?._nativeUserId);
+  let claudePlan = null;
   loadMessageSkillChoices(sorted.flatMap(turn => turn.items || []));
   if (historyError && sorted.length)
     children.push(historyLoadButton("最新记录加载失败，重试", () => void loadHistory()));
@@ -226,7 +230,7 @@ export function renderMessages(keepScroll = true) {
       }
       items.push(note);
     }
-    if (turn.plan?.length) {
+    if (!claudeSession && turn.plan?.length) {
       const plan = element("ul", "turn-plan");
       for (const step of turn.plan) plan.append(element("li", step.status, `${step.status === "completed" ? "✓" : step.status === "inProgress" ? "◌" : "○"} ${step.step}`));
       items.push(renderTurnPlanTitle(turn.plan), plan);
@@ -236,6 +240,18 @@ export function renderMessages(keepScroll = true) {
     for (const item of trailingManualCompactions) items.push(renderMessage(item));
     reconcileChildren(group, items);
     if (items.length) children.push(group);
+    if (claudeSession && Array.isArray(turn.plan)) claudePlan = turn.plan;
+  }
+  if (claudeSession && claudePlan?.length) {
+    const plan = element("section", "claude-session-plan");
+    plan.dataset.planScope = "claude-session";
+    const title = renderTurnPlanTitle(claudePlan);
+    const list = element("ul", "turn-plan");
+    for (const step of claudePlan)
+      list.append(element("li", step.status,
+        `${step.status === "completed" ? "✓" : step.status === "inProgress" ? "◌" : "○"} ${step.step}`));
+    plan.append(title, list);
+    children.push(plan);
   }
   if (!sorted.length) children.push(creating ? welcomeNode()
     : selectedId && (!historyInitialized || historyError) ? historyPlaceholder()
