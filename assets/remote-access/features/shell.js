@@ -65,6 +65,7 @@ import {
   markMessageChannelUnavailable, setAuthenticationRequired
 } from "./session/connection-state.js";
 import { activeInstanceId, newChatBackendOptions } from "./session/instances.js";
+import { mountWorkspaceOpenIn } from "./session/open-in.js";
 import { disconnect, refreshConnectionFromIndicator } from "./session/lifecycle.js";
 import { showLogin } from "./session/login.js";
 import { relatedSessionView, relatedThreadOperations, stopRelatedSessionTimers } from "./session/related-state.js";
@@ -79,7 +80,7 @@ import {
   announceAppReady, closeMobileSidebar, composerScroll, desktopSidebarOpen, messagesResizeObserver,
   sessionMenu, sessionTools, setCloseMobileSidebar, setComposerScroll, setDesktopSidebarOpen,
   setMessagesResizeObserver, setSessionMenu, setSessionTools, setSidebarLayoutCleanup,
-  setSyncRelatedSidebarLayout, sidebarLayoutCleanup, syncRelatedSidebarLayout
+  setSyncRelatedSidebarLayout, setWorkspaceOpenIn, sidebarLayoutCleanup, syncRelatedSidebarLayout, workspaceOpenIn
 } from "./shell-state.js";
 import { changeSidebar, openWorkspaceFileContextMenu, sidebarFilters } from "./sidebar/actions.js";
 import { renderSessionFilter } from "./sidebar/filters.js";
@@ -91,6 +92,7 @@ export function shell() {
   sessionMenu?.dispose(); setSessionMenu(null);
   stopRelatedSessionTimers();
   sessionTools?.dispose(); setSessionTools(null);
+  workspaceOpenIn?.dispose(); setWorkspaceOpenIn(null);
   closeContextUsageTip();
   resetClaudeUsage();
   resetComposerMetrics();
@@ -125,6 +127,9 @@ export function shell() {
   (composerTooltips || setComposerTooltips(installComposerTooltips()));
   // 用户要求移除顶部 CLI 连接按钮，不再创建或按会话类型恢复该入口。
   $("#open-sidebar").append(icon("menu"));
+  // 用户要求 Open in 位于会话菜单左侧；独立客户端内创建，右侧标签页开关保持原有位置。
+  setWorkspaceOpenIn(mountWorkspaceOpenIn({ anchor: $("#open-session-tools"),
+    beforeOpen: () => { sessionMenu?.close(); closeComposerMenus(); } }));
   $("#related-session-back").onclick = () => void returnToParentSession().catch(error => notice(error.message, true));
   $("#prompt-optimize").onclick = () => void activatePromptOptimization();
   $("#fast-button").onclick = () => void toggleRemoteFast();

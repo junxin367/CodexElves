@@ -46,6 +46,7 @@ mod harness;
 mod image_preview;
 mod instances;
 mod ngrok_tunnel;
+mod open_in;
 mod permissions;
 mod preferences;
 mod primary_route;
@@ -1111,6 +1112,12 @@ impl RemoteAccessController {
         mut payload: Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
+        if action == "openWorkspace" {
+            // 工作区打开使用独立原生实现，但沿用持久回执，浏览器/网关重试不能重复启动应用。
+            return open_in::dispatch(payload, authorization)
+                .await
+                .map_err(Into::into);
+        }
         if action == "setPermissions" {
             let id = payload["threadId"]
                 .as_str()
@@ -2307,6 +2314,8 @@ pub fn web_router(
         .route("/api/workspace/files", post(workspace::files))
         .route("/api/workspace/file", post(workspace::file))
         .route("/api/workspace/open-browser", post(workspace::open_browser))
+        .route("/api/workspace/open-in-targets", post(open_in::targets))
+        .route("/api/workspace/open-in", post(open_in::open))
         .route(
             "/api/workspace/view/{thread_id}/{*path}",
             get(workspace::view),
@@ -3087,7 +3096,7 @@ async fn session(
         "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
         "sendText":native_write_available || service_connected,
         "sideThreads":true,"serviceSideThreads":true,"subagents":true,"serviceSubagents":true,
-        "sessionMetrics":true,
+        "sessionMetrics":true,"workspaceOpenIn":cfg!(windows),
         "claudeSessions":true,"claudeProjectTrust":true,"claudeSubscriptionUsage":true}})))
 }
 

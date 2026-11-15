@@ -171,6 +171,7 @@ CodexElves 通过独立 launcher 启动桌面应用并注入增强脚本。桌�
 
 ## 更多文档
 
+- [产品规范](docs/product-standards.md)：已确认的产品行为与交互体验约定，包括菜单展开方向和特殊定位例外。
 - [远程会话移动端指南](docs/remote-access-mobile.md)：面向使用者的连接步骤、GIF 与手机界面说明。
 - [远程会话技术说明](docs/remote-access.md)：公网入口、权限、协议、状态恢复与本机调试。
 - [会话工具说明](docs/remote-session-tools.md)：当前菜单、工作区读取、侧边会话和原生/service 路由边界。

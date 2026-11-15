@@ -21,7 +21,7 @@ export async function api(path, body, id, signal, { resourcePriority = "foregrou
   // 16 KiB/s 包含 base64 上传；12 MiB 图片可等待约 18 分钟，仍有有限上限。
   const actionTimeout = path.startsWith("/api/action/")
     ? Math.min(20 * 60000, 90000 + Math.ceil(new TextEncoder().encode(encodedBody || "").length / 16384) * 1000) : 0;
-  const timeout = ["/api/diagnostics", "/api/workspace/context"].includes(path) || path.startsWith("/api/settings/") ? 45000 : path.startsWith("/api/read/") ? 60000
+  const timeout = ["/api/diagnostics", "/api/workspace/context", "/api/workspace/open-in-targets"].includes(path) || path.startsWith("/api/settings/") ? 45000 : path.startsWith("/api/read/") ? 60000
     : path === "/api/session" || path.startsWith("/api/receipts/") ? 15000 : actionTimeout;
   const controller = timeout ? new AbortController() : null;
   const abort = () => controller?.abort(signal?.reason);

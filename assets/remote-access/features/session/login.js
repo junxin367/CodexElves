@@ -45,7 +45,7 @@ import { connect, disconnect } from "./lifecycle.js";
 import { resetRelatedSessions } from "./related.js";
 import {
   announceAppReady, composerScroll, sessionTools, setCloseMobileSidebar, setComposerScroll,
-  setSessionTools, setSidebarLayoutCleanup, sidebarLayoutCleanup
+  setSessionTools, setSidebarLayoutCleanup, setWorkspaceOpenIn, sidebarLayoutCleanup, workspaceOpenIn
 } from "../shell-state.js";
 import { setSidebarBusy, setSidebarPreferenceScope } from "../sidebar/actions.js";
 import {
@@ -58,6 +58,7 @@ export function showLogin() {
   resetNewChatBranch();
   resetRelatedSessions();
   sessionTools?.dispose(); setSessionTools(null);
+  workspaceOpenIn?.dispose(); setWorkspaceOpenIn(null);
   stopGoalLiveTimer();
   closePopup(); closeContextUsageTip();
   composerScroll?.dispose(); setComposerScroll(null);

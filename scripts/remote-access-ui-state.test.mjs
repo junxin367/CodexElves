@@ -2756,7 +2756,8 @@ test("会话菜单跟随侧栏、右侧面板及关联页动画移动，静止�
     h.frame();
     assert.equal(writes.length, initialWrites, "布局不变时只读锚点，不反复写样式");
     for (const [left, top, expectedLeft] of [[1000, 24, 732], [500, 28, 500],
-      [584, 28, 316], [850, 28, 582], [1138, 20, 870]]) {
+      [584, 28, 584], [763, 28, 763], [764, 28, 496], [765, 28, 497],
+      [850, 28, 582], [1138, 20, 870]]) {
       h.move({ left, top }); h.frame();
       assert.equal(context.menu.style.left, `${expectedLeft}px`);
       assert.equal(context.menu.style.top, `${top + 32 + 10}px`);
@@ -2781,6 +2782,10 @@ test("会话菜单保持 PC 短窗口宽度、手机比例及可视视口边界"
   assert.equal(context.menu.style.left, "492px", "右侧保留 8px");
   assert.equal(context.menu.style.top, "92px");
   assert.equal(context.menu.style.maxHeight, "320px");
+  h.move({ left: 538, top: 50 }); h.frame();
+  assert.equal(context.menu.style.left, "492px", "带偏移视口中，65% 分界前向右展开并保持边缘避让");
+  h.move({ left: 539, top: 50 }); h.frame();
+  assert.equal(context.menu.style.left, "271px", "带偏移视口中，入口中心恰好到达 65% 时向左展开");
   h.move({ left: 104, top: 400 }); h.frame();
   assert.equal(context.menu.style.left, "108px", "左侧保留 8px");
   assert.equal(context.menu.style.top, "432px");

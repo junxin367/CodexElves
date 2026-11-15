@@ -210,6 +210,7 @@ export async function requestRemote(path, options, consume, measurements = chann
       || /^\/api\/receipts\/[a-zA-Z0-9-]{1,100}$/.test(pathname))
     || options.method === "POST" && (/^\/api\/read\/[a-zA-Z]+$/.test(pathname)
       || ["/api/workspace/context", "/api/workspace/changes", "/api/workspace/change", "/api/workspace/files", "/api/workspace/file",
+        "/api/workspace/open-in-targets",
         "/api/settings/environments"].includes(pathname));
   let candidates = orderedRoutes(routes().filter(route => supportsRequest(route, path, options.method)), measurements);
   if (!candidates.length) throw notSubmitted("当前没有可用的请求线路，请等待连接恢复后重试。");

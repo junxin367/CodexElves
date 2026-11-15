@@ -152,6 +152,7 @@ pub(super) fn read_path(method: &Method, path: &str) -> bool {
                         | "/api/workspace/change"
                         | "/api/workspace/files"
                         | "/api/workspace/file"
+                        | "/api/workspace/open-in-targets"
                         | "/api/settings/environments"
                 )
         }
@@ -169,6 +170,8 @@ pub(super) fn request_path(method: &Method, path: &str) -> bool {
                     | "/api/settings/instructions"
                     // 打开本机浏览器有副作用，不能归入允许自动重试的文件读取。
                     | "/api/workspace/open-browser"
+                    // 打开工作区同样只提交一次；不能因超时或换线路再次启动应用。
+                    | "/api/workspace/open-in"
             ) || path.strip_prefix("/api/action/").is_some_and(|action| {
                 !action.is_empty()
                     && action.len() <= 64

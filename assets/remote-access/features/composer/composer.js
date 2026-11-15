@@ -100,7 +100,7 @@ import {
 import { syncWorkspaceSidePanelState } from "../session/side-panel.js";
 import { currentThreadDisplay } from "../session/thread-cache.js";
 import { rememberThreadDisplay, syncRelatedModelDisplay } from "../session/thread-display.js";
-import { sessionTools } from "../shell-state.js";
+import { sessionTools, workspaceOpenIn } from "../shell-state.js";
 import { sidebarBusy } from "../sidebar/actions.js";
 import {
   threadDeleted, threadDeletionChecks, threadDeletionKey, threadDeletionLocked, threadDeletions
@@ -141,6 +141,7 @@ export function syncPendingFeedbackTimer() {
   }, Math.min(...remaining)));
 }
 export function updateComposer() {
+  workspaceOpenIn?.updateContext();
   sessionTools?.updateContext();
   syncRelatedSessionLayout();
   syncWorkspaceSidePanelState();

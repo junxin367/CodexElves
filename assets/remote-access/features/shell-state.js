@@ -19,3 +19,5 @@ export function setSessionTools(value) { return sessionTools = value; }
 export let sessionMenu = null, syncRelatedSidebarLayout = null;
 export function setSyncRelatedSidebarLayout(value) { return syncRelatedSidebarLayout = value; }
 export function setSessionMenu(value) { return sessionMenu = value; }
+export let workspaceOpenIn = null;
+export function setWorkspaceOpenIn(value) { return workspaceOpenIn = value; }

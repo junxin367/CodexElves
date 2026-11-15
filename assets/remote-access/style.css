@@ -1139,6 +1139,34 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .connection-state .connection-route.online{color:var(--green)}
 .connection-state .connection-route.pending{color:var(--muted)}
 .connection-state .connection-route.unavailable{color:var(--danger)}
+/* 用户要求独立客户端在会话菜单左侧沿用注入版 Open in：28px 高、30px 主按钮、14px 箭头；
+   两个 1px 外边框合计宽 46px，按钮图标 14px；需同步核对 features/session/open-in.js 的按钮顺序。 */
+.workspace-open-in{display:inline-flex;align-items:center;flex:0 0 auto;height:28px;gap:0;overflow:hidden;border:1px solid transparent;border-radius:7px;background:color-mix(in oklab,var(--text) 5%,transparent);color:var(--muted)}
+.workspace-open-in>button{display:inline-grid;place-items:center;flex:0 0 auto;height:26px;min-width:0;margin:0;padding:0;border:0;border-radius:0;background:transparent;color:inherit}
+.workspace-open-in-primary{width:30px}
+.workspace-open-in>.workspace-open-in-arrow{width:14px;border-left:1px solid color-mix(in srgb,var(--line) 48%,transparent)}
+.workspace-open-in-arrow>.ui-icon{width:10px;height:10px;transition:transform .12s ease}
+.workspace-open-in-arrow[aria-expanded=true]>.ui-icon{transform:rotate(180deg)}
+.workspace-open-in-primary>.workspace-open-in-app-icon{width:14px;height:14px}
+.workspace-open-in-app-icon{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:18px;height:18px}
+.workspace-open-in-app-icon>svg{display:block;width:100%;height:100%}
+.workspace-open-in-app-icon>.ui-icon{width:100%;height:100%}
+.workspace-open-in-vscode{color:#23a8f2}
+.workspace-open-in-visualStudio{color:#b587e6}
+.workspace-open-in-sublimeText{color:#f8a13d;font:800 19px/1 "Segoe UI",sans-serif}
+.workspace-open-in-githubDesktop{color:light-dark(#7650a1,#c6b0ef)}
+.workspace-open-in-fileManager{color:light-dark(#b77c13,#efc15c)}
+.workspace-open-in-gitBash{color:#ee7054}
+.workspace-open-in-cmder{color:light-dark(#377332,#a3cda0)}
+.workspace-open-in-rider>span{display:block;width:100%;height:100%;border-radius:2px;background:linear-gradient(135deg,#f2673e,#d94583 55%,#8771e5);color:#fff;font:700 8px/1 "Segoe UI",sans-serif;text-align:center;align-content:center}
+/* 用户确认展开菜单不显示 Open in 描述；178px 菜单、31px 行高、5px 内边距与效果图一致，只放应用项。 */
+.workspace-open-in-menu.ui-popup{width:178px;padding:5px;border-color:var(--menu-divider,var(--line));border-radius:10px;background:var(--control-bg,var(--side));color:var(--text);box-shadow:0 14px 40px #0000004d;animation:none}
+.workspace-open-in-menu .popup-option{height:31px;min-height:31px;gap:8px;padding:0 8px;border-radius:6px;font:12px/18px system-ui,sans-serif}
+.workspace-open-in-menu .workspace-open-in-app-icon>svg{width:16px;height:16px}
+.workspace-open-in-menu .popup-option-label{overflow:hidden;white-space:nowrap}
+.workspace-open-in-menu .popup-option-label>span{overflow:hidden;text-overflow:ellipsis}
+.workspace.related-session-view .workspace-open-in{display:none!important}
+@media(hover:hover) and (pointer:fine){.workspace-open-in>button:hover:not(:disabled){background:color-mix(in oklab,var(--text) 10%,transparent)}.workspace-open-in-menu .popup-option:hover:not(:disabled){background:var(--control-hover,var(--hover))}}
 .session-tools-trigger[aria-expanded=true]{background:var(--hover);color:var(--text)}
 .session-tools-trigger .session-tools-unread-dot{display:none;fill:#3076df;stroke:none}
 .session-tools-trigger.has-unread-side-thread .session-tools-lower-left{display:none}
