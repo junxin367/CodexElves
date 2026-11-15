@@ -6575,11 +6575,9 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         assert_eq!(rejected["state"], "failed");
         assert_eq!(rejected["result"]["code"], 409);
         assert_eq!(rejected["result"]["notSent"], true);
-        assert!(
-            rejected["result"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("本次未删除")
+        assert_eq!(
+            rejected["result"]["message"],
+            "该会话由其他 Codex 持有，当前无法删除。"
         );
         assert_eq!(delete("delete-owned").await.unwrap(), rejected);
         assert_eq!(

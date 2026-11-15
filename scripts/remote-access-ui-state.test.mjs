@@ -7961,11 +7961,11 @@ test("删除尚无原生确认时迟到HTTP失败仍保留准确原回执unknown
   h.assertControlRetained();
 });
 
-test("桌面占用明确拒绝删除时解除目标锁定并保留会话和草稿", async () => {
+test("其他 Codex 持有明确拒绝删除时展示简洁提示，解除锁定并保留会话和草稿", async () => {
   const h = sidebarDeletionHarness();
   const deletion = h.context.deleteSidebarThread(h.target);
   await new Promise(resolve => setImmediate(resolve));
-  const message = "会话仍由 Codex 桌面占用，本次未删除。";
+  const message = "该会话由其他 Codex 持有，当前无法删除。";
   h.reply.reject(Object.assign(new Error(message), { code: 409, operationState: "failed" }));
   await deletion;
   assert.equal(h.context.threadDeletions.has(h.context.threadDeletionKey(h.target.id)), false);

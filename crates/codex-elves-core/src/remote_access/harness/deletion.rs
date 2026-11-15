@@ -359,10 +359,8 @@ fn delete_failure(id: &str, failure: anyhow::Error) -> anyhow::Error {
             && api.code == 409
             && api.message == format!("Codex 操作失败：thread {id} already has an active writer")
         {
-            return error(
-                409,
-                "会话被另一个 Codex 进程持有，空闲时也可能继续占用，本次未删除。请在持有会话的客户端中删除，或关闭该客户端释放后手动重试；重装远程客户端不会释放此占用。",
-            );
+            // 用户要求占用提示简洁；仅映射目标会话已确认的写入锁拒绝，不扩展到后代删除或未知结果。
+            return error(409, "该会话由其他 Codex 持有，当前无法删除。");
         }
         if matches!(api.code, 401 | 403) && !api.outcome_unknown {
             return failure;
